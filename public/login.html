@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inverter Dashboard Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          const theme = localStorage.getItem("adsi_theme") === "light" ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (_) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <style>
+      :root {
+        --bg: #050c17;
+        --bg2: #080f1c;
+        --surface: #0c1526;
+        --surface2: #0f1d32;
+        --border: #182a48;
+        --border2: #243d66;
+        --text: #dce8fa;
+        --text2: #8aa3cc;
+        --text3: #526a92;
+        --accent: #2d7ef7;
+        --accent2: #1a60d0;
+        --green: #10b370;
+        --red: #e03560;
+      }
+
+      :root[data-theme="light"] {
+        --bg: #e8dfcf;
+        --bg2: #ded4c2;
+        --surface: #f1e8d8;
+        --surface2: #ebe1d0;
+        --border: #b9ab96;
+        --border2: #a8967f;
+        --text: #2f271a;
+        --text2: #524533;
+        --text3: #7b6a54;
+        --accent: #2b67ad;
+        --accent2: #1f4f89;
+        --green: #0f8f5b;
+        --red: #ba3555;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Sora", "Segoe UI", sans-serif;
+        color: var(--text);
+        background: var(--bg);
+      }
+
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(45, 126, 247, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(45, 126, 247, 0.03) 1px, transparent 1px);
+        background-size: 32px 32px;
+      }
+
+      :root[data-theme="light"] body::before {
+        background-image:
+          linear-gradient(rgba(126, 106, 78, 0.14) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(126, 106, 78, 0.14) 1px, transparent 1px);
+      }
+
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(ellipse 60% 40% at 15% -10%, rgba(45, 126, 247, 0.1) 0%, transparent 60%),
+          radial-gradient(ellipse 50% 35% at 90% -5%, rgba(16, 179, 112, 0.06) 0%, transparent 55%);
+      }
+
+      :root[data-theme="light"] body::after {
+        background:
+          radial-gradient(ellipse 60% 40% at 15% -10%, rgba(178, 144, 86, 0.18) 0%, transparent 60%),
+          radial-gradient(ellipse 50% 35% at 90% -5%, rgba(138, 118, 87, 0.11) 0%, transparent 55%);
+      }
+
+      .login-shell {
+        position: relative;
+        z-index: 1;
+        width: min(92vw, 440px);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px 60px 16px;
+        background: linear-gradient(160deg, var(--surface) 0%, #091523 100%);
+        box-shadow:
+          0 14px 38px rgba(0, 0, 0, 0.42),
+          inset 0 1px 0 rgba(148, 179, 230, 0.08);
+      }
+
+      :root[data-theme="light"] .login-shell {
+        background: linear-gradient(160deg, #f3ebdd 0%, #e8ddca 100%);
+        box-shadow:
+          0 10px 24px rgba(77, 64, 43, 0.18),
+          inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .brand img {
+        width: 48px;
+        height: 48px;
+        object-fit: contain;
+      }
+
+      .brand-text h1 {
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.7px;
+        color: var(--text);
+        text-transform: uppercase;
+      }
+
+      .brand-text p {
+        margin-top: 2px;
+        font-size: 10px;
+        color: var(--text2);
+        letter-spacing: 0.4px;
+      }
+
+      .section-title {
+        margin: 36px 0 0px;
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.35px;
+        color: var(--text);
+        text-align: center;
+      }
+
+      .inp {
+        margin-top: 20px;
+        width: 100%;
+        height: 38px;
+        border: 1px solid var(--border2);
+        border-radius: 8px;
+        background: rgba(11, 20, 37, 0.88);
+        color: var(--text);
+        font-family: "Sora", "Segoe UI", sans-serif;
+        font-size: 13px;
+        padding: 0 12px;
+        text-align: center;
+        outline: none;
+        transition: border-color 0.14s, box-shadow 0.14s;
+      }
+
+      .inp + .inp {
+        margin-top: 8px;
+      }
+
+      .inp:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(45, 126, 247, 0.2);
+      }
+
+      :root[data-theme="light"] .inp {
+        background: rgba(249, 242, 229, 0.98);
+        color: #2e2418;
+        border-color: #af9b7d;
+      }
+
+      :root[data-theme="light"] .inp:focus {
+        border-color: #2b67ad;
+        box-shadow: 0 0 0 2px rgba(43, 103, 173, 0.18);
+      }
+
+      .remember {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--text2);
+        user-select: none;
+      }
+
+      .remember input {
+        width: 14px;
+        height: 14px;
+        accent-color: var(--accent);
+      }
+
+      .btn {
+        width: 100%;
+        height: 38px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        font-family: "Sora", "Segoe UI", sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: filter 0.14s, transform 0.1s;
+      }
+
+      .btn:active {
+        transform: translateY(1px);
+      }
+
+      .btn-primary {
+        color: #fff;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+      }
+
+      #loginBtn {
+        margin-top: 12px;
+      }
+
+      .btn-primary:hover {
+        filter: brightness(1.08);
+      }
+
+      .links {
+        margin-top: 12px;
+        font-size: 12px;
+        color: var(--text2);
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .links a {
+        color: #6fb0ff;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .links a:hover {
+        text-decoration: underline;
+      }
+
+      :root[data-theme="light"] .links a {
+        color: #2b67ad;
+      }
+
+      .footer {
+        margin-top: 14px;
+        text-align: center;
+        font-size: 11px;
+        color: var(--text3);
+      }
+
+      #modal-bg,
+      #reset-bg {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        padding: 14px;
+        background: rgba(2, 8, 16, 0.82);
+        backdrop-filter: blur(4px);
+        justify-content: center;
+        align-items: center;
+      }
+
+      .modal {
+        width: min(92vw, 420px);
+        border: 1px solid var(--border2);
+        border-radius: 12px;
+        padding: 18px 24px;
+        background: linear-gradient(160deg, var(--surface) 0%, #091523 100%);
+        box-shadow:
+          0 16px 34px rgba(0, 0, 0, 0.45),
+          inset 0 1px 0 rgba(148, 179, 230, 0.09);
+      }
+
+      :root[data-theme="light"] .modal {
+        background: linear-gradient(160deg, #f3ebdd 0%, #e8ddca 100%);
+        border-color: #b09a7a;
+      }
+
+      .modal h3 {
+        font-size: 14px;
+        margin-bottom: 10px;
+        color: var(--text);
+        letter-spacing: 0.3px;
+      }
+
+      .modal .inp {
+        margin-bottom: 8px;
+      }
+
+      .modal-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 2px;
+      }
+
+      .modal-actions .btn {
+        flex: 1;
+        margin-top: 0;
+      }
+
+      .btn-outline {
+        background: transparent;
+        border-color: var(--border2);
+        color: var(--text2);
+      }
+
+      .btn-outline:hover {
+        border-color: var(--accent);
+        color: var(--text);
+      }
+
+      .msg {
+        position: fixed;
+        left: 50%;
+        bottom: 22px;
+        transform: translateX(-50%);
+        padding: 9px 14px;
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        z-index: 30;
+        display: none;
+      }
+
+      .msg.success {
+        background: #10b370;
+        color: #fff;
+      }
+
+      .msg.error {
+        background: #d73c60;
+        color: #fff;
+      }
+
+      body.modal-open .login-shell {
+        filter: blur(1.2px) saturate(0.85);
+        transform: scale(0.992);
+        transition: filter 0.12s ease, transform 0.12s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="login-shell">
+      <div class="brand">
+        <img src="../assets/logo.png" alt="ADSI Logo" />
+        <div class="brand-text">
+          <h1>Inverter Dashboard</h1>
+          <p>Secure Access</p>
+        </div>
+      </div>
+
+      <div class="section-title">Login</div>
+      <input id="username" class="inp" type="text" placeholder="Username" autofocus />
+      <input id="password" class="inp" type="password" placeholder="Password" />
+      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember Username & Password</label>
+      <button id="loginBtn" class="btn btn-primary">Login</button>
+
+      <div class="links">
+        <a id="changeUserPass">Change Username & Password</a>
+        <span>|</span>
+        <a id="resetPass">Reset via Auth Key</a>
+      </div>
+
+      <div class="footer">© 2026 Engr. Clard Systems</div>
+    </main>
+
+    <div id="modal-bg">
+      <div class="modal">
+        <h3>Change Username & Password</h3>
+        <input id="authKey" class="inp" type="password" placeholder="Enter Auth Key" />
+        <input id="newUsername" class="inp" type="text" placeholder="Enter New Username" />
+        <input id="newPassword" class="inp" type="password" placeholder="Enter New Password" />
+        <div class="modal-actions">
+          <button id="saveChange" class="btn btn-primary">Save</button>
+          <button id="cancelChange" class="btn btn-outline">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="reset-bg">
+      <div class="modal">
+        <h3>Reset Credentials to Default</h3>
+        <input id="resetAuthKey" class="inp" type="password" placeholder="Auth Key" />
+        <div class="modal-actions">
+          <button id="resetSave" class="btn btn-primary">Reset</button>
+          <button id="resetCancel" class="btn btn-outline">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="msg" class="msg"></div>
+
+    <script>
+      window.addEventListener("DOMContentLoaded", async () => {
+        const msg = document.getElementById("msg");
+        const usernameInput = document.getElementById("username");
+        const passwordInput = document.getElementById("password");
+        const rememberCheck = document.getElementById("rememberMe");
+        const modalBg = document.getElementById("modal-bg");
+        const resetBg = document.getElementById("reset-bg");
+        const api = window.loginAPI;
+
+        function showMsg(text, type = "success") {
+          msg.textContent = text;
+          msg.className = `msg ${type}`;
+          msg.style.display = "block";
+          setTimeout(() => {
+            msg.style.display = "none";
+          }, 2500);
+        }
+
+        function resetLoginForm() {
+          usernameInput.value = "";
+          passwordInput.value = "";
+          rememberCheck.checked = false;
+          usernameInput.focus();
+        }
+
+        function openLayer(layer) {
+          if (!layer) return;
+          layer.style.display = "flex";
+          document.body.classList.add("modal-open");
+        }
+
+        function closeLayer(layer) {
+          if (!layer) return;
+          layer.style.display = "none";
+          const stillOpen = modalBg.style.display === "flex" || resetBg.style.display === "flex";
+          if (!stillOpen) document.body.classList.remove("modal-open");
+        }
+
+        try {
+          const remembered = await api.getRemembered();
+          if (remembered?.remember) {
+            usernameInput.value = remembered.username || "";
+            passwordInput.value = remembered.password || "";
+            rememberCheck.checked = true;
+          }
+        } catch (_) {}
+
+        async function doLogin() {
+          const user = usernameInput.value.trim();
+          const pass = passwordInput.value.trim();
+          if (!user || !pass) return showMsg("Please enter username and password", "error");
+
+          const ok = await api.checkLogin(user, pass);
+          if (!ok) return showMsg("Invalid username or password", "error");
+
+          if (rememberCheck.checked) {
+            await api.saveRemembered({ username: user, password: pass, remember: true });
+          } else {
+            await api.clearRemembered();
+          }
+          api.loginSuccess();
+        }
+
+        async function handleSaveChange() {
+          const key = document.getElementById("authKey").value.trim();
+          const newUser = document.getElementById("newUsername").value.trim();
+          const newPass = document.getElementById("newPassword").value.trim();
+          if (!key || !newUser || !newPass) return showMsg("All fields required", "error");
+
+          const ok = await api.changeUsernamePassword(key, newUser, newPass);
+          closeLayer(modalBg);
+          if (ok) {
+            await api.clearRemembered();
+            showMsg("Username & Password updated");
+            resetLoginForm();
+          } else {
+            showMsg("Invalid authentication key", "error");
+          }
+        }
+
+        async function handleResetSave() {
+          const key = document.getElementById("resetAuthKey").value.trim();
+          if (!key) return showMsg("Auth key required", "error");
+
+          const ok = await api.resetPassword(key);
+          closeLayer(resetBg);
+          if (ok) {
+            await api.clearRemembered();
+            showMsg("Credentials reset to default: admin / 1234");
+            resetLoginForm();
+            return;
+          }
+          showMsg("Invalid authentication key", "error");
+        }
+
+        document.getElementById("loginBtn").addEventListener("click", doLogin);
+
+        document.getElementById("changeUserPass").addEventListener("click", () => {
+          openLayer(modalBg);
+          modalBg.querySelectorAll("input").forEach((i) => {
+            i.value = "";
+          });
+        });
+        document.getElementById("cancelChange").addEventListener("click", () => {
+          closeLayer(modalBg);
+        });
+
+        document.getElementById("saveChange").addEventListener("click", handleSaveChange);
+
+        document.getElementById("resetPass").addEventListener("click", () => {
+          openLayer(resetBg);
+          resetBg.querySelectorAll("input").forEach((i) => {
+            i.value = "";
+          });
+        });
+        document.getElementById("resetCancel").addEventListener("click", () => {
+          closeLayer(resetBg);
+        });
+
+        document.getElementById("resetSave").addEventListener("click", handleResetSave);
+
+        [modalBg, resetBg].forEach((layer) => {
+          layer.addEventListener("click", (e) => {
+            if (e.target === layer) closeLayer(layer);
+          });
+        });
+
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") {
+            if (modalBg.style.display === "flex") closeLayer(modalBg);
+            else if (resetBg.style.display === "flex") closeLayer(resetBg);
+            return;
+          }
+
+          if (e.key !== "Enter") return;
+          if (modalBg.style.display === "flex") {
+            e.preventDefault();
+            handleSaveChange();
+            return;
+          }
+          if (resetBg.style.display === "flex") {
+            e.preventDefault();
+            handleResetSave();
+            return;
+          }
+
+          const active = document.activeElement;
+          if (!active) return;
+          const id = active.id || "";
+          if (id === "username" || id === "password" || id === "loginBtn") {
+            e.preventDefault();
+            doLogin();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

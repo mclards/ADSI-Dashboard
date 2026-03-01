@@ -1,0 +1,903 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Inverter IP Configuration</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f3f6fb;
+        --surface: #ffffff;
+        --surface2: #eef3fb;
+        --surface3: #f7faff;
+        --border: #d7e2f1;
+        --border2: #bdd0e8;
+        --accent: #0d6efd;
+        --accent2: #0a58ca;
+        --text: #1a2b44;
+        --text2: #4f6788;
+        --ok: #0ea765;
+        --warn: #e0315b;
+        --radius: 12px;
+      }
+      html.dark {
+        --bg: #061022;
+        --surface: #0b162b;
+        --surface2: #0f1e38;
+        --surface3: #132647;
+        --border: #1f3252;
+        --border2: #2a4772;
+        --accent: #60a5fa;
+        --accent2: #2563eb;
+        --text: #dbe7ff;
+        --text2: #8ea4c8;
+        --ok: #10b981;
+        --warn: #ef476f;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font:
+          13px "Sora",
+          sans-serif;
+      }
+      .page {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 20px 40px;
+      }
+      .header {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      #header-logo {
+        height: 34px;
+        width: auto;
+        object-fit: contain;
+        filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15));
+      }
+      .header-title {
+        font:
+          800 19px Sora,
+          sans-serif;
+        text-align: center;
+      }
+      .header-title span {
+        color: var(--accent);
+      }
+      .header-right {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 10px;
+        grid-column: 3;
+      }
+      .btn-exit {
+        border-color: rgba(224, 49, 91, 0.45) !important;
+        color: var(--warn) !important;
+      }
+      .btn-exit:hover {
+        background: rgba(224, 49, 91, 0.08) !important;
+      }
+      .reach-badge {
+        padding: 7px 12px;
+        background: var(--surface2);
+        border: 1px solid var(--border2);
+        border-radius: 8px;
+        font:
+          11px "JetBrains Mono",
+          monospace;
+        color: var(--text2);
+      }
+      .scan-indicator {
+        display: none;
+        color: var(--accent);
+        font:
+          10px "JetBrains Mono",
+          monospace;
+      }
+      .scan-indicator.active {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      .scan-ring {
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--accent);
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .btn {
+        border: none;
+        border-radius: 10px;
+        padding: 8px 16px;
+        cursor: pointer;
+        font:
+          600 12px "Sora",
+          sans-serif;
+      }
+      .btn-primary {
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        color: #001018;
+      }
+      .btn-ghost {
+        background: var(--surface2);
+        color: var(--text2);
+        border: 1px solid var(--border2);
+      }
+      #themeToggle {
+        min-width: 74px;
+      }
+      .table-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      thead tr {
+        background: var(--surface2);
+      }
+      th {
+        padding: 10px 12px;
+        text-align: center;
+        font:
+          600 9px "JetBrains Mono",
+          monospace;
+        letter-spacing: 0.12em;
+        color: var(--accent);
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--border2);
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+        padding-left: 14px;
+      }
+      td {
+        padding: 7px 12px;
+        text-align: center;
+        border-bottom: 1px solid var(--border);
+      }
+      tbody tr:hover {
+        background: var(--surface2);
+      }
+      .inv-cell {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .inv-num {
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        background: var(--surface3);
+        border: 1px solid var(--border2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font:
+          600 10px "JetBrains Mono",
+          monospace;
+        color: var(--text2);
+      }
+      .cfg-icon {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .ip-empty {
+        background: var(--surface3);
+        color: #425366;
+      }
+      .ip-unreachable {
+        background: rgba(255, 83, 112, 0.12);
+        color: var(--warn);
+        border-color: rgba(255, 83, 112, 0.25);
+      }
+      .ip-ok {
+        background: rgba(0, 230, 118, 0.12);
+        color: var(--ok);
+        border-color: rgba(0, 230, 118, 0.25);
+      }
+      input[type="text"],
+      input[type="number"] {
+        background: var(--surface3);
+        color: var(--text);
+        border: 1px solid var(--border2);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font:
+          12px "JetBrains Mono",
+          monospace;
+        text-align: center;
+      }
+      input[type="text"] {
+        width: 150px;
+      }
+      input[type="number"] {
+        width: 90px;
+      }
+      .units-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .unit-chip {
+        display: inline-flex;
+        gap: 4px;
+        align-items: center;
+        padding: 3px 8px;
+        border-radius: 5px;
+        background: var(--surface3);
+        border: 1px solid var(--border2);
+        font:
+          600 10px "JetBrains Mono",
+          monospace;
+        color: var(--text2);
+      }
+      .unit-chip input {
+        width: 11px;
+        height: 11px;
+        accent-color: var(--accent);
+      }
+      .sep-line {
+        width: 1px;
+        height: 16px;
+        background: var(--border2);
+      }
+      .footer {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 16px;
+      }
+      .status-bar {
+        flex: 1;
+        min-height: 36px;
+        padding: 9px 14px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font:
+          11px "JetBrains Mono",
+          monospace;
+        color: var(--text2);
+      }
+      .status-bar.success {
+        color: var(--ok);
+      }
+      .status-bar.error {
+        color: var(--warn);
+      }
+      #auth-gate {
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 8, 16, 0.96);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 99999;
+      }
+      #auth-card {
+        width: min(92vw, 420px);
+        border: 1px solid var(--border2);
+        background: var(--surface);
+        padding: 18px;
+      }
+      #auth-title {
+        font:
+          700 0.9rem Sora,
+          sans-serif;
+        color: var(--accent);
+        letter-spacing: 0.04em;
+      }
+      #auth-sub {
+        margin-top: 8px;
+        font-size: 0.72rem;
+        color: var(--text2);
+      }
+      #auth-input {
+        width: 100%;
+        margin-top: 12px;
+        height: 34px;
+        border: 1px solid var(--border2);
+        background: var(--surface3);
+        color: var(--text);
+        padding: 0 10px;
+        outline: none;
+      }
+      #auth-submit {
+        margin-top: 10px;
+        width: 100%;
+        height: 34px;
+      }
+      #auth-error {
+        min-height: 18px;
+        margin-top: 8px;
+        font-size: 0.7rem;
+        color: var(--warn);
+      }
+
+      /* Main-dashboard-like header shell */
+      .page {
+        max-width: none;
+        margin: 0;
+        padding: 0 20px 28px;
+      }
+      .header {
+        min-height: 78px;
+        margin: 0 -20px 16px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border2);
+        background: linear-gradient(
+          180deg,
+          rgba(10, 18, 34, 0.97) 0%,
+          rgba(8, 15, 28, 0.97) 100%
+        );
+        box-shadow:
+          0 1px 0 var(--border2),
+          0 6px 20px rgba(0, 0, 0, 0.28);
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 12px;
+        align-items: center;
+      }
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      #header-logo {
+        height: 34px;
+        width: auto;
+        object-fit: contain;
+        filter: none;
+      }
+      .header-center {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 0;
+      }
+      .metric-pill {
+        min-width: 420px;
+        max-width: 100%;
+        border: 1px solid var(--border2);
+        border-radius: 9px;
+        padding: 8px 16px;
+        text-align: center;
+        background: linear-gradient(
+          135deg,
+          rgba(20, 36, 64, 0.9) 0%,
+          rgba(12, 22, 44, 0.9) 100%
+        );
+      }
+      .metric-label {
+        font:
+          700 0.56rem "JetBrains Mono",
+          monospace;
+        letter-spacing: 0.12em;
+        color: var(--text2);
+        text-transform: uppercase;
+      }
+      .metric-value {
+        margin-top: 2px;
+        font:
+          800 1.02rem "Sora",
+          sans-serif;
+        letter-spacing: 0.08em;
+        color: var(--accent);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .header-right {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 8px;
+        grid-column: auto;
+      }
+      .clock-wrap {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 34px;
+        padding: 0 10px;
+        border: 1px solid var(--border2);
+        border-radius: 8px;
+        background: rgba(15, 30, 56, 0.58);
+      }
+      .ws-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 8px var(--ok);
+      }
+      .ws-label {
+        font:
+          700 0.66rem "JetBrains Mono",
+          monospace;
+        color: var(--ok);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      #clock {
+        font:
+          700 0.76rem "JetBrains Mono",
+          monospace;
+        color: var(--text2);
+        min-width: 68px;
+        text-align: right;
+      }
+      .btn {
+        height: 34px;
+        padding: 0 13px;
+        border-radius: 8px;
+        font:
+          700 0.74rem "Sora",
+          sans-serif;
+      }
+      html:not(.dark) .header {
+        background: linear-gradient(
+          180deg,
+          rgba(20, 33, 56, 0.98) 0%,
+          rgba(12, 22, 40, 0.98) 100%
+        );
+        border-bottom-color: #38527c;
+        box-shadow:
+          0 1px 0 #38527c,
+          0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+      html:not(.dark) .metric-pill {
+        border-color: #446089;
+        background: linear-gradient(
+          135deg,
+          rgba(30, 48, 78, 0.94) 0%,
+          rgba(18, 31, 56, 0.94) 100%
+        );
+      }
+      html:not(.dark) .metric-label {
+        color: #9db4d8;
+      }
+      html:not(.dark) .metric-value {
+        color: #72a9ff;
+      }
+      html:not(.dark) .clock-wrap {
+        background: rgba(13, 29, 54, 0.86);
+        border-color: #446089;
+      }
+      html:not(.dark) #clock {
+        color: #d7e8ff;
+      }
+      html:not(.dark) .header .reach-badge {
+        color: #d7e8ff;
+        border-color: #4b678f;
+        background: rgba(15, 31, 56, 0.45);
+      }
+      html:not(.dark) .header #scanIndicator {
+        color: #a9c7ff;
+      }
+      html:not(.dark) .header .btn-ghost {
+        color: #e7efff;
+        border-color: #4b678f;
+        background: rgba(15, 31, 56, 0.45);
+      }
+      html:not(.dark) .header .btn-ghost:hover {
+        color: #fff;
+        border-color: #79aaff;
+        background: rgba(33, 60, 102, 0.72);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="auth-gate">
+      <div id="auth-card">
+        <div id="auth-title">IP CONFIG AUTHORIZATION</div>
+        <div id="auth-sub">Enter authorization key to continue.</div>
+        <input id="auth-input" type="password" autocomplete="off" />
+        <button class="btn btn-primary" id="auth-submit">Unlock</button>
+        <div id="auth-error"></div>
+      </div>
+    </div>
+    <div class="page">
+      <div class="header">
+        <div class="header-left">
+          <img id="header-logo" src="/assets/adsi_logo.png" alt="ADSI logo" />
+        </div>
+        <div class="header-center">
+          <div class="metric-pill">
+            <div class="metric-label">Configuration</div>
+            <div class="metric-value">INVERTER IP CONFIGURATION</div>
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="clock-wrap">
+            <span class="ws-dot"></span>
+            <span class="ws-label">Live</span>
+            <div id="clock">--:--:--</div>
+          </div>
+          <div id="scanIndicator" class="scan-indicator">
+            <div class="scan-ring"></div>
+            <span>Scanning</span>
+          </div>
+          <div class="reach-badge" id="ipCounter">Reachable: — / 27</div>
+          <button class="btn btn-ghost" id="themeToggle">Light</button>
+          <button class="btn btn-ghost" onclick="scanAll()">Scan</button>
+          <button class="btn btn-ghost" id="toTopologyBtn">Topology</button>
+        </div>
+      </div>
+
+      <div class="table-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Inverter</th>
+              <th>IP Address</th>
+              <th>Poll Interval (s)</th>
+              <th>Units</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="inverterTable">
+            <tr>
+              <td
+                colspan="5"
+                style="padding: 28px; text-align: center; color: var(--text2)"
+              >
+                Loading configuration...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="footer">
+        <div class="status-bar" id="statusBar">
+          <span id="statusText">Ready</span>
+        </div>
+        <button class="btn btn-primary" onclick="saveAll()">
+          Save All Changes
+        </button>
+      </div>
+    </div>
+
+    <script>
+      if (!window.electronAPI) {
+        window.electronAPI = {
+          getConfig: async () => ({
+            inverters: {},
+            poll_interval: {},
+            units: {},
+          }),
+          saveConfig: async () => ({ success: true }),
+          openIP: () => {},
+          openIPCheck: () => {},
+          onIPStatus: () => {},
+        };
+      }
+      const tbody = document.getElementById("inverterTable");
+      const statusBar = document.getElementById("statusBar");
+      const statusText = document.getElementById("statusText");
+      const themeToggle = document.getElementById("themeToggle");
+      const THEME_KEY = "topology_theme";
+      const DEFAULT_INTERVAL = 0.05;
+      const dirtyRows = new Set();
+      let config = {};
+      let ipState = {};
+      let reachableCount = 0;
+
+      function initTheme() {
+        const saved = localStorage.getItem(THEME_KEY);
+        setTheme(saved === "light" ? "light" : "dark");
+      }
+      function setTheme(mode) {
+        const dark = mode !== "light";
+        document.documentElement.classList.toggle("dark", dark);
+        themeToggle.textContent = dark ? "Light" : "Dark";
+        localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
+      }
+      function toggleTheme() {
+        setTheme(
+          document.documentElement.classList.contains("dark")
+            ? "light"
+            : "dark",
+        );
+      }
+
+      function setStatus(msg, kind = "") {
+        statusText.textContent = msg;
+        statusBar.className = "status-bar" + (kind ? ` ${kind}` : "");
+      }
+      function markDirty(n) {
+        dirtyRows.add(n);
+      }
+      function isValidIP(ip) {
+        const parts = String(ip).split(".");
+        return (
+          parts.length === 4 &&
+          parts.every(
+            (p) => p !== "" && !isNaN(p) && Number(p) >= 0 && Number(p) <= 255,
+          )
+        );
+      }
+      function updateCounter() {
+        document.getElementById("ipCounter").textContent =
+          `Reachable: ${reachableCount} / 27`;
+      }
+      function showScanIndicator(on) {
+        document
+          .getElementById("scanIndicator")
+          .classList.toggle("active", !!on);
+      }
+
+      function getUnits(num) {
+        const selected = [];
+        for (let u = 1; u <= 4; u++) {
+          if (document.getElementById(`u-${num}-${u}`).checked)
+            selected.push(u);
+        }
+        return selected;
+      }
+      function toggleAll(num) {
+        const all = document.getElementById(`u-${num}-all`).checked;
+        for (let u = 1; u <= 4; u++)
+          document.getElementById(`u-${num}-${u}`).checked = all;
+        markDirty(num);
+      }
+      function unitChanged(num) {
+        document.getElementById(`u-${num}-all`).checked =
+          getUnits(num).length === 4;
+        markDirty(num);
+      }
+
+      function rowHtml(num, ip, interval, units) {
+        const checked = (n) => (units.includes(n) ? "checked" : "");
+        const allChecked = units.length === 4 ? "checked" : "";
+        return `<tr>
+    <td><div class="inv-cell"><div class="inv-num">${String(num).padStart(2, "0")}</div><span>INV-${String(num).padStart(2, "0")}</span><div class="cfg-icon ip-empty" id="cfg-${num}" onclick="openInverter(${num})" title="Open inverter web interface">⚙</div></div></td>
+    <td><input id="ip-${num}" type="text" value="${ip}" oninput="markDirty(${num})"></td>
+    <td><input id="poll-${num}" type="number" step="0.01" min="0.01" value="${interval}" oninput="markDirty(${num})"></td>
+    <td><div class="units-wrap"><label class="unit-chip"><input type="checkbox" id="u-${num}-all" ${allChecked} onclick="toggleAll(${num})">All</label><div class="sep-line"></div><label class="unit-chip"><input type="checkbox" id="u-${num}-1" ${checked(1)} onclick="unitChanged(${num})">1</label><label class="unit-chip"><input type="checkbox" id="u-${num}-2" ${checked(2)} onclick="unitChanged(${num})">2</label><label class="unit-chip"><input type="checkbox" id="u-${num}-3" ${checked(3)} onclick="unitChanged(${num})">3</label><label class="unit-chip"><input type="checkbox" id="u-${num}-4" ${checked(4)} onclick="unitChanged(${num})">4</label></div></td>
+    <td><button class="btn btn-ghost" onclick="saveIP(${num})">Save</button></td>
+  </tr>`;
+      }
+
+      function openInverter(num) {
+        const ip = document.getElementById(`ip-${num}`).value.trim();
+        if (!ip) {
+          setStatus("No IP configured for this inverter", "error");
+          return;
+        }
+        window.electronAPI.openIP(ip);
+      }
+
+      async function load() {
+        const loaded = await window.electronAPI.getConfig();
+        config =
+          loaded && loaded.inverters
+            ? loaded
+            : { inverters: {}, poll_interval: {}, units: {} };
+        if (!config.poll_interval) config.poll_interval = {};
+        if (!config.units) config.units = {};
+        tbody.innerHTML = "";
+        for (let n = 1; n <= 27; n++) {
+          const ip = config.inverters[n] || "";
+          const interval = Number(config.poll_interval[n]) || DEFAULT_INTERVAL;
+          const units = Array.isArray(config.units[n])
+            ? config.units[n]
+            : [1, 2, 3, 4];
+          tbody.insertAdjacentHTML(
+            "beforeend",
+            rowHtml(n, ip, interval, units),
+          );
+        }
+        setStatus("Loaded inverter configuration", "success");
+        scanAll();
+      }
+
+      function collectRow(num) {
+        const ip = document.getElementById(`ip-${num}`).value.trim();
+        const poll = Number(
+          document.getElementById(`poll-${num}`).value.trim(),
+        );
+        const units = getUnits(num);
+        if (!ip || !isValidIP(ip))
+          throw new Error(`Invalid IP at inverter ${num}`);
+        if (!Number.isFinite(poll) || poll < 0.01)
+          throw new Error(`Invalid poll interval at inverter ${num}`);
+        return { ip, poll, units };
+      }
+
+      async function saveIP(num) {
+        try {
+          const row = collectRow(num);
+          config.inverters[num] = row.ip;
+          config.poll_interval[num] = row.poll;
+          config.units[num] = row.units;
+          const ret = await window.electronAPI.saveConfig(config);
+          if (ret && ret.success === false)
+            throw new Error(ret.error || "Save failed");
+          dirtyRows.delete(num);
+          setStatus(`Saved inverter ${num} (${row.ip})`, "success");
+        } catch (e) {
+          setStatus(`Save failed: ${e.message}`, "error");
+        }
+      }
+
+      async function saveAll() {
+        try {
+          for (let n = 1; n <= 27; n++) {
+            const row = collectRow(n);
+            config.inverters[n] = row.ip;
+            config.poll_interval[n] = row.poll;
+            config.units[n] = row.units;
+          }
+          const ret = await window.electronAPI.saveConfig(config);
+          if (ret && ret.success === false)
+            throw new Error(ret.error || "Save failed");
+          dirtyRows.clear();
+          setStatus("All changes saved successfully", "success");
+        } catch (e) {
+          setStatus(`Save failed: ${e.message}`, "error");
+        }
+      }
+
+      function scanAll() {
+        showScanIndicator(true);
+        ipState = {};
+        reachableCount = 0;
+        updateCounter();
+        for (let n = 1; n <= 27; n++) {
+          const ip = document.getElementById(`ip-${n}`)?.value.trim();
+          const icon = document.getElementById(`cfg-${n}`);
+          if (!icon) continue;
+          if (!ip) {
+            icon.className = "cfg-icon ip-empty";
+            continue;
+          }
+          icon.className = "cfg-icon ip-unreachable";
+          window.electronAPI.openIPCheck(ip);
+        }
+        setTimeout(() => showScanIndicator(false), 3000);
+      }
+
+      window.electronAPI.onIPStatus(({ ip, ok }) => {
+        ipState[ip] = ok;
+        reachableCount = 0;
+        for (let n = 1; n <= 27; n++) {
+          const ipBox = document.getElementById(`ip-${n}`);
+          const icon = document.getElementById(`cfg-${n}`);
+          if (!ipBox || !icon) continue;
+          const v = ipBox.value.trim();
+          if (!v) icon.className = "cfg-icon ip-empty";
+          else if (ipState[v] === true) {
+            icon.className = "cfg-icon ip-ok";
+            reachableCount++;
+          } else if (ipState[v] === false)
+            icon.className = "cfg-icon ip-unreachable";
+        }
+        updateCounter();
+      });
+      function getMinuteKeys() {
+        const m = new Date().getMinutes();
+        return [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
+      }
+      function verifyKey(v) {
+        return getMinuteKeys().includes(
+          String(v || "")
+            .trim()
+            .toLowerCase(),
+        );
+      }
+      const AUTH_SESSION_KEY = "adsi_auth_until";
+      const AUTH_SESSION_MS = 10 * 60 * 1000;
+      function hasAuthSession() {
+        return (
+          Number(sessionStorage.getItem(AUTH_SESSION_KEY) || 0) > Date.now()
+        );
+      }
+      function setAuthSession() {
+        sessionStorage.setItem(
+          AUTH_SESSION_KEY,
+          String(Date.now() + AUTH_SESSION_MS),
+        );
+      }
+      function initAuthGate() {
+        const gate = document.getElementById("auth-gate");
+        const input = document.getElementById("auth-input");
+        const submit = document.getElementById("auth-submit");
+        const err = document.getElementById("auth-error");
+        if (hasAuthSession()) {
+          gate.style.display = "none";
+          load();
+          return;
+        }
+        const unlock = async () => {
+          if (!verifyKey(input.value)) {
+            err.textContent = "Invalid key. Use adsi<current minute>.";
+            input.select();
+            return;
+          }
+          err.textContent = "";
+          setAuthSession();
+          gate.style.display = "none";
+          await load();
+        };
+        submit.addEventListener("click", unlock);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") unlock();
+        });
+        input.focus();
+      }
+      initAuthGate();
+      initTheme();
+      themeToggle.addEventListener("click", toggleTheme);
+      document.getElementById("toTopologyBtn").addEventListener("click", () => {
+        if (
+          dirtyRows.size > 0 &&
+          !confirm("Unsaved changes will be lost. Continue to topology?")
+        )
+          return;
+        if (window.electronAPI?.openTopologyWindow) {
+          window.electronAPI.openTopologyWindow();
+          return;
+        }
+        window.location.href = "/topology.html?from=ip-config";
+      });
+      function tickClock() {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        document.getElementById("clock").textContent =
+          `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+      }
+      setInterval(tickClock, 1000);
+      tickClock();
+      document.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && e.key.toLowerCase() === "l") {
+          e.preventDefault();
+          toggleTheme();
+        }
+      });
+    </script>
+  </body>
+</html>

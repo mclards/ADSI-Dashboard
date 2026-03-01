@@ -1,0 +1,84 @@
+{
+  "name": "adsi-dashboard",
+  "version": "2.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node start-electron.js",
+    "dev": "set NODE_ENV=development && node start-electron.js",
+    "server": "node server/index.js",
+    "build:win": "electron-builder --win nsis portable --x64",
+    "build:installer": "electron-builder --win nsis --x64",
+    "build:portable": "electron-builder --win portable --x64"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "chart.js": "^4.5.1",
+    "cors": "^2.8.6",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.1",
+    "express-ws": "^5.0.2",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9"
+  },
+  "build": {
+    "appId": "com.adsi.dashboard",
+    "productName": "Inverter Dashboard",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "server/**/*",
+      "assets/**/*",
+      "drivers/**/*",
+      "shared_data.py",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/InverterCoreService.exe",
+        "to": "backend/InverterCoreService.exe"
+      },
+      {
+        "from": "dist/ForecastCoreService.exe",
+        "to": "backend/ForecastCoreService.exe"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon-256.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    }
+  }
+}

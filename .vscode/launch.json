@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Server",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/server/index.js",
+      "env": { "NODE_ENV": "development" },
+      "console": "integratedTerminal",
+      "restart": true
+    },
+    {
+      "name": "Debug Electron",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/electron/main.js",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/electron.cmd"
+      },
+      "console": "integratedTerminal"
+    }
+  ]
+}

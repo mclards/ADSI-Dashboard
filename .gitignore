@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+release/
+build/
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller intermediate artifacts
+*.spec.bak
+
+# Compiled Python service EXEs (root-level legacy; packaged ones live in dist/)
+ADSI_ForecastService.exe
+ADSI_InverterService.exe
+
+# Runtime data / databases
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Throwaway test / stale files
+test-electron.js
+d*ADSI-Dashboardtest-electron.js
+
+# OS
+.DS_Store
+Thumbs.db

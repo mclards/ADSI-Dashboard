@@ -1,0 +1,50 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+// Single unified API surface exposed to all renderer windows.
+contextBridge.exposeInMainWorld("electronAPI", {
+  // Window controls
+  minimize: () => ipcRenderer.send("window-minimize"),
+  maximize: () => ipcRenderer.send("window-maximize"),
+  close: () => ipcRenderer.send("window-close"),
+  closeCurrentWindow: () => ipcRenderer.send("close-current-window"),
+
+  // Navigation
+  openTopologyWindow: () => ipcRenderer.send("open-topology-window"),
+  openIpConfigWindow: () => ipcRenderer.send("open-ip-config-window"),
+  openLogs: (folder) => ipcRenderer.send("open-logs-folder", folder),
+
+  // File/folder operations
+  pickFolder: (startPath) => ipcRenderer.invoke("pick-folder", startPath),
+  openFolder: (folder) => ipcRenderer.invoke("open-folder", folder),
+
+  // IP config
+  getConfig: () => ipcRenderer.invoke("config-get"),
+  saveConfig: (config) => ipcRenderer.invoke("config-save", config),
+  openIP: (ip) => ipcRenderer.send("open-ip", ip),
+  openIPCheck: (ip) => ipcRenderer.send("open-ip-check", ip),
+
+  // Events — return a cleanup function that the caller must invoke to remove the listener
+  onIPStatus: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("ip-status", handler);
+    return () => ipcRenderer.removeListener("ip-status", handler);
+  },
+  onInverterStatus: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("inverter-status", handler);
+    return () => ipcRenderer.removeListener("inverter-status", handler);
+  },
+
+  // License
+  getLicenseStatus: () => ipcRenderer.invoke("license-get-status"),
+  getLicenseAudit: () => ipcRenderer.invoke("license-get-audit"),
+  uploadLicense: () => ipcRenderer.invoke("license-upload"),
+  onLicenseStatus: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("license-status", handler);
+    return () => ipcRenderer.removeListener("license-status", handler);
+  },
+
+  // Admin
+  getAuthKey: () => ipcRenderer.invoke("get-auth-key"),
+});

@@ -1,0 +1,1202 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inverter Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/vendor/chart.umd.min.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css"
+    />
+    <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <!-- ═══════════════════════════ HEADER ═══════════════════════════════════════ -->
+    <header id="titlebar">
+      <div class="tb-metrics-row">
+        <div class="tb-left">
+          <div class="tb-logo">
+            <img
+              id="logo-img"
+              src="/assets/adsi_logo.png"
+              alt="ADSI"
+            />
+            <span id="logo-text" class="logo-fallback" style="display: none"
+              >ADSI</span
+            >
+          </div>
+        </div>
+
+        <div class="tb-metrics-center">
+          <div class="metric-pill">
+            <div class="metric-label">TOTAL PAC</div>
+            <div class="metric-value" id="totalPac" aria-live="polite">
+              —<span class="unit">kW</span>
+            </div>
+          </div>
+          <div class="metric-pill">
+            <div class="metric-label">TODAY MWh</div>
+            <div class="metric-value" id="totalKwh" aria-live="polite">
+              —<span class="unit">MWh</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tb-right">
+          <button
+            id="themeToggleBtn"
+            class="tb-theme-toggle"
+            type="button"
+            aria-label="Toggle theme"
+            title="Toggle theme"
+          >
+            <span id="themeToggleIcon" class="mdi mdi-weather-sunny"></span>
+            <span id="themeToggleLabel">Light</span>
+          </button>
+          <div class="tb-clock-wrap">
+            <div class="ws-dot" id="wsDot" title="Disconnected"></div>
+            <div>
+              <div class="tb-clock" id="clock">--:--:--</div>
+              <div class="tb-date" id="dateLbl"></div>
+            </div>
+          </div>
+          <button
+            id="navToggleBtn"
+            class="tb-nav-toggle"
+            type="button"
+            aria-label="Toggle menu"
+            title="Toggle menu"
+          >
+            <span class="mdi mdi-menu"></span>
+          </button>
+        </div>
+      </div>
+    </header>
+    <div id="globalProgressRow" class="tb-progress-row">
+      <div class="tb-progress-track">
+        <div id="globalProgressFill" class="tb-progress-fill"></div>
+      </div>
+    </div>
+    <div id="licenseNotice" class="license-notice hidden">
+      <span id="licenseNoticeText">License notice</span>
+      <button id="licenseNoticeUpload" type="button">Upload License</button>
+    </div>
+    <aside id="sideNav" class="side-nav">
+      <nav class="tb-nav" id="mainNav">
+        <button class="nav-btn active" data-page="inverters">
+          <span class="nav-icon">⚡</span><span>INVERTERS</span>
+        </button>
+        <button class="nav-btn" data-page="analytics">
+          <span class="nav-icon">📈</span><span>ANALYTICS</span>
+        </button>
+        <button class="nav-btn" data-page="alarms">
+          <span class="nav-icon">🔔</span><span>ALARMS</span>
+          <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
+        </button>
+        <button class="nav-btn" data-page="energy">
+          <span class="nav-icon">🔋</span><span>ENERGY</span>
+        </button>
+        <button class="nav-btn" data-page="audit">
+          <span class="nav-icon">📋</span><span>AUDIT</span>
+        </button>
+        <button class="nav-btn" data-page="report">
+          <span class="nav-icon">📊</span><span>REPORT</span>
+        </button>
+        <button class="nav-btn" data-page="export">
+          <span class="nav-icon">💾</span><span>EXPORT</span>
+        </button>
+        <button class="nav-btn" data-page="settings">
+          <span class="nav-icon">⚙</span><span>SETTINGS</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- ═══════════════════════════ MAIN CONTENT ═════════════════════════════════ -->
+    <main id="main">
+      <!-- ─── PAGE: INVERTERS ─────────────────────────────────────────────────────── -->
+      <section id="page-inverters" class="page active">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <select id="invFilter" class="sel" aria-label="Filter inverters by status">
+              <option value="all">All Inverters</option>
+            </select>
+            <label
+              >Layout
+              <select
+                id="invGridLayout"
+                class="sel inv-layout-sel"
+                aria-label="Select grid layout columns"
+              >
+                <option value="auto">Auto</option>
+                <option value="2">2 Columns</option>
+                <option value="3">3 Columns</option>
+                <option value="4">4 Columns</option>
+                <option value="5">5 Columns</option>
+                <option value="6">6 Columns</option>
+                <option value="7">7 Columns</option>
+              </select>
+            </label>
+          </div>
+          <div class="tl-right">
+            <div class="stat-chip online">Online: <b id="statOnline">0</b></div>
+            <div class="stat-chip alarm">
+              Alarmed: <b id="statAlarmed">0</b>
+            </div>
+            <div class="stat-chip offline">
+              Offline: <b id="statOffline">0</b>
+            </div>
+          </div>
+        </div>
+        <div class="inv-grid" id="invGrid"></div>
+      </section>
+
+      <!-- ─── PAGE: ANALYTICS ────────────────────────────────────────────────────── -->
+      <section id="page-analytics" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <label>Date <input type="date" id="anaDate" class="inp" /></label>
+            <label
+              >Interval
+              <select id="anaInterval" class="sel">
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">1 hour</option>
+              </select>
+            </label>
+            <button id="btnLoadAnalytics" class="btn btn-accent">
+              Load
+            </button>
+          </div>
+          <div class="tl-right" id="analyticsSummary">
+            <span class="toolbar-info">Interval: <b>—</b></span>
+            <span class="toolbar-info">Total: <b>—</b></span>
+            <span class="toolbar-info">Plant Peak: <b>—</b></span>
+            <span class="toolbar-info">Active Inv: <b>—</b></span>
+            <span class="toolbar-info">Last: <b>—</b></span>
+          </div>
+        </div>
+        <div class="chart-grid analytics-grid" id="analyticsCharts"></div>
+      </section>
+
+      <!-- ─── PAGE: ALARMS ───────────────────────────────────────────────────────── -->
+      <section id="page-alarms" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <label
+              >Inverter
+              <select id="alarmInv" class="sel">
+                <option value="all">All</option>
+              </select></label
+            >
+            <label
+              >From <input type="date" id="alarmStart" class="inp"
+            /></label>
+            <label>To <input type="date" id="alarmEnd" class="inp" /></label>
+            <button id="btnFetchAlarms" class="btn btn-accent">
+              Search
+            </button>
+            <button id="btnAckAll" class="btn btn-outline">
+              ✔ Ack All
+            </button>
+          </div>
+          <div class="tl-right">
+            <span class="toolbar-info" id="alarmCount">—</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Occurred At</th>
+                <th>Inverter</th>
+                <th>Node</th>
+                <th>Alarm Code</th>
+                <th>Severity</th>
+                <th>Description</th>
+                <th>Cleared</th>
+                <th>Duration</th>
+                <th>Status</th>
+                <th>ACK</th>
+              </tr>
+            </thead>
+            <tbody id="alarmBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── PAGE: ENERGY LOG ───────────────────────────────────────────────────── -->
+      <section id="page-energy" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <label
+              >Inverter
+              <select id="energyInv" class="sel">
+                <option value="all">All</option>
+              </select></label
+            >
+            <label
+              >From <input type="date" id="energyStart" class="inp"
+            /></label>
+            <label>To <input type="date" id="energyEnd" class="inp" /></label>
+            <label
+              >Resolution
+              <select id="energyRes" class="sel">
+                <option value="5min">5-Minute</option>
+              </select>
+            </label>
+            <button id="btnFetchEnergy" class="btn btn-accent">Load</button>
+          </div>
+          <div class="tl-right">
+            <span class="toolbar-info" id="energyCount">—</span>
+          </div>
+        </div>
+        <div id="energySummary" class="energy-summary">
+          <div class="energy-kpi">
+            <div class="energy-kpi-label">Total Energy (Range)</div>
+            <div class="energy-kpi-value" id="energyTotalMwh">— MWh</div>
+          </div>
+          <div class="energy-kpi">
+            <div class="energy-kpi-label">Average / Record</div>
+            <div class="energy-kpi-value" id="energyAvgMwh">— MWh</div>
+          </div>
+          <div class="energy-kpi">
+            <div class="energy-kpi-label">Peak Interval</div>
+            <div class="energy-kpi-value" id="energyPeakMwh">— MWh</div>
+            <div class="energy-kpi-sub" id="energyPeakMeta">—</div>
+          </div>
+          <div class="energy-kpi">
+            <div class="energy-kpi-label">Inverters Reporting</div>
+            <div class="energy-kpi-value" id="energyInvCount">—</div>
+          </div>
+          <div class="energy-kpi">
+            <div class="energy-kpi-label">Latest Interval</div>
+            <div class="energy-kpi-value" id="energyLastTs">—</div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="energyTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Interval End</th>
+                <th>Inverter</th>
+                <th>Energy Added (MWh)</th>
+              </tr>
+            </thead>
+            <tbody id="energyBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── PAGE: AUDIT LOG ────────────────────────────────────────────────────── -->
+      <section id="page-audit" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <label
+              >Inverter
+              <select id="auditInv" class="sel">
+                <option value="all">All</option>
+              </select></label
+            >
+            <label
+              >From <input type="date" id="auditStart" class="inp"
+            /></label>
+            <label>To <input type="date" id="auditEnd" class="inp" /></label>
+            <button id="btnFetchAudit" class="btn btn-accent">Load</button>
+          </div>
+          <div class="tl-right">
+            <button id="btnResetAuditFilters" class="btn btn-outline">
+              Reset Filters
+            </button>
+            <span class="toolbar-info" id="auditCount">—</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="auditTable">
+            <thead>
+              <tr>
+                <th class="audit-sort" data-key="ts" data-label="Date/Time">
+                  Date/Time
+                </th>
+                <th
+                  class="audit-sort"
+                  data-key="operator"
+                  data-label="Operator"
+                >
+                  Operator
+                </th>
+                <th
+                  class="audit-sort"
+                  data-key="inverter"
+                  data-label="Inverter"
+                >
+                  Inverter
+                </th>
+                <th class="audit-sort" data-key="node" data-label="Node">
+                  Node
+                </th>
+                <th class="audit-sort" data-key="action" data-label="Action">
+                  Action
+                </th>
+                <th class="audit-sort" data-key="scope" data-label="Scope">
+                  Scope
+                </th>
+                <th class="audit-sort" data-key="result" data-label="Result">
+                  Result
+                </th>
+                <th class="audit-sort" data-key="ip" data-label="IP">IP</th>
+              </tr>
+              <tr class="audit-filter-row">
+                <th>
+                  <input
+                    id="auditFilterTs"
+                    class="inp audit-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+                <th>
+                  <input
+                    id="auditFilterOperator"
+                    class="inp audit-filter-inp"
+                    type="text"
+                    placeholder="operator"
+                  />
+                </th>
+                <th>
+                  <select id="auditFilterInverter" class="sel audit-filter-sel">
+                    <option value="all">All</option>
+                  </select>
+                </th>
+                <th>
+                  <select id="auditFilterNode" class="sel audit-filter-sel">
+                    <option value="all">All</option>
+                    <option value="ALL">ALL</option>
+                    <option value="N1">N1</option>
+                    <option value="N2">N2</option>
+                    <option value="N3">N3</option>
+                    <option value="N4">N4</option>
+                  </select>
+                </th>
+                <th>
+                  <select id="auditFilterAction" class="sel audit-filter-sel">
+                    <option value="all">All</option>
+                    <option value="START">START</option>
+                    <option value="STOP">STOP</option>
+                  </select>
+                </th>
+                <th>
+                  <select id="auditFilterScope" class="sel audit-filter-sel">
+                    <option value="all">All</option>
+                    <option value="single">single</option>
+                    <option value="scope-all">all</option>
+                    <option value="selected">selected</option>
+                  </select>
+                </th>
+                <th>
+                  <select id="auditFilterResult" class="sel audit-filter-sel">
+                    <option value="all">All</option>
+                    <option value="ok">OK</option>
+                    <option value="error">ERROR</option>
+                  </select>
+                </th>
+                <th>
+                  <input
+                    id="auditFilterIp"
+                    class="inp audit-filter-inp"
+                    type="text"
+                    placeholder="ip"
+                  />
+                </th>
+              </tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── PAGE: DAILY REPORT ─────────────────────────────────────────────────── -->
+      <section id="page-report" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <label
+              >Date <input type="date" id="reportDate" class="inp"
+            /></label>
+            <button id="btnFetchReport" class="btn btn-accent">Load</button>
+            <label
+              >Format
+              <select id="reportExportFormat" class="sel">
+                <option value="xlsx" selected>Excel (.xlsx)</option>
+                <option value="csv">CSV</option>
+              </select>
+            </label>
+            <button id="btnExportDailyReport" class="btn btn-outline">
+              ⬇ Export
+            </button>
+          </div>
+          <div class="tl-right" id="reportKpis"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="reportTable">
+            <thead>
+              <tr>
+                <th
+                  class="report-sort"
+                  data-key="inverter"
+                  data-label="Inverter"
+                >
+                  Inverter
+                </th>
+                <th class="report-sort" data-key="mwh" data-label="Energy (MWh)">
+                  Energy (MWh)
+                </th>
+                <th
+                  class="report-sort"
+                  data-key="peak_kw"
+                  data-label="Peak Pac (kW)"
+                >
+                  Peak Pac (kW)
+                </th>
+                <th
+                  class="report-sort"
+                  data-key="avg_kw"
+                  data-label="Avg Pac (kW)"
+                >
+                  Avg Pac (kW)
+                </th>
+                <th
+                  class="report-sort"
+                  data-key="uptime_h"
+                  data-label="Uptime (h)"
+                >
+                  Uptime (h)
+                </th>
+                <th
+                  class="report-sort"
+                  data-key="alarm_count"
+                  data-label="Alarms"
+                >
+                  Alarms
+                </th>
+                <th class="report-sort" data-key="perf" data-label="Availability (%)">
+                  Availability (%)
+                </th>
+              </tr>
+              <tr class="report-filter-row">
+                <th>
+                  <select id="reportFilterInverter" class="sel report-filter-sel">
+                    <option value="all">All</option>
+                  </select>
+                </th>
+                <th>
+                  <input
+                    id="reportFilterEnergy"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+                <th>
+                  <input
+                    id="reportFilterPeak"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+                <th>
+                  <input
+                    id="reportFilterAvg"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+                <th>
+                  <input
+                    id="reportFilterUptime"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+                <th>
+                  <select id="reportFilterAlarms" class="sel report-filter-sel">
+                    <option value="all">All</option>
+                    <option value="with">With Alarms</option>
+                    <option value="none">No Alarms</option>
+                  </select>
+                </th>
+                <th>
+                  <input
+                    id="reportFilterPerf"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
+                </th>
+              </tr>
+            </thead>
+            <tbody id="reportBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── PAGE: EXPORT ───────────────────────────────────────────────────────── -->
+      <section id="page-export" class="page">
+        <div class="export-grid">
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-alarm">🔔</div>
+            <div class="exp-title">Alarm Log Export</div>
+            <div class="exp-desc">
+              Full alarm history with fault codes, severity levels, duration,
+              and acknowledgement status
+            </div>
+            <div class="exp-form">
+              <label
+                >Inverter<select id="expAlarmInv" class="sel">
+                  <option value="all">All Inverters</option>
+                </select></label
+              >
+              <label
+                >From<input type="date" id="expAlarmStart" class="inp"
+              /></label>
+              <label
+                >To<input type="date" id="expAlarmEnd" class="inp"
+              /></label>
+              <label
+                >Format
+                <select id="expAlarmFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button
+              id="btnExportAlarms"
+              class="btn btn-accent btn-full"
+            >
+              ⬇ Export Alarms
+            </button>
+            <div class="exp-result" id="expAlarmResult"></div>
+          </div>
+
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-energy">⚡</div>
+            <div class="exp-title">Energy Export</div>
+            <div class="exp-desc">
+              Date, last reading time, inverter, node, total MWh register, and
+              total MWh calculated with per-inverter/day totals
+            </div>
+            <div class="exp-form">
+              <label
+                >Inverter<select id="expEnergyInv" class="sel">
+                  <option value="all">All Inverters</option>
+                </select></label
+              >
+              <label
+                >From<input type="date" id="expEnergyStart" class="inp"
+              /></label>
+              <label
+                >To<input type="date" id="expEnergyEnd" class="inp"
+              /></label>
+              <label
+                >Format
+                <select id="expEnergyFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button id="btnRunEnergyExport" class="btn btn-accent btn-full">
+              ⬇ Export Energy
+            </button>
+            <div class="exp-result" id="expEnergyResult"></div>
+          </div>
+
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-report">📉</div>
+            <div class="exp-title">Day-ahead vs Actual Export</div>
+            <div class="exp-desc">
+              Plant total interval energy comparison between actual measured MWh
+              and day-ahead forecast MWh
+            </div>
+            <div class="exp-form">
+              <label
+                >Date<input type="date" id="expForecastDate" class="inp"
+              /></label>
+              <label
+                >Resolution
+                <select id="expForecastResolution" class="sel">
+                  <option value="5min">5 min</option>
+                  <option value="15min">15 min</option>
+                  <option value="30min">30 min</option>
+                  <option value="1hr">1 hour</option>
+                  <option value="daily">Daily</option>
+                </select>
+              </label>
+              <label
+                >Format
+                <select id="expForecastFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button
+              id="btnRunForecastExport"
+              class="btn btn-accent btn-full"
+            >
+              ⬇ Export Day-ahead vs Actual
+            </button>
+            <div class="exp-result" id="expForecastResult"></div>
+          </div>
+
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-energy">🧾</div>
+            <div class="exp-title">Inverter Data Export</div>
+            <div class="exp-desc">
+              Full inverter sampled dataset
+              (Vdc/Idc/Vac/Iac/Pac/Pdc/MWh/alarm/online) for troubleshooting and
+              deep analysis
+            </div>
+            <div class="exp-form">
+              <label
+                >Inverter<select id="expInvDataInv" class="sel">
+                  <option value="all">All Inverters</option>
+                </select></label
+              >
+              <label
+                >From<input type="date" id="expInvDataStart" class="inp"
+              /></label>
+              <label
+                >To<input type="date" id="expInvDataEnd" class="inp"
+              /></label>
+              <label
+                >Format
+                <select id="expInvDataFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button
+              id="btnRunInvDataExport"
+              class="btn btn-accent btn-full"
+            >
+              ⬇ Export Inverter Data
+            </button>
+            <div class="exp-result" id="expInvDataResult"></div>
+          </div>
+
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-audit">📋</div>
+            <div class="exp-title">Audit Log Export</div>
+            <div class="exp-desc">
+              All operator control actions — start/stop commands, timestamps,
+              scope (single/all)
+            </div>
+            <div class="exp-form">
+              <label
+                >Inverter<select id="expAuditInv" class="sel">
+                  <option value="all">All Inverters</option>
+                </select></label
+              >
+              <label
+                >From<input type="date" id="expAuditStart" class="inp"
+              /></label>
+              <label
+                >To<input type="date" id="expAuditEnd" class="inp"
+              /></label>
+              <label
+                >Format
+                <select id="expAuditFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button
+              id="btnExportAudit"
+              class="btn btn-accent btn-full"
+            >
+              ⬇ Export Audit
+            </button>
+            <div class="exp-result" id="expAuditResult"></div>
+          </div>
+
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-report">📊</div>
+            <div class="exp-title">Daily Generation Report</div>
+            <div class="exp-desc">
+              Plant performance summary: total MWh, peak power, uptime, and
+              fault count per inverter per day
+            </div>
+            <div class="exp-form">
+              <label
+                >From<input type="date" id="expReportStart" class="inp"
+              /></label>
+              <label
+                >To<input type="date" id="expReportEnd" class="inp"
+              /></label>
+              <label
+                >Format
+                <select id="expReportFormat" class="sel">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <button
+              id="btnRunDailyReportExport"
+              class="btn btn-accent btn-full"
+            >
+              ⬇ Export Daily Report
+            </button>
+            <div class="exp-result" id="expReportResult"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── PAGE: SETTINGS ─────────────────────────────────────────────────────── -->
+      <section id="page-settings" class="page">
+        <div class="settings-wrap">
+          <div class="sgroup">
+            <div class="sgroup-title">🏭 Plant Configuration</div>
+            <div class="srow">
+              <label data-required="*"
+                >Plant Name<input
+                  type="text"
+                  id="setPlantName"
+                  class="inp"
+                  placeholder="ADSI Solar Plant"
+                  aria-describedby="plantNameHelp"
+              /></label>
+              <small id="plantNameHelp">Name of your solar installation (required)</small>
+              <label
+                >Operator Name<input
+                  type="text"
+                  id="setOperatorName"
+                  class="inp"
+                  placeholder="OPERATOR"
+              /></label>
+              <label data-required="*"
+                >Inverter Count<input
+                  type="number"
+                  id="setInverterCount"
+                  class="inp inp-sm"
+                  min="1"
+                  max="100"
+                  aria-describedby="inverterCountHelp"
+              /></label>
+              <small id="inverterCountHelp">Number of inverters (1-100)</small>
+              <label data-required="*"
+                >Nodes/Inverter<input
+                  type="number"
+                  id="setNodeCount"
+                  class="inp inp-sm"
+                  min="1"
+                  max="16"
+                  aria-describedby="nodeCountHelp"
+              /></label>
+              <small id="nodeCountHelp">Data collection nodes per inverter (1-16)</small>
+            </div>
+          </div>
+          <div class="sgroup">
+            <div class="sgroup-title">🌐 Connectivity Mode (Tailscale Ready)</div>
+            <div class="srow">
+              <label
+                >Operation Mode
+                <select id="setOperationMode" class="sel">
+                  <option value="gateway">Gateway (Plant Polling)</option>
+                  <option value="remote">Remote (Via Gateway)</option>
+                </select>
+              </label>
+              <label
+                >Remote Gateway URL<input
+                  type="text"
+                  id="setRemoteGatewayUrl"
+                  class="inp inp-lg"
+                  placeholder="http://100.x.x.x:3500"
+              /></label>
+              <label
+                >Remote API Token<input
+                  type="password"
+                  id="setRemoteApiToken"
+                  class="inp inp-lg"
+                  autocomplete="off"
+                  placeholder="Shared token"
+              /></label>
+              <label
+                >Tailscale Device Hint<input
+                  type="text"
+                  id="setTailscaleDeviceHint"
+                  class="inp"
+                  placeholder="plant-gateway"
+              /></label>
+            </div>
+            <div class="sinfo" style="margin-top: 8px">
+              <div>
+                Use Gateway mode on the plant device. Use Remote mode on viewing/control devices and connect through Tailscale tailnet.
+              </div>
+            </div>
+            <div class="sgroup-actions" style="margin-top: 8px">
+              <button id="btnTestRemoteGateway" class="btn btn-outline" type="button">
+                🔎 Test Remote Gateway
+              </button>
+              <button id="btnCheckTailscale" class="btn btn-outline" type="button">
+                🛡 Check Tailscale
+              </button>
+              <span class="smsg" id="networkMsg"></span>
+            </div>
+          </div>
+          <div class="sgroup">
+            <div class="sgroup-title">🔌 Data API</div>
+            <div class="srow">
+              <label
+                >Data API URL<input
+                  type="text"
+                  id="setApiUrl"
+                  class="inp inp-lg"
+                  placeholder="http://127.0.0.1:9100/data"
+              /></label>
+              <label
+                >Write API URL<input
+                  type="text"
+                  id="setWriteUrl"
+                  class="inp inp-lg"
+                  placeholder="http://127.0.0.1:9100/write"
+              /></label>
+            </div>
+          </div>
+          <div class="sgroup">
+            <div class="sgroup-title">☀️ Forecast Integration (Solcast Ready)</div>
+            <div class="srow">
+              <label
+                >Forecast Source
+                <select id="setForecastProvider" class="sel">
+                  <option value="ml_local">Local ML (Current)</option>
+                  <option value="solcast">Solcast API</option>
+                </select></label
+              >
+              <label
+                >Solcast Base URL<input
+                  type="text"
+                  id="setSolcastBaseUrl"
+                  class="inp inp-lg"
+                  placeholder="https://api.solcast.com.au"
+              /></label>
+              <label
+                >Solcast API Key<input
+                  type="password"
+                  id="setSolcastApiKey"
+                  class="inp inp-lg"
+                  autocomplete="off"
+                  placeholder="API key"
+              /></label>
+              <label
+                >Resource ID<input
+                  type="text"
+                  id="setSolcastResourceId"
+                  class="inp"
+                  placeholder="rooftop/site resource id"
+              /></label>
+              <label
+                >Timezone<input
+                  type="text"
+                  id="setSolcastTimezone"
+                  class="inp"
+                  placeholder="Asia/Manila"
+              /></label>
+            </div>
+            <div class="sinfo" style="margin-top: 8px">
+              <div>
+                Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
+              </div>
+            </div>
+            <div class="sgroup-actions" style="margin-top: 8px">
+              <button
+                id="btnSolcastSaveTest"
+                class="btn btn-accent"
+                type="button"
+              >
+                💾 Save + Test Solcast
+              </button>
+              <button
+                id="btnSolcastTest"
+                class="btn btn-outline"
+                type="button"
+              >
+                🔎 Test Solcast Connection
+              </button>
+              <span class="smsg" id="solcastTestMsg"></span>
+            </div>
+          </div>
+          <div class="sgroup">
+            <div class="sgroup-title">💾 Storage</div>
+            <div class="srow">
+              <label
+                >Export Folder<input
+                  type="text"
+                  id="setCsvPath"
+                  class="inp inp-lg"
+                  placeholder="C:\Logs\ADSI"
+              /></label>
+              <label
+                >Retention (days)<input
+                  type="number"
+                  id="setRetainDays"
+                  class="inp inp-sm"
+                  min="7"
+                  max="1095"
+              /></label>
+            </div>
+          </div>
+          <div class="sgroup" id="licenseSection">
+            <div class="sgroup-title">🔐 License</div>
+            <div class="license-grid">
+              <div class="license-item">
+                <div class="license-label">Status</div>
+                <div id="licenseStatusText" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Source</div>
+                <div id="licenseSourceText" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Expiry Timestamp</div>
+                <div id="licenseExpiryText" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Days Left</div>
+                <div id="licenseDaysLeftText" class="license-value">—</div>
+              </div>
+            </div>
+            <div class="sgroup-actions" style="margin-top: 10px">
+              <button id="btnUploadLicense" class="btn btn-accent">
+                ⬆ Replace License
+              </button>
+              <button id="btnRefreshLicense" class="btn btn-outline">
+                ↻ Refresh License Status
+              </button>
+              <span class="smsg" id="licenseMsg"></span>
+            </div>
+            <div class="license-audit-wrap">
+              <table class="data-table license-audit-table">
+                <thead>
+                  <tr>
+                    <th>Date/Time</th>
+                    <th>Event</th>
+                    <th>Details</th>
+                    <th>Level</th>
+                  </tr>
+                </thead>
+                <tbody id="licenseAuditBody">
+                  <tr class="table-empty"><td colspan="4">No license audit entries.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="sgroup-actions">
+            <button id="btnSaveSettings" class="btn btn-accent">
+              💾 Save Settings
+            </button>
+            <button id="btnPickExportFolder" class="btn btn-outline">
+              📂 Browse Export Folder
+            </button>
+            <button id="btnOpenExportFolder" class="btn btn-outline">
+              📁 Open Export Folder
+            </button>
+            <button id="btnOpenIpConfig" class="btn btn-outline">
+              🌐 IP Configuration
+            </button>
+            <span class="smsg" id="settingsMsg"></span>
+          </div>
+          <div class="sgroup" style="margin-top: 24px">
+            <div class="sgroup-title">ℹ About</div>
+            <div class="sinfo">
+              <div><b>Inverter Dashboard v2.0</b></div>
+              <div>
+                Inverter: Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor
+              </div>
+              <div>Manual Reference: AAV2015IQE01_B</div>
+              <div>DB Path: <code id="setDataDir">—</code></div>
+            </div>
+            <div class="smanual">
+              <div class="smanual-head">User Guide</div>
+              <div class="sinfo" style="margin-bottom: 8px">
+                <div>
+                  Open the interactive guide for complete operation instructions,
+                  controls, workflows, and troubleshooting references.
+                </div>
+              </div>
+              <button id="btnOpenGuide" class="btn btn-outline">
+                📘 Open User Guide
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ═══════════════════════════ OVERLAYS ══════════════════════════════════════ -->
+    <div id="alarmToast" class="alarm-toast"></div>
+
+    <div id="notifPanel" class="notif-panel hidden">
+      <div class="notif-hdr">
+        <span>🔔 Active Alarms</span>
+        <button id="btnCloseNotif" aria-label="Close notifications">✕</button>
+      </div>
+      <div id="notifList" class="notif-list"></div>
+    </div>
+
+    <button
+      id="notifBell"
+      class="notif-bell hidden"
+      title="Active Alarms"
+      aria-label="View active alarms"
+    >
+      🔔<span id="notifCount" aria-label="Number of active alarms">0</span>
+    </button>
+
+    <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
+      <div class="guide-modal-card">
+        <div class="guide-modal-head">
+          <div class="guide-modal-title">Dashboard User Guide</div>
+          <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">✕</button>
+        </div>
+        <div class="guide-modal-body">
+          <div class="guide-visual-grid">
+            <div class="guide-visual-item">
+              <span class="mdi mdi-flash guide-visual-icon"></span>
+              <div class="guide-visual-text">Live inverter monitoring and controls</div>
+            </div>
+            <div class="guide-visual-item">
+              <span class="mdi mdi-chart-line guide-visual-icon"></span>
+              <div class="guide-visual-text">Analytics with actual vs day-ahead trends</div>
+            </div>
+            <div class="guide-visual-item">
+              <span class="mdi mdi-bell-alert guide-visual-icon"></span>
+              <div class="guide-visual-text">Alarm tracking, ACK, and event persistence</div>
+            </div>
+            <div class="guide-visual-item">
+              <span class="mdi mdi-file-export guide-visual-icon"></span>
+              <div class="guide-visual-text">Structured exports in Excel/CSV</div>
+            </div>
+          </div>
+
+          <div class="guide-accordion">
+            <details open>
+              <summary>1. Startup and Access</summary>
+              <ul>
+                <li>Login is required before backend/server startup proceeds.</li>
+                <li>License/trial validation runs before opening the dashboard.</li>
+                <li>Near-expiry license warning appears as a fixed notice with upload action.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>2. Inverters and Node Controls</summary>
+              <ul>
+                <li>Each inverter card shows AC/DC power, node table, alarm code, and last seen time.</li>
+                <li>Node control buttons follow actual runtime state (START/STOP/ISOLATED).</li>
+                <li>Bulk command panel accepts ranges like <code>1-13,16,23-27</code> and requires authorization.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>3. Analytics and Forecast</summary>
+              <ul>
+                <li>Analytics displays total plant and per-inverter MWh trends.</li>
+                <li>Day-ahead forecast overlays actual data and updates with selected interval/date.</li>
+                <li>Weekly weather context supports forecast interpretation.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>4. Alarms, Audit, and Report</summary>
+              <ul>
+                <li>Alarm table tracks occurred time, cleared time, duration, status, and ACK state.</li>
+                <li>Audit table records operator, scope, command result, and IP source.</li>
+                <li>Report tab summarizes daily and weekly MWh, availability, and performance metrics.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>5. Export and Data Persistence</summary>
+              <ul>
+                <li>Exports support Excel (.xlsx default) and CSV where applicable.</li>
+                <li>Export files are grouped by inverter scope and data category in subfolders.</li>
+                <li>Export options/date selections and core settings persist across app restarts.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>6. IP Config and Topology Windows</summary>
+              <ul>
+                <li>IP Config controls inverter IPs, polling interval, and enabled nodes.</li>
+                <li>Topology provides interactive status mapping, filters, and quick navigation.</li>
+                <li>Both windows open separately to avoid blocking main dashboard operations.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>7. Keyboard and Operations</summary>
+              <ul>
+                <li><code>Ctrl+T</code>: Open topology window.</li>
+                <li><code>Ctrl+I</code>: Open IP configuration window.</li>
+                <li><code>Ctrl + / - / 0</code>: Native Electron zoom in/out/reset.</li>
+              </ul>
+            </details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="bulkAuthModal"
+      class="modal-backdrop hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="bulkAuthTitle"
+    >
+      <div class="auth-modal-card">
+        <button
+          id="bulkAuthClose"
+          class="auth-modal-close"
+          type="button"
+          aria-label="Close"
+        >
+          ✕
+        </button>
+        <div class="auth-modal-title" id="bulkAuthTitle">
+          Plant Authorization
+        </div>
+        <div class="auth-modal-message" id="bulkAuthMessage">—</div>
+        <div class="auth-modal-sub">Bulk control requires authorization.</div>
+        <label class="auth-modal-label" for="bulkAuthInput"
+          >Enter Auth Key</label
+        >
+        <input
+          id="bulkAuthInput"
+          class="inp auth-modal-input"
+          type="password"
+          autocomplete="off"
+        />
+        <div id="bulkAuthError" class="auth-modal-error"></div>
+        <div class="auth-modal-actions">
+          <button id="bulkAuthCancel" class="btn btn-outline" type="button">
+            Cancel
+          </button>
+          <button id="bulkAuthOk" class="btn btn-accent" type="button">
+            Authorize
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script src="js/app.js"></script>
+  </body>
+</html>
