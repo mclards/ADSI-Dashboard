@@ -2,12 +2,12 @@ from pymodbus.client.sync import ModbusTcpClient
 import time
 
 
-def create_client(ip, port=502):
+def create_client(ip, port=502, timeout=1.0):
     """
     Create a persistent Modbus TCP client.
+    timeout: TCP read timeout in seconds; configurable from dashboard settings.
     """
-    # Keep timeout short so one bad unit cannot stall the whole inverter cycle.
-    client = ModbusTcpClient(host=ip, port=port, timeout=0.2, retry_on_empty=True)
+    client = ModbusTcpClient(host=ip, port=port, timeout=timeout, retry_on_empty=False)
     try:
         client.connect()
     except Exception:

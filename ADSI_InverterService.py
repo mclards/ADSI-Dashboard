@@ -32,6 +32,7 @@ from drivers.modbus_tcp import create_client, read_input, read_holding, write_si
 from shared_data import shared
 
 ENGINE_PORT = int(os.getenv("INVERTER_ENGINE_PORT", "9100"))
+ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
 
 
 # -------------------------------------------------
@@ -127,13 +128,13 @@ LEGACY_IPCONFIG_PATHS = [
 ]
 AUTORESET_PATH = PROGRAMDATA_DIR / "autoreset.json"
 
-READ_SPACING     = 0.003   # seconds between input / holding reads
-DEFAULT_INTERVAL = 0.05    # default poll interval per inverter
-RECONNECT_DELAY  = 0.1     # seconds to wait after a reconnect attempt
+DEFAULT_INTERVAL  = 0.05   # default poll interval per inverter
 MIN_POLL_INTERVAL = 0.05   # keep poll cadence close to configured interval
-UNIT_FAIL_THRESHOLD = 2    # faster suppression for repeatedly failing units
-UNIT_FAIL_BACKOFF_S = 8    # shorter backoff to recover quickly
-RECONNECT_COOLDOWN_S = 2.0 # avoid reconnect storms per inverter
+
+# ── Tunable constants — overridden at runtime from DB 'inverterPollConfig' ──
+READ_SPACING    = 0.005  # seconds between input / holding reads
+RECONNECT_DELAY = 0.5    # seconds to wait after reconnect before retry read
+_modbus_timeout = 1.0    # Modbus TCP read timeout (passed to create_client)
 
 
 # -------------------------------------------------
@@ -151,8 +152,6 @@ static_units    = {}   # ip -> [unit list] or None
 
 auto_reset_state = {}  # (ip, unit) -> {"state": str, "since": float, "busy": bool}
 _last_unit_fail  = {}  # ip -> timestamp of last failed unit-detect
-_unit_read_backoff = {}  # (ip, unit) -> {"fails": int, "suppress_until": float}
-_last_reconnect_try = {}  # ip -> ts of last reconnect attempt
 
 auto_reset_cfg = {
     "enabled":                 False,
@@ -161,7 +160,7 @@ auto_reset_cfg = {
     "wait_clear_timeout_sec":  10,
 }
 
-executor = ThreadPoolExecutor(max_workers=64)
+executor = ThreadPoolExecutor(max_workers=16)
 
 
 # -------------------------------------------------
@@ -295,6 +294,50 @@ async def load_ipconfig():
 
 
 # -------------------------------------------------
+#   inverterPollConfig  —  live-tunable constants
+# -------------------------------------------------
+
+def _load_poll_config_sync():
+    """Read inverterPollConfig JSON from the SQLite settings table."""
+    if not DB_PATH.exists():
+        return {}
+    conn = None
+    try:
+        conn = sqlite3.connect(str(DB_PATH), timeout=1.0)
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key=?",
+            ("inverterPollConfig",),
+        ).fetchone()
+        if not row or not row[0]:
+            return {}
+        cfg = json.loads(row[0])
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _apply_poll_config(cfg):
+    """Apply a poll-config dict to the module-level tunable constants."""
+    global READ_SPACING, RECONNECT_DELAY, _modbus_timeout
+
+    if "readSpacing" in cfg:
+        v = float(cfg["readSpacing"])
+        READ_SPACING = max(0.001, min(v, 1.0))
+    if "reconnectDelay" in cfg:
+        v = float(cfg["reconnectDelay"])
+        RECONNECT_DELAY = max(0.1, min(v, 10.0))
+    if "modbusTimeout" in cfg:
+        v = float(cfg["modbusTimeout"])
+        _modbus_timeout = max(0.2, min(v, 10.0))
+
+
+# -------------------------------------------------
 #   autoreset.json  —  load
 # -------------------------------------------------
 
@@ -388,13 +431,7 @@ async def safe_read(func, client, addr, count, unit, ip):
     except Exception:
         pass
 
-    # ── Reconnect + retry (throttled per inverter) ──
-    now = time.time()
-    last_try = _last_reconnect_try.get(ip, 0.0)
-    if now - last_try < RECONNECT_COOLDOWN_S:
-        return None
-    _last_reconnect_try[ip] = now
-
+    # ── Reconnect + retry ──
     def reconnect_and_read():
         try:
             with lock:
@@ -525,7 +562,7 @@ async def detect_units_async(ip):
     Honours static overrides; throttles on repeated failure.
     """
     now = time.time()
-    if _last_unit_fail.get(ip, 0) + 1 > now:
+    if _last_unit_fail.get(ip, 0) + 5 > now:
         return []
 
     # Static override wins
@@ -625,24 +662,16 @@ async def poll_inverter(ip):
 
             out     = []
             inv_num = inverter_number_from_ip(ip)
+            if inv_num is None:
+                print(f"[POLL] WARNING: no inverter number for IP {ip} — data will be dropped")
+                await asyncio.sleep(1)
+                break  # wait for ip_map to be rebuilt
 
             for u in units:
-                backoff_key = (ip, u)
-                now_s = time.time()
-                st = _unit_read_backoff.get(backoff_key, {"fails": 0, "suppress_until": 0.0})
-                if st.get("suppress_until", 0.0) > now_s:
-                    continue
-
                 data = await read_fast_async(client, u, ip)
                 if not data:
-                    st["fails"] = int(st.get("fails", 0)) + 1
-                    if st["fails"] >= UNIT_FAIL_THRESHOLD:
-                        st["fails"] = 0
-                        st["suppress_until"] = now_s + UNIT_FAIL_BACKOFF_S
-                    _unit_read_backoff[backoff_key] = st
                     continue
 
-                _unit_read_backoff[backoff_key] = {"fails": 0, "suppress_until": 0.0}
                 data["inverter"] = inv_num if inv_num is not None else -1
                 data["unit"]     = u
                 out.append(data)
@@ -707,7 +736,7 @@ async def rebuild_global_maps(cfg=None):
         if ip not in clients:
             loop = asyncio.get_running_loop()
             try:
-                c = await loop.run_in_executor(executor, create_client, ip, 502)
+                c = await loop.run_in_executor(executor, create_client, ip, 502, _modbus_timeout)
             except Exception:
                 c = None
             clients[ip] = c
@@ -739,9 +768,7 @@ async def rebuild_global_maps(cfg=None):
 
             thread_locks.pop(ip, None)
             intervals.pop(ip, None)
-            for key in list(_unit_read_backoff.keys()):
-                if key[0] == ip:
-                    _unit_read_backoff.pop(key, None)
+            shared.pop(ip, None)   # remove stale live-data so dropped inverters don't linger in /data
 
     print(f"[IPCONFIG] Maps rebuilt — {len(inverters)} inverter(s) active")
 
@@ -779,9 +806,12 @@ async def start_polling_manager():
 # -------------------------------------------------
 
 async def ipconfig_watcher():
-    """Re-build maps whenever DB/file-backed ipconfig changes."""
+    """Re-build maps whenever DB/file-backed ipconfig or poll config changes."""
     last_signature = None
+    last_poll_sig = ""
+    loop = asyncio.get_running_loop()
     while True:
+        # ── Check ipconfig ──
         try:
             cfg = await load_ipconfig()
             signature = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
@@ -792,6 +822,23 @@ async def ipconfig_watcher():
                 await rebuild_global_maps(cfg)
         except Exception:
             pass
+
+        # ── Check poll config (inverterPollConfig) ──
+        try:
+            poll_cfg = await loop.run_in_executor(executor, _load_poll_config_sync)
+            poll_sig = json.dumps(poll_cfg, sort_keys=True, separators=(",", ":"))
+            if poll_sig != last_poll_sig:
+                last_poll_sig = poll_sig
+                old_timeout = _modbus_timeout
+                _apply_poll_config(poll_cfg)
+                if _modbus_timeout != old_timeout:
+                    print(f"[WATCH] modbusTimeout changed to {_modbus_timeout}s — rebuilding clients")
+                    await rebuild_global_maps()
+                elif last_poll_sig != "{}":
+                    print(f"[WATCH] poll config updated: {poll_cfg}")
+        except Exception:
+            pass
+
         await asyncio.sleep(1)
 
 
@@ -1069,11 +1116,11 @@ async def main():
     asyncio.create_task(ipconfig_watcher())
     asyncio.create_task(start_polling_manager())
 
-    print(f"[ENGINE] Hybrid engine started — listening on :{ENGINE_PORT}")
+    print(f"[ENGINE] Hybrid engine started — listening on {ENGINE_HOST}:{ENGINE_PORT}")
 
     config = uvicorn.Config(
         app,
-        host="0.0.0.0",
+        host=ENGINE_HOST,
         port=ENGINE_PORT,
         log_level="critical",
         access_log=False,

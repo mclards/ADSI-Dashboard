@@ -2074,6 +2074,26 @@
         await bootTopology();
       }
 
+      async function isClientMode() {
+        try {
+          const r = await fetch("/api/settings", { cache: "no-store" });
+          if (!r.ok) return false;
+          const s = await r.json();
+          return (
+            String(s?.operationMode || "gateway").trim().toLowerCase() ===
+            "remote"
+          );
+        } catch {
+          return false;
+        }
+      }
+
+      function alertClientModeUnavailable(feature) {
+        alert(
+          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+        );
+      }
+
       // ── Static event listeners ────────────────────────────────────────────────────
       document
         .querySelectorAll(".filter-btn")
@@ -2088,7 +2108,11 @@
         .addEventListener("click", scanAllInverters);
       document
         .getElementById("open-config-btn")
-        .addEventListener("click", () => {
+        .addEventListener("click", async () => {
+          if (await isClientMode()) {
+            alertClientModeUnavailable("IP Configuration");
+            return;
+          }
           if (window.electronAPI?.openIpConfigWindow) {
             window.electronAPI.openIpConfigWindow();
             return;
@@ -2165,7 +2189,7 @@
       });
 
       // ── Keyboard shortcuts ────────────────────────────────────────────────────────
-      document.addEventListener("keydown", (e) => {
+      document.addEventListener("keydown", async (e) => {
         const tag = String(e.target?.tagName || "").toLowerCase();
         if (tag === "input" || tag === "textarea") return;
         if (e.key === "Escape") closeDetailPanel();
@@ -2187,6 +2211,10 @@
         }
         if (e.ctrlKey && e.key.toLowerCase() === "i") {
           e.preventDefault();
+          if (await isClientMode()) {
+            alertClientModeUnavailable("IP Configuration");
+            return;
+          }
           if (window.electronAPI?.openIpConfigWindow) {
             window.electronAPI.openIpConfigWindow();
             return;

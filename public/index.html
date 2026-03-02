@@ -115,6 +115,18 @@
         <button class="nav-btn" data-page="settings">
           <span class="nav-icon">⚙</span><span>SETTINGS</span>
         </button>
+        <section id="aboutSection" class="side-about-card" aria-label="About">
+          <div class="side-about-title">ℹ ABOUT</div>
+          <div class="side-about-info">
+            <div><b>Inverter Dashboard v2.0</b></div>
+            <div>Inverter: Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor</div>
+            <div>Manual Reference: AAV2015IQE01_B</div>
+            <div>DB Path: <code id="setDataDir">—</code></div>
+          </div>
+          <div class="side-about-actions">
+            <button id="btnOpenGuide" class="btn btn-outline">📘 Open User Guide</button>
+          </div>
+        </section>
       </nav>
     </aside>
 
@@ -145,13 +157,12 @@
             </label>
           </div>
           <div class="tl-right">
+            <div class="stat-chip count-chip">Inverters <b id="metricInvCount">—</b><span class="count-total" id="metricInvTotal">/ —</span></div>
+            <div class="stat-chip count-chip">Nodes <b id="metricNodeCount">—</b><span class="count-total" id="metricNodeTotal">/ —</span></div>
+            <div class="tl-divider"></div>
             <div class="stat-chip online">Online: <b id="statOnline">0</b></div>
-            <div class="stat-chip alarm">
-              Alarmed: <b id="statAlarmed">0</b>
-            </div>
-            <div class="stat-chip offline">
-              Offline: <b id="statOffline">0</b>
-            </div>
+            <div class="stat-chip alarm">Alarmed: <b id="statAlarmed">0</b></div>
+            <div class="stat-chip offline">Offline: <b id="statOffline">0</b></div>
           </div>
         </div>
         <div class="inv-grid" id="invGrid"></div>
@@ -769,7 +780,7 @@
       <!-- ─── PAGE: SETTINGS ─────────────────────────────────────────────────────── -->
       <section id="page-settings" class="page">
         <div class="settings-wrap">
-          <div class="sgroup">
+          <div class="sgroup settings-card" id="plantConfigSection">
             <div class="sgroup-title">🏭 Plant Configuration</div>
             <div class="srow">
               <label data-required="*"
@@ -810,7 +821,26 @@
               <small id="nodeCountHelp">Data collection nodes per inverter (1-16)</small>
             </div>
           </div>
-          <div class="sgroup">
+          <div class="sgroup settings-card" id="dataApiSection">
+            <div class="sgroup-title">🔌 Data API</div>
+            <div class="srow">
+              <label
+                >Data API URL<input
+                  type="text"
+                  id="setApiUrl"
+                  class="inp inp-lg"
+                  placeholder="http://127.0.0.1:9100/data"
+              /></label>
+              <label
+                >Write API URL<input
+                  type="text"
+                  id="setWriteUrl"
+                  class="inp inp-lg"
+                  placeholder="http://127.0.0.1:9100/write"
+              /></label>
+            </div>
+          </div>
+          <div class="sgroup settings-card" id="connectivitySection">
             <div class="sgroup-title">🌐 Connectivity Mode (Tailscale Ready)</div>
             <div class="srow">
               <label
@@ -848,6 +878,12 @@
                 Use Gateway mode on the plant device. Use Remote mode on viewing/control devices and connect through Tailscale tailnet.
               </div>
             </div>
+            <div class="srow" style="margin-top: 8px">
+              <label class="chk-inline">
+                <input type="checkbox" id="setRemoteAutoSync" />
+                <span>Auto Sync on Startup (Remote mode)</span>
+              </label>
+            </div>
             <div class="sgroup-actions" style="margin-top: 8px">
               <button id="btnTestRemoteGateway" class="btn btn-outline" type="button">
                 🔎 Test Remote Gateway
@@ -858,26 +894,7 @@
               <span class="smsg" id="networkMsg"></span>
             </div>
           </div>
-          <div class="sgroup">
-            <div class="sgroup-title">🔌 Data API</div>
-            <div class="srow">
-              <label
-                >Data API URL<input
-                  type="text"
-                  id="setApiUrl"
-                  class="inp inp-lg"
-                  placeholder="http://127.0.0.1:9100/data"
-              /></label>
-              <label
-                >Write API URL<input
-                  type="text"
-                  id="setWriteUrl"
-                  class="inp inp-lg"
-                  placeholder="http://127.0.0.1:9100/write"
-              /></label>
-            </div>
-          </div>
-          <div class="sgroup">
+          <div class="sgroup settings-card" id="forecastSection">
             <div class="sgroup-title">☀️ Forecast Integration (Solcast Ready)</div>
             <div class="srow">
               <label
@@ -917,12 +934,12 @@
                   placeholder="Asia/Manila"
               /></label>
             </div>
-            <div class="sinfo" style="margin-top: 8px">
+            <div class="sinfo">
               <div>
                 Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
               </div>
             </div>
-            <div class="sgroup-actions" style="margin-top: 8px">
+            <div class="sgroup-actions">
               <button
                 id="btnSolcastSaveTest"
                 class="btn btn-accent"
@@ -940,7 +957,7 @@
               <span class="smsg" id="solcastTestMsg"></span>
             </div>
           </div>
-          <div class="sgroup">
+          <div class="sgroup settings-card" id="storageSection">
             <div class="sgroup-title">💾 Storage</div>
             <div class="srow">
               <label
@@ -960,7 +977,181 @@
               /></label>
             </div>
           </div>
-          <div class="sgroup" id="licenseSection">
+          <div class="sgroup settings-card" id="modbusPollingSection">
+            <div class="sgroup-title">⚙ Modbus / Polling</div>
+            <div class="srow">
+              <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" /></label>
+              <small>TCP read timeout per register. Raise on slow networks (0.2 – 10 s).</small>
+            </div>
+            <div class="srow">
+              <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" /></label>
+              <small>Wait after TCP reconnect before retry read (0.1 – 10 s).</small>
+            </div>
+            <div class="srow">
+              <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" /></label>
+              <small>Pause between input and holding register reads (0.001 – 1 s).</small>
+            </div>
+          </div>
+          <div class="sgroup settings-card" id="replicationHealthSection">
+            <div class="sgroup-title">🛰 Replication Health</div>
+            <div class="rep-health-grid">
+              <div class="license-item">
+                <div class="license-label">Mode</div>
+                <div id="repModeVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Gateway URL</div>
+                <div id="repGatewayVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Bridge Status</div>
+                <div id="repConnectedVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Last Sync Direction</div>
+                <div id="repDirectionVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Last Contact</div>
+                <div id="repLastSuccessVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Last Replication</div>
+                <div id="repLastReplicationVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Rows Imported</div>
+                <div id="repLastRowsVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Last Reconcile</div>
+                <div id="repLastReconcileVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Rows Pushed</div>
+                <div id="repLastReconcileRowsVal" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Signature</div>
+                <div id="repSignatureVal" class="license-value">—</div>
+              </div>
+            </div>
+            <div class="rep-health-cursors">
+              <div class="license-label">Cursors</div>
+              <code id="repCursorsVal">—</code>
+            </div>
+            <div class="rep-health-errors">
+              <div class="license-label">Last Errors</div>
+              <div id="repErrorsVal" class="license-value">—</div>
+            </div>
+            <div class="replication-transfer-wrap">
+              <div class="license-label">Transfer Monitor</div>
+              <div id="netIoWidget" class="net-io-widget" title="Network I/O — Ingress ↓ / Egress ↑" aria-label="Network transfer rates">
+                <div id="netIoRxRow" class="net-io-row">
+                  <span class="net-io-arrow net-io-rx-arrow">↓</span>
+                  <span class="net-io-label">RX</span>
+                  <span class="net-io-speed" id="netIoRxSpeed">0 B/s</span>
+                </div>
+                <div id="netIoTxRow" class="net-io-row">
+                  <span class="net-io-arrow net-io-tx-arrow">↑</span>
+                  <span class="net-io-label">TX</span>
+                  <span class="net-io-speed" id="netIoTxSpeed">0 B/s</span>
+                </div>
+                <div id="xferPanel" class="xfer-panel" hidden>
+                  <div class="xfer-panel-sep"></div>
+                  <div class="xfer-panel-row">
+                    <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">↑</span>
+                    <span id="xferLabel" class="xfer-label">Pushing...</span>
+                    <span id="xferPct" class="xfer-pct">0%</span>
+                  </div>
+                  <div class="xfer-bar-track">
+                    <div id="xferBarFill" class="xfer-bar-fill"></div>
+                  </div>
+                  <div class="xfer-size-row">
+                    <span id="xferSizeCurr" class="xfer-size-curr">0 B</span>
+                    <span class="xfer-size-sep">/</span>
+                    <span id="xferSizeTotal" class="xfer-size-total">? B</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="sgroup-actions">
+              <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button">
+                ↻ Refresh
+              </button>
+              <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
+                Pull Latest From Server
+              </button>
+              <button id="btnRunReplicationPush" class="btn btn-outline" type="button">
+                Push Local To Server
+              </button>
+              <span class="smsg" id="replicationMsg"></span>
+            </div>
+          </div>
+          <div class="sgroup settings-card" id="runtimePerfSection">
+            <div class="sgroup-title">Performance Diagnostics</div>
+            <div class="rep-health-grid">
+              <div class="license-item">
+                <div class="license-label">Mode</div>
+                <div id="perfModeVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">CPU</div>
+                <div id="perfCpuVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Memory (RSS)</div>
+                <div id="perfMemVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Uptime</div>
+                <div id="perfUptimeVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Live Keys</div>
+                <div id="perfLiveKeysVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Poll Tick Count</div>
+                <div id="perfPollTicksVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Poll Duration</div>
+                <div id="perfPollDurVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Fetch Errors</div>
+                <div id="perfFetchErrVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Rows Persisted</div>
+                <div id="perfPersistRowsVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Persist Skipped</div>
+                <div id="perfPersistSkipVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">WS Clients</div>
+                <div id="perfWsClientsVal" class="license-value">-</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">WS Backpressure Drops</div>
+                <div id="perfWsDropsVal" class="license-value">-</div>
+              </div>
+            </div>
+            <div class="rep-health-errors">
+              <div class="license-label">Last Errors</div>
+              <div id="perfErrorsVal" class="license-value">-</div>
+            </div>
+            <div class="sgroup-actions">
+              <button id="btnRefreshRuntimePerf" class="btn btn-outline" type="button">
+                Refresh
+              </button>
+              <span class="smsg" id="perfMsg"></span>
+            </div>
+          </div>
+          <div class="sgroup settings-card" id="licenseSection">
             <div class="sgroup-title">🔐 License</div>
             <div class="license-grid">
               <div class="license-item">
@@ -980,7 +1171,7 @@
                 <div id="licenseDaysLeftText" class="license-value">—</div>
               </div>
             </div>
-            <div class="sgroup-actions" style="margin-top: 10px">
+            <div class="sgroup-actions">
               <button id="btnUploadLicense" class="btn btn-accent">
                 ⬆ Replace License
               </button>
@@ -1005,7 +1196,7 @@
               </table>
             </div>
           </div>
-          <div class="sgroup-actions">
+          <div class="sgroup-actions settings-actions-bar" id="settingsGlobalActions">
             <button id="btnSaveSettings" class="btn btn-accent">
               💾 Save Settings
             </button>
@@ -1019,29 +1210,6 @@
               🌐 IP Configuration
             </button>
             <span class="smsg" id="settingsMsg"></span>
-          </div>
-          <div class="sgroup" style="margin-top: 24px">
-            <div class="sgroup-title">ℹ About</div>
-            <div class="sinfo">
-              <div><b>Inverter Dashboard v2.0</b></div>
-              <div>
-                Inverter: Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor
-              </div>
-              <div>Manual Reference: AAV2015IQE01_B</div>
-              <div>DB Path: <code id="setDataDir">—</code></div>
-            </div>
-            <div class="smanual">
-              <div class="smanual-head">User Guide</div>
-              <div class="sinfo" style="margin-bottom: 8px">
-                <div>
-                  Open the interactive guide for complete operation instructions,
-                  controls, workflows, and troubleshooting references.
-                </div>
-              </div>
-              <button id="btnOpenGuide" class="btn btn-outline">
-                📘 Open User Guide
-              </button>
-            </div>
           </div>
         </div>
       </section>
@@ -1200,3 +1368,4 @@
     <script src="js/app.js"></script>
   </body>
 </html>
+

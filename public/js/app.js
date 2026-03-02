@@ -12,6 +12,7 @@ const State = {
   ipConfig: null, // /api/ip-config snapshot
   settings: {
     operationMode: "gateway",
+    remoteAutoSync: false,
     remoteGatewayUrl: "",
     remoteApiToken: "",
     tailscaleDeviceHint: "",
@@ -49,6 +50,7 @@ const State = {
   alarmSoundTimer: null,
   alarmAudioCtx: null,
   exportUiSaveTimer: null,
+  exportBtnTimers: {},
   auditView: {
     rows: [],
     sortKey: "ts",
@@ -73,19 +75,53 @@ const State = {
     lastTotalPacW: 0,
     totalKwh: 0,
   },
+  netIO: {
+    rxBytes: 0,        // cumulative bytes received (WS + HTTP response bodies)
+    txBytes: 0,        // cumulative bytes sent (HTTP request bodies)
+    rxBps: 0,          // rolling 1s rate
+    txBps: 0,
+    lastCalcTs: 0,
+    lastRxBytes: 0,
+    lastTxBytes: 0,
+    rxFlashTimer: null,
+    txFlashTimer: null,
+    monitorTimer: null,
+  },
+  xfer: {
+    active: false,
+    dir: null,        // 'tx' | 'rx'
+    label: "",        // optional custom action label (e.g., "Receiving push")
+    totalBytes: 0,    // known total (TX only; 0 = unknown)
+    doneBytes: 0,     // bytes sent/received so far
+    chunkCount: 0,
+    chunkDone: 0,
+    totalRows: 0,
+    importedRows: 0,
+    hideTimer: null,
+  },
   licenseStatus: null,
   licenseAudit: [],
   clockTimer: null,
   alarmBadgeTimer: null,
+  replicationHealthTimer: null,
+  todayMwhSyncTimer: null,
+  cardRenderScheduled: false,
+  cardRenderTimer: null,
+  lastCardRenderTs: 0,
+  nodeOrderSig: {},
 };
+const NODE_RATED_W  = Math.round(997000 / 4); // 249,250 W — rated per-node (997 kW ÷ 4, always 4 nodes)
+const INV_RATED_KW  = 997;                    // rated per-inverter capacity kW
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
+const CARD_RENDER_MIN_INTERVAL_MS = 220;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
+const TODAY_MWH_SYNC_INTERVAL_MS = 1000;
 const THEME_META = {
   dark: {
     label: "Maroon",
@@ -564,14 +600,14 @@ async function persistExportUiState() {
   try {
     const r = await api("/api/settings/export-ui", "POST", {
       exportUiState: next,
-    });
+    }, { progress: false });
     State.settings.exportUiState = sanitizeExportUiStateClient(
       r?.exportUiState || next,
     );
   } catch (err) {
     // Backward compatibility for older backend builds.
     console.warn("[app] exportUiState save (v2) failed, using legacy endpoint:", err.message);
-    await api("/api/settings", "POST", { exportUiState: next });
+    await api("/api/settings", "POST", { exportUiState: next }, { progress: false });
     State.settings.exportUiState = next;
   }
 }
@@ -708,7 +744,181 @@ function endProgress(doneLabel = "Done") {
   }, 420);
 }
 
+// ─── Network I/O Tracking ─────────────────────────────────────────────────────
+function fmtBps(bps) {
+  if (bps < 1024) return `${Math.round(bps)} B/s`;
+  if (bps < 1048576) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${(bps / 1048576).toFixed(2)} MB/s`;
+}
+
+function _netIOFlash(rowId, timerKey) {
+  const io = State.netIO;
+  const rowEl = document.getElementById(rowId);
+  if (!rowEl) return;
+  rowEl.classList.add("active");
+  if (io[timerKey]) clearTimeout(io[timerKey]);
+  io[timerKey] = setTimeout(() => {
+    rowEl.classList.remove("active");
+    io[timerKey] = null;
+  }, 280);
+}
+
+function netIOTrackRx(bytes) {
+  State.netIO.rxBytes += bytes;
+  _netIOFlash("netIoRxRow", "rxFlashTimer");
+}
+
+function netIOTrackTx(bytes) {
+  State.netIO.txBytes += bytes;
+  _netIOFlash("netIoTxRow", "txFlashTimer");
+}
+
+function startNetIOMonitor() {
+  const io = State.netIO;
+  io.lastCalcTs = Date.now();
+  io.lastRxBytes = io.rxBytes;
+  io.lastTxBytes = io.txBytes;
+  io.monitorTimer = setInterval(() => {
+    const now = Date.now();
+    const elapsed = (now - io.lastCalcTs) / 1000;
+    if (elapsed <= 0) return;
+    io.rxBps = (io.rxBytes - io.lastRxBytes) / elapsed;
+    io.txBps = (io.txBytes - io.lastTxBytes) / elapsed;
+    io.lastCalcTs = now;
+    io.lastRxBytes = io.rxBytes;
+    io.lastTxBytes = io.txBytes;
+    const rxEl = document.getElementById("netIoRxSpeed");
+    const txEl = document.getElementById("netIoTxSpeed");
+    if (rxEl) rxEl.textContent = fmtBps(io.rxBps);
+    if (txEl) txEl.textContent = fmtBps(io.txBps);
+  }, 1000);
+}
+
+function handleXferProgress(msg) {
+  const x = State.xfer;
+  const dir = String(msg.dir || "");
+  const phase = String(msg.phase || "");
+  const msgLabel = String(msg.label || "").trim();
+
+  // Clear any pending hide timer on new activity
+  if (x.hideTimer) { clearTimeout(x.hideTimer); x.hideTimer = null; }
+
+  // Update transfer state
+  if (phase === "start") {
+    x.active = true;
+    x.dir = dir;
+    x.label = msgLabel;
+    x.totalBytes = Number(msg.totalBytes || 0);
+    x.doneBytes = 0;
+    x.chunkCount = Number(msg.chunkCount || 0);
+    x.chunkDone = 0;
+    x.totalRows = Number(msg.totalRows || 0);
+    x.importedRows = 0;
+  } else if (phase === "chunk") {
+    x.active = true;
+    x.dir = dir;
+    if (msgLabel) x.label = msgLabel;
+    const prev = x.doneBytes;
+    x.doneBytes = dir === "tx" ? Number(msg.sentBytes || 0) : Number(msg.recvBytes || 0);
+    x.chunkDone = dir === "tx" ? Number(msg.chunk || 0) : Number(msg.batch || 0);
+    // Feed actual bytes into the speed tracker
+    const delta = x.doneBytes - prev;
+    if (delta > 0) { dir === "tx" ? netIOTrackTx(delta) : netIOTrackRx(delta); }
+  } else if (phase === "done") {
+    x.active = true;
+    if (msgLabel) x.label = msgLabel;
+    x.doneBytes = dir === "tx" ? Number(msg.sentBytes || msg.totalBytes || x.doneBytes) : Number(msg.recvBytes || x.doneBytes);
+    x.importedRows = Number(msg.importedRows || 0);
+    if (x.totalBytes === 0) x.totalBytes = x.doneBytes; // fill total for rx
+    x.hideTimer = setTimeout(() => {
+      x.active = false;
+      x.label = "";
+      renderXferPanel();
+      x.hideTimer = null;
+    }, 3500);
+  } else if (phase === "error") {
+    x.active = true;
+    if (msgLabel) x.label = msgLabel;
+    x.hideTimer = setTimeout(() => {
+      x.active = false;
+      x.label = "";
+      renderXferPanel();
+      x.hideTimer = null;
+    }, 3000);
+  }
+
+  renderXferPanel();
+}
+
+function renderXferPanel() {
+  const panel = document.getElementById("xferPanel");
+  if (!panel) return;
+  const x = State.xfer;
+
+  if (!x.active) {
+    panel.hidden = true;
+    return;
+  }
+
+  panel.hidden = false;
+
+  const dirIcon = document.getElementById("xferDirIcon");
+  const labelEl = document.getElementById("xferLabel");
+  const pctEl = document.getElementById("xferPct");
+  const fillEl = document.getElementById("xferBarFill");
+  const currEl = document.getElementById("xferSizeCurr");
+  const totalEl = document.getElementById("xferSizeTotal");
+
+  if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
+  if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
+
+  const done = x.doneBytes;
+  const total = x.totalBytes;
+  const known = total > 0;
+  const pct = known ? Math.min(100, Math.round((done / total) * 100)) : 0;
+
+  if (fillEl) {
+    if (known) {
+      fillEl.style.width = `${pct}%`;
+      fillEl.classList.remove("xfer-bar-indeterminate");
+    } else {
+      fillEl.style.width = "100%";
+      fillEl.classList.add("xfer-bar-indeterminate");
+    }
+  }
+
+  if (labelEl) {
+    const custom = String(x.label || "").trim();
+    if (custom) {
+      const suffix =
+        x.chunkCount > 1
+          ? ` · ${Math.max(0, Number(x.chunkDone || 0))}/${Math.max(0, Number(x.chunkCount || 0))}`
+          : x.chunkDone > 0
+            ? ` · ${Math.max(0, Number(x.chunkDone || 0))}`
+            : "";
+      labelEl.textContent = `${custom}${suffix}`;
+    } else if (x.dir === "tx") {
+      const cStr = x.chunkCount > 1 ? ` · chunk ${x.chunkDone}/${x.chunkCount}` : "";
+      labelEl.textContent = `Pushing${cStr}`;
+    } else {
+      const bStr = x.chunkDone > 0 ? ` · batch ${x.chunkDone}` : "";
+      labelEl.textContent = `Pulling${bStr}`;
+    }
+  }
+
+  if (pctEl) pctEl.textContent = known ? `${pct}%` : "…";
+  if (currEl) currEl.textContent = fmtBytes(done);
+  if (totalEl) totalEl.textContent = known ? fmtBytes(total) : "?";
+}
+
+function fmtBytes(b) {
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1048576).toFixed(2)} MB`;
+}
+
 function renderEmptyRow(tbody, colspan, message) {
+  if (!tbody) return;
   const tr = el("tr", "table-empty");
   tr.innerHTML = `<td colspan="${colspan}">${message}</td>`;
   tbody.appendChild(tr);
@@ -820,47 +1030,91 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   State.pacToday.lastTotalPacW = 0;
   State.pacToday.totalKwh = 0;
 }
-function integrateTodayFromPac(totals) {
-  const now = Date.now();
-  resetPacTodayIfNeeded(now);
+
+function getCurrentFreshTotalPacW(now = Date.now()) {
   let totalPacW = 0;
-  // Include only online and fresh units in energy accumulation.
   Object.values(State.liveData || {}).forEach((d) => {
     const isFresh = now - Number(d?.ts || 0) <= DATA_FRESH_MS;
     if (!d?.online || !isFresh) return;
     totalPacW += Number(d?.pac || 0);
   });
+  return totalPacW;
+}
 
-  if (State.pacToday.lastTs > 0) {
-    const dtSec = Math.max(0, (now - State.pacToday.lastTs) / 1000);
-    const safeDt = Math.min(dtSec, 5);
-    const avgPacW = (State.pacToday.lastTotalPacW + totalPacW) / 2;
-    State.pacToday.totalKwh += (avgPacW * safeDt) / 3600000;
+function applySyncedTodayKwh(totalKwh, syncedAt = Date.now()) {
+  resetPacTodayIfNeeded(syncedAt);
+  State.pacToday.totalKwh = Math.max(0, Number(totalKwh) || 0);
+  State.pacToday.lastTs = syncedAt;
+  State.pacToday.lastTotalPacW = getCurrentFreshTotalPacW(syncedAt);
+  const meter = $("totalKwh");
+  if (meter) {
+    meter.title = `Synced: ${fmtDateTime(syncedAt)}`;
   }
+}
 
+function integrateTodayFromPac(totals) {
+  const now = Date.now();
+  resetPacTodayIfNeeded(now);
+  // Keep header total MWh server-authoritative so it matches report/energy outputs.
   State.pacToday.lastTs = now;
-  State.pacToday.lastTotalPacW = totalPacW;
+  State.pacToday.lastTotalPacW = getCurrentFreshTotalPacW(now);
 }
 function renderTodayKwhFromPac() {
-  $("totalKwh").firstChild.nodeValue = fmtMWh(State.pacToday.totalKwh, 3);
+  const el = $("totalKwh");
+  if (el && el.firstChild) el.firstChild.nodeValue = fmtMWh(State.pacToday.totalKwh, 3);
+}
+
+async function fetchTodayEnergyTotalsRaw() {
+  const r = await fetch("/api/energy/today", {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+  return r.json();
 }
 
 async function seedTodayEnergyFromDb() {
   try {
-    const rows = await api("/api/energy/today");
+    const rows = await fetchTodayEnergyTotalsRaw();
     const totalKwh = (rows || []).reduce(
       (sum, r) => sum + Number(r?.total_kwh || 0),
       0,
     );
-    resetPacTodayIfNeeded(Date.now());
-    State.pacToday.totalKwh = Math.max(0, Number(totalKwh) || 0);
-    // Let live integration resume cleanly from the next realtime frame.
-    State.pacToday.lastTs = 0;
-    State.pacToday.lastTotalPacW = 0;
+    applySyncedTodayKwh(totalKwh, Date.now());
     renderTodayKwhFromPac();
   } catch (e) {
     console.warn("seedTodayEnergyFromDb:", e?.message || e);
   }
+}
+
+async function syncTodayMwhFromServer() {
+  try {
+    const rows = await fetchTodayEnergyTotalsRaw();
+    const totalKwh = (rows || []).reduce(
+      (sum, r) => sum + Number(r?.total_kwh || 0),
+      0,
+    );
+    applySyncedTodayKwh(totalKwh, Date.now());
+    renderTodayKwhFromPac();
+  } catch (e) {
+    // Non-fatal: live integration keeps the metric moving between sync polls.
+    console.warn("syncTodayMwhFromServer:", e?.message || e);
+  }
+}
+
+function stopTodayMwhSyncTimer() {
+  if (State.todayMwhSyncTimer) {
+    clearInterval(State.todayMwhSyncTimer);
+    State.todayMwhSyncTimer = null;
+  }
+}
+
+function startTodayMwhSyncTimer() {
+  stopTodayMwhSyncTimer();
+  syncTodayMwhFromServer().catch(() => {});
+  State.todayMwhSyncTimer = setInterval(() => {
+    syncTodayMwhFromServer().catch(() => {});
+  }, TODAY_MWH_SYNC_INTERVAL_MS);
 }
 
 // ─── API fetch wrapper with enhanced error handling ──────────────────────────
@@ -887,14 +1141,26 @@ function getDetailedErrorMessage(status, errorMsg) {
   return errorMsg || "Request failed. Please try again.";
 }
 
-async function api(url, method = "GET", body) {
-  beginProgress(getProgressLabel(url, method));
+function shouldShowProgress(url, method = "GET", options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options || {}, "progress")) {
+    return Boolean(options.progress);
+  }
+  const m = String(method || "GET").toUpperCase();
+  // Keep strip for explicit user actions (POST/PUT/PATCH/DELETE) only.
+  return m !== "GET";
+}
+
+async function api(url, method = "GET", body, options = {}) {
+  const showProgress = shouldShowProgress(url, method, options);
+  if (showProgress) beginProgress(getProgressLabel(url, method));
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
+  if (opts.body) netIOTrackTx(opts.body.length);
   let ok = false;
   try {
     const r = await fetch(url, opts);
     const text = await r.text();
+    if (text) netIOTrackRx(text.length);
     let parsed = null;
     try {
       parsed = text ? JSON.parse(text) : null;
@@ -908,7 +1174,31 @@ async function api(url, method = "GET", body) {
         parsed?.message ||
         (text && text.trim()) ||
         `HTTP ${r.status}`;
-      const detailedMsg = getDetailedErrorMessage(r.status, rawMsg);
+      let detailedMsg = getDetailedErrorMessage(r.status, rawMsg);
+      if (
+        url.includes("/api/forecast/generate") &&
+        Number(r.status) >= 500
+      ) {
+        const providerAttempt = Array.isArray(parsed?.attempts)
+          ? parsed.attempts
+              .filter((a) => a && a.provider)
+              .map((a) =>
+                `${String(a.provider)}: ${a.ok ? "ok" : String(a.error || "failed")}`,
+              )
+              .join(" | ")
+          : "";
+        const detailText = String(parsed?.details || "").trim();
+        const errText = String(parsed?.error || rawMsg || "").trim();
+        const parts = [errText, detailText, providerAttempt].filter(Boolean);
+        if (parts.length) detailedMsg = parts.join(" :: ");
+      }
+      if (
+        url.includes("/api/replication/pull-now") ||
+        url.includes("/api/replication/push-now") ||
+        url.includes("/api/replication/reconcile-now")
+      ) {
+        detailedMsg = String(rawMsg || detailedMsg);
+      }
       throw new Error(String(detailedMsg));
     }
     ok = true;
@@ -921,7 +1211,7 @@ async function api(url, method = "GET", body) {
     }
     throw err;
   } finally {
-    endProgress(ok ? "Done" : "Request failed");
+    if (showProgress) endProgress(ok ? "Done" : "Request failed");
   }
 }
 
@@ -987,7 +1277,89 @@ function openLogsFolder() {
   // Backward compatibility
   openExportFolder();
 }
+const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
+
+function normalizeRemoteGatewayUrlInput(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const hasScheme = /^[a-z][a-z0-9+\-.]*:\/\//i.test(raw);
+  const candidate = hasScheme ? raw : `http://${raw}`;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    if (!u.hostname) return "";
+    if (!u.port) u.port = String(REMOTE_GATEWAY_DEFAULT_PORT);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "";
+  }
+}
+
+function applyRemoteGatewayInputNormalization() {
+  const input = $("setRemoteGatewayUrl");
+  if (!input) return "";
+  const raw = String(input.value || "").trim();
+  if (!raw) {
+    input.value = "";
+    return "";
+  }
+  const normalized = normalizeRemoteGatewayUrlInput(raw);
+  if (normalized) input.value = normalized;
+  return normalized;
+}
+
+function isClientModeActive() {
+  const modeSetting = $("setOperationMode")?.value || State.settings?.operationMode;
+  return String(modeSetting || "gateway").trim().toLowerCase() === "remote";
+}
+
+function syncDayAheadGeneratorAvailability() {
+  const isClient = isClientModeActive();
+  const input = $("genDayCount");
+  const btn = document.querySelector(".analytics-gen-btn");
+  const res = $("genDayResult");
+  if (input) {
+    input.disabled = isClient;
+    input.readOnly = isClient;
+    input.title = isClient
+      ? "Day-ahead generation is available on Gateway mode only."
+      : "";
+  }
+  if (btn) {
+    btn.disabled = isClient;
+    btn.setAttribute("aria-disabled", isClient ? "true" : "false");
+    btn.title = isClient
+      ? "Unavailable in Client mode. Use the Gateway server to generate day-ahead."
+      : "";
+  }
+  if (res) {
+    if (isClient) {
+      res.className = "exp-result";
+      res.textContent =
+        "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.";
+    } else if (
+      res.textContent &&
+      /disabled in Client mode/i.test(String(res.textContent))
+    ) {
+      res.textContent = "";
+    }
+  }
+}
+
+function notifyClientModeUnavailable(featureLabel) {
+  const safeFeature = String(featureLabel || "This feature");
+  showToast(
+    `${safeFeature} is unavailable in Client mode. Switch to Gateway mode in Settings.`,
+    "warning",
+    4200,
+  );
+}
+
 function openIpConfigSettings() {
+  if (isClientModeActive()) {
+    notifyClientModeUnavailable("IP Configuration");
+    return;
+  }
   if (window.electronAPI?.openIpConfigWindow) {
     window.electronAPI.openIpConfigWindow();
     return;
@@ -1047,6 +1419,9 @@ function switchPage(page) {
     stopAnalyticsRealtime();
     stopAnalyticsAutoRefresh();
   }
+  if (page !== "settings") {
+    stopReplicationHealthPolling();
+  }
   document
     .querySelectorAll(".page")
     .forEach((p) => p.classList.remove("active"));
@@ -1068,6 +1443,7 @@ function switchPage(page) {
   if (page === "settings") {
     unlockSettingsInputs();
     refreshLicenseSection().catch(() => {});
+    startReplicationHealthPolling();
   }
 }
 
@@ -1126,6 +1502,9 @@ async function loadSettings() {
     $("setPlantName").value = s.plantName || "";
     $("setOperatorName").value = s.operatorName || "OPERATOR";
     $("setOperationMode").value = s.operationMode || "gateway";
+    if ($("setRemoteAutoSync")) {
+      $("setRemoteAutoSync").checked = Boolean(s.remoteAutoSync);
+    }
     $("setRemoteGatewayUrl").value = s.remoteGatewayUrl || "";
     $("setRemoteApiToken").value = s.remoteApiToken || "";
     const tsHint = s.tailscaleDeviceHint || s.wireguardInterface || "";
@@ -1145,6 +1524,10 @@ async function loadSettings() {
     $("setSolcastResourceId").value = s.solcastResourceId || "";
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
     $("setDataDir").textContent = s.dataDir || "—";
+    const pc = s.inverterPollConfig || {};
+    if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
+    if ($("setPollReconnectDelay")) $("setPollReconnectDelay").value = pc.reconnectDelay ?? 0.5;
+    if ($("setPollReadSpacing"))    $("setPollReadSpacing").value    = pc.readSpacing    ?? 0.005;
     if ($("invGridLayout")) $("invGridLayout").value = State.settings.invGridLayout;
     applyInverterGridLayout(State.settings.invGridLayout);
     const providerSel = $("setForecastProvider");
@@ -1208,18 +1591,22 @@ function syncOperationModeUi() {
   showMsg(
     "networkMsg",
     remote
-      ? "Remote mode selected. Save settings to activate gateway relay."
+      ? `Remote mode selected. ${$("setRemoteAutoSync")?.checked ? "Startup Auto Sync is enabled." : "Startup Auto Sync is disabled; use manual Pull/Push."}`
       : "Gateway mode selected. Local polling is active; remote/Tailscale fields are optional.",
     "",
   );
+  syncDayAheadGeneratorAvailability();
 }
 
 async function saveSettings() {
+  const normalizedGateway = applyRemoteGatewayInputNormalization();
   const body = {
     plantName: $("setPlantName").value,
     operatorName: $("setOperatorName").value,
     operationMode: $("setOperationMode").value,
-    remoteGatewayUrl: $("setRemoteGatewayUrl").value,
+    remoteAutoSync: Boolean($("setRemoteAutoSync")?.checked),
+    remoteGatewayUrl:
+      normalizedGateway || String($("setRemoteGatewayUrl").value || "").trim(),
     remoteApiToken: $("setRemoteApiToken").value,
     tailscaleDeviceHint: $("setTailscaleDeviceHint")?.value || "",
     inverterCount: Number($("setInverterCount").value),
@@ -1233,15 +1620,36 @@ async function saveSettings() {
     solcastApiKey: $("setSolcastApiKey").value,
     solcastResourceId: $("setSolcastResourceId").value,
     solcastTimezone: $("setSolcastTimezone").value,
+    inverterPollConfig: {
+      modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
+      reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
+      readSpacing:    Number($("setPollReadSpacing")?.value    ?? 0.005),
+    },
   };
   try {
-    await api("/api/settings", "POST", body);
-    State.settings = { ...State.settings, ...body };
+    const saved = await api("/api/settings", "POST", body);
+    const nextCsvPath =
+      String(saved?.csvSavePath || body.csvSavePath || "").trim() ||
+      State.settings.csvSavePath;
+    if ($("setCsvPath")) $("setCsvPath").value = nextCsvPath;
+    State.settings = { ...State.settings, ...body, csvSavePath: nextCsvPath };
     if ($("plantNameDisplay"))
       $("plantNameDisplay").textContent = body.plantName;
-    showMsg("settingsMsg", "✔ Settings saved", "");
+    showMsg(
+      "settingsMsg",
+      saved?.exportDirCreated
+        ? "✔ Settings saved. Export folder created."
+        : "✔ Settings saved",
+      "",
+    );
     buildInverterGrid();
     buildSelects();
+    syncDayAheadGeneratorAvailability();
+    syncOperationModeUi();
+    if (State.currentPage === "settings") {
+      startReplicationHealthPolling();
+      refreshReplicationHealth(true).catch(() => {});
+    }
     return true;
   } catch (e) {
     showMsg("settingsMsg", "✗ Save failed: " + e.message, "error");
@@ -1254,8 +1662,11 @@ async function testRemoteGateway() {
   if (btn) btn.disabled = true;
   showMsg("networkMsg", "Testing remote gateway...", "");
   try {
+    const normalizedGateway = applyRemoteGatewayInputNormalization();
     const r = await api("/api/runtime/network/test", "POST", {
-      remoteGatewayUrl: $("setRemoteGatewayUrl")?.value || "",
+      remoteGatewayUrl:
+        normalizedGateway ||
+        String($("setRemoteGatewayUrl")?.value || "").trim(),
       remoteApiToken: $("setRemoteApiToken")?.value || "",
     });
     const latency = Number(r?.latencyMs || 0);
@@ -1304,6 +1715,320 @@ async function checkTailscaleStatus() {
     );
   } catch (e) {
     showMsg("networkMsg", `✗ ${e.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function setReplicationField(id, value, cls = "") {
+  const node = $(id);
+  if (!node) return;
+  node.textContent = value == null || value === "" ? "—" : String(value);
+  node.className = `license-value ${cls}`.trim();
+}
+
+function fmtTsWithAge(ts) {
+  const n = Number(ts || 0);
+  if (!n) return "—";
+  return `${fmtDateTime(n)} (${relTime(n)})`;
+}
+
+function fmtUptimeSec(sec) {
+  const s = Math.max(0, Math.floor(Number(sec || 0)));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function formatSyncDirection(value) {
+  const v = String(value || "")
+    .trim()
+    .toLowerCase();
+  const map = {
+    idle: "Idle",
+    "startup-auto-sync": "Startup auto sync",
+    "startup-auto-sync-failed": "Startup auto sync failed",
+    "pull-only": "Pull only",
+    "pull-live": "Live pull",
+    "pull-live-failed": "Live pull failed",
+    "push-then-pull": "Push then pull",
+    "push-full": "Push full",
+    "push-full-failed": "Push full failed",
+    "push-failed": "Push failed",
+    "pull-full": "Full pull",
+    "pull-full-failed": "Full pull failed",
+    "pull-incremental": "Incremental pull",
+    "pull-incremental-failed": "Incremental pull failed",
+  };
+  return map[v] || (v ? v.replace(/[-_]/g, " ") : "—");
+}
+
+function stopReplicationHealthPolling() {
+  if (State.replicationHealthTimer) {
+    clearInterval(State.replicationHealthTimer);
+    State.replicationHealthTimer = null;
+  }
+}
+
+function startReplicationHealthPolling() {
+  stopReplicationHealthPolling();
+  refreshReplicationHealth().catch(() => {});
+  refreshRuntimePerf().catch(() => {});
+  State.replicationHealthTimer = setInterval(() => {
+    if (State.currentPage !== "settings") return;
+    refreshReplicationHealth().catch(() => {});
+    refreshRuntimePerf().catch(() => {});
+  }, 6000);
+}
+
+async function refreshReplicationHealth(silent = true) {
+  try {
+    const n = await api("/api/runtime/network");
+    const mode = String(n?.operationMode || State.settings.operationMode || "gateway")
+      .trim()
+      .toLowerCase();
+    const pullOnly = Boolean(n?.remotePullOnly);
+    const connected = Boolean(n?.remoteConnected);
+    setReplicationField("repModeVal", mode === "remote" ? "Remote" : "Gateway");
+    setReplicationField(
+      "repGatewayVal",
+      String(n?.remoteGatewayUrl || "—").trim() || "—",
+    );
+    setReplicationField(
+      "repConnectedVal",
+      mode === "remote"
+        ? connected
+          ? "Connected"
+          : "Disconnected"
+        : "Gateway local polling",
+      mode === "remote" ? (connected ? "ok" : "warn") : "",
+    );
+    const directionRaw = pullOnly
+      ? "pull-live-only"
+      : String(n?.remoteLastSyncDirection || "idle");
+    const directionClass =
+      /failed/i.test(directionRaw)
+        ? "error"
+        : /push|pull/i.test(directionRaw)
+          ? "ok"
+          : "";
+    setReplicationField(
+      "repDirectionVal",
+      formatSyncDirection(directionRaw),
+      directionClass,
+    );
+    setReplicationField("repLastSuccessVal", fmtTsWithAge(n?.remoteLastSuccessTs || 0));
+    setReplicationField(
+      "repLastReplicationVal",
+      fmtTsWithAge(n?.remoteLastReplicationTs || 0),
+    );
+    setReplicationField(
+      "repLastRowsVal",
+      Number(n?.remoteLastReplicationRows || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "repLastReconcileVal",
+      fmtTsWithAge(n?.remoteLastReconcileTs || 0),
+    );
+    setReplicationField(
+      "repLastReconcileRowsVal",
+      Number(n?.remoteLastReconcileRows || 0).toLocaleString(),
+    );
+    const sig = String(n?.remoteLastReplicationSignature || "").trim();
+    setReplicationField("repSignatureVal", sig ? `${sig.slice(0, 16)}…` : "—");
+    const cursors = n?.remoteReplicationCursors || {};
+    const cNode = $("repCursorsVal");
+    if (cNode) cNode.textContent = pullOnly ? "N/A (pull-only)" : JSON.stringify(cursors);
+    const bridgeErr = String(n?.remoteLastError || "").trim();
+    const repErr = String(n?.remoteLastReplicationError || "").trim();
+    const recErr = String(n?.remoteLastReconcileError || "").trim();
+    const allErr = [bridgeErr, repErr, recErr].filter(Boolean);
+    setReplicationField(
+      "repErrorsVal",
+      allErr.length ? allErr.join(" | ") : "None",
+      allErr.length ? "warn" : "ok",
+    );
+    const pullBtn = $("btnRunReplicationPull");
+    const pushBtn = $("btnRunReplicationPush");
+    const manualDisabled = mode !== "remote";
+    if (pullBtn) {
+      pullBtn.disabled = manualDisabled;
+      pullBtn.title = manualDisabled
+        ? "Available only in Remote mode."
+        : "Pull latest DB snapshot from server.";
+    }
+    if (pushBtn) {
+      pushBtn.disabled = manualDisabled;
+      pushBtn.title = manualDisabled
+        ? "Available only in Remote mode."
+        : "Push local DB snapshot to server, then pull back.";
+    }
+    if (!silent) {
+      showMsg("replicationMsg", "✔ Replication health refreshed", "");
+    }
+  } catch (e) {
+    if (!silent) showMsg("replicationMsg", `✗ ${e.message}`, "error");
+  }
+}
+
+async function refreshRuntimePerf(silent = true) {
+  try {
+    const p = await api("/api/runtime/perf");
+    const proc = p?.process || {};
+    const poll = p?.poller || {};
+    const ws = p?.ws || {};
+    const remote = p?.remote || {};
+    const mode = String(p?.operationMode || "gateway")
+      .trim()
+      .toLowerCase();
+
+    setReplicationField("perfModeVal", mode === "remote" ? "Remote" : "Gateway");
+    setReplicationField(
+      "perfCpuVal",
+      `${Number(proc?.cpuPercent || 0).toFixed(2)}%`,
+    );
+    setReplicationField(
+      "perfMemVal",
+      `${Number(proc?.memoryMb?.rss || 0).toFixed(2)} MB`,
+    );
+    setReplicationField("perfUptimeVal", fmtUptimeSec(proc?.uptimeSec || 0));
+    setReplicationField(
+      "perfLiveKeysVal",
+      Number(poll?.liveKeyCount || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "perfPollTicksVal",
+      Number(poll?.tickCount || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "perfPollDurVal",
+      `last ${Number(poll?.lastPollDurationMs || 0).toFixed(1)} ms | avg ${Number(poll?.avgPollDurationMs || 0).toFixed(1)} ms | max ${Number(poll?.maxPollDurationMs || 0).toFixed(1)} ms`,
+    );
+    setReplicationField(
+      "perfFetchErrVal",
+      `${Number(poll?.fetchErrorCount || 0).toLocaleString()} error(s) / ${Number(poll?.fetchOkCount || 0).toLocaleString()} ok`,
+      Number(poll?.fetchErrorCount || 0) > 0 ? "warn" : "ok",
+    );
+    setReplicationField(
+      "perfPersistRowsVal",
+      Number(poll?.rowsPersisted || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "perfPersistSkipVal",
+      Number(poll?.rowsPersistSkippedCadence || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "perfWsClientsVal",
+      Number(ws?.connectedClients || 0).toLocaleString(),
+    );
+    setReplicationField(
+      "perfWsDropsVal",
+      Number(ws?.droppedFramesBackpressure || 0).toLocaleString(),
+      Number(ws?.droppedFramesBackpressure || 0) > 0 ? "warn" : "ok",
+    );
+
+    const errs = [
+      String(poll?.lastFetchError || "").trim(),
+      String(remote?.lastError || "").trim(),
+      String(remote?.lastReplicationError || "").trim(),
+    ].filter(Boolean);
+    setReplicationField(
+      "perfErrorsVal",
+      errs.length ? errs.join(" | ") : "None",
+      errs.length ? "warn" : "ok",
+    );
+    if (!silent) showMsg("perfMsg", "✔ Performance refreshed", "");
+  } catch (e) {
+    if (!silent) showMsg("perfMsg", `✗ ${e.message}`, "error");
+  }
+}
+
+function ensureRemoteModeForReplicationActions() {
+  const mode = String($("setOperationMode")?.value || State.settings.operationMode || "gateway")
+    .trim()
+    .toLowerCase();
+  if (mode !== "remote") {
+    showMsg(
+      "replicationMsg",
+      "Replication actions are available only in Remote mode.",
+      "error",
+    );
+    return false;
+  }
+  return true;
+}
+
+async function runReplicationPullNow() {
+  if (!ensureRemoteModeForReplicationActions()) return;
+  if (
+    !window.confirm(
+      "Pull latest data from server now?\n\nThis will reload local client data from the gateway snapshot.",
+    )
+  ) {
+    return;
+  }
+
+  const btn = $("btnRunReplicationPull");
+  if (btn) btn.disabled = true;
+  showMsg("replicationMsg", "Pulling latest data from server...", "");
+  try {
+    const result = await api("/api/replication/pull-now", "POST", {});
+    const importedRows = Number(
+      result?.incremental?.importedRows || result?.full?.importedRows || 0,
+    );
+    const mode = String(result?.mode || "incremental");
+    const hasMore =
+      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
+    const dir = formatSyncDirection(result?.direction || "idle");
+    showMsg(
+      "replicationMsg",
+      `✔ Pull complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | imported=${importedRows.toLocaleString()}`,
+      "",
+    );
+    await refreshReplicationHealth(true);
+    await refreshRuntimePerf(true);
+  } catch (e) {
+    showMsg("replicationMsg", `✗ ${e.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runReplicationPushNow() {
+  if (!ensureRemoteModeForReplicationActions()) return;
+  if (
+    !window.confirm(
+      "Push local data to server now?\n\nThis sends local DB snapshot to gateway, then pulls back for consistency.",
+    )
+  ) {
+    return;
+  }
+
+  const btn = $("btnRunReplicationPush");
+  if (btn) btn.disabled = true;
+  showMsg("replicationMsg", "Pushing local data to server...", "");
+  try {
+    const result = await api("/api/replication/push-now", "POST", {});
+    const pushedRows = Number(result?.pushed?.importedRows || 0);
+    const pulledRows = Number(
+      result?.incremental?.importedRows || result?.full?.importedRows || 0,
+    );
+    const mode = String(result?.mode || "incremental");
+    const hasMore =
+      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
+    const dir = formatSyncDirection(result?.direction || "idle");
+    showMsg(
+      "replicationMsg",
+      `✔ Push complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | pushed=${pushedRows.toLocaleString()} pulled=${pulledRows.toLocaleString()}`,
+      "",
+    );
+    await refreshReplicationHealth(true);
+    await refreshRuntimePerf(true);
+  } catch (e) {
+    showMsg("replicationMsg", `✗ ${e.message}`, "error");
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1363,7 +2088,9 @@ function showMsg(id, text, cls) {
 // ─── Inverter Grid ────────────────────────────────────────────────────────────
 function buildInverterGrid() {
   const grid = $("invGrid");
+  if (!grid) return;
   grid.innerHTML = "";
+  State.nodeOrderSig = {};
   const count = State.settings.inverterCount;
   const nodes = State.settings.nodeCount || 4;
   const frag = document.createDocumentFragment();
@@ -1432,12 +2159,12 @@ function buildInverterCard(inv, nodeCount) {
         <button class="card-ctrl-btn stop" onclick="sendAllNodesInv(${inv},0)">Stop</button>
       </div>
       <div class="pac-cell">
-        <div class="pac-label">AC POWER</div>
-        <div class="pac-val zero" id="pac-${inv}">0.00<span class="pac-unit">kW</span></div>
-      </div>
-      <div class="pac-cell">
         <div class="pac-label">DC POWER</div>
         <div class="pac-val zero" id="pdcsum-${inv}">0.00<span class="pac-unit">kW</span></div>
+      </div>
+      <div class="pac-cell">
+        <div class="pac-label">AC POWER</div>
+        <div class="pac-val zero" id="pac-${inv}">0.00<span class="pac-unit">kW</span></div>
       </div>
     </div>
     <div class="card-main">
@@ -1488,33 +2215,86 @@ function buildNodeRows(inv, nodeCount) {
 }
 
 // ─── Inverter card updates ────────────────────────────────────────────────────
+function scheduleInverterCardsUpdate(force = false) {
+  if (force) {
+    if (State.cardRenderTimer) {
+      clearTimeout(State.cardRenderTimer);
+      State.cardRenderTimer = null;
+    }
+    State.cardRenderScheduled = false;
+    State.lastCardRenderTs = Date.now();
+    updateInverterCards();
+    return;
+  }
+
+  if (State.cardRenderScheduled) return;
+  const elapsed = Date.now() - Number(State.lastCardRenderTs || 0);
+  const delay = Math.max(0, CARD_RENDER_MIN_INTERVAL_MS - elapsed);
+  State.cardRenderScheduled = true;
+  State.cardRenderTimer = setTimeout(() => {
+    State.cardRenderTimer = null;
+    requestAnimationFrame(() => {
+      State.cardRenderScheduled = false;
+      State.lastCardRenderTs = Date.now();
+      updateInverterCards();
+    });
+  }, delay);
+}
+
 function updateInverterCards() {
   const data = State.liveData;
   const totals = State.totals;
   const now = Date.now();
   const nodeCount = Number(State.settings.nodeCount || 4);
+  const invCount = Number(State.settings.inverterCount || 27);
+
+  // Build lightweight lookup indexes once per render tick.
+  const unitsByInv = Array.from({ length: invCount + 1 }, () => []);
+  const unitMapByInv = Array.from({ length: invCount + 1 }, () =>
+    Object.create(null),
+  );
+  const dataValues = Object.values(data || {});
+  for (const row of dataValues) {
+    const inv = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!inv || inv > invCount || unit <= 0) continue;
+    unitsByInv[inv].push(row);
+    unitMapByInv[inv][unit] = row;
+  }
+
+  const activeAlarmsByInv = Array.from({ length: invCount + 1 }, () => []);
+  const activeAlarmValues = Object.values(State.activeAlarms || {});
+  for (const alarm of activeAlarmValues) {
+    const inv = Number(alarm?.inverter || 0);
+    if (!inv || inv > invCount) continue;
+    activeAlarmsByInv[inv].push(alarm);
+  }
 
   let totalPac = 0,
     online = 0,
     alarmed = 0,
-    offline = 0;
+    offline = 0,
+    activeNodes = 0,
+    totalNodes = 0;
 
-  for (let inv = 1; inv <= State.settings.inverterCount; inv++) {
+  for (let inv = 1; inv <= invCount; inv++) {
     const configuredUnits = getConfiguredUnits(inv, nodeCount);
     const configuredSet = new Set(configuredUnits);
+    totalNodes += configuredUnits.length;
     const t = totals[inv];
     if (t) {
       totalPac += t.pac || 0;
     }
 
     // Aggregate units for this inverter
-    const units = Object.values(data).filter(
+    const units = (unitsByInv[inv] || []).filter(
       (d) => d.inverter === inv && configuredSet.has(Number(d.unit || 0)),
     );
+    const invUnitMap = unitMapByInv[inv] || Object.create(null);
     const freshUnits = units.filter(
       (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS,
     );
-    const activeAlarmEntries = Object.values(State.activeAlarms || {}).filter(
+    const activeAlarmEntries = (activeAlarmsByInv[inv] || []).filter(
       (a) =>
         Number(a.inverter) === inv && configuredSet.has(Number(a.unit || 0)),
     );
@@ -1635,13 +2415,14 @@ function updateInverterCards() {
         continue;
       }
 
-      const d = units.find((u) => Number(u.unit) === n);
+      const d = invUnitMap[n];
       const rowFresh =
         d &&
         d.online &&
         now - Number(d.ts || 0) <= DATA_FRESH_MS + CARD_OFFLINE_HOLD_MS;
       const nodeReachable =
         d && d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS;
+      if (nodeReachable) activeNodes++;
       const nodeOn = nodeReachable && Number(d.on_off) === 1 ? 1 : 0;
       const activeAlarm = State.activeAlarms[key] || null;
       const liveAlarmValue = rowFresh ? Number(d?.alarm || 0) : 0;
@@ -1728,12 +2509,23 @@ function updateInverterCards() {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-  $("totalPac").firstChild.nodeValue = pacKw;
+  const pacEl = $("totalPac");
+  if (pacEl && pacEl.firstChild) pacEl.firstChild.nodeValue = pacKw;
 
   // Stats
   $("statOnline").textContent = online;
   $("statAlarmed").textContent = alarmed;
   $("statOffline").textContent = offline;
+
+  // Toolbar counters: active / total
+  const micEl = $("metricInvCount");
+  if (micEl) micEl.textContent = online;
+  const mitEl = $("metricInvTotal");
+  if (mitEl) mitEl.textContent = `/ ${invCount}`;
+  const mncEl = $("metricNodeCount");
+  if (mncEl) mncEl.textContent = activeNodes;
+  const mntEl = $("metricNodeTotal");
+  if (mntEl) mntEl.textContent = `/ ${totalNodes}`;
   renderTodayKwhFromPac();
 }
 
@@ -1753,6 +2545,9 @@ function applyNodeRowOrdering(inv, rowStateMap) {
   );
   if (!rows.length) return;
 
+  const nextSig = rows.map(({ n, state }) => `${n}:${state}`).join("|");
+  if (State.nodeOrderSig[inv] === nextSig) return;
+
   const rank = {
     // Configured nodes (online or offline) are treated the same.
     active: 0,
@@ -1768,11 +2563,12 @@ function applyNodeRowOrdering(inv, rowStateMap) {
   });
 
   rows.forEach(({ row }) => tbody.appendChild(row));
+  State.nodeOrderSig[inv] = nextSig;
 }
 
 async function updateTodayKwh() {
-  // Keep function for backward compatibility; metric is now Pac-integrated
-  // from live websocket totals for backend-independent behavior.
+  // Backward-compatible hook: force immediate server sync + render.
+  await syncTodayMwhFromServer();
   renderTodayKwhFromPac();
 }
 
@@ -1799,9 +2595,9 @@ function getRowSev(alarmVal) {
 function getPacRowClass(pacW, hasAlarm) {
   if (hasAlarm) return "row-pac-alarm";
   const v = Number(pacW || 0);
-  if (v >= 240000) return "row-pac-high";
-  if (v > 175000) return "row-pac-mid";
-  if (v > 100000) return "row-pac-low";
+  if (v >= NODE_RATED_W * 0.80) return "row-pac-high"; // ≥80% rated (~199 kW); allows up to 103% over-production
+  if (v >  NODE_RATED_W * 0.50) return "row-pac-mid";  // >50% rated (~125 kW)
+  if (v >  0)                   return "row-pac-low";
   return "row-pac-off";
 }
 
@@ -2270,6 +3066,7 @@ function filterInverters() {
   document.querySelectorAll(".inv-card").forEach((c) => {
     c.style.display = v === "all" || c.id === `inv-card-${v}` ? "" : "none";
   });
+  scheduleInverterCardsUpdate(true);
 }
 
 // ─── Build selects ────────────────────────────────────────────────────────────
@@ -2364,11 +3161,12 @@ function connectWS() {
   };
 
   ws.onmessage = ({ data }) => {
+    netIOTrackRx(typeof data === "string" ? data.length : (data.byteLength || 0));
     try {
       const msg = JSON.parse(data);
       handleWS(msg);
     } catch (err) {
-      console.warn("[ws] message parse failed:", err.message);
+      console.warn("[ws] message handling failed:", err.message);
     }
   };
 
@@ -2399,7 +3197,12 @@ function handleWS(msg) {
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
-    updateInverterCards();
+    scheduleInverterCardsUpdate();
+  }
+  if (msg.type === "configChanged") {
+    loadSettings().then(() => buildInverterGrid()).catch((err) => {
+      console.warn("[ws] configChanged rebuild failed:", err.message);
+    });
   }
   if (msg.type === "alarm") {
     handleAlarmPush(msg.alarms || []);
@@ -2411,8 +3214,11 @@ function handleWS(msg) {
       if (Date.now() - Number(d.ts || 0) <= 2000) return;
       d.online = 0;
       integrateTodayFromPac();
-      updateInverterCards();
+      scheduleInverterCardsUpdate();
     }
+  }
+  if (msg.type === "xfer_progress") {
+    handleXferProgress(msg);
   }
 }
 
@@ -2446,7 +3252,7 @@ function handleAlarmPush(alarms) {
   });
 
   setAlarmSoundActive(true);
-  updateInverterCards();
+  scheduleInverterCardsUpdate();
 
   // Badge
   refreshAlarmBadge();
@@ -2495,7 +3301,7 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
 async function refreshAlarmBadge() {
   try {
     const rows = await api("/api/alarms/active");
-    const filteredRows = (rows || []).filter((r) =>
+    const filteredRows = (Array.isArray(rows) ? rows : []).filter((r) =>
       isConfiguredNodeClient(r?.inverter, r?.unit),
     );
     syncActiveAlarmMap(filteredRows);
@@ -2505,19 +3311,18 @@ async function refreshAlarmBadge() {
     const count = $("notifCount");
 
     if (unacked > 0) {
-      badge.textContent = unacked > 99 ? "99+" : unacked;
-      badge.style.display = "";
-      bell.classList.remove("hidden");
-      count.textContent = unacked;
+      if (badge) { badge.textContent = unacked > 99 ? "99+" : unacked; badge.style.display = ""; }
+      if (bell) bell.classList.remove("hidden");
+      if (count) count.textContent = unacked;
     } else {
-      badge.style.display = "none";
-      bell.classList.add("hidden");
+      if (badge) badge.style.display = "none";
+      if (bell) bell.classList.add("hidden");
       closeNotif();
     }
     setAlarmSoundActive(unacked > 0);
-    updateInverterCards();
+    scheduleInverterCardsUpdate();
   } catch (err) {
-    console.warn("[app] handleWS failed:", err.message);
+    console.warn("[app] refreshAlarmBadge failed:", err.message);
   }
 }
 
@@ -2528,6 +3333,7 @@ async function refreshNotifPanel() {
       isConfiguredNodeClient(r?.inverter, r?.unit),
     );
     const list = $("notifList");
+    if (!list) return;
     list.innerHTML = "";
     filteredRows.slice(0, 50).forEach((r) => {
       const desc = (r.decoded || []).map((b) => b.label).join(", ") || "Alarm";
@@ -2545,11 +3351,11 @@ async function refreshNotifPanel() {
 }
 
 function toggleNotif() {
-  $("notifPanel").classList.toggle("hidden");
+  $("notifPanel")?.classList.toggle("hidden");
   refreshNotifPanel();
 }
 function closeNotif() {
-  $("notifPanel").classList.add("hidden");
+  $("notifPanel")?.classList.add("hidden");
 }
 
 // ─── Alarms Page ──────────────────────────────────────────────────────────────
@@ -2575,9 +3381,11 @@ async function fetchAlarms() {
     ...(inv !== "all" ? { inverter: inv } : {}),
   });
   try {
-    const rows = await api(`/api/alarms?${qs}`);
+    const raw = await api(`/api/alarms?${qs}`);
+    const rows = Array.isArray(raw) ? raw : [];
     renderAlarmTable(rows);
-    $("alarmCount").textContent = `${rows.length} records`;
+    const countEl = $("alarmCount");
+    if (countEl) countEl.textContent = `${rows.length} records`;
     refreshAlarmBadge();
   } catch (e) {
     console.error("fetchAlarms:", e);
@@ -2586,12 +3394,14 @@ async function fetchAlarms() {
 
 function renderAlarmTable(rows) {
   const tbody = $("alarmBody");
+  if (!tbody) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
   tbody.innerHTML = "";
-  if (!rows.length) {
+  if (!safeRows.length) {
     renderEmptyRow(tbody, 10, "No alarm records for the selected filter.");
     return;
   }
-  rows.forEach((r) => {
+  safeRows.forEach((r) => {
     const desc = (r.decoded || []).map((b) => b.label).join(", ") || "—";
     const occurredTs = Number(r.occurred_ts || r.ts || 0);
     const clearedTs = r.cleared_ts ? Number(r.cleared_ts) : null;
@@ -2729,10 +3539,12 @@ async function fetchEnergy() {
     ...(inv !== "all" ? { inverter: inv } : {}),
   });
   try {
-    const rows = await api(`/api/energy/5min?${qs}`);
+    const raw = await api(`/api/energy/5min?${qs}`);
+    const rows = Array.isArray(raw) ? raw : [];
     renderEnergyTable(rows);
     renderEnergySummary(rows);
-    $("energyCount").textContent = `${rows.length} interval records`;
+    const countEl = $("energyCount");
+    if (countEl) countEl.textContent = `${rows.length} interval records`;
   } catch (e) {
     console.error("fetchEnergy:", e);
   }
@@ -2740,6 +3552,7 @@ async function fetchEnergy() {
 
 function renderEnergyTable(rows) {
   const tbody = $("energyBody");
+  if (!tbody) return;
   tbody.innerHTML = "";
   if (!rows.length) {
     renderEmptyRow(
@@ -2847,6 +3660,7 @@ async function fetchAudit() {
 
 function renderAuditTable(rows) {
   const tbody = $("auditBody");
+  if (!tbody) return;
   tbody.innerHTML = "";
   if (!rows.length) {
     renderEmptyRow(tbody, 8, "No audit records for the selected filter.");
@@ -3028,7 +3842,8 @@ function applyAuditTableView() {
 
   renderAuditTable(filtered);
   renderAuditSortIndicators();
-  $("auditCount").textContent = `${filtered.length}/${allRows.length} records`;
+  const auditCountEl = $("auditCount");
+  if (auditCountEl) auditCountEl.textContent = `${filtered.length}/${allRows.length} records`;
 }
 
 function resetAuditFilters() {
@@ -3065,18 +3880,36 @@ async function fetchReport() {
   const date = $("reportDate").value;
   queuePersistExportUiState();
   try {
-    const rows = await api(`/api/report/daily?date=${date}`);
+    let rows = await api(`/api/report/daily?date=${date}`);
+    if ((!Array.isArray(rows) || rows.length === 0) && date) {
+      try {
+        const latest = await api("/api/report/latest-date");
+        const latestDate = String(latest?.latestDate || "").trim();
+        if (latestDate && latestDate !== date) {
+          $("reportDate").value = latestDate;
+          rows = await api(`/api/report/daily?date=${latestDate}`);
+          showToast(
+            `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
+            "warning",
+            3800,
+          );
+        }
+      } catch (_) {
+        // Non-fatal fallback; keep original empty result.
+      }
+    }
     State.reportView.rows = Array.isArray(rows)
       ? rows.map((r) => toReportViewRow(r))
       : [];
     applyReportTableView();
-    await fetchReportSummary(date);
+    await fetchReportSummary($("reportDate").value || date);
   } catch (e) {
     console.error("fetchReport:", e);
     State.reportView.rows = [];
     State.reportView.summary = null;
     applyReportTableView();
     renderReportKpis();
+    showToast(`Report load failed: ${e.message}`, "error", 4200);
   }
 }
 
@@ -3085,6 +3918,13 @@ async function fetchReportSummary(date) {
     const summary = await api(`/api/report/summary?date=${date}`);
     State.reportView.summary =
       summary && typeof summary === "object" ? summary : null;
+    if (sanitizeDateInputValue(date) === today()) {
+      const totalKwh = Number(summary?.daily?.total_kwh);
+      if (Number.isFinite(totalKwh)) {
+        applySyncedTodayKwh(totalKwh, Date.now());
+        renderTodayKwhFromPac();
+      }
+    }
   } catch (e) {
     console.warn("fetchReportSummary:", e?.message || e);
     State.reportView.summary = null;
@@ -3092,13 +3932,59 @@ async function fetchReportSummary(date) {
   renderReportKpis();
 }
 
+function clampPctClient(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+}
+
+function getReportWindowHours(dateText = "") {
+  const day = sanitizeDateInputValue(dateText) || today();
+  const t = today();
+  if (day > t) return 0;
+  const solarStart = new Date(`${day}T05:00:00.000`).getTime();
+  let solarEnd = new Date(`${day}T18:00:00.000`).getTime();
+  if (day === t) solarEnd = Math.min(solarEnd, Date.now());
+  return Math.max(0, (solarEnd - solarStart) / 3600000);
+}
+
+function calcReportAvailabilityPctClient(row, reportDay = "") {
+  const explicit = Number(row?.availability_pct);
+  if (Number.isFinite(explicit)) return clampPctClient(explicit);
+  const uph =
+    Number(row?.uptime_h || 0) || (Number(row?.uptime_s || 0) / 3600);
+  const windowH = getReportWindowHours(reportDay || row?.date || today());
+  if (!Number.isFinite(windowH) || windowH <= 0) return 0;
+  return clampPctClient((Math.max(0, uph) / windowH) * 100);
+}
+
+function calcReportPerformancePctClient(row) {
+  const explicit = Number(row?.performance_pct);
+  if (Number.isFinite(explicit)) return clampPctClient(explicit);
+  const kwh = Number(row?.kwh_total || 0);
+  const uph =
+    Number(row?.uptime_h || 0) || (Number(row?.uptime_s || 0) / 3600);
+  const denom = INV_RATED_KW * Math.max(0, uph);
+  if (!Number.isFinite(denom) || denom <= 0) return 0;
+  return clampPctClient((Math.max(0, kwh) / denom) * 100);
+}
+
 function toReportViewRow(r) {
   const kwh = Number(r?.kwh_total || 0);
   const mwh = kwh / 1000;
-  const peak = Number(r?.pac_peak || 0) / 1000;
+  const peak = Number(r?.pac_peak || 0) / 1000; // measured peak kW (display only)
   const avg = Number(r?.pac_avg || 0) / 1000;
   const uph = Number(r?.uptime_s || 0) / 3600;
-  const perf = Math.min(100, Math.round((kwh / (peak * uph || 1)) * 100)) || 0;
+  const reportDay = String(r?.date || $("reportDate")?.value || today()).trim();
+  const availabilityPct = calcReportAvailabilityPctClient(
+    { ...r, uptime_h: uph },
+    reportDay,
+  );
+  const performancePct = calcReportPerformancePctClient({
+    ...r,
+    uptime_h: uph,
+  });
+  const perf = Math.round(performancePct);
   return {
     ...r,
     inverter: Number(r?.inverter || 0),
@@ -3107,6 +3993,8 @@ function toReportViewRow(r) {
     avg_kw: avg,
     uptime_h: uph,
     alarm_count: Number(r?.alarm_count || 0),
+    availability_pct: Number(availabilityPct.toFixed(3)),
+    performance_pct: Number(performancePct.toFixed(3)),
     perf,
   };
 }
@@ -3256,16 +4144,21 @@ function applyReportTableView() {
     (a, b) => dir * compareReportRows(a, b, State.reportView.sortKey),
   );
 
-  renderReportTable(filtered);
+  renderReportTable(filtered, allRows.length);
   renderReportSortIndicators();
   renderReportKpis();
 }
 
-function renderReportTable(rows) {
+function renderReportTable(rows, totalRows = rows.length) {
   const tbody = $("reportBody");
+  if (!tbody) return;
   tbody.innerHTML = "";
   if (!rows.length) {
-    renderEmptyRow(tbody, 7, "No daily report rows for this date.");
+    const msg =
+      Number(totalRows || 0) > 0
+        ? "No rows match current report filters."
+        : "No daily report rows for this date.";
+    renderEmptyRow(tbody, 7, msg);
     return;
   }
 
@@ -3316,25 +4209,27 @@ function computeReportSummaryFromRows(rows) {
     const mwh = Number(r?.mwh || 0);
     const peak = Number(r?.peak_kw || 0);
     const uph = Number(r?.uptime_h || 0);
-    const avail = Number(r?.perf || 0);
-    const denom = (peak * uph) / 1000; // kW*h -> MWh
+    const avail = calcReportAvailabilityPctClient(r, r?.date || $("reportDate")?.value || today());
+    const denom = (INV_RATED_KW * uph) / 1000; // rated kW*h -> MWh
     totalMwh += Math.max(0, mwh);
     if (peak > peakKw) peakKw = peak;
     alarmCount += Math.max(0, Math.trunc(Number(r?.alarm_count || 0)));
-    availSum += Math.max(0, Math.min(100, avail));
+    availSum += clampPctClient(avail);
     denomMwh += Math.max(0, denom);
   });
   const avgAvail = list.length ? availSum / list.length : 0;
   const perf = denomMwh > 0 ? (totalMwh / denomMwh) * 100 : 0;
   return {
-    inverter_count: list.length,
+    inverter_count: new Set(
+      list.map((r) => Number(r?.inverter || 0)).filter((n) => n > 0),
+    ).size,
     total_mwh: Number(totalMwh.toFixed(6)),
     peak_kw: Number(peakKw.toFixed(3)),
     alarm_count: alarmCount,
     availability_avg_pct: Number(
-      Math.max(0, Math.min(100, avgAvail)).toFixed(3),
+      clampPctClient(avgAvail).toFixed(3),
     ),
-    performance_pct: Number(Math.max(0, Math.min(100, perf)).toFixed(3)),
+    performance_pct: Number(clampPctClient(perf).toFixed(3)),
   };
 }
 
@@ -3360,22 +4255,27 @@ function renderReportKpis() {
 
 async function exportDailyReport() {
   await persistExportUiState().catch(() => {});
-  const date = $("reportDate").value;
+  const date = $("reportDate").value || today();
+  if (!$("reportDate").value) $("reportDate").value = date;
   const ts = localDateStartMs(date);
   const format = $("reportExportFormat")?.value || "xlsx";
+  setExportButtonState("btnExportDailyReport", "loading");
   try {
+    // Ensure report rows are materialized in DB before export.
+    await api(`/api/report/daily?date=${encodeURIComponent(date)}&refresh=1`, "GET");
     const r = await api("/api/export/daily-report", "POST", {
       date,
       startTs: ts,
       endTs: ts + 86399999,
       format,
     });
-    if (r.ok) {
-      alert(`Saved to:\n${r.path}`);
-      await openExportPathFolder(r.path);
-    } else alert("Export failed: " + r.error);
+    if (!r?.path) throw new Error("Export did not return output path.");
+    alert(`Saved to:\n${r.path}`);
+    await openExportPathFolder(r.path);
+    setExportButtonState("btnExportDailyReport", "ok");
   } catch (e) {
     alert("Export error: " + e.message);
+    setExportButtonState("btnExportDailyReport", "fail");
   }
 }
 
@@ -3835,6 +4735,7 @@ function ensureAnalyticsCards() {
     );
   }
   bindExportUiStatePersistence();
+  syncDayAheadGeneratorAvailability();
 
   for (let inv = 1; inv <= count; inv++) {
     const card = document.createElement("div");
@@ -4286,6 +5187,64 @@ function initExportPage() {
   queuePersistExportUiState();
 }
 
+function clearExportButtonTimer(btnId) {
+  const key = String(btnId || "").trim();
+  if (!key) return;
+  const timer = State.exportBtnTimers[key];
+  if (timer) {
+    clearInterval(timer);
+    delete State.exportBtnTimers[key];
+  }
+}
+
+function setExportButtonState(btnId, mode = "idle") {
+  const btn = $(btnId);
+  if (!btn) return;
+  const key = String(btnId || "").trim();
+  if (!btn.dataset.baseLabel) {
+    btn.dataset.baseLabel = String(btn.textContent || "").trim() || "Export";
+  }
+  const base = btn.dataset.baseLabel;
+
+  clearExportButtonTimer(key);
+  btn.classList.remove("btn-export-busy", "btn-export-ok", "btn-export-fail");
+
+  if (mode === "loading") {
+    btn.disabled = true;
+    btn.classList.add("btn-export-busy");
+    let step = 0;
+    btn.textContent = "Please wait.";
+    State.exportBtnTimers[key] = setInterval(() => {
+      step = (step + 1) % 3;
+      btn.textContent = `Please wait${".".repeat(step + 1)}`;
+    }, 320);
+    return;
+  }
+
+  btn.disabled = false;
+  if (mode === "ok") {
+    btn.classList.add("btn-export-ok");
+    btn.textContent = "Saved...";
+    setTimeout(() => {
+      btn.classList.remove("btn-export-ok");
+      btn.textContent = base;
+    }, 1800);
+    return;
+  }
+
+  if (mode === "fail") {
+    btn.classList.add("btn-export-fail");
+    btn.textContent = "Failed...";
+    setTimeout(() => {
+      btn.classList.remove("btn-export-fail");
+      btn.textContent = base;
+    }, 2200);
+    return;
+  }
+
+  btn.textContent = base;
+}
+
 async function runExport(
   type,
   invId,
@@ -4293,6 +5252,7 @@ async function runExport(
   endId,
   resultId,
   extraBody = {},
+  btnId = "",
 ) {
   await persistExportUiState().catch(() => {});
   const inv = $(invId)?.value;
@@ -4310,6 +5270,7 @@ async function runExport(
     res.className = "exp-result";
     res.textContent = "Exporting…";
   }
+  setExportButtonState(btnId, "loading");
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   const body = { inverter: inv, startTs, endTs, format, ...extraBody };
@@ -4320,11 +5281,13 @@ async function runExport(
       res.textContent = "✔ Saved: " + r.path;
     }
     await openExportPathFolder(r.path);
+    setExportButtonState(btnId, "ok");
   } catch (e) {
     if (res) {
       res.className = "exp-result error";
       res.textContent = "✗ " + e.message;
     }
+    setExportButtonState(btnId, "fail");
   }
 }
 
@@ -4335,6 +5298,8 @@ async function runEnergyExport() {
     "expEnergyStart",
     "expEnergyEnd",
     "expEnergyResult",
+    {},
+    "btnRunEnergyExport",
   );
 }
 
@@ -4348,6 +5313,7 @@ async function runForecastActualExport() {
     res.className = "exp-result";
     res.textContent = "Exporting…";
   }
+  setExportButtonState("btnRunForecastExport", "loading");
   const startTs = day ? localDateStartMs(day) : undefined;
   const endTs = day ? localDateEndMs(day) : undefined;
   try {
@@ -4362,15 +5328,31 @@ async function runForecastActualExport() {
       res.textContent = "✔ Saved: " + r.path;
     }
     await openExportPathFolder(r.path);
+    setExportButtonState("btnRunForecastExport", "ok");
   } catch (e) {
     if (res) {
       res.className = "exp-result error";
       res.textContent = "✗ " + e.message;
     }
+    setExportButtonState("btnRunForecastExport", "fail");
   }
 }
 
 async function runDayAheadGeneration() {
+  if (isClientModeActive()) {
+    const resBlocked = $("genDayResult");
+    if (resBlocked) {
+      resBlocked.className = "exp-result error";
+      resBlocked.textContent =
+        "✗ Unavailable in Client mode. Generate day-ahead on the Gateway server.";
+    }
+    showToast(
+      "Day-ahead generation is disabled in Client mode. Please generate from the Gateway server.",
+      "warning",
+      4200,
+    );
+    return;
+  }
   await persistExportUiState().catch(() => {});
   const dayCount = Math.min(
     31,
@@ -4417,37 +5399,61 @@ async function runInverterDataExport() {
     "expInvDataStart",
     "expInvDataEnd",
     "expInvDataResult",
+    {},
+    "btnRunInvDataExport",
   );
 }
 
 async function runDailyReportExport() {
   await persistExportUiState().catch(() => {});
-  const start = $("expReportStart").value;
-  const end = $("expReportEnd").value;
+  let start = $("expReportStart").value;
+  let end = $("expReportEnd").value;
+  if (!start && !end) {
+    start = today();
+    end = start;
+    if ($("expReportStart")) $("expReportStart").value = start;
+    if ($("expReportEnd")) $("expReportEnd").value = end;
+  } else if (start && !end) {
+    end = start;
+    if ($("expReportEnd")) $("expReportEnd").value = end;
+  } else if (!start && end) {
+    start = end;
+    if ($("expReportStart")) $("expReportStart").value = start;
+  }
   const format = $("expReportFormat")?.value || "xlsx";
   const res = $("expReportResult");
   if (res) {
     res.className = "exp-result";
     res.textContent = "Exporting…";
   }
+  setExportButtonState("btnRunDailyReportExport", "loading");
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   try {
+    if (start) {
+      await api(
+        `/api/report/daily?date=${encodeURIComponent(start)}&refresh=1`,
+        "GET",
+      );
+    }
     const r = await api("/api/export/daily-report", "POST", {
       startTs,
       endTs,
       format,
     });
+    if (!r?.path) throw new Error("Export did not return output path.");
     if (res) {
       res.className = "exp-result";
       res.textContent = "✔ Saved: " + r.path;
     }
     await openExportPathFolder(r.path);
+    setExportButtonState("btnRunDailyReportExport", "ok");
   } catch (e) {
     if (res) {
       res.className = "exp-result error";
       res.textContent = "✗ " + e.message;
     }
+    setExportButtonState("btnRunDailyReportExport", "fail");
   }
 }
 
@@ -4506,12 +5512,28 @@ function bindEventHandlers() {
 
   // Export page
   $("btnExportAlarms")?.addEventListener("click", () =>
-    runExport("alarms", "expAlarmInv", "expAlarmStart", "expAlarmEnd", "expAlarmResult"));
+    runExport(
+      "alarms",
+      "expAlarmInv",
+      "expAlarmStart",
+      "expAlarmEnd",
+      "expAlarmResult",
+      {},
+      "btnExportAlarms",
+    ));
   $("btnRunEnergyExport")?.addEventListener("click", runEnergyExport);
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
   $("btnExportAudit")?.addEventListener("click", () =>
-    runExport("audit", "expAuditInv", "expAuditStart", "expAuditEnd", "expAuditResult"));
+    runExport(
+      "audit",
+      "expAuditInv",
+      "expAuditStart",
+      "expAuditEnd",
+      "expAuditResult",
+      {},
+      "btnExportAudit",
+    ));
   $("btnRunDailyReportExport")?.addEventListener("click", runDailyReportExport);
 
   // Settings page
@@ -4520,9 +5542,22 @@ function bindEventHandlers() {
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
   $("btnSaveSettings")?.addEventListener("click", saveSettings);
-  $("setOperationMode")?.addEventListener("change", syncOperationModeUi);
+  $("setOperationMode")?.addEventListener("change", () => {
+    syncOperationModeUi();
+    syncDayAheadGeneratorAvailability();
+  });
+  $("setRemoteAutoSync")?.addEventListener("change", syncOperationModeUi);
+  $("setRemoteGatewayUrl")?.addEventListener("blur", applyRemoteGatewayInputNormalization);
   $("btnTestRemoteGateway")?.addEventListener("click", testRemoteGateway);
   $("btnCheckTailscale")?.addEventListener("click", checkTailscaleStatus);
+  $("btnRefreshReplicationHealth")?.addEventListener("click", () =>
+    refreshReplicationHealth(false),
+  );
+  $("btnRefreshRuntimePerf")?.addEventListener("click", () =>
+    refreshRuntimePerf(false),
+  );
+  $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
+  $("btnRunReplicationPush")?.addEventListener("click", runReplicationPushNow);
   $("btnPickExportFolder")?.addEventListener("click", pickExportFolder);
   $("btnOpenExportFolder")?.addEventListener("click", openExportFolder);
   $("btnOpenIpConfig")?.addEventListener("click", openIpConfigSettings);
@@ -4539,6 +5574,10 @@ function bindEventHandlers() {
   window.addEventListener("beforeunload", () => {
     clearInterval(State.clockTimer);
     clearInterval(State.alarmBadgeTimer);
+    if (State.netIO.monitorTimer) { clearInterval(State.netIO.monitorTimer); State.netIO.monitorTimer = null; }
+    if (State.xfer.hideTimer) { clearTimeout(State.xfer.hideTimer); State.xfer.hideTimer = null; }
+    stopReplicationHealthPolling();
+    stopTodayMwhSyncTimer();
   });
 }
 
@@ -4564,13 +5603,16 @@ async function init() {
   );
   bindEventHandlers();
   await loadSettings();
+  syncDayAheadGeneratorAvailability();
   bindExportUiStatePersistence();
   setupExportUiStateFlush();
   await loadIpConfig();
   await seedTodayEnergyFromDb();
+  startTodayMwhSyncTimer();
   buildInverterGrid();
   buildSelects();
   connectWS();
+  startNetIOMonitor();
   refreshAlarmBadge();
 
   // Refresh alarm badge every 30s

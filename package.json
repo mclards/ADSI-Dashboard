@@ -1,11 +1,14 @@
 {
   "name": "adsi-dashboard",
-  "version": "2.0.0",
+  "version": "2.1.0",
+  "description": "Desktop dashboard for ADSI inverter monitoring, reporting, and remote replication.",
+  "author": "ADSI Team",
   "main": "electron/main.js",
   "scripts": {
     "start": "node start-electron.js",
     "dev": "set NODE_ENV=development && node start-electron.js",
     "server": "node server/index.js",
+    "postinstall": "electron-builder install-app-deps",
     "build:win": "electron-builder --win nsis portable --x64",
     "build:installer": "electron-builder --win nsis --x64",
     "build:portable": "electron-builder --win portable --x64"
@@ -22,8 +25,7 @@
   },
   "devDependencies": {
     "electron": "^29.0.0",
-    "electron-builder": "^24.13.3",
-    "electron-rebuild": "^3.2.9"
+    "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "com.adsi.dashboard",
@@ -55,7 +57,7 @@
       }
     ],
     "win": {
-      "icon": "assets/icon-256.png",
+      "icon": "icon-256.png",
       "target": [
         {
           "target": "nsis",

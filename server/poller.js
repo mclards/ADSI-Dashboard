@@ -8,6 +8,7 @@ const { broadcastUpdate } = require('./ws');
 const liveData = {};       // key: `${inv}_${unit}` → latest parsed row
 const prevKwh  = {};       // for 5-min energy increment tracking
 const unreachableState = {}; // per-key miss/suppression tracking
+const lastPersistState = {}; // per-key DB persist cadence state
 
 const POLL_MS    = 500;    // poll interval
 const OFFLINE_MS = 20000;   // mark offline after 20s no data
@@ -19,9 +20,36 @@ const SUPPRESS_AFTER_MISS_MS = 120000; // suppress after prolonged misses
 const SUPPRESS_BACKOFF_MS = 30000;    // retry after backoff window
 const API_FETCH_TIMEOUT_MS = 5000;
 const IPCONFIG_CACHE_MS = 5000;
+const DB_MIN_PERSIST_MS = 1000;
+const DB_PAC_DELTA_PERSIST_W = 250;
 
 let pollTimer = null;
 let running   = false;
+let liveJsonCache = "{}";
+let liveJsonCacheTs = Date.now();
+const pollStats = {
+  startedAt: Date.now(),
+  tickCount: 0,
+  lastPollStartedTs: 0,
+  lastPollEndedTs: 0,
+  lastPollDurationMs: 0,
+  avgPollDurationMs: 0,
+  maxPollDurationMs: 0,
+  fetchOkCount: 0,
+  fetchErrorCount: 0,
+  lastFetchError: "",
+  rowsFetched: 0,
+  rowsParsed: 0,
+  rowsAccepted: 0,
+  rowsSkippedUnconfigured: 0,
+  rowsNoChange: 0,
+  rowsPersisted: 0,
+  rowsPersistSkippedCadence: 0,
+  dbBulkInsertCount: 0,
+  dbInsertErrorCount: 0,
+  offlineMarkCount: 0,
+  lastCacheUpdateTs: Date.now(),
+};
 
 // Pac-based daily energy integrator (independent from kWh register).
 const pacTodayByInverter = {}; // key: inverter -> kWh
@@ -31,6 +59,17 @@ let ipConfigCache = null;
 let ipConfigCacheTs = 0;
 let apiFailMs = 0;
 let apiOfflineBroadcasted = false;
+
+function updateLiveSnapshotCache() {
+  try {
+    liveJsonCache = JSON.stringify(liveData);
+    liveJsonCacheTs = Date.now();
+    pollStats.lastCacheUpdateTs = liveJsonCacheTs;
+  } catch (err) {
+    // Keep last good snapshot; avoid throwing in hot path.
+    console.warn("[poller] live snapshot cache failed:", err.message);
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -80,9 +119,10 @@ function integratePacToday(parsed) {
 }
 
 function parseRow(row) {
-  const inverter = Number(row.inverter || 0);
-  const unit     = Number(row.unit || 0);
-  if (!inverter || !unit) return null;
+  const inverter = Math.trunc(Number(row.inverter));
+  const unit     = Math.trunc(Number(row.unit));
+  // Reject rows with inverter/unit outside valid hardware ranges.
+  if (inverter < 1 || inverter > 27 || unit < 1 || unit > 4) return null;
 
   const vdc  = Number(row.vdc  || 0);
   const idc  = Number(row.idc  || 0);
@@ -217,6 +257,7 @@ function markMissingKey(key, now) {
       liveData[key].pac = 0;
       liveData[key].pdc = 0;
       broadcastUpdate({ type: 'offline', key });
+      pollStats.offlineMarkCount += 1;
     }
     s.offlineSent = true;
   }
@@ -278,6 +319,7 @@ function buildTotals(now) {
 function markAllOffline() {
   for (const [key, d] of Object.entries(liveData)) {
     if (!d) continue;
+    if (Number(d.online || 0) === 1) pollStats.offlineMarkCount += 1;
     d.online = 0;
     d.pac = 0;
     d.pdc = 0;
@@ -290,6 +332,15 @@ function markAllOffline() {
 async function poll() {
   if (!running) return;
   const now = Date.now();
+  const pollStartedAt = Date.now();
+  pollStats.tickCount += 1;
+  pollStats.lastPollStartedTs = pollStartedAt;
+  let parsedThisTick = 0;
+  let acceptedThisTick = 0;
+  let skippedConfigThisTick = 0;
+  let noChangeThisTick = 0;
+  let persistedThisTick = 0;
+  let skippedCadenceThisTick = 0;
 
   const apiUrl = getSetting('apiUrl', 'http://127.0.0.1:9100/data');
   const ipConfig = loadIpConfigSnapshot();
@@ -303,11 +354,15 @@ async function poll() {
     rows = await res.json();
     if (!Array.isArray(rows)) rows = [];
     fetchOk = true;
+    pollStats.fetchOkCount += 1;
+    pollStats.rowsFetched += rows.length;
     apiFailMs = 0;
     apiOfflineBroadcasted = false;
   } catch (e) {
     fetchOk = false;
-    apiFailMs += POLL_MS;
+    pollStats.fetchErrorCount += 1;
+    pollStats.lastFetchError = String(e?.message || e || "");
+    apiFailMs += Math.max(POLL_MS, Date.now() - pollStartedAt);
   }
 
   // Avoid flapping all cards on short API hiccups.
@@ -316,8 +371,17 @@ async function poll() {
       markAllOffline();
       apiOfflineBroadcasted = true;
     }
+    updateLiveSnapshotCache();
     const totals = buildTotals(now);
     broadcastUpdate({ type: 'live', data: liveData, totals });
+    const pollEndedAt = Date.now();
+    const dur = Math.max(0, pollEndedAt - pollStartedAt);
+    pollStats.lastPollEndedTs = pollEndedAt;
+    pollStats.lastPollDurationMs = dur;
+    pollStats.avgPollDurationMs =
+      ((pollStats.avgPollDurationMs * (pollStats.tickCount - 1)) + dur) /
+      pollStats.tickCount;
+    if (dur > pollStats.maxPollDurationMs) pollStats.maxPollDurationMs = dur;
     return;
   }
 
@@ -327,8 +391,12 @@ async function poll() {
   for (const row of rows) {
     const parsed = parseRow(row);
     if (!parsed) continue;
+    parsedThisTick += 1;
     const key = `${parsed.inverter}_${parsed.unit}`;
-    if (!expectedSet.has(key)) continue;
+    if (!expectedSet.has(key)) {
+      skippedConfigThisTick += 1;
+      continue;
+    }
 
     integratePacToday(parsed);
 
@@ -344,15 +412,41 @@ async function poll() {
       // Heartbeat refresh: keep timestamp/online fresh even when values are stable.
       prev.ts = parsed.ts;
       prev.online = 1;
+      noChangeThisTick += 1;
       continue;
     }
 
     liveData[key] = parsed;
+    acceptedThisTick += 1;
 
-    // Only write to DB during solar window
-    if (isSolarWindow()) {
+    // Persist with cadence guard to reduce synchronous DB pressure.
+    const persistPrev = lastPersistState[key];
+    const forcePersist =
+      !persistPrev ||
+      Number(parsed.alarm || 0) !== Number(persistPrev.alarm || 0) ||
+      Number(parsed.on_off || 0) !== Number(persistPrev.on_off || 0);
+    const elapsedMs = !persistPrev
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, Number(parsed.ts || 0) - Number(persistPrev.ts || 0));
+    const pacDelta = !persistPrev
+      ? Number.MAX_SAFE_INTEGER
+      : Math.abs(Number(parsed.pac || 0) - Number(persistPrev.pac || 0));
+    const shouldPersist =
+      isSolarWindow() &&
+      (forcePersist || elapsedMs >= DB_MIN_PERSIST_MS || pacDelta >= DB_PAC_DELTA_PERSIST_W);
+
+    if (shouldPersist) {
       batch.push(parsed);
       update5minBucket(parsed);
+      lastPersistState[key] = {
+        ts: Number(parsed.ts || 0),
+        pac: Number(parsed.pac || 0),
+        alarm: Number(parsed.alarm || 0),
+        on_off: Number(parsed.on_off || 0),
+      };
+      persistedThisTick += 1;
+    } else {
+      skippedCadenceThisTick += 1;
     }
 
   }
@@ -361,8 +455,10 @@ async function poll() {
     try {
       bulkInsert(batch);
       checkAlarms(batch);
+      pollStats.dbBulkInsertCount += 1;
     } catch (e) {
       console.error('[DB]', e.message);
+      pollStats.dbInsertErrorCount += 1;
     }
   }
 
@@ -371,6 +467,7 @@ async function poll() {
     if (expectedSet.has(key)) continue;
     delete liveData[key];
     if (unreachableState[key]) delete unreachableState[key];
+    if (lastPersistState[key]) delete lastPersistState[key];
   }
 
   // Track configured IDs that were not seen and auto-suppress prolonged misses.
@@ -387,8 +484,23 @@ async function poll() {
   }
 
   const totals = buildTotals(now);
-
+  updateLiveSnapshotCache();
   broadcastUpdate({ type: 'live', data: liveData, totals });
+
+  pollStats.rowsParsed += parsedThisTick;
+  pollStats.rowsAccepted += acceptedThisTick;
+  pollStats.rowsSkippedUnconfigured += skippedConfigThisTick;
+  pollStats.rowsNoChange += noChangeThisTick;
+  pollStats.rowsPersisted += persistedThisTick;
+  pollStats.rowsPersistSkippedCadence += skippedCadenceThisTick;
+  const pollEndedAt = Date.now();
+  const dur = Math.max(0, pollEndedAt - pollStartedAt);
+  pollStats.lastPollEndedTs = pollEndedAt;
+  pollStats.lastPollDurationMs = dur;
+  pollStats.avgPollDurationMs =
+    ((pollStats.avgPollDurationMs * (pollStats.tickCount - 1)) + dur) /
+    pollStats.tickCount;
+  if (dur > pollStats.maxPollDurationMs) pollStats.maxPollDurationMs = dur;
 }
 
 function start() {
@@ -411,6 +523,13 @@ function stop() {
 
 function getLiveData() { return liveData; }
 
+function getLiveSnapshotJson() {
+  return {
+    json: liveJsonCache,
+    ts: liveJsonCacheTs,
+  };
+}
+
 function getTodayPacKwh() {
   resetPacTodayIfNeeded(Date.now());
   return Object.keys(pacTodayByInverter)
@@ -421,4 +540,25 @@ function getTodayPacKwh() {
     .sort((a, b) => a.inverter - b.inverter);
 }
 
-module.exports = { start, stop, getLiveData, getTodayPacKwh, setIpConfigSnapshot };
+function getPerfStats() {
+  return {
+    running: Boolean(running),
+    pollMs: POLL_MS,
+    offlineMs: OFFLINE_MS,
+    liveKeyCount: Object.keys(liveData).length,
+    expectedSuppressedKeyCount: Object.keys(unreachableState).length,
+    ...pollStats,
+    avgPollDurationMs: Number(Number(pollStats.avgPollDurationMs || 0).toFixed(3)),
+  };
+}
+
+module.exports = {
+  start,
+  stop,
+  markAllOffline,
+  getLiveData,
+  getLiveSnapshotJson,
+  getTodayPacKwh,
+  setIpConfigSnapshot,
+  getPerfStats,
+};

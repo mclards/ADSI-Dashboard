@@ -830,7 +830,10 @@
         );
       }
       const AUTH_SESSION_KEY = "adsi_auth_until";
-      const AUTH_SESSION_MS = 10 * 60 * 1000;
+      // sessionStorage is cleared whenever the window closes, so reopening always
+      // resets the gate regardless of time. The 1-hour limit guards against leaving
+      // the window open unattended for extended periods.
+      const AUTH_SESSION_MS = 60 * 60 * 1000;
       function hasAuthSession() {
         return (
           Number(sessionStorage.getItem(AUTH_SESSION_KEY) || 0) > Date.now()
@@ -872,7 +875,29 @@
       initAuthGate();
       initTheme();
       themeToggle.addEventListener("click", toggleTheme);
-      document.getElementById("toTopologyBtn").addEventListener("click", () => {
+      async function isClientMode() {
+        try {
+          const r = await fetch("/api/settings", { cache: "no-store" });
+          if (!r.ok) return false;
+          const s = await r.json();
+          return (
+            String(s?.operationMode || "gateway").trim().toLowerCase() ===
+            "remote"
+          );
+        } catch {
+          return false;
+        }
+      }
+      function alertClientModeUnavailable(feature) {
+        alert(
+          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+        );
+      }
+      document.getElementById("toTopologyBtn").addEventListener("click", async () => {
+        if (await isClientMode()) {
+          alertClientModeUnavailable("Topology");
+          return;
+        }
         if (
           dirtyRows.size > 0 &&
           !confirm("Unsaved changes will be lost. Continue to topology?")

@@ -4,6 +4,7 @@ const expressWs = require("express-ws");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { spawnSync } = require("child_process");
@@ -19,7 +20,7 @@ const {
   DATA_DIR,
   bulkUpsertForecastDayAhead,
 } = require("./db");
-const { registerClient, broadcastUpdate } = require("./ws");
+const { registerClient, broadcastUpdate, getStats: getWsStats } = require("./ws");
 const poller = require("./poller");
 const exporter = require("./exporter");
 const {
@@ -41,11 +42,21 @@ app.use(
     },
   }),
 );
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use((err, req, res, next) => {
+  if (err && (err.type === "entity.too.large" || Number(err.status || 0) === 413)) {
+    return res.status(413).json({
+      ok: false,
+      error: "Payload too large for a single request. Retry using chunked replication push.",
+    });
+  }
+  return next(err);
+});
 app.use("/assets", express.static(path.join(__dirname, "../assets")));
 app.use(express.static(path.join(__dirname, "../public")));
 app.use("/api", remoteApiTokenGate);
 const PORT = 3500;
+const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
 const PORTABLE_ROOT = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
@@ -81,13 +92,29 @@ const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
 const SOLCAST_SOLAR_END_H = 18;
 const SOLCAST_UNIT_KW_MAX = 997.0;
+const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
+const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
+const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
+const REPORT_EXPECTED_NODES_PER_INVERTER = 4;
 const REMOTE_BRIDGE_INTERVAL_MS = 1200;
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
-const REMOTE_REPLICATION_TIMEOUT_MS = 120000;
+const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
-const REMOTE_INCREMENTAL_APPEND_LIMIT = 20000;
+const REMOTE_INCREMENTAL_APPEND_LIMIT = 10000;
+const REMOTE_PUSH_DELTA_LIMIT = 50000;
+const REMOTE_PUSH_CHUNK_MAX_ROWS = 3000;
+const REMOTE_PUSH_CHUNK_TARGET_BYTES = 2 * 1024 * 1024;
+const REMOTE_PUSH_FETCH_RETRIES = 3;
+const REMOTE_PUSH_FETCH_RETRY_BASE_MS = 1200;
+const REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES = 200;
+const REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES = 200;
+const REMOTE_INCREMENTAL_CATCHUP_PASSES = 8;
+const REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS = 90000;
+const REMOTE_INCREMENTAL_FETCH_RETRIES = 3;
+const REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS = 1200;
 const LIVE_FRESH_MS = 20000;
+const REMOTE_CLIENT_PULL_ONLY = false;
 const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "operationMode",
   "remoteGatewayUrl",
@@ -209,7 +236,19 @@ const remoteBridgeState = {
   lastReplicationRows: 0,
   lastIncrementalTs: 0,
   replicationCursors: null,
+  lastReconcileTs: 0,
+  lastReconcileRows: 0,
+  lastReconcileError: "",
+  lastSyncDirection: "idle",
+  autoSyncAttempted: false,
 };
+const inboundPushRxProgress = {
+  active: false,
+  key: "",
+  recvBytes: 0,
+};
+let cpuSampleTs = Date.now();
+let cpuSampleUsage = process.cpuUsage();
 
 function sanitizeOperationMode(value, def = "gateway") {
   const v = String(value || def)
@@ -228,8 +267,22 @@ function sanitizeTailscaleDeviceHint(value, def = "") {
 function normalizeGatewayUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  if (!isHttpUrl(raw)) return "";
-  return raw.replace(/\/+$/, "");
+  const hasScheme = /^[a-z][a-z0-9+\-.]*:\/\//i.test(raw);
+  const candidate = hasScheme ? raw : `http://${raw}`;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    if (!u.hostname) return "";
+    u.username = "";
+    u.password = "";
+    if (!u.port) u.port = String(REMOTE_GATEWAY_DEFAULT_PORT);
+    u.pathname = "/";
+    u.search = "";
+    u.hash = "";
+    return u.origin.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
 }
 
 function readOperationMode() {
@@ -238,6 +291,17 @@ function readOperationMode() {
 
 function isRemoteMode() {
   return readOperationMode() === "remote";
+}
+
+function isRemotePullOnlyMode() {
+  return isRemoteMode() && REMOTE_CLIENT_PULL_ONLY;
+}
+
+function readRemoteAutoSyncEnabled() {
+  const raw = String(getSetting("remoteAutoSync", "0") || "")
+    .trim()
+    .toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function getRemoteGatewayBaseUrl() {
@@ -281,17 +345,77 @@ function shouldProxyApiPath(pathname) {
   const p = String(pathname || "");
   if (p === "/settings" || p.startsWith("/settings/")) return false;
   if (p === "/runtime/network" || p.startsWith("/runtime/network/")) return false;
+  if (p === "/runtime/perf" || p.startsWith("/runtime/perf/")) return false;
   if (p === "/tailscale/status" || p.startsWith("/tailscale/status/")) return false;
   if (p === "/wireguard/status" || p.startsWith("/wireguard/status/")) return false;
   if (p === "/runtime/network/test" || p.startsWith("/runtime/network/test/"))
     return false;
+  if (p === "/forecast/generate" || p.startsWith("/forecast/generate/"))
+    return false;
   if (p === "/live" || p.startsWith("/live/")) return false;
   if (p === "/write" || p.startsWith("/write/")) return false;
+  if (p.startsWith("/export/")) return false;
   return true;
 }
 
 function getRuntimeLiveData() {
   return isRemoteMode() ? remoteBridgeState.liveData || {} : poller.getLiveData();
+}
+
+function sampleProcessCpuPercent() {
+  const now = Date.now();
+  const elapsedMs = Math.max(1, now - cpuSampleTs);
+  const usageNow = process.cpuUsage();
+  const deltaUser = Math.max(0, Number(usageNow.user || 0) - Number(cpuSampleUsage.user || 0));
+  const deltaSys = Math.max(0, Number(usageNow.system || 0) - Number(cpuSampleUsage.system || 0));
+  cpuSampleTs = now;
+  cpuSampleUsage = usageNow;
+  const cpuCount = Math.max(1, Number(os.cpus()?.length || 1));
+  const cpuMicrosCapacity = elapsedMs * 1000 * cpuCount;
+  const pct = cpuMicrosCapacity > 0 ? ((deltaUser + deltaSys) / cpuMicrosCapacity) * 100 : 0;
+  return Number(Math.max(0, Math.min(100, pct)).toFixed(2));
+}
+
+function getRuntimePerfSnapshot() {
+  const mem = process.memoryUsage();
+  const mb = (v) => Number((Number(v || 0) / (1024 * 1024)).toFixed(2));
+  const mode = readOperationMode();
+  const pollerStats =
+    typeof poller.getPerfStats === "function" ? poller.getPerfStats() : {};
+  const wsStats = typeof getWsStats === "function" ? getWsStats() : {};
+  return {
+    ok: true,
+    ts: Date.now(),
+    operationMode: mode,
+    process: {
+      pid: process.pid,
+      uptimeSec: Number(process.uptime().toFixed(2)),
+      cpuPercent: sampleProcessCpuPercent(),
+      memoryMb: {
+        rss: mb(mem.rss),
+        heapTotal: mb(mem.heapTotal),
+        heapUsed: mb(mem.heapUsed),
+        external: mb(mem.external),
+      },
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+    },
+    poller: pollerStats,
+    ws: wsStats,
+    remote: {
+      connected: Boolean(remoteBridgeState.connected),
+      running: Boolean(remoteBridgeState.running),
+      replicationRunning: Boolean(remoteBridgeState.replicationRunning),
+      lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
+      lastError: String(remoteBridgeState.lastError || ""),
+      lastReplicationTs: Number(remoteBridgeState.lastReplicationTs || 0),
+      lastIncrementalTs: Number(remoteBridgeState.lastIncrementalTs || 0),
+      lastReplicationRows: Number(remoteBridgeState.lastReplicationRows || 0),
+      lastReplicationError: String(remoteBridgeState.lastReplicationError || ""),
+      lastSyncDirection: String(remoteBridgeState.lastSyncDirection || "idle"),
+    },
+  };
 }
 
 function computeTotalsFromLiveData(data) {
@@ -354,6 +478,485 @@ function buildCurrentReplicationCursors() {
     }
   }
   return out;
+}
+
+function getReplicationWatermarkColumn(tableName, strategy) {
+  const s = strategy || REPLICATION_INCREMENTAL_STRATEGY[tableName] || {};
+  const def = REPLICATION_DEF_MAP[tableName];
+  if (!def) return "id";
+  if (s.mode === "append") {
+    if (def.columns.includes("ts")) return "ts";
+    return String(s.cursorColumn || "id");
+  }
+  return String(s.cursorColumn || "updated_ts");
+}
+
+function buildReplicationSummary() {
+  const tables = {};
+  let globalWatermark = 0;
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const strategy = REPLICATION_INCREMENTAL_STRATEGY[def.name];
+    if (!strategy) continue;
+    const watermarkColumn = getReplicationWatermarkColumn(def.name, strategy);
+    const hasId = def.columns.includes("id");
+    const sql = hasId
+      ? `SELECT COUNT(1) AS rowCount,
+                COALESCE(MAX(COALESCE(${watermarkColumn}, 0)), 0) AS watermark,
+                COALESCE(MAX(id), 0) AS maxId
+           FROM ${def.name}`
+      : `SELECT COUNT(1) AS rowCount,
+                COALESCE(MAX(COALESCE(${watermarkColumn}, 0)), 0) AS watermark
+           FROM ${def.name}`;
+    let row = {};
+    try {
+      row = db.prepare(sql).get() || {};
+    } catch {
+      row = {};
+    }
+    const watermark = Number(row?.watermark || 0);
+    const rowCount = Number(row?.rowCount || 0);
+    const maxId = Number(row?.maxId || 0);
+    tables[def.name] = {
+      mode: strategy.mode,
+      watermarkColumn,
+      watermark: Number.isFinite(watermark) ? watermark : 0,
+      rowCount: Number.isFinite(rowCount) ? rowCount : 0,
+      maxId: Number.isFinite(maxId) ? maxId : 0,
+    };
+    globalWatermark = Math.max(globalWatermark, tables[def.name].watermark);
+  }
+
+  const signature = crypto
+    .createHash("sha1")
+    .update(JSON.stringify({ tables }))
+    .digest("hex");
+
+  return {
+    generatedTs: Date.now(),
+    mode: readOperationMode(),
+    source: readOperationMode() === "remote" ? "remote-client" : "gateway",
+    globalWatermark,
+    tables,
+    signature,
+  };
+}
+
+function normalizeReplicationSummary(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const inTables = src.tables && typeof src.tables === "object" ? src.tables : {};
+  const tables = {};
+  let globalWatermark = 0;
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const strategy = REPLICATION_INCREMENTAL_STRATEGY[def.name];
+    if (!strategy) continue;
+    const row = inTables[def.name] && typeof inTables[def.name] === "object" ? inTables[def.name] : {};
+    const watermark = Number(row?.watermark || 0);
+    const rowCount = Number(row?.rowCount || 0);
+    const maxId = Number(row?.maxId || 0);
+    tables[def.name] = {
+      mode: strategy.mode,
+      watermarkColumn: getReplicationWatermarkColumn(def.name, strategy),
+      watermark: Number.isFinite(watermark) && watermark > 0 ? watermark : 0,
+      rowCount: Number.isFinite(rowCount) && rowCount > 0 ? rowCount : 0,
+      maxId: Number.isFinite(maxId) && maxId > 0 ? maxId : 0,
+    };
+    globalWatermark = Math.max(globalWatermark, tables[def.name].watermark);
+  }
+  return {
+    generatedTs: Number(src?.generatedTs || 0),
+    mode: sanitizeOperationMode(src?.mode || "gateway", "gateway"),
+    source: String(src?.source || ""),
+    signature: String(src?.signature || ""),
+    globalWatermark,
+    tables,
+  };
+}
+
+function hasLocalNewerReplicationData(localSummaryRaw, gatewaySummaryRaw) {
+  const local = normalizeReplicationSummary(localSummaryRaw);
+  const remote = normalizeReplicationSummary(gatewaySummaryRaw);
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const a = Number(local.tables?.[def.name]?.watermark || 0);
+    const b = Number(remote.tables?.[def.name]?.watermark || 0);
+    if (a > b) return true;
+  }
+  return false;
+}
+
+function buildPushDeltaAgainstSummary(peerSummaryRaw) {
+  const peerSummary = normalizeReplicationSummary(peerSummaryRaw);
+  const tables = {};
+  const tableCounts = {};
+  let totalRows = 0;
+
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const strategy = REPLICATION_INCREMENTAL_STRATEGY[def.name];
+    if (!strategy) continue;
+    const cols = def.columns.join(", ");
+    const watermarkColumn = getReplicationWatermarkColumn(def.name, strategy);
+    const peerWatermark = Number(peerSummary.tables?.[def.name]?.watermark || 0);
+    let rows = [];
+    if (strategy.mode === "append") {
+      const orderBy = def.columns.includes("id")
+        ? `${watermarkColumn} ASC, id ASC`
+        : `${watermarkColumn} ASC`;
+      rows = db
+        .prepare(
+          `SELECT ${cols}
+             FROM ${def.name}
+            WHERE COALESCE(${watermarkColumn}, 0) > ?
+            ORDER BY ${orderBy}
+            LIMIT ?`,
+        )
+        .all(peerWatermark, REMOTE_PUSH_DELTA_LIMIT);
+    } else {
+      rows = db
+        .prepare(
+          `SELECT ${cols}
+             FROM ${def.name}
+            WHERE COALESCE(${watermarkColumn}, 0) > ?
+            ORDER BY ${strategy.orderBy}`,
+        )
+        .all(peerWatermark);
+    }
+    tables[def.name] = rows;
+    tableCounts[def.name] = rows.length;
+    totalRows += rows.length;
+  }
+
+  const localSummary = buildReplicationSummary();
+  const signature = crypto
+    .createHash("sha1")
+    .update(
+      JSON.stringify({
+        sourceSignature: localSummary.signature,
+        peerSignature: peerSummary.signature,
+        tableCounts,
+      }),
+    )
+    .digest("hex");
+
+  return {
+    meta: {
+      generatedTs: Date.now(),
+      mode: "push-delta",
+      sourceSummary: localSummary,
+      peerSummary,
+      tableCounts,
+      totalRows,
+      signature,
+    },
+    tables,
+  };
+}
+
+function countReplicationRowsByTables(tablesRaw) {
+  const tables = tablesRaw && typeof tablesRaw === "object" ? tablesRaw : {};
+  let total = 0;
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const rows = Array.isArray(tables[def.name]) ? tables[def.name] : [];
+    total += rows.length;
+  }
+  return total;
+}
+
+function buildPushDeltaChunks(deltaPayload) {
+  const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
+  if (!delta) return [];
+  const inTables = delta.tables && typeof delta.tables === "object" ? delta.tables : {};
+  const sourceMeta = delta.meta && typeof delta.meta === "object" ? delta.meta : {};
+  const safeMaxRows = Math.max(1, Number(REMOTE_PUSH_CHUNK_MAX_ROWS || 1));
+  const safeTargetBytes = Math.max(32768, Number(REMOTE_PUSH_CHUNK_TARGET_BYTES || 32768));
+  const rawChunks = [];
+
+  let currentTables = Object.create(null);
+  let currentRows = 0;
+  let currentBytes = 0;
+
+  const flushChunk = () => {
+    if (currentRows <= 0) return;
+    rawChunks.push({
+      tables: currentTables,
+      rows: currentRows,
+      bytes: currentBytes,
+    });
+    currentTables = Object.create(null);
+    currentRows = 0;
+    currentBytes = 0;
+  };
+
+  for (const def of REPLICATION_TABLE_DEFS) {
+    const rows = Array.isArray(inTables[def.name]) ? inTables[def.name] : [];
+    for (const row of rows) {
+      const rowBytes = Math.max(8, Buffer.byteLength(JSON.stringify(row ?? null), "utf8"));
+      const willOverflowRows = currentRows > 0 && currentRows + 1 > safeMaxRows;
+      const willOverflowBytes = currentRows > 0 && currentBytes + rowBytes > safeTargetBytes;
+      if (willOverflowRows || willOverflowBytes) {
+        flushChunk();
+      }
+      if (!currentTables[def.name]) {
+        currentTables[def.name] = [];
+      }
+      currentTables[def.name].push(row);
+      currentRows += 1;
+      currentBytes += rowBytes;
+    }
+  }
+  flushChunk();
+
+  const chunkCount = rawChunks.length;
+  const totalRowsFromMeta = Number(sourceMeta?.totalRows || 0);
+  const totalRows = totalRowsFromMeta > 0 ? totalRowsFromMeta : countReplicationRowsByTables(inTables);
+  const baseMode = String(sourceMeta?.mode || "push").trim() || "push";
+  const baseSignature = String(sourceMeta?.signature || "").trim();
+
+  return rawChunks.map((chunk, idx) => {
+    const tableCounts = {};
+    for (const def of REPLICATION_TABLE_DEFS) {
+      const rows = Array.isArray(chunk.tables[def.name]) ? chunk.tables[def.name] : [];
+      tableCounts[def.name] = rows.length;
+    }
+    return {
+      meta: {
+        generatedTs: Date.now(),
+        mode: `${baseMode}-chunk`,
+        signature: baseSignature,
+        totalRows,
+        chunkCount,
+        chunkIndex: idx + 1,
+        chunkRows: Number(chunk.rows || 0),
+        chunkBytes: Number(chunk.bytes || 0),
+        tableCounts,
+      },
+      tables: chunk.tables,
+    };
+  });
+}
+
+function makeReplicationRowPayload(row, cols) {
+  const payload = {};
+  for (const c of cols) {
+    payload[c] = Object.prototype.hasOwnProperty.call(row || {}, c) ? row[c] : null;
+  }
+  return payload;
+}
+
+const REPLICATION_STMT_CACHE = Object.create(null);
+
+function stmtCached(key, sql) {
+  if (!REPLICATION_STMT_CACHE[key]) {
+    REPLICATION_STMT_CACHE[key] = db.prepare(sql);
+  }
+  return REPLICATION_STMT_CACHE[key];
+}
+
+function mergeAppendReplicationRow(tableName, payload, cols) {
+  if (tableName === "readings") {
+    const exists = stmtCached(
+      "exists:readings:ts_inv_unit",
+      `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
+    ).get(payload.ts, payload.inverter, payload.unit);
+    if (exists?.id) return false;
+    const sql = `INSERT INTO readings (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(id) DO UPDATE SET
+        ts=excluded.ts,
+        inverter=excluded.inverter,
+        unit=excluded.unit,
+        vdc=excluded.vdc,
+        idc=excluded.idc,
+        vac1=excluded.vac1,
+        vac2=excluded.vac2,
+        vac3=excluded.vac3,
+        iac1=excluded.iac1,
+        iac2=excluded.iac2,
+        iac3=excluded.iac3,
+        pac=excluded.pac,
+        kwh=excluded.kwh,
+        alarm=excluded.alarm,
+        online=excluded.online
+      WHERE COALESCE(excluded.ts,0) >= COALESCE(readings.ts,0)`;
+    stmtCached("merge:readings", sql).run(payload);
+    return true;
+  }
+
+  if (tableName === "energy_5min") {
+    const exists = stmtCached(
+      "exists:energy_5min:ts_inv",
+      `SELECT id FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
+    ).get(payload.ts, payload.inverter);
+    if (exists?.id) return false;
+    const sql = `INSERT INTO energy_5min (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(id) DO UPDATE SET
+        ts=excluded.ts,
+        inverter=excluded.inverter,
+        kwh_inc=excluded.kwh_inc
+      WHERE COALESCE(excluded.ts,0) >= COALESCE(energy_5min.ts,0)`;
+    stmtCached("merge:energy_5min", sql).run(payload);
+    return true;
+  }
+
+  if (tableName === "audit_log") {
+    const exists = stmtCached(
+      "exists:audit_log:natural",
+      `SELECT id
+         FROM audit_log
+        WHERE ts=? AND inverter=? AND node=? AND action=? AND scope=? AND operator=? AND result=? AND ip=?
+        LIMIT 1`,
+    ).get(
+      payload.ts,
+      payload.inverter,
+      payload.node,
+      payload.action,
+      payload.scope,
+      payload.operator,
+      payload.result,
+      payload.ip,
+    );
+    if (exists?.id) return false;
+    const sql = `INSERT INTO audit_log (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(id) DO UPDATE SET
+        ts=excluded.ts,
+        operator=excluded.operator,
+        inverter=excluded.inverter,
+        node=excluded.node,
+        action=excluded.action,
+        scope=excluded.scope,
+        result=excluded.result,
+        ip=excluded.ip
+      WHERE COALESCE(excluded.ts,0) >= COALESCE(audit_log.ts,0)`;
+    stmtCached("merge:audit_log", sql).run(payload);
+    return true;
+  }
+
+  const sql = `INSERT OR REPLACE INTO ${tableName} (${cols.join(", ")}) VALUES (${cols
+    .map((c) => `@${c}`)
+    .join(", ")})`;
+  stmtCached(`merge:append:${tableName}`, sql).run(payload);
+  return true;
+}
+
+function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings = true) {
+  if (tableName === "settings") {
+    const k = String(payload?.key || "").trim();
+    if (preserveSettings && REMOTE_REPLICATION_PRESERVE_SETTING_KEYS.has(k)) {
+      return false;
+    }
+    const sql = `INSERT INTO settings (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(settings.updated_ts,0)`;
+    stmtCached("merge:settings:lww", sql).run(payload);
+    return true;
+  }
+
+  if (tableName === "forecast_dayahead") {
+    const sql = `INSERT INTO forecast_dayahead (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(date, slot) DO UPDATE SET
+        ts=excluded.ts,
+        time_hms=excluded.time_hms,
+        kwh_inc=excluded.kwh_inc,
+        kwh_lo=excluded.kwh_lo,
+        kwh_hi=excluded.kwh_hi,
+        source=excluded.source,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)`;
+    stmtCached("merge:forecast_dayahead:lww", sql).run(payload);
+    return true;
+  }
+
+  if (tableName === "daily_report") {
+    // Exclude surrogate `id` — local DB assigns its own AUTOINCREMENT id.
+    // Business key is (date, inverter); including gateway's id causes a PK
+    // conflict when the client already holds a different row with that id.
+    const drCols = cols.filter((c) => c !== "id");
+    const drPayload = Object.fromEntries(
+      Object.entries(payload).filter(([k]) => k !== "id"),
+    );
+    const sql = `INSERT INTO daily_report (${drCols.join(", ")}) VALUES (${drCols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(date, inverter) DO UPDATE SET
+        kwh_total=excluded.kwh_total,
+        pac_peak=excluded.pac_peak,
+        pac_avg=excluded.pac_avg,
+        uptime_s=excluded.uptime_s,
+        alarm_count=excluded.alarm_count,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)`;
+    stmtCached("merge:daily_report:lww", sql).run(drPayload);
+    return true;
+  }
+
+  if (tableName === "alarms") {
+    const sql = `INSERT INTO alarms (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(id) DO UPDATE SET
+        ts=excluded.ts,
+        inverter=excluded.inverter,
+        unit=excluded.unit,
+        alarm_code=excluded.alarm_code,
+        alarm_value=excluded.alarm_value,
+        severity=excluded.severity,
+        cleared_ts=excluded.cleared_ts,
+        acknowledged=excluded.acknowledged,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)`;
+    stmtCached("merge:alarms:lww", sql).run(payload);
+    return true;
+  }
+
+  const sql = `INSERT OR REPLACE INTO ${tableName} (${cols.join(", ")}) VALUES (${cols
+    .map((c) => `@${c}`)
+    .join(", ")})`;
+  stmtCached(`merge:updated:${tableName}`, sql).run(payload);
+  return true;
+}
+
+function applyReplicationTableMerge(tablesPayload, options = {}) {
+  const tables =
+    tablesPayload && typeof tablesPayload === "object" ? tablesPayload : {};
+  const preserveSettings = options?.preserveSettings !== false;
+  const runMerge = () => {
+    let importedRows = 0;
+    let skippedRows = 0;
+    for (const def of REPLICATION_TABLE_DEFS) {
+      const incoming = Array.isArray(tables[def.name]) ? tables[def.name] : [];
+      if (!incoming.length) continue;
+      const strategy = REPLICATION_INCREMENTAL_STRATEGY[def.name];
+      if (!strategy) continue;
+      for (const row of incoming) {
+        const payload = makeReplicationRowPayload(row, def.columns);
+        const applied =
+          strategy.mode === "append"
+            ? mergeAppendReplicationRow(def.name, payload, def.columns)
+            : mergeUpdatedReplicationRow(
+                def.name,
+                payload,
+                def.columns,
+                preserveSettings,
+              );
+        if (applied) importedRows += 1;
+        else skippedRows += 1;
+      }
+    }
+    return { importedRows, skippedRows };
+  };
+  if (options?.inTransaction) {
+    return runMerge();
+  }
+  return db.transaction(runMerge)();
 }
 
 function buildFullDbSnapshot() {
@@ -425,26 +1028,10 @@ function applyFullDbSnapshot(snapshot) {
 
   const preserveRows = capturePreservedLocalSettings();
   const importTx = db.transaction(() => {
-    let importedRows = 0;
-    for (const def of REPLICATION_TABLE_DEFS) {
-      const incoming = Array.isArray(tables[def.name]) ? tables[def.name] : [];
-      db.prepare(`DELETE FROM ${def.name}`).run();
-      if (!incoming.length) continue;
-
-      const cols = def.columns;
-      const sql = `INSERT INTO ${def.name} (${cols.join(", ")}) VALUES (${cols
-        .map((c) => `@${c}`)
-        .join(", ")})`;
-      const stmt = db.prepare(sql);
-      for (const row of incoming) {
-        const payload = {};
-        for (const c of cols) {
-          payload[c] = Object.prototype.hasOwnProperty.call(row || {}, c) ? row[c] : null;
-        }
-        stmt.run(payload);
-        importedRows += 1;
-      }
-    }
+    const merged = applyReplicationTableMerge(tables, {
+      preserveSettings: true,
+      inTransaction: true,
+    });
 
     for (const kv of preserveRows) {
       if (!kv?.key) continue;
@@ -460,12 +1047,17 @@ function applyFullDbSnapshot(snapshot) {
     );
     saveReplicationCursorsSetting(nextCursors);
 
-    return { importedRows, nextCursors };
+    return {
+      importedRows: Number(merged?.importedRows || 0),
+      skippedRows: Number(merged?.skippedRows || 0),
+      nextCursors,
+    };
   });
 
   const applied = importTx();
   return {
     importedRows: Number(applied?.importedRows || 0),
+    skippedRows: Number(applied?.skippedRows || 0),
     tableCounts: snap?.meta?.tableCounts || {},
     signature: String(snap?.meta?.signature || ""),
     nextCursors: normalizeReplicationCursors(applied?.nextCursors || {}),
@@ -568,47 +1160,103 @@ function applyIncrementalDbDelta(deltaPayload) {
   const nextCursors = normalizeReplicationCursors(delta?.meta?.nextCursors || {});
   const hasMoreAny = Boolean(delta?.meta?.hasMoreAny);
   const signature = String(delta?.meta?.signature || "");
-
-  const tx = db.transaction(() => {
-    let importedRows = 0;
-    for (const def of REPLICATION_TABLE_DEFS) {
-      const incoming = Array.isArray(tables[def.name]) ? tables[def.name] : [];
-      if (!incoming.length) continue;
-      const cols = def.columns;
-      const sql = `INSERT OR REPLACE INTO ${def.name} (${cols.join(", ")}) VALUES (${cols
-        .map((c) => `@${c}`)
-        .join(", ")})`;
-      const stmt = db.prepare(sql);
-
-      for (const row of incoming) {
-        if (
-          def.name === "settings" &&
-          REMOTE_REPLICATION_PRESERVE_SETTING_KEYS.has(String(row?.key || "").trim())
-        ) {
-          continue;
-        }
-        const payload = {};
-        for (const c of cols) {
-          payload[c] = Object.prototype.hasOwnProperty.call(row || {}, c) ? row[c] : null;
-        }
-        stmt.run(payload);
-        importedRows += 1;
-      }
-    }
-
+  const applied = db.transaction(() => {
+    const merged = applyReplicationTableMerge(tables, {
+      preserveSettings: true,
+      inTransaction: true,
+    });
     const safe = saveReplicationCursorsSetting(nextCursors);
     setSetting("remoteReplicationLastTs", String(Date.now()));
     if (signature) setSetting("remoteReplicationLastSignature", signature);
-    return { importedRows, safeCursors: safe };
-  });
-
-  const applied = tx();
+    return {
+      importedRows: Number(merged?.importedRows || 0),
+      safeCursors: safe,
+      skippedRows: Number(merged?.skippedRows || 0),
+    };
+  })();
   return {
     importedRows: Number(applied?.importedRows || 0),
+    skippedRows: Number(applied?.skippedRows || 0),
     nextCursors: normalizeReplicationCursors(applied?.safeCursors || nextCursors),
     hasMoreAny,
     signature,
   };
+}
+
+function applyReplicationPushDelta(deltaPayload) {
+  const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
+  if (!delta || typeof delta !== "object") {
+    throw new Error("Invalid push replication payload.");
+  }
+  const tables = delta.tables && typeof delta.tables === "object" ? delta.tables : {};
+  const signature = String(delta?.meta?.signature || "");
+  const merged = applyReplicationTableMerge(tables, { preserveSettings: true });
+  return {
+    importedRows: Number(merged?.importedRows || 0),
+    skippedRows: Number(merged?.skippedRows || 0),
+    signature,
+  };
+}
+
+async function reconcileRemoteBeforePull(baseUrl) {
+  remoteBridgeState.lastReconcileError = "";
+  remoteBridgeState.lastReconcileRows = 0;
+  let localNewerDetected = false;
+  try {
+    const summaryRes = await fetch(`${baseUrl}/api/replication/summary`, {
+      method: "GET",
+      headers: buildRemoteProxyHeaders(),
+      timeout: REMOTE_FETCH_TIMEOUT_MS,
+    });
+    if (!summaryRes.ok) {
+      throw new Error(`Summary HTTP ${summaryRes.status} ${summaryRes.statusText}`);
+    }
+    const summaryData = await summaryRes.json();
+    if (!summaryData?.ok || !summaryData?.summary) {
+      throw new Error(String(summaryData?.error || "Invalid replication summary payload."));
+    }
+
+    const gatewaySummary = normalizeReplicationSummary(summaryData.summary);
+    const localSummary = buildReplicationSummary();
+    const localNewer = hasLocalNewerReplicationData(localSummary, gatewaySummary);
+    localNewerDetected = localNewer;
+    if (!localNewer) {
+      remoteBridgeState.lastReconcileTs = Date.now();
+      remoteBridgeState.lastSyncDirection = "pull-only";
+      return { ok: true, pushed: false, rows: 0, localNewer: false };
+    }
+
+    const delta = buildPushDeltaAgainstSummary(gatewaySummary);
+    const expectedRows = Number(delta?.meta?.totalRows || 0);
+    if (expectedRows <= 0) {
+      remoteBridgeState.lastReconcileTs = Date.now();
+      remoteBridgeState.lastSyncDirection = "pull-only";
+      return { ok: true, pushed: false, rows: 0, localNewer: true };
+    }
+
+    const pushed = await pushDeltaInChunks(baseUrl, delta);
+    remoteBridgeState.lastReconcileTs = Date.now();
+    remoteBridgeState.lastReconcileRows = Number(pushed?.importedRows || 0);
+    remoteBridgeState.lastSyncDirection = "push-then-pull";
+    return {
+      ok: true,
+      pushed: true,
+      rows: Number(pushed?.importedRows || 0),
+      skipped: Number(pushed?.skippedRows || 0),
+      chunks: Number(pushed?.chunkCount || 0),
+      localNewer: true,
+    };
+  } catch (err) {
+    remoteBridgeState.lastReconcileError = String(err?.message || err);
+    if (localNewerDetected) {
+      remoteBridgeState.lastSyncDirection = "push-failed";
+    }
+    return {
+      ok: false,
+      error: remoteBridgeState.lastReconcileError,
+      localNewer: localNewerDetected,
+    };
+  }
 }
 
 async function runRemoteFullReplication(baseUrl) {
@@ -649,10 +1297,16 @@ async function runRemoteFullReplication(baseUrl) {
     );
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastIncrementalTs = Date.now();
+    if (remoteBridgeState.lastSyncDirection !== "push-then-pull") {
+      remoteBridgeState.lastSyncDirection = "pull-full";
+    }
 
     return { ok: true, ...stats };
   } catch (err) {
     remoteBridgeState.lastReplicationError = String(err?.message || err);
+    if (remoteBridgeState.lastSyncDirection !== "push-failed") {
+      remoteBridgeState.lastSyncDirection = "pull-full-failed";
+    }
     return { ok: false, error: remoteBridgeState.lastReplicationError };
   } finally {
     remoteBridgeState.replicationRunning = false;
@@ -670,25 +1324,18 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
     let importedRows = 0;
     let hasMore = false;
     let signature = "";
+    let totalRecvBytes = 0;
     let cursors = normalizeReplicationCursors(
       remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     );
 
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0 });
+
     do {
-      const r = await fetch(`${baseUrl}/api/replication/incremental`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...buildRemoteProxyHeaders(),
-        },
-        body: JSON.stringify({ cursors }),
-        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      const data = await requestIncrementalDeltaWithRetry(baseUrl, cursors, (bytes) => {
+        totalRecvBytes += bytes;
+        broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1 });
       });
-      if (!r.ok) throw new Error(`Incremental replication HTTP ${r.status} ${r.statusText}`);
-      const data = await r.json();
-      if (!data?.ok || !data?.delta) {
-        throw new Error(String(data?.error || "Gateway returned invalid incremental payload."));
-      }
 
       const applied = applyIncrementalDbDelta(data.delta);
       importedRows += Number(applied.importedRows || 0);
@@ -713,9 +1360,111 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
     remoteBridgeState.lastReplicationSignature = signature;
     remoteBridgeState.replicationCursors = cursors;
     remoteBridgeState.lastReplicationError = "";
+    remoteBridgeState.lastSyncDirection = "pull-incremental";
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: totalRecvBytes, importedRows });
     return { ok: true, importedRows, hasMore, batches, signature, nextCursors: cursors };
   } catch (err) {
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: totalRecvBytes || 0 });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
+    remoteBridgeState.lastSyncDirection = "pull-incremental-failed";
+    return { ok: false, error: remoteBridgeState.lastReplicationError };
+  } finally {
+    remoteBridgeState.replicationRunning = false;
+  }
+}
+
+async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses = 8) {
+  const safeBatches = Math.max(1, Number(maxBatches || 1));
+  const safePasses = Math.max(1, Number(maxPasses || 1));
+  let pass = 0;
+  let totalImported = 0;
+  let last = {
+    ok: true,
+    hasMore: false,
+    batches: 0,
+    signature: "",
+    nextCursors: normalizeReplicationCursors(
+      remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
+    ),
+  };
+
+  while (pass < safePasses) {
+    pass += 1;
+    const res = await runRemoteIncrementalReplication(baseUrl, safeBatches);
+    if (res?.skipped) return { skipped: true, reason: String(res.reason || "in_progress") };
+    if (!res?.ok) return { ok: false, pass, error: String(res?.error || "Incremental replication failed.") };
+    totalImported += Number(res.importedRows || 0);
+    last = { ...last, ...res };
+    if (!res.hasMore) {
+      return {
+        ok: true,
+        mode: "incremental",
+        pass,
+        importedRows: totalImported,
+        hasMore: false,
+        batches: Number(res.batches || 0),
+        signature: String(res.signature || ""),
+        nextCursors: normalizeReplicationCursors(res.nextCursors || {}),
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    mode: "incremental-partial",
+    pass: safePasses,
+    importedRows: totalImported,
+    hasMore: true,
+    batches: Number(last.batches || 0),
+    signature: String(last.signature || ""),
+    nextCursors: normalizeReplicationCursors(last.nextCursors || {}),
+  };
+}
+
+async function runRemotePushFull(baseUrl) {
+  if (remoteBridgeState.replicationRunning) {
+    return { skipped: true, reason: "in_progress" };
+  }
+  remoteBridgeState.replicationRunning = true;
+  remoteBridgeState.lastReplicationAttemptTs = Date.now();
+  remoteBridgeState.lastReplicationError = "";
+
+  try {
+    const snapshot = buildFullDbSnapshot();
+    const tables = snapshot?.tables && typeof snapshot.tables === "object" ? snapshot.tables : {};
+    const totalRows = Object.values(tables).reduce(
+      (sum, rows) => sum + (Array.isArray(rows) ? rows.length : 0),
+      0,
+    );
+    const delta = {
+      meta: {
+        generatedTs: Date.now(),
+        mode: "push-full",
+        signature: String(snapshot?.meta?.signature || ""),
+        tableCounts: snapshot?.meta?.tableCounts || {},
+        totalRows,
+      },
+      tables,
+    };
+
+    const pushed = await pushDeltaInChunks(baseUrl, delta);
+    const importedRows = Number(pushed?.importedRows || 0);
+    remoteBridgeState.lastReconcileTs = Date.now();
+    remoteBridgeState.lastReconcileRows = importedRows;
+    remoteBridgeState.lastSyncDirection = "push-full";
+    remoteBridgeState.lastReplicationError = "";
+
+    return {
+      ok: true,
+      totalRows: Number(pushed?.totalRows || totalRows),
+      importedRows,
+      skippedRows: Number(pushed?.skippedRows || 0),
+      chunkCount: Number(pushed?.chunkCount || 0),
+      signature: String(pushed?.signature || ""),
+    };
+  } catch (err) {
+    remoteBridgeState.lastReplicationError = String(err?.message || err);
+    remoteBridgeState.lastSyncDirection = "push-full-failed";
     return { ok: false, error: remoteBridgeState.lastReplicationError };
   } finally {
     remoteBridgeState.replicationRunning = false;
@@ -726,6 +1475,229 @@ function isUnsafeRemoteLoop(baseUrl) {
   return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/i.test(
     String(baseUrl || ""),
   );
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+function isRetryableNetworkError(err) {
+  const code = String(err?.code || "").trim().toUpperCase();
+  if (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "ESOCKETTIMEDOUT" ||
+    code === "ECONNREFUSED" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_SOCKET"
+  ) {
+    return true;
+  }
+  const msg = String(err?.message || err || "")
+    .trim()
+    .toLowerCase();
+  return (
+    msg.includes("econnreset") ||
+    msg.includes("socket hang up") ||
+    msg.includes("network timeout") ||
+    msg.includes("timed out") ||
+    msg.includes("fetch failed") ||
+    msg.includes("reason: read econnreset")
+  );
+}
+
+function isRetryableHttpStatus(status) {
+  const n = Number(status || 0);
+  return n === 408 || n === 425 || n === 429 || n === 500 || n === 502 || n === 503 || n === 504;
+}
+
+async function fetchWithRetry(url, options = {}, retryOptions = {}) {
+  const attempts = Math.max(1, Number(retryOptions?.attempts || 1));
+  const baseDelay = Math.max(0, Number(retryOptions?.baseDelayMs || 0));
+  let lastErr = null;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      lastErr = err;
+      const shouldRetry = i < attempts && isRetryableNetworkError(err);
+      if (!shouldRetry) throw err;
+      const jitter = Math.floor(Math.random() * 250);
+      const delay = baseDelay * i + jitter;
+      await waitMs(delay);
+    }
+  }
+  throw lastErr || new Error("Fetch failed");
+}
+
+async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
+  const attempts = Math.max(1, Number(REMOTE_INCREMENTAL_FETCH_RETRIES || 1));
+  let lastErr = null;
+
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const r = await fetch(`${baseUrl}/api/replication/incremental`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...buildRemoteProxyHeaders(),
+        },
+        body: JSON.stringify({ cursors }),
+        timeout: REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS,
+      });
+      if (!r.ok) {
+        const err = new Error(`Incremental replication HTTP ${r.status} ${r.statusText}`);
+        err.httpStatus = Number(r.status || 0);
+        throw err;
+      }
+      const txt = await r.text();
+      const recvBytes = Buffer.byteLength(txt, "utf8");
+      if (onBytes) onBytes(recvBytes);
+      let data;
+      try { data = JSON.parse(txt); } catch (_) { data = null; }
+      if (!data?.ok || !data?.delta) {
+        throw new Error(String(data?.error || "Gateway returned invalid incremental payload."));
+      }
+      return data;
+    } catch (err) {
+      lastErr = err;
+      const retryable =
+        isRetryableNetworkError(err) || isRetryableHttpStatus(err?.httpStatus);
+      if (!retryable || i >= attempts) {
+        throw err;
+      }
+      const jitter = Math.floor(Math.random() * 250);
+      const delay = REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS * i + jitter;
+      await waitMs(delay);
+    }
+  }
+
+  throw lastErr || new Error("Incremental delta request failed.");
+}
+
+async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
+  const attempts = Math.max(1, Number(REMOTE_PUSH_FETCH_RETRIES || 1));
+  let lastErr = null;
+
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const r = await fetch(`${baseUrl}/api/replication/push`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...buildRemoteProxyHeaders(),
+        },
+        body: JSON.stringify({ delta: deltaPayload }),
+        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      });
+      if (!r.ok) {
+        let detail = "";
+        try {
+          const txt = await r.text();
+          detail = String(txt || "")
+            .trim()
+            .replace(/\s+/g, " ")
+            .slice(0, 260);
+        } catch (_) {
+          // Ignore body parse errors for HTTP failures.
+        }
+        const err = new Error(
+          detail
+            ? `Push HTTP ${r.status} ${r.statusText}: ${detail}`
+            : `Push HTTP ${r.status} ${r.statusText}`,
+        );
+        err.httpStatus = Number(r.status || 0);
+        throw err;
+      }
+      const data = await r.json();
+      if (!data?.ok) {
+        throw new Error(String(data?.error || "Gateway rejected push delta."));
+      }
+      return data;
+    } catch (err) {
+      lastErr = err;
+      const status = Number(err?.httpStatus || 0);
+      const retryable =
+        isRetryableNetworkError(err) ||
+        (isRetryableHttpStatus(status) && status !== 413);
+      if (!retryable || i >= attempts) {
+        throw err;
+      }
+      const jitter = Math.floor(Math.random() * 250);
+      const delay = REMOTE_PUSH_FETCH_RETRY_BASE_MS * i + jitter;
+      await waitMs(delay);
+    }
+  }
+
+  throw lastErr || new Error("Push delta request failed.");
+}
+
+async function pushDeltaInChunks(baseUrl, deltaPayload) {
+  const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
+  if (!delta || typeof delta !== "object") {
+    throw new Error("Invalid push replication payload.");
+  }
+  const sourceTables = delta.tables && typeof delta.tables === "object" ? delta.tables : {};
+  const totalRows = countReplicationRowsByTables(sourceTables);
+  if (totalRows <= 0) {
+    return {
+      importedRows: 0,
+      skippedRows: 0,
+      chunkCount: 0,
+      totalRows: 0,
+      signature: String(delta?.meta?.signature || ""),
+    };
+  }
+
+  const chunks = buildPushDeltaChunks(delta);
+  if (!Array.isArray(chunks) || chunks.length <= 0) {
+    throw new Error("Failed to build push delta chunks.");
+  }
+
+  const totalBytes = chunks.reduce((s, c) => s + Number(c?.meta?.chunkBytes || 0), 0);
+  let sentBytes = 0;
+  let importedRows = 0;
+  let skippedRows = 0;
+  let signature = String(delta?.meta?.signature || "");
+
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", totalBytes, sentBytes: 0, chunkCount: chunks.length, totalRows });
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    const chunk = chunks[i];
+    const chunkRows = Number(chunk?.meta?.chunkRows || 0);
+    const chunkBytes = Number(chunk?.meta?.chunkBytes || 0);
+    try {
+      const data = await requestPushDeltaWithRetry(baseUrl, chunk);
+      const stats = data?.stats || {};
+      importedRows += Number(stats?.importedRows || 0);
+      skippedRows += Number(stats?.skippedRows || 0);
+      signature = String(stats?.signature || signature || "");
+      sentBytes += chunkBytes;
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "chunk", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, totalRows });
+    } catch (err) {
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length });
+      const status = Number(err?.httpStatus || 0);
+      const baseMsg =
+        status === 413
+          ? "Push HTTP 413 Payload Too Large"
+          : String(err?.message || err || "Push chunk failed.");
+      const detail = `${baseMsg} (chunk ${i + 1}/${chunks.length}, rows=${chunkRows}).`;
+      const e = new Error(detail);
+      e.httpStatus = status;
+      throw e;
+    }
+  }
+
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", totalBytes, sentBytes, chunkCount: chunks.length, importedRows, totalRows });
+
+  return {
+    importedRows,
+    skippedRows,
+    chunkCount: chunks.length,
+    totalRows,
+    signature,
+  };
 }
 
 function buildRemoteProxyHeaders(tokenOverride = "") {
@@ -753,6 +1725,23 @@ async function proxyToRemote(req, res, tokenOverride = "") {
 
   const target = `${base}${req.originalUrl}`;
   const method = String(req.method || "GET").toUpperCase();
+  let timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
+  try {
+    const u = new URL(target);
+    const p = String(u.pathname || "").toLowerCase();
+    if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 180000);
+    else if (p.startsWith("/api/report/")) timeoutMs = Math.max(timeoutMs, 45000);
+    else if (
+      p.startsWith("/api/analytics/") ||
+      p.startsWith("/api/energy/5min") ||
+      p.startsWith("/api/alarms") ||
+      p.startsWith("/api/audit")
+    ) {
+      timeoutMs = Math.max(timeoutMs, 20000);
+    }
+  } catch (_) {
+    timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
+  }
   const headers = {
     ...buildRemoteProxyHeaders(tokenOverride),
   };
@@ -763,7 +1752,7 @@ async function proxyToRemote(req, res, tokenOverride = "") {
       method,
       headers,
       body: hasBody ? JSON.stringify(req.body || {}) : undefined,
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
     const contentType = String(upstream.headers.get("content-type") || "");
     const bodyText = await upstream.text();
@@ -783,9 +1772,61 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   }
 }
 
+async function runRemoteStartupAutoSync(baseUrl) {
+  const reconcile = await reconcileRemoteBeforePull(baseUrl);
+  if (!reconcile?.ok) {
+    const reason = String(reconcile?.error || "Reconciliation failed.");
+    if (reconcile?.localNewer) {
+      remoteBridgeState.lastReplicationError =
+        `Startup auto sync blocked: local data is newer but push reconciliation failed (${reason}).`;
+    } else {
+      remoteBridgeState.lastReplicationError = `Startup reconciliation failed: ${reason}`;
+      remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
+    }
+    return {
+      ok: false,
+      stage: "reconcile",
+      localNewer: Boolean(reconcile?.localNewer),
+      error: remoteBridgeState.lastReplicationError,
+      reconcile,
+    };
+  }
+
+  const inc = await runRemoteCatchUpReplication(
+    baseUrl,
+    REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES,
+    REMOTE_INCREMENTAL_CATCHUP_PASSES,
+  );
+  if (inc?.skipped) {
+    return {
+      ok: false,
+      stage: "incremental",
+      skipped: true,
+      error: String(inc?.reason || "Replication already in progress."),
+      reconcile,
+      incremental: inc,
+    };
+  }
+  if (!inc?.ok) {
+    remoteBridgeState.lastReplicationError = String(
+      inc?.error || "Startup incremental replication failed.",
+    );
+    remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
+    return {
+      ok: false,
+      stage: "incremental",
+      error: remoteBridgeState.lastReplicationError,
+      reconcile,
+      incremental: inc,
+    };
+  }
+
+  remoteBridgeState.lastReplicationError = "";
+  return { ok: true, stage: "complete", reconcile, incremental: inc };
+}
+
 async function pollRemoteLiveOnce() {
   const wasConnected = Boolean(remoteBridgeState.connected);
-  const now = Date.now();
   remoteBridgeState.lastAttemptTs = Date.now();
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
@@ -822,25 +1863,25 @@ async function pollRemoteLiveOnce() {
       data: remoteBridgeState.liveData,
       totals: remoteBridgeState.totals,
     });
-    if (!wasConnected) {
-      runRemoteFullReplication(base).catch(() => {});
-    } else if (
-      !remoteBridgeState.lastReplicationTs &&
-      !remoteBridgeState.replicationRunning &&
-      now - Number(remoteBridgeState.lastReplicationAttemptTs || 0) >=
-        REMOTE_REPLICATION_RETRY_MS
-    ) {
-      runRemoteFullReplication(base).catch(() => {});
-    } else if (
-      remoteBridgeState.lastReplicationTs &&
-      !remoteBridgeState.replicationRunning &&
-      now - Number(remoteBridgeState.lastIncrementalTs || 0) >= REMOTE_INCREMENTAL_INTERVAL_MS
-    ) {
-      runRemoteIncrementalReplication(base).catch(() => {});
+    remoteBridgeState.lastSyncDirection = "pull-live";
+    if (isRemotePullOnlyMode()) {
+      remoteBridgeState.replicationRunning = false;
+      remoteBridgeState.lastReplicationError =
+        "Disabled in Client pull-only mode.";
+    } else if (readRemoteAutoSyncEnabled() && !remoteBridgeState.autoSyncAttempted) {
+      remoteBridgeState.autoSyncAttempted = true;
+      remoteBridgeState.lastSyncDirection = "startup-auto-sync";
+      runRemoteStartupAutoSync(base).catch((err) => {
+        remoteBridgeState.lastReplicationError = String(err?.message || err);
+        remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
+      });
     }
   } catch (err) {
     remoteBridgeState.connected = false;
     remoteBridgeState.lastError = String(err.message || err);
+    if (wasConnected) {
+      remoteBridgeState.lastSyncDirection = "pull-live-failed";
+    }
   }
 }
 
@@ -852,12 +1893,18 @@ function stopRemoteBridge() {
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
   remoteBridgeState.replicationRunning = false;
+  if (!isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
 
 function startRemoteBridge() {
   if (remoteBridgeState.running) return;
   remoteBridgeState.running = true;
-  remoteBridgeState.replicationCursors = readReplicationCursorsSetting();
+  remoteBridgeState.autoSyncAttempted = false;
+  if (isRemotePullOnlyMode()) {
+    remoteBridgeState.replicationCursors = normalizeReplicationCursors({});
+  } else {
+    remoteBridgeState.replicationCursors = readReplicationCursorsSetting();
+  }
   const tick = async () => {
     if (!remoteBridgeState.running) return;
     if (!isRemoteMode()) {
@@ -873,6 +1920,7 @@ function startRemoteBridge() {
 function applyRuntimeMode() {
   if (isRemoteMode()) {
     poller.stop();
+    poller.markAllOffline();
     startRemoteBridge();
   } else {
     stopRemoteBridge();
@@ -1191,6 +2239,25 @@ function sanitizeExportUiState(input) {
   return out;
 }
 
+const DEFAULT_POLL_CFG = {
+  modbusTimeout:  1.0,
+  reconnectDelay: 0.5,
+  readSpacing:    0.005,
+};
+
+function sanitizePollConfig(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const clamp = (v, lo, hi, def) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(Math.max(n, lo), hi) : def;
+  };
+  return {
+    modbusTimeout:  clamp(src.modbusTimeout,  0.2,   10,  DEFAULT_POLL_CFG.modbusTimeout),
+    reconnectDelay: clamp(src.reconnectDelay, 0.1,   10,  DEFAULT_POLL_CFG.reconnectDelay),
+    readSpacing:    clamp(src.readSpacing,    0.001,  1,  DEFAULT_POLL_CFG.readSpacing),
+  };
+}
+
 function readJsonSetting(key, fallback = {}) {
   const raw = String(getSetting(key, "") || "").trim();
   if (!raw) return fallback;
@@ -1225,6 +2292,7 @@ function buildDefaultExportUiState() {
 function ensurePersistedSettings() {
   const defaults = {
     operationMode: "gateway",
+    remoteAutoSync: "0",
     remoteGatewayUrl: "",
     remoteApiToken: "",
     tailscaleDeviceHint: "",
@@ -1244,6 +2312,7 @@ function ensurePersistedSettings() {
     solcastResourceId: "",
     solcastTimezone: "Asia/Manila",
     remoteReplicationCursors: JSON.stringify(normalizeReplicationCursors({})),
+    inverterPollConfig: JSON.stringify(DEFAULT_POLL_CFG),
   };
 
   Object.entries(defaults).forEach(([key, def]) => {
@@ -1917,7 +2986,9 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
   const s = Number(startTs) || Date.now() - 86400000;
   const e = Number(endTs) || Date.now();
   const bucketMs = Math.max(1, Number(bucketMin) || 5) * 60000;
-  const dtCapSec = 10;
+  // Match the poller's MAX_PAC_DT_S cap so DB-recomputed totals agree with
+  // the energy_5min table written by the live integrator.
+  const dtCapSec = 30;
 
   let rows = [];
   if (!inverter || inverter === "all") {
@@ -1979,34 +3050,76 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 }
 
 function buildTodayPacTotalsFromDb() {
-  const s = startOfLocalDayMs(Date.now());
-  const e = Date.now();
-  const rows = buildPacEnergyBuckets({
-    inverter: "all",
-    startTs: s,
-    endTs: e,
-    bucketMin: 5,
+  // Keep header today-MWh source aligned with report computations.
+  const day = localDateStr();
+  const rows = buildDailyReportRowsForDate(day, {
+    persist: true,
+    includeTodayPartial: true,
   });
-  const byInv = new Map();
-  for (const r of rows) {
-    const inv = Number(r?.inverter || 0);
-    if (!inv) continue;
-    byInv.set(inv, Number(byInv.get(inv) || 0) + Number(r?.kwh_inc || 0));
+  return (rows || [])
+    .map((r) => ({
+      inverter: Number(r?.inverter || 0),
+      total_kwh: Number(Number(r?.kwh_total || 0).toFixed(6)),
+    }))
+    .filter((r) => r.inverter > 0)
+    .sort((a, b) => a.inverter - b.inverter);
+}
+
+const TODAY_ENERGY_CACHE_MS = 1000;
+const todayEnergyCache = {
+  day: "",
+  ts: 0,
+  rows: [],
+};
+
+function getTodayPacTotalsFromDbCached() {
+  const now = Date.now();
+  const day = localDateStr(now);
+  if (
+    todayEnergyCache.day === day &&
+    now - Number(todayEnergyCache.ts || 0) < TODAY_ENERGY_CACHE_MS
+  ) {
+    return todayEnergyCache.rows;
   }
-  const out = [];
-  for (const [inv, total] of byInv.entries()) {
-    out.push({
-      inverter: Number(inv),
-      total_kwh: Number(total.toFixed(6)),
-    });
-  }
-  out.sort((a, b) => a.inverter - b.inverter);
-  return out;
+  const rows = buildTodayPacTotalsFromDb();
+  todayEnergyCache.day = day;
+  todayEnergyCache.ts = now;
+  todayEnergyCache.rows = Array.isArray(rows) ? rows : [];
+  return todayEnergyCache.rows;
 }
 
 const getAlarmCountByInverterStmt = db.prepare(
   "SELECT COUNT(*) AS cnt FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ?",
 );
+
+function clampPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, n));
+}
+
+function computeSpanSeconds(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length >= 2) {
+    const firstTs = Number(list[0]?.ts || 0);
+    const lastTs = Number(list[list.length - 1]?.ts || 0);
+    return Math.max(0, (lastTs - firstTs) / 1000);
+  }
+  return list.length === 1 ? 1 : 0;
+}
+
+function getReportSolarWindowSeconds(day, includeTodayPartial = true) {
+  const d = parseIsoDateStrict(day || localDateStr(), "date");
+  const today = localDateStr();
+  if (d > today) return 0;
+  const hh = (n) => String(Math.trunc(Number(n) || 0)).padStart(2, "0");
+  const startTs = new Date(`${d}T${hh(REPORT_SOLAR_START_H)}:00:00.000`).getTime();
+  let endTs = new Date(`${d}T${hh(REPORT_SOLAR_END_H)}:00:00.000`).getTime();
+  if (includeTodayPartial && d === today) {
+    endTs = Math.min(endTs, Date.now());
+  }
+  return Math.max(0, (endTs - startTs) / 1000);
+}
 
 function buildDailyReportRowsForDate(dateText, options = {}) {
   const persist = options.persist !== false;
@@ -2039,6 +3152,10 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       Number(pacKwhByInv.get(inv) || 0) + Number(row?.kwh_inc || 0);
     pacKwhByInv.set(inv, next);
   }
+  const expectedSolarWindowS = getReportSolarWindowSeconds(
+    day,
+    includeTodayPartial,
+  );
 
   const out = [];
   for (let inv = 1; inv <= invCount; inv++) {
@@ -2053,6 +3170,13 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
     const onlineRows = rows.filter(
       (r) => Number(r?.online || 0) === 1 && Number(r?.pac || 0) > 0,
     );
+    const onlineRowsByUnit = new Map();
+    for (const r of onlineRows) {
+      const unit = Number(r?.unit || 0);
+      if (unit < 1 || unit > REPORT_EXPECTED_NODES_PER_INVERTER) continue;
+      if (!onlineRowsByUnit.has(unit)) onlineRowsByUnit.set(unit, []);
+      onlineRowsByUnit.get(unit).push(r);
+    }
     const pacValues = rows
       .map((r) => Number(r?.pac || 0))
       .filter((v) => Number.isFinite(v) && v >= 0);
@@ -2062,10 +3186,13 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       ? onlineRows.reduce((s, r) => s + Number(r?.pac || 0), 0) /
         onlineRows.length
       : 0;
-    // Compute uptime from the actual timestamp span of online readings (not row count).
-    const uptimeS = onlineRows.length >= 2
-      ? Math.max(0, (Number(onlineRows[onlineRows.length - 1]?.ts || 0) - Number(onlineRows[0]?.ts || 0)) / 1000)
-      : onlineRows.length === 1 ? 1 : 0;
+    // Inverter uptime uses online+producing span across all node rows.
+    const uptimeS = computeSpanSeconds(onlineRows);
+    // Availability uses expected 4-node topology, so missing nodes reduce score.
+    let nodeUptimeS = 0;
+    for (let unit = 1; unit <= REPORT_EXPECTED_NODES_PER_INVERTER; unit++) {
+      nodeUptimeS += computeSpanSeconds(onlineRowsByUnit.get(unit) || []);
+    }
 
     let kwhTotal = Math.max(0, pacKwh);
     if (kwhTotal <= 0 && rows.length >= 2) {
@@ -2074,6 +3201,14 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       const regDiff = lastKwh - firstKwh;
       if (Number.isFinite(regDiff) && regDiff > 0) kwhTotal = regDiff;
     }
+    const expectedNodeUptimeS =
+      expectedSolarWindowS * REPORT_EXPECTED_NODES_PER_INVERTER;
+    const availabilityPct =
+      expectedNodeUptimeS > 0 ? (nodeUptimeS / expectedNodeUptimeS) * 100 : 0;
+    const uptimeH = uptimeS / 3600;
+    const perfDenomKwh = REPORT_UNIT_KW_MAX * uptimeH;
+    const performancePct =
+      perfDenomKwh > 0 ? (kwhTotal / perfDenomKwh) * 100 : 0;
 
     const row = {
       date: day,
@@ -2083,6 +3218,11 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       pac_avg: Number(Math.max(0, pacAvg).toFixed(3)),
       uptime_s: Math.max(0, Math.round(uptimeS)),
       alarm_count: Math.max(0, Math.trunc(alarmCount)),
+      availability_pct: Number(clampPct(availabilityPct).toFixed(3)),
+      performance_pct: Number(clampPct(performancePct).toFixed(3)),
+      node_uptime_s: Math.max(0, Math.round(nodeUptimeS)),
+      expected_node_uptime_s: Math.max(0, Math.round(expectedNodeUptimeS)),
+      expected_nodes: REPORT_EXPECTED_NODES_PER_INVERTER,
     };
 
     if (persist) {
@@ -2105,13 +3245,20 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 }
 
 function calcAvailabilityPctFromRow(row) {
-  const kwh = Number(row?.kwh_total || 0);
-  const peakKw = Number(row?.pac_peak || 0) / 1000;
-  const uph = Number(row?.uptime_s || 0) / 3600;
-  const denom = peakKw * uph;
-  if (!Number.isFinite(denom) || denom <= 0) return 0;
-  const pct = (kwh / denom) * 100;
-  return Math.max(0, Math.min(100, pct));
+  const explicit = Number(row?.availability_pct);
+  if (Number.isFinite(explicit)) return clampPct(explicit);
+
+  // Fallback for legacy DB rows that do not yet carry computed availability.
+  let day = localDateStr();
+  try {
+    day = parseIsoDateStrict(String(row?.date || localDateStr()), "date");
+  } catch (_) {
+    day = localDateStr();
+  }
+  const windowS = getReportSolarWindowSeconds(day, true);
+  if (windowS <= 0) return 0;
+  const uptimeS = Math.max(0, Number(row?.uptime_s || 0));
+  return clampPct((uptimeS / windowS) * 100);
 }
 
 function summarizeDailyReportRows(rows) {
@@ -2142,7 +3289,7 @@ function summarizeDailyReportRows(rows) {
     const kwh = Number(row?.kwh_total || 0);
     const rowPeakKw = Number(row?.pac_peak || 0) / 1000;
     const uph = Number(row?.uptime_s || 0) / 3600;
-    const rowDenom = Math.max(0, rowPeakKw * uph);
+    const rowDenom = Math.max(0, REPORT_UNIT_KW_MAX * uph);
 
     totalKwh += Math.max(0, kwh);
     if (rowPeakKw > peakKw) peakKw = rowPeakKw;
@@ -2163,9 +3310,9 @@ function summarizeDailyReportRows(rows) {
     peak_kw: Number(peakKw.toFixed(3)),
     alarm_count: alarmCount,
     availability_avg_pct: Number(
-      Math.max(0, Math.min(100, availabilityAvgPct)).toFixed(3),
+      clampPct(availabilityAvgPct).toFixed(3),
     ),
-    performance_pct: Number(Math.max(0, Math.min(100, perfPct)).toFixed(3)),
+    performance_pct: Number(clampPct(perfPct).toFixed(3)),
   };
 }
 
@@ -2196,12 +3343,14 @@ function buildDailyWeeklyReportSummary(targetDateText) {
 
   for (const d of dates) {
     if (d === day) continue;
-    let rows = stmts.getDailyReport.all(d);
-    if (!rows.length && d <= today) {
+    let rows = [];
+    if (d <= today) {
       rows = buildDailyReportRowsForDate(d, {
         persist: true,
         includeTodayPartial: d === today,
       });
+    } else {
+      rows = stmts.getDailyReport.all(d);
     }
     byDateRows.set(d, rows);
   }
@@ -2214,6 +3363,28 @@ function buildDailyWeeklyReportSummary(targetDateText) {
     daily: summarizeDailyReportRows(dailyRows),
     weekly: summarizeDailyReportRows(weeklyRows),
   };
+}
+
+function getLatestReportDate() {
+  try {
+    const rowDaily = db
+      .prepare("SELECT date FROM daily_report ORDER BY date DESC LIMIT 1")
+      .get();
+    const dailyDate = String(rowDaily?.date || "").trim();
+    if (dailyDate) return dailyDate;
+  } catch (_) {
+    // Fallback handled below.
+  }
+  try {
+    const rowReadings = db
+      .prepare(
+        "SELECT strftime('%Y-%m-%d', MAX(ts)/1000, 'unixepoch', 'localtime') AS d FROM readings",
+      )
+      .get();
+    return String(rowReadings?.d || "").trim();
+  } catch (_) {
+    return "";
+  }
 }
 
 function defaultIpConfig() {
@@ -2395,9 +3566,43 @@ app.ws("/ws", (ws) => {
   );
 });
 
-app.get("/api/live", (req, res) => res.json(getRuntimeLiveData()));
+app.get("/api/live", (req, res) => {
+  // Hot-path optimization for gateway mode: avoid per-request stringify cost.
+  if (!isRemoteMode() && typeof poller.getLiveSnapshotJson === "function") {
+    const snap = poller.getLiveSnapshotJson();
+    if (snap && typeof snap.json === "string") {
+      res.set("Content-Type", "application/json; charset=utf-8");
+      return res.send(snap.json);
+    }
+  }
+  return res.json(getRuntimeLiveData());
+});
+
+app.get("/api/replication/summary", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const summary = buildReplicationSummary();
+    res.json({ ok: true, summary });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
 
 app.get("/api/replication/full", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
@@ -2410,6 +3615,12 @@ app.get("/api/replication/full", async (req, res) => {
 });
 
 app.post("/api/replication/incremental", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
@@ -2419,6 +3630,338 @@ app.post("/api/replication/incremental", async (req, res) => {
     res.json({ ok: true, delta });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.post("/api/replication/push", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const delta = req?.body?.delta;
+    const meta = delta && typeof delta === "object" && delta.meta && typeof delta.meta === "object"
+      ? delta.meta
+      : {};
+    const chunkIndex = Math.max(0, Number(meta?.chunkIndex || 0));
+    const chunkCount = Math.max(0, Number(meta?.chunkCount || 0));
+    const totalRows = Math.max(0, Number(meta?.totalRows || 0));
+    const signature = String(meta?.signature || "");
+    const chunkBytesFromMeta = Math.max(0, Number(meta?.chunkBytes || 0));
+    const reqBytes = Buffer.byteLength(JSON.stringify(req?.body || {}), "utf8");
+    const recvBytes = chunkBytesFromMeta > 0 ? chunkBytesFromMeta : reqBytes;
+    const pushKey = `${signature}|${chunkCount}|${totalRows}`;
+
+    if (chunkCount > 0) {
+      if (!inboundPushRxProgress.active || chunkIndex <= 1 || inboundPushRxProgress.key !== pushKey) {
+        inboundPushRxProgress.active = true;
+        inboundPushRxProgress.key = pushKey;
+        inboundPushRxProgress.recvBytes = 0;
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "start",
+          recvBytes: 0,
+          chunkCount,
+          totalRows,
+          label: "Receiving push",
+        });
+      }
+      inboundPushRxProgress.recvBytes += Math.max(0, recvBytes);
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes: inboundPushRxProgress.recvBytes,
+        batch: chunkIndex > 0 ? chunkIndex : 1,
+        chunkCount,
+        totalRows,
+        label: "Receiving push",
+      });
+    } else {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "start",
+        recvBytes: 0,
+        label: "Receiving push",
+      });
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes: Math.max(0, recvBytes),
+        batch: 1,
+        chunkCount: 1,
+        totalRows,
+        label: "Receiving push",
+      });
+    }
+
+    const stats = applyReplicationPushDelta(delta);
+    ensurePersistedSettings();
+    try {
+      const cfg = loadIpConfigFromDb();
+      mirrorIpConfigToLegacyFiles(cfg);
+      backfillAuditIpsFromConfig();
+    } catch (_) {
+      // Non-fatal maintenance tasks.
+    }
+
+    if (chunkCount > 0) {
+      if (chunkIndex >= chunkCount) {
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "done",
+          recvBytes: Math.max(0, Number(inboundPushRxProgress.recvBytes || 0)),
+          chunkCount,
+          totalRows,
+          importedRows: Number(stats?.importedRows || 0),
+          label: "Receiving push",
+        });
+        inboundPushRxProgress.active = false;
+        inboundPushRxProgress.key = "";
+        inboundPushRxProgress.recvBytes = 0;
+      }
+    } else {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "done",
+        recvBytes: Math.max(0, recvBytes),
+        importedRows: Number(stats?.importedRows || 0),
+        label: "Receiving push",
+      });
+    }
+
+    res.json({ ok: true, stats });
+  } catch (err) {
+    const recvBytes = Math.max(0, Number(inboundPushRxProgress.recvBytes || 0));
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "error",
+      recvBytes,
+      label: "Receiving push",
+    });
+    inboundPushRxProgress.active = false;
+    inboundPushRxProgress.key = "";
+    inboundPushRxProgress.recvBytes = 0;
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.post("/api/replication/pull-now", async (req, res) => {
+  if (!isRemoteMode()) {
+    return res.status(400).json({
+      ok: false,
+      error: "Manual pull is available only in Remote mode.",
+    });
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res
+      .status(503)
+      .json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res.status(400).json({
+      ok: false,
+      error: "Remote gateway URL cannot be localhost in remote mode.",
+    });
+  }
+  try {
+    const inc = await runRemoteCatchUpReplication(
+      base,
+      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
+      REMOTE_INCREMENTAL_CATCHUP_PASSES,
+    );
+    if (inc?.skipped) {
+      return res.status(202).json({
+        ok: false,
+        error: "Replication already in progress.",
+        incremental: inc,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    if (inc?.ok) {
+      return res.json({
+        ok: true,
+        mode: String(inc.mode || "incremental"),
+        incremental: inc,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+
+    return res.status(502).json({
+      ok: false,
+      error: `Incremental pull failed: ${String(
+        inc?.error || "unknown error",
+      )}. Ensure gateway and client are on the same build.`,
+      incremental: inc,
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.post("/api/replication/push-now", async (req, res) => {
+  if (!isRemoteMode()) {
+    return res.status(400).json({
+      ok: false,
+      error: "Manual push is available only in Remote mode.",
+    });
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res
+      .status(503)
+      .json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res.status(400).json({
+      ok: false,
+      error: "Remote gateway URL cannot be localhost in remote mode.",
+    });
+  }
+  try {
+    const pushed = await runRemotePushFull(base);
+    if (pushed?.skipped) {
+      return res.status(202).json({
+        ok: false,
+        error: "Replication already in progress.",
+        pushed,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    if (!pushed?.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: String(pushed?.error || "Full push failed."),
+        pushed,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    const incremental = await runRemoteCatchUpReplication(
+      base,
+      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
+      REMOTE_INCREMENTAL_CATCHUP_PASSES,
+    );
+    if (incremental?.ok) {
+      return res.json({
+        ok: true,
+        pushed,
+        mode: String(incremental.mode || "incremental"),
+        incremental,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    return res.status(502).json({
+      ok: false,
+      error: `Post-push incremental pull failed: ${String(
+        incremental?.error || "unknown error",
+      )}. Ensure gateway and client are on the same build.`,
+      pushed,
+      incremental,
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.post("/api/replication/reconcile-now", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error:
+        "Manual replication is disabled in Client pull-only mode. Use the gateway server as source of truth.",
+    });
+  }
+  if (!isRemoteMode()) {
+    return res.status(400).json({
+      ok: false,
+      error: "Manual replication is only available in Remote mode.",
+    });
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res
+      .status(503)
+      .json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res.status(400).json({
+      ok: false,
+      error: "Remote gateway URL cannot be localhost in remote mode.",
+    });
+  }
+
+  const forcePull = Boolean(req?.body?.forcePull);
+  try {
+    const reconcile = await reconcileRemoteBeforePull(base);
+    if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
+      return res.status(409).json({
+        ok: false,
+        code: "LOCAL_NEWER_PUSH_FAILED",
+        canForcePull: true,
+        error:
+          "Local data appears newer, but push reconciliation failed. Retry with forcePull to pull from gateway anyway.",
+        reconcile,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    if (!reconcile?.ok && !forcePull) {
+      return res.status(502).json({
+        ok: false,
+        error: String(reconcile?.error || "Reconciliation failed."),
+        reconcile,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    if (!reconcile?.ok && forcePull) {
+      remoteBridgeState.lastSyncDirection = "pull-only";
+    }
+
+    const incremental = await runRemoteCatchUpReplication(
+      base,
+      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
+      REMOTE_INCREMENTAL_CATCHUP_PASSES,
+    );
+    if (incremental?.ok) {
+      return res.json({
+        ok: true,
+        reconcile,
+        mode: String(incremental.mode || "incremental"),
+        incremental,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+
+    return res.status(502).json({
+      ok: false,
+      error: `Reconcile pull failed: ${String(
+        incremental?.error || "unknown error",
+      )}. Ensure gateway and client are on the same build.`,
+      reconcile,
+      incremental,
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
   }
 });
 
@@ -2494,6 +4037,7 @@ app.post("/api/write", async (req, res) => {
 app.get("/api/settings", (req, res) =>
   res.json({
     operationMode: readOperationMode(),
+    remoteAutoSync: readRemoteAutoSyncEnabled(),
     remoteGatewayUrl: getRemoteGatewayBaseUrl(),
     remoteApiToken: getRemoteApiToken(),
     tailscaleDeviceHint: sanitizeTailscaleDeviceHint(
@@ -2521,6 +4065,7 @@ app.get("/api/settings", (req, res) =>
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", {}),
     ),
+    inverterPollConfig: sanitizePollConfig(readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG)),
     dataDir: DATA_DIR,
   }),
 );
@@ -2552,6 +4097,10 @@ app.post("/api/ip-config", (req, res) => {
     const cfg = saveIpConfigToDb(req.body || {});
     mirrorIpConfigToLegacyFiles(cfg);
     backfillAuditIpsFromConfig();
+    // Push new config to poller immediately (skip 5 s cache lag).
+    if (!isRemoteMode()) poller.setIpConfigSnapshot(cfg);
+    // Notify the dashboard so it rebuilds inverter cards without a restart.
+    broadcastUpdate({ type: "configChanged" });
     res.json(cfg);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -2560,11 +4109,14 @@ app.post("/api/ip-config", (req, res) => {
 
 app.post("/api/settings", (req, res) => {
   const updates = {};
+  let exportDirCreated = false;
+  let exportDirResolved = "";
   const modeBefore = readOperationMode();
   const remoteGatewayBefore = getRemoteGatewayBaseUrl();
   const remoteTokenBefore = getRemoteApiToken();
   const {
     operationMode,
+    remoteAutoSync,
     remoteGatewayUrl,
     remoteApiToken,
     wireguardInterface,
@@ -2584,11 +4136,15 @@ app.post("/api/settings", (req, res) => {
     solcastResourceId,
     solcastTimezone,
     exportUiState,
+    inverterPollConfig,
   } =
     req.body || {};
 
   if (operationMode !== undefined) {
     updates.operationMode = sanitizeOperationMode(operationMode, "gateway");
+  }
+  if (remoteAutoSync !== undefined) {
+    updates.remoteAutoSync = Boolean(remoteAutoSync) ? "1" : "0";
   }
   if (remoteGatewayUrl !== undefined) {
     const url = normalizeGatewayUrl(remoteGatewayUrl);
@@ -2611,20 +4167,34 @@ app.post("/api/settings", (req, res) => {
   }
 
   if (apiUrl !== undefined) {
-    if (!isHttpUrl(apiUrl))
+    const trimmedApiUrl = String(apiUrl || "").trim();
+    if (trimmedApiUrl && !isHttpUrl(trimmedApiUrl))
       return res.status(400).json({ ok: false, error: "Invalid apiUrl" });
-    updates.apiUrl = apiUrl;
+    if (trimmedApiUrl) updates.apiUrl = trimmedApiUrl;
   }
   if (writeUrl !== undefined) {
-    if (!isHttpUrl(writeUrl))
+    const trimmedWriteUrl = String(writeUrl || "").trim();
+    if (trimmedWriteUrl && !isHttpUrl(trimmedWriteUrl))
       return res.status(400).json({ ok: false, error: "Invalid writeUrl" });
-    updates.writeUrl = writeUrl;
+    if (trimmedWriteUrl) updates.writeUrl = trimmedWriteUrl;
   }
   if (csvSavePath !== undefined) {
     const pathVal = String(csvSavePath).trim();
     if (!pathVal)
       return res.status(400).json({ ok: false, error: "Invalid csvSavePath" });
-    updates.csvSavePath = pathVal;
+    try {
+      const resolvedPath = path.resolve(pathVal);
+      const existed = fs.existsSync(resolvedPath);
+      fs.mkdirSync(resolvedPath, { recursive: true });
+      exportDirCreated = !existed;
+      exportDirResolved = resolvedPath;
+      updates.csvSavePath = resolvedPath;
+    } catch (err) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid csvSavePath: ${err.message}`,
+      });
+    }
   }
   if (inverterCount !== undefined)
     updates.inverterCount = clampInt(inverterCount, 1, 100, 27);
@@ -2682,6 +4252,9 @@ app.post("/api/settings", (req, res) => {
   if (exportUiState !== undefined) {
     updates.exportUiState = JSON.stringify(sanitizeExportUiState(exportUiState));
   }
+  if (inverterPollConfig !== undefined) {
+    updates.inverterPollConfig = JSON.stringify(sanitizePollConfig(inverterPollConfig));
+  }
 
   db.transaction(() => {
     Object.entries(updates).forEach(([k, v]) => setSetting(k, v));
@@ -2696,7 +4269,14 @@ app.post("/api/settings", (req, res) => {
   ) {
     applyRuntimeMode();
   }
-  res.json({ ok: true });
+  if (updates.remoteAutoSync === "0") {
+    remoteBridgeState.autoSyncAttempted = false;
+  }
+  res.json({
+    ok: true,
+    csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\ADSI"),
+    exportDirCreated,
+  });
 });
 
 app.post("/api/settings/export-ui", (req, res) => {
@@ -2710,6 +4290,9 @@ app.get("/api/runtime/network", (req, res) => {
   res.json({
     ok: true,
     operationMode: readOperationMode(),
+    remoteAutoSync: readRemoteAutoSyncEnabled(),
+    remoteAutoSyncAttempted: Boolean(remoteBridgeState.autoSyncAttempted),
+    remotePullOnly: Boolean(isRemotePullOnlyMode()),
     remoteGatewayUrl: getRemoteGatewayBaseUrl(),
     remoteConnected: Boolean(remoteBridgeState.connected),
     remoteLastAttemptTs: Number(remoteBridgeState.lastAttemptTs || 0),
@@ -2722,11 +4305,21 @@ app.get("/api/runtime/network", (req, res) => {
     remoteLastReplicationRows: Number(remoteBridgeState.lastReplicationRows || 0),
     remoteLastReplicationSignature: String(remoteBridgeState.lastReplicationSignature || ""),
     remoteLastReplicationError: String(remoteBridgeState.lastReplicationError || ""),
+    remoteLastReconcileTs: Number(remoteBridgeState.lastReconcileTs || 0),
+    remoteLastReconcileRows: Number(remoteBridgeState.lastReconcileRows || 0),
+    remoteLastReconcileError: String(remoteBridgeState.lastReconcileError || ""),
+    remoteLastSyncDirection: String(remoteBridgeState.lastSyncDirection || "idle"),
     remoteReplicationCursors: normalizeReplicationCursors(
-      remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
+      isRemotePullOnlyMode()
+        ? {}
+        : remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     ),
     tailscale: getTailscaleStatusSnapshot(),
   });
+});
+
+app.get("/api/runtime/perf", (req, res) => {
+  res.json(getRuntimePerfSnapshot());
 });
 
 app.get("/api/tailscale/status", (req, res) => {
@@ -3011,6 +4604,13 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
 let forecastGenerating = false;
 
 app.post("/api/forecast/generate", async (req, res) => {
+  if (isRemoteMode()) {
+    return res.status(403).json({
+      ok: false,
+      error:
+        "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.",
+    });
+  }
   if (forecastGenerating) {
     return res.status(409).json({ ok: false, error: "Forecast generation already in progress." });
   }
@@ -3117,34 +4717,28 @@ app.post("/api/forecast/generate", async (req, res) => {
 
 app.get("/api/energy/today", (req, res) => {
   try {
-    const rows = buildTodayPacTotalsFromDb();
-    if (rows.length) {
-      res.json(rows);
-      return;
-    }
+    const rows = getTodayPacTotalsFromDbCached();
+    // Keep this endpoint strictly aligned with logged daily report rows.
+    return res.json(rows);
   } catch (e) {
     console.warn("[energy/today] DB PAC total failed:", e.message);
+    return res.json([]);
   }
-  // Fallback to in-memory live integrator if DB query returns empty/unavailable.
-  res.json(poller.getTodayPacKwh());
 });
 
 app.get("/api/report/daily", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
-    const { date, start, end, refresh } = req.query;
+    const { date, start, end } = req.query;
     if (date) {
       const day = parseIsoDateStrict(date, "date");
       const isToday = day === localDateStr();
-      const forceRefresh = String(refresh || "").trim() === "1" || isToday;
-
-      if (!forceRefresh) {
-        const cached = stmts.getDailyReport.all(day);
-        if (cached.length) return res.json(cached);
-      }
 
       const generated = buildDailyReportRowsForDate(day, {
         persist: true,
-        includeTodayPartial: true,
+        includeTodayPartial: isToday,
       });
       if (generated.length) return res.json(generated);
       return res.json(stmts.getDailyReport.all(day));
@@ -3159,11 +4753,30 @@ app.get("/api/report/daily", (req, res) => {
 });
 
 app.get("/api/report/summary", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
     return res.json(buildDailyWeeklyReportSummary(day));
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/report/latest-date", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const latestDate = getLatestReportDate();
+    return res.json({
+      ok: true,
+      latestDate: latestDate || "",
+      hasData: Boolean(latestDate),
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -3209,6 +4822,34 @@ app.post("/api/export/audit", async (req, res) => {
 });
 app.post("/api/export/daily-report", async (req, res) => {
   try {
+    const payload = req.body || {};
+    const dateText = String(payload?.date || "").trim();
+    if (dateText) {
+      try {
+        const day = parseIsoDateStrict(dateText, "date");
+        buildDailyReportRowsForDate(day, {
+          persist: true,
+          includeTodayPartial: day === localDateStr(),
+        });
+      } catch (_) {
+        // Exporter handles fallback/defaults.
+      }
+    } else {
+      const s = Number(payload?.startTs || 0);
+      const e = Number(payload?.endTs || 0);
+      if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
+        const startDay = fmtDate(s);
+        const endDay = fmtDate(e);
+        const today = localDateStr();
+        for (const day of daysInclusive(startDay, endDay)) {
+          if (day > today) continue;
+          buildDailyReportRowsForDate(day, {
+            persist: true,
+            includeTodayPartial: day === today,
+          });
+        }
+      }
+    }
     const outPath = await exporter.exportDailyReport(req.body || {});
     res.json({ ok: true, path: outPath });
   } catch (e) {

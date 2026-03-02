@@ -60,6 +60,30 @@ function formatDurationMs(ms) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
+// Solar production window mirrors poller.js SOLAR_HOUR_START / SOLAR_HOUR_END.
+const SOLAR_WINDOW_H = 13;   // 05:00–18:00
+// Minimum peak to form a valid denominator.  Below this the inverter was either
+// barely online (cloud transient, startup flicker) and the ratio would be
+// meaningless — report 0 % instead.
+const MIN_PEAK_KW = 0.1;     // 100 W
+
+// Performance ratio: actual kWh vs theoretical maximum (peak_kW × uptime_h).
+// Hardening applied:
+//   • uptimeH is capped at SOLAR_WINDOW_H to prevent anomalously large uptime_s
+//     values (e.g. spanning midnight) from collapsing the denominator.
+//   • peakKw must be ≥ MIN_PEAK_KW; brief power spikes that set pac_peak to a
+//     tiny value would otherwise inflate the ratio to near-infinity before capping.
+// Returns 0–100 %; inactive inverters (no uptime/peak) return 0.
+function calcDailyAvailabilityPct(row) {
+  const kwh     = safeNum(row?.kwh_total);
+  const peakKw  = safeNum(row?.pac_peak) / 1000;                          // W → kW
+  const uptimeH = Math.min(safeNum(row?.uptime_s) / 3600, SOLAR_WINDOW_H); // s → h, capped
+  if (peakKw < MIN_PEAK_KW || uptimeH <= 0) return 0;
+  const denom = peakKw * uptimeH;
+  if (!Number.isFinite(denom) || denom <= 0) return 0;
+  return Math.max(0, Math.min(100, (kwh / denom) * 100));
+}
+
 function toCsv(headers, rows) {
   const escape = v => {
     const s = String(v ?? '');
@@ -314,22 +338,19 @@ function aggregateEnergyRows(rows, resolutionSpec, rangeStart) {
   const bucketMs = (resolutionSpec.minutes || 5) * 60000;
 
   for (const r of rows) {
-    const inv = Number(r.inverter || 0);
-    const ts = Number(r.ts || 0);
-    const inc = Number(r.kwh_inc || 0);
+    const inv = safeNum(r.inverter);
+    const ts  = safeNum(r.ts);
+    const inc = Math.max(0, safeNum(r.kwh_inc));   // kWh increment is never negative
     if (!inv || !ts) continue;
 
-    let key;
     let bucketTs;
     if (resolutionSpec.mode === 'day') {
       const d = new Date(ts);
       bucketTs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-      key = `${inv}|${bucketTs}`;
     } else {
       bucketTs = Math.floor(ts / bucketMs) * bucketMs;
-      key = `${inv}|${bucketTs}`;
     }
-
+    const key = `${inv}|${bucketTs}`;
     const prev = out.get(key);
     if (prev) prev.kwh_inc += inc;
     else out.set(key, { inverter: inv, ts: bucketTs, kwh_inc: inc });
@@ -343,8 +364,8 @@ function aggregateKwhByResolution(rows, resolutionSpec) {
   const bucketMs = (resolutionSpec.minutes || 5) * 60000;
 
   for (const r of rows || []) {
-    const ts = Number(r?.ts || 0);
-    const kwh = Number(r?.kwh_inc || 0);
+    const ts  = safeNum(r?.ts);
+    const kwh = Math.max(0, safeNum(r?.kwh_inc));   // increment never negative
     if (!ts) continue;
 
     let bucketTs;
@@ -353,15 +374,15 @@ function aggregateKwhByResolution(rows, resolutionSpec) {
     } else {
       bucketTs = Math.floor(ts / bucketMs) * bucketMs;
     }
-    out.set(bucketTs, Number(out.get(bucketTs) || 0) + kwh);
+    out.set(bucketTs, safeNum(out.get(bucketTs)) + kwh);
   }
 
   return Array.from(out.entries())
     .map(([ts, kwh]) => ({
-      ts: Number(ts),
-      kwh_inc: Number(Number(kwh || 0).toFixed(6)),
+      ts:      safeNum(ts),
+      kwh_inc: Number(kwh.toFixed(6)),
     }))
-    .sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+    .sort((a, b) => a.ts - b.ts);
 }
 
 function collectDayAheadRowsForRange(startTs, endTs) {
@@ -438,6 +459,32 @@ function readInverterIpMap() {
     console.warn('[exporter] readInverterIpMap failed:', err.message);
     return {};
   }
+}
+
+// Returns { invCount, units: { [inv]: number[] } } from ipConfigJson.
+function readInverterConfig() {
+  const invCount = Math.max(1, Number(getSetting('inverterCount', 27)) || 27);
+  const units = {};
+  try {
+    const raw = JSON.parse(String(getSetting('ipConfigJson', '{}') || '{}'));
+    const src = raw && typeof raw === 'object' ? raw : {};
+    for (let inv = 1; inv <= invCount; inv++) {
+      const unitsRaw = src?.units?.[inv] ?? src?.units?.[String(inv)];
+      const parsed = Array.isArray(unitsRaw)
+        ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 16)
+        : [];
+      units[inv] = parsed.length ? [...new Set(parsed)] : [1];
+    }
+  } catch {
+    for (let inv = 1; inv <= invCount; inv++) units[inv] = [1];
+  }
+  return { invCount, units };
+}
+
+// Safe finite-number helper — never returns NaN or Infinity.
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function resolveAuditIp(ipMap, inverter, currentIp) {
@@ -517,128 +564,146 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
 }
 
 // ─── Energy CSV ───────────────────────────────────────────────────────────────
+// Per-unit (node) rows showing two independent energy measurements:
+//   Register  — sum of positive consecutive kWh register deltas (LAG), per unit.
+//               Immune to mid-day register resets.
+//   Computed  — PAC trapezoidal integration from readings, per unit.
+//               Gap cap of 30 000 ms mirrors MAX_PAC_DT_S in poller.js.
+// Per-inverter subtotal sums both columns across nodes.
 async function exportEnergy({ startTs, endTs, inverter, format }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
 
-  const s = startTs || Date.now()-86400000;
+  const s = startTs || Date.now() - 86400000;
   const e = endTs   || Date.now();
   const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
-  const sql = `
-    WITH base AS (
+  const params = invNum ? [s, e, invNum] : [s, e];
+
+  // Register kWh per (day, inverter, unit) — LAG-based consecutive positive deltas.
+  const regSql = `
+    WITH ordered AS (
       SELECT
         date(ts/1000, 'unixepoch', 'localtime') AS day,
-        inverter,
-        unit,
-        ts,
-        kwh
+        inverter, unit,
+        kwh - LAG(kwh) OVER (PARTITION BY inverter, unit ORDER BY ts) AS kwh_delta
       FROM readings
       WHERE ts BETWEEN ? AND ?
       ${invNum ? 'AND inverter = ?' : ''}
-    ),
-    agg AS (
-      SELECT
-        day,
-        inverter,
-        unit,
-        MIN(kwh) AS min_kwh,
-        MAX(kwh) AS max_kwh,
-        MAX(ts)  AS last_ts
-      FROM base
-      GROUP BY day, inverter, unit
     )
-    SELECT
-      day,
-      inverter,
-      unit,
-      last_ts,
-      CASE WHEN (max_kwh - min_kwh) < 0 THEN 0 ELSE (max_kwh - min_kwh) END AS reg_kwh
-    FROM agg
+    SELECT day, inverter, unit,
+      SUM(CASE WHEN kwh_delta > 0 THEN kwh_delta ELSE 0 END) AS reg_kwh
+    FROM ordered
+    GROUP BY day, inverter, unit
     ORDER BY day, inverter, unit
   `;
-  const params = invNum ? [s, e, invNum] : [s, e];
-  const groups = db.prepare(sql).all(...params);
-  groups.sort((a, b) => {
-    const d = parseDateSortValue(a.day) - parseDateSortValue(b.day);
-    if (d !== 0) return d;
-    const invCmp = Number(a.inverter || 0) - Number(b.inverter || 0);
-    if (invCmp !== 0) return invCmp;
-    const t = Number(a.last_ts || 0) - Number(b.last_ts || 0);
-    if (t !== 0) return t;
-    return Number(a.unit || 0) - Number(b.unit || 0);
+
+  // Computed kWh per (day, inverter, unit) — PAC trapezoidal integration.
+  // (pac[i] + pac[i-1]) / 2 * dt_ms / 3 600 000 000  →  kWh
+  const compSql = `
+    WITH ordered AS (
+      SELECT
+        date(ts/1000, 'unixepoch', 'localtime') AS day,
+        inverter, unit, ts, pac,
+        LAG(ts)  OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_ts,
+        LAG(pac) OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_pac
+      FROM readings
+      WHERE ts BETWEEN ? AND ?
+      ${invNum ? 'AND inverter = ?' : ''}
+    )
+    SELECT day, inverter, unit,
+      SUM(
+        CASE
+          WHEN prev_ts IS NOT NULL AND (ts - prev_ts) <= 30000
+          THEN ((pac + prev_pac) / 2.0) * (ts - prev_ts) / 3600000000.0
+          ELSE 0
+        END
+      ) AS computed_kwh
+    FROM ordered
+    GROUP BY day, inverter, unit
+    ORDER BY day, inverter, unit
+  `;
+
+  const regRows  = db.prepare(regSql).all(...params);
+  const compRows = db.prepare(compSql).all(...params);
+
+  // Both maps keyed by `${day}|${inv}|${unit}`
+  const regMap  = new Map(regRows.map( r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.reg_kwh)]));
+  const compMap = new Map(compRows.map(r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.computed_kwh)]));
+
+  // Union of all (day, inverter) combinations; zero-fill every configured inverter.
+  const { invCount, units: invUnits } = readInverterConfig();
+  const invDaySet = new Set();
+  for (const r of regRows)  invDaySet.add(`${r.day}|${Number(r.inverter)}`);
+  for (const r of compRows) invDaySet.add(`${r.day}|${Number(r.inverter)}`);
+  if (!invNum) {
+    for (const d of iterateLocalDates(s, e)) {
+      for (let inv = 1; inv <= invCount; inv++) invDaySet.add(`${d}|${inv}`);
+    }
+  }
+
+  const sortedInvDayKeys = Array.from(invDaySet).sort((a, b) => {
+    const [dayA, invA] = a.split('|');
+    const [dayB, invB] = b.split('|');
+    const dc = parseDateSortValue(dayA) - parseDateSortValue(dayB);
+    return dc !== 0 ? dc : Number(invA) - Number(invB);
   });
 
   const mapped = [];
-  let curDay = '';
-  let curInv = -1;
-  let subReg = 0;
-  let subCalc = 0;
-  let grandReg = 0;
-  let grandCalc = 0;
+  let grandReg  = 0;
+  let grandComp = 0;
 
-  const pushSubtotal = () => {
-    if (!curDay || curInv < 0) return;
-    mapped.push({
-      Date: `Total for ${curDay} (Inverter ${curInv})`,
-      LastReadingTime: '',
-      Inverter: '',
-      Node: '',
-      TotalKWhRegister: Number(subReg.toFixed(0)),
-      TotalKWhCalc: Number(subCalc.toFixed(3)),
-    });
-    mapped.push({
-      Date: '',
-      LastReadingTime: '',
-      Inverter: '',
-      Node: '',
-      TotalKWhRegister: '',
-      TotalKWhCalc: '',
-    });
-  };
+  for (const key of sortedInvDayKeys) {
+    const [day, invStr] = key.split('|');
+    const inv   = Number(invStr);
+    const units = (invUnits[inv] || [1]).slice().sort((a, b) => a - b);
+    let subReg  = 0;
+    let subComp = 0;
 
-  for (const g of groups) {
-    const regVal = Number(g.reg_kwh || 0);
-    const calcVal = regVal; // keep matching export format; calc mirrors aggregated register delta
-
-    if (curDay !== g.day || curInv !== Number(g.inverter)) {
-      pushSubtotal();
-      curDay = g.day;
-      curInv = Number(g.inverter);
-      subReg = 0;
-      subCalc = 0;
+    for (const unit of units) {
+      const uKey    = `${day}|${inv}|${unit}`;
+      const regKwh  = safeNum(regMap.get(uKey));
+      const compKwh = safeNum(compMap.get(uKey));
+      subReg  += regKwh;
+      subComp += compKwh;
+      mapped.push({
+        Date:         day,
+        Inverter:     `INV-${String(inv).padStart(2, '0')}`,
+        Node:         unit,
+        Register_MWh: Number((regKwh  / 1000).toFixed(6)),
+        Computed_MWh: Number((compKwh / 1000).toFixed(6)),
+        Status:       regKwh > 0 || compKwh > 0 ? 'ACTIVE' : 'INACTIVE',
+      });
     }
 
-    subReg += regVal;
-    subCalc += calcVal;
-    grandReg += regVal;
-    grandCalc += calcVal;
+    grandReg  += subReg;
+    grandComp += subComp;
 
     mapped.push({
-      Date: g.day,
-      LastReadingTime: fmtTime(g.last_ts),
-      Inverter: Number(g.inverter),
-      Node: Number(g.unit),
-      TotalKWhRegister: Number(regVal.toFixed(0)),
-      TotalKWhCalc: Number(calcVal.toFixed(3)),
+      Date:         `Total for ${day} (Inverter ${inv})`,
+      Inverter:     '',
+      Node:         '',
+      Register_MWh: Number((subReg  / 1000).toFixed(6)),
+      Computed_MWh: Number((subComp / 1000).toFixed(6)),
+      Status:       subReg > 0 || subComp > 0 ? 'ACTIVE' : 'INACTIVE',
     });
+    mapped.push({ Date: '', Inverter: '', Node: '', Register_MWh: '', Computed_MWh: '', Status: '' });
   }
-  pushSubtotal();
 
   mapped.push({
-    Date: `GRAND TOTAL for ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (ALL INVERTERS)`,
-    LastReadingTime: '',
-    Inverter: '',
-    Node: '',
-    TotalKWhRegister: Number(grandReg.toFixed(0)),
-    TotalKWhCalc: Number(grandCalc.toFixed(3)),
+    Date:         `GRAND TOTAL ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (ALL INVERTERS)`,
+    Inverter:     '',
+    Node:         '',
+    Register_MWh: Number((grandReg  / 1000).toFixed(6)),
+    Computed_MWh: Number((grandComp / 1000).toFixed(6)),
+    Status:       '',
   });
 
   const headers = [
-    { key: 'Date', label: 'Date' },
-    { key: 'LastReadingTime', label: 'Last Reading Time' },
-    { key: 'Inverter', label: 'Inverter' },
-    { key: 'Node', label: 'Node' },
-    { key: 'TotalKWhRegister', label: 'Total kWh (Register)' },
-    { key: 'TotalKWhCalc', label: 'Total kWh (Calc)' },
+    { key: 'Date',         label: 'Date' },
+    { key: 'Inverter',     label: 'Inverter' },
+    { key: 'Node',         label: 'Node' },
+    { key: 'Register_MWh', label: 'Register (MWh)' },
+    { key: 'Computed_MWh', label: 'Computed PAC (MWh)' },
+    { key: 'Status',       label: 'Status' },
   ];
 
   const fileBase = exportFileBase(s, e, inverter, 'Recorded Energy');
@@ -731,22 +796,40 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
     : stmts.get5minRange.all(Number(inverter), s, e);
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
-  const mapped = aggregated.map(r => ({
-    Date: fmtDate(r.ts),
-    Time: fmtTime(r.ts),
-    Resolution: spec.label,
-    Plant: getSetting('plantName','ADSI Solar Plant'),
-    Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
-    kWh_Increment: Number(r.kwh_inc).toFixed(6),
+  // For "all inverters" daily-mode export, zero-fill inverters that had no data.
+  if ((!inverter || inverter === 'all') && spec.mode === 'day') {
+    const { invCount } = readInverterConfig();
+    const covered = new Set(aggregated.map((r) => `${r.inverter}|${r.ts}`));
+    for (const d of iterateLocalDates(s, e)) {
+      const bucketTs = new Date(`${d}T00:00:00`).getTime();
+      for (let inv = 1; inv <= invCount; inv++) {
+        if (!covered.has(`${inv}|${bucketTs}`)) {
+          aggregated.push({ inverter: inv, ts: bucketTs, kwh_inc: 0 });
+        }
+      }
+    }
+    aggregated.sort((a, b) => (a.inverter - b.inverter) || (a.ts - b.ts));
+  }
+
+  const plantName = getSetting('plantName', 'ADSI Solar Plant');
+  const mapped = aggregated.map((r) => ({
+    Date:          fmtDate(r.ts),
+    Time:          fmtTime(r.ts),
+    Resolution:    spec.label,
+    Plant:         plantName,
+    Inverter:      `INV-${String(r.inverter).padStart(2, '0')}`,
+    kWh_Increment: Math.max(0, safeNum(r.kwh_inc)).toFixed(6),
+    MWh_Increment: (Math.max(0, safeNum(r.kwh_inc)) / 1000).toFixed(9),
   }));
 
   const headers = [
-    {key:'Date',label:'Date'},
-    {key:'Time',label:'Time'},
-    {key:'Resolution',label:'Resolution'},
-    {key:'Plant',label:'Plant'},
-    {key:'Inverter',label:'Inverter'},
-    {key:'kWh_Increment',label:'Energy Increment (kWh)'},
+    { key: 'Date',          label: 'Date' },
+    { key: 'Time',          label: 'Time' },
+    { key: 'Resolution',    label: 'Resolution' },
+    { key: 'Plant',         label: 'Plant' },
+    { key: 'Inverter',      label: 'Inverter' },
+    { key: 'kWh_Increment', label: 'Energy Increment (kWh)' },
+    { key: 'MWh_Increment', label: 'Energy Increment (MWh)' },
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(mapped, {
@@ -806,35 +889,76 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
 // ─── Daily Generation Report CSV ──────────────────────────────────────────────
 async function exportDailyReport({ startTs, endTs, date, format }) {
   const dir = resolveExportDir('all', EXPORT_FOLDERS.daily);
+  const { invCount } = readInverterConfig();
+  const plantName = getSetting('plantName', 'ADSI Solar Plant');
 
-  let rows;
+  let dbRows;
   let s;
   let e;
   if (date) {
-    rows = stmts.getDailyReport.all(date);
-    const dayStart = new Date(`${date}T00:00:00`).getTime();
-    s = dayStart;
-    e = dayStart;
+    dbRows = stmts.getDailyReport.all(date);
+    s = new Date(`${date}T00:00:00`).getTime();
+    e = s;
   } else {
     s = startTs || (Date.now() - 7 * 86400000);
     e = endTs || Date.now();
-    rows = stmts.getDailyReportRange.all(fmtDate(s), fmtDate(e));
+    dbRows = stmts.getDailyReportRange.all(fmtDate(s), fmtDate(e));
   }
 
-  const mapped = rows.map(r => ({
-    Date: r.date, Plant: getSetting('plantName','ADSI Solar Plant'),
-    Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
-    Energy_kWh:   Number(r.kwh_total||0).toFixed(3),
-    Peak_Pac_kW:  (Number(r.pac_peak||0)/1000).toFixed(3),
-    Avg_Pac_kW:   (Number(r.pac_avg||0)/1000).toFixed(3),
-    Uptime_h:     (Number(r.uptime_s||0)/3600).toFixed(2),
-    Alarm_Count:  r.alarm_count || 0,
-  }));
+  // Index existing rows by "date|inverter" so we can detect gaps.
+  const existing = new Map();
+  for (const r of dbRows) {
+    existing.set(`${r.date}|${Number(r.inverter)}`, r);
+  }
+
+  // Enumerate every date × every configured inverter; zero-fill any gaps.
+  // This ensures inactive inverters always appear with 0 values so the
+  // exported Availability (%) denominator matches what the UI displays.
+  const allRows = [];
+  for (const d of iterateLocalDates(s, e)) {
+    for (let inv = 1; inv <= invCount; inv++) {
+      const key = `${d}|${inv}`;
+      const r = existing.get(key) || {
+        date: d, inverter: inv,
+        kwh_total: 0, pac_peak: 0, pac_avg: 0, uptime_s: 0, alarm_count: 0,
+      };
+      allRows.push(r);
+    }
+  }
+
+  const mapped = allRows.map((r) => {
+    const kwhTotal = Math.max(0, safeNum(r.kwh_total));
+    const pacPeakW = Math.max(0, safeNum(r.pac_peak));
+    const pacAvgW  = Math.max(0, safeNum(r.pac_avg));
+    const uptimeS  = Math.max(0, safeNum(r.uptime_s));
+    const alarms   = Math.max(0, Math.trunc(safeNum(r.alarm_count)));
+    return {
+      Date:             r.date,
+      Plant:            plantName,
+      Inverter:         `INV-${String(r.inverter).padStart(2, '0')}`,
+      Energy_kWh:       kwhTotal.toFixed(3),
+      Energy_MWh:       (kwhTotal / 1000).toFixed(6),
+      Peak_Pac_kW:      (pacPeakW / 1000).toFixed(3),
+      Avg_Pac_kW:       (pacAvgW  / 1000).toFixed(3),
+      Availability_pct: calcDailyAvailabilityPct(r).toFixed(2),
+      Uptime_h:         (uptimeS / 3600).toFixed(2),
+      Alarm_Count:      alarms,
+      Status:           kwhTotal > 0 || uptimeS > 0 ? 'ACTIVE' : 'INACTIVE',
+    };
+  });
 
   const headers = [
-    {key:'Date',label:'Date'},{key:'Plant',label:'Plant'},{key:'Inverter',label:'Inverter'},
-    {key:'Energy_kWh',label:'Energy (kWh)'},{key:'Peak_Pac_kW',label:'Peak Pac (kW)'},
-    {key:'Avg_Pac_kW',label:'Avg Pac (kW)'},{key:'Uptime_h',label:'Uptime (h)'},{key:'Alarm_Count',label:'Alarm Count'},
+    { key: 'Date',             label: 'Date' },
+    { key: 'Plant',            label: 'Plant' },
+    { key: 'Inverter',         label: 'Inverter' },
+    { key: 'Energy_kWh',       label: 'Energy (kWh)' },
+    { key: 'Energy_MWh',       label: 'Energy (MWh)' },
+    { key: 'Peak_Pac_kW',      label: 'Peak Pac (kW)' },
+    { key: 'Avg_Pac_kW',       label: 'Avg Pac (kW)' },
+    { key: 'Availability_pct', label: 'Availability (%)' },
+    { key: 'Uptime_h',         label: 'Uptime (h)' },
+    { key: 'Alarm_Count',      label: 'Alarm Count' },
+    { key: 'Status',           label: 'Status' },
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(mapped, {
@@ -872,28 +996,36 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
     (a, b) => a - b,
   );
 
+  const plantName = getSetting('plantName', 'ADSI Solar Plant');
   const rows = allTs.map((ts) => {
-    const actualKwh = Number(actualMap.get(ts) || 0);
-    const dayAheadKwh = Number(dayAheadMap.get(ts) || 0);
+    const actualKwh   = Math.max(0, safeNum(actualMap.get(ts)));
+    const dayAheadKwh = Math.max(0, safeNum(dayAheadMap.get(ts)));
+    const deltaKwh    = actualKwh - dayAheadKwh;          // can be negative (under-forecast)
     return {
-      Date: fmtDate(ts),
-      Time: spec.mode === 'day' ? 'Daily' : fmtTime(ts),
-      Resolution: spec.mode === 'day' ? 'Daily' : spec.label,
-      Plant: getSetting('plantName', 'ADSI Solar Plant'),
-      ActualMWh: Number((actualKwh / 1000).toFixed(6)),
-      DayAheadMWh: Number((dayAheadKwh / 1000).toFixed(6)),
-      DeltaMWh: Number(((actualKwh - dayAheadKwh) / 1000).toFixed(6)),
+      Date:        fmtDate(ts),
+      Time:        spec.mode === 'day' ? 'Daily' : fmtTime(ts),
+      Resolution:  spec.mode === 'day' ? 'Daily' : spec.label,
+      Plant:       plantName,
+      ActualKWh:   actualKwh.toFixed(6),
+      ActualMWh:   (actualKwh   / 1000).toFixed(6),
+      DayAheadKWh: dayAheadKwh.toFixed(6),
+      DayAheadMWh: (dayAheadKwh / 1000).toFixed(6),
+      DeltaKWh:    deltaKwh.toFixed(6),
+      DeltaMWh:    (deltaKwh    / 1000).toFixed(6),
     };
   });
 
   const headers = [
-    { key: 'Date', label: 'Date' },
-    { key: 'Time', label: 'Time' },
-    { key: 'Resolution', label: 'Resolution' },
-    { key: 'Plant', label: 'Plant' },
-    { key: 'ActualMWh', label: 'Actual MWh' },
-    { key: 'DayAheadMWh', label: 'Day-Ahead MWh' },
-    { key: 'DeltaMWh', label: 'Delta MWh' },
+    { key: 'Date',        label: 'Date' },
+    { key: 'Time',        label: 'Time' },
+    { key: 'Resolution',  label: 'Resolution' },
+    { key: 'Plant',       label: 'Plant' },
+    { key: 'ActualKWh',   label: 'Actual (kWh)' },
+    { key: 'ActualMWh',   label: 'Actual (MWh)' },
+    { key: 'DayAheadKWh', label: 'Day-Ahead (kWh)' },
+    { key: 'DayAheadMWh', label: 'Day-Ahead (MWh)' },
+    { key: 'DeltaKWh',    label: 'Delta (kWh)' },
+    { key: 'DeltaMWh',    label: 'Delta (MWh)' },
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(rows, {

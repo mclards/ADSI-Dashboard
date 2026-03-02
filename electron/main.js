@@ -215,7 +215,7 @@ function showLoadingWindow() {
     icon: APP_ICON,
     frame: false,
     resizable: false,
-    alwaysOnTop: true,
+    alwaysOnTop: false,
     center: true,
     backgroundColor: "#0f1117",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
@@ -256,10 +256,16 @@ function registerShortcutsOnce() {
   };
 
   globalShortcut.register("Control+T", () => {
-    openTopologyWindow();
+    const focused = BrowserWindow.getFocusedWindow() || mainWin || null;
+    openTopologyWindowGuarded(focused).catch((err) => {
+      console.warn("[main] topology shortcut guard failed:", err.message);
+    });
   });
   globalShortcut.register("Control+I", () => {
-    openIpConfigWindow();
+    const focused = BrowserWindow.getFocusedWindow() || mainWin || null;
+    openIpConfigWindowGuarded(focused).catch((err) => {
+      console.warn("[main] ip-config shortcut guard failed:", err.message);
+    });
   });
   // Native Electron zoom shortcuts (Cmd/Ctrl + / - / 0).
   safeRegister("CommandOrControl+=", () => adjustZoom(0.1));
@@ -288,7 +294,7 @@ function showLoginWindow() {
     minimizable: false,
     backgroundColor: "#102029",
     center: true,
-    alwaysOnTop: true,
+    alwaysOnTop: false,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload-login.js"),
@@ -1631,6 +1637,57 @@ function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
   });
 }
 
+async function getCurrentOperationMode(timeoutMs = 1500) {
+  try {
+    const settings = await requestServerJson(
+      "GET",
+      "/api/settings",
+      undefined,
+      timeoutMs,
+    );
+    const mode = String(settings?.operationMode || "gateway")
+      .trim()
+      .toLowerCase();
+    return mode === "remote" ? "remote" : "gateway";
+  } catch {
+    return "gateway";
+  }
+}
+
+async function ensureGatewayModeForWindow(featureLabel, ownerWin) {
+  const mode = await getCurrentOperationMode();
+  if (mode !== "remote") return true;
+  const target = ownerWin && !ownerWin.isDestroyed() ? ownerWin : mainWin || undefined;
+  const detail =
+    "This feature is disabled in Client mode.\nSwitch Operation Mode to Gateway in Settings to access it.";
+  try {
+    await dialog.showMessageBox(target, {
+      type: "info",
+      title: `${featureLabel} Unavailable`,
+      message: `${featureLabel} is not available while running in Client mode.`,
+      detail,
+      buttons: ["OK"],
+      defaultId: 0,
+      noLink: true,
+    });
+  } catch (_) {}
+  return false;
+}
+
+async function openTopologyWindowGuarded(ownerWin) {
+  const allowed = await ensureGatewayModeForWindow("Topology", ownerWin);
+  if (!allowed) return false;
+  openTopologyWindow();
+  return true;
+}
+
+async function openIpConfigWindowGuarded(ownerWin) {
+  const allowed = await ensureGatewayModeForWindow("IP Configuration", ownerWin);
+  if (!allowed) return false;
+  openIpConfigWindow();
+  return true;
+}
+
 function getConfigPath() {
   const portableRoot = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
   if (portableRoot) {
@@ -1875,8 +1932,14 @@ ipcMain.on("window-close", () => quit());
 ipcMain.on("open-logs-folder", (_, folder) => {
   if (folder) shell.openPath(folder).catch(console.error);
 });
-ipcMain.on("open-topology-window", () => openTopologyWindow());
-ipcMain.on("open-ip-config-window", () => openIpConfigWindow());
+ipcMain.on("open-topology-window", async (event) => {
+  const ownerWin = BrowserWindow.fromWebContents(event.sender) || null;
+  await openTopologyWindowGuarded(ownerWin);
+});
+ipcMain.on("open-ip-config-window", async (event) => {
+  const ownerWin = BrowserWindow.fromWebContents(event.sender) || null;
+  await openIpConfigWindowGuarded(ownerWin);
+});
 ipcMain.on("close-current-window", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
@@ -1900,6 +1963,9 @@ ipcMain.handle("open-folder", async (_, folder) => {
   try {
     const target = String(folder || "").trim();
     if (!target) return false;
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(target, { recursive: true });
+    }
     const err = await shell.openPath(target);
     return !err;
   } catch (e) {
