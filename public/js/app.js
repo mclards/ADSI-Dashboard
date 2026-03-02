@@ -1,7 +1,9 @@
 ﻿"use strict";
 /* ═══════════════════════════════════════════════════════════════════════
-   ADSI Inverter Dashboard v2.0 — Main Application
+   Inverter Dashboard v2.2 — Main Application
    WebSocket-driven, real-time inverter monitoring & control
+   Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
+   © 2026 Engr. Clariden Montaño REE. All rights reserved.
    ═══════════════════════════════════════════════════════════════════════ */
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -18,9 +20,9 @@ const State = {
     tailscaleDeviceHint: "",
     inverterCount: 27,
     nodeCount: 4,
-    plantName: "ADSI Solar Plant",
+    plantName: "Solar Plant",
     operatorName: "OPERATOR",
-    csvSavePath: "C:\\Logs\\ADSI",
+    csvSavePath: "C:\\Logs\\InverterDashboard",
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
     solcastApiKey: "",
@@ -121,7 +123,7 @@ const ANALYTICS_VIEW_END_MIN = 0;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
-const TODAY_MWH_SYNC_INTERVAL_MS = 1000;
+const TODAY_MWH_SYNC_INTERVAL_MS = 5000; // server caches for 5s; polling faster has no benefit
 const THEME_META = {
   dark: {
     label: "Maroon",
@@ -1242,7 +1244,7 @@ async function pickExportFolder() {
   // Browser fallback
   const manual = prompt(
     "Enter export folder path:",
-    current || "C:\\Logs\\ADSI",
+    current || "C:\\Logs\\InverterDashboard",
   );
   if (!manual) return;
   $("setCsvPath").value = manual;
@@ -1498,7 +1500,7 @@ async function loadSettings() {
       s.exportUiState || {},
     );
     if ($("plantNameDisplay"))
-      $("plantNameDisplay").textContent = s.plantName || "ADSI Solar Plant";
+      $("plantNameDisplay").textContent = s.plantName || "Solar Plant";
     $("setPlantName").value = s.plantName || "";
     $("setOperatorName").value = s.operatorName || "OPERATOR";
     $("setOperationMode").value = s.operationMode || "gateway";
@@ -3193,7 +3195,7 @@ function handleWS(msg) {
     integrateTodayFromPac();
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
-      State.settings.plantName = msg.settings.plantName || "ADSI Solar Plant";
+      State.settings.plantName = msg.settings.plantName || "Solar Plant";
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
     }

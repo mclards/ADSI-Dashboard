@@ -1,2 +1,2 @@
-"""Driver package for ADSI inverter services."""
+"""Driver package for Inverter Dashboard services."""
 

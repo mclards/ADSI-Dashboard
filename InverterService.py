@@ -1,9 +1,5 @@
 # =================================================
-#   Inverter Dashboard — Hybrid Engine
-#   ASYNCIO POLLING + WRITE THREADS
-#
-#   Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
-#   © 2026 Engr. Clariden Montaño REE. All rights reserved.
+#   HYBRID ENGINE  —  ASYNCIO POLLING + WRITE THREADS
 # =================================================
 import sys
 import os
@@ -19,8 +15,8 @@ import re
 import os
 import asyncio
 import json
+import shutil
 import time
-import sqlite3
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -34,9 +30,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from drivers.modbus_tcp import create_client, read_input, read_holding, write_single
 from shared_data import shared
-
-ENGINE_PORT = int(os.getenv("INVERTER_ENGINE_PORT", "9100"))
-ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
 
 
 # -------------------------------------------------
@@ -57,17 +50,16 @@ app.add_middleware(
 #   Helpers
 # -------------------------------------------------
 
-def free_engine_port():
-    """Kill any process currently listening on ENGINE_PORT (Windows only)."""
+def free_port_9000():
+    """Kill any process currently listening on TCP 9000 (Windows only)."""
     try:
         result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
-        pattern = rf"TCP\s+\S+:{ENGINE_PORT}\s+\S+\s+LISTENING\s+(\d+)"
-        pids = re.findall(pattern, result.stdout)
+        pids = re.findall(r"TCP\s+\S+:9000\s+\S+\s+LISTENING\s+(\d+)", result.stdout)
         for pid in set(pids):
             subprocess.run(["taskkill", "/PID", pid, "/F", "/T"], capture_output=True)
-            print(f"[PORT {ENGINE_PORT}] Killed PID {pid}")
+            print(f"[PORT 9000] Killed PID {pid}")
     except Exception as e:
-        print(f"[PORT {ENGINE_PORT}] Error:", e)
+        print("[PORT 9000] Error:", e)
 
 
 def hex_h_to_dec(val):
@@ -92,53 +84,16 @@ def inverter_number_from_ip(ip):
 #   Configuration  —  paths & tunables
 # -------------------------------------------------
 
-PORTABLE_ROOT = str(os.getenv("IM_PORTABLE_DATA_DIR") or "").strip()
-EXPLICIT_DATA_DIR = str(os.getenv("IM_DATA_DIR") or "").strip()
-
-if PORTABLE_ROOT:
-    PROGRAMDATA_DIR = Path(PORTABLE_ROOT) / "programdata"
-else:
-    PROGRAMDATA_ROOT = (
-        os.getenv("PROGRAMDATA")
-        or os.getenv("ALLUSERSPROFILE")
-        or str(Path.home())
-    )
-    PROGRAMDATA_DIR = Path(PROGRAMDATA_ROOT) / "InverterDashboard"
+PROGRAMDATA_DIR  = Path(os.getenv("PROGRAMDATA")) / "InverterDashboard"
 PROGRAMDATA_DIR.mkdir(parents=True, exist_ok=True)
 
-if EXPLICIT_DATA_DIR:
-    DATA_DIR = Path(EXPLICIT_DATA_DIR)
-elif PORTABLE_ROOT:
-    DATA_DIR = Path(PORTABLE_ROOT) / "db"
-else:
-    APPDATA_ROOT = os.getenv("APPDATA")
-    if APPDATA_ROOT:
-        DATA_DIR = Path(APPDATA_ROOT) / "Inverter-Dashboard"
-    else:
-        DATA_DIR = Path.home() / ".inverter-dashboard"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+IPCONFIG_PATH    = PROGRAMDATA_DIR / "ipconfig.json"
+BUNDLED_IPCONFIG = Path(os.path.dirname(__file__)) / "ipconfig.json"
+AUTORESET_PATH   = PROGRAMDATA_DIR / "autoreset.json"
 
-DB_PATH = DATA_DIR / "adsi.db"
-if PORTABLE_ROOT:
-    IPCONFIG_PATH = Path(PORTABLE_ROOT) / "config" / "ipconfig.json"
-else:
-    IPCONFIG_PATH = DATA_DIR / "ipconfig.json"
-IPCONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-LEGACY_IPCONFIG_PATHS = [
-    DATA_DIR / "ipconfig.json",
-    PROGRAMDATA_DIR / "ipconfig.json",
-    Path(os.path.dirname(__file__)) / "ipconfig.json",
-    Path.cwd() / "ipconfig.json",
-]
-AUTORESET_PATH = PROGRAMDATA_DIR / "autoreset.json"
-
-DEFAULT_INTERVAL  = 0.05   # default poll interval per inverter
-MIN_POLL_INTERVAL = 0.05   # keep poll cadence close to configured interval
-
-# ── Tunable constants — overridden at runtime from DB 'inverterPollConfig' ──
-READ_SPACING    = 0.005  # seconds between input / holding reads
-RECONNECT_DELAY = 0.5    # seconds to wait after reconnect before retry read
-_modbus_timeout = 1.0    # Modbus TCP read timeout (passed to create_client)
+READ_SPACING     = 0.003   # seconds between input / holding reads
+DEFAULT_INTERVAL = 0.05    # default poll interval per inverter
+RECONNECT_DELAY  = 0.1     # seconds to wait after a reconnect attempt
 
 
 # -------------------------------------------------
@@ -171,174 +126,34 @@ executor = ThreadPoolExecutor(max_workers=16)
 #   ipconfig.json  —  load
 # -------------------------------------------------
 
-def _default_ipconfig():
-    cfg = {"inverters": {}, "poll_interval": {}, "units": {}}
-    for i in range(1, 28):
-        key = str(i)
-        cfg["inverters"][key] = f"192.168.1.{100 + i}"
-        cfg["poll_interval"][key] = float(DEFAULT_INTERVAL)
-        cfg["units"][key] = [1, 2, 3, 4]
-    return cfg
-
-
-def _sanitize_ipconfig(data):
-    out = _default_ipconfig()
-    src = data if isinstance(data, dict) else {}
-    src_inv = src.get("inverters", {}) if isinstance(src.get("inverters"), dict) else {}
-    src_poll = src.get("poll_interval", {}) if isinstance(src.get("poll_interval"), dict) else {}
-    src_units = src.get("units", {}) if isinstance(src.get("units"), dict) else {}
-
-    for i in range(1, 28):
-        key = str(i)
-
-        ip_raw = src_inv.get(key, src_inv.get(i, out["inverters"][key]))
-        ip = str(ip_raw).strip()
-
-        poll_raw = src_poll.get(key, src_poll.get(i, out["poll_interval"][key]))
-        try:
-            poll = float(poll_raw)
-        except Exception:
-            poll = float(DEFAULT_INTERVAL)
-
-        units_raw = src_units.get(key, src_units.get(i, out["units"][key]))
-        if isinstance(units_raw, list):
-            units = []
-            for u in units_raw:
-                try:
-                    n = int(u)
-                except Exception:
-                    continue
-                if 1 <= n <= 4 and n not in units:
-                    units.append(n)
-        else:
-            units = [1, 2, 3, 4]
-
-        out["inverters"][key] = ip
-        out["poll_interval"][key] = poll if poll >= 0.01 else float(DEFAULT_INTERVAL)
-        out["units"][key] = units if units else [1]
-
-    return out
-
-
-def _read_ipconfig_from_db():
-    if not DB_PATH.exists():
-        return None
-
-    conn = None
-    try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=1.0)
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key=?",
-            ("ipConfigJson",),
-        ).fetchone()
-        if not row or not row[0]:
-            return None
-        return json.loads(row[0])
-    except Exception:
-        return None
-    finally:
-        try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-
-
-def _read_ipconfig_file(path_obj):
-    try:
-        if not path_obj.exists():
-            return None
-        with open(path_obj, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _write_ipconfig_file(path_obj, cfg):
-    try:
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        with open(path_obj, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-        return True
-    except Exception:
-        return False
-
-
 def _load_ipconfig_sync():
     """Synchronous load; called via executor so the event loop stays unblocked."""
-    # 1) Primary source: Node/Electron DB settings key (single source of truth).
-    db_raw = _read_ipconfig_from_db()
-    if db_raw is not None:
-        cfg = _sanitize_ipconfig(db_raw)
-        _write_ipconfig_file(IPCONFIG_PATH, cfg)
-        return cfg
+    if not IPCONFIG_PATH.exists():
+        try:
+            shutil.copy(BUNDLED_IPCONFIG, IPCONFIG_PATH)
+            print("[IPCONFIG] Created default ipconfig.json")
+        except Exception as e:
+            print("[IPCONFIG] Copy failed:", e)
 
-    # 2) Fallbacks: AppData ipconfig, then legacy paths.
-    candidate_paths = [IPCONFIG_PATH]
-    candidate_paths.extend(LEGACY_IPCONFIG_PATHS)
+    try:
+        data = json.load(open(IPCONFIG_PATH, "r"))
+    except Exception:
+        data = {}
 
-    for p in candidate_paths:
-        raw = _read_ipconfig_file(p)
-        if raw is None:
-            continue
-        cfg = _sanitize_ipconfig(raw)
-        _write_ipconfig_file(IPCONFIG_PATH, cfg)
-        return cfg
+    inv   = data.get("inverters",     {})
+    poll  = data.get("poll_interval", {})
+    units = data.get("units",         {})
 
-    # 3) Default if nothing exists.
-    cfg = _default_ipconfig()
-    _write_ipconfig_file(IPCONFIG_PATH, cfg)
-    print("[IPCONFIG] Created default ipconfig.json at", IPCONFIG_PATH)
-    return cfg
+    return {
+        "inverters":     {str(k): v           for k, v in inv.items()},
+        "poll_interval": {str(k): float(v)    for k, v in poll.items()},
+        "units":         {str(k): list(v)     for k, v in units.items()},
+    }
 
 
 async def load_ipconfig():
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _load_ipconfig_sync)
-
-
-# -------------------------------------------------
-#   inverterPollConfig  —  live-tunable constants
-# -------------------------------------------------
-
-def _load_poll_config_sync():
-    """Read inverterPollConfig JSON from the SQLite settings table."""
-    if not DB_PATH.exists():
-        return {}
-    conn = None
-    try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=1.0)
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key=?",
-            ("inverterPollConfig",),
-        ).fetchone()
-        if not row or not row[0]:
-            return {}
-        cfg = json.loads(row[0])
-        return cfg if isinstance(cfg, dict) else {}
-    except Exception:
-        return {}
-    finally:
-        try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-
-
-def _apply_poll_config(cfg):
-    """Apply a poll-config dict to the module-level tunable constants."""
-    global READ_SPACING, RECONNECT_DELAY, _modbus_timeout
-
-    if "readSpacing" in cfg:
-        v = float(cfg["readSpacing"])
-        READ_SPACING = max(0.001, min(v, 1.0))
-    if "reconnectDelay" in cfg:
-        v = float(cfg["reconnectDelay"])
-        RECONNECT_DELAY = max(0.1, min(v, 10.0))
-    if "modbusTimeout" in cfg:
-        v = float(cfg["modbusTimeout"])
-        _modbus_timeout = max(0.2, min(v, 10.0))
 
 
 # -------------------------------------------------
@@ -566,7 +381,7 @@ async def detect_units_async(ip):
     Honours static overrides; throttles on repeated failure.
     """
     now = time.time()
-    if _last_unit_fail.get(ip, 0) + 5 > now:
+    if _last_unit_fail.get(ip, 0) + 1 > now:
         return []
 
     # Static override wins
@@ -612,7 +427,6 @@ async def read_fast_async(client, unit, ip):
         return regs[i] if len(regs) > i else 0
 
     return {
-        "ts":       int(time.time() * 1000),
         "kwh_high": reg(0),
         "kwh_low":  reg(1),
         "alarm":    reg(7),
@@ -640,7 +454,7 @@ async def read_fast_async(client, unit, ip):
 # -------------------------------------------------
 
 async def poll_inverter(ip):
-    interval = max(MIN_POLL_INTERVAL, intervals.get(ip, DEFAULT_INTERVAL))
+    interval = intervals.get(ip, DEFAULT_INTERVAL)
     print(f"[POLL] Started  {ip}  every {interval}s")
 
     while True:
@@ -666,10 +480,6 @@ async def poll_inverter(ip):
 
             out     = []
             inv_num = inverter_number_from_ip(ip)
-            if inv_num is None:
-                print(f"[POLL] WARNING: no inverter number for IP {ip} — data will be dropped")
-                await asyncio.sleep(1)
-                break  # wait for ip_map to be rebuilt
 
             for u in units:
                 data = await read_fast_async(client, u, ip)
@@ -686,9 +496,7 @@ async def poll_inverter(ip):
                 if not entry.get("busy"):
                     asyncio.create_task(handle_auto_reset(ip, u, data["alarm"]))
 
-            # Do not wipe last good frame on transient all-unit read misses.
-            if out:
-                shared[ip] = list(out)
+            shared[ip] = list(out)
             await asyncio.sleep(interval)
 
 
@@ -696,42 +504,34 @@ async def poll_inverter(ip):
 #   Global map rebuild
 # -------------------------------------------------
 
-async def rebuild_global_maps(cfg=None):
+async def rebuild_global_maps():
     """
     Re-read ipconfig.json and reconcile clients / threads / queues.
     Safe to call at runtime (e.g. from the file watcher).
     """
     global ip_map, inverters, intervals, static_units
 
-    if cfg is None:
-        cfg = await load_ipconfig()
+    cfg      = await load_ipconfig()
     ip_map   = cfg["inverters"]
     poll_cfg = cfg["poll_interval"]
     unit_cfg = cfg["units"]
 
-    inverters[:] = []
-    for i in range(1, 28):
-        ip = str(ip_map.get(str(i), "")).strip()
-        if not ip:
-            continue
-        inverters.append(ip)
+    inverters[:] = [
+        ip_map[str(i)]
+        for i in range(1, 28)
+        if str(i) in ip_map
+    ]
 
-    intervals = {}
-    for i in range(1, 28):
-        ip = str(ip_map.get(str(i), "")).strip()
-        if not ip:
-            continue
-        try:
-            poll = float(poll_cfg.get(str(i), DEFAULT_INTERVAL))
-        except Exception:
-            poll = DEFAULT_INTERVAL
-        poll = poll if poll >= 0.01 else DEFAULT_INTERVAL
-        intervals[ip] = max(MIN_POLL_INTERVAL, poll)
+    intervals = {
+        ip_map[str(i)]: float(poll_cfg.get(str(i), DEFAULT_INTERVAL))
+        for i in range(1, 28)
+        if str(i) in ip_map
+    }
 
     static_units.clear()
     for i in range(1, 28):
         key = str(i)
-        ip = str(ip_map.get(key, "")).strip()
+        ip  = ip_map.get(key)
         if ip:
             static_units[ip] = unit_cfg.get(key)
 
@@ -740,7 +540,7 @@ async def rebuild_global_maps(cfg=None):
         if ip not in clients:
             loop = asyncio.get_running_loop()
             try:
-                c = await loop.run_in_executor(executor, create_client, ip, 502, _modbus_timeout)
+                c = await loop.run_in_executor(executor, create_client, ip, 502)
             except Exception:
                 c = None
             clients[ip] = c
@@ -772,7 +572,6 @@ async def rebuild_global_maps(cfg=None):
 
             thread_locks.pop(ip, None)
             intervals.pop(ip, None)
-            shared.pop(ip, None)   # remove stale live-data so dropped inverters don't linger in /data
 
     print(f"[IPCONFIG] Maps rebuilt — {len(inverters)} inverter(s) active")
 
@@ -810,39 +609,18 @@ async def start_polling_manager():
 # -------------------------------------------------
 
 async def ipconfig_watcher():
-    """Re-build maps whenever DB/file-backed ipconfig or poll config changes."""
-    last_signature = None
-    last_poll_sig = ""
-    loop = asyncio.get_running_loop()
+    """Re-build maps whenever ipconfig.json changes on disk."""
+    last_mtime = 0
     while True:
-        # ── Check ipconfig ──
         try:
-            cfg = await load_ipconfig()
-            signature = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
-            if signature != last_signature:
-                if last_signature is not None:
-                    print("[WATCH] ipconfig changed — reloading")
-                last_signature = signature
-                await rebuild_global_maps(cfg)
-        except Exception:
-            pass
-
-        # ── Check poll config (inverterPollConfig) ──
-        try:
-            poll_cfg = await loop.run_in_executor(executor, _load_poll_config_sync)
-            poll_sig = json.dumps(poll_cfg, sort_keys=True, separators=(",", ":"))
-            if poll_sig != last_poll_sig:
-                last_poll_sig = poll_sig
-                old_timeout = _modbus_timeout
-                _apply_poll_config(poll_cfg)
-                if _modbus_timeout != old_timeout:
-                    print(f"[WATCH] modbusTimeout changed to {_modbus_timeout}s — rebuilding clients")
+            if IPCONFIG_PATH.exists():
+                mtime = IPCONFIG_PATH.stat().st_mtime
+                if mtime != last_mtime:
+                    last_mtime = mtime
+                    print("[WATCH] ipconfig.json changed — reloading")
                     await rebuild_global_maps()
-                elif last_poll_sig != "{}":
-                    print(f"[WATCH] poll config updated: {poll_cfg}")
         except Exception:
             pass
-
         await asyncio.sleep(1)
 
 
@@ -1111,7 +889,7 @@ async def websocket_metrics(ws: WebSocket):
 
 async def main():
     if os.name == "nt":
-        free_engine_port()
+        free_port_9000()
 
     load_autoreset_config()
     auto_reset_state.clear()
@@ -1120,12 +898,12 @@ async def main():
     asyncio.create_task(ipconfig_watcher())
     asyncio.create_task(start_polling_manager())
 
-    print(f"[ENGINE] Hybrid engine started — listening on {ENGINE_HOST}:{ENGINE_PORT}")
+    print("[ENGINE] Hybrid engine started — listening on :9000")
 
     config = uvicorn.Config(
         app,
-        host=ENGINE_HOST,
-        port=ENGINE_PORT,
+        host="0.0.0.0",
+        port=9000,
         log_level="critical",
         access_log=False,
     )

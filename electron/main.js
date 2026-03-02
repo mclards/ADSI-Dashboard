@@ -1,6 +1,7 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for ADSI Inverter Dashboard v2.0
+ * main.js - Electron entry point for Inverter Dashboard v2.2
+ * Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
  */
 
@@ -83,14 +84,15 @@ const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
 const FORECAST_EXE_NAMES = ["ForecastCoreService.exe"];
 const FORECAST_SCRIPT_NAMES = ["ForecastCoreService.py"];
-const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe"];
+// Legacy service image names from previous ADSI-branded releases (kept for cleanup on upgrade).
+const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe", "InverterCoreService.exe", "ForecastCoreService.exe"];
 // Login-page admin auth key is intentionally fixed across devices.
-const LOGIN_ADMIN_AUTH_KEY = "ADSI-2026";
+const LOGIN_ADMIN_AUTH_KEY = "IM-2026";
 const DEFAULT_LOGIN_USERNAME = "admin";
 const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
-const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard");
+const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
 const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
@@ -137,8 +139,8 @@ function configurePortableDataPaths() {
     fs.mkdirSync(dbDir, { recursive: true });
     fs.mkdirSync(cfgDir, { recursive: true });
     app.setPath("userData", userDataDir);
-    process.env.ADSI_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
-    process.env.ADSI_DATA_DIR = dbDir;
+    process.env.IM_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
+    process.env.IM_DATA_DIR = dbDir;
     console.log("[main] Portable data root:", PORTABLE_DATA_DIR);
   } catch (err) {
     console.error("[main] Portable path setup failed:", err.message);
@@ -1143,7 +1145,7 @@ function startServer() {
 }
 
 function resolveBackendLaunch() {
-  const explicit = process.env.ADSI_BACKEND_PATH;
+  const explicit = process.env.IM_BACKEND_PATH;
   if (explicit && fs.existsSync(explicit)) {
     return buildLaunch(explicit);
   }
@@ -1180,7 +1182,7 @@ function resolveBackendLaunch() {
 }
 
 function resolveForecastLaunch() {
-  const explicit = process.env.ADSI_FORECAST_PATH;
+  const explicit = process.env.IM_FORECAST_PATH;
   if (explicit && fs.existsSync(explicit)) return buildLaunch(explicit);
 
   const exeBaseDirs = [
@@ -1274,7 +1276,7 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
 function startBackendProcess() {
   const backendLaunch = resolveBackendLaunch();
   if (!backendLaunch) {
-    console.error("[main] Backend not found. Set ADSI_BACKEND_PATH or place backend executable.");
+    console.error("[main] Backend not found. Set IM_BACKEND_PATH or place backend executable.");
     return false;
   }
   spawnBackendProcess(backendLaunch);
@@ -1689,7 +1691,7 @@ async function openIpConfigWindowGuarded(ownerWin) {
 }
 
 function getConfigPath() {
-  const portableRoot = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
+  const portableRoot = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
   if (portableRoot) {
     const cfgDir = path.join(portableRoot, "config");
     try {

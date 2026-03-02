@@ -1,25 +1,26 @@
-﻿"""
-ADSI Solar Power Forecasting System
-Day-Ahead Forecast Engine  Â·  v3.0
+﻿“””
+Solar Power Forecasting System
+Day-Ahead Forecast Engine · v3.0
 
 Architecture
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-1. Solar Geometry      â€“ precise declination / hour-angle / air-mass / AOI
-2. Clear-Sky Model     â€“ Ineichen simplified + humidity attenuation
-3. Cloud Transmittance â€“ non-linear cloud-cover â†’ transmission mapping (PH-tuned)
-4. Physics Baseline    â€“ per-slot kWh_inc from plant specs (dependable rating)
-5. Residual ML         â€“ GradientBoosting learns (actual âˆ’ physics) residual
+────────────
+1. Solar Geometry      – precise declination / hour-angle / air-mass / AOI
+2. Clear-Sky Model     – Ineichen simplified + humidity attenuation
+3. Cloud Transmittance – non-linear cloud-cover → transmission mapping (PH-tuned)
+4. Physics Baseline    – per-slot kWh_inc from plant specs (dependable rating)
+5. Residual ML         – GradientBoosting learns (actual − physics) residual
                          trained on last N_TRAIN_DAYS with recency weighting
-6. Error Memory        â€“ rolling weighted average of recent forecast errors
+6. Error Memory        – rolling weighted average of recent forecast errors
                          applied as a bias-correction term
-7. Anomaly Guard       â€“ rejects training days with irradiance/generation
+7. Anomaly Guard       – rejects training days with irradiance/generation
                          inconsistencies before they corrupt the model
-8. Forecast QA         â€“ logs MAPE, MBE, skill-score vs persistence each cycle
-9. Output              â€“ 5-min kWh_inc series with Â±confidence bands
+8. Forecast QA         – logs MAPE, MBE, skill-score vs persistence each cycle
+9. Output              – 5-min kWh_inc series with ±confidence bands
 
-Author  : ADSI Engineering Team
+Author  : Engr. Clariden Montaño REE (Engr. M.)
 Version : 3.0 (Day-Ahead Hardened)
-"""
+© 2026 Engr. Clariden Montaño REE. All rights reserved.
+“””
 
 import argparse
 import json
@@ -43,14 +44,14 @@ from sklearn.preprocessing import RobustScaler
 # ============================================================================
 # PATHS
 # ============================================================================
-PORTABLE_ROOT_RAW = str(os.getenv("ADSI_PORTABLE_DATA_DIR") or "").strip()
+PORTABLE_ROOT_RAW = str(os.getenv("IM_PORTABLE_DATA_DIR") or "").strip()
 PORTABLE_ROOT = Path(PORTABLE_ROOT_RAW) if PORTABLE_ROOT_RAW else None
-EXPLICIT_DATA_DIR = str(os.getenv("ADSI_DATA_DIR") or "").strip()
+EXPLICIT_DATA_DIR = str(os.getenv("IM_DATA_DIR") or "").strip()
 
 if PORTABLE_ROOT is not None:
     BASE = PORTABLE_ROOT / "programdata"
 else:
-    BASE = Path(os.getenv("PROGRAMDATA") or os.getenv("ALLUSERSPROFILE") or r"C:\ProgramData") / "ADSI-InverterDashboard"
+    BASE = Path(os.getenv("PROGRAMDATA") or os.getenv("ALLUSERSPROFILE") or r"C:\ProgramData") / "InverterDashboard"
 
 HISTORY_CTX   = BASE / "history/context/global/global.json"
 FORECAST_CTX  = BASE / "forecast/context/global/global.json"
@@ -65,8 +66,8 @@ if EXPLICIT_DATA_DIR:
 elif PORTABLE_ROOT is not None:
     APP_DB_FILE = PORTABLE_ROOT / "db" / "adsi.db"
 else:
-    APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".adsi-dashboard")))
-    APP_DB_FILE = APPDATA_ROOT / "ADSI-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
+    APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".inverter-dashboard")))
+    APP_DB_FILE = APPDATA_ROOT / "Inverter-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
 
 for _d in [WEATHER_DIR, MODEL_FILE.parent, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
     _d.mkdir(parents=True, exist_ok=True)
@@ -1680,7 +1681,7 @@ def run_manual_generation(dates: list[datetime.date]) -> bool:
 
 def parse_cli_args():
     parser = argparse.ArgumentParser(
-        description="ADSI Forecast Service - daemon mode or manual day-ahead generation",
+        description="Inverter Dashboard Forecast Service - daemon mode or manual day-ahead generation",
     )
     parser.add_argument(
         "--generate-date",
@@ -1742,7 +1743,7 @@ def main() -> None:
     cap_max = float(profile["max_kw"])
 
     log.info("=" * 70)
-    log.info("ADSI Day-Ahead Forecast Service  v3.0")
+    log.info("Inverter Dashboard — Day-Ahead Forecast Service  v3.0")
     log.info("Site          : Configured  (%.6f N  %.6f E)", LAT_DEG, LON_DEG)
     log.info("Inverters     : %.0f kW max / %.0f kW dependable each", UNIT_KW_MAX, UNIT_KW_DEPENDABLE)
     log.info(

@@ -1,8 +1,8 @@
 {
-  "name": "adsi-dashboard",
-  "version": "2.1.0",
-  "description": "Desktop dashboard for ADSI inverter monitoring, reporting, and remote replication.",
-  "author": "ADSI Team",
+  "name": "inverter-dashboard",
+  "version": "2.2.0",
+  "description": "Industrial inverter monitoring, analytics, forecasting, and remote replication dashboard. Designed and developed by Engr. Clariden Montaño REE (Engr. M.).",
+  "author": "Engr. Clariden Montaño REE",
   "main": "electron/main.js",
   "scripts": {
     "start": "node start-electron.js",
@@ -28,7 +28,7 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.adsi.dashboard",
+    "appId": "com.engr-m.inverter-dashboard",
     "productName": "Inverter Dashboard",
     "directories": {
       "output": "release",

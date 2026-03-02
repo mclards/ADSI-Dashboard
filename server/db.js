@@ -9,15 +9,23 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
-const EXPLICIT_DATA_DIR = String(process.env.ADSI_DATA_DIR || "").trim();
-const PORTABLE_ROOT = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
-const DATA_DIR = EXPLICIT_DATA_DIR
-  ? EXPLICIT_DATA_DIR
-  : PORTABLE_ROOT
-    ? path.join(PORTABLE_ROOT, "db")
-    : process.env.APPDATA
-      ? path.join(process.env.APPDATA, "ADSI-Dashboard")
-      : path.join(os.homedir(), ".adsi-dashboard");
+const EXPLICIT_DATA_DIR = String(process.env.IM_DATA_DIR || "").trim();
+const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
+function resolveDataDir() {
+  if (EXPLICIT_DATA_DIR) return EXPLICIT_DATA_DIR;
+  if (PORTABLE_ROOT) return path.join(PORTABLE_ROOT, "db");
+  if (process.env.APPDATA) {
+    const preferred = path.join(process.env.APPDATA, "Inverter-Dashboard");
+    const legacy    = path.join(process.env.APPDATA, "ADSI-Dashboard");
+    // Migrate: if old dir exists and new does not, rename it transparently.
+    if (!fs.existsSync(preferred) && fs.existsSync(legacy)) {
+      try { fs.renameSync(legacy, preferred); } catch (_) { return legacy; }
+    }
+    return preferred;
+  }
+  return path.join(os.homedir(), ".inverter-dashboard");
+}
+const DATA_DIR = resolveDataDir();
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 

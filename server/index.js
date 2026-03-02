@@ -57,10 +57,10 @@ app.use(express.static(path.join(__dirname, "../public")));
 app.use("/api", remoteApiTokenGate);
 const PORT = 3500;
 const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
-const PORTABLE_ROOT = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
+const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
-  : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "ADSI-InverterDashboard");
+  : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "InverterDashboard");
 const FORECAST_CTX_PATH = path.join(
   PROGRAMDATA_ROOT,
   "forecast",
@@ -2299,11 +2299,11 @@ function ensurePersistedSettings() {
     wireguardInterface: "",
     apiUrl: `${INVERTER_ENGINE_BASE_URL}/data`,
     writeUrl: `${INVERTER_ENGINE_BASE_URL}/write`,
-    csvSavePath: "C:\\Logs\\ADSI",
+    csvSavePath: "C:\\Logs\\InverterDashboard",
     inverterCount: "27",
     nodeCount: "4",
     invGridLayout: "4",
-    plantName: "ADSI Solar Plant",
+    plantName: "Solar Plant",
     operatorName: "OPERATOR",
     retainDays: "90",
     forecastProvider: "ml_local",
@@ -2772,7 +2772,7 @@ async function getWeeklyWeather(startDay) {
 }
 
 function resolveForecastLaunch() {
-  const explicit = String(process.env.ADSI_FORECAST_PATH || "").trim();
+  const explicit = String(process.env.IM_FORECAST_PATH || "").trim();
   if (explicit && fs.existsSync(explicit)) {
     const ext = path.extname(explicit).toLowerCase();
     if (ext === ".py") {
@@ -3050,22 +3050,41 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 }
 
 function buildTodayPacTotalsFromDb() {
-  // Keep header today-MWh source aligned with report computations.
+  // Use energy_5min (completed 5-min buckets) as primary source, supplemented by
+  // the poller's live PAC accumulator for the current partial bucket.
+  // This is reliable, fast, and resets automatically at midnight via timestamp boundary.
   const day = localDateStr();
-  const rows = buildDailyReportRowsForDate(day, {
-    persist: true,
-    includeTodayPartial: true,
-  });
-  return (rows || [])
-    .map((r) => ({
-      inverter: Number(r?.inverter || 0),
-      total_kwh: Number(Number(r?.kwh_total || 0).toFixed(6)),
+  const startTs = new Date(`${day}T00:00:00.000`).getTime();
+  const endTs = Date.now();
+
+  const e5Rows = db.prepare(
+    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter ORDER BY inverter ASC",
+  ).all(startTs, endTs);
+
+  const resultMap = new Map();
+  for (const r of e5Rows) {
+    const inv = Number(r?.inverter || 0);
+    if (inv > 0) resultMap.set(inv, Number(r?.total_kwh || 0));
+  }
+
+  // Supplement with live poller accumulator (includes current partial bucket).
+  // Take max per inverter: poller > e5min in normal operation, e5min > poller after restart.
+  const pollerRows = poller.getTodayPacKwh ? poller.getTodayPacKwh() : [];
+  for (const { inverter, total_kwh } of pollerRows) {
+    const inv = Number(inverter || 0);
+    if (inv <= 0 || !(total_kwh > 0)) continue;
+    resultMap.set(inv, Math.max(resultMap.get(inv) || 0, total_kwh));
+  }
+
+  return Array.from(resultMap.entries())
+    .map(([inverter, total_kwh]) => ({
+      inverter,
+      total_kwh: Number(Number(total_kwh).toFixed(6)),
     }))
-    .filter((r) => r.inverter > 0)
     .sort((a, b) => a.inverter - b.inverter);
 }
 
-const TODAY_ENERGY_CACHE_MS = 1000;
+const TODAY_ENERGY_CACHE_MS = 5000; // 5-second cache; fast query, 5-min lag from energy_5min is expected
 const todayEnergyCache = {
   day: "",
   ts: 0,
@@ -3196,10 +3215,23 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 
     let kwhTotal = Math.max(0, pacKwh);
     if (kwhTotal <= 0 && rows.length >= 2) {
-      const firstKwh = Number(rows[0]?.kwh || 0);
-      const lastKwh = Number(rows[rows.length - 1]?.kwh || 0);
-      const regDiff = lastKwh - firstKwh;
-      if (Number.isFinite(regDiff) && regDiff > 0) kwhTotal = regDiff;
+      // Per-unit register difference (rows are mixed-unit, sorted by ts).
+      const unitFirst = new Map();
+      const unitLast = new Map();
+      for (const r of rows) {
+        const unit = Number(r?.unit || 0);
+        const kwh = Number(r?.kwh || 0);
+        if (!unit || !Number.isFinite(kwh)) continue;
+        if (!unitFirst.has(unit)) unitFirst.set(unit, kwh);
+        unitLast.set(unit, kwh);
+      }
+      let regTotal = 0;
+      for (const [unit, firstKwh] of unitFirst.entries()) {
+        const lastKwh = unitLast.get(unit) || firstKwh;
+        const diff = lastKwh - firstKwh;
+        if (Number.isFinite(diff) && diff > 0) regTotal += diff;
+      }
+      if (regTotal > 0) kwhTotal = regTotal;
     }
     const expectedNodeUptimeS =
       expectedSolarWindowS * REPORT_EXPECTED_NODES_PER_INVERTER;
@@ -3560,7 +3592,7 @@ app.ws("/ws", (ws) => {
       data: getRuntimeLiveData(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
-        plantName: getSetting("plantName", "ADSI Solar Plant"),
+        plantName: getSetting("plantName", "Solar Plant"),
       },
     }),
   );
@@ -4050,11 +4082,11 @@ app.get("/api/settings", (req, res) =>
     ),
     apiUrl: getSetting("apiUrl", `${INVERTER_ENGINE_BASE_URL}/data`),
     writeUrl: getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`),
-    csvSavePath: getSetting("csvSavePath", "C:\\Logs\\ADSI"),
+    csvSavePath: getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     inverterCount: Number(getSetting("inverterCount", 27)),
     nodeCount: Number(getSetting("nodeCount", 4)),
     invGridLayout: sanitizeInvGridLayout(getSetting("invGridLayout", "4")),
-    plantName: getSetting("plantName", "ADSI Solar Plant"),
+    plantName: getSetting("plantName", "Solar Plant"),
     operatorName: getSetting("operatorName", "OPERATOR"),
     retainDays: Number(getSetting("retainDays", 90)),
     forecastProvider: String(getSetting("forecastProvider", "ml_local") || "ml_local").trim().toLowerCase() === "solcast" ? "solcast" : "ml_local",
@@ -4274,7 +4306,7 @@ app.post("/api/settings", (req, res) => {
   }
   res.json({
     ok: true,
-    csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\ADSI"),
+    csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     exportDirCreated,
   });
 });

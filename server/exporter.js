@@ -10,10 +10,10 @@ const ExcelJS = require('exceljs');
 const { db, stmts, getSetting } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
-const PORTABLE_ROOT = String(process.env.ADSI_PORTABLE_DATA_DIR || '').trim();
+const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || '').trim();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, 'programdata')
-  : path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'ADSI-InverterDashboard');
+  : path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'InverterDashboard');
 const FORECAST_CTX_PATH = path.join(
   PROGRAMDATA_ROOT,
   'forecast',
@@ -433,7 +433,7 @@ function resolveExportDir(inverter, categoryFolder) {
     throw new Error(`[exporter] Invalid export category folder: "${categoryFolder}"`);
   }
 
-  const base = getSetting('csvSavePath', 'C:\\Logs\\ADSI');
+  const base = getSetting('csvSavePath', 'C:\\Logs\\InverterDashboard');
   const invDir = path.join(base, inverterFolderLabel(inverter));
   ensureDir(invDir);
 
@@ -521,7 +521,7 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     Date:         fmtDate(occurredTs),
     Time:         fmtTime(occurredTs),
     DateTime:     fmtDateTime(occurredTs),
-    Plant:        getSetting('plantName','ADSI Solar Plant'),
+    Plant:        getSetting('plantName','Solar Plant'),
     Operator:     operator,
     Inverter:     `INV-${String(r.inverter).padStart(2,'0')}`,
     Unit:         r.unit,
@@ -726,7 +726,7 @@ async function exportInverterData({ startTs, endTs, inverter, format }) {
       rowsOut.push({
         Date: fmtDate(r.ts),
         Time: fmtTime(r.ts),
-        Plant: getSetting('plantName', 'ADSI Solar Plant'),
+        Plant: getSetting('plantName', 'Solar Plant'),
         Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
         UnitNode: r.unit,
         Vdc_V: Number(r.vdc || 0).toFixed(1),
@@ -811,7 +811,7 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
     aggregated.sort((a, b) => (a.inverter - b.inverter) || (a.ts - b.ts));
   }
 
-  const plantName = getSetting('plantName', 'ADSI Solar Plant');
+  const plantName = getSetting('plantName', 'Solar Plant');
   const mapped = aggregated.map((r) => ({
     Date:          fmtDate(r.ts),
     Time:          fmtTime(r.ts),
@@ -858,7 +858,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
     : db.prepare('SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
 
   const mapped = raw.map(r => ({
-    Date: fmtDate(r.ts), Time: fmtTime(r.ts), Plant: getSetting('plantName','ADSI Solar Plant'),
+    Date: fmtDate(r.ts), Time: fmtTime(r.ts), Plant: getSetting('plantName','Solar Plant'),
     Operator: r.operator || 'OPERATOR',
     Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
     Node: r.node === 0 ? 'ALL' : `Node-${r.node}`,
@@ -890,7 +890,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
 async function exportDailyReport({ startTs, endTs, date, format }) {
   const dir = resolveExportDir('all', EXPORT_FOLDERS.daily);
   const { invCount } = readInverterConfig();
-  const plantName = getSetting('plantName', 'ADSI Solar Plant');
+  const plantName = getSetting('plantName', 'Solar Plant');
 
   let dbRows;
   let s;
@@ -996,7 +996,7 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
     (a, b) => a - b,
   );
 
-  const plantName = getSetting('plantName', 'ADSI Solar Plant');
+  const plantName = getSetting('plantName', 'Solar Plant');
   const rows = allTs.map((ts) => {
     const actualKwh   = Math.max(0, safeNum(actualMap.get(ts)));
     const dayAheadKwh = Math.max(0, safeNum(dayAheadMap.get(ts)));

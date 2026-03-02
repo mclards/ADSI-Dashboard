@@ -3261,6 +3261,152 @@ label[data-required]::after {
   color: var(--accent);
 }
 
+/* ─── Guide author banner ────────────────────────────────────────────────── */
+.guide-author-banner {
+  text-align: center;
+  padding: 14px 16px 10px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(52,211,153,0.08) 0%, rgba(96,165,250,0.06) 100%);
+  border: 1px solid rgba(52,211,153,0.2);
+}
+.guide-author-app {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 0.3px;
+}
+.guide-author-ver {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 4px;
+}
+.guide-author-desc {
+  font-size: 10.5px;
+  color: var(--text2);
+  margin-top: 4px;
+  line-height: 1.45;
+}
+.guide-author-credit {
+  font-size: 11px;
+  color: var(--text);
+  margin-top: 8px;
+  font-weight: 600;
+}
+.guide-author-credit strong {
+  color: var(--accent);
+}
+.guide-author-credit em {
+  color: var(--cyan);
+}
+.guide-author-copy {
+  font-size: 9.5px;
+  color: var(--text3);
+  margin-top: 4px;
+}
+.guide-footer-credit {
+  text-align: center;
+  margin-top: 18px;
+  padding: 10px 16px;
+  font-size: 10px;
+  color: var(--text3);
+  border-top: 1px solid var(--border2);
+}
+
+/* ─── About sidebar expanded styles ─────────────────────────────────────── */
+.side-about-appname {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
+}
+.side-about-ver {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 4px;
+}
+.side-about-desc {
+  font-size: 9.5px;
+  color: var(--text2);
+  line-height: 1.4;
+}
+.side-about-sep {
+  height: 1px;
+  background: var(--border2);
+  margin: 4px 0;
+}
+.side-about-author-block {
+  display: grid;
+  gap: 2px;
+}
+.side-about-author-label {
+  font-size: 9px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.side-about-author-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.side-about-author-alias {
+  font-size: 9.5px;
+  color: var(--cyan);
+  font-style: italic;
+}
+.side-about-copyright {
+  font-size: 9px;
+  color: var(--text3);
+  line-height: 1.4;
+  margin-top: 3px;
+}
+.side-about-hw {
+  font-size: 9.5px;
+  color: var(--text2);
+  line-height: 1.4;
+}
+.side-about-db {
+  font-size: 9px;
+  color: var(--text3);
+}
+.side-about-db code {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--cyan);
+  overflow-wrap: anywhere;
+}
+
+/* ─── App footer ─────────────────────────────────────────────────────────── */
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 10px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--border2);
+  background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.18) 100%);
+  font-size: 10px;
+  color: var(--text3);
+  flex-shrink: 0;
+}
+.app-footer-name {
+  font-weight: 700;
+  color: var(--text2);
+}
+.app-footer-sep {
+  color: var(--text3);
+  opacity: 0.5;
+}
+.app-footer-author strong {
+  color: var(--accent);
+}
+.app-footer-copy {
+  font-size: 9.5px;
+}
+
 /* ─── Cross-tab polish (non-inverter pages) ─────────────────────────────── */
 #page-analytics .page-toolbar,
 #page-alarms .page-toolbar,

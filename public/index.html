@@ -26,10 +26,10 @@
             <img
               id="logo-img"
               src="/assets/adsi_logo.png"
-              alt="ADSI"
+              alt="Inverter Dashboard"
             />
             <span id="logo-text" class="logo-fallback" style="display: none"
-              >ADSI</span
+              >IM</span
             >
           </div>
         </div>
@@ -118,10 +118,21 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title">ℹ ABOUT</div>
           <div class="side-about-info">
-            <div><b>Inverter Dashboard v2.0</b></div>
-            <div>Inverter: Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor</div>
-            <div>Manual Reference: AAV2015IQE01_B</div>
-            <div>DB Path: <code id="setDataDir">—</code></div>
+            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2</span></div>
+            <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
+            <div class="side-about-sep"></div>
+            <div class="side-about-author-block">
+              <div class="side-about-author-label">Designed &amp; Developed by</div>
+              <div class="side-about-author-name">Engr. Clariden Montaño REE</div>
+              <div class="side-about-author-alias">Alias: Engr. M.</div>
+              <div class="side-about-copyright">© 2026 Engr. Clariden Montaño REE.<br>All rights reserved.</div>
+            </div>
+            <div class="side-about-sep"></div>
+            <div class="side-about-hw"><b>Hardware:</b> Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor</div>
+            <div class="side-about-hw"><b>Manual:</b> AAV2015IQE01_B</div>
+            <div class="side-about-hw"><b>Protocol:</b> Modbus TCP (27 inverters)</div>
+            <div class="side-about-sep"></div>
+            <div class="side-about-db">DB: <code id="setDataDir">—</code></div>
           </div>
           <div class="side-about-actions">
             <button id="btnOpenGuide" class="btn btn-outline">📘 Open User Guide</button>
@@ -788,7 +799,7 @@
                   type="text"
                   id="setPlantName"
                   class="inp"
-                  placeholder="ADSI Solar Plant"
+                  placeholder="Solar Plant"
                   aria-describedby="plantNameHelp"
               /></label>
               <small id="plantNameHelp">Name of your solar installation (required)</small>
@@ -965,7 +976,7 @@
                   type="text"
                   id="setCsvPath"
                   class="inp inp-lg"
-                  placeholder="C:\Logs\ADSI"
+                  placeholder="C:\Logs\InverterDashboard"
               /></label>
               <label
                 >Retention (days)<input
@@ -1213,6 +1224,14 @@
           </div>
         </div>
       </section>
+
+      <footer class="app-footer">
+        <span class="app-footer-name">Inverter Dashboard v2.2</span>
+        <span class="app-footer-sep">·</span>
+        <span class="app-footer-author">Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.)</span>
+        <span class="app-footer-sep">·</span>
+        <span class="app-footer-copy">© 2026 Engr. Clariden Montaño REE. All rights reserved.</span>
+      </footer>
     </main>
 
     <!-- ═══════════════════════════ OVERLAYS ══════════════════════════════════════ -->
@@ -1238,10 +1257,20 @@
     <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
       <div class="guide-modal-card">
         <div class="guide-modal-head">
-          <div class="guide-modal-title">Dashboard User Guide</div>
+          <div class="guide-modal-title">Inverter Dashboard — User Guide &amp; Manual</div>
           <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">✕</button>
         </div>
         <div class="guide-modal-body">
+
+          <div class="guide-author-banner">
+            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2</span></div>
+            <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
+            <div class="guide-author-credit">
+              Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
+            </div>
+            <div class="guide-author-copy">© 2026 Engr. Clariden Montaño REE. All rights reserved.</div>
+          </div>
+
           <div class="guide-visual-grid">
             <div class="guide-visual-item">
               <span class="mdi mdi-flash guide-visual-icon"></span>
@@ -1249,7 +1278,7 @@
             </div>
             <div class="guide-visual-item">
               <span class="mdi mdi-chart-line guide-visual-icon"></span>
-              <div class="guide-visual-text">Analytics with actual vs day-ahead trends</div>
+              <div class="guide-visual-text">Analytics with actual vs day-ahead forecast</div>
             </div>
             <div class="guide-visual-item">
               <span class="mdi mdi-bell-alert guide-visual-icon"></span>
@@ -1257,67 +1286,125 @@
             </div>
             <div class="guide-visual-item">
               <span class="mdi mdi-file-export guide-visual-icon"></span>
-              <div class="guide-visual-text">Structured exports in Excel/CSV</div>
+              <div class="guide-visual-text">Structured exports in Excel / CSV</div>
+            </div>
+            <div class="guide-visual-item">
+              <span class="mdi mdi-brain guide-visual-icon"></span>
+              <div class="guide-visual-text">AI solar forecasting (physics + ML)</div>
+            </div>
+            <div class="guide-visual-item">
+              <span class="mdi mdi-server-network guide-visual-icon"></span>
+              <div class="guide-visual-text">Remote replication and gateway sync</div>
             </div>
           </div>
 
           <div class="guide-accordion">
             <details open>
-              <summary>1. Startup and Access</summary>
+              <summary>1. Overview &amp; Purpose</summary>
               <ul>
-                <li>Login is required before backend/server startup proceeds.</li>
-                <li>License/trial validation runs before opening the dashboard.</li>
-                <li>Near-expiry license warning appears as a fixed notice with upload action.</li>
+                <li>This system monitors up to 27 Ingeteam INGECON SUN inverters via Modbus TCP in real-time.</li>
+                <li>It records 5-minute energy data, raw readings, daily reports, alarms, and audit logs in a local SQLite database.</li>
+                <li>A physics + machine-learning forecast engine generates day-ahead 5-minute power predictions.</li>
+                <li>Multi-site data replication allows gateway (remote) and local plant modes via authenticated REST API.</li>
+                <li>The dashboard runs as a self-contained desktop application (Electron + Express) — no internet required for core functions.</li>
               </ul>
             </details>
             <details>
-              <summary>2. Inverters and Node Controls</summary>
+              <summary>2. Startup and Access</summary>
               <ul>
-                <li>Each inverter card shows AC/DC power, node table, alarm code, and last seen time.</li>
-                <li>Node control buttons follow actual runtime state (START/STOP/ISOLATED).</li>
-                <li>Bulk command panel accepts ranges like <code>1-13,16,23-27</code> and requires authorization.</li>
+                <li>Launch the app; the login window opens first before any backend starts.</li>
+                <li>Default credentials: <code>admin / 1234</code>. Change via Settings after first login.</li>
+                <li>License/trial validation runs automatically before the dashboard loads.</li>
+                <li>Near-expiry license shows a fixed banner with a license file upload action.</li>
+                <li>The backend Python service (inverter engine) and Node.js Express server start after authentication.</li>
               </ul>
             </details>
             <details>
-              <summary>3. Analytics and Forecast</summary>
+              <summary>3. Inverters Page &amp; Node Controls</summary>
               <ul>
-                <li>Analytics displays total plant and per-inverter MWh trends.</li>
-                <li>Day-ahead forecast overlays actual data and updates with selected interval/date.</li>
-                <li>Weekly weather context supports forecast interpretation.</li>
+                <li>Each inverter card displays: AC power (kW), DC voltage/current, active alarm code, online status, and last-seen timestamp.</li>
+                <li>Expand a card to see the per-node table: node ID, state (RUNNING / STOPPED / ISOLATED), VAC, IAC, PAC, VDC.</li>
+                <li>Node control buttons reflect live Modbus state — START, STOP, and ISOLATED commands are sent with confirmation.</li>
+                <li>Bulk command panel accepts inverter range expressions (e.g., <code>1-13,16,23-27</code>) and requires an auth key.</li>
+                <li>Filter bar lets you show All, Online, Offline, or Alarmed inverters. Grid layout is configurable (2–7 columns).</li>
               </ul>
             </details>
             <details>
-              <summary>4. Alarms, Audit, and Report</summary>
+              <summary>4. Analytics &amp; Day-Ahead Forecast</summary>
               <ul>
-                <li>Alarm table tracks occurred time, cleared time, duration, status, and ACK state.</li>
-                <li>Audit table records operator, scope, command result, and IP source.</li>
-                <li>Report tab summarizes daily and weekly MWh, availability, and performance metrics.</li>
+                <li>Analytics chart shows total plant MWh trend for a selected date, in 5-minute or hourly resolution.</li>
+                <li>Per-inverter breakdown charts show individual contribution and performance deviation.</li>
+                <li>Day-ahead forecast overlay renders predicted vs actual power on the same axis with confidence bands.</li>
+                <li>Weekly weather summary shows temperature, cloud cover, and irradiance for forecast interpretation.</li>
+                <li>Forecast is generated by the local ML engine; Solcast API integration is available as an alternative source.</li>
               </ul>
             </details>
             <details>
-              <summary>5. Export and Data Persistence</summary>
+              <summary>5. Alarms, Audit Log &amp; Reports</summary>
               <ul>
-                <li>Exports support Excel (.xlsx default) and CSV where applicable.</li>
-                <li>Export files are grouped by inverter scope and data category in subfolders.</li>
-                <li>Export options/date selections and core settings persist across app restarts.</li>
+                <li>Alarm table shows: occurred time, cleared time, duration, inverter, node, alarm code (hex), severity, and ACK state.</li>
+                <li>Click ACK to acknowledge individual alarms; ACK All clears the entire active alarm list.</li>
+                <li>Audit log records every operator control action: who, what inverter/node, result, and source IP.</li>
+                <li>Daily Report summarizes MWh, peak PAC, average PAC, uptime, and alarm count per inverter.</li>
+                <li>Weekly and monthly rollup views are available with sortable columns and export options.</li>
               </ul>
             </details>
             <details>
-              <summary>6. IP Config and Topology Windows</summary>
+              <summary>6. Data Export</summary>
               <ul>
-                <li>IP Config controls inverter IPs, polling interval, and enabled nodes.</li>
-                <li>Topology provides interactive status mapping, filters, and quick navigation.</li>
-                <li>Both windows open separately to avoid blocking main dashboard operations.</li>
+                <li>All exports use Excel (.xlsx) by default. Most also support raw CSV fallback.</li>
+                <li>Export types: Readings, Energy 5-min, Daily Report, Alarm History, Audit Log, Forecast.</li>
+                <li>Files are organized into subfolders by type and inverter scope under the configured export directory.</li>
+                <li>Filename convention follows plant-standard format: <code>DDMMYY_Type_InverterX.xlsx</code>.</li>
+                <li>Export path is configurable via Settings. Use the Browse button to pick a folder or enter manually.</li>
               </ul>
             </details>
             <details>
-              <summary>7. Keyboard and Operations</summary>
+              <summary>7. Settings &amp; Configuration</summary>
               <ul>
-                <li><code>Ctrl+T</code>: Open topology window.</li>
-                <li><code>Ctrl+I</code>: Open IP configuration window.</li>
-                <li><code>Ctrl + / - / 0</code>: Native Electron zoom in/out/reset.</li>
+                <li><b>Plant Name:</b> Used as a label on all export sheets and report headers.</li>
+                <li><b>Operator Name:</b> Logged in the audit trail for every control action.</li>
+                <li><b>Data Retention:</b> Configurable in days for readings/energy (default 90) and audit log (default 365).</li>
+                <li><b>Forecast Provider:</b> Choose between local ML engine or Solcast API.</li>
+                <li><b>Replication Mode:</b> Set to Gateway (pull from remote) or Local Plant (push to remote).</li>
+                <li><b>Remote URL &amp; Token:</b> Required for replication. Token must match the remote node's API key.</li>
               </ul>
             </details>
+            <details>
+              <summary>8. Remote Replication</summary>
+              <ul>
+                <li>Replication syncs inverter readings, energy data, alarms, and daily reports between a local plant and a gateway server.</li>
+                <li>Push mode: local plant sends new records to the remote gateway since last sync timestamp.</li>
+                <li>Pull mode: gateway downloads incremental records from the remote plant node.</li>
+                <li>Transfer progress is shown as a download-bar panel with bytes, percentage, and speed (KB/s).</li>
+                <li>Auto-sync can be enabled to run replication at a configured interval automatically.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>9. IP Configuration &amp; Topology</summary>
+              <ul>
+                <li>IP Config window lets you assign IP addresses, polling intervals, and enabled node counts per inverter.</li>
+                <li>Changes are saved to <code>ipconfig.json</code> and applied on next polling cycle without restart.</li>
+                <li>Topology window provides an interactive grid showing all 27 inverters × 4 nodes with live status colors.</li>
+                <li>Filter by status (online, offline, alarmed, isolated) or click a cell to navigate to the inverter card.</li>
+                <li>Both windows open as separate Electron windows and do not block the main dashboard.</li>
+              </ul>
+            </details>
+            <details>
+              <summary>10. Keyboard Shortcuts &amp; Interface Tips</summary>
+              <ul>
+                <li><code>Ctrl+T</code>: Open Topology window.</li>
+                <li><code>Ctrl+I</code>: Open IP Configuration window.</li>
+                <li><code>Ctrl + =</code> / <code>Ctrl + -</code> / <code>Ctrl+0</code>: Zoom in / out / reset (Electron native).</li>
+                <li>Click the notification bell (🔔) to view active alarms without leaving the current page.</li>
+                <li>The Net I/O widget (in Settings) shows live WebSocket RX/TX speed in KB/s.</li>
+                <li>Theme can be changed (Dark / Light / Classic) from the Settings page and persists across restarts.</li>
+              </ul>
+            </details>
+          </div>
+
+          <div class="guide-footer-credit">
+            Inverter Dashboard v2.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>
