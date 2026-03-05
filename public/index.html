@@ -18,7 +18,7 @@
     <link rel="stylesheet" href="css/style.css" />
   </head>
   <body>
-    <!-- ═══════════════════════════ HEADER ═══════════════════════════════════════ -->
+    <!-- --------------------------- HEADER --------------------------------------- -->
     <header id="titlebar">
       <div class="tb-metrics-row">
         <div class="tb-left">
@@ -100,34 +100,34 @@
     <aside id="sideNav" class="side-nav">
       <nav class="tb-nav" id="mainNav">
         <button class="nav-btn active" data-page="inverters">
-          <span class="nav-icon">⚡</span><span>INVERTERS</span>
+          <span class="nav-icon">&#9889;</span><span>INVERTERS</span>
         </button>
         <button class="nav-btn" data-page="analytics">
-          <span class="nav-icon">📈</span><span>ANALYTICS</span>
+          <span class="nav-icon">&#128200;</span><span>ANALYTICS</span>
         </button>
         <button class="nav-btn" data-page="alarms">
-          <span class="nav-icon">🔔</span><span>ALARMS</span>
+          <span class="nav-icon">&#128680;</span><span>ALARMS</span>
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
         </button>
         <button class="nav-btn" data-page="energy">
-          <span class="nav-icon">🔋</span><span>ENERGY</span>
+          <span class="nav-icon">&#9889;</span><span>ENERGY</span>
         </button>
         <button class="nav-btn" data-page="audit">
-          <span class="nav-icon">📋</span><span>AUDIT</span>
+          <span class="nav-icon">&#128221;</span><span>AUDIT</span>
         </button>
         <button class="nav-btn" data-page="report">
-          <span class="nav-icon">📊</span><span>REPORT</span>
+          <span class="nav-icon">&#128202;</span><span>REPORT</span>
         </button>
         <button class="nav-btn" data-page="export">
-          <span class="nav-icon">💾</span><span>EXPORT</span>
+          <span class="nav-icon">&#128229;</span><span>EXPORT</span>
         </button>
         <button class="nav-btn" data-page="settings">
-          <span class="nav-icon">⚙</span><span>SETTINGS</span>
+          <span class="nav-icon">&#9881;</span><span>SETTINGS</span>
         </button>
         <section id="aboutSection" class="side-about-card" aria-label="About">
-          <div class="side-about-title">ℹ ABOUT</div>
+          <div class="side-about-title">&#8505;&#65039; ABOUT</div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.2</span></div>
+            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.6</span></div>
             <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
@@ -144,16 +144,16 @@
             <div class="side-about-hw"><b>Update:</b> <span id="aboutUpdateStatus">—</span></div>
           </div>
           <div class="side-about-actions">
-            <button id="btnAboutCheckUpdate" class="btn btn-outline">⬆ Check App Update</button>
-            <button id="btnOpenGuide" class="btn btn-outline">📘 Open User Guide</button>
+            <button id="btnAboutCheckUpdate" class="btn btn-outline">&#8635; Check App Update</button>
+            <button id="btnOpenGuide" class="btn btn-outline">&#128214; Open User Guide</button>
           </div>
         </section>
       </nav>
     </aside>
 
-    <!-- ═══════════════════════════ MAIN CONTENT ═════════════════════════════════ -->
+    <!-- --------------------------- MAIN CONTENT --------------------------------- -->
     <main id="main">
-      <!-- ─── PAGE: INVERTERS ─────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: INVERTERS ------------------------------------------------------- -->
       <section id="page-inverters" class="page active">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -189,7 +189,7 @@
         <div class="inv-grid" id="invGrid"></div>
       </section>
 
-      <!-- ─── PAGE: ANALYTICS ────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: ANALYTICS ------------------------------------------------------ -->
       <section id="page-analytics" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -218,7 +218,7 @@
         <div class="chart-grid analytics-grid" id="analyticsCharts"></div>
       </section>
 
-      <!-- ─── PAGE: ALARMS ───────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: ALARMS --------------------------------------------------------- -->
       <section id="page-alarms" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -236,7 +236,7 @@
               Search
             </button>
             <button id="btnAckAll" class="btn btn-outline">
-              ✔ Ack All
+              &#10003; Ack All
             </button>
           </div>
           <div class="tl-right">
@@ -264,7 +264,7 @@
         </div>
       </section>
 
-      <!-- ─── PAGE: ENERGY LOG ───────────────────────────────────────────────────── -->
+      <!-- --- PAGE: ENERGY LOG ----------------------------------------------------- -->
       <section id="page-energy" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -328,7 +328,7 @@
         </div>
       </section>
 
-      <!-- ─── PAGE: AUDIT LOG ────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: AUDIT LOG ------------------------------------------------------ -->
       <section id="page-audit" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -456,7 +456,7 @@
         </div>
       </section>
 
-      <!-- ─── PAGE: DAILY REPORT ─────────────────────────────────────────────────── -->
+      <!-- --- PAGE: DAILY REPORT --------------------------------------------------- -->
       <section id="page-report" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -472,7 +472,7 @@
               </select>
             </label>
             <button id="btnExportDailyReport" class="btn btn-outline">
-              ⬇ Export
+              &#11015; Export
             </button>
           </div>
           <div class="tl-right" id="reportKpis"></div>
@@ -594,11 +594,11 @@
         </div>
       </section>
 
-      <!-- ─── PAGE: EXPORT ───────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: EXPORT --------------------------------------------------------- -->
       <section id="page-export" class="page">
         <div class="export-grid">
           <div class="exp-card">
-            <div class="exp-icon exp-icon-alarm">🔔</div>
+            <div class="exp-icon exp-icon-alarm">&#128680;</div>
             <div class="exp-title">Alarm Log Export</div>
             <div class="exp-desc">
               Full alarm history with fault codes, severity levels, duration,
@@ -628,13 +628,13 @@
               id="btnExportAlarms"
               class="btn btn-accent btn-full"
             >
-              ⬇ Export Alarms
+              &#11015; Export Alarms
             </button>
             <div class="exp-result" id="expAlarmResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-energy">⚡</div>
+            <div class="exp-icon exp-icon-energy">&#9889;</div>
             <div class="exp-title">Energy Export</div>
             <div class="exp-desc">
               Date, last reading time, inverter, node, total MWh register, and
@@ -661,13 +661,13 @@
               </label>
             </div>
             <button id="btnRunEnergyExport" class="btn btn-accent btn-full">
-              ⬇ Export Energy
+              &#11015; Export Energy
             </button>
             <div class="exp-result" id="expEnergyResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-report">📉</div>
+            <div class="exp-icon exp-icon-report">&#128202;</div>
             <div class="exp-title">Day-ahead vs Actual Export</div>
             <div class="exp-desc">
               Plant total interval energy comparison between actual measured MWh
@@ -699,13 +699,13 @@
               id="btnRunForecastExport"
               class="btn btn-accent btn-full"
             >
-              ⬇ Export Day-ahead vs Actual
+              &#11015; Export Day-ahead vs Actual
             </button>
             <div class="exp-result" id="expForecastResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-energy">🧾</div>
+            <div class="exp-icon exp-icon-energy">&#9889;</div>
             <div class="exp-title">Inverter Data Export</div>
             <div class="exp-desc">
               Full inverter sampled dataset
@@ -736,13 +736,13 @@
               id="btnRunInvDataExport"
               class="btn btn-accent btn-full"
             >
-              ⬇ Export Inverter Data
+              &#11015; Export Inverter Data
             </button>
             <div class="exp-result" id="expInvDataResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-audit">📋</div>
+            <div class="exp-icon exp-icon-audit">&#128221;</div>
             <div class="exp-title">Audit Log Export</div>
             <div class="exp-desc">
               All operator control actions — start/stop commands, timestamps,
@@ -772,13 +772,13 @@
               id="btnExportAudit"
               class="btn btn-accent btn-full"
             >
-              ⬇ Export Audit
+              &#11015; Export Audit
             </button>
             <div class="exp-result" id="expAuditResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-report">📊</div>
+            <div class="exp-icon exp-icon-report">&#128202;</div>
             <div class="exp-title">Daily Generation Report</div>
             <div class="exp-desc">
               Plant performance summary: total MWh, peak power, uptime, and
@@ -803,18 +803,58 @@
               id="btnRunDailyReportExport"
               class="btn btn-accent btn-full"
             >
-              ⬇ Export Daily Report
+              &#11015; Export Daily Report
             </button>
             <div class="exp-result" id="expReportResult"></div>
           </div>
         </div>
       </section>
 
-      <!-- ─── PAGE: SETTINGS ─────────────────────────────────────────────────────── -->
+      <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->
       <section id="page-settings" class="page">
         <div class="settings-wrap">
-          <div class="sgroup settings-card" id="plantConfigSection">
-            <div class="sgroup-title">🏭 Plant Configuration</div>
+          <div class="settings-nav-bar" id="settingsNavBar">
+            <label class="settings-picker-label">
+              Settings Section
+              <select id="settingsSectionPicker" class="sel">
+                <option value="plantConfigSection">Plant Configuration</option>
+                <option value="opsCompactSection">Data / Storage / Modbus</option>
+                <option value="connectivitySection">Connectivity + Replication</option>
+                <option value="forecastSection">Forecast</option>
+                <option value="licenseSection">License</option>
+                <option value="appUpdateSection">App Updates</option>
+                <option value="cloudBackupSection">Cloud Backup</option>
+              </select>
+            </label>
+            <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
+              <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection">Plant</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection">Data/Modbus</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">Connect+Rep</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="forecastSection">Forecast</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">License</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection">Updates</button>
+              <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection">Cloud</button>
+            </div>
+          </div>
+
+          <div class="sgroup-actions settings-actions-bar" id="settingsGlobalActions">
+            <button id="btnSaveSettings" class="btn btn-accent">
+              &#128190; Save Settings
+            </button>
+            <button id="btnPickExportFolder" class="btn btn-outline">
+              &#128194; Browse Export Folder
+            </button>
+            <button id="btnOpenExportFolder" class="btn btn-outline">
+              &#128193; Open Export Folder
+            </button>
+            <button id="btnOpenIpConfig" class="btn btn-outline">
+              &#127760; IP Configuration
+            </button>
+            <span class="smsg" id="settingsMsg"></span>
+          </div>
+
+          <div class="sgroup settings-card settings-section-active" id="plantConfigSection">
+            <div class="sgroup-title">&#127981; Plant Configuration</div>
             <div class="srow">
               <label
                 >Plant Name<input
@@ -862,7 +902,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
-            <div class="sgroup-title">🔧 Data / Storage / Modbus</div>
+            <div class="sgroup-title">&#128295; Data / Storage / Modbus</div>
             <div class="settings-subsection">
               <div class="settings-subtitle">Data API</div>
               <div class="srow">
@@ -919,124 +959,61 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
-            <div class="sgroup-title">🌐 Connectivity Mode (Tailscale Ready)</div>
-            <div class="srow">
-              <label
-                >Operation Mode
-                <select id="setOperationMode" class="sel">
-                  <option value="gateway">Gateway (Plant Polling)</option>
-                  <option value="remote">Remote (Via Gateway)</option>
-                </select>
-              </label>
-              <label
-                >Remote Gateway URL<input
-                  type="text"
-                  id="setRemoteGatewayUrl"
-                  class="inp inp-lg"
-                  placeholder="http://100.x.x.x:3500"
-              /></label>
-              <label
-                >Remote API Token<input
-                  type="password"
-                  id="setRemoteApiToken"
-                  class="inp inp-lg"
-                  autocomplete="off"
-                  placeholder="Shared token"
-              /></label>
-              <label
-                >Tailscale Device Hint<input
-                  type="text"
-                  id="setTailscaleDeviceHint"
-                  class="inp"
-                  placeholder="plant-gateway"
-              /></label>
-            </div>
-            <div class="sinfo" style="margin-top: 8px">
-              <div>
-                Use Gateway mode on the plant device. Use Remote mode on viewing/control devices and connect through Tailscale tailnet.
+            <div class="sgroup-title">&#127760; Connectivity + Replication</div>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Connectivity Mode (Tailscale Ready)</div>
+              <div class="srow">
+                <label
+                  >Operation Mode
+                  <select id="setOperationMode" class="sel">
+                    <option value="gateway">Gateway (Plant Polling)</option>
+                    <option value="remote">Remote (Via Gateway)</option>
+                  </select>
+                </label>
+                <label
+                  >Remote Gateway URL<input
+                    type="text"
+                    id="setRemoteGatewayUrl"
+                    class="inp inp-lg"
+                    placeholder="http://100.x.x.x:3500"
+                /></label>
+                <label
+                  >Remote API Token<input
+                    type="password"
+                    id="setRemoteApiToken"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Shared token"
+                /></label>
+                <label
+                  >Tailscale Device Hint<input
+                    type="text"
+                    id="setTailscaleDeviceHint"
+                    class="inp"
+                    placeholder="plant-gateway"
+                /></label>
+              </div>
+              <div class="sinfo" style="margin-top: 8px">
+                <div>
+                  Use Gateway mode on the plant device. Use Remote mode on viewing/control devices and connect through Tailscale tailnet.
+                </div>
+              </div>
+              <div class="srow" style="margin-top: 8px">
+                <label class="chk-inline">
+                  <input type="checkbox" id="setRemoteAutoSync" />
+                  <span>Auto Sync on Startup (Remote mode)</span>
+                </label>
+              </div>
+              <div class="sgroup-actions" style="margin-top: 8px">
+                <button id="btnTestRemoteGateway" class="btn btn-outline" type="button">
+                  &#128269; Test Remote Gateway
+                </button>
+                <button id="btnCheckTailscale" class="btn btn-outline" type="button">
+                  &#128737; Check Tailscale
+                </button>
+                <span class="smsg" id="networkMsg"></span>
               </div>
             </div>
-            <div class="srow" style="margin-top: 8px">
-              <label class="chk-inline">
-                <input type="checkbox" id="setRemoteAutoSync" />
-                <span>Auto Sync on Startup (Remote mode)</span>
-              </label>
-            </div>
-            <div class="sgroup-actions" style="margin-top: 8px">
-              <button id="btnTestRemoteGateway" class="btn btn-outline" type="button">
-                🔎 Test Remote Gateway
-              </button>
-              <button id="btnCheckTailscale" class="btn btn-outline" type="button">
-                🛡 Check Tailscale
-              </button>
-              <span class="smsg" id="networkMsg"></span>
-            </div>
-          </div>
-          <div class="sgroup settings-card" id="forecastSection">
-            <div class="sgroup-title">☀️ Forecast Integration (Solcast Ready)</div>
-            <div class="srow">
-              <label
-                >Forecast Source
-                <select id="setForecastProvider" class="sel">
-                  <option value="ml_local">Local ML (Current)</option>
-                  <option value="solcast">Solcast API</option>
-                </select></label
-              >
-              <label
-                >Solcast Base URL<input
-                  type="text"
-                  id="setSolcastBaseUrl"
-                  class="inp inp-lg"
-                  placeholder="https://api.solcast.com.au"
-              /></label>
-              <label
-                >Solcast API Key<input
-                  type="password"
-                  id="setSolcastApiKey"
-                  class="inp inp-lg"
-                  autocomplete="off"
-                  placeholder="API key"
-              /></label>
-              <label
-                >Resource ID<input
-                  type="text"
-                  id="setSolcastResourceId"
-                  class="inp"
-                  placeholder="rooftop/site resource id"
-              /></label>
-              <label
-                >Timezone<input
-                  type="text"
-                  id="setSolcastTimezone"
-                  class="inp"
-                  placeholder="Asia/Manila"
-              /></label>
-            </div>
-            <div class="sinfo">
-              <div>
-                Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
-              </div>
-            </div>
-            <div class="sgroup-actions">
-              <button
-                id="btnSolcastSaveTest"
-                class="btn btn-accent"
-                type="button"
-              >
-                💾 Save + Test Solcast
-              </button>
-              <button
-                id="btnSolcastTest"
-                class="btn btn-outline"
-                type="button"
-              >
-                🔎 Test Solcast Connection
-              </button>
-              <span class="smsg" id="solcastTestMsg"></span>
-            </div>
-          </div>
-          <div class="sgroup settings-card" id="replicationHealthSection">
-            <div class="sgroup-title">🛰 Replication &amp; Performance</div>
             <div class="settings-subsection">
               <div class="settings-subtitle">Replication Health</div>
               <div class="rep-health-grid">
@@ -1091,21 +1068,21 @@
               </div>
               <div class="replication-transfer-wrap">
                 <div class="license-label">Transfer Monitor</div>
-                <div id="netIoWidget" class="net-io-widget" title="Network I/O — Ingress ↓ / Egress ↑" aria-label="Network transfer rates">
+                <div id="netIoWidget" class="net-io-widget" title="Network I/O — Ingress &#8595; / Egress &#8593;" aria-label="Network transfer rates">
                   <div id="netIoRxRow" class="net-io-row">
-                    <span class="net-io-arrow net-io-rx-arrow">↓</span>
+                    <span class="net-io-arrow net-io-rx-arrow">&#8595;</span>
                     <span class="net-io-label">RX</span>
                     <span class="net-io-speed" id="netIoRxSpeed">0 B/s</span>
                   </div>
                   <div id="netIoTxRow" class="net-io-row">
-                    <span class="net-io-arrow net-io-tx-arrow">↑</span>
+                    <span class="net-io-arrow net-io-tx-arrow">&#8593;</span>
                     <span class="net-io-label">TX</span>
                     <span class="net-io-speed" id="netIoTxSpeed">0 B/s</span>
                   </div>
                   <div id="xferPanel" class="xfer-panel" hidden>
                     <div class="xfer-panel-sep"></div>
                     <div class="xfer-panel-row">
-                      <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">↑</span>
+                      <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">&#8593;</span>
                       <span id="xferLabel" class="xfer-label">Pushing...</span>
                       <span id="xferPct" class="xfer-pct">0%</span>
                     </div>
@@ -1122,13 +1099,13 @@
               </div>
               <div class="sgroup-actions">
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button">
-                  ↻ Refresh
+                  &#8635; Refresh
                 </button>
                 <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
-                  Pull Latest From Server
+                  Pull From Server
                 </button>
                 <button id="btnRunReplicationPush" class="btn btn-outline" type="button">
-                  Push Local To Server
+                  Push To Server
                 </button>
                 <span class="smsg" id="replicationMsg"></span>
               </div>
@@ -1197,8 +1174,71 @@
               </div>
             </div>
           </div>
+          <div class="sgroup settings-card" id="forecastSection">
+            <div class="sgroup-title">&#9728;&#65039; Forecast Integration (Solcast Ready)</div>
+            <div class="srow">
+              <label
+                >Forecast Source
+                <select id="setForecastProvider" class="sel">
+                  <option value="ml_local">Local ML (Current)</option>
+                  <option value="solcast">Solcast API</option>
+                </select></label
+              >
+              <label
+                >Solcast Base URL<input
+                  type="text"
+                  id="setSolcastBaseUrl"
+                  class="inp inp-lg"
+                  placeholder="https://api.solcast.com.au"
+              /></label>
+              <label
+                >Solcast API Key<input
+                  type="password"
+                  id="setSolcastApiKey"
+                  class="inp inp-lg"
+                  autocomplete="off"
+                  placeholder="API key"
+              /></label>
+              <label
+                >Resource ID<input
+                  type="text"
+                  id="setSolcastResourceId"
+                  class="inp"
+                  placeholder="rooftop/site resource id"
+              /></label>
+              <label
+                >Timezone<input
+                  type="text"
+                  id="setSolcastTimezone"
+                  class="inp"
+                  placeholder="Asia/Manila"
+              /></label>
+            </div>
+            <div class="sinfo">
+              <div>
+                Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
+              </div>
+            </div>
+            <div class="sgroup-actions">
+              <button
+                id="btnSolcastSaveTest"
+                class="btn btn-accent"
+                type="button"
+              >
+                &#128190; Save + Test Solcast
+              </button>
+              <button
+                id="btnSolcastTest"
+                class="btn btn-outline"
+                type="button"
+              >
+                &#128269; Test Solcast Connection
+              </button>
+              <span class="smsg" id="solcastTestMsg"></span>
+            </div>
+          </div>
           <div class="sgroup settings-card" id="licenseSection">
-            <div class="sgroup-title">🔐 License</div>
+            <div class="sgroup-title">&#128274; License</div>
             <div class="license-grid">
               <div class="license-item">
                 <div class="license-label">Status</div>
@@ -1219,10 +1259,10 @@
             </div>
             <div class="sgroup-actions">
               <button id="btnUploadLicense" class="btn btn-accent">
-                ⬆ Replace License
+                &#11014; Replace License
               </button>
               <button id="btnRefreshLicense" class="btn btn-outline">
-                ↻ Refresh License Status
+                &#8635; Refresh License Status
               </button>
               <span class="smsg" id="licenseMsg"></span>
             </div>
@@ -1243,7 +1283,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="appUpdateSection">
-            <div class="sgroup-title">⬆ App Updates</div>
+            <div class="sgroup-title">&#11014; App Updates</div>
             <div class="license-grid">
               <div class="license-item">
                 <div class="license-label">Current Version</div>
@@ -1278,9 +1318,9 @@
               <span class="smsg" id="updateMsg"></span>
             </div>
           </div>
-          <!-- ── Cloud Backup Panel ─────────────────────────────────────────── -->
+          <!-- -- Cloud Backup Panel ------------------------------------------- -->
           <div class="sgroup settings-card" id="cloudBackupSection">
-            <div class="sgroup-title">☁ Cloud Backup &amp; Restore</div>
+            <div class="sgroup-title">&#9729; Cloud Backup &amp; Restore</div>
 
             <!-- Provider Setup -->
             <div class="cb-subsection">
@@ -1303,7 +1343,7 @@
               <!-- OneDrive connect -->
               <div class="cb-provider-block" id="cbOneDriveBlock">
                 <div class="cb-provider-header">
-                  <span class="cb-provider-icon">☁</span>
+                  <span class="cb-provider-icon">&#9729;</span>
                   <strong>Microsoft OneDrive</strong>
                   <span class="cb-conn-badge" id="cbOneDriveStatus">Not connected</span>
                 </div>
@@ -1314,7 +1354,7 @@
                   </label>
                 </div>
                 <div class="cb-provider-help">
-                  <a href="#" id="cbOneDriveSetupLink" class="cb-setup-link">How to register Azure app →</a>
+                  <a href="#" id="cbOneDriveSetupLink" class="cb-setup-link">How to register Azure app &rarr;</a>
                 </div>
                 <div class="sgroup-actions" style="margin-top:6px">
                   <button id="btnConnectOneDrive" class="btn btn-outline" type="button">Connect OneDrive</button>
@@ -1326,7 +1366,7 @@
               <!-- Google Drive connect -->
               <div class="cb-provider-block" id="cbGDriveBlock">
                 <div class="cb-provider-header">
-                  <span class="cb-provider-icon">🔵</span>
+                  <span class="cb-provider-icon">&#9729;</span>
                   <strong>Google Drive</strong>
                   <span class="cb-conn-badge" id="cbGDriveStatus">Not connected</span>
                 </div>
@@ -1341,7 +1381,7 @@
                   </label>
                 </div>
                 <div class="cb-provider-help">
-                  <a href="#" id="cbGDriveSetupLink" class="cb-setup-link">How to create Google OAuth app →</a>
+                  <a href="#" id="cbGDriveSetupLink" class="cb-setup-link">How to create Google OAuth app &rarr;</a>
                 </div>
                 <div class="sgroup-actions" style="margin-top:6px">
                   <button id="btnConnectGDrive" class="btn btn-outline" type="button">Connect Google Drive</button>
@@ -1391,7 +1431,7 @@
             <!-- Backup Progress -->
             <div class="cb-progress-wrap" id="cbProgressWrap" hidden>
               <div class="cb-progress-row">
-                <span class="cb-progress-icon" id="cbProgressIcon">⏳</span>
+                <span class="cb-progress-icon" id="cbProgressIcon">&#9881;</span>
                 <span class="cb-progress-label" id="cbProgressLabel">Preparing…</span>
                 <span class="cb-progress-pct" id="cbProgressPct"></span>
               </div>
@@ -1402,16 +1442,16 @@
 
             <!-- Actions -->
             <div class="sgroup-actions" style="margin-top:8px">
-              <button id="btnSaveCloudSettings" class="btn btn-outline" type="button">💾 Save Cloud Settings</button>
-              <button id="btnBackupNow" class="btn btn-accent" type="button">⬆ Backup Now</button>
-              <button id="btnListCloudBackups" class="btn btn-outline" type="button">☁ List Cloud Backups</button>
+              <button id="btnSaveCloudSettings" class="btn btn-outline" type="button">&#128190; Save Cloud Settings</button>
+              <button id="btnBackupNow" class="btn btn-accent" type="button">&#11014; Backup Now</button>
+              <button id="btnListCloudBackups" class="btn btn-outline" type="button">&#128203; List Cloud Backups</button>
               <span class="smsg" id="cbActionMsg"></span>
             </div>
 
             <!-- Backup History Table -->
             <div class="cb-subsection">
               <div class="cb-sub-title">Backup History
-                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px">↻</button>
+                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px">&#8635;</button>
               </div>
               <div class="cb-restore-date-row">
                 <label>Filter by Date
@@ -1458,27 +1498,11 @@
               </div>
             </div>
           </div>
-
-          <div class="sgroup-actions settings-actions-bar" id="settingsGlobalActions">
-            <button id="btnSaveSettings" class="btn btn-accent">
-              💾 Save Settings
-            </button>
-            <button id="btnPickExportFolder" class="btn btn-outline">
-              📂 Browse Export Folder
-            </button>
-            <button id="btnOpenExportFolder" class="btn btn-outline">
-              📁 Open Export Folder
-            </button>
-            <button id="btnOpenIpConfig" class="btn btn-outline">
-              🌐 IP Configuration
-            </button>
-            <span class="smsg" id="settingsMsg"></span>
-          </div>
         </div>
       </section>
 
       <footer class="app-footer">
-        <span class="app-footer-name">Inverter Dashboard v2.2.2</span>
+        <span class="app-footer-name">Inverter Dashboard v2.2.6</span>
         <span class="app-footer-sep">·</span>
         <span class="app-footer-author">Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.)</span>
         <span class="app-footer-sep">·</span>
@@ -1486,13 +1510,13 @@
       </footer>
     </main>
 
-    <!-- ═══════════════════════════ OVERLAYS ══════════════════════════════════════ -->
+    <!-- --------------------------- OVERLAYS -------------------------------------- -->
     <div id="alarmToast" class="alarm-toast"></div>
 
     <div id="notifPanel" class="notif-panel hidden">
       <div class="notif-hdr">
-        <span>🔔 Active Alarms</span>
-        <button id="btnCloseNotif" aria-label="Close notifications">✕</button>
+        <span>&#128680; Active Alarms</span>
+        <button id="btnCloseNotif" aria-label="Close notifications">&times;</button>
       </div>
       <div id="notifList" class="notif-list"></div>
     </div>
@@ -1503,19 +1527,19 @@
       title="Active Alarms"
       aria-label="View active alarms"
     >
-      🔔<span id="notifCount" aria-label="Number of active alarms">0</span>
+      &#128276;<span id="notifCount" aria-label="Number of active alarms">0</span>
     </button>
 
     <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
       <div class="guide-modal-card">
         <div class="guide-modal-head">
           <div class="guide-modal-title">Inverter Dashboard — User Guide &amp; Manual</div>
-          <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">✕</button>
+          <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">&times;</button>
         </div>
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.2</span></div>
+            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.6</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1648,7 +1672,7 @@
                 <li><code>Ctrl+T</code>: Open Topology window.</li>
                 <li><code>Ctrl+I</code>: Open IP Configuration window.</li>
                 <li><code>Ctrl + =</code> / <code>Ctrl + -</code> / <code>Ctrl+0</code>: Zoom in / out / reset (Electron native).</li>
-                <li>Click the notification bell (🔔) to view active alarms without leaving the current page.</li>
+                <li>Click the notification bell (&#128276;) to view active alarms without leaving the current page.</li>
                 <li>The Net I/O widget (in Settings) shows live WebSocket RX/TX speed in KB/s.</li>
                 <li>Theme can be changed (Dark / Light / Classic) from the Settings page and persists across restarts.</li>
               </ul>
@@ -1656,7 +1680,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Inverter Dashboard v2.2.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Inverter Dashboard v2.2.6 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>
@@ -1676,7 +1700,7 @@
           type="button"
           aria-label="Close"
         >
-          ✕
+          &times;
         </button>
         <div class="auth-modal-title" id="bulkAuthTitle">
           Plant Authorization
@@ -1707,4 +1731,5 @@
     <script src="js/app.js"></script>
   </body>
 </html>
+
 

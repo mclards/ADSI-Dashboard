@@ -181,6 +181,16 @@ const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
+const SETTINGS_SECTION_IDS = [
+  "plantConfigSection",
+  "opsCompactSection",
+  "connectivitySection",
+  "forecastSection",
+  "licenseSection",
+  "appUpdateSection",
+  "cloudBackupSection",
+];
+const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const THEME_META = {
   dark: {
     label: "Maroon",
@@ -1845,6 +1855,7 @@ function switchPage(page) {
   if (page === "report") initReportPage();
   if (page === "export") initExportPage();
   if (page === "settings") {
+    initSettingsSectionNav();
     unlockSettingsInputs();
     refreshLicenseSection().catch(() => {});
     startReplicationHealthPolling();
@@ -1878,6 +1889,69 @@ function initGuideModal() {
       closeGuideModal();
     }
   });
+}
+
+function normalizeSettingsSectionId(value) {
+  const v = String(value || "").trim();
+  return SETTINGS_SECTION_IDS.includes(v) ? v : DEFAULT_SETTINGS_SECTION_ID;
+}
+
+function setActiveSettingsSection(sectionId, persist = true) {
+  const activeId = normalizeSettingsSectionId(sectionId);
+  SETTINGS_SECTION_IDS.forEach((id) => {
+    const node = $(id);
+    if (!node) return;
+    const isActive = id === activeId;
+    node.classList.toggle("settings-section-active", isActive);
+    node.hidden = !isActive;
+  });
+
+  const picker = $("settingsSectionPicker");
+  if (picker && picker.value !== activeId) picker.value = activeId;
+
+  document
+    .querySelectorAll("#settingsSectionMenu .settings-menu-btn")
+    .forEach((btn) => {
+      const isActive = String(btn.dataset.settingsSection || "") === activeId;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+
+  if (persist) {
+    try {
+      localStorage.setItem("adsi_settings_section", activeId);
+    } catch (err) {
+      console.warn("[app] settings section persist failed:", err.message);
+    }
+  }
+}
+
+function initSettingsSectionNav() {
+  const picker = $("settingsSectionPicker");
+  const menu = $("settingsSectionMenu");
+  if (!picker && !menu) return;
+
+  if (picker && picker.dataset.bound !== "1") {
+    picker.dataset.bound = "1";
+    picker.addEventListener("change", (e) => {
+      setActiveSettingsSection(e.target.value, true);
+    });
+  }
+
+  if (menu && menu.dataset.bound !== "1") {
+    menu.dataset.bound = "1";
+    menu.addEventListener("click", (e) => {
+      const btn = e.target.closest(".settings-menu-btn");
+      if (!btn) return;
+      setActiveSettingsSection(btn.dataset.settingsSection, true);
+    });
+  }
+
+  let saved = "";
+  try {
+    saved = String(localStorage.getItem("adsi_settings_section") || "").trim();
+  } catch (_) {}
+  setActiveSettingsSection(saved || picker?.value || DEFAULT_SETTINGS_SECTION_ID, false);
 }
 
 // ─── Clock ────────────────────────────────────────────────────────────────────
@@ -6854,6 +6928,7 @@ async function init() {
   setupSideNav();
   initGuideModal();
   setupNav();
+  initSettingsSectionNav();
   document.addEventListener(
     "pointerdown",
     () => {

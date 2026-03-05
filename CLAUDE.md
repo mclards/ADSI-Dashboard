@@ -77,6 +77,7 @@ npm run build:portable
 Release versioning rule:
 
 - Always bump app version in `package.json` before every release build.
+- For any request to build EXE artifacts (`installer`, `portable`, or both), bump version first, then build.
 - Keep UI-visible version text aligned (About/footer/guide labels) with `package.json` version.
 - Never publish installer/portable artifacts with an unchanged version number.
 
@@ -113,8 +114,8 @@ node --check public/js/app.js
 
 Expected artifacts:
 
-- `release/Inverter Dashboard-Setup-<version>.exe`
-- `release/Inverter Dashboard-Portable-<version>.exe`
+- `release/Inverter-Dashboard-Setup-<version>.exe`
+- `release/Inverter-Dashboard-Portable-<version>.exe`
 
 ## Build Warning Policy
 

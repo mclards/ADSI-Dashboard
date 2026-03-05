@@ -183,11 +183,11 @@ npm run build:portable
 
 Portable artifact:
 
-- `release/Inverter Dashboard-Portable-<version>.exe`
+- `release/Inverter-Dashboard-Portable-<version>.exe`
 
 Installer artifact:
 
-- `release/Inverter Dashboard-Setup-<version>.exe`
+- `release/Inverter-Dashboard-Setup-<version>.exe`
 
 ## Build Warning Policy
 
@@ -225,6 +225,7 @@ Release metadata expectation:
 Release versioning requirement:
 
 - Bump `package.json` `version` for every release build (installer and/or portable).
+- For every EXE build request, perform version bump before running build commands.
 - Sync UI-exposed version labels with `package.json` before packaging.
 - Do not ship release artifacts when the version was not incremented.
 

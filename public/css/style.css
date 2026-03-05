@@ -419,29 +419,29 @@ body.license-notice-open .side-nav {
   text-shadow: none;
 }
 
-.metric-value {
+#titlebar .metric-value {
   font-family: var(--font-mono);
   font-size: calc(22px * var(--top-scale));
   font-weight: 800;
   line-height: 1.05;
-  color: #ffe8ef;
+  color: #ffd700;
   text-shadow: none;
 }
 
-.metric-value .unit {
+#titlebar .metric-value .unit {
   margin-left: calc(3px * var(--top-scale));
   font-size: calc(10px * var(--top-scale));
-  color: #f2ceda;
+  color: #ffd700;
   font-weight: 700;
 }
 
 #totalPac {
-  color: #ffe8ef;
+  color: #ffd700;
   text-shadow: none;
 }
 
 #totalKwh {
-  color: #ffe8ef;
+  color: #ffd700;
   text-shadow: none;
 }
 
@@ -3879,19 +3879,19 @@ label[data-required]::after {
 }
 
 #page-settings #opsCompactSection .settings-subsection,
-#page-settings #replicationHealthSection .settings-subsection {
+#page-settings #connectivitySection .settings-subsection {
   padding: 4px 0 2px;
   border-top: 1px solid rgba(101, 72, 86, 0.42);
 }
 
 #page-settings #opsCompactSection .settings-subsection:first-of-type,
-#page-settings #replicationHealthSection .settings-subsection:first-of-type {
+#page-settings #connectivitySection .settings-subsection:first-of-type {
   border-top: none;
   padding-top: 0;
 }
 
 #page-settings #opsCompactSection .settings-subtitle,
-#page-settings #replicationHealthSection .settings-subtitle {
+#page-settings #connectivitySection .settings-subtitle {
   margin: 0 0 8px;
   font-size: 9px;
   font-weight: 700;
@@ -3973,7 +3973,7 @@ label[data-required]::after {
 }
 
 #page-settings .rep-health-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 /* Actions bar inside a card: top-border separator only */
@@ -4013,6 +4013,10 @@ label[data-required]::after {
 
 @media (max-width: 1400px) {
   #page-settings .settings-wrap {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #page-settings .rep-health-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -4464,11 +4468,11 @@ label[data-required]::after {
 :root[data-theme="light"] #titlebar .metric-value,
 :root[data-theme="light"] #titlebar #totalPac,
 :root[data-theme="light"] #titlebar #totalKwh {
-  color: #ffe8ef;
+  color: #ffd700;
 }
 
 :root[data-theme="light"] #titlebar .metric-value .unit {
-  color: #f2ceda;
+  color: #ffd700;
 }
 
 :root[data-theme="light"] #titlebar .tb-clock-wrap {
@@ -5045,13 +5049,16 @@ label[data-required]::after {
   color: #9eb8df;
 }
 
-:root[data-theme="classic"] .metric-value,
-:root[data-theme="classic"] #totalPac,
-:root[data-theme="classic"] #totalKwh {
-  color: #e8f2ff;
+:root[data-theme="classic"] #titlebar .metric-value,
+:root[data-theme="classic"] #titlebar #totalPac,
+:root[data-theme="classic"] #titlebar #totalKwh {
+  color: #ffd700;
 }
 
-:root[data-theme="classic"] .metric-value .unit,
+:root[data-theme="classic"] #titlebar .metric-value .unit {
+  color: #ffd700;
+}
+
 :root[data-theme="classic"] .tb-date {
   color: #96b1d8;
 }
@@ -5689,4 +5696,135 @@ label[data-required]::after {
   padding: 3px 8px;
   font-size: 11px;
   border-radius: 5px;
+}
+
+/* ── Settings Rehab: focused section flow ───────────────────────────────────── */
+#page-settings .settings-wrap {
+  max-width: none;
+  padding: 12px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+#page-settings .settings-nav-bar {
+  position: sticky;
+  top: 0;
+  z-index: 7;
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border2);
+  background: linear-gradient(160deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18);
+}
+
+#page-settings .settings-picker-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+#page-settings .settings-picker-label .sel {
+  min-height: 34px;
+}
+
+#page-settings .settings-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#page-settings .settings-menu-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.45px;
+  cursor: pointer;
+}
+
+#page-settings .settings-menu-btn:hover {
+  border-color: var(--border2);
+  color: var(--text);
+}
+
+#page-settings .settings-menu-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(216, 106, 139, 0.14);
+}
+
+#page-settings #settingsGlobalActions {
+  position: sticky;
+  top: 74px;
+  z-index: 6;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+#page-settings .settings-wrap > .sgroup.settings-card {
+  display: none;
+  margin: 0;
+  padding: 14px 16px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border2);
+  background: linear-gradient(160deg, var(--surface) 0%, var(--surface2) 100%);
+  box-shadow:
+    0 1px 8px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+#page-settings .settings-wrap > .sgroup.settings-card.settings-section-active {
+  display: flex;
+}
+
+#page-settings .settings-wrap > .sgroup > .sgroup-title {
+  position: static;
+  top: auto;
+  margin: 0 0 10px;
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+}
+
+#page-settings #cloudBackupSection {
+  grid-column: auto;
+}
+
+@media (max-width: 1200px) {
+  #page-settings .settings-nav-bar {
+    grid-template-columns: 1fr;
+  }
+
+  #page-settings #settingsGlobalActions {
+    top: 126px;
+  }
+}
+
+@media (max-width: 760px) {
+  #page-settings .settings-menu {
+    display: none;
+  }
+
+  #page-settings #settingsGlobalActions {
+    position: static;
+    top: auto;
+  }
 }
