@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.6",
+  "version": "2.2.7",
   "description": "Industrial inverter monitoring, analytics, forecasting, and remote replication dashboard. Designed and developed by Engr. Clariden Montaño REE (Engr. M.).",
   "author": "Engr. Clariden D. Montaño, REE",
   "main": "electron/main.js",

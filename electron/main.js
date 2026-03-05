@@ -2715,7 +2715,7 @@ function killServer() {
   isAppShuttingDown = true;
   clearForecastRestartTimer();
 
-  // Always force-kill Python processes (no graceful shutdown path).
+  // Always force-kill Python processes (no graceful shutdown path)
   forceKillProc(backendProc, "backend");
   forceKillProc(forecastProc, "forecast");
   backendProc = null;
