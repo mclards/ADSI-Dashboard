@@ -19,7 +19,7 @@ for pkg in (
     hiddenimports += h
 
 a = Analysis(
-    ["ForecastCoreService.py"],
+    ["ADSI_ForecastService.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,

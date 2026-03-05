@@ -51,6 +51,15 @@
 
         <div class="tb-right">
           <button
+            id="btnAlarmSound"
+            class="tb-nav-toggle"
+            type="button"
+            aria-label="Mute alarm sound"
+            title="Mute alarm sound"
+          >
+            <span id="alarmSoundIcon" class="mdi mdi-volume-high"></span>
+          </button>
+          <button
             id="themeToggleBtn"
             class="tb-theme-toggle"
             type="button"
@@ -118,23 +127,24 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title">ℹ ABOUT</div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2</span></div>
+            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.2</span></div>
             <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
               <div class="side-about-author-label">Designed &amp; Developed by</div>
-              <div class="side-about-author-name">Engr. Clariden Montaño REE</div>
-              <div class="side-about-author-alias">Alias: Engr. M.</div>
-              <div class="side-about-copyright">© 2026 Engr. Clariden Montaño REE.<br>All rights reserved.</div>
+              <div class="side-about-author-name">Engr. Clariden Montaño, REE</div>
+              <div class="side-about-copyright">© 2026 Engr. M.<br>All rights reserved.</div>
             </div>
             <div class="side-about-sep"></div>
             <div class="side-about-hw"><b>Hardware:</b> Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor</div>
             <div class="side-about-hw"><b>Manual:</b> AAV2015IQE01_B</div>
-            <div class="side-about-hw"><b>Protocol:</b> Modbus TCP (27 inverters)</div>
             <div class="side-about-sep"></div>
             <div class="side-about-db">DB: <code id="setDataDir">—</code></div>
+            <div class="side-about-hw"><b>App:</b> <span id="aboutAppVersion">—</span></div>
+            <div class="side-about-hw"><b>Update:</b> <span id="aboutUpdateStatus">—</span></div>
           </div>
           <div class="side-about-actions">
+            <button id="btnAboutCheckUpdate" class="btn btn-outline">⬆ Check App Update</button>
             <button id="btnOpenGuide" class="btn btn-outline">📘 Open User Guide</button>
           </div>
         </section>
@@ -419,6 +429,7 @@
                   <select id="auditFilterScope" class="sel audit-filter-sel">
                     <option value="all">All</option>
                     <option value="single">single</option>
+                    <option value="inverter">inverter</option>
                     <option value="scope-all">all</option>
                     <option value="selected">selected</option>
                   </select>
@@ -508,8 +519,11 @@
                 >
                   Alarms
                 </th>
-                <th class="report-sort" data-key="perf" data-label="Availability (%)">
+                <th class="report-sort" data-key="availability_pct" data-label="Availability (%)">
                   Availability (%)
+                </th>
+                <th class="report-sort" data-key="performance_pct" data-label="Performance (%)">
+                  Performance (%)
                 </th>
               </tr>
               <tr class="report-filter-row">
@@ -556,6 +570,14 @@
                     <option value="with">With Alarms</option>
                     <option value="none">No Alarms</option>
                   </select>
+                </th>
+                <th>
+                  <input
+                    id="reportFilterAvail"
+                    class="inp report-filter-inp"
+                    type="text"
+                    placeholder="contains..."
+                  />
                 </th>
                 <th>
                   <input
@@ -794,7 +816,7 @@
           <div class="sgroup settings-card" id="plantConfigSection">
             <div class="sgroup-title">🏭 Plant Configuration</div>
             <div class="srow">
-              <label data-required="*"
+              <label
                 >Plant Name<input
                   type="text"
                   id="setPlantName"
@@ -803,6 +825,8 @@
                   aria-describedby="plantNameHelp"
               /></label>
               <small id="plantNameHelp">Name of your solar installation (required)</small>
+            </div>
+            <div class="srow">
               <label
                 >Operator Name<input
                   type="text"
@@ -810,7 +834,10 @@
                   class="inp"
                   placeholder="OPERATOR"
               /></label>
-              <label data-required="*"
+              <small>Default label shown on logs and reports.</small>
+            </div>
+            <div class="srow">
+              <label
                 >Inverter Count<input
                   type="number"
                   id="setInverterCount"
@@ -820,7 +847,9 @@
                   aria-describedby="inverterCountHelp"
               /></label>
               <small id="inverterCountHelp">Number of inverters (1-100)</small>
-              <label data-required="*"
+            </div>
+            <div class="srow">
+              <label
                 >Nodes/Inverter<input
                   type="number"
                   id="setNodeCount"
@@ -832,23 +861,61 @@
               <small id="nodeCountHelp">Data collection nodes per inverter (1-16)</small>
             </div>
           </div>
-          <div class="sgroup settings-card" id="dataApiSection">
-            <div class="sgroup-title">🔌 Data API</div>
-            <div class="srow">
-              <label
-                >Data API URL<input
-                  type="text"
-                  id="setApiUrl"
-                  class="inp inp-lg"
-                  placeholder="http://127.0.0.1:9100/data"
-              /></label>
-              <label
-                >Write API URL<input
-                  type="text"
-                  id="setWriteUrl"
-                  class="inp inp-lg"
-                  placeholder="http://127.0.0.1:9100/write"
-              /></label>
+          <div class="sgroup settings-card" id="opsCompactSection">
+            <div class="sgroup-title">🔧 Data / Storage / Modbus</div>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Data API</div>
+              <div class="srow">
+                <label
+                  >Data API URL<input
+                    type="text"
+                    id="setApiUrl"
+                    class="inp inp-lg"
+                    placeholder="http://127.0.0.1:9100/data"
+                /></label>
+                <label
+                  >Write API URL<input
+                    type="text"
+                    id="setWriteUrl"
+                    class="inp inp-lg"
+                    placeholder="http://127.0.0.1:9100/write"
+                /></label>
+              </div>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Storage</div>
+              <div class="srow">
+                <label
+                  >Export Folder<input
+                    type="text"
+                    id="setCsvPath"
+                    class="inp inp-lg"
+                    placeholder="C:\Logs\InverterDashboard"
+                /></label>
+                <label
+                  >Retention (days)<input
+                    type="number"
+                    id="setRetainDays"
+                    class="inp inp-sm"
+                    min="7"
+                    max="1095"
+                /></label>
+              </div>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Modbus / Polling</div>
+              <div class="srow">
+                <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" /></label>
+                <small>TCP read timeout per register. Raise on slow networks (0.2 – 10 s).</small>
+              </div>
+              <div class="srow">
+                <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" /></label>
+                <small>Wait after TCP reconnect before retry read (0.1 – 10 s).</small>
+              </div>
+              <div class="srow">
+                <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" /></label>
+                <small>Pause between input and holding register reads (0.001 – 1 s).</small>
+              </div>
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
@@ -968,198 +1035,166 @@
               <span class="smsg" id="solcastTestMsg"></span>
             </div>
           </div>
-          <div class="sgroup settings-card" id="storageSection">
-            <div class="sgroup-title">💾 Storage</div>
-            <div class="srow">
-              <label
-                >Export Folder<input
-                  type="text"
-                  id="setCsvPath"
-                  class="inp inp-lg"
-                  placeholder="C:\Logs\InverterDashboard"
-              /></label>
-              <label
-                >Retention (days)<input
-                  type="number"
-                  id="setRetainDays"
-                  class="inp inp-sm"
-                  min="7"
-                  max="1095"
-              /></label>
-            </div>
-          </div>
-          <div class="sgroup settings-card" id="modbusPollingSection">
-            <div class="sgroup-title">⚙ Modbus / Polling</div>
-            <div class="srow">
-              <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" /></label>
-              <small>TCP read timeout per register. Raise on slow networks (0.2 – 10 s).</small>
-            </div>
-            <div class="srow">
-              <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" /></label>
-              <small>Wait after TCP reconnect before retry read (0.1 – 10 s).</small>
-            </div>
-            <div class="srow">
-              <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" /></label>
-              <small>Pause between input and holding register reads (0.001 – 1 s).</small>
-            </div>
-          </div>
           <div class="sgroup settings-card" id="replicationHealthSection">
-            <div class="sgroup-title">🛰 Replication Health</div>
-            <div class="rep-health-grid">
-              <div class="license-item">
-                <div class="license-label">Mode</div>
-                <div id="repModeVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Gateway URL</div>
-                <div id="repGatewayVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Bridge Status</div>
-                <div id="repConnectedVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Last Sync Direction</div>
-                <div id="repDirectionVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Last Contact</div>
-                <div id="repLastSuccessVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Last Replication</div>
-                <div id="repLastReplicationVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Rows Imported</div>
-                <div id="repLastRowsVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Last Reconcile</div>
-                <div id="repLastReconcileVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Rows Pushed</div>
-                <div id="repLastReconcileRowsVal" class="license-value">—</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Signature</div>
-                <div id="repSignatureVal" class="license-value">—</div>
-              </div>
-            </div>
-            <div class="rep-health-cursors">
-              <div class="license-label">Cursors</div>
-              <code id="repCursorsVal">—</code>
-            </div>
-            <div class="rep-health-errors">
-              <div class="license-label">Last Errors</div>
-              <div id="repErrorsVal" class="license-value">—</div>
-            </div>
-            <div class="replication-transfer-wrap">
-              <div class="license-label">Transfer Monitor</div>
-              <div id="netIoWidget" class="net-io-widget" title="Network I/O — Ingress ↓ / Egress ↑" aria-label="Network transfer rates">
-                <div id="netIoRxRow" class="net-io-row">
-                  <span class="net-io-arrow net-io-rx-arrow">↓</span>
-                  <span class="net-io-label">RX</span>
-                  <span class="net-io-speed" id="netIoRxSpeed">0 B/s</span>
+            <div class="sgroup-title">🛰 Replication &amp; Performance</div>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Replication Health</div>
+              <div class="rep-health-grid">
+                <div class="license-item">
+                  <div class="license-label">Mode</div>
+                  <div id="repModeVal" class="license-value">—</div>
                 </div>
-                <div id="netIoTxRow" class="net-io-row">
-                  <span class="net-io-arrow net-io-tx-arrow">↑</span>
-                  <span class="net-io-label">TX</span>
-                  <span class="net-io-speed" id="netIoTxSpeed">0 B/s</span>
+                <div class="license-item">
+                  <div class="license-label">Gateway URL</div>
+                  <div id="repGatewayVal" class="license-value">—</div>
                 </div>
-                <div id="xferPanel" class="xfer-panel" hidden>
-                  <div class="xfer-panel-sep"></div>
-                  <div class="xfer-panel-row">
-                    <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">↑</span>
-                    <span id="xferLabel" class="xfer-label">Pushing...</span>
-                    <span id="xferPct" class="xfer-pct">0%</span>
-                  </div>
-                  <div class="xfer-bar-track">
-                    <div id="xferBarFill" class="xfer-bar-fill"></div>
-                  </div>
-                  <div class="xfer-size-row">
-                    <span id="xferSizeCurr" class="xfer-size-curr">0 B</span>
-                    <span class="xfer-size-sep">/</span>
-                    <span id="xferSizeTotal" class="xfer-size-total">? B</span>
-                  </div>
+                <div class="license-item">
+                  <div class="license-label">Bridge Status</div>
+                  <div id="repConnectedVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Last Sync Direction</div>
+                  <div id="repDirectionVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Last Contact</div>
+                  <div id="repLastSuccessVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Last Replication</div>
+                  <div id="repLastReplicationVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Rows Imported</div>
+                  <div id="repLastRowsVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Last Reconcile</div>
+                  <div id="repLastReconcileVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Rows Pushed</div>
+                  <div id="repLastReconcileRowsVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Signature</div>
+                  <div id="repSignatureVal" class="license-value">—</div>
                 </div>
               </div>
-            </div>
-            <div class="sgroup-actions">
-              <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button">
-                ↻ Refresh
-              </button>
-              <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
-                Pull Latest From Server
-              </button>
-              <button id="btnRunReplicationPush" class="btn btn-outline" type="button">
-                Push Local To Server
-              </button>
-              <span class="smsg" id="replicationMsg"></span>
-            </div>
-          </div>
-          <div class="sgroup settings-card" id="runtimePerfSection">
-            <div class="sgroup-title">Performance Diagnostics</div>
-            <div class="rep-health-grid">
-              <div class="license-item">
-                <div class="license-label">Mode</div>
-                <div id="perfModeVal" class="license-value">-</div>
+              <div class="rep-health-cursors">
+                <div class="license-label">Cursors</div>
+                <code id="repCursorsVal">—</code>
               </div>
-              <div class="license-item">
-                <div class="license-label">CPU</div>
-                <div id="perfCpuVal" class="license-value">-</div>
+              <div class="rep-health-errors">
+                <div class="license-label">Last Errors</div>
+                <div id="repErrorsVal" class="license-value">—</div>
               </div>
-              <div class="license-item">
-                <div class="license-label">Memory (RSS)</div>
-                <div id="perfMemVal" class="license-value">-</div>
+              <div class="replication-transfer-wrap">
+                <div class="license-label">Transfer Monitor</div>
+                <div id="netIoWidget" class="net-io-widget" title="Network I/O — Ingress ↓ / Egress ↑" aria-label="Network transfer rates">
+                  <div id="netIoRxRow" class="net-io-row">
+                    <span class="net-io-arrow net-io-rx-arrow">↓</span>
+                    <span class="net-io-label">RX</span>
+                    <span class="net-io-speed" id="netIoRxSpeed">0 B/s</span>
+                  </div>
+                  <div id="netIoTxRow" class="net-io-row">
+                    <span class="net-io-arrow net-io-tx-arrow">↑</span>
+                    <span class="net-io-label">TX</span>
+                    <span class="net-io-speed" id="netIoTxSpeed">0 B/s</span>
+                  </div>
+                  <div id="xferPanel" class="xfer-panel" hidden>
+                    <div class="xfer-panel-sep"></div>
+                    <div class="xfer-panel-row">
+                      <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">↑</span>
+                      <span id="xferLabel" class="xfer-label">Pushing...</span>
+                      <span id="xferPct" class="xfer-pct">0%</span>
+                    </div>
+                    <div class="xfer-bar-track">
+                      <div id="xferBarFill" class="xfer-bar-fill"></div>
+                    </div>
+                    <div class="xfer-size-row">
+                      <span id="xferSizeCurr" class="xfer-size-curr">0 B</span>
+                      <span class="xfer-size-sep">/</span>
+                      <span id="xferSizeTotal" class="xfer-size-total">? B</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div class="license-item">
-                <div class="license-label">Uptime</div>
-                <div id="perfUptimeVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Live Keys</div>
-                <div id="perfLiveKeysVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Poll Tick Count</div>
-                <div id="perfPollTicksVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Poll Duration</div>
-                <div id="perfPollDurVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Fetch Errors</div>
-                <div id="perfFetchErrVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Rows Persisted</div>
-                <div id="perfPersistRowsVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">Persist Skipped</div>
-                <div id="perfPersistSkipVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">WS Clients</div>
-                <div id="perfWsClientsVal" class="license-value">-</div>
-              </div>
-              <div class="license-item">
-                <div class="license-label">WS Backpressure Drops</div>
-                <div id="perfWsDropsVal" class="license-value">-</div>
+              <div class="sgroup-actions">
+                <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button">
+                  ↻ Refresh
+                </button>
+                <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
+                  Pull Latest From Server
+                </button>
+                <button id="btnRunReplicationPush" class="btn btn-outline" type="button">
+                  Push Local To Server
+                </button>
+                <span class="smsg" id="replicationMsg"></span>
               </div>
             </div>
-            <div class="rep-health-errors">
-              <div class="license-label">Last Errors</div>
-              <div id="perfErrorsVal" class="license-value">-</div>
-            </div>
-            <div class="sgroup-actions">
-              <button id="btnRefreshRuntimePerf" class="btn btn-outline" type="button">
-                Refresh
-              </button>
-              <span class="smsg" id="perfMsg"></span>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Performance Diagnostics</div>
+              <div class="rep-health-grid">
+                <div class="license-item">
+                  <div class="license-label">Mode</div>
+                  <div id="perfModeVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">CPU</div>
+                  <div id="perfCpuVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Memory (RSS)</div>
+                  <div id="perfMemVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Uptime</div>
+                  <div id="perfUptimeVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Live Keys</div>
+                  <div id="perfLiveKeysVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Poll Tick Count</div>
+                  <div id="perfPollTicksVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Poll Duration</div>
+                  <div id="perfPollDurVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Fetch Errors</div>
+                  <div id="perfFetchErrVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Rows Persisted</div>
+                  <div id="perfPersistRowsVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">Persist Skipped</div>
+                  <div id="perfPersistSkipVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">WS Clients</div>
+                  <div id="perfWsClientsVal" class="license-value">-</div>
+                </div>
+                <div class="license-item">
+                  <div class="license-label">WS Backpressure Drops</div>
+                  <div id="perfWsDropsVal" class="license-value">-</div>
+                </div>
+              </div>
+              <div class="rep-health-errors">
+                <div class="license-label">Last Errors</div>
+                <div id="perfErrorsVal" class="license-value">-</div>
+              </div>
+              <div class="sgroup-actions">
+                <button id="btnRefreshRuntimePerf" class="btn btn-outline" type="button">
+                  Refresh
+                </button>
+                <span class="smsg" id="perfMsg"></span>
+              </div>
             </div>
           </div>
           <div class="sgroup settings-card" id="licenseSection">
@@ -1207,6 +1242,223 @@
               </table>
             </div>
           </div>
+          <div class="sgroup settings-card" id="appUpdateSection">
+            <div class="sgroup-title">⬆ App Updates</div>
+            <div class="license-grid">
+              <div class="license-item">
+                <div class="license-label">Current Version</div>
+                <div id="updCurrentVersion" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Channel</div>
+                <div id="updMode" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Latest Version</div>
+                <div id="updLatestVersion" class="license-value">—</div>
+              </div>
+              <div class="license-item">
+                <div class="license-label">Status</div>
+                <div id="updStatusText" class="license-value">—</div>
+              </div>
+            </div>
+            <div class="sinfo" style="margin-top:8px">
+              <div id="updStatusDetail">Use "Check for Updates" to verify the latest release.</div>
+            </div>
+            <div class="sgroup-actions">
+              <button id="btnCheckAppUpdate" class="btn btn-outline" type="button">
+                Check for Updates
+              </button>
+              <button id="btnDownloadAppUpdate" class="btn btn-accent" type="button" hidden>
+                Download Update
+              </button>
+              <button id="btnInstallAppUpdate" class="btn btn-accent" type="button" hidden>
+                Restart &amp; Install
+              </button>
+              <span class="smsg" id="updateMsg"></span>
+            </div>
+          </div>
+          <!-- ── Cloud Backup Panel ─────────────────────────────────────────── -->
+          <div class="sgroup settings-card" id="cloudBackupSection">
+            <div class="sgroup-title">☁ Cloud Backup &amp; Restore</div>
+
+            <!-- Provider Setup -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title">Provider Setup</div>
+              <div class="srow">
+                <label>Email (for suggestion)
+                  <input type="email" id="cbEmail" class="inp" placeholder="you@example.com" />
+                </label>
+                <label>Backup Provider
+                  <select id="cbProvider" class="sel">
+                    <option value="auto">Auto (use any connected)</option>
+                    <option value="onedrive">OneDrive only</option>
+                    <option value="gdrive">Google Drive only</option>
+                    <option value="both">Both providers</option>
+                  </select>
+                </label>
+                <small id="cbEmailHint" class="cb-email-hint"></small>
+              </div>
+
+              <!-- OneDrive connect -->
+              <div class="cb-provider-block" id="cbOneDriveBlock">
+                <div class="cb-provider-header">
+                  <span class="cb-provider-icon">☁</span>
+                  <strong>Microsoft OneDrive</strong>
+                  <span class="cb-conn-badge" id="cbOneDriveStatus">Not connected</span>
+                </div>
+                <div class="srow cb-provider-fields">
+                  <label>Azure App Client ID
+                    <input type="text" id="cbOneDriveClientId" class="inp inp-lg"
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="cb-provider-help">
+                  <a href="#" id="cbOneDriveSetupLink" class="cb-setup-link">How to register Azure app →</a>
+                </div>
+                <div class="sgroup-actions" style="margin-top:6px">
+                  <button id="btnConnectOneDrive" class="btn btn-outline" type="button">Connect OneDrive</button>
+                  <button id="btnDisconnectOneDrive" class="btn btn-outline" type="button" hidden>Disconnect</button>
+                  <span class="smsg" id="cbOneDriveMsg"></span>
+                </div>
+              </div>
+
+              <!-- Google Drive connect -->
+              <div class="cb-provider-block" id="cbGDriveBlock">
+                <div class="cb-provider-header">
+                  <span class="cb-provider-icon">🔵</span>
+                  <strong>Google Drive</strong>
+                  <span class="cb-conn-badge" id="cbGDriveStatus">Not connected</span>
+                </div>
+                <div class="srow cb-provider-fields">
+                  <label>Client ID
+                    <input type="text" id="cbGDriveClientId" class="inp inp-lg"
+                      placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off" />
+                  </label>
+                  <label>Client Secret
+                    <input type="password" id="cbGDriveClientSecret" class="inp inp-lg"
+                      placeholder="Desktop app client secret" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="cb-provider-help">
+                  <a href="#" id="cbGDriveSetupLink" class="cb-setup-link">How to create Google OAuth app →</a>
+                </div>
+                <div class="sgroup-actions" style="margin-top:6px">
+                  <button id="btnConnectGDrive" class="btn btn-outline" type="button">Connect Google Drive</button>
+                  <button id="btnDisconnectGDrive" class="btn btn-outline" type="button" hidden>Disconnect</button>
+                  <span class="smsg" id="cbGDriveMsg"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Backup Configuration -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title">Backup Configuration</div>
+              <div class="srow">
+                <label class="chk-inline">
+                  <input type="checkbox" id="cbEnabled" />
+                  <span>Enable automatic cloud backup</span>
+                </label>
+                <label class="cb-scope-label">Scope
+                  <div class="cb-scope-checks">
+                    <label class="chk-inline">
+                      <input type="checkbox" id="cbScopeDb" checked />
+                      <span>Database</span>
+                    </label>
+                    <label class="chk-inline">
+                      <input type="checkbox" id="cbScopeConfig" checked />
+                      <span>Config files</span>
+                    </label>
+                    <label class="chk-inline">
+                      <input type="checkbox" id="cbScopeLogs" />
+                      <span>Logs (optional)</span>
+                    </label>
+                  </div>
+                </label>
+                <label>Schedule
+                  <select id="cbSchedule" class="sel">
+                    <option value="manual">Manual only</option>
+                    <option value="daily">Daily (3:00 AM)</option>
+                    <option value="every6h">Every 6 hours</option>
+                  </select>
+                </label>
+                <label>Backup Date Tag
+                  <input type="date" id="cbBackupDate" class="inp inp-sm" />
+                </label>
+              </div>
+            </div>
+
+            <!-- Backup Progress -->
+            <div class="cb-progress-wrap" id="cbProgressWrap" hidden>
+              <div class="cb-progress-row">
+                <span class="cb-progress-icon" id="cbProgressIcon">⏳</span>
+                <span class="cb-progress-label" id="cbProgressLabel">Preparing…</span>
+                <span class="cb-progress-pct" id="cbProgressPct"></span>
+              </div>
+              <div class="cb-progress-bar-track">
+                <div class="cb-progress-bar-fill" id="cbProgressBarFill"></div>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="sgroup-actions" style="margin-top:8px">
+              <button id="btnSaveCloudSettings" class="btn btn-outline" type="button">💾 Save Cloud Settings</button>
+              <button id="btnBackupNow" class="btn btn-accent" type="button">⬆ Backup Now</button>
+              <button id="btnListCloudBackups" class="btn btn-outline" type="button">☁ List Cloud Backups</button>
+              <span class="smsg" id="cbActionMsg"></span>
+            </div>
+
+            <!-- Backup History Table -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title">Backup History
+                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px">↻</button>
+              </div>
+              <div class="cb-restore-date-row">
+                <label>Filter by Date
+                  <input type="date" id="cbRestoreDate" class="inp inp-sm" />
+                </label>
+                <button id="btnClearRestoreDate" class="btn btn-outline btn-xs" type="button">Clear</button>
+              </div>
+              <div class="cb-history-table-wrap">
+                <table class="data-table cb-history-table">
+                  <thead>
+                    <tr>
+                      <th>Date/Time</th>
+                      <th>Tag</th>
+                      <th>Scope</th>
+                      <th>Size</th>
+                      <th>Status</th>
+                      <th>Cloud</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cbHistoryBody">
+                    <tr class="table-empty"><td colspan="7">No backup history yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Cloud Backups List (when browsing cloud) -->
+            <div class="cb-subsection" id="cbCloudListSection" hidden>
+              <div class="cb-sub-title" id="cbCloudListTitle">Cloud Backups</div>
+              <div class="cb-history-table-wrap">
+                <table class="data-table cb-history-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Created</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cbCloudListBody">
+                    <tr class="table-empty"><td colspan="3">No cloud backups found.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           <div class="sgroup-actions settings-actions-bar" id="settingsGlobalActions">
             <button id="btnSaveSettings" class="btn btn-accent">
               💾 Save Settings
@@ -1226,7 +1478,7 @@
       </section>
 
       <footer class="app-footer">
-        <span class="app-footer-name">Inverter Dashboard v2.2</span>
+        <span class="app-footer-name">Inverter Dashboard v2.2.2</span>
         <span class="app-footer-sep">·</span>
         <span class="app-footer-author">Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.)</span>
         <span class="app-footer-sep">·</span>
@@ -1263,7 +1515,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2</span></div>
+            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.2</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1404,7 +1656,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Inverter Dashboard v2.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Inverter Dashboard v2.2.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

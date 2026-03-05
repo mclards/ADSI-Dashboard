@@ -20,6 +20,7 @@
         --border2: #bdd0e8;
         --accent: #0d6efd;
         --accent2: #0a58ca;
+        --accent-glow: rgba(13, 110, 253, 0.2);
         --text: #1a2b44;
         --text2: #4f6788;
         --ok: #0ea765;
@@ -35,6 +36,7 @@
         --border2: #2a4772;
         --accent: #60a5fa;
         --accent2: #2563eb;
+        --accent-glow: rgba(96, 165, 250, 0.2);
         --text: #dbe7ff;
         --text2: #8ea4c8;
         --ok: #10b981;
@@ -306,54 +308,123 @@
       .status-bar.error {
         color: var(--warn);
       }
+      /* ── Auth Gate ─────────────────────────────────────── */
       #auth-gate {
         position: fixed;
         inset: 0;
-        background: rgba(2, 8, 16, 0.96);
+        background: rgba(2, 8, 18, 0.82);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
         display: flex;
         align-items: center;
         justify-content: center;
         z-index: 99999;
+        animation: gate-in 0.18s ease both;
+      }
+      @keyframes gate-in {
+        from { opacity: 0; }
+        to   { opacity: 1; }
       }
       #auth-card {
-        width: min(92vw, 420px);
+        width: min(90vw, 344px);
+        background: linear-gradient(158deg, var(--surface) 0%, var(--surface2) 100%);
         border: 1px solid var(--border2);
-        background: var(--surface);
-        padding: 18px;
+        border-top: 2px solid var(--accent);
+        border-radius: 14px;
+        padding: 26px 22px 20px;
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.04),
+          0 20px 56px rgba(0, 0, 0, 0.52),
+          0 6px 18px rgba(0, 0, 0, 0.28);
+        animation: card-in 0.24s cubic-bezier(0.34, 1.28, 0.64, 1) both;
+      }
+      @keyframes card-in {
+        from { opacity: 0; transform: scale(0.92) translateY(10px); }
+        to   { opacity: 1; transform: scale(1)    translateY(0);     }
+      }
+      /* icon badge + title row */
+      .auth-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 7px;
+      }
+      .auth-icon {
+        width: 32px;
+        height: 32px;
+        flex-shrink: 0;
+        border-radius: 8px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        box-shadow: 0 2px 10px var(--accent-glow);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .auth-icon svg {
+        width: 15px;
+        height: 15px;
+        fill: none;
+        stroke: #fff;
+        stroke-width: 2.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
       #auth-title {
-        font:
-          700 0.9rem Sora,
-          sans-serif;
-        color: var(--accent);
-        letter-spacing: 0.04em;
+        font: 700 0.78rem Sora, sans-serif;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--text);
       }
       #auth-sub {
-        margin-top: 8px;
-        font-size: 0.72rem;
+        font-size: 0.69rem;
+        line-height: 1.55;
         color: var(--text2);
+        margin-bottom: 14px;
       }
       #auth-input {
         width: 100%;
-        margin-top: 12px;
-        height: 34px;
-        border: 1px solid var(--border2);
+        height: 38px;
+        padding: 0 12px;
         background: var(--surface3);
         color: var(--text);
-        padding: 0 10px;
+        border: 1px solid var(--border2);
+        border-radius: 8px;
+        font: 13px "JetBrains Mono", monospace;
         outline: none;
+        transition: border-color 0.15s, box-shadow 0.15s;
+        margin-bottom: 10px;
+      }
+      #auth-input::placeholder { color: var(--text2); opacity: 0.55; }
+      #auth-input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-glow);
       }
       #auth-submit {
-        margin-top: 10px;
         width: 100%;
-        height: 34px;
+        height: 38px;
+        border: none;
+        border-radius: 8px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        color: #fff;
+        font: 700 0.76rem Sora, sans-serif;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        transition: filter 0.15s, transform 0.1s;
       }
+      #auth-submit:hover  { filter: brightness(1.13); }
+      #auth-submit:active { transform: scale(0.975); filter: brightness(0.96); }
       #auth-error {
-        min-height: 18px;
-        margin-top: 8px;
-        font-size: 0.7rem;
+        margin-top: 10px;
+        font-size: 0.68rem;
         color: var(--warn);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-height: 0;
+        opacity: 0;
+        transition: opacity 0.18s;
       }
+      #auth-error:not(:empty) { opacity: 1; }
 
       /* Main-dashboard-like header shell */
       .page {
@@ -532,11 +603,20 @@
   <body>
     <div id="auth-gate">
       <div id="auth-card">
-        <div id="auth-title">IP CONFIG AUTHORIZATION</div>
-        <div id="auth-sub">Enter authorization key to continue.</div>
-        <input id="auth-input" type="password" autocomplete="off" />
-        <button class="btn btn-primary" id="auth-submit">Unlock</button>
-        <div id="auth-error"></div>
+        <div class="auth-header">
+          <!-- lock icon -->
+          <div class="auth-icon">
+            <svg viewBox="0 0 24 24">
+              <rect x="3" y="11" width="18" height="11" rx="2"/>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </div>
+          <div id="auth-title">IP Config Authorization</div>
+        </div>
+        <div id="auth-sub">Enter the authorization key to continue.</div>
+        <input id="auth-input" type="password" autocomplete="off" placeholder="adsi••" />
+        <button id="auth-submit">Unlock</button>
+        <div id="auth-error" role="alert"></div>
       </div>
     </div>
     <div class="page">

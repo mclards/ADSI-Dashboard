@@ -6,6 +6,23 @@
    © 2026 Engr. Clariden Montaño REE. All rights reserved.
    ═══════════════════════════════════════════════════════════════════════ */
 
+function createXferSlot(dir) {
+  return {
+    dir,
+    active: false,
+    phase: "idle",
+    label: "",
+    totalBytes: 0,
+    doneBytes: 0,
+    chunkCount: 0,
+    chunkDone: 0,
+    totalRows: 0,
+    importedRows: 0,
+    hideTimer: null,
+    updatedAt: 0,
+  };
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
   liveData: {}, // key: `${inv}_${unit}` → parsed row
@@ -46,23 +63,46 @@ const State = {
   analyticsBaseRows: [],
   analyticsDayAheadBaseRows: [],
   analyticsIntervalMin: 5,
+  analyticsDailyTotalMwh: null,
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
+  // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
+  analyticsDayAheadCache: null,  // { src, intervalMin, result }
+  // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
+  analyticsLastPacSig: "",
   activeAlarms: {}, // key: `${inv}_${unit}` -> active alarm row
   alarmSoundTimer: null,
   alarmAudioCtx: null,
+  alarmSoundMuted: false,
   exportUiSaveTimer: null,
   exportBtnTimers: {},
+  alarmView: {
+    rows: [],
+    page: 1,
+    pageSize: 180,
+  },
+  energyView: {
+    page: 1,
+    pageSize: 500,
+    totalRows: 0,
+    rows: [],
+    summary: null,
+    serverPaged: true,
+  },
   auditView: {
     rows: [],
     sortKey: "ts",
     sortDir: "desc",
+    page: 1,
+    pageSize: 200,
   },
   reportView: {
     rows: [],
     sortKey: "inverter",
     sortDir: "asc",
     summary: null,
+    page: 1,
+    pageSize: 120,
   },
   progressUi: {
     activeCount: 0,
@@ -90,19 +130,29 @@ const State = {
     monitorTimer: null,
   },
   xfer: {
-    active: false,
-    dir: null,        // 'tx' | 'rx'
-    label: "",        // optional custom action label (e.g., "Receiving push")
-    totalBytes: 0,    // known total (TX only; 0 = unknown)
-    doneBytes: 0,     // bytes sent/received so far
-    chunkCount: 0,
-    chunkDone: 0,
-    totalRows: 0,
-    importedRows: 0,
-    hideTimer: null,
+    slots: {
+      tx: createXferSlot("tx"),
+      rx: createXferSlot("rx"),
+    },
   },
   licenseStatus: null,
   licenseAudit: [],
+  appUpdate: {
+    mode: "disabled",
+    modeLabel: "Unavailable",
+    appVersion: "",
+    status: "idle",
+    message: "",
+    checking: false,
+    updateAvailable: false,
+    latestVersion: "",
+    downloadPercent: 0,
+    canDownload: false,
+    canInstall: false,
+    downloadUrl: "",
+    checkedAt: 0,
+    error: "",
+  },
   clockTimer: null,
   alarmBadgeTimer: null,
   replicationHealthTimer: null,
@@ -111,19 +161,26 @@ const State = {
   cardRenderTimer: null,
   lastCardRenderTs: 0,
   nodeOrderSig: {},
+  // Stale-tab cache: tab name → ms of last successful data fetch.
+  // Prevents redundant re-fetches when switching tabs rapidly.
+  tabFetchTs: {},
+  // In-flight fetch guard: tab name → true while HTTP request is active.
+  tabFetching: {},
 };
+const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
 const NODE_RATED_W  = Math.round(997000 / 4); // 249,250 W — rated per-node (997 kW ÷ 4, always 4 nodes)
 const INV_RATED_KW  = 997;                    // rated per-inverter capacity kW
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
+const TABLE_FILTER_DEBOUNCE_MS = 140;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
-const TODAY_MWH_SYNC_INTERVAL_MS = 5000; // server caches for 5s; polling faster has no benefit
+const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
 const THEME_META = {
   dark: {
     label: "Maroon",
@@ -417,6 +474,163 @@ async function uploadLicenseFromSettings() {
     await refreshLicenseSection();
   } catch (err) {
     showMsg("licenseMsg", `✗ License upload failed: ${err.message}`, "error");
+  }
+}
+
+function setUpdateField(id, value, cls = "") {
+  const node = $(id);
+  if (!node) return;
+  node.textContent = value == null || value === "" ? "—" : String(value);
+  node.className = `license-value ${cls}`.trim();
+}
+
+function getUpdateStatusClass(update) {
+  const status = String(update?.status || "").toLowerCase();
+  if (status === "error") return "error";
+  if (status === "up-to-date") return "ok";
+  if (status === "update-available" || status === "downloading" || status === "downloaded") return "warn";
+  if (status === "installing") return "warn";
+  return "";
+}
+
+function applyAppUpdateState(nextState) {
+  if (!nextState || typeof nextState !== "object") return;
+  State.appUpdate = { ...State.appUpdate, ...nextState };
+  renderAppUpdateSummary();
+}
+
+function renderAppUpdateSummary() {
+  const update = State.appUpdate || {};
+  const statusClass = getUpdateStatusClass(update);
+  const currentVersion = String(update.appVersion || "—");
+  const latestVersion = String(update.latestVersion || currentVersion || "—");
+  const modeLabel = String(update.modeLabel || "Unavailable");
+  const statusTextMap = {
+    idle: "Idle",
+    checking: "Checking",
+    "up-to-date": "Up to date",
+    "update-available": "Update available",
+    downloading: "Downloading",
+    downloaded: "Ready to install",
+    installing: "Installing",
+    disabled: "Disabled",
+    error: "Error",
+  };
+  const statusText = statusTextMap[String(update.status || "").toLowerCase()] || "—";
+  const detailText = String(update.message || "").trim()
+    || "Use \"Check for Updates\" to verify the latest release.";
+
+  setUpdateField("updCurrentVersion", currentVersion);
+  setUpdateField("updMode", modeLabel);
+  setUpdateField("updLatestVersion", latestVersion, update.updateAvailable ? "warn" : "ok");
+  setUpdateField("updStatusText", statusText, statusClass);
+
+  const detailEl = $("updStatusDetail");
+  if (detailEl) detailEl.textContent = detailText;
+  const aboutVersion = $("aboutAppVersion");
+  if (aboutVersion) aboutVersion.textContent = currentVersion;
+  const aboutStatus = $("aboutUpdateStatus");
+  if (aboutStatus) aboutStatus.textContent = detailText;
+
+  const checkBtn = $("btnCheckAppUpdate");
+  const downloadBtn = $("btnDownloadAppUpdate");
+  const installBtn = $("btnInstallAppUpdate");
+  const isInstaller = String(update.mode || "").toLowerCase() === "installer";
+  const isPortable = String(update.mode || "").toLowerCase() === "portable";
+
+  if (checkBtn) checkBtn.disabled = !!update.checking;
+  if (downloadBtn) {
+    const canShow = isInstaller ? !!update.canDownload : isPortable && !!update.updateAvailable;
+    downloadBtn.hidden = !canShow;
+    downloadBtn.disabled = !!update.checking;
+    downloadBtn.textContent = isPortable ? "Open Download" : "Download Update";
+  }
+  if (installBtn) {
+    installBtn.hidden = !(isInstaller && !!update.canInstall);
+    installBtn.disabled = !!update.checking;
+  }
+}
+
+async function initAppUpdateBridge() {
+  if (!window.electronAPI) return;
+  try {
+    if (window.electronAPI.onUpdateStatus) {
+      window.electronAPI.onUpdateStatus((payload) => {
+        applyAppUpdateState(payload || {});
+      });
+    }
+    if (window.electronAPI.getUpdateState) {
+      const state = await window.electronAPI.getUpdateState();
+      applyAppUpdateState(state || {});
+    } else {
+      renderAppUpdateSummary();
+    }
+  } catch (err) {
+    applyAppUpdateState({
+      status: "error",
+      message: `Updater bridge error: ${err.message}`,
+      error: String(err.message || "Updater bridge error"),
+    });
+  }
+}
+
+async function checkForUpdatesNow() {
+  if (!window.electronAPI?.checkForUpdates) {
+    showMsg("updateMsg", "Updater is unavailable in this runtime.", "error");
+    return;
+  }
+  showMsg("updateMsg", "Checking for updates...", "");
+  try {
+    const res = await window.electronAPI.checkForUpdates();
+    applyAppUpdateState(res?.state || {});
+    const msg = String(res?.state?.message || "Update check completed.");
+    showMsg("updateMsg", res?.ok ? `✔ ${msg}` : `✗ ${msg}`, res?.ok ? "" : "error");
+  } catch (err) {
+    showMsg("updateMsg", `✗ Update check failed: ${err.message}`, "error");
+  }
+}
+
+async function downloadUpdateNow() {
+  if (!window.electronAPI?.downloadUpdate) {
+    showMsg("updateMsg", "Updater is unavailable in this runtime.", "error");
+    return;
+  }
+  const mode = String(State.appUpdate?.mode || "").toLowerCase();
+  showMsg(
+    "updateMsg",
+    mode === "portable" ? "Opening latest download page..." : "Downloading update...",
+    "",
+  );
+  try {
+    const res = await window.electronAPI.downloadUpdate();
+    applyAppUpdateState(res?.state || {});
+    if (!res?.ok) {
+      showMsg("updateMsg", `✗ ${res?.error || "Update download failed."}`, "error");
+      return;
+    }
+    const okMsg = mode === "portable"
+      ? "✔ Download page opened."
+      : `✔ ${res?.state?.message || "Update download started."}`;
+    showMsg("updateMsg", okMsg, "");
+  } catch (err) {
+    showMsg("updateMsg", `✗ Update download failed: ${err.message}`, "error");
+  }
+}
+
+async function installUpdateNow() {
+  if (!window.electronAPI?.installUpdate) {
+    showMsg("updateMsg", "Updater is unavailable in this runtime.", "error");
+    return;
+  }
+  showMsg("updateMsg", "Restarting app to install update...", "");
+  try {
+    const res = await window.electronAPI.installUpdate();
+    applyAppUpdateState(res?.state || {});
+    if (!res?.ok) {
+      showMsg("updateMsg", `✗ ${res?.error || "Install failed."}`, "error");
+    }
+  } catch (err) {
+    showMsg("updateMsg", `✗ Install failed: ${err.message}`, "error");
   }
 }
 
@@ -797,67 +1011,120 @@ function startNetIOMonitor() {
 }
 
 function handleXferProgress(msg) {
-  const x = State.xfer;
-  const dir = String(msg.dir || "");
-  const phase = String(msg.phase || "");
-  const msgLabel = String(msg.label || "").trim();
+  const slots = State.xfer?.slots || {};
+  const dir = String(msg?.dir || "").trim().toLowerCase() === "tx" ? "tx" : "rx";
+  const slot = slots[dir];
+  if (!slot) return;
 
-  // Clear any pending hide timer on new activity
-  if (x.hideTimer) { clearTimeout(x.hideTimer); x.hideTimer = null; }
+  const phase = String(msg?.phase || "").trim().toLowerCase();
+  const msgLabel = String(msg?.label || "").trim();
+  const now = Date.now();
+  const totalBytes = Math.max(0, Number(msg?.totalBytes || 0));
+  const chunkCount = Math.max(0, Number(msg?.chunkCount || 0));
+  const chunkOrd = Math.max(0, Number(msg?.chunk || msg?.batch || 0));
+  const totalRows = Math.max(0, Number(msg?.totalRows || 0));
+  const importedRows = Math.max(0, Number(msg?.importedRows || 0));
+  const rawDoneBytes = Math.max(
+    0,
+    Number((dir === "tx" ? msg?.sentBytes : msg?.recvBytes) || 0),
+  );
 
-  // Update transfer state
-  if (phase === "start") {
-    x.active = true;
-    x.dir = dir;
-    x.label = msgLabel;
-    x.totalBytes = Number(msg.totalBytes || 0);
-    x.doneBytes = 0;
-    x.chunkCount = Number(msg.chunkCount || 0);
-    x.chunkDone = 0;
-    x.totalRows = Number(msg.totalRows || 0);
-    x.importedRows = 0;
-  } else if (phase === "chunk") {
-    x.active = true;
-    x.dir = dir;
-    if (msgLabel) x.label = msgLabel;
-    const prev = x.doneBytes;
-    x.doneBytes = dir === "tx" ? Number(msg.sentBytes || 0) : Number(msg.recvBytes || 0);
-    x.chunkDone = dir === "tx" ? Number(msg.chunk || 0) : Number(msg.batch || 0);
-    // Feed actual bytes into the speed tracker
-    const delta = x.doneBytes - prev;
-    if (delta > 0) { dir === "tx" ? netIOTrackTx(delta) : netIOTrackRx(delta); }
-  } else if (phase === "done") {
-    x.active = true;
-    if (msgLabel) x.label = msgLabel;
-    x.doneBytes = dir === "tx" ? Number(msg.sentBytes || msg.totalBytes || x.doneBytes) : Number(msg.recvBytes || x.doneBytes);
-    x.importedRows = Number(msg.importedRows || 0);
-    if (x.totalBytes === 0) x.totalBytes = x.doneBytes; // fill total for rx
-    x.hideTimer = setTimeout(() => {
-      x.active = false;
-      x.label = "";
-      renderXferPanel();
-      x.hideTimer = null;
-    }, 3500);
-  } else if (phase === "error") {
-    x.active = true;
-    if (msgLabel) x.label = msgLabel;
-    x.hideTimer = setTimeout(() => {
-      x.active = false;
-      x.label = "";
-      renderXferPanel();
-      x.hideTimer = null;
-    }, 3000);
+  if (slot.hideTimer) {
+    clearTimeout(slot.hideTimer);
+    slot.hideTimer = null;
   }
 
+  if (phase === "start") {
+    slot.active = true;
+    slot.phase = "start";
+    slot.label = msgLabel;
+    slot.totalBytes = totalBytes;
+    slot.doneBytes = rawDoneBytes;
+    slot.chunkCount = chunkCount;
+    slot.chunkDone = chunkOrd;
+    slot.totalRows = totalRows;
+    slot.importedRows = 0;
+    slot.updatedAt = now;
+    renderXferPanel();
+    return;
+  }
+
+  if (phase === "chunk") {
+    slot.active = true;
+    slot.phase = "chunk";
+    if (msgLabel) slot.label = msgLabel;
+    if (totalBytes > 0) slot.totalBytes = totalBytes;
+    if (chunkCount > 0) slot.chunkCount = chunkCount;
+    if (chunkOrd > 0) slot.chunkDone = chunkOrd;
+    if (totalRows > 0) slot.totalRows = totalRows;
+    if (importedRows > 0) slot.importedRows = importedRows;
+
+    let prevDone = Math.max(0, Number(slot.doneBytes || 0));
+    let nextDone = rawDoneBytes;
+    // Some senders may miss a start frame; allow chunk#1 to restart the counter.
+    if (nextDone < prevDone && chunkOrd <= 1) {
+      prevDone = 0;
+      slot.doneBytes = 0;
+    }
+    if (nextDone < prevDone) nextDone = prevDone;
+    slot.doneBytes = nextDone;
+
+    const delta = nextDone - prevDone;
+    if (delta > 0) {
+      if (dir === "tx") netIOTrackTx(delta);
+      else netIOTrackRx(delta);
+    }
+    slot.updatedAt = now;
+    renderXferPanel();
+    return;
+  }
+
+  if (phase === "done" || phase === "error") {
+    slot.active = true;
+    slot.phase = phase;
+    if (msgLabel) slot.label = msgLabel;
+    if (totalBytes > 0) slot.totalBytes = totalBytes;
+    if (chunkCount > 0) slot.chunkCount = chunkCount;
+    if (chunkOrd > 0) slot.chunkDone = chunkOrd;
+    if (totalRows > 0) slot.totalRows = totalRows;
+    if (importedRows > 0) slot.importedRows = importedRows;
+    if (rawDoneBytes > 0) slot.doneBytes = Math.max(slot.doneBytes, rawDoneBytes);
+    if (phase === "done" && slot.totalBytes <= 0 && slot.doneBytes > 0) {
+      slot.totalBytes = slot.doneBytes;
+    }
+    slot.updatedAt = now;
+    slot.hideTimer = setTimeout(() => {
+      slot.active = false;
+      slot.phase = "idle";
+      slot.label = "";
+      slot.updatedAt = Date.now();
+      slot.hideTimer = null;
+      renderXferPanel();
+    }, phase === "done" ? 3500 : 3000);
+    renderXferPanel();
+    return;
+  }
+
+  slot.updatedAt = now;
   renderXferPanel();
+}
+
+function getVisibleXferSlot() {
+  const slots = State.xfer?.slots || {};
+  const tx = slots.tx || null;
+  const rx = slots.rx || null;
+  const active = [tx, rx].filter((s) => s && s.active);
+  if (active.length <= 0) return null;
+  active.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+  return active[0];
 }
 
 function renderXferPanel() {
   const panel = document.getElementById("xferPanel");
   if (!panel) return;
-  const x = State.xfer;
+  const x = getVisibleXferSlot();
 
-  if (!x.active) {
+  if (!x) {
     panel.hidden = true;
     return;
   }
@@ -874,13 +1141,15 @@ function renderXferPanel() {
   if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
   if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
 
-  const done = x.doneBytes;
-  const total = x.totalBytes;
+  const done = Math.max(0, Number(x.doneBytes || 0));
+  const total = Math.max(0, Number(x.totalBytes || 0));
   const known = total > 0;
-  const pct = known ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const pct = known
+    ? Math.min(100, Math.round((done / total) * 100))
+    : (x.phase === "done" ? 100 : 0);
 
   if (fillEl) {
-    if (known) {
+    if (known || x.phase === "done") {
       fillEl.style.width = `${pct}%`;
       fillEl.classList.remove("xfer-bar-indeterminate");
     } else {
@@ -899,6 +1168,10 @@ function renderXferPanel() {
             ? ` · ${Math.max(0, Number(x.chunkDone || 0))}`
             : "";
       labelEl.textContent = `${custom}${suffix}`;
+    } else if (x.phase === "done") {
+      labelEl.textContent = x.dir === "tx" ? "Push complete" : "Pull complete";
+    } else if (x.phase === "error") {
+      labelEl.textContent = x.dir === "tx" ? "Push failed" : "Pull failed";
     } else if (x.dir === "tx") {
       const cStr = x.chunkCount > 1 ? ` · chunk ${x.chunkDone}/${x.chunkCount}` : "";
       labelEl.textContent = `Pushing${cStr}`;
@@ -908,7 +1181,7 @@ function renderXferPanel() {
     }
   }
 
-  if (pctEl) pctEl.textContent = known ? `${pct}%` : "…";
+  if (pctEl) pctEl.textContent = known || x.phase === "done" ? `${pct}%` : "…";
   if (currEl) currEl.textContent = fmtBytes(done);
   if (totalEl) totalEl.textContent = known ? fmtBytes(total) : "?";
 }
@@ -925,6 +1198,100 @@ function renderEmptyRow(tbody, colspan, message) {
   tr.innerHTML = `<td colspan="${colspan}">${message}</td>`;
   tbody.appendChild(tr);
 }
+
+function showTableLoading(tbodyId, colspan) {
+  const tbody = $(tbodyId);
+  if (!tbody) return;
+  tbody.innerHTML = `<tr class="table-loading"><td colspan="${colspan}" style="text-align:center;padding:14px;color:var(--muted,#888)">Loading\u2026</td></tr>`;
+}
+
+function debounce(fn, waitMs = TABLE_FILTER_DEBOUNCE_MS) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), Math.max(0, Number(waitMs) || 0));
+  };
+}
+
+function paginateRows(rows, page, pageSize) {
+  const list = Array.isArray(rows) ? rows : [];
+  const size = Math.max(1, Math.trunc(Number(pageSize) || 1));
+  const totalRows = list.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / size));
+  const safePage = Math.min(
+    totalPages,
+    Math.max(1, Math.trunc(Number(page) || 1)),
+  );
+  const startIdx = (safePage - 1) * size;
+  const endIdx = Math.min(totalRows, startIdx + size);
+  return {
+    rows: list.slice(startIdx, endIdx),
+    page: safePage,
+    pageSize: size,
+    totalRows,
+    totalPages,
+    from: totalRows ? startIdx + 1 : 0,
+    to: endIdx,
+  };
+}
+
+function ensureTablePagerHost(hostId, tbodyId) {
+  if (!hostId || !tbodyId) return null;
+  let host = $(hostId);
+  if (host) return host;
+  const tbody = $(tbodyId);
+  if (!tbody) return null;
+  const table = tbody.closest("table");
+  const wrap = table ? table.closest(".table-wrap") : null;
+  if (!wrap || !wrap.parentElement) return null;
+  host = el("div", "table-pagination");
+  host.id = hostId;
+  wrap.insertAdjacentElement("afterend", host);
+  return host;
+}
+
+function renderTablePager({
+  hostId,
+  tbodyId,
+  page,
+  pageSize,
+  totalRows,
+  onPageChange,
+}) {
+  const host = ensureTablePagerHost(hostId, tbodyId);
+  if (!host) return;
+  const safeSize = Math.max(1, Math.trunc(Number(pageSize) || 1));
+  const safeTotal = Math.max(0, Math.trunc(Number(totalRows) || 0));
+  const totalPages = Math.max(1, Math.ceil(safeTotal / safeSize));
+  const safePage = Math.min(
+    totalPages,
+    Math.max(1, Math.trunc(Number(page) || 1)),
+  );
+  const from = safeTotal ? (safePage - 1) * safeSize + 1 : 0;
+  const to = safeTotal ? Math.min(safeTotal, safePage * safeSize) : 0;
+
+  host.innerHTML = `
+    <div class="pager-meta">Showing ${from}-${to} of ${safeTotal}</div>
+    <div class="pager-actions">
+      <button class="btn btn-outline pager-btn" data-action="prev" ${safePage <= 1 ? "disabled" : ""}>Prev</button>
+      <span class="pager-page">Page ${safePage}/${totalPages}</span>
+      <button class="btn btn-outline pager-btn" data-action="next" ${safePage >= totalPages ? "disabled" : ""}>Next</button>
+    </div>
+  `;
+
+  host.querySelector("[data-action=\"prev\"]")?.addEventListener("click", () => {
+    if (safePage <= 1 || typeof onPageChange !== "function") return;
+    onPageChange(safePage - 1);
+  });
+  host.querySelector("[data-action=\"next\"]")?.addEventListener("click", () => {
+    if (safePage >= totalPages || typeof onPageChange !== "function") return;
+    onPageChange(safePage + 1);
+  });
+}
+
+const applyAuditTableViewDebounced = debounce(() => applyAuditTableView());
+const applyReportTableViewDebounced = debounce(() => applyReportTableView());
+
 const duration_min = (ts1, ts2) => {
   if (!ts1 || !ts2) return "—";
   return Math.round((ts2 - ts1) / 60000) + "m";
@@ -1013,7 +1380,7 @@ function playAlarmBeepOnce() {
 }
 
 function setAlarmSoundActive(active) {
-  if (!active) {
+  if (!active || State.alarmSoundMuted) {
     if (State.alarmSoundTimer) {
       clearInterval(State.alarmSoundTimer);
       State.alarmSoundTimer = null;
@@ -1023,6 +1390,37 @@ function setAlarmSoundActive(active) {
   if (State.alarmSoundTimer) return;
   playAlarmBeepOnce();
   State.alarmSoundTimer = setInterval(playAlarmBeepOnce, 1600);
+}
+
+function hasUnackedActiveAlarms() {
+  return Object.values(State.activeAlarms || {}).some(
+    (a) => a && a.acknowledged !== true,
+  );
+}
+
+function renderAlarmSoundBtn() {
+  const btn = $("btnAlarmSound");
+  const icon = $("alarmSoundIcon");
+  if (!btn || !icon) return;
+  if (State.alarmSoundMuted) {
+    icon.className = "mdi mdi-volume-off";
+    btn.classList.add("muted");
+    btn.title = "Unmute alarm sound";
+    btn.setAttribute("aria-label", "Unmute alarm sound");
+  } else {
+    icon.className = "mdi mdi-volume-high";
+    btn.classList.remove("muted");
+    btn.title = "Mute alarm sound";
+    btn.setAttribute("aria-label", "Mute alarm sound");
+  }
+}
+
+function toggleAlarmSound() {
+  State.alarmSoundMuted = !State.alarmSoundMuted;
+  try { localStorage.setItem("alarmSoundMuted", State.alarmSoundMuted ? "1" : "0"); } catch (_) {}
+  // Apply immediately based on current alarm state (no need to wait for next poll tick).
+  setAlarmSoundActive(hasUnackedActiveAlarms());
+  renderAlarmSoundBtn();
 }
 function resetPacTodayIfNeeded(ts = Date.now()) {
   const d = dateStr(new Date(ts));
@@ -1045,21 +1443,25 @@ function getCurrentFreshTotalPacW(now = Date.now()) {
 
 function applySyncedTodayKwh(totalKwh, syncedAt = Date.now()) {
   resetPacTodayIfNeeded(syncedAt);
-  State.pacToday.totalKwh = Math.max(0, Number(totalKwh) || 0);
-  State.pacToday.lastTs = syncedAt;
-  State.pacToday.lastTotalPacW = getCurrentFreshTotalPacW(syncedAt);
+  const serverKwh = Math.max(0, Number(totalKwh) || 0);
+  // Keep header strictly server-authoritative so it matches report/analytics totals.
+  State.pacToday.totalKwh = serverKwh;
+  State.pacToday.lastTs         = syncedAt;
+  State.pacToday.lastTotalPacW  = getCurrentFreshTotalPacW(syncedAt);
   const meter = $("totalKwh");
   if (meter) {
     meter.title = `Synced: ${fmtDateTime(syncedAt)}`;
   }
 }
 
-function integrateTodayFromPac(totals) {
+function integrateTodayFromPac() {
   const now = Date.now();
   resetPacTodayIfNeeded(now);
-  // Keep header total MWh server-authoritative so it matches report/energy outputs.
-  State.pacToday.lastTs = now;
-  State.pacToday.lastTotalPacW = getCurrentFreshTotalPacW(now);
+  // No client-side kWh integration here; server sync is authoritative.
+  const currentPacW = getCurrentFreshTotalPacW(now);
+  State.pacToday.lastTs         = now;
+  State.pacToday.lastTotalPacW  = currentPacW;
+  renderTodayKwhFromPac();
 }
 function renderTodayKwhFromPac() {
   const el = $("totalKwh");
@@ -1099,7 +1501,7 @@ async function syncTodayMwhFromServer() {
     applySyncedTodayKwh(totalKwh, Date.now());
     renderTodayKwhFromPac();
   } catch (e) {
-    // Non-fatal: live integration keeps the metric moving between sync polls.
+    // Non-fatal: next sync tick will refresh the metric.
     console.warn("syncTodayMwhFromServer:", e?.message || e);
   }
 }
@@ -1446,6 +1848,7 @@ function switchPage(page) {
     unlockSettingsInputs();
     refreshLicenseSection().catch(() => {});
     startReplicationHealthPolling();
+    cbLoadSettings().catch(() => {});
   }
 }
 
@@ -1600,7 +2003,59 @@ function syncOperationModeUi() {
   syncDayAheadGeneratorAvailability();
 }
 
+function normalizeOperationModeValue(mode) {
+  return String(mode || "gateway").trim().toLowerCase() === "remote"
+    ? "remote"
+    : "gateway";
+}
+
+async function handleOperationModeTransition(
+  prevModeRaw,
+  nextModeRaw,
+  reason = "",
+) {
+  const prevMode = normalizeOperationModeValue(prevModeRaw);
+  const nextMode = normalizeOperationModeValue(nextModeRaw);
+  if (prevMode === nextMode) return;
+
+  // Clear mode-specific runtime views immediately to avoid stale carry-over.
+  State.liveData = {};
+  State.totals = {};
+  State.invLastFresh = {};
+  State.analyticsBaseRows = [];
+  State.analyticsDayAheadBaseRows = [];
+  State.analyticsDailyTotalMwh = null;
+  State.pacToday.lastTs = 0;
+  State.pacToday.lastTotalPacW = 0;
+  scheduleInverterCardsUpdate(true);
+
+  // Re-seed canonical today MWh for the new mode source.
+  await syncTodayMwhFromServer().catch((err) => {
+    console.warn(
+      `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
+      err?.message || err,
+    );
+  });
+  renderTodayKwhFromPac();
+
+  // Refresh currently visible data views so numbers align with the new mode immediately.
+  if (State.currentPage === "analytics") {
+    await loadAnalytics({ force: true }).catch((err) => {
+      console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
+    });
+  } else if (State.currentPage === "report") {
+    await fetchReport().catch((err) => {
+      console.warn("[app] mode transition report refresh failed:", err?.message || err);
+    });
+  } else if (State.currentPage === "energy") {
+    await fetchEnergy().catch((err) => {
+      console.warn("[app] mode transition energy refresh failed:", err?.message || err);
+    });
+  }
+}
+
 async function saveSettings() {
+  const prevMode = State.settings.operationMode;
   const normalizedGateway = applyRemoteGatewayInputNormalization();
   const body = {
     plantName: $("setPlantName").value,
@@ -1635,6 +2090,7 @@ async function saveSettings() {
       State.settings.csvSavePath;
     if ($("setCsvPath")) $("setCsvPath").value = nextCsvPath;
     State.settings = { ...State.settings, ...body, csvSavePath: nextCsvPath };
+    await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
     if ($("plantNameDisplay"))
       $("plantNameDisplay").textContent = body.plantName;
     showMsg(
@@ -1645,6 +2101,7 @@ async function saveSettings() {
       "",
     );
     buildInverterGrid();
+    scheduleInverterCardsUpdate(true); // render cards immediately with cleared/current data
     buildSelects();
     syncDayAheadGeneratorAvailability();
     syncOperationModeUi();
@@ -3202,9 +3659,20 @@ function handleWS(msg) {
     scheduleInverterCardsUpdate();
   }
   if (msg.type === "configChanged") {
-    loadSettings().then(() => buildInverterGrid()).catch((err) => {
-      console.warn("[ws] configChanged rebuild failed:", err.message);
-    });
+    const prevModeWs = State.settings.operationMode;
+    loadSettings()
+      .then(async () => {
+        await handleOperationModeTransition(
+          prevModeWs,
+          State.settings.operationMode,
+          "configChanged",
+        );
+        buildInverterGrid();
+        scheduleInverterCardsUpdate(true);
+      })
+      .catch((err) => {
+        console.warn("[ws] configChanged rebuild failed:", err.message);
+      });
   }
   if (msg.type === "alarm") {
     handleAlarmPush(msg.alarms || []);
@@ -3368,10 +3836,24 @@ function initAlarmsPage() {
     $("alarmStart").value = dateStr(s);
     $("alarmEnd").value = today();
   }
+  if (!Number.isFinite(Number(State.alarmView.page)) || State.alarmView.page < 1) {
+    State.alarmView.page = 1;
+  }
+  // Stale cache: skip fetch and re-render from State if data is fresh.
+  if (
+    State.alarmView.rows.length > 0 &&
+    Date.now() - (State.tabFetchTs.alarms || 0) < TAB_STALE_MS
+  ) {
+    applyAlarmTableView();
+    return;
+  }
   fetchAlarms();
 }
 
 async function fetchAlarms() {
+  if (State.tabFetching.alarms) return;
+  State.tabFetching.alarms = true;
+  showTableLoading("alarmBody", 10);
   const inv = $("alarmInv").value;
   const start = $("alarmStart").value;
   const end = $("alarmEnd").value;
@@ -3385,24 +3867,50 @@ async function fetchAlarms() {
   try {
     const raw = await api(`/api/alarms?${qs}`);
     const rows = Array.isArray(raw) ? raw : [];
-    renderAlarmTable(rows);
-    const countEl = $("alarmCount");
-    if (countEl) countEl.textContent = `${rows.length} records`;
+    State.alarmView.rows = rows;
+    State.alarmView.page = 1;
+    State.tabFetchTs.alarms = Date.now();
+    applyAlarmTableView();
     refreshAlarmBadge();
   } catch (e) {
     console.error("fetchAlarms:", e);
+  } finally {
+    State.tabFetching.alarms = false;
   }
+}
+
+function applyAlarmTableView() {
+  const allRows = Array.isArray(State.alarmView.rows) ? State.alarmView.rows : [];
+  const pageData = paginateRows(allRows, State.alarmView.page, State.alarmView.pageSize);
+  State.alarmView.page = pageData.page;
+  renderAlarmTable(pageData.rows);
+  const countEl = $("alarmCount");
+  if (countEl) {
+    countEl.textContent = `${pageData.from}-${pageData.to} / ${allRows.length} records`;
+  }
+  renderTablePager({
+    hostId: "alarmPager",
+    tbodyId: "alarmBody",
+    page: pageData.page,
+    pageSize: pageData.pageSize,
+    totalRows: pageData.totalRows,
+    onPageChange(nextPage) {
+      State.alarmView.page = nextPage;
+      applyAlarmTableView();
+    },
+  });
 }
 
 function renderAlarmTable(rows) {
   const tbody = $("alarmBody");
   if (!tbody) return;
   const safeRows = Array.isArray(rows) ? rows : [];
-  tbody.innerHTML = "";
   if (!safeRows.length) {
+    tbody.textContent = "";
     renderEmptyRow(tbody, 10, "No alarm records for the selected filter.");
     return;
   }
+  const frag = document.createDocumentFragment();
   safeRows.forEach((r) => {
     const desc = (r.decoded || []).map((b) => b.label).join(", ") || "—";
     const occurredTs = Number(r.occurred_ts || r.ts || 0);
@@ -3432,8 +3940,10 @@ function renderAlarmTable(rows) {
       <td>${dur}</td>
       <td>${status}</td>
       <td>${ackBtn}</td>`;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.textContent = "";
+  tbody.appendChild(frag);
 }
 
 async function ackAlarm(id, btn) {
@@ -3526,27 +4036,97 @@ function initEnergyPage() {
     $("energyStart").value = today();
     $("energyEnd").value = today();
   }
-  fetchEnergy();
+  if (!Number.isFinite(Number(State.energyView.page)) || State.energyView.page < 1) {
+    State.energyView.page = 1;
+  }
+  // Stale cache: skip fetch and re-render from State if data is fresh.
+  if (
+    State.energyView.rows.length > 0 &&
+    Date.now() - (State.tabFetchTs.energy || 0) < TAB_STALE_MS
+  ) {
+    renderEnergyTable(State.energyView.rows);
+    return;
+  }
+  fetchEnergy({ page: State.energyView.page });
 }
 
-async function fetchEnergy() {
+async function fetchEnergy(options = {}) {
   const inv = $("energyInv").value;
   const start = $("energyStart").value;
   const end = $("energyEnd").value;
   const sTs = localDateStartMs(start);
   const eTs = localDateEndMs(end);
+  const requestedPage = Math.max(
+    1,
+    Math.trunc(Number(options?.page ?? State.energyView.page) || 1),
+  );
+  const pageSize = Math.max(
+    100,
+    Math.trunc(Number(State.energyView.pageSize || 500)),
+  );
+  const offset = (requestedPage - 1) * pageSize;
   const qs = new URLSearchParams({
     start: sTs,
     end: eTs,
+    paged: "1",
+    limit: String(pageSize),
+    offset: String(offset),
     ...(inv !== "all" ? { inverter: inv } : {}),
   });
   try {
     const raw = await api(`/api/energy/5min?${qs}`);
-    const rows = Array.isArray(raw) ? raw : [];
+    const serverPaged = !Array.isArray(raw) && Array.isArray(raw?.rows);
+    const fullRows = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.rows)
+        ? raw.rows
+        : [];
+    const totalRowsRaw = Math.max(
+      fullRows.length,
+      Math.trunc(Number(raw?.total ?? fullRows.length) || fullRows.length),
+    );
+    let rows = fullRows;
+    let safePage = requestedPage;
+    if (!serverPaged) {
+      const sliced = paginateRows(fullRows, requestedPage, pageSize);
+      rows = sliced.rows;
+      safePage = sliced.page;
+    } else {
+      const totalPages = Math.max(1, Math.ceil(totalRowsRaw / pageSize));
+      safePage = Math.min(totalPages, requestedPage);
+    }
+    const totalRows = totalRowsRaw;
+    State.energyView.page = safePage;
+    State.energyView.totalRows = totalRows;
+    State.energyView.rows = rows;
+    State.energyView.summary =
+      raw?.summary && typeof raw.summary === "object" ? raw.summary : null;
+    State.energyView.serverPaged = serverPaged;
+    State.tabFetchTs.energy = Date.now();
     renderEnergyTable(rows);
-    renderEnergySummary(rows);
+    if (State.energyView.summary) {
+      renderEnergySummaryFromStats(State.energyView.summary);
+    } else {
+      renderEnergySummary(serverPaged ? rows : fullRows);
+    }
     const countEl = $("energyCount");
-    if (countEl) countEl.textContent = `${rows.length} interval records`;
+    if (countEl) {
+      const from = totalRows ? (safePage - 1) * pageSize + 1 : 0;
+      const to = totalRows ? Math.min(totalRows, safePage * pageSize) : 0;
+      countEl.textContent = `${from}-${to} / ${totalRows} interval records`;
+    }
+    renderTablePager({
+      hostId: "energyPager",
+      tbodyId: "energyBody",
+      page: safePage,
+      pageSize,
+      totalRows,
+      onPageChange(nextPage) {
+        fetchEnergy({ page: nextPage }).catch((err) => {
+          console.warn("energy page change failed:", err?.message || err);
+        });
+      },
+    });
   } catch (e) {
     console.error("fetchEnergy:", e);
   }
@@ -3555,8 +4135,8 @@ async function fetchEnergy() {
 function renderEnergyTable(rows) {
   const tbody = $("energyBody");
   if (!tbody) return;
-  tbody.innerHTML = "";
   if (!rows.length) {
+    tbody.textContent = "";
     renderEmptyRow(
       tbody,
       4,
@@ -3564,11 +4144,14 @@ function renderEnergyTable(rows) {
     );
     return;
   }
-  const ordered = [...rows].sort(
-    (a, b) =>
-      Number(b.ts || 0) - Number(a.ts || 0) ||
-      Number(a.inverter || 0) - Number(b.inverter || 0),
-  );
+  const ordered = State.energyView.serverPaged
+    ? rows
+    : [...rows].sort(
+        (a, b) =>
+          Number(b.ts || 0) - Number(a.ts || 0) ||
+          Number(a.inverter || 0) - Number(b.inverter || 0),
+      );
+  const frag = document.createDocumentFragment();
   ordered.forEach((r) => {
     const dt = new Date(r.ts);
     const tr = el("tr");
@@ -3577,8 +4160,43 @@ function renderEnergyTable(rows) {
       <td>${pad2(dt.getHours())}:${pad2(dt.getMinutes())}</td>
       <td>INV-${String(r.inverter).padStart(2, "0")}</td>
       <td>${fmtMWh(Number(r.kwh_inc || 0), 6)}</td>`;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.textContent = "";
+  tbody.appendChild(frag);
+}
+
+function renderEnergySummaryFromStats(summary) {
+  const setText = (id, v) => {
+    const node = $(id);
+    if (node) node.textContent = v;
+  };
+  const stats = summary && typeof summary === "object" ? summary : null;
+  if (!stats) {
+    renderEnergySummary(State.energyView.rows);
+    return;
+  }
+  const totalKwh = Number(stats.totalKwh || 0);
+  const rowCount = Math.max(0, Number(stats.rowCount || 0));
+  const avgKwh = rowCount > 0 ? totalKwh / rowCount : 0;
+  const peak = stats.peak && typeof stats.peak === "object" ? stats.peak : {};
+  const peakKwh = Number(peak.kwhInc || 0);
+  const peakInv = Number(peak.inverter || 0);
+  const peakTs = Number(peak.ts || 0);
+  const invCount = Math.max(0, Number(stats.inverterCount || 0));
+  const latestTs = Number(stats.latestTs || 0);
+
+  setText("energyTotalMwh", `${fmtMWh(totalKwh, 6)} MWh`);
+  setText("energyAvgMwh", `${fmtMWh(avgKwh, 6)} MWh`);
+  setText("energyPeakMwh", `${fmtMWh(peakKwh, 6)} MWh`);
+  setText(
+    "energyPeakMeta",
+    peakTs && peakInv
+      ? `INV-${String(peakInv).padStart(2, "0")} @ ${fmtDateTime(peakTs)}`
+      : "—",
+  );
+  setText("energyInvCount", String(invCount));
+  setText("energyLastTs", latestTs ? fmtDateTime(latestTs) : "—");
 }
 
 function renderEnergySummary(rows) {
@@ -3637,37 +4255,60 @@ function initAuditPage() {
     $("auditStart").value = dateStr(s);
     $("auditEnd").value = today();
   }
+  // Stale cache: skip fetch and re-render from State if data is fresh.
+  if (
+    State.auditView.rows.length > 0 &&
+    Date.now() - (State.tabFetchTs.audit || 0) < TAB_STALE_MS
+  ) {
+    applyAuditTableView();
+    return;
+  }
   fetchAudit();
 }
 
 async function fetchAudit() {
+  if (State.tabFetching.audit) return;
+  State.tabFetching.audit = true;
+  showTableLoading("auditBody", 8);
   const inv = $("auditInv").value;
   const start = $("auditStart").value;
   const end = $("auditEnd").value;
+  const hasValidDates = Boolean(start && end);
+  if (hasValidDates && start > end) {
+    showToast("Audit date range is invalid (From is after To).", "warning", 2600);
+    State.tabFetching.audit = false;
+    return;
+  }
   const startMs = start ? new Date(`${start}T00:00:00`).getTime() : "";
   const endMs = end ? new Date(`${end}T23:59:59.999`).getTime() : "";
   const qs = new URLSearchParams({
     start: String(startMs),
     end: String(endMs),
+    limit: "5000",
     ...(inv !== "all" ? { inverter: inv } : {}),
   });
   try {
     const rows = await api(`/api/audit?${qs}`);
     State.auditView.rows = Array.isArray(rows) ? rows : [];
+    State.auditView.page = 1;
+    State.tabFetchTs.audit = Date.now();
     applyAuditTableView();
   } catch (e) {
     console.error("fetchAudit:", e);
+  } finally {
+    State.tabFetching.audit = false;
   }
 }
 
 function renderAuditTable(rows) {
   const tbody = $("auditBody");
   if (!tbody) return;
-  tbody.innerHTML = "";
   if (!rows.length) {
+    tbody.textContent = "";
     renderEmptyRow(tbody, 8, "No audit records for the selected filter.");
     return;
   }
+  const frag = document.createDocumentFragment();
   rows.forEach((r) => {
     const action =
       r.action === "START"
@@ -3687,8 +4328,10 @@ function renderAuditTable(rows) {
       <td>${(r.scope || "single").toUpperCase()}</td>
       <td>${result}</td>
       <td>${r.ip || "—"}</td>`;
-    $("auditBody").appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.textContent = "";
+  tbody.appendChild(frag);
 }
 
 function setupAuditTableControls() {
@@ -3724,8 +4367,14 @@ function setupAuditTableControls() {
     const f = $(id);
     if (!f || f.dataset.bound === "1") return;
     f.dataset.bound = "1";
-    f.addEventListener("input", applyAuditTableView);
-    f.addEventListener("change", applyAuditTableView);
+    f.addEventListener("input", () => {
+      State.auditView.page = 1;
+      applyAuditTableViewDebounced();
+    });
+    f.addEventListener("change", () => {
+      State.auditView.page = 1;
+      applyAuditTableView();
+    });
   });
 }
 
@@ -3842,10 +4491,29 @@ function applyAuditTableView() {
     (a, b) => dir * compareAuditRows(a, b, State.auditView.sortKey),
   );
 
-  renderAuditTable(filtered);
+  const pageData = paginateRows(
+    filtered,
+    State.auditView.page,
+    State.auditView.pageSize,
+  );
+  State.auditView.page = pageData.page;
+  renderAuditTable(pageData.rows);
   renderAuditSortIndicators();
   const auditCountEl = $("auditCount");
-  if (auditCountEl) auditCountEl.textContent = `${filtered.length}/${allRows.length} records`;
+  if (auditCountEl) {
+    auditCountEl.textContent = `${pageData.from}-${pageData.to} / ${filtered.length} filtered (${allRows.length} total)`;
+  }
+  renderTablePager({
+    hostId: "auditPager",
+    tbodyId: "auditBody",
+    page: pageData.page,
+    pageSize: pageData.pageSize,
+    totalRows: pageData.totalRows,
+    onPageChange(nextPage) {
+      State.auditView.page = nextPage;
+      applyAuditTableView();
+    },
+  });
 }
 
 function resetAuditFilters() {
@@ -3865,6 +4533,7 @@ function resetAuditFilters() {
   });
   State.auditView.sortKey = "ts";
   State.auditView.sortDir = "desc";
+  State.auditView.page = 1;
   applyAuditTableView();
 }
 
@@ -3875,10 +4544,21 @@ function initReportPage() {
     $("reportDate").value = today();
     queuePersistExportUiState();
   }
+  // Stale cache: skip fetch and re-render from State if data is fresh.
+  if (
+    State.reportView.rows.length > 0 &&
+    Date.now() - (State.tabFetchTs.report || 0) < TAB_STALE_MS
+  ) {
+    applyReportTableView();
+    return;
+  }
   fetchReport();
 }
 
 async function fetchReport() {
+  if (State.tabFetching.report) return;
+  State.tabFetching.report = true;
+  showTableLoading("reportBody", 14);
   const date = $("reportDate").value;
   queuePersistExportUiState();
   try {
@@ -3903,6 +4583,8 @@ async function fetchReport() {
     State.reportView.rows = Array.isArray(rows)
       ? rows.map((r) => toReportViewRow(r))
       : [];
+    State.reportView.page = 1;
+    State.tabFetchTs.report = Date.now();
     applyReportTableView();
     await fetchReportSummary($("reportDate").value || date);
   } catch (e) {
@@ -3912,6 +4594,8 @@ async function fetchReport() {
     applyReportTableView();
     renderReportKpis();
     showToast(`Report load failed: ${e.message}`, "error", 4200);
+  } finally {
+    State.tabFetching.report = false;
   }
 }
 
@@ -3986,6 +4670,7 @@ function toReportViewRow(r) {
     ...r,
     uptime_h: uph,
   });
+  const avail = Math.round(availabilityPct);
   const perf = Math.round(performancePct);
   return {
     ...r,
@@ -3997,6 +4682,7 @@ function toReportViewRow(r) {
     alarm_count: Number(r?.alarm_count || 0),
     availability_pct: Number(availabilityPct.toFixed(3)),
     performance_pct: Number(performancePct.toFixed(3)),
+    avail,
     perf,
   };
 }
@@ -4028,13 +4714,20 @@ function setupReportTableControls() {
     "reportFilterAvg",
     "reportFilterUptime",
     "reportFilterAlarms",
+    "reportFilterAvail",
     "reportFilterPerf",
   ].forEach((id) => {
     const f = $(id);
     if (!f || f.dataset.bound === "1") return;
     f.dataset.bound = "1";
-    f.addEventListener("input", applyReportTableView);
-    f.addEventListener("change", applyReportTableView);
+    f.addEventListener("input", () => {
+      State.reportView.page = 1;
+      applyReportTableViewDebounced();
+    });
+    f.addEventListener("change", () => {
+      State.reportView.page = 1;
+      applyReportTableView();
+    });
   });
 }
 
@@ -4047,6 +4740,7 @@ function getReportFilters() {
     avg: getVal("reportFilterAvg").toLowerCase(),
     uptime: getVal("reportFilterUptime").toLowerCase(),
     alarms: getVal("reportFilterAlarms"),
+    avail: getVal("reportFilterAvail").toLowerCase(),
     perf: getVal("reportFilterPerf").toLowerCase(),
   };
 }
@@ -4059,6 +4753,9 @@ function compareReportRows(a, b, key) {
     key === "avg_kw" ||
     key === "uptime_h" ||
     key === "alarm_count" ||
+    key === "availability_pct" ||
+    key === "performance_pct" ||
+    key === "avail" ||
     key === "perf"
   ) {
     return Number(a?.[key] || 0) - Number(b?.[key] || 0);
@@ -4129,8 +4826,15 @@ function applyReportTableView() {
     )
       return false;
     if (
+      f.avail &&
+      !String(Number(r.availability_pct || 0).toFixed(1))
+        .toLowerCase()
+        .includes(f.avail)
+    )
+      return false;
+    if (
       f.perf &&
-      !String(r.perf || 0)
+      !String(Number(r.performance_pct || 0).toFixed(1))
         .toLowerCase()
         .includes(f.perf)
     )
@@ -4146,30 +4850,49 @@ function applyReportTableView() {
     (a, b) => dir * compareReportRows(a, b, State.reportView.sortKey),
   );
 
-  renderReportTable(filtered, allRows.length);
+  const pageData = paginateRows(
+    filtered,
+    State.reportView.page,
+    State.reportView.pageSize,
+  );
+  State.reportView.page = pageData.page;
+  renderReportTable(pageData.rows, allRows.length);
   renderReportSortIndicators();
   renderReportKpis();
+  renderTablePager({
+    hostId: "reportPager",
+    tbodyId: "reportBody",
+    page: pageData.page,
+    pageSize: pageData.pageSize,
+    totalRows: pageData.totalRows,
+    onPageChange(nextPage) {
+      State.reportView.page = nextPage;
+      applyReportTableView();
+    },
+  });
 }
 
 function renderReportTable(rows, totalRows = rows.length) {
   const tbody = $("reportBody");
   if (!tbody) return;
-  tbody.innerHTML = "";
   if (!rows.length) {
     const msg =
       Number(totalRows || 0) > 0
         ? "No rows match current report filters."
         : "No daily report rows for this date.";
-    renderEmptyRow(tbody, 7, msg);
+    tbody.textContent = "";
+    renderEmptyRow(tbody, 8, msg);
     return;
   }
 
+  const frag = document.createDocumentFragment();
   rows.forEach((r) => {
     const mwh = Number(r.mwh || 0);
     const peak = Number(r.peak_kw || 0);
     const avg = Number(r.avg_kw || 0);
     const uph = Number(r.uptime_h || 0);
-    const perf = Number(r.perf || 0);
+    const avail = Number(r.availability_pct || 0);
+    const perf = Number(r.performance_pct || 0);
 
     const tr = el("tr");
     tr.innerHTML = `
@@ -4181,12 +4904,20 @@ function renderReportTable(rows, totalRows = rows.length) {
       <td class="${r.alarm_count > 0 ? "text-red" : ""}">${r.alarm_count || 0}</td>
       <td>
         <div class="perf-bar">
+          <div class="perf-track"><div class="perf-fill" style="width:${avail}%;background:${avail > 80 ? "var(--green)" : avail > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
+          <span>${avail.toFixed(1)}%</span>
+        </div>
+      </td>
+      <td>
+        <div class="perf-bar">
           <div class="perf-track"><div class="perf-fill" style="width:${perf}%;background:${perf > 80 ? "var(--green)" : perf > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
-          <span>${perf}%</span>
+          <span>${perf.toFixed(1)}%</span>
         </div>
       </td>`;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.textContent = "";
+  tbody.appendChild(frag);
 }
 
 function computeReportSummaryFromRows(rows) {
@@ -4285,6 +5016,9 @@ async function exportDailyReport() {
 function initAnalytics() {
   if (!$("anaDate").value) $("anaDate").value = today();
   if ($("anaInterval") && !$("anaInterval").value) $("anaInterval").value = "5";
+  // Render cached data immediately so the tab feels instant on revisit,
+  // then kick off a fresh fetch in the background.
+  if (State.analyticsBaseRows.length > 0) renderAnalyticsFromState();
   ensureAnalyticsAutoRefresh();
   loadAnalytics({ force: true });
 }
@@ -4312,16 +5046,21 @@ async function loadAnalytics(options = {}) {
     });
     let rows = [];
     let dayAheadRows = [];
+    let dailySummary = null;
     try {
-      [rows, dayAheadRows] = await Promise.all([
+      [rows, dayAheadRows, dailySummary] = await Promise.all([
         api(`/api/analytics/energy?${qs}`),
         api(`/api/analytics/dayahead?${qs}`).catch(() => []),
+        api(`/api/report/summary?date=${encodeURIComponent(date)}`).catch(
+          () => null,
+        ),
       ]);
     } catch (err) {
       // Backward fallback for older backend versions.
       console.warn("[app] analytics v2 endpoint failed, using legacy:", err.message);
       rows = await api(`/api/energy/5min?${qs}`);
       dayAheadRows = [];
+      dailySummary = null;
     }
     if (reqId !== State.analyticsReqId) return;
     const bucketed = aggregateEnergyRows(rows, intervalMin);
@@ -4329,6 +5068,10 @@ async function loadAnalytics(options = {}) {
     State.analyticsBaseRows = bucketed;
     State.analyticsDayAheadBaseRows = dayAheadBucketed;
     State.analyticsIntervalMin = intervalMin;
+    const summaryMwh = Number(dailySummary?.daily?.total_mwh);
+    State.analyticsDailyTotalMwh = Number.isFinite(summaryMwh)
+      ? Number(summaryMwh.toFixed(6))
+      : null;
     renderAnalyticsFromState();
     ensureAnalyticsRealtime();
     ensureAnalyticsAutoRefresh();
@@ -4502,10 +5245,20 @@ function mergeRealtimeOverlay(baseRows, intervalMin) {
 function renderAnalyticsFromState() {
   const intervalMin = Number(State.analyticsIntervalMin || 5);
   const actualRows = mergeRealtimeOverlay(State.analyticsBaseRows, intervalMin);
-  const dayAheadRows = aggregateForecastRows(
-    State.analyticsDayAheadBaseRows,
-    intervalMin,
-  );
+
+  // Cache dayahead aggregation — the source rows only change on a full fetch
+  // (every 60 s or on tab switch), so re-aggregating on every 2-s realtime tick
+  // is redundant. Invalidate by object-reference + interval.
+  const daSrc = State.analyticsDayAheadBaseRows;
+  const cache = State.analyticsDayAheadCache;
+  let dayAheadRows;
+  if (cache && cache.src === daSrc && cache.intervalMin === intervalMin) {
+    dayAheadRows = cache.result;
+  } else {
+    dayAheadRows = aggregateForecastRows(daSrc, intervalMin);
+    State.analyticsDayAheadCache = { src: daSrc, intervalMin, result: dayAheadRows };
+  }
+
   renderAnalyticsCharts(actualRows, intervalMin, dayAheadRows);
 }
 
@@ -4539,6 +5292,7 @@ function ensureAnalyticsAutoRefresh() {
 
 function ensureAnalyticsRealtime() {
   stopAnalyticsRealtime();
+  State.analyticsLastPacSig = ""; // reset so the first tick always renders
   if (State.currentPage !== "analytics") return;
   if (!isTodayAnalyticsDate()) return;
   State.analyticsRealtimeTimer = setInterval(() => {
@@ -4550,6 +5304,19 @@ function ensureAnalyticsRealtime() {
       stopAnalyticsRealtime();
       return;
     }
+    // Build a cheap live-PAC signature. Skip re-render when no inverter data
+    // has changed since the last tick — avoids rebuilding 28 chart datasets
+    // every 2 s when power output is stable.
+    let s = 0;
+    const now = Date.now();
+    Object.values(State.liveData || {}).forEach((d) => {
+      if (d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS) {
+        s += Number(d.pac || 0) * Number(d.inverter || 0);
+      }
+    });
+    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}`;
+    if (sig === State.analyticsLastPacSig) return;
+    State.analyticsLastPacSig = sig;
     renderAnalyticsFromState();
   }, 2000);
 }
@@ -5007,9 +5774,22 @@ function renderAnalyticsSummary(
   const numericTotalValues = (totalValues || []).filter(
     (v) => v !== null && v !== undefined && Number.isFinite(Number(v)),
   );
-  const totalMwh = Number(
+  const computedTotalMwh = Number(
     numericTotalValues.reduce((s, v) => s + Number(v || 0), 0).toFixed(6),
   );
+  let totalMwh = computedTotalMwh;
+  const selectedDate = String($("anaDate")?.value || today()).trim();
+  if (selectedDate === today()) {
+    // Keep today's analytics total aligned with header/report canonical total.
+    totalMwh = Number(
+      (Math.max(0, Number(State.pacToday.totalKwh || 0)) / 1000).toFixed(6),
+    );
+  } else {
+    const summaryMwh = Number(State.analyticsDailyTotalMwh);
+    if (Number.isFinite(summaryMwh) && summaryMwh >= 0) {
+      totalMwh = Number(summaryMwh.toFixed(6));
+    }
+  }
   const peakRaw = (totalValues || []).map((v) =>
     v !== null && v !== undefined && Number.isFinite(Number(v))
       ? Number(v)
@@ -5478,6 +6258,456 @@ async function openExportPathFolder(filePath) {
   }
 }
 
+// ─── Cloud Backup UI ──────────────────────────────────────────────────────────
+
+/** Lookup table for email domain → suggested provider. */
+const CB_DOMAIN_MAP = [
+  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "💡 Looks like a Microsoft account — OneDrive recommended." },
+  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "💡 Looks like a Google account — Google Drive recommended." },
+];
+
+function cbSuggestProvider(email) {
+  const hint = $("cbEmailHint");
+  if (!hint) return;
+  const domain = (email || "").split("@")[1]?.toLowerCase().trim() || "";
+  if (!domain) { hint.textContent = ""; return; }
+  for (const { domains, hint: h } of CB_DOMAIN_MAP) {
+    if (domains.includes(domain)) { hint.textContent = h; return; }
+  }
+  hint.textContent = "ℹ️ Domain unrecognized — select a provider manually or use Auto.";
+}
+
+function cbSetProgress(data) {
+  const wrap = $("cbProgressWrap");
+  const icon = $("cbProgressIcon");
+  const label = $("cbProgressLabel");
+  const pct = $("cbProgressPct");
+  const fill = $("cbProgressBarFill");
+  if (!wrap) return;
+
+  const icons = {
+    idle: "💤",
+    queued: "⏳",
+    creating: "⚙",
+    uploading: "⬆",
+    pulling: "⬇",
+    restoring: "🔄",
+    done: "✅",
+    error: "❌",
+    success: "✅",
+    failed: "❌",
+  };
+  const { status = "idle", pct: p = 0, message = "", updatedAt = 0, finishedAt = 0, startedAt = 0 } = data;
+
+  if (status === "idle") { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  if (icon) icon.textContent = icons[status] || "⏳";
+  const ts = Number(updatedAt || finishedAt || startedAt || 0);
+  const tsText = ts > 0 ? new Date(ts).toLocaleString() : "";
+  if (label) label.textContent = tsText ? `${message || status} · Last: ${tsText}` : (message || status);
+  if (pct) pct.textContent = p > 0 ? `${p}%` : "";
+  if (fill) fill.style.width = `${p}%`;
+}
+
+let _cbProgressPoller = null;
+function startCbProgressPolling() {
+  if (_cbProgressPoller) return;
+  _cbProgressPoller = setInterval(async () => {
+    try {
+      const data = await api("/api/backup/progress");
+      cbSetProgress(data.progress || {});
+      if (data.progress?.status === "done" || data.progress?.status === "error") {
+        stopCbProgressPolling();
+        await cbRefreshHistory();
+        cbUpdateConnectionStatus();
+      }
+    } catch {
+      // ignore
+    }
+  }, 1500);
+}
+
+function stopCbProgressPolling() {
+  if (_cbProgressPoller) { clearInterval(_cbProgressPoller); _cbProgressPoller = null; }
+}
+
+function cbFormatSize(bytes) {
+  if (!bytes || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function cbStatusBadge(status) {
+  const map = {
+    local: "🗂 Local",
+    cloud: "☁ Cloud",
+    pulled: "⬇ Pulled",
+    "pulled-unverified": "⚠ Pulled",
+    restored: "🔄 Restored",
+    "pre-restore-safety": "🛡 Safety",
+  };
+  return map[status] || status;
+}
+
+function cbCloudBadges(cloud) {
+  if (!cloud || !Object.keys(cloud).length) return "—";
+  return Object.keys(cloud).map((p) => (p === "onedrive" ? "☁OD" : "🔵GD")).join(" ");
+}
+
+async function cbRefreshHistory() {
+  const body = $("cbHistoryBody");
+  if (!body) return;
+  try {
+    const data = await api("/api/backup/history");
+    const history = data.history || [];
+    const filterDate = ($("cbRestoreDate")?.value || "").trim();
+    const filtered = filterDate
+      ? history.filter((h) => (h.createdAt || "").startsWith(filterDate))
+      : history;
+
+    if (!filtered.length) {
+      body.innerHTML = '<tr class="table-empty"><td colspan="7">No backup history yet.</td></tr>';
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const h of filtered) {
+      const tr = document.createElement("tr");
+      const dt = h.createdAt ? new Date(h.createdAt).toLocaleString() : "—";
+      const restoreAble = ["local","cloud","pulled"].includes(h.status);
+      const localAble = ["local","cloud","pulled","pulled-unverified"].includes(h.status);
+      tr.innerHTML = `
+        <td style="white-space:nowrap">${dt}</td>
+        <td>${escapeHtml(h.tag || "—")}</td>
+        <td>${Array.isArray(h.scope) ? h.scope.join(", ") : "—"}</td>
+        <td>${cbFormatSize(h.totalSize)}</td>
+        <td>${cbStatusBadge(h.status)}</td>
+        <td>${cbCloudBadges(h.cloud)}</td>
+        <td style="white-space:nowrap">
+          ${restoreAble ? `<button class="btn btn-xs btn-outline cb-action-restore" data-id="${escapeHtml(h.id)}" type="button">Restore</button>` : ""}
+          ${localAble ? `<button class="btn btn-xs btn-outline cb-action-delete" data-id="${escapeHtml(h.id)}" type="button">Delete</button>` : ""}
+        </td>`;
+      frag.appendChild(tr);
+    }
+    body.innerHTML = "";
+    body.appendChild(frag);
+
+    // Bind action buttons.
+    body.querySelectorAll(".cb-action-restore").forEach((btn) => {
+      btn.addEventListener("click", () => cbRestoreBackup(btn.dataset.id));
+    });
+    body.querySelectorAll(".cb-action-delete").forEach((btn) => {
+      btn.addEventListener("click", () => cbDeleteBackup(btn.dataset.id));
+    });
+  } catch (err) {
+    console.warn("[CloudBackup] History refresh failed:", err.message);
+  }
+}
+
+async function cbUpdateConnectionStatus() {
+  try {
+    const data = await api("/api/backup/status");
+    const connected = data.connected || [];
+    const odConn = connected.find((c) => c.provider === "onedrive");
+    const gdConn = connected.find((c) => c.provider === "gdrive");
+
+    const odBadge = $("cbOneDriveStatus");
+    const gdBadge = $("cbGDriveStatus");
+    const btnConnOD = $("btnConnectOneDrive");
+    const btnDiscOD = $("btnDisconnectOneDrive");
+    const btnConnGD = $("btnConnectGDrive");
+    const btnDiscGD = $("btnDisconnectGDrive");
+
+    if (odBadge) {
+      odBadge.textContent = odConn ? (odConn.expired ? "Expired — reconnect" : "Connected") : "Not connected";
+      odBadge.className = "cb-conn-badge" + (odConn && !odConn.expired ? " connected" : "");
+    }
+    if (gdBadge) {
+      gdBadge.textContent = gdConn ? (gdConn.expired ? "Expired — reconnect" : "Connected") : "Not connected";
+      gdBadge.className = "cb-conn-badge" + (gdConn && !gdConn.expired ? " connected" : "");
+    }
+    if (btnConnOD) btnConnOD.hidden = !!(odConn && !odConn.expired);
+    if (btnDiscOD) btnDiscOD.hidden = !(odConn && !odConn.expired);
+    if (btnConnGD) btnConnGD.hidden = !!(gdConn && !gdConn.expired);
+    if (btnDiscGD) btnDiscGD.hidden = !(gdConn && !gdConn.expired);
+
+    cbSetProgress(data.progress || {});
+  } catch {
+    // ignore
+  }
+}
+
+async function cbLoadSettings() {
+  try {
+    const data = await api("/api/backup/settings");
+    const s = data.settings || {};
+    const c = data.connected || [];
+
+    if ($("cbEmail")) $("cbEmail").value = s.email || "";
+    if ($("cbEnabled")) $("cbEnabled").checked = !!s.enabled;
+    if ($("cbProvider")) $("cbProvider").value = s.provider || "auto";
+    if ($("cbSchedule")) $("cbSchedule").value = s.schedule || "manual";
+    if ($("cbScopeDb")) $("cbScopeDb").checked = !s.scope || s.scope.includes("database");
+    if ($("cbScopeConfig")) $("cbScopeConfig").checked = !s.scope || s.scope.includes("config");
+    if ($("cbScopeLogs")) $("cbScopeLogs").checked = s.scope?.includes("logs") || false;
+    if ($("cbOneDriveClientId")) $("cbOneDriveClientId").value = s.onedrive?.clientId || "";
+    if ($("cbGDriveClientId")) $("cbGDriveClientId").value = s.gdrive?.clientId || "";
+    if ($("cbGDriveClientSecret")) $("cbGDriveClientSecret").value = s.gdrive?.clientSecret || "";
+
+    cbSuggestProvider(s.email || "");
+    await cbUpdateConnectionStatus();
+    await cbRefreshHistory();
+  } catch (err) {
+    console.warn("[CloudBackup] Settings load failed:", err.message);
+  }
+}
+
+async function cbSaveSettings() {
+  const scope = [];
+  if ($("cbScopeDb")?.checked) scope.push("database");
+  if ($("cbScopeConfig")?.checked) scope.push("config");
+  if ($("cbScopeLogs")?.checked) scope.push("logs");
+
+  const body = {
+    email: $("cbEmail")?.value || "",
+    enabled: !!$("cbEnabled")?.checked,
+    provider: $("cbProvider")?.value || "auto",
+    schedule: $("cbSchedule")?.value || "manual",
+    scope,
+    onedrive: { clientId: ($("cbOneDriveClientId")?.value || "").trim() },
+    gdrive: {
+      clientId: ($("cbGDriveClientId")?.value || "").trim(),
+      clientSecret: ($("cbGDriveClientSecret")?.value || "").trim(),
+    },
+  };
+  try {
+    await api("/api/backup/settings", "POST", body);
+    showMsg("cbActionMsg", "✔ Cloud settings saved", "");
+  } catch (err) {
+    showMsg("cbActionMsg", "✗ Save failed: " + err.message, "error");
+  }
+}
+
+async function cbConnectProvider(provider) {
+  // Save credentials first.
+  await cbSaveSettings();
+
+  const msgId = provider === "onedrive" ? "cbOneDriveMsg" : "cbGDriveMsg";
+  showMsg(msgId, "Opening browser for authentication…", "");
+
+  try {
+    // Get auth URL from server.
+    const startData = await api(`/api/backup/auth/${provider}/start`, "POST", {});
+    if (!startData.ok) throw new Error(startData.error || "Failed to start OAuth");
+
+    if (!window.electronAPI?.openOAuthWindow) {
+      showMsg(msgId, "✗ OAuth requires the desktop app (not browser preview)", "error");
+      return;
+    }
+
+    // Open OAuth window in Electron.
+    const result = await window.electronAPI.openOAuthWindow(startData.authUrl);
+    if (!result?.ok) {
+      showMsg(msgId, `✗ ${result?.error || "OAuth cancelled"}`, "error");
+      return;
+    }
+
+    // Extract code and state from callbackUrl.
+    const cbUrl = new URL(result.callbackUrl);
+    const code = cbUrl.searchParams.get("code");
+    const state = cbUrl.searchParams.get("state");
+
+    if (!code) {
+      const errMsg = cbUrl.searchParams.get("error_description") || cbUrl.searchParams.get("error") || "No code returned";
+      showMsg(msgId, `✗ ${errMsg}`, "error");
+      return;
+    }
+
+    // Exchange code for tokens.
+    const cbData = await api(`/api/backup/auth/${provider}/callback`, "POST", { code, state });
+    if (!cbData.ok) throw new Error(cbData.error || "Token exchange failed");
+
+    const userName = cbData.user?.name || cbData.user?.email || "";
+    showMsg(msgId, `✔ Connected${userName ? ` as ${userName}` : ""}`, "");
+    await cbUpdateConnectionStatus();
+  } catch (err) {
+    showMsg(msgId, `✗ ${err.message}`, "error");
+  }
+}
+
+async function cbDisconnectProvider(provider) {
+  const msgId = provider === "onedrive" ? "cbOneDriveMsg" : "cbGDriveMsg";
+  try {
+    await api(`/api/backup/auth/${provider}/disconnect`, "POST", {});
+    showMsg(msgId, `✔ Disconnected from ${provider}`, "");
+    await cbUpdateConnectionStatus();
+  } catch (err) {
+    showMsg(msgId, `✗ ${err.message}`, "error");
+  }
+}
+
+async function cbBackupNow() {
+  const scope = [];
+  if ($("cbScopeDb")?.checked) scope.push("database");
+  if ($("cbScopeConfig")?.checked) scope.push("config");
+  if ($("cbScopeLogs")?.checked) scope.push("logs");
+  const provider = $("cbProvider")?.value || "auto";
+  const dateTag = $("cbBackupDate")?.value || "";
+  const tag = dateTag ? `manual-${dateTag}` : `manual-${new Date().toISOString().slice(0, 10)}`;
+
+  showMsg("cbActionMsg", "Backup started…", "");
+  cbSetProgress({ status: "queued", pct: 2, message: "Backup queued…" });
+  $("cbProgressWrap").hidden = false;
+  startCbProgressPolling();
+  try {
+    await api("/api/backup/now", "POST", { scope, provider, tag });
+  } catch (err) {
+    showMsg("cbActionMsg", `✗ ${err.message}`, "error");
+    stopCbProgressPolling();
+  }
+}
+
+async function cbListCloudBackups() {
+  const providerPref = $("cbProvider")?.value || "auto";
+  const providers =
+    providerPref === "both" || providerPref === "auto"
+      ? ["onedrive", "gdrive"]
+      : [providerPref];
+  const restoreDateFilter = ($("cbRestoreDate")?.value || "").trim();
+  const listSection = $("cbCloudListSection");
+  const listTitle = $("cbCloudListTitle");
+  const listBody = $("cbCloudListBody");
+  if (!listSection || !listBody) return;
+
+  showMsg("cbActionMsg", `Listing ${providers.join(" + ")} backups…`, "");
+  listSection.hidden = false;
+  if (listTitle) listTitle.textContent = `Cloud Backups (${providers.join(" + ")})`;
+  listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Loading…</td></tr>';
+
+  try {
+    const results = await Promise.all(
+      providers.map(async (provider) => {
+        try {
+          const data = await api(`/api/backup/cloud/${provider}`);
+          return { provider, items: data.items || [], error: null };
+        } catch (err) {
+          return { provider, items: [], error: err };
+        }
+      }),
+    );
+
+    const items = [];
+    const errors = [];
+    for (const r of results) {
+      if (r.error) {
+        errors.push(`${r.provider}: ${r.error.message}`);
+        continue;
+      }
+      for (const item of r.items) {
+        items.push({ ...item, __provider: r.provider });
+      }
+    }
+
+    const filtered = restoreDateFilter
+      ? items.filter((item) => {
+          const created = String(item.createdTime || item.createdDateTime || item.lastModifiedDateTime || "");
+          return created.startsWith(restoreDateFilter);
+        })
+      : items;
+    filtered.sort((a, b) => {
+      const ta = Date.parse(a.createdTime || a.createdDateTime || a.lastModifiedDateTime || 0) || 0;
+      const tb = Date.parse(b.createdTime || b.createdDateTime || b.lastModifiedDateTime || 0) || 0;
+      return tb - ta;
+    });
+    if (!filtered.length) {
+      listBody.innerHTML = '<tr class="table-empty"><td colspan="3">No cloud backups found.</td></tr>';
+      showMsg("cbActionMsg", errors.length ? `⚠ ${errors.join(" | ")}` : "No cloud backups found.", errors.length ? "error" : "");
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const item of filtered) {
+      const tr = document.createElement("tr");
+      const created = item.createdTime || item.createdDateTime || item.lastModifiedDateTime || "";
+      const createdFmt = created ? new Date(created).toLocaleString() : "—";
+      const p = String(item.__provider || "").toLowerCase();
+      const providerTag = p === "onedrive" ? "OD" : p === "gdrive" ? "GD" : p;
+      tr.innerHTML = `
+        <td>[${escapeHtml(providerTag)}] ${escapeHtml(item.name)}</td>
+        <td>${createdFmt}</td>
+        <td>
+          <button class="btn btn-xs btn-outline cb-cloud-pull" data-id="${escapeHtml(item.id)}"
+            data-name="${escapeHtml(item.name)}" data-provider="${escapeHtml(item.__provider || "")}" type="button">
+            ⬇ Pull
+          </button>
+        </td>`;
+      frag.appendChild(tr);
+    }
+    listBody.innerHTML = "";
+    listBody.appendChild(frag);
+
+    listBody.querySelectorAll(".cb-cloud-pull").forEach((btn) => {
+      btn.addEventListener("click", () =>
+        cbPullFromCloud(btn.dataset.provider, btn.dataset.id, btn.dataset.name),
+      );
+    });
+    if (errors.length) {
+      showMsg("cbActionMsg", `✔ Found ${filtered.length} cloud backup(s) · ${errors.join(" | ")}`, "error");
+    } else {
+      showMsg("cbActionMsg", `✔ Found ${filtered.length} cloud backup(s)`, "");
+    }
+  } catch (err) {
+    listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Error loading.</td></tr>';
+    showMsg("cbActionMsg", `✗ ${err.message}`, "error");
+  }
+}
+
+async function cbPullFromCloud(provider, remoteId, remoteName) {
+  showMsg("cbActionMsg", "Pulling from cloud…", "");
+  cbSetProgress({ status: "queued", pct: 5, message: "Pull queued…" });
+  $("cbProgressWrap").hidden = false;
+  startCbProgressPolling();
+  try {
+    await api("/api/backup/pull", "POST", { provider, remoteId, remoteName });
+  } catch (err) {
+    showMsg("cbActionMsg", `✗ ${err.message}`, "error");
+    stopCbProgressPolling();
+  }
+}
+
+async function cbRestoreBackup(backupId) {
+  if (!confirm(`Restore backup "${backupId}"?\n\nThis will overwrite the current database and config. A safety backup will be created first.\n\nThe app will need to restart after restore.`)) return;
+  showMsg("cbActionMsg", "Restore started…", "");
+  cbSetProgress({ status: "queued", pct: 5, message: "Restore queued…" });
+  $("cbProgressWrap").hidden = false;
+  startCbProgressPolling();
+  try {
+    await api(`/api/backup/restore/${encodeURIComponent(backupId)}`, "POST", {});
+  } catch (err) {
+    showMsg("cbActionMsg", `✗ ${err.message}`, "error");
+    stopCbProgressPolling();
+  }
+}
+
+async function cbDeleteBackup(backupId) {
+  if (!confirm(`Delete local backup "${backupId}"?\nThis only removes the local copy. Cloud copies are not affected.`)) return;
+  try {
+    await api(`/api/backup/${encodeURIComponent(backupId)}`, "DELETE");
+    showMsg("cbActionMsg", "✔ Backup deleted", "");
+    await cbRefreshHistory();
+  } catch (err) {
+    showMsg("cbActionMsg", `✗ ${err.message}`, "error");
+  }
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // ─── Event Bindings ───────────────────────────────────────────────────────────
 function bindEventHandlers() {
   // Logo fallback
@@ -5502,7 +6732,10 @@ function bindEventHandlers() {
   $("btnAckAll")?.addEventListener("click", ackAll);
 
   // Energy page
-  $("btnFetchEnergy")?.addEventListener("click", fetchEnergy);
+  $("btnFetchEnergy")?.addEventListener("click", () => {
+    State.energyView.page = 1;
+    fetchEnergy({ page: 1 });
+  });
 
   // Audit page
   $("btnFetchAudit")?.addEventListener("click", fetchAudit);
@@ -5563,7 +6796,29 @@ function bindEventHandlers() {
   $("btnPickExportFolder")?.addEventListener("click", pickExportFolder);
   $("btnOpenExportFolder")?.addEventListener("click", openExportFolder);
   $("btnOpenIpConfig")?.addEventListener("click", openIpConfigSettings);
+  $("btnCheckAppUpdate")?.addEventListener("click", checkForUpdatesNow);
+  $("btnDownloadAppUpdate")?.addEventListener("click", downloadUpdateNow);
+  $("btnInstallAppUpdate")?.addEventListener("click", installUpdateNow);
+  $("btnAboutCheckUpdate")?.addEventListener("click", checkForUpdatesNow);
   $("btnOpenGuide")?.addEventListener("click", openGuideModal);
+
+  // Cloud Backup
+  $("cbEmail")?.addEventListener("input", () => cbSuggestProvider($("cbEmail").value));
+  $("btnSaveCloudSettings")?.addEventListener("click", cbSaveSettings);
+  $("btnBackupNow")?.addEventListener("click", cbBackupNow);
+  $("btnListCloudBackups")?.addEventListener("click", cbListCloudBackups);
+  $("btnConnectOneDrive")?.addEventListener("click", () => cbConnectProvider("onedrive"));
+  $("btnDisconnectOneDrive")?.addEventListener("click", () => cbDisconnectProvider("onedrive"));
+  $("btnConnectGDrive")?.addEventListener("click", () => cbConnectProvider("gdrive"));
+  $("btnDisconnectGDrive")?.addEventListener("click", () => cbDisconnectProvider("gdrive"));
+  $("btnRefreshBackupHistory")?.addEventListener("click", cbRefreshHistory);
+  $("cbRestoreDate")?.addEventListener("change", cbRefreshHistory);
+  $("btnClearRestoreDate")?.addEventListener("click", () => { if ($("cbRestoreDate")) { $("cbRestoreDate").value = ""; cbRefreshHistory(); } });
+  $("cbOneDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade") || window.open("https://portal.azure.com"); });
+  $("cbGDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://console.cloud.google.com/apis/credentials") || window.open("https://console.cloud.google.com"); });
+
+  // Alarm sound toggle
+  $("btnAlarmSound")?.addEventListener("click", toggleAlarmSound);
 
   // Notification panel
   $("notifBell")?.addEventListener("click", toggleNotif);
@@ -5577,7 +6832,14 @@ function bindEventHandlers() {
     clearInterval(State.clockTimer);
     clearInterval(State.alarmBadgeTimer);
     if (State.netIO.monitorTimer) { clearInterval(State.netIO.monitorTimer); State.netIO.monitorTimer = null; }
-    if (State.xfer.hideTimer) { clearTimeout(State.xfer.hideTimer); State.xfer.hideTimer = null; }
+    const slots = State.xfer?.slots || {};
+    for (const key of Object.keys(slots)) {
+      const slot = slots[key];
+      if (slot?.hideTimer) {
+        clearTimeout(slot.hideTimer);
+        slot.hideTimer = null;
+      }
+    }
     stopReplicationHealthPolling();
     stopTodayMwhSyncTimer();
   });
@@ -5587,6 +6849,7 @@ function bindEventHandlers() {
 async function init() {
   initThemeToggle();
   await initLicenseBridge();
+  await initAppUpdateBridge();
   startClock();
   setupSideNav();
   initGuideModal();
@@ -5604,7 +6867,11 @@ async function init() {
     { passive: true },
   );
   bindEventHandlers();
+  // Restore alarm sound mute preference
+  try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
+  renderAlarmSoundBtn();
   await loadSettings();
+  cbLoadSettings().catch(() => {});
   syncDayAheadGeneratorAvailability();
   bindExportUiStatePersistence();
   setupExportUiStateFlush();

@@ -33,7 +33,7 @@ const DB_PATH = path.join(DATA_DIR, "adsi.db");
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
+db.pragma("synchronous = FULL");   // fsync every WAL commit — safe on hard power cut
 db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
@@ -67,6 +67,7 @@ db.exec(`
     kwh_inc   REAL NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_e5_inv_ts ON energy_5min(inverter, ts);
+  CREATE INDEX IF NOT EXISTS idx_e5_ts     ON energy_5min(ts);
 
   CREATE TABLE IF NOT EXISTS alarms (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +143,8 @@ function ensureColumn(tableName, columnName, columnDDL) {
 ensureColumn("alarms", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("daily_report", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("settings", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
+// Migration: daily audit control-action count per inverter (added 2026-03).
+ensureColumn("daily_report", "control_count", "control_count INTEGER DEFAULT 0");
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
@@ -236,14 +239,15 @@ const stmts = {
     `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter, ts ASC`,
   ),
   upsertDailyReport: db.prepare(`
-    INSERT INTO daily_report(date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,updated_ts)
-    VALUES(?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    INSERT INTO daily_report(date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,control_count,updated_ts)
+    VALUES(?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     ON CONFLICT(date,inverter) DO UPDATE SET
       kwh_total=excluded.kwh_total,
       pac_peak=excluded.pac_peak,
       pac_avg=excluded.pac_avg,
       uptime_s=excluded.uptime_s,
       alarm_count=excluded.alarm_count,
+      control_count=excluded.control_count,
       updated_ts=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   `),
   getDailyReport: db.prepare(
@@ -332,6 +336,19 @@ function pruneOldData() {
   }
 }
 
+function closeDb() {
+  try {
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch (err) {
+    console.error("[DB] WAL checkpoint failed:", err.message);
+  }
+  try {
+    db.close();
+  } catch (err) {
+    console.error("[DB] close failed:", err.message);
+  }
+}
+
 module.exports = {
   db,
   stmts,
@@ -340,5 +357,6 @@ module.exports = {
   getSetting,
   setSetting,
   pruneOldData,
+  closeDb,
   DATA_DIR,
 };

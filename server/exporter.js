@@ -60,28 +60,34 @@ function formatDurationMs(ms) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
-// Solar production window mirrors poller.js SOLAR_HOUR_START / SOLAR_HOUR_END.
-const SOLAR_WINDOW_H = 13;   // 05:00–18:00
-// Minimum peak to form a valid denominator.  Below this the inverter was either
-// barely online (cloud transient, startup flicker) and the ratio would be
-// meaningless — report 0 % instead.
-const MIN_PEAK_KW = 0.1;     // 100 W
+// Daily report metric constants aligned with dashboard computation semantics.
+const REPORT_SOLAR_WINDOW_H = 13;     // 05:00–18:00
+const REPORT_INVERTER_KW = 997;       // one inverter rated capacity in kW
 
-// Performance ratio: actual kWh vs theoretical maximum (peak_kW × uptime_h).
-// Hardening applied:
-//   • uptimeH is capped at SOLAR_WINDOW_H to prevent anomalously large uptime_s
-//     values (e.g. spanning midnight) from collapsing the denominator.
-//   • peakKw must be ≥ MIN_PEAK_KW; brief power spikes that set pac_peak to a
-//     tiny value would otherwise inflate the ratio to near-infinity before capping.
-// Returns 0–100 %; inactive inverters (no uptime/peak) return 0.
+function clampPct(v) {
+  return Math.max(0, Math.min(100, safeNum(v, 0)));
+}
+
+// Daily availability:
+// uptime time ratio over the fixed solar window.
 function calcDailyAvailabilityPct(row) {
-  const kwh     = safeNum(row?.kwh_total);
-  const peakKw  = safeNum(row?.pac_peak) / 1000;                          // W → kW
-  const uptimeH = Math.min(safeNum(row?.uptime_s) / 3600, SOLAR_WINDOW_H); // s → h, capped
-  if (peakKw < MIN_PEAK_KW || uptimeH <= 0) return 0;
-  const denom = peakKw * uptimeH;
+  const explicit = Number(row?.availability_pct);
+  if (Number.isFinite(explicit)) return clampPct(explicit);
+  const uptimeH = Math.max(0, safeNum(row?.uptime_s) / 3600); // s -> h
+  if (REPORT_SOLAR_WINDOW_H <= 0) return 0;
+  return clampPct((uptimeH / REPORT_SOLAR_WINDOW_H) * 100);
+}
+
+// Daily performance:
+// actual energy vs rated inverter output during online uptime.
+function calcDailyPerformancePct(row) {
+  const explicit = Number(row?.performance_pct);
+  if (Number.isFinite(explicit)) return clampPct(explicit);
+  const kwh = Math.max(0, safeNum(row?.kwh_total));
+  const uptimeH = Math.max(0, safeNum(row?.uptime_s) / 3600); // s -> h
+  const denom = REPORT_INVERTER_KW * uptimeH;
   if (!Number.isFinite(denom) || denom <= 0) return 0;
-  return Math.max(0, Math.min(100, (kwh / denom) * 100));
+  return clampPct((kwh / denom) * 100);
 }
 
 function toCsv(headers, rows) {
@@ -912,8 +918,7 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
   }
 
   // Enumerate every date × every configured inverter; zero-fill any gaps.
-  // This ensures inactive inverters always appear with 0 values so the
-  // exported Availability (%) denominator matches what the UI displays.
+  // This ensures inactive inverters always appear with 0 values.
   const allRows = [];
   for (const d of iterateLocalDates(s, e)) {
     for (let inv = 1; inv <= invCount; inv++) {
@@ -941,6 +946,7 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
       Peak_Pac_kW:      (pacPeakW / 1000).toFixed(3),
       Avg_Pac_kW:       (pacAvgW  / 1000).toFixed(3),
       Availability_pct: calcDailyAvailabilityPct(r).toFixed(2),
+      Performance_pct:  calcDailyPerformancePct(r).toFixed(2),
       Uptime_h:         (uptimeS / 3600).toFixed(2),
       Alarm_Count:      alarms,
       Status:           kwhTotal > 0 || uptimeS > 0 ? 'ACTIVE' : 'INACTIVE',
@@ -956,6 +962,7 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
     { key: 'Peak_Pac_kW',      label: 'Peak Pac (kW)' },
     { key: 'Avg_Pac_kW',       label: 'Avg Pac (kW)' },
     { key: 'Availability_pct', label: 'Availability (%)' },
+    { key: 'Performance_pct',  label: 'Performance (%)' },
     { key: 'Uptime_h',         label: 'Uptime (h)' },
     { key: 'Alarm_Count',      label: 'Alarm Count' },
     { key: 'Status',           label: 'Status' },

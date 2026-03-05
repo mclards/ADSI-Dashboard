@@ -1,4 +1,4 @@
-﻿“””
+"""
 Solar Power Forecasting System
 Day-Ahead Forecast Engine · v3.0
 
@@ -20,7 +20,7 @@ Architecture
 Author  : Engr. Clariden Montaño REE (Engr. M.)
 Version : 3.0 (Day-Ahead Hardened)
 © 2026 Engr. Clariden Montaño REE. All rights reserved.
-“””
+"""
 
 import argparse
 import json

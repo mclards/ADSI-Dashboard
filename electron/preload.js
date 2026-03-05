@@ -47,4 +47,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Admin
   getAuthKey: () => ipcRenderer.invoke("get-auth-key"),
+
+  // App update
+  getUpdateState: () => ipcRenderer.invoke("app-update-get-state"),
+  checkForUpdates: () => ipcRenderer.invoke("app-update-check"),
+  downloadUpdate: () => ipcRenderer.invoke("app-update-download"),
+  installUpdate: () => ipcRenderer.invoke("app-update-install"),
+  onUpdateStatus: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("app-update-status", handler);
+    return () => ipcRenderer.removeListener("app-update-status", handler);
+  },
+
+  // Cloud Backup OAuth
+  // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }
+  openOAuthWindow: (authUrl) => ipcRenderer.invoke("oauth-start", { authUrl }),
 });

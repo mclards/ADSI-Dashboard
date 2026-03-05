@@ -521,6 +521,33 @@ function stop() {
   clearTimeout(pollTimer);
 }
 
+// Flush any liveData readings not yet written due to cadence guards.
+// Called on graceful shutdown to recover up to ~1 s of readings.
+function flushPending() {
+  const batch = [];
+  for (const d of Object.values(liveData)) {
+    if (!d || !d.ts) continue;
+    const key = `${d.inverter}_${d.unit}`;
+    const prev = lastPersistState[key];
+    if (prev && Number(d.ts) <= Number(prev.ts)) continue;
+    batch.push({
+      ts: Number(d.ts), inverter: Number(d.inverter), unit: Number(d.unit),
+      vdc: Number(d.vdc || 0), idc: Number(d.idc || 0),
+      vac1: Number(d.vac1 || 0), vac2: Number(d.vac2 || 0), vac3: Number(d.vac3 || 0),
+      iac1: Number(d.iac1 || 0), iac2: Number(d.iac2 || 0), iac3: Number(d.iac3 || 0),
+      pac: Number(d.pac || 0), kwh: Number(d.kwh || 0),
+      alarm: Number(d.alarm || 0), online: Number(d.online ?? 1),
+    });
+    lastPersistState[key] = {
+      ts: Number(d.ts), pac: Number(d.pac || 0),
+      alarm: Number(d.alarm || 0), on_off: Number(d.on_off || 0),
+    };
+  }
+  if (batch.length) {
+    try { bulkInsert(batch); } catch (err) { console.error('[poller] flushPending failed:', err.message); }
+  }
+}
+
 function getLiveData() { return liveData; }
 
 function getLiveSnapshotJson() {
@@ -555,6 +582,7 @@ function getPerfStats() {
 module.exports = {
   start,
   stop,
+  flushPending,
   markAllOffline,
   getLiveData,
   getLiveSnapshotJson,

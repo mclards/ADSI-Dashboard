@@ -1,119 +1,122 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Repository guidance for Claude Code in `d:\ADSI-Dashboard`.
 
-## Commands
+## Project Snapshot
 
-### Run / Develop
-```bash
-npm start                   # Launch full Electron app (production mode)
-npm run dev                 # Launch with NODE_ENV=development
-npm run server              # Run Express server standalone (no Electron)
-node server/index.js        # Same as above
+- Product: `Inverter Dashboard`
+- Stack:
+  - Electron desktop app
+  - Express server (`server/index.js`) on `:3500`
+  - Python inverter service on `:9100`
+  - Python forecast service
+  - SQLite (`better-sqlite3`)
+
+## Core Priorities
+
+1. Do not break live polling, write control, replication, report, or export.
+2. In remote mode, treat gateway as source of truth.
+3. Keep UI compact, aligned, and readable in all themes.
+4. Keep theming consistent across reusable components in `dark`, `light`, and `classic`; prefer shared CSS theme tokens and avoid ad-hoc hardcoded overrides outside intentional scoped areas (for example, titlebar-only styling).
+5. Keep export default format `.xlsx`.
+6. Keep Windows build outputs working (`installer` and `portable`).
+
+## Current UI Decisions
+
+- Keep About panel in the sidebar.
+- Keep Settings cards uniform height on desktop layouts.
+- Preserve responsive fallback (auto-height stacked cards on small screens).
+
+## Operating Modes
+
+- `gateway`:
+  - polls plant locally
+  - can generate day-ahead forecast
+- `remote`:
+  - pulls live data from gateway
+  - can run replication workflows
+  - must not run day-ahead generation
+
+## Replication Guardrails
+
+- Prefer incremental cursor-based pull.
+- Startup auto-sync in remote mode must reconcile before pull.
+- If local data is newer and reconciliation push fails, do not force pull.
+- Use chunked push uploads to avoid HTTP `413 Payload Too Large`.
+- Keep local-only settings protected during merge.
+
+## Computation Guardrails
+
+- Expected nodes per inverter: `4`.
+- Inverter max peak baseline: `997.0 kW`.
+- Per-node equivalent at 4 nodes: `249.25 kW`.
+- Capacity normalization:
+  - `equiv_inverters = enabled_nodes / 4`
+  - `dependable_kw = equiv_inverters * 917.0`
+  - `max_kw = equiv_inverters * 997.0`
+- Availability:
+  - `availability_pct = (kwh_total / ((pac_peak_W/1000) * (uptime_s/3600))) * 100`
+  - clamp to `0..100`
+
+## High-Impact Files
+
+- Electron: `electron/main.js`, `electron/preload.js`
+- Server: `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js`
+- Frontend: `public/index.html`, `public/js/app.js`, `public/css/style.css`
+- Python: `ADSI_InverterService.py`, `ADSI_ForecastService.py`, `drivers/modbus_tcp.py`
+
+## Build and Validation
+
+Run from repo root:
+
+```powershell
+npm run build:installer
+npm run build:portable
 ```
 
-### Build (Windows x64 only)
-```bash
-npm run build:win           # NSIS installer + portable exe → release/
-npm run build:installer     # NSIS installer only
-npm run build:portable      # Portable exe only
+Release versioning rule:
+
+- Always bump app version in `package.json` before every release build.
+- Keep UI-visible version text aligned (About/footer/guide labels) with `package.json` version.
+- Never publish installer/portable artifacts with an unchanged version number.
+
+## App Update Model (Required)
+
+Keep these 3 update behaviors intact:
+
+1. Installer auto-update:
+   - Runtime: installed NSIS build (non-portable, packaged app).
+   - Use `electron-updater` flow: check -> download -> restart/install.
+   - UI must expose `Check for Updates`, `Download Update`, and `Restart & Install`.
+
+2. Portable manual update:
+   - Runtime: portable EXE.
+   - Do not attempt in-place self-install.
+   - Check latest GitHub release metadata and open release/asset download link for user.
+
+3. In-app update checker UI:
+   - Show current version, latest version, channel/mode, and status.
+   - Provide update actions in Settings and a quick `Check App Update` entry in About.
+   - Keep renderer state synced from main-process updater events.
+
+Release channel defaults:
+
+- GitHub repo: `mclards/ADSI-Dashboard`
+- Build publish config in `package.json` must remain aligned with updater code.
+
+Useful checks after JS edits:
+
+```powershell
+node --check server/index.js
+node --check public/js/app.js
 ```
 
-### Python services (PyInstaller)
-```bash
-# Build inverter backend (outputs dist/InverterCoreService.exe)
-pyinstaller InverterCoreService.spec
+Expected artifacts:
 
-# Build forecast backend (outputs dist/ForecastCoreService.exe)
-pyinstaller ForecastCoreService.spec
-```
-The electron-builder `extraResources` copies the two EXEs from `dist/` into `resources/backend/` in the packaged app.
+- `release/Inverter Dashboard-Setup-<version>.exe`
+- `release/Inverter Dashboard-Portable-<version>.exe`
 
-### Run Python services manually (dev only)
-```bash
-python InverterCoreService.py   # Starts FastAPI on port 9100
-python ForecastCoreService.py   # Starts forecast daemon
-```
+## Build Warning Policy
 
-## Architecture
-
-### Process topology
-```
-Electron main.js
-  ├─ spawns → InverterCoreService.exe  (FastAPI, port 9100, Modbus TCP to inverters)
-  ├─ spawns → ForecastCoreService.exe  (ML forecast daemon)
-  └─ spawns → node server/index.js     (Express + WebSocket, port 3500)
-                 └─ serves → public/index.html  (Chromium renderer)
-```
-
-### Data flow
-```
-Modbus TCP (inverters 192.168.1.x)
-  → InverterCoreService (FastAPI :9100, asyncio polling + ThreadPoolExecutor writes)
-  → Express server/poller.js (polls :9100 every 500 ms, integrates Pac→kWh)
-  → SQLite (adsi.db, WAL mode)
-  → WebSocket broadcast (server/ws.js)
-  → Browser (Chart.js, live update)
-
-Weather APIs (Open-Meteo, Solcast)
-  → ForecastCoreService (physics model + GradientBoosting residual ML)
-  → ProgramData JSON files  (forecast/context/global/global.json)
-  → Express /api/forecast*  → Browser
-```
-
-### Key source files
-
-| File | Purpose |
-|---|---|
-| `electron/main.js` | Electron entry: window management, IPC handlers, license check, process spawning/restart |
-| `electron/preload.js` | Context bridge — exposes `window.electronAPI` (the sole IPC surface) |
-| `server/index.js` | Express REST API + WebSocket; proxies to Python engine; cron for forecast/pruning |
-| `server/db.js` | better-sqlite3 wrapper; schema migrations; `readings`, `energy_5min`, `alarms`, `audit_log`, `settings`, `forecast_day_ahead` tables |
-| `server/poller.js` | 500 ms poll loop against InverterCoreService; Pac integrator; offline detection; 5-min energy buckets |
-| `server/alarms.js` | Ingeteam INGECON 16-bit alarm bitfield decoder; alarm persistence; audit log |
-| `server/ws.js` | WebSocket client registry; `broadcastUpdate()` |
-| `server/exporter.js` | CSV/Excel export (ExcelJS); path traversal guard; filename sanitisation |
-| `public/js/app.js` | Vanilla JS frontend; Chart.js charts; WebSocket client; all UI logic |
-| `public/index.html` | Single-page dashboard shell; no inline event handlers (all bound in `bindEventHandlers()`) |
-| `ADSI_InverterService.py` | FastAPI app with asyncio polling + ThreadPoolExecutor DB writes; one persistent Modbus client per inverter |
-| `ADSI_ForecastService.py` | 9-stage forecast pipeline (solar geometry → clear-sky → cloud transmittance → physics baseline → GBR residual → error memory → anomaly guard → QA → output) |
-| `drivers/modbus_tcp.py` | Thin pymodbus wrapper: `create_client`, `read_input`, `read_holding`, `write_single` (with reconnect retry) |
-| `shared_data.py` | Single `shared = {}` dict used as in-process state between inverter service modules |
-| `ipconfig.json` | 27 inverter IPs (192.168.1.x) + per-inverter Modbus unit IDs + poll intervals |
-
-### Ports
-- **3500** — Express HTTP + WebSocket (browser connects here)
-- **9100** — InverterCoreService FastAPI (internal only; controlled by `INVERTER_ENGINE_PORT` env var)
-
-### Data directories (runtime)
-The app resolves paths from environment variables with this priority:
-
-| Env var | Override |
-|---|---|
-| `ADSI_DATA_DIR` | Explicit SQLite DB directory |
-| `ADSI_PORTABLE_DATA_DIR` | Portable mode root (relative sub-dirs for db, config, programdata) |
-| *(default)* | `%APPDATA%\ADSI-Dashboard` (DB), `%PROGRAMDATA%\ADSI-InverterDashboard` (forecast/weather JSON) |
-
-### IPC (Electron ↔ renderer)
-All communication goes through `window.electronAPI` (defined in `electron/preload.js`). Never add `window.electron.*` — the single `electronAPI` object is the contract. IPC channels use `ipcMain.handle` (invoke/handle pattern) for async and `ipcMain.on` (fire-and-forget) for events.
-
-### SQLite schema notes
-- `readings` — raw per-unit telemetry (vdc, idc, vac1-3, iac1-3, pac, kwh, alarm, online)
-- `energy_5min` — 5-minute kWh increment buckets derived from Pac integration
-- `alarms` — decoded alarm events with severity, cleared_ts, acknowledged flag
-- `audit_log` — every control action (start/stop node/all) with operator, result, reason
-- `settings` — key/value store (adminPassword AES-256-GCM encrypted, authKey, plant config)
-- `forecast_day_ahead` — 5-min kWh_inc slots with confidence bands
-
-### Alarm decoding
-`server/alarms.js` maps the 16-bit Modbus alarm register to named faults per Ingeteam AAV2015IQE01_B §19.2–19.4. Each bit has `label`, `severity` (`warning`|`fault`), `description`, and `action`.
-
-### Forecast pipeline
-`ADSI_ForecastService.py` runs as a daemon (cycle configured via settings). It writes output to `%PROGRAMDATA%\ADSI-InverterDashboard\forecast\context\global\global.json`. Express polls that file (mtime-gated) and loads new data via `bulkUpsertForecastDayAhead`. The ML model (`GradientBoostingRegressor` + `RobustScaler`) is persisted to `.joblib` files in the same programdata tree.
-
-### Build artifacts
-- `dist/InverterCoreService.exe` — PyInstaller one-file exe (no console window)
-- `dist/ForecastCoreService.exe` — PyInstaller one-file exe (no console window)
-- `release/` — electron-builder output (NSIS setup + portable exe)
-
-The PyInstaller specs bundle `drivers/`, `shared_data.py`, and `ipconfig.json` as data files so the frozen EXEs are self-contained.
+- Address actionable build warnings.
+- Do not over-fix non-fatal electron-builder dependency-scanner warnings when artifacts build successfully.

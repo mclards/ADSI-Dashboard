@@ -1,17 +1,18 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for Inverter Dashboard v2.2
- * Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
+ * main.js - Electron entry point for ADSI Inverter Dashboard v2.0
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
  */
 
 const { app, BrowserWindow, ipcMain, shell, globalShortcut, dialog, Menu } = require("electron");
 const path = require("path");
 const http = require("http");
+const https = require("https");
 const { spawn, execFile, execFileSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
 const crypto = require("crypto");
+const { autoUpdater } = require("electron-updater");
 
 // Prevent packaged app crashes when stdout/stderr pipe is unavailable (EPIPE).
 function makeSafeConsoleWriter(method) {
@@ -29,6 +30,7 @@ function makeSafeConsoleWriter(method) {
       }
     }
   };
+  
 }
 
 console.log = makeSafeConsoleWriter("log");
@@ -84,21 +86,28 @@ const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
 const FORECAST_EXE_NAMES = ["ForecastCoreService.exe"];
 const FORECAST_SCRIPT_NAMES = ["ForecastCoreService.py"];
-// Legacy service image names from previous ADSI-branded releases (kept for cleanup on upgrade).
-const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe", "InverterCoreService.exe", "ForecastCoreService.exe"];
+const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe"];
 // Login-page admin auth key is intentionally fixed across devices.
-const LOGIN_ADMIN_AUTH_KEY = "IM-2026";
+const LOGIN_ADMIN_AUTH_KEY = "ADSI-2026";
 const DEFAULT_LOGIN_USERNAME = "admin";
 const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
-const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
+const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard");
 const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
 const TRIAL_DAYS = 7;
 const LICENSE_WARN_MS = 24 * 60 * 60 * 1000; // 1 day
 const LICENSE_CHECK_INTERVAL_MS = 30 * 1000;
+const UPDATE_REPO_OWNER = String(process.env.ADSI_UPDATE_REPO_OWNER || "mclards").trim();
+const UPDATE_REPO_NAME = String(process.env.ADSI_UPDATE_REPO_NAME || "ADSI-Dashboard").trim();
+const UPDATE_FEED_URL = String(
+  process.env.ADSI_UPDATE_FEED_URL
+  || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest/download`,
+).trim();
+const UPDATE_GITHUB_TOKEN = String(process.env.ADSI_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim();
+const UPDATE_CHECK_TIMEOUT_MS = 10000;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let mainWin = null;
@@ -108,6 +117,7 @@ let topologyWin = null;
 let ipConfigWin = null;
 let webProc = null;
 let embeddedServerStarted = false;
+let embeddedServerModule = null;
 let backendProc = null;
 let forecastProc = null;
 let serverBootError = "";
@@ -127,6 +137,24 @@ let licenseCheckerTimer = null;
 let licenseShutdownTriggered = false;
 let lastBroadcastLicenseSignature = "";
 let allowMainWindowClose = false;
+let appUpdateAutoCheckTimer = null;
+let appUpdateAutoCheckStarted = false;
+let appUpdateBridgeBound = false;
+let appUpdateState = {
+  mode: "disabled",
+  appVersion: "0.0.0",
+  status: "idle",
+  message: "Updater not initialized.",
+  checking: false,
+  updateAvailable: false,
+  latestVersion: "",
+  downloadPercent: 0,
+  canDownload: false,
+  canInstall: false,
+  downloadUrl: "",
+  checkedAt: 0,
+  error: "",
+};
 
 function configurePortableDataPaths() {
   if (!PORTABLE_DATA_DIR) return;
@@ -139,8 +167,8 @@ function configurePortableDataPaths() {
     fs.mkdirSync(dbDir, { recursive: true });
     fs.mkdirSync(cfgDir, { recursive: true });
     app.setPath("userData", userDataDir);
-    process.env.IM_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
-    process.env.IM_DATA_DIR = dbDir;
+    process.env.ADSI_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
+    process.env.ADSI_DATA_DIR = dbDir;
     console.log("[main] Portable data root:", PORTABLE_DATA_DIR);
   } catch (err) {
     console.error("[main] Portable path setup failed:", err.message);
@@ -149,12 +177,543 @@ function configurePortableDataPaths() {
 
 configurePortableDataPaths();
 
+function parseVersionParts(input) {
+  const normalized = String(input || "")
+    .trim()
+    .replace(/^v/i, "");
+  if (!normalized) return [0, 0, 0];
+  return normalized.split(".").map((part) => {
+    const n = Number.parseInt(String(part).replace(/[^\d].*$/, ""), 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  });
+}
+
+function compareVersions(a, b) {
+  const pa = parseVersionParts(a);
+  const pb = parseVersionParts(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const va = Number(pa[i] || 0);
+    const vb = Number(pb[i] || 0);
+    if (va > vb) return 1;
+    if (va < vb) return -1;
+  }
+  return 0;
+}
+
+function isPortableRuntime() {
+  return !!String(process.env.PORTABLE_EXECUTABLE_DIR || "").trim()
+    || !!String(process.env.PORTABLE_EXECUTABLE_FILE || "").trim();
+}
+
+function getAppUpdateMode() {
+  if (!app.isPackaged) return "dev";
+  if (isPortableRuntime()) return "portable";
+  return "installer";
+}
+
+function buildPublicAppUpdateState() {
+  return {
+    ...appUpdateState,
+    appVersion: app.getVersion(),
+    modeLabel:
+      appUpdateState.mode === "installer"
+        ? "Installer (Auto)"
+        : appUpdateState.mode === "portable"
+          ? "Portable (Manual)"
+          : appUpdateState.mode === "dev"
+            ? "Development"
+            : "Unavailable",
+  };
+}
+
+function setAppUpdateState(patch, broadcast = true) {
+  appUpdateState = {
+    ...appUpdateState,
+    ...patch,
+    appVersion: app.getVersion(),
+  };
+  if (broadcast) broadcastAppUpdateState();
+  return buildPublicAppUpdateState();
+}
+
+function broadcastAppUpdateState() {
+  const payload = buildPublicAppUpdateState();
+  const windows = BrowserWindow.getAllWindows();
+  for (const win of windows) {
+    if (!win || win.isDestroyed()) continue;
+    try {
+      win.webContents.send("app-update-status", payload);
+    } catch (_) {}
+  }
+}
+
+function requestJsonHttps(url, timeoutMs = UPDATE_CHECK_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const headers = {
+      "User-Agent": "InverterDashboard-Updater",
+      Accept: "application/vnd.github+json",
+    };
+    if (UPDATE_GITHUB_TOKEN) {
+      headers.Authorization = `Bearer ${UPDATE_GITHUB_TOKEN}`;
+    }
+    const req = https.request(
+      url,
+      {
+        method: "GET",
+        headers,
+      },
+      (res) => {
+        const status = Number(res.statusCode || 0);
+        let raw = "";
+        res.on("data", (chunk) => {
+          raw += String(chunk || "");
+        });
+        res.on("end", () => {
+          if (status < 200 || status >= 300) {
+            reject(new Error(`GitHub API HTTP ${status}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(raw || "{}"));
+          } catch (err) {
+            reject(new Error(`Invalid JSON response: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("Update check timed out")));
+    req.end();
+  });
+}
+
+function findPortableAssetUrl(release) {
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  const scored = assets
+    .map((asset) => {
+      const name = String(asset?.name || "").toLowerCase();
+      const url = String(asset?.browser_download_url || "").trim();
+      if (!name || !url) return null;
+      if (!name.endsWith(".exe")) return null;
+      let score = 0;
+      if (name.includes("portable")) score += 100;
+      if (name.includes("setup")) score -= 25;
+      if (name.includes(app.getVersion().split(".")[0])) score += 1;
+      return { score, url };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length) return scored[0].url;
+  const pageUrl = String(release?.html_url || "").trim();
+  return pageUrl || "";
+}
+
+async function checkPortableUpdates() {
+  const currentVersion = app.getVersion();
+  setAppUpdateState({
+    mode: "portable",
+    status: "checking",
+    checking: true,
+    message: "Checking latest release from GitHub...",
+    error: "",
+  });
+
+  const apiUrl = `https://api.github.com/repos/${encodeURIComponent(UPDATE_REPO_OWNER)}/${encodeURIComponent(UPDATE_REPO_NAME)}/releases/latest`;
+  try {
+    const release = await requestJsonHttps(apiUrl, UPDATE_CHECK_TIMEOUT_MS);
+    const latestVersion = String(release?.tag_name || release?.name || "")
+      .trim()
+      .replace(/^v/i, "");
+    if (!latestVersion) {
+      throw new Error("Latest release version is missing.");
+    }
+    const hasUpdate = compareVersions(latestVersion, currentVersion) > 0;
+    const downloadUrl = hasUpdate ? findPortableAssetUrl(release) : "";
+    return setAppUpdateState({
+      status: hasUpdate ? "update-available" : "up-to-date",
+      checking: false,
+      checkedAt: Date.now(),
+      updateAvailable: hasUpdate,
+      latestVersion,
+      canDownload: hasUpdate && !!downloadUrl,
+      canInstall: false,
+      downloadPercent: 0,
+      downloadUrl,
+      message: hasUpdate
+        ? `Update ${latestVersion} is available. Download the new portable EXE.`
+        : `You are up to date (${currentVersion}).`,
+      error: "",
+    });
+  } catch (err) {
+    return setAppUpdateState({
+      status: "error",
+      checking: false,
+      checkedAt: Date.now(),
+      updateAvailable: false,
+      canDownload: false,
+      canInstall: false,
+      downloadPercent: 0,
+      downloadUrl: "",
+      message: `Update check failed: ${err.message}`,
+      error: String(err.message || "Update check failed"),
+    });
+  }
+}
+
+function bindAutoUpdaterEventsOnce() {
+  if (appUpdateBridgeBound) return;
+  appUpdateBridgeBound = true;
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on("checking-for-update", () => {
+    setAppUpdateState({
+      mode: "installer",
+      status: "checking",
+      checking: true,
+      message: "Checking for updates...",
+      error: "",
+      canDownload: false,
+      canInstall: false,
+      downloadPercent: 0,
+      downloadUrl: "",
+    });
+  });
+
+  autoUpdater.on("update-available", (info) => {
+    const latestVersion = String(info?.version || "").trim();
+    setAppUpdateState({
+      mode: "installer",
+      status: "update-available",
+      checking: false,
+      checkedAt: Date.now(),
+      updateAvailable: true,
+      latestVersion,
+      canDownload: true,
+      canInstall: false,
+      downloadPercent: 0,
+      message: `Update ${latestVersion || "available"} found. Click Download Update.`,
+      error: "",
+    });
+  });
+
+  autoUpdater.on("update-not-available", (info) => {
+    const latestVersion = String(info?.version || app.getVersion()).trim();
+    setAppUpdateState({
+      mode: "installer",
+      status: "up-to-date",
+      checking: false,
+      checkedAt: Date.now(),
+      updateAvailable: false,
+      latestVersion,
+      canDownload: false,
+      canInstall: false,
+      downloadPercent: 0,
+      downloadUrl: "",
+      message: `You are up to date (${app.getVersion()}).`,
+      error: "",
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    const percent = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
+    setAppUpdateState({
+      mode: "installer",
+      status: "downloading",
+      checking: false,
+      updateAvailable: true,
+      canDownload: false,
+      canInstall: false,
+      downloadPercent: percent,
+      message: `Downloading update... ${percent.toFixed(1)}%`,
+      error: "",
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    const latestVersion = String(info?.version || appUpdateState.latestVersion || "").trim();
+    setAppUpdateState({
+      mode: "installer",
+      status: "downloaded",
+      checking: false,
+      checkedAt: Date.now(),
+      updateAvailable: true,
+      latestVersion,
+      canDownload: false,
+      canInstall: true,
+      downloadPercent: 100,
+      message: `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
+      error: "",
+    });
+  });
+
+  autoUpdater.on("error", (err) => {
+    const friendly = getUpdateErrorMessage(err);
+    setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      checking: false,
+      checkedAt: Date.now(),
+      canDownload: false,
+      canInstall: false,
+      message: `Updater error: ${friendly}`,
+      error: String(friendly || "Updater error"),
+    });
+  });
+}
+
+function initAppUpdater() {
+  const mode = getAppUpdateMode();
+  if (mode === "installer") {
+    bindAutoUpdaterEventsOnce();
+    try {
+      autoUpdater.setFeedURL({
+        provider: "generic",
+        url: UPDATE_FEED_URL,
+      });
+      console.log("[updater] Generic feed URL:", UPDATE_FEED_URL);
+    } catch (err) {
+      console.warn("[updater] setFeedURL failed:", err.message);
+    }
+    setAppUpdateState({
+      mode,
+      status: "idle",
+      checking: false,
+      updateAvailable: false,
+      latestVersion: "",
+      downloadPercent: 0,
+      canDownload: false,
+      canInstall: false,
+      downloadUrl: "",
+      message: `Installer update channel ready (${UPDATE_FEED_URL}).`,
+      error: "",
+    }, false);
+    return;
+  }
+  if (mode === "portable") {
+    setAppUpdateState({
+      mode,
+      status: "idle",
+      checking: false,
+      updateAvailable: false,
+      latestVersion: "",
+      downloadPercent: 0,
+      canDownload: false,
+      canInstall: false,
+      downloadUrl: "",
+      message: "Portable mode uses manual download updates.",
+      error: "",
+    }, false);
+    return;
+  }
+  setAppUpdateState({
+    mode,
+    status: "disabled",
+    checking: false,
+    updateAvailable: false,
+    latestVersion: "",
+    downloadPercent: 0,
+    canDownload: false,
+    canInstall: false,
+    downloadUrl: "",
+    message: "Update checks are disabled in development mode.",
+    error: "",
+  }, false);
+}
+
+async function checkForAppUpdates(options = {}) {
+  const mode = getAppUpdateMode();
+  const manual = !!options?.manual;
+  if (mode === "dev") {
+    return setAppUpdateState({
+      mode,
+      status: "disabled",
+      checking: false,
+      message: "Update checks are disabled in development mode.",
+      error: "",
+    });
+  }
+  if (appUpdateState.checking) {
+    return buildPublicAppUpdateState();
+  }
+  if (mode === "portable") {
+    return checkPortableUpdates();
+  }
+  if (mode !== "installer") {
+    return setAppUpdateState({
+      mode: "disabled",
+      status: "disabled",
+      checking: false,
+      message: "Updater is unavailable for this runtime.",
+      error: "",
+    });
+  }
+
+  bindAutoUpdaterEventsOnce();
+  try {
+    if (manual) {
+      setAppUpdateState({
+        mode: "installer",
+        status: "checking",
+        checking: true,
+        message: "Checking for updates...",
+        error: "",
+      });
+    }
+    await autoUpdater.checkForUpdates();
+    return buildPublicAppUpdateState();
+  } catch (err) {
+    const friendly = getUpdateErrorMessage(err);
+    return setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      checking: false,
+      checkedAt: Date.now(),
+      message: `Update check failed: ${friendly}`,
+      error: String(friendly || "Update check failed"),
+      canDownload: false,
+      canInstall: false,
+    });
+  }
+}
+
+async function downloadAppUpdate() {
+  const mode = getAppUpdateMode();
+  if (mode === "portable") {
+    let url = String(appUpdateState.downloadUrl || "").trim();
+    if (!url) {
+      await checkPortableUpdates();
+      url = String(appUpdateState.downloadUrl || "").trim();
+    }
+    if (!url) {
+      return { ok: false, error: "No download URL found for latest portable release.", state: buildPublicAppUpdateState() };
+    }
+    try {
+      await shell.openExternal(url);
+      setAppUpdateState({
+        mode: "portable",
+        message: "Opened latest release download page.",
+      });
+      return { ok: true, state: buildPublicAppUpdateState(), openedUrl: url };
+    } catch (err) {
+      setAppUpdateState({
+        mode: "portable",
+        status: "error",
+        message: `Unable to open download URL: ${err.message}`,
+        error: String(err.message || "Unable to open download URL"),
+      });
+      return { ok: false, error: err.message, state: buildPublicAppUpdateState() };
+    }
+  }
+
+  if (mode !== "installer") {
+    return { ok: false, error: "Updater is unavailable in this runtime mode.", state: buildPublicAppUpdateState() };
+  }
+  if (!appUpdateState.updateAvailable) {
+    return { ok: false, error: "No update is available to download.", state: buildPublicAppUpdateState() };
+  }
+  if (appUpdateState.canInstall) {
+    return { ok: true, state: buildPublicAppUpdateState() };
+  }
+  try {
+    setAppUpdateState({
+      mode: "installer",
+      status: "downloading",
+      checking: false,
+      canDownload: false,
+      canInstall: false,
+      downloadPercent: 0,
+      message: "Downloading update...",
+      error: "",
+    });
+    await autoUpdater.downloadUpdate();
+    return { ok: true, state: buildPublicAppUpdateState() };
+  } catch (err) {
+    setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      checking: false,
+      canDownload: false,
+      canInstall: false,
+      message: `Download failed: ${err.message}`,
+      error: String(err.message || "Download failed"),
+    });
+    return { ok: false, error: err.message, state: buildPublicAppUpdateState() };
+  }
+}
+
+async function installAppUpdateNow() {
+  const mode = getAppUpdateMode();
+  if (mode !== "installer") {
+    return { ok: false, error: "Install is only available for installer builds.", state: buildPublicAppUpdateState() };
+  }
+  if (!appUpdateState.canInstall) {
+    return { ok: false, error: "No downloaded update is ready to install.", state: buildPublicAppUpdateState() };
+  }
+  setAppUpdateState({
+    mode: "installer",
+    status: "installing",
+    message: "Restarting app to install update...",
+    checking: false,
+  });
+  setTimeout(() => {
+    try {
+      allowMainWindowClose = true;
+      autoUpdater.quitAndInstall(false, true);
+    } catch (err) {
+      setAppUpdateState({
+        mode: "installer",
+        status: "error",
+        message: `Install failed: ${err.message}`,
+        error: String(err.message || "Install failed"),
+      });
+    }
+  }, 150);
+  return { ok: true, state: buildPublicAppUpdateState() };
+}
+
+function scheduleAutoUpdateCheck() {
+  if (appUpdateAutoCheckStarted) return;
+  appUpdateAutoCheckStarted = true;
+  const mode = getAppUpdateMode();
+  if (mode === "dev") return;
+  appUpdateAutoCheckTimer = setTimeout(() => {
+    checkForAppUpdates({ manual: false }).catch((err) => {
+      console.warn("[updater] startup update check failed:", err.message);
+    });
+  }, 8000);
+  if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
+    appUpdateAutoCheckTimer.unref();
+  }
+}
+
+function getUpdateErrorMessage(err) {
+  const raw = String(err?.message || err || "Update check failed");
+  const lower = raw.toLowerCase();
+  const has404 = lower.includes(" 404") || lower.includes("http 404") || lower.includes("status code 404");
+  const feedBlocked = lower.includes("releases.atom") || lower.includes("latest.yml") || lower.includes("/releases/latest/download");
+  if (has404 && feedBlocked) {
+    return [
+      "Update feed returned 404 (not publicly reachable).",
+      "Ensure this repo release feed is public and has latest.yml + setup artifacts.",
+      "If private, set ADSI_UPDATE_FEED_URL to a public generic feed URL.",
+    ].join(" ");
+  }
+  if (has404) {
+    return "Update feed returned 404. Verify publish URL and release assets.";
+  }
+  return raw;
+}
+
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
   app.setName("Inverter Dashboard");
+  initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
   Menu.setApplicationMenu(null);
   const licensed = await ensureLicenseAtStartup();
@@ -192,9 +751,17 @@ app.on("activate", async () => {
 app.on("before-quit", () => {
   allowMainWindowClose = true;
   isAppShuttingDown = true;
+  if (appUpdateAutoCheckTimer) {
+    clearTimeout(appUpdateAutoCheckTimer);
+    appUpdateAutoCheckTimer = null;
+  }
   if (licenseCheckerTimer) {
     clearInterval(licenseCheckerTimer);
     licenseCheckerTimer = null;
+  }
+  // Embedded mode (packaged): server runs in-process — call its shutdown directly.
+  if (embeddedServerModule && typeof embeddedServerModule.shutdownEmbedded === "function") {
+    try { embeddedServerModule.shutdownEmbedded(); } catch (_) {}
   }
   killServer();
 });
@@ -217,7 +784,8 @@ function showLoadingWindow() {
     icon: APP_ICON,
     frame: false,
     resizable: false,
-    alwaysOnTop: false,
+    // No alwaysOnTop: loading should be visible during startup but must not trap
+    // clicks on other OS windows (e.g. the user's taskbar or other apps).
     center: true,
     backgroundColor: "#0f1117",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
@@ -296,7 +864,7 @@ function showLoginWindow() {
     minimizable: false,
     backgroundColor: "#102029",
     center: true,
-    alwaysOnTop: false,
+    alwaysOnTop: true,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload-login.js"),
@@ -1054,7 +1622,7 @@ function startEmbeddedServer(serverEntry) {
   try {
     console.log("[main] Starting embedded web server:", serverEntry);
     // eslint-disable-next-line global-require, import/no-dynamic-require
-    require(serverEntry);
+    embeddedServerModule = require(serverEntry);
     embeddedServerStarted = true;
     serverBootError = "";
     return true;
@@ -1125,7 +1693,7 @@ function startServer() {
   console.log("[main] Spawning web server:", runtimeBin, serverEntry);
   webProc = spawn(runtimeBin, [serverEntry], {
     cwd: path.dirname(serverEntry),
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
     env: {
       ...process.env,
       NODE_ENV: "production",
@@ -1145,7 +1713,7 @@ function startServer() {
 }
 
 function resolveBackendLaunch() {
-  const explicit = process.env.IM_BACKEND_PATH;
+  const explicit = process.env.ADSI_BACKEND_PATH;
   if (explicit && fs.existsSync(explicit)) {
     return buildLaunch(explicit);
   }
@@ -1182,7 +1750,7 @@ function resolveBackendLaunch() {
 }
 
 function resolveForecastLaunch() {
-  const explicit = process.env.IM_FORECAST_PATH;
+  const explicit = process.env.ADSI_FORECAST_PATH;
   if (explicit && fs.existsSync(explicit)) return buildLaunch(explicit);
 
   const exeBaseDirs = [
@@ -1276,7 +1844,7 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
 function startBackendProcess() {
   const backendLaunch = resolveBackendLaunch();
   if (!backendLaunch) {
-    console.error("[main] Backend not found. Set IM_BACKEND_PATH or place backend executable.");
+    console.error("[main] Backend not found. Set ADSI_BACKEND_PATH or place backend executable.");
     return false;
   }
   spawnBackendProcess(backendLaunch);
@@ -1435,15 +2003,17 @@ function createMainWindow() {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
     }
+    // Bring the dashboard to front BEFORE closing the loading window so there
+    // is no focus vacuum that lets it slip behind other OS windows.
+    mainWin.show();
+    mainWin.focus();
     if (loadingWin && !loadingWin.isDestroyed()) {
       loadingWin.close();
       loadingWin = null;
     }
-    if (!mainWin.isVisible()) {
-      mainWin.show();
-      mainWin.focus();
-    }
     broadcastLicenseStatus(true);
+    broadcastAppUpdateState();
+    scheduleAutoUpdateCheck();
   });
 
   mainWin.webContents.on("did-fail-load", (e, code, desc) => {
@@ -1691,7 +2261,7 @@ async function openIpConfigWindowGuarded(ownerWin) {
 }
 
 function getConfigPath() {
-  const portableRoot = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
+  const portableRoot = String(process.env.ADSI_PORTABLE_DATA_DIR || "").trim();
   if (portableRoot) {
     const cfgDir = path.join(portableRoot, "config");
     try {
@@ -1906,6 +2476,32 @@ ipcMain.handle("license-get-audit", async () => {
   }
 });
 
+ipcMain.handle("app-update-get-state", async () => {
+  try {
+    return buildPublicAppUpdateState();
+  } catch (err) {
+    return {
+      ...buildPublicAppUpdateState(),
+      status: "error",
+      message: `Unable to read updater state: ${err.message}`,
+      error: String(err.message || "Unable to read updater state"),
+    };
+  }
+});
+
+ipcMain.handle("app-update-check", async () => {
+  const state = await checkForAppUpdates({ manual: true });
+  return { ok: state.status !== "error", state };
+});
+
+ipcMain.handle("app-update-download", async () => {
+  return downloadAppUpdate();
+});
+
+ipcMain.handle("app-update-install", async () => {
+  return installAppUpdateNow();
+});
+
 ipcMain.on("login-success", async () => {
   if (hasAuthenticated) return;
   const status = buildLicensePublicStatus();
@@ -2050,19 +2646,90 @@ ipcMain.on("open-ip-check", async (event, ip) => {
   }
 });
 
+// ─── Cloud Backup OAuth Window ────────────────────────────────────────────────
+// Opens a temporary BrowserWindow for OAuth, intercepts the localhost:3500
+// callback URL before it loads, and returns the code to the renderer.
+ipcMain.handle("oauth-start", async (_, { authUrl }) => {
+  return new Promise((resolve) => {
+    const CALLBACK_ORIGIN = "http://localhost:3500/oauth/callback";
+
+    const oauthWin = new BrowserWindow({
+      width: 900,
+      height: 720,
+      title: "Cloud Backup — Connect Account",
+      autoHideMenuBar: true,
+      webPreferences: {
+        partition: "persist:oauth-temp",  // isolated session
+        nodeIntegration: false,
+        contextIsolation: true,
+        webSecurity: true,
+      },
+    });
+
+    let settled = false;
+    let timeout = null;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      try {
+        oauthWin.webContents.session.webRequest.onBeforeRequest({ urls: [] }, null);
+      } catch (_) {}
+      if (timeout) clearTimeout(timeout);
+      if (!oauthWin.isDestroyed()) oauthWin.destroy();
+      resolve(result);
+    };
+
+    timeout = setTimeout(() => {
+      finish({ ok: false, error: "OAuth timed out (5 minutes)" });
+    }, 5 * 60 * 1000);
+
+    // Intercept the redirect to localhost before it hits the server.
+    oauthWin.webContents.session.webRequest.onBeforeRequest(
+      { urls: [`${CALLBACK_ORIGIN}/*`] },
+      (details, callback) => {
+        callback({ cancel: true });
+        finish({ ok: true, callbackUrl: details.url });
+      },
+    );
+
+    oauthWin.on("closed", () => {
+      finish({ ok: false, error: "OAuth window closed by user" });
+    });
+
+    oauthWin.loadURL(String(authUrl)).catch((err) => {
+      finish({ ok: false, error: err.message });
+    });
+  });
+});
+
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
+function forceKillProc(proc, label) {
+  if (!proc || proc.killed) return;
+  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
+    if (err) console.warn(`[main] taskkill ${label} failed:`, err.message);
+  });
+}
+
 function killServer() {
   isAppShuttingDown = true;
   clearForecastRestartTimer();
-  for (const proc of [webProc, backendProc, forecastProc]) {
-    if (!proc || proc.killed) continue;
-    execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
-      if (err) console.warn("[main] taskkill pid failed:", err.message);
-    });
-  }
-  webProc = null;
+
+  // Always force-kill Python processes (no graceful shutdown path).
+  forceKillProc(backendProc, "backend");
+  forceKillProc(forecastProc, "forecast");
   backendProc = null;
   forecastProc = null;
+
+  // Ask the web server (Node.js child) to flush the DB and exit cleanly,
+  // then force-kill it if it hasn't gone away within 1.5 s.
+  const wp = webProc;
+  webProc = null;
+  if (!wp || wp.killed) return;
+  try { wp.send({ type: "shutdown" }); } catch (_) {}
+  const deadline = setTimeout(() => forceKillProc(wp, "web-server"), 1500);
+  if (deadline.unref) deadline.unref();
+  wp.once("exit", () => clearTimeout(deadline));
 }
 
 function quit() {

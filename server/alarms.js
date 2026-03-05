@@ -5,7 +5,7 @@
  * Audit log: every control action (start/stop node/all) is persisted
  */
 
-const { db, stmts } = require("./db");
+const { db, stmts, getSetting } = require("./db");
 const { broadcastUpdate } = require("./ws");
 
 // ─── 16-bit alarm bitfield ───────────────────────────────────────────────────
@@ -368,13 +368,15 @@ function logControlAction({
 }) {
   const inv = Number(inverter || 0);
   const nd  = Number(node || 0);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
 
-  if (!Number.isFinite(inv) || inv < 1 || inv > 27) {
+  if (!Number.isFinite(inv) || inv < 1 || inv > invMax) {
     console.warn("[alarms] logControlAction: invalid inverter value:", inverter);
     return;
   }
-  // node 0 = ALL nodes; 1-4 are individual nodes.
-  if (!Number.isFinite(nd) || nd < 0 || nd > 4) {
+  // node 0 = ALL nodes; 1..nodeMax are individual nodes.
+  if (!Number.isFinite(nd) || nd < 0 || nd > nodeMax) {
     console.warn("[alarms] logControlAction: invalid node value:", node);
     return;
   }
@@ -400,9 +402,16 @@ function getInverterIpMap() {
     const row = stmts.getSetting.get("ipConfigJson");
     const raw = row && row.value ? JSON.parse(row.value) : {};
     const src = raw && typeof raw === "object" ? raw.inverters || {} : {};
+    const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
     const map = {};
-    for (let inv = 1; inv <= 27; inv++) {
+    for (let inv = 1; inv <= invCount; inv++) {
       const v = String(src[inv] ?? src[String(inv)] ?? "").trim();
+      if (v) map[inv] = v;
+    }
+    for (const [k, vRaw] of Object.entries(src || {})) {
+      const inv = Math.trunc(Number(k));
+      if (!Number.isFinite(inv) || inv < 1 || map[inv]) continue;
+      const v = String(vRaw ?? "").trim();
       if (v) map[inv] = v;
     }
     return map;
@@ -437,20 +446,22 @@ function withAuditIpFallback(rows) {
 function getAuditLog({ start, end, inverter, limit = 500 } = {}) {
   const s = start || 0;
   const e = end || Date.now();
+  const safeLimit = Math.min(20000, Math.max(1, Math.trunc(Number(limit) || 5000)));
+  const invNum = Math.trunc(Number(inverter || 0));
   let rows;
-  if (inverter) {
+  if (Number.isFinite(invNum) && invNum > 0) {
     rows = db
       .prepare(
         `SELECT * FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT ?`,
       )
-      .all(inverter, s, e, limit);
+      .all(invNum, s, e, safeLimit);
     return withAuditIpFallback(rows);
   }
   rows = db
     .prepare(
       `SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT ?`,
     )
-    .all(s, e, limit);
+    .all(s, e, safeLimit);
   return withAuditIpFallback(rows);
 }
 

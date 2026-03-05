@@ -19,6 +19,7 @@ const {
   db,
   DATA_DIR,
   bulkUpsertForecastDayAhead,
+  closeDb,
 } = require("./db");
 const { registerClient, broadcastUpdate, getStats: getWsStats } = require("./ws");
 const poller = require("./poller");
@@ -30,6 +31,21 @@ const {
   logControlAction,
   getAuditLog,
 } = require("./alarms");
+
+// ─── Cloud Backup ─────────────────────────────────────────────────────────────
+const TokenStore = require("./tokenStore");
+const OneDriveProvider = require("./cloudProviders/onedrive");
+const GDriveProvider = require("./cloudProviders/gdrive");
+const CloudBackupService = require("./cloudBackup");
+const {
+  MAX_SHADOW_AGE_MS: CORE_MAX_SHADOW_AGE_MS,
+  localDateStr: localDateStrCore,
+  normalizeTodayEnergyRows: normalizeTodayEnergyRowsCore,
+  mergeTodayEnergyRowsMax: mergeTodayEnergyRowsMaxCore,
+  todayEnergyRowsEqual: todayEnergyRowsEqualCore,
+  applyGatewayCarryRows,
+  evaluateHandoffProgress,
+} = require("./mwhHandoffCore");
 
 const app = express();
 expressWs(app);
@@ -96,6 +112,8 @@ const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
 const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_EXPECTED_NODES_PER_INVERTER = 4;
+const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6× OFFLINE_MS=20s)
+const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
 const REMOTE_BRIDGE_INTERVAL_MS = 1200;
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
@@ -115,6 +133,10 @@ const REMOTE_INCREMENTAL_FETCH_RETRIES = 3;
 const REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS = 1200;
 const LIVE_FRESH_MS = 20000;
 const REMOTE_CLIENT_PULL_ONLY = false;
+const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
+const REMOTE_GATEWAY_HANDOFF_SETTING_KEY = "remoteGatewayHandoffMeta";
+const MAX_SHADOW_AGE_MS = CORE_MAX_SHADOW_AGE_MS; // 4h stale same-day shadow protection
+const MAX_HANDOFF_ACTIVE_MS = 4 * 60 * 60 * 1000; // 4h hard cap for active handoff
 const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "operationMode",
   "remoteGatewayUrl",
@@ -125,6 +147,8 @@ const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "remoteReplicationCursors",
   "remoteReplicationLastTs",
   "remoteReplicationLastSignature",
+  REMOTE_TODAY_SHADOW_SETTING_KEY,
+  REMOTE_GATEWAY_HANDOFF_SETTING_KEY,
 ]);
 const REPLICATION_TABLE_DEFS = [
   {
@@ -187,6 +211,7 @@ const REPLICATION_TABLE_DEFS = [
       "pac_avg",
       "uptime_s",
       "alarm_count",
+      "control_count",
       "updated_ts",
     ],
   },
@@ -228,6 +253,7 @@ const remoteBridgeState = {
   lastError: "",
   liveData: {},
   totals: {},
+  todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
   replicationRunning: false,
   lastReplicationAttemptTs: 0,
   lastReplicationTs: 0,
@@ -242,6 +268,23 @@ const remoteBridgeState = {
   lastSyncDirection: "idle",
   autoSyncAttempted: false,
 };
+const remoteTodayEnergyShadow = {
+  day: "",
+  rows: [],
+  syncedAt: 0,
+};
+const gatewayTodayCarryState = {
+  day: "",
+  byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
+};
+// Handoff lifecycle: tracks an active Remote→Gateway transition so the stale-shadow
+// guard does not discard a freshly-captured shadow and carry-completion can be logged.
+const gatewayHandoffMeta = {
+  active: false,
+  startedAt: 0,
+  day: "",
+  baselines: Object.create(null), // inv -> shadowKwh at handoff time
+};
 const inboundPushRxProgress = {
   active: false,
   key: "",
@@ -249,6 +292,98 @@ const inboundPushRxProgress = {
 };
 let cpuSampleTs = Date.now();
 let cpuSampleUsage = process.cpuUsage();
+
+// ─── Cloud Backup — Service Initialization ────────────────────────────────────
+const _tokenStore  = new TokenStore(DATA_DIR);
+const _onedrive    = new OneDriveProvider(_tokenStore);
+const _gdrive      = new GDriveProvider(_tokenStore);
+const _cloudBackup = new CloudBackupService({
+  dataDir:     DATA_DIR,
+  db,
+  getSetting,
+  setSetting,
+  tokenStore:  _tokenStore,
+  onedrive:    _onedrive,
+  gdrive:      _gdrive,
+  poller,
+  ipConfigPath: path.join(DATA_DIR, "ipconfig.json"),
+});
+// Apply saved schedule on startup (after cron module is ready).
+setTimeout(() => {
+  try { _cloudBackup.applyInitialSchedule(); } catch (e) {
+    console.warn("[CloudBackup] Schedule init failed:", e.message);
+  }
+}, 2000);
+
+const CLOUD_OP_BUSY_RE = /already in progress/i;
+const CLOUD_OP_MAX_BUSY_RETRIES = 120; // up to ~4 minutes at 2s retry delay
+const CLOUD_OP_BUSY_RETRY_MS = 2000;
+let _cloudOpRunnerBusy = false;
+const _cloudOpQueue = [];
+
+function _scheduleCloudQueueRun(delayMs = 0) {
+  const ms = Math.max(0, Number(delayMs) || 0);
+  if (ms <= 0) {
+    setImmediate(_runNextCloudOp);
+    return;
+  }
+  const t = setTimeout(_runNextCloudOp, ms);
+  if (t.unref) t.unref();
+}
+
+async function _runNextCloudOp() {
+  if (_cloudOpRunnerBusy) return;
+  const job = _cloudOpQueue.shift();
+  if (!job) return;
+  _cloudOpRunnerBusy = true;
+  let retryBusy = false;
+  try {
+    await job.fn();
+  } catch (err) {
+    const msg = String(err?.message || err || "");
+    if (
+      CLOUD_OP_BUSY_RE.test(msg) &&
+      Number(job.busyRetries || 0) < CLOUD_OP_MAX_BUSY_RETRIES
+    ) {
+      retryBusy = true;
+      job.busyRetries = Number(job.busyRetries || 0) + 1;
+      _cloudOpQueue.unshift(job);
+    } else {
+      console.error(`[CloudBackup] queued op "${job.label}" failed:`, msg);
+    }
+  } finally {
+    _cloudOpRunnerBusy = false;
+    if (_cloudOpQueue.length > 0) {
+      _scheduleCloudQueueRun(retryBusy ? CLOUD_OP_BUSY_RETRY_MS : 0);
+    }
+  }
+}
+
+function enqueueCloudOp(label, fn) {
+  const pending = _cloudOpQueue.length + (_cloudOpRunnerBusy ? 1 : 0);
+  _cloudOpQueue.push({
+    label: String(label || "cloud-op"),
+    fn,
+    busyRetries: 0,
+  });
+  _scheduleCloudQueueRun(0);
+  return {
+    position: pending + 1,
+  };
+}
+
+// OAuth pending state: stateKey -> { provider, codeVerifier, expiresAt }
+const _oauthPending = new Map();
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function _cleanOauthPending() {
+  const now = Date.now();
+  for (const [k, v] of _oauthPending) {
+    if (now > v.expiresAt) _oauthPending.delete(k);
+  }
+}
+
+const OAUTH_REDIRECT_BASE = `http://localhost:${3500}/oauth/callback`;
 
 function sanitizeOperationMode(value, def = "gateway") {
   const v = String(value || def)
@@ -343,6 +478,7 @@ function resolveRequestToken(req) {
 
 function shouldProxyApiPath(pathname) {
   const p = String(pathname || "");
+  if (p === "/backup" || p.startsWith("/backup/")) return false;
   if (p === "/settings" || p.startsWith("/settings/")) return false;
   if (p === "/runtime/network" || p.startsWith("/runtime/network/")) return false;
   if (p === "/runtime/perf" || p.startsWith("/runtime/perf/")) return false;
@@ -782,11 +918,25 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
   }
 
   if (tableName === "energy_5min") {
-    const exists = stmtCached(
+    const existingRow = stmtCached(
       "exists:energy_5min:ts_inv",
-      `SELECT id FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
+      `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
     ).get(payload.ts, payload.inverter);
-    if (exists?.id) return false;
+    if (existingRow?.id) {
+      // Row exists for this (ts, inverter). Update kwh_inc if the incoming value differs —
+      // this corrects stale local rows that were written with a lower value (e.g., from a
+      // previous partial bucket or a prior diverged local-gateway state).
+      const incomingKwh = Number(payload.kwh_inc || 0);
+      const existingKwh = Number(existingRow.kwh_inc || 0);
+      if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
+        stmtCached(
+          "update:energy_5min:kwh_inc_by_id",
+          `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
+        ).run(incomingKwh, existingRow.id);
+        return true;
+      }
+      return false; // identical — no change needed
+    }
     const sql = `INSERT INTO energy_5min (${cols.join(", ")}) VALUES (${cols
       .map((c) => `@${c}`)
       .join(", ")})
@@ -892,6 +1042,7 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
         pac_avg=excluded.pac_avg,
         uptime_s=excluded.uptime_s,
         alarm_count=excluded.alarm_count,
+        control_count=excluded.control_count,
         updated_ts=excluded.updated_ts
       WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)`;
     stmtCached("merge:daily_report:lww", sql).run(drPayload);
@@ -1864,6 +2015,26 @@ async function pollRemoteLiveOnce() {
       totals: remoteBridgeState.totals,
     });
     remoteBridgeState.lastSyncDirection = "pull-live";
+
+    // Piggyback today's energy totals so /api/energy/today matches gateway exactly.
+    try {
+      const et = await fetch(`${base}/api/energy/today`, {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_FETCH_TIMEOUT_MS,
+      });
+      if (et.ok) {
+        const rows = await et.json();
+        if (Array.isArray(rows)) {
+          const normalizedRows = normalizeTodayEnergyRows(rows);
+          remoteBridgeState.todayEnergyRows = normalizedRows;
+          updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
+          todayEnergyCache.ts = 0; // force next request to re-read with new data
+        }
+      }
+    } catch (_) {
+      // Non-fatal; stale todayEnergyRows will be used until next tick.
+    }
     if (isRemotePullOnlyMode()) {
       remoteBridgeState.replicationRunning = false;
       remoteBridgeState.lastReplicationError =
@@ -1919,11 +2090,60 @@ function startRemoteBridge() {
 
 function applyRuntimeMode() {
   if (isRemoteMode()) {
+    if (
+      gatewayHandoffMeta.active ||
+      gatewayHandoffMeta.day ||
+      Object.keys(gatewayHandoffMeta.baselines).length
+    ) {
+      resetGatewayHandoffMeta(true);
+    }
+    gatewayTodayCarryState.day = localDateStr();
+    gatewayTodayCarryState.byInv = Object.create(null);
     poller.stop();
     poller.markAllOffline();
+    // Broadcast the all-offline state immediately so clients don't keep showing
+    // stale gateway live data while waiting for the first remote-bridge push.
+    broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: { pac: 0, kwh: 0 } });
     startRemoteBridge();
   } else {
+    const wasRemoteActive =
+      Boolean(remoteBridgeState.running) || Boolean(remoteBridgeState.connected);
+    if (wasRemoteActive && Array.isArray(remoteBridgeState.todayEnergyRows)) {
+      updateRemoteTodayEnergyShadow(remoteBridgeState.todayEnergyRows, Date.now());
+    }
+    // ── Handoff lifecycle: capture per-inverter baselines ──────────────────────
+    if (wasRemoteActive) {
+      const handoffNow = Date.now();
+      const handoffDay = localDateStr(handoffNow);
+      gatewayHandoffMeta.active = true;
+      gatewayHandoffMeta.startedAt = handoffNow;
+      gatewayHandoffMeta.day = handoffDay;
+      gatewayHandoffMeta.baselines = Object.create(null);
+      const capturedRows = normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
+      for (const row of capturedRows) {
+        const inv = Number(row?.inverter || 0);
+        if (inv > 0) gatewayHandoffMeta.baselines[inv] = Number(row?.total_kwh || 0);
+      }
+      const baselineList = capturedRows
+        .slice(0, 8)
+        .map((r) => `${r.inverter}:${Number(r.total_kwh || 0).toFixed(2)}kWh`)
+        .join(", ");
+      console.log(
+        `[handoff] Remote→Gateway started day=${handoffDay}` +
+        ` inverters=${capturedRows.length}` +
+        ` baselines=[${baselineList}${capturedRows.length > 8 ? " ..." : ""}]`,
+      );
+      persistGatewayHandoffMeta();
+    }
     stopRemoteBridge();
+    remoteBridgeState.liveData = {}; // discard stale remote snapshot
+    remoteBridgeState.totals = {};
+    remoteBridgeState.todayEnergyRows = []; // discard bridge cache; gateway mode uses DB + shadow supplement
+    if (wasRemoteActive) {
+      // Clear stale remote values on clients before local poller publishes fresh rows.
+      poller.markAllOffline();
+      broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: {} });
+    }
     poller.start();
   }
 }
@@ -2025,11 +2245,282 @@ function remoteApiTokenGate(req, res, next) {
 }
 
 function localDateStr(ts = Date.now()) {
-  const d = new Date(ts);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return localDateStrCore(ts);
+}
+
+function normalizeTodayEnergyRows(rowsRaw) {
+  return normalizeTodayEnergyRowsCore(rowsRaw);
+}
+
+function mergeTodayEnergyRowsMax(...lists) {
+  return mergeTodayEnergyRowsMaxCore(...lists);
+}
+
+function updateRemoteTodayEnergyShadow(rowsRaw, syncedAt = Date.now()) {
+  const day = localDateStr(syncedAt);
+  const incoming = normalizeTodayEnergyRows(rowsRaw);
+  let changed = false;
+  if (remoteTodayEnergyShadow.day !== day) {
+    remoteTodayEnergyShadow.day = day;
+    remoteTodayEnergyShadow.rows = incoming;
+    remoteTodayEnergyShadow.syncedAt = Number(syncedAt || Date.now());
+    changed = true;
+    persistRemoteTodayEnergyShadow();
+    return remoteTodayEnergyShadow.rows;
+  }
+  const merged = mergeTodayEnergyRowsMax(
+    remoteTodayEnergyShadow.rows,
+    incoming,
+  );
+  changed = !todayEnergyRowsEqual(remoteTodayEnergyShadow.rows, merged);
+  remoteTodayEnergyShadow.rows = merged;
+  remoteTodayEnergyShadow.syncedAt = Math.max(
+    Number(remoteTodayEnergyShadow.syncedAt || 0),
+    Number(syncedAt || Date.now()),
+  );
+  if (changed) persistRemoteTodayEnergyShadow();
+  return remoteTodayEnergyShadow.rows;
+}
+
+function getRemoteTodayEnergyShadowRows(day = localDateStr()) {
+  if (gatewayHandoffMeta.day && gatewayHandoffMeta.day !== day) {
+    resetGatewayHandoffMeta(true);
+  }
+  if (remoteTodayEnergyShadow.day !== day) {
+    if (remoteTodayEnergyShadow.day) {
+      remoteTodayEnergyShadow.day = "";
+      remoteTodayEnergyShadow.rows = [];
+      remoteTodayEnergyShadow.syncedAt = 0;
+      persistRemoteTodayEnergyShadow();
+    }
+    return [];
+  }
+  // Stale-shadow protection: if the handoff is not currently active and the
+  // shadow is older than MAX_SHADOW_AGE_MS, discard it to prevent stale data
+  // from a previous Remote session from permanently inflating today's totals.
+  const shadowAgeMs = Date.now() - Number(remoteTodayEnergyShadow.syncedAt || 0);
+  const handoffActive = gatewayHandoffMeta.active && gatewayHandoffMeta.day === day;
+  if (!handoffActive && shadowAgeMs > MAX_SHADOW_AGE_MS) {
+    console.warn(
+      `[shadow] stale shadow discarded: age=${Math.round(shadowAgeMs / 60000)}min` +
+      ` day=${day} syncedAt=${new Date(remoteTodayEnergyShadow.syncedAt).toISOString()}`,
+    );
+    remoteTodayEnergyShadow.day = "";
+    remoteTodayEnergyShadow.rows = [];
+    remoteTodayEnergyShadow.syncedAt = 0;
+    persistRemoteTodayEnergyShadow();
+    return [];
+  }
+  return normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
+}
+
+// Checks whether per-inverter baselines have been surpassed by local data and
+// closes the handoff either on completion or timeout.
+function _checkHandoffCompletion(pollerMap, day) {
+  const progress = evaluateHandoffProgress({
+    handoffMeta: gatewayHandoffMeta,
+    carryByInv: gatewayTodayCarryState.byInv,
+    pollerMap,
+    day,
+    now: Date.now(),
+    maxActiveMs: MAX_HANDOFF_ACTIVE_MS,
+  });
+  if (progress.action === "none") return;
+
+  const elapsedS = Math.round(Number(progress.elapsedMs || 0) / 1000);
+  const resolved = Number(progress.resolvedCount || 0);
+  if (progress.action === "timeout") {
+    console.warn(
+      `[handoff] Remote->Gateway handoff timeout: day=${day}` +
+      ` elapsed=${elapsedS}s resolved=${resolved} inverters` +
+      ` carryRemaining=${Object.keys(gatewayTodayCarryState.byInv).length}`,
+    );
+    resetGatewayHandoffMeta(true);
+    return;
+  }
+
+  console.log(
+    `[handoff] Remote->Gateway handoff complete: day=${day}` +
+    ` elapsed=${elapsedS}s` +
+    ` resolved=${resolved} inverters`,
+  );
+  resetGatewayHandoffMeta(true);
+}
+
+function getTodayEnergySupplementRows(day = localDateStr()) {
+  if (isRemoteMode()) {
+    return mergeTodayEnergyRowsMax(
+      remoteBridgeState.todayEnergyRows || [],
+      getRemoteTodayEnergyShadowRows(day),
+    );
+  }
+
+  const pollerRows = normalizeTodayEnergyRows(
+    poller.getTodayPacKwh ? poller.getTodayPacKwh() : [],
+  );
+  const shadowRows = getRemoteTodayEnergyShadowRows(day);
+  if (!shadowRows.length) {
+    gatewayTodayCarryState.day = day;
+    gatewayTodayCarryState.byInv = Object.create(null);
+    return pollerRows;
+  }
+
+  if (gatewayTodayCarryState.day !== day) {
+    gatewayTodayCarryState.day = day;
+    gatewayTodayCarryState.byInv = Object.create(null);
+  }
+
+  const { rows: out, pollerMap } = applyGatewayCarryRows({
+    pollerRows,
+    shadowRows,
+    carryByInv: gatewayTodayCarryState.byInv,
+    onEvent(evt) {
+      if (!evt || typeof evt !== "object") return;
+      if (evt.type === "carry_applied") {
+        console.log(
+          `[handoff] carry applied: inv=${evt.inverter}` +
+          ` shadow=${Number(evt.shadowKwh || 0).toFixed(2)}kWh` +
+          ` poller=${Number(evt.pollerKwh || 0).toFixed(2)}kWh` +
+          ` gap=${Number(evt.gapKwh || 0).toFixed(2)}kWh`,
+        );
+        return;
+      }
+      if (evt.type === "carry_removed") {
+        console.log(
+          `[handoff] inv=${evt.inverter} caught up:` +
+          ` poller=${Number(evt.pollerKwh || 0).toFixed(2)}kWh` +
+          ` >= shadow=${Number(evt.shadowKwh || 0).toFixed(2)}kWh - carry removed`,
+        );
+      }
+    },
+  });
+
+  // Check whether all inverters have caught up and the handoff is complete.
+  _checkHandoffCompletion(pollerMap, day);
+
+  return out;
+}
+
+function todayEnergyRowsEqual(aRaw, bRaw) {
+  return todayEnergyRowsEqualCore(aRaw, bRaw);
+}
+
+function normalizeGatewayHandoffBaselines(raw) {
+  const out = Object.create(null);
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const inv = Math.floor(Number(key));
+    const kwh = Number(value);
+    if (inv <= 0 || !Number.isFinite(kwh) || kwh < 0) continue;
+    out[inv] = Number(kwh.toFixed(6));
+  }
+  return out;
+}
+
+function resetGatewayHandoffMeta(persist = false) {
+  gatewayHandoffMeta.active = false;
+  gatewayHandoffMeta.startedAt = 0;
+  gatewayHandoffMeta.day = "";
+  gatewayHandoffMeta.baselines = Object.create(null);
+  if (persist) persistGatewayHandoffMeta();
+}
+
+function persistGatewayHandoffMeta() {
+  try {
+    if (!gatewayHandoffMeta.active) {
+      setSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "");
+      return;
+    }
+    const day = String(gatewayHandoffMeta.day || "").trim();
+    const startedAt = Number(gatewayHandoffMeta.startedAt || 0);
+    const baselines = normalizeGatewayHandoffBaselines(gatewayHandoffMeta.baselines);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(startedAt) || startedAt <= 0) {
+      setSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "");
+      return;
+    }
+    setSetting(
+      REMOTE_GATEWAY_HANDOFF_SETTING_KEY,
+      JSON.stringify({
+        active: true,
+        day,
+        startedAt,
+        baselines,
+      }),
+    );
+  } catch (err) {
+    console.warn("[handoff] persist meta failed:", err?.message || err);
+  }
+}
+
+function loadGatewayHandoffMetaFromSettings() {
+  try {
+    const raw = String(getSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "") || "").trim();
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const active = Boolean(parsed?.active);
+    const day = String(parsed?.day || "").trim();
+    const startedAt = Number(parsed?.startedAt || 0);
+    const baselines = normalizeGatewayHandoffBaselines(parsed?.baselines);
+    if (!active) {
+      setSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "");
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day !== localDateStr()) {
+      setSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "");
+      return;
+    }
+    if (!Number.isFinite(startedAt) || startedAt <= 0) {
+      setSetting(REMOTE_GATEWAY_HANDOFF_SETTING_KEY, "");
+      return;
+    }
+    gatewayHandoffMeta.active = true;
+    gatewayHandoffMeta.day = day;
+    gatewayHandoffMeta.startedAt = Math.min(startedAt, Date.now());
+    gatewayHandoffMeta.baselines = baselines;
+  } catch (err) {
+    console.warn("[handoff] load meta failed:", err?.message || err);
+  }
+}
+
+function persistRemoteTodayEnergyShadow() {
+  try {
+    if (!remoteTodayEnergyShadow.day || !Array.isArray(remoteTodayEnergyShadow.rows) || !remoteTodayEnergyShadow.rows.length) {
+      setSetting(REMOTE_TODAY_SHADOW_SETTING_KEY, "");
+      return;
+    }
+    setSetting(
+      REMOTE_TODAY_SHADOW_SETTING_KEY,
+      JSON.stringify({
+        day: String(remoteTodayEnergyShadow.day || ""),
+        rows: normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows),
+        syncedAt: Number(remoteTodayEnergyShadow.syncedAt || 0),
+      }),
+    );
+  } catch (err) {
+    console.warn("[shadow] persist remote today-energy failed:", err?.message || err);
+  }
+}
+
+function loadRemoteTodayEnergyShadowFromSettings() {
+  try {
+    const raw = String(getSetting(REMOTE_TODAY_SHADOW_SETTING_KEY, "") || "").trim();
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const day = String(parsed?.day || "").trim();
+    const syncedAt = Number(parsed?.syncedAt || 0);
+    const rows = normalizeTodayEnergyRows(parsed?.rows);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !rows.length) return;
+    if (day !== localDateStr()) {
+      // Keep shadow strictly scoped to the current day.
+      setSetting(REMOTE_TODAY_SHADOW_SETTING_KEY, "");
+      return;
+    }
+    remoteTodayEnergyShadow.day = day;
+    remoteTodayEnergyShadow.rows = rows;
+    remoteTodayEnergyShadow.syncedAt = Number.isFinite(syncedAt) ? syncedAt : 0;
+  } catch (err) {
+    console.warn("[shadow] load remote today-energy failed:", err?.message || err);
+  }
 }
 
 function readForecastContext() {
@@ -3067,10 +3558,12 @@ function buildTodayPacTotalsFromDb() {
     if (inv > 0) resultMap.set(inv, Number(r?.total_kwh || 0));
   }
 
-  // Supplement with live poller accumulator (includes current partial bucket).
-  // Take max per inverter: poller > e5min in normal operation, e5min > poller after restart.
-  const pollerRows = poller.getTodayPacKwh ? poller.getTodayPacKwh() : [];
-  for (const { inverter, total_kwh } of pollerRows) {
+  // Supplement with current partial-bucket totals plus the latest remote shadow
+  // captured while this client was in Remote mode. This keeps totals stable when
+  // switching Remote -> Gateway before the source gateway flushes its current
+  // 5-minute bucket to energy_5min.
+  const supplementRows = getTodayEnergySupplementRows(day);
+  for (const { inverter, total_kwh } of supplementRows) {
     const inv = Number(inverter || 0);
     if (inv <= 0 || !(total_kwh > 0)) continue;
     resultMap.set(inv, Math.max(resultMap.get(inv) || 0, total_kwh));
@@ -3084,12 +3577,14 @@ function buildTodayPacTotalsFromDb() {
     .sort((a, b) => a.inverter - b.inverter);
 }
 
-const TODAY_ENERGY_CACHE_MS = 5000; // 5-second cache; fast query, 5-min lag from energy_5min is expected
+const TODAY_ENERGY_CACHE_MS = 1000; // 1-second cache for near-realtime header updates
 const todayEnergyCache = {
   day: "",
   ts: 0,
   rows: [],
 };
+const PAST_DAILY_REPORT_CACHE_TTL_MS = 5 * 60 * 1000; // 5-minute cache for immutable past days
+const pastDailyReportCache = new Map(); // day -> { ts, rows }
 
 function getTodayPacTotalsFromDbCached() {
   const now = Date.now();
@@ -3107,8 +3602,74 @@ function getTodayPacTotalsFromDbCached() {
   return todayEnergyCache.rows;
 }
 
+function cloneDailyReportRows(rowsRaw) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  return rows.map((r) => ({ ...r }));
+}
+
+function getPastDailyReportRowsCached(day, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key) return null;
+  const entry = pastDailyReportCache.get(key);
+  if (!entry) return null;
+  if (Number(now || Date.now()) - Number(entry.ts || 0) > PAST_DAILY_REPORT_CACHE_TTL_MS) {
+    pastDailyReportCache.delete(key);
+    return null;
+  }
+  return cloneDailyReportRows(entry.rows);
+}
+
+function setPastDailyReportRowsCache(day, rowsRaw, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key) return;
+  pastDailyReportCache.set(key, {
+    ts: Number(now || Date.now()),
+    rows: cloneDailyReportRows(rowsRaw),
+  });
+}
+
+function getDailyReportRowsForDay(dayInput, options = {}) {
+  const day = parseIsoDateStrict(dayInput || localDateStr(), "date");
+  const today = localDateStr();
+  const refresh = options.refresh === true;
+  const persist = options.persist !== false;
+  const includeTodayPartial = options.includeTodayPartial !== false;
+
+  if (day > today) {
+    return cloneDailyReportRows(stmts.getDailyReport.all(day));
+  }
+
+  if (day < today) {
+    if (!refresh) {
+      const cached = getPastDailyReportRowsCached(day);
+      if (cached) return cached;
+
+      const dbRows = stmts.getDailyReport.all(day);
+      if (dbRows.length > 0) {
+        setPastDailyReportRowsCache(day, dbRows);
+        return cloneDailyReportRows(dbRows);
+      }
+    }
+
+    const rebuilt = buildDailyReportRowsForDate(day, {
+      persist,
+      includeTodayPartial: false,
+    });
+    setPastDailyReportRowsCache(day, rebuilt);
+    return cloneDailyReportRows(rebuilt);
+  }
+
+  return buildDailyReportRowsForDate(day, {
+    persist,
+    includeTodayPartial,
+  });
+}
+
 const getAlarmCountByInverterStmt = db.prepare(
   "SELECT COUNT(*) AS cnt FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ?",
+);
+const getAuditCountByInverterStmt = db.prepare(
+  "SELECT COUNT(*) AS cnt FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ?",
 );
 
 function clampPct(value) {
@@ -3125,6 +3686,82 @@ function computeSpanSeconds(rows) {
     return Math.max(0, (lastTs - firstTs) / 1000);
   }
   return list.length === 1 ? 1 : 0;
+}
+
+// Correct availability computation: consecutive-interval summation.
+// Processes ALL rows for a node (online=1 and online=0) sorted by ts.
+// For each consecutive pair, the interval is credited only when the starting
+// row is online=1.  Each interval is capped at AVAIL_MAX_GAP_S so that long
+// silent gaps (outages / comms loss that produced no readings) are not
+// mistakenly counted as uptime — the old lastTs-firstTs span formula would
+// credit the entire gap regardless of what happened inside it.
+function computeNodeOnlineSeconds(rows, maxGapS = AVAIL_MAX_GAP_S) {
+  const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return Number(sorted[0]?.online || 0) === 1 ? 1 : 0;
+  let totalS = 0;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (Number(sorted[i]?.online || 0) !== 1) continue;
+    const dt = (Number(sorted[i + 1].ts) - Number(sorted[i].ts)) / 1000;
+    totalS += Math.min(Math.max(0, dt), maxGapS);
+  }
+  // Credit 1 s for the last row when it is still online (avoids losing the
+  // tail of a day where the final reading happened to be the last one).
+  if (Number(sorted[sorted.length - 1]?.online || 0) === 1) totalS += 1;
+  return totalS;
+}
+
+function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
+  const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
+  if (sorted.length === 0) return [];
+
+  const intervals = [];
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const cur = sorted[i];
+    const next = sorted[i + 1];
+    if (Number(cur?.online || 0) !== 1) continue;
+    const start = Number(cur?.ts || 0);
+    const endRaw = Number(next?.ts || 0);
+    if (!(start > 0) || !(endRaw > start)) continue;
+    const maxEnd = start + Math.max(0, Number(maxGapS || 0)) * 1000;
+    const end = Math.min(endRaw, maxEnd);
+    if (end > start) intervals.push([start, end]);
+  }
+
+  // Keep parity with computeNodeOnlineSeconds(): tail credit for a final online row.
+  const last = sorted[sorted.length - 1];
+  if (Number(last?.online || 0) === 1) {
+    const start = Number(last?.ts || 0);
+    if (start > 0) intervals.push([start, start + 1000]);
+  }
+  return intervals;
+}
+
+function computeInverterOnlineSeconds(rowsByUnit, maxGapS = AVAIL_MAX_GAP_S) {
+  const byUnit = rowsByUnit instanceof Map ? rowsByUnit : new Map();
+  const intervals = [];
+  for (const unitRows of byUnit.values()) {
+    intervals.push(...buildNodeOnlineIntervalsMs(unitRows, maxGapS));
+  }
+  if (!intervals.length) return 0;
+
+  intervals.sort((a, b) => Number(a[0]) - Number(b[0]) || Number(a[1]) - Number(b[1]));
+  let totalMs = 0;
+  let curStart = intervals[0][0];
+  let curEnd = intervals[0][1];
+
+  for (let i = 1; i < intervals.length; i += 1) {
+    const [start, end] = intervals[i];
+    if (start <= curEnd) {
+      if (end > curEnd) curEnd = end;
+      continue;
+    }
+    totalMs += Math.max(0, curEnd - curStart);
+    curStart = start;
+    curEnd = end;
+  }
+  totalMs += Math.max(0, curEnd - curStart);
+  return totalMs / 1000;
 }
 
 function getReportSolarWindowSeconds(day, includeTodayPartial = true) {
@@ -3156,45 +3793,81 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       : dayEndTs;
 
   const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
-  const pacRows = buildPacEnergyBuckets({
-    inverter: "all",
-    startTs,
-    endTs,
-    bucketMin: 5,
-  });
 
+  // Use energy_5min as the single source of truth for kWh, matching the TODAY MWh
+  // header. buildPacEnergyBuckets re-integrates the subsampled readings table and
+  // systematically undercounts vs. the continuous live integrator that writes energy_5min.
   const pacKwhByInv = new Map();
-  for (const row of pacRows) {
-    const inv = Number(row?.inverter || 0);
-    if (!inv) continue;
-    const next =
-      Number(pacKwhByInv.get(inv) || 0) + Number(row?.kwh_inc || 0);
-    pacKwhByInv.set(inv, next);
+  const e5Rows = db.prepare(
+    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter",
+  ).all(startTs, endTs);
+  for (const r of e5Rows) {
+    const inv = Number(r?.inverter || 0);
+    if (inv > 0) pacKwhByInv.set(inv, Number(r?.total_kwh || 0));
+  }
+
+  // For today's partial day, fold in the live supplement source used by
+  // /api/energy/today (poller in gateway mode, remote shadow on mode transition).
+  if (day === localDateStr() && includeTodayPartial) {
+    const supplementalRows = getTodayEnergySupplementRows(day);
+    for (const { inverter, total_kwh } of supplementalRows) {
+      const inv = Number(inverter || 0);
+      if (inv <= 0 || !(total_kwh > 0)) continue;
+      pacKwhByInv.set(inv, Math.max(pacKwhByInv.get(inv) || 0, total_kwh));
+    }
   }
   const expectedSolarWindowS = getReportSolarWindowSeconds(
     day,
     includeTodayPartial,
   );
 
+  // ── Batch queries: replace per-inverter N+1 pattern (was 27×3 = 81 queries) ──
+  // All readings for the day in a single scan, grouped in-process by inverter.
+  const allReadingsBatch = db.prepare(
+    "SELECT inverter, unit, ts, pac, kwh, online FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC",
+  ).all(startTs, endTs);
+  const readingsByInv = new Map();
+  for (const r of allReadingsBatch) {
+    const inv = Number(r.inverter);
+    if (!readingsByInv.has(inv)) readingsByInv.set(inv, []);
+    readingsByInv.get(inv).push(r);
+  }
+  // Alarm and audit counts per inverter in 2 queries instead of 54.
+  const alarmCountBatch = db.prepare(
+    "SELECT inverter, COUNT(*) AS cnt FROM alarms WHERE ts BETWEEN ? AND ? GROUP BY inverter",
+  ).all(startTs, endTs);
+  const alarmCountByInv = new Map(
+    alarmCountBatch.map((r) => [Number(r.inverter), Number(r.cnt || 0)]),
+  );
+  const auditCountBatch = db.prepare(
+    "SELECT inverter, COUNT(*) AS cnt FROM audit_log WHERE ts BETWEEN ? AND ? GROUP BY inverter",
+  ).all(startTs, endTs);
+  const auditCountByInv = new Map(
+    auditCountBatch.map((r) => [Number(r.inverter), Number(r.cnt || 0)]),
+  );
+
   const out = [];
   for (let inv = 1; inv <= invCount; inv++) {
-    const rows = stmts.getReadingsRange.all(inv, startTs, endTs);
-    const alarmCount = Number(
-      getAlarmCountByInverterStmt.get(inv, startTs, endTs)?.cnt || 0,
-    );
+    const rows = readingsByInv.get(inv) || [];
+    const alarmCount = alarmCountByInv.get(inv) || 0;
+    const controlCount = auditCountByInv.get(inv) || 0;
     const pacKwh = Number(pacKwhByInv.get(inv) || 0);
-    const hasLiveData = rows.length > 0 || pacKwh > 0 || alarmCount > 0;
+    const hasLiveData = rows.length > 0 || pacKwh > 0 || alarmCount > 0 || controlCount > 0;
     if (!hasLiveData) continue;
 
     const onlineRows = rows.filter(
       (r) => Number(r?.online || 0) === 1 && Number(r?.pac || 0) > 0,
     );
-    const onlineRowsByUnit = new Map();
-    for (const r of onlineRows) {
+    // Group ALL rows by unit (online and offline) so computeNodeOnlineSeconds
+    // can see every state transition.  Using only online=1 rows (the old
+    // onlineRowsByUnit approach) caused computeSpanSeconds to credit the full
+    // first→last span even when the node was offline for hours in between.
+    const rowsByUnit = new Map();
+    for (const r of rows) {
       const unit = Number(r?.unit || 0);
-      if (unit < 1 || unit > REPORT_EXPECTED_NODES_PER_INVERTER) continue;
-      if (!onlineRowsByUnit.has(unit)) onlineRowsByUnit.set(unit, []);
-      onlineRowsByUnit.get(unit).push(r);
+      if (unit < 1) continue;
+      if (!rowsByUnit.has(unit)) rowsByUnit.set(unit, []);
+      rowsByUnit.get(unit).push(r);
     }
     const pacValues = rows
       .map((r) => Number(r?.pac || 0))
@@ -3205,13 +3878,24 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       ? onlineRows.reduce((s, r) => s + Number(r?.pac || 0), 0) /
         onlineRows.length
       : 0;
-    // Inverter uptime uses online+producing span across all node rows.
-    const uptimeS = computeSpanSeconds(onlineRows);
-    // Availability uses expected 4-node topology, so missing nodes reduce score.
-    let nodeUptimeS = 0;
-    for (let unit = 1; unit <= REPORT_EXPECTED_NODES_PER_INVERTER; unit++) {
-      nodeUptimeS += computeSpanSeconds(onlineRowsByUnit.get(unit) || []);
+    // Inverter uptime is the union of online intervals across all observed units.
+    // If any unit is online, inverter uptime advances.
+    const uptimeS = computeInverterOnlineSeconds(rowsByUnit);
+    const perUnitUptime = [];
+    for (const [unit, unitRows] of rowsByUnit.entries()) {
+      perUnitUptime.push({
+        unit,
+        uptimeS: computeNodeOnlineSeconds(unitRows),
+      });
     }
+    perUnitUptime.sort(
+      (a, b) =>
+        Number(b.uptimeS || 0) - Number(a.uptimeS || 0) ||
+        Number(a.unit || 0) - Number(b.unit || 0),
+    );
+    const nodeUptimeS = perUnitUptime
+      .slice(0, REPORT_EXPECTED_NODES_PER_INVERTER)
+      .reduce((s, r) => s + Math.max(0, Number(r?.uptimeS || 0)), 0);
 
     let kwhTotal = Math.max(0, pacKwh);
     if (kwhTotal <= 0 && rows.length >= 2) {
@@ -3250,6 +3934,7 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       pac_avg: Number(Math.max(0, pacAvg).toFixed(3)),
       uptime_s: Math.max(0, Math.round(uptimeS)),
       alarm_count: Math.max(0, Math.trunc(alarmCount)),
+      control_count: Math.max(0, Math.trunc(controlCount)),
       availability_pct: Number(clampPct(availabilityPct).toFixed(3)),
       performance_pct: Number(clampPct(performancePct).toFixed(3)),
       node_uptime_s: Math.max(0, Math.round(nodeUptimeS)),
@@ -3266,6 +3951,7 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
         row.pac_avg,
         row.uptime_s,
         row.alarm_count,
+        row.control_count,
       );
     }
 
@@ -3273,6 +3959,9 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
   }
 
   out.sort((a, b) => a.inverter - b.inverter);
+  if (day < localDateStr()) {
+    setPastDailyReportRowsCache(day, out);
+  }
   return out;
 }
 
@@ -3348,8 +4037,9 @@ function summarizeDailyReportRows(rows) {
   };
 }
 
-function buildDailyWeeklyReportSummary(targetDateText) {
+function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const day = parseIsoDateStrict(targetDateText || localDateStr(), "date");
+  const refreshDay = options.refreshDay === true;
   const selectedDate = new Date(`${day}T00:00:00.000`);
   const dow = selectedDate.getDay(); // 0=Sunday ... 6=Saturday
   const weekStartDate = new Date(selectedDate.getTime());
@@ -3361,29 +4051,20 @@ function buildDailyWeeklyReportSummary(targetDateText) {
 
   const byDateRows = new Map();
   const isToday = day === today;
-  const isFutureDay = day > today;
-  let dailyRows = [];
-  if (!isFutureDay) {
-    dailyRows = buildDailyReportRowsForDate(day, {
-      persist: true,
-      includeTodayPartial: isToday,
-    });
-  } else {
-    dailyRows = stmts.getDailyReport.all(day);
-  }
+  const dailyRows = getDailyReportRowsForDay(day, {
+    persist: true,
+    includeTodayPartial: isToday,
+    refresh: refreshDay,
+  });
   byDateRows.set(day, dailyRows);
 
   for (const d of dates) {
     if (d === day) continue;
-    let rows = [];
-    if (d <= today) {
-      rows = buildDailyReportRowsForDate(d, {
-        persist: true,
-        includeTodayPartial: d === today,
-      });
-    } else {
-      rows = stmts.getDailyReport.all(d);
-    }
+    const rows = getDailyReportRowsForDay(d, {
+      persist: true,
+      includeTodayPartial: d === today,
+      refresh: false,
+    });
     byDateRows.set(d, rows);
   }
 
@@ -3563,6 +4244,7 @@ function backfillAuditIpsFromConfig() {
     return;
   }
   const invMap = (cfg && typeof cfg === "object" && cfg.inverters) || {};
+  const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
   const update = db.prepare(
     `UPDATE audit_log
      SET ip = ?
@@ -3572,8 +4254,17 @@ function backfillAuditIpsFromConfig() {
        )`,
   );
   const tx = db.transaction(() => {
-    for (let inv = 1; inv <= 27; inv++) {
+    const seen = new Set();
+    for (let inv = 1; inv <= invCount; inv++) {
       const ip = String(invMap[inv] ?? invMap[String(inv)] ?? "").trim();
+      if (!ip) continue;
+      seen.add(inv);
+      update.run(ip, inv);
+    }
+    for (const [k, vRaw] of Object.entries(invMap || {})) {
+      const inv = Math.trunc(Number(k));
+      if (!Number.isFinite(inv) || inv < 1 || seen.has(inv)) continue;
+      const ip = String(vRaw ?? "").trim();
       if (!ip) continue;
       update.run(ip, inv);
     }
@@ -4006,11 +4697,13 @@ app.post("/api/write", async (req, res) => {
   const invNum = Number(inverter);
   const unitNum = Number(unit ?? node);
   const valueNum = Number(value);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
 
-  if (!Number.isFinite(invNum) || invNum < 1) {
+  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
     return res.status(400).json({ ok: false, error: "Invalid inverter" });
   }
-  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > 4) {
+  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) {
     return res.status(400).json({ ok: false, error: "Invalid unit/node" });
   }
   if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
@@ -4300,6 +4993,8 @@ app.post("/api/settings", (req, res) => {
     remoteTokenAfter !== remoteTokenBefore
   ) {
     applyRuntimeMode();
+    todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
+    broadcastUpdate({ type: "configChanged" }); // tell clients to reload settings + rebuild UI
   }
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
@@ -4428,6 +5123,7 @@ app.get("/api/alarms/active", (req, res) => {
   res.json(rows.map((r) => enrichAlarmRow(r, nowTs)));
 });
 app.get("/api/alarms", (req, res) => {
+  const _t0 = Date.now();
   const { start, end, inverter } = req.query;
   const s = parseDateMs(start, Date.now() - 7 * 86400000, false);
   const e = parseDateMs(end, Date.now(), true);
@@ -4441,13 +5137,13 @@ app.get("/api/alarms", (req, res) => {
           .all(Number(inverter), s, e)
       : stmts.getAlarmsRange.all(s, e);
   const nowTs = Date.now();
-  res.json(
-    rows
-      .filter((r) =>
-        configured.has(`${Number(r.inverter) || 0}_${Number(r.unit) || 0}`),
-      )
-      .map((r) => enrichAlarmRow(r, nowTs)),
-  );
+  const out = rows
+    .filter((r) =>
+      configured.has(`${Number(r.inverter) || 0}_${Number(r.unit) || 0}`),
+    )
+    .map((r) => enrichAlarmRow(r, nowTs));
+  res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+  res.json(out);
 });
 app.post("/api/alarms/:id/ack", (req, res) => {
   const id = Number(req.params.id);
@@ -4463,29 +5159,188 @@ app.post("/api/alarms/ack-all", (req, res) => {
 });
 
 app.get("/api/audit", (req, res) => {
+  const _t0 = Date.now();
   const { start, end, inverter, limit } = req.query;
   const s = parseDateMs(start, Date.now() - 7 * 86400000, false);
   const e = parseDateMs(end, Date.now(), true);
-  res.json(
-    getAuditLog({
-      start: s,
-      end: e,
-      inverter: inverter && inverter !== "all" ? Number(inverter) : null,
-      limit: Number(limit) || 500,
-    }),
-  );
+  const rawLimit = Number(limit);
+  const safeLimit = Number.isFinite(rawLimit)
+    ? Math.min(20000, Math.max(1, Math.trunc(rawLimit)))
+    : 5000;
+  const invNum = Math.trunc(Number(inverter || 0));
+  const out = getAuditLog({
+    start: s,
+    end: e,
+    inverter:
+      inverter && inverter !== "all" && Number.isFinite(invNum) && invNum > 0
+        ? invNum
+        : null,
+    limit: safeLimit,
+  });
+  res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+  res.json(out);
 });
 
 app.get("/api/energy/5min", (req, res) => {
-  const { inverter, start, end } = req.query;
+  const _t0 = Date.now();
+  const { inverter, start, end, paged, limit, offset } = req.query;
   const s = start ? Number(start) : Date.now() - 86400000;
   const e = end ? Number(end) : Date.now();
   if (s >= e) return res.status(400).json({ ok: false, error: "start must be before end" });
-  res.json(
-    !inverter || inverter === "all"
-      ? stmts.get5minRangeAll.all(s, e)
-      : stmts.get5minRange.all(Number(inverter), s, e),
+  const pagedMode = ["1", "true", "yes", "on"].includes(
+    String(paged || "")
+      .trim()
+      .toLowerCase(),
   );
+  const invParsed = Number(inverter);
+  const scopedInv =
+    inverter && inverter !== "all" && Number.isFinite(invParsed) && invParsed > 0
+      ? invParsed
+      : null;
+
+  if (pagedMode) {
+    const safeLimit = clampInt(limit, 100, 5000, 500);
+    const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+    try {
+      let rows = [];
+      let total = 0;
+      let summaryRow = {};
+      let peakRow = {};
+
+      if (Number.isFinite(scopedInv) && scopedInv > 0) {
+        rows = db
+          .prepare(
+            `SELECT id, ts, inverter, kwh_inc
+             FROM energy_5min
+             WHERE inverter=? AND ts BETWEEN ? AND ?
+             ORDER BY ts DESC, inverter ASC
+             LIMIT ? OFFSET ?`,
+          )
+          .all(scopedInv, s, e, safeLimit, safeOffset);
+        total = Number(
+          db
+            .prepare(
+              `SELECT COUNT(1) AS c
+               FROM energy_5min
+               WHERE inverter=? AND ts BETWEEN ? AND ?`,
+            )
+            .get(scopedInv, s, e)?.c || 0,
+        );
+        summaryRow =
+          db
+            .prepare(
+              `SELECT COUNT(1) AS row_count,
+                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
+                      COALESCE(MAX(ts), 0) AS latest_ts,
+                      COUNT(DISTINCT inverter) AS inverter_count
+                 FROM energy_5min
+                WHERE inverter=? AND ts BETWEEN ? AND ?`,
+            )
+            .get(scopedInv, s, e) || {};
+        peakRow =
+          db
+            .prepare(
+              `SELECT inverter, ts, kwh_inc
+                 FROM energy_5min
+                WHERE inverter=? AND ts BETWEEN ? AND ?
+                ORDER BY kwh_inc DESC, ts DESC
+                LIMIT 1`,
+            )
+            .get(scopedInv, s, e) || {};
+      } else {
+        rows = db
+          .prepare(
+            `SELECT id, ts, inverter, kwh_inc
+             FROM energy_5min
+             WHERE ts BETWEEN ? AND ?
+             ORDER BY ts DESC, inverter ASC
+             LIMIT ? OFFSET ?`,
+          )
+          .all(s, e, safeLimit, safeOffset);
+        total = Number(
+          db
+            .prepare(
+              `SELECT COUNT(1) AS c
+               FROM energy_5min
+               WHERE ts BETWEEN ? AND ?`,
+            )
+            .get(s, e)?.c || 0,
+        );
+        summaryRow =
+          db
+            .prepare(
+              `SELECT COUNT(1) AS row_count,
+                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
+                      COALESCE(MAX(ts), 0) AS latest_ts,
+                      COUNT(DISTINCT inverter) AS inverter_count
+                 FROM energy_5min
+                WHERE ts BETWEEN ? AND ?`,
+            )
+            .get(s, e) || {};
+        peakRow =
+          db
+            .prepare(
+              `SELECT inverter, ts, kwh_inc
+                 FROM energy_5min
+                WHERE ts BETWEEN ? AND ?
+                ORDER BY kwh_inc DESC, ts DESC
+                LIMIT 1`,
+            )
+            .get(s, e) || {};
+      }
+
+      const rowCount = Number(summaryRow?.row_count || 0);
+      const totalKwh = Number(summaryRow?.total_kwh || 0);
+      const summary = {
+        rowCount,
+        totalKwh: Number(totalKwh.toFixed(6)),
+        avgKwh: rowCount > 0 ? Number((totalKwh / rowCount).toFixed(6)) : 0,
+        latestTs: Number(summaryRow?.latest_ts || 0),
+        inverterCount: Number(summaryRow?.inverter_count || 0),
+        peak: {
+          inverter: Number(peakRow?.inverter || 0),
+          ts: Number(peakRow?.ts || 0),
+          kwhInc: Number(Number(peakRow?.kwh_inc || 0).toFixed(6)),
+        },
+      };
+
+      res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+      return res.json({
+        ok: true,
+        rows,
+        total,
+        limit: safeLimit,
+        offset: safeOffset,
+        hasMore: safeOffset + rows.length < total,
+        summary,
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message || "Energy pagination failed." });
+    }
+  }
+
+  // Non-paged fallback: apply a hard row cap so a wide date range cannot
+  // serialize millions of rows and hang the process. Use paged=1 for large ranges.
+  try {
+    const capLimit = ENERGY_5MIN_UNPAGED_ROW_CAP;
+    const rows = !scopedInv
+      ? db.prepare(
+          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
+        ).all(s, e, capLimit + 1)
+      : db.prepare(
+          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
+        ).all(Number(scopedInv), s, e, capLimit + 1);
+    if (rows.length > capLimit) {
+      return res.status(400).json({
+        ok: false,
+        error: `Date range too large: use paged=1 with limit/offset or narrow the range. Exceeded ${capLimit} row cap.`,
+        rowCap: capLimit,
+      });
+    }
+    return res.json(rows);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Analytics-specific energy source:
@@ -4496,22 +5351,50 @@ app.get("/api/analytics/energy", (req, res) => {
   const e = end ? Number(end) : Date.now();
   if (s >= e) return res.status(400).json({ ok: false, error: "start must be before end" });
   const bm = clampInt(bucketMin, 1, 60, 5);
-  const pacRows = buildPacEnergyBuckets({
+  // Apply row cap to prevent wide date ranges from hanging the analytics chart.
+  const baseRows =
+    !inverter || inverter === "all"
+      ? db.prepare(
+          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
+        ).all(s, e, ENERGY_5MIN_UNPAGED_ROW_CAP)
+      : db.prepare(
+          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
+        ).all(Number(inverter), s, e, ENERGY_5MIN_UNPAGED_ROW_CAP);
+
+  if (baseRows.length) {
+    if (bm <= 5) return res.json(baseRows);
+    const bucketMs = bm * 60000;
+    const map = new Map();
+    for (const r of baseRows) {
+      const ts = Number(r?.ts || 0);
+      const inv = Number(r?.inverter || 0);
+      if (!ts || !inv) continue;
+      const bucketTs = Math.floor(ts / bucketMs) * bucketMs;
+      const key = `${inv}|${bucketTs}`;
+      const prev = Number(map.get(key) || 0);
+      map.set(key, prev + Number(r?.kwh_inc || 0));
+    }
+    const out = Array.from(map.entries())
+      .map(([key, kwh]) => {
+        const [invStr, tsStr] = String(key).split("|");
+        return {
+          inverter: Number(invStr),
+          ts: Number(tsStr),
+          kwh_inc: Number(Number(kwh || 0).toFixed(6)),
+        };
+      })
+      .sort((a, b) => Number(a.inverter || 0) - Number(b.inverter || 0) || Number(a.ts || 0) - Number(b.ts || 0));
+    return res.json(out);
+  }
+
+  // Fallback only when energy_5min is empty/unavailable for the requested range.
+  const rebuilt = buildPacEnergyBuckets({
     inverter: inverter || "all",
     startTs: s,
     endTs: e,
     bucketMin: bm,
   });
-  if (pacRows.length) {
-    res.json(pacRows);
-    return;
-  }
-  // Safety fallback: don't leave charts blank if PAC reconstruction has no range rows.
-  res.json(
-    !inverter || inverter === "all"
-      ? stmts.get5minRangeAll.all(s, e)
-      : stmts.get5minRange.all(Number(inverter), s, e),
-  );
+  return res.json(rebuilt);
 });
 
 app.get("/api/analytics/dayahead", (req, res) => {
@@ -4762,22 +5645,29 @@ app.get("/api/report/daily", (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
+  const _t0 = Date.now();
   try {
-    const { date, start, end } = req.query;
+    const { date, start, end, refresh } = req.query;
+    const refreshRequested = ["1", "true", "yes", "on"].includes(
+      String(refresh || "")
+        .trim()
+        .toLowerCase(),
+    );
     if (date) {
       const day = parseIsoDateStrict(date, "date");
       const isToday = day === localDateStr();
-
-      const generated = buildDailyReportRowsForDate(day, {
+      const rows = getDailyReportRowsForDay(day, {
         persist: true,
         includeTodayPartial: isToday,
+        refresh: refreshRequested,
       });
-      if (generated.length) return res.json(generated);
-      return res.json(stmts.getDailyReport.all(day));
+      res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+      return res.json(rows);
     }
 
     const s = start || localDateStr(Date.now() - 7 * 86400000);
     const e = end || localDateStr();
+    res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
     return res.json(stmts.getDailyReportRange.all(s, e));
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
@@ -4790,7 +5680,14 @@ app.get("/api/report/summary", (req, res) => {
   }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
-    return res.json(buildDailyWeeklyReportSummary(day));
+    const refreshRequested = ["1", "true", "yes", "on"].includes(
+      String(req.query?.refresh || "")
+        .trim()
+        .toLowerCase(),
+    );
+    return res.json(
+      buildDailyWeeklyReportSummary(day, { refreshDay: refreshRequested }),
+    );
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
@@ -4913,8 +5810,10 @@ cron.schedule("5 18 * * *", () => {
   }
 });
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
+  loadRemoteTodayEnergyShadowFromSettings();
+  loadGatewayHandoffMetaFromSettings();
   try {
     const cfg = loadIpConfigFromDb();
     mirrorIpConfigToLegacyFiles(cfg);
@@ -4943,3 +5842,286 @@ app.listen(PORT, () => {
   applyRuntimeMode();
   if (process.send) process.send("ready");
 });
+
+// ─── Cloud Backup API Routes ──────────────────────────────────────────────────
+
+/** GET /api/backup/settings  — return cloud backup settings */
+app.get("/api/backup/settings", (req, res) => {
+  try {
+    const s = _cloudBackup.getCloudSettings();
+    res.json({ ok: true, settings: s, connected: _tokenStore.listConnected() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/settings  — save cloud backup settings */
+app.post("/api/backup/settings", (req, res) => {
+  try {
+    const body = req.body || {};
+    const saved = _cloudBackup.saveCloudSettings(body);
+    res.json({ ok: true, settings: saved });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/auth/:provider/start  — begin OAuth flow */
+app.post("/api/backup/auth/:provider/start", (req, res) => {
+  const provider = req.params.provider;
+  if (provider !== "onedrive" && provider !== "gdrive") {
+    return res.status(400).json({ ok: false, error: "Unknown provider" });
+  }
+  try {
+    _cleanOauthPending();
+    const settings = _cloudBackup.getCloudSettings();
+    const state = crypto.randomBytes(16).toString("hex");
+    const redirectUri = `${OAUTH_REDIRECT_BASE}/${provider}`;
+
+    let authUrl;
+    if (provider === "onedrive") {
+      const clientId = settings.onedrive?.clientId || "";
+      const { verifier, challenge } = OneDriveProvider.generatePKCE();
+      authUrl = _onedrive.getAuthUrl(clientId, redirectUri, state, challenge);
+      _oauthPending.set(state, {
+        provider,
+        codeVerifier: verifier,
+        clientId,
+        expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+      });
+    } else {
+      const clientId = settings.gdrive?.clientId || "";
+      authUrl = _gdrive.getAuthUrl(clientId, redirectUri, state);
+      _oauthPending.set(state, {
+        provider,
+        codeVerifier: null,
+        clientId,
+        clientSecret: settings.gdrive?.clientSecret || "",
+        expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+      });
+    }
+    res.json({ ok: true, authUrl, state });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/auth/:provider/callback  — complete OAuth token exchange */
+app.post("/api/backup/auth/:provider/callback", async (req, res) => {
+  const provider = req.params.provider;
+  const { code, state } = req.body || {};
+  if (!code || !state) {
+    return res.status(400).json({ ok: false, error: "Missing code or state" });
+  }
+  _cleanOauthPending();
+  const pending = _oauthPending.get(state);
+  if (!pending || pending.provider !== provider) {
+    return res.status(400).json({ ok: false, error: "Invalid or expired OAuth state" });
+  }
+  _oauthPending.delete(state);
+  const redirectUri = `${OAUTH_REDIRECT_BASE}/${provider}`;
+  try {
+    if (provider === "onedrive") {
+      await _onedrive.exchangeCode(pending.clientId, code, redirectUri, pending.codeVerifier);
+      const userInfo = await _onedrive.getUserInfo().catch(() => null);
+      res.json({ ok: true, provider, user: userInfo });
+    } else {
+      await _gdrive.exchangeCode(pending.clientId, pending.clientSecret, code, redirectUri);
+      const userInfo = await _gdrive.getUserInfo().catch(() => null);
+      res.json({ ok: true, provider, user: userInfo });
+    }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/auth/:provider/disconnect  — revoke stored tokens */
+app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
+  const provider = req.params.provider;
+  try {
+    if (provider === "onedrive") _onedrive.disconnect();
+    else if (provider === "gdrive") _gdrive.disconnect();
+    res.json({ ok: true, provider, connected: _tokenStore.listConnected() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** GET /api/backup/status  — connection status + progress */
+app.get("/api/backup/status", (req, res) => {
+  res.json({
+    ok: true,
+    connected: _tokenStore.listConnected(),
+    progress: _cloudBackup.getProgress(),
+  });
+});
+
+/** GET /api/backup/progress  — current operation progress */
+app.get("/api/backup/progress", (req, res) => {
+  res.json({ ok: true, progress: _cloudBackup.getProgress() });
+});
+
+/** GET /api/backup/history  — local backup history */
+app.get("/api/backup/history", (req, res) => {
+  try {
+    const history = _cloudBackup.getHistory().map((h) => ({
+      id: h.id,
+      createdAt: h.createdAt,
+      scope: h.scope,
+      tag: h.tag,
+      totalSize: h.totalSize,
+      status: h.status,
+      cloud: h.cloud,
+      restoredFrom: h.restoredFrom || null,
+    }));
+    res.json({ ok: true, history });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/now  — run backup immediately */
+app.post("/api/backup/now", async (req, res) => {
+  const { scope, provider, tag } = req.body || {};
+  try {
+    const q = enqueueCloudOp("backupNow", async () => {
+      await _cloudBackup.backupNow({ scope, provider, tag });
+    });
+    res.json({
+      ok: true,
+      status: "queued",
+      queuePosition: q.position,
+      message: "Backup queued in background.",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** GET /api/backup/cloud/:provider  — list cloud backups */
+app.get("/api/backup/cloud/:provider", async (req, res) => {
+  const provider = req.params.provider;
+  try {
+    const items = await _cloudBackup.listCloudBackups(provider);
+    res.json({ ok: true, provider, items });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/pull  — pull backup from cloud */
+app.post("/api/backup/pull", async (req, res) => {
+  const { provider, remoteId, remoteName } = req.body || {};
+  if (!provider || !remoteId || !remoteName) {
+    return res.status(400).json({ ok: false, error: "Missing provider, remoteId, or remoteName" });
+  }
+  try {
+    const q = enqueueCloudOp("pullFromCloud", async () => {
+      await _cloudBackup.pullFromCloud(provider, remoteId, remoteName);
+    });
+    res.json({
+      ok: true,
+      status: "queued",
+      queuePosition: q.position,
+      message: "Pull queued in background.",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/restore/:id  — restore a local backup */
+app.post("/api/backup/restore/:id", async (req, res) => {
+  const backupId = decodeURIComponent(req.params.id);
+  const { skipSafetyBackup } = req.body || {};
+  try {
+    const q = enqueueCloudOp("restoreBackup", async () => {
+      await _cloudBackup.restoreBackup(backupId, {
+        skipSafetyBackup: !!skipSafetyBackup,
+      });
+    });
+    res.json({
+      ok: true,
+      status: "queued",
+      queuePosition: q.position,
+      message: "Restore queued in background.",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** DELETE /api/backup/:id  — delete a local backup package */
+app.delete("/api/backup/:id", (req, res) => {
+  const backupId = decodeURIComponent(req.params.id);
+  try {
+    const result = _cloudBackup.deleteLocalBackup(backupId);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+let _shutdownCalled = false;
+
+function _flushAndClose() {
+  try { poller.flushPending(); } catch (_) {}   // recover last ~1 s of readings
+  closeDb();                                      // WAL checkpoint + db.close
+}
+
+// Called when running as a spawned child process (dev mode or future use).
+function gracefulShutdown(reason) {
+  if (_shutdownCalled) return;
+  _shutdownCalled = true;
+  console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
+  try { poller.stop(); } catch (_) {}
+  httpServer.close(() => { _flushAndClose(); process.exit(0); });
+  // Safety: if httpServer doesn't drain within 2 s, force-close and exit.
+  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2000).unref();
+}
+
+// Called when running embedded in the Electron main process (packaged mode).
+// Must NOT call process.exit — Electron controls the lifecycle.
+function shutdownEmbedded() {
+  if (_shutdownCalled) return;
+  _shutdownCalled = true;
+  console.log("[Server] Embedded shutdown: flushing DB...");
+  try { poller.stop(); } catch (_) {}
+  _flushAndClose();
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
+process.on("message", (msg) => {
+  if (msg && msg.type === "shutdown") gracefulShutdown("ipc");
+});
+
+// ─── Periodic WAL Checkpoint ──────────────────────────────────────────────────
+// Keeps the WAL file from growing unbounded between auto-checkpoints.
+setInterval(() => {
+  try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
+}, 15 * 60 * 1000).unref();
+
+// ─── Periodic DB Backup ───────────────────────────────────────────────────────
+// Rotates between 2 backup files every 2 hours. Uses SQLite's online backup API
+// so it never blocks reads/writes and is always consistent.
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+let _backupSlot = 0;
+async function runPeriodicBackup() {
+  try { fs.mkdirSync(BACKUP_DIR, { recursive: true }); } catch (_) {}
+  const dest = path.join(BACKUP_DIR, `adsi_backup_${_backupSlot}.db`);
+  _backupSlot = (_backupSlot + 1) % 2;
+  try {
+    await db.backup(dest);
+    console.log("[DB] Backup written:", dest);
+  } catch (err) {
+    console.error("[DB] Backup failed:", err.message);
+  }
+}
+setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
+setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
+
+module.exports = { shutdownEmbedded };
+
+
