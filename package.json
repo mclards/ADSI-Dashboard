@@ -1,8 +1,8 @@
 {
   "name": "inverter-dashboard",
   "version": "2.2.10",
-  "description": "Industrial inverter monitoring, analytics, forecasting, and remote replication dashboard. Designed and developed by Engr. Clariden Montaño REE (Engr. M.).",
-  "author": "Engr. Clariden D. Montaño, REE",
+  "description": "Dashboard V2 for industrial inverter monitoring, analytics, forecasting, and remote replication.",
+  "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
   "scripts": {
     "start": "node start-electron.js",
@@ -34,7 +34,7 @@
   },
   "build": {
     "appId": "com.engr-m.inverter-dashboard",
-    "productName": "InverterDashboard",
+    "productName": "Dashboard V2",
     "directories": {
       "output": "release",
       "buildResources": "assets"
@@ -45,7 +45,7 @@
       "server/**/*",
       "assets/**/*",
       "drivers/**/*",
-      "shared_data.py",
+      "services/**/*",
       "package.json"
     ],
     "asarUnpack": [

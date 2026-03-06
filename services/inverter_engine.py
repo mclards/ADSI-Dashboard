@@ -33,7 +33,7 @@ import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 
 from drivers.modbus_tcp import create_client, read_input, read_holding, write_single
-from shared_data import shared
+from .shared_data import shared
 
 ENGINE_PORT = int(os.getenv("INVERTER_ENGINE_PORT", "9100"))
 ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"

@@ -1,16 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('drivers', 'drivers'), ('shared_data.py', '.'), ('ipconfig.json', '.')]
-binaries = []
-hiddenimports = ['drivers.modbus_tcp', 'uvicorn.loops.asyncio', 'uvicorn.lifespan.off', 'uvicorn.protocols.http.h11_impl', 'anyio._backends._asyncio', 'pydantic.v1.datetime_parse']
-tmp_ret = collect_all('pymodbus')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 
+datas = []
+binaries = []
+hiddenimports = []
+
+for pkg in (
+    "numpy",
+    "pandas",
+    "scipy",
+    "sklearn",
+    "joblib",
+    "requests",
+):
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
 
 a = Analysis(
-    ['InverterCoreService.py'],
-    pathex=[],
+    [os.path.join(ROOT_DIR, "ForecastCoreService.py")],
+    pathex=[ROOT_DIR],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -29,7 +43,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='InverterCoreService',
+    name="ForecastCoreService",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

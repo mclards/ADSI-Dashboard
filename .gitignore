@@ -20,6 +20,7 @@ ADSI_InverterService.exe
 *.db
 *.db-shm
 *.db-wal
+services/__pycache__/
 
 # Logs
 *.log
@@ -34,6 +35,23 @@ license-generator/
 tools/license-generator.js
 tools/license-fingerprint.js
 tools/license-keygen.js
+
+# Secrets / local credentials
+.env
+.env.*
+keys/
+secrets/
+private/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local runtime / auth / customer artifacts
+cloud_backups/
+auth/
+userData/
+*.lic
 
 # OS
 .DS_Store

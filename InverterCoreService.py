@@ -1,6 +1,6 @@
 import asyncio
 
-from ADSI_InverterService import main
+from services.inverter_engine import main
 
 
 if __name__ == "__main__":
