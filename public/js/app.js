@@ -168,8 +168,9 @@ const State = {
   tabFetching: {},
 };
 const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
-const NODE_RATED_W  = Math.round(997000 / 4); // 249,250 W — rated per-node (997 kW ÷ 4, always 4 nodes)
-const INV_RATED_KW  = 997;                    // rated per-inverter capacity kW
+const MAX_INV_UNITS = 4;
+const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
+const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
@@ -5139,13 +5140,23 @@ function calcReportAvailabilityPctClient(row, reportDay = "") {
   return clampPctClient((Math.max(0, uph) / windowH) * 100);
 }
 
+function getReportRatedKwClient(row) {
+  const explicit = Number(row?.rated_kw);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const expectedNodes = Number(row?.expected_nodes);
+  if (Number.isFinite(expectedNodes) && expectedNodes > 0) {
+    return (INV_RATED_KW * Math.min(MAX_INV_UNITS, expectedNodes)) / MAX_INV_UNITS;
+  }
+  return INV_RATED_KW;
+}
+
 function calcReportPerformancePctClient(row) {
   const explicit = Number(row?.performance_pct);
   if (Number.isFinite(explicit)) return clampPctClient(explicit);
   const kwh = Number(row?.kwh_total || 0);
   const uph =
     Number(row?.uptime_h || 0) || (Number(row?.uptime_s || 0) / 3600);
-  const denom = INV_RATED_KW * Math.max(0, uph);
+  const denom = getReportRatedKwClient(row) * Math.max(0, uph);
   if (!Number.isFinite(denom) || denom <= 0) return 0;
   return clampPctClient((Math.max(0, kwh) / denom) * 100);
 }
@@ -5177,6 +5188,8 @@ function toReportViewRow(r) {
     alarm_count: Number(r?.alarm_count || 0),
     availability_pct: Number(availabilityPct.toFixed(3)),
     performance_pct: Number(performancePct.toFixed(3)),
+    expected_nodes: Number(r?.expected_nodes || 0),
+    rated_kw: Number(r?.rated_kw || getReportRatedKwClient(r)),
     avail,
     perf,
   };
@@ -5438,7 +5451,7 @@ function computeReportSummaryFromRows(rows) {
     const peak = Number(r?.peak_kw || 0);
     const uph = Number(r?.uptime_h || 0);
     const avail = calcReportAvailabilityPctClient(r, r?.date || $("reportDate")?.value || today());
-    const denom = (INV_RATED_KW * uph) / 1000; // rated kW*h -> MWh
+    const denom = (getReportRatedKwClient(r) * uph) / 1000; // rated kW*h -> MWh
     totalMwh += Math.max(0, mwh);
     if (peak > peakKw) peakKw = peak;
     alarmCount += Math.max(0, Math.trunc(Number(r?.alarm_count || 0)));
