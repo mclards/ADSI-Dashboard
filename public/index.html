@@ -127,7 +127,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title">&#8505;&#65039; ABOUT</div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.7</span></div>
+            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.9</span></div>
             <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
@@ -812,49 +812,95 @@
 
       <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->
       <section id="page-settings" class="page">
-        <div class="settings-wrap">
-          <div class="settings-nav-bar" id="settingsNavBar">
-            <label class="settings-picker-label">
-              Settings Section
-              <select id="settingsSectionPicker" class="sel">
-                <option value="plantConfigSection">Plant Configuration</option>
-                <option value="opsCompactSection">Data / Storage / Modbus</option>
-                <option value="connectivitySection">Connectivity + Replication</option>
-                <option value="forecastSection">Forecast</option>
-                <option value="licenseSection">License</option>
-                <option value="appUpdateSection">App Updates</option>
-                <option value="cloudBackupSection">Cloud Backup</option>
-              </select>
-            </label>
-            <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
-              <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection">Plant</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection">Data/Modbus</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">Connect+Rep</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="forecastSection">Forecast</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">License</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection">Updates</button>
-              <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection">Cloud</button>
+        <div class="settings-shell">
+          <aside class="settings-sidebar">
+            <div class="settings-sidebar-card">
+              <div class="settings-kicker">Settings Workspace</div>
+              <div class="settings-current-title" id="settingsCurrentSectionTitle">Plant Configuration</div>
+              <div class="settings-current-copy" id="settingsCurrentSectionCopy">
+                Configure the plant identity, scale, and core operating values for this dashboard.
+              </div>
+              <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
+                <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection">
+                  <span class="settings-menu-label">Plant</span>
+                  <span class="settings-menu-copy">Plant name, operator, inverter count, and node count.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection">
+                  <span class="settings-menu-label">Data &amp; Polling</span>
+                  <span class="settings-menu-copy">API endpoints, export storage, and Modbus timing.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">
+                  <span class="settings-menu-label">Connectivity &amp; Sync</span>
+                  <span class="settings-menu-copy">Gateway mode, remote access, replication, and diagnostics.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="forecastSection">
+                  <span class="settings-menu-label">Forecast</span>
+                  <span class="settings-menu-copy">Local ML and Solcast provider settings.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">
+                  <span class="settings-menu-label">License</span>
+                  <span class="settings-menu-copy">License status, expiry, and audit trail.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection">
+                  <span class="settings-menu-label">App Updates</span>
+                  <span class="settings-menu-copy">Check release status and install updates.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection">
+                  <span class="settings-menu-label">Cloud Backup</span>
+                  <span class="settings-menu-copy">Provider setup, backup schedule, restore, and history.</span>
+                </button>
+              </div>
             </div>
-          </div>
 
-          <div class="sgroup-actions settings-actions-bar" id="settingsGlobalActions">
-            <button id="btnSaveSettings" class="btn btn-accent">
-              &#128190; Save Settings
-            </button>
-            <button id="btnPickExportFolder" class="btn btn-outline">
-              &#128194; Browse Export Folder
-            </button>
-            <button id="btnOpenExportFolder" class="btn btn-outline">
-              &#128193; Open Export Folder
-            </button>
-            <button id="btnOpenIpConfig" class="btn btn-outline">
-              &#127760; IP Configuration
-            </button>
-            <span class="smsg" id="settingsMsg"></span>
-          </div>
+            <div class="settings-sidebar-card settings-utility-card" id="settingsGlobalActions">
+              <div class="settings-kicker">Quick Actions</div>
+              <button id="btnSaveSettings" class="btn btn-accent">
+                <span class="mdi mdi-content-save-outline" aria-hidden="true"></span>
+                <span>Save All Settings</span>
+              </button>
+              <div class="settings-utility-grid">
+                <button id="btnExportSettingsConfig" class="btn btn-outline">
+                  <span class="mdi mdi-export-variant" aria-hidden="true"></span>
+                  <span>Export Config</span>
+                </button>
+                <button id="btnImportSettingsConfig" class="btn btn-outline">
+                  <span class="mdi mdi-import" aria-hidden="true"></span>
+                  <span>Import Config</span>
+                </button>
+                <button id="btnPickExportFolder" class="btn btn-outline">
+                  <span class="mdi mdi-folder-search-outline" aria-hidden="true"></span>
+                  <span>Export Folder</span>
+                </button>
+                <button id="btnOpenExportFolder" class="btn btn-outline">
+                  <span class="mdi mdi-folder-open-outline" aria-hidden="true"></span>
+                  <span>Open Folder</span>
+                </button>
+                <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide">
+                  <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
+                  <span>IP Configuration</span>
+                </button>
+                <button id="btnResetSettingsDefaults" class="btn btn-red settings-utility-wide">
+                  <span class="mdi mdi-restore" aria-hidden="true"></span>
+                  <span>Reset to Defaults</span>
+                </button>
+              </div>
+              <span class="smsg" id="settingsMsg"></span>
+            </div>
+          </aside>
 
+          <div class="settings-main">
+            <div class="settings-main-header">
+              <div class="settings-main-eyebrow">Current Section</div>
+              <div class="settings-main-title" id="settingsMainSectionTitle">Plant Configuration</div>
+              <div class="settings-main-copy" id="settingsMainSectionCopy">
+                Configure the plant identity, scale, and core operating values for this dashboard.
+              </div>
+            </div>
+
+            <div class="settings-sections">
           <div class="sgroup settings-card settings-section-active" id="plantConfigSection">
             <div class="sgroup-title">&#127981; Plant Configuration</div>
+            <p class="settings-section-copy">Set the base identity and sizing values the dashboard uses across pages, logs, and reports.</p>
             <div class="srow">
               <label
                 >Plant Name<input
@@ -902,9 +948,10 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
-            <div class="sgroup-title">&#128295; Data / Storage / Modbus</div>
+            <div class="sgroup-title">&#128295; Data &amp; Polling</div>
+            <p class="settings-section-copy">Keep data endpoints, export storage, and polling timing together so the data path can be reviewed in one place.</p>
             <div class="settings-subsection">
-              <div class="settings-subtitle">Data API</div>
+              <div class="settings-subtitle">Data Endpoints</div>
               <div class="srow">
                 <label
                   >Data API URL<input
@@ -943,7 +990,7 @@
               </div>
             </div>
             <div class="settings-subsection">
-              <div class="settings-subtitle">Modbus / Polling</div>
+              <div class="settings-subtitle">Polling Timing</div>
               <div class="srow">
                 <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" /></label>
                 <small>TCP read timeout per register. Raise on slow networks (0.2 – 10 s).</small>
@@ -959,9 +1006,10 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
-            <div class="sgroup-title">&#127760; Connectivity + Replication</div>
+            <div class="sgroup-title">&#127760; Connectivity &amp; Sync</div>
+            <p class="settings-section-copy">Choose whether this device is the plant gateway or a remote viewer, then monitor replication and runtime health below.</p>
             <div class="settings-subsection">
-              <div class="settings-subtitle">Connectivity Mode (Tailscale Ready)</div>
+              <div class="settings-subtitle">Mode &amp; Remote Access</div>
               <div class="srow">
                 <label
                   >Operation Mode
@@ -1111,7 +1159,7 @@
               </div>
             </div>
             <div class="settings-subsection">
-              <div class="settings-subtitle">Performance Diagnostics</div>
+              <div class="settings-subtitle">Runtime Diagnostics</div>
               <div class="rep-health-grid">
                 <div class="license-item">
                   <div class="license-label">Mode</div>
@@ -1175,7 +1223,8 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="forecastSection">
-            <div class="sgroup-title">&#9728;&#65039; Forecast Integration (Solcast Ready)</div>
+            <div class="sgroup-title">&#9728;&#65039; Forecast</div>
+            <p class="settings-section-copy">Manage the forecast provider used by the dashboard and keep external provider credentials in one focused section.</p>
             <div class="srow">
               <label
                 >Forecast Source
@@ -1239,6 +1288,7 @@
           </div>
           <div class="sgroup settings-card" id="licenseSection">
             <div class="sgroup-title">&#128274; License</div>
+            <p class="settings-section-copy">Review license state, expiry, and audit history, and replace the active license file when needed.</p>
             <div class="license-grid">
               <div class="license-item">
                 <div class="license-label">Status</div>
@@ -1284,6 +1334,7 @@
           </div>
           <div class="sgroup settings-card" id="appUpdateSection">
             <div class="sgroup-title">&#11014; App Updates</div>
+            <p class="settings-section-copy">Check the installed version, compare it with the latest release, and run the appropriate update action for this build type.</p>
             <div class="license-grid">
               <div class="license-item">
                 <div class="license-label">Current Version</div>
@@ -1321,6 +1372,7 @@
           <!-- -- Cloud Backup Panel ------------------------------------------- -->
           <div class="sgroup settings-card" id="cloudBackupSection">
             <div class="sgroup-title">&#9729; Cloud Backup &amp; Restore</div>
+            <p class="settings-section-copy">Configure providers, choose backup scope, and restore usable dashboard snapshots from cloud history.</p>
 
             <!-- Provider Setup -->
             <div class="cb-subsection">
@@ -1498,15 +1550,30 @@
               </div>
             </div>
           </div>
+            </div>
+          </div>
         </div>
       </section>
 
       <footer class="app-footer">
-        <span class="app-footer-name">Inverter Dashboard v2.2.7</span>
+        <span class="app-footer-item app-footer-name">ENGR. CLARIDEN D. MONTANO, REE</span>
         <span class="app-footer-sep">·</span>
-        <span class="app-footer-author">Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.)</span>
+        <a
+          class="app-footer-link"
+          href="https://www.facebook.com/engr.clard"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open Facebook profile for ENGR. CLARIDEN D. MONTANO, REE"
+        >
+          <span class="mdi mdi-facebook-box app-footer-icon" aria-hidden="true"></span>
+          <span>Facebook</span>
+        </a>
         <span class="app-footer-sep">·</span>
-        <span class="app-footer-copy">© 2026 Engr. Clariden Montaño REE. All rights reserved.</span>
+        <span class="app-footer-item app-footer-contact">
+          <span class="mdi mdi-phone-outline app-footer-icon" aria-hidden="true"></span>
+          <span>+639474128851</span>
+          <span class="app-footer-contact-note">Viber / Telegram</span>
+        </span>
       </footer>
     </main>
 
@@ -1539,7 +1606,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.7</span></div>
+            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.9</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1680,7 +1747,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Inverter Dashboard v2.2.7 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Inverter Dashboard v2.2.9 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>
@@ -1729,7 +1796,6 @@
     </div>
 
     <script src="js/app.js"></script>
-  </body>
+</body>
 </html>
-
 

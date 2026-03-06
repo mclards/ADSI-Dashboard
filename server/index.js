@@ -2834,6 +2834,87 @@ function ensurePersistedSettings() {
   }
 }
 
+function buildDefaultSettingsSnapshot() {
+  return {
+    operationMode: "gateway",
+    remoteAutoSync: false,
+    remoteGatewayUrl: "",
+    remoteApiToken: "",
+    tailscaleDeviceHint: "",
+    wireguardInterface: "",
+    apiUrl: `${INVERTER_ENGINE_BASE_URL}/data`,
+    writeUrl: `${INVERTER_ENGINE_BASE_URL}/write`,
+    csvSavePath: "C:\\Logs\\InverterDashboard",
+    inverterCount: 27,
+    nodeCount: 4,
+    invGridLayout: "4",
+    plantName: "Solar Plant",
+    operatorName: "OPERATOR",
+    retainDays: 90,
+    forecastProvider: "ml_local",
+    solcastBaseUrl: "https://api.solcast.com.au",
+    solcastApiKey: "",
+    solcastResourceId: "",
+    solcastTimezone: "Asia/Manila",
+    exportUiState: buildDefaultExportUiState(),
+    inverterPollConfig: { ...DEFAULT_POLL_CFG },
+    dataDir: DATA_DIR,
+  };
+}
+
+function buildSettingsSnapshot() {
+  const defaults = buildDefaultSettingsSnapshot();
+  const tailscaleHint = sanitizeTailscaleDeviceHint(
+    getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
+    "",
+  );
+  return {
+    operationMode: readOperationMode(),
+    remoteAutoSync: readRemoteAutoSyncEnabled(),
+    remoteGatewayUrl: getRemoteGatewayBaseUrl(),
+    remoteApiToken: getRemoteApiToken(),
+    tailscaleDeviceHint: tailscaleHint,
+    wireguardInterface: tailscaleHint,
+    apiUrl: getSetting("apiUrl", defaults.apiUrl),
+    writeUrl: getSetting("writeUrl", defaults.writeUrl),
+    csvSavePath: getSetting("csvSavePath", defaults.csvSavePath),
+    inverterCount: Number(getSetting("inverterCount", defaults.inverterCount)),
+    nodeCount: Number(getSetting("nodeCount", defaults.nodeCount)),
+    invGridLayout: sanitizeInvGridLayout(
+      getSetting("invGridLayout", defaults.invGridLayout),
+    ),
+    plantName: getSetting("plantName", defaults.plantName),
+    operatorName: getSetting("operatorName", defaults.operatorName),
+    retainDays: Number(getSetting("retainDays", defaults.retainDays)),
+    forecastProvider:
+      String(
+        getSetting("forecastProvider", defaults.forecastProvider) ||
+          defaults.forecastProvider,
+      )
+        .trim()
+        .toLowerCase() === "solcast"
+        ? "solcast"
+        : "ml_local",
+    solcastBaseUrl: getSetting("solcastBaseUrl", defaults.solcastBaseUrl),
+    solcastApiKey: getSetting("solcastApiKey", defaults.solcastApiKey),
+    solcastResourceId: getSetting(
+      "solcastResourceId",
+      defaults.solcastResourceId,
+    ),
+    solcastTimezone: getSetting(
+      "solcastTimezone",
+      defaults.solcastTimezone,
+    ),
+    exportUiState: sanitizeExportUiState(
+      readJsonSetting("exportUiState", defaults.exportUiState),
+    ),
+    inverterPollConfig: sanitizePollConfig(
+      readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG),
+    ),
+    dataDir: DATA_DIR,
+  };
+}
+
 function parseIsoDateStrict(value, fieldName) {
   const s = String(value || "").trim();
   if (!ISO_DATE_RE.test(s)) {
@@ -4759,41 +4840,21 @@ app.post("/api/write", async (req, res) => {
   }
 });
 
-app.get("/api/settings", (req, res) =>
-  res.json({
-    operationMode: readOperationMode(),
-    remoteAutoSync: readRemoteAutoSyncEnabled(),
-    remoteGatewayUrl: getRemoteGatewayBaseUrl(),
-    remoteApiToken: getRemoteApiToken(),
-    tailscaleDeviceHint: sanitizeTailscaleDeviceHint(
-      getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
-      "",
-    ),
-    wireguardInterface: sanitizeTailscaleDeviceHint(
-      getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
-      "",
-    ),
-    apiUrl: getSetting("apiUrl", `${INVERTER_ENGINE_BASE_URL}/data`),
-    writeUrl: getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`),
-    csvSavePath: getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
-    inverterCount: Number(getSetting("inverterCount", 27)),
-    nodeCount: Number(getSetting("nodeCount", 4)),
-    invGridLayout: sanitizeInvGridLayout(getSetting("invGridLayout", "4")),
-    plantName: getSetting("plantName", "Solar Plant"),
-    operatorName: getSetting("operatorName", "OPERATOR"),
-    retainDays: Number(getSetting("retainDays", 90)),
-    forecastProvider: String(getSetting("forecastProvider", "ml_local") || "ml_local").trim().toLowerCase() === "solcast" ? "solcast" : "ml_local",
-    solcastBaseUrl: getSetting("solcastBaseUrl", "https://api.solcast.com.au"),
-    solcastApiKey: getSetting("solcastApiKey", ""),
-    solcastResourceId: getSetting("solcastResourceId", ""),
-    solcastTimezone: getSetting("solcastTimezone", "Asia/Manila"),
-    exportUiState: sanitizeExportUiState(
-      readJsonSetting("exportUiState", {}),
-    ),
-    inverterPollConfig: sanitizePollConfig(readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG)),
-    dataDir: DATA_DIR,
-  }),
-);
+app.get("/api/settings", (req, res) => {
+  res.json(buildSettingsSnapshot());
+});
+
+app.get("/api/settings/defaults", (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      settings: buildDefaultSettingsSnapshot(),
+      cloudBackupSettings: _cloudBackup.getDefaultSettings(),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 app.get("/api/settings/export-ui", (req, res) => {
   res.json({

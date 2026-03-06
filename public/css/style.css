@@ -3488,29 +3488,68 @@ label[data-required]::after {
   gap: 6px 10px;
   padding: 8px 20px;
   border-top: 1px solid var(--border2);
-  background: linear-gradient(180deg, rgba(8, 13, 24, 0.72) 0%, rgba(4, 8, 14, 0.9) 100%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(180deg, var(--surface2) 0%, var(--surface) 100%);
   font-size: 10px;
   color: var(--text3);
   flex-shrink: 0;
   overflow: hidden;
 }
 
-.app-footer span {
+.app-footer span,
+.app-footer a {
   white-space: nowrap;
+}
+.app-footer-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .app-footer-name {
   font-weight: 700;
-  color: var(--text2);
+  color: var(--text);
 }
 .app-footer-sep {
   color: var(--text3);
   opacity: 0.5;
 }
-.app-footer-author strong {
-  color: var(--accent);
+.app-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text2);
+  text-decoration: none;
+  transition: color 0.18s ease, transform 0.18s ease;
 }
-.app-footer-copy {
-  font-size: 9.5px;
+.app-footer-link:hover,
+.app-footer-link:focus-visible {
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+.app-footer-link:focus-visible {
+  outline: none;
+}
+.app-footer-icon {
+  font-size: 13px;
+}
+.app-footer-contact {
+  color: var(--text2);
+}
+.app-footer-contact-note {
+  color: var(--text3);
+}
+
+@media (max-width: 1100px) {
+  .app-footer {
+    gap: 5px 8px;
+    padding-inline: 14px;
+    font-size: 9.5px;
+  }
+
+  .app-footer-contact-note {
+    display: none;
+  }
 }
 
 /* ─── Cross-tab polish (non-inverter pages) ─────────────────────────────── */
@@ -5842,5 +5881,416 @@ label[data-required]::after {
   #page-settings #settingsGlobalActions {
     position: static;
     top: auto;
+  }
+}
+
+/* Settings rehab: replace duplicated top bars with one sidebar workspace. */
+#page-settings {
+  overflow: hidden;
+}
+
+#page-settings .settings-shell {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  overflow: hidden;
+}
+
+#page-settings .settings-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#page-settings .settings-sidebar-card {
+  flex: 0 0 auto;
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 14px;
+}
+
+#page-settings .settings-sidebar-card:first-child {
+  position: static;
+  top: auto;
+}
+
+#page-settings .settings-kicker,
+#page-settings .settings-main-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.85px;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.88;
+}
+
+#page-settings .settings-current-title,
+#page-settings .settings-main-title {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+#page-settings .settings-current-copy,
+#page-settings .settings-main-copy {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text2);
+}
+
+#page-settings .settings-menu {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#page-settings .settings-menu-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  height: auto;
+  min-height: 58px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 100%);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, transform 0.18s, box-shadow 0.18s;
+}
+
+#page-settings .settings-menu-btn:hover {
+  border-color: var(--border2);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+  transform: translateY(-1px);
+}
+
+#page-settings .settings-menu-btn.active {
+  border-color: var(--accent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.03) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    0 10px 24px rgba(0, 0, 0, 0.08);
+  color: var(--text);
+}
+
+#page-settings .settings-menu-label {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.25px;
+}
+
+#page-settings .settings-menu-copy {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text3);
+}
+
+#page-settings .settings-menu-btn.active .settings-menu-copy {
+  color: var(--text2);
+}
+
+#page-settings .settings-utility-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#page-settings #settingsGlobalActions {
+  position: static;
+  top: auto;
+  z-index: auto;
+  grid-column: auto;
+}
+
+#page-settings .settings-utility-card .btn {
+  width: 100%;
+  height: 38px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  line-height: 1;
+}
+
+#page-settings .settings-utility-card > .btn {
+  justify-content: center;
+}
+
+#page-settings .settings-utility-grid .btn {
+  justify-content: flex-start;
+}
+
+#page-settings .settings-utility-grid .settings-utility-wide.btn {
+  justify-content: center;
+}
+
+#page-settings .settings-utility-card .btn .mdi {
+  font-size: 14px;
+  line-height: 1;
+}
+
+#page-settings .settings-utility-card .btn-outline {
+  --btn-color: var(--text);
+  --btn-border: var(--border);
+  --btn-bg-1: rgba(255, 255, 255, 0.045);
+  --btn-bg-2: rgba(255, 255, 255, 0.015);
+  --btn-shine: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+#page-settings .settings-utility-card .btn-outline:hover,
+#page-settings .settings-utility-card .btn-outline:focus-visible {
+  border-color: var(--accent);
+}
+
+#page-settings .settings-utility-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#page-settings .settings-utility-wide {
+  grid-column: 1 / -1;
+}
+
+#page-settings .settings-utility-card .smsg {
+  min-height: 18px;
+  display: flex;
+  align-items: center;
+}
+
+#page-settings .settings-main {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+#page-settings .settings-main-header {
+  padding: 16px 18px;
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+#page-settings .settings-sections {
+  min-height: 0;
+}
+
+#page-settings .settings-sections > .sgroup.settings-card {
+  display: none;
+  margin: 0;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid var(--border2);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: visible;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+
+#page-settings .settings-sections > .sgroup.settings-card.settings-section-active {
+  display: flex;
+}
+
+#page-settings .settings-sections > .sgroup.settings-card > .sgroup-title {
+  position: static;
+  margin: 0;
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--accent);
+}
+
+#page-settings .settings-section-copy {
+  margin: 2px 0 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text2);
+}
+
+#page-settings .settings-card .settings-subsection,
+#page-settings .settings-card .cb-subsection {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%);
+}
+
+#page-settings .settings-card .settings-subsection:first-of-type,
+#page-settings .settings-card .cb-subsection:first-of-type {
+  margin-top: 8px;
+}
+
+#page-settings .settings-card .settings-subtitle,
+#page-settings .settings-card .cb-sub-title {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+#page-settings .settings-sections .srow {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 10px 12px;
+  align-items: flex-start;
+}
+
+#page-settings .settings-sections .srow label {
+  grid-column: span 6;
+  min-width: 0;
+}
+
+#page-settings .settings-sections .srow > small {
+  grid-column: span 6;
+  margin-top: -6px;
+  margin-bottom: 2px;
+  font-size: 10px;
+  color: var(--text3);
+  line-height: 1.3;
+}
+
+#page-settings .settings-sections #opsCompactSection .srow > label,
+#page-settings .settings-sections #forecastSection .srow > label,
+#page-settings .settings-sections #cloudBackupSection .srow > label {
+  grid-column: span 12;
+}
+
+#page-settings .settings-sections .srow .inp,
+#page-settings .settings-sections .srow .sel {
+  width: 100%;
+  min-height: 34px;
+}
+
+#page-settings .settings-sections .sgroup-actions {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  gap: 8px;
+}
+
+#page-settings .settings-sections .license-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+#page-settings .settings-sections .rep-health-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 1280px) {
+  #page-settings .settings-shell {
+    grid-template-columns: 280px minmax(0, 1fr);
+  }
+
+  #page-settings .settings-sections .license-grid,
+  #page-settings .settings-sections .rep-health-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  #page-settings .settings-shell {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  #page-settings .settings-sidebar {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  #page-settings .settings-sidebar-card:first-child {
+    position: static;
+    top: auto;
+  }
+
+  #page-settings .settings-main {
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  #page-settings .settings-shell {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  #page-settings .settings-menu {
+    display: flex;
+  }
+
+  #page-settings .settings-sections > .sgroup.settings-card,
+  #page-settings .settings-main-header,
+  #page-settings .settings-sidebar-card {
+    padding: 14px;
+  }
+
+  #page-settings .settings-sections .srow {
+    grid-template-columns: 1fr;
+  }
+
+  #page-settings .settings-sections .srow label,
+  #page-settings .settings-sections .srow > small,
+  #page-settings .settings-sections #opsCompactSection .srow > label,
+  #page-settings .settings-sections #forecastSection .srow > label,
+  #page-settings .settings-sections #cloudBackupSection .srow > label {
+    grid-column: 1;
+  }
+
+  #page-settings .settings-utility-grid {
+    grid-template-columns: 1fr;
+  }
+
+  #page-settings .settings-sections .license-grid,
+  #page-settings .settings-sections .rep-health-grid {
+    grid-template-columns: 1fr;
   }
 }

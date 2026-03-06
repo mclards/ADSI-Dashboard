@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.7",
+  "version": "2.2.9",
   "description": "Industrial inverter monitoring, analytics, forecasting, and remote replication dashboard. Designed and developed by Engr. Clariden Montaño REE (Engr. M.).",
   "author": "Engr. Clariden D. Montaño, REE",
   "main": "electron/main.js",
@@ -11,7 +11,11 @@
     "postinstall": "electron-builder install-app-deps",
     "build:win": "electron-builder --win nsis portable --x64",
     "build:installer": "electron-builder --win nsis --x64",
-    "build:portable": "electron-builder --win portable --x64"
+    "build:portable": "electron-builder --win portable --x64",
+    "build:license-tools": "npx --yes pkg tools/license-generator.js --targets node18-win-x64 --output release/license-tools/LicenseGenerator.exe && npx --yes pkg tools/license-fingerprint.js --targets node18-win-x64 --output release/license-tools/LicenseFingerprint.exe && npx --yes pkg tools/license-keygen.js --targets node18-win-x64 --output release/license-tools/LicenseKeygen.exe",
+    "license:keygen": "node tools/license-keygen.js",
+    "license:generate": "node tools/license-generator.js",
+    "license:fingerprint": "node tools/license-fingerprint.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",

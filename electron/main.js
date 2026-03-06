@@ -97,9 +97,14 @@ const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard");
 const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
+const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
 const TRIAL_DAYS = 7;
 const LICENSE_WARN_MS = 24 * 60 * 60 * 1000; // 1 day
-const LICENSE_CHECK_INTERVAL_MS = 30 * 1000;
+const LICENSE_CHECK_INTERVAL_MS = 5 * 1000;
+const LICENSE_PUBLIC_KEY_PATH = String(process.env.ADSI_LICENSE_PUBLIC_KEY_PATH || "").trim();
+const LICENSE_PUBLIC_KEY_PEM = String(process.env.ADSI_LICENSE_PUBLIC_KEY || "").trim();
+const LICENSE_REQUIRE_SIGNATURE =
+  String(process.env.ADSI_LICENSE_REQUIRE_SIGNATURE || "0").trim() === "1";
 const UPDATE_REPO_OWNER = String(process.env.ADSI_UPDATE_REPO_OWNER || "mclards").trim();
 const UPDATE_REPO_NAME = String(process.env.ADSI_UPDATE_REPO_NAME || "ADSI-Dashboard").trim();
 const UPDATE_FEED_URL = String(
@@ -1046,6 +1051,76 @@ function readWindowsMachineGuid() {
   }
 }
 
+function readRegistryValue(regPath, valueName) {
+  try {
+    const out = execFileSync(
+      "reg",
+      ["query", regPath, "/v", valueName],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const line = String(out || "")
+      .split(/\r?\n/)
+      .find((ln) => ln.includes(valueName) && /REG_/i.test(ln));
+    if (!line) return "";
+    const parts = line.trim().split(/\s+/);
+    const typeIdx = parts.findIndex((part) => /^REG_/i.test(part));
+    if (typeIdx < 0) return "";
+    return String(parts.slice(typeIdx + 1).join(" ") || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function writeRegistryValue(regPath, valueName, value) {
+  try {
+    execFileSync(
+      "reg",
+      ["add", regPath, "/v", valueName, "/t", "REG_SZ", "/d", String(value || ""), "/f"],
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function pickEarliestTimestamp(...values) {
+  const items = values
+    .map((v) => parseDateMs(v))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  if (!items.length) return null;
+  return Math.min(...items);
+}
+
+function loadLicenseRegistryMarker() {
+  return {
+    deviceFingerprint: String(readRegistryValue(LICENSE_REG_PATH, "DeviceFingerprint") || "").trim(),
+    firstInstallAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "FirstInstallAt")),
+    trialAcceptedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialAcceptedAt")),
+    trialExpiresAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt")),
+  };
+}
+
+function saveLicenseRegistryMarker(state) {
+  const fp = String(state?.deviceFingerprint || getDeviceFingerprint()).trim();
+  if (fp) writeRegistryValue(LICENSE_REG_PATH, "DeviceFingerprint", fp);
+
+  const firstInstallAt = parseDateMs(state?.firstInstallAt);
+  if (Number.isFinite(firstInstallAt) && firstInstallAt > 0) {
+    writeRegistryValue(LICENSE_REG_PATH, "FirstInstallAt", String(firstInstallAt));
+  }
+
+  const trialAcceptedAt = parseDateMs(state?.trialAcceptedAt);
+  if (Number.isFinite(trialAcceptedAt) && trialAcceptedAt > 0) {
+    writeRegistryValue(LICENSE_REG_PATH, "TrialAcceptedAt", String(trialAcceptedAt));
+  }
+
+  const trialExpiresAt = parseDateMs(state?.trialExpiresAt);
+  if (Number.isFinite(trialExpiresAt) && trialExpiresAt > 0) {
+    writeRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt", String(trialExpiresAt));
+  }
+}
+
 // ─── Credential Encryption ─────────────────────────────────────────────────
 // Derive a machine-bound AES key so remembered passwords are unreadable outside this device.
 function deriveEncryptionKey() {
@@ -1101,6 +1176,135 @@ function getDeviceFingerprint() {
   return crypto.createHash("sha256").update(base, "utf8").digest("hex");
 }
 
+function stableStringify(value) {
+  if (value == null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  const pairs = keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`);
+  return `{${pairs.join(",")}}`;
+}
+
+function stripLicenseSignature(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const clone = { ...payload };
+  delete clone.signature;
+  delete clone._signature;
+  delete clone.sig;
+  return clone;
+}
+
+function extractLicenseSignature(payload) {
+  if (!payload || typeof payload !== "object") return null;
+
+  if (payload.signature && typeof payload.signature === "object") {
+    const sigObj = payload.signature;
+    const value = String(sigObj.value || sigObj.signature || sigObj.sig || "").trim();
+    if (!value) return null;
+    const alg = String(sigObj.alg || sigObj.algorithm || "RSA-SHA256").trim().toUpperCase();
+    const kid = String(sigObj.kid || sigObj.keyId || "").trim();
+    return { value, alg, kid };
+  }
+
+  if (payload._signature && typeof payload._signature === "object") {
+    const sigObj = payload._signature;
+    const value = String(sigObj.value || sigObj.signature || sigObj.sig || "").trim();
+    if (!value) return null;
+    const alg = String(sigObj.alg || sigObj.algorithm || "RSA-SHA256").trim().toUpperCase();
+    const kid = String(sigObj.kid || sigObj.keyId || "").trim();
+    return { value, alg, kid };
+  }
+
+  const flat = String(payload.signature || payload.sig || "").trim();
+  if (!flat) return null;
+  return { value: flat, alg: "RSA-SHA256", kid: "" };
+}
+
+function loadLicensePublicKeys() {
+  const out = [];
+  const addKey = (pem, source) => {
+    const key = String(pem || "").trim();
+    if (!key) return;
+    if (!/BEGIN (RSA )?PUBLIC KEY/.test(key)) return;
+    out.push({ key, source: String(source || "unknown") });
+  };
+
+  addKey(LICENSE_PUBLIC_KEY_PEM, "env:ADSI_LICENSE_PUBLIC_KEY");
+
+  if (LICENSE_PUBLIC_KEY_PATH) {
+    try {
+      addKey(fs.readFileSync(path.resolve(LICENSE_PUBLIC_KEY_PATH), "utf8"), "env:ADSI_LICENSE_PUBLIC_KEY_PATH");
+    } catch (err) {
+      console.warn("[license] failed to read configured public key path:", err.message);
+    }
+  } else {
+    const defaultPath = path.join(LICENSE_DIR, "public-key.pem");
+    if (fs.existsSync(defaultPath)) {
+      try {
+        addKey(fs.readFileSync(defaultPath, "utf8"), defaultPath);
+      } catch (err) {
+        console.warn("[license] failed to read default public key path:", err.message);
+      }
+    }
+  }
+
+  return out;
+}
+
+function verifyLicenseSignature(payload) {
+  const sig = extractLicenseSignature(payload);
+  if (!sig) {
+    if (LICENSE_REQUIRE_SIGNATURE) {
+      return { ok: false, error: "License signature is required." };
+    }
+    return { ok: true, verified: false, missing: true, kid: "", alg: "" };
+  }
+
+  if (sig.alg && sig.alg !== "RSA-SHA256") {
+    return { ok: false, error: `Unsupported signature algorithm: ${sig.alg}` };
+  }
+
+  const publicKeys = loadLicensePublicKeys();
+  if (!publicKeys.length) {
+    return { ok: false, error: "License signature found but no public key is configured." };
+  }
+
+  const unsignedPayload = stripLicenseSignature(payload);
+  const canonical = stableStringify(unsignedPayload);
+  const data = Buffer.from(canonical, "utf8");
+  let signatureBuffer = null;
+  try {
+    signatureBuffer = Buffer.from(sig.value, "base64");
+  } catch (_) {
+    return { ok: false, error: "License signature is not valid base64." };
+  }
+  if (!signatureBuffer || !signatureBuffer.length) {
+    return { ok: false, error: "License signature is empty." };
+  }
+
+  for (const pub of publicKeys) {
+    try {
+      const verifier = crypto.createVerify("RSA-SHA256");
+      verifier.update(data);
+      verifier.end();
+      const valid = verifier.verify(pub.key, signatureBuffer);
+      if (valid) {
+        return {
+          ok: true,
+          verified: true,
+          missing: false,
+          kid: sig.kid || "",
+          alg: sig.alg || "RSA-SHA256",
+          source: pub.source,
+        };
+      }
+    } catch (err) {
+      console.warn("[license] signature verify failed with key:", pub.source, err.message);
+    }
+  }
+
+  return { ok: false, error: "License signature verification failed." };
+}
+
 function defaultLicenseState() {
   return {
     schema: 1,
@@ -1134,10 +1338,18 @@ function normalizeLicenseAudit(entries) {
 
 function loadLicenseState() {
   ensureDir(LICENSE_DIR);
+  const regState = loadLicenseRegistryMarker();
   try {
     if (!fs.existsSync(LICENSE_STATE_PATH)) {
       const def = defaultLicenseState();
-      def.audit = normalizeLicenseAudit([
+      const state = {
+        ...def,
+        deviceFingerprint: String(regState.deviceFingerprint || def.deviceFingerprint),
+        firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
+        trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
+        trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+      };
+      state.audit = normalizeLicenseAudit([
         {
           ts: Date.now(),
           action: "install_initialized",
@@ -1145,34 +1357,44 @@ function loadLicenseState() {
           details: "License state created on this device.",
         },
       ]);
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(def, null, 2), "utf8");
-      licenseStateCache = def;
-      return def;
+      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      saveLicenseRegistryMarker(state);
+      licenseStateCache = state;
+      return state;
     }
     const raw = JSON.parse(fs.readFileSync(LICENSE_STATE_PATH, "utf8"));
     const def = defaultLicenseState();
     const state = {
       schema: Number(raw?.schema || 1),
-      deviceFingerprint: String(raw?.deviceFingerprint || def.deviceFingerprint),
-      firstInstallAt: parseDateMs(raw?.firstInstallAt) || def.firstInstallAt,
-      trialAcceptedAt: parseDateMs(raw?.trialAcceptedAt),
-      trialExpiresAt: parseDateMs(raw?.trialExpiresAt),
+      deviceFingerprint: String(regState.deviceFingerprint || raw?.deviceFingerprint || def.deviceFingerprint),
+      firstInstallAt: pickEarliestTimestamp(raw?.firstInstallAt, regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
+      trialAcceptedAt: pickEarliestTimestamp(raw?.trialAcceptedAt, regState.trialAcceptedAt),
+      trialExpiresAt: pickEarliestTimestamp(raw?.trialExpiresAt, regState.trialExpiresAt),
       license: raw?.license && typeof raw.license === "object" ? raw.license : null,
       audit: normalizeLicenseAudit(raw?.audit),
     };
     fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    saveLicenseRegistryMarker(state);
     licenseStateCache = state;
     return state;
   } catch (err) {
     console.error("[license] state load failed:", err.message);
     const def = defaultLicenseState();
+    const state = {
+      ...def,
+      deviceFingerprint: String(regState.deviceFingerprint || def.deviceFingerprint),
+      firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
+      trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
+      trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+    };
     try {
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(def, null, 2), "utf8");
+      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      saveLicenseRegistryMarker(state);
     } catch (writeErr) {
       console.error("[license] fallback state write failed:", writeErr.message);
     }
-    licenseStateCache = def;
-    return def;
+    licenseStateCache = state;
+    return state;
   }
 }
 
@@ -1183,6 +1405,7 @@ function saveLicenseState(state) {
   const tmpPath = LICENSE_STATE_PATH + ".tmp";
   fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf8");
   fs.renameSync(tmpPath, LICENSE_STATE_PATH);
+  saveLicenseRegistryMarker(state);
   licenseStateCache = state;
 }
 
@@ -1211,6 +1434,11 @@ function getLicenseAuditRows() {
 function normalizeLicensePayload(payload, sourcePath) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "License file must contain a JSON object." };
+  }
+
+  const signatureCheck = verifyLicenseSignature(payload);
+  if (!signatureCheck.ok) {
+    return { ok: false, error: signatureCheck.error || "License signature is invalid." };
   }
 
   const now = Date.now();
@@ -1284,6 +1512,10 @@ function normalizeLicensePayload(payload, sourcePath) {
       issuedTo: payload.issuedTo || payload.customer || payload.customerName || "",
       notes: payload.notes || "",
       serial: payload.serial || payload.keyId || payload.licenseId || "",
+      signatureVerified: !!signatureCheck.verified,
+      signatureKid: signatureCheck.kid || "",
+      signatureAlg: signatureCheck.alg || "",
+      signatureSource: signatureCheck.source || "",
     },
   };
 
@@ -1317,8 +1549,16 @@ function installLicenseFromFile(filePath) {
     appendLicenseAudit(
       "license_imported",
       normalized.license.lifetime
-        ? "Lifetime license imported."
-        : `License imported. Expires at ${new Date(normalized.license.expiresAt).toISOString()}.`,
+        ? `Lifetime license imported. ${
+            normalized.license?.metadata?.signatureVerified
+              ? "Signature verified."
+              : "Unsigned license accepted."
+          }`
+        : `License imported. Expires at ${new Date(normalized.license.expiresAt).toISOString()}. ${
+            normalized.license?.metadata?.signatureVerified
+              ? "Signature verified."
+              : "Unsigned license accepted."
+          }`,
       "success",
     );
 
@@ -1522,7 +1762,7 @@ async function ensureLicenseAtStartup() {
         title: "License Required",
         message: "Welcome to Inverter Dashboard",
         detail:
-          "Choose an option to continue:\n• Start one-time 7-day trial on this device\n• Upload a valid license file",
+          "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
       });
       if (choice.response === 0) {
         activateTrialNow();
@@ -2554,6 +2794,50 @@ ipcMain.handle("pick-folder", async (_, startPath) => {
     return result.filePaths[0];
   } catch (err) {
     console.error("[main] pick-folder failed:", err.message);
+    return null;
+  }
+});
+ipcMain.handle("save-text-file", async (_, options = {}) => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const result = await dialog.showSaveDialog(targetWin, {
+      title: String(options.title || "Save File"),
+      defaultPath:
+        options.defaultPath && String(options.defaultPath).trim()
+          ? String(options.defaultPath).trim()
+          : undefined,
+      filters:
+        Array.isArray(options.filters) && options.filters.length
+          ? options.filters
+          : [{ name: "JSON Files", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    fs.writeFileSync(result.filePath, String(options.content ?? ""), "utf8");
+    return result.filePath;
+  } catch (err) {
+    console.error("[main] save-text-file failed:", err.message);
+    return null;
+  }
+});
+ipcMain.handle("open-text-file", async (_, options = {}) => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const result = await dialog.showOpenDialog(targetWin, {
+      title: String(options.title || "Open File"),
+      properties: ["openFile"],
+      filters:
+        Array.isArray(options.filters) && options.filters.length
+          ? options.filters
+          : [{ name: "JSON Files", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePaths?.length) return null;
+    const filePath = result.filePaths[0];
+    return {
+      path: filePath,
+      content: fs.readFileSync(filePath, "utf8"),
+    };
+  } catch (err) {
+    console.error("[main] open-text-file failed:", err.message);
     return null;
   }
 });
