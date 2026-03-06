@@ -28,6 +28,13 @@ ADSI_InverterService.exe
 test-electron.js
 d*ADSI-Dashboardtest-electron.js
 
+# Local-only licensing tools
+LICENSE-GENERATOR.md
+license-generator/
+tools/license-generator.js
+tools/license-fingerprint.js
+tools/license-keygen.js
+
 # OS
 .DS_Store
 Thumbs.db
