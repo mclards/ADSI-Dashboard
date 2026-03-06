@@ -168,8 +168,9 @@ const State = {
   tabFetching: {},
 };
 const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
-const NODE_RATED_W  = Math.round(997000 / 4); // 249,250 W — rated per-node (997 kW ÷ 4, always 4 nodes)
-const INV_RATED_KW  = 997;                    // rated per-inverter capacity kW
+const MAX_INV_UNITS = 4;
+const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
+const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
@@ -181,6 +182,51 @@ const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
+const SETTINGS_SECTION_IDS = [
+  "plantConfigSection",
+  "opsCompactSection",
+  "connectivitySection",
+  "forecastSection",
+  "licenseSection",
+  "appUpdateSection",
+  "cloudBackupSection",
+];
+const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
+const SETTINGS_SECTION_META = {
+  plantConfigSection: {
+    title: "Plant Configuration",
+    copy: "Configure the plant identity, scale, and core operating values for this dashboard.",
+  },
+  opsCompactSection: {
+    title: "Data & Polling",
+    copy: "Review data endpoints, export storage, and Modbus polling timing in one place.",
+  },
+  connectivitySection: {
+    title: "Connectivity & Sync",
+    copy: "Choose gateway or remote mode, then manage replication and runtime diagnostics.",
+  },
+  forecastSection: {
+    title: "Forecast",
+    copy: "Manage forecast provider settings and test the configured integration.",
+  },
+  licenseSection: {
+    title: "License",
+    copy: "Review license validity, expiry, and audit history, then replace the active license if needed.",
+  },
+  appUpdateSection: {
+    title: "App Updates",
+    copy: "Check the installed version, compare release status, and run update actions from here.",
+  },
+  cloudBackupSection: {
+    title: "Cloud Backup",
+    copy: "Configure providers, backup scope, restore actions, and cloud backup history.",
+  },
+};
+const SETTINGS_CONFIG_KIND = "adsi-settings-config";
+const SETTINGS_CONFIG_SCHEMA_VERSION = 1;
+const SETTINGS_CONFIG_FILE_FILTERS = [
+  { name: "ADSI Settings Config", extensions: ["json"] },
+];
 const THEME_META = {
   dark: {
     label: "Maroon",
@@ -1845,6 +1891,7 @@ function switchPage(page) {
   if (page === "report") initReportPage();
   if (page === "export") initExportPage();
   if (page === "settings") {
+    initSettingsSectionNav();
     unlockSettingsInputs();
     refreshLicenseSection().catch(() => {});
     startReplicationHealthPolling();
@@ -1878,6 +1925,86 @@ function initGuideModal() {
       closeGuideModal();
     }
   });
+}
+
+function normalizeSettingsSectionId(value) {
+  const v = String(value || "").trim();
+  return SETTINGS_SECTION_IDS.includes(v) ? v : DEFAULT_SETTINGS_SECTION_ID;
+}
+
+function renderActiveSettingsMeta(sectionId) {
+  const activeId = normalizeSettingsSectionId(sectionId);
+  const meta = SETTINGS_SECTION_META[activeId] || SETTINGS_SECTION_META[DEFAULT_SETTINGS_SECTION_ID];
+  const titleNodes = [
+    $("settingsCurrentSectionTitle"),
+    $("settingsMainSectionTitle"),
+  ];
+  const copyNodes = [
+    $("settingsCurrentSectionCopy"),
+    $("settingsMainSectionCopy"),
+  ];
+  titleNodes.forEach((node) => {
+    if (node) node.textContent = meta.title;
+  });
+  copyNodes.forEach((node) => {
+    if (node) node.textContent = meta.copy;
+  });
+}
+
+function setActiveSettingsSection(sectionId, persist = true) {
+  const activeId = normalizeSettingsSectionId(sectionId);
+  SETTINGS_SECTION_IDS.forEach((id) => {
+    const node = $(id);
+    if (!node) return;
+    const isActive = id === activeId;
+    node.classList.toggle("settings-section-active", isActive);
+    node.hidden = !isActive;
+  });
+
+  renderActiveSettingsMeta(activeId);
+
+  document
+    .querySelectorAll("#settingsSectionMenu .settings-menu-btn")
+    .forEach((btn) => {
+      const isActive = String(btn.dataset.settingsSection || "") === activeId;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+
+  if (persist) {
+    const scroller = document.querySelector("#page-settings .settings-main");
+    if (scroller && typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
+  if (persist) {
+    try {
+      localStorage.setItem("adsi_settings_section", activeId);
+    } catch (err) {
+      console.warn("[app] settings section persist failed:", err.message);
+    }
+  }
+}
+
+function initSettingsSectionNav() {
+  const menu = $("settingsSectionMenu");
+  if (!menu) return;
+
+  if (menu && menu.dataset.bound !== "1") {
+    menu.dataset.bound = "1";
+    menu.addEventListener("click", (e) => {
+      const btn = e.target.closest(".settings-menu-btn");
+      if (!btn) return;
+      setActiveSettingsSection(btn.dataset.settingsSection, true);
+    });
+  }
+
+  let saved = "";
+  try {
+    saved = String(localStorage.getItem("adsi_settings_section") || "").trim();
+  } catch (_) {}
+  setActiveSettingsSection(saved || DEFAULT_SETTINGS_SECTION_ID, false);
 }
 
 // ─── Clock ────────────────────────────────────────────────────────────────────
@@ -2001,6 +2128,375 @@ function syncOperationModeUi() {
     "",
   );
   syncDayAheadGeneratorAvailability();
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function pickSettingsConfigFields(src) {
+  const out = {};
+  if (!src || typeof src !== "object" || Array.isArray(src)) return out;
+
+  if (hasOwn(src, "plantName")) out.plantName = String(src.plantName ?? "");
+  if (hasOwn(src, "operatorName"))
+    out.operatorName = String(src.operatorName ?? "");
+  if (hasOwn(src, "inverterCount"))
+    out.inverterCount = Number(src.inverterCount);
+  if (hasOwn(src, "nodeCount")) out.nodeCount = Number(src.nodeCount);
+  if (hasOwn(src, "operationMode"))
+    out.operationMode = String(src.operationMode ?? "");
+  if (hasOwn(src, "remoteAutoSync"))
+    out.remoteAutoSync = Boolean(src.remoteAutoSync);
+  if (hasOwn(src, "remoteGatewayUrl"))
+    out.remoteGatewayUrl = String(src.remoteGatewayUrl ?? "");
+  if (hasOwn(src, "remoteApiToken"))
+    out.remoteApiToken = String(src.remoteApiToken ?? "");
+  if (hasOwn(src, "tailscaleDeviceHint"))
+    out.tailscaleDeviceHint = String(src.tailscaleDeviceHint ?? "");
+  if (hasOwn(src, "apiUrl")) out.apiUrl = String(src.apiUrl ?? "");
+  if (hasOwn(src, "writeUrl")) out.writeUrl = String(src.writeUrl ?? "");
+  if (hasOwn(src, "csvSavePath"))
+    out.csvSavePath = String(src.csvSavePath ?? "");
+  if (hasOwn(src, "retainDays")) out.retainDays = Number(src.retainDays);
+  if (hasOwn(src, "forecastProvider"))
+    out.forecastProvider = String(src.forecastProvider ?? "");
+  if (hasOwn(src, "solcastBaseUrl"))
+    out.solcastBaseUrl = String(src.solcastBaseUrl ?? "");
+  if (hasOwn(src, "solcastApiKey"))
+    out.solcastApiKey = String(src.solcastApiKey ?? "");
+  if (hasOwn(src, "solcastResourceId"))
+    out.solcastResourceId = String(src.solcastResourceId ?? "");
+  if (hasOwn(src, "solcastTimezone"))
+    out.solcastTimezone = String(src.solcastTimezone ?? "");
+  if (hasOwn(src, "invGridLayout"))
+    out.invGridLayout = String(src.invGridLayout ?? "");
+  if (
+    hasOwn(src, "inverterPollConfig") &&
+    src.inverterPollConfig &&
+    typeof src.inverterPollConfig === "object"
+  ) {
+    const poll = {};
+    if (hasOwn(src.inverterPollConfig, "modbusTimeout")) {
+      poll.modbusTimeout = Number(src.inverterPollConfig.modbusTimeout);
+    }
+    if (hasOwn(src.inverterPollConfig, "reconnectDelay")) {
+      poll.reconnectDelay = Number(src.inverterPollConfig.reconnectDelay);
+    }
+    if (hasOwn(src.inverterPollConfig, "readSpacing")) {
+      poll.readSpacing = Number(src.inverterPollConfig.readSpacing);
+    }
+    if (Object.keys(poll).length) out.inverterPollConfig = poll;
+  }
+
+  return out;
+}
+
+function pickCloudBackupSettingsFields(src) {
+  if (!src || typeof src !== "object" || Array.isArray(src)) return null;
+  const out = {};
+  const allowedScope = new Set(["database", "config", "logs"]);
+
+  if (hasOwn(src, "enabled")) out.enabled = Boolean(src.enabled);
+  if (hasOwn(src, "email")) out.email = String(src.email ?? "");
+  if (hasOwn(src, "provider")) out.provider = String(src.provider ?? "");
+  if (hasOwn(src, "schedule")) out.schedule = String(src.schedule ?? "");
+  if (hasOwn(src, "scope")) {
+    out.scope = Array.isArray(src.scope)
+      ? Array.from(
+          new Set(
+            src.scope
+              .map((item) => String(item || "").trim().toLowerCase())
+              .filter((item) => allowedScope.has(item)),
+          ),
+        )
+      : [];
+  }
+  if (hasOwn(src, "onedrive")) {
+    out.onedrive = {
+      clientId: String(src.onedrive?.clientId ?? ""),
+    };
+  }
+  if (hasOwn(src, "gdrive")) {
+    out.gdrive = {
+      clientId: String(src.gdrive?.clientId ?? ""),
+      clientSecret: String(src.gdrive?.clientSecret ?? ""),
+    };
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+function getSettingsConfigFilename() {
+  const now = new Date();
+  return `inverter-dashboard-settings-${dateStr(now)}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}.json`;
+}
+
+function getAppVersionLabel() {
+  return String(document.querySelector(".side-about-ver")?.textContent || "")
+    .replace(/^v/i, "")
+    .trim();
+}
+
+function downloadTextFileFallback(content, filename) {
+  const blob = new Blob([String(content ?? "")], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return filename;
+}
+
+async function saveTextFileLocally(content, defaultPath, title) {
+  if (window.electronAPI?.saveTextFile) {
+    return window.electronAPI.saveTextFile({
+      title,
+      defaultPath,
+      filters: SETTINGS_CONFIG_FILE_FILTERS,
+      content,
+    });
+  }
+  return downloadTextFileFallback(content, defaultPath);
+}
+
+function openTextFileFallback() {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve({
+          path: file.name,
+          content: String(reader.result || ""),
+        });
+      reader.onerror = () =>
+        reject(new Error("Unable to read the selected config file."));
+      reader.readAsText(file);
+    });
+    input.click();
+  });
+}
+
+async function openTextFileLocally(title) {
+  if (window.electronAPI?.openTextFile) {
+    return window.electronAPI.openTextFile({
+      title,
+      filters: SETTINGS_CONFIG_FILE_FILTERS,
+    });
+  }
+  return openTextFileFallback();
+}
+
+function parseSettingsConfigPayload(rawContent) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(rawContent || ""));
+  } catch {
+    throw new Error("Invalid JSON file.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid settings config format.");
+  }
+  if (
+    hasOwn(parsed, "kind") &&
+    String(parsed.kind || "").trim() !== SETTINGS_CONFIG_KIND
+  ) {
+    throw new Error("Unsupported config file type.");
+  }
+  if (
+    hasOwn(parsed, "schemaVersion") &&
+    Number(parsed.schemaVersion) > SETTINGS_CONFIG_SCHEMA_VERSION
+  ) {
+    throw new Error("Config file was created by a newer app version.");
+  }
+
+  const settings = pickSettingsConfigFields(parsed.settings);
+  const cloudBackupSettings = hasOwn(parsed, "cloudBackupSettings")
+    ? pickCloudBackupSettingsFields(parsed.cloudBackupSettings)
+    : null;
+
+  if (!Object.keys(settings).length && !cloudBackupSettings) {
+    throw new Error("Config file does not contain importable settings.");
+  }
+
+  return {
+    settings: Object.keys(settings).length ? settings : null,
+    cloudBackupSettings,
+  };
+}
+
+async function disconnectCloudProvidersForConfigChange() {
+  await Promise.allSettled([
+    api("/api/backup/auth/onedrive/disconnect", "POST", {}),
+    api("/api/backup/auth/gdrive/disconnect", "POST", {}),
+  ]);
+}
+
+async function refreshAfterSettingsConfigApply(prevMode, reason) {
+  await loadSettings();
+  await cbLoadSettings();
+  await handleOperationModeTransition(
+    prevMode,
+    State.settings.operationMode,
+    reason,
+  );
+  buildInverterGrid();
+  scheduleInverterCardsUpdate(true);
+  buildSelects();
+  syncOperationModeUi();
+  syncDayAheadGeneratorAvailability();
+  if (State.currentPage === "settings") {
+    startReplicationHealthPolling();
+    refreshReplicationHealth(true).catch(() => {});
+  }
+}
+
+async function applySettingsConfigBundle(
+  bundle,
+  { reason = "settingsConfigApply", disconnectCloud = false } = {},
+) {
+  const prevMode = State.settings.operationMode;
+  const applied = {
+    settings: false,
+    cloudBackupSettings: false,
+    cloudDisconnected: false,
+  };
+
+  try {
+    if (bundle?.settings && Object.keys(bundle.settings).length) {
+      await api("/api/settings", "POST", bundle.settings);
+      applied.settings = true;
+    }
+    if (bundle?.cloudBackupSettings) {
+      await api("/api/backup/settings", "POST", bundle.cloudBackupSettings);
+      applied.cloudBackupSettings = true;
+      if (disconnectCloud) {
+        await disconnectCloudProvidersForConfigChange();
+        applied.cloudDisconnected = true;
+      }
+    }
+  } catch (err) {
+    if (
+      applied.settings ||
+      applied.cloudBackupSettings ||
+      applied.cloudDisconnected
+    ) {
+      await refreshAfterSettingsConfigApply(prevMode, `${reason}Partial`).catch(
+        () => {},
+      );
+      const partial = [];
+      if (applied.settings) partial.push("core settings applied");
+      if (applied.cloudBackupSettings) partial.push("cloud settings applied");
+      if (applied.cloudDisconnected) {
+        partial.push("cloud sessions cleared");
+      }
+      throw new Error(`${partial.join(", ")}; ${err.message}`);
+    }
+    throw err;
+  }
+
+  await refreshAfterSettingsConfigApply(prevMode, reason);
+  return applied;
+}
+
+async function exportSettingsConfig() {
+  showMsg("settingsMsg", "Preparing settings config export...", "");
+  try {
+    const [settingsSnapshot, cloudData] = await Promise.all([
+      api("/api/settings"),
+      api("/api/backup/settings"),
+    ]);
+    const payload = {
+      kind: SETTINGS_CONFIG_KIND,
+      schemaVersion: SETTINGS_CONFIG_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      appVersion: getAppVersionLabel(),
+      containsSecrets: true,
+      settings: pickSettingsConfigFields(settingsSnapshot),
+      cloudBackupSettings: pickCloudBackupSettingsFields(
+        cloudData?.settings || {},
+      ),
+    };
+    const filePath = await saveTextFileLocally(
+      JSON.stringify(payload, null, 2),
+      getSettingsConfigFilename(),
+      "Export Settings Configuration",
+    );
+    if (!filePath) {
+      showMsg("settingsMsg", "Export cancelled.", "");
+      return;
+    }
+    showMsg("settingsMsg", "✔ Settings config exported", "");
+  } catch (err) {
+    showMsg("settingsMsg", `✗ Export failed: ${err.message}`, "error");
+  }
+}
+
+async function importSettingsConfig() {
+  try {
+    const picked = await openTextFileLocally("Import Settings Configuration");
+    if (!picked?.content) return;
+    const bundle = parseSettingsConfigPayload(picked.content);
+    const ok = window.confirm(
+      "Import this settings config and overwrite the current settings?",
+    );
+    if (!ok) return;
+
+    showMsg("settingsMsg", "Importing settings config...", "");
+    const applied = await applySettingsConfigBundle(bundle, {
+      reason: "importSettingsConfig",
+      disconnectCloud: Boolean(bundle.cloudBackupSettings),
+    });
+    showMsg(
+      "settingsMsg",
+      applied.cloudBackupSettings
+        ? "✔ Config imported. Cloud providers were disconnected; reconnect if needed."
+        : "✔ Config imported",
+      "",
+    );
+  } catch (err) {
+    showMsg("settingsMsg", `✗ Import failed: ${err.message}`, "error");
+  }
+}
+
+async function resetSettingsToDefaults() {
+  const ok = window.confirm(
+    "Reset all dashboard settings and cloud backup configuration to defaults?",
+  );
+  if (!ok) return;
+
+  showMsg("settingsMsg", "Resetting settings to defaults...", "");
+  try {
+    const defaults = await api("/api/settings/defaults");
+    const bundle = {
+      settings: pickSettingsConfigFields(defaults?.settings || {}),
+      cloudBackupSettings: pickCloudBackupSettingsFields(
+        defaults?.cloudBackupSettings || {},
+      ),
+    };
+    await applySettingsConfigBundle(bundle, {
+      reason: "resetSettingsDefaults",
+      disconnectCloud: true,
+    });
+    showMsg(
+      "settingsMsg",
+      "✔ Settings reset to defaults. Cloud providers were disconnected.",
+      "",
+    );
+  } catch (err) {
+    showMsg("settingsMsg", `✗ Reset failed: ${err.message}`, "error");
+  }
 }
 
 function normalizeOperationModeValue(mode) {
@@ -4644,13 +5140,23 @@ function calcReportAvailabilityPctClient(row, reportDay = "") {
   return clampPctClient((Math.max(0, uph) / windowH) * 100);
 }
 
+function getReportRatedKwClient(row) {
+  const explicit = Number(row?.rated_kw);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const expectedNodes = Number(row?.expected_nodes);
+  if (Number.isFinite(expectedNodes) && expectedNodes > 0) {
+    return (INV_RATED_KW * Math.min(MAX_INV_UNITS, expectedNodes)) / MAX_INV_UNITS;
+  }
+  return INV_RATED_KW;
+}
+
 function calcReportPerformancePctClient(row) {
   const explicit = Number(row?.performance_pct);
   if (Number.isFinite(explicit)) return clampPctClient(explicit);
   const kwh = Number(row?.kwh_total || 0);
   const uph =
     Number(row?.uptime_h || 0) || (Number(row?.uptime_s || 0) / 3600);
-  const denom = INV_RATED_KW * Math.max(0, uph);
+  const denom = getReportRatedKwClient(row) * Math.max(0, uph);
   if (!Number.isFinite(denom) || denom <= 0) return 0;
   return clampPctClient((Math.max(0, kwh) / denom) * 100);
 }
@@ -4682,6 +5188,8 @@ function toReportViewRow(r) {
     alarm_count: Number(r?.alarm_count || 0),
     availability_pct: Number(availabilityPct.toFixed(3)),
     performance_pct: Number(performancePct.toFixed(3)),
+    expected_nodes: Number(r?.expected_nodes || 0),
+    rated_kw: Number(r?.rated_kw || getReportRatedKwClient(r)),
     avail,
     perf,
   };
@@ -4943,7 +5451,7 @@ function computeReportSummaryFromRows(rows) {
     const peak = Number(r?.peak_kw || 0);
     const uph = Number(r?.uptime_h || 0);
     const avail = calcReportAvailabilityPctClient(r, r?.date || $("reportDate")?.value || today());
-    const denom = (INV_RATED_KW * uph) / 1000; // rated kW*h -> MWh
+    const denom = (getReportRatedKwClient(r) * uph) / 1000; // rated kW*h -> MWh
     totalMwh += Math.max(0, mwh);
     if (peak > peakKw) peakKw = peak;
     alarmCount += Math.max(0, Math.trunc(Number(r?.alarm_count || 0)));
@@ -6777,6 +7285,9 @@ function bindEventHandlers() {
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
   $("btnSaveSettings")?.addEventListener("click", saveSettings);
+  $("btnExportSettingsConfig")?.addEventListener("click", exportSettingsConfig);
+  $("btnImportSettingsConfig")?.addEventListener("click", importSettingsConfig);
+  $("btnResetSettingsDefaults")?.addEventListener("click", resetSettingsToDefaults);
   $("setOperationMode")?.addEventListener("change", () => {
     syncOperationModeUi();
     syncDayAheadGeneratorAvailability();
@@ -6854,6 +7365,7 @@ async function init() {
   setupSideNav();
   initGuideModal();
   setupNav();
+  initSettingsSectionNav();
   document.addEventListener(
     "pointerdown",
     () => {

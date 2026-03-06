@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // File/folder operations
   pickFolder: (startPath) => ipcRenderer.invoke("pick-folder", startPath),
   openFolder: (folder) => ipcRenderer.invoke("open-folder", folder),
+  saveTextFile: (options) => ipcRenderer.invoke("save-text-file", options),
+  openTextFile: (options) => ipcRenderer.invoke("open-text-file", options),
 
   // IP config
   getConfig: () => ipcRenderer.invoke("config-get"),

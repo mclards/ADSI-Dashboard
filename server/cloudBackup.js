@@ -124,20 +124,40 @@ class CloudBackupService {
 
   // ─── Settings ─────────────────────────────────────────────────────────────
 
-  getCloudSettings() {
-    const raw = this.getSetting("cloudBackupSettings", null);
-    const defaults = {
+  getDefaultSettings() {
+    return {
       enabled: false,
       email: "",
-      provider: "auto",            // auto | onedrive | gdrive | both
+      provider: "auto",              // auto | onedrive | gdrive | both
       scope: ["database", "config"], // database | config | logs
-      schedule: "manual",          // manual | daily | every6h
+      schedule: "manual",            // manual | daily | every6h
       onedrive: { clientId: "" },
       gdrive: { clientId: "", clientSecret: "" },
     };
+  }
+
+  getCloudSettings() {
+    const raw = this.getSetting("cloudBackupSettings", null);
+    const defaults = this.getDefaultSettings();
     if (!raw) return defaults;
     try {
-      return { ...defaults, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw);
+      return {
+        ...defaults,
+        ...parsed,
+        onedrive: {
+          ...defaults.onedrive,
+          ...(parsed?.onedrive && typeof parsed.onedrive === "object"
+            ? parsed.onedrive
+            : {}),
+        },
+        gdrive: {
+          ...defaults.gdrive,
+          ...(parsed?.gdrive && typeof parsed.gdrive === "object"
+            ? parsed.gdrive
+            : {}),
+        },
+      };
     } catch {
       return defaults;
     }

@@ -1,7 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('drivers', 'drivers'), ('shared_data.py', '.'), ('ipconfig.json', '.')]
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+
+datas = [
+    (os.path.join(ROOT_DIR, 'drivers'), 'drivers'),
+    (os.path.join(BASE_DIR, 'shared_data.py'), '.'),
+    (os.path.join(ROOT_DIR, 'ipconfig.json'), '.'),
+]
 binaries = []
 hiddenimports = ['drivers.modbus_tcp', 'uvicorn.loops.asyncio', 'uvicorn.lifespan.off', 'uvicorn.protocols.http.h11_impl', 'anyio._backends._asyncio', 'pydantic.v1.datetime_parse']
 tmp_ret = collect_all('pymodbus')
@@ -9,8 +17,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['InverterCoreService.py'],
-    pathex=[],
+    [os.path.join(ROOT_DIR, 'InverterCoreService.py')],
+    pathex=[ROOT_DIR],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

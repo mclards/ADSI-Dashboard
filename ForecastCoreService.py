@@ -1,4 +1,4 @@
-from ADSI_ForecastService import main, parse_cli_args, run_cli_generation
+from services.forecast_engine import main, parse_cli_args, run_cli_generation
 
 
 if __name__ == "__main__":

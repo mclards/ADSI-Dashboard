@@ -111,7 +111,7 @@ const SOLCAST_UNIT_KW_MAX = 997.0;
 const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
 const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
-const REPORT_EXPECTED_NODES_PER_INVERTER = 4;
+const REPORT_MAX_NODES_PER_INVERTER = 4;
 const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6× OFFLINE_MS=20s)
 const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
 const REMOTE_BRIDGE_INTERVAL_MS = 1200;
@@ -2834,6 +2834,87 @@ function ensurePersistedSettings() {
   }
 }
 
+function buildDefaultSettingsSnapshot() {
+  return {
+    operationMode: "gateway",
+    remoteAutoSync: false,
+    remoteGatewayUrl: "",
+    remoteApiToken: "",
+    tailscaleDeviceHint: "",
+    wireguardInterface: "",
+    apiUrl: `${INVERTER_ENGINE_BASE_URL}/data`,
+    writeUrl: `${INVERTER_ENGINE_BASE_URL}/write`,
+    csvSavePath: "C:\\Logs\\InverterDashboard",
+    inverterCount: 27,
+    nodeCount: 4,
+    invGridLayout: "4",
+    plantName: "Solar Plant",
+    operatorName: "OPERATOR",
+    retainDays: 90,
+    forecastProvider: "ml_local",
+    solcastBaseUrl: "https://api.solcast.com.au",
+    solcastApiKey: "",
+    solcastResourceId: "",
+    solcastTimezone: "Asia/Manila",
+    exportUiState: buildDefaultExportUiState(),
+    inverterPollConfig: { ...DEFAULT_POLL_CFG },
+    dataDir: DATA_DIR,
+  };
+}
+
+function buildSettingsSnapshot() {
+  const defaults = buildDefaultSettingsSnapshot();
+  const tailscaleHint = sanitizeTailscaleDeviceHint(
+    getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
+    "",
+  );
+  return {
+    operationMode: readOperationMode(),
+    remoteAutoSync: readRemoteAutoSyncEnabled(),
+    remoteGatewayUrl: getRemoteGatewayBaseUrl(),
+    remoteApiToken: getRemoteApiToken(),
+    tailscaleDeviceHint: tailscaleHint,
+    wireguardInterface: tailscaleHint,
+    apiUrl: getSetting("apiUrl", defaults.apiUrl),
+    writeUrl: getSetting("writeUrl", defaults.writeUrl),
+    csvSavePath: getSetting("csvSavePath", defaults.csvSavePath),
+    inverterCount: Number(getSetting("inverterCount", defaults.inverterCount)),
+    nodeCount: Number(getSetting("nodeCount", defaults.nodeCount)),
+    invGridLayout: sanitizeInvGridLayout(
+      getSetting("invGridLayout", defaults.invGridLayout),
+    ),
+    plantName: getSetting("plantName", defaults.plantName),
+    operatorName: getSetting("operatorName", defaults.operatorName),
+    retainDays: Number(getSetting("retainDays", defaults.retainDays)),
+    forecastProvider:
+      String(
+        getSetting("forecastProvider", defaults.forecastProvider) ||
+          defaults.forecastProvider,
+      )
+        .trim()
+        .toLowerCase() === "solcast"
+        ? "solcast"
+        : "ml_local",
+    solcastBaseUrl: getSetting("solcastBaseUrl", defaults.solcastBaseUrl),
+    solcastApiKey: getSetting("solcastApiKey", defaults.solcastApiKey),
+    solcastResourceId: getSetting(
+      "solcastResourceId",
+      defaults.solcastResourceId,
+    ),
+    solcastTimezone: getSetting(
+      "solcastTimezone",
+      defaults.solcastTimezone,
+    ),
+    exportUiState: sanitizeExportUiState(
+      readJsonSetting("exportUiState", defaults.exportUiState),
+    ),
+    inverterPollConfig: sanitizePollConfig(
+      readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG),
+    ),
+    dataDir: DATA_DIR,
+  };
+}
+
 function parseIsoDateStrict(value, fieldName) {
   const s = String(value || "").trim();
   if (!ISO_DATE_RE.test(s)) {
@@ -3643,12 +3724,6 @@ function getDailyReportRowsForDay(dayInput, options = {}) {
     if (!refresh) {
       const cached = getPastDailyReportRowsCached(day);
       if (cached) return cached;
-
-      const dbRows = stmts.getDailyReport.all(day);
-      if (dbRows.length > 0) {
-        setPastDailyReportRowsCache(day, dbRows);
-        return cloneDailyReportRows(dbRows);
-      }
     }
 
     const rebuilt = buildDailyReportRowsForDate(day, {
@@ -3695,22 +3770,6 @@ function computeSpanSeconds(rows) {
 // silent gaps (outages / comms loss that produced no readings) are not
 // mistakenly counted as uptime — the old lastTs-firstTs span formula would
 // credit the entire gap regardless of what happened inside it.
-function computeNodeOnlineSeconds(rows, maxGapS = AVAIL_MAX_GAP_S) {
-  const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
-  if (sorted.length === 0) return 0;
-  if (sorted.length === 1) return Number(sorted[0]?.online || 0) === 1 ? 1 : 0;
-  let totalS = 0;
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (Number(sorted[i]?.online || 0) !== 1) continue;
-    const dt = (Number(sorted[i + 1].ts) - Number(sorted[i].ts)) / 1000;
-    totalS += Math.min(Math.max(0, dt), maxGapS);
-  }
-  // Credit 1 s for the last row when it is still online (avoids losing the
-  // tail of a day where the final reading happened to be the last one).
-  if (Number(sorted[sorted.length - 1]?.online || 0) === 1) totalS += 1;
-  return totalS;
-}
-
 function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
   if (sorted.length === 0) return [];
@@ -3737,12 +3796,20 @@ function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   return intervals;
 }
 
-function computeInverterOnlineSeconds(rowsByUnit, maxGapS = AVAIL_MAX_GAP_S) {
-  const byUnit = rowsByUnit instanceof Map ? rowsByUnit : new Map();
-  const intervals = [];
-  for (const unitRows of byUnit.values()) {
-    intervals.push(...buildNodeOnlineIntervalsMs(unitRows, maxGapS));
-  }
+function clipIntervalsToWindowMs(intervals, startMs, endMs) {
+  const start = Number(startMs || 0);
+  const end = Number(endMs || 0);
+  if (!(start > 0) || !(end > start)) return [];
+  return (Array.isArray(intervals) ? intervals : [])
+    .map(([rawStart, rawEnd]) => {
+      const clippedStart = Math.max(start, Number(rawStart || 0));
+      const clippedEnd = Math.min(end, Number(rawEnd || 0));
+      return clippedEnd > clippedStart ? [clippedStart, clippedEnd] : null;
+    })
+    .filter(Boolean);
+}
+
+function sumMergedIntervalsMs(intervals) {
   if (!intervals.length) return 0;
 
   intervals.sort((a, b) => Number(a[0]) - Number(b[0]) || Number(a[1]) - Number(b[1]));
@@ -3761,20 +3828,80 @@ function computeInverterOnlineSeconds(rowsByUnit, maxGapS = AVAIL_MAX_GAP_S) {
     curEnd = end;
   }
   totalMs += Math.max(0, curEnd - curStart);
-  return totalMs / 1000;
+  return totalMs;
 }
 
-function getReportSolarWindowSeconds(day, includeTodayPartial = true) {
+function computeNodeOnlineSeconds(rows, maxGapS = AVAIL_MAX_GAP_S, window = null) {
+  let intervals = buildNodeOnlineIntervalsMs(rows, maxGapS);
+  if (window?.startTs > 0 && window?.endTs > window.startTs) {
+    intervals = clipIntervalsToWindowMs(intervals, window.startTs, window.endTs);
+  }
+  return sumMergedIntervalsMs(intervals) / 1000;
+}
+
+function computeInverterOnlineSeconds(rowsByUnit, maxGapS = AVAIL_MAX_GAP_S, window = null) {
+  const byUnit = rowsByUnit instanceof Map ? rowsByUnit : new Map();
+  let intervals = [];
+  for (const unitRows of byUnit.values()) {
+    intervals.push(...buildNodeOnlineIntervalsMs(unitRows, maxGapS));
+  }
+  if (window?.startTs > 0 && window?.endTs > window.startTs) {
+    intervals = clipIntervalsToWindowMs(intervals, window.startTs, window.endTs);
+  }
+  return sumMergedIntervalsMs(intervals) / 1000;
+}
+
+function getReportSolarWindowBounds(day, includeTodayPartial = true) {
   const d = parseIsoDateStrict(day || localDateStr(), "date");
   const today = localDateStr();
-  if (d > today) return 0;
+  if (d > today) {
+    return { startTs: 0, endTs: 0, seconds: 0 };
+  }
   const hh = (n) => String(Math.trunc(Number(n) || 0)).padStart(2, "0");
   const startTs = new Date(`${d}T${hh(REPORT_SOLAR_START_H)}:00:00.000`).getTime();
   let endTs = new Date(`${d}T${hh(REPORT_SOLAR_END_H)}:00:00.000`).getTime();
   if (includeTodayPartial && d === today) {
     endTs = Math.min(endTs, Date.now());
   }
-  return Math.max(0, (endTs - startTs) / 1000);
+  return {
+    startTs,
+    endTs,
+    seconds: Math.max(0, (endTs - startTs) / 1000),
+  };
+}
+
+function getReportSolarWindowSeconds(day, includeTodayPartial = true) {
+  return getReportSolarWindowBounds(day, includeTodayPartial).seconds;
+}
+
+function getConfiguredUnitsForReportInverter(cfg, inverter) {
+  const unitsRaw =
+    cfg?.units?.[inverter] ??
+    cfg?.units?.[String(inverter)] ??
+    [1, 2, 3, 4];
+  const units = Array.isArray(unitsRaw)
+    ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= REPORT_MAX_NODES_PER_INVERTER)
+    : [1, 2, 3, 4];
+  return [...new Set(units)].sort((a, b) => a - b);
+}
+
+function getReportActiveNodeCount(configuredUnits, rowsByUnit) {
+  const configuredCount = Array.isArray(configuredUnits) ? configuredUnits.length : 0;
+  if (configuredCount > 0) return configuredCount;
+  const observedCount = rowsByUnit instanceof Map ? rowsByUnit.size : 0;
+  if (observedCount > 0) {
+    return Math.max(1, Math.min(REPORT_MAX_NODES_PER_INVERTER, observedCount));
+  }
+  return REPORT_MAX_NODES_PER_INVERTER;
+}
+
+function getReportRatedKwForNodeCount(nodeCount) {
+  const count = Math.max(
+    0,
+    Math.min(REPORT_MAX_NODES_PER_INVERTER, Number(nodeCount || 0)),
+  );
+  if (count <= 0) return 0;
+  return (REPORT_UNIT_KW_MAX * count) / REPORT_MAX_NODES_PER_INVERTER;
 }
 
 function buildDailyReportRowsForDate(dateText, options = {}) {
@@ -3816,10 +3943,9 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       pacKwhByInv.set(inv, Math.max(pacKwhByInv.get(inv) || 0, total_kwh));
     }
   }
-  const expectedSolarWindowS = getReportSolarWindowSeconds(
-    day,
-    includeTodayPartial,
-  );
+  const reportWindow = getReportSolarWindowBounds(day, includeTodayPartial);
+  const expectedSolarWindowS = Number(reportWindow.seconds || 0);
+  const ipCfg = loadIpConfigFromDb();
 
   // ── Batch queries: replace per-inverter N+1 pattern (was 27×3 = 81 queries) ──
   // All readings for the day in a single scan, grouped in-process by inverter.
@@ -3848,11 +3974,17 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 
   const out = [];
   for (let inv = 1; inv <= invCount; inv++) {
-    const rows = readingsByInv.get(inv) || [];
+    const allRows = readingsByInv.get(inv) || [];
     const alarmCount = alarmCountByInv.get(inv) || 0;
     const controlCount = auditCountByInv.get(inv) || 0;
     const pacKwh = Number(pacKwhByInv.get(inv) || 0);
-    const hasLiveData = rows.length > 0 || pacKwh > 0 || alarmCount > 0 || controlCount > 0;
+    const configuredUnits = getConfiguredUnitsForReportInverter(ipCfg, inv);
+    const configuredUnitSet = new Set(configuredUnits);
+    const rows = configuredUnits.length
+      ? allRows.filter((r) => configuredUnitSet.has(Number(r?.unit || 0)))
+      : allRows;
+    const hasLiveData =
+      rows.length > 0 || pacKwh > 0 || alarmCount > 0 || controlCount > 0;
     if (!hasLiveData) continue;
 
     const onlineRows = rows.filter(
@@ -3880,12 +4012,18 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       : 0;
     // Inverter uptime is the union of online intervals across all observed units.
     // If any unit is online, inverter uptime advances.
-    const uptimeS = computeInverterOnlineSeconds(rowsByUnit);
+    const activeNodeCount = getReportActiveNodeCount(configuredUnits, rowsByUnit);
+    const ratedKw = getReportRatedKwForNodeCount(activeNodeCount);
+    const uptimeS = computeInverterOnlineSeconds(
+      rowsByUnit,
+      AVAIL_MAX_GAP_S,
+      reportWindow,
+    );
     const perUnitUptime = [];
     for (const [unit, unitRows] of rowsByUnit.entries()) {
       perUnitUptime.push({
         unit,
-        uptimeS: computeNodeOnlineSeconds(unitRows),
+        uptimeS: computeNodeOnlineSeconds(unitRows, AVAIL_MAX_GAP_S, reportWindow),
       });
     }
     perUnitUptime.sort(
@@ -3894,7 +4032,7 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
         Number(a.unit || 0) - Number(b.unit || 0),
     );
     const nodeUptimeS = perUnitUptime
-      .slice(0, REPORT_EXPECTED_NODES_PER_INVERTER)
+      .slice(0, activeNodeCount)
       .reduce((s, r) => s + Math.max(0, Number(r?.uptimeS || 0)), 0);
 
     let kwhTotal = Math.max(0, pacKwh);
@@ -3917,12 +4055,11 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       }
       if (regTotal > 0) kwhTotal = regTotal;
     }
-    const expectedNodeUptimeS =
-      expectedSolarWindowS * REPORT_EXPECTED_NODES_PER_INVERTER;
+    const expectedNodeUptimeS = expectedSolarWindowS * activeNodeCount;
     const availabilityPct =
-      expectedNodeUptimeS > 0 ? (nodeUptimeS / expectedNodeUptimeS) * 100 : 0;
+      expectedSolarWindowS > 0 ? (uptimeS / expectedSolarWindowS) * 100 : 0;
     const uptimeH = uptimeS / 3600;
-    const perfDenomKwh = REPORT_UNIT_KW_MAX * uptimeH;
+    const perfDenomKwh = ratedKw * uptimeH;
     const performancePct =
       perfDenomKwh > 0 ? (kwhTotal / perfDenomKwh) * 100 : 0;
 
@@ -3939,7 +4076,8 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       performance_pct: Number(clampPct(performancePct).toFixed(3)),
       node_uptime_s: Math.max(0, Math.round(nodeUptimeS)),
       expected_node_uptime_s: Math.max(0, Math.round(expectedNodeUptimeS)),
-      expected_nodes: REPORT_EXPECTED_NODES_PER_INVERTER,
+      expected_nodes: activeNodeCount,
+      rated_kw: Number(ratedKw.toFixed(3)),
     };
 
     if (persist) {
@@ -4010,7 +4148,17 @@ function summarizeDailyReportRows(rows) {
     const kwh = Number(row?.kwh_total || 0);
     const rowPeakKw = Number(row?.pac_peak || 0) / 1000;
     const uph = Number(row?.uptime_s || 0) / 3600;
-    const rowDenom = Math.max(0, REPORT_UNIT_KW_MAX * uph);
+    const expectedNodes = Math.max(
+      0,
+      Math.min(
+        REPORT_MAX_NODES_PER_INVERTER,
+        Number(row?.expected_nodes || REPORT_MAX_NODES_PER_INVERTER),
+      ),
+    );
+    const ratedKw =
+      Number(row?.rated_kw || 0) ||
+      getReportRatedKwForNodeCount(expectedNodes || REPORT_MAX_NODES_PER_INVERTER);
+    const rowDenom = Math.max(0, ratedKw * uph);
 
     totalKwh += Math.max(0, kwh);
     if (rowPeakKw > peakKw) peakKw = rowPeakKw;
@@ -4759,41 +4907,21 @@ app.post("/api/write", async (req, res) => {
   }
 });
 
-app.get("/api/settings", (req, res) =>
-  res.json({
-    operationMode: readOperationMode(),
-    remoteAutoSync: readRemoteAutoSyncEnabled(),
-    remoteGatewayUrl: getRemoteGatewayBaseUrl(),
-    remoteApiToken: getRemoteApiToken(),
-    tailscaleDeviceHint: sanitizeTailscaleDeviceHint(
-      getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
-      "",
-    ),
-    wireguardInterface: sanitizeTailscaleDeviceHint(
-      getSetting("tailscaleDeviceHint", getSetting("wireguardInterface", "")),
-      "",
-    ),
-    apiUrl: getSetting("apiUrl", `${INVERTER_ENGINE_BASE_URL}/data`),
-    writeUrl: getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`),
-    csvSavePath: getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
-    inverterCount: Number(getSetting("inverterCount", 27)),
-    nodeCount: Number(getSetting("nodeCount", 4)),
-    invGridLayout: sanitizeInvGridLayout(getSetting("invGridLayout", "4")),
-    plantName: getSetting("plantName", "Solar Plant"),
-    operatorName: getSetting("operatorName", "OPERATOR"),
-    retainDays: Number(getSetting("retainDays", 90)),
-    forecastProvider: String(getSetting("forecastProvider", "ml_local") || "ml_local").trim().toLowerCase() === "solcast" ? "solcast" : "ml_local",
-    solcastBaseUrl: getSetting("solcastBaseUrl", "https://api.solcast.com.au"),
-    solcastApiKey: getSetting("solcastApiKey", ""),
-    solcastResourceId: getSetting("solcastResourceId", ""),
-    solcastTimezone: getSetting("solcastTimezone", "Asia/Manila"),
-    exportUiState: sanitizeExportUiState(
-      readJsonSetting("exportUiState", {}),
-    ),
-    inverterPollConfig: sanitizePollConfig(readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG)),
-    dataDir: DATA_DIR,
-  }),
-);
+app.get("/api/settings", (req, res) => {
+  res.json(buildSettingsSnapshot());
+});
+
+app.get("/api/settings/defaults", (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      settings: buildDefaultSettingsSnapshot(),
+      cloudBackupSettings: _cloudBackup.getDefaultSettings(),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 app.get("/api/settings/export-ui", (req, res) => {
   res.json({
@@ -4822,6 +4950,7 @@ app.post("/api/ip-config", (req, res) => {
     const cfg = saveIpConfigToDb(req.body || {});
     mirrorIpConfigToLegacyFiles(cfg);
     backfillAuditIpsFromConfig();
+    pastDailyReportCache.clear();
     // Push new config to poller immediately (skip 5 s cache lag).
     if (!isRemoteMode()) poller.setIpConfigSnapshot(cfg);
     // Notify the dashboard so it rebuilds inverter cards without a restart.
@@ -4995,6 +5124,12 @@ app.post("/api/settings", (req, res) => {
     applyRuntimeMode();
     todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
     broadcastUpdate({ type: "configChanged" }); // tell clients to reload settings + rebuild UI
+  }
+  if (
+    updates.inverterCount !== undefined ||
+    updates.nodeCount !== undefined
+  ) {
+    pastDailyReportCache.clear();
   }
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
