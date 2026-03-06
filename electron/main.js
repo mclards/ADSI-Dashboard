@@ -1,6 +1,6 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for ADSI Inverter Dashboard v2.0
+ * main.js - Electron entry point for Dashboard V2
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
  */
 
@@ -717,7 +717,7 @@ app.whenReady().then(async () => {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
-  app.setName("Inverter Dashboard");
+  app.setName("Dashboard V2");
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
   Menu.setApplicationMenu(null);
@@ -1760,7 +1760,7 @@ async function ensureLicenseAtStartup() {
         defaultId: 0,
         cancelId: 2,
         title: "License Required",
-        message: "Welcome to Inverter Dashboard",
+        message: "Welcome to Dashboard V2",
         detail:
           "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
       });
@@ -2296,7 +2296,7 @@ function createMainWindow() {
       defaultId: 0,
       cancelId: 0,
       title: "Confirm Exit",
-      message: "Exit Inverter Dashboard?",
+      message: "Exit Dashboard V2?",
       detail: "This will stop local services and close the dashboard.",
     });
     if (choice !== 1) {

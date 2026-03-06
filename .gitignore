@@ -52,6 +52,7 @@ cloud_backups/
 auth/
 userData/
 *.lic
+.claude/settings.local.json
 
 # OS
 .DS_Store

@@ -1,6 +1,6 @@
 ﻿"use strict";
 /* ═══════════════════════════════════════════════════════════════════════
-   Inverter Dashboard v2.2 — Main Application
+   Dashboard V2 — Main Application
    WebSocket-driven, real-time inverter monitoring & control
    Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
    © 2026 Engr. Clariden Montaño REE. All rights reserved.
@@ -52,6 +52,7 @@ const State = {
   alarmFilter: "all",
   ws: null,
   wsConnecting: false,
+  _wsHeartbeatTimer: null,
   charts: {},
   currentPage: "inverters",
   wsRetries: 0,
@@ -1935,20 +1936,12 @@ function normalizeSettingsSectionId(value) {
 function renderActiveSettingsMeta(sectionId) {
   const activeId = normalizeSettingsSectionId(sectionId);
   const meta = SETTINGS_SECTION_META[activeId] || SETTINGS_SECTION_META[DEFAULT_SETTINGS_SECTION_ID];
-  const titleNodes = [
-    $("settingsCurrentSectionTitle"),
-    $("settingsMainSectionTitle"),
-  ];
-  const copyNodes = [
-    $("settingsCurrentSectionCopy"),
-    $("settingsMainSectionCopy"),
-  ];
-  titleNodes.forEach((node) => {
-    if (node) node.textContent = meta.title;
-  });
-  copyNodes.forEach((node) => {
-    if (node) node.textContent = meta.copy;
-  });
+  const mainTitle = $("settingsMainSectionTitle");
+  const mainCopy = $("settingsMainSectionCopy");
+  const sidebarChip = $("settingsSidebarCurrentChip");
+  if (mainTitle) mainTitle.textContent = meta.title;
+  if (mainCopy) mainCopy.textContent = meta.copy;
+  if (sidebarChip) sidebarChip.textContent = meta.title;
 }
 
 function setActiveSettingsSection(sectionId, persist = true) {
@@ -2218,10 +2211,12 @@ function pickCloudBackupSettingsFields(src) {
     };
   }
   if (hasOwn(src, "gdrive")) {
-    out.gdrive = {
+    const nextGDrive = {
       clientId: String(src.gdrive?.clientId ?? ""),
-      clientSecret: String(src.gdrive?.clientSecret ?? ""),
     };
+    const nextSecret = String(src.gdrive?.clientSecret ?? "").trim();
+    if (nextSecret) nextGDrive.clientSecret = nextSecret;
+    out.gdrive = nextGDrive;
   }
 
   return Object.keys(out).length ? out : null;
@@ -2333,6 +2328,10 @@ function parseSettingsConfigPayload(rawContent) {
   return {
     settings: Object.keys(settings).length ? settings : null,
     cloudBackupSettings,
+    containsSecrets: Boolean(parsed.containsSecrets),
+    excludedSecrets: Array.isArray(parsed.excludedSecrets)
+      ? parsed.excludedSecrets.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
   };
 }
 
@@ -2364,7 +2363,11 @@ async function refreshAfterSettingsConfigApply(prevMode, reason) {
 
 async function applySettingsConfigBundle(
   bundle,
-  { reason = "settingsConfigApply", disconnectCloud = false } = {},
+  {
+    reason = "settingsConfigApply",
+    disconnectCloud = false,
+    clearGDriveClientSecret = false,
+  } = {},
 ) {
   const prevMode = State.settings.operationMode;
   const applied = {
@@ -2379,7 +2382,13 @@ async function applySettingsConfigBundle(
       applied.settings = true;
     }
     if (bundle?.cloudBackupSettings) {
-      await api("/api/backup/settings", "POST", bundle.cloudBackupSettings);
+      const cloudPayload = {
+        ...bundle.cloudBackupSettings,
+      };
+      if (clearGDriveClientSecret) {
+        cloudPayload.clearGDriveClientSecret = true;
+      }
+      await api("/api/backup/settings", "POST", cloudPayload);
       applied.cloudBackupSettings = true;
       if (disconnectCloud) {
         await disconnectCloudProvidersForConfigChange();
@@ -2417,16 +2426,22 @@ async function exportSettingsConfig() {
       api("/api/settings"),
       api("/api/backup/settings"),
     ]);
+    const settings = pickSettingsConfigFields(settingsSnapshot);
+    const cloudBackupSettings = pickCloudBackupSettingsFields(
+      cloudData?.settings || {},
+    );
+    const containsSecrets = Boolean(
+      settings?.remoteApiToken || settings?.solcastApiKey,
+    );
     const payload = {
       kind: SETTINGS_CONFIG_KIND,
       schemaVersion: SETTINGS_CONFIG_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       appVersion: getAppVersionLabel(),
-      containsSecrets: true,
-      settings: pickSettingsConfigFields(settingsSnapshot),
-      cloudBackupSettings: pickCloudBackupSettingsFields(
-        cloudData?.settings || {},
-      ),
+      containsSecrets,
+      excludedSecrets: ["gdrive.clientSecret", "oauthSessions"],
+      settings,
+      cloudBackupSettings,
     };
     const filePath = await saveTextFileLocally(
       JSON.stringify(payload, null, 2),
@@ -2437,7 +2452,10 @@ async function exportSettingsConfig() {
       showMsg("settingsMsg", "Export cancelled.", "");
       return;
     }
-    showMsg("settingsMsg", "✔ Settings config exported", "");
+    const exportMsg = containsSecrets
+      ? "✔ Settings config exported. Treat the file as sensitive. Stored Google client secret and cloud sessions were excluded."
+      : "✔ Settings config exported. Stored Google client secret and cloud sessions were excluded.";
+    showMsg("settingsMsg", exportMsg, "");
   } catch (err) {
     showMsg("settingsMsg", `✗ Export failed: ${err.message}`, "error");
   }
@@ -2448,8 +2466,21 @@ async function importSettingsConfig() {
     const picked = await openTextFileLocally("Import Settings Configuration");
     if (!picked?.content) return;
     const bundle = parseSettingsConfigPayload(picked.content);
-    const ok = window.confirm(
+    const confirmLines = [
       "Import this settings config and overwrite the current settings?",
+    ];
+    if (bundle.containsSecrets) {
+      confirmLines.push(
+        "This file may contain API credentials. Keep it private.",
+      );
+    }
+    if (bundle.cloudBackupSettings) {
+      confirmLines.push(
+        "Cloud providers will be disconnected after import. Stored Google client secret is not included in exported files and must be re-entered separately if needed.",
+      );
+    }
+    const ok = window.confirm(
+      confirmLines.join("\n\n"),
     );
     if (!ok) return;
 
@@ -2472,7 +2503,7 @@ async function importSettingsConfig() {
 
 async function resetSettingsToDefaults() {
   const ok = window.confirm(
-    "Reset all dashboard settings and cloud backup configuration to defaults?",
+    "Reset all dashboard settings and cloud backup configuration to defaults?\n\nThis will disconnect cloud providers and clear the stored Google client secret.",
   );
   if (!ok) return;
 
@@ -2488,10 +2519,11 @@ async function resetSettingsToDefaults() {
     await applySettingsConfigBundle(bundle, {
       reason: "resetSettingsDefaults",
       disconnectCloud: true,
+      clearGDriveClientSecret: true,
     });
     showMsg(
       "settingsMsg",
-      "✔ Settings reset to defaults. Cloud providers were disconnected.",
+      "✔ Settings reset to defaults. Cloud providers were disconnected and the stored Google client secret was cleared.",
       "",
     );
   } catch (err) {
@@ -2747,20 +2779,29 @@ async function refreshReplicationHealth(silent = true) {
       .toLowerCase();
     const pullOnly = Boolean(n?.remotePullOnly);
     const connected = Boolean(n?.remoteConnected);
+    const liveFailureCount = Math.max(0, Number(n?.remoteLiveFailureCount || 0));
+    const bridgeStatus =
+      mode === "remote"
+        ? connected
+          ? liveFailureCount > 0
+            ? "Connected (recovering)"
+            : "Connected"
+          : "Disconnected"
+        : "Gateway local polling";
+    const bridgeStatusClass =
+      mode === "remote"
+        ? connected
+          ? liveFailureCount > 0
+            ? "warn"
+            : "ok"
+          : "error"
+        : "";
     setReplicationField("repModeVal", mode === "remote" ? "Remote" : "Gateway");
     setReplicationField(
       "repGatewayVal",
       String(n?.remoteGatewayUrl || "—").trim() || "—",
     );
-    setReplicationField(
-      "repConnectedVal",
-      mode === "remote"
-        ? connected
-          ? "Connected"
-          : "Disconnected"
-        : "Gateway local polling",
-      mode === "remote" ? (connected ? "ok" : "warn") : "",
-    );
+    setReplicationField("repConnectedVal", bridgeStatus, bridgeStatusClass);
     const directionRaw = pullOnly
       ? "pull-live-only"
       : String(n?.remoteLastSyncDirection || "idle");
@@ -4099,9 +4140,30 @@ function showOfflineIndicator(show, message) {
   }
 }
 
+// If no WS message arrives for this long, force a reconnect.
+// The server sends a WS-level ping every 25 s, so a 60 s silence
+// means the connection is genuinely dead (not just idle).
+const WS_HEARTBEAT_TIMEOUT_MS = 60000;
+
+function _clearWsHeartbeat() {
+  if (State._wsHeartbeatTimer) {
+    clearTimeout(State._wsHeartbeatTimer);
+    State._wsHeartbeatTimer = null;
+  }
+}
+
+function _resetWsHeartbeat(ws) {
+  _clearWsHeartbeat();
+  State._wsHeartbeatTimer = setTimeout(() => {
+    console.warn("[ws] heartbeat timeout — forcing reconnect");
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  }, WS_HEARTBEAT_TIMEOUT_MS);
+}
+
 function connectWS() {
   if (State.wsConnecting) return;
   State.wsConnecting = true;
+  _clearWsHeartbeat();
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = `${wsProto}://${location.host}/ws`;
@@ -4113,9 +4175,11 @@ function connectWS() {
     setWsState(true, "ONLINE");
     State.wsRetries = 0;
     showOfflineIndicator(false);  // Clear offline banner on reconnect
+    _resetWsHeartbeat(ws);
   };
 
   ws.onmessage = ({ data }) => {
+    _resetWsHeartbeat(ws); // any incoming message keeps the connection alive
     netIOTrackRx(typeof data === "string" ? data.length : (data.byteLength || 0));
     try {
       const msg = JSON.parse(data);
@@ -4127,6 +4191,7 @@ function connectWS() {
 
   ws.onclose = () => {
     State.wsConnecting = false;
+    _clearWsHeartbeat();
     setWsState(false, "RECONNECT");
     const delay = Math.min(5000, 500 * ++State.wsRetries);
     const delaySeconds = Math.ceil(delay / 1000);
@@ -4136,6 +4201,7 @@ function connectWS() {
 
   ws.onerror = () => {
     State.wsConnecting = false;
+    _clearWsHeartbeat();
     showOfflineIndicator(true, "Connection lost. Retrying...");
     ws.close();
   };
@@ -6770,8 +6836,8 @@ async function openExportPathFolder(filePath) {
 
 /** Lookup table for email domain → suggested provider. */
 const CB_DOMAIN_MAP = [
-  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "💡 Looks like a Microsoft account — OneDrive recommended." },
-  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "💡 Looks like a Google account — Google Drive recommended." },
+  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "Microsoft account detected. OneDrive is the recommended provider." },
+  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "Google account detected. Google Drive is the recommended provider." },
 ];
 
 function cbSuggestProvider(email) {
@@ -6782,7 +6848,7 @@ function cbSuggestProvider(email) {
   for (const { domains, hint: h } of CB_DOMAIN_MAP) {
     if (domains.includes(domain)) { hint.textContent = h; return; }
   }
-  hint.textContent = "ℹ️ Domain unrecognized — select a provider manually or use Auto.";
+  hint.textContent = "Domain not recognized. Select a provider manually or keep Auto.";
 }
 
 function cbSetProgress(data) {
@@ -6794,22 +6860,26 @@ function cbSetProgress(data) {
   if (!wrap) return;
 
   const icons = {
-    idle: "💤",
-    queued: "⏳",
-    creating: "⚙",
-    uploading: "⬆",
-    pulling: "⬇",
-    restoring: "🔄",
-    done: "✅",
-    error: "❌",
-    success: "✅",
-    failed: "❌",
+    idle: "mdi mdi-sleep",
+    queued: "mdi mdi-timer-sand",
+    creating: "mdi mdi-cog-outline",
+    uploading: "mdi mdi-cloud-upload-outline",
+    pulling: "mdi mdi-cloud-download-outline",
+    restoring: "mdi mdi-backup-restore",
+    done: "mdi mdi-check-circle-outline",
+    error: "mdi mdi-alert-circle-outline",
+    success: "mdi mdi-check-circle-outline",
+    failed: "mdi mdi-alert-circle-outline",
   };
   const { status = "idle", pct: p = 0, message = "", updatedAt = 0, finishedAt = 0, startedAt = 0 } = data;
 
   if (status === "idle") { wrap.hidden = true; return; }
   wrap.hidden = false;
-  if (icon) icon.textContent = icons[status] || "⏳";
+  if (icon) {
+    icon.className = `cb-progress-icon ${icons[status] || "mdi mdi-timer-sand"}`;
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "";
+  }
   const ts = Number(updatedAt || finishedAt || startedAt || 0);
   const tsText = ts > 0 ? new Date(ts).toLocaleString() : "";
   if (label) label.textContent = tsText ? `${message || status} · Last: ${tsText}` : (message || status);
@@ -6961,7 +7031,22 @@ async function cbLoadSettings() {
     if ($("cbScopeLogs")) $("cbScopeLogs").checked = s.scope?.includes("logs") || false;
     if ($("cbOneDriveClientId")) $("cbOneDriveClientId").value = s.onedrive?.clientId || "";
     if ($("cbGDriveClientId")) $("cbGDriveClientId").value = s.gdrive?.clientId || "";
-    if ($("cbGDriveClientSecret")) $("cbGDriveClientSecret").value = s.gdrive?.clientSecret || "";
+    if ($("cbGDriveClientSecret")) {
+      const input = $("cbGDriveClientSecret");
+      const secretSaved = Boolean(s.gdrive?.clientSecretSaved);
+      input.value = "";
+      input.placeholder = secretSaved
+        ? "Stored securely. Enter a new secret to replace it."
+        : "Desktop app client secret";
+      input.title = secretSaved
+        ? "A Google client secret is already stored securely. Leave this blank to keep it, or enter a new one to replace it."
+        : "Enter the Google OAuth desktop client secret used for Drive access.";
+    }
+    if ($("cbGDriveSecretNote")) {
+      $("cbGDriveSecretNote").textContent = s.gdrive?.clientSecretSaved
+        ? "Stored securely in the app. Leave blank to keep it, or enter a new secret to replace it."
+        : "The client secret is stored locally after save and is not shown again in this screen.";
+    }
 
     cbSuggestProvider(s.email || "");
     await cbUpdateConnectionStatus();

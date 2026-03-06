@@ -31,7 +31,7 @@
   --chart-ahead-fill: rgba(245, 158, 11, 0.1);
   --progress-tip-core: rgba(255, 255, 255, 0.95);
   --progress-tip-fade: rgba(255, 255, 255, 0);
-  --app-footer-h: 34px;
+  --app-footer-h: 42px;
 }
 
 :root[data-theme="light"] {
@@ -338,11 +338,24 @@ body.license-notice-open .side-nav {
   color: #ffffff;
 }
 
-#btnAlarmSound.muted {
-  color: rgba(246, 217, 228, 0.62);
+#btnAlarmSound {
+  position: relative;
+  transition: opacity 0.18s, box-shadow 0.18s, border-color 0.18s;
 }
+
+/* Active (unmuted): subtle accent ring so it reads as "on" */
+#btnAlarmSound:not(.muted) {
+  box-shadow: 0 0 0 1.5px rgba(192, 91, 124, 0.55);
+}
+
+/* Muted: desaturate and dim; diagonal line pseudo-element over icon */
+#btnAlarmSound.muted {
+  opacity: 0.45;
+  box-shadow: none;
+}
+
 #btnAlarmSound.muted:hover {
-  color: rgba(246, 217, 228, 0.88);
+  opacity: 0.72;
 }
 
 .tb-logo {
@@ -573,7 +586,7 @@ body.license-notice-open .side-nav {
   color: var(--red);
 }
 
-/* ─── Network I/O Widget ──────────────────────────────────────────────────── */
+/* Network I/O Widget */
 .net-io-widget {
   display: flex;
   flex-direction: column;
@@ -626,7 +639,7 @@ body.license-notice-open .side-nav {
   transition: color 0.12s;
 }
 
-/* ─── Transfer Progress Panel (inside net-io-widget) ─────────────────────── */
+/* Transfer Progress Panel (inside net-io-widget) */
 .xfer-panel {
   display: flex;
   flex-direction: column;
@@ -827,6 +840,9 @@ body.sidebar-open .side-nav {
 }
 
 .side-about-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.9px;
@@ -862,11 +878,12 @@ body.sidebar-open .side-nav {
 .side-about-actions .btn {
   width: 100%;
   min-height: 30px;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 6px;
 }
 
 .nav-btn {
-  height: 36px;
+  height: 38px;
   width: 100%;
   display: flex;
   align-items: center;
@@ -900,7 +917,18 @@ body.sidebar-open .side-nav {
 }
 
 .nav-icon {
-  font-size: 13px;
+  width: 18px;
+  min-width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.nav-icon .mdi {
+  font-size: 16px;
+  line-height: 1;
 }
 
 .nav-badge {
@@ -981,6 +1009,8 @@ body.sidebar-open .side-nav {
   inset: 0 0 var(--app-footer-h) 0;
   display: flex;
   flex-direction: column;
+  gap: 12px;
+  padding: 12px;
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
@@ -995,15 +1025,21 @@ body.sidebar-open .side-nav {
 }
 
 .page-toolbar {
-  min-height: 42px;
+  min-height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 7px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg2);
+  gap: 10px 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
   flex-shrink: 0;
 }
 
@@ -1025,6 +1061,14 @@ body.sidebar-open .side-nav {
 }
 
 .toolbar-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid rgba(108, 52, 69, 0.84);
+  border-radius: 999px;
+  background: rgba(45, 18, 29, 0.6);
   font-size: 10px;
   font-family: var(--font-mono);
   color: var(--text2);
@@ -1110,6 +1154,11 @@ body.sidebar-open .side-nav {
     color 0.14s ease;
 }
 
+.btn .mdi {
+  font-size: 14px;
+  line-height: 1;
+}
+
 .btn::before {
   content: "";
   position: absolute;
@@ -1180,7 +1229,7 @@ body.sidebar-open .side-nav {
   height: 30px;
 }
 
-/* ─── Button Loading & Disabled States ─── */
+/* Button Loading & Disabled States */
 .btn:disabled,
 .btn.loading {
   opacity: 0.65;
@@ -1227,7 +1276,7 @@ body.sidebar-open .side-nav {
   --btn-bg-2: #a33556;
 }
 
-/* ─── Input Validation States ─── */
+/* Input Validation States */
 .inp.error,
 input.error {
   border-color: var(--red) !important;
@@ -1247,12 +1296,12 @@ input:focus {
   box-shadow: 0 0 0 2px rgba(216, 106, 139, 0.15) !important;
 }
 
-/* ─── Required Field Indicator ─── */
+/* Required Field Indicator */
 .sgroup label::after {
   content: none;
 }
 
-/* ─── Form Error Summary ─── */
+/* Form Error Summary */
 .form-errors {
   padding: 8px 12px;
   border-radius: 6px;
@@ -1274,7 +1323,7 @@ input:focus {
   margin: 2px 0;
 }
 
-/* ─── Skeleton Loader Animation ─── */
+/* Skeleton Loader Animation */
 @keyframes shimmer {
   0% {
     background-position: -1000px 0;
@@ -1306,7 +1355,7 @@ input:focus {
   margin-bottom: 8px;
 }
 
-/* ─── Table Loading State ─── */
+/* Table Loading State */
 .table-loading {
   text-align: center;
   color: var(--text3);
@@ -1314,7 +1363,7 @@ input:focus {
   font-style: italic;
 }
 
-/* ─── Offline Indicator ─── */
+/* Offline Indicator */
 .offline-banner {
   position: fixed;
   bottom: 20px;
@@ -1343,14 +1392,14 @@ input:focus {
   animation: pulse 1.5s ease-in-out infinite;
 }
 
-/* ─── Spinner Animation ─── */
+/* Spinner Animation */
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
 
-/* ─── Pulse Animation ─── */
+/* Pulse Animation */
 @keyframes pulse {
   0%,
   100% {
@@ -1361,7 +1410,7 @@ input:focus {
   }
 }
 
-/* ─── Slide Up Animation ─── */
+/* Slide Up Animation */
 @keyframes slideUp {
   from {
     transform: translateY(20px);
@@ -1373,7 +1422,7 @@ input:focus {
   }
 }
 
-/* ─── Enhanced Focus Indicators for Accessibility ─── */
+/* Enhanced Focus Indicators for Accessibility */
 .btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1387,7 +1436,7 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
-/* ─── Toast Error State ─── */
+/* Toast Error State */
 .toast.error {
   border-left: 3px solid var(--red);
 }
@@ -1400,13 +1449,13 @@ textarea:focus-visible {
   border-left: 3px solid var(--orange);
 }
 
-/* ─── Accessibility: Enhanced Color Contrast ─── */
+/* Accessibility: Enhanced Color Contrast */
 .label-required {
   color: var(--red);
   font-weight: 700;
 }
 
-/* ─── Form Helper Text & Labels ─── */
+/* Form Helper Text & Labels */
 small {
   display: block;
   font-size: 9px;
@@ -1424,8 +1473,9 @@ label[data-required]::after {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 10px;
-  border-radius: 20px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
   font-size: 10px;
   font-weight: 500;
 }
@@ -1480,7 +1530,7 @@ label[data-required]::after {
   grid-template-columns: repeat(4, minmax(320px, 1fr));
   grid-auto-rows: auto;
   gap: 12px;
-  padding: 14px;
+  padding: 0;
   overflow: auto;
   align-content: start;
 }
@@ -2323,8 +2373,13 @@ label[data-required]::after {
   gap: 10px;
   padding: 10px 12px;
   border-radius: 10px;
-  border: 1px solid var(--border);
-  background: linear-gradient(160deg, #2a121a 0%, #1b0c12 100%);
+  border: 1px solid var(--border2);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .bulk-control-title {
@@ -2384,7 +2439,7 @@ label[data-required]::after {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  padding: 12px;
+  padding: 0;
   overflow: auto;
 }
 
@@ -2879,6 +2934,11 @@ label[data-required]::after {
   justify-content: center;
 }
 
+.exp-icon .mdi {
+  font-size: 26px;
+  line-height: 1;
+}
+
 .exp-icon-alarm {
   background: rgba(224, 53, 96, 0.1);
 }
@@ -2946,13 +3006,6 @@ label[data-required]::after {
   color: var(--red);
 }
 
-.settings-wrap {
-  flex: 1;
-  max-width: 860px;
-  padding: 16px;
-  overflow-y: auto;
-}
-
 .sgroup {
   margin-bottom: 10px;
   padding: 14px;
@@ -2968,6 +3021,14 @@ label[data-required]::after {
   color: var(--accent);
   letter-spacing: 0.8px;
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sgroup-title .icon-inline {
+  font-size: 14px;
+  line-height: 1;
 }
 
 .srow {
@@ -3084,6 +3145,8 @@ label[data-required]::after {
   color: var(--text3);
   letter-spacing: 0.6px;
   text-transform: uppercase;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .license-value {
@@ -3092,6 +3155,8 @@ label[data-required]::after {
   font-size: 11px;
   font-weight: 700;
   color: var(--text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .license-value.ok {
@@ -3328,13 +3393,13 @@ label[data-required]::after {
 }
 
 .guide-accordion summary::after {
-  content: "▾";
+  content: "\25BE";
   float: right;
   color: var(--text3);
 }
 
 .guide-accordion details[open] summary::after {
-  content: "▴";
+  content: "\25B4";
 }
 
 .guide-accordion ul {
@@ -3356,7 +3421,7 @@ label[data-required]::after {
   color: var(--accent);
 }
 
-/* ─── Guide author banner ────────────────────────────────────────────────── */
+/* Guide author banner */
 .guide-author-banner {
   text-align: center;
   padding: 14px 16px 10px;
@@ -3409,7 +3474,7 @@ label[data-required]::after {
   border-top: 1px solid var(--border2);
 }
 
-/* ─── About sidebar expanded styles ─────────────────────────────────────── */
+/* About sidebar expanded styles */
 .side-about-appname {
   font-size: 12px;
   font-weight: 800;
@@ -3473,20 +3538,20 @@ label[data-required]::after {
   overflow-wrap: anywhere;
 }
 
-/* ─── App footer ─────────────────────────────────────────────────────────── */
+/* App footer */
 .app-footer {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   z-index: 10;
-  min-height: var(--app-footer-h);
+  height: var(--app-footer-h);
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
   gap: 6px 10px;
-  padding: 8px 20px;
+  padding: 0 20px;
   border-top: 1px solid var(--border2);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%),
@@ -3494,6 +3559,7 @@ label[data-required]::after {
   font-size: 10px;
   color: var(--text3);
   flex-shrink: 0;
+  box-sizing: border-box;
   overflow: hidden;
 }
 
@@ -3552,16 +3618,17 @@ label[data-required]::after {
   }
 }
 
-/* ─── Cross-tab polish (non-inverter pages) ─────────────────────────────── */
+/* Cross-tab polish (non-inverter pages) */
 #page-analytics .page-toolbar,
 #page-alarms .page-toolbar,
 #page-energy .page-toolbar,
 #page-audit .page-toolbar,
 #page-report .page-toolbar {
-  min-height: 46px;
-  padding: 9px 14px;
-  background: linear-gradient(180deg, rgba(39, 14, 24, 0.93) 0%, rgba(28, 10, 17, 0.93) 100%);
-  border-bottom: 1px solid rgba(97, 47, 62, 0.8);
+  min-height: 54px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(160deg, rgba(39, 14, 24, 0.93) 0%, rgba(28, 10, 17, 0.93) 100%);
+  border-color: rgba(97, 47, 62, 0.82);
 }
 
 #page-analytics .tl-left label,
@@ -3621,7 +3688,6 @@ label[data-required]::after {
 }
 
 #page-analytics .chart-grid {
-  padding: 12px;
   gap: 12px;
 }
 
@@ -3641,7 +3707,7 @@ label[data-required]::after {
 #page-energy .table-wrap,
 #page-audit .table-wrap,
 #page-report .table-wrap {
-  margin: 10px 12px 12px;
+  margin: 0;
   border-radius: 12px;
   border: 1px solid rgba(96, 46, 61, 0.8);
   background: linear-gradient(160deg, rgba(34, 14, 22, 0.96) 0%, rgba(24, 10, 16, 0.96) 100%);
@@ -3649,7 +3715,7 @@ label[data-required]::after {
 }
 
 #page-energy .energy-summary {
-  margin: 10px 12px 0;
+  margin: 0;
   padding: 10px;
   border-radius: 12px;
   border: 1px solid rgba(96, 46, 61, 0.8);
@@ -3820,7 +3886,7 @@ label[data-required]::after {
 }
 
 #page-export .export-grid {
-  padding: 14px;
+  padding: 0;
   gap: 14px;
 }
 
@@ -3867,139 +3933,6 @@ label[data-required]::after {
   font-size: 10px;
 }
 
-#page-settings .settings-wrap {
-  max-width: none;
-  padding: 12px 14px 18px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  align-content: start;
-  align-items: start;
-}
-
-#page-settings .sgroup {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border-color: var(--border);
-  box-shadow:
-    0 1px 8px rgba(0, 0, 0, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-#page-settings .settings-wrap > .sgroup {
-  grid-column: span 1;
-  height: 420px;
-  min-height: 420px;
-  max-height: 420px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border2) transparent;
-}
-
-#page-settings #plantConfigSection .srow,
-#page-settings #opsCompactSection .srow {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-  align-items: start;
-}
-
-#page-settings #plantConfigSection .srow > label,
-#page-settings #opsCompactSection .srow > label {
-  grid-column: 1;
-  min-width: 0;
-}
-
-#page-settings #plantConfigSection .srow > small,
-#page-settings #opsCompactSection .srow > small {
-  grid-column: 1;
-  margin: 0;
-  align-self: start;
-  overflow-wrap: anywhere;
-}
-
-#page-settings #plantConfigSection .srow .inp,
-#page-settings #opsCompactSection .srow .inp {
-  min-height: 31px;
-}
-
-#page-settings #opsCompactSection .settings-subsection,
-#page-settings #connectivitySection .settings-subsection {
-  padding: 4px 0 2px;
-  border-top: 1px solid rgba(101, 72, 86, 0.42);
-}
-
-#page-settings #opsCompactSection .settings-subsection:first-of-type,
-#page-settings #connectivitySection .settings-subsection:first-of-type {
-  border-top: none;
-  padding-top: 0;
-}
-
-#page-settings #opsCompactSection .settings-subtitle,
-#page-settings #connectivitySection .settings-subtitle {
-  margin: 0 0 8px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.75px;
-  text-transform: uppercase;
-  color: var(--text3);
-}
-
-#page-settings #cloudBackupSection {
-  grid-column: span 2;
-}
-
-#page-settings .settings-wrap > .sgroup > .sgroup-title {
-  position: sticky;
-  top: -12px;
-  z-index: 2;
-  margin: -12px -14px 8px;
-  padding: 10px 14px 8px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface2) 100%);
-}
-
-#page-settings #settingsGlobalActions {
-  grid-column: 1 / -1;
-}
-
-#page-settings .srow {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 10px 12px;
-  align-items: flex-start;
-}
-
-#page-settings .srow label {
-  grid-column: span 6;
-  min-width: 0;
-}
-
-#page-settings .srow > small {
-  grid-column: span 6;
-  margin-top: -6px;
-  margin-bottom: 2px;
-  font-size: 10px;
-  color: var(--text3);
-  line-height: 1.3;
-}
-
-#page-settings #opsCompactSection .srow > label {
-  grid-column: span 12;
-}
-
-#page-settings .srow .inp,
-#page-settings .srow .sel {
-  width: 100%;
-  min-height: 33px;
-}
-
 #page-settings .srow label.chk-inline {
   grid-column: 1 / -1;
   display: flex;
@@ -4036,16 +3969,6 @@ label[data-required]::after {
   row-gap: 8px;
 }
 
-/* Standalone save/action bar (direct child of grid) */
-#page-settings .settings-wrap > .sgroup-actions {
-  padding: 10px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--border2);
-  background: var(--surface2);
-  gap: 8px;
-  row-gap: 8px;
-}
-
 #page-settings .sgroup-actions .smsg {
   flex: 1 1 260px;
   min-height: 20px;
@@ -4060,60 +3983,6 @@ label[data-required]::after {
 
 #page-settings .rep-health-errors {
   min-height: 52px;
-}
-
-@media (max-width: 1400px) {
-  #page-settings .settings-wrap {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  #page-settings .rep-health-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 1100px) {
-  #page-settings .settings-wrap {
-    grid-template-columns: 1fr;
-  }
-
-  #page-settings .settings-wrap > .sgroup,
-  #page-settings #settingsGlobalActions {
-    grid-column: 1;
-    height: auto;
-    min-height: 0;
-    max-height: none;
-  }
-
-  #page-settings #cloudBackupSection {
-    grid-column: 1;
-  }
-
-  #page-settings .settings-wrap > .sgroup > .sgroup-title {
-    position: static;
-    top: auto;
-    margin: 0 0 10px;
-    padding: 0;
-    border-bottom: none;
-    background: transparent;
-  }
-
-  #page-settings .srow {
-    grid-template-columns: 1fr;
-  }
-
-  #page-settings .srow > label,
-  #page-settings .srow > small,
-  #page-settings #opsCompactSection .srow > label {
-    grid-column: 1;
-  }
-
-  #page-alarms .table-wrap,
-  #page-energy .table-wrap,
-  #page-audit .table-wrap,
-  #page-report .table-wrap {
-    margin: 8px 10px 10px;
-  }
 }
 
 .alarm-toast {
@@ -4245,10 +4114,15 @@ label[data-required]::after {
   }
 }
 
-.notif-bell span {
+.notif-bell #notifCount {
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
+}
+
+.notif-bell > .mdi {
+  font-size: 16px;
+  line-height: 1;
 }
 
 .notif-bell.hidden {
@@ -4467,7 +4341,7 @@ label[data-required]::after {
   font-family: var(--font-mono);
 }
 
-/* ─── Light Theme (muted) ─────────────────────────────────────────────────── */
+/* Light Theme (muted) */
 :root[data-theme="light"] body::before {
   background-image:
     linear-gradient(rgba(126, 106, 78, 0.14) 1px, transparent 1px),
@@ -4742,7 +4616,7 @@ label[data-required]::after {
 :root[data-theme="light"] #page-audit .page-toolbar,
 :root[data-theme="light"] #page-report .page-toolbar {
   background: linear-gradient(180deg, rgba(228, 217, 199, 0.96) 0%, rgba(218, 204, 182, 0.96) 100%);
-  border-bottom-color: #b49f82;
+  border-color: #b49f82;
 }
 
 :root[data-theme="light"] #analyticsSummary .toolbar-info {
@@ -5078,6 +4952,10 @@ label[data-required]::after {
   color: #dce8fa;
 }
 
+:root[data-theme="classic"] #btnAlarmSound:not(.muted) {
+  box-shadow: 0 0 0 1.5px rgba(92, 140, 220, 0.6);
+}
+
 :root[data-theme="classic"] .tb-nav-toggle:hover,
 :root[data-theme="classic"] .tb-theme-toggle:hover {
   border-color: rgba(92, 130, 198, 0.95);
@@ -5255,7 +5133,7 @@ label[data-required]::after {
 :root[data-theme="classic"] #page-audit .page-toolbar,
 :root[data-theme="classic"] #page-report .page-toolbar {
   background: linear-gradient(180deg, rgba(14, 27, 47, 0.93) 0%, rgba(9, 17, 31, 0.93) 100%);
-  border-bottom-color: rgba(45, 68, 104, 0.8);
+  border-color: rgba(45, 68, 104, 0.8);
 }
 
 :root[data-theme="classic"] #analyticsSummary .toolbar-info {
@@ -5585,7 +5463,7 @@ label[data-required]::after {
   }
 }
 
-/* ── Cloud Backup Panel ────────────────────────────────────────────────────── */
+/* Cloud Backup Panel */
 .cb-subsection {
   margin: 14px 0 0;
   padding: 12px 0 0;
@@ -5625,8 +5503,12 @@ label[data-required]::after {
 }
 
 .cb-provider-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 18px;
   line-height: 1;
+  color: var(--accent);
 }
 
 .cb-conn-badge {
@@ -5651,6 +5533,13 @@ label[data-required]::after {
 
 .cb-provider-help {
   margin-bottom: 4px;
+}
+
+.field-note {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text2);
 }
 
 .cb-setup-link {
@@ -5693,6 +5582,8 @@ label[data-required]::after {
 
 .cb-progress-icon {
   font-size: 15px;
+  line-height: 1;
+  color: var(--accent);
 }
 
 .cb-progress-label {
@@ -5749,140 +5640,7 @@ label[data-required]::after {
   border-radius: 5px;
 }
 
-/* ── Settings Rehab: focused section flow ───────────────────────────────────── */
-#page-settings .settings-wrap {
-  width: min(1240px, 100%);
-  margin: 0 auto;
-  max-width: none;
-  padding: 12px 14px 18px;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-  overflow-y: auto;
-}
-
-#page-settings .settings-nav-bar {
-  position: sticky;
-  top: 0;
-  z-index: 7;
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) 1fr;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border2);
-  background: linear-gradient(160deg, var(--surface2) 0%, var(--surface) 100%);
-  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18);
-}
-
-#page-settings .settings-picker-label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 10px;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
-  color: var(--text3);
-}
-
-#page-settings .settings-picker-label .sel {
-  min-height: 34px;
-}
-
-#page-settings .settings-menu {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-#page-settings .settings-menu-btn {
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text2);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.45px;
-  cursor: pointer;
-}
-
-#page-settings .settings-menu-btn:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-
-#page-settings .settings-menu-btn.active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(216, 106, 139, 0.14);
-}
-
-#page-settings #settingsGlobalActions {
-  position: sticky;
-  top: 74px;
-  z-index: 6;
-  margin: 0;
-  padding: 10px 12px;
-}
-
-#page-settings .settings-wrap > .sgroup.settings-card {
-  display: none;
-  margin: 0;
-  padding: 14px 16px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--border2);
-  background: linear-gradient(160deg, var(--surface) 0%, var(--surface2) 100%);
-  box-shadow:
-    0 1px 8px rgba(0, 0, 0, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  height: auto;
-  min-height: 0;
-  max-height: none;
-  overflow: visible;
-}
-
-#page-settings .settings-wrap > .sgroup.settings-card.settings-section-active {
-  display: flex;
-  width: 100%;
-}
-
-#page-settings .settings-wrap > .sgroup > .sgroup-title {
-  position: static;
-  top: auto;
-  margin: 0 0 10px;
-  padding: 0;
-  border-bottom: none;
-  background: transparent;
-}
-
-#page-settings #cloudBackupSection {
-  grid-column: auto;
-}
-
-@media (max-width: 1200px) {
-  #page-settings .settings-nav-bar {
-    grid-template-columns: 1fr;
-  }
-
-  #page-settings #settingsGlobalActions {
-    top: 126px;
-  }
-}
-
-@media (max-width: 760px) {
-  #page-settings .settings-menu {
-    display: none;
-  }
-
-  #page-settings #settingsGlobalActions {
-    position: static;
-    top: auto;
-  }
-}
+/* Settings Rehab: focused section flow */
 
 /* Settings rehab: replace duplicated top bars with one sidebar workspace. */
 #page-settings {
@@ -5894,8 +5652,9 @@ label[data-required]::after {
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   gap: 16px;
   width: 100%;
-  height: 100%;
-  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
   overflow: hidden;
 }
 
@@ -5951,6 +5710,21 @@ label[data-required]::after {
   font-size: 12px;
   line-height: 1.55;
   color: var(--text2);
+}
+
+#page-settings .settings-current-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.015) 100%);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
 }
 
 #page-settings .settings-menu {
@@ -6096,6 +5870,9 @@ label[data-required]::after {
 }
 
 #page-settings .settings-main-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   padding: 16px 18px;
   border: 1px solid var(--border2);
   border-radius: 16px;
@@ -6130,10 +5907,14 @@ label[data-required]::after {
 }
 
 #page-settings .settings-sections > .sgroup.settings-card.settings-section-active {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  align-content: start;
 }
 
 #page-settings .settings-sections > .sgroup.settings-card > .sgroup-title {
+  grid-column: 1 / -1;
   position: static;
   margin: 0;
   padding: 0;
@@ -6145,10 +5926,12 @@ label[data-required]::after {
 }
 
 #page-settings .settings-section-copy {
+  grid-column: 1 / -1;
   margin: 2px 0 10px;
   font-size: 12px;
   line-height: 1.55;
   color: var(--text2);
+  max-width: 72ch;
 }
 
 #page-settings .settings-card .settings-subsection,
@@ -6174,6 +5957,15 @@ label[data-required]::after {
   letter-spacing: 0.8px;
   text-transform: uppercase;
   color: var(--text3);
+}
+
+#page-settings .settings-sections > .sgroup.settings-card > .sinfo,
+#page-settings .settings-sections > .sgroup.settings-card > .sgroup-actions,
+#page-settings .settings-sections > .sgroup.settings-card > .license-grid,
+#page-settings .settings-sections > .sgroup.settings-card > .license-audit-wrap,
+#page-settings .settings-sections > .sgroup.settings-card > .cb-progress-wrap,
+#page-settings .settings-sections > .sgroup.settings-card > #cbCloudListSection {
+  grid-column: 1 / -1;
 }
 
 #page-settings .settings-sections .srow {
@@ -6221,12 +6013,154 @@ label[data-required]::after {
 }
 
 #page-settings .settings-sections .rep-health-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+}
+
+#page-settings #plantConfigSection .srow {
+  grid-column: span 6;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.015) 100%);
+}
+
+#page-settings #plantConfigSection .srow label,
+#page-settings #plantConfigSection .srow > small {
+  grid-column: 1;
+}
+
+#page-settings #plantConfigSection .srow > small {
+  margin: 0;
+}
+
+/* nth-of-type counts all div siblings; .sgroup-title is div[1], subsections start at div[2] */
+#page-settings #opsCompactSection .settings-subsection:nth-of-type(2) {
+  grid-column: span 5; /* Data Endpoints — wider for URL inputs */
+}
+
+#page-settings #opsCompactSection .settings-subsection:nth-of-type(3) {
+  grid-column: span 4; /* Storage */
+}
+
+#page-settings #opsCompactSection .settings-subsection:nth-of-type(4) {
+  grid-column: span 3; /* Polling Timing — small number inputs */
+}
+
+#page-settings #opsCompactSection .settings-subsection .srow,
+#page-settings #connectivitySection .settings-subsection .srow,
+#page-settings #cloudBackupSection .cb-subsection .srow {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+#page-settings #opsCompactSection .settings-subsection .srow label,
+#page-settings #connectivitySection .settings-subsection .srow label,
+#page-settings #cloudBackupSection .cb-subsection .srow label {
+  grid-column: span 6;
+}
+
+/* Mode & Remote Access: full width so 4 form fields can sit 2-per-row */
+#page-settings #connectivitySection .settings-subsection:nth-of-type(2) {
+  grid-column: 1 / -1;
+}
+
+/* 2 form fields per row inside the full-width Mode & Remote Access subsection */
+#page-settings #connectivitySection .settings-subsection:nth-of-type(2) .srow label:not(.chk-inline) {
+  grid-column: span 3;
+}
+
+/* Replication Health: ~58% width */
+#page-settings #connectivitySection .settings-subsection:nth-of-type(3) {
+  grid-column: span 7;
+}
+
+/* Runtime Diagnostics: ~42% width */
+#page-settings #connectivitySection .settings-subsection:nth-of-type(4) {
+  grid-column: span 5;
+}
+
+#page-settings #licenseSection .license-grid,
+#page-settings #appUpdateSection .license-grid,
+#page-settings #licenseSection .license-audit-wrap,
+#page-settings #appUpdateSection .sinfo,
+#page-settings #appUpdateSection .sgroup-actions {
+  grid-column: 1 / -1;
+}
+
+/* Forecast Provider subsection (~33% width) */
+#page-settings #forecastSection .settings-subsection:nth-of-type(2) {
+  grid-column: span 4;
+}
+
+/* Forecast Solcast Configuration subsection (~67% width) */
+#page-settings #forecastSection .settings-subsection:nth-of-type(3) {
+  grid-column: span 8;
+}
+
+/* Provider subsection: single select fills full width of its panel */
+#page-settings #forecastSection .settings-subsection:nth-of-type(2) .srow label {
+  grid-column: 1 / -1;
+}
+
+/* Solcast subsection: 2 fields per row */
+#page-settings #forecastSection .settings-subsection:nth-of-type(3) .srow label {
+  grid-column: span 6;
+}
+
+/* Provider Setup: ~58% width */
+#page-settings #cloudBackupSection .cb-subsection:nth-of-type(2) {
+  grid-column: span 7;
+}
+
+/* Backup Configuration: ~42% width, sits next to Provider Setup */
+#page-settings #cloudBackupSection .cb-subsection:nth-of-type(3) {
+  grid-column: span 5;
+}
+
+/* cb-subsection:nth-of-type(6) = Backup History Table (after .cb-progress-wrap + .sgroup-actions divs) */
+#page-settings #cloudBackupSection .cb-progress-wrap,
+#page-settings #cloudBackupSection > .sgroup-actions,
+#page-settings #cloudBackupSection .cb-subsection:nth-of-type(6),
+#page-settings #cloudBackupSection #cbCloudListSection {
+  grid-column: 1 / -1;
+}
+
+#page-settings #cloudBackupSection .cb-provider-fields label {
+  grid-column: span 6;
+}
+
+#page-settings #cloudBackupSection .cb-restore-date-row {
+  flex-wrap: wrap;
 }
 
 @media (max-width: 1280px) {
   #page-settings .settings-shell {
     grid-template-columns: 280px minmax(0, 1fr);
+  }
+
+  /* Data Endpoints + Storage side-by-side; Polling Timing full-width below */
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(2),
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(3) {
+    grid-column: span 6;
+  }
+
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(4) {
+    grid-column: 1 / -1;
+  }
+
+  /* Connectivity: Mode & Remote stays full-width; health+diag stay 7/5 — no override needed */
+
+  /* Cloud Backup: Provider Setup + Backup Config side-by-side */
+  #page-settings #cloudBackupSection .cb-subsection:nth-of-type(2),
+  #page-settings #cloudBackupSection .cb-subsection:nth-of-type(3) {
+    grid-column: span 6;
+  }
+
+  /* Forecast: both subsections side-by-side */
+  #page-settings #forecastSection .settings-subsection:nth-of-type(2),
+  #page-settings #forecastSection .settings-subsection:nth-of-type(3) {
+    grid-column: span 6;
   }
 
   #page-settings .settings-sections .license-grid,
@@ -6292,5 +6226,23 @@ label[data-required]::after {
   #page-settings .settings-sections .license-grid,
   #page-settings .settings-sections .rep-health-grid {
     grid-template-columns: 1fr;
+  }
+
+  #page-settings #plantConfigSection .srow,
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(2),
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(3),
+  #page-settings #opsCompactSection .settings-subsection:nth-of-type(4),
+  #page-settings #connectivitySection .settings-subsection:nth-of-type(3),
+  #page-settings #connectivitySection .settings-subsection:nth-of-type(4),
+  #page-settings #cloudBackupSection .cb-subsection:nth-of-type(2),
+  #page-settings #cloudBackupSection .cb-subsection:nth-of-type(3),
+  #page-settings #forecastSection .settings-subsection:nth-of-type(2),
+  #page-settings #forecastSection .settings-subsection:nth-of-type(3) {
+    grid-column: 1 / -1;
+  }
+
+  /* Mode & Remote Access labels back to full-width at narrow screens */
+  #page-settings #connectivitySection .settings-subsection:nth-of-type(2) .srow label:not(.chk-inline) {
+    grid-column: span 6;
   }
 }

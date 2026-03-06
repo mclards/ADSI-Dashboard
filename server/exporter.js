@@ -7,7 +7,15 @@
 const fs   = require('fs');
 const path = require('path');
 const ExcelJS = require('exceljs');
-const { db, stmts, getSetting } = require('./db');
+const {
+  db,
+  stmts,
+  getSetting,
+  queryReadingsRangeAll,
+  queryReadingsRange,
+  queryEnergy5minRange,
+  queryEnergy5minRangeAll,
+} = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
 const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || '').trim();
@@ -582,54 +590,42 @@ async function exportEnergy({ startTs, endTs, inverter, format }) {
   const s = startTs || Date.now() - 86400000;
   const e = endTs   || Date.now();
   const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
-  const params = invNum ? [s, e, invNum] : [s, e];
+  const rawRows = invNum ? queryReadingsRange(invNum, s, e) : queryReadingsRangeAll(s, e);
+  const rowsByKey = new Map();
+  for (const row of rawRows) {
+    const inv = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    const ts = Number(row?.ts || 0);
+    if (!(inv > 0) || !(unit > 0) || !(ts > 0)) continue;
+    const day = fmtDate(ts);
+    const key = `${day}|${inv}|${unit}`;
+    if (!rowsByKey.has(key)) rowsByKey.set(key, []);
+    rowsByKey.get(key).push(row);
+  }
 
-  // Register kWh per (day, inverter, unit) — LAG-based consecutive positive deltas.
-  const regSql = `
-    WITH ordered AS (
-      SELECT
-        date(ts/1000, 'unixepoch', 'localtime') AS day,
-        inverter, unit,
-        kwh - LAG(kwh) OVER (PARTITION BY inverter, unit ORDER BY ts) AS kwh_delta
-      FROM readings
-      WHERE ts BETWEEN ? AND ?
-      ${invNum ? 'AND inverter = ?' : ''}
-    )
-    SELECT day, inverter, unit,
-      SUM(CASE WHEN kwh_delta > 0 THEN kwh_delta ELSE 0 END) AS reg_kwh
-    FROM ordered
-    GROUP BY day, inverter, unit
-    ORDER BY day, inverter, unit
-  `;
-
-  // Computed kWh per (day, inverter, unit) — PAC trapezoidal integration.
-  // (pac[i] + pac[i-1]) / 2 * dt_ms / 3 600 000 000  →  kWh
-  const compSql = `
-    WITH ordered AS (
-      SELECT
-        date(ts/1000, 'unixepoch', 'localtime') AS day,
-        inverter, unit, ts, pac,
-        LAG(ts)  OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_ts,
-        LAG(pac) OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_pac
-      FROM readings
-      WHERE ts BETWEEN ? AND ?
-      ${invNum ? 'AND inverter = ?' : ''}
-    )
-    SELECT day, inverter, unit,
-      SUM(
-        CASE
-          WHEN prev_ts IS NOT NULL AND (ts - prev_ts) <= 30000
-          THEN ((pac + prev_pac) / 2.0) * (ts - prev_ts) / 3600000000.0
-          ELSE 0
-        END
-      ) AS computed_kwh
-    FROM ordered
-    GROUP BY day, inverter, unit
-    ORDER BY day, inverter, unit
-  `;
-
-  const regRows  = db.prepare(regSql).all(...params);
-  const compRows = db.prepare(compSql).all(...params);
+  const regRows = [];
+  const compRows = [];
+  for (const [key, rows] of rowsByKey.entries()) {
+    const [day, invStr, unitStr] = key.split('|');
+    const inv = Number(invStr);
+    const unit = Number(unitStr);
+    const sorted = rows.slice().sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
+    let regKwh = 0;
+    let compKwh = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      const delta = Number(cur?.kwh || 0) - Number(prev?.kwh || 0);
+      if (Number.isFinite(delta) && delta > 0) regKwh += delta;
+      const dtMs = Number(cur?.ts || 0) - Number(prev?.ts || 0);
+      if (dtMs > 0 && dtMs <= 30000) {
+        const avgPac = (Number(cur?.pac || 0) + Number(prev?.pac || 0)) / 2;
+        compKwh += (avgPac * dtMs) / 3600000000.0;
+      }
+    }
+    regRows.push({ day, inverter: inv, unit, reg_kwh: regKwh });
+    compRows.push({ day, inverter: inv, unit, computed_kwh: compKwh });
+  }
 
   // Both maps keyed by `${day}|${inv}|${unit}`
   const regMap  = new Map(regRows.map( r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.reg_kwh)]));
@@ -728,7 +724,7 @@ async function exportInverterData({ startTs, endTs, inverter, format }) {
 
   const rowsOut = [];
   for (const inv of invList) {
-    for (const r of stmts.getReadingsRange.all(inv, s, e)) {
+    for (const r of queryReadingsRange(inv, s, e)) {
       rowsOut.push({
         Date: fmtDate(r.ts),
         Time: fmtTime(r.ts),
@@ -798,8 +794,8 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const e = endTs   || Date.now();
   const spec = normalizeEnergyResolution(resolution);
   const rows = !inverter || inverter === 'all'
-    ? stmts.get5minRangeAll.all(s, e)
-    : stmts.get5minRange.all(Number(inverter), s, e);
+    ? queryEnergy5minRangeAll(s, e)
+    : queryEnergy5minRange(Number(inverter), s, e);
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
   // For "all inverters" daily-mode export, zero-fill inverters that had no data.
@@ -988,7 +984,7 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   const e = endTs || Date.now();
   const spec = normalizeEnergyResolution(resolution);
 
-  const actualRaw = stmts.get5minRangeAll.all(s, e).map((r) => ({
+  const actualRaw = queryEnergy5minRangeAll(s, e).map((r) => ({
     ts: Number(r?.ts || 0),
     kwh_inc: Number(r?.kwh_inc || 0),
   }));

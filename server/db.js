@@ -25,11 +25,49 @@ function resolveDataDir() {
   }
   return path.join(os.homedir(), ".inverter-dashboard");
 }
+
+function pad2(n) {
+  return String(Math.trunc(Number(n) || 0)).padStart(2, "0");
+}
+
+function localDateStr(ts = Date.now()) {
+  const d = new Date(Number(ts || Date.now()));
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function monthKeyFromTs(ts) {
+  const d = new Date(Number(ts || 0));
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+}
+
+function iterateMonthKeys(startTs, endTs) {
+  const start = new Date(Number(startTs || 0));
+  const end = new Date(Number(endTs || 0));
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return [];
+  if (start.getTime() > end.getTime()) return [];
+  const cur = new Date(start.getFullYear(), start.getMonth(), 1);
+  const stop = new Date(end.getFullYear(), end.getMonth(), 1);
+  const out = [];
+  while (cur.getTime() <= stop.getTime()) {
+    out.push(`${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}`);
+    cur.setMonth(cur.getMonth() + 1);
+  }
+  return out;
+}
 const DATA_DIR = resolveDataDir();
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, "adsi.db");
+const ARCHIVE_DIR = path.join(DATA_DIR, "archive");
+const SUMMARY_SOLAR_START_H = 5;
+const SUMMARY_SOLAR_END_H = 18;
+const SUMMARY_MAX_GAP_S = 120;
+const ARCHIVE_BATCH_SIZE = 5000;
+const ARCHIVE_DB_CACHE = new Map();
+
+fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
@@ -107,8 +145,34 @@ db.exec(`
     pac_avg   REAL DEFAULT 0,
     uptime_s  INTEGER DEFAULT 0,
     alarm_count INTEGER DEFAULT 0,
+    control_count INTEGER DEFAULT 0,
+    availability_pct REAL DEFAULT 0,
+    performance_pct REAL DEFAULT 0,
+    node_uptime_s INTEGER DEFAULT 0,
+    expected_node_uptime_s INTEGER DEFAULT 0,
+    expected_nodes INTEGER DEFAULT 4,
+    rated_kw REAL DEFAULT 0,
     updated_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
     UNIQUE(date, inverter)
+  );
+
+  CREATE TABLE IF NOT EXISTS daily_readings_summary (
+    date TEXT NOT NULL,
+    inverter INTEGER NOT NULL,
+    unit INTEGER NOT NULL,
+    sample_count INTEGER DEFAULT 0,
+    online_samples INTEGER DEFAULT 0,
+    pac_online_sum REAL DEFAULT 0,
+    pac_online_count INTEGER DEFAULT 0,
+    pac_peak REAL DEFAULT 0,
+    first_ts INTEGER DEFAULT 0,
+    last_ts INTEGER DEFAULT 0,
+    first_kwh REAL DEFAULT 0,
+    last_kwh REAL DEFAULT 0,
+    last_online INTEGER DEFAULT 0,
+    intervals_json TEXT DEFAULT '[]',
+    updated_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    PRIMARY KEY(date, inverter, unit)
   );
 
   CREATE TABLE IF NOT EXISTS settings (
@@ -145,10 +209,37 @@ ensureColumn("daily_report", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 
 ensureColumn("settings", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 // Migration: daily audit control-action count per inverter (added 2026-03).
 ensureColumn("daily_report", "control_count", "control_count INTEGER DEFAULT 0");
+ensureColumn("daily_report", "availability_pct", "availability_pct REAL DEFAULT 0");
+ensureColumn("daily_report", "performance_pct", "performance_pct REAL DEFAULT 0");
+ensureColumn("daily_report", "node_uptime_s", "node_uptime_s INTEGER DEFAULT 0");
+ensureColumn(
+  "daily_report",
+  "expected_node_uptime_s",
+  "expected_node_uptime_s INTEGER DEFAULT 0",
+);
+ensureColumn("daily_report", "expected_nodes", "expected_nodes INTEGER DEFAULT 4");
+ensureColumn("daily_report", "rated_kw", "rated_kw REAL DEFAULT 0");
+ensureColumn(
+  "daily_readings_summary",
+  "updated_ts",
+  "updated_ts INTEGER NOT NULL DEFAULT 0",
+);
+ensureColumn(
+  "daily_readings_summary",
+  "last_online",
+  "last_online INTEGER DEFAULT 0",
+);
+ensureColumn(
+  "daily_readings_summary",
+  "intervals_json",
+  "intervals_json TEXT DEFAULT '[]'",
+);
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_settings_updated_ts ON settings(updated_ts);
+  CREATE INDEX IF NOT EXISTS idx_summary_date_inv ON daily_readings_summary(date, inverter, unit);
+  CREATE INDEX IF NOT EXISTS idx_summary_updated_ts ON daily_readings_summary(updated_ts);
 `);
 
 const NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
@@ -169,7 +260,16 @@ db.exec(`
      SET updated_ts = CASE
        WHEN COALESCE(updated_ts, 0) > 0 THEN updated_ts
        ELSE ${NOW_MS_SQL}
-     END;
+      END;
+  UPDATE daily_readings_summary
+     SET updated_ts = CASE
+       WHEN COALESCE(updated_ts, 0) > 0 THEN updated_ts
+       ELSE ${NOW_MS_SQL}
+     END,
+         intervals_json = CASE
+           WHEN TRIM(COALESCE(intervals_json, '')) <> '' THEN intervals_json
+           ELSE '[]'
+         END;
 `);
 
 db.exec(`
@@ -195,6 +295,16 @@ db.exec(`
   WHEN NEW.updated_ts = OLD.updated_ts
   BEGIN
     UPDATE daily_report SET updated_ts = ${NOW_MS_SQL} WHERE id = NEW.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_summary_touch_updated_ts
+  AFTER UPDATE ON daily_readings_summary
+  FOR EACH ROW
+  WHEN NEW.updated_ts = OLD.updated_ts
+  BEGIN
+    UPDATE daily_readings_summary
+       SET updated_ts = ${NOW_MS_SQL}
+     WHERE date = NEW.date AND inverter = NEW.inverter AND unit = NEW.unit;
   END;
 `);
 
@@ -232,15 +342,34 @@ const stmts = {
   getReadingsRange: db.prepare(
     `SELECT * FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
   ),
+  getReadingsRangeAll: db.prepare(
+    `SELECT * FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
+  ),
   get5minRange: db.prepare(
     `SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
   ),
   get5minRangeAll: db.prepare(
     `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter, ts ASC`,
   ),
+  sumEnergy5minRange: db.prepare(
+    `SELECT inverter, SUM(kwh_inc) AS total_kwh
+       FROM energy_5min
+      WHERE ts BETWEEN ? AND ?
+      GROUP BY inverter
+      ORDER BY inverter ASC`,
+  ),
+  sumEnergy5minRangeByInv: db.prepare(
+    `SELECT inverter, SUM(kwh_inc) AS total_kwh
+       FROM energy_5min
+      WHERE inverter=? AND ts BETWEEN ? AND ?
+      GROUP BY inverter`,
+  ),
   upsertDailyReport: db.prepare(`
-    INSERT INTO daily_report(date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,control_count,updated_ts)
-    VALUES(?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    INSERT INTO daily_report(
+      date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,control_count,
+      availability_pct,performance_pct,node_uptime_s,expected_node_uptime_s,expected_nodes,rated_kw,updated_ts
+    )
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     ON CONFLICT(date,inverter) DO UPDATE SET
       kwh_total=excluded.kwh_total,
       pac_peak=excluded.pac_peak,
@@ -248,6 +377,12 @@ const stmts = {
       uptime_s=excluded.uptime_s,
       alarm_count=excluded.alarm_count,
       control_count=excluded.control_count,
+      availability_pct=excluded.availability_pct,
+      performance_pct=excluded.performance_pct,
+      node_uptime_s=excluded.node_uptime_s,
+      expected_node_uptime_s=excluded.expected_node_uptime_s,
+      expected_nodes=excluded.expected_nodes,
+      rated_kw=excluded.rated_kw,
       updated_ts=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   `),
   getDailyReport: db.prepare(
@@ -256,6 +391,38 @@ const stmts = {
   getDailyReportRange: db.prepare(
     `SELECT * FROM daily_report WHERE date BETWEEN ? AND ? ORDER BY date, inverter`,
   ),
+  getDailyReadingsSummaryOne: db.prepare(
+    `SELECT * FROM daily_readings_summary WHERE date=? AND inverter=? AND unit=?`,
+  ),
+  getDailyReadingsSummaryDay: db.prepare(
+    `SELECT * FROM daily_readings_summary WHERE date=? ORDER BY inverter ASC, unit ASC`,
+  ),
+  deleteDailyReadingsSummaryDay: db.prepare(
+    `DELETE FROM daily_readings_summary WHERE date=?`,
+  ),
+  upsertDailyReadingsSummary: db.prepare(`
+    INSERT INTO daily_readings_summary(
+      date,inverter,unit,sample_count,online_samples,pac_online_sum,pac_online_count,pac_peak,
+      first_ts,last_ts,first_kwh,last_kwh,last_online,intervals_json,updated_ts
+    )
+    VALUES(
+      @date,@inverter,@unit,@sample_count,@online_samples,@pac_online_sum,@pac_online_count,@pac_peak,
+      @first_ts,@last_ts,@first_kwh,@last_kwh,@last_online,@intervals_json,@updated_ts
+    )
+    ON CONFLICT(date,inverter,unit) DO UPDATE SET
+      sample_count=excluded.sample_count,
+      online_samples=excluded.online_samples,
+      pac_online_sum=excluded.pac_online_sum,
+      pac_online_count=excluded.pac_online_count,
+      pac_peak=excluded.pac_peak,
+      first_ts=excluded.first_ts,
+      last_ts=excluded.last_ts,
+      first_kwh=excluded.first_kwh,
+      last_kwh=excluded.last_kwh,
+      last_online=excluded.last_online,
+      intervals_json=excluded.intervals_json,
+      updated_ts=excluded.updated_ts
+  `),
   upsertForecastDayAhead: db.prepare(`
     INSERT INTO forecast_dayahead(date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
     VALUES (@date, @ts, @slot, @time_hms, @kwh_inc, @kwh_lo, @kwh_hi, @source, @updated_ts)
@@ -320,20 +487,503 @@ function getSetting(key, def = null) {
 function setSetting(key, value) {
   stmts.setSetting.run(key, String(value), Date.now());
 }
+
+function ensureArchiveSchema(archiveDb) {
+  archiveDb.pragma("journal_mode = WAL");
+  archiveDb.pragma("synchronous = NORMAL");
+  archiveDb.pragma("temp_store = memory");
+  archiveDb.exec(`
+    CREATE TABLE IF NOT EXISTS readings (
+      id        INTEGER PRIMARY KEY,
+      ts        INTEGER NOT NULL,
+      inverter  INTEGER NOT NULL,
+      unit      INTEGER NOT NULL,
+      vdc       REAL DEFAULT 0,
+      idc       REAL DEFAULT 0,
+      vac1      REAL DEFAULT 0,
+      vac2      REAL DEFAULT 0,
+      vac3      REAL DEFAULT 0,
+      iac1      REAL DEFAULT 0,
+      iac2      REAL DEFAULT 0,
+      iac3      REAL DEFAULT 0,
+      pac       REAL DEFAULT 0,
+      kwh       REAL DEFAULT 0,
+      alarm     INTEGER DEFAULT 0,
+      online    INTEGER DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_ar_ts ON readings(ts);
+    CREATE INDEX IF NOT EXISTS idx_ar_inv_ts ON readings(inverter, unit, ts);
+
+    CREATE TABLE IF NOT EXISTS energy_5min (
+      id        INTEGER PRIMARY KEY,
+      ts        INTEGER NOT NULL,
+      inverter  INTEGER NOT NULL,
+      kwh_inc   REAL NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ae5_ts ON energy_5min(ts);
+    CREATE INDEX IF NOT EXISTS idx_ae5_inv_ts ON energy_5min(inverter, ts);
+  `);
+}
+
+function createArchiveEntry(filePath) {
+  const archiveDb = new Database(filePath);
+  ensureArchiveSchema(archiveDb);
+  const entry = {
+    db: archiveDb,
+    insertReading: archiveDb.prepare(`
+      INSERT OR IGNORE INTO readings
+      (id,ts,inverter,unit,vdc,idc,vac1,vac2,vac3,iac1,iac2,iac3,pac,kwh,alarm,online)
+      VALUES (@id,@ts,@inverter,@unit,@vdc,@idc,@vac1,@vac2,@vac3,@iac1,@iac2,@iac3,@pac,@kwh,@alarm,@online)
+    `),
+    insertEnergy5: archiveDb.prepare(`
+      INSERT OR IGNORE INTO energy_5min (id,ts,inverter,kwh_inc)
+      VALUES (@id,@ts,@inverter,@kwh_inc)
+    `),
+    selectReadingsRangeAll: archiveDb.prepare(
+      `SELECT * FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
+    ),
+    selectReadingsRangeByInv: archiveDb.prepare(
+      `SELECT * FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
+    ),
+    selectEnergyRangeAll: archiveDb.prepare(
+      `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC`,
+    ),
+    selectEnergyRangeByInv: archiveDb.prepare(
+      `SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
+    ),
+    sumEnergyRangeAll: archiveDb.prepare(
+      `SELECT inverter, SUM(kwh_inc) AS total_kwh
+         FROM energy_5min
+        WHERE ts BETWEEN ? AND ?
+        GROUP BY inverter
+        ORDER BY inverter ASC`,
+    ),
+    sumEnergyRangeByInv: archiveDb.prepare(
+      `SELECT inverter, SUM(kwh_inc) AS total_kwh
+         FROM energy_5min
+        WHERE inverter=? AND ts BETWEEN ? AND ?
+        GROUP BY inverter`,
+    ),
+  };
+  entry.insertReadingsTx = archiveDb.transaction((rows) => {
+    for (const row of rows || []) entry.insertReading.run(row);
+  });
+  entry.insertEnergyTx = archiveDb.transaction((rows) => {
+    for (const row of rows || []) entry.insertEnergy5.run(row);
+  });
+  return entry;
+}
+
+function getArchiveEntry(monthKey, createIfMissing = false) {
+  const key = String(monthKey || "").trim();
+  if (!key) return null;
+  if (ARCHIVE_DB_CACHE.has(key)) return ARCHIVE_DB_CACHE.get(key);
+  const filePath = path.join(ARCHIVE_DIR, `${key}.db`);
+  if (!createIfMissing && !fs.existsSync(filePath)) return null;
+  const entry = createArchiveEntry(filePath);
+  ARCHIVE_DB_CACHE.set(key, entry);
+  return entry;
+}
+
+function parseIntervalsJson(text) {
+  try {
+    const parsed = JSON.parse(String(text || "[]"));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((pair) => {
+        if (!Array.isArray(pair) || pair.length < 2) return null;
+        const start = Number(pair[0] || 0);
+        const end = Number(pair[1] || 0);
+        return end > start && start > 0 ? [start, end] : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => Number(a[0]) - Number(b[0]) || Number(a[1]) - Number(b[1]));
+  } catch (_) {
+    return [];
+  }
+}
+
+function addMergedInterval(intervals, start, end) {
+  const s = Number(start || 0);
+  const e = Number(end || 0);
+  if (!(e > s) || !(s > 0)) return;
+  const list = Array.isArray(intervals) ? intervals : [];
+  if (!list.length) {
+    list.push([s, e]);
+    return;
+  }
+  const last = list[list.length - 1];
+  if (s <= Number(last[1] || 0)) {
+    if (e > Number(last[1] || 0)) last[1] = e;
+    return;
+  }
+  list.push([s, e]);
+}
+
+function createSummaryState(day, inverter, unit, row = null) {
+  return {
+    date: String(day || ""),
+    inverter: Number(inverter || row?.inverter || 0),
+    unit: Number(unit || row?.unit || 0),
+    sample_count: Math.max(0, Math.trunc(Number(row?.sample_count || 0))),
+    online_samples: Math.max(0, Math.trunc(Number(row?.online_samples || 0))),
+    pac_online_sum: Number(row?.pac_online_sum || 0),
+    pac_online_count: Math.max(0, Math.trunc(Number(row?.pac_online_count || 0))),
+    pac_peak: Number(row?.pac_peak || 0),
+    first_ts: Number(row?.first_ts || 0),
+    last_ts: Number(row?.last_ts || 0),
+    first_kwh: Number(row?.first_kwh || 0),
+    last_kwh: Number(row?.last_kwh || 0),
+    last_online: Number(row?.last_online || 0) === 1 ? 1 : 0,
+    intervals: parseIntervalsJson(row?.intervals_json),
+  };
+}
+
+function applyReadingToSummaryState(state, row) {
+  if (!state || !row) return;
+  const ts = Number(row?.ts || 0);
+  if (!(ts > 0)) return;
+  const pac = Math.max(0, Number(row?.pac || 0));
+  const kwh = Number(row?.kwh || 0);
+  const isOnline = Number(row?.online || 0) === 1 && pac > 0;
+
+  state.sample_count += 1;
+  if (isOnline) {
+    state.online_samples += 1;
+    state.pac_online_sum += pac;
+    state.pac_online_count += 1;
+  }
+  if (pac > state.pac_peak) state.pac_peak = pac;
+
+  if (!(state.first_ts > 0) || ts < state.first_ts) {
+    state.first_ts = ts;
+    state.first_kwh = Number.isFinite(kwh) ? kwh : 0;
+  }
+
+  if (state.last_ts > 0 && ts > state.last_ts && state.last_online === 1) {
+    const maxEnd = state.last_ts + SUMMARY_MAX_GAP_S * 1000;
+    addMergedInterval(state.intervals, state.last_ts, Math.min(ts, maxEnd));
+  }
+
+  if (!(state.last_ts > 0) || ts >= state.last_ts) {
+    state.last_ts = ts;
+    state.last_kwh = Number.isFinite(kwh) ? kwh : state.last_kwh;
+    state.last_online = isOnline ? 1 : 0;
+  }
+}
+
+function summaryStateToPayload(state, updatedTs = Date.now()) {
+  return {
+    date: state.date,
+    inverter: Number(state.inverter || 0),
+    unit: Number(state.unit || 0),
+    sample_count: Math.max(0, Math.trunc(Number(state.sample_count || 0))),
+    online_samples: Math.max(0, Math.trunc(Number(state.online_samples || 0))),
+    pac_online_sum: Number(Number(state.pac_online_sum || 0).toFixed(6)),
+    pac_online_count: Math.max(0, Math.trunc(Number(state.pac_online_count || 0))),
+    pac_peak: Number(Number(state.pac_peak || 0).toFixed(3)),
+    first_ts: Number(state.first_ts || 0),
+    last_ts: Number(state.last_ts || 0),
+    first_kwh: Number(Number(state.first_kwh || 0).toFixed(6)),
+    last_kwh: Number(Number(state.last_kwh || 0).toFixed(6)),
+    last_online: Number(state.last_online || 0) === 1 ? 1 : 0,
+    intervals_json: JSON.stringify(Array.isArray(state.intervals) ? state.intervals : []),
+    updated_ts: Number(updatedTs || Date.now()),
+  };
+}
+
+const writeSummaryPayloadsTx = db.transaction((payloads, dayToDelete = "") => {
+  if (dayToDelete) stmts.deleteDailyReadingsSummaryDay.run(String(dayToDelete));
+  for (const payload of payloads || []) {
+    stmts.upsertDailyReadingsSummary.run(payload);
+  }
+});
+
+function getDailyReadingsSummaryRows(dayInput) {
+  const day = String(dayInput || "").trim();
+  if (!day) return [];
+  return stmts.getDailyReadingsSummaryDay.all(day);
+}
+
+function ingestDailyReadingsSummary(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return;
+  const states = new Map();
+  for (const row of list) {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!(ts > 0) || !(inverter > 0) || !(unit > 0)) continue;
+    const day = localDateStr(ts);
+    const key = `${day}|${inverter}|${unit}`;
+    let state = states.get(key);
+    if (!state) {
+      const existing = stmts.getDailyReadingsSummaryOne.get(day, inverter, unit);
+      state = createSummaryState(day, inverter, unit, existing);
+      states.set(key, state);
+    }
+    applyReadingToSummaryState(state, row);
+  }
+  if (!states.size) return;
+  const now = Date.now();
+  const payloads = Array.from(states.values()).map((state) => summaryStateToPayload(state, now));
+  writeSummaryPayloadsTx(payloads);
+}
+
+function readingsNaturalKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`;
+}
+
+function energyNaturalKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}`;
+}
+
+function sortReadingsAsc(a, b) {
+  return (
+    Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
+    Number(a?.unit || 0) - Number(b?.unit || 0) ||
+    Number(a?.ts || 0) - Number(b?.ts || 0)
+  );
+}
+
+function sortEnergyAsc(a, b) {
+  return (
+    Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
+    Number(a?.ts || 0) - Number(b?.ts || 0)
+  );
+}
+
+function pushUniqueRows(targetMap, rows, keyFn) {
+  for (const row of rows || []) {
+    const key = keyFn(row);
+    if (!targetMap.has(key)) targetMap.set(key, row);
+  }
+}
+
+function queryReadingsRangeAll(startTs, endTs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const out = new Map();
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(out, entry.selectReadingsRangeAll.all(s, e), readingsNaturalKey);
+  }
+  pushUniqueRows(out, stmts.getReadingsRangeAll.all(s, e), readingsNaturalKey);
+  return Array.from(out.values()).sort(sortReadingsAsc);
+}
+
+function queryReadingsRange(inverter, startTs, endTs) {
+  const inv = Number(inverter || 0);
+  if (!(inv > 0)) return [];
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const out = new Map();
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(out, entry.selectReadingsRangeByInv.all(inv, s, e), readingsNaturalKey);
+  }
+  pushUniqueRows(out, stmts.getReadingsRange.all(inv, s, e), readingsNaturalKey);
+  return Array.from(out.values()).sort(sortReadingsAsc);
+}
+
+function queryEnergy5minRangeAll(startTs, endTs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const out = new Map();
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(out, entry.selectEnergyRangeAll.all(s, e), energyNaturalKey);
+  }
+  pushUniqueRows(out, stmts.get5minRangeAll.all(s, e), energyNaturalKey);
+  return Array.from(out.values()).sort(sortEnergyAsc);
+}
+
+function queryEnergy5minRange(inverter, startTs, endTs) {
+  const inv = Number(inverter || 0);
+  if (!(inv > 0)) return [];
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const out = new Map();
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(out, entry.selectEnergyRangeByInv.all(inv, s, e), energyNaturalKey);
+  }
+  pushUniqueRows(out, stmts.get5minRange.all(inv, s, e), energyNaturalKey);
+  return Array.from(out.values()).sort(sortEnergyAsc);
+}
+
+function sumEnergy5minByInverterRange(startTs, endTs, inverter = null) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  const inv = Number(inverter || 0);
+  const out = new Map();
+  if (!(e >= s)) return out;
+
+  function addSumRows(rows) {
+    for (const row of rows || []) {
+      const key = Number(row?.inverter || 0);
+      if (!(key > 0)) continue;
+      out.set(key, Number(out.get(key) || 0) + Number(row?.total_kwh || 0));
+    }
+  }
+
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    addSumRows(
+      inv > 0
+        ? entry.sumEnergyRangeByInv.all(inv, s, e)
+        : entry.sumEnergyRangeAll.all(s, e),
+    );
+  }
+
+  addSumRows(
+    inv > 0
+      ? stmts.sumEnergy5minRangeByInv.all(inv, s, e)
+      : stmts.sumEnergy5minRange.all(s, e),
+  );
+
+  return out;
+}
+
+function rebuildDailyReadingsSummaryForDate(dayInput) {
+  const day = String(dayInput || "").trim();
+  if (!day) return [];
+  const startTs = new Date(`${day}T00:00:00.000`).getTime();
+  const endTs = new Date(`${day}T23:59:59.999`).getTime();
+  const rows = queryReadingsRangeAll(startTs, endTs);
+  const states = new Map();
+  for (const row of rows) {
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!(inverter > 0) || !(unit > 0)) continue;
+    const key = `${day}|${inverter}|${unit}`;
+    let state = states.get(key);
+    if (!state) {
+      state = createSummaryState(day, inverter, unit);
+      states.set(key, state);
+    }
+    applyReadingToSummaryState(state, row);
+  }
+  const now = Date.now();
+  const payloads = Array.from(states.values()).map((state) => summaryStateToPayload(state, now));
+  writeSummaryPayloadsTx(payloads, day);
+  return getDailyReadingsSummaryRows(day);
+}
+const deleteReadingById = db.prepare(`DELETE FROM readings WHERE id=?`);
+const deleteEnergy5ById = db.prepare(`DELETE FROM energy_5min WHERE id=?`);
+const deleteReadingsBatchTx = db.transaction((ids) => {
+  for (const id of ids || []) deleteReadingById.run(id);
+});
+const deleteEnergyBatchTx = db.transaction((ids) => {
+  for (const id of ids || []) deleteEnergy5ById.run(id);
+});
+const selectOldReadingsBatch = db.prepare(`
+  SELECT id, ts, inverter, unit, vdc, idc, vac1, vac2, vac3, iac1, iac2, iac3, pac, kwh, alarm, online
+    FROM readings
+   WHERE ts < ?
+   ORDER BY ts ASC, id ASC
+   LIMIT ?
+`);
+const selectOldEnergyBatch = db.prepare(`
+  SELECT id, ts, inverter, kwh_inc
+    FROM energy_5min
+   WHERE ts < ?
+   ORDER BY ts ASC, id ASC
+   LIMIT ?
+`);
+
+function archiveRowsByMonth(rows, type) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    const monthKey = monthKeyFromTs(row?.ts);
+    if (!groups.has(monthKey)) groups.set(monthKey, []);
+    groups.get(monthKey).push(row);
+  }
+  for (const [monthKey, groupedRows] of groups.entries()) {
+    const entry = getArchiveEntry(monthKey, true);
+    if (!entry) throw new Error(`Archive DB open failed for month ${monthKey}`);
+    if (type === "readings") entry.insertReadingsTx(groupedRows);
+    else entry.insertEnergyTx(groupedRows);
+  }
+}
+
+function archiveReadingsRows(rows) {
+  archiveRowsByMonth(rows, "readings");
+}
+
+function archiveEnergyRows(rows) {
+  archiveRowsByMonth(rows, "energy");
+}
+
+function getTelemetryHotCutoffTs(now = Date.now()) {
+  const retainDays = Math.max(1, Number(getSetting("retainDays", 90)));
+  return Number(now || Date.now()) - retainDays * 24 * 60 * 60 * 1000;
+}
+
+function archiveTelemetryBeforeCutoff(cutoffTs) {
+  const cutoff = Number(cutoffTs || 0);
+  const stats = { readings: 0, energy5: 0 };
+  if (!(cutoff > 0)) return stats;
+
+  while (true) {
+    const rows = selectOldReadingsBatch.all(cutoff, ARCHIVE_BATCH_SIZE);
+    if (!rows.length) break;
+    archiveRowsByMonth(rows, "readings");
+    deleteReadingsBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
+    stats.readings += rows.length;
+  }
+
+  while (true) {
+    const rows = selectOldEnergyBatch.all(cutoff, ARCHIVE_BATCH_SIZE);
+    if (!rows.length) break;
+    archiveRowsByMonth(rows, "energy");
+    deleteEnergyBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
+    stats.energy5 += rows.length;
+  }
+
+  return stats;
+}
+
 function pruneOldData() {
   try {
     const retainDays = Math.max(1, Number(getSetting("retainDays", 90)));
     const auditRetainDays = Math.max(1, Number(getSetting("auditRetainDays", 365)));
     const cutoff = Date.now() - retainDays * 24 * 60 * 60 * 1000;
     const auditCutoff = Date.now() - auditRetainDays * 24 * 60 * 60 * 1000;
-    db.prepare("DELETE FROM readings    WHERE ts < ?").run(cutoff);
-    db.prepare("DELETE FROM energy_5min WHERE ts < ?").run(cutoff);
-    db.prepare("DELETE FROM alarms      WHERE ts < ? AND cleared_ts IS NOT NULL").run(cutoff);
-    db.prepare("DELETE FROM audit_log   WHERE ts < ?").run(auditCutoff);
-    console.log("[DB] Old data pruned.");
+    const archived = archiveTelemetryBeforeCutoff(cutoff);
+    db.prepare("DELETE FROM alarms WHERE ts < ? AND cleared_ts IS NOT NULL").run(cutoff);
+    db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
+    console.log(
+      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}.`,
+    );
   } catch (err) {
     console.error("[DB] pruneOldData failed:", err.message);
   }
+}
+
+function closeArchiveDbs() {
+  for (const entry of ARCHIVE_DB_CACHE.values()) {
+    try {
+      entry.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch (_) {
+      // Ignore archive checkpoint failures during shutdown.
+    }
+    try {
+      entry.db.close();
+    } catch (_) {
+      // Ignore archive close failures during shutdown.
+    }
+  }
+  ARCHIVE_DB_CACHE.clear();
 }
 
 function closeDb() {
@@ -342,6 +992,7 @@ function closeDb() {
   } catch (err) {
     console.error("[DB] WAL checkpoint failed:", err.message);
   }
+  closeArchiveDbs();
   try {
     db.close();
   } catch (err) {
@@ -359,4 +1010,20 @@ module.exports = {
   pruneOldData,
   closeDb,
   DATA_DIR,
+  ARCHIVE_DIR,
+  SUMMARY_SOLAR_START_H,
+  SUMMARY_SOLAR_END_H,
+  SUMMARY_MAX_GAP_S,
+  localDateStr,
+  getTelemetryHotCutoffTs,
+  queryReadingsRangeAll,
+  queryReadingsRange,
+  queryEnergy5minRangeAll,
+  queryEnergy5minRange,
+  sumEnergy5minByInverterRange,
+  archiveReadingsRows,
+  archiveEnergyRows,
+  getDailyReadingsSummaryRows,
+  ingestDailyReadingsSummary,
+  rebuildDailyReadingsSummaryForDate,
 };

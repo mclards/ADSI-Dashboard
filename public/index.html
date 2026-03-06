@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Inverter Dashboard</title>
+    <title>Dashboard V2</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700&display=swap"
@@ -26,7 +26,7 @@
             <img
               id="logo-img"
               src="/assets/adsi_logo.png"
-              alt="Inverter Dashboard"
+              alt="Dashboard V2"
             />
             <span id="logo-text" class="logo-fallback" style="display: none"
               >IM</span
@@ -100,34 +100,34 @@
     <aside id="sideNav" class="side-nav">
       <nav class="tb-nav" id="mainNav">
         <button class="nav-btn active" data-page="inverters">
-          <span class="nav-icon">&#9889;</span><span>INVERTERS</span>
+          <span class="nav-icon"><span class="mdi mdi-flash"></span></span><span>INVERTERS</span>
         </button>
         <button class="nav-btn" data-page="analytics">
-          <span class="nav-icon">&#128200;</span><span>ANALYTICS</span>
+          <span class="nav-icon"><span class="mdi mdi-chart-line"></span></span><span>ANALYTICS</span>
         </button>
         <button class="nav-btn" data-page="alarms">
-          <span class="nav-icon">&#128680;</span><span>ALARMS</span>
+          <span class="nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span><span>ALARMS</span>
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
         </button>
         <button class="nav-btn" data-page="energy">
-          <span class="nav-icon">&#9889;</span><span>ENERGY</span>
+          <span class="nav-icon"><span class="mdi mdi-lightning-bolt"></span></span><span>ENERGY</span>
         </button>
         <button class="nav-btn" data-page="audit">
-          <span class="nav-icon">&#128221;</span><span>AUDIT</span>
+          <span class="nav-icon"><span class="mdi mdi-clipboard-text-outline"></span></span><span>AUDIT</span>
         </button>
         <button class="nav-btn" data-page="report">
-          <span class="nav-icon">&#128202;</span><span>REPORT</span>
+          <span class="nav-icon"><span class="mdi mdi-file-chart-outline"></span></span><span>REPORT</span>
         </button>
         <button class="nav-btn" data-page="export">
-          <span class="nav-icon">&#128229;</span><span>EXPORT</span>
+          <span class="nav-icon"><span class="mdi mdi-export-variant"></span></span><span>EXPORT</span>
         </button>
         <button class="nav-btn" data-page="settings">
-          <span class="nav-icon">&#9881;</span><span>SETTINGS</span>
+          <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
         <section id="aboutSection" class="side-about-card" aria-label="About">
-          <div class="side-about-title">&#8505;&#65039; ABOUT</div>
+          <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Inverter Dashboard</b> <span class="side-about-ver">v2.2.10</span></div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.10</span></div>
             <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
@@ -144,8 +144,14 @@
             <div class="side-about-hw"><b>Update:</b> <span id="aboutUpdateStatus">—</span></div>
           </div>
           <div class="side-about-actions">
-            <button id="btnAboutCheckUpdate" class="btn btn-outline">&#8635; Check App Update</button>
-            <button id="btnOpenGuide" class="btn btn-outline">&#128214; Open User Guide</button>
+            <button id="btnAboutCheckUpdate" class="btn btn-outline">
+              <span class="mdi mdi-update" aria-hidden="true"></span>
+              <span>Check App Update</span>
+            </button>
+            <button id="btnOpenGuide" class="btn btn-outline">
+              <span class="mdi mdi-book-open-page-variant-outline" aria-hidden="true"></span>
+              <span>Open User Guide</span>
+            </button>
           </div>
         </section>
       </nav>
@@ -236,7 +242,7 @@
               Search
             </button>
             <button id="btnAckAll" class="btn btn-outline">
-              &#10003; Ack All
+              <span class="mdi mdi-check-all" aria-hidden="true"></span><span>Ack All</span>
             </button>
           </div>
           <div class="tl-right">
@@ -472,7 +478,7 @@
               </select>
             </label>
             <button id="btnExportDailyReport" class="btn btn-outline">
-              &#11015; Export
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export</span>
             </button>
           </div>
           <div class="tl-right" id="reportKpis"></div>
@@ -598,7 +604,7 @@
       <section id="page-export" class="page">
         <div class="export-grid">
           <div class="exp-card">
-            <div class="exp-icon exp-icon-alarm">&#128680;</div>
+            <div class="exp-icon exp-icon-alarm"><span class="mdi mdi-bell-alert-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Alarm Log Export</div>
             <div class="exp-desc">
               Full alarm history with fault codes, severity levels, duration,
@@ -627,14 +633,15 @@
             <button
               id="btnExportAlarms"
               class="btn btn-accent btn-full"
+              title="Export alarm history for the selected date range and format."
             >
-              &#11015; Export Alarms
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Alarms</span>
             </button>
             <div class="exp-result" id="expAlarmResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-energy">&#9889;</div>
+            <div class="exp-icon exp-icon-energy"><span class="mdi mdi-lightning-bolt" aria-hidden="true"></span></div>
             <div class="exp-title">Energy Export</div>
             <div class="exp-desc">
               Date, last reading time, inverter, node, total MWh register, and
@@ -661,13 +668,13 @@
               </label>
             </div>
             <button id="btnRunEnergyExport" class="btn btn-accent btn-full">
-              &#11015; Export Energy
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Energy</span>
             </button>
             <div class="exp-result" id="expEnergyResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-report">&#128202;</div>
+            <div class="exp-icon exp-icon-report"><span class="mdi mdi-chart-timeline-variant" aria-hidden="true"></span></div>
             <div class="exp-title">Day-ahead vs Actual Export</div>
             <div class="exp-desc">
               Plant total interval energy comparison between actual measured MWh
@@ -699,13 +706,13 @@
               id="btnRunForecastExport"
               class="btn btn-accent btn-full"
             >
-              &#11015; Export Day-ahead vs Actual
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Day-ahead vs Actual</span>
             </button>
             <div class="exp-result" id="expForecastResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-energy">&#9889;</div>
+            <div class="exp-icon exp-icon-energy"><span class="mdi mdi-database-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Inverter Data Export</div>
             <div class="exp-desc">
               Full inverter sampled dataset
@@ -736,13 +743,13 @@
               id="btnRunInvDataExport"
               class="btn btn-accent btn-full"
             >
-              &#11015; Export Inverter Data
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Inverter Data</span>
             </button>
             <div class="exp-result" id="expInvDataResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-audit">&#128221;</div>
+            <div class="exp-icon exp-icon-audit"><span class="mdi mdi-clipboard-text-clock-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Audit Log Export</div>
             <div class="exp-desc">
               All operator control actions — start/stop commands, timestamps,
@@ -772,13 +779,13 @@
               id="btnExportAudit"
               class="btn btn-accent btn-full"
             >
-              &#11015; Export Audit
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Audit</span>
             </button>
             <div class="exp-result" id="expAuditResult"></div>
           </div>
 
           <div class="exp-card">
-            <div class="exp-icon exp-icon-report">&#128202;</div>
+            <div class="exp-icon exp-icon-report"><span class="mdi mdi-file-chart-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Daily Generation Report</div>
             <div class="exp-desc">
               Plant performance summary: total MWh, peak power, uptime, and
@@ -803,7 +810,7 @@
               id="btnRunDailyReportExport"
               class="btn btn-accent btn-full"
             >
-              &#11015; Export Daily Report
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Daily Report</span>
             </button>
             <div class="exp-result" id="expReportResult"></div>
           </div>
@@ -816,10 +823,11 @@
           <aside class="settings-sidebar">
             <div class="settings-sidebar-card">
               <div class="settings-kicker">Settings Workspace</div>
-              <div class="settings-current-title" id="settingsCurrentSectionTitle">Plant Configuration</div>
-              <div class="settings-current-copy" id="settingsCurrentSectionCopy">
-                Configure the plant identity, scale, and core operating values for this dashboard.
+              <div class="settings-current-title">Choose Section</div>
+              <div class="settings-current-copy">
+                Open one settings section at a time, review the fields in the main panel, then save when ready.
               </div>
+              <div class="settings-current-chip" id="settingsSidebarCurrentChip">Plant Configuration</div>
               <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
                 <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection">
                   <span class="settings-menu-label">Plant</span>
@@ -899,7 +907,7 @@
 
             <div class="settings-sections">
           <div class="sgroup settings-card settings-section-active" id="plantConfigSection">
-            <div class="sgroup-title">&#127981; Plant Configuration</div>
+            <div class="sgroup-title"><span class="mdi mdi-factory icon-inline" aria-hidden="true"></span> Plant Configuration</div>
             <p class="settings-section-copy">Set the base identity and sizing values the dashboard uses across pages, logs, and reports.</p>
             <div class="srow">
               <label
@@ -948,7 +956,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
-            <div class="sgroup-title">&#128295; Data &amp; Polling</div>
+            <div class="sgroup-title"><span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span> Data &amp; Polling</div>
             <p class="settings-section-copy">Keep data endpoints, export storage, and polling timing together so the data path can be reviewed in one place.</p>
             <div class="settings-subsection">
               <div class="settings-subtitle">Data Endpoints</div>
@@ -1006,7 +1014,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
-            <div class="sgroup-title">&#127760; Connectivity &amp; Sync</div>
+            <div class="sgroup-title"><span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span> Connectivity &amp; Sync</div>
             <p class="settings-section-copy">Choose whether this device is the plant gateway or a remote viewer, then monitor replication and runtime health below.</p>
             <div class="settings-subsection">
               <div class="settings-subtitle">Mode &amp; Remote Access</div>
@@ -1053,11 +1061,11 @@
                 </label>
               </div>
               <div class="sgroup-actions" style="margin-top: 8px">
-                <button id="btnTestRemoteGateway" class="btn btn-outline" type="button">
-                  &#128269; Test Remote Gateway
+                <button id="btnTestRemoteGateway" class="btn btn-outline" type="button" title="Check whether the configured remote gateway URL is reachable and responding." aria-label="Test remote gateway">
+                  <span class="mdi mdi-lan-connect" aria-hidden="true"></span><span>Test Remote Gateway</span>
                 </button>
-                <button id="btnCheckTailscale" class="btn btn-outline" type="button">
-                  &#128737; Check Tailscale
+                <button id="btnCheckTailscale" class="btn btn-outline" type="button" title="Check if Tailscale is installed, running, and connected for remote access." aria-label="Check Tailscale status">
+                  <span class="mdi mdi-shield-link-variant-outline" aria-hidden="true"></span><span>Check Tailscale</span>
                 </button>
                 <span class="smsg" id="networkMsg"></span>
               </div>
@@ -1146,8 +1154,8 @@
                 </div>
               </div>
               <div class="sgroup-actions">
-                <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button">
-                  &#8635; Refresh
+                <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh replication health, sync counters, and transfer diagnostics." aria-label="Refresh replication health">
+                  <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
                 </button>
                 <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
                   Pull From Server
@@ -1215,57 +1223,65 @@
                 <div id="perfErrorsVal" class="license-value">-</div>
               </div>
               <div class="sgroup-actions">
-                <button id="btnRefreshRuntimePerf" class="btn btn-outline" type="button">
-                  Refresh
+                <button id="btnRefreshRuntimePerf" class="btn btn-outline" type="button" title="Refresh runtime performance counters such as CPU, memory, poll duration, and errors." aria-label="Refresh runtime performance diagnostics">
+                  <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
                 </button>
                 <span class="smsg" id="perfMsg"></span>
               </div>
             </div>
           </div>
           <div class="sgroup settings-card" id="forecastSection">
-            <div class="sgroup-title">&#9728;&#65039; Forecast</div>
+            <div class="sgroup-title"><span class="mdi mdi-weather-partly-cloudy icon-inline" aria-hidden="true"></span> Forecast</div>
             <p class="settings-section-copy">Manage the forecast provider used by the dashboard and keep external provider credentials in one focused section.</p>
-            <div class="srow">
-              <label
-                >Forecast Source
-                <select id="setForecastProvider" class="sel">
-                  <option value="ml_local">Local ML (Current)</option>
-                  <option value="solcast">Solcast API</option>
-                </select></label
-              >
-              <label
-                >Solcast Base URL<input
-                  type="text"
-                  id="setSolcastBaseUrl"
-                  class="inp inp-lg"
-                  placeholder="https://api.solcast.com.au"
-              /></label>
-              <label
-                >Solcast API Key<input
-                  type="password"
-                  id="setSolcastApiKey"
-                  class="inp inp-lg"
-                  autocomplete="off"
-                  placeholder="API key"
-              /></label>
-              <label
-                >Resource ID<input
-                  type="text"
-                  id="setSolcastResourceId"
-                  class="inp"
-                  placeholder="rooftop/site resource id"
-              /></label>
-              <label
-                >Timezone<input
-                  type="text"
-                  id="setSolcastTimezone"
-                  class="inp"
-                  placeholder="Asia/Manila"
-              /></label>
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Provider</div>
+              <div class="srow">
+                <label
+                  >Forecast Source
+                  <select id="setForecastProvider" class="sel">
+                    <option value="ml_local">Local ML (Current)</option>
+                    <option value="solcast">Solcast API</option>
+                  </select></label
+                >
+              </div>
+              <div class="sinfo" style="margin-top: 8px">
+                <div>
+                  Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
+                </div>
+              </div>
             </div>
-            <div class="sinfo">
-              <div>
-                Current runtime forecast remains on local ML. These Solcast fields are persisted now and ready for provider switching.
+            <div class="settings-subsection">
+              <div class="settings-subtitle">Solcast Configuration</div>
+              <div class="srow">
+                <label
+                  >Solcast Base URL<input
+                    type="text"
+                    id="setSolcastBaseUrl"
+                    class="inp inp-lg"
+                    placeholder="https://api.solcast.com.au"
+                /></label>
+                <label
+                  >Solcast API Key<input
+                    type="password"
+                    id="setSolcastApiKey"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="API key"
+                /></label>
+                <label
+                  >Resource ID<input
+                    type="text"
+                    id="setSolcastResourceId"
+                    class="inp"
+                    placeholder="rooftop/site resource id"
+                /></label>
+                <label
+                  >Timezone<input
+                    type="text"
+                    id="setSolcastTimezone"
+                    class="inp"
+                    placeholder="Asia/Manila"
+                /></label>
               </div>
             </div>
             <div class="sgroup-actions">
@@ -1273,21 +1289,25 @@
                 id="btnSolcastSaveTest"
                 class="btn btn-accent"
                 type="button"
+                title="Save the Solcast settings first, then test the connection with the saved values."
+                aria-label="Save and test Solcast settings"
               >
-                &#128190; Save + Test Solcast
+                <span class="mdi mdi-content-save-check-outline" aria-hidden="true"></span><span>Save + Test Solcast</span>
               </button>
               <button
                 id="btnSolcastTest"
                 class="btn btn-outline"
                 type="button"
+                title="Test the current Solcast endpoint and credentials without changing any saved settings."
+                aria-label="Test Solcast connection"
               >
-                &#128269; Test Solcast Connection
+                <span class="mdi mdi-cloud-check-outline" aria-hidden="true"></span><span>Test Solcast Connection</span>
               </button>
               <span class="smsg" id="solcastTestMsg"></span>
             </div>
           </div>
           <div class="sgroup settings-card" id="licenseSection">
-            <div class="sgroup-title">&#128274; License</div>
+            <div class="sgroup-title"><span class="mdi mdi-shield-key-outline icon-inline" aria-hidden="true"></span> License</div>
             <p class="settings-section-copy">Review license state, expiry, and audit history, and replace the active license file when needed.</p>
             <div class="license-grid">
               <div class="license-item">
@@ -1308,11 +1328,11 @@
               </div>
             </div>
             <div class="sgroup-actions">
-              <button id="btnUploadLicense" class="btn btn-accent">
-                &#11014; Replace License
+              <button id="btnUploadLicense" class="btn btn-accent" title="Upload and apply a new license file for this installation." aria-label="Upload replacement license">
+                <span class="mdi mdi-upload-outline" aria-hidden="true"></span><span>Replace License</span>
               </button>
-              <button id="btnRefreshLicense" class="btn btn-outline">
-                &#8635; Refresh License Status
+              <button id="btnRefreshLicense" class="btn btn-outline" title="Reload the active license state, expiry, and audit trail from the app." aria-label="Refresh license status">
+                <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh License Status</span>
               </button>
               <span class="smsg" id="licenseMsg"></span>
             </div>
@@ -1333,7 +1353,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="appUpdateSection">
-            <div class="sgroup-title">&#11014; App Updates</div>
+            <div class="sgroup-title"><span class="mdi mdi-update icon-inline" aria-hidden="true"></span> App Updates</div>
             <p class="settings-section-copy">Check the installed version, compare it with the latest release, and run the appropriate update action for this build type.</p>
             <div class="license-grid">
               <div class="license-item">
@@ -1371,7 +1391,7 @@
           </div>
           <!-- -- Cloud Backup Panel ------------------------------------------- -->
           <div class="sgroup settings-card" id="cloudBackupSection">
-            <div class="sgroup-title">&#9729; Cloud Backup &amp; Restore</div>
+            <div class="sgroup-title"><span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span> Cloud Backup &amp; Restore</div>
             <p class="settings-section-copy">Configure providers, choose backup scope, and restore usable dashboard snapshots from cloud history.</p>
 
             <!-- Provider Setup -->
@@ -1395,7 +1415,7 @@
               <!-- OneDrive connect -->
               <div class="cb-provider-block" id="cbOneDriveBlock">
                 <div class="cb-provider-header">
-                  <span class="cb-provider-icon">&#9729;</span>
+                  <span class="cb-provider-icon mdi mdi-microsoft-onedrive" aria-hidden="true"></span>
                   <strong>Microsoft OneDrive</strong>
                   <span class="cb-conn-badge" id="cbOneDriveStatus">Not connected</span>
                 </div>
@@ -1409,8 +1429,12 @@
                   <a href="#" id="cbOneDriveSetupLink" class="cb-setup-link">How to register Azure app &rarr;</a>
                 </div>
                 <div class="sgroup-actions" style="margin-top:6px">
-                  <button id="btnConnectOneDrive" class="btn btn-outline" type="button">Connect OneDrive</button>
-                  <button id="btnDisconnectOneDrive" class="btn btn-outline" type="button" hidden>Disconnect</button>
+                  <button id="btnConnectOneDrive" class="btn btn-outline" type="button" title="Open Microsoft sign-in to authorize this app to upload and restore backups from OneDrive." aria-label="Connect Microsoft OneDrive">
+                    <span class="mdi mdi-link-variant" aria-hidden="true"></span><span>Connect OneDrive</span>
+                  </button>
+                  <button id="btnDisconnectOneDrive" class="btn btn-outline" type="button" title="Disconnect the current OneDrive session for cloud backup." aria-label="Disconnect Microsoft OneDrive" hidden>
+                    <span class="mdi mdi-link-variant-off" aria-hidden="true"></span><span>Disconnect</span>
+                  </button>
                   <span class="smsg" id="cbOneDriveMsg"></span>
                 </div>
               </div>
@@ -1418,7 +1442,7 @@
               <!-- Google Drive connect -->
               <div class="cb-provider-block" id="cbGDriveBlock">
                 <div class="cb-provider-header">
-                  <span class="cb-provider-icon">&#9729;</span>
+                  <span class="cb-provider-icon mdi mdi-google-drive" aria-hidden="true"></span>
                   <strong>Google Drive</strong>
                   <span class="cb-conn-badge" id="cbGDriveStatus">Not connected</span>
                 </div>
@@ -1429,15 +1453,21 @@
                   </label>
                   <label>Client Secret
                     <input type="password" id="cbGDriveClientSecret" class="inp inp-lg"
-                      placeholder="Desktop app client secret" autocomplete="off" />
+                      placeholder="Desktop app client secret" autocomplete="off"
+                      title="Enter a new Google OAuth client secret to save or replace the stored one." />
                   </label>
                 </div>
+                <div class="field-note" id="cbGDriveSecretNote">The client secret is stored locally after save and is not shown again in this screen.</div>
                 <div class="cb-provider-help">
                   <a href="#" id="cbGDriveSetupLink" class="cb-setup-link">How to create Google OAuth app &rarr;</a>
                 </div>
                 <div class="sgroup-actions" style="margin-top:6px">
-                  <button id="btnConnectGDrive" class="btn btn-outline" type="button">Connect Google Drive</button>
-                  <button id="btnDisconnectGDrive" class="btn btn-outline" type="button" hidden>Disconnect</button>
+                  <button id="btnConnectGDrive" class="btn btn-outline" type="button" title="Open Google sign-in to authorize this app to upload and restore backups from Google Drive." aria-label="Connect Google Drive">
+                    <span class="mdi mdi-link-variant" aria-hidden="true"></span><span>Connect Google Drive</span>
+                  </button>
+                  <button id="btnDisconnectGDrive" class="btn btn-outline" type="button" title="Disconnect the current Google Drive session for cloud backup." aria-label="Disconnect Google Drive" hidden>
+                    <span class="mdi mdi-link-variant-off" aria-hidden="true"></span><span>Disconnect</span>
+                  </button>
                   <span class="smsg" id="cbGDriveMsg"></span>
                 </div>
               </div>
@@ -1483,7 +1513,7 @@
             <!-- Backup Progress -->
             <div class="cb-progress-wrap" id="cbProgressWrap" hidden>
               <div class="cb-progress-row">
-                <span class="cb-progress-icon" id="cbProgressIcon">&#9881;</span>
+                <span class="cb-progress-icon mdi mdi-timer-sand" id="cbProgressIcon" aria-hidden="true"></span>
                 <span class="cb-progress-label" id="cbProgressLabel">Preparing…</span>
                 <span class="cb-progress-pct" id="cbProgressPct"></span>
               </div>
@@ -1494,16 +1524,16 @@
 
             <!-- Actions -->
             <div class="sgroup-actions" style="margin-top:8px">
-              <button id="btnSaveCloudSettings" class="btn btn-outline" type="button">&#128190; Save Cloud Settings</button>
-              <button id="btnBackupNow" class="btn btn-accent" type="button">&#11014; Backup Now</button>
-              <button id="btnListCloudBackups" class="btn btn-outline" type="button">&#128203; List Cloud Backups</button>
+              <button id="btnSaveCloudSettings" class="btn btn-outline" type="button" title="Save the cloud backup provider selection, credentials, scope, and schedule." aria-label="Save cloud backup settings"><span class="mdi mdi-content-save-outline" aria-hidden="true"></span><span>Save Cloud Settings</span></button>
+              <button id="btnBackupNow" class="btn btn-accent" type="button" title="Create a backup package now and upload it using the current cloud backup provider settings." aria-label="Run backup now"><span class="mdi mdi-cloud-upload-outline" aria-hidden="true"></span><span>Backup Now</span></button>
+              <button id="btnListCloudBackups" class="btn btn-outline" type="button" title="Refresh the list of available cloud backup packages for restore or download." aria-label="List cloud backups"><span class="mdi mdi-format-list-bulleted-square" aria-hidden="true"></span><span>List Cloud Backups</span></button>
               <span class="smsg" id="cbActionMsg"></span>
             </div>
 
             <!-- Backup History Table -->
             <div class="cb-subsection">
               <div class="cb-sub-title">Backup History
-                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px">&#8635;</button>
+                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px" title="Refresh the cloud backup history and restore list." aria-label="Refresh backup history"><span class="mdi mdi-refresh" aria-hidden="true"></span></button>
               </div>
               <div class="cb-restore-date-row">
                 <label>Filter by Date
@@ -1582,7 +1612,7 @@
 
     <div id="notifPanel" class="notif-panel hidden">
       <div class="notif-hdr">
-        <span>&#128680; Active Alarms</span>
+        <span><span class="mdi mdi-alert-outline" aria-hidden="true"></span> Active Alarms</span>
         <button id="btnCloseNotif" aria-label="Close notifications">&times;</button>
       </div>
       <div id="notifList" class="notif-list"></div>
@@ -1594,19 +1624,19 @@
       title="Active Alarms"
       aria-label="View active alarms"
     >
-      &#128276;<span id="notifCount" aria-label="Number of active alarms">0</span>
+      <span class="mdi mdi-bell-alert-outline" aria-hidden="true"></span><span id="notifCount" aria-label="Number of active alarms">0</span>
     </button>
 
     <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
       <div class="guide-modal-card">
         <div class="guide-modal-head">
-          <div class="guide-modal-title">Inverter Dashboard — User Guide &amp; Manual</div>
+          <div class="guide-modal-title">Dashboard V2 — User Guide &amp; Manual</div>
           <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">&times;</button>
         </div>
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Inverter Dashboard <span class="guide-author-ver">v2.2.10</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.10</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1739,7 +1769,7 @@
                 <li><code>Ctrl+T</code>: Open Topology window.</li>
                 <li><code>Ctrl+I</code>: Open IP Configuration window.</li>
                 <li><code>Ctrl + =</code> / <code>Ctrl + -</code> / <code>Ctrl+0</code>: Zoom in / out / reset (Electron native).</li>
-                <li>Click the notification bell (&#128276;) to view active alarms without leaving the current page.</li>
+                <li>Click the notification bell to view active alarms without leaving the current page.</li>
                 <li>The Net I/O widget (in Settings) shows live WebSocket RX/TX speed in KB/s.</li>
                 <li>Theme can be changed (Dark / Light / Classic) from the Settings page and persists across restarts.</li>
               </ul>
@@ -1747,7 +1777,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Inverter Dashboard v2.2.10 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.10 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

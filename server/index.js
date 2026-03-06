@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 const express = require("express");
 const expressWs = require("express-ws");
 const cors = require("cors");
@@ -20,8 +20,18 @@ const {
   DATA_DIR,
   bulkUpsertForecastDayAhead,
   closeDb,
+  getTelemetryHotCutoffTs,
+  queryReadingsRangeAll,
+  queryReadingsRange,
+  queryEnergy5minRangeAll,
+  queryEnergy5minRange,
+  sumEnergy5minByInverterRange,
+  archiveReadingsRows,
+  archiveEnergyRows,
+  getDailyReadingsSummaryRows,
+  rebuildDailyReadingsSummaryForDate,
 } = require("./db");
-const { registerClient, broadcastUpdate, getStats: getWsStats } = require("./ws");
+const { registerClient, broadcastUpdate, startKeepAlive, getStats: getWsStats } = require("./ws");
 const poller = require("./poller");
 const exporter = require("./exporter");
 const {
@@ -32,7 +42,7 @@ const {
   getAuditLog,
 } = require("./alarms");
 
-// ─── Cloud Backup ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Cloud Backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TokenStore = require("./tokenStore");
 const OneDriveProvider = require("./cloudProviders/onedrive");
 const GDriveProvider = require("./cloudProviders/gdrive");
@@ -112,10 +122,15 @@ const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
 const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
-const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6× OFFLINE_MS=20s)
+const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
 const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
 const REMOTE_BRIDGE_INTERVAL_MS = 1200;
+const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
+const REMOTE_ENERGY_POLL_INTERVAL_MS = 30000; // today-energy endpoint is rate-limited to 30 s
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
+const REMOTE_LIVE_FETCH_RETRIES = 2;
+const REMOTE_LIVE_FETCH_RETRY_BASE_MS = 350;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 2;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
@@ -212,6 +227,33 @@ const REPLICATION_TABLE_DEFS = [
       "uptime_s",
       "alarm_count",
       "control_count",
+      "availability_pct",
+      "performance_pct",
+      "node_uptime_s",
+      "expected_node_uptime_s",
+      "expected_nodes",
+      "rated_kw",
+      "updated_ts",
+    ],
+  },
+  {
+    name: "daily_readings_summary",
+    orderBy: "date ASC, inverter ASC, unit ASC",
+    columns: [
+      "date",
+      "inverter",
+      "unit",
+      "sample_count",
+      "online_samples",
+      "pac_online_sum",
+      "pac_online_count",
+      "pac_peak",
+      "first_ts",
+      "last_ts",
+      "first_kwh",
+      "last_kwh",
+      "last_online",
+      "intervals_json",
       "updated_ts",
     ],
   },
@@ -235,6 +277,12 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
   audit_log: { mode: "append", cursorColumn: "id", orderBy: "id ASC", limit: REMOTE_INCREMENTAL_APPEND_LIMIT },
   alarms: { mode: "updated", cursorColumn: "updated_ts", orderBy: "updated_ts ASC, id ASC", limit: 0 },
   daily_report: { mode: "updated", cursorColumn: "updated_ts", orderBy: "updated_ts ASC, id ASC", limit: 0 },
+  daily_readings_summary: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, date ASC, inverter ASC, unit ASC",
+    limit: 0,
+  },
   forecast_dayahead: {
     mode: "updated",
     cursorColumn: "updated_ts",
@@ -250,10 +298,13 @@ const remoteBridgeState = {
   connected: false,
   lastAttemptTs: 0,
   lastSuccessTs: 0,
+  liveFailureCount: 0,
+  lastFailureTs: 0,
   lastError: "",
   liveData: {},
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
+  lastTodayEnergyFetchTs: 0, // ts of last successful today-energy fetch (rate-limited)
   replicationRunning: false,
   lastReplicationAttemptTs: 0,
   lastReplicationTs: 0,
@@ -277,7 +328,7 @@ const gatewayTodayCarryState = {
   day: "",
   byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
 };
-// Handoff lifecycle: tracks an active Remote→Gateway transition so the stale-shadow
+// Handoff lifecycle: tracks an active Remoteâ†’Gateway transition so the stale-shadow
 // guard does not discard a freshly-captured shadow and carry-completion can be logged.
 const gatewayHandoffMeta = {
   active: false,
@@ -293,7 +344,7 @@ const inboundPushRxProgress = {
 let cpuSampleTs = Date.now();
 let cpuSampleUsage = process.cpuUsage();
 
-// ─── Cloud Backup — Service Initialization ────────────────────────────────────
+// â”€â”€â”€ Cloud Backup â€” Service Initialization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const _tokenStore  = new TokenStore(DATA_DIR);
 const _onedrive    = new OneDriveProvider(_tokenStore);
 const _gdrive      = new GDriveProvider(_tokenStore);
@@ -474,6 +525,16 @@ function resolveRequestToken(req) {
     String(req?.headers?.["x-inverter-remote-token"] || "").trim() ||
     readBearerToken(req)
   );
+}
+
+function broadcastRemoteOfflineLiveState() {
+  remoteBridgeState.liveData = {};
+  remoteBridgeState.totals = { pac: 0, kwh: 0 };
+  broadcastUpdate({
+    type: "live",
+    data: remoteBridgeState.liveData,
+    totals: remoteBridgeState.totals,
+  });
 }
 
 function shouldProxyApiPath(pathname) {
@@ -888,6 +949,10 @@ function stmtCached(key, sql) {
 
 function mergeAppendReplicationRow(tableName, payload, cols) {
   if (tableName === "readings") {
+    if (Number(payload?.ts || 0) < getTelemetryHotCutoffTs()) {
+      archiveReadingsRows([payload]);
+      return true;
+    }
     const exists = stmtCached(
       "exists:readings:ts_inv_unit",
       `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
@@ -918,12 +983,16 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
   }
 
   if (tableName === "energy_5min") {
+    if (Number(payload?.ts || 0) < getTelemetryHotCutoffTs()) {
+      archiveEnergyRows([payload]);
+      return true;
+    }
     const existingRow = stmtCached(
       "exists:energy_5min:ts_inv",
       `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
     ).get(payload.ts, payload.inverter);
     if (existingRow?.id) {
-      // Row exists for this (ts, inverter). Update kwh_inc if the incoming value differs —
+      // Row exists for this (ts, inverter). Update kwh_inc if the incoming value differs â€”
       // this corrects stale local rows that were written with a lower value (e.g., from a
       // previous partial bucket or a prior diverged local-gateway state).
       const incomingKwh = Number(payload.kwh_inc || 0);
@@ -935,7 +1004,7 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
         ).run(incomingKwh, existingRow.id);
         return true;
       }
-      return false; // identical — no change needed
+      return false; // identical â€” no change needed
     }
     const sql = `INSERT INTO energy_5min (${cols.join(", ")}) VALUES (${cols
       .map((c) => `@${c}`)
@@ -1026,7 +1095,7 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
   }
 
   if (tableName === "daily_report") {
-    // Exclude surrogate `id` — local DB assigns its own AUTOINCREMENT id.
+    // Exclude surrogate `id` â€” local DB assigns its own AUTOINCREMENT id.
     // Business key is (date, inverter); including gateway's id causes a PK
     // conflict when the client already holds a different row with that id.
     const drCols = cols.filter((c) => c !== "id");
@@ -1043,9 +1112,37 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
         uptime_s=excluded.uptime_s,
         alarm_count=excluded.alarm_count,
         control_count=excluded.control_count,
+        availability_pct=excluded.availability_pct,
+        performance_pct=excluded.performance_pct,
+        node_uptime_s=excluded.node_uptime_s,
+        expected_node_uptime_s=excluded.expected_node_uptime_s,
+        expected_nodes=excluded.expected_nodes,
+        rated_kw=excluded.rated_kw,
         updated_ts=excluded.updated_ts
       WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)`;
     stmtCached("merge:daily_report:lww", sql).run(drPayload);
+    return true;
+  }
+
+  if (tableName === "daily_readings_summary") {
+    const sql = `INSERT INTO daily_readings_summary (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(date, inverter, unit) DO UPDATE SET
+        sample_count=excluded.sample_count,
+        online_samples=excluded.online_samples,
+        pac_online_sum=excluded.pac_online_sum,
+        pac_online_count=excluded.pac_online_count,
+        pac_peak=excluded.pac_peak,
+        first_ts=excluded.first_ts,
+        last_ts=excluded.last_ts,
+        first_kwh=excluded.first_kwh,
+        last_kwh=excluded.last_kwh,
+        last_online=excluded.last_online,
+        intervals_json=excluded.intervals_json,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_readings_summary.updated_ts,0)`;
+    stmtCached("merge:daily_readings_summary:lww", sql).run(payload);
     return true;
   }
 
@@ -1978,25 +2075,43 @@ async function runRemoteStartupAutoSync(baseUrl) {
 
 async function pollRemoteLiveOnce() {
   const wasConnected = Boolean(remoteBridgeState.connected);
+  const hadLiveData = Boolean(
+    remoteBridgeState.liveData &&
+      typeof remoteBridgeState.liveData === "object" &&
+      Object.keys(remoteBridgeState.liveData).length,
+  );
   remoteBridgeState.lastAttemptTs = Date.now();
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = Date.now();
     remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    if (wasConnected || hadLiveData) broadcastRemoteOfflineLiveState();
     return;
   }
   if (isUnsafeRemoteLoop(base)) {
     remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = Date.now();
     remoteBridgeState.lastError =
       "Remote gateway URL cannot be localhost in remote mode.";
+    if (wasConnected || hadLiveData) broadcastRemoteOfflineLiveState();
     return;
   }
   try {
-    const r = await fetch(`${base}/api/live`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-    });
+    const r = await fetchWithRetry(
+      `${base}/api/live`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_FETCH_TIMEOUT_MS,
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
     if (!r.ok) {
       throw new Error(`HTTP ${r.status} ${r.statusText}`);
     }
@@ -2007,6 +2122,8 @@ async function pollRemoteLiveOnce() {
       remoteBridgeState.liveData,
     );
     remoteBridgeState.connected = true;
+    remoteBridgeState.liveFailureCount = 0;
+    remoteBridgeState.lastFailureTs = 0;
     remoteBridgeState.lastSuccessTs = Date.now();
     remoteBridgeState.lastError = "";
     broadcastUpdate({
@@ -2017,23 +2134,29 @@ async function pollRemoteLiveOnce() {
     remoteBridgeState.lastSyncDirection = "pull-live";
 
     // Piggyback today's energy totals so /api/energy/today matches gateway exactly.
-    try {
-      const et = await fetch(`${base}/api/energy/today`, {
-        method: "GET",
-        headers: buildRemoteProxyHeaders(),
-        timeout: REMOTE_FETCH_TIMEOUT_MS,
-      });
-      if (et.ok) {
-        const rows = await et.json();
-        if (Array.isArray(rows)) {
-          const normalizedRows = normalizeTodayEnergyRows(rows);
-          remoteBridgeState.todayEnergyRows = normalizedRows;
-          updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
-          todayEnergyCache.ts = 0; // force next request to re-read with new data
+    // Rate-limited: only fetch when stale (>30 s) to avoid hammering the gateway
+    // on every 1.2 s bridge tick.
+    const energyAgeMs = Date.now() - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
+    if (energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS) {
+      try {
+        const et = await fetch(`${base}/api/energy/today`, {
+          method: "GET",
+          headers: buildRemoteProxyHeaders(),
+          timeout: REMOTE_FETCH_TIMEOUT_MS,
+        });
+        if (et.ok) {
+          const rows = await et.json();
+          if (Array.isArray(rows)) {
+            const normalizedRows = normalizeTodayEnergyRows(rows);
+            remoteBridgeState.todayEnergyRows = normalizedRows;
+            updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
+            todayEnergyCache.ts = 0; // force next request to re-read with new data
+          }
+          remoteBridgeState.lastTodayEnergyFetchTs = Date.now();
         }
+      } catch (_) {
+        // Non-fatal; stale todayEnergyRows will be used until next tick.
       }
-    } catch (_) {
-      // Non-fatal; stale todayEnergyRows will be used until next tick.
     }
     if (isRemotePullOnlyMode()) {
       remoteBridgeState.replicationRunning = false;
@@ -2048,9 +2171,22 @@ async function pollRemoteLiveOnce() {
       });
     }
   } catch (err) {
-    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = Date.now();
     remoteBridgeState.lastError = String(err.message || err);
-    if (wasConnected) {
+    const lastSuccessAgeMs = remoteBridgeState.lastSuccessTs
+      ? Date.now() - Number(remoteBridgeState.lastSuccessTs || 0)
+      : Number.POSITIVE_INFINITY;
+    const shouldMarkOffline =
+      !wasConnected ||
+      remoteBridgeState.liveFailureCount >= REMOTE_LIVE_FAILURES_BEFORE_OFFLINE ||
+      lastSuccessAgeMs >=
+        REMOTE_FETCH_TIMEOUT_MS * REMOTE_LIVE_FAILURES_BEFORE_OFFLINE;
+    remoteBridgeState.connected = !shouldMarkOffline && wasConnected;
+    if (shouldMarkOffline && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    if (shouldMarkOffline && wasConnected) {
       remoteBridgeState.lastSyncDirection = "pull-live-failed";
     }
   }
@@ -2063,6 +2199,8 @@ function stopRemoteBridge() {
   }
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
   remoteBridgeState.replicationRunning = false;
   if (!isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
@@ -2071,6 +2209,8 @@ function startRemoteBridge() {
   if (remoteBridgeState.running) return;
   remoteBridgeState.running = true;
   remoteBridgeState.autoSyncAttempted = false;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
   if (isRemotePullOnlyMode()) {
     remoteBridgeState.replicationCursors = normalizeReplicationCursors({});
   } else {
@@ -2083,7 +2223,13 @@ function startRemoteBridge() {
       return;
     }
     await pollRemoteLiveOnce().catch(() => {});
-    remoteBridgeTimer = setTimeout(tick, REMOTE_BRIDGE_INTERVAL_MS);
+    // Back off when the gateway is unreachable: doubles each failure up to
+    // REMOTE_BRIDGE_MAX_BACKOFF_MS, then resets to fast-poll on reconnect.
+    const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+    const nextDelay = failures <= 1
+      ? REMOTE_BRIDGE_INTERVAL_MS
+      : Math.min(REMOTE_BRIDGE_MAX_BACKOFF_MS, REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1));
+    remoteBridgeTimer = setTimeout(tick, Math.round(nextDelay));
   };
   tick();
 }
@@ -2111,7 +2257,7 @@ function applyRuntimeMode() {
     if (wasRemoteActive && Array.isArray(remoteBridgeState.todayEnergyRows)) {
       updateRemoteTodayEnergyShadow(remoteBridgeState.todayEnergyRows, Date.now());
     }
-    // ── Handoff lifecycle: capture per-inverter baselines ──────────────────────
+    // â”€â”€ Handoff lifecycle: capture per-inverter baselines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (wasRemoteActive) {
       const handoffNow = Date.now();
       const handoffDay = localDateStr(handoffNow);
@@ -2129,7 +2275,7 @@ function applyRuntimeMode() {
         .map((r) => `${r.inverter}:${Number(r.total_kwh || 0).toFixed(2)}kWh`)
         .join(", ");
       console.log(
-        `[handoff] Remote→Gateway started day=${handoffDay}` +
+        `[handoff] Remoteâ†’Gateway started day=${handoffDay}` +
         ` inverters=${capturedRows.length}` +
         ` baselines=[${baselineList}${capturedRows.length > 8 ? " ..." : ""}]`,
       );
@@ -3564,17 +3710,21 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 
   let rows = [];
   if (!inverter || inverter === "all") {
-    rows = db
-      .prepare(
-        "SELECT inverter, unit, ts, pac, online FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter, unit, ts ASC",
-      )
-      .all(s, e);
+    rows = queryReadingsRangeAll(s, e).map((r) => ({
+      inverter: r.inverter,
+      unit: r.unit,
+      ts: r.ts,
+      pac: r.pac,
+      online: r.online,
+    }));
   } else {
-    rows = db
-      .prepare(
-        "SELECT inverter, unit, ts, pac, online FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY inverter, unit, ts ASC",
-      )
-      .all(Number(inverter), s, e);
+    rows = queryReadingsRange(Number(inverter), s, e).map((r) => ({
+      inverter: r.inverter,
+      unit: r.unit,
+      ts: r.ts,
+      pac: r.pac,
+      online: r.online,
+    }));
   }
 
   const nodeState = new Map(); // `${inv}_${unit}` -> { ts, pac }
@@ -3629,15 +3779,7 @@ function buildTodayPacTotalsFromDb() {
   const startTs = new Date(`${day}T00:00:00.000`).getTime();
   const endTs = Date.now();
 
-  const e5Rows = db.prepare(
-    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter ORDER BY inverter ASC",
-  ).all(startTs, endTs);
-
-  const resultMap = new Map();
-  for (const r of e5Rows) {
-    const inv = Number(r?.inverter || 0);
-    if (inv > 0) resultMap.set(inv, Number(r?.total_kwh || 0));
-  }
+  const resultMap = sumEnergy5minByInverterRange(startTs, endTs);
 
   // Supplement with current partial-bucket totals plus the latest remote shadow
   // captured while this client was in Remote mode. This keeps totals stable when
@@ -3709,6 +3851,82 @@ function setPastDailyReportRowsCache(day, rowsRaw, now = Date.now()) {
   });
 }
 
+function getSummaryIntervalsForRow(summaryRow) {
+  let intervals = [];
+  try {
+    const parsed = JSON.parse(String(summaryRow?.intervals_json || "[]"));
+    if (Array.isArray(parsed)) {
+      intervals = parsed
+        .map((pair) => {
+          if (!Array.isArray(pair) || pair.length < 2) return null;
+          const start = Number(pair[0] || 0);
+          const end = Number(pair[1] || 0);
+          return end > start && start > 0 ? [start, end] : null;
+        })
+        .filter(Boolean);
+    }
+  } catch (_) {
+    intervals = [];
+  }
+  const lastTs = Number(summaryRow?.last_ts || 0);
+  if (Number(summaryRow?.last_online || 0) === 1 && lastTs > 0) {
+    intervals.push([lastTs, lastTs + 1000]);
+  }
+  return intervals;
+}
+
+function computeOnlineSecondsFromIntervals(intervals, window = null) {
+  let clipped = Array.isArray(intervals) ? intervals.slice() : [];
+  if (window?.startTs > 0 && window?.endTs > window.startTs) {
+    clipped = clipIntervalsToWindowMs(clipped, window.startTs, window.endTs);
+  }
+  return sumMergedIntervalsMs(clipped) / 1000;
+}
+
+function normalizePersistedDailyReportRow(row, day, ipCfg = null) {
+  const safeRow = row && typeof row === "object" ? { ...row } : {};
+  const reportDay = parseIsoDateStrict(String(day || safeRow?.date || localDateStr()), "date");
+  const inv = Number(safeRow?.inverter || 0);
+  const configuredUnits = inv > 0 ? getConfiguredUnitsForReportInverter(ipCfg || loadIpConfigFromDb(), inv) : [];
+  const expectedNodesRaw = Number(safeRow?.expected_nodes || 0);
+  const expectedNodes = expectedNodesRaw > 0
+    ? Math.max(1, Math.min(REPORT_MAX_NODES_PER_INVERTER, Math.trunc(expectedNodesRaw)))
+    : getReportActiveNodeCount(configuredUnits, new Map());
+  const ratedKw = Number(safeRow?.rated_kw || 0) > 0
+    ? Number(safeRow?.rated_kw || 0)
+    : getReportRatedKwForNodeCount(expectedNodes);
+  const uptimeS = Math.max(0, Number(safeRow?.uptime_s || 0));
+  const windowS = getReportSolarWindowSeconds(reportDay, reportDay === localDateStr());
+  const availabilityPct = Number(safeRow?.availability_pct);
+  const performancePct = Number(safeRow?.performance_pct);
+  const kwhTotal = Math.max(0, Number(safeRow?.kwh_total || 0));
+  const perfDenom = ratedKw > 0 ? ratedKw * (uptimeS / 3600) : 0;
+
+  safeRow.date = reportDay;
+  safeRow.expected_nodes = expectedNodes;
+  safeRow.rated_kw = Number(ratedKw.toFixed(3));
+  safeRow.availability_pct = Number(
+    clampPct(Number.isFinite(availabilityPct) ? availabilityPct : (windowS > 0 ? (uptimeS / windowS) * 100 : 0)).toFixed(3),
+  );
+  safeRow.performance_pct = Number(
+    clampPct(Number.isFinite(performancePct) ? performancePct : (perfDenom > 0 ? (kwhTotal / perfDenom) * 100 : 0)).toFixed(3),
+  );
+  safeRow.node_uptime_s = Math.max(0, Math.round(Number(safeRow?.node_uptime_s || 0)));
+  safeRow.expected_node_uptime_s = Math.max(
+    0,
+    Math.round(Number(safeRow?.expected_node_uptime_s || windowS * expectedNodes)),
+  );
+  safeRow.control_count = Math.max(0, Math.trunc(Number(safeRow?.control_count || 0)));
+  return safeRow;
+}
+
+function normalizePersistedDailyReportRows(rows, day) {
+  const ipCfg = loadIpConfigFromDb();
+  return (Array.isArray(rows) ? rows : []).map((row) =>
+    normalizePersistedDailyReportRow(row, day || row?.date || localDateStr(), ipCfg),
+  );
+}
+
 function getDailyReportRowsForDay(dayInput, options = {}) {
   const day = parseIsoDateStrict(dayInput || localDateStr(), "date");
   const today = localDateStr();
@@ -3724,10 +3942,18 @@ function getDailyReportRowsForDay(dayInput, options = {}) {
     if (!refresh) {
       const cached = getPastDailyReportRowsCached(day);
       if (cached) return cached;
+
+      const persisted = stmts.getDailyReport.all(day);
+      if (persisted.length) {
+        const normalized = normalizePersistedDailyReportRows(persisted, day);
+        setPastDailyReportRowsCache(day, normalized);
+        return cloneDailyReportRows(normalized);
+      }
     }
 
     const rebuilt = buildDailyReportRowsForDate(day, {
       persist,
+      refresh,
       includeTodayPartial: false,
     });
     setPastDailyReportRowsCache(day, rebuilt);
@@ -3736,6 +3962,7 @@ function getDailyReportRowsForDay(dayInput, options = {}) {
 
   return buildDailyReportRowsForDate(day, {
     persist,
+    refresh,
     includeTodayPartial,
   });
 }
@@ -3768,7 +3995,7 @@ function computeSpanSeconds(rows) {
 // For each consecutive pair, the interval is credited only when the starting
 // row is online=1.  Each interval is capped at AVAIL_MAX_GAP_S so that long
 // silent gaps (outages / comms loss that produced no readings) are not
-// mistakenly counted as uptime — the old lastTs-firstTs span formula would
+// mistakenly counted as uptime â€” the old lastTs-firstTs span formula would
 // credit the entire gap regardless of what happened inside it.
 function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
@@ -3906,6 +4133,7 @@ function getReportRatedKwForNodeCount(nodeCount) {
 
 function buildDailyReportRowsForDate(dateText, options = {}) {
   const persist = options.persist !== false;
+  const refresh = options.refresh === true;
   const includeTodayPartial = options.includeTodayPartial !== false;
   const day = parseIsoDateStrict(
     dateText || localDateStr(),
@@ -3920,21 +4148,8 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       : dayEndTs;
 
   const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const pacKwhByInv = sumEnergy5minByInverterRange(startTs, endTs);
 
-  // Use energy_5min as the single source of truth for kWh, matching the TODAY MWh
-  // header. buildPacEnergyBuckets re-integrates the subsampled readings table and
-  // systematically undercounts vs. the continuous live integrator that writes energy_5min.
-  const pacKwhByInv = new Map();
-  const e5Rows = db.prepare(
-    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter",
-  ).all(startTs, endTs);
-  for (const r of e5Rows) {
-    const inv = Number(r?.inverter || 0);
-    if (inv > 0) pacKwhByInv.set(inv, Number(r?.total_kwh || 0));
-  }
-
-  // For today's partial day, fold in the live supplement source used by
-  // /api/energy/today (poller in gateway mode, remote shadow on mode transition).
   if (day === localDateStr() && includeTodayPartial) {
     const supplementalRows = getTodayEnergySupplementRows(day);
     for (const { inverter, total_kwh } of supplementalRows) {
@@ -3943,22 +4158,27 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       pacKwhByInv.set(inv, Math.max(pacKwhByInv.get(inv) || 0, total_kwh));
     }
   }
+
   const reportWindow = getReportSolarWindowBounds(day, includeTodayPartial);
   const expectedSolarWindowS = Number(reportWindow.seconds || 0);
   const ipCfg = loadIpConfigFromDb();
+  const persistedRows = normalizePersistedDailyReportRows(stmts.getDailyReport.all(day), day);
+  const persistedByInv = new Map(
+    persistedRows.map((row) => [Number(row?.inverter || 0), row]),
+  );
 
-  // ── Batch queries: replace per-inverter N+1 pattern (was 27×3 = 81 queries) ──
-  // All readings for the day in a single scan, grouped in-process by inverter.
-  const allReadingsBatch = db.prepare(
-    "SELECT inverter, unit, ts, pac, kwh, online FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC",
-  ).all(startTs, endTs);
-  const readingsByInv = new Map();
-  for (const r of allReadingsBatch) {
-    const inv = Number(r.inverter);
-    if (!readingsByInv.has(inv)) readingsByInv.set(inv, []);
-    readingsByInv.get(inv).push(r);
+  let summaryRows = refresh ? rebuildDailyReadingsSummaryForDate(day) : getDailyReadingsSummaryRows(day);
+  if ((!summaryRows || !summaryRows.length) && day <= localDateStr()) {
+    summaryRows = rebuildDailyReadingsSummaryForDate(day);
   }
-  // Alarm and audit counts per inverter in 2 queries instead of 54.
+  const summaryByInv = new Map();
+  for (const row of summaryRows || []) {
+    const inv = Number(row?.inverter || 0);
+    if (!(inv > 0)) continue;
+    if (!summaryByInv.has(inv)) summaryByInv.set(inv, []);
+    summaryByInv.get(inv).push(row);
+  }
+
   const alarmCountBatch = db.prepare(
     "SELECT inverter, COUNT(*) AS cnt FROM alarms WHERE ts BETWEEN ? AND ? GROUP BY inverter",
   ).all(startTs, endTs);
@@ -3974,58 +4194,70 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 
   const out = [];
   for (let inv = 1; inv <= invCount; inv++) {
-    const allRows = readingsByInv.get(inv) || [];
-    const alarmCount = alarmCountByInv.get(inv) || 0;
-    const controlCount = auditCountByInv.get(inv) || 0;
+    const persistedRow = persistedByInv.get(inv) || null;
+    const alarmCountRaw = alarmCountByInv.get(inv) || 0;
+    const controlCountRaw = auditCountByInv.get(inv) || 0;
+    const alarmCount = day < localDateStr()
+      ? Math.max(alarmCountRaw, Number(persistedRow?.alarm_count || 0))
+      : alarmCountRaw;
+    const controlCount = day < localDateStr()
+      ? Math.max(controlCountRaw, Number(persistedRow?.control_count || 0))
+      : controlCountRaw;
     const pacKwh = Number(pacKwhByInv.get(inv) || 0);
     const configuredUnits = getConfiguredUnitsForReportInverter(ipCfg, inv);
     const configuredUnitSet = new Set(configuredUnits);
+    const allRows = summaryByInv.get(inv) || [];
     const rows = configuredUnits.length
       ? allRows.filter((r) => configuredUnitSet.has(Number(r?.unit || 0)))
       : allRows;
     const hasLiveData =
-      rows.length > 0 || pacKwh > 0 || alarmCount > 0 || controlCount > 0;
+      rows.length > 0 ||
+      pacKwh > 0 ||
+      alarmCount > 0 ||
+      controlCount > 0 ||
+      Boolean(persistedRow);
     if (!hasLiveData) continue;
+    if (!rows.length && persistedRow) {
+      const fallbackRow = normalizePersistedDailyReportRow(
+        {
+          ...persistedRow,
+          date: day,
+          inverter: inv,
+          alarm_count: Math.max(alarmCount, Number(persistedRow?.alarm_count || 0)),
+          control_count: Math.max(controlCount, Number(persistedRow?.control_count || 0)),
+        },
+        day,
+        ipCfg,
+      );
+      out.push(fallbackRow);
+      continue;
+    }
 
-    const onlineRows = rows.filter(
-      (r) => Number(r?.online || 0) === 1 && Number(r?.pac || 0) > 0,
-    );
-    // Group ALL rows by unit (online and offline) so computeNodeOnlineSeconds
-    // can see every state transition.  Using only online=1 rows (the old
-    // onlineRowsByUnit approach) caused computeSpanSeconds to credit the full
-    // first→last span even when the node was offline for hours in between.
     const rowsByUnit = new Map();
+    const perUnitUptime = [];
+    let allIntervals = [];
+    let pacPeak = 0;
+    let pacOnlineSum = 0;
+    let pacOnlineCount = 0;
     for (const r of rows) {
       const unit = Number(r?.unit || 0);
       if (unit < 1) continue;
-      if (!rowsByUnit.has(unit)) rowsByUnit.set(unit, []);
-      rowsByUnit.get(unit).push(r);
-    }
-    const pacValues = rows
-      .map((r) => Number(r?.pac || 0))
-      .filter((v) => Number.isFinite(v) && v >= 0);
-
-    const pacPeak = pacValues.length ? Math.max(...pacValues) : 0;
-    const pacAvg = onlineRows.length
-      ? onlineRows.reduce((s, r) => s + Number(r?.pac || 0), 0) /
-        onlineRows.length
-      : 0;
-    // Inverter uptime is the union of online intervals across all observed units.
-    // If any unit is online, inverter uptime advances.
-    const activeNodeCount = getReportActiveNodeCount(configuredUnits, rowsByUnit);
-    const ratedKw = getReportRatedKwForNodeCount(activeNodeCount);
-    const uptimeS = computeInverterOnlineSeconds(
-      rowsByUnit,
-      AVAIL_MAX_GAP_S,
-      reportWindow,
-    );
-    const perUnitUptime = [];
-    for (const [unit, unitRows] of rowsByUnit.entries()) {
+      rowsByUnit.set(unit, r);
+      pacPeak = Math.max(pacPeak, Number(r?.pac_peak || 0));
+      pacOnlineSum += Number(r?.pac_online_sum || 0);
+      pacOnlineCount += Number(r?.pac_online_count || 0);
+      const intervals = getSummaryIntervalsForRow(r);
+      allIntervals.push(...intervals);
       perUnitUptime.push({
         unit,
-        uptimeS: computeNodeOnlineSeconds(unitRows, AVAIL_MAX_GAP_S, reportWindow),
+        uptimeS: computeOnlineSecondsFromIntervals(intervals, reportWindow),
       });
     }
+
+    const pacAvg = pacOnlineCount > 0 ? pacOnlineSum / pacOnlineCount : 0;
+    const activeNodeCount = getReportActiveNodeCount(configuredUnits, rowsByUnit);
+    const ratedKw = getReportRatedKwForNodeCount(activeNodeCount);
+    const uptimeS = computeOnlineSecondsFromIntervals(allIntervals, reportWindow);
     perUnitUptime.sort(
       (a, b) =>
         Number(b.uptimeS || 0) - Number(a.uptimeS || 0) ||
@@ -4036,25 +4268,17 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       .reduce((s, r) => s + Math.max(0, Number(r?.uptimeS || 0)), 0);
 
     let kwhTotal = Math.max(0, pacKwh);
-    if (kwhTotal <= 0 && rows.length >= 2) {
-      // Per-unit register difference (rows are mixed-unit, sorted by ts).
-      const unitFirst = new Map();
-      const unitLast = new Map();
-      for (const r of rows) {
-        const unit = Number(r?.unit || 0);
-        const kwh = Number(r?.kwh || 0);
-        if (!unit || !Number.isFinite(kwh)) continue;
-        if (!unitFirst.has(unit)) unitFirst.set(unit, kwh);
-        unitLast.set(unit, kwh);
-      }
+    if (kwhTotal <= 0 && rows.length >= 1) {
       let regTotal = 0;
-      for (const [unit, firstKwh] of unitFirst.entries()) {
-        const lastKwh = unitLast.get(unit) || firstKwh;
+      for (const r of rows) {
+        const firstKwh = Number(r?.first_kwh || 0);
+        const lastKwh = Number(r?.last_kwh || firstKwh);
         const diff = lastKwh - firstKwh;
         if (Number.isFinite(diff) && diff > 0) regTotal += diff;
       }
       if (regTotal > 0) kwhTotal = regTotal;
     }
+
     const expectedNodeUptimeS = expectedSolarWindowS * activeNodeCount;
     const availabilityPct =
       expectedSolarWindowS > 0 ? (uptimeS / expectedSolarWindowS) * 100 : 0;
@@ -4090,6 +4314,12 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
         row.uptime_s,
         row.alarm_count,
         row.control_count,
+        row.availability_pct,
+        row.performance_pct,
+        row.node_uptime_s,
+        row.expected_node_uptime_s,
+        row.expected_nodes,
+        row.rated_kw,
       );
     }
 
@@ -4102,7 +4332,6 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
   }
   return out;
 }
-
 function calcAvailabilityPctFromRow(row) {
   const explicit = Number(row?.availability_pct);
   if (Number.isFinite(explicit)) return clampPct(explicit);
@@ -5157,6 +5386,8 @@ app.get("/api/runtime/network", (req, res) => {
     remotePullOnly: Boolean(isRemotePullOnlyMode()),
     remoteGatewayUrl: getRemoteGatewayBaseUrl(),
     remoteConnected: Boolean(remoteBridgeState.connected),
+    remoteLiveFailureCount: Number(remoteBridgeState.liveFailureCount || 0),
+    remoteLastFailureTs: Number(remoteBridgeState.lastFailureTs || 0),
     remoteLastAttemptTs: Number(remoteBridgeState.lastAttemptTs || 0),
     remoteLastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
     remoteLastError: String(remoteBridgeState.lastError || ""),
@@ -5219,11 +5450,18 @@ app.post("/api/runtime/network/test", async (req, res) => {
   }
   const started = Date.now();
   try {
-    const r = await fetch(`${base}/api/live`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(token),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-    });
+    const r = await fetchWithRetry(
+      `${base}/api/live`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(token),
+        timeout: REMOTE_FETCH_TIMEOUT_MS,
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
     if (!r.ok) {
       return res.status(502).json({
         ok: false,
@@ -5333,148 +5571,73 @@ app.get("/api/energy/5min", (req, res) => {
       ? invParsed
       : null;
 
-  if (pagedMode) {
-    const safeLimit = clampInt(limit, 100, 5000, 500);
-    const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
-    try {
-      let rows = [];
-      let total = 0;
-      let summaryRow = {};
-      let peakRow = {};
+  try {
+    const baseRows = scopedInv
+      ? queryEnergy5minRange(scopedInv, s, e)
+      : queryEnergy5minRangeAll(s, e);
 
-      if (Number.isFinite(scopedInv) && scopedInv > 0) {
-        rows = db
-          .prepare(
-            `SELECT id, ts, inverter, kwh_inc
-             FROM energy_5min
-             WHERE inverter=? AND ts BETWEEN ? AND ?
-             ORDER BY ts DESC, inverter ASC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(scopedInv, s, e, safeLimit, safeOffset);
-        total = Number(
-          db
-            .prepare(
-              `SELECT COUNT(1) AS c
-               FROM energy_5min
-               WHERE inverter=? AND ts BETWEEN ? AND ?`,
-            )
-            .get(scopedInv, s, e)?.c || 0,
-        );
-        summaryRow =
-          db
-            .prepare(
-              `SELECT COUNT(1) AS row_count,
-                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
-                      COALESCE(MAX(ts), 0) AS latest_ts,
-                      COUNT(DISTINCT inverter) AS inverter_count
-                 FROM energy_5min
-                WHERE inverter=? AND ts BETWEEN ? AND ?`,
-            )
-            .get(scopedInv, s, e) || {};
-        peakRow =
-          db
-            .prepare(
-              `SELECT inverter, ts, kwh_inc
-                 FROM energy_5min
-                WHERE inverter=? AND ts BETWEEN ? AND ?
-                ORDER BY kwh_inc DESC, ts DESC
-                LIMIT 1`,
-            )
-            .get(scopedInv, s, e) || {};
-      } else {
-        rows = db
-          .prepare(
-            `SELECT id, ts, inverter, kwh_inc
-             FROM energy_5min
-             WHERE ts BETWEEN ? AND ?
-             ORDER BY ts DESC, inverter ASC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(s, e, safeLimit, safeOffset);
-        total = Number(
-          db
-            .prepare(
-              `SELECT COUNT(1) AS c
-               FROM energy_5min
-               WHERE ts BETWEEN ? AND ?`,
-            )
-            .get(s, e)?.c || 0,
-        );
-        summaryRow =
-          db
-            .prepare(
-              `SELECT COUNT(1) AS row_count,
-                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
-                      COALESCE(MAX(ts), 0) AS latest_ts,
-                      COUNT(DISTINCT inverter) AS inverter_count
-                 FROM energy_5min
-                WHERE ts BETWEEN ? AND ?`,
-            )
-            .get(s, e) || {};
-        peakRow =
-          db
-            .prepare(
-              `SELECT inverter, ts, kwh_inc
-                 FROM energy_5min
-                WHERE ts BETWEEN ? AND ?
-                ORDER BY kwh_inc DESC, ts DESC
-                LIMIT 1`,
-            )
-            .get(s, e) || {};
+    if (pagedMode) {
+      const safeLimit = clampInt(limit, 100, 5000, 500);
+      const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+      const rows = baseRows
+        .slice()
+        .sort((a, b) => Number(b?.ts || 0) - Number(a?.ts || 0) || Number(a?.inverter || 0) - Number(b?.inverter || 0))
+        .slice(safeOffset, safeOffset + safeLimit);
+
+      let totalKwh = 0;
+      let latestTs = 0;
+      let peak = { inverter: 0, ts: 0, kwhInc: 0 };
+      const inverterSet = new Set();
+      for (const row of baseRows) {
+        const inv = Number(row?.inverter || 0);
+        const ts = Number(row?.ts || 0);
+        const kwhInc = Number(row?.kwh_inc || 0);
+        if (inv > 0) inverterSet.add(inv);
+        totalKwh += kwhInc;
+        if (ts > latestTs) latestTs = ts;
+        if (
+          kwhInc > Number(peak.kwhInc || 0) ||
+          (kwhInc === Number(peak.kwhInc || 0) && ts > Number(peak.ts || 0))
+        ) {
+          peak = { inverter: inv, ts, kwhInc };
+        }
       }
-
-      const rowCount = Number(summaryRow?.row_count || 0);
-      const totalKwh = Number(summaryRow?.total_kwh || 0);
-      const summary = {
-        rowCount,
-        totalKwh: Number(totalKwh.toFixed(6)),
-        avgKwh: rowCount > 0 ? Number((totalKwh / rowCount).toFixed(6)) : 0,
-        latestTs: Number(summaryRow?.latest_ts || 0),
-        inverterCount: Number(summaryRow?.inverter_count || 0),
-        peak: {
-          inverter: Number(peakRow?.inverter || 0),
-          ts: Number(peakRow?.ts || 0),
-          kwhInc: Number(Number(peakRow?.kwh_inc || 0).toFixed(6)),
-        },
-      };
 
       res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
       return res.json({
         ok: true,
         rows,
-        total,
+        total: baseRows.length,
         limit: safeLimit,
         offset: safeOffset,
-        hasMore: safeOffset + rows.length < total,
-        summary,
+        hasMore: safeOffset + rows.length < baseRows.length,
+        summary: {
+          rowCount: baseRows.length,
+          totalKwh: Number(totalKwh.toFixed(6)),
+          avgKwh: baseRows.length > 0 ? Number((totalKwh / baseRows.length).toFixed(6)) : 0,
+          latestTs,
+          inverterCount: inverterSet.size,
+          peak: {
+            inverter: Number(peak.inverter || 0),
+            ts: Number(peak.ts || 0),
+            kwhInc: Number(Number(peak.kwhInc || 0).toFixed(6)),
+          },
+        },
       });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message || "Energy pagination failed." });
     }
-  }
 
-  // Non-paged fallback: apply a hard row cap so a wide date range cannot
-  // serialize millions of rows and hang the process. Use paged=1 for large ranges.
-  try {
     const capLimit = ENERGY_5MIN_UNPAGED_ROW_CAP;
-    const rows = !scopedInv
-      ? db.prepare(
-          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
-        ).all(s, e, capLimit + 1)
-      : db.prepare(
-          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
-        ).all(Number(scopedInv), s, e, capLimit + 1);
-    if (rows.length > capLimit) {
+    if (baseRows.length > capLimit) {
       return res.status(400).json({
         ok: false,
         error: `Date range too large: use paged=1 with limit/offset or narrow the range. Exceeded ${capLimit} row cap.`,
         rowCap: capLimit,
       });
     }
-    return res.json(rows);
+    res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+    return res.json(baseRows);
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message || "Energy read failed." });
   }
 });
 
@@ -5489,12 +5652,8 @@ app.get("/api/analytics/energy", (req, res) => {
   // Apply row cap to prevent wide date ranges from hanging the analytics chart.
   const baseRows =
     !inverter || inverter === "all"
-      ? db.prepare(
-          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
-        ).all(s, e, ENERGY_5MIN_UNPAGED_ROW_CAP)
-      : db.prepare(
-          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
-        ).all(Number(inverter), s, e, ENERGY_5MIN_UNPAGED_ROW_CAP);
+      ? queryEnergy5minRangeAll(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
+      : queryEnergy5minRange(Number(inverter), s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP);
 
   if (baseRows.length) {
     if (bm <= 5) return res.json(baseRows);
@@ -5803,7 +5962,9 @@ app.get("/api/report/daily", (req, res) => {
     const s = start || localDateStr(Date.now() - 7 * 86400000);
     const e = end || localDateStr();
     res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
-    return res.json(stmts.getDailyReportRange.all(s, e));
+    return res.json(
+      normalizePersistedDailyReportRows(stmts.getDailyReportRange.all(s, e)),
+    );
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
@@ -5974,34 +6135,39 @@ const httpServer = app.listen(PORT, () => {
   } catch (e) {
     console.warn("[Forecast] startup sync failed:", e.message);
   }
+  startKeepAlive();
   applyRuntimeMode();
   if (process.send) process.send("ready");
 });
 
-// ─── Cloud Backup API Routes ──────────────────────────────────────────────────
+// â”€â”€â”€ Cloud Backup API Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** GET /api/backup/settings  — return cloud backup settings */
+/** GET /api/backup/settings  â€” return cloud backup settings */
 app.get("/api/backup/settings", (req, res) => {
   try {
-    const s = _cloudBackup.getCloudSettings();
+    const s = _cloudBackup.getCloudSettingsForClient();
     res.json({ ok: true, settings: s, connected: _tokenStore.listConnected() });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-/** POST /api/backup/settings  — save cloud backup settings */
+/** POST /api/backup/settings  â€” save cloud backup settings */
 app.post("/api/backup/settings", (req, res) => {
   try {
-    const body = req.body || {};
-    const saved = _cloudBackup.saveCloudSettings(body);
-    res.json({ ok: true, settings: saved });
+    const body = req.body && typeof req.body === "object" ? { ...req.body } : {};
+    const clearGDriveClientSecret = Boolean(body.clearGDriveClientSecret);
+    delete body.clearGDriveClientSecret;
+    const saved = _cloudBackup.saveCloudSettings(body, {
+      clearGDriveClientSecret,
+    });
+    res.json({ ok: true, settings: _cloudBackup.getCloudSettingsForClient(saved) });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
   }
 });
 
-/** POST /api/backup/auth/:provider/start  — begin OAuth flow */
+/** POST /api/backup/auth/:provider/start  â€” begin OAuth flow */
 app.post("/api/backup/auth/:provider/start", (req, res) => {
   const provider = req.params.provider;
   if (provider !== "onedrive" && provider !== "gdrive") {
@@ -6041,7 +6207,7 @@ app.post("/api/backup/auth/:provider/start", (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/callback  — complete OAuth token exchange */
+/** POST /api/backup/auth/:provider/callback  â€” complete OAuth token exchange */
 app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   const provider = req.params.provider;
   const { code, state } = req.body || {};
@@ -6070,7 +6236,7 @@ app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/disconnect  — revoke stored tokens */
+/** POST /api/backup/auth/:provider/disconnect  â€” revoke stored tokens */
 app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   const provider = req.params.provider;
   try {
@@ -6082,7 +6248,7 @@ app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   }
 });
 
-/** GET /api/backup/status  — connection status + progress */
+/** GET /api/backup/status  â€” connection status + progress */
 app.get("/api/backup/status", (req, res) => {
   res.json({
     ok: true,
@@ -6091,12 +6257,12 @@ app.get("/api/backup/status", (req, res) => {
   });
 });
 
-/** GET /api/backup/progress  — current operation progress */
+/** GET /api/backup/progress  â€” current operation progress */
 app.get("/api/backup/progress", (req, res) => {
   res.json({ ok: true, progress: _cloudBackup.getProgress() });
 });
 
-/** GET /api/backup/history  — local backup history */
+/** GET /api/backup/history  â€” local backup history */
 app.get("/api/backup/history", (req, res) => {
   try {
     const history = _cloudBackup.getHistory().map((h) => ({
@@ -6115,7 +6281,7 @@ app.get("/api/backup/history", (req, res) => {
   }
 });
 
-/** POST /api/backup/now  — run backup immediately */
+/** POST /api/backup/now  â€” run backup immediately */
 app.post("/api/backup/now", async (req, res) => {
   const { scope, provider, tag } = req.body || {};
   try {
@@ -6133,7 +6299,7 @@ app.post("/api/backup/now", async (req, res) => {
   }
 });
 
-/** GET /api/backup/cloud/:provider  — list cloud backups */
+/** GET /api/backup/cloud/:provider  â€” list cloud backups */
 app.get("/api/backup/cloud/:provider", async (req, res) => {
   const provider = req.params.provider;
   try {
@@ -6144,7 +6310,7 @@ app.get("/api/backup/cloud/:provider", async (req, res) => {
   }
 });
 
-/** POST /api/backup/pull  — pull backup from cloud */
+/** POST /api/backup/pull  â€” pull backup from cloud */
 app.post("/api/backup/pull", async (req, res) => {
   const { provider, remoteId, remoteName } = req.body || {};
   if (!provider || !remoteId || !remoteName) {
@@ -6165,7 +6331,7 @@ app.post("/api/backup/pull", async (req, res) => {
   }
 });
 
-/** POST /api/backup/restore/:id  — restore a local backup */
+/** POST /api/backup/restore/:id  â€” restore a local backup */
 app.post("/api/backup/restore/:id", async (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   const { skipSafetyBackup } = req.body || {};
@@ -6186,7 +6352,7 @@ app.post("/api/backup/restore/:id", async (req, res) => {
   }
 });
 
-/** DELETE /api/backup/:id  — delete a local backup package */
+/** DELETE /api/backup/:id  â€” delete a local backup package */
 app.delete("/api/backup/:id", (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   try {
@@ -6197,7 +6363,7 @@ app.delete("/api/backup/:id", (req, res) => {
   }
 });
 
-// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+// â”€â”€â”€ Graceful Shutdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let _shutdownCalled = false;
 
 function _flushAndClose() {
@@ -6217,7 +6383,7 @@ function gracefulShutdown(reason) {
 }
 
 // Called when running embedded in the Electron main process (packaged mode).
-// Must NOT call process.exit — Electron controls the lifecycle.
+// Must NOT call process.exit â€” Electron controls the lifecycle.
 function shutdownEmbedded() {
   if (_shutdownCalled) return;
   _shutdownCalled = true;
@@ -6232,13 +6398,13 @@ process.on("message", (msg) => {
   if (msg && msg.type === "shutdown") gracefulShutdown("ipc");
 });
 
-// ─── Periodic WAL Checkpoint ──────────────────────────────────────────────────
+// â”€â”€â”€ Periodic WAL Checkpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.
 setInterval(() => {
   try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
 }, 15 * 60 * 1000).unref();
 
-// ─── Periodic DB Backup ───────────────────────────────────────────────────────
+// â”€â”€â”€ Periodic DB Backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Rotates between 2 backup files every 2 hours. Uses SQLite's online backup API
 // so it never blocks reads/writes and is always consistent.
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
@@ -6258,5 +6424,4 @@ setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
 
 module.exports = { shutdownEmbedded };
-
 

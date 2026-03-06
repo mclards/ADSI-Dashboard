@@ -1,18 +1,19 @@
 # SKILL.md
 
-Project guidance for Codex and other coding agents working in `d:\ADSI-Dashboard`.
+Project guidance for Codex, Claude, and other coding agents working in `d:\ADSI-Dashboard`.
 
-This file is intended to be reusable by local coding agents and as the canonical project rulebook. If another agent such as Claude cannot consume `SKILL.md` directly, keep the same rules mirrored in `CLAUDE.md`.
+This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it whenever this file changes.
 
 ## Project Identity
 
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.10` in [package.json](d:/ADSI-Dashboard/package.json)
+- Current repo version baseline: `2.2.10` in `package.json`
 - Release source of truth for versioning: `package.json`
+- GitHub release channel: `mclards/ADSI-Dashboard`
 
-Do not casually rename internal updater identifiers. The visible app name may change, but updater compatibility with old installed versions must remain intact unless a deliberate migration is implemented.
+Do not casually rename internal updater identifiers. Visible branding may change, but updater compatibility with installed legacy builds must remain intact unless a deliberate migration is implemented.
 
 ## Core Stack
 
@@ -27,8 +28,8 @@ Do not casually rename internal updater identifiers. The visible app name may ch
 
 - Keep the repo root focused on app entrypoints, app metadata, and user-visible config only.
 - Put Python backend support files, shared Python modules, and PyInstaller spec files under `services/`.
-- Do not let legacy duplicate service files accumulate again at the repo root.
-- Current intended root Python surface:
+- Do not reintroduce legacy duplicate service files at the repo root.
+- Current intended root surface:
   - `InverterCoreService.py`
   - `ForecastCoreService.py`
   - `package.json`
@@ -42,7 +43,59 @@ Do not casually rename internal updater identifiers. The visible app name may ch
 2. In `remote` mode, treat the gateway as source of truth.
 3. Preserve updater compatibility with old app releases.
 4. Keep UI compact, readable, and consistent across `dark`, `light`, and `classic`.
-5. Treat credentials, license internals, and user data as sensitive.
+5. Treat credentials, license internals, archives, and user data as sensitive.
+
+## Data Architecture Rules
+
+The project now uses a hot/cold telemetry model. Keep future work aligned with that model.
+
+- Hot DB: main SQLite file under `C:\ProgramData\InverterDashboard`
+- Cold DBs: monthly archive SQLite files under `C:\ProgramData\InverterDashboard\archive`
+- Hot telemetry tables:
+  - `readings`
+  - `energy_5min`
+- Persistent summary/report tables kept in the main DB:
+  - `daily_report`
+  - `daily_readings_summary`
+  - alarms, audit, forecast, settings, and other operational tables
+
+### Retention
+
+- `retainDays` controls how long raw `readings` and `energy_5min` stay hot in the main DB.
+- Old raw telemetry must be archived, not simply discarded.
+- Archived telemetry must remain readable for historical analytics, exports, and report rebuilds.
+- Do not bypass the configured `retainDays` window when deciding what remains in the hot DB.
+
+### Historical Read Rules
+
+- Use archive-aware helpers when reading historical telemetry:
+  - `queryReadingsRange(All)`
+  - `queryEnergy5minRange(All)`
+  - `sumEnergy5minByInverterRange()`
+- Do not add new direct SQL scans over hot-only `readings` or `energy_5min` for date ranges that may cross retention boundaries.
+- Historical reports and exports must continue to work even after raw telemetry is archived.
+
+### Daily Report Strategy
+
+- For past days, prefer persisted `daily_report` rows.
+- Rebuild past daily reports only when:
+  - persisted rows are missing
+  - refresh is explicitly requested
+  - a repair or backfill action intentionally regenerates them
+- Use `daily_readings_summary` as the normal source for inverter/day/unit uptime and PAC rollups.
+- Do not reintroduce full-day raw `readings` scans as the normal report path.
+
+### Replication and Archive Guardrails
+
+- Replicate `daily_report` and `daily_readings_summary` so historical reporting survives across machines.
+- Incremental cursor-based pull remains the preferred replication model.
+- Remote startup reconcile must happen before pull.
+- If local data is newer and reconciliation push fails, do not force pull.
+- Use chunked push uploads to avoid HTTP `413`.
+- Protect local-only settings during merge/import.
+- Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
+- If replicated `readings` or `energy_5min` rows are already older than local `retainDays`, write them directly into the local archive instead of the hot DB.
+- Archive DB files themselves are local artifacts unless a deliberate archive-file replication design is implemented later.
 
 ## UX and Theming Rules
 
@@ -52,16 +105,17 @@ When adding, removing, or restructuring UI:
 - Avoid hardcoded one-off colors for reusable panels, forms, cards, toolbars, status chips, and action bars unless the area is intentionally isolated.
 - If a component exists in one theme, validate it conceptually against all three themes. Do not leave light/classic with dark-only styling.
 - Keep spacing, radius, shadows, and panel hierarchy aligned with existing dashboard patterns.
-- Remove stale CSS, HTML, and JS when replacing an older UI pattern. Do not leave dead settings layouts, orphan selectors, or unused controls behind.
+- Remove stale CSS, HTML, and JS when replacing an older UI pattern. Do not leave dead layouts, orphan selectors, or unused controls behind.
 - Prefer one clear interaction path over duplicated controls that do the same thing.
+- If a page is dense or long, make the right area scrollable instead of allowing overlap or hidden actions.
 
 ## Icons, Logos, and Visual Consistency
 
-- Use the existing MDI icon system for navigation, settings, actions, and status where possible.
+- Use the existing MDI icon system for navigation, settings, actions, and status wherever possible.
 - Do not mix emoji icons with MDI icons in the same workflow.
 - If the app icon, brand logo, or visible product name changes, update all affected surfaces together:
   - `package.json` build metadata
-  - header/about/footer branding
+  - header, about, and footer branding
   - installer icon references
   - release artifact expectations if intentionally changed
 - Current Windows build icon reference: `icon-256.png`
@@ -73,7 +127,7 @@ The UI should reduce operator confusion without making screens noisy.
 - Any icon-only action or non-obvious control should expose short hover help, tooltip text, or inline helper text.
 - Use hover info for controls with operational consequences, technical abbreviations, or hidden assumptions.
 - Keep hover text concise and operational. Prefer "what this does" and "why it matters".
-- Do not rely on hover only for critical safety information; pair it with visible labels when the action is destructive or high impact.
+- Do not rely on hover only for critical safety information. Pair it with visible labels when the action is destructive or high impact.
 
 ## Security and Privacy Rules
 
@@ -82,14 +136,14 @@ The UI should reduce operator confusion without making screens noisy.
 - Do not add logs that print tokens, OAuth responses, license payload internals, filesystem secrets, or personally sensitive data.
 - If a UI flow can be simplified without exposing security internals, prefer the simpler user-facing flow.
 - License generation and verification UI should not reveal unnecessary implementation hints.
-- Treat exported configuration files as sensitive when they contain credentials.
+- Treat exported configuration files and archived operational data as sensitive when they contain credentials or customer telemetry.
 
 ## GitHub Repo Hygiene
 
 Keep the public repository clean, professional, and safe to publish.
 
 - Exclude confidential files from Git tracking and GitHub releases.
-- Do not commit secrets, tokens, OAuth client secrets, private keys, signing keys, local database snapshots, local auth caches, portable runtime data, or customer-specific exports.
+- Do not commit secrets, tokens, OAuth client secrets, private keys, signing keys, local database snapshots, local auth caches, archive DB copies, portable runtime data, or customer-specific exports.
 - Keep local-only tooling out of app releases unless explicitly requested.
 - Before push or release, review staged files for accidental sensitive content and stale generated artifacts.
 - Keep public docs, screenshots, and release notes aligned with the current app name, version, and UX.
@@ -101,7 +155,7 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
 - `keys/`, `secrets/`, `private/`
 - `*.pem`, `*.key`, `*.p12`, `*.pfx`
 - local license files, signing outputs, and auth/token caches
-- local database copies and runtime backup folders
+- local database copies, archive DB copies, and runtime backup folders
 - local-only license generator tools and their outputs
 
 ## Versioning and Release Rules
@@ -112,7 +166,7 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
   - app ID stays `com.engr-m.inverter-dashboard`
   - release asset names stay compatible with existing updater expectations
   - GitHub release channel remains `mclards/ADSI-Dashboard`
-- Never publish new installer/portable artifacts under an unchanged version.
+- Never publish new installer or portable artifacts under an unchanged version.
 - Every build release must append the latest app version to the release artifacts and release metadata.
 
 ## Build and Artifact Rules
@@ -141,10 +195,11 @@ Preserve these storage and compatibility paths unless a migration is intentional
 - License mirror file: `C:\ProgramData\ADSI-InverterDashboard\license\license.dat`
 - License state: `C:\ProgramData\ADSI-InverterDashboard\license\license-state.json`
 - License registry mirror: `HKCU\Software\ADSI\InverterDashboard\License`
-- Server/export data root: `C:\ProgramData\InverterDashboard`
+- Server and export data root: `C:\ProgramData\InverterDashboard`
+- Archive root: `C:\ProgramData\InverterDashboard\archive`
 - Default export path: `C:\Logs\InverterDashboard`
 - Portable data root: `<portable exe dir>\InverterDashboardData`
-- OneDrive/Google Drive backup folder name: `InverterDashboardBackups`
+- OneDrive and Google Drive backup folder name: `InverterDashboardBackups`
 
 If a visible product rename affects install directory behavior, assess updater impact and migration impact before changing it.
 
@@ -157,14 +212,6 @@ If a visible product rename affects install directory behavior, assess updater i
   - pulls live data from gateway
   - can run replication workflows
   - must not run day-ahead generation
-
-## Replication Guardrails
-
-- Prefer incremental cursor-based pull.
-- Remote startup sync must reconcile before pull.
-- If local data is newer and reconciliation push fails, do not force pull.
-- Use chunked push uploads to avoid HTTP `413`.
-- Protect local-only settings during merge/import.
 
 ## Current Metrics Guardrails
 
@@ -199,12 +246,15 @@ Useful checks after JS edits:
 
 ```powershell
 node --check server/index.js
+node --check server/db.js
+node --check server/poller.js
+node --check server/exporter.js
 node --check public/js/app.js
 node --check electron/main.js
 node --check electron/preload.js
 ```
 
-Useful checks after CSS/HTML UX edits:
+Useful checks after CSS or HTML UX edits:
 
 ```powershell
 git diff -- public/index.html public/css/style.css
