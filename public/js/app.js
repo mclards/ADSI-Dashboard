@@ -2320,6 +2320,8 @@ async function loadSettings() {
     $("setSolcastApiKey").value = s.solcastApiKey || "";
     $("setSolcastResourceId").value = s.solcastResourceId || "";
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
+    if ($("setPlantLatitude"))  $("setPlantLatitude").value  = s.plantLatitude  ?? "";
+    if ($("setPlantLongitude")) $("setPlantLongitude").value = s.plantLongitude ?? "";
     $("setDataDir").textContent = s.dataDir || "—";
     const pc = s.inverterPollConfig || {};
     if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
@@ -2878,6 +2880,8 @@ async function saveSettings() {
     solcastApiKey: $("setSolcastApiKey").value,
     solcastResourceId: $("setSolcastResourceId").value,
     solcastTimezone: $("setSolcastTimezone").value,
+    plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
+    plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
     inverterPollConfig: {
       modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
       reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
@@ -6559,9 +6563,24 @@ function ensureAnalyticsCards() {
           step="1"
           value="1"
         />
-        <button class="btn btn-accent analytics-gen-btn" onclick="runDayAheadGeneration()">
-          Generate
-        </button>
+        <div class="analytics-gen-actions">
+          <button
+            class="btn btn-accent analytics-gen-btn"
+            type="button"
+            title="Generate day-ahead forecast from the selected date."
+            onclick="runDayAheadGeneration()"
+          >
+            Generate
+          </button>
+          <button
+            class="btn btn-outline analytics-gen-btn analytics-gen-export-btn"
+            type="button"
+            title="Export day-ahead vs actual for the selected date and chart interval."
+            onclick="runAnalyticsDayAheadExport()"
+          >
+            Export
+          </button>
+        </div>
       </div>
       <div class="exp-result analytics-gen-result" id="genDayResult"></div>
     </div>
@@ -7286,6 +7305,46 @@ async function runForecastActualExport() {
     }
   } finally {
     releaseExportAbortController("btnCancelForecastExport");
+  }
+}
+
+function getAnalyticsForecastExportResolution() {
+  const intervalMin = Number($("anaInterval")?.value || State.analyticsIntervalMin || 5);
+  if (intervalMin === 15) return "15min";
+  if (intervalMin === 30) return "30min";
+  if (intervalMin === 60) return "1hr";
+  return "5min";
+}
+
+async function runAnalyticsDayAheadExport() {
+  const day = String($("anaDate")?.value || today()).trim();
+  const res = $("genDayResult");
+  const startTs = day ? localDateStartMs(day) : undefined;
+  const endTs = day ? localDateEndMs(day) : undefined;
+  const resolution = getAnalyticsForecastExportResolution();
+
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+
+  try {
+    const r = await api("/api/export/forecast-actual", "POST", {
+      startTs,
+      endTs,
+      resolution,
+      format: "xlsx",
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = `✔ Exported ${day} (${resolution})`;
+    }
+    await openExportPathFolder(r.path);
+  } catch (e) {
+    if (res) {
+      res.className = "exp-result error";
+      res.textContent = `✗ ${e.message}`;
+    }
   }
 }
 

@@ -54,6 +54,10 @@ userData/
 *.lic
 .claude/settings.local.json
 
+# Local machine IP config (do not commit)
+ipconfig.json
+server/ipconfig.json
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1014,6 +1014,34 @@
               /></label>
               <small id="nodeCountHelp">Data collection nodes per inverter (1-16)</small>
             </div>
+            <div class="srow">
+              <label
+                >Plant Latitude<input
+                  type="number"
+                  id="setPlantLatitude"
+                  class="inp inp-sm"
+                  step="0.000001"
+                  min="-90"
+                  max="90"
+                  placeholder="e.g. 6.772269"
+                  aria-describedby="plantLatHelp"
+              /></label>
+              <small id="plantLatHelp">Latitude used for weather data (-90 to 90)</small>
+            </div>
+            <div class="srow">
+              <label
+                >Plant Longitude<input
+                  type="number"
+                  id="setPlantLongitude"
+                  class="inp inp-sm"
+                  step="0.000001"
+                  min="-180"
+                  max="180"
+                  placeholder="e.g. 125.284455"
+                  aria-describedby="plantLonHelp"
+              /></label>
+              <small id="plantLonHelp">Longitude used for weather data (-180 to 180)</small>
+            </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
             <div class="sgroup-title"><span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span> Data &amp; Polling</div>

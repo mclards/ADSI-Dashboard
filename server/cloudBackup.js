@@ -21,7 +21,7 @@ const crypto = require("crypto");
 const cron = require("node-cron");
 const fetch = require("node-fetch");
 
-const APP_VERSION = "2.2.1";
+const APP_VERSION = require("../package.json").version;
 const DB_SCHEMA_VERSION = "2";
 
 // Limit how many local backup packages to keep.

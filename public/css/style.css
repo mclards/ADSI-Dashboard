@@ -2609,10 +2609,17 @@ label[data-required]::after {
 
 .analytics-gen-row {
   display: grid;
-  grid-template-columns: auto minmax(64px, 86px) 1fr;
+  grid-template-columns: auto minmax(64px, 86px) minmax(0, 1fr);
   gap: 6px;
   align-items: center;
   margin-top: 6px;
+}
+
+.analytics-gen-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .analytics-gen-label {
@@ -2630,6 +2637,10 @@ label[data-required]::after {
   height: 28px;
   justify-content: center;
   padding: 0 10px;
+}
+
+.analytics-gen-export-btn {
+  min-width: 74px;
 }
 
 .analytics-gen-result {

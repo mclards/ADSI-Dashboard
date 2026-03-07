@@ -3747,6 +3747,8 @@ function ensurePersistedSettings() {
     solcastApiKey: "",
     solcastResourceId: "",
     solcastTimezone: "Asia/Manila",
+    plantLatitude: String(WEATHER_LAT),
+    plantLongitude: String(WEATHER_LON),
     remoteReplicationCursors: JSON.stringify(normalizeReplicationCursors({})),
     inverterPollConfig: JSON.stringify(DEFAULT_POLL_CFG),
   };
@@ -3801,6 +3803,8 @@ function buildDefaultSettingsSnapshot() {
     solcastApiKey: "",
     solcastResourceId: "",
     solcastTimezone: "Asia/Manila",
+    plantLatitude: WEATHER_LAT,
+    plantLongitude: WEATHER_LON,
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     dataDir: DATA_DIR,
@@ -3850,6 +3854,8 @@ function buildSettingsSnapshot() {
       "solcastTimezone",
       defaults.solcastTimezone,
     ),
+    plantLatitude: Number(getSetting("plantLatitude", WEATHER_LAT)),
+    plantLongitude: Number(getSetting("plantLongitude", WEATHER_LON)),
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", defaults.exportUiState),
     ),
@@ -4192,8 +4198,10 @@ async function fetchDailyWeatherRange(startDay, endDay, useArchive = false) {
   const base = useArchive
     ? "https://archive-api.open-meteo.com/v1/archive"
     : "https://api.open-meteo.com/v1/forecast";
+  const _lat = Number(getSetting("plantLatitude", WEATHER_LAT));
+  const _lon = Number(getSetting("plantLongitude", WEATHER_LON));
   const url =
-    `${base}?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}` +
+    `${base}?latitude=${_lat}&longitude=${_lon}` +
     `&daily=${encodeURIComponent(WEATHER_DAILY_FIELDS)}` +
     `&start_date=${encodeURIComponent(startDay)}` +
     `&end_date=${encodeURIComponent(endDay)}` +
@@ -6187,6 +6195,8 @@ app.post("/api/settings", (req, res) => {
     solcastTimezone,
     exportUiState,
     inverterPollConfig,
+    plantLatitude,
+    plantLongitude,
   } =
     req.body || {};
 
@@ -6298,6 +6308,18 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid solcastTimezone" });
     }
     updates.solcastTimezone = (tz || "Asia/Manila").slice(0, 80);
+  }
+  if (plantLatitude !== undefined) {
+    const lat = Number(plantLatitude);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90)
+      return res.status(400).json({ ok: false, error: "plantLatitude must be between -90 and 90" });
+    updates.plantLatitude = String(lat);
+  }
+  if (plantLongitude !== undefined) {
+    const lon = Number(plantLongitude);
+    if (!Number.isFinite(lon) || lon < -180 || lon > 180)
+      return res.status(400).json({ ok: false, error: "plantLongitude must be between -180 and 180" });
+    updates.plantLongitude = String(lon);
   }
   if (exportUiState !== undefined) {
     updates.exportUiState = JSON.stringify(sanitizeExportUiState(exportUiState));
