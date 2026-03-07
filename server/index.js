@@ -4207,51 +4207,60 @@ async function fetchDailyWeatherRange(startDay, endDay, useArchive = false) {
     `&end_date=${encodeURIComponent(endDay)}` +
     `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
 
-  const r = await fetch(url, { timeout: 20000 });
-  if (!r.ok) {
-    throw new Error(`Weather API HTTP ${r.status}`);
-  }
-  const payload = await r.json();
-  const d = payload?.daily || {};
-  const time = Array.isArray(d.time) ? d.time : [];
-  const tempMax = Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max : [];
-  const tempMin = Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min : [];
-  const precip = Array.isArray(d.precipitation_sum) ? d.precipitation_sum : [];
-  const precipProb = Array.isArray(d.precipitation_probability_max)
-    ? d.precipitation_probability_max
-    : [];
-  const cloud = Array.isArray(d.cloudcover_mean)
-    ? d.cloudcover_mean
-    : Array.isArray(d.cloud_cover_mean)
-      ? d.cloud_cover_mean
+  try {
+    const r = await fetch(url, { timeout: 20000 });
+    if (!r.ok) {
+      throw new Error(`Weather API HTTP ${r.status}`);
+    }
+    const payload = await r.json();
+    const d = payload?.daily || {};
+    const time = Array.isArray(d.time) ? d.time : [];
+    const tempMax = Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max : [];
+    const tempMin = Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min : [];
+    const precip = Array.isArray(d.precipitation_sum) ? d.precipitation_sum : [];
+    const precipProb = Array.isArray(d.precipitation_probability_max)
+      ? d.precipitation_probability_max
       : [];
-  const wind = Array.isArray(d.windspeed_10m_max)
-    ? d.windspeed_10m_max
-    : Array.isArray(d.wind_speed_10m_max)
-      ? d.wind_speed_10m_max
-      : [];
-  const rad = Array.isArray(d.shortwave_radiation_sum) ? d.shortwave_radiation_sum : [];
+    const cloud = Array.isArray(d.cloudcover_mean)
+      ? d.cloudcover_mean
+      : Array.isArray(d.cloud_cover_mean)
+        ? d.cloud_cover_mean
+        : [];
+    const wind = Array.isArray(d.windspeed_10m_max)
+      ? d.windspeed_10m_max
+      : Array.isArray(d.wind_speed_10m_max)
+        ? d.wind_speed_10m_max
+        : [];
+    const rad = Array.isArray(d.shortwave_radiation_sum) ? d.shortwave_radiation_sum : [];
 
-  const n = time.length;
-  const rows = [];
-  for (let i = 0; i < n; i++) {
-    const solarMJ = Number(rad[i] || 0);
-    const row = {
-      date: String(time[i] || ""),
-      temp_max_c: Number.isFinite(Number(tempMax[i])) ? Number(Number(tempMax[i]).toFixed(1)) : null,
-      temp_min_c: Number.isFinite(Number(tempMin[i])) ? Number(Number(tempMin[i]).toFixed(1)) : null,
-      precip_mm: Number.isFinite(Number(precip[i])) ? Number(Number(precip[i]).toFixed(1)) : 0,
-      precip_prob_pct: Number.isFinite(Number(precipProb[i])) ? Number(Math.round(Number(precipProb[i]))) : 0,
-      cloud_pct: Number.isFinite(Number(cloud[i])) ? Number(Math.round(Number(cloud[i]))) : 0,
-      wind_kph: Number.isFinite(Number(wind[i])) ? Number(Number(wind[i]).toFixed(1)) : 0,
-      solar_kwh_m2: Number.isFinite(solarMJ) ? Number((solarMJ / 3.6).toFixed(2)) : 0,
-    };
-    row.sky = classifyDailySky(row);
-    rows.push(row);
+    const n = time.length;
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const solarMJ = Number(rad[i] || 0);
+      const row = {
+        date: String(time[i] || ""),
+        temp_max_c: Number.isFinite(Number(tempMax[i])) ? Number(Number(tempMax[i]).toFixed(1)) : null,
+        temp_min_c: Number.isFinite(Number(tempMin[i])) ? Number(Number(tempMin[i]).toFixed(1)) : null,
+        precip_mm: Number.isFinite(Number(precip[i])) ? Number(Number(precip[i]).toFixed(1)) : 0,
+        precip_prob_pct: Number.isFinite(Number(precipProb[i])) ? Number(Math.round(Number(precipProb[i]))) : 0,
+        cloud_pct: Number.isFinite(Number(cloud[i])) ? Number(Math.round(Number(cloud[i]))) : 0,
+        wind_kph: Number.isFinite(Number(wind[i])) ? Number(Number(wind[i]).toFixed(1)) : 0,
+        solar_kwh_m2: Number.isFinite(solarMJ) ? Number((solarMJ / 3.6).toFixed(2)) : 0,
+      };
+      row.sky = classifyDailySky(row);
+      rows.push(row);
+    }
+
+    weatherWeeklyCache.set(key, { ts: now, rows });
+    return rows;
+  } catch (err) {
+    // Network error or API failure — serve stale cache if available, even past TTL.
+    if (cached && Array.isArray(cached.rows) && cached.rows.length) {
+      console.warn(`[weather] API unavailable (${err.message}); serving stale cache for ${key}`);
+      return cached.rows;
+    }
+    throw err; // No stale data available — propagate so route returns 500
   }
-
-  weatherWeeklyCache.set(key, { ts: now, rows });
-  return rows;
 }
 
 async function getWeeklyWeather(startDay) {

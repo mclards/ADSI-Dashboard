@@ -178,6 +178,8 @@ const State = {
   tabFetchTs: {},
   // In-flight fetch guard: tab name → true while HTTP request is active.
   tabFetching: {},
+  // Tracks the calendar day when tab dates were last reset to today (YYYY-MM-DD).
+  lastDateInitDay: "",
 };
 const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
 const MAX_INV_UNITS = 4;
@@ -2280,6 +2282,15 @@ function startClock() {
       `${pad2(n.getHours())}:${pad2(n.getMinutes())}:${pad2(n.getSeconds())}`;
     $("dateLbl").textContent =
       `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())} PHT`;
+    // Day-rollover: reset tab dates and invalidate caches when the calendar day changes.
+    if (State.lastDateInitDay && State.lastDateInitDay !== dateStr(n)) {
+      initAllTabDatesToToday();
+      State.tabFetchTs = {};
+      State.alarmView.rows  = [];
+      State.energyView.rows = [];
+      State.auditView.rows  = [];
+      State.reportView.rows = [];
+    }
   }
   tick();
   State.clockTimer = setInterval(tick, 1000);
@@ -8196,6 +8207,20 @@ function bindEventHandlers() {
   });
 }
 
+// ─── Date defaults ────────────────────────────────────────────────────────────
+// Force all tab date inputs to today's values. Called at startup (to override
+// any stale exportUiState) and automatically by startClock on day rollover.
+function initAllTabDatesToToday() {
+  const d = today();
+  const weekStart = dateStr(new Date(Date.now() - 7 * 86400000));
+  if ($("anaDate"))     $("anaDate").value = d;
+  if ($("reportDate"))  $("reportDate").value = d;
+  if ($("alarmStart"))  { $("alarmStart").value = weekStart; $("alarmEnd").value  = d; }
+  if ($("energyStart")) { $("energyStart").value = d;        $("energyEnd").value = d; }
+  if ($("auditStart"))  { $("auditStart").value = weekStart; $("auditEnd").value  = d; }
+  State.lastDateInitDay = d;
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
   initThemeToggle();
@@ -8222,6 +8247,8 @@ async function init() {
   try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
   renderAlarmSoundBtn();
   await loadSettings();
+  initAllTabDatesToToday();    // override any stale exportUiState date with today
+  queuePersistExportUiState(); // persist today's reportDate immediately
   cbLoadSettings().catch(() => {});
   syncDayAheadGeneratorAvailability();
   bindExportUiStatePersistence();
