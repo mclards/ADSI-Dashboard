@@ -180,6 +180,9 @@ const State = {
   tabFetching: {},
   // Tracks the calendar day when tab dates were last reset to today (YYYY-MM-DD).
   lastDateInitDay: "",
+  // Single-inverter detail panel state.
+  invDetailInv: 0,
+  invDetailLoading: false,
 };
 const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
 const MAX_INV_UNITS = 4;
@@ -4539,6 +4542,211 @@ function filterInverters() {
     c.style.display = v === "all" || c.id === `inv-card-${v}` ? "" : "none";
   });
   scheduleInverterCardsUpdate(true);
+  if (v === "all") {
+    clearInverterDetail();
+  } else {
+    loadInverterDetail(Number(v));
+  }
+}
+
+// ─── Inverter Detail Panel ────────────────────────────────────────────────────
+
+function clearInverterDetail() {
+  const panel = $("invDetailPanel");
+  if (panel) panel.style.display = "none";
+  if (State.charts.invDetail) {
+    State.charts.invDetail.destroy();
+    delete State.charts.invDetail;
+  }
+  State.invDetailInv = 0;
+  State.invDetailLoading = false;
+}
+
+async function loadInverterDetail(inv) {
+  if (State.invDetailInv === inv && State.invDetailLoading) return;
+  State.invDetailInv = inv;
+  State.invDetailLoading = true;
+
+  const panel = $("invDetailPanel");
+  if (!panel) return;
+  panel.style.display = "flex";
+
+  const invLabel = `INV-${String(inv).padStart(2, "0")}`;
+
+  // Loading placeholders
+  const statsEl = $("invDetailStats");
+  const alarmsEl = $("invDetailAlarms");
+  const historyEl = $("invDetailHistory");
+  if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label">Loading ${invLabel}…</span></div>`;
+  if (alarmsEl) alarmsEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
+  if (historyEl) historyEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
+
+  const todayStr = today();
+  const todayStart = localDateStartMs(todayStr);
+  const now = Date.now();
+  const thirtyDaysAgo = now - 30 * 86400000;
+  const sevenDaysAgo  = now -  7 * 86400000;
+  const sevenDayStart = dateStr(new Date(sevenDaysAgo));
+
+  try {
+    const [energyResp, alarmsResp, reportResp] = await Promise.all([
+      api(`/api/energy/5min?inverter=${inv}&start=${todayStart}&end=${now}`).catch(() => ({ rows: [] })),
+      api(`/api/alarms?inverter=${inv}&start=${Math.floor(thirtyDaysAgo)}&end=${now}`).catch(() => []),
+      api(`/api/report/daily?start=${sevenDayStart}&end=${todayStr}`).catch(() => []),
+    ]);
+
+    // Guard: user may have changed selection while fetching
+    if (State.invDetailInv !== inv) return;
+
+    const energy5Rows = Array.isArray(energyResp?.rows) ? energyResp.rows : [];
+    const alarmRows   = Array.isArray(alarmsResp) ? alarmsResp : (Array.isArray(alarmsResp?.rows) ? alarmsResp.rows : []);
+    const reportRows  = Array.isArray(reportResp) ? reportResp : (Array.isArray(reportResp?.rows) ? reportResp.rows : []);
+
+    renderInverterDetailStats(inv, energy5Rows, alarmRows, reportRows);
+    renderInverterDetailChart(inv, energy5Rows);
+    renderInverterDetailAlarms(alarmRows);
+    renderInverterDetailHistory(inv, reportRows);
+  } catch (err) {
+    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load detail: ${err.message}</span></div>`;
+  } finally {
+    State.invDetailLoading = false;
+  }
+}
+
+function renderInverterDetailStats(inv, energy5Rows, alarmRows, reportRows) {
+  const el = $("invDetailStats");
+  if (!el) return;
+
+  const todayStr = today();
+  const pac = Number(State.totals?.[inv]?.pac || 0);
+  const kwh = Number(State.todayKwh?.[inv] ?? energy5Rows.reduce((s, r) => s + Number(r.kwh_inc || 0), 0));
+  const todayReport = reportRows.find((r) => r.date === todayStr && r.inverter === inv);
+  const availPct = todayReport ? Number(todayReport.availability_pct ?? 0) : null;
+  const activeAlarmCount = alarmRows.filter((r) => !r.cleared_ts).length;
+
+  const chips = [
+    { label: "Today's Generation", value: kwh >= 1 ? kwh.toFixed(2) : (kwh * 1000).toFixed(0), unit: kwh >= 1 ? "kWh" : "Wh" },
+    { label: "Current AC Power",   value: (pac / 1000).toFixed(2),    unit: "kW"  },
+    { label: "Availability Today", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
+    { label: "Active Alarms",      value: String(activeAlarmCount),   unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
+  ];
+
+  el.innerHTML = chips.map((c) => `
+    <div class="inv-detail-stat">
+      <span class="inv-detail-stat-label">${c.label}</span>
+      <span class="inv-detail-stat-value">${c.value}</span>
+      <span class="inv-detail-stat-unit">${c.unit}</span>
+    </div>`).join("");
+}
+
+function renderInverterDetailChart(inv, energy5Rows) {
+  const pal = getChartPalette();
+  const rows = energy5Rows.slice().sort((a, b) => Number(a.ts) - Number(b.ts));
+  const labels = rows.map((r) => {
+    const d = new Date(Number(r.ts));
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  });
+  // kwh_inc over 5 min → average kW = kwh_inc * 12
+  const data = rows.map((r) => Number.isFinite(Number(r.kwh_inc)) ? +(Number(r.kwh_inc) * 12).toFixed(3) : 0);
+
+  const existing = State.charts.invDetail;
+  if (existing) {
+    existing.data.labels = labels;
+    if (!existing.data.datasets?.length) existing.data.datasets = [{}];
+    existing.data.datasets[0].data = data;
+    existing.update("none");
+    return;
+  }
+
+  const canvas = $("invDetailChart");
+  if (!canvas) return;
+
+  State.charts.invDetail = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "AC Power (kW)",
+        data,
+        borderColor: pal.actual,
+        backgroundColor: pal.actualFill,
+        borderWidth: 1.6,
+        pointRadius: 0,
+        pointHoverRadius: 2.2,
+        tension: 0.2,
+        fill: true,
+      }],
+    },
+    options: chartOpts("kW", false),
+  });
+}
+
+function renderInverterDetailAlarms(alarmRows) {
+  const el = $("invDetailAlarms");
+  if (!el) return;
+
+  const rows = alarmRows.slice().sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0)).slice(0, 15);
+  if (!rows.length) {
+    el.innerHTML = `<div class="inv-detail-no-data">No alarms in last 30 days</div>`;
+    return;
+  }
+
+  const sevPill = (sev) => {
+    const cls = sev === "critical" ? "sev-critical" : sev === "fault" ? "sev-fault" : sev === "warning" ? "sev-warning" : "sev-info";
+    return `<span class="inv-detail-sev-pill ${cls}">${sev || "?"}</span>`;
+  };
+
+  const thead = `<tr><th>Time</th><th>N</th><th>Code</th><th>Sev</th><th>Status</th></tr>`;
+  const tbody = rows.map((r) => {
+    const ts = fmtDateTime(Number(r.ts || r.occurred_ts || 0));
+    const node = r.unit ? `N${r.unit}` : "—";
+    const code = r.alarm_code ? String(r.alarm_code).toUpperCase() : "—";
+    const status = r.cleared_ts
+      ? `<span class="status-cleared">CLR</span>`
+      : `<span class="status-active">ACT</span>`;
+    return `<tr><td title="${ts}">${ts.slice(11, 19)}</td><td>${node}</td><td class="mono">${code}</td><td>${sevPill(r.severity)}</td><td>${status}</td></tr>`;
+  }).join("");
+
+  el.innerHTML = `
+    <table class="inv-detail-alarm-table">
+      <thead>${thead}</thead>
+    </table>
+    <div class="inv-detail-alarm-scroll">
+      <table class="inv-detail-alarm-table">
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderInverterDetailHistory(inv, reportRows) {
+  const el = $("invDetailHistory");
+  if (!el) return;
+
+  const rows = reportRows
+    .filter((r) => r.inverter === inv)
+    .sort((a, b) => (b.date > a.date ? 1 : -1));
+
+  if (!rows.length) {
+    el.innerHTML = `<div class="inv-detail-no-data">No daily report data available</div>`;
+    return;
+  }
+
+  const fmtKw  = (w)   => (Number(w || 0) / 1000).toFixed(2);
+  const fmtPct = (pct) => pct != null ? `${Number(pct).toFixed(1)}%` : "—";
+
+  const thead = `<tr>
+    <th>Date</th><th>kWh</th><th>Peak (kW)</th><th>Avg (kW)</th><th>Avail</th><th>Alarms</th>
+  </tr>`;
+  const tbody = rows.map((r) => `<tr>
+    <td>${r.date}</td>
+    <td>${Number(r.kwh_total || 0).toFixed(2)}</td>
+    <td>${fmtKw(r.pac_peak)}</td>
+    <td>${fmtKw(r.pac_avg)}</td>
+    <td>${fmtPct(r.availability_pct)}</td>
+    <td>${r.alarm_count ?? 0}</td>
+  </tr>`).join("");
+
+  el.innerHTML = `<table><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
 }
 
 // ─── Build selects ────────────────────────────────────────────────────────────

@@ -6406,3 +6406,140 @@ label[data-required]::after {
     grid-column: span 6;
   }
 }
+
+/* ── Inverter Detail Panel ───────────────────────────────────────────────── */
+.inv-detail-panel {
+  padding: 0 0 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.inv-detail-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.inv-detail-stat {
+  flex: 1;
+  min-width: 150px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.inv-detail-stat-label {
+  font-size: 10px;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.inv-detail-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text1);
+  line-height: 1;
+}
+.inv-detail-stat-unit {
+  font-size: 11px;
+  color: var(--text2);
+}
+.inv-detail-body {
+  display: grid;
+  grid-template-columns: 1fr minmax(260px, 360px);
+  gap: 10px;
+}
+.inv-detail-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.inv-detail-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text2);
+  margin-bottom: 10px;
+}
+.inv-detail-subtitle {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text2);
+  font-size: 10px;
+}
+.inv-detail-chart-container {
+  position: relative;
+  height: 200px;
+}
+.inv-detail-alarms-wrap {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.inv-detail-alarm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.inv-detail-alarm-table th {
+  color: var(--text2);
+  font-weight: 500;
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.inv-detail-alarm-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text1);
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inv-detail-alarm-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+}
+.inv-detail-no-data {
+  color: var(--text2);
+  font-size: 12px;
+  padding: 12px 0;
+  text-align: center;
+}
+.inv-detail-history-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.inv-detail-history-wrap th {
+  color: var(--text2);
+  font-weight: 500;
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.inv-detail-history-wrap td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text1);
+}
+.inv-detail-history-wrap tr:last-child td { border-bottom: none; }
+.inv-detail-sev-pill {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+@media (max-width: 900px) {
+  .inv-detail-body { grid-template-columns: 1fr; }
+}
