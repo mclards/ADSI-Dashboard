@@ -1579,14 +1579,22 @@ label[data-required]::after {
   align-self: center;
 }
 
-.inv-grid {
+.inv-page-body {
   flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inv-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(320px, 1fr));
   grid-auto-rows: auto;
   gap: 12px;
   padding: 0;
-  overflow: auto;
+  overflow: visible;
   align-content: start;
 }
 
