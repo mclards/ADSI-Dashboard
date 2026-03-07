@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.12` in `package.json`
+- Current repo version baseline: `2.2.13` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -29,6 +29,7 @@ Do not casually rename internal updater identifiers. Visible branding may change
 - Keep the repo root focused on app entrypoints, app metadata, and user-visible config only.
 - Put Python backend support files, shared Python modules, and PyInstaller spec files under `services/`.
 - Do not reintroduce legacy duplicate service files at the repo root.
+- Treat `ipconfig.json` and `server/ipconfig.json` as local machine config in normal workflows. Do not commit or release them unless a deliberate config-baseline change is intended.
 - Current intended root surface:
   - `InverterCoreService.py`
   - `ForecastCoreService.py`
@@ -84,6 +85,8 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
   - a repair or backfill action intentionally regenerates them
 - Use `daily_readings_summary` as the normal source for inverter/day/unit uptime and PAC rollups.
 - Do not reintroduce full-day raw `readings` scans as the normal report path.
+- Daily report exports should keep one row per inverter per day and then append one `TOTAL` row for that same date.
+- Do not fake plant `Peak Pac` or `Avg Pac` totals by summing inverter peak or average values. Leave them blank unless they come from a real plant-level aggregate query.
 
 ### Replication and Archive Guardrails
 
@@ -108,6 +111,24 @@ When adding, removing, or restructuring UI:
 - Remove stale CSS, HTML, and JS when replacing an older UI pattern. Do not leave dead layouts, orphan selectors, or unused controls behind.
 - Prefer one clear interaction path over duplicated controls that do the same thing.
 - If a page is dense or long, make the right area scrollable instead of allowing overlap or hidden actions.
+- Keep analytics quick actions close to the chart they affect. The day-ahead generator area should keep `Generate` and `Export` together, and the quick export should use the currently selected analytics date and interval.
+
+### Scrollable Page Body Pattern
+
+`.page` is `position: absolute; overflow: hidden; display: flex; flex-direction: column`. To make content below the toolbar scrollable, wrap it in a body div — do not give `flex: 1` directly to a grid or content block inside the page:
+
+```css
+.some-page-body {
+  flex: 1;
+  min-height: 0;      /* required: prevents flex child from overflowing */
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+```
+
+The existing `#page-inverters` uses `.inv-page-body` for this. Apply the same pattern to any future page that has a pinned toolbar and scrollable body content.
 
 ## Icons, Logos, and Visual Consistency
 
@@ -148,6 +169,7 @@ Keep the public repository clean, professional, and safe to publish.
 - Before push or release, review staged files for accidental sensitive content and stale generated artifacts.
 - Keep public docs, screenshots, and release notes aligned with the current app name, version, and UX.
 - Remove obsolete generated files and stale binaries from the workspace before publishing new releases.
+- Exclude local machine config such as `ipconfig.json` and `server/ipconfig.json` from normal commits and GitHub releases.
 
 Confidential or local-only examples to keep out of GitHub unless there is a deliberate reason:
 
@@ -162,6 +184,7 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
 
 - Always bump `package.json` version before building any release EXE.
 - Keep visible version text aligned with `package.json`.
+- Keep default plant-name fallbacks aligned with the current baseline: `ADSI Plant`.
 - Keep updater compatibility intact:
   - app ID stays `com.engr-m.inverter-dashboard`
   - release asset names stay compatible with existing updater expectations
@@ -237,6 +260,32 @@ Availability:
 - Node count should not reduce availability by itself.
 - `4 active nodes` and inverter up for the full window means `100% availability`.
 - If all `4` nodes for an inverter are offline or inactive, availability must be `0`.
+
+## Frontend Patterns
+
+### Inverter Detail Panel
+
+When a single inverter is selected from the `invFilter` dropdown, `filterInverters()` calls `loadInverterDetail(inv)` to populate `#invDetailPanel` with:
+- Stat chips: Today kWh, Current PAC, Availability %, Active Alarms
+- Today's AC Power chart (5-min energy → average kW via `kwh_inc * 12`)
+- Recent Alarms table (last 30 days, max 15 rows)
+- Last 7 Days summary table
+
+Functions: `clearInverterDetail()`, `loadInverterDetail(inv)`, `renderInverterDetailStats()`, `renderInverterDetailChart()`, `renderInverterDetailAlarms()`, `renderInverterDetailHistory()` — all in `public/js/app.js` after `filterInverters()`.
+
+`#invDetailPanel` lives inside `.inv-page-body` alongside `#invGrid`. Both scroll together in the wrapper.
+
+### Tab Date Initialization
+
+`initAllTabDatesToToday()` sets all date inputs (Analytics, Alarms, Energy, Audit, Report) to today's date. It is called:
+- On `init()` after `loadSettings()`, overriding any stale `exportUiState` dates
+- On day rollover inside `startClock()` tick (compares `dateStr(now)` to `State.lastDateInitDay`)
+
+Day rollover also clears `State.tabFetchTs` and all tab row caches so data re-fetches on next tab visit.
+
+### Weather Offline Hardening
+
+`fetchDailyWeatherRange()` in `server/index.js` wraps the external weather API fetch in try/catch. On any network or HTTP error, it serves the stale in-memory cache (even if past TTL) with a `console.warn`. It only re-throws if there is no cached data at all. This keeps forecast and analytics working without internet.
 
 ## High-Impact Files
 

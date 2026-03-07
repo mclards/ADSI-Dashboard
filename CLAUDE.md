@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.12` in `package.json`
+- Current repo version baseline: `2.2.13` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -25,6 +25,7 @@ Do not casually rename updater identifiers. Visible branding may change, but old
 - Keep the repo root focused on app entrypoints, app metadata, and user-visible config.
 - Put Python backend support files, shared Python modules, and PyInstaller spec files under `services/`.
 - Do not reintroduce legacy duplicate service files at the repo root.
+- Treat `ipconfig.json` and `server/ipconfig.json` as local machine config in normal workflows. Do not commit or release them unless a deliberate baseline change is intended.
 - Current intended root surface:
   - `InverterCoreService.py`
   - `ForecastCoreService.py`
@@ -75,6 +76,8 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Rebuild past daily reports only when rows are missing, refresh is explicitly requested, or a deliberate repair flow requires it.
 - Use `daily_readings_summary` as the normal source for per-unit uptime and PAC rollups.
 - Do not reintroduce full-day raw `readings` scans as the default report path.
+- Daily report exports should keep one row per inverter per day and then append one `TOTAL` row for that same date.
+- Do not fake plant `Peak Pac` or `Avg Pac` totals by summing inverter peak or average values. Leave them blank unless they come from a real plant-level aggregate query.
 
 ### Replication and Archive Guardrails
 
@@ -97,11 +100,23 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Keep iconography consistent. Prefer the existing MDI icon system over mixed emoji usage.
 - Any non-obvious or icon-only control should expose short hover help, tooltip text, or helper text.
 - Do not hide critical safety or destructive behavior behind hover-only messaging.
+- Keep analytics quick actions close to the chart they affect. The day-ahead generator area should keep `Generate` and `Export` together, and the quick export should use the currently selected analytics date and interval.
+
+### Scrollable Page Body Pattern
+
+`.page` is `overflow: hidden; display: flex; flex-direction: column`. Content below the toolbar must be wrapped in a body div (`flex: 1; min-height: 0; overflow: auto`) — never give `flex: 1` directly to a grid or content block inside the page, as it will steal all vertical space and clip siblings. The Inverters page uses `.inv-page-body` for this.
+
+### Key Frontend Patterns (app.js)
+
+- **Inverter detail panel**: `filterInverters()` calls `loadInverterDetail(inv)` / `clearInverterDetail()`. Functions `renderInverterDetailStats/Chart/Alarms/History` live after `filterInverters()`. Panel is inside `.inv-page-body` alongside `#invGrid`.
+- **Tab date init**: `initAllTabDatesToToday()` called on startup and on day rollover in `startClock()`. Also clears `State.tabFetchTs` on rollover.
+- **Weather offline**: `fetchDailyWeatherRange()` (server/index.js) serves stale cache on any API/network failure.
 
 ## Version, Branding, and Release Compatibility
 
 - Always bump `package.json` version before every EXE release build.
 - Keep visible version text aligned with `package.json`.
+- Keep default plant-name fallbacks aligned with the current baseline: `ADSI Plant`.
 - Preserve updater compatibility:
   - app ID stays `com.engr-m.inverter-dashboard`
   - GitHub repo stays `mclards/ADSI-Dashboard`
@@ -175,6 +190,7 @@ Availability:
 - Review staged files before push or release so stale binaries and sensitive files do not leak into GitHub.
 - Keep public repo docs and release notes aligned with the current app name, version, and UX.
 - If `SKILL.md` changes, keep `CLAUDE.md` aligned instead of letting the two drift.
+- Exclude local machine config such as `ipconfig.json` and `server/ipconfig.json` from normal commits and GitHub releases.
 
 ## High-Impact Files
 
