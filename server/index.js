@@ -8,6 +8,7 @@ const os = require("os");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { spawnSync } = require("child_process");
+const { pipeline } = require("stream/promises");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
 
@@ -18,6 +19,7 @@ const {
   stmts,
   db,
   DATA_DIR,
+  ARCHIVE_DIR,
   bulkUpsertForecastDayAhead,
   closeDb,
   getTelemetryHotCutoffTs,
@@ -30,6 +32,7 @@ const {
   archiveEnergyRows,
   getDailyReadingsSummaryRows,
   rebuildDailyReadingsSummaryForDate,
+  closeArchiveDbForMonth,
 } = require("./db");
 const { registerClient, broadcastUpdate, startKeepAlive, getStats: getWsStats } = require("./ws");
 const poller = require("./poller");
@@ -37,6 +40,7 @@ const exporter = require("./exporter");
 const {
   getActiveAlarms,
   decodeAlarm,
+  getTopSeverity,
   formatAlarmHex,
   logControlAction,
   getAuditLog,
@@ -130,7 +134,9 @@ const REMOTE_ENERGY_POLL_INTERVAL_MS = 30000; // today-energy endpoint is rate-l
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
 const REMOTE_LIVE_FETCH_RETRIES = 2;
 const REMOTE_LIVE_FETCH_RETRY_BASE_MS = 350;
-const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 2;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 4;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC = 8;
+const REMOTE_LIVE_DEGRADED_GRACE_MS = 45000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
@@ -174,14 +180,6 @@ const REPLICATION_TABLE_DEFS = [
       "ts",
       "inverter",
       "unit",
-      "vdc",
-      "idc",
-      "vac1",
-      "vac2",
-      "vac3",
-      "iac1",
-      "iac2",
-      "iac3",
       "pac",
       "kwh",
       "alarm",
@@ -324,6 +322,7 @@ const remoteTodayEnergyShadow = {
   rows: [],
   syncedAt: 0,
 };
+const remoteBridgeAlarmState = Object.create(null);
 const gatewayTodayCarryState = {
   day: "",
   byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
@@ -341,6 +340,23 @@ const inboundPushRxProgress = {
   key: "",
   recvBytes: 0,
 };
+function createManualReplicationJobState() {
+  return {
+    id: "",
+    action: "idle",
+    status: "idle",
+    running: false,
+    includeArchive: true,
+    startedAt: 0,
+    updatedAt: 0,
+    finishedAt: 0,
+    error: "",
+    summary: "",
+    needsRestart: false,
+    result: null,
+  };
+}
+const manualReplicationJobState = createManualReplicationJobState();
 let cpuSampleTs = Date.now();
 let cpuSampleUsage = process.cpuUsage();
 
@@ -559,6 +575,48 @@ function getRuntimeLiveData() {
   return isRemoteMode() ? remoteBridgeState.liveData || {} : poller.getLiveData();
 }
 
+function resetRemoteBridgeAlarmState() {
+  for (const key of Object.keys(remoteBridgeAlarmState)) {
+    delete remoteBridgeAlarmState[key];
+  }
+}
+
+function syncRemoteBridgeAlarmTransitions(nextLiveData) {
+  const rows = nextLiveData && typeof nextLiveData === "object" ? nextLiveData : {};
+  const nextState = Object.create(null);
+  const raised = [];
+
+  for (const [key, row] of Object.entries(rows)) {
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!inverter || !unit) continue;
+
+    const alarmValue = Number(row?.alarm || 0);
+    nextState[key] = alarmValue;
+
+    const prevAlarmValue = Number(remoteBridgeAlarmState[key] || 0);
+    if (!alarmValue || alarmValue === prevAlarmValue) continue;
+
+    raised.push({
+      inverter,
+      unit,
+      alarm_value: alarmValue,
+      severity: getTopSeverity(alarmValue) || "fault",
+      decoded: decodeAlarm(alarmValue),
+      alarm_hex: formatAlarmHex(alarmValue),
+    });
+  }
+
+  resetRemoteBridgeAlarmState();
+  for (const [key, value] of Object.entries(nextState)) {
+    remoteBridgeAlarmState[key] = value;
+  }
+
+  if (raised.length) {
+    broadcastUpdate({ type: "alarm", alarms: raised });
+  }
+}
+
 function sampleProcessCpuPercent() {
   const now = Date.now();
   const elapsedMs = Math.max(1, now - cpuSampleTs);
@@ -686,6 +744,139 @@ function getReplicationWatermarkColumn(tableName, strategy) {
     return String(s.cursorColumn || "id");
   }
   return String(s.cursorColumn || "updated_ts");
+}
+
+function sanitizeArchiveFileName(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  const fileName = raw.toLowerCase().endsWith(".db") ? raw : `${raw}.db`;
+  return /^\d{4}-\d{2}\.db$/i.test(fileName) ? fileName : "";
+}
+
+function monthKeyFromArchiveFileName(fileName) {
+  const safe = sanitizeArchiveFileName(fileName);
+  return safe ? safe.slice(0, 7) : "";
+}
+
+function listLocalArchiveManifest() {
+  let names = [];
+  try {
+    names = fs
+      .readdirSync(ARCHIVE_DIR, { withFileTypes: true })
+      .filter((entry) => entry?.isFile?.())
+      .map((entry) => String(entry.name || ""))
+      .filter((name) => Boolean(sanitizeArchiveFileName(name)))
+      .sort((a, b) => a.localeCompare(b));
+  } catch (_) {
+    names = [];
+  }
+  return names.map((name) => {
+    const filePath = path.join(ARCHIVE_DIR, name);
+    let size = 0;
+    let mtimeMs = 0;
+    try {
+      const stat = fs.statSync(filePath);
+      size = Math.max(0, Number(stat.size || 0));
+      mtimeMs = Math.max(0, Number(stat.mtimeMs || 0));
+    } catch (_) {
+      size = 0;
+      mtimeMs = 0;
+    }
+    return {
+      name,
+      monthKey: monthKeyFromArchiveFileName(name),
+      size,
+      mtimeMs,
+    };
+  });
+}
+
+function summarizeArchiveManifest(manifestRaw) {
+  const manifest = Array.isArray(manifestRaw) ? manifestRaw : [];
+  const fileCount = manifest.length;
+  const totalBytes = manifest.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  const newestMtimeMs = manifest.reduce(
+    (max, entry) => Math.max(max, Math.max(0, Number(entry?.mtimeMs || 0))),
+    0,
+  );
+  return {
+    fileCount,
+    totalBytes,
+    newestMtimeMs,
+    files: manifest,
+  };
+}
+
+function buildManualReplicationScope() {
+  const archiveSummary = summarizeArchiveManifest(listLocalArchiveManifest());
+  return {
+    background: true,
+    includeArchiveOptional: true,
+    defaultIncludeArchive: false,
+    hotTables: REPLICATION_TABLE_DEFS.map((def) => def.name),
+    preservedSettings: Array.from(REMOTE_REPLICATION_PRESERVE_SETTING_KEYS),
+    archive: {
+      ...archiveSummary,
+      optional: true,
+    },
+    notes: {
+      transport: "Manual sync uses the configured remote gateway URL over Tailscale/reachable network path.",
+      push:
+        "Push sends the local replicated hot tables first, then returns to the gateway as source of truth and pulls back the latest state.",
+      pull:
+        "Pull fetches the gateway replicated hot tables and, when enabled, the monthly archive DB files.",
+      liveBridge:
+        "Live bridge polling stays lightweight. Archive transfer is manual-only and does not run on the automatic live sync loop.",
+      hotPriority:
+        "Hot replicated tables are always prioritized. Archive DB files are optional and intended for historical catch-up only.",
+    },
+  };
+}
+
+function snapshotManualReplicationJob() {
+  return {
+    id: String(manualReplicationJobState.id || ""),
+    action: String(manualReplicationJobState.action || "idle"),
+    status: String(manualReplicationJobState.status || "idle"),
+    running: Boolean(manualReplicationJobState.running),
+    includeArchive: Boolean(manualReplicationJobState.includeArchive),
+    startedAt: Number(manualReplicationJobState.startedAt || 0),
+    updatedAt: Number(manualReplicationJobState.updatedAt || 0),
+    finishedAt: Number(manualReplicationJobState.finishedAt || 0),
+    error: String(manualReplicationJobState.error || ""),
+    summary: String(manualReplicationJobState.summary || ""),
+    needsRestart: Boolean(manualReplicationJobState.needsRestart),
+    result:
+      manualReplicationJobState.result &&
+      typeof manualReplicationJobState.result === "object"
+        ? { ...manualReplicationJobState.result }
+        : null,
+  };
+}
+
+function updateManualReplicationJob(patch = {}, options = {}) {
+  Object.assign(manualReplicationJobState, patch || {});
+  manualReplicationJobState.updatedAt = Date.now();
+  if (options.broadcast === false) return snapshotManualReplicationJob();
+  broadcastUpdate({
+    type: "replication_job",
+    job: snapshotManualReplicationJob(),
+  });
+  return snapshotManualReplicationJob();
+}
+
+function resetManualReplicationJob() {
+  Object.assign(manualReplicationJobState, createManualReplicationJobState(), {
+    updatedAt: Date.now(),
+  });
+  return snapshotManualReplicationJob();
+}
+
+function isManualReplicationJobRunning() {
+  return Boolean(manualReplicationJobState.running);
 }
 
 function buildReplicationSummary() {
@@ -965,14 +1156,6 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
         ts=excluded.ts,
         inverter=excluded.inverter,
         unit=excluded.unit,
-        vdc=excluded.vdc,
-        idc=excluded.idc,
-        vac1=excluded.vac1,
-        vac2=excluded.vac2,
-        vac3=excluded.vac3,
-        iac1=excluded.iac1,
-        iac2=excluded.iac2,
-        iac3=excluded.iac3,
         pac=excluded.pac,
         kwh=excluded.kwh,
         alarm=excluded.alarm,
@@ -1719,6 +1902,146 @@ async function runRemotePushFull(baseUrl) {
   }
 }
 
+async function runManualPullSync(baseUrl, includeArchive = true) {
+  updateManualReplicationJob({
+    summary: "Pulling replicated hot data from gateway in the background.",
+  });
+  const hot = await runRemoteCatchUpReplication(
+    baseUrl,
+    REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
+    REMOTE_INCREMENTAL_CATCHUP_PASSES,
+  );
+  if (hot?.skipped) {
+    throw new Error("Replication already in progress.");
+  }
+  if (!hot?.ok) {
+    throw new Error(
+      `Incremental pull failed: ${String(
+        hot?.error || "unknown error",
+      )}. Ensure gateway and client are on the same build.`,
+    );
+  }
+
+  let archive = {
+    ok: true,
+    availableFiles: 0,
+    transferredFiles: 0,
+    skippedFiles: 0,
+    totalBytes: 0,
+    transferredBytes: 0,
+    files: [],
+    unsupported: false,
+  };
+  if (includeArchive) {
+    updateManualReplicationJob({
+      summary: "Hot pull finished. Downloading archive DB files from gateway.",
+    });
+    archive = await pullArchiveFilesFromRemote(baseUrl);
+  }
+  const archiveSummary = includeArchive
+    ? archive.unsupported
+      ? "archive skipped (remote build has no archive sync)"
+      : `archive files pulled=${Number(archive.transferredFiles || 0).toLocaleString()}`
+    : "archive skipped";
+  return {
+    needsRestart: true,
+    direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+    mode: String(hot.mode || "incremental"),
+    importedRows: Number(hot.importedRows || 0),
+    batches: Number(hot.batches || 0),
+    archive,
+    summary: `Pull complete | imported=${Number(hot.importedRows || 0).toLocaleString()} | ${archiveSummary}. Restart the app to refresh runtime state.`,
+  };
+}
+
+async function runManualPushSync(baseUrl, includeArchive = true) {
+  updateManualReplicationJob({
+    summary: "Pushing local replicated hot data to gateway in the background.",
+  });
+  const pushed = await runRemotePushFull(baseUrl);
+  if (pushed?.skipped) {
+    throw new Error("Replication already in progress.");
+  }
+  if (!pushed?.ok) {
+    throw new Error(String(pushed?.error || "Full push failed."));
+  }
+
+  let archivePush = {
+    ok: true,
+    availableFiles: 0,
+    transferredFiles: 0,
+    skippedFiles: 0,
+    totalBytes: 0,
+    transferredBytes: 0,
+    files: [],
+    unsupported: false,
+  };
+  if (includeArchive) {
+    updateManualReplicationJob({
+      summary: "Hot push finished. Uploading local archive DB files to gateway.",
+    });
+    archivePush = await pushArchiveFilesToRemote(baseUrl);
+  }
+
+  updateManualReplicationJob({
+    summary: "Pulling the latest gateway state back for final consistency.",
+  });
+  const hotPull = await runRemoteCatchUpReplication(
+    baseUrl,
+    REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
+    REMOTE_INCREMENTAL_CATCHUP_PASSES,
+  );
+  if (hotPull?.skipped) {
+    throw new Error("Replication already in progress.");
+  }
+  if (!hotPull?.ok) {
+    throw new Error(
+      `Consistency pull failed: ${String(
+        hotPull?.error || "unknown error",
+      )}. Ensure gateway and client are on the same build.`,
+    );
+  }
+
+  let archivePull = {
+    ok: true,
+    availableFiles: 0,
+    transferredFiles: 0,
+    skippedFiles: 0,
+    totalBytes: 0,
+    transferredBytes: 0,
+    files: [],
+    unsupported: false,
+  };
+  if (includeArchive) {
+    updateManualReplicationJob({
+      summary: "Final hot pull finished. Pulling gateway archive files for local consistency.",
+    });
+    archivePull = await pullArchiveFilesFromRemote(baseUrl);
+  }
+
+  const archivePushSummary = includeArchive
+    ? archivePush.unsupported
+      ? "archive upload skipped"
+      : `archive pushed=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
+    : "archive skipped";
+  const archivePullSummary = includeArchive
+    ? archivePull.unsupported
+      ? "archive pull skipped"
+      : `archive pulled=${Number(archivePull.transferredFiles || 0).toLocaleString()}`
+    : "archive skipped";
+  return {
+    needsRestart: true,
+    direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+    pushedRows: Number(pushed.importedRows || 0),
+    pulledRows: Number(hotPull.importedRows || 0),
+    pushChunks: Number(pushed.chunkCount || 0),
+    mode: String(hotPull.mode || "incremental"),
+    archivePush,
+    archivePull,
+    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} pulled=${Number(hotPull.importedRows || 0).toLocaleString()} | ${archivePushSummary} | ${archivePullSummary}. Restart the app to refresh runtime state.`,
+  };
+}
+
 function isUnsafeRemoteLoop(baseUrl) {
   return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/i.test(
     String(baseUrl || ""),
@@ -1758,6 +2081,31 @@ function isRetryableNetworkError(err) {
 function isRetryableHttpStatus(status) {
   const n = Number(status || 0);
   return n === 408 || n === 425 || n === 429 || n === 500 || n === 502 || n === 503 || n === 504;
+}
+
+function shouldForceRemoteOffline(err) {
+  const status = Number(err?.httpStatus || 0);
+  if (status === 400 || status === 401 || status === 403 || status === 404) return true;
+  const msg = String(err?.message || err || "")
+    .trim()
+    .toLowerCase();
+  return (
+    msg.includes("remote gateway url is not configured") ||
+    msg.includes("cannot be localhost in remote mode") ||
+    msg.includes("unauthorized api request")
+  );
+}
+
+function getRemoteOfflineFailureThreshold() {
+  return remoteBridgeState.replicationRunning
+    ? REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC
+    : REMOTE_LIVE_FAILURES_BEFORE_OFFLINE;
+}
+
+function hasRecentRemoteBridgeSuccess(nowTs = Date.now()) {
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  if (!lastSuccessTs) return false;
+  return nowTs - lastSuccessTs < REMOTE_LIVE_DEGRADED_GRACE_MS;
 }
 
 async function fetchWithRetry(url, options = {}, retryOptions = {}) {
@@ -1948,6 +2296,437 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
   };
 }
 
+function shouldPullArchiveFile(remoteMeta, localMeta) {
+  if (!localMeta) return true;
+  const remoteSize = Math.max(0, Number(remoteMeta?.size || 0));
+  const localSize = Math.max(0, Number(localMeta?.size || 0));
+  const remoteMtime = Math.max(0, Number(remoteMeta?.mtimeMs || 0));
+  const localMtime = Math.max(0, Number(localMeta?.mtimeMs || 0));
+  if (remoteSize !== localSize) return true;
+  return remoteMtime > localMtime + 2000;
+}
+
+function shouldPushArchiveFile(localMeta, remoteMeta) {
+  if (!remoteMeta) return true;
+  const localSize = Math.max(0, Number(localMeta?.size || 0));
+  const remoteSize = Math.max(0, Number(remoteMeta?.size || 0));
+  const localMtime = Math.max(0, Number(localMeta?.mtimeMs || 0));
+  const remoteMtime = Math.max(0, Number(remoteMeta?.mtimeMs || 0));
+  if (localSize > remoteSize) return true;
+  if (localSize < remoteSize) return false;
+  return localMtime > remoteMtime + 2000;
+}
+
+async function fetchRemoteArchiveManifest(baseUrl) {
+  const r = await fetch(`${baseUrl}/api/replication/archive-manifest`, {
+    method: "GET",
+    headers: buildRemoteProxyHeaders(),
+    timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+  });
+  if (!r.ok) {
+    if (Number(r.status || 0) === 404) {
+      return { ok: false, unsupported: true, error: "Remote build does not expose archive sync." };
+    }
+    throw new Error(`Archive manifest HTTP ${r.status} ${r.statusText}`);
+  }
+  const data = await r.json();
+  if (!data?.ok) {
+    throw new Error(String(data?.error || "Invalid archive manifest payload."));
+  }
+  const files = Array.isArray(data?.manifest) ? data.manifest : [];
+  return {
+    ok: true,
+    manifest: files
+      .map((entry) => {
+        const name = sanitizeArchiveFileName(entry?.name || "");
+        if (!name) return null;
+        return {
+          name,
+          monthKey: monthKeyFromArchiveFileName(name),
+          size: Math.max(0, Number(entry?.size || 0)),
+          mtimeMs: Math.max(0, Number(entry?.mtimeMs || 0)),
+        };
+      })
+      .filter(Boolean),
+  };
+}
+
+async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
+  const name = sanitizeArchiveFileName(fileMeta?.name || "");
+  if (!name) throw new Error("Invalid archive file name.");
+  const monthKey = monthKeyFromArchiveFileName(name);
+  const tempPath = path.join(ARCHIVE_DIR, `${name}.download-${Date.now()}.tmp`);
+  const finalPath = path.join(ARCHIVE_DIR, name);
+  await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
+  closeArchiveDbForMonth(monthKey);
+
+  let body = null;
+  try {
+    const r = await fetch(
+      `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      },
+    );
+    if (!r.ok) {
+      throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
+    }
+    body = r.body;
+    if (!body) {
+      throw new Error("Archive download returned an empty body.");
+    }
+    body.on("data", (chunk) => {
+      const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
+    });
+    await pipeline(body, fs.createWriteStream(tempPath));
+    closeArchiveDbForMonth(monthKey);
+    try {
+      await fs.promises.unlink(finalPath);
+    } catch (_) {
+      // Ignore missing existing archive file.
+    }
+    await fs.promises.rename(tempPath, finalPath);
+    const targetMtimeMs = Math.max(0, Number(fileMeta?.mtimeMs || 0));
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      await fs.promises.utimes(finalPath, mtime, mtime);
+    }
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    throw err;
+  }
+  return {
+    name,
+    monthKey,
+    size: Math.max(0, Number(fileMeta?.size || 0)),
+    mtimeMs: Math.max(0, Number(fileMeta?.mtimeMs || 0)),
+  };
+}
+
+async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
+  const name = sanitizeArchiveFileName(fileMeta?.name || "");
+  if (!name) throw new Error("Invalid archive file name.");
+  const monthKey = monthKeyFromArchiveFileName(name);
+  const filePath = path.join(ARCHIVE_DIR, name);
+  closeArchiveDbForMonth(monthKey);
+  const stat = await fs.promises.stat(filePath);
+  const stream = fs.createReadStream(filePath);
+  stream.on("data", (chunk) => {
+    const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+    if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
+  });
+
+  const r = await fetch(
+    `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`,
+    {
+      method: "POST",
+      headers: {
+        ...buildRemoteProxyHeaders(),
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(Math.max(0, Number(stat.size || 0))),
+        "x-archive-size": String(Math.max(0, Number(stat.size || 0))),
+        "x-archive-mtime": String(
+          Math.max(0, Number(fileMeta?.mtimeMs || stat.mtimeMs || Date.now())),
+        ),
+      },
+      body: stream,
+      timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    },
+  );
+  if (!r.ok) {
+    let detail = "";
+    try {
+      detail = String(await r.text()).trim();
+    } catch (_) {
+      detail = "";
+    }
+    throw new Error(
+      detail
+        ? `Archive upload HTTP ${r.status} ${r.statusText}: ${detail}`
+        : `Archive upload HTTP ${r.status} ${r.statusText}`,
+    );
+  }
+  const data = await r.json();
+  if (!data?.ok) {
+    throw new Error(String(data?.error || "Archive upload failed."));
+  }
+  return {
+    name,
+    monthKey,
+    size: Math.max(0, Number(stat.size || 0)),
+    mtimeMs: Math.max(0, Number(fileMeta?.mtimeMs || stat.mtimeMs || 0)),
+  };
+}
+
+async function pullArchiveFilesFromRemote(baseUrl) {
+  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
+  if (!remoteManifestRes.ok) {
+    return {
+      ok: false,
+      unsupported: Boolean(remoteManifestRes.unsupported),
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      error: String(remoteManifestRes.error || "Archive manifest unavailable."),
+    };
+  }
+
+  const remoteManifest = Array.isArray(remoteManifestRes.manifest)
+    ? remoteManifestRes.manifest
+    : [];
+  const localMap = new Map(
+    listLocalArchiveManifest().map((entry) => [String(entry.name || ""), entry]),
+  );
+  const toPull = remoteManifest.filter((entry) =>
+    shouldPullArchiveFile(entry, localMap.get(String(entry.name || ""))),
+  );
+  const totalBytes = toPull.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  let transferredBytes = 0;
+  let transferredFiles = 0;
+  if (toPull.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes,
+      chunkCount: toPull.length,
+      label: "Pulling archive",
+    });
+  }
+
+  try {
+    for (let i = 0; i < toPull.length; i += 1) {
+      const fileMeta = toPull[i];
+      await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
+        transferredBytes += Math.max(0, Number(bytes || 0));
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "chunk",
+          recvBytes: transferredBytes,
+          totalBytes,
+          chunk: i + 1,
+          chunkCount: toPull.length,
+          label: `Pulling archive ${fileMeta.name}`,
+        });
+      });
+      transferredFiles += 1;
+    }
+  } catch (err) {
+    if (toPull.length > 0) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "error",
+        recvBytes: transferredBytes,
+        totalBytes,
+        chunkCount: toPull.length,
+        label: "Pulling archive",
+      });
+    }
+    throw err;
+  }
+
+  if (toPull.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes: transferredBytes,
+      totalBytes,
+      chunkCount: toPull.length,
+      label: "Pulling archive",
+    });
+  }
+
+  return {
+    ok: true,
+    availableFiles: remoteManifest.length,
+    transferredFiles,
+    skippedFiles: Math.max(0, remoteManifest.length - transferredFiles),
+    totalBytes,
+    transferredBytes,
+    files: toPull.map((entry) => entry.name),
+  };
+}
+
+async function pushArchiveFilesToRemote(baseUrl) {
+  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
+  if (!remoteManifestRes.ok) {
+    return {
+      ok: false,
+      unsupported: Boolean(remoteManifestRes.unsupported),
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      error: String(remoteManifestRes.error || "Archive manifest unavailable."),
+    };
+  }
+
+  const remoteMap = new Map(
+    (Array.isArray(remoteManifestRes.manifest) ? remoteManifestRes.manifest : []).map(
+      (entry) => [String(entry.name || ""), entry],
+    ),
+  );
+  const localManifest = listLocalArchiveManifest();
+  const toPush = localManifest.filter((entry) =>
+    shouldPushArchiveFile(entry, remoteMap.get(String(entry.name || ""))),
+  );
+  const totalBytes = toPush.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  let transferredBytes = 0;
+  let transferredFiles = 0;
+  if (toPush.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "start",
+      sentBytes: 0,
+      totalBytes,
+      chunkCount: toPush.length,
+      label: "Pushing archive",
+    });
+  }
+
+  try {
+    for (let i = 0; i < toPush.length; i += 1) {
+      const fileMeta = toPush[i];
+      await uploadArchiveFileToRemote(baseUrl, fileMeta, (bytes) => {
+        transferredBytes += Math.max(0, Number(bytes || 0));
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "tx",
+          phase: "chunk",
+          sentBytes: transferredBytes,
+          totalBytes,
+          chunk: i + 1,
+          chunkCount: toPush.length,
+          label: `Pushing archive ${fileMeta.name}`,
+        });
+      });
+      transferredFiles += 1;
+    }
+  } catch (err) {
+    if (toPush.length > 0) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "tx",
+        phase: "error",
+        sentBytes: transferredBytes,
+        totalBytes,
+        chunkCount: toPush.length,
+        label: "Pushing archive",
+      });
+    }
+    throw err;
+  }
+
+  if (toPush.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "done",
+      sentBytes: transferredBytes,
+      totalBytes,
+      chunkCount: toPush.length,
+      label: "Pushing archive",
+    });
+  }
+
+  return {
+    ok: true,
+    availableFiles: localManifest.length,
+    transferredFiles,
+    skippedFiles: Math.max(0, localManifest.length - transferredFiles),
+    totalBytes,
+    transferredBytes,
+    files: toPush.map((entry) => entry.name),
+  };
+}
+
+function startManualReplicationJob(action, options, runner) {
+  if (isManualReplicationJobRunning() || remoteBridgeState.replicationRunning) {
+    return {
+      started: false,
+      reason: "in_progress",
+      job: snapshotManualReplicationJob(),
+    };
+  }
+  const jobId = `${String(action || "sync")}-${Date.now()}`;
+  updateManualReplicationJob({
+    id: jobId,
+    action: String(action || "sync"),
+    status: "queued",
+    running: true,
+    includeArchive: options?.includeArchive !== false,
+    startedAt: Date.now(),
+    finishedAt: 0,
+    error: "",
+    summary: String(options?.summary || "Queued"),
+    needsRestart: false,
+    result: null,
+  });
+
+  setTimeout(async () => {
+    updateManualReplicationJob({
+      status: "running",
+      summary: String(options?.runningSummary || "Running"),
+    });
+    try {
+      const result = await runner();
+      updateManualReplicationJob({
+        status: "completed",
+        running: false,
+        finishedAt: Date.now(),
+        summary: String(
+          result?.summary ||
+            `${String(action || "sync")} complete. Restart the app to refresh in-memory state.`,
+        ),
+        error: "",
+        needsRestart: Boolean(result?.needsRestart),
+        result:
+          result && typeof result === "object"
+            ? { ...result }
+            : null,
+      });
+    } catch (err) {
+      updateManualReplicationJob({
+        status: "failed",
+        running: false,
+        finishedAt: Date.now(),
+        summary: `${String(action || "sync")} failed`,
+        error: String(err?.message || err),
+        needsRestart: false,
+        result: null,
+      });
+    }
+  }, 25);
+
+  return {
+    started: true,
+    job: snapshotManualReplicationJob(),
+  };
+}
+
 function buildRemoteProxyHeaders(tokenOverride = "") {
   const token = String(tokenOverride || getRemoteApiToken() || "").trim();
   const headers = {};
@@ -2113,7 +2892,9 @@ async function pollRemoteLiveOnce() {
       },
     );
     if (!r.ok) {
-      throw new Error(`HTTP ${r.status} ${r.statusText}`);
+      const err = new Error(`HTTP ${r.status} ${r.statusText}`);
+      err.httpStatus = Number(r.status || 0);
+      throw err;
     }
     const data = await r.json();
     remoteBridgeState.liveData =
@@ -2121,6 +2902,7 @@ async function pollRemoteLiveOnce() {
     remoteBridgeState.totals = computeTotalsFromLiveData(
       remoteBridgeState.liveData,
     );
+    syncRemoteBridgeAlarmTransitions(remoteBridgeState.liveData);
     remoteBridgeState.connected = true;
     remoteBridgeState.liveFailureCount = 0;
     remoteBridgeState.lastFailureTs = 0;
@@ -2139,11 +2921,18 @@ async function pollRemoteLiveOnce() {
     const energyAgeMs = Date.now() - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
     if (energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS) {
       try {
-        const et = await fetch(`${base}/api/energy/today`, {
-          method: "GET",
-          headers: buildRemoteProxyHeaders(),
-          timeout: REMOTE_FETCH_TIMEOUT_MS,
-        });
+        const et = await fetchWithRetry(
+          `${base}/api/energy/today`,
+          {
+            method: "GET",
+            headers: buildRemoteProxyHeaders(),
+            timeout: REMOTE_FETCH_TIMEOUT_MS,
+          },
+          {
+            attempts: REMOTE_LIVE_FETCH_RETRIES,
+            baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+          },
+        );
         if (et.ok) {
           const rows = await et.json();
           if (Array.isArray(rows)) {
@@ -2174,14 +2963,18 @@ async function pollRemoteLiveOnce() {
     remoteBridgeState.liveFailureCount += 1;
     remoteBridgeState.lastFailureTs = Date.now();
     remoteBridgeState.lastError = String(err.message || err);
+    const nowTs = Date.now();
     const lastSuccessAgeMs = remoteBridgeState.lastSuccessTs
-      ? Date.now() - Number(remoteBridgeState.lastSuccessTs || 0)
+      ? nowTs - Number(remoteBridgeState.lastSuccessTs || 0)
       : Number.POSITIVE_INFINITY;
+    const failureThreshold = getRemoteOfflineFailureThreshold();
+    const forceOffline = shouldForceRemoteOffline(err);
+    const recentSuccess = hasRecentRemoteBridgeSuccess(nowTs);
     const shouldMarkOffline =
-      !wasConnected ||
-      remoteBridgeState.liveFailureCount >= REMOTE_LIVE_FAILURES_BEFORE_OFFLINE ||
-      lastSuccessAgeMs >=
-        REMOTE_FETCH_TIMEOUT_MS * REMOTE_LIVE_FAILURES_BEFORE_OFFLINE;
+      forceOffline ||
+      (!wasConnected && !recentSuccess) ||
+      remoteBridgeState.liveFailureCount >= failureThreshold ||
+      lastSuccessAgeMs >= REMOTE_LIVE_DEGRADED_GRACE_MS;
     remoteBridgeState.connected = !shouldMarkOffline && wasConnected;
     if (shouldMarkOffline && (wasConnected || hadLiveData)) {
       broadcastRemoteOfflineLiveState();
@@ -2197,6 +2990,7 @@ function stopRemoteBridge() {
     clearTimeout(remoteBridgeTimer);
     remoteBridgeTimer = null;
   }
+  resetRemoteBridgeAlarmState();
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
   remoteBridgeState.liveFailureCount = 0;
@@ -2223,12 +3017,17 @@ function startRemoteBridge() {
       return;
     }
     await pollRemoteLiveOnce().catch(() => {});
-    // Back off when the gateway is unreachable: doubles each failure up to
-    // REMOTE_BRIDGE_MAX_BACKOFF_MS, then resets to fast-poll on reconnect.
+    // Keep fast retry while the bridge is still connected or has a recent
+    // successful poll. Only apply exponential backoff after a real disconnect.
     const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
-    const nextDelay = failures <= 1
+    const fastRetry =
+      Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess();
+    const nextDelay = fastRetry || failures <= 1
       ? REMOTE_BRIDGE_INTERVAL_MS
-      : Math.min(REMOTE_BRIDGE_MAX_BACKOFF_MS, REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1));
+      : Math.min(
+          REMOTE_BRIDGE_MAX_BACKOFF_MS,
+          REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1),
+        );
     remoteBridgeTimer = setTimeout(tick, Math.round(nextDelay));
   };
   tick();
@@ -3808,6 +4607,8 @@ const todayEnergyCache = {
 };
 const PAST_DAILY_REPORT_CACHE_TTL_MS = 5 * 60 * 1000; // 5-minute cache for immutable past days
 const pastDailyReportCache = new Map(); // day -> { ts, rows }
+const PAST_REPORT_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
+const pastReportSummaryCache = new Map(); // day -> { ts, summary }
 
 function getTodayPacTotalsFromDbCached() {
   const now = Date.now();
@@ -3848,6 +4649,32 @@ function setPastDailyReportRowsCache(day, rowsRaw, now = Date.now()) {
   pastDailyReportCache.set(key, {
     ts: Number(now || Date.now()),
     rows: cloneDailyReportRows(rowsRaw),
+  });
+}
+
+function cloneReportSummary(summary) {
+  if (!summary || typeof summary !== "object") return null;
+  return JSON.parse(JSON.stringify(summary));
+}
+
+function getPastReportSummaryCached(day, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key) return null;
+  const entry = pastReportSummaryCache.get(key);
+  if (!entry) return null;
+  if (Number(now || Date.now()) - Number(entry.ts || 0) > PAST_REPORT_SUMMARY_CACHE_TTL_MS) {
+    pastReportSummaryCache.delete(key);
+    return null;
+  }
+  return cloneReportSummary(entry.summary);
+}
+
+function setPastReportSummaryCache(day, summary, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key || !summary || typeof summary !== "object") return;
+  pastReportSummaryCache.set(key, {
+    ts: Number(now || Date.now()),
+    summary: cloneReportSummary(summary),
   });
 }
 
@@ -4417,6 +5244,7 @@ function summarizeDailyReportRows(rows) {
 function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const day = parseIsoDateStrict(targetDateText || localDateStr(), "date");
   const refreshDay = options.refreshDay === true;
+  const today = localDateStr();
   const selectedDate = new Date(`${day}T00:00:00.000`);
   const dow = selectedDate.getDay(); // 0=Sunday ... 6=Saturday
   const weekStartDate = new Date(selectedDate.getTime());
@@ -4424,7 +5252,11 @@ function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const weekStart = localDateStr(weekStartDate.getTime());
   const weekEnd = addDaysIso(weekStart, 6);
   const dates = daysInclusive(weekStart, weekEnd);
-  const today = localDateStr();
+  const canCacheSummary = day < today && weekEnd < today;
+  if (canCacheSummary && !refreshDay) {
+    const cached = getPastReportSummaryCached(day);
+    if (cached) return cached;
+  }
 
   const byDateRows = new Map();
   const isToday = day === today;
@@ -4446,13 +5278,15 @@ function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   }
 
   const weeklyRows = dates.flatMap((d) => byDateRows.get(d) || []);
-  return {
+  const summary = {
     date: day,
     week_start: weekStart,
     week_end: weekEnd,
     daily: summarizeDailyReportRows(dailyRows),
     weekly: summarizeDailyReportRows(weeklyRows),
   };
+  if (canCacheSummary) setPastReportSummaryCache(day, summary);
+  return summary;
 }
 
 function getLatestReportDate() {
@@ -4678,6 +5512,131 @@ app.get("/api/live", (req, res) => {
   return res.json(getRuntimeLiveData());
 });
 
+app.get("/api/replication/manual-scope", (req, res) => {
+  res.json({ ok: true, scope: buildManualReplicationScope() });
+});
+
+app.get("/api/replication/job-status", (req, res) => {
+  res.json({ ok: true, job: snapshotManualReplicationJob() });
+});
+
+app.get("/api/replication/archive-manifest", (req, res) => {
+  try {
+    const manifest = listLocalArchiveManifest();
+    res.json({
+      ok: true,
+      manifest,
+      summary: summarizeArchiveManifest(manifest),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/replication/archive-download", async (req, res) => {
+  const fileName = sanitizeArchiveFileName(req.query?.file || "");
+  if (!fileName) {
+    return res.status(400).json({ ok: false, error: "Invalid archive file." });
+  }
+  const monthKey = monthKeyFromArchiveFileName(fileName);
+  const filePath = path.join(ARCHIVE_DIR, fileName);
+  closeArchiveDbForMonth(monthKey);
+  try {
+    const stat = await fs.promises.stat(filePath);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(Math.max(0, Number(stat.size || 0))));
+    res.setHeader("x-archive-mtime", String(Math.max(0, Number(stat.mtimeMs || 0))));
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    fs.createReadStream(filePath).pipe(res);
+  } catch (err) {
+    return res.status(404).json({ ok: false, error: "Archive file not found." });
+  }
+});
+
+app.post("/api/replication/archive-upload", async (req, res) => {
+  const fileName = sanitizeArchiveFileName(req.query?.file || "");
+  if (!fileName) {
+    return res.status(400).json({ ok: false, error: "Invalid archive file." });
+  }
+  const monthKey = monthKeyFromArchiveFileName(fileName);
+  const targetPath = path.join(ARCHIVE_DIR, fileName);
+  const tempPath = path.join(ARCHIVE_DIR, `${fileName}.upload-${Date.now()}.tmp`);
+  const expectedSize = Math.max(0, Number(req.headers["x-archive-size"] || 0));
+  const expectedMtimeMs = Math.max(0, Number(req.headers["x-archive-mtime"] || Date.now()));
+  let recvBytes = 0;
+  try {
+    await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
+    closeArchiveDbForMonth(monthKey);
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes: expectedSize,
+      chunkCount: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    req.on("data", (chunk) => {
+      recvBytes += Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes,
+        totalBytes: expectedSize,
+        chunk: 1,
+        chunkCount: 1,
+        label: `Receiving archive ${fileName}`,
+      });
+    });
+    await pipeline(req, fs.createWriteStream(tempPath));
+    closeArchiveDbForMonth(monthKey);
+    try {
+      await fs.promises.unlink(targetPath);
+    } catch (_) {
+      // Ignore missing prior archive file.
+    }
+    await fs.promises.rename(tempPath, targetPath);
+    const mtime = new Date(expectedMtimeMs);
+    await fs.promises.utimes(targetPath, mtime, mtime);
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes,
+      totalBytes: expectedSize > 0 ? expectedSize : recvBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    return res.json({
+      ok: true,
+      file: {
+        name: fileName,
+        monthKey,
+        size: expectedSize > 0 ? expectedSize : recvBytes,
+        mtimeMs: expectedMtimeMs,
+      },
+    });
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "error",
+      recvBytes,
+      totalBytes: expectedSize > 0 ? expectedSize : recvBytes,
+      chunkCount: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 app.get("/api/replication/summary", async (req, res) => {
   if (isRemotePullOnlyMode()) {
     return res.status(409).json({
@@ -4876,35 +5835,43 @@ app.post("/api/replication/pull-now", async (req, res) => {
       error: "Remote gateway URL cannot be localhost in remote mode.",
     });
   }
+  const includeArchive = req?.body?.includeArchive !== false;
+  const background = req?.body?.background !== false;
   try {
-    const inc = await runRemoteCatchUpReplication(
-      base,
-      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-      REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    );
-    if (inc?.skipped) {
+    if (background) {
+      const started = startManualReplicationJob(
+        "pull",
+        {
+          includeArchive,
+          summary: "Queued background pull from gateway.",
+          runningSummary: "Pulling data from gateway in the background.",
+        },
+        () => runManualPullSync(base, includeArchive),
+      );
+      if (!started?.started) {
+        return res.status(202).json({
+          ok: false,
+          error: "Replication already in progress.",
+          background: true,
+          job: started?.job || snapshotManualReplicationJob(),
+        });
+      }
       return res.status(202).json({
-        ok: false,
-        error: "Replication already in progress.",
-        incremental: inc,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (inc?.ok) {
-      return res.json({
         ok: true,
-        mode: String(inc.mode || "incremental"),
-        incremental: inc,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+        background: true,
+        includeArchive,
+        job: started.job,
+        message:
+          "Background pull started. Hot replicated tables and archive DB files will continue syncing while you use the dashboard.",
       });
     }
 
-    return res.status(502).json({
-      ok: false,
-      error: `Incremental pull failed: ${String(
-        inc?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-      incremental: inc,
+    const result = await runManualPullSync(base, includeArchive);
+    return res.json({
+      ok: true,
+      background: false,
+      includeArchive,
+      result,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
   } catch (err) {
@@ -4933,45 +5900,43 @@ app.post("/api/replication/push-now", async (req, res) => {
       error: "Remote gateway URL cannot be localhost in remote mode.",
     });
   }
+  const includeArchive = req?.body?.includeArchive !== false;
+  const background = req?.body?.background !== false;
   try {
-    const pushed = await runRemotePushFull(base);
-    if (pushed?.skipped) {
+    if (background) {
+      const started = startManualReplicationJob(
+        "push",
+        {
+          includeArchive,
+          summary: "Queued background push to gateway.",
+          runningSummary: "Pushing local data to gateway in the background.",
+        },
+        () => runManualPushSync(base, includeArchive),
+      );
+      if (!started?.started) {
+        return res.status(202).json({
+          ok: false,
+          error: "Replication already in progress.",
+          background: true,
+          job: started?.job || snapshotManualReplicationJob(),
+        });
+      }
       return res.status(202).json({
-        ok: false,
-        error: "Replication already in progress.",
-        pushed,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (!pushed?.ok) {
-      return res.status(502).json({
-        ok: false,
-        error: String(pushed?.error || "Full push failed."),
-        pushed,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    const incremental = await runRemoteCatchUpReplication(
-      base,
-      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-      REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    );
-    if (incremental?.ok) {
-      return res.json({
         ok: true,
-        pushed,
-        mode: String(incremental.mode || "incremental"),
-        incremental,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+        background: true,
+        includeArchive,
+        job: started.job,
+        message:
+          "Background push started. Hot replicated tables and archive DB files will continue syncing while you use the dashboard.",
       });
     }
-    return res.status(502).json({
-      ok: false,
-      error: `Post-push incremental pull failed: ${String(
-        incremental?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-      pushed,
-      incremental,
+
+    const result = await runManualPushSync(base, includeArchive);
+    return res.json({
+      ok: true,
+      background: false,
+      includeArchive,
+      result,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
   } catch (err) {
@@ -5180,6 +6145,7 @@ app.post("/api/ip-config", (req, res) => {
     mirrorIpConfigToLegacyFiles(cfg);
     backfillAuditIpsFromConfig();
     pastDailyReportCache.clear();
+    pastReportSummaryCache.clear();
     // Push new config to poller immediately (skip 5 s cache lag).
     if (!isRemoteMode()) poller.setIpConfigSnapshot(cfg);
     // Notify the dashboard so it rebuilds inverter cards without a restart.
@@ -5359,6 +6325,7 @@ app.post("/api/settings", (req, res) => {
     updates.nodeCount !== undefined
   ) {
     pastDailyReportCache.clear();
+    pastReportSummaryCache.clear();
   }
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
@@ -5407,6 +6374,8 @@ app.get("/api/runtime/network", (req, res) => {
         ? {}
         : remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     ),
+    manualReplicationJob: snapshotManualReplicationJob(),
+    manualReplicationScope: buildManualReplicationScope(),
     tailscale: getTailscaleStatusSnapshot(),
   });
 });
@@ -5965,6 +6934,55 @@ app.get("/api/report/daily", (req, res) => {
     return res.json(
       normalizePersistedDailyReportRows(stmts.getDailyReportRange.all(s, e)),
     );
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/report/payload", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const _t0 = Date.now();
+  try {
+    const requestedDate = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
+    const refreshRequested = ["1", "true", "yes", "on"].includes(
+      String(req.query?.refresh || "")
+        .trim()
+        .toLowerCase(),
+    );
+    const latestDate = getLatestReportDate();
+    let date = requestedDate;
+    let rows = getDailyReportRowsForDay(date, {
+      persist: true,
+      includeTodayPartial: date === localDateStr(),
+      refresh: refreshRequested,
+    });
+    let fallbackUsed = false;
+
+    if ((!Array.isArray(rows) || rows.length === 0) && latestDate && latestDate !== date) {
+      date = latestDate;
+      rows = getDailyReportRowsForDay(date, {
+        persist: true,
+        includeTodayPartial: date === localDateStr(),
+        refresh: false,
+      });
+      fallbackUsed = true;
+    }
+
+    const summary = buildDailyWeeklyReportSummary(date, {
+      refreshDay: refreshRequested && date === requestedDate,
+    });
+    res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+    return res.json({
+      ok: true,
+      requestedDate,
+      date,
+      latestDate: latestDate || "",
+      fallbackUsed,
+      rows: Array.isArray(rows) ? rows : [],
+      summary,
+    });
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }

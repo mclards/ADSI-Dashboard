@@ -65,6 +65,39 @@ const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;
 const ARCHIVE_BATCH_SIZE = 5000;
 const ARCHIVE_DB_CACHE = new Map();
+const STARTUP_COMPACT_MAX_BYTES = 64 * 1024 * 1024;
+const READING_STORAGE_COLUMNS = [
+  "id",
+  "ts",
+  "inverter",
+  "unit",
+  "pac",
+  "kwh",
+  "alarm",
+  "online",
+];
+const READING_VALUE_COLUMNS = READING_STORAGE_COLUMNS.filter((col) => col !== "id");
+const READING_SELECT_SQL = READING_VALUE_COLUMNS.join(",");
+const READING_TABLE_DDL = `
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        INTEGER NOT NULL,
+  inverter  INTEGER NOT NULL,
+  unit      INTEGER NOT NULL,
+  pac       REAL DEFAULT 0,
+  kwh       REAL DEFAULT 0,
+  alarm     INTEGER DEFAULT 0,
+  online    INTEGER DEFAULT 1
+`;
+const ARCHIVE_READING_TABLE_DDL = `
+  id        INTEGER PRIMARY KEY,
+  ts        INTEGER NOT NULL,
+  inverter  INTEGER NOT NULL,
+  unit      INTEGER NOT NULL,
+  pac       REAL DEFAULT 0,
+  kwh       REAL DEFAULT 0,
+  alarm     INTEGER DEFAULT 0,
+  online    INTEGER DEFAULT 1
+`;
 
 fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -78,22 +111,7 @@ db.pragma("mmap_size = 268435456");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS readings (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts        INTEGER NOT NULL,
-    inverter  INTEGER NOT NULL,
-    unit      INTEGER NOT NULL,
-    vdc       REAL DEFAULT 0,
-    idc       REAL DEFAULT 0,
-    vac1      REAL DEFAULT 0,
-    vac2      REAL DEFAULT 0,
-    vac3      REAL DEFAULT 0,
-    iac1      REAL DEFAULT 0,
-    iac2      REAL DEFAULT 0,
-    iac3      REAL DEFAULT 0,
-    pac       REAL DEFAULT 0,
-    kwh       REAL DEFAULT 0,
-    alarm     INTEGER DEFAULT 0,
-    online    INTEGER DEFAULT 1
+    ${READING_TABLE_DDL}
   );
   CREATE INDEX IF NOT EXISTS idx_r_ts      ON readings(ts);
   CREATE INDEX IF NOT EXISTS idx_r_inv_ts  ON readings(inverter, unit, ts);
@@ -196,6 +214,84 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fd_ts      ON forecast_dayahead(ts);
   CREATE INDEX IF NOT EXISTS idx_fd_date_ts ON forecast_dayahead(date, ts);
 `);
+
+function getTableColumns(database, tableName) {
+  return database
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all()
+    .map((row) => String(row?.name || "").trim())
+    .filter(Boolean);
+}
+
+function isCompactReadingsShape(columns) {
+  const cols = Array.isArray(columns) ? columns : [];
+  return (
+    cols.length === READING_STORAGE_COLUMNS.length &&
+    READING_STORAGE_COLUMNS.every((name, idx) => cols[idx] === name)
+  );
+}
+
+function compactReadingsTable(database) {
+  const cols = getTableColumns(database, "readings");
+  if (!cols.length || isCompactReadingsShape(cols)) return false;
+
+  console.info("[DB] Compacting readings table to operational columns only.");
+  const tempTable = "readings__compact_migrate";
+  database.exec(`DROP TABLE IF EXISTS ${tempTable}`);
+  const migrateTx = database.transaction(() => {
+    database.exec(`
+      CREATE TABLE ${tempTable} (
+        ${READING_TABLE_DDL}
+      );
+      INSERT INTO ${tempTable}(id, ts, inverter, unit, pac, kwh, alarm, online)
+      SELECT id, ts, inverter, unit, pac, kwh, alarm, online
+        FROM readings
+       ORDER BY id ASC;
+      DROP TABLE readings;
+      ALTER TABLE ${tempTable} RENAME TO readings;
+      CREATE INDEX IF NOT EXISTS idx_r_ts ON readings(ts);
+      CREATE INDEX IF NOT EXISTS idx_r_inv_ts ON readings(inverter, unit, ts);
+    `);
+  });
+  migrateTx();
+  try {
+    database.exec("VACUUM");
+  } catch (err) {
+    console.warn("[DB] readings VACUUM skipped:", err.message);
+  }
+  return true;
+}
+
+function getDbStartupFootprintBytes(dbPath) {
+  let total = 0;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const filePath = `${dbPath}${suffix}`;
+    try {
+      if (fs.existsSync(filePath)) total += Number(fs.statSync(filePath).size || 0);
+    } catch (_) {
+      // Best effort only.
+    }
+  }
+  return total;
+}
+
+function maybeCompactReadingsTableOnStartup(database, dbPath) {
+  const cols = getTableColumns(database, "readings");
+  if (!cols.length || isCompactReadingsShape(cols)) return false;
+
+  const startupBytes = getDbStartupFootprintBytes(dbPath);
+  if (startupBytes > STARTUP_COMPACT_MAX_BYTES) {
+    console.warn(
+      `[DB] Skipping startup readings compaction (${Math.round(startupBytes / (1024 * 1024))} MB footprint). ` +
+        "Compact raw storage is still used for new rows; existing DB can be compacted later during maintenance.",
+    );
+    return false;
+  }
+
+  return compactReadingsTable(database);
+}
+
+maybeCompactReadingsTableOnStartup(db, DB_PATH);
 
 function ensureColumn(tableName, columnName, columnDDL) {
   const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
@@ -310,8 +406,8 @@ db.exec(`
 
 const stmts = {
   insertReading: db.prepare(`
-    INSERT INTO readings (ts,inverter,unit,vdc,idc,vac1,vac2,vac3,iac1,iac2,iac3,pac,kwh,alarm,online)
-    VALUES (@ts,@inverter,@unit,@vdc,@idc,@vac1,@vac2,@vac3,@iac1,@iac2,@iac3,@pac,@kwh,@alarm,@online)
+    INSERT INTO readings (ts,inverter,unit,pac,kwh,alarm,online)
+    VALUES (@ts,@inverter,@unit,@pac,@kwh,@alarm,@online)
   `),
   insertAlarm: db.prepare(`
     INSERT INTO alarms (ts,inverter,unit,alarm_code,alarm_value,severity)
@@ -340,10 +436,10 @@ const stmts = {
     `SELECT * FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
   ),
   getReadingsRange: db.prepare(
-    `SELECT * FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
+    `SELECT ${READING_SELECT_SQL} FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
   ),
   getReadingsRangeAll: db.prepare(
-    `SELECT * FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
+    `SELECT ${READING_SELECT_SQL} FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
   ),
   get5minRange: db.prepare(
     `SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
@@ -494,22 +590,7 @@ function ensureArchiveSchema(archiveDb) {
   archiveDb.pragma("temp_store = memory");
   archiveDb.exec(`
     CREATE TABLE IF NOT EXISTS readings (
-      id        INTEGER PRIMARY KEY,
-      ts        INTEGER NOT NULL,
-      inverter  INTEGER NOT NULL,
-      unit      INTEGER NOT NULL,
-      vdc       REAL DEFAULT 0,
-      idc       REAL DEFAULT 0,
-      vac1      REAL DEFAULT 0,
-      vac2      REAL DEFAULT 0,
-      vac3      REAL DEFAULT 0,
-      iac1      REAL DEFAULT 0,
-      iac2      REAL DEFAULT 0,
-      iac3      REAL DEFAULT 0,
-      pac       REAL DEFAULT 0,
-      kwh       REAL DEFAULT 0,
-      alarm     INTEGER DEFAULT 0,
-      online    INTEGER DEFAULT 1
+      ${ARCHIVE_READING_TABLE_DDL}
     );
     CREATE INDEX IF NOT EXISTS idx_ar_ts ON readings(ts);
     CREATE INDEX IF NOT EXISTS idx_ar_inv_ts ON readings(inverter, unit, ts);
@@ -532,18 +613,18 @@ function createArchiveEntry(filePath) {
     db: archiveDb,
     insertReading: archiveDb.prepare(`
       INSERT OR IGNORE INTO readings
-      (id,ts,inverter,unit,vdc,idc,vac1,vac2,vac3,iac1,iac2,iac3,pac,kwh,alarm,online)
-      VALUES (@id,@ts,@inverter,@unit,@vdc,@idc,@vac1,@vac2,@vac3,@iac1,@iac2,@iac3,@pac,@kwh,@alarm,@online)
+      (id,ts,inverter,unit,pac,kwh,alarm,online)
+      VALUES (@id,@ts,@inverter,@unit,@pac,@kwh,@alarm,@online)
     `),
     insertEnergy5: archiveDb.prepare(`
       INSERT OR IGNORE INTO energy_5min (id,ts,inverter,kwh_inc)
       VALUES (@id,@ts,@inverter,@kwh_inc)
     `),
     selectReadingsRangeAll: archiveDb.prepare(
-      `SELECT * FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
+      `SELECT ${READING_SELECT_SQL} FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC`,
     ),
     selectReadingsRangeByInv: archiveDb.prepare(
-      `SELECT * FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
+      `SELECT ${READING_SELECT_SQL} FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
     ),
     selectEnergyRangeAll: archiveDb.prepare(
       `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC`,
@@ -583,6 +664,27 @@ function getArchiveEntry(monthKey, createIfMissing = false) {
   const entry = createArchiveEntry(filePath);
   ARCHIVE_DB_CACHE.set(key, entry);
   return entry;
+}
+
+function closeArchiveDbForMonth(monthKey) {
+  const key = String(monthKey || "")
+    .trim()
+    .replace(/\.db$/i, "");
+  if (!key) return false;
+  const entry = ARCHIVE_DB_CACHE.get(key);
+  if (!entry) return false;
+  try {
+    entry.db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch (_) {
+    // Ignore archive checkpoint failures during targeted close.
+  }
+  try {
+    entry.db.close();
+  } catch (_) {
+    // Ignore archive close failures during targeted close.
+  }
+  ARCHIVE_DB_CACHE.delete(key);
+  return true;
 }
 
 function parseIntervalsJson(text) {
@@ -753,6 +855,34 @@ function sortEnergyAsc(a, b) {
   );
 }
 
+function annotateRowsWithComputedKwh(rowsRaw, maxGapMs = 30000) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw.slice() : [];
+  const lastByKey = new Map();
+  const totalByKey = new Map();
+  return rows.map((row) => {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    const pac = Math.max(0, Number(row?.pac || 0));
+    const key = `${localDateStr(ts)}|${inverter}|${unit}`;
+    const prev = lastByKey.get(key);
+    let totalKwh = Number(totalByKey.get(key) || 0);
+
+    if (prev && ts > prev.ts) {
+      const dtMs = ts - prev.ts;
+      if (dtMs > 0 && dtMs <= maxGapMs) {
+        const avgPac = (prev.pac + pac) / 2;
+        totalKwh += (avgPac * dtMs) / 3600000000.0;
+      }
+    }
+
+    totalKwh = Number(totalKwh.toFixed(6));
+    lastByKey.set(key, { ts, pac });
+    totalByKey.set(key, totalKwh);
+    return { ...row, kwh: totalKwh };
+  });
+}
+
 function pushUniqueRows(targetMap, rows, keyFn) {
   for (const row of rows || []) {
     const key = keyFn(row);
@@ -859,7 +989,7 @@ function rebuildDailyReadingsSummaryForDate(dayInput) {
   if (!day) return [];
   const startTs = new Date(`${day}T00:00:00.000`).getTime();
   const endTs = new Date(`${day}T23:59:59.999`).getTime();
-  const rows = queryReadingsRangeAll(startTs, endTs);
+  const rows = annotateRowsWithComputedKwh(queryReadingsRangeAll(startTs, endTs));
   const states = new Map();
   for (const row of rows) {
     const inverter = Number(row?.inverter || 0);
@@ -887,7 +1017,7 @@ const deleteEnergyBatchTx = db.transaction((ids) => {
   for (const id of ids || []) deleteEnergy5ById.run(id);
 });
 const selectOldReadingsBatch = db.prepare(`
-  SELECT id, ts, inverter, unit, vdc, idc, vac1, vac2, vac3, iac1, iac2, iac3, pac, kwh, alarm, online
+  SELECT id, ts, inverter, unit, pac, kwh, alarm, online
     FROM readings
    WHERE ts < ?
    ORDER BY ts ASC, id ASC
@@ -1026,4 +1156,5 @@ module.exports = {
   getDailyReadingsSummaryRows,
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
+  closeArchiveDbForMonth,
 };

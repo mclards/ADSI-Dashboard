@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.10` in `package.json`
+- Current repo version baseline: `2.2.12` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -110,6 +110,11 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
     - `Inverter-Dashboard-Portable-<version>.exe`
 - Keep Windows build icon usage aligned with `icon-256.png`.
 - If visible branding changes, audit header, about, footer, and build metadata together.
+- When the user says `publish release`, Claude should execute the release workflow directly:
+  - build artifacts if needed
+  - create or upload the GitHub release itself
+  - do not stop at providing commands unless auth, permissions, or network access prevent publishing
+- If publishing is blocked, report the exact blocker and then provide only the minimum command(s) the user needs to run.
 
 ## Storage and Compatibility Paths
 

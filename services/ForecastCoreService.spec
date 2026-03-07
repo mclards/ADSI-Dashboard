@@ -2,7 +2,10 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+SPEC_PATH = os.path.abspath(
+    globals().get("__file__", os.path.join(os.getcwd(), "services", "ForecastCoreService.spec"))
+)
+BASE_DIR = os.path.abspath(os.path.dirname(SPEC_PATH))
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 
 datas = []

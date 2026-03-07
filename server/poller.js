@@ -6,7 +6,6 @@ const { broadcastUpdate } = require('./ws');
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const liveData = {};       // key: `${inv}_${unit}` → latest parsed row
-const prevKwh  = {};       // for 5-min energy increment tracking
 const unreachableState = {}; // per-key miss/suppression tracking
 const lastPersistState = {}; // per-key DB persist cadence state
 
@@ -94,6 +93,10 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   for (const key of Object.keys(pacIntegratorState)) delete pacIntegratorState[key];
 }
 
+function roundKwh(value) {
+  return Number((Math.max(0, Number(value) || 0)).toFixed(6));
+}
+
 function integratePacToday(parsed) {
   const now = parsed.ts || Date.now();
   resetPacTodayIfNeeded(now);
@@ -102,20 +105,24 @@ function integratePacToday(parsed) {
   const prev = pacIntegratorState[key];
 
   if (!prev) {
-    pacIntegratorState[key] = { ts: now, pac };
+    pacIntegratorState[key] = { ts: now, pac, totalKwh: 0 };
+    parsed.kwh = 0;
     return;
   }
 
+  let totalKwh = Number(prev.totalKwh || 0);
   const dtSec = Math.max(0, (now - prev.ts) / 1000);
   if (dtSec > 0) {
     const safeDt = Math.min(dtSec, MAX_PAC_DT_S);
     const avgPac = (prev.pac + pac) / 2;
     const kwhInc = (avgPac * safeDt) / 3600000; // W*s -> kWh
+    totalKwh += kwhInc;
     pacTodayByInverter[parsed.inverter] =
       (pacTodayByInverter[parsed.inverter] || 0) + kwhInc;
   }
 
-  pacIntegratorState[key] = { ts: now, pac };
+  parsed.kwh = roundKwh(totalKwh);
+  pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh };
 }
 
 function parseRow(row) {
@@ -133,8 +140,6 @@ function parseRow(row) {
   const iac2 = Number(row.iac2 || 0);
   const iac3 = Number(row.iac3 || 0);
   const pac  = Number(row.pac  || 0);
-  // Use multiplication instead of left-shift to avoid signed 32-bit overflow in JS.
-  const kwh  = (((Number(row.kwh_high || 0) & 0xFFFF) * 65536) + (Number(row.kwh_low || 0) & 0xFFFF)) / 10;
   const alarm = Number(row.alarm || 0);
   const onOffRaw = Number(row.on_off ?? row.onOff ?? 0);
   const on_off = onOffRaw === 1 ? 1 : 0;
@@ -154,10 +159,22 @@ function parseRow(row) {
     iac1, iac2, iac3,
     pac: safePac,
     pdc: safePdc,
-    kwh,
+    kwh: 0,
     alarm,
     on_off,
     online: 1
+  };
+}
+
+function toPersistedReadingRow(row) {
+  return {
+    ts: Number(row?.ts || 0),
+    inverter: Number(row?.inverter || 0),
+    unit: Number(row?.unit || 0),
+    pac: Number(row?.pac || 0),
+    kwh: roundKwh(row?.kwh),
+    alarm: Number(row?.alarm || 0),
+    online: Number(row?.online ?? 1) === 1 ? 1 : 0,
   };
 }
 
@@ -386,6 +403,7 @@ async function poll() {
   }
 
   const batch = [];
+  const alarmBatch = [];
   const seen  = new Set();
 
   for (const row of rows) {
@@ -407,17 +425,19 @@ async function poll() {
     const prev = liveData[key];
     if (prev &&
         prev.pac === parsed.pac &&
-        prev.kwh === parsed.kwh &&
-        prev.alarm === parsed.alarm) {
+        prev.alarm === parsed.alarm &&
+        prev.on_off === parsed.on_off) {
       // Heartbeat refresh: keep timestamp/online fresh even when values are stable.
       prev.ts = parsed.ts;
       prev.online = 1;
+      prev.kwh = parsed.kwh;
       noChangeThisTick += 1;
       continue;
     }
 
     liveData[key] = parsed;
     acceptedThisTick += 1;
+    alarmBatch.push(parsed);
 
     // Persist with cadence guard to reduce synchronous DB pressure.
     const persistPrev = lastPersistState[key];
@@ -436,7 +456,7 @@ async function poll() {
       (forcePersist || elapsedMs >= DB_MIN_PERSIST_MS || pacDelta >= DB_PAC_DELTA_PERSIST_W);
 
     if (shouldPersist) {
-      batch.push(parsed);
+      batch.push(toPersistedReadingRow(parsed));
       update5minBucket(parsed);
       lastPersistState[key] = {
         ts: Number(parsed.ts || 0),
@@ -455,11 +475,18 @@ async function poll() {
     try {
       bulkInsert(batch);
       ingestDailyReadingsSummary(batch);
-      checkAlarms(batch);
       pollStats.dbBulkInsertCount += 1;
     } catch (e) {
       console.error('[DB]', e.message);
       pollStats.dbInsertErrorCount += 1;
+    }
+  }
+
+  if (alarmBatch.length) {
+    try {
+      checkAlarms(alarmBatch);
+    } catch (e) {
+      console.error("[alarms]", e.message);
     }
   }
 
@@ -531,14 +558,7 @@ function flushPending() {
     const key = `${d.inverter}_${d.unit}`;
     const prev = lastPersistState[key];
     if (prev && Number(d.ts) <= Number(prev.ts)) continue;
-    batch.push({
-      ts: Number(d.ts), inverter: Number(d.inverter), unit: Number(d.unit),
-      vdc: Number(d.vdc || 0), idc: Number(d.idc || 0),
-      vac1: Number(d.vac1 || 0), vac2: Number(d.vac2 || 0), vac3: Number(d.vac3 || 0),
-      iac1: Number(d.iac1 || 0), iac2: Number(d.iac2 || 0), iac3: Number(d.iac3 || 0),
-      pac: Number(d.pac || 0), kwh: Number(d.kwh || 0),
-      alarm: Number(d.alarm || 0), online: Number(d.online ?? 1),
-    });
+    batch.push(toPersistedReadingRow(d));
     lastPersistState[key] = {
       ts: Number(d.ts), pac: Number(d.pac || 0),
       alarm: Number(d.alarm || 0), on_off: Number(d.on_off || 0),

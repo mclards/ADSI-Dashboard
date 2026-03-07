@@ -67,6 +67,8 @@ const State = {
   analyticsDailyTotalMwh: null,
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
+  analyticsChartPage: 1,
+  analyticsChartPageSize: 6,
   // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
   analyticsDayAheadCache: null,  // { src, intervalMin, result }
   // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
@@ -75,6 +77,9 @@ const State = {
   alarmSoundTimer: null,
   alarmAudioCtx: null,
   alarmSoundMuted: false,
+  alarmLiveSig: "",
+  alarmLiveSyncing: false,
+  pendingAlarmLiveSig: "",
   exportUiSaveTimer: null,
   exportBtnTimers: {},
   alarmView: {
@@ -130,6 +135,11 @@ const State = {
     txFlashTimer: null,
     monitorTimer: null,
   },
+  replication: {
+    job: null,
+    scope: null,
+    restartPromptedJobId: "",
+  },
   xfer: {
     slots: {
       tx: createXferSlot("tx"),
@@ -179,6 +189,7 @@ const TABLE_FILTER_DEBOUNCE_MS = 140;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
+const ANALYTICS_CHARTS_PAGE_SIZE = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
@@ -1166,6 +1177,44 @@ function getVisibleXferSlot() {
   return active[0];
 }
 
+function getXferScopeInfo(x) {
+  const label = String(x?.label || "")
+    .trim()
+    .toLowerCase();
+  if (label.includes("archive")) {
+    return { text: "Archive DB", cls: "archive" };
+  }
+  if (label.includes("receiving push")) {
+    return { text: "Hot data RX", cls: "hot" };
+  }
+  if (x?.dir === "tx") {
+    return { text: "Hot data TX", cls: "hot" };
+  }
+  return { text: "Hot data RX", cls: "hot" };
+}
+
+function getXferDetailText(x) {
+  const parts = [];
+  if (x.chunkCount > 1) {
+    parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}/${Math.max(0, Number(x.chunkCount || 0))}`);
+  } else if (x.chunkDone > 0) {
+    parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}`);
+  }
+  if (Number(x.totalRows || 0) > 0) {
+    const imported = Math.max(0, Number(x.importedRows || 0));
+    const totalRows = Math.max(0, Number(x.totalRows || 0));
+    if (imported > 0) parts.push(`${imported.toLocaleString()} row${imported === 1 ? "" : "s"} applied`);
+    else parts.push(`${totalRows.toLocaleString()} row${totalRows === 1 ? "" : "s"} scheduled`);
+  } else if (x.phase === "done") {
+    parts.push("transfer finished");
+  } else if (x.phase === "error") {
+    parts.push("transfer failed");
+  } else {
+    parts.push("background transfer running");
+  }
+  return parts.join(" · ");
+}
+
 function renderXferPanel() {
   const panel = document.getElementById("xferPanel");
   if (!panel) return;
@@ -1184,9 +1233,12 @@ function renderXferPanel() {
   const fillEl = document.getElementById("xferBarFill");
   const currEl = document.getElementById("xferSizeCurr");
   const totalEl = document.getElementById("xferSizeTotal");
+  const scopeChipEl = document.getElementById("xferScopeChip");
+  const detailEl = document.getElementById("xferDetail");
 
   if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
   if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
+  panel.className = `xfer-panel xfer-panel-${x.phase || "idle"}`.trim();
 
   const done = Math.max(0, Number(x.doneBytes || 0));
   const total = Math.max(0, Number(x.totalBytes || 0));
@@ -1227,6 +1279,13 @@ function renderXferPanel() {
       labelEl.textContent = `Pulling${bStr}`;
     }
   }
+
+  const scopeInfo = getXferScopeInfo(x);
+  if (scopeChipEl) {
+    scopeChipEl.textContent = scopeInfo.text;
+    scopeChipEl.className = `xfer-scope-chip xfer-scope-${scopeInfo.cls || "hot"}`;
+  }
+  if (detailEl) detailEl.textContent = getXferDetailText(x);
 
   if (pctEl) pctEl.textContent = known || x.phase === "done" ? `${pct}%` : "…";
   if (currEl) currEl.textContent = fmtBytes(done);
@@ -1404,13 +1463,8 @@ function getOrCreateAlarmAudioCtx() {
   }
 }
 
-function playAlarmBeepOnce() {
+function _scheduleAlarmBeep(ctx) {
   try {
-    const ctx = getOrCreateAlarmAudioCtx();
-    if (!ctx) return;
-    if (ctx.state === "suspended") {
-      ctx.resume().catch(() => {});
-    }
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "square";
@@ -1421,6 +1475,22 @@ function playAlarmBeepOnce() {
     const t0 = ctx.currentTime;
     osc.start(t0);
     osc.stop(t0 + 0.16);
+  } catch (err) {
+    console.warn("[app] alarm beep schedule failed:", err.message);
+  }
+}
+
+function playAlarmBeepOnce() {
+  try {
+    const ctx = getOrCreateAlarmAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === "suspended") {
+      // Defer oscillator scheduling until AudioContext is actually running.
+      // Scheduling against a frozen currentTime while suspended produces no sound.
+      ctx.resume().then(() => _scheduleAlarmBeep(ctx)).catch(() => {});
+    } else {
+      _scheduleAlarmBeep(ctx);
+    }
   } catch (err) {
     console.warn("[app] alarm beep failed:", err.message);
   }
@@ -1443,6 +1513,34 @@ function hasUnackedActiveAlarms() {
   return Object.values(State.activeAlarms || {}).some(
     (a) => a && a.acknowledged !== true,
   );
+}
+
+function getLiveAlarmSignature() {
+  const parts = [];
+  for (const [key, row] of Object.entries(State.liveData || {})) {
+    const alarmValue = Number(row?.alarm || 0);
+    if (!alarmValue) continue;
+    parts.push(`${key}:${alarmValue}`);
+  }
+  parts.sort();
+  return parts.join("|");
+}
+
+async function syncAlarmStateFromLiveData() {
+  State.pendingAlarmLiveSig = getLiveAlarmSignature();
+  if (State.alarmLiveSyncing) return;
+
+  State.alarmLiveSyncing = true;
+  try {
+    while (State.pendingAlarmLiveSig !== State.alarmLiveSig) {
+      const targetSig = State.pendingAlarmLiveSig;
+      const ok = await refreshAlarmBadge();
+      if (!ok) break;
+      State.alarmLiveSig = targetSig;
+    }
+  } finally {
+    State.alarmLiveSyncing = false;
+  }
 }
 
 function renderAlarmSoundBtn() {
@@ -2753,6 +2851,132 @@ function formatSyncDirection(value) {
   return map[v] || (v ? v.replace(/[-_]/g, " ") : "—");
 }
 
+function isManualArchiveSyncSelected() {
+  return Boolean($("setReplicationIncludeArchive")?.checked);
+}
+
+function formatTailscaleStatus(ts) {
+  const snap = ts && typeof ts === "object" ? ts : {};
+  if (!snap.installed) return { text: "Not installed", cls: "error" };
+  if (!snap.running) return { text: "Installed, not running", cls: "warn" };
+  if (!snap.connected) return { text: "Running, not connected", cls: "warn" };
+  const ip = Array.isArray(snap.tailscaleIps) && snap.tailscaleIps[0] ? snap.tailscaleIps[0] : "";
+  return {
+    text: ip ? `Connected (${ip})` : "Connected",
+    cls: "ok",
+  };
+}
+
+function formatReplicationScopeText(scope) {
+  const hotTables = Array.isArray(scope?.hotTables) ? scope.hotTables : [];
+  if (!hotTables.length) return "Hot replicated tables are not available.";
+  return `Hot-data scope (always first): ${hotTables.join(", ")}.`;
+}
+
+function formatArchiveScopeText(scope) {
+  const archive = scope?.archive && typeof scope.archive === "object" ? scope.archive : {};
+  const count = Math.max(0, Number(archive?.fileCount || 0));
+  const totalBytes = Math.max(0, Number(archive?.totalBytes || 0));
+  const selected = isManualArchiveSyncSelected();
+  return `${selected ? "Archive sync is enabled for the next manual run." : "Archive sync is optional and currently off, so hot data stays the priority path."} Monthly archive DB files available locally: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Operation mode, gateway URL/token, Tailscale hint, export path, replication cursors, and live handoff state stay local for mode compatibility.`;
+}
+
+function formatReplicationJobStatus(job) {
+  const j = job && typeof job === "object" ? job : null;
+  if (!j) return { text: "Idle", cls: "" };
+  const status = String(j.status || "idle").trim().toLowerCase();
+  const action = String(j.action || "sync").trim();
+  if (status === "running" || status === "queued") {
+    return {
+      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · hot + archive" : " · hot only"}`,
+      cls: status === "queued" ? "warn" : "ok",
+    };
+  }
+  if (status === "completed") {
+    return {
+      text: `${action} complete${j.needsRestart ? " · restart recommended" : ""}`,
+      cls: "ok",
+    };
+  }
+  if (status === "failed") {
+    return { text: `${action} failed`, cls: "error" };
+  }
+  return { text: "Idle", cls: "" };
+}
+
+async function promptReplicationRestart(job) {
+  const j = job && typeof job === "object" ? job : null;
+  if (!j?.needsRestart || !j?.id) return;
+  if (State.replication.restartPromptedJobId === j.id) return;
+  State.replication.restartPromptedJobId = j.id;
+  const summary = String(j.summary || "").trim();
+  const ok = window.confirm(
+    `Replication finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
+  );
+  if (!ok) return;
+  try {
+    if (window.electronAPI?.restartApp) {
+      const res = await window.electronAPI.restartApp();
+      if (res?.ok === false) {
+        throw new Error(String(res?.error || "Restart request failed."));
+      }
+      return;
+    }
+    showToast("Restart the desktop app manually to reload the synced data.", "info", 5000);
+  } catch (err) {
+    showToast(`Restart request failed: ${err.message}`, "warning", 5000);
+  }
+}
+
+function handleReplicationJobUpdate(jobRaw, opts = {}) {
+  const job = jobRaw && typeof jobRaw === "object" ? jobRaw : null;
+  State.replication.job = job;
+  const status = formatReplicationJobStatus(job);
+  setReplicationField("repJobStatusVal", status.text, status.cls);
+
+  if (!job) return;
+  if (opts.showMessage !== false) {
+    if (job.status === "running" || job.status === "queued") {
+      showMsg("replicationMsg", `Background ${job.action} started. You can return to normal operation.`, "");
+    } else if (job.status === "completed") {
+      showMsg("replicationMsg", `✔ ${job.summary || "Replication complete."}`, "");
+      showToast(job.summary || "Replication complete.", "success", 5200);
+    } else if (job.status === "failed") {
+      const msg = job.error || job.summary || "Replication failed.";
+      showMsg("replicationMsg", `✗ ${msg}`, "error");
+      showToast(`Replication failed: ${msg}`, "warning", 6000);
+    }
+  }
+  if (job.status === "completed") {
+    promptReplicationRestart(job).catch(() => {});
+  }
+}
+
+function updateReplicationArchiveSelectionUi(silent = false) {
+  const checked = isManualArchiveSyncSelected();
+  const hint = $("replicationArchiveHint");
+  if (hint) {
+    hint.textContent = checked
+      ? "Archive copy is enabled for the next manual sync. Expect a longer transfer because monthly archive DB files can be large."
+      : "Optional. Leave this off for faster hot-data sync. Enable it only when you need historical archive files copied too.";
+  }
+  if (State.replication.scope) {
+    setReplicationField(
+      "repArchiveScopeVal",
+      formatArchiveScopeText(State.replication.scope),
+    );
+  }
+  if (!silent) {
+    showMsg(
+      "replicationMsg",
+      checked
+        ? "Archive sync enabled for the next manual run. Expect a longer transfer."
+        : "Archive sync disabled. Manual pull/push will prioritize hot data only.",
+      checked ? "error" : "",
+    );
+  }
+}
+
 function stopReplicationHealthPolling() {
   if (State.replicationHealthTimer) {
     clearInterval(State.replicationHealthTimer);
@@ -2774,6 +2998,10 @@ function startReplicationHealthPolling() {
 async function refreshReplicationHealth(silent = true) {
   try {
     const n = await api("/api/runtime/network");
+    const scope = n?.manualReplicationScope || null;
+    const job = n?.manualReplicationJob || null;
+    State.replication.scope = scope;
+    State.replication.job = job;
     const mode = String(n?.operationMode || State.settings.operationMode || "gateway")
       .trim()
       .toLowerCase();
@@ -2802,6 +3030,8 @@ async function refreshReplicationHealth(silent = true) {
       String(n?.remoteGatewayUrl || "—").trim() || "—",
     );
     setReplicationField("repConnectedVal", bridgeStatus, bridgeStatusClass);
+    const tailscaleState = formatTailscaleStatus(n?.tailscale || {});
+    setReplicationField("repTailnetVal", tailscaleState.text, tailscaleState.cls);
     const directionRaw = pullOnly
       ? "pull-live-only"
       : String(n?.remoteLastSyncDirection || "idle");
@@ -2847,20 +3077,35 @@ async function refreshReplicationHealth(silent = true) {
       allErr.length ? allErr.join(" | ") : "None",
       allErr.length ? "warn" : "ok",
     );
+    setReplicationField("repScopeVal", formatReplicationScopeText(scope));
+    setReplicationField("repArchiveScopeVal", formatArchiveScopeText(scope));
+    handleReplicationJobUpdate(job, { showMessage: false });
     const pullBtn = $("btnRunReplicationPull");
     const pushBtn = $("btnRunReplicationPush");
-    const manualDisabled = mode !== "remote";
+    const archiveToggle = $("setReplicationIncludeArchive");
+    const manualDisabled = mode !== "remote" || Boolean(job?.running);
     if (pullBtn) {
       pullBtn.disabled = manualDisabled;
       pullBtn.title = manualDisabled
-        ? "Available only in Remote mode."
-        : "Pull latest DB snapshot from server.";
+        ? mode !== "remote"
+          ? "Available only in Remote mode."
+          : "A manual replication job is already running."
+        : isManualArchiveSyncSelected()
+          ? "Start a background pull from the gateway, including archive DB files."
+          : "Start a background pull from the gateway using hot replicated data only.";
     }
     if (pushBtn) {
       pushBtn.disabled = manualDisabled;
       pushBtn.title = manualDisabled
-        ? "Available only in Remote mode."
-        : "Push local DB snapshot to server, then pull back.";
+        ? mode !== "remote"
+          ? "Available only in Remote mode."
+          : "A manual replication job is already running."
+        : isManualArchiveSyncSelected()
+          ? "Start a background push to the gateway, including archive DB files, then pull back the final gateway state."
+          : "Start a background push to the gateway using hot replicated data only, then pull back the final gateway state.";
+    }
+    if (archiveToggle) {
+      archiveToggle.disabled = manualDisabled;
     }
     if (!silent) {
       showMsg("replicationMsg", "✔ Replication health refreshed", "");
@@ -2959,9 +3204,12 @@ function ensureRemoteModeForReplicationActions() {
 
 async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
+  const includeArchive = isManualArchiveSyncSelected();
   if (
     !window.confirm(
-      "Pull latest data from server now?\n\nThis will reload local client data from the gateway snapshot.",
+      includeArchive
+        ? "Start background pull from server now?\n\nThis will sync replicated hot tables first, then monthly archive DB files from the gateway while you continue using the dashboard.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
+        : "Start background pull from server now?\n\nThis will sync replicated hot tables from the gateway while you continue using the dashboard.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
     )
   ) {
     return;
@@ -2969,19 +3217,19 @@ async function runReplicationPullNow() {
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Pulling latest data from server...", "");
+  showMsg("replicationMsg", "Starting background pull from server...", "");
   try {
-    const result = await api("/api/replication/pull-now", "POST", {});
-    const importedRows = Number(
-      result?.incremental?.importedRows || result?.full?.importedRows || 0,
-    );
-    const mode = String(result?.mode || "incremental");
-    const hasMore =
-      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
-    const dir = formatSyncDirection(result?.direction || "idle");
+    const result = await api("/api/replication/pull-now", "POST", {
+      background: true,
+      includeArchive,
+    });
+    const job = result?.job || null;
+    if (job) handleReplicationJobUpdate(job, { showMessage: false });
     showMsg(
       "replicationMsg",
-      `✔ Pull complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | imported=${importedRows.toLocaleString()}`,
+      includeArchive
+        ? "Background pull started. Hot data is syncing first, then archive DB files if needed."
+        : "Background pull started. Hot data is syncing while you continue normal operation.",
       "",
     );
     await refreshReplicationHealth(true);
@@ -2995,9 +3243,12 @@ async function runReplicationPullNow() {
 
 async function runReplicationPushNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
+  const includeArchive = isManualArchiveSyncSelected();
   if (
     !window.confirm(
-      "Push local data to server now?\n\nThis sends local DB snapshot to gateway, then pulls back for consistency.",
+      includeArchive
+        ? "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway first, uploads monthly archive DB files when needed, then pulls the final gateway state back for consistency.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
+        : "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway, then pulls the final gateway state back for consistency.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
     )
   ) {
     return;
@@ -3005,20 +3256,19 @@ async function runReplicationPushNow() {
 
   const btn = $("btnRunReplicationPush");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Pushing local data to server...", "");
+  showMsg("replicationMsg", "Starting background push to server...", "");
   try {
-    const result = await api("/api/replication/push-now", "POST", {});
-    const pushedRows = Number(result?.pushed?.importedRows || 0);
-    const pulledRows = Number(
-      result?.incremental?.importedRows || result?.full?.importedRows || 0,
-    );
-    const mode = String(result?.mode || "incremental");
-    const hasMore =
-      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
-    const dir = formatSyncDirection(result?.direction || "idle");
+    const result = await api("/api/replication/push-now", "POST", {
+      background: true,
+      includeArchive,
+    });
+    const job = result?.job || null;
+    if (job) handleReplicationJobUpdate(job, { showMessage: false });
     showMsg(
       "replicationMsg",
-      `✔ Push complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | pushed=${pushedRows.toLocaleString()} pulled=${pulledRows.toLocaleString()}`,
+      includeArchive
+        ? "Background push started. Hot data is syncing first, then archive DB files if needed."
+        : "Background push started. Hot data is syncing while you continue normal operation.",
       "",
     );
     await refreshReplicationHealth(true);
@@ -4219,6 +4469,9 @@ function handleWS(msg) {
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
     scheduleInverterCardsUpdate();
+    syncAlarmStateFromLiveData().catch((err) => {
+      console.warn("[app] live alarm sync failed:", err.message);
+    });
   }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;
@@ -4251,6 +4504,9 @@ function handleWS(msg) {
   }
   if (msg.type === "xfer_progress") {
     handleXferProgress(msg);
+  }
+  if (msg.type === "replication_job") {
+    handleReplicationJobUpdate(msg.job || null);
   }
 }
 
@@ -4353,8 +4609,10 @@ async function refreshAlarmBadge() {
     }
     setAlarmSoundActive(unacked > 0);
     scheduleInverterCardsUpdate();
+    return true;
   } catch (err) {
     console.warn("[app] refreshAlarmBadge failed:", err.message);
+    return false;
   }
 }
 
@@ -5124,31 +5382,49 @@ async function fetchReport() {
   const date = $("reportDate").value;
   queuePersistExportUiState();
   try {
-    let rows = await api(`/api/report/daily?date=${date}`);
-    if ((!Array.isArray(rows) || rows.length === 0) && date) {
-      try {
-        const latest = await api("/api/report/latest-date");
-        const latestDate = String(latest?.latestDate || "").trim();
-        if (latestDate && latestDate !== date) {
-          $("reportDate").value = latestDate;
-          rows = await api(`/api/report/daily?date=${latestDate}`);
-          showToast(
-            `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
-            "warning",
-            3800,
-          );
-        }
-      } catch (_) {
-        // Non-fatal fallback; keep original empty result.
+    let rows = [];
+    let summary = null;
+    try {
+      const payload = await api(`/api/report/payload?date=${encodeURIComponent(date)}`);
+      rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : null;
+      const finalDate = String(payload?.date || "").trim();
+      if (payload?.fallbackUsed && finalDate && finalDate !== date) {
+        $("reportDate").value = finalDate;
+        showToast(
+          `No report rows for ${date}. Showing latest available date: ${finalDate}.`,
+          "warning",
+          3800,
+        );
       }
+    } catch (payloadErr) {
+      console.warn("fetchReport payload:", payloadErr?.message || payloadErr);
+      rows = await api(`/api/report/daily?date=${date}`);
+      if ((!Array.isArray(rows) || rows.length === 0) && date) {
+        try {
+          const latest = await api("/api/report/latest-date");
+          const latestDate = String(latest?.latestDate || "").trim();
+          if (latestDate && latestDate !== date) {
+            $("reportDate").value = latestDate;
+            rows = await api(`/api/report/daily?date=${latestDate}`);
+            showToast(
+              `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
+              "warning",
+              3800,
+            );
+          }
+        } catch (_) {
+          // Non-fatal fallback; keep original empty result.
+        }
+      }
+      summary = await fetchReportSummary($("reportDate").value || date);
     }
-    State.reportView.rows = Array.isArray(rows)
-      ? rows.map((r) => toReportViewRow(r))
-      : [];
+    State.reportView.rows = Array.isArray(rows) ? rows.map((r) => toReportViewRow(r)) : [];
+    State.reportView.summary = summary;
     State.reportView.page = 1;
     State.tabFetchTs.report = Date.now();
     applyReportTableView();
-    await fetchReportSummary($("reportDate").value || date);
+    renderReportKpis();
   } catch (e) {
     console.error("fetchReport:", e);
     State.reportView.rows = [];
@@ -5178,6 +5454,7 @@ async function fetchReportSummary(date) {
     State.reportView.summary = null;
   }
   renderReportKpis();
+  return State.reportView.summary;
 }
 
 function clampPctClient(value) {
@@ -5590,6 +5867,10 @@ async function exportDailyReport() {
 function initAnalytics() {
   if (!$("anaDate").value) $("anaDate").value = today();
   if ($("anaInterval") && !$("anaInterval").value) $("anaInterval").value = "5";
+  if (!Number.isFinite(Number(State.analyticsChartPage)) || Number(State.analyticsChartPage) < 1) {
+    State.analyticsChartPage = 1;
+  }
+  State.analyticsChartPageSize = ANALYTICS_CHARTS_PAGE_SIZE;
   // Render cached data immediately so the tab feels instant on revisit,
   // then kick off a fresh fetch in the background.
   if (State.analyticsBaseRows.length > 0) renderAnalyticsFromState();
@@ -5616,7 +5897,7 @@ async function loadAnalytics(options = {}) {
       date,
       start: sTs,
       end: eTs,
-      bucketMin: 5,
+      bucketMin: String(intervalMin),
     });
     let rows = [];
     let dayAheadRows = [];
@@ -5991,17 +6272,41 @@ function destroyAnalyticsCharts() {
   State.charts = {};
 }
 
-function ensureAnalyticsCards() {
+function getAnalyticsChartPaging(invCount) {
+  const totalRows = Math.max(0, Math.trunc(Number(invCount) || 0));
+  const pageSize = Math.max(
+    1,
+    Math.trunc(Number(State.analyticsChartPageSize || ANALYTICS_CHARTS_PAGE_SIZE)),
+  );
+  const inverters = Array.from({ length: totalRows }, (_, idx) => idx + 1);
+  const pageData = paginateRows(inverters, State.analyticsChartPage, pageSize);
+  State.analyticsChartPage = pageData.page;
+  return pageData;
+}
+
+function setAnalyticsChartPage(nextPage) {
+  const safePage = Math.max(1, Math.trunc(Number(nextPage) || 1));
+  if (safePage === Number(State.analyticsChartPage || 1)) return;
+  State.analyticsChartPage = safePage;
+  if (State.analyticsBaseRows.length > 0 || State.analyticsDayAheadBaseRows.length > 0) {
+    renderAnalyticsFromState();
+  }
+}
+
+function ensureAnalyticsCards(visibleInvs, paging) {
   const host = $("analyticsCharts");
   if (!host) return;
   const count = Number(State.settings.inverterCount || 27);
-  const expectedCanvasCount = count + 1; // total + per-inverter
+  const visible = Array.isArray(visibleInvs) ? visibleInvs : [];
+  const pageInfo = paging && typeof paging === "object" ? paging : getAnalyticsChartPaging(count);
+  const expectedCanvasCount = visible.length + 1; // total + visible per-inverter
   const existingCanvasCount = host.querySelectorAll(
     "canvas[id^='chart-']",
   ).length;
   const hasSideCard = !!host.querySelector("#analyticsTotalSideCard");
+  const sig = `${count}|${pageInfo.page}|${pageInfo.totalPages}|${visible.join(",")}`;
   if (
-    host.dataset.count === String(count) &&
+    host.dataset.sig === sig &&
     existingCanvasCount === expectedCanvasCount &&
     hasSideCard
   ) {
@@ -6010,7 +6315,7 @@ function ensureAnalyticsCards() {
 
   destroyAnalyticsCharts();
   host.innerHTML = "";
-  host.dataset.count = String(count);
+  host.dataset.sig = sig;
 
   const totalCard = document.createElement("div");
   totalCard.className = "chart-card";
@@ -6040,6 +6345,14 @@ function ensureAnalyticsCards() {
       <div class="analytics-side-item">
         <div class="analytics-side-label">Peak Interval</div>
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
+      </div>
+    </div>
+    <div class="analytics-chart-pager">
+      <div class="analytics-side-label">Inverter Charts</div>
+      <div class="analytics-chart-pager-row">
+        <button class="btn btn-outline analytics-chart-page-btn" id="anaChartPrev" ${pageInfo.page <= 1 ? "disabled" : ""}>Prev</button>
+        <div class="analytics-chart-page-meta" id="anaChartPageMeta">Showing ${pageInfo.from}-${pageInfo.to} of ${pageInfo.totalRows}</div>
+        <button class="btn btn-outline analytics-chart-page-btn" id="anaChartNext" ${pageInfo.page >= pageInfo.totalPages ? "disabled" : ""}>Next</button>
       </div>
     </div>
     <div class="analytics-gen-wrap">
@@ -6077,10 +6390,16 @@ function ensureAnalyticsCards() {
       Math.min(31, Math.max(1, Math.trunc(savedDayCount))),
     );
   }
+  totalSideCard.querySelector("#anaChartPrev")?.addEventListener("click", () => {
+    setAnalyticsChartPage(pageInfo.page - 1);
+  });
+  totalSideCard.querySelector("#anaChartNext")?.addEventListener("click", () => {
+    setAnalyticsChartPage(pageInfo.page + 1);
+  });
   bindExportUiStatePersistence();
   syncDayAheadGeneratorAvailability();
 
-  for (let inv = 1; inv <= count; inv++) {
+  for (const inv of visible) {
     const card = document.createElement("div");
     card.className = "chart-card";
     card.innerHTML = `<div class="chart-title">⚡ INVERTER ${pad2(inv)} Energy — MWh</div><canvas id="chart-inv-${inv}" height="120"></canvas>`;
@@ -6097,7 +6416,10 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     }
     return;
   }
-  ensureAnalyticsCards();
+  const count = Number(State.settings.inverterCount || 27);
+  const paging = getAnalyticsChartPaging(count);
+  const visibleInvs = paging.rows;
+  ensureAnalyticsCards(visibleInvs, paging);
 
   const { timeline, byInv } = buildSeriesByInverter(rows, intervalMin);
   const dayAheadMwhByTs = new Map(
@@ -6120,7 +6442,6 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     const d = new Date(ts);
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   });
-  const count = Number(State.settings.inverterCount || 27);
   const selectedDate = String($("anaDate")?.value || today()).trim();
   const todayDate = today();
   let fillPastMissingAsZero = false;
@@ -6163,7 +6484,7 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     dayAheadValues,
   );
 
-  for (let inv = 1; inv <= count; inv++) {
+  for (const inv of visibleInvs) {
     const p = paletteByInv(inv);
     upsertLineChart(
       `inv_${inv}`,
@@ -6190,21 +6511,6 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     mergedTimeline,
     dayAheadValues,
   );
-
-  // Clean up stale charts if inverter count changes downward.
-  for (const [key, chart] of Object.entries(State.charts || {})) {
-    if (key === "totalPac") continue;
-    const m = /^inv_(\d+)$/.exec(key);
-    if (!m) continue;
-    if (Number(m[1]) > count) {
-      try {
-        chart?.destroy?.();
-      } catch (err) {
-        console.warn("[app] chart destroy failed:", err.message);
-      }
-      delete State.charts[key];
-    }
-  }
 }
 
 function upsertLineChart(
@@ -7389,6 +7695,27 @@ function bindEventHandlers() {
   );
   $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
   $("btnRunReplicationPush")?.addEventListener("click", runReplicationPushNow);
+  $("setReplicationIncludeArchive")?.addEventListener("change", (event) => {
+    const target = event?.target;
+    if (!target) return;
+    if (target.checked) {
+      const ok = window.confirm(
+        "Include archive DB files in the next manual pull/push?\n\nThis can take significantly longer because monthly archive files may be large. Hot data will still sync first.",
+      );
+      if (!ok) {
+        target.checked = false;
+        updateReplicationArchiveSelectionUi(true);
+        return;
+      }
+      showToast(
+        "Archive sync enabled. Expect a longer transfer if monthly archive DB files are large.",
+        "warning",
+        5200,
+      );
+    }
+    updateReplicationArchiveSelectionUi();
+    refreshReplicationHealth(true).catch(() => {});
+  });
   $("btnPickExportFolder")?.addEventListener("click", pickExportFolder);
   $("btnOpenExportFolder")?.addEventListener("click", openExportFolder);
   $("btnOpenIpConfig")?.addEventListener("click", openIpConfigSettings);
@@ -7451,19 +7778,18 @@ async function init() {
   initGuideModal();
   setupNav();
   initSettingsSectionNav();
-  document.addEventListener(
-    "pointerdown",
-    () => {
-      try {
-        const ctx = getOrCreateAlarmAudioCtx();
-        if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
-      } catch (err) {
-        console.warn("[app] audio resume failed:", err.message);
-      }
-    },
-    { passive: true },
-  );
+  const resumeAlarmAudio = () => {
+    try {
+      const ctx = getOrCreateAlarmAudioCtx();
+      if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+    } catch (err) {
+      console.warn("[app] audio resume failed:", err.message);
+    }
+  };
+  document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
+  document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
   bindEventHandlers();
+  updateReplicationArchiveSelectionUi(true);
   // Restore alarm sound mute preference
   try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
   renderAlarmSoundBtn();

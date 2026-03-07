@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.10` in `package.json`
+- Current repo version baseline: `2.2.12` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -168,6 +168,11 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
   - GitHub release channel remains `mclards/ADSI-Dashboard`
 - Never publish new installer or portable artifacts under an unchanged version.
 - Every build release must append the latest app version to the release artifacts and release metadata.
+- When the user says `publish release`, the agent should perform the release workflow directly:
+  - build the required artifacts if needed
+  - create or upload the GitHub release itself
+  - avoid stopping at copy-paste commands unless GitHub auth, repo permissions, or network access blocks execution
+- If release publishing is blocked by auth, permissions, or network issues, state the exact blocker and then provide the minimal command(s) needed for the user to finish it.
 
 ## Build and Artifact Rules
 

@@ -31,6 +31,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -68,6 +69,12 @@ elif PORTABLE_ROOT is not None:
 else:
     APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".inverter-dashboard")))
     APP_DB_FILE = APPDATA_ROOT / "Inverter-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
+
+ARCHIVE_DIR = APP_DB_FILE.parent / "archive"
+SQLITE_READ_TIMEOUT_SEC = 8.0
+SQLITE_WRITE_TIMEOUT_SEC = 20.0
+SQLITE_RETRY_ATTEMPTS = 3
+SQLITE_RETRY_BACKOFF_SEC = 0.35
 
 for _d in [WEATHER_DIR, MODEL_FILE.parent, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
     _d.mkdir(parents=True, exist_ok=True)
@@ -120,6 +127,8 @@ N_TRAIN_DAYS   = 14    # rolling training window (days)
 MIN_TRAIN_DAYS = 3     # minimum days before ML is used
 RECENCY_BASE   = 1.6   # weight multiplier per day closer to today
 MIN_SAMPLES    = 60    # minimum usable slots per training day
+MIN_HISTORY_SOLAR_SLOTS = MIN_SAMPLES
+MIN_DAYAHEAD_SOLAR_SLOTS = max(24, MIN_SAMPLES // 2)
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -162,6 +171,7 @@ def _load_json(path: Path) -> dict:
 
 def _save_json(path: Path, data: dict) -> bool:
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(path)
@@ -169,6 +179,136 @@ def _save_json(path: Path, data: dict) -> bool:
     except Exception as e:
         log.error("JSON save failed %s: %s", path, e)
         return False
+
+
+def _is_retryable_sqlite_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return (
+        "database is locked" in msg
+        or "database is busy" in msg
+        or "locked" == msg.strip()
+        or "busy" == msg.strip()
+    )
+
+
+def _open_sqlite(db_path: Path, timeout_sec: float, readonly: bool = False) -> sqlite3.Connection:
+    if readonly:
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, timeout=timeout_sec, uri=True)
+    else:
+        conn = sqlite3.connect(str(db_path), timeout=timeout_sec)
+    conn.execute(f"PRAGMA busy_timeout = {int(max(0.1, float(timeout_sec)) * 1000)}")
+    return conn
+
+
+def _sleep_sqlite_retry(attempt: int) -> None:
+    time.sleep(SQLITE_RETRY_BACKOFF_SEC * max(1, int(attempt)))
+
+
+def _coerce_non_negative_float(value, default: float = 0.0) -> float:
+    try:
+        f = float(value)
+    except Exception:
+        return float(default)
+    if not math.isfinite(f):
+        return float(default)
+    return max(0.0, f)
+
+
+def _empty_slot_values() -> np.ndarray:
+    return np.zeros(SLOTS_DAY, dtype=float)
+
+
+def _empty_slot_presence() -> np.ndarray:
+    return np.zeros(SLOTS_DAY, dtype=bool)
+
+
+def _count_solar_present_slots(present: np.ndarray | None) -> int:
+    if present is None:
+        return 0
+    arr = np.asarray(present, dtype=bool)
+    if arr.size < SLOTS_DAY:
+        return 0
+    return int(np.count_nonzero(arr[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+
+
+def _parse_slot_from_time_text(day: str, time_text: str | None) -> int | None:
+    try:
+        raw = str(time_text or "").strip()
+        if not raw:
+            return None
+        parts = [int(p) for p in raw.split(":")]
+        if len(parts) < 2:
+            return None
+        hh = parts[0]
+        mm = parts[1]
+        if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+            return None
+        slot = (hh * 60 + mm) // SLOT_MIN
+        return slot if 0 <= slot < SLOTS_DAY else None
+    except Exception:
+        return None
+
+
+def _default_legacy_slot(index: int, total_rows: int) -> int:
+    if total_rows <= SOLAR_SLOTS:
+        return SOLAR_START_SLOT + int(index)
+    return int(index)
+
+
+def _merge_slot_series(
+    label: str,
+    day: str,
+    primary_values: np.ndarray | None,
+    primary_present: np.ndarray | None,
+    fallback_values: np.ndarray | None,
+    fallback_present: np.ndarray | None,
+    min_solar_slots: int,
+) -> np.ndarray | None:
+    if primary_values is None and fallback_values is None:
+        return None
+
+    if primary_values is None:
+        merged_values = np.array(fallback_values, dtype=float, copy=True)
+        merged_present = np.array(fallback_present, dtype=bool, copy=True)
+    else:
+        merged_values = np.array(primary_values, dtype=float, copy=True)
+        merged_present = np.array(primary_present, dtype=bool, copy=True)
+        if fallback_values is not None and fallback_present is not None:
+            fill_mask = (~merged_present) & np.asarray(fallback_present, dtype=bool)
+            if np.any(fill_mask):
+                merged_values[fill_mask] = np.asarray(fallback_values, dtype=float)[fill_mask]
+                merged_present[fill_mask] = True
+                log.info(
+                    "%s source gap fill [%s]: filled %d slots from legacy fallback",
+                    label,
+                    day,
+                    int(np.count_nonzero(fill_mask)),
+                )
+
+    solar_slots = _count_solar_present_slots(merged_present)
+    if solar_slots <= 0:
+        return None
+    if solar_slots < min_solar_slots:
+        log.warning(
+            "%s coverage is sparse [%s]: %d solar slots available (min=%d). Skipping this day.",
+            label,
+            day,
+            solar_slots,
+            min_solar_slots,
+        )
+        return None
+
+    merged_values = np.nan_to_num(merged_values, nan=0.0, posinf=0.0, neginf=0.0)
+    merged_values[merged_values < 0] = 0.0
+    return merged_values
+
+
+def clear_forecast_data_cache() -> None:
+    load_actual.cache_clear()
+    load_dayahead.cache_clear()
 
 
 def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
@@ -965,34 +1105,208 @@ def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = 0.97) 
 # ENERGY DATA LOADERS
 # ============================================================================
 
-def load_actual(day: str) -> np.ndarray | None:
-    ctx  = _load_json(HISTORY_CTX)
-    rows = ctx.get("PacEnergy_5min", {}).get("0", {}).get(day)
-    if not isinstance(rows, list):
-        return None
-    out = np.zeros(SLOTS_DAY)
-    for i, r in enumerate(rows[:SLOTS_DAY]):
+def _day_bounds_ms(day: str) -> tuple[int, int] | tuple[None, None]:
+    try:
+        start = datetime.strptime(str(day).strip(), "%Y-%m-%d")
+    except Exception:
+        return None, None
+    end = start + timedelta(days=1)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[str]:
+    try:
+        start_dt = datetime.fromtimestamp(max(0, int(start_ms)) / 1000.0)
+        end_dt = datetime.fromtimestamp(max(0, int(end_ms_exclusive - 1)) / 1000.0)
+    except Exception:
+        return []
+    keys = []
+    cur = datetime(start_dt.year, start_dt.month, 1)
+    stop = datetime(end_dt.year, end_dt.month, 1)
+    while cur <= stop:
+        keys.append(f"{cur.year:04d}-{cur.month:02d}")
+        if cur.month == 12:
+            cur = datetime(cur.year + 1, 1, 1)
+        else:
+            cur = datetime(cur.year, cur.month + 1, 1)
+    return keys
+
+
+def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, float]:
+    if not db_path.exists():
+        return {}
+    sql = """
+        SELECT ts, SUM(COALESCE(kwh_inc, 0)) AS kwh_inc
+          FROM energy_5min
+         WHERE ts >= ? AND ts < ?
+         GROUP BY ts
+         ORDER BY ts ASC
+    """
+    out: dict[int, float] = {}
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
         try:
-            out[i] = float(r.get("kWh_inc", 0) or 0)
-        except (TypeError, ValueError):
-            pass
+            with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cur = conn.execute(sql, (int(day_start_ms), int(day_end_ms)))
+                for ts, kwh_inc in cur.fetchall():
+                    ts_i = int(ts or 0)
+                    if ts_i <= 0:
+                        continue
+                    out[ts_i] = _coerce_non_negative_float(kwh_inc)
+            return out
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB actual load retry %d/%d [%s]: %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    db_path.name,
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB actual load failed [%s]: %s", db_path, e)
+            break
     return out
 
 
-def load_dayahead(day: str) -> np.ndarray | None:
+def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return None, None
+
+    merged = _query_energy_5min_totals(APP_DB_FILE, day_start_ms, day_end_ms)
+    for month_key in _archive_month_keys_for_range(day_start_ms, day_end_ms):
+        archive_path = ARCHIVE_DIR / f"{month_key}.db"
+        archive_rows = _query_energy_5min_totals(archive_path, day_start_ms, day_end_ms)
+        for ts, kwh_inc in archive_rows.items():
+            prev = merged.get(ts, None)
+            if prev is None:
+                merged[ts] = kwh_inc
+            elif prev <= 0 < kwh_inc:
+                merged[ts] = kwh_inc
+
+    if not merged:
+        return None, None
+
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    slot_ms = SLOT_MIN * 60 * 1000
+    for ts in sorted(merged.keys()):
+        slot = int((int(ts) - day_start_ms) // slot_ms)
+        if 0 <= slot < SLOTS_DAY:
+            out[slot] += _coerce_non_negative_float(merged[ts])
+            present[slot] = True
+    return out, present
+
+
+def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    ctx = _load_json(HISTORY_CTX)
+    rows = ctx.get("PacEnergy_5min", {}).get("0", {}).get(day)
+    if not isinstance(rows, list):
+        return None, None
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    total_rows = len(rows)
+    for i, r in enumerate(rows[:SLOTS_DAY]):
+        if not isinstance(r, dict):
+            continue
+        slot = _parse_slot_from_time_text(day, r.get("time") or r.get("time_hms"))
+        if slot is None:
+            slot = _default_legacy_slot(i, total_rows)
+        if 0 <= slot < SLOTS_DAY:
+            out[slot] = _coerce_non_negative_float(r.get("kWh_inc", r.get("kwh_inc", 0)))
+            present[slot] = True
+    return (out, present) if present.any() else (None, None)
+
+
+@lru_cache(maxsize=256)
+def load_actual(day: str) -> np.ndarray | None:
+    db_actual, db_present = _load_actual_from_appdata(day)
+    legacy_actual, legacy_present = _load_actual_from_legacy_context(day)
+    return _merge_slot_series(
+        "Actual history",
+        day,
+        db_actual,
+        db_present,
+        legacy_actual,
+        legacy_present,
+        MIN_HISTORY_SOLAR_SLOTS,
+    )
+
+
+def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if not APP_DB_FILE.exists():
+        return None, None
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cur = conn.execute(
+                    """
+                    SELECT slot, kwh_inc
+                      FROM forecast_dayahead
+                     WHERE date=?
+                     ORDER BY slot ASC
+                    """,
+                    (str(day),),
+                )
+                for slot, kwh_inc in cur.fetchall():
+                    slot_i = int(slot or 0)
+                    if 0 <= slot_i < SLOTS_DAY:
+                        out[slot_i] = _coerce_non_negative_float(kwh_inc)
+                        present[slot_i] = True
+            return (out, present) if present.any() else (None, None)
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB day-ahead load retry %d/%d [%s]: %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    day,
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB day-ahead load failed [%s]: %s", day, e)
+            return None, None
+
+
+def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     ctx = _load_json(FORECAST_CTX)
     da  = ctx.get("PacEnergy_DayAhead", {}).get(day)
     if not isinstance(da, list) or not da:
-        return None
-    out = np.zeros(SLOTS_DAY)
+        return None, None
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    total_rows = len(da)
     for i, p in enumerate(da):
-        slot = SOLAR_START_SLOT + i
-        if slot < SLOTS_DAY:
-            try:
-                out[slot] = float(p.get("kWh_inc", 0) or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
+        if not isinstance(p, dict):
+            continue
+        slot = _parse_slot_from_time_text(day, p.get("time") or p.get("time_hms"))
+        if slot is None:
+            slot = _default_legacy_slot(i, total_rows)
+        if 0 <= slot < SLOTS_DAY:
+            out[slot] = _coerce_non_negative_float(p.get("kWh_inc", p.get("kwh_inc", 0)))
+            present[slot] = True
+    return (out, present) if present.any() else (None, None)
+
+
+@lru_cache(maxsize=256)
+def load_dayahead(day: str) -> np.ndarray | None:
+    db_rows, db_present = _load_dayahead_from_db(day)
+    legacy_rows, legacy_present = _load_dayahead_from_legacy(day)
+    return _merge_slot_series(
+        "Day-ahead history",
+        day,
+        db_rows,
+        db_present,
+        legacy_rows,
+        legacy_present,
+        MIN_DAYAHEAD_SOLAR_SLOTS,
+    )
 
 
 # ============================================================================
@@ -1408,7 +1722,6 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
         log.error("DB forecast write skipped: invalid day=%s", day)
         return False
 
-    day_start = datetime(day_dt.year, day_dt.month, day_dt.day, 0, 0, 0)
     rows = []
     for rec in series:
         t = str(rec.get("time", "")).strip()
@@ -1434,33 +1747,45 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
             )
         )
 
-    try:
-        with sqlite3.connect(APP_DB_FILE) as conn:
-            _ensure_forecast_table(conn)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM forecast_dayahead WHERE date=?", (str(day),))
-            cur.executemany(
-                """
-                INSERT INTO forecast_dayahead
-                (date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(date, slot) DO UPDATE SET
-                    ts=excluded.ts,
-                    time_hms=excluded.time_hms,
-                    kwh_inc=excluded.kwh_inc,
-                    kwh_lo=excluded.kwh_lo,
-                    kwh_hi=excluded.kwh_hi,
-                    source=excluded.source,
-                    updated_ts=excluded.updated_ts
-                """,
-                rows,
-            )
-            conn.commit()
-        log.info("Wrote forecast DB [%s] - %d slots", day, len(rows))
-        return True
-    except Exception as e:
-        log.error("DB forecast write failed for %s: %s", day, e)
-        return False
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+                _ensure_forecast_table(conn)
+                cur = conn.cursor()
+                cur.execute("DELETE FROM forecast_dayahead WHERE date=?", (str(day),))
+                cur.executemany(
+                    """
+                    INSERT INTO forecast_dayahead
+                    (date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date, slot) DO UPDATE SET
+                        ts=excluded.ts,
+                        time_hms=excluded.time_hms,
+                        kwh_inc=excluded.kwh_inc,
+                        kwh_lo=excluded.kwh_lo,
+                        kwh_hi=excluded.kwh_hi,
+                        source=excluded.source,
+                        updated_ts=excluded.updated_ts
+                    """,
+                    rows,
+                )
+                conn.commit()
+            clear_forecast_data_cache()
+            log.info("Wrote forecast DB [%s] - %d slots", day, len(rows))
+            return True
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB forecast write retry %d/%d for %s: %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    day,
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.error("DB forecast write failed for %s: %s", day, e)
+            return False
 
 
 def write_forecast(key: str, day: str, series: list[dict]) -> bool:
@@ -1470,7 +1795,11 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
     ok_db = _write_forecast_db(key, day, series)
     if ok_file:
         log.info("Wrote %s[%s] â€“ %d slots", key, day, len(series))
-    return bool(ok_file and ok_db)
+    if ok_db and not ok_file:
+        log.warning("Legacy forecast JSON write failed for %s; DB write succeeded and remains authoritative.", day)
+    elif ok_file and not ok_db:
+        log.warning("Forecast DB write failed for %s; legacy JSON fallback succeeded.", day)
+    return bool(ok_db or ok_file)
 
 
 # ============================================================================
@@ -1657,6 +1986,7 @@ def run_manual_generation(dates: list[datetime.date]) -> bool:
         log.error("Manual generation: no target dates provided.")
         return False
 
+    clear_forecast_data_cache()
     today_ref = datetime.now().date()
     log.info("Manual generation start: %d date(s), reference=%s", len(dates), today_ref.isoformat())
 
@@ -1756,6 +2086,7 @@ def main() -> None:
     log.info("Slot Cap      : dep=%.4f MWh  max=%.4f MWh per 5-min", slot_cap_kwh(True) / 1000.0, slot_cap_kwh(False) / 1000.0)
     log.info("Export Limit  : %.0f MW  (dispatch only - not applied to forecast curve)", EXPORT_MW)
     log.info("Train Window  : %d days  (min %d)", N_TRAIN_DAYS, MIN_TRAIN_DAYS)
+    log.info("Actual Source : AppData energy_5min (hot + archive), legacy JSON fallback only")
     log.info("=" * 70)
 
     last_run_hour = -1   # track which hour we last ran in
@@ -1790,6 +2121,7 @@ def main() -> None:
                     "Run trigger: scheduled=%s  missing_target=%s",
                     run_scheduled, run_missing,
                 )
+                clear_forecast_data_cache()
 
                 # (Re)train model before forecast
                 trained = train_model(today)
@@ -1809,6 +2141,7 @@ def main() -> None:
 
             elif run_recovery:
                 log.warning("Recovery: today %s missing day-ahead â€“ generating now", today_s)
+                clear_forecast_data_cache()
                 run_dayahead(today, today)
 
             else:

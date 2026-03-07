@@ -14,6 +14,9 @@ const net = require("net");
 const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
 
+// Allow dashboard alarm audio to start immediately on packaged clients.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
 // Prevent packaged app crashes when stdout/stderr pipe is unavailable (EPIPE).
 function makeSafeConsoleWriter(method) {
   const original = console[method].bind(console);
@@ -76,7 +79,7 @@ const SERVER_PORT = Number(SERVER_HTTP.port || 80);
 const TOPOLOGY_URL = `${SERVER_URL}/topology.html`;
 const IP_CONFIG_URL = `${SERVER_URL}/ip-config.html`;
 const POLL_INTERVAL = 600;
-const POLL_TIMEOUT = 60000;
+const POLL_TIMEOUT = 120000;
 const INITIAL_LOAD_RETRY_DELAY = 1200;
 const INITIAL_LOAD_RETRY_MAX = 8;
 const FORECAST_RESTART_BASE_MS = 1500;
@@ -113,6 +116,10 @@ const UPDATE_FEED_URL = String(
 ).trim();
 const UPDATE_GITHUB_TOKEN = String(process.env.ADSI_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim();
 const UPDATE_CHECK_TIMEOUT_MS = 10000;
+const LEGACY_USERDATA_DIR_NAMES = [
+  "adsi-dashboard",
+  "adsi-inverter-dashboard",
+];
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let mainWin = null;
@@ -181,6 +188,99 @@ function configurePortableDataPaths() {
 }
 
 configurePortableDataPaths();
+
+function copyFileIfMissing(src, dest) {
+  try {
+    if (!fs.existsSync(src) || fs.existsSync(dest)) return false;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    return true;
+  } catch (err) {
+    console.warn("[migrate] file copy failed:", src, "->", dest, err.message);
+    return false;
+  }
+}
+
+function copyDirIfMissing(srcDir, destDir) {
+  try {
+    if (!fs.existsSync(srcDir)) return 0;
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] dir init failed:", srcDir, "->", destDir, err.message);
+    return 0;
+  }
+  let copied = 0;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  } catch (err) {
+    console.warn("[migrate] dir read failed:", srcDir, err.message);
+    return 0;
+  }
+  for (const entry of entries) {
+    const src = path.join(srcDir, entry.name);
+    const dest = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copied += copyDirIfMissing(src, dest);
+    } else if (entry.isFile()) {
+      copied += copyFileIfMissing(src, dest) ? 1 : 0;
+    }
+  }
+  return copied;
+}
+
+function migrateLegacyUserDataIfNeeded() {
+  if (isPortableRuntime()) return { migrated: false, source: "", files: 0 };
+  let appDataDir = "";
+  let currentUserData = "";
+  try {
+    appDataDir = app.getPath("appData");
+    currentUserData = app.getPath("userData");
+  } catch (err) {
+    console.warn("[migrate] userData path resolve failed:", err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+  if (!appDataDir || !currentUserData) return { migrated: false, source: "", files: 0 };
+  try {
+    fs.mkdirSync(currentUserData, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] current userData init failed:", currentUserData, err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+
+  const currentNorm = path.resolve(currentUserData).toLowerCase();
+  const candidateDirs = [];
+  for (const name of LEGACY_USERDATA_DIR_NAMES) {
+    const abs = path.join(appDataDir, name);
+    const norm = path.resolve(abs).toLowerCase();
+    if (norm === currentNorm) continue;
+    candidateDirs.push(abs);
+  }
+
+  for (const legacyDir of candidateDirs) {
+    if (!fs.existsSync(legacyDir)) continue;
+    const authCopied = copyDirIfMissing(
+      path.join(legacyDir, "auth"),
+      path.join(currentUserData, "auth"),
+    );
+    const configCopied = copyDirIfMissing(
+      path.join(legacyDir, "config"),
+      path.join(currentUserData, "config"),
+    );
+    const rootConfigCopied = copyFileIfMissing(
+      path.join(legacyDir, "ipconfig.json"),
+      path.join(currentUserData, "config", "ipconfig.json"),
+    ) ? 1 : 0;
+    const totalCopied = authCopied + configCopied + rootConfigCopied;
+    if (totalCopied > 0) {
+      console.log(
+        `[migrate] userData migrated from ${legacyDir} -> ${currentUserData} (${totalCopied} file(s))`,
+      );
+      return { migrated: true, source: legacyDir, files: totalCopied };
+    }
+  }
+  return { migrated: false, source: "", files: 0 };
+}
 
 function parseVersionParts(input) {
   const normalized = String(input || "")
@@ -718,6 +818,7 @@ app.whenReady().then(async () => {
     app.setAppUserModelId("com.inverter.dashboard");
   }
   app.setName("Dashboard V2");
+  migrateLegacyUserDataIfNeeded();
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
   Menu.setApplicationMenu(null);
@@ -2169,13 +2270,9 @@ function pollUntilReady() {
       if (Date.now() < deadline) setTimeout(attempt, POLL_INTERVAL);
       else {
         console.error("[main] Poll timed out - backend did not become ready.");
-        if (loadingWin && !loadingWin.isDestroyed()) {
-          loadingWin.webContents
-            .executeJavaScript(
-              "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Backend startup timed out.<br/>Please close the app and retry.</div>';",
-            )
-            .catch(() => {});
-        }
+        showLoadingErrorMessage(
+          "Backend startup timed out. If this is the first run after an update, database maintenance may still be finishing. Please retry.",
+        );
       }
     });
 
@@ -2740,6 +2837,18 @@ ipcMain.handle("app-update-download", async () => {
 
 ipcMain.handle("app-update-install", async () => {
   return installAppUpdateNow();
+});
+
+ipcMain.handle("app-restart", async () => {
+  try {
+    allowMainWindowClose = true;
+    app.relaunch();
+    killServer();
+    app.exit(0);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 });
 
 ipcMain.on("login-success", async () => {

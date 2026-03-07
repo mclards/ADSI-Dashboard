@@ -127,7 +127,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.10</span></div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.12</span></div>
             <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
@@ -1086,6 +1086,10 @@
                   <div id="repConnectedVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
+                  <div class="license-label">Tailscale</div>
+                  <div id="repTailnetVal" class="license-value">—</div>
+                </div>
+                <div class="license-item">
                   <div class="license-label">Last Sync Direction</div>
                   <div id="repDirectionVal" class="license-value">—</div>
                 </div>
@@ -1113,6 +1117,10 @@
                   <div class="license-label">Signature</div>
                   <div id="repSignatureVal" class="license-value">—</div>
                 </div>
+                <div class="license-item">
+                  <div class="license-label">Background Job</div>
+                  <div id="repJobStatusVal" class="license-value">Idle</div>
+                </div>
               </div>
               <div class="rep-health-cursors">
                 <div class="license-label">Cursors</div>
@@ -1121,6 +1129,18 @@
               <div class="rep-health-errors">
                 <div class="license-label">Last Errors</div>
                 <div id="repErrorsVal" class="license-value">—</div>
+              </div>
+              <div class="rep-health-errors">
+                <div class="license-label">Manual Sync Scope</div>
+                <div id="repScopeVal" class="license-value">
+                  Hot replicated tables only. Refresh to load current scope details.
+                </div>
+              </div>
+              <div class="rep-health-errors">
+                <div class="license-label">Archive Scope</div>
+                <div id="repArchiveScopeVal" class="license-value">
+                  Manual push/pull can include monthly archive DB files and continues in the background after you start it.
+                </div>
               </div>
               <div class="replication-transfer-wrap">
                 <div class="license-label">Transfer Monitor</div>
@@ -1142,6 +1162,10 @@
                       <span id="xferLabel" class="xfer-label">Pushing...</span>
                       <span id="xferPct" class="xfer-pct">0%</span>
                     </div>
+                    <div class="xfer-meta-row">
+                      <span id="xferScopeChip" class="xfer-scope-chip xfer-scope-hot">Hot data</span>
+                      <span id="xferDetail" class="xfer-detail">Preparing transfer…</span>
+                    </div>
                     <div class="xfer-bar-track">
                       <div id="xferBarFill" class="xfer-bar-fill"></div>
                     </div>
@@ -1153,14 +1177,21 @@
                   </div>
                 </div>
               </div>
+              <div class="srow" style="margin-top: 8px">
+                <label class="chk-inline" title="Optional: include monthly archive DB files in the next manual pull or push. Hot replicated data stays the priority path.">
+                  <input type="checkbox" id="setReplicationIncludeArchive" />
+                  <span>Include archive DB files in manual pull/push</span>
+                </label>
+                <small id="replicationArchiveHint">Optional. Leave this off for faster hot-data sync. Enable it only when you need historical archive files copied too.</small>
+              </div>
               <div class="sgroup-actions">
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh replication health, sync counters, and transfer diagnostics." aria-label="Refresh replication health">
                   <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
                 </button>
-                <button id="btnRunReplicationPull" class="btn btn-accent" type="button">
+                <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Start a background pull from the gateway. Hot tables and archive DB files continue syncing while you use the dashboard.">
                   Pull From Server
                 </button>
-                <button id="btnRunReplicationPush" class="btn btn-outline" type="button">
+                <button id="btnRunReplicationPush" class="btn btn-outline" type="button" title="Start a background push to the gateway, then pull back the final gateway state for consistency.">
                   Push To Server
                 </button>
                 <span class="smsg" id="replicationMsg"></span>
@@ -1636,7 +1667,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.10</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.12</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1777,7 +1808,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.2.10 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.12 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

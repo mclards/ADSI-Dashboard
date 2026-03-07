@@ -68,6 +68,40 @@ function formatDurationMs(ms) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
+const COMPUTED_ENERGY_MAX_DT_MS = 30000;
+
+function annotateReadingsWithComputedEnergy(rowsRaw) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw.slice() : [];
+  const lastByKey = new Map();
+  const totalByKey = new Map();
+  return rows.map((row) => {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    const pac = Math.max(0, Number(row?.pac || 0));
+    const day = fmtDate(ts);
+    const key = `${day}|${inverter}|${unit}`;
+    const prev = lastByKey.get(key);
+    let totalKwh = Number(totalByKey.get(key) || 0);
+
+    if (prev && ts > prev.ts) {
+      const dtMs = ts - prev.ts;
+      if (dtMs > 0 && dtMs <= COMPUTED_ENERGY_MAX_DT_MS) {
+        const avgPac = (prev.pac + pac) / 2;
+        totalKwh += (avgPac * dtMs) / 3600000000.0;
+      }
+    }
+
+    totalKwh = Number(totalKwh.toFixed(6));
+    lastByKey.set(key, { ts, pac });
+    totalByKey.set(key, totalKwh);
+    return {
+      ...row,
+      computed_kwh: totalKwh,
+    };
+  });
+}
+
 // Daily report metric constants aligned with dashboard computation semantics.
 const REPORT_SOLAR_WINDOW_H = 13;     // 05:00–18:00
 const REPORT_INVERTER_KW = 997;       // one inverter rated capacity in kW
@@ -578,19 +612,18 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
 }
 
 // ─── Energy CSV ───────────────────────────────────────────────────────────────
-// Per-unit (node) rows showing two independent energy measurements:
-//   Register  — sum of positive consecutive kWh register deltas (LAG), per unit.
-//               Immune to mid-day register resets.
-//   Computed  — PAC trapezoidal integration from readings, per unit.
-//               Gap cap of 30 000 ms mirrors MAX_PAC_DT_S in poller.js.
-// Per-inverter subtotal sums both columns across nodes.
+// Per-unit (node) rows showing computed energy only.
+// Energy is derived from PAC trapezoidal integration with a 30 000 ms gap cap,
+// aligned with the poller and energy_5min computation path.
 async function exportEnergy({ startTs, endTs, inverter, format }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
 
   const s = startTs || Date.now() - 86400000;
   const e = endTs   || Date.now();
   const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
-  const rawRows = invNum ? queryReadingsRange(invNum, s, e) : queryReadingsRangeAll(s, e);
+  const rawRows = annotateReadingsWithComputedEnergy(
+    invNum ? queryReadingsRange(invNum, s, e) : queryReadingsRangeAll(s, e),
+  );
   const rowsByKey = new Map();
   for (const row of rawRows) {
     const inv = Number(row?.inverter || 0);
@@ -603,38 +636,21 @@ async function exportEnergy({ startTs, endTs, inverter, format }) {
     rowsByKey.get(key).push(row);
   }
 
-  const regRows = [];
   const compRows = [];
   for (const [key, rows] of rowsByKey.entries()) {
     const [day, invStr, unitStr] = key.split('|');
     const inv = Number(invStr);
     const unit = Number(unitStr);
     const sorted = rows.slice().sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
-    let regKwh = 0;
-    let compKwh = 0;
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1];
-      const cur = sorted[i];
-      const delta = Number(cur?.kwh || 0) - Number(prev?.kwh || 0);
-      if (Number.isFinite(delta) && delta > 0) regKwh += delta;
-      const dtMs = Number(cur?.ts || 0) - Number(prev?.ts || 0);
-      if (dtMs > 0 && dtMs <= 30000) {
-        const avgPac = (Number(cur?.pac || 0) + Number(prev?.pac || 0)) / 2;
-        compKwh += (avgPac * dtMs) / 3600000000.0;
-      }
-    }
-    regRows.push({ day, inverter: inv, unit, reg_kwh: regKwh });
-    compRows.push({ day, inverter: inv, unit, computed_kwh: compKwh });
+    const computedKwh = Number(sorted[sorted.length - 1]?.computed_kwh || 0);
+    compRows.push({ day, inverter: inv, unit, computed_kwh: computedKwh });
   }
 
-  // Both maps keyed by `${day}|${inv}|${unit}`
-  const regMap  = new Map(regRows.map( r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.reg_kwh)]));
   const compMap = new Map(compRows.map(r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.computed_kwh)]));
 
   // Union of all (day, inverter) combinations; zero-fill every configured inverter.
   const { invCount, units: invUnits } = readInverterConfig();
   const invDaySet = new Set();
-  for (const r of regRows)  invDaySet.add(`${r.day}|${Number(r.inverter)}`);
   for (const r of compRows) invDaySet.add(`${r.day}|${Number(r.inverter)}`);
   if (!invNum) {
     for (const d of iterateLocalDates(s, e)) {
@@ -650,62 +666,53 @@ async function exportEnergy({ startTs, endTs, inverter, format }) {
   });
 
   const mapped = [];
-  let grandReg  = 0;
   let grandComp = 0;
 
   for (const key of sortedInvDayKeys) {
     const [day, invStr] = key.split('|');
     const inv   = Number(invStr);
     const units = (invUnits[inv] || [1]).slice().sort((a, b) => a - b);
-    let subReg  = 0;
     let subComp = 0;
 
     for (const unit of units) {
       const uKey    = `${day}|${inv}|${unit}`;
-      const regKwh  = safeNum(regMap.get(uKey));
       const compKwh = safeNum(compMap.get(uKey));
-      subReg  += regKwh;
       subComp += compKwh;
       mapped.push({
         Date:         day,
         Inverter:     `INV-${String(inv).padStart(2, '0')}`,
         Node:         unit,
-        Register_MWh: Number((regKwh  / 1000).toFixed(6)),
-        Computed_MWh: Number((compKwh / 1000).toFixed(6)),
-        Status:       regKwh > 0 || compKwh > 0 ? 'ACTIVE' : 'INACTIVE',
+        Energy_MWh:   Number((compKwh / 1000).toFixed(6)),
+        Status:       compKwh > 0 ? 'ACTIVE' : 'INACTIVE',
       });
     }
 
-    grandReg  += subReg;
     grandComp += subComp;
 
     mapped.push({
       Date:         `Total for ${day} (Inverter ${inv})`,
       Inverter:     '',
       Node:         '',
-      Register_MWh: Number((subReg  / 1000).toFixed(6)),
-      Computed_MWh: Number((subComp / 1000).toFixed(6)),
-      Status:       subReg > 0 || subComp > 0 ? 'ACTIVE' : 'INACTIVE',
+      Energy_MWh:   Number((subComp / 1000).toFixed(6)),
+      Status:       subComp > 0 ? 'ACTIVE' : 'INACTIVE',
     });
-    mapped.push({ Date: '', Inverter: '', Node: '', Register_MWh: '', Computed_MWh: '', Status: '' });
+    mapped.push({ Date: '', Inverter: '', Node: '', Energy_MWh: '', Status: '' });
   }
 
   mapped.push({
-    Date:         `GRAND TOTAL ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (ALL INVERTERS)`,
-    Inverter:     '',
-    Node:         '',
-    Register_MWh: Number((grandReg  / 1000).toFixed(6)),
-    Computed_MWh: Number((grandComp / 1000).toFixed(6)),
-    Status:       '',
+    Date:       `GRAND TOTAL ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (ALL INVERTERS)`,
+    Inverter:   '',
+    Node:       '',
+    Energy_MWh: Number((grandComp / 1000).toFixed(6)),
+    Status:     '',
   });
 
   const headers = [
-    { key: 'Date',         label: 'Date' },
-    { key: 'Inverter',     label: 'Inverter' },
-    { key: 'Node',         label: 'Node' },
-    { key: 'Register_MWh', label: 'Register (MWh)' },
-    { key: 'Computed_MWh', label: 'Computed PAC (MWh)' },
-    { key: 'Status',       label: 'Status' },
+    { key: 'Date',       label: 'Date' },
+    { key: 'Inverter',   label: 'Inverter' },
+    { key: 'Node',       label: 'Node' },
+    { key: 'Energy_MWh', label: 'Computed PAC (MWh)' },
+    { key: 'Status',     label: 'Status' },
   ];
 
   const fileBase = exportFileBase(s, e, inverter, 'Recorded Energy');
@@ -724,25 +731,16 @@ async function exportInverterData({ startTs, endTs, inverter, format }) {
 
   const rowsOut = [];
   for (const inv of invList) {
-    for (const r of queryReadingsRange(inv, s, e)) {
+    for (const r of annotateReadingsWithComputedEnergy(queryReadingsRange(inv, s, e))) {
       rowsOut.push({
         Date: fmtDate(r.ts),
         Time: fmtTime(r.ts),
         Plant: getSetting('plantName', 'Solar Plant'),
         Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
         UnitNode: r.unit,
-        Vdc_V: Number(r.vdc || 0).toFixed(1),
-        Idc_A: Number(r.idc || 0).toFixed(2),
-        Vac1_V: Number(r.vac1 || 0).toFixed(1),
-        Vac2_V: Number(r.vac2 || 0).toFixed(1),
-        Vac3_V: Number(r.vac3 || 0).toFixed(1),
-        Iac1_A: Number(r.iac1 || 0).toFixed(2),
-        Iac2_A: Number(r.iac2 || 0).toFixed(2),
-        Iac3_A: Number(r.iac3 || 0).toFixed(2),
         Pac_W: Number(r.pac || 0).toFixed(1),
         Pac_kW: (Number(r.pac || 0) / 1000).toFixed(3),
-        Pdc_W: (Number(r.vdc || 0) * Number(r.idc || 0)).toFixed(1),
-        Energy_kWh: Number(r.kwh || 0).toFixed(3),
+        Energy_kWh: Number(r.computed_kwh || 0).toFixed(3),
         AlarmCode: formatAlarmHex(r.alarm),
         Online: r.online ? 'YES' : 'NO',
       });
@@ -755,18 +753,9 @@ async function exportInverterData({ startTs, endTs, inverter, format }) {
     { key: 'Plant', label: 'Plant' },
     { key: 'Inverter', label: 'Inverter' },
     { key: 'UnitNode', label: 'Unit/Node' },
-    { key: 'Vdc_V', label: 'Vdc (V)' },
-    { key: 'Idc_A', label: 'Idc (A)' },
-    { key: 'Vac1_V', label: 'Vac1 (V)' },
-    { key: 'Vac2_V', label: 'Vac2 (V)' },
-    { key: 'Vac3_V', label: 'Vac3 (V)' },
-    { key: 'Iac1_A', label: 'Iac1 (A)' },
-    { key: 'Iac2_A', label: 'Iac2 (A)' },
-    { key: 'Iac3_A', label: 'Iac3 (A)' },
     { key: 'Pac_W', label: 'Pac (W)' },
     { key: 'Pac_kW', label: 'Pac (kW)' },
-    { key: 'Pdc_W', label: 'Pdc (W)' },
-    { key: 'Energy_kWh', label: 'Energy (kWh)' },
+    { key: 'Energy_kWh', label: 'Computed Energy (kWh)' },
     { key: 'AlarmCode', label: 'Alarm Code' },
     { key: 'Online', label: 'Online' },
   ];
