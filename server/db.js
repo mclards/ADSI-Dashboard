@@ -1054,6 +1054,59 @@ function archiveEnergyRows(rows) {
   archiveRowsByMonth(rows, "energy");
 }
 
+function safeFileSize(filePath) {
+  try {
+    return Number(fs.statSync(filePath).size || 0);
+  } catch (_) {
+    return 0;
+  }
+}
+
+function getArchiveDirStats() {
+  const stats = { fileCount: 0, totalBytes: 0 };
+  try {
+    const entries = fs.readdirSync(ARCHIVE_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.db$/i.test(entry.name)) continue;
+      stats.fileCount += 1;
+      stats.totalBytes += safeFileSize(path.join(ARCHIVE_DIR, entry.name));
+    }
+  } catch (_) {
+    // Ignore archive stats failures during best-effort telemetry pruning.
+  }
+  return stats;
+}
+
+function checkpointArchiveDbs(mode = "TRUNCATE") {
+  for (const entry of ARCHIVE_DB_CACHE.values()) {
+    try {
+      entry.db.pragma(`wal_checkpoint(${mode})`);
+    } catch (_) {
+      // Ignore archive checkpoint failures during routine maintenance.
+    }
+  }
+}
+
+function checkpointMainDb(mode = "TRUNCATE") {
+  try {
+    db.pragma(`wal_checkpoint(${mode})`);
+    return true;
+  } catch (err) {
+    console.error("[DB] WAL checkpoint failed:", err.message);
+    return false;
+  }
+}
+
+function vacuumMainDb() {
+  try {
+    db.exec("VACUUM");
+    return true;
+  } catch (err) {
+    console.error("[DB] VACUUM failed:", err.message);
+    return false;
+  }
+}
+
 function getTelemetryHotCutoffTs(now = Date.now()) {
   const retainDays = Math.max(1, Number(getSetting("retainDays", 90)));
   return Number(now || Date.now()) - retainDays * 24 * 60 * 60 * 1000;
@@ -1083,20 +1136,60 @@ function archiveTelemetryBeforeCutoff(cutoffTs) {
   return stats;
 }
 
-function pruneOldData() {
+function pruneOldData(options = {}) {
+  const opts =
+    options && typeof options === "object" ? options : {};
   try {
     const retainDays = Math.max(1, Number(getSetting("retainDays", 90)));
     const auditRetainDays = Math.max(1, Number(getSetting("auditRetainDays", 365)));
     const cutoff = Date.now() - retainDays * 24 * 60 * 60 * 1000;
     const auditCutoff = Date.now() - auditRetainDays * 24 * 60 * 60 * 1000;
+    const mainDbBytesBefore = safeFileSize(DB_PATH);
+    const archiveBefore = getArchiveDirStats();
     const archived = archiveTelemetryBeforeCutoff(cutoff);
     db.prepare("DELETE FROM alarms WHERE ts < ? AND cleared_ts IS NOT NULL").run(cutoff);
     db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
+    checkpointArchiveDbs("TRUNCATE");
+    const checkpointed = checkpointMainDb("TRUNCATE");
+    const vacuumRequested =
+      !!opts.vacuum && (archived.readings > 0 || archived.energy5 > 0 || !!opts.forceVacuum);
+    const vacuumed = vacuumRequested ? vacuumMainDb() : false;
+    if (vacuumed) checkpointMainDb("TRUNCATE");
+    const mainDbBytesAfter = safeFileSize(DB_PATH);
+    const archiveAfter = getArchiveDirStats();
+    const result = {
+      ok: true,
+      retainDays,
+      auditRetainDays,
+      archived,
+      checkpointed,
+      vacuumed,
+      mainDbBytesBefore,
+      mainDbBytesAfter,
+      archiveDbFilesBefore: archiveBefore.fileCount,
+      archiveDbFilesAfter: archiveAfter.fileCount,
+      archiveBytesBefore: archiveBefore.totalBytes,
+      archiveBytesAfter: archiveAfter.totalBytes,
+    };
     console.log(
-      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}.`,
+      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}, vacuumed=${vacuumed}.`,
     );
+    return result;
   } catch (err) {
     console.error("[DB] pruneOldData failed:", err.message);
+    return {
+      ok: false,
+      error: err.message || "Unknown prune error.",
+      archived: { readings: 0, energy5: 0 },
+      checkpointed: false,
+      vacuumed: false,
+      mainDbBytesBefore: safeFileSize(DB_PATH),
+      mainDbBytesAfter: safeFileSize(DB_PATH),
+      archiveDbFilesBefore: getArchiveDirStats().fileCount,
+      archiveDbFilesAfter: getArchiveDirStats().fileCount,
+      archiveBytesBefore: getArchiveDirStats().totalBytes,
+      archiveBytesAfter: getArchiveDirStats().totalBytes,
+    };
   }
 }
 
@@ -1117,11 +1210,7 @@ function closeArchiveDbs() {
 }
 
 function closeDb() {
-  try {
-    db.pragma("wal_checkpoint(TRUNCATE)");
-  } catch (err) {
-    console.error("[DB] WAL checkpoint failed:", err.message);
-  }
+  checkpointMainDb("TRUNCATE");
   closeArchiveDbs();
   try {
     db.close();

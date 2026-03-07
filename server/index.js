@@ -2756,7 +2756,7 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   try {
     const u = new URL(target);
     const p = String(u.pathname || "").toLowerCase();
-    if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 180000);
+    if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 600000);
     else if (p.startsWith("/api/report/")) timeoutMs = Math.max(timeoutMs, 45000);
     else if (
       p.startsWith("/api/analytics/") ||
@@ -3739,7 +3739,7 @@ function ensurePersistedSettings() {
     inverterCount: "27",
     nodeCount: "4",
     invGridLayout: "4",
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     retainDays: "90",
     forecastProvider: "ml_local",
@@ -3793,7 +3793,7 @@ function buildDefaultSettingsSnapshot() {
     inverterCount: 27,
     nodeCount: 4,
     invGridLayout: "4",
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     retainDays: 90,
     forecastProvider: "ml_local",
@@ -5494,7 +5494,7 @@ app.ws("/ws", (ws) => {
       data: getRuntimeLiveData(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
-        plantName: getSetting("plantName", "Solar Plant"),
+        plantName: getSetting("plantName", "ADSI Plant"),
       },
     }),
   );
@@ -6161,6 +6161,7 @@ app.post("/api/settings", (req, res) => {
   let exportDirCreated = false;
   let exportDirResolved = "";
   const modeBefore = readOperationMode();
+  const retainDaysBefore = Math.max(1, Number(getSetting("retainDays", 90)));
   const remoteGatewayBefore = getRemoteGatewayBaseUrl();
   const remoteTokenBefore = getRemoteApiToken();
   const {
@@ -6252,7 +6253,7 @@ app.post("/api/settings", (req, res) => {
   if (invGridLayout !== undefined)
     updates.invGridLayout = sanitizeInvGridLayout(invGridLayout);
   if (retainDays !== undefined)
-    updates.retainDays = clampInt(retainDays, 7, 1095, 90);
+    updates.retainDays = clampInt(retainDays, 1, 1095, 90);
   if (plantName !== undefined) {
     const name = String(plantName).trim();
     if (!name)
@@ -6330,10 +6331,20 @@ app.post("/api/settings", (req, res) => {
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
   }
+  let retentionApplied = null;
+  if (updates.retainDays !== undefined) {
+    const retainDaysAfter = Math.max(1, Number(updates.retainDays || retainDaysBefore));
+    if (retainDaysAfter !== retainDaysBefore) {
+      retentionApplied = pruneOldData({ vacuum: retainDaysAfter < retainDaysBefore });
+    }
+  }
+  const snapshot = buildSettingsSnapshot();
   res.json({
     ok: true,
     csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     exportDirCreated,
+    settings: snapshot,
+    retentionApplied,
   });
 });
 

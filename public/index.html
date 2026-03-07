@@ -127,8 +127,18 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.12</span></div>
-            <div class="side-about-desc">Industrial solar power plant monitoring, analytics, AI forecasting, and remote replication system.</div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.13</span></div>
+            <div class="side-about-desc">Alterpower Digos Solar Plant monitoring, analytics, AI forecasting, and remote replication system.</div>
+            <a
+              class="side-about-link"
+              href="https://www.alterpowerdigos.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Open Alterpower Digos Solar Plant website"
+            >
+              <span class="mdi mdi-web" aria-hidden="true"></span>
+              <span>www.alterpowerdigos.com</span>
+            </a>
             <div class="side-about-sep"></div>
             <div class="side-about-author-block">
               <div class="side-about-author-label">Designed &amp; Developed by</div>
@@ -141,6 +151,7 @@
             <div class="side-about-sep"></div>
             <div class="side-about-db">DB: <code id="setDataDir">—</code></div>
             <div class="side-about-hw"><b>App:</b> <span id="aboutAppVersion">—</span></div>
+            <div class="side-about-hw"><b>License:</b> <span id="aboutLicenseStatus" class="side-about-inline-status">—</span></div>
             <div class="side-about-hw"><b>Update:</b> <span id="aboutUpdateStatus">—</span></div>
           </div>
           <div class="side-about-actions">
@@ -630,13 +641,18 @@
                 </select>
               </label>
             </div>
-            <button
-              id="btnExportAlarms"
-              class="btn btn-accent btn-full"
-              title="Export alarm history for the selected date range and format."
-            >
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Alarms</span>
-            </button>
+            <div class="exp-actions">
+              <button
+                id="btnExportAlarms"
+                class="btn btn-accent btn-full"
+                title="Export alarm history for the selected date range and format."
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Alarms</span>
+              </button>
+              <button id="btnCancelAlarmExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expAlarmResult"></div>
           </div>
 
@@ -644,8 +660,9 @@
             <div class="exp-icon exp-icon-energy"><span class="mdi mdi-lightning-bolt" aria-hidden="true"></span></div>
             <div class="exp-title">Energy Export</div>
             <div class="exp-desc">
-              Date, last reading time, inverter, node, total MWh register, and
-              total MWh calculated with per-inverter/day totals
+              Per-day inverter and node totals with first and last seen time,
+              sample counts, peak PAC, computed energy, and status. Works with
+              hot and archived telemetry.
             </div>
             <div class="exp-form">
               <label
@@ -667,9 +684,14 @@
                 </select>
               </label>
             </div>
-            <button id="btnRunEnergyExport" class="btn btn-accent btn-full">
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Energy</span>
-            </button>
+            <div class="exp-actions">
+              <button id="btnRunEnergyExport" class="btn btn-accent btn-full" type="button">
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Energy</span>
+              </button>
+              <button id="btnCancelEnergyExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expEnergyResult"></div>
           </div>
 
@@ -702,12 +724,18 @@
                 </select>
               </label>
             </div>
-            <button
-              id="btnRunForecastExport"
-              class="btn btn-accent btn-full"
-            >
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Day-ahead vs Actual</span>
-            </button>
+            <div class="exp-actions">
+              <button
+                id="btnRunForecastExport"
+                class="btn btn-accent btn-full"
+                type="button"
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Day-ahead vs Actual</span>
+              </button>
+              <button id="btnCancelForecastExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expForecastResult"></div>
           </div>
 
@@ -715,9 +743,9 @@
             <div class="exp-icon exp-icon-energy"><span class="mdi mdi-database-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Inverter Data Export</div>
             <div class="exp-desc">
-              Full inverter sampled dataset
-              (Vdc/Idc/Vac/Iac/Pac/Pdc/MWh/alarm/online) for troubleshooting and
-              deep analysis
+              Interval-sampled operational dataset with PAC, computed energy,
+              alarm code and description, and online state for troubleshooting.
+              Works with hot and archived telemetry.
             </div>
             <div class="exp-form">
               <label
@@ -732,6 +760,16 @@
                 >To<input type="date" id="expInvDataEnd" class="inp"
               /></label>
               <label
+                >Interval (min)<input
+                  type="number"
+                  id="expInvDataInterval"
+                  class="inp"
+                  min="1"
+                  max="60"
+                  step="1"
+                  value="1"
+              /></label>
+              <label
                 >Format
                 <select id="expInvDataFormat" class="sel">
                   <option value="xlsx" selected>Excel (.xlsx)</option>
@@ -739,12 +777,18 @@
                 </select>
               </label>
             </div>
-            <button
-              id="btnRunInvDataExport"
-              class="btn btn-accent btn-full"
-            >
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Inverter Data</span>
-            </button>
+            <div class="exp-actions">
+              <button
+                id="btnRunInvDataExport"
+                class="btn btn-accent btn-full"
+                type="button"
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Inverter Data</span>
+              </button>
+              <button id="btnCancelInvDataExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expInvDataResult"></div>
           </div>
 
@@ -775,12 +819,18 @@
                 </select>
               </label>
             </div>
-            <button
-              id="btnExportAudit"
-              class="btn btn-accent btn-full"
-            >
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Audit</span>
-            </button>
+            <div class="exp-actions">
+              <button
+                id="btnExportAudit"
+                class="btn btn-accent btn-full"
+                type="button"
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Audit</span>
+              </button>
+              <button id="btnCancelAuditExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expAuditResult"></div>
           </div>
 
@@ -788,8 +838,12 @@
             <div class="exp-icon exp-icon-report"><span class="mdi mdi-file-chart-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Daily Generation Report</div>
             <div class="exp-desc">
-              Plant performance summary: total MWh, peak power, uptime, and
-              fault count per inverter per day
+              One row per inverter per day. Includes energy in kWh and MWh,
+              peak and average PAC, availability, performance, uptime,
+              alarm count, and status.
+            </div>
+            <div class="exp-note">
+              Bucket: Daily only. Interval selection is not needed for this report.
             </div>
             <div class="exp-form">
               <label
@@ -806,12 +860,18 @@
                 </select>
               </label>
             </div>
-            <button
-              id="btnRunDailyReportExport"
-              class="btn btn-accent btn-full"
-            >
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Daily Report</span>
-            </button>
+            <div class="exp-actions">
+              <button
+                id="btnRunDailyReportExport"
+                class="btn btn-accent btn-full"
+                type="button"
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Daily Report</span>
+              </button>
+              <button id="btnCancelDailyReportExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
             <div class="exp-result" id="expReportResult"></div>
           </div>
         </div>
@@ -915,7 +975,7 @@
                   type="text"
                   id="setPlantName"
                   class="inp"
-                  placeholder="Solar Plant"
+                  placeholder="ADSI Plant"
                   aria-describedby="plantNameHelp"
               /></label>
               <small id="plantNameHelp">Name of your solar installation (required)</small>
@@ -992,7 +1052,7 @@
                     type="number"
                     id="setRetainDays"
                     class="inp inp-sm"
-                    min="7"
+                    min="1"
                     max="1095"
                 /></label>
               </div>
@@ -1667,7 +1727,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.12</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.13</span></div>
             <div class="guide-author-desc">Industrial Solar Power Plant Monitoring, Analytics, AI Forecasting &amp; Remote Replication System</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1808,7 +1868,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.2.12 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.13 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

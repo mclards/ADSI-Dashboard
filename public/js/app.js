@@ -37,7 +37,7 @@ const State = {
     tailscaleDeviceHint: "",
     inverterCount: 27,
     nodeCount: 4,
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     csvSavePath: "C:\\Logs\\InverterDashboard",
     forecastProvider: "ml_local",
@@ -67,8 +67,8 @@ const State = {
   analyticsDailyTotalMwh: null,
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
-  analyticsChartPage: 1,
-  analyticsChartPageSize: 6,
+  analyticsRenderTimer: null,
+  analyticsRenderToken: 0,
   // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
   analyticsDayAheadCache: null,  // { src, intervalMin, result }
   // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
@@ -82,6 +82,7 @@ const State = {
   pendingAlarmLiveSig: "",
   exportUiSaveTimer: null,
   exportBtnTimers: {},
+  exportAbortControllers: {},
   alarmView: {
     rows: [],
     page: 1,
@@ -189,7 +190,7 @@ const TABLE_FILTER_DEBOUNCE_MS = 140;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
-const ANALYTICS_CHARTS_PAGE_SIZE = 6;
+const ANALYTICS_CHART_RENDER_BATCH = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
@@ -392,6 +393,7 @@ function bindLicenseNoticeUpload() {
       if (res.status) {
         State.licenseStatus = res.status;
         renderLicenseNotice(res.status);
+        renderLicenseSummary();
       }
     } catch (err) {
       pushToast("error", `License upload failed: ${err.message || err}`);
@@ -426,15 +428,18 @@ function renderLicenseSummary() {
   const sourceEl = $("licenseSourceText");
   const expiryEl = $("licenseExpiryText");
   const daysEl = $("licenseDaysLeftText");
+  const aboutEl = $("aboutLicenseStatus");
   if (!statusEl || !sourceEl || !expiryEl || !daysEl) return;
 
   statusEl.classList.remove("ok", "warn", "error");
+  if (aboutEl) aboutEl.className = "side-about-inline-status";
 
   if (!status) {
     statusEl.textContent = "Unknown";
     sourceEl.textContent = "—";
     expiryEl.textContent = "—";
     daysEl.textContent = "—";
+    if (aboutEl) aboutEl.textContent = "Unknown";
     return;
   }
 
@@ -456,11 +461,22 @@ function renderLicenseSummary() {
     license: "License",
     device: "Device",
   };
-  sourceEl.textContent = sourceMap[String(status.source || "").toLowerCase()] || String(status.source || "—");
+  const sourceText =
+    sourceMap[String(status.source || "").toLowerCase()] || String(status.source || "—");
+  sourceEl.textContent = sourceText;
+  if (aboutEl) {
+    if (status.valid && !status.nearExpiry) aboutEl.classList.add("ok");
+    else if (status.valid && status.nearExpiry) aboutEl.classList.add("warn");
+    else aboutEl.classList.add("error");
+  }
 
   if (status.lifetime) {
     expiryEl.textContent = "Never (Lifetime)";
     daysEl.textContent = "∞";
+    if (aboutEl) {
+      const prefix = sourceText === "License" ? "" : `${sourceText}: `;
+      aboutEl.textContent = `${prefix}Lifetime`;
+    }
     return;
   }
 
@@ -468,12 +484,21 @@ function renderLicenseSummary() {
   if (!Number.isFinite(exp) || exp <= 0) {
     expiryEl.textContent = "—";
     daysEl.textContent = "—";
+    if (aboutEl) aboutEl.textContent = statusText;
     return;
   }
 
   expiryEl.textContent = fmtDateTime(exp);
   const dLeft = Math.max(0, Math.floor((exp - Date.now()) / 86400000));
   daysEl.textContent = `${dLeft}`;
+  if (aboutEl) {
+    const prefix = sourceText === "License" ? "" : `${sourceText}: `;
+    aboutEl.textContent = status.valid
+      ? status.nearExpiry
+        ? `${prefix}Expiring in ${fmtRemaining(Number(status.msLeft || 0))}`
+        : `${prefix}${dLeft} day(s) left`
+      : statusText;
+  }
 }
 
 function renderLicenseAuditRows() {
@@ -800,7 +825,11 @@ const EXPORT_DATE_FIELD_IDS = [
   "expReportStart",
   "expReportEnd",
 ];
-const EXPORT_NUM_FIELD_IDS = ["genDayCount"];
+const EXPORT_NUM_FIELD_RULES = {
+  genDayCount: { min: 1, max: 31, fallback: 1 },
+  expInvDataInterval: { min: 1, max: 60, fallback: 1 },
+};
+const EXPORT_NUM_FIELD_IDS = Object.keys(EXPORT_NUM_FIELD_RULES);
 const DATE_INPUT_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function sanitizeDateInputValue(v) {
@@ -820,6 +849,17 @@ function localDateEndMs(dateText) {
   return new Date(`${d}T23:59:59.999`).getTime();
 }
 
+function clampExportNumberValue(id, value) {
+  const rule = EXPORT_NUM_FIELD_RULES[id];
+  if (!rule) return null;
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return Number(rule.fallback || rule.min || 1);
+  return Math.min(
+    Number(rule.max || raw),
+    Math.max(Number(rule.min || raw), Math.trunc(raw)),
+  );
+}
+
 function sanitizeExportUiStateClient(input) {
   const out = {};
   const src = input && typeof input === "object" ? input : {};
@@ -828,9 +868,7 @@ function sanitizeExportUiStateClient(input) {
     if (v) out[id] = v;
   });
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
-    const n = Number(src[id]);
-    if (!Number.isFinite(n)) return;
-    out[id] = Math.min(31, Math.max(1, Math.trunc(n)));
+    out[id] = clampExportNumberValue(id, src[id]);
   });
   return out;
 }
@@ -860,9 +898,7 @@ function collectExportUiStateFromInputs() {
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
     const input = $(id);
     if (!input) return;
-    const n = Number(input.value);
-    if (!Number.isFinite(n)) return;
-    out[id] = Math.min(31, Math.max(1, Math.trunc(n)));
+    out[id] = clampExportNumberValue(id, input.value);
   });
   return out;
 }
@@ -904,6 +940,137 @@ function bindExportUiStatePersistence() {
     input.addEventListener("change", queuePersistExportUiState);
     input.addEventListener("input", queuePersistExportUiState);
   });
+}
+
+function normalizeExportNumberInput(id) {
+  const input = $(id);
+  if (!input) return 0;
+  const value = clampExportNumberValue(id, input.value);
+  if (value > 0) input.value = String(value);
+  return value;
+}
+
+function bindExportNumberValidators() {
+  EXPORT_NUM_FIELD_IDS.forEach((id) => {
+    const input = $(id);
+    if (!input || input.dataset.exportNumberBound === "1") return;
+    input.dataset.exportNumberBound = "1";
+    const sync = () => {
+      normalizeExportNumberInput(id);
+      queuePersistExportUiState();
+    };
+    input.addEventListener("change", sync);
+    input.addEventListener("blur", sync);
+  });
+}
+
+const EXPORT_DATE_RANGE_IDS = [
+  ["expAlarmStart", "expAlarmEnd"],
+  ["expEnergyStart", "expEnergyEnd"],
+  ["expInvDataStart", "expInvDataEnd"],
+  ["expAuditStart", "expAuditEnd"],
+  ["expReportStart", "expReportEnd"],
+];
+
+function clampExportDateToToday(value) {
+  const v = sanitizeDateInputValue(value);
+  if (!v) return "";
+  const maxDate = today();
+  return v > maxDate ? maxDate : v;
+}
+
+function normalizeExportDatePair(startId, endId, options = {}) {
+  const { forceDefault = false, preferred = "start" } = options;
+  const startInput = $(startId);
+  const endInput = $(endId);
+  if (!startInput || !endInput) return { start: "", end: "" };
+
+  const maxDate = today();
+  let startValue = clampExportDateToToday(startInput.value);
+  let endValue = clampExportDateToToday(endInput.value);
+
+  if (forceDefault && !startValue && !endValue) {
+    startValue = maxDate;
+    endValue = maxDate;
+  } else if (!startValue && endValue) {
+    startValue = endValue;
+  } else if (startValue && !endValue) {
+    endValue = startValue;
+  }
+
+  if (startValue && endValue) {
+    if (preferred === "end" && endValue < startValue) startValue = endValue;
+    else if (preferred === "start" && startValue > endValue) endValue = startValue;
+  }
+
+  startInput.max = endValue && endValue < maxDate ? endValue : maxDate;
+  endInput.min = startValue || "";
+  endInput.max = maxDate;
+
+  startInput.value = startValue;
+  endInput.value = endValue;
+  return { start: startValue, end: endValue };
+}
+
+function normalizeExportSingleDateInput(inputId, options = {}) {
+  const { forceDefault = false } = options;
+  const input = $(inputId);
+  if (!input) return "";
+  const maxDate = today();
+  let value = clampExportDateToToday(input.value);
+  if (forceDefault && !value) value = maxDate;
+  input.max = maxDate;
+  input.value = value;
+  return value;
+}
+
+function normalizeAllExportDateInputs(options = {}) {
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
+    normalizeExportDatePair(startId, endId, options);
+  });
+  normalizeExportSingleDateInput("expForecastDate", options);
+}
+
+function bindExportDateValidators() {
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
+    const startInput = $(startId);
+    const endInput = $(endId);
+    if (startInput && startInput.dataset.exportDateBound !== "1") {
+      startInput.dataset.exportDateBound = "1";
+      const syncFromStart = () => {
+        normalizeExportDatePair(startId, endId, {
+          forceDefault: true,
+          preferred: "start",
+        });
+        queuePersistExportUiState();
+      };
+      startInput.addEventListener("change", syncFromStart);
+      startInput.addEventListener("input", syncFromStart);
+    }
+    if (endInput && endInput.dataset.exportDateBound !== "1") {
+      endInput.dataset.exportDateBound = "1";
+      const syncFromEnd = () => {
+        normalizeExportDatePair(startId, endId, {
+          forceDefault: true,
+          preferred: "end",
+        });
+        queuePersistExportUiState();
+      };
+      endInput.addEventListener("change", syncFromEnd);
+      endInput.addEventListener("input", syncFromEnd);
+    }
+  });
+
+  const forecastInput = $("expForecastDate");
+  if (forecastInput && forecastInput.dataset.exportDateBound !== "1") {
+    forecastInput.dataset.exportDateBound = "1";
+    const syncForecast = () => {
+      normalizeExportSingleDateInput("expForecastDate", { forceDefault: true });
+      queuePersistExportUiState();
+    };
+    forecastInput.addEventListener("change", syncForecast);
+    forecastInput.addEventListener("input", syncForecast);
+  }
 }
 
 function setupExportUiStateFlush() {
@@ -1704,8 +1871,10 @@ async function api(url, method = "GET", body, options = {}) {
   if (showProgress) beginProgress(getProgressLabel(url, method));
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
+  if (options?.signal) opts.signal = options.signal;
   if (opts.body) netIOTrackTx(opts.body.length);
   let ok = false;
+  let progressDoneLabel = "Request failed";
   try {
     const r = await fetch(url, opts);
     const text = await r.text();
@@ -1751,16 +1920,21 @@ async function api(url, method = "GET", body, options = {}) {
       throw new Error(String(detailedMsg));
     }
     ok = true;
+    progressDoneLabel = "Done";
     return parsed ?? {};
   } catch (err) {
     // Network error or parsing failure
+    if (err?.name === "AbortError") {
+      progressDoneLabel = "Cancelled";
+      throw new Error("Export cancelled.");
+    }
     if (err instanceof TypeError) {
       console.warn("[app] Network error:", err.message);
       throw new Error("Network error. Please check your internet connection.");
     }
     throw err;
   } finally {
-    if (showProgress) endProgress(ok ? "Done" : "Request failed");
+    if (showProgress) endProgress(progressDoneLabel);
   }
 }
 
@@ -2121,7 +2295,7 @@ async function loadSettings() {
       s.exportUiState || {},
     );
     if ($("plantNameDisplay"))
-      $("plantNameDisplay").textContent = s.plantName || "Solar Plant";
+      $("plantNameDisplay").textContent = s.plantName || "ADSI Plant";
     $("setPlantName").value = s.plantName || "";
     $("setOperatorName").value = s.operatorName || "OPERATOR";
     $("setOperationMode").value = s.operationMode || "gateway";
@@ -2682,6 +2856,7 @@ async function handleOperationModeTransition(
 
 async function saveSettings() {
   const prevMode = State.settings.operationMode;
+  const prevRetainDays = Math.max(1, Number(State.settings.retainDays || 90));
   const normalizedGateway = applyRemoteGatewayInputNormalization();
   const body = {
     plantName: $("setPlantName").value,
@@ -2710,20 +2885,55 @@ async function saveSettings() {
     },
   };
   try {
+    if (Number(body.retainDays || prevRetainDays) < prevRetainDays) {
+      showMsg(
+        "settingsMsg",
+        "Saving settings and applying telemetry retention. This can take a while on large databases...",
+        "",
+      );
+    }
     const saved = await api("/api/settings", "POST", body);
+    const savedSettings =
+      saved?.settings && typeof saved.settings === "object" ? saved.settings : null;
     const nextCsvPath =
-      String(saved?.csvSavePath || body.csvSavePath || "").trim() ||
+      String(saved?.csvSavePath || savedSettings?.csvSavePath || body.csvSavePath || "").trim() ||
       State.settings.csvSavePath;
     if ($("setCsvPath")) $("setCsvPath").value = nextCsvPath;
-    State.settings = { ...State.settings, ...body, csvSavePath: nextCsvPath };
+    if ($("setRetainDays") && savedSettings?.retainDays !== undefined) {
+      $("setRetainDays").value = String(savedSettings.retainDays);
+    }
+    State.settings = {
+      ...State.settings,
+      ...body,
+      ...(savedSettings || {}),
+      csvSavePath: nextCsvPath,
+    };
     await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
     if ($("plantNameDisplay"))
-      $("plantNameDisplay").textContent = body.plantName;
+      $("plantNameDisplay").textContent = State.settings.plantName || body.plantName;
+    let saveMsg = saved?.exportDirCreated
+      ? "✔ Settings saved. Export folder created."
+      : "✔ Settings saved";
+    const retentionApplied =
+      saved?.retentionApplied && typeof saved.retentionApplied === "object"
+        ? saved.retentionApplied
+        : null;
+    if (retentionApplied) {
+      if (retentionApplied.ok === false) {
+        saveMsg += ` Retention apply failed: ${retentionApplied.error || "unknown error"}.`;
+      } else {
+        const archivedReadings = Number(retentionApplied?.archived?.readings || 0);
+        const archivedEnergy = Number(retentionApplied?.archived?.energy5 || 0);
+        if (archivedReadings > 0 || archivedEnergy > 0) {
+          saveMsg += ` Retention applied: archived ${archivedReadings.toLocaleString()} readings and ${archivedEnergy.toLocaleString()} energy rows. Main DB ${fmtBytes(Number(retentionApplied.mainDbBytesBefore || 0))} -> ${fmtBytes(Number(retentionApplied.mainDbBytesAfter || 0))}.`;
+        } else {
+          saveMsg += ` Retention applied: no telemetry older than ${State.settings.retainDays} day(s) was found.`;
+        }
+      }
+    }
     showMsg(
       "settingsMsg",
-      saved?.exportDirCreated
-        ? "✔ Settings saved. Export folder created."
-        : "✔ Settings saved",
+      saveMsg,
       "",
     );
     buildInverterGrid();
@@ -4464,7 +4674,7 @@ function handleWS(msg) {
     integrateTodayFromPac();
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
-      State.settings.plantName = msg.settings.plantName || "Solar Plant";
+      State.settings.plantName = msg.settings.plantName || "ADSI Plant";
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
@@ -5867,10 +6077,6 @@ async function exportDailyReport() {
 function initAnalytics() {
   if (!$("anaDate").value) $("anaDate").value = today();
   if ($("anaInterval") && !$("anaInterval").value) $("anaInterval").value = "5";
-  if (!Number.isFinite(Number(State.analyticsChartPage)) || Number(State.analyticsChartPage) < 1) {
-    State.analyticsChartPage = 1;
-  }
-  State.analyticsChartPageSize = ANALYTICS_CHARTS_PAGE_SIZE;
   // Render cached data immediately so the tab feels instant on revisit,
   // then kick off a fresh fetch in the background.
   if (State.analyticsBaseRows.length > 0) renderAnalyticsFromState();
@@ -6262,6 +6468,11 @@ function buildSeriesByInverter(rows, intervalMin = 5) {
 }
 
 function destroyAnalyticsCharts() {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
+  }
+  State.analyticsRenderToken = Number(State.analyticsRenderToken || 0) + 1;
   Object.values(State.charts || {}).forEach((chart) => {
     try {
       chart?.destroy?.();
@@ -6272,39 +6483,27 @@ function destroyAnalyticsCharts() {
   State.charts = {};
 }
 
-function getAnalyticsChartPaging(invCount) {
-  const totalRows = Math.max(0, Math.trunc(Number(invCount) || 0));
-  const pageSize = Math.max(
-    1,
-    Math.trunc(Number(State.analyticsChartPageSize || ANALYTICS_CHARTS_PAGE_SIZE)),
-  );
-  const inverters = Array.from({ length: totalRows }, (_, idx) => idx + 1);
-  const pageData = paginateRows(inverters, State.analyticsChartPage, pageSize);
-  State.analyticsChartPage = pageData.page;
-  return pageData;
-}
-
-function setAnalyticsChartPage(nextPage) {
-  const safePage = Math.max(1, Math.trunc(Number(nextPage) || 1));
-  if (safePage === Number(State.analyticsChartPage || 1)) return;
-  State.analyticsChartPage = safePage;
-  if (State.analyticsBaseRows.length > 0 || State.analyticsDayAheadBaseRows.length > 0) {
-    renderAnalyticsFromState();
+function scheduleAnalyticsChartRender(step) {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
   }
+  State.analyticsRenderTimer = setTimeout(() => {
+    State.analyticsRenderTimer = null;
+    step();
+  }, 0);
 }
 
-function ensureAnalyticsCards(visibleInvs, paging) {
+function ensureAnalyticsCards() {
   const host = $("analyticsCharts");
   if (!host) return;
   const count = Number(State.settings.inverterCount || 27);
-  const visible = Array.isArray(visibleInvs) ? visibleInvs : [];
-  const pageInfo = paging && typeof paging === "object" ? paging : getAnalyticsChartPaging(count);
-  const expectedCanvasCount = visible.length + 1; // total + visible per-inverter
+  const expectedCanvasCount = count + 1; // total + per-inverter
   const existingCanvasCount = host.querySelectorAll(
     "canvas[id^='chart-']",
   ).length;
   const hasSideCard = !!host.querySelector("#analyticsTotalSideCard");
-  const sig = `${count}|${pageInfo.page}|${pageInfo.totalPages}|${visible.join(",")}`;
+  const sig = String(count);
   if (
     host.dataset.sig === sig &&
     existingCanvasCount === expectedCanvasCount &&
@@ -6347,14 +6546,6 @@ function ensureAnalyticsCards(visibleInvs, paging) {
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
       </div>
     </div>
-    <div class="analytics-chart-pager">
-      <div class="analytics-side-label">Inverter Charts</div>
-      <div class="analytics-chart-pager-row">
-        <button class="btn btn-outline analytics-chart-page-btn" id="anaChartPrev" ${pageInfo.page <= 1 ? "disabled" : ""}>Prev</button>
-        <div class="analytics-chart-page-meta" id="anaChartPageMeta">Showing ${pageInfo.from}-${pageInfo.to} of ${pageInfo.totalRows}</div>
-        <button class="btn btn-outline analytics-chart-page-btn" id="anaChartNext" ${pageInfo.page >= pageInfo.totalPages ? "disabled" : ""}>Next</button>
-      </div>
-    </div>
     <div class="analytics-gen-wrap">
       <div class="analytics-side-label">Day-ahead Generator</div>
       <div class="analytics-gen-row">
@@ -6390,21 +6581,70 @@ function ensureAnalyticsCards(visibleInvs, paging) {
       Math.min(31, Math.max(1, Math.trunc(savedDayCount))),
     );
   }
-  totalSideCard.querySelector("#anaChartPrev")?.addEventListener("click", () => {
-    setAnalyticsChartPage(pageInfo.page - 1);
-  });
-  totalSideCard.querySelector("#anaChartNext")?.addEventListener("click", () => {
-    setAnalyticsChartPage(pageInfo.page + 1);
-  });
   bindExportUiStatePersistence();
   syncDayAheadGeneratorAvailability();
 
-  for (const inv of visible) {
+  for (let inv = 1; inv <= count; inv++) {
     const card = document.createElement("div");
     card.className = "chart-card";
     card.innerHTML = `<div class="chart-title">⚡ INVERTER ${pad2(inv)} Energy — MWh</div><canvas id="chart-inv-${inv}" height="120"></canvas>`;
     host.appendChild(card);
   }
+}
+
+function renderAnalyticsInverterCharts(
+  count,
+  labels,
+  mergedTimeline,
+  byInv,
+  fillPastMissingAsZero,
+  pastCutoffTs,
+) {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
+  }
+  State.analyticsRenderToken = Number(State.analyticsRenderToken || 0) + 1;
+  const token = State.analyticsRenderToken;
+  const jobs = [];
+
+  for (let inv = 1; inv <= count; inv++) {
+    jobs.push(() => {
+      const p = paletteByInv(inv);
+      upsertLineChart(
+        `inv_${inv}`,
+        `chart-inv-${inv}`,
+        `INVERTER ${pad2(inv)} Energy (MWh)`,
+        labels,
+        mergedTimeline.map((ts) => {
+          const m = byInv.get(inv);
+          if (!m || !m.has(ts)) {
+            if (fillPastMissingAsZero && ts <= pastCutoffTs) return 0;
+            return null;
+          }
+          return Number(m.get(ts) || 0);
+        }),
+        p.stroke,
+        p.fill,
+        1.6,
+      );
+    });
+  }
+
+  let index = 0;
+  const runBatch = () => {
+    if (token !== Number(State.analyticsRenderToken || 0)) return;
+    const limit = Math.min(jobs.length, index + ANALYTICS_CHART_RENDER_BATCH);
+    while (index < limit) {
+      jobs[index]();
+      index += 1;
+    }
+    if (index < jobs.length) {
+      scheduleAnalyticsChartRender(runBatch);
+    }
+  };
+
+  runBatch();
 }
 
 function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
@@ -6417,9 +6657,7 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     return;
   }
   const count = Number(State.settings.inverterCount || 27);
-  const paging = getAnalyticsChartPaging(count);
-  const visibleInvs = paging.rows;
-  ensureAnalyticsCards(visibleInvs, paging);
+  ensureAnalyticsCards();
 
   const { timeline, byInv } = buildSeriesByInverter(rows, intervalMin);
   const dayAheadMwhByTs = new Map(
@@ -6484,26 +6722,14 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     dayAheadValues,
   );
 
-  for (const inv of visibleInvs) {
-    const p = paletteByInv(inv);
-    upsertLineChart(
-      `inv_${inv}`,
-      `chart-inv-${inv}`,
-      `INVERTER ${pad2(inv)} Energy (MWh)`,
-      labels,
-      mergedTimeline.map((ts) => {
-        const m = byInv.get(inv);
-        if (!m || !m.has(ts)) {
-          if (fillPastMissingAsZero && ts <= pastCutoffTs) return 0;
-          return null;
-        }
-        return Number(m.get(ts) || 0);
-      }),
-      p.stroke,
-      p.fill,
-      1.6,
-    );
-  }
+  renderAnalyticsInverterCharts(
+    count,
+    labels,
+    mergedTimeline,
+    byInv,
+    fillPastMissingAsZero,
+    pastCutoffTs,
+  );
   renderAnalyticsSummary(
     rows,
     intervalMin,
@@ -6825,27 +7051,19 @@ function chartOpts(unit, showLegend) {
 // ─── Export Page ──────────────────────────────────────────────────────────────
 function initExportPage() {
   applyExportUiStateToInputs(State.settings.exportUiState || {});
-  const t = today(),
-    s = dateStr(new Date(Date.now() - 7 * 86400000));
+  bindExportDateValidators();
+  bindExportNumberValidators();
+  normalizeAllExportDateInputs({ forceDefault: true, preferred: "start" });
+  normalizeExportNumberInput("genDayCount");
+  normalizeExportNumberInput("expInvDataInterval");
   [
-    ["expAlarmStart", "expAlarmEnd"],
-    ["expEnergyStart", "expEnergyEnd"],
-    ["expInvDataStart", "expInvDataEnd"],
-    ["expAuditStart", "expAuditEnd"],
-    ["expReportStart", "expReportEnd"],
-  ].forEach(([a, b]) => {
-    const ea = $(a),
-      eb = $(b);
-    if (ea && !ea.value) ea.value = s;
-    if (eb && !eb.value) eb.value = t;
-  });
-  const expForecastDate = $("expForecastDate");
-  if (expForecastDate && !expForecastDate.value) expForecastDate.value = t;
-  const genDayCount = $("genDayCount");
-  if (genDayCount) {
-    const n = Number(genDayCount.value);
-    if (!Number.isFinite(n) || n < 1) genDayCount.value = "1";
-  }
+    "btnCancelAlarmExport",
+    "btnCancelEnergyExport",
+    "btnCancelForecastExport",
+    "btnCancelInvDataExport",
+    "btnCancelAuditExport",
+    "btnCancelDailyReportExport",
+  ].forEach((id) => setExportCancelButtonState(id, !!State.exportAbortControllers[id]));
   queuePersistExportUiState();
 }
 
@@ -6907,6 +7125,42 @@ function setExportButtonState(btnId, mode = "idle") {
   btn.textContent = base;
 }
 
+function setExportCancelButtonState(btnId, active = false) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.disabled = !active;
+  btn.classList.toggle("btn-red", active);
+  btn.classList.toggle("btn-outline", !active);
+}
+
+function registerExportAbortController(btnId, controller) {
+  if (!btnId || !controller) return;
+  State.exportAbortControllers[btnId] = controller;
+  setExportCancelButtonState(btnId, true);
+}
+
+function releaseExportAbortController(btnId) {
+  if (!btnId) return;
+  delete State.exportAbortControllers[btnId];
+  setExportCancelButtonState(btnId, false);
+}
+
+function requestExportCancellation(btnId, resultId) {
+  const controller = State.exportAbortControllers[btnId];
+  if (!controller) return;
+  const res = $(resultId);
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Cancelling…";
+  }
+  setExportCancelButtonState(btnId, false);
+  controller.abort();
+}
+
+function isExportCancelledError(err) {
+  return String(err?.message || "").trim().toLowerCase() === "export cancelled.";
+}
+
 async function runExport(
   type,
   invId,
@@ -6915,7 +7169,12 @@ async function runExport(
   resultId,
   extraBody = {},
   btnId = "",
+  cancelBtnId = "",
 ) {
+  normalizeExportDatePair(startId, endId, {
+    forceDefault: true,
+    preferred: "start",
+  });
   await persistExportUiState().catch(() => {});
   const inv = $(invId)?.value;
   const start = $(startId)?.value;
@@ -6933,11 +7192,15 @@ async function runExport(
     res.textContent = "Exporting…";
   }
   setExportButtonState(btnId, "loading");
+  const controller = new AbortController();
+  registerExportAbortController(cancelBtnId, controller);
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   const body = { inverter: inv, startTs, endTs, format, ...extraBody };
   try {
-    const r = await api(`/api/export/${type}`, "POST", body);
+    const r = await api(`/api/export/${type}`, "POST", body, {
+      signal: controller.signal,
+    });
     if (res) {
       res.className = "exp-result";
       res.textContent = "✔ Saved: " + r.path;
@@ -6945,11 +7208,21 @@ async function runExport(
     await openExportPathFolder(r.path);
     setExportButtonState(btnId, "ok");
   } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState(btnId, "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState(btnId, "fail");
     }
-    setExportButtonState(btnId, "fail");
+  } finally {
+    releaseExportAbortController(cancelBtnId);
   }
 }
 
@@ -6962,10 +7235,12 @@ async function runEnergyExport() {
     "expEnergyResult",
     {},
     "btnRunEnergyExport",
+    "btnCancelEnergyExport",
   );
 }
 
 async function runForecastActualExport() {
+  normalizeExportSingleDateInput("expForecastDate", { forceDefault: true });
   await persistExportUiState().catch(() => {});
   const day = $("expForecastDate")?.value;
   const format = $("expForecastFormat")?.value || "xlsx";
@@ -6976,6 +7251,8 @@ async function runForecastActualExport() {
     res.textContent = "Exporting…";
   }
   setExportButtonState("btnRunForecastExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelForecastExport", controller);
   const startTs = day ? localDateStartMs(day) : undefined;
   const endTs = day ? localDateEndMs(day) : undefined;
   try {
@@ -6984,6 +7261,8 @@ async function runForecastActualExport() {
       endTs,
       resolution,
       format,
+    }, {
+      signal: controller.signal,
     });
     if (res) {
       res.className = "exp-result";
@@ -6992,11 +7271,21 @@ async function runForecastActualExport() {
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunForecastExport", "ok");
   } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunForecastExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunForecastExport", "fail");
     }
-    setExportButtonState("btnRunForecastExport", "fail");
+  } finally {
+    releaseExportAbortController("btnCancelForecastExport");
   }
 }
 
@@ -7055,18 +7344,24 @@ async function runDayAheadGeneration() {
 }
 
 async function runInverterDataExport() {
+  normalizeExportNumberInput("expInvDataInterval");
   await runExport(
     "inverter-data",
     "expInvDataInv",
     "expInvDataStart",
     "expInvDataEnd",
     "expInvDataResult",
-    {},
+    { intervalMin: normalizeExportNumberInput("expInvDataInterval") || 1 },
     "btnRunInvDataExport",
+    "btnCancelInvDataExport",
   );
 }
 
 async function runDailyReportExport() {
+  normalizeExportDatePair("expReportStart", "expReportEnd", {
+    forceDefault: true,
+    preferred: "start",
+  });
   await persistExportUiState().catch(() => {});
   let start = $("expReportStart").value;
   let end = $("expReportEnd").value;
@@ -7089,20 +7384,23 @@ async function runDailyReportExport() {
     res.textContent = "Exporting…";
   }
   setExportButtonState("btnRunDailyReportExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelDailyReportExport", controller);
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   try {
-    if (start) {
-      await api(
-        `/api/report/daily?date=${encodeURIComponent(start)}&refresh=1`,
-        "GET",
-      );
-    }
-    const r = await api("/api/export/daily-report", "POST", {
-      startTs,
-      endTs,
-      format,
-    });
+    const body =
+      start && end && start === end
+        ? { date: start, format }
+        : { startTs, endTs, format };
+    const r = await api(
+      "/api/export/daily-report",
+      "POST",
+      body,
+      {
+        signal: controller.signal,
+      },
+    );
     if (!r?.path) throw new Error("Export did not return output path.");
     if (res) {
       res.className = "exp-result";
@@ -7111,11 +7409,21 @@ async function runDailyReportExport() {
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunDailyReportExport", "ok");
   } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunDailyReportExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunDailyReportExport", "fail");
     }
-    setExportButtonState("btnRunDailyReportExport", "fail");
+  } finally {
+    releaseExportAbortController("btnCancelDailyReportExport");
   }
 }
 
@@ -7654,6 +7962,7 @@ function bindEventHandlers() {
       "expAlarmResult",
       {},
       "btnExportAlarms",
+      "btnCancelAlarmExport",
     ));
   $("btnRunEnergyExport")?.addEventListener("click", runEnergyExport);
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
@@ -7667,8 +7976,27 @@ function bindEventHandlers() {
       "expAuditResult",
       {},
       "btnExportAudit",
+      "btnCancelAuditExport",
     ));
   $("btnRunDailyReportExport")?.addEventListener("click", runDailyReportExport);
+  $("btnCancelAlarmExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelAlarmExport", "expAlarmResult"),
+  );
+  $("btnCancelEnergyExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelEnergyExport", "expEnergyResult"),
+  );
+  $("btnCancelForecastExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelForecastExport", "expForecastResult"),
+  );
+  $("btnCancelInvDataExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelInvDataExport", "expInvDataResult"),
+  );
+  $("btnCancelAuditExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelAuditExport", "expAuditResult"),
+  );
+  $("btnCancelDailyReportExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelDailyReportExport", "expReportResult"),
+  );
 
   // Settings page
   $("btnSolcastSaveTest")?.addEventListener("click", saveAndTestSolcast);

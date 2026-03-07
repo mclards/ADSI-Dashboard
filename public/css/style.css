@@ -2494,7 +2494,7 @@ label[data-required]::after {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  padding: 0;
+  padding: 12px;
   overflow: auto;
 }
 
@@ -2551,32 +2551,6 @@ label[data-required]::after {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-}
-
-.analytics-chart-pager {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
-.analytics-chart-pager-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.analytics-chart-page-meta {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text2);
-  text-align: center;
-}
-
-.analytics-chart-page-btn {
-  min-width: 72px;
-  justify-content: center;
 }
 
 .analytics-side-item {
@@ -3049,6 +3023,17 @@ label[data-required]::after {
   line-height: 1.5;
 }
 
+.exp-note {
+  margin-top: -2px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px dashed var(--border2);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 10px;
+  color: var(--text2);
+  line-height: 1.45;
+}
+
 .exp-form {
   display: flex;
   flex-direction: column;
@@ -3081,6 +3066,27 @@ label[data-required]::after {
 
 .exp-card .btn-full {
   margin-top: auto;
+}
+
+.exp-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.exp-actions .btn {
+  min-width: 0;
+}
+
+.exp-actions .btn-full {
+  width: 100%;
+  margin-top: 0;
+}
+
+.exp-cancel-btn {
+  min-width: 104px;
+  justify-content: center;
 }
 
 .exp-result.error {
@@ -3588,6 +3594,19 @@ label[data-required]::after {
   color: var(--text2);
   line-height: 1.4;
 }
+.side-about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--cyan);
+  text-decoration: none;
+  width: fit-content;
+}
+.side-about-link:hover {
+  color: var(--accent);
+}
 .side-about-sep {
   height: 1px;
   background: var(--border2);
@@ -3623,6 +3642,21 @@ label[data-required]::after {
   font-size: 9.5px;
   color: var(--text2);
   line-height: 1.4;
+}
+.side-about-inline-status {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.side-about-inline-status.ok {
+  color: var(--green);
+}
+.side-about-inline-status.warn {
+  color: var(--orange);
+}
+.side-about-inline-status.error {
+  color: var(--red);
 }
 .side-about-db {
   font-size: 9px;
@@ -4016,6 +4050,10 @@ label[data-required]::after {
   line-height: 1.48;
 }
 
+#page-export .exp-note {
+  font-size: 10px;
+}
+
 #page-export .exp-form {
   gap: 8px;
 }
@@ -4028,6 +4066,20 @@ label[data-required]::after {
   min-height: 18px;
   padding-top: 2px;
   font-size: 10px;
+}
+
+#page-export .exp-actions {
+  align-items: stretch;
+}
+
+@media (max-width: 430px) {
+  .exp-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-cancel-btn {
+    min-width: 0;
+  }
 }
 
 #page-settings .srow label.chk-inline {
