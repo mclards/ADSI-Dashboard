@@ -3587,12 +3587,12 @@ function buildBulkControlPanel() {
         <div class="bulk-range-helper">Accepts single values, ranges, or both. Duplicate inverter numbers are blocked.</div>
       </div>
       <div class="bulk-action-group">
-        <button class="btn btn-outline" onclick="fillAllCommandTargets()">All Inverters</button>
-        <button class="btn btn-outline" onclick="clearCommandTargets()">Clear</button>
+        <button id="btnFillAllTargets" class="btn btn-outline">All Inverters</button>
+        <button id="btnClearTargets" class="btn btn-outline">Clear</button>
       </div>
       <div class="bulk-action-group bulk-action-primary">
-        <button class="btn btn-green" onclick="sendSelectedNodes(1)">START SELECTED</button>
-        <button class="btn btn-red" onclick="sendSelectedNodes(0)">STOP SELECTED</button>
+        <button id="btnStartSelected" class="btn btn-green">START SELECTED</button>
+        <button id="btnStopSelected" class="btn btn-red">STOP SELECTED</button>
       </div>
     </div>`;
   return wrap;
@@ -3615,8 +3615,8 @@ function buildInverterCard(inv, nodeCount) {
     </div>
     <div class="card-pac">
       <div class="pac-controls">
-        <button class="card-ctrl-btn start" onclick="sendAllNodesInv(${inv},1)">Start</button>
-        <button class="card-ctrl-btn stop" onclick="sendAllNodesInv(${inv},0)">Stop</button>
+        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start">Start</button>
+        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop">Stop</button>
       </div>
       <div class="pac-cell">
         <div class="pac-label">DC POWER</div>
@@ -3664,10 +3664,11 @@ function buildNodeRows(inv, nodeCount) {
         <td class="mono text-muted" id="rts-${inv}-${n}">—</td>
         <td class="ctrl-cell">
           <button class="${btnClass}" id="nbtn-${inv}-${n}"
+            data-inv="${inv}"
             data-node="${n}"
             title="${btnTitle}"
             aria-label="${btnAria}"
-            onclick="toggleNode(${inv},${n},this)" ${nodeConfigured ? "" : "disabled"}>${btnText}</button>
+            ${nodeConfigured ? "" : "disabled"}>${btnText}</button>
         </td>
       </tr>`;
   }
@@ -4787,7 +4788,7 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
   item.innerHTML = `
     <div class="toast-hdr">
       <span class="toast-title">${sevLabel}</span>
-      <button class="toast-close" onclick="this.parentElement.parentElement.remove()">✕</button>
+      <button class="toast-close" aria-label="Dismiss">✕</button>
     </div>
     <div class="toast-body">${html}</div>
     <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
@@ -4960,7 +4961,7 @@ function renderAlarmTable(rows) {
         : '<span class="status-active">ACTIVE</span>';
     const ackBtn = r.acknowledged
       ? '<button class="ack-btn acked" disabled>✔ ACK</button>'
-      : `<button class="ack-btn" onclick="ackAlarm(${r.id},this)">ACK</button>`;
+      : `<button class="ack-btn" data-alarm-id="${r.id}">ACK</button>`;
     const tr = el("tr");
     tr.id = `alarm-row-${r.id}`;
     tr.innerHTML = `
@@ -6565,18 +6566,18 @@ function ensureAnalyticsCards() {
         />
         <div class="analytics-gen-actions">
           <button
+            id="btnDayAheadGenerate"
             class="btn btn-accent analytics-gen-btn"
             type="button"
             title="Generate day-ahead forecast from the selected date."
-            onclick="runDayAheadGeneration()"
           >
             Generate
           </button>
           <button
+            id="btnDayAheadExport"
             class="btn btn-outline analytics-gen-btn analytics-gen-export-btn"
             type="button"
             title="Export day-ahead vs actual for the selected date and chart interval."
-            onclick="runAnalyticsDayAheadExport()"
           >
             Export
           </button>
@@ -8126,6 +8127,46 @@ function bindEventHandlers() {
   $("btnClearRestoreDate")?.addEventListener("click", () => { if ($("cbRestoreDate")) { $("cbRestoreDate").value = ""; cbRefreshHistory(); } });
   $("cbOneDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade") || window.open("https://portal.azure.com"); });
   $("cbGDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://console.cloud.google.com/apis/credentials") || window.open("https://console.cloud.google.com"); });
+
+  // Bulk command form (static-param buttons built in buildBulkCommandTpl)
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.id === "btnFillAllTargets") { fillAllCommandTargets(); return; }
+    if (t.id === "btnClearTargets")   { clearCommandTargets();   return; }
+    if (t.id === "btnStartSelected")  { sendSelectedNodes(1);    return; }
+    if (t.id === "btnStopSelected")   { sendSelectedNodes(0);    return; }
+  });
+
+  // Inverter grid — card start/stop and node toggle buttons (event delegation)
+  $("invGrid")?.addEventListener("click", (e) => {
+    const ctrlBtn = e.target.closest(".card-ctrl-btn[data-inv]");
+    if (ctrlBtn) {
+      sendAllNodesInv(Number(ctrlBtn.dataset.inv), ctrlBtn.dataset.action === "start" ? 1 : 0);
+      return;
+    }
+    const nodeBtn = e.target.closest("button[data-inv][data-node]");
+    if (nodeBtn && !nodeBtn.disabled) {
+      toggleNode(Number(nodeBtn.dataset.inv), Number(nodeBtn.dataset.node), nodeBtn);
+    }
+  });
+
+  // Alarm table — ACK button (event delegation)
+  $("alarmBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ack-btn:not([disabled])");
+    if (btn) ackAlarm(Number(btn.dataset.alarmId), btn);
+  });
+
+  // Toast close (event delegation on toast container)
+  $("alarmToast")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".toast-close");
+    if (btn) btn.closest(".toast-item")?.remove();
+  });
+
+  // Analytics day-ahead buttons (delegated on page container; rendered lazily by ensureAnalyticsCards)
+  $("page-analytics")?.addEventListener("click", (e) => {
+    if (e.target.id === "btnDayAheadGenerate") { runDayAheadGeneration();    return; }
+    if (e.target.id === "btnDayAheadExport")   { runAnalyticsDayAheadExport(); }
+  });
 
   // Alarm sound toggle
   $("btnAlarmSound")?.addEventListener("click", toggleAlarmSound);
