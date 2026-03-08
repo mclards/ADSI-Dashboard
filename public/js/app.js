@@ -4004,7 +4004,7 @@ function updateInverterCards() {
   const mncEl = $("metricNodeCount");
   if (mncEl) mncEl.textContent = activeNodes;
   const mntEl = $("metricNodeTotal");
-  if (mntEl) mntEl.textContent = `/ ${totalNodes}`;
+  if (mntEl) mntEl.textContent = `/ ${invCount * nodeCount}`; // designed total, not configured-only
   renderTodayKwhFromPac();
 }
 
