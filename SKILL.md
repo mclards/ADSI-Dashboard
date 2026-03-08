@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.13` in `package.json`
+- Current repo version baseline: `2.2.16` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -241,6 +241,18 @@ If a visible product rename affects install directory behavior, assess updater i
   - can run replication workflows
   - must not run day-ahead generation
 
+## Operator Messaging Rules
+
+- The operator messaging panel is a compact two-machine note channel between `gateway` and `remote`.
+- Canonical operator messages are stored only on the gateway in `chat_messages`.
+- The browser should always call its own local `/api/chat/*` routes. In `remote` mode, the local server is responsible for forwarding to the gateway.
+- Remote inbound messaging is transport-only polling. It must use monotonic `id` cursors and must not mark rows as read during background fetches.
+- `read_ts` should only change when the operator actually opens or reads the thread.
+- Keep the messaging UI operational and discreet:
+  - short plain-text notes only
+  - no token, transport, or server-internal wording exposed in the renderer
+  - no overlap with the alarm notification control
+
 ## Current Metrics Guardrails
 
 - Expected full inverter node count: `4`
@@ -282,6 +294,29 @@ Functions: `clearInverterDetail()`, `loadInverterDetail(inv)`, `renderInverterDe
 - On day rollover inside `startClock()` tick (compares `dateStr(now)` to `State.lastDateInitDay`)
 
 Day rollover also clears `State.tabFetchTs` and all tab row caches so data re-fetches on next tab visit.
+
+### Startup Tab Prefetch
+
+`prefetchAllTabs()` fires 2 s after startup and runs `fetchAlarms / fetchReport / fetchAudit / fetchEnergy` in parallel so the first tab switch renders instantly from cache. `TAB_STALE_MS` is set to `60000` (60 s). Called at the end of `init()`.
+
+### PAC Indicator Thresholds
+
+Each inverter node has a 6×14 px colored bar (`getPacRowClass()`) based on `NODE_RATED_W = 249,250 W`:
+- ≥ 90% rated → `.row-pac-high` (green, #00cf00) — **High**
+- > 70% rated  → `.row-pac-mid`  (yellow, #ffff00) — **Moderate**
+- > 40% rated  → `.row-pac-low`  (orange, #ffa500) — **Mild**
+- ≤ 40% rated  → `.row-pac-off`  (red, #ff0000) — **Low**
+- Alarm active → blink animation — **Alarm**
+
+A compact static legend (`.pac-legend-wrap`) sits in the inverter toolbar between the layout selector and the counters.
+
+### App Confirm Modal (replaces native `window.confirm`)
+
+`appConfirm(title, bodyText, { ok, cancel })` → `Promise<boolean>`. Renders `#appConfirmModal` (`.modal-backdrop` + `.confirm-dialog`) with a title, body (paragraphs split on `\n\n`), and labelled OK/Cancel buttons. Supports Escape (cancel), Enter (confirm), backdrop click (cancel). `initConfirmModal()` called from `init()`. All `confirm()` / `window.confirm()` calls in `app.js` replaced with `await appConfirm(...)`. All `alert()` calls replaced with `showToast(...)`.
+
+### Availability Computation
+
+Availability for today is computed live via `getDailyReportRowsForDay(today, { includeTodayPartial: true })`. The `/api/report/daily?start&end` range endpoint detects when today falls in the requested range and splices in the live result rather than serving the stale persisted row. The detail panel 60 s refresh timer fetches `/api/report/daily?date=<today>` and merges the fresh rows into `State.invDetailReportRows` so the availability chip stays current.
 
 ### Weather Offline Hardening
 

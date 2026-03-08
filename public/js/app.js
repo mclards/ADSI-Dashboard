@@ -165,6 +165,17 @@ const State = {
     checkedAt: 0,
     error: "",
   },
+  chatOpen: false,
+  chatUnread: 0,
+  chatMessages: [],
+  chatDismissTimer: null,
+  chatLastReadId: 0,
+  chatLastInboundId: 0,
+  chatPendingSend: false,
+  chatAudioReady: false,
+  chatReadInFlight: false,
+  chatPendingReadUpToId: 0,
+  chatHistoryLoaded: false,
   clockTimer: null,
   alarmBadgeTimer: null,
   replicationHealthTimer: null,
@@ -188,7 +199,7 @@ const State = {
   invDetailReportRows: [],  // cached report rows for live chip refresh
   invDetailRefreshTimer: null, // setInterval ref for periodic kWh refresh
 };
-const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
+const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re-fetch after that
 const MAX_INV_UNITS = 4;
 const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
 const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
@@ -204,6 +215,8 @@ const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
+const CHAT_THREAD_LIMIT = 20;
+const CHAT_DISMISS_MS = 30000;
 const SETTINGS_SECTION_IDS = [
   "plantConfigSection",
   "opsCompactSection",
@@ -217,31 +230,31 @@ const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const SETTINGS_SECTION_META = {
   plantConfigSection: {
     title: "Plant Configuration",
-    copy: "Configure the plant identity, scale, and core operating values for this dashboard.",
+    copy: "Review site identity, fleet sizing, and the core values used across the dashboard.",
   },
   opsCompactSection: {
     title: "Data & Polling",
-    copy: "Review data endpoints, export storage, and Modbus polling timing in one place.",
+    copy: "Review operational endpoints, export storage, and polling timing from one controlled section.",
   },
   connectivitySection: {
     title: "Connectivity & Sync",
-    copy: "Choose gateway or remote mode, then manage replication and runtime diagnostics.",
+    copy: "Define gateway or remote operation, then review synchronization and runtime health.",
   },
   forecastSection: {
     title: "Forecast",
-    copy: "Manage forecast provider settings and test the configured integration.",
+    copy: "Manage the forecast source and validate configured provider access.",
   },
   licenseSection: {
     title: "License",
-    copy: "Review license validity, expiry, and audit history, then replace the active license if needed.",
+    copy: "Review entitlement state, remaining term, and license activity, then replace the current file when needed.",
   },
   appUpdateSection: {
     title: "App Updates",
-    copy: "Check the installed version, compare release status, and run update actions from here.",
+    copy: "Review the installed build, compare it with the release channel, and run update actions from here.",
   },
   cloudBackupSection: {
     title: "Cloud Backup",
-    copy: "Configure providers, backup scope, restore actions, and cloud backup history.",
+    copy: "Configure approved providers, backup scope, restore actions, and backup history.",
   },
 };
 const SETTINGS_CONFIG_KIND = "adsi-settings-config";
@@ -515,7 +528,7 @@ function renderLicenseAuditRows() {
   if (!tbody) return;
   const rows = Array.isArray(State.licenseAudit) ? State.licenseAudit : [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="table-empty"><td colspan="4">No license audit entries.</td></tr>';
+    tbody.innerHTML = '<tr class="table-empty"><td colspan="4">No license activity recorded.</td></tr>';
     return;
   }
   tbody.innerHTML = rows
@@ -1632,6 +1645,7 @@ function getOrCreateAlarmAudioCtx() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return null;
     State.alarmAudioCtx = new Ctx();
+    State.chatAudioReady = State.alarmAudioCtx.state === "running";
     return State.alarmAudioCtx;
   } catch (err) {
     console.warn("[app] AudioContext creation failed:", err.message);
@@ -1926,6 +1940,9 @@ async function api(url, method = "GET", body, options = {}) {
       ) {
         detailedMsg = String(rawMsg || detailedMsg);
       }
+      if (url.includes("/api/chat/")) {
+        detailedMsg = String(rawMsg || detailedMsg);
+      }
       throw new Error(String(detailedMsg));
     }
     ok = true;
@@ -2002,7 +2019,7 @@ async function openExportFolder() {
     return;
   }
 
-  alert(`Export folder: ${p}`);
+  showToast(`Export folder: ${p}`, "success", 5000);
 }
 
 function openLogsFolder() {
@@ -2054,24 +2071,24 @@ function syncDayAheadGeneratorAvailability() {
     input.disabled = isClient;
     input.readOnly = isClient;
     input.title = isClient
-      ? "Day-ahead generation is available on Gateway mode only."
+      ? "Day-ahead generation is available only in Gateway mode."
       : "";
   }
   if (btn) {
     btn.disabled = isClient;
     btn.setAttribute("aria-disabled", isClient ? "true" : "false");
     btn.title = isClient
-      ? "Unavailable in Client mode. Use the Gateway server to generate day-ahead."
+      ? "Unavailable in Remote mode. Use the gateway workstation to generate the day-ahead forecast."
       : "";
   }
   if (res) {
     if (isClient) {
       res.className = "exp-result";
       res.textContent =
-        "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.";
+        "Day-ahead generation is unavailable in Remote mode. Run it from the gateway workstation.";
     } else if (
       res.textContent &&
-      /disabled in Client mode/i.test(String(res.textContent))
+      /unavailable in Remote mode/i.test(String(res.textContent))
     ) {
       res.textContent = "";
     }
@@ -2081,7 +2098,7 @@ function syncDayAheadGeneratorAvailability() {
 function notifyClientModeUnavailable(featureLabel) {
   const safeFeature = String(featureLabel || "This feature");
   showToast(
-    `${safeFeature} is unavailable in Client mode. Switch to Gateway mode in Settings.`,
+    `${safeFeature} is available only in Gateway mode. Change Operation Mode in Settings to continue.`,
     "warning",
     4200,
   );
@@ -2745,8 +2762,8 @@ async function exportSettingsConfig() {
       return;
     }
     const exportMsg = containsSecrets
-      ? "✔ Settings config exported. Treat the file as sensitive. Stored Google client secret and cloud sessions were excluded."
-      : "✔ Settings config exported. Stored Google client secret and cloud sessions were excluded.";
+      ? "✔ Settings file exported. Treat it as restricted configuration data. Stored Google client secret and active cloud sessions were not included."
+      : "✔ Settings file exported. Stored Google client secret and active cloud sessions were not included.";
     showMsg("settingsMsg", exportMsg, "");
   } catch (err) {
     showMsg("settingsMsg", `✗ Export failed: ${err.message}`, "error");
@@ -2759,24 +2776,22 @@ async function importSettingsConfig() {
     if (!picked?.content) return;
     const bundle = parseSettingsConfigPayload(picked.content);
     const confirmLines = [
-      "Import this settings config and overwrite the current settings?",
+      "Import this settings file and replace the current configuration?",
     ];
     if (bundle.containsSecrets) {
       confirmLines.push(
-        "This file may contain API credentials. Keep it private.",
+        "This file may contain operational credentials. Handle it as restricted configuration data.",
       );
     }
     if (bundle.cloudBackupSettings) {
       confirmLines.push(
-        "Cloud providers will be disconnected after import. Stored Google client secret is not included in exported files and must be re-entered separately if needed.",
+        "Cloud providers will be disconnected after import. The stored Google client secret is never included in exported files and must be entered again if required.",
       );
     }
-    const ok = window.confirm(
-      confirmLines.join("\n\n"),
-    );
+    const ok = await appConfirm("Import Settings", confirmLines.join("\n\n"), { ok: "Import" });
     if (!ok) return;
 
-    showMsg("settingsMsg", "Importing settings config...", "");
+    showMsg("settingsMsg", "Importing settings file...", "");
     const applied = await applySettingsConfigBundle(bundle, {
       reason: "importSettingsConfig",
       disconnectCloud: Boolean(bundle.cloudBackupSettings),
@@ -2784,8 +2799,8 @@ async function importSettingsConfig() {
     showMsg(
       "settingsMsg",
       applied.cloudBackupSettings
-        ? "✔ Config imported. Cloud providers were disconnected; reconnect if needed."
-        : "✔ Config imported",
+        ? "✔ Settings imported. Cloud providers were disconnected; reconnect them when ready."
+        : "✔ Settings imported.",
       "",
     );
   } catch (err) {
@@ -2794,12 +2809,14 @@ async function importSettingsConfig() {
 }
 
 async function resetSettingsToDefaults() {
-  const ok = window.confirm(
-    "Reset all dashboard settings and cloud backup configuration to defaults?\n\nThis will disconnect cloud providers and clear the stored Google client secret.",
+  const ok = await appConfirm(
+    "Restore Defaults",
+    "Restore dashboard settings and cloud backup configuration to their default values?\n\nThis will disconnect cloud providers and remove the stored Google client secret.",
+    { ok: "Restore" },
   );
   if (!ok) return;
 
-  showMsg("settingsMsg", "Resetting settings to defaults...", "");
+  showMsg("settingsMsg", "Restoring default settings...", "");
   try {
     const defaults = await api("/api/settings/defaults");
     const bundle = {
@@ -2815,7 +2832,7 @@ async function resetSettingsToDefaults() {
     });
     showMsg(
       "settingsMsg",
-      "✔ Settings reset to defaults. Cloud providers were disconnected and the stored Google client secret was cleared.",
+      "✔ Default settings restored. Cloud providers were disconnected and the stored Google client secret was removed.",
       "",
     );
   } catch (err) {
@@ -2847,6 +2864,7 @@ async function handleOperationModeTransition(
   State.analyticsDailyTotalMwh = null;
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
+  resetChatState();
   scheduleInverterCardsUpdate(true);
 
   // Re-seed canonical today MWh for the new mode source.
@@ -2872,6 +2890,10 @@ async function handleOperationModeTransition(
       console.warn("[app] mode transition energy refresh failed:", err?.message || err);
     });
   }
+
+  await loadChatHistory({ silent: true }).catch((err) => {
+    console.warn("[app] mode transition chat refresh failed:", err?.message || err);
+  });
 }
 
 async function saveSettings() {
@@ -3142,8 +3164,10 @@ async function promptReplicationRestart(job) {
   if (State.replication.restartPromptedJobId === j.id) return;
   State.replication.restartPromptedJobId = j.id;
   const summary = String(j.summary || "").trim();
-  const ok = window.confirm(
+  const ok = await appConfirm(
+    "Replication Complete",
     `Replication finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
+    { ok: "Restart Now", cancel: "Later" },
   );
   if (!ok) return;
   try {
@@ -3437,15 +3461,14 @@ function ensureRemoteModeForReplicationActions() {
 async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
-  if (
-    !window.confirm(
-      includeArchive
-        ? "Start background pull from server now?\n\nThis will sync replicated hot tables first, then monthly archive DB files from the gateway while you continue using the dashboard.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
-        : "Start background pull from server now?\n\nThis will sync replicated hot tables from the gateway while you continue using the dashboard.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
-    )
-  ) {
-    return;
-  }
+  const _pullOk = await appConfirm(
+    "Start Background Pull",
+    includeArchive
+      ? "Start background pull from server now?\n\nThis will sync replicated hot tables first, then monthly archive DB files from the gateway while you continue using the dashboard.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
+      : "Start background pull from server now?\n\nThis will sync replicated hot tables from the gateway while you continue using the dashboard.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
+    { ok: "Start Pull" },
+  );
+  if (!_pullOk) return;
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
@@ -3476,15 +3499,14 @@ async function runReplicationPullNow() {
 async function runReplicationPushNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
-  if (
-    !window.confirm(
-      includeArchive
-        ? "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway first, uploads monthly archive DB files when needed, then pulls the final gateway state back for consistency.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
-        : "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway, then pulls the final gateway state back for consistency.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
-    )
-  ) {
-    return;
-  }
+  const _pushOk = await appConfirm(
+    "Start Background Push",
+    includeArchive
+      ? "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway first, uploads monthly archive DB files when needed, then pulls the final gateway state back for consistency.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
+      : "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway, then pulls the final gateway state back for consistency.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
+    { ok: "Start Push" },
+  );
+  if (!_pushOk) return;
 
   const btn = $("btnRunReplicationPush");
   if (btn) btn.disabled = true;
@@ -3587,6 +3609,397 @@ function currentOperator() {
   return fromInput || "OPERATOR";
 }
 
+function currentChatMachine() {
+  return normalizeOperationModeValue(State.settings.operationMode);
+}
+
+function normalizeChatMachineClient(value, def = "gateway") {
+  return String(value || def).trim().toLowerCase() === "remote"
+    ? "remote"
+    : "gateway";
+}
+
+function isChatInboundRow(row, machine = currentChatMachine()) {
+  const ownMachine = normalizeChatMachineClient(machine, currentChatMachine());
+  return (
+    !!row &&
+    normalizeChatMachineClient(row.to_machine, ownMachine) === ownMachine &&
+    normalizeChatMachineClient(row.from_machine, ownMachine) !== ownMachine
+  );
+}
+
+function sanitizeChatRowClient(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = Math.max(0, Math.trunc(Number(row.id || 0)));
+  if (!id) return null;
+  const fromMachine = normalizeChatMachineClient(row.from_machine, "gateway");
+  const toMachine = normalizeChatMachineClient(
+    row.to_machine,
+    fromMachine === "remote" ? "gateway" : "remote",
+  );
+  return {
+    id,
+    ts: Math.max(0, Math.trunc(Number(row.ts || 0))),
+    from_machine: fromMachine,
+    to_machine: toMachine,
+    from_name: String(row.from_name || "").trim().slice(0, 160),
+    message: String(row.message || ""),
+    read_ts:
+      row.read_ts == null || row.read_ts === ""
+        ? null
+        : Math.max(0, Math.trunc(Number(row.read_ts || 0))),
+  };
+}
+
+function syncChatRuntimeFromRows() {
+  const machine = currentChatMachine();
+  let lastInboundId = 0;
+  let lastReadId = 0;
+  let unread = 0;
+  for (const row of State.chatMessages) {
+    if (normalizeChatMachineClient(row.to_machine, machine) !== machine) continue;
+    lastInboundId = Math.max(lastInboundId, Number(row.id || 0));
+    if (row.read_ts) lastReadId = Math.max(lastReadId, Number(row.id || 0));
+    else unread += 1;
+  }
+  State.chatLastInboundId = lastInboundId;
+  State.chatLastReadId = Math.max(Number(State.chatLastReadId || 0), lastReadId);
+  State.chatUnread = State.chatOpen ? 0 : unread;
+}
+
+function mergeChatRows(rows) {
+  const merged = new Map();
+  for (const row of State.chatMessages || []) {
+    const normalized = sanitizeChatRowClient(row);
+    if (normalized) merged.set(normalized.id, normalized);
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const normalized = sanitizeChatRowClient(row);
+    if (!normalized) continue;
+    const prev = merged.get(normalized.id);
+    if (!prev) {
+      merged.set(normalized.id, normalized);
+      continue;
+    }
+    merged.set(normalized.id, {
+      ...prev,
+      ...normalized,
+      read_ts: normalized.read_ts || prev.read_ts || null,
+    });
+  }
+  State.chatMessages = Array.from(merged.values())
+    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+    .slice(-CHAT_THREAD_LIMIT);
+  syncChatRuntimeFromRows();
+  return State.chatMessages;
+}
+
+function renderChatBadge() {
+  const badge = $("chatBadge");
+  if (!badge) return;
+  const count = Math.max(0, Math.trunc(Number(State.chatUnread || 0)));
+  if (count > 0) {
+    badge.hidden = false;
+    badge.textContent = count > 99 ? "99+" : String(count);
+  } else {
+    badge.hidden = true;
+    badge.textContent = "0";
+  }
+}
+
+function renderChatSendState() {
+  const btn = $("chatSend");
+  const input = $("chatInput");
+  if (btn) {
+    btn.disabled = !!State.chatPendingSend;
+    btn.textContent = State.chatPendingSend ? "Sending..." : "Send";
+  }
+  if (input) input.disabled = !!State.chatPendingSend;
+}
+
+function renderChatThread() {
+  const thread = $("chatThread");
+  if (!thread) return;
+  thread.textContent = "";
+  const rows = Array.isArray(State.chatMessages) ? State.chatMessages : [];
+  if (!rows.length) {
+    const empty = el("div", "chat-empty");
+    empty.textContent = "No recent operator messages.";
+    thread.appendChild(empty);
+    return;
+  }
+  const machine = currentChatMachine();
+  for (const row of rows) {
+    const self = normalizeChatMachineClient(row.from_machine, machine) === machine;
+    const item = el("div", `chat-message${self ? " is-self" : ""}`);
+    const meta = el("div", "chat-message-meta");
+    const sender =
+      self
+        ? "You"
+        : String(row.from_name || "").trim() ||
+          (normalizeChatMachineClient(row.from_machine, "gateway") === "gateway"
+            ? "Gateway"
+            : "Remote");
+    meta.textContent = `${sender} • ${fmtDateTime(row.ts)}`;
+    const body = el("div", "chat-message-body");
+    body.textContent = String(row.message || "");
+    item.appendChild(meta);
+    item.appendChild(body);
+    thread.appendChild(item);
+  }
+  if (State.chatOpen) {
+    requestAnimationFrame(() => {
+      thread.scrollTop = thread.scrollHeight;
+    });
+  }
+}
+
+function clearChatDismissTimer() {
+  if (State.chatDismissTimer) {
+    clearTimeout(State.chatDismissTimer);
+    State.chatDismissTimer = null;
+  }
+}
+
+function chatHasProtectedDraft() {
+  const input = $("chatInput");
+  if (!input) return false;
+  return document.activeElement === input && String(input.value || "").trim().length > 0;
+}
+
+function resetChatDismissTimer() {
+  clearChatDismissTimer();
+  if (!State.chatOpen) return;
+  if (State.chatPendingSend) return;
+  if (chatHasProtectedDraft()) return;
+  State.chatDismissTimer = setTimeout(() => {
+    closeChatPanel();
+  }, CHAT_DISMISS_MS);
+}
+
+function openChatPanel() {
+  const panel = $("chatPanel");
+  const bubble = $("chatBubble");
+  if (!panel || !bubble) return;
+  State.chatOpen = true;
+  panel.classList.add("chat-panel--open");
+  panel.setAttribute("aria-hidden", "false");
+  bubble.setAttribute("aria-expanded", "true");
+  State.chatUnread = 0;
+  renderChatBadge();
+  renderChatThread();
+  markChatRead().catch((err) => {
+    console.warn("[chat] mark read failed:", err.message);
+  });
+  resetChatDismissTimer();
+}
+
+function closeChatPanel() {
+  const panel = $("chatPanel");
+  const bubble = $("chatBubble");
+  if (!panel || !bubble) return;
+  State.chatOpen = false;
+  panel.classList.remove("chat-panel--open");
+  panel.setAttribute("aria-hidden", "true");
+  bubble.setAttribute("aria-expanded", "false");
+  clearChatDismissTimer();
+}
+
+async function loadChatHistory(options = {}) {
+  try {
+    const payload = await api(
+      `/api/chat/messages?mode=thread&limit=${CHAT_THREAD_LIMIT}`,
+      "GET",
+      null,
+      { progress: false },
+    );
+    mergeChatRows(payload?.rows);
+    State.chatHistoryLoaded = true;
+    renderChatBadge();
+    renderChatThread();
+    if (State.chatOpen) {
+      await markChatRead();
+      resetChatDismissTimer();
+    }
+    return State.chatMessages;
+  } catch (err) {
+    State.chatHistoryLoaded = false;
+    if (!options?.silent) {
+      console.warn("[chat] history load failed:", err.message);
+    }
+    return [];
+  }
+}
+
+async function markChatRead(forcedUpToId = 0) {
+  const machine = currentChatMachine();
+  let upToId = Math.max(0, Math.trunc(Number(forcedUpToId || 0)));
+  for (const row of State.chatMessages || []) {
+    if (!isChatInboundRow(row, machine)) continue;
+    upToId = Math.max(upToId, Number(row.id || 0));
+  }
+  if (!upToId || upToId <= Number(State.chatLastReadId || 0)) {
+    State.chatUnread = 0;
+    renderChatBadge();
+    return 0;
+  }
+  if (State.chatReadInFlight) {
+    State.chatPendingReadUpToId = Math.max(
+      Number(State.chatPendingReadUpToId || 0),
+      upToId,
+    );
+    return 0;
+  }
+  State.chatReadInFlight = true;
+  try {
+    const payload = await api(
+      "/api/chat/read",
+      "POST",
+      { upToId },
+      { progress: false },
+    );
+    const readTs = Date.now();
+    State.chatLastReadId = Math.max(Number(State.chatLastReadId || 0), upToId);
+    State.chatMessages = (State.chatMessages || []).map((row) => {
+      if (!isChatInboundRow(row, machine)) return row;
+      if (Number(row.id || 0) > upToId) return row;
+      if (row.read_ts) return row;
+      return {
+        ...row,
+        read_ts: readTs,
+      };
+    });
+    State.chatUnread = 0;
+    renderChatBadge();
+    return Math.max(0, Math.trunc(Number(payload?.updated || 0)));
+  } catch (err) {
+    console.warn("[chat] read sync failed:", err.message);
+    return 0;
+  } finally {
+    State.chatReadInFlight = false;
+    const pending = Math.max(0, Math.trunc(Number(State.chatPendingReadUpToId || 0)));
+    State.chatPendingReadUpToId = 0;
+    if (pending > Number(State.chatLastReadId || 0)) {
+      markChatRead(pending).catch(() => {});
+    }
+  }
+}
+
+function playChatSound() {
+  try {
+    const ctx = getOrCreateAlarmAudioCtx();
+    if (!ctx || ctx.state !== "running") {
+      State.chatAudioReady = false;
+      return;
+    }
+    State.chatAudioReady = true;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.018;
+    gain.connect(ctx.destination);
+    const t0 = ctx.currentTime;
+    [660, 880].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      const startAt = t0 + idx * 0.105;
+      osc.start(startAt);
+      osc.stop(startAt + 0.085);
+    });
+  } catch (err) {
+    console.warn("[chat] sound failed:", err.message);
+  }
+}
+
+function handleIncomingChatMessage(row) {
+  const normalized = sanitizeChatRowClient(row);
+  if (!normalized) return;
+  const hadRow = (State.chatMessages || []).some(
+    (item) => Number(item?.id || 0) === normalized.id,
+  );
+  const inbound = isChatInboundRow(normalized);
+  mergeChatRows([normalized]);
+  renderChatThread();
+  renderChatBadge();
+  if (!hadRow && inbound) {
+    openChatPanel();
+    playChatSound();
+  } else if (State.chatOpen && inbound) {
+    markChatRead(normalized.id).catch((err) => {
+      console.warn("[chat] mark read failed:", err.message);
+    });
+  }
+  resetChatDismissTimer();
+}
+
+async function sendChatMessage() {
+  const input = $("chatInput");
+  if (!input || State.chatPendingSend) return;
+  const draft = String(input.value || "").replace(/\r\n?/g, "\n");
+  const message = draft.trim();
+  if (!message) {
+    input.value = message;
+    resetChatDismissTimer();
+    return;
+  }
+  if (message.length > 500) {
+    showToast("Message must be 500 characters or fewer.", "warning", 3200);
+    return;
+  }
+  State.chatPendingSend = true;
+  renderChatSendState();
+  try {
+    const payload = await api(
+      "/api/chat/send",
+      "POST",
+      { message },
+      { progress: false },
+    );
+    const row = sanitizeChatRowClient(payload?.row);
+    if (!row) throw new Error("Chat send completed without a message row.");
+    mergeChatRows([row]);
+    input.value = "";
+    renderChatThread();
+    renderChatBadge();
+    resetChatDismissTimer();
+  } catch (err) {
+    showToast(String(err?.message || "Gateway unavailable. Message not sent."), "warning", 3600);
+  } finally {
+    State.chatPendingSend = false;
+    renderChatSendState();
+    if (State.chatOpen) resetChatDismissTimer();
+  }
+}
+
+function toggleChatPanel() {
+  if (State.chatOpen) {
+    closeChatPanel();
+    return;
+  }
+  openChatPanel();
+  if (!State.chatHistoryLoaded) {
+    loadChatHistory({ silent: true }).catch(() => {});
+  }
+}
+
+function resetChatState() {
+  clearChatDismissTimer();
+  State.chatOpen = false;
+  State.chatUnread = 0;
+  State.chatMessages = [];
+  State.chatLastReadId = 0;
+  State.chatLastInboundId = 0;
+  State.chatPendingSend = false;
+  State.chatReadInFlight = false;
+  State.chatPendingReadUpToId = 0;
+  State.chatHistoryLoaded = false;
+  if ($("chatInput")) $("chatInput").value = "";
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
+  closeChatPanel();
+}
+
 function buildBulkControlPanel() {
   const wrap = el("div", "bulk-control-bar");
   wrap.innerHTML = `
@@ -3602,7 +4015,7 @@ function buildBulkControlPanel() {
           autocomplete="off"
           placeholder="1-13, 16, 18, 23-27"
         />
-        <div class="bulk-range-helper">Accepts single values, ranges, or both. Duplicate inverter numbers are blocked.</div>
+        <div class="bulk-range-helper">Enter individual inverter numbers, ranges, or a combination of both. Duplicate entries are not allowed.</div>
       </div>
       <div class="bulk-action-group">
         <button id="btnFillAllTargets" class="btn btn-outline">All Inverters</button>
@@ -4603,9 +5016,9 @@ async function loadInverterDetail(inv) {
   const statsEl = $("invDetailStats");
   const alarmsEl = $("invDetailAlarms");
   const historyEl = $("invDetailHistory");
-  if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label">Loading ${invLabel}…</span></div>`;
-  if (alarmsEl) alarmsEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
-  if (historyEl) historyEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
+  if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label">Loading ${invLabel} details…</span></div>`;
+  if (alarmsEl) alarmsEl.innerHTML = `<div class="inv-detail-no-data">Loading current activity…</div>`;
+  if (historyEl) historyEl.innerHTML = `<div class="inv-detail-no-data">Loading recent history…</div>`;
 
   const now = Date.now();
   const todayStr = today();
@@ -4658,7 +5071,7 @@ async function loadInverterDetail(inv) {
       } catch (_) { /* silent — stale values stay */ }
     }, 60000);
   } catch (err) {
-    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load: ${err.message}</span></div>`;
+    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Unable to load detail view: ${err.message}</span></div>`;
   } finally {
     State.invDetailLoading = false;
   }
@@ -4681,10 +5094,10 @@ function renderInverterDetailStats(inv) {
   const activeAlarmCount = State.invDetailAlarmRows.filter((r) => !r.cleared_ts).length;
 
   const chips = [
-    { label: "Today's Generation", value: kwh.toFixed(2),               unit: "kWh" },
-    { label: "Current AC Power",   value: (pac / 1000).toFixed(2),      unit: "kW"  },
-    { label: "Availability Today", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
-    { label: "Active Alarms",      value: String(activeAlarmCount),      unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
+    { label: "Today Energy", value: kwh.toFixed(2),               unit: "kWh" },
+    { label: "Live AC Output", value: (pac / 1000).toFixed(2),    unit: "kW"  },
+    { label: "Today Availability", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
+    { label: "Active Alarms", value: String(activeAlarmCount),    unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
   ];
 
   el.innerHTML = chips.map((c) => `
@@ -4701,7 +5114,7 @@ function renderInverterDetailAlarms(alarmRows) {
 
   const rows = alarmRows.slice().sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0)).slice(0, 15);
   if (!rows.length) {
-    el.innerHTML = `<div class="inv-detail-no-data">No alarms today</div>`;
+    el.innerHTML = `<div class="inv-detail-no-data">No alarm activity recorded today.</div>`;
     return;
   }
 
@@ -4710,14 +5123,14 @@ function renderInverterDetailAlarms(alarmRows) {
     return `<span class="inv-detail-sev-pill ${cls}">${sev || "?"}</span>`;
   };
 
-  const thead = `<tr><th>Time</th><th>N</th><th>Code</th><th>Sev</th><th>Status</th></tr>`;
+  const thead = `<tr><th>Time</th><th>Node</th><th>Code</th><th>Severity</th><th>Status</th></tr>`;
   const tbody = rows.map((r) => {
     const ts = fmtDateTime(Number(r.ts || r.occurred_ts || 0));
     const node = r.unit ? `N${r.unit}` : "—";
     const code = r.alarm_code ? String(r.alarm_code).toUpperCase() : "—";
     const status = r.cleared_ts
-      ? `<span class="status-cleared">CLR</span>`
-      : `<span class="status-active">ACT</span>`;
+      ? `<span class="status-cleared">Closed</span>`
+      : `<span class="status-active">Active</span>`;
     return `<tr><td title="${ts}">${ts.slice(11, 19)}</td><td>${node}</td><td class="mono">${code}</td><td>${sevPill(r.severity)}</td><td>${status}</td></tr>`;
   }).join("");
 
@@ -4741,7 +5154,7 @@ function renderInverterDetailHistory(inv, reportRows) {
     .sort((a, b) => (b.date > a.date ? 1 : -1));
 
   if (!rows.length) {
-    el.innerHTML = `<div class="inv-detail-no-data">No daily report data available</div>`;
+    el.innerHTML = `<div class="inv-detail-no-data">No recent daily summary is available.</div>`;
     return;
   }
 
@@ -4957,6 +5370,9 @@ function handleWS(msg) {
   }
   if (msg.type === "replication_job") {
     handleReplicationJobUpdate(msg.job || null);
+  }
+  if (msg.type === "chat") {
+    handleIncomingChatMessage(msg.row);
   }
 }
 
@@ -5229,7 +5645,7 @@ async function ackAlarm(id, btn) {
       showToast("Alarm already acknowledged.", "info", 1800);
     }
   } catch (e) {
-    alert("ACK failed: " + e.message);
+    showToast("ACK failed: " + e.message, "fault", 5000);
   }
 }
 
@@ -5274,7 +5690,7 @@ function sanitizeLiveDataByConfig(rawMap) {
 }
 
 async function ackAll() {
-  if (!confirm("Acknowledge ALL unacknowledged alarms?")) return;
+  if (!await appConfirm("Acknowledge All Alarms", "Acknowledge all active alarms that have not yet been acknowledged?", { ok: "Acknowledge All" })) return;
   try {
     const res = await api("/api/alarms/ack-all", "POST");
     document
@@ -5296,7 +5712,7 @@ async function ackAll() {
       2200,
     );
   } catch (e) {
-    alert("ACK ALL failed: " + e.message);
+    showToast("ACK ALL failed: " + e.message, "fault", 5000);
   }
 }
 
@@ -6304,11 +6720,11 @@ async function exportDailyReport() {
       format,
     });
     if (!r?.path) throw new Error("Export did not return output path.");
-    alert(`Saved to:\n${r.path}`);
+    showToast("Saved to: " + r.path, "success", 5000);
     await openExportPathFolder(r.path);
     setExportButtonState("btnExportDailyReport", "ok");
   } catch (e) {
-    alert("Export error: " + e.message);
+    showToast("Export error: " + e.message, "fault", 5000);
     setExportButtonState("btnExportDailyReport", "fail");
   }
 }
@@ -7590,10 +8006,10 @@ async function runDayAheadGeneration() {
     if (resBlocked) {
       resBlocked.className = "exp-result error";
       resBlocked.textContent =
-        "✗ Unavailable in Client mode. Generate day-ahead on the Gateway server.";
+        "✗ Unavailable in Remote mode. Run day-ahead generation from the gateway workstation.";
     }
     showToast(
-      "Day-ahead generation is disabled in Client mode. Please generate from the Gateway server.",
+      "Day-ahead generation is unavailable in Remote mode. Please generate it from the gateway workstation.",
       "warning",
       4200,
     );
@@ -7745,8 +8161,8 @@ async function openExportPathFolder(filePath) {
 
 /** Lookup table for email domain → suggested provider. */
 const CB_DOMAIN_MAP = [
-  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "Microsoft account detected. OneDrive is the recommended provider." },
-  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "Google account detected. Google Drive is the recommended provider." },
+  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "Microsoft account detected. OneDrive is the recommended backup provider." },
+  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "Google account detected. Google Drive is the recommended backup provider." },
 ];
 
 function cbSuggestProvider(email) {
@@ -7757,7 +8173,7 @@ function cbSuggestProvider(email) {
   for (const { domains, hint: h } of CB_DOMAIN_MAP) {
     if (domains.includes(domain)) { hint.textContent = h; return; }
   }
-  hint.textContent = "Domain not recognized. Select a provider manually or keep Auto.";
+  hint.textContent = "No provider recommendation is available for this domain. Select a provider manually or keep Auto.";
 }
 
 function cbSetProgress(data) {
@@ -7854,7 +8270,7 @@ async function cbRefreshHistory() {
       : history;
 
     if (!filtered.length) {
-      body.innerHTML = '<tr class="table-empty"><td colspan="7">No backup history yet.</td></tr>';
+      body.innerHTML = '<tr class="table-empty"><td colspan="7">No backup activity available.</td></tr>';
       return;
     }
 
@@ -8085,7 +8501,7 @@ async function cbListCloudBackups() {
   showMsg("cbActionMsg", `Listing ${providers.join(" + ")} backups…`, "");
   listSection.hidden = false;
   if (listTitle) listTitle.textContent = `Cloud Backups (${providers.join(" + ")})`;
-  listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Loading…</td></tr>';
+  listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Loading available backup files…</td></tr>';
 
   try {
     const results = await Promise.all(
@@ -8123,8 +8539,8 @@ async function cbListCloudBackups() {
       return tb - ta;
     });
     if (!filtered.length) {
-      listBody.innerHTML = '<tr class="table-empty"><td colspan="3">No cloud backups found.</td></tr>';
-      showMsg("cbActionMsg", errors.length ? `⚠ ${errors.join(" | ")}` : "No cloud backups found.", errors.length ? "error" : "");
+      listBody.innerHTML = '<tr class="table-empty"><td colspan="3">No cloud backups available.</td></tr>';
+      showMsg("cbActionMsg", errors.length ? `⚠ ${errors.join(" | ")}` : "No cloud backups are currently available.", errors.length ? "error" : "");
       return;
     }
     const frag = document.createDocumentFragment();
@@ -8159,7 +8575,7 @@ async function cbListCloudBackups() {
       showMsg("cbActionMsg", `✔ Found ${filtered.length} cloud backup(s)`, "");
     }
   } catch (err) {
-    listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Error loading.</td></tr>';
+    listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Unable to load backup files.</td></tr>';
     showMsg("cbActionMsg", `✗ ${err.message}`, "error");
   }
 }
@@ -8178,7 +8594,7 @@ async function cbPullFromCloud(provider, remoteId, remoteName) {
 }
 
 async function cbRestoreBackup(backupId) {
-  if (!confirm(`Restore backup "${backupId}"?\n\nThis will overwrite the current database and config. A safety backup will be created first.\n\nThe app will need to restart after restore.`)) return;
+  if (!await appConfirm("Restore Backup", `Restore backup "${backupId}"?\n\nThis will overwrite the current database and config. A safety backup will be created first.\n\nThe app will need to restart after restore.`, { ok: "Restore" })) return;
   showMsg("cbActionMsg", "Restore started…", "");
   cbSetProgress({ status: "queued", pct: 5, message: "Restore queued…" });
   $("cbProgressWrap").hidden = false;
@@ -8192,7 +8608,7 @@ async function cbRestoreBackup(backupId) {
 }
 
 async function cbDeleteBackup(backupId) {
-  if (!confirm(`Delete local backup "${backupId}"?\nThis only removes the local copy. Cloud copies are not affected.`)) return;
+  if (!await appConfirm("Delete Backup", `Delete local backup "${backupId}"?\n\nThis only removes the local copy. Cloud copies are not affected.`, { ok: "Delete" })) return;
   try {
     await api(`/api/backup/${encodeURIComponent(backupId)}`, "DELETE");
     showMsg("cbActionMsg", "✔ Backup deleted", "");
@@ -8318,12 +8734,14 @@ function bindEventHandlers() {
   );
   $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
   $("btnRunReplicationPush")?.addEventListener("click", runReplicationPushNow);
-  $("setReplicationIncludeArchive")?.addEventListener("change", (event) => {
+  $("setReplicationIncludeArchive")?.addEventListener("change", async (event) => {
     const target = event?.target;
     if (!target) return;
     if (target.checked) {
-      const ok = window.confirm(
+      const ok = await appConfirm(
+        "Include Archive DB Files",
         "Include archive DB files in the next manual pull/push?\n\nThis can take significantly longer because monthly archive files may be large. Hot data will still sync first.",
+        { ok: "Include" },
       );
       if (!ok) {
         target.checked = false;
@@ -8410,6 +8828,33 @@ function bindEventHandlers() {
   $("notifBell")?.addEventListener("click", toggleNotif);
   $("btnCloseNotif")?.addEventListener("click", closeNotif);
 
+  // Operator chat
+  $("chatBubble")?.addEventListener("click", toggleChatPanel);
+  $("chatClose")?.addEventListener("click", closeChatPanel);
+  $("chatSend")?.addEventListener("click", sendChatMessage);
+  $("chatPanel")?.addEventListener("pointerdown", () => {
+    if (State.chatOpen) resetChatDismissTimer();
+  });
+  $("chatThread")?.addEventListener("scroll", () => {
+    if (State.chatOpen) resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("focus", () => {
+    if (!State.chatOpen) openChatPanel();
+    resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("blur", () => {
+    setTimeout(() => resetChatDismissTimer(), 0);
+  });
+  $("chatInput")?.addEventListener("input", () => {
+    resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
   // Guide modal
   $("btnCloseGuide")?.addEventListener("click", closeGuideModal);
 
@@ -8417,6 +8862,7 @@ function bindEventHandlers() {
   window.addEventListener("beforeunload", () => {
     clearInterval(State.clockTimer);
     clearInterval(State.alarmBadgeTimer);
+    clearChatDismissTimer();
     if (State.netIO.monitorTimer) { clearInterval(State.netIO.monitorTimer); State.netIO.monitorTimer = null; }
     const slots = State.xfer?.slots || {};
     for (const key of Object.keys(slots)) {
@@ -8445,6 +8891,68 @@ function initAllTabDatesToToday() {
   State.lastDateInitDay = d;
 }
 
+// ─── Startup Tab Prefetch ─────────────────────────────────────────────────────
+// Fires ~2 s after startup (after WS connects and grid settles) so the first
+// visit to any data tab renders from State instead of waiting for a fetch.
+async function prefetchAllTabs() {
+  await new Promise((r) => setTimeout(r, 2000));
+  await Promise.allSettled([
+    fetchAlarms().catch(() => {}),
+    fetchReport().catch(() => {}),
+    fetchAudit().catch(() => {}),
+    fetchEnergy({ page: 1 }).catch(() => {}),
+  ]);
+}
+
+// ─── App Confirm Modal ────────────────────────────────────────────────────────
+const _appConfirmState = { resolver: null };
+
+function _resolveConfirm(result) {
+  const modal = $("appConfirmModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  const done = _appConfirmState.resolver;
+  _appConfirmState.resolver = null;
+  if (typeof done === "function") done(result);
+}
+
+function initConfirmModal() {
+  const modal = $("appConfirmModal");
+  if (!modal || modal.dataset.bound === "1") return;
+  modal.dataset.bound = "1";
+  $("confirmOk")?.addEventListener("click", () => _resolveConfirm(true));
+  $("confirmCancel")?.addEventListener("click", () => _resolveConfirm(false));
+  modal.addEventListener("click", (e) => { if (e.target === modal) _resolveConfirm(false); });
+  document.addEventListener("keydown", (e) => {
+    if (!modal.classList.contains("hidden")) {
+      if (e.key === "Escape") _resolveConfirm(false);
+      if (e.key === "Enter") _resolveConfirm(true);
+    }
+  });
+}
+
+function appConfirm(title, bodyText, { ok = "OK", cancel = "Cancel" } = {}) {
+  return new Promise((resolve) => {
+    _appConfirmState.resolver = resolve;
+    const modal = $("appConfirmModal");
+    const titleEl = $("confirmTitle");
+    const bodyEl = $("confirmBody");
+    if (titleEl) titleEl.textContent = title;
+    if (bodyEl) {
+      bodyEl.innerHTML = bodyText
+        .split("\n\n")
+        .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+        .join("");
+    }
+    const okBtn = $("confirmOk");
+    const cancelBtn = $("confirmCancel");
+    if (okBtn) okBtn.textContent = ok;
+    if (cancelBtn) cancelBtn.textContent = cancel;
+    if (modal) { modal.classList.remove("hidden"); modal.focus(); }
+    document.body.classList.add("modal-open");
+  });
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
   initThemeToggle();
@@ -8453,12 +8961,20 @@ async function init() {
   startClock();
   setupSideNav();
   initGuideModal();
+  initConfirmModal();
   setupNav();
   initSettingsSectionNav();
   const resumeAlarmAudio = () => {
     try {
       const ctx = getOrCreateAlarmAudioCtx();
-      if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+      if (!ctx) return;
+      if (ctx.state === "suspended") {
+        ctx.resume().then(() => {
+          State.chatAudioReady = ctx.state === "running";
+        }).catch(() => {});
+      } else {
+        State.chatAudioReady = ctx.state === "running";
+      }
     } catch (err) {
       console.warn("[app] audio resume failed:", err.message);
     }
@@ -8466,6 +8982,9 @@ async function init() {
   document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
   document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
   bindEventHandlers();
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
   updateReplicationArchiveSelectionUi(true);
   // Restore alarm sound mute preference
   try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
@@ -8484,10 +9003,13 @@ async function init() {
   buildSelects();
   connectWS();
   startNetIOMonitor();
+  await loadChatHistory({ silent: true });
   refreshAlarmBadge();
 
   // Refresh alarm badge every 30s
   State.alarmBadgeTimer = setInterval(refreshAlarmBadge, 30000);
+  // Background prefetch so all data tabs are ready before the user visits them
+  prefetchAllTabs().catch(() => {});
 }
 
 document.addEventListener("DOMContentLoaded", init);

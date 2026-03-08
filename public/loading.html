@@ -123,22 +123,22 @@
   </head>
   <body>
     <div class="wrap">
-      <img class="icon" src="../assets/logo.png" alt="Inverter Dashboard" />
-      <div class="title">Inverter Dashboard</div>
-      <div class="sub" id="statusText">Starting server, please wait…</div>
+      <img class="icon" src="../assets/logo.png" alt="Dashboard V2" />
+      <div class="title">Dashboard V2</div>
+      <div class="sub" id="statusText">Starting application services. Please wait…</div>
       <div class="spinner" id="spinner"></div>
 
       <div class="steps">
-        <div class="step active" id="step1">Starting server…</div>
-        <div class="step" id="step2">Validating license…</div>
-        <div class="step" id="step3">Loading configuration…</div>
-        <div class="step" id="step4">Initializing services…</div>
+        <div class="step active" id="step1">Starting application services…</div>
+        <div class="step" id="step2">Verifying license state…</div>
+        <div class="step" id="step3">Loading operating configuration…</div>
+        <div class="step" id="step4">Bringing services online…</div>
       </div>
 
       <div class="error-panel" id="errorPanel">
-        <div class="error-title">Startup Failed</div>
-        <div id="errorMsg">Check that backend services are running.</div>
-        <button class="retry-btn" onclick="location.reload()">Retry</button>
+        <div class="error-title">Startup Check Required</div>
+        <div id="errorMsg">The application did not finish starting. Verify that the required services are available, then try again.</div>
+        <button class="retry-btn" onclick="location.reload()">Try Again</button>
       </div>
     </div>
 
@@ -161,7 +161,7 @@
 
       function showError(message) {
         document.getElementById("spinner").style.display = "none";
-        document.getElementById("statusText").textContent = "Startup failed";
+        document.getElementById("statusText").textContent = "Startup requires attention";
         document.getElementById("errorMsg").textContent = message;
         document.getElementById("errorPanel").style.display = "block";
       }
@@ -189,7 +189,7 @@
         // Timeout check
         if (elapsed > STARTUP_TIMEOUT) {
           showError(
-            "Server startup is taking longer than expected. If this is the first run after an update, database maintenance may still be finishing. Check that backend services and configuration are correct, then retry."
+            "Startup is taking longer than expected. If this is the first launch after an update, maintenance may still be finishing. Verify configuration and required services, then try again."
           );
           return;
         }

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.13` in `package.json`
+- Current repo version baseline: `2.2.16` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -111,6 +111,10 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - **Inverter detail panel**: `filterInverters()` calls `loadInverterDetail(inv)` / `clearInverterDetail()`. Functions `renderInverterDetailStats/Chart/Alarms/History` live after `filterInverters()`. Panel is inside `.inv-page-body` alongside `#invGrid`.
 - **Tab date init**: `initAllTabDatesToToday()` called on startup and on day rollover in `startClock()`. Also clears `State.tabFetchTs` on rollover.
 - **Weather offline**: `fetchDailyWeatherRange()` (server/index.js) serves stale cache on any API/network failure.
+- **Startup tab prefetch**: `prefetchAllTabs()` fires 2 s after `init()` and pre-warms all 4 tabs in parallel. `TAB_STALE_MS = 60000`.
+- **PAC indicator thresholds**: `getPacRowClass()` uses `NODE_RATED_W = 249,250 W`. ≥90% → High (green), >70% → Moderate (yellow), >40% → Mild (orange), ≤40% → Low (red). Static `.pac-legend-wrap` in inverter toolbar.
+- **App confirm modal**: `appConfirm(title, body, {ok, cancel})` → `Promise<boolean>`. Replaces all native `confirm()` and `alert()` calls. `#appConfirmModal` + `.confirm-dialog` CSS. `initConfirmModal()` called from `init()`.
+- **Availability today**: `/api/report/daily` range handler splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range. Detail panel 60 s refresh also fetches today's report rows to keep availability chip current.
 
 ## Version, Branding, and Release Compatibility
 
@@ -154,6 +158,15 @@ Preserve these unless a deliberate migration is implemented:
   - pulls live data from gateway
   - can run replication workflows
   - must not run day-ahead generation
+
+## Operator Messaging
+
+- The operator messaging panel is a compact gateway-to-remote note channel, not a general chat product.
+- Canonical message storage lives on the gateway in `chat_messages`.
+- The renderer should always use local `/api/chat/*` routes. In `remote` mode, the local server forwards or polls upstream through the configured gateway token path.
+- Remote inbox transport must use monotonic `id` cursors and must never mark messages read while polling.
+- `read_ts` should change only when the operator opens or reads the visible thread.
+- Keep visible UI wording operational and reserved. Do not expose transport details, tokens, or server terminology.
 
 ## Current Metrics Guardrails
 
@@ -211,6 +224,7 @@ npm run build:portable
 Useful checks after JS edits:
 
 ```powershell
+node --check public/js/app.js
 node --check server/index.js
 node --check server/db.js
 node --check server/poller.js

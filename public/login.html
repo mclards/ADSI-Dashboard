@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Inverter Dashboard Login</title>
+    <title>Dashboard V2 Sign In</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
@@ -373,36 +373,36 @@
   <body>
     <main class="login-shell">
       <div class="brand">
-        <img src="../assets/logo.png" alt="Inverter Dashboard" />
+        <img src="../assets/logo.png" alt="Dashboard V2" />
         <div class="brand-text">
-          <h1>Inverter Dashboard</h1>
-          <p>Secure Access</p>
+          <h1>Dashboard V2</h1>
+          <p>Authorized Access</p>
         </div>
       </div>
 
-      <div class="section-title">Login</div>
+      <div class="section-title">Sign In</div>
       <input id="username" class="inp" type="text" placeholder="Username" autofocus />
       <input id="password" class="inp" type="password" placeholder="Password" />
-      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember Username & Password</label>
-      <button id="loginBtn" class="btn btn-primary">Login</button>
+      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember credentials on this workstation</label>
+      <button id="loginBtn" class="btn btn-primary">Sign In</button>
 
       <div class="links">
-        <a id="changeUserPass">Change Username & Password</a>
+        <a id="changeUserPass">Update Username and Password</a>
         <span>|</span>
-        <a id="resetPass">Reset via Auth Key</a>
+        <a id="resetPass">Recover with Authorization Key</a>
       </div>
 
-      <div class="footer">© 2026 Engr. Clard Systems</div>
+      <div class="footer">Dashboard V2 · Authorized Workstation Access</div>
     </main>
 
     <div id="modal-bg">
       <div class="modal">
-        <h3>Change Username & Password</h3>
-        <input id="authKey" class="inp" type="password" placeholder="Enter Auth Key" />
-        <input id="newUsername" class="inp" type="text" placeholder="Enter New Username" />
-        <input id="newPassword" class="inp" type="password" placeholder="Enter New Password" />
+        <h3>Update Username and Password</h3>
+        <input id="authKey" class="inp" type="password" placeholder="Authorization Key" />
+        <input id="newUsername" class="inp" type="text" placeholder="New Username" />
+        <input id="newPassword" class="inp" type="password" placeholder="New Password" />
         <div class="modal-actions">
-          <button id="saveChange" class="btn btn-primary">Save</button>
+          <button id="saveChange" class="btn btn-primary">Save Changes</button>
           <button id="cancelChange" class="btn btn-outline">Cancel</button>
         </div>
       </div>
@@ -410,10 +410,10 @@
 
     <div id="reset-bg">
       <div class="modal">
-        <h3>Reset Credentials to Default</h3>
-        <input id="resetAuthKey" class="inp" type="password" placeholder="Auth Key" />
+        <h3>Restore Default Administrator Access</h3>
+        <input id="resetAuthKey" class="inp" type="password" placeholder="Authorization Key" />
         <div class="modal-actions">
-          <button id="resetSave" class="btn btn-primary">Reset</button>
+          <button id="resetSave" class="btn btn-primary">Restore Access</button>
           <button id="resetCancel" class="btn btn-outline">Cancel</button>
         </div>
       </div>
@@ -472,10 +472,10 @@
         async function doLogin() {
           const user = usernameInput.value.trim();
           const pass = passwordInput.value.trim();
-          if (!user || !pass) return showMsg("Please enter username and password", "error");
+          if (!user || !pass) return showMsg("Enter your username and password.", "error");
 
           const ok = await api.checkLogin(user, pass);
-          if (!ok) return showMsg("Invalid username or password", "error");
+          if (!ok) return showMsg("The sign-in details are not valid.", "error");
 
           if (rememberCheck.checked) {
             await api.saveRemembered({ username: user, password: pass, remember: true });
@@ -489,32 +489,32 @@
           const key = document.getElementById("authKey").value.trim();
           const newUser = document.getElementById("newUsername").value.trim();
           const newPass = document.getElementById("newPassword").value.trim();
-          if (!key || !newUser || !newPass) return showMsg("All fields required", "error");
+          if (!key || !newUser || !newPass) return showMsg("Complete all required fields.", "error");
 
           const ok = await api.changeUsernamePassword(key, newUser, newPass);
           closeLayer(modalBg);
           if (ok) {
             await api.clearRemembered();
-            showMsg("Username & Password updated");
+            showMsg("Sign-in credentials were updated.");
             resetLoginForm();
           } else {
-            showMsg("Invalid authentication key", "error");
+            showMsg("The authorization key is not valid.", "error");
           }
         }
 
         async function handleResetSave() {
           const key = document.getElementById("resetAuthKey").value.trim();
-          if (!key) return showMsg("Auth key required", "error");
+          if (!key) return showMsg("Enter the authorization key.", "error");
 
           const ok = await api.resetPassword(key);
           closeLayer(resetBg);
           if (ok) {
             await api.clearRemembered();
-            showMsg("Credentials reset to default: admin / 1234");
+            showMsg("Default administrator access has been restored. Update the credentials after sign-in.");
             resetLoginForm();
             return;
           }
-          showMsg("Invalid authentication key", "error");
+          showMsg("The authorization key is not valid.", "error");
         }
 
         document.getElementById("loginBtn").addEventListener("click", doLogin);
