@@ -4609,12 +4609,12 @@ async function loadInverterDetail(inv) {
 
   const now = Date.now();
   const todayStr = today();
-  const thirtyDaysAgo = now - 30 * 86400000;
+  const todayStartMs = localDateStartMs(todayStr);
   const sevenDayStart = dateStr(new Date(now - 7 * 86400000));
 
   try {
     const [alarmsResp, reportResp, todayEnergyResp] = await Promise.all([
-      api(`/api/alarms?inverter=${inv}&start=${Math.floor(thirtyDaysAgo)}&end=${now}`).catch(() => []),
+      api(`/api/alarms?inverter=${inv}&start=${Math.floor(todayStartMs)}&end=${now}`).catch(() => []),
       api(`/api/report/daily?start=${sevenDayStart}&end=${todayStr}`).catch(() => []),
       api(`/api/energy/today`).catch(() => []),
     ]);
@@ -4634,7 +4634,7 @@ async function loadInverterDetail(inv) {
     renderInverterDetailAlarms(alarmRows);
     renderInverterDetailHistory(inv, reportRows);
 
-    // Refresh kWh from server every 60 s while panel is open
+    // Refresh kWh every 10 s — energy_5min buckets land every 5 min, 10 s is responsive
     if (State.invDetailRefreshTimer) clearInterval(State.invDetailRefreshTimer);
     State.invDetailRefreshTimer = setInterval(async () => {
       if (!State.invDetailInv) return;
@@ -4645,7 +4645,7 @@ async function loadInverterDetail(inv) {
           renderInverterDetailStats(State.invDetailInv);
         }
       } catch (_) { /* silent — stale value stays */ }
-    }, 60000);
+    }, 10000);
   } catch (err) {
     if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load: ${err.message}</span></div>`;
   } finally {
@@ -4690,7 +4690,7 @@ function renderInverterDetailAlarms(alarmRows) {
 
   const rows = alarmRows.slice().sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0)).slice(0, 15);
   if (!rows.length) {
-    el.innerHTML = `<div class="inv-detail-no-data">No alarms in last 30 days</div>`;
+    el.innerHTML = `<div class="inv-detail-no-data">No alarms today</div>`;
     return;
   }
 
