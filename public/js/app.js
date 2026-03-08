@@ -4074,10 +4074,10 @@ function getRowSev(alarmVal) {
 function getPacRowClass(pacW, hasAlarm) {
   if (hasAlarm) return "row-pac-alarm";
   const v = Number(pacW || 0);
-  if (v >= NODE_RATED_W * 0.80) return "row-pac-high"; // ≥80% rated (~199 kW); allows up to 103% over-production
-  if (v >  NODE_RATED_W * 0.50) return "row-pac-mid";  // >50% rated (~125 kW)
-  if (v >  0)                   return "row-pac-low";
-  return "row-pac-off";
+  if (v >= NODE_RATED_W * 0.90) return "row-pac-high"; // ≥90% — High     (~224 kW)
+  if (v >  NODE_RATED_W * 0.70) return "row-pac-mid";  // >70%  — Moderate (~175 kW)
+  if (v >  NODE_RATED_W * 0.40) return "row-pac-low";  // >40%  — Mild     (~100 kW)
+  return "row-pac-off";                                 // ≤40%  — Low
 }
 
 function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
@@ -4634,18 +4634,29 @@ async function loadInverterDetail(inv) {
     renderInverterDetailAlarms(alarmRows);
     renderInverterDetailHistory(inv, reportRows);
 
-    // Refresh kWh every 10 s — energy_5min buckets land every 5 min, 10 s is responsive
+    // Refresh kWh and availability every 60 s.
+    // /api/report/daily?date=today recomputes the partial-day window live so
+    // availability_pct stays accurate throughout the day.
     if (State.invDetailRefreshTimer) clearInterval(State.invDetailRefreshTimer);
     State.invDetailRefreshTimer = setInterval(async () => {
-      if (!State.invDetailInv) return;
+      const curInv = State.invDetailInv;
+      if (!curInv) return;
       try {
-        const rows = await api(`/api/energy/today`);
-        if (Array.isArray(rows)) {
-          State.invDetailKwh = Number(rows.find((r) => Number(r.inverter) === State.invDetailInv)?.total_kwh || 0);
-          renderInverterDetailStats(State.invDetailInv);
+        const [energyRows, reportRows] = await Promise.all([
+          api(`/api/energy/today`).catch(() => null),
+          api(`/api/report/daily?date=${today()}`).catch(() => null),
+        ]);
+        if (Array.isArray(energyRows)) {
+          State.invDetailKwh = Number(energyRows.find((r) => Number(r.inverter) === curInv)?.total_kwh || 0);
         }
-      } catch (_) { /* silent — stale value stays */ }
-    }, 10000);
+        if (Array.isArray(reportRows) && reportRows.length) {
+          const todayKey = today();
+          const others = State.invDetailReportRows.filter((r) => String(r.date || "") !== todayKey);
+          State.invDetailReportRows = [...others, ...reportRows];
+        }
+        renderInverterDetailStats(curInv);
+      } catch (_) { /* silent — stale values stay */ }
+    }, 60000);
   } catch (err) {
     if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load: ${err.message}</span></div>`;
   } finally {

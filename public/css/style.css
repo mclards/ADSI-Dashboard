@@ -2056,6 +2056,45 @@ label[data-required]::after {
   border-color: #5d7396;
 }
 
+/* ── PAC Legend (inverter toolbar) ─────────────────────────────────────────── */
+.pac-legend-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 12px;
+  flex-wrap: wrap;
+  overflow: hidden;
+}
+.pac-leg + .pac-leg::before {
+  content: "|";
+  margin-right: 10px;
+  color: var(--border2);
+  font-size: 11px;
+}
+.pac-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text2);
+  letter-spacing: 0.04em;
+  user-select: none;
+  white-space: nowrap;
+}
+.pac-leg-ind {
+  width: 6px;
+  min-width: 6px;
+  height: 14px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.pac-leg-blink {
+  animation: alarmBlink 1s ease-in-out infinite;
+}
+
 .card-table td.ctrl-cell .node-btn {
   width: 100%;
   min-width: 0;

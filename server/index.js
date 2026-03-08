@@ -6972,6 +6972,28 @@ app.get("/api/report/daily", (req, res) => {
 
     const s = start || localDateStr(Date.now() - 7 * 86400000);
     const e = end || localDateStr();
+    const today = localDateStr();
+    // For ranges that include today, compute today live (partial-day window) and
+    // merge with persisted past rows. The raw DB range query returns stale
+    // persisted availability_pct for today and must not be used for it.
+    if (e >= today && s <= today) {
+      const dayBeforeToday = localDateStr(new Date(`${today}T00:00:00.000`).getTime() - 1);
+      const pastRows = normalizePersistedDailyReportRows(
+        s < today ? stmts.getDailyReportRange.all(s, dayBeforeToday) : [],
+      );
+      const todayRows = getDailyReportRowsForDay(today, {
+        persist: true,
+        includeTodayPartial: true,
+        refresh: refreshRequested,
+      });
+      const merged = [...pastRows, ...todayRows].sort(
+        (a, b) =>
+          String(a.date || "").localeCompare(String(b.date || "")) ||
+          Number(a.inverter || 0) - Number(b.inverter || 0),
+      );
+      res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+      return res.json(merged);
+    }
     res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
     return res.json(
       normalizePersistedDailyReportRows(stmts.getDailyReportRange.all(s, e)),
