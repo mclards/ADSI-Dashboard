@@ -6480,9 +6480,8 @@ label[data-required]::after {
   color: var(--text2);
   font-size: 10px;
 }
-.inv-detail-chart-container {
-  position: relative;
-  height: 200px;
+.inv-detail-card-slot {
+  min-width: 0; /* hosts the moved .inv-card — natural card size */
 }
 .inv-detail-alarms-wrap {
   overflow: hidden;

@@ -183,6 +183,10 @@ const State = {
   // Single-inverter detail panel state.
   invDetailInv: 0,
   invDetailLoading: false,
+  invDetailKwh: 0,          // kWh today for selected inverter (from /api/energy/today)
+  invDetailAlarmRows: [],   // cached alarm rows for live chip refresh
+  invDetailReportRows: [],  // cached report rows for live chip refresh
+  invDetailRefreshTimer: null, // setInterval ref for periodic kWh refresh
 };
 const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
 const MAX_INV_UNITS = 4;
@@ -4552,18 +4556,34 @@ function filterInverters() {
 // ─── Inverter Detail Panel ────────────────────────────────────────────────────
 
 function clearInverterDetail() {
+  // Return the inv-card to the grid before hiding the panel
+  const inv = State.invDetailInv;
+  if (inv) {
+    const card = document.getElementById(`inv-card-${inv}`);
+    const grid = $("invGrid");
+    if (card && grid && !grid.contains(card)) {
+      // re-insert before the bulk control panel (last child)
+      const bulk = grid.querySelector(".bulk-control-bar");
+      grid.insertBefore(card, bulk || null);
+    }
+  }
   const panel = $("invDetailPanel");
   if (panel) panel.style.display = "none";
-  if (State.charts.invDetail) {
-    State.charts.invDetail.destroy();
-    delete State.charts.invDetail;
+  if (State.invDetailRefreshTimer) {
+    clearInterval(State.invDetailRefreshTimer);
+    State.invDetailRefreshTimer = null;
   }
   State.invDetailInv = 0;
   State.invDetailLoading = false;
+  State.invDetailKwh = 0;
+  State.invDetailAlarmRows = [];
+  State.invDetailReportRows = [];
 }
 
 async function loadInverterDetail(inv) {
   if (State.invDetailInv === inv && State.invDetailLoading) return;
+  // If switching inverters, return old card first
+  if (State.invDetailInv && State.invDetailInv !== inv) clearInverterDetail();
   State.invDetailInv = inv;
   State.invDetailLoading = true;
 
@@ -4571,9 +4591,15 @@ async function loadInverterDetail(inv) {
   if (!panel) return;
   panel.style.display = "flex";
 
-  const invLabel = `INV-${String(inv).padStart(2, "0")}`;
+  // Move the live inv-card into the slot (card continues to update in real-time)
+  const card = document.getElementById(`inv-card-${inv}`);
+  const slot = $("invDetailCardSlot");
+  if (card && slot) {
+    slot.innerHTML = "";
+    slot.appendChild(card);
+  }
 
-  // Loading placeholders
+  const invLabel = `INV-${String(inv).padStart(2, "0")}`;
   const statsEl = $("invDetailStats");
   const alarmsEl = $("invDetailAlarms");
   const historyEl = $("invDetailHistory");
@@ -4581,54 +4607,73 @@ async function loadInverterDetail(inv) {
   if (alarmsEl) alarmsEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
   if (historyEl) historyEl.innerHTML = `<div class="inv-detail-no-data">Loading…</div>`;
 
-  const todayStr = today();
-  const todayStart = localDateStartMs(todayStr);
   const now = Date.now();
+  const todayStr = today();
   const thirtyDaysAgo = now - 30 * 86400000;
-  const sevenDaysAgo  = now -  7 * 86400000;
-  const sevenDayStart = dateStr(new Date(sevenDaysAgo));
+  const sevenDayStart = dateStr(new Date(now - 7 * 86400000));
 
   try {
-    const [energyResp, alarmsResp, reportResp] = await Promise.all([
-      api(`/api/energy/5min?inverter=${inv}&start=${todayStart}&end=${now}`).catch(() => ({ rows: [] })),
+    const [alarmsResp, reportResp, todayEnergyResp] = await Promise.all([
       api(`/api/alarms?inverter=${inv}&start=${Math.floor(thirtyDaysAgo)}&end=${now}`).catch(() => []),
       api(`/api/report/daily?start=${sevenDayStart}&end=${todayStr}`).catch(() => []),
+      api(`/api/energy/today`).catch(() => []),
     ]);
 
-    // Guard: user may have changed selection while fetching
-    if (State.invDetailInv !== inv) return;
+    if (State.invDetailInv !== inv) return; // selection changed while fetching
 
-    const energy5Rows = Array.isArray(energyResp?.rows) ? energyResp.rows : [];
-    const alarmRows   = Array.isArray(alarmsResp) ? alarmsResp : (Array.isArray(alarmsResp?.rows) ? alarmsResp.rows : []);
-    const reportRows  = Array.isArray(reportResp) ? reportResp : (Array.isArray(reportResp?.rows) ? reportResp.rows : []);
+    const alarmRows  = Array.isArray(alarmsResp) ? alarmsResp : (Array.isArray(alarmsResp?.rows) ? alarmsResp.rows : []);
+    const reportRows = Array.isArray(reportResp) ? reportResp : (Array.isArray(reportResp?.rows) ? reportResp.rows : []);
+    const todayRows  = Array.isArray(todayEnergyResp) ? todayEnergyResp : [];
 
-    renderInverterDetailStats(inv, energy5Rows, alarmRows, reportRows);
-    renderInverterDetailChart(inv, energy5Rows);
+    // Store for live refresh
+    State.invDetailAlarmRows  = alarmRows;
+    State.invDetailReportRows = reportRows;
+    State.invDetailKwh = Number(todayRows.find((r) => Number(r.inverter) === inv)?.total_kwh || 0);
+
+    renderInverterDetailStats(inv);
     renderInverterDetailAlarms(alarmRows);
     renderInverterDetailHistory(inv, reportRows);
+
+    // Refresh kWh from server every 60 s while panel is open
+    if (State.invDetailRefreshTimer) clearInterval(State.invDetailRefreshTimer);
+    State.invDetailRefreshTimer = setInterval(async () => {
+      if (!State.invDetailInv) return;
+      try {
+        const rows = await api(`/api/energy/today`);
+        if (Array.isArray(rows)) {
+          State.invDetailKwh = Number(rows.find((r) => Number(r.inverter) === State.invDetailInv)?.total_kwh || 0);
+          renderInverterDetailStats(State.invDetailInv);
+        }
+      } catch (_) { /* silent — stale value stays */ }
+    }, 60000);
   } catch (err) {
-    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load detail: ${err.message}</span></div>`;
+    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Failed to load: ${err.message}</span></div>`;
   } finally {
     State.invDetailLoading = false;
   }
 }
 
-function renderInverterDetailStats(inv, energy5Rows, alarmRows, reportRows) {
+function renderInverterDetailStats(inv) {
   const el = $("invDetailStats");
   if (!el) return;
 
   const todayStr = today();
   const pac = Number(State.totals?.[inv]?.pac || 0);
-  const kwh = Number(State.todayKwh?.[inv] ?? energy5Rows.reduce((s, r) => s + Number(r.kwh_inc || 0), 0));
-  const todayReport = reportRows.find((r) => r.date === todayStr && r.inverter === inv);
-  const availPct = todayReport ? Number(todayReport.availability_pct ?? 0) : null;
-  const activeAlarmCount = alarmRows.filter((r) => !r.cleared_ts).length;
+  const kwh = Number(State.invDetailKwh || 0);
+  const todayReport = State.invDetailReportRows.find((r) => r.date === todayStr && r.inverter === inv);
+  // Availability: treat as unknown ("—") if uptime_s is 0 and kwh_total is 0 (no data yet for today)
+  let availPct = null;
+  if (todayReport) {
+    const hasSomeData = Number(todayReport.uptime_s || 0) > 0 || Number(todayReport.kwh_total || 0) > 0;
+    availPct = hasSomeData ? Number(todayReport.availability_pct ?? 0) : null;
+  }
+  const activeAlarmCount = State.invDetailAlarmRows.filter((r) => !r.cleared_ts).length;
 
   const chips = [
-    { label: "Today's Generation", value: kwh >= 1 ? kwh.toFixed(2) : (kwh * 1000).toFixed(0), unit: kwh >= 1 ? "kWh" : "Wh" },
-    { label: "Current AC Power",   value: (pac / 1000).toFixed(2),    unit: "kW"  },
+    { label: "Today's Generation", value: kwh.toFixed(2),               unit: "kWh" },
+    { label: "Current AC Power",   value: (pac / 1000).toFixed(2),      unit: "kW"  },
     { label: "Availability Today", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
-    { label: "Active Alarms",      value: String(activeAlarmCount),   unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
+    { label: "Active Alarms",      value: String(activeAlarmCount),      unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
   ];
 
   el.innerHTML = chips.map((c) => `
@@ -4637,48 +4682,6 @@ function renderInverterDetailStats(inv, energy5Rows, alarmRows, reportRows) {
       <span class="inv-detail-stat-value">${c.value}</span>
       <span class="inv-detail-stat-unit">${c.unit}</span>
     </div>`).join("");
-}
-
-function renderInverterDetailChart(inv, energy5Rows) {
-  const pal = getChartPalette();
-  const rows = energy5Rows.slice().sort((a, b) => Number(a.ts) - Number(b.ts));
-  const labels = rows.map((r) => {
-    const d = new Date(Number(r.ts));
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  });
-  // kwh_inc over 5 min → average kW = kwh_inc * 12
-  const data = rows.map((r) => Number.isFinite(Number(r.kwh_inc)) ? +(Number(r.kwh_inc) * 12).toFixed(3) : 0);
-
-  const existing = State.charts.invDetail;
-  if (existing) {
-    existing.data.labels = labels;
-    if (!existing.data.datasets?.length) existing.data.datasets = [{}];
-    existing.data.datasets[0].data = data;
-    existing.update("none");
-    return;
-  }
-
-  const canvas = $("invDetailChart");
-  if (!canvas) return;
-
-  State.charts.invDetail = new Chart(canvas, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [{
-        label: "AC Power (kW)",
-        data,
-        borderColor: pal.actual,
-        backgroundColor: pal.actualFill,
-        borderWidth: 1.6,
-        pointRadius: 0,
-        pointHoverRadius: 2.2,
-        tension: 0.2,
-        fill: true,
-      }],
-    },
-    options: chartOpts("kW", false),
-  });
 }
 
 function renderInverterDetailAlarms(alarmRows) {
@@ -4903,6 +4906,8 @@ function handleWS(msg) {
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
     scheduleInverterCardsUpdate();
+    // Keep detail panel stat chips live on every WS tick
+    if (State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv);
     syncAlarmStateFromLiveData().catch((err) => {
       console.warn("[app] live alarm sync failed:", err.message);
     });
