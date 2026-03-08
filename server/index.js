@@ -37,6 +37,7 @@ const {
   getChatThread,
   getChatInboxAfterId,
   markChatReadUpToId,
+  clearAllChatMessages,
 } = require("./db");
 const { registerClient, broadcastUpdate, startKeepAlive, getStats: getWsStats } = require("./ws");
 const poller = require("./poller");
@@ -603,10 +604,15 @@ function getOppositeChatMachine(machine) {
     : "remote";
 }
 
-function buildChatDisplayName(plantName, operatorName) {
-  const plant = String(plantName || "").trim();
+function getChatModeLabel(machine) {
+  return normalizeChatMachine(machine, "gateway") === "remote"
+    ? "Remote"
+    : "Server";
+}
+
+function buildChatDisplayName(machine, operatorName) {
   const operator = String(operatorName || "").trim() || "OPERATOR";
-  return plant ? `${plant} - ${operator}`.slice(0, 160) : operator.slice(0, 160);
+  return `${operator} - ${getChatModeLabel(machine)}`.slice(0, 160);
 }
 
 function buildLocalChatIdentity(machineOverride = "") {
@@ -615,7 +621,7 @@ function buildLocalChatIdentity(machineOverride = "") {
     from_machine: fromMachine,
     to_machine: getOppositeChatMachine(fromMachine),
     from_name: buildChatDisplayName(
-      getSetting("plantName", "ADSI Plant"),
+      fromMachine,
       getSetting("operatorName", "OPERATOR"),
     ),
   };
@@ -5816,7 +5822,7 @@ function resolveGatewayChatIdentity(req) {
     from_name:
       fromName ||
       buildChatDisplayName(
-        getSetting("plantName", "ADSI Plant"),
+        fromMachine,
         getSetting("operatorName", "OPERATOR"),
       ),
   };
@@ -5958,6 +5964,37 @@ app.post("/api/chat/read", async (req, res) => {
     return res.status(status).json({
       ok: false,
       error: String(err?.message || err || "Chat read update failed."),
+    });
+  }
+});
+
+app.post("/api/chat/clear", async (req, res) => {
+  try {
+    if (isRemoteMode()) {
+      const payload = await requestRemoteChat("/api/chat/clear", {
+        method: "POST",
+        body: {},
+        timeout: CHAT_PROXY_TIMEOUT_MS,
+        retry: {
+          attempts: 2,
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      });
+      broadcastUpdate({ type: "chat_clear" });
+      return res.json({
+        ok: true,
+        cleared: Math.max(0, Math.trunc(Number(payload?.cleared || 0))),
+      });
+    }
+
+    const cleared = clearAllChatMessages();
+    broadcastUpdate({ type: "chat_clear" });
+    return res.json({ ok: true, cleared });
+  } catch (err) {
+    const status = Math.max(400, Math.min(599, Number(err?.httpStatus || 502)));
+    return res.status(status).json({
+      ok: false,
+      error: String(err?.message || err || "Chat clear failed."),
     });
   }
 });

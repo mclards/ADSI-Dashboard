@@ -4458,6 +4458,43 @@ label[data-required]::after {
   color: var(--text2);
 }
 
+.chat-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chat-clear-btn {
+  min-width: 68px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-clear-btn:hover,
+.chat-clear-btn:focus-visible {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.chat-clear-btn[disabled] {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .chat-close-btn {
   width: 28px;
   height: 28px;
@@ -5104,6 +5141,12 @@ label[data-required]::after {
   border-color: #b49f82;
 }
 
+:root[data-theme="light"] .toolbar-info {
+  border-color: #b39d80;
+  background: rgba(239, 230, 213, 0.9);
+  color: #5a4630;
+}
+
 :root[data-theme="light"] #analyticsSummary .toolbar-info {
   border-color: #b39d80;
   background: rgba(239, 230, 213, 0.9);
@@ -5626,6 +5669,12 @@ label[data-required]::after {
 :root[data-theme="classic"] #page-report .page-toolbar {
   background: linear-gradient(180deg, rgba(14, 27, 47, 0.93) 0%, rgba(9, 17, 31, 0.93) 100%);
   border-color: rgba(45, 68, 104, 0.8);
+}
+
+:root[data-theme="classic"] .toolbar-info {
+  border-color: rgba(58, 88, 128, 0.82);
+  background: rgba(13, 24, 42, 0.74);
+  color: var(--text2);
 }
 
 :root[data-theme="classic"] #analyticsSummary .toolbar-info {

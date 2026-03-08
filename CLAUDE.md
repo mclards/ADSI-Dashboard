@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.16` in `package.json`
+- Current repo version baseline: `2.2.17` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -166,6 +166,9 @@ Preserve these unless a deliberate migration is implemented:
 - The renderer should always use local `/api/chat/*` routes. In `remote` mode, the local server forwards or polls upstream through the configured gateway token path.
 - Remote inbox transport must use monotonic `id` cursors and must never mark messages read while polling.
 - `read_ts` should change only when the operator opens or reads the visible thread.
+- Visible sender identity should use only `operatorName` plus `Server` or `Remote`.
+- The panel should expose an explicit clear-thread action with confirmation and sync it through the shared gateway-backed history.
+- Chat notification sound is inbound-only, stays silent for self-send echoes, and depends on the shared browser audio context already being unlocked by user interaction.
 - Keep visible UI wording operational and reserved. Do not expose transport details, tokens, or server terminology.
 
 ## Current Metrics Guardrails
@@ -221,6 +224,9 @@ npm run build:installer
 npm run build:portable
 ```
 
+- Before every release build, clean the workspace `release/` folder so old EXEs, blockmaps, unpacked folders, and transient build leftovers do not accumulate.
+- After publishing the latest release, remove prior build leftovers from `release/` and keep only the current release assets when they still need to remain local.
+
 Useful checks after JS edits:
 
 ```powershell
@@ -229,7 +235,6 @@ node --check server/index.js
 node --check server/db.js
 node --check server/poller.js
 node --check server/exporter.js
-node --check public/js/app.js
 node --check electron/main.js
 node --check electron/preload.js
 ```

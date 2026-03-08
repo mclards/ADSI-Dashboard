@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.16
+- **Version:** 2.2.17
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -99,8 +99,14 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loading…" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
 - **public/js/app.js (DocumentFragment):** renderAlarmTable, renderAuditTable, renderReportTable, renderEnergyTable all now use DocumentFragment + single `tbody.textContent=""` + `appendChild(frag)` instead of per-row `appendChild`
 
+## v2.2.17 Changes (2026-03-08)
+- **Clear thread control:** Operator Messages now includes a confirmed clear action that removes the shared message history through local `POST /api/chat/clear` routing and gateway-backed canonical deletion
+- **Renderer sync refinement:** `public/js/app.js` now tracks `chatPendingClear`, disables chat actions while clearing, handles `chat_clear` WebSocket events, preserves unsent drafts, and resets the thread state cleanly without reopening transport logic
+- **Chat responsiveness:** Hidden-panel thread rerenders stay suppressed, sender labels remain limited to `Operator Name - Server/Remote`, and clear-state updates keep the panel operational without extra churn
+- **Release hygiene:** Version baseline moved to `2.2.17`; release builds must clean `release/` before build and keep only current release artifacts after publish
+
 ## v2.2.16 Changes (2026-03-08)
-- **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, and soft Web Audio notification
+- **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, soft inbound-only Web Audio notification, and sender labels limited to `Operator Name - Server/Remote`
 - **Gateway canonical chat storage:** `server/db.js` now provisions `chat_messages` with monotonic `id`, explicit `from_machine` / `to_machine`, `read_ts`, and 500-row retention pruning
 - **Gateway/remote transport:** `server/index.js` adds local `/api/chat/send`, `/api/chat/messages`, and `/api/chat/read` routes; remote mode forwards sends/reads to the gateway and runs a 5 s inbox poll loop that rebroadcasts inbound rows over the local WebSocket
 - **Renderer chat state:** `public/js/app.js` now merges chat rows by `id`, loads thread history through the local server, marks inbound rows read only on actual panel open/read, and keeps failed remote drafts intact

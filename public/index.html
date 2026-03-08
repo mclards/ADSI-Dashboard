@@ -127,7 +127,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.16</span></div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.17</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and controlled multi-machine synchronization for the plant.</div>
             <a
               class="side-about-link"
@@ -956,13 +956,13 @@
                   <span class="mdi mdi-import" aria-hidden="true"></span>
                   <span>Import Settings</span>
                 </button>
-                <button id="btnPickExportFolder" class="btn btn-outline">
+                <button id="btnPickExportFolder" class="btn btn-outline" title="Choose export output folder">
                   <span class="mdi mdi-folder-search-outline" aria-hidden="true"></span>
-                  <span>Choose Export Folder</span>
+                  <span>Export Folder…</span>
                 </button>
-                <button id="btnOpenExportFolder" class="btn btn-outline">
+                <button id="btnOpenExportFolder" class="btn btn-outline" title="Open export output folder">
                   <span class="mdi mdi-folder-open-outline" aria-hidden="true"></span>
-                  <span>Open Export Folder</span>
+                  <span>Open Folder</span>
                 </button>
                 <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
@@ -1790,14 +1790,24 @@
           <div class="chat-panel-title">Operator Messages</div>
           <div class="chat-panel-subtitle">Gateway and remote operator notes</div>
         </div>
-        <button
-          id="chatClose"
-          class="chat-close-btn"
-          type="button"
-          aria-label="Close operator messages"
-        >
-          <span class="mdi mdi-close" aria-hidden="true"></span>
-        </button>
+        <div class="chat-panel-actions">
+          <button
+            id="chatClear"
+            class="chat-clear-btn"
+            type="button"
+            aria-label="Clear operator messages"
+          >
+            Clear
+          </button>
+          <button
+            id="chatClose"
+            class="chat-close-btn"
+            type="button"
+            aria-label="Close operator messages"
+          >
+            <span class="mdi mdi-close" aria-hidden="true"></span>
+          </button>
+        </div>
       </div>
 
       <div id="chatThread" class="chat-thread">
@@ -1832,7 +1842,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.16</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.17</span></div>
             <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1973,7 +1983,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.2.16 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.17 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

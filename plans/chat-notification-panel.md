@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in `v2.2.16`.
+Initial implementation landed in `v2.2.16`. Clear-thread controls and chat responsiveness refinements landed in `v2.2.17`.
 
 Implemented files:
 
@@ -57,12 +57,14 @@ Explicitly out of scope for v1:
 2. If the existing alarm bell is also visible, the two floating controls must not overlap. Stack or offset them intentionally.
 3. Incoming messages from the opposite machine open the panel automatically, play a short notification sound, and update the unread badge if the panel was closed.
 4. Messages sent by the current machine appear immediately after the gateway accepts them. Self-sent messages do not play a sound.
-5. The panel shows only the latest 20 messages in ascending order.
-6. The panel auto-dismisses 30 seconds after the last message or user activity.
-7. Auto-dismiss must pause while the input has focus and contains an unsent draft.
-8. Clicking the bubble toggles the panel open or closed.
-9. Opening the panel clears the local unread badge and marks visible inbound messages as read.
-10. If sending fails, the draft stays in the input and the user gets a concise error toast.
+5. Notification sound depends on the shared browser audio context already being unlocked by a user gesture.
+6. The panel shows only the latest 20 messages in ascending order.
+7. The panel auto-dismisses 30 seconds after the last message or user activity.
+8. Auto-dismiss must pause while the input has focus and contains an unsent draft.
+9. Clicking the bubble toggles the panel open or closed.
+10. Opening the panel clears the local unread badge and marks visible inbound messages as read.
+11. If sending fails, the draft stays in the input and the user gets a concise error toast.
+12. Operators can clear the shared thread from the panel header after a confirmation step; the clear event must propagate to both machines.
 
 ## Operator Copy Direction
 
@@ -81,7 +83,7 @@ Do not expose internal transport details, tokens, or server terminology in the v
 
 ```text
 Remote browser
-  -> local remote server (/api/chat/send, /api/chat/messages, /api/chat/read)
+  -> local remote server (/api/chat/send, /api/chat/messages, /api/chat/read, /api/chat/clear)
   -> gateway server (machine-to-machine, token-authenticated)
   -> gateway DB + gateway local WS broadcast
 
@@ -111,7 +113,7 @@ Use settings already present in the dashboard:
 |------|--------|------|
 | `from_machine` | local `operationMode` | `gateway` or `remote` |
 | `to_machine` | derived opposite of sender | explicit in DB for clarity and query safety |
-| `from_name` | local `plantName` + `operatorName` | e.g. `ADSI Plant - OPERATOR` |
+| `from_name` | local `operatorName` + mode label | e.g. `OPERATOR - Server` or `OPERATOR - Remote` |
 
 Frontend should not invent these fields. The local server should derive them from current settings.
 
@@ -178,7 +180,7 @@ Server behavior:
 Response:
 
 ```json
-{ "ok": true, "row": { "id": 42, "ts": 1740000000000, "from_machine": "remote", "to_machine": "gateway", "from_name": "ADSI Plant - OPERATOR", "message": "..." } }
+{ "ok": true, "row": { "id": 42, "ts": 1740000000000, "from_machine": "remote", "to_machine": "gateway", "from_name": "OPERATOR - Remote", "message": "..." } }
 ```
 
 Important:
@@ -240,6 +242,27 @@ Response:
 { "ok": true, "updated": 3 }
 ```
 
+### `POST /api/chat/clear`
+
+Browser request body:
+
+```json
+{}
+```
+
+Behavior:
+
+- Clear all rows from the shared gateway `chat_messages` table
+- In `remote` mode, proxy the clear request to the gateway
+- Broadcast `chat_clear` through the local WebSocket on both machines
+- Keep unsent local draft text intact in the renderer
+
+Response:
+
+```json
+{ "ok": true, "cleared": 20 }
+```
+
 ## Backend Responsibilities
 
 ### `server/db.js`
@@ -252,6 +275,7 @@ Add:
   - fetch latest thread rows
   - fetch inbound rows after `id`
   - mark rows read up to `id`
+  - clear all message rows
   - purge oldest rows beyond retention
 
 ### `server/index.js`
@@ -262,6 +286,7 @@ Add:
   - `POST /api/chat/send`
   - `GET /api/chat/messages`
   - `POST /api/chat/read`
+  - `POST /api/chat/clear`
 - remote-mode poll loop startup and shutdown handling
 - proxy logic for `remote` mode
 - local WS broadcasts using existing `broadcastUpdate()`
@@ -301,6 +326,7 @@ chatDismissTimer: null,
 chatLastReadId: 0,
 chatLastInboundId: 0,
 chatPendingSend: false,
+chatPendingClear: false,
 chatAudioReady: false,
 ```
 
@@ -317,6 +343,9 @@ Extend the existing WS message switch:
 ```js
 case "chat":
   handleIncomingChatMessage(d.row);
+  break;
+case "chat_clear":
+  handleChatCleared();
   break;
 ```
 
@@ -388,6 +417,14 @@ case "chat":
   - keep draft text
   - show concise toast
 
+#### `clearChatMessages()`
+
+- require a confirmation step before deletion
+- call local `POST /api/chat/clear`
+- disable send and clear actions while the request is in flight
+- preserve unsent draft text
+- reset the local thread state when the clear completes
+
 #### `playChatSound()`
 
 - only for inbound rows from the opposite machine
@@ -414,9 +451,14 @@ Suggested structure:
       <div class="chat-panel-title">Operator Messages</div>
       <div class="chat-panel-subtitle">Gateway and remote operator notes</div>
     </div>
-    <button id="chatClose" class="chat-close-btn" type="button" aria-label="Close operator messages">
-      <span class="mdi mdi-close" aria-hidden="true"></span>
-    </button>
+    <div class="chat-panel-actions">
+      <button id="chatClear" class="chat-clear-btn" type="button" aria-label="Clear operator messages">
+        Clear
+      </button>
+      <button id="chatClose" class="chat-close-btn" type="button" aria-label="Close operator messages">
+        <span class="mdi mdi-close" aria-hidden="true"></span>
+      </button>
+    </div>
   </div>
 
   <div id="chatThread" class="chat-thread">

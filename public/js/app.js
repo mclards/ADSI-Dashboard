@@ -172,6 +172,7 @@ const State = {
   chatLastReadId: 0,
   chatLastInboundId: 0,
   chatPendingSend: false,
+  chatPendingClear: false,
   chatAudioReady: false,
   chatReadInFlight: false,
   chatPendingReadUpToId: 0,
@@ -3613,6 +3614,19 @@ function currentChatMachine() {
   return normalizeOperationModeValue(State.settings.operationMode);
 }
 
+function getChatModeLabel(machine = currentChatMachine()) {
+  return normalizeChatMachineClient(machine, "gateway") === "remote"
+    ? "Remote"
+    : "Server";
+}
+
+function buildChatSenderLabel(row) {
+  const machine = normalizeChatMachineClient(row?.from_machine, currentChatMachine());
+  const explicit = String(row?.from_name || "").trim();
+  if (explicit) return explicit;
+  return `${currentOperator()} - ${getChatModeLabel(machine)}`;
+}
+
 function normalizeChatMachineClient(value, def = "gateway") {
   return String(value || def).trim().toLowerCase() === "remote"
     ? "remote"
@@ -3691,6 +3705,7 @@ function mergeChatRows(rows) {
     .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
     .slice(-CHAT_THREAD_LIMIT);
   syncChatRuntimeFromRows();
+  renderChatSendState();
   return State.chatMessages;
 }
 
@@ -3709,44 +3724,46 @@ function renderChatBadge() {
 
 function renderChatSendState() {
   const btn = $("chatSend");
+  const clearBtn = $("chatClear");
   const input = $("chatInput");
+  const busy = !!State.chatPendingSend || !!State.chatPendingClear;
   if (btn) {
-    btn.disabled = !!State.chatPendingSend;
+    btn.disabled = busy;
     btn.textContent = State.chatPendingSend ? "Sending..." : "Send";
   }
-  if (input) input.disabled = !!State.chatPendingSend;
+  if (clearBtn) {
+    clearBtn.disabled =
+      busy || !Array.isArray(State.chatMessages) || State.chatMessages.length === 0;
+    clearBtn.textContent = State.chatPendingClear ? "Clearing..." : "Clear";
+  }
+  if (input) input.disabled = busy;
 }
 
 function renderChatThread() {
   const thread = $("chatThread");
   if (!thread) return;
-  thread.textContent = "";
   const rows = Array.isArray(State.chatMessages) ? State.chatMessages : [];
+  const frag = document.createDocumentFragment();
   if (!rows.length) {
     const empty = el("div", "chat-empty");
     empty.textContent = "No recent operator messages.";
-    thread.appendChild(empty);
-    return;
+    frag.appendChild(empty);
+  } else {
+    const machine = currentChatMachine();
+    for (const row of rows) {
+      const self = normalizeChatMachineClient(row.from_machine, machine) === machine;
+      const item = el("div", `chat-message${self ? " is-self" : ""}`);
+      const meta = el("div", "chat-message-meta");
+      meta.textContent = `${buildChatSenderLabel(row)} • ${fmtDateTime(row.ts)}`;
+      const body = el("div", "chat-message-body");
+      body.textContent = String(row.message || "");
+      item.appendChild(meta);
+      item.appendChild(body);
+      frag.appendChild(item);
+    }
   }
-  const machine = currentChatMachine();
-  for (const row of rows) {
-    const self = normalizeChatMachineClient(row.from_machine, machine) === machine;
-    const item = el("div", `chat-message${self ? " is-self" : ""}`);
-    const meta = el("div", "chat-message-meta");
-    const sender =
-      self
-        ? "You"
-        : String(row.from_name || "").trim() ||
-          (normalizeChatMachineClient(row.from_machine, "gateway") === "gateway"
-            ? "Gateway"
-            : "Remote");
-    meta.textContent = `${sender} • ${fmtDateTime(row.ts)}`;
-    const body = el("div", "chat-message-body");
-    body.textContent = String(row.message || "");
-    item.appendChild(meta);
-    item.appendChild(body);
-    thread.appendChild(item);
-  }
+  thread.textContent = "";
+  thread.appendChild(frag);
   if (State.chatOpen) {
     requestAnimationFrame(() => {
       thread.scrollTop = thread.scrollHeight;
@@ -3771,6 +3788,7 @@ function resetChatDismissTimer() {
   clearChatDismissTimer();
   if (!State.chatOpen) return;
   if (State.chatPendingSend) return;
+  if (State.chatPendingClear) return;
   if (chatHasProtectedDraft()) return;
   State.chatDismissTimer = setTimeout(() => {
     closeChatPanel();
@@ -3805,6 +3823,21 @@ function closeChatPanel() {
   clearChatDismissTimer();
 }
 
+function applyChatClearedState({ preserveDraft = true } = {}) {
+  State.chatMessages = [];
+  State.chatUnread = 0;
+  State.chatLastReadId = 0;
+  State.chatLastInboundId = 0;
+  State.chatReadInFlight = false;
+  State.chatPendingReadUpToId = 0;
+  State.chatHistoryLoaded = true;
+  if (!preserveDraft && $("chatInput")) $("chatInput").value = "";
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
+  if (State.chatOpen) resetChatDismissTimer();
+}
+
 async function loadChatHistory(options = {}) {
   try {
     const payload = await api(
@@ -3816,8 +3849,8 @@ async function loadChatHistory(options = {}) {
     mergeChatRows(payload?.rows);
     State.chatHistoryLoaded = true;
     renderChatBadge();
-    renderChatThread();
     if (State.chatOpen) {
+      renderChatThread();
       await markChatRead();
       resetChatDismissTimer();
     }
@@ -3919,22 +3952,30 @@ function handleIncomingChatMessage(row) {
   );
   const inbound = isChatInboundRow(normalized);
   mergeChatRows([normalized]);
-  renderChatThread();
   renderChatBadge();
   if (!hadRow && inbound) {
     openChatPanel();
     playChatSound();
-  } else if (State.chatOpen && inbound) {
-    markChatRead(normalized.id).catch((err) => {
-      console.warn("[chat] mark read failed:", err.message);
-    });
+    return;
+  }
+  if (State.chatOpen) {
+    renderChatThread();
+    if (inbound) {
+      markChatRead(normalized.id).catch((err) => {
+        console.warn("[chat] mark read failed:", err.message);
+      });
+    }
   }
   resetChatDismissTimer();
 }
 
+function handleChatCleared() {
+  applyChatClearedState({ preserveDraft: true });
+}
+
 async function sendChatMessage() {
   const input = $("chatInput");
-  if (!input || State.chatPendingSend) return;
+  if (!input || State.chatPendingSend || State.chatPendingClear) return;
   const draft = String(input.value || "").replace(/\r\n?/g, "\n");
   const message = draft.trim();
   if (!message) {
@@ -3959,13 +4000,47 @@ async function sendChatMessage() {
     if (!row) throw new Error("Chat send completed without a message row.");
     mergeChatRows([row]);
     input.value = "";
-    renderChatThread();
+    if (State.chatOpen) renderChatThread();
     renderChatBadge();
     resetChatDismissTimer();
   } catch (err) {
     showToast(String(err?.message || "Gateway unavailable. Message not sent."), "warning", 3600);
   } finally {
     State.chatPendingSend = false;
+    renderChatSendState();
+    if (State.chatOpen) resetChatDismissTimer();
+  }
+}
+
+async function clearChatMessages() {
+  if (State.chatPendingSend || State.chatPendingClear) return;
+  if (!Array.isArray(State.chatMessages) || State.chatMessages.length === 0) {
+    renderChatSendState();
+    return;
+  }
+  const ok = await appConfirm(
+    "Clear Operator Messages",
+    "Clear the current operator message thread?\n\nThis removes the shared message history for both Server and Remote panels.",
+    { ok: "Clear Messages", cancel: "Keep Messages" },
+  );
+  if (!ok) {
+    resetChatDismissTimer();
+    return;
+  }
+  State.chatPendingClear = true;
+  renderChatSendState();
+  try {
+    await api("/api/chat/clear", "POST", {}, { progress: false });
+    applyChatClearedState({ preserveDraft: true });
+    showToast("Operator message history cleared.", "success", 2600);
+  } catch (err) {
+    showToast(
+      String(err?.message || "Unable to clear operator messages."),
+      "warning",
+      3600,
+    );
+  } finally {
+    State.chatPendingClear = false;
     renderChatSendState();
     if (State.chatOpen) resetChatDismissTimer();
   }
@@ -3990,6 +4065,7 @@ function resetChatState() {
   State.chatLastReadId = 0;
   State.chatLastInboundId = 0;
   State.chatPendingSend = false;
+  State.chatPendingClear = false;
   State.chatReadInFlight = false;
   State.chatPendingReadUpToId = 0;
   State.chatHistoryLoaded = false;
@@ -5373,6 +5449,9 @@ function handleWS(msg) {
   }
   if (msg.type === "chat") {
     handleIncomingChatMessage(msg.row);
+  }
+  if (msg.type === "chat_clear") {
+    handleChatCleared();
   }
 }
 
@@ -8832,6 +8911,11 @@ function bindEventHandlers() {
   $("chatBubble")?.addEventListener("click", toggleChatPanel);
   $("chatClose")?.addEventListener("click", closeChatPanel);
   $("chatSend")?.addEventListener("click", sendChatMessage);
+  $("chatClear")?.addEventListener("click", () => {
+    clearChatMessages().catch((err) => {
+      console.warn("[chat] clear failed:", err.message);
+    });
+  });
   $("chatPanel")?.addEventListener("pointerdown", () => {
     if (State.chatOpen) resetChatDismissTimer();
   });

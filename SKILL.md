@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.16` in `package.json`
+- Current repo version baseline: `2.2.17` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -208,6 +208,9 @@ Expected app artifacts:
 
 Do not include local-only license-generator builds in GitHub app releases unless explicitly requested.
 
+- Before every release build, clean the workspace `release/` folder so old EXEs, blockmaps, unpacked folders, and transient build leftovers do not stack up.
+- After publishing the latest release, remove previous build leftovers from `release/` and keep only the current release assets when they still need to be referenced locally.
+
 Build commands:
 
 ```powershell
@@ -250,6 +253,11 @@ If a visible product rename affects install directory behavior, assess updater i
 - `read_ts` should only change when the operator actually opens or reads the thread.
 - Keep the messaging UI operational and discreet:
   - short plain-text notes only
+  - visible sender identity should use only `operatorName` plus the role label `Server` or `Remote`
+  - provide a clear-thread action with confirmation so operators can intentionally reset the shared note history
+  - chat notification sound should fire only for inbound messages from the opposite machine
+  - self-sent messages should remain silent
+  - the sound depends on the browser audio context already being unlocked by a user gesture
   - no token, transport, or server-internal wording exposed in the renderer
   - no overlap with the alarm notification control
 

@@ -596,6 +596,7 @@ const stmts = {
         AND id<=?
         AND read_ts IS NULL`,
   ),
+  clearChatMessages: db.prepare(`DELETE FROM chat_messages`),
   purgeChatOverflow: db.prepare(
     `DELETE FROM chat_messages
       WHERE id<=COALESCE((
@@ -694,6 +695,11 @@ function markChatReadUpToId(machine, upToId, readTs = Date.now()) {
     normalizedMachine,
     maxId,
   );
+  return Math.max(0, Math.trunc(Number(info?.changes || 0)));
+}
+
+function clearAllChatMessages() {
+  const info = stmts.clearChatMessages.run();
   return Math.max(0, Math.trunc(Number(info?.changes || 0)));
 }
 
@@ -1364,4 +1370,5 @@ module.exports = {
   getChatInboxAfterId,
   getLatestChatInboundId,
   markChatReadUpToId,
+  clearAllChatMessages,
 };
