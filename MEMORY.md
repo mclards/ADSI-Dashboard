@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.18
+- **Version:** 2.2.19
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -113,6 +113,12 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Forecast hardening:** `services/forecast_engine.py` now uses a hardened historical basis from actual archived weather plus actual generation, learned intra-hour shape correction, startup/shutdown activity gating, and conservative low-power node staging
 - **ML fallback correctness:** `server/index.js` now treats forecast generator exit code `0` correctly, so successful physics-fallback day-ahead runs no longer report false `code -1` failures
 - **Build rule:** project docs now explicitly require rebuilding `dist/ForecastCoreService.exe` and/or `dist/InverterCoreService.exe` whenever the corresponding Python service code or PyInstaller spec changes before any Electron build or release
+
+## v2.2.19 Changes (2026-03-08)
+- **Forecast hardening completed:** `services/forecast_engine.py` now fully implements the remaining day-ahead hardening phases with strict archive-vs-forecast weather separation, persisted forecast-weather snapshots, a separate weather-bias layer, regime-aware residual model routing, and a distinct `PacEnergy_IntradayAdjusted` forecast product
+- **Server forecast support:** `server/db.js` and `server/index.js` now persist, replicate, and expose `forecast_intraday_adjusted`, while `/api/analytics/dayahead` can return the separate intraday-adjusted product when requested
+- **Native module workflow:** `package.json` now includes `rebuild:native:node` and `rebuild:native:electron` scripts so `better-sqlite3` can be rebuilt explicitly for shell-Node checks or Electron release/runtime use without ABI confusion
+- **Release readiness verification:** `dist/ForecastCoreService.exe` was rebuilt after the forecast changes, direct `server/db.js` loads were verified in shell Node, and a live Electron startup smoke test reached `/api/settings` successfully
 
 ## v2.2.16 Changes (2026-03-08)
 - **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, soft inbound-only Web Audio notification, and sender labels limited to `Operator Name - Server/Remote`

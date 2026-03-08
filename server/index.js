@@ -21,6 +21,7 @@ const {
   DATA_DIR,
   ARCHIVE_DIR,
   bulkUpsertForecastDayAhead,
+  bulkUpsertForecastIntradayAdjusted,
   closeDb,
   getTelemetryHotCutoffTs,
   queryReadingsRangeAll,
@@ -272,6 +273,11 @@ const REPLICATION_TABLE_DEFS = [
     columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts"],
   },
   {
+    name: "forecast_intraday_adjusted",
+    orderBy: "date ASC, slot ASC",
+    columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts"],
+  },
+  {
     name: "settings",
     orderBy: "key ASC",
     columns: ["key", "value", "updated_ts"],
@@ -293,6 +299,12 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
     limit: 0,
   },
   forecast_dayahead: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, date ASC, slot ASC",
+    limit: 0,
+  },
+  forecast_intraday_adjusted: {
     mode: "updated",
     cursorColumn: "updated_ts",
     orderBy: "updated_ts ASC, date ASC, slot ASC",
@@ -1395,6 +1407,23 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
         updated_ts=excluded.updated_ts
       WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)`;
     stmtCached("merge:forecast_dayahead:lww", sql).run(payload);
+    return true;
+  }
+
+  if (tableName === "forecast_intraday_adjusted") {
+    const sql = `INSERT INTO forecast_intraday_adjusted (${cols.join(", ")}) VALUES (${cols
+      .map((c) => `@${c}`)
+      .join(", ")})
+      ON CONFLICT(date, slot) DO UPDATE SET
+        ts=excluded.ts,
+        time_hms=excluded.time_hms,
+        kwh_inc=excluded.kwh_inc,
+        kwh_lo=excluded.kwh_lo,
+        kwh_hi=excluded.kwh_hi,
+        source=excluded.source,
+        updated_ts=excluded.updated_ts
+      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_intraday_adjusted.updated_ts,0)`;
+    stmtCached("merge:forecast_intraday_adjusted:lww", sql).run(payload);
     return true;
   }
 
@@ -3818,6 +3847,45 @@ function getDayAheadRowsForDate(day) {
   });
 }
 
+function getIntradayAdjustedRowsForDate(day) {
+  const dayKey = String(day || "").trim();
+  if (!dayKey) return [];
+  let dbRows = [];
+  try {
+    dbRows = stmts.getForecastIntradayAdjustedDate.all(dayKey);
+  } catch (err) {
+    console.error("[forecast] intraday DB read failed:", err.message);
+    dbRows = [];
+  }
+  if (!dbRows.length) {
+    const ctx = readForecastContext();
+    const root =
+      ctx && typeof ctx === "object" ? ctx.PacEnergy_IntradayAdjusted : null;
+    const series =
+      root && typeof root === "object" ? root[dayKey] : null;
+    if (Array.isArray(series) && series.length) {
+      try {
+        upsertIntradayAdjustedSeriesToDb(dayKey, series, "legacy-fallback");
+        dbRows = stmts.getForecastIntradayAdjustedDate.all(dayKey);
+      } catch (err) {
+        console.warn(
+          "[forecast] intraday legacy fallback upsert failed:",
+          err.message,
+        );
+      }
+    }
+  }
+  if (!dbRows.length) return [];
+  return dbRows.map((r) => {
+    const kwhInc = Number(r?.kwh_inc || 0);
+    return {
+      ts: Number(r?.ts || 0),
+      kwh_inc: Number(kwhInc.toFixed(6)),
+      mwh_inc: Number((kwhInc / 1000).toFixed(6)),
+    };
+  });
+}
+
 function normalizeDayAheadSeries(day, series) {
   if (!Array.isArray(series)) return [];
   const out = [];
@@ -3845,6 +3913,12 @@ function normalizeDayAheadSeries(day, series) {
 function upsertDayAheadSeriesToDb(day, series, source = "context-sync") {
   const rows = normalizeDayAheadSeries(day, series);
   bulkUpsertForecastDayAhead(day, rows, source);
+  return rows.length;
+}
+
+function upsertIntradayAdjustedSeriesToDb(day, series, source = "context-sync") {
+  const rows = normalizeDayAheadSeries(day, series);
+  bulkUpsertForecastIntradayAdjusted(day, rows, source);
   return rows.length;
 }
 
@@ -3880,12 +3954,17 @@ function normalizeForecastDbWindow() {
   try {
     // Forecast window is 05:00..18:00 (5-minute window, typically ending at 17:55 slot).
     // Keep slots 60..216 inclusive so 18:00 boundary rows (if any) are preserved.
-    const info = db
+    const infoDayAhead = db
       .prepare(
         "DELETE FROM forecast_dayahead WHERE slot < 60 OR slot > 216",
       )
       .run();
-    return Number(info?.changes || 0);
+    const infoIntraday = db
+      .prepare(
+        "DELETE FROM forecast_intraday_adjusted WHERE slot < 60 OR slot > 216",
+      )
+      .run();
+    return Number(infoDayAhead?.changes || 0) + Number(infoIntraday?.changes || 0);
   } catch (e) {
     console.warn("[Forecast] DB window normalization failed:", e.message);
     return 0;
@@ -7188,15 +7267,18 @@ app.get("/api/analytics/energy", (req, res) => {
 });
 
 app.get("/api/analytics/dayahead", (req, res) => {
-  const { date, start, end, bucketMin } = req.query;
+  const { date, start, end, bucketMin, product } = req.query;
   const parsedStart = parseDateMs(start, NaN, false);
   const parsedEnd = parseDateMs(end, NaN, true);
   const targetDate = String(
     date || (Number.isFinite(parsedStart) ? localDateStr(parsedStart) : localDateStr()),
   ).trim();
   const solarWindow = getForecastSolarWindowBounds(targetDate);
-
-  let rows = getDayAheadRowsForDate(targetDate);
+  const productKey = String(product || "dayahead").trim().toLowerCase();
+  let rows =
+    productKey === "intraday" || productKey === "intraday-adjusted"
+      ? getIntradayAdjustedRowsForDate(targetDate)
+      : getDayAheadRowsForDate(targetDate);
   const s = Number.isFinite(parsedStart)
     ? Math.max(parsedStart, solarWindow.startTs)
     : solarWindow.startTs;

@@ -225,6 +225,21 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_fd_ts      ON forecast_dayahead(ts);
   CREATE INDEX IF NOT EXISTS idx_fd_date_ts ON forecast_dayahead(date, ts);
+
+  CREATE TABLE IF NOT EXISTS forecast_intraday_adjusted (
+    date       TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    slot       INTEGER NOT NULL,
+    time_hms   TEXT NOT NULL,
+    kwh_inc    REAL NOT NULL DEFAULT 0,
+    kwh_lo     REAL DEFAULT 0,
+    kwh_hi     REAL DEFAULT 0,
+    source     TEXT DEFAULT 'service',
+    updated_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    PRIMARY KEY(date, slot)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fia_ts      ON forecast_intraday_adjusted(ts);
+  CREATE INDEX IF NOT EXISTS idx_fia_date_ts ON forecast_intraday_adjusted(date, ts);
 `);
 
 function getTableColumns(database, tableName) {
@@ -543,8 +558,23 @@ const stmts = {
       source=excluded.source,
       updated_ts=excluded.updated_ts
   `),
+  upsertForecastIntradayAdjusted: db.prepare(`
+    INSERT INTO forecast_intraday_adjusted(date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
+    VALUES (@date, @ts, @slot, @time_hms, @kwh_inc, @kwh_lo, @kwh_hi, @source, @updated_ts)
+    ON CONFLICT(date, slot) DO UPDATE SET
+      ts=excluded.ts,
+      time_hms=excluded.time_hms,
+      kwh_inc=excluded.kwh_inc,
+      kwh_lo=excluded.kwh_lo,
+      kwh_hi=excluded.kwh_hi,
+      source=excluded.source,
+      updated_ts=excluded.updated_ts
+  `),
   deleteForecastDayAheadDate: db.prepare(
     `DELETE FROM forecast_dayahead WHERE date=?`,
+  ),
+  deleteForecastIntradayAdjustedDate: db.prepare(
+    `DELETE FROM forecast_intraday_adjusted WHERE date=?`,
   ),
   getForecastDayAheadDate: db.prepare(
     `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
@@ -552,9 +582,21 @@ const stmts = {
      WHERE date=?
      ORDER BY ts ASC`,
   ),
+  getForecastIntradayAdjustedDate: db.prepare(
+    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
+     FROM forecast_intraday_adjusted
+     WHERE date=?
+     ORDER BY ts ASC`,
+  ),
   getForecastDayAheadRange: db.prepare(
     `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
      FROM forecast_dayahead
+     WHERE ts BETWEEN ? AND ?
+     ORDER BY ts ASC`,
+  ),
+  getForecastIntradayAdjustedRange: db.prepare(
+    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
+     FROM forecast_intraday_adjusted
      WHERE ts BETWEEN ? AND ?
      ORDER BY ts ASC`,
   ),
@@ -623,6 +665,24 @@ const bulkUpsertForecastDayAhead = db.transaction((date, rows, source = "service
   const now = Date.now();
   for (const r of rows || []) {
     stmts.upsertForecastDayAhead.run({
+      date: String(date || ""),
+      ts: Number(r?.ts || 0),
+      slot: Number(r?.slot || 0),
+      time_hms: String(r?.time_hms || ""),
+      kwh_inc: Number(r?.kwh_inc || 0),
+      kwh_lo: Number(r?.kwh_lo || 0),
+      kwh_hi: Number(r?.kwh_hi || 0),
+      source: String(source || "service"),
+      updated_ts: now,
+    });
+  }
+});
+
+const bulkUpsertForecastIntradayAdjusted = db.transaction((date, rows, source = "service") => {
+  stmts.deleteForecastIntradayAdjustedDate.run(String(date || ""));
+  const now = Date.now();
+  for (const r of rows || []) {
+    stmts.upsertForecastIntradayAdjusted.run({
       date: String(date || ""),
       ts: Number(r?.ts || 0),
       slot: Number(r?.slot || 0),
@@ -1343,6 +1403,7 @@ module.exports = {
   stmts,
   bulkInsert,
   bulkUpsertForecastDayAhead,
+  bulkUpsertForecastIntradayAdjusted,
   getSetting,
   setSetting,
   pruneOldData,

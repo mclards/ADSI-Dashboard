@@ -58,7 +58,10 @@ HISTORY_CTX   = BASE / "history/context/global/global.json"
 FORECAST_CTX  = BASE / "forecast/context/global/global.json"
 MODEL_FILE    = BASE / "forecast/pv_dayahead_model.joblib"
 SCALER_FILE   = BASE / "forecast/pv_dayahead_scaler.joblib"
+MODEL_BUNDLE_FILE = BASE / "forecast/pv_dayahead_model_bundle.joblib"
 ARTIFACT_FILE = BASE / "forecast/pv_dayahead_artifacts.joblib"
+WEATHER_BIAS_FILE = BASE / "forecast/pv_weather_bias.joblib"
+FORECAST_SNAPSHOT_DIR = BASE / "forecast/snapshots"
 WEATHER_DIR   = BASE / "weather"
 IPCONFIG_FILE = (PORTABLE_ROOT / "config" / "ipconfig.json") if PORTABLE_ROOT is not None else (BASE / "ipconfig.json")
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
@@ -77,7 +80,7 @@ SQLITE_WRITE_TIMEOUT_SEC = 20.0
 SQLITE_RETRY_ATTEMPTS = 3
 SQLITE_RETRY_BACKOFF_SEC = 0.35
 
-for _d in [WEATHER_DIR, MODEL_FILE.parent, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
+for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
     _d.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
@@ -145,6 +148,23 @@ LOW_POWER_STAGE_FRACTION = 0.16
 STAGING_BLEND_MAX = 0.72
 MODULES_PER_INVERTER = 4
 NODE_KW_NOMINAL = 226.73
+REGIME_MODEL_MIN_DAYS = 6
+REGIME_MODEL_MIN_SAMPLES = 320
+REGIME_BLEND_BASE = 0.52
+REGIME_BLEND_MAX = 0.82
+WEATHER_BIAS_LOOKBACK_DAYS = 21
+WEATHER_BIAS_MIN_MATCHES = 4
+WEATHER_BIAS_TOP_K = 6
+WEATHER_BIAS_RAD_BLEND = 0.38
+WEATHER_BIAS_CLOUD_BLEND = 0.26
+WEATHER_BIAS_SHIFT_BLEND = 0.35
+WEATHER_BIAS_FACTOR_CLIP = (0.84, 1.18)
+WEATHER_BIAS_CLOUD_DELTA_CLIP = (-16.0, 16.0)
+INTRADAY_MIN_OBS_SLOTS = 6
+INTRADAY_MAX_OBS_SLOTS = 36
+INTRADAY_RATIO_CLIP = (0.65, 1.35)
+INTRADAY_RECENT_RATIO_CLIP = (0.55, 1.45)
+INTRADAY_BLEND_MAX = 0.72
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -322,9 +342,61 @@ def _merge_slot_series(
     return merged_values
 
 
+def _merge_slot_series_with_presence(
+    label: str,
+    day: str,
+    primary_values: np.ndarray | None,
+    primary_present: np.ndarray | None,
+    fallback_values: np.ndarray | None,
+    fallback_present: np.ndarray | None,
+    min_solar_slots: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if primary_values is None and fallback_values is None:
+        return None, None
+
+    if primary_values is None:
+        merged_values = np.array(fallback_values, dtype=float, copy=True)
+        merged_present = np.array(fallback_present, dtype=bool, copy=True)
+    else:
+        merged_values = np.array(primary_values, dtype=float, copy=True)
+        merged_present = np.array(primary_present, dtype=bool, copy=True)
+        if fallback_values is not None and fallback_present is not None:
+            fill_mask = (~merged_present) & np.asarray(fallback_present, dtype=bool)
+            if np.any(fill_mask):
+                merged_values[fill_mask] = np.asarray(fallback_values, dtype=float)[fill_mask]
+                merged_present[fill_mask] = True
+                log.info(
+                    "%s source gap fill [%s]: filled %d slots from legacy fallback",
+                    label,
+                    day,
+                    int(np.count_nonzero(fill_mask)),
+                )
+
+    solar_slots = _count_solar_present_slots(merged_present)
+    if solar_slots <= 0:
+        return None, None
+    if solar_slots < min_solar_slots:
+        log.warning(
+            "%s coverage is sparse [%s]: %d solar slots available (min=%d). Skipping this day.",
+            label,
+            day,
+            solar_slots,
+            min_solar_slots,
+        )
+        return None, None
+
+    merged_values = np.nan_to_num(merged_values, nan=0.0, posinf=0.0, neginf=0.0)
+    merged_values[merged_values < 0] = 0.0
+    return merged_values, merged_present
+
+
 def clear_forecast_data_cache() -> None:
     load_actual.cache_clear()
+    load_actual_with_presence.cache_clear()
     load_dayahead.cache_clear()
+    load_dayahead_with_presence.cache_clear()
+    load_intraday_adjusted.cache_clear()
+    load_intraday_adjusted_with_presence.cache_clear()
 
 
 def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
@@ -588,29 +660,42 @@ def _sample_weight_for_days_ago(days_ago: int) -> float:
     return float(np.clip(weight, TRAIN_WEIGHT_FLOOR, 1.0))
 
 
+def _weather_cache_path(day: str, source_kind: str) -> Path:
+    loc_tag = f"{LAT_DEG:.6f}_{LON_DEG:.6f}".replace("-", "m")
+    tag = "archive" if str(source_kind or "").strip().lower() == "archive" else "forecast"
+    return WEATHER_DIR / f"om_{tag}_{day}_{loc_tag}.csv"
+
+
 # ============================================================================
 # WEATHER FETCH & CACHE
 # ============================================================================
 
-def fetch_weather(day: str) -> pd.DataFrame | None:
+def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
     """
     Fetch hourly weather from Open-Meteo for *day* (YYYY-MM-DD).
-    Returns a DataFrame with columns: time, rad, cloud, temp, rh, wind_speed.
-    Caches per-day CSV; re-fetches today every call.
+
+    `source="archive"` always means observed archive weather for historical
+    training and bias evaluation. `source="forecast"` means the provider
+    forecast used for day-ahead generation. `source="auto"` uses archive for
+    past days and forecast for today/future days.
     """
-    loc_tag = f"{LAT_DEG:.6f}_{LON_DEG:.6f}".replace("-", "m")
-    cache = WEATHER_DIR / f"om_{day}_{loc_tag}.csv"
+    src_raw = str(source or "auto").strip().lower()
+    if src_raw not in {"auto", "archive", "forecast"}:
+        src_raw = "auto"
+    source_kind = "archive" if src_raw == "archive" or (src_raw == "auto" and _is_past_day(day)) else "forecast"
+    cache = _weather_cache_path(day, source_kind)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if day != today and cache.exists():
+    use_cache = not (source_kind == "forecast" and day == today)
+    if use_cache and cache.exists():
         try:
             df = pd.read_csv(cache, parse_dates=["time"])
             day_df = _slice_weather_day(df, day)
             ok, reason = validate_weather_hourly(day, day_df)
             if ok:
-                log.debug("Weather cache hit: %s (%d rows)", day, len(day_df))
+                log.debug("Weather cache hit [%s]: %s (%d rows)", source_kind, day, len(day_df))
                 return day_df
-            log.warning("Weather cache invalid for %s: %s", day, reason)
+            log.warning("Weather cache invalid [%s] for %s: %s", source_kind, day, reason)
         except Exception:
             pass
 
@@ -619,7 +704,7 @@ def fetch_weather(day: str) -> pd.DataFrame | None:
         "cloudcover,cloudcover_low,cloudcover_mid,cloudcover_high,"
         "temperature_2m,relativehumidity_2m,windspeed_10m,precipitation,cape"
     )
-    if _is_past_day(day):
+    if source_kind == "archive":
         # Backfill training weather when cache is missing.
         url = (
             "https://archive-api.open-meteo.com/v1/archive"
@@ -662,13 +747,13 @@ def fetch_weather(day: str) -> pd.DataFrame | None:
         day_df = _slice_weather_day(full_df, day)
         ok, reason = validate_weather_hourly(day, day_df)
         if not ok:
-            log.error("Weather fetched but invalid for %s: %s", day, reason)
+            log.error("Weather fetched but invalid [%s] for %s: %s", source_kind, day, reason)
             return None
         day_df.to_csv(cache, index=False)
-        log.info("Weather fetched & cached: %s (%d rows)", day, len(day_df))
+        log.info("Weather fetched & cached [%s]: %s (%d rows)", source_kind, day, len(day_df))
         return day_df
     except Exception as e:
-        log.error("Weather fetch failed for %s: %s", day, e)
+        log.error("Weather fetch failed [%s] for %s: %s", source_kind, day, e)
         return None
 
 
@@ -1014,6 +1099,21 @@ def analyse_weather_day(day: str, w5: pd.DataFrame, actual: np.ndarray | None = 
     return stats
 
 
+def classify_day_regime(stats: dict) -> str:
+    cloud_mean = float(stats.get("cloud_mean", 0.0))
+    vol_index = float(stats.get("vol_index", 0.0))
+    rad_peak = float(stats.get("rad_peak", 0.0))
+    rainy = bool(stats.get("rainy", False))
+    convective = bool(stats.get("convective", False))
+    if rainy or (convective and cloud_mean >= 75.0):
+        return "rainy"
+    if cloud_mean < 26.0 and vol_index < 0.18 and rad_peak >= 650.0:
+        return "clear"
+    if cloud_mean < 72.0:
+        return "mixed"
+    return "overcast"
+
+
 def classify_hour_regime(
     cloud_mean: float,
     cloud_std: float,
@@ -1142,6 +1242,8 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
         cap_kw                              â€“ plant scale normalizer
     """
     geo  = solar_geometry(day)
+    day_stats = analyse_weather_day(day, w5)
+    day_regime = classify_day_regime(day_stats)
 
     def col(name: str, default: float = 0.0) -> np.ndarray:
         if name not in w5.columns:
@@ -1220,6 +1322,13 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
     shoulder_flag = ((sunrise_slots < 18) | (sunset_slots < 18)).astype(float)
     node_count = max(1, plant_node_count())
     expected_nodes = np.clip((cap_kw * np.clip(kt, 0.0, 1.0)) / max(NODE_KW_NOMINAL, 1.0), 0.0, float(node_count))
+    season_bucket = _season_bucket_from_day(day)
+    wet_season_flag = 1.0 if season_bucket == "wet" else 0.0
+    dry_season_flag = 1.0 - wet_season_flag
+    day_regime_clear = 1.0 if day_regime == "clear" else 0.0
+    day_regime_mixed = 1.0 if day_regime == "mixed" else 0.0
+    day_regime_overcast = 1.0 if day_regime == "overcast" else 0.0
+    day_regime_rainy = 1.0 if day_regime == "rainy" else 0.0
 
     df = pd.DataFrame({
         # Radiation
@@ -1269,6 +1378,14 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
         "shoulder_flag": shoulder_flag,
         "doy_sin":       doy_sin,
         "doy_cos":       doy_cos,
+        "day_cloud_mean": np.full(SLOTS_DAY, float(day_stats.get("cloud_mean", 0.0))),
+        "day_vol_index": np.full(SLOTS_DAY, float(day_stats.get("vol_index", 0.0))),
+        "wet_season_flag": np.full(SLOTS_DAY, wet_season_flag),
+        "dry_season_flag": np.full(SLOTS_DAY, dry_season_flag),
+        "day_regime_clear": np.full(SLOTS_DAY, day_regime_clear),
+        "day_regime_mixed": np.full(SLOTS_DAY, day_regime_mixed),
+        "day_regime_overcast": np.full(SLOTS_DAY, day_regime_overcast),
+        "day_regime_rainy": np.full(SLOTS_DAY, day_regime_rainy),
         # Plant
         "expected_nodes": expected_nodes,
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
@@ -1287,6 +1404,8 @@ FEATURE_COLS = [
     "solar_prog", "solar_prog_sq", "solar_prog_sin", "tod_sin", "tod_cos",
     "slot_in_hour_sin", "slot_in_hour_cos", "sunrise_rel", "sunset_rel", "shoulder_flag",
     "doy_sin", "doy_cos",
+    "day_cloud_mean", "day_vol_index", "wet_season_flag", "dry_season_flag",
+    "day_regime_clear", "day_regime_mixed", "day_regime_overcast", "day_regime_rainy",
     "expected_nodes", "cap_kw",
 ]
 
@@ -1425,10 +1544,10 @@ def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.nd
 
 
 @lru_cache(maxsize=256)
-def load_actual(day: str) -> np.ndarray | None:
+def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_actual, db_present = _load_actual_from_appdata(day)
     legacy_actual, legacy_present = _load_actual_from_legacy_context(day)
-    return _merge_slot_series(
+    return _merge_slot_series_with_presence(
         "Actual history",
         day,
         db_actual,
@@ -1437,6 +1556,12 @@ def load_actual(day: str) -> np.ndarray | None:
         legacy_present,
         MIN_HISTORY_SOLAR_SLOTS,
     )
+
+
+@lru_cache(maxsize=256)
+def load_actual(day: str) -> np.ndarray | None:
+    values, _ = load_actual_with_presence(day)
+    return values
 
 
 def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -1499,10 +1624,10 @@ def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray 
 
 
 @lru_cache(maxsize=256)
-def load_dayahead(day: str) -> np.ndarray | None:
+def load_dayahead_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_rows, db_present = _load_dayahead_from_db(day)
     legacy_rows, legacy_present = _load_dayahead_from_legacy(day)
-    return _merge_slot_series(
+    return _merge_slot_series_with_presence(
         "Day-ahead history",
         day,
         db_rows,
@@ -1511,6 +1636,92 @@ def load_dayahead(day: str) -> np.ndarray | None:
         legacy_present,
         MIN_DAYAHEAD_SOLAR_SLOTS,
     )
+
+
+@lru_cache(maxsize=256)
+def load_dayahead(day: str) -> np.ndarray | None:
+    values, _ = load_dayahead_with_presence(day)
+    return values
+
+
+def _load_intraday_adjusted_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if not APP_DB_FILE.exists():
+        return None, None
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cur = conn.execute(
+                    """
+                    SELECT slot, kwh_inc
+                      FROM forecast_intraday_adjusted
+                     WHERE date=?
+                     ORDER BY slot ASC
+                    """,
+                    (str(day),),
+                )
+                for slot, kwh_inc in cur.fetchall():
+                    slot_i = int(slot or 0)
+                    if 0 <= slot_i < SLOTS_DAY:
+                        out[slot_i] = _coerce_non_negative_float(kwh_inc)
+                        present[slot_i] = True
+            return (out, present) if present.any() else (None, None)
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB intraday load retry %d/%d [%s]: %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    day,
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB intraday load failed [%s]: %s", day, e)
+            return None, None
+
+
+def _load_intraday_adjusted_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    ctx = _load_json(FORECAST_CTX)
+    da = ctx.get("PacEnergy_IntradayAdjusted", {}).get(day)
+    if not isinstance(da, list) or not da:
+        return None, None
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    total_rows = len(da)
+    for i, p in enumerate(da):
+        if not isinstance(p, dict):
+            continue
+        slot = _parse_slot_from_time_text(day, p.get("time") or p.get("time_hms"))
+        if slot is None:
+            slot = _default_legacy_slot(i, total_rows)
+        if 0 <= slot < SLOTS_DAY:
+            out[slot] = _coerce_non_negative_float(p.get("kWh_inc", p.get("kwh_inc", 0)))
+            present[slot] = True
+    return (out, present) if present.any() else (None, None)
+
+
+@lru_cache(maxsize=256)
+def load_intraday_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    db_rows, db_present = _load_intraday_adjusted_from_db(day)
+    legacy_rows, legacy_present = _load_intraday_adjusted_from_legacy(day)
+    return _merge_slot_series_with_presence(
+        "Intraday adjusted",
+        day,
+        db_rows,
+        db_present,
+        legacy_rows,
+        legacy_present,
+        MIN_DAYAHEAD_SOLAR_SLOTS,
+    )
+
+
+@lru_cache(maxsize=256)
+def load_intraday_adjusted(day: str) -> np.ndarray | None:
+    values, _ = load_intraday_adjusted_with_presence(day)
+    return values
 
 
 # ============================================================================
@@ -1586,7 +1797,7 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
     for days_ago in range(1, lookback_days + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
         actual = load_actual(day)
-        wdata = fetch_weather(day)
+        wdata = fetch_weather(day, source="archive")
         if actual is None or wdata is None:
             log.debug("  Skip %s - missing history basis", day)
             continue
@@ -1612,6 +1823,7 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
             "baseline": np.asarray(baseline, dtype=float),
             "stats": stats,
             "season": _season_bucket_from_day(day),
+            "day_regime": classify_day_regime(stats),
             "first_active_slot": _find_first_active_slot(actual),
             "last_active_slot": _find_last_active_slot(actual),
         })
@@ -1707,6 +1919,331 @@ def load_forecast_artifacts(today: date | None = None, allow_build: bool = False
         return artifact
 
     return None
+
+
+def _weather_frame_to_records(df: pd.DataFrame) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    cols = [
+        "time",
+        "rad",
+        "rad_direct",
+        "rad_diffuse",
+        "cloud",
+        "cloud_low",
+        "cloud_mid",
+        "cloud_high",
+        "temp",
+        "rh",
+        "wind",
+        "precip",
+        "cape",
+    ]
+    frame = df.copy()
+    if "time" in frame.columns:
+        frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    def safe_num(value) -> float:
+        try:
+            num = float(pd.to_numeric(value, errors="coerce"))
+        except Exception:
+            return 0.0
+        return num if math.isfinite(num) else 0.0
+    out = []
+    for _, row in frame.iterrows():
+        time_value = row.get("time")
+        if pd.isna(time_value):
+            continue
+        rec = {"time": pd.Timestamp(time_value).strftime("%Y-%m-%d %H:%M:%S")}
+        for col in cols[1:]:
+            rec[col] = round(safe_num(row.get(col)), 6)
+        out.append(rec)
+    return out
+
+
+def _weather_records_to_frame(records: list[dict], day: str) -> pd.DataFrame:
+    if not isinstance(records, list) or not records:
+        return pd.DataFrame()
+    rows = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rows.append({
+            "time": pd.to_datetime(rec.get("time"), errors="coerce"),
+            "rad": pd.to_numeric(rec.get("rad"), errors="coerce"),
+            "rad_direct": pd.to_numeric(rec.get("rad_direct"), errors="coerce"),
+            "rad_diffuse": pd.to_numeric(rec.get("rad_diffuse"), errors="coerce"),
+            "cloud": pd.to_numeric(rec.get("cloud"), errors="coerce"),
+            "cloud_low": pd.to_numeric(rec.get("cloud_low"), errors="coerce"),
+            "cloud_mid": pd.to_numeric(rec.get("cloud_mid"), errors="coerce"),
+            "cloud_high": pd.to_numeric(rec.get("cloud_high"), errors="coerce"),
+            "temp": pd.to_numeric(rec.get("temp"), errors="coerce"),
+            "rh": pd.to_numeric(rec.get("rh"), errors="coerce"),
+            "wind": pd.to_numeric(rec.get("wind"), errors="coerce"),
+            "precip": pd.to_numeric(rec.get("precip"), errors="coerce"),
+            "cape": pd.to_numeric(rec.get("cape"), errors="coerce"),
+        })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    return _slice_weather_day(frame, day)
+
+
+def forecast_snapshot_path(day: str) -> Path:
+    return FORECAST_SNAPSHOT_DIR / f"{str(day).strip()}.json"
+
+
+def weather_day_signature(day: str, hourly_df: pd.DataFrame) -> dict:
+    w5 = interpolate_5min(hourly_df, day)
+    stats = analyse_weather_day(day, w5)
+    return {
+        "day": str(day),
+        "season": _season_bucket_from_day(day),
+        "day_regime": classify_day_regime(stats),
+        "sky_class": stats.get("sky_class"),
+        "cloud_mean": float(stats.get("cloud_mean", 0.0)),
+        "rad_peak": float(stats.get("rad_peak", 0.0)),
+        "vol_index": float(stats.get("vol_index", 0.0)),
+        "rh_mean": float(stats.get("rh_mean", 0.0)),
+        "rainy": bool(stats.get("rainy", False)),
+        "convective": bool(stats.get("convective", False)),
+    }
+
+
+def save_forecast_weather_snapshot(
+    day: str,
+    raw_hourly: pd.DataFrame,
+    applied_hourly: pd.DataFrame | None = None,
+    provider: str = "open-meteo",
+    meta: dict | None = None,
+) -> bool:
+    payload = {
+        "day": str(day),
+        "provider": str(provider or "open-meteo"),
+        "saved_ts": int(time.time()),
+        "raw_hourly": _weather_frame_to_records(raw_hourly),
+        "applied_hourly": _weather_frame_to_records(applied_hourly if applied_hourly is not None else raw_hourly),
+        "signature": weather_day_signature(day, raw_hourly),
+        "applied_signature": weather_day_signature(day, applied_hourly if applied_hourly is not None else raw_hourly),
+        "meta": dict(meta or {}),
+    }
+    return _save_json(forecast_snapshot_path(day), payload)
+
+
+def load_forecast_weather_snapshot(day: str) -> dict | None:
+    payload = _load_json(forecast_snapshot_path(day))
+    return payload if isinstance(payload, dict) and payload else None
+
+
+def _hourly_series_by_hour(df: pd.DataFrame, column: str, day: str) -> np.ndarray:
+    out = np.zeros(SOLAR_END_H - SOLAR_START_H, dtype=float)
+    frame = _slice_weather_day(df, day)
+    if frame.empty or "time" not in frame.columns or column not in frame.columns:
+        return out
+    frame = frame.copy()
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    frame = frame.dropna(subset=["time"])
+    for _, row in frame.iterrows():
+        hour = int(pd.Timestamp(row["time"]).hour)
+        if SOLAR_START_H <= hour < SOLAR_END_H:
+            value = pd.to_numeric(row.get(column), errors="coerce")
+            out[hour - SOLAR_START_H] = float(value) if pd.notna(value) and math.isfinite(float(value)) else 0.0
+    return out
+
+
+def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_LOOKBACK_DAYS) -> dict:
+    records = []
+    for days_ago in range(1, lookback_days + 1):
+        day = (today - timedelta(days=days_ago)).isoformat()
+        snap = load_forecast_weather_snapshot(day)
+        if not snap:
+            continue
+        raw_hourly = _weather_records_to_frame(list(snap.get("raw_hourly") or []), day)
+        if raw_hourly.empty:
+            continue
+        actual_hourly = fetch_weather(day, source="archive")
+        if actual_hourly is None or actual_hourly.empty:
+            continue
+
+        raw_sig = snap.get("signature") if isinstance(snap.get("signature"), dict) else weather_day_signature(day, raw_hourly)
+        actual_sig = weather_day_signature(day, actual_hourly)
+        forecast_rad = _hourly_series_by_hour(raw_hourly, "rad", day)
+        actual_rad = _hourly_series_by_hour(actual_hourly, "rad", day)
+        forecast_cloud = _hourly_series_by_hour(raw_hourly, "cloud", day)
+        actual_cloud = _hourly_series_by_hour(actual_hourly, "cloud", day)
+
+        rad_ratio = np.ones_like(forecast_rad, dtype=float)
+        for idx, (f_rad, a_rad) in enumerate(zip(forecast_rad, actual_rad)):
+            if f_rad < 30.0 and a_rad < 30.0:
+                rad_ratio[idx] = 1.0
+            elif f_rad < 30.0:
+                rad_ratio[idx] = float(np.clip(1.0 + ((a_rad - f_rad) / 180.0), 0.80, 1.35))
+            else:
+                rad_ratio[idx] = float(np.clip(a_rad / max(f_rad, 1.0), 0.55, 1.55))
+
+        cloud_delta = np.clip(actual_cloud - forecast_cloud, -38.0, 38.0)
+        mean_ratio_error = float(np.mean(np.abs(rad_ratio - 1.0))) if rad_ratio.size else 0.0
+        mean_cloud_error = float(np.mean(np.abs(cloud_delta))) if cloud_delta.size else 0.0
+        confidence = float(np.clip(1.0 - 0.55 * mean_ratio_error - 0.006 * mean_cloud_error, 0.55, 1.0))
+
+        forecast_start = next((idx for idx, value in enumerate(forecast_rad) if value >= STARTUP_RAD_WM2), None)
+        actual_start = next((idx for idx, value in enumerate(actual_rad) if value >= STARTUP_RAD_WM2), None)
+        morning_shift_slots = 0.0
+        if forecast_start is not None and actual_start is not None:
+            morning_shift_slots = float((actual_start - forecast_start) * (60 // SLOT_MIN))
+
+        records.append({
+            "day": day,
+            "days_ago": int(days_ago),
+            "season": raw_sig.get("season") or _season_bucket_from_day(day),
+            "forecast_regime": raw_sig.get("day_regime") or classify_day_regime(raw_sig),
+            "actual_regime": actual_sig.get("day_regime") or classify_day_regime(actual_sig),
+            "cloud_mean": float(raw_sig.get("cloud_mean", 0.0)),
+            "rad_peak": float(raw_sig.get("rad_peak", 0.0)),
+            "vol_index": float(raw_sig.get("vol_index", 0.0)),
+            "rh_mean": float(raw_sig.get("rh_mean", 0.0)),
+            "confidence": confidence,
+            "morning_shift_slots": float(np.clip(morning_shift_slots, -24.0, 24.0)),
+            "rad_ratio": rad_ratio.astype(np.float32),
+            "cloud_delta": cloud_delta.astype(np.float32),
+        })
+
+    return {
+        "created_ts": int(time.time()),
+        "lookback_days": int(lookback_days),
+        "record_count": int(len(records)),
+        "records": records,
+    }
+
+
+def save_weather_bias_artifact(artifact: dict) -> bool:
+    try:
+        WEATHER_BIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dump(artifact, WEATHER_BIAS_FILE)
+        return True
+    except Exception as e:
+        log.error("Weather-bias artifact save failed %s: %s", WEATHER_BIAS_FILE, e)
+        return False
+
+
+def load_weather_bias_artifact(today: date | None = None, allow_build: bool = False) -> dict | None:
+    if WEATHER_BIAS_FILE.exists():
+        try:
+            data = load(WEATHER_BIAS_FILE)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            log.warning("Weather-bias artifact load failed %s: %s", WEATHER_BIAS_FILE, e)
+
+    if allow_build and today is not None:
+        artifact = build_weather_bias_artifact(today)
+        save_weather_bias_artifact(artifact)
+        return artifact
+
+    return None
+
+
+def _weather_bias_similarity_score(record: dict, target: dict) -> float:
+    score = 0.0
+    if record.get("season") != target.get("season"):
+        score += 0.55
+    if record.get("forecast_regime") != target.get("day_regime"):
+        score += 1.05
+    score += abs(float(record.get("cloud_mean", 0.0)) - float(target.get("cloud_mean", 0.0))) / 26.0
+    score += abs(float(record.get("rad_peak", 0.0)) - float(target.get("rad_peak", 0.0))) / 420.0
+    score += abs(float(record.get("vol_index", 0.0)) - float(target.get("vol_index", 0.0))) / 0.18
+    score += abs(float(record.get("rh_mean", 0.0)) - float(target.get("rh_mean", 0.0))) / 22.0
+    score += min(float(record.get("days_ago", WEATHER_BIAS_LOOKBACK_DAYS)), float(WEATHER_BIAS_LOOKBACK_DAYS)) / max(float(WEATHER_BIAS_LOOKBACK_DAYS), 1.0) * 0.24
+    return score
+
+
+def apply_weather_bias_adjustment(
+    hourly_df: pd.DataFrame,
+    day: str,
+    artifact: dict | None,
+) -> tuple[pd.DataFrame, dict]:
+    frame = _slice_weather_day(hourly_df, day)
+    default_meta = {
+        "matches": 0,
+        "avg_score": None,
+        "day_regime": None,
+        "regime_confidence": 1.0,
+        "morning_shift_slots": 0.0,
+        "mean_rad_factor": 1.0,
+    }
+    records = list((artifact or {}).get("records") or [])
+    if frame.empty or not records:
+        if not frame.empty:
+            sig = weather_day_signature(day, frame)
+            default_meta["day_regime"] = sig.get("day_regime")
+        return frame if not frame.empty else hourly_df.copy(), default_meta
+
+    target = weather_day_signature(day, frame)
+    exact = [
+        record for record in records
+        if record.get("season") == target.get("season") and record.get("forecast_regime") == target.get("day_regime")
+    ]
+    pool = exact if len(exact) >= WEATHER_BIAS_MIN_MATCHES else records
+    scored = []
+    for record in pool:
+        score = _weather_bias_similarity_score(record, target)
+        if math.isfinite(score):
+            scored.append((score, record))
+    if not scored:
+        return frame.copy(), {
+            **default_meta,
+            "day_regime": target.get("day_regime"),
+        }
+
+    scored.sort(key=lambda item: item[0])
+    top = scored[:WEATHER_BIAS_TOP_K]
+    weights = np.array([1.0 / ((0.25 + score) ** 2) for score, _ in top], dtype=float)
+    rad_ratio = np.average(np.array([np.asarray(record["rad_ratio"], dtype=float) for _, record in top], dtype=float), axis=0, weights=weights)
+    cloud_delta = np.average(np.array([np.asarray(record["cloud_delta"], dtype=float) for _, record in top], dtype=float), axis=0, weights=weights)
+    confidence = float(np.clip(np.average([float(record.get("confidence", 1.0)) for _, record in top], weights=weights), 0.55, 1.0))
+    morning_shift = float(np.average([float(record.get("morning_shift_slots", 0.0)) for _, record in top], weights=weights))
+
+    adjusted = frame.copy()
+    def safe_num(value) -> float:
+        try:
+            num = float(pd.to_numeric(value, errors="coerce"))
+        except Exception:
+            return 0.0
+        return num if math.isfinite(num) else 0.0
+    adjusted["time"] = pd.to_datetime(adjusted["time"], errors="coerce")
+    rad_factors = []
+    for idx, row in adjusted.iterrows():
+        ts = pd.Timestamp(row["time"])
+        hour = int(ts.hour)
+        if hour < SOLAR_START_H or hour >= SOLAR_END_H:
+            continue
+        hour_idx = hour - SOLAR_START_H
+        raw_factor = 1.0 + WEATHER_BIAS_RAD_BLEND * (float(rad_ratio[hour_idx]) - 1.0)
+        factor = float(np.clip(raw_factor, WEATHER_BIAS_FACTOR_CLIP[0], WEATHER_BIAS_FACTOR_CLIP[1]))
+        rad_factors.append(factor)
+        for col in ("rad", "rad_direct", "rad_diffuse"):
+            adjusted.at[idx, col] = max(0.0, safe_num(row.get(col)) * factor)
+
+        delta = float(np.clip(WEATHER_BIAS_CLOUD_BLEND * float(cloud_delta[hour_idx]), WEATHER_BIAS_CLOUD_DELTA_CLIP[0], WEATHER_BIAS_CLOUD_DELTA_CLIP[1]))
+        base_cloud = safe_num(row.get("cloud"))
+        target_cloud = float(np.clip(base_cloud + delta, 0.0, 100.0))
+        adjusted.at[idx, "cloud"] = target_cloud
+        if base_cloud > 1.0:
+            scale = target_cloud / max(base_cloud, 1.0)
+            for col in ("cloud_low", "cloud_mid", "cloud_high"):
+                adjusted.at[idx, col] = float(np.clip(safe_num(row.get(col)) * scale, 0.0, 100.0))
+        else:
+            adjusted.at[idx, "cloud_low"] = float(np.clip(safe_num(row.get("cloud_low")) + delta * 0.45, 0.0, 100.0))
+            adjusted.at[idx, "cloud_mid"] = float(np.clip(safe_num(row.get("cloud_mid")) + delta * 0.35, 0.0, 100.0))
+            adjusted.at[idx, "cloud_high"] = float(np.clip(safe_num(row.get("cloud_high")) + delta * 0.20, 0.0, 100.0))
+
+    return adjusted, {
+        "matches": int(len(top)),
+        "avg_score": float(np.mean([score for score, _ in top])) if top else None,
+        "day_regime": target.get("day_regime"),
+        "regime_confidence": confidence,
+        "morning_shift_slots": float(np.clip(morning_shift, -24.0, 24.0)),
+        "mean_rad_factor": float(np.mean(rad_factors)) if rad_factors else 1.0,
+    }
 
 
 def _shape_similarity_score(record: dict, target_meta: dict) -> float:
@@ -1929,6 +2466,7 @@ def apply_activity_hysteresis(
     day: str,
     w5: pd.DataFrame,
     artifacts: dict | None,
+    bias_meta: dict | None = None,
 ) -> tuple[np.ndarray, dict]:
     out = np.clip(np.asarray(forecast, dtype=float), 0.0, None).copy()
     if float(out.sum()) <= 0:
@@ -1937,6 +2475,14 @@ def apply_activity_hysteresis(
     window = estimate_activity_window(day, w5, out, artifacts)
     first_slot = int(window["first_slot"])
     last_slot = int(window["last_slot"])
+    morning_shift = float((bias_meta or {}).get("morning_shift_slots", 0.0) or 0.0)
+    if abs(morning_shift) > 0.01:
+        shift = int(round(np.clip(morning_shift * WEATHER_BIAS_SHIFT_BLEND, -8.0, 8.0)))
+        first_slot = int(np.clip(first_slot + shift, SOLAR_START_SLOT, SOLAR_END_SLOT - 1))
+        last_slot = max(first_slot, last_slot)
+        window["bias_shift_slots"] = shift
+    else:
+        window["bias_shift_slots"] = 0
     first_hour = first_slot // (60 // SLOT_MIN)
     last_hour = last_slot // (60 // SLOT_MIN)
 
@@ -2046,7 +2592,7 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
     for d in range(1, N_TRAIN_DAYS + 1):
         day    = (today - timedelta(days=d)).isoformat()
         actual = load_actual(day)
-        wdata  = fetch_weather(day)
+        wdata  = fetch_weather(day, source="archive")
 
         if actual is None or wdata is None:
             log.debug("  Skip %s â€“ missing data", day)
@@ -2115,6 +2661,7 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
 def collect_training_data_hardened(
     today: date,
     history_days: list[dict] | None = None,
+    day_regime: str | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray] | tuple[None, None, None]:
     """
     Build the residual-training set from the hardened historical basis.
@@ -2124,12 +2671,21 @@ def collect_training_data_hardened(
     """
     samples = list(history_days or collect_history_days(today, N_TRAIN_DAYS))
     samples = [sample for sample in samples if int(sample.get("days_ago", N_TRAIN_DAYS + 1)) <= N_TRAIN_DAYS]
+    if day_regime:
+        samples = [sample for sample in samples if str(sample.get("day_regime") or "") == str(day_regime)]
 
     X_parts = []
     y_parts = []
     weight_parts = []
 
-    log.info("Collecting residual training samples from %d accepted history day(s)", len(samples))
+    if day_regime:
+        log.info(
+            "Collecting residual training samples from %d accepted history day(s) for regime=%s",
+            len(samples),
+            day_regime,
+        )
+    else:
+        log.info("Collecting residual training samples from %d accepted history day(s)", len(samples))
 
     for sample in samples:
         day = str(sample["day"])
@@ -2194,6 +2750,124 @@ def collect_training_data_hardened(
     return X_train, y_train, w_train
 
 
+def _make_residual_regressor() -> GradientBoostingRegressor:
+    return GradientBoostingRegressor(
+        n_estimators=500,
+        learning_rate=0.025,
+        max_depth=4,
+        min_samples_split=15,
+        min_samples_leaf=8,
+        subsample=0.8,
+        max_features=0.75,
+        random_state=42,
+        loss="huber",
+        alpha=0.85,
+        validation_fraction=0.1,
+        n_iter_no_change=30,
+        tol=1e-4,
+    )
+
+
+def fit_residual_model(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    sample_weight: np.ndarray,
+) -> tuple[GradientBoostingRegressor, RobustScaler, dict]:
+    scaler = RobustScaler()
+    X_sc = scaler.fit_transform(X)
+    model = _make_residual_regressor()
+    model.fit(X_sc, y, sample_weight=sample_weight)
+    meta = {
+        "sample_count": int(len(y)),
+        "feature_count": int(X.shape[1]),
+        "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
+        "estimators_used": int(getattr(model, "n_estimators_", model.n_estimators)),
+    }
+    return model, scaler, meta
+
+
+def save_model_bundle(bundle: dict) -> bool:
+    try:
+        MODEL_BUNDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dump(bundle, MODEL_BUNDLE_FILE)
+        return True
+    except Exception as e:
+        log.error("Model bundle save failed %s: %s", MODEL_BUNDLE_FILE, e)
+        return False
+
+
+def load_model_bundle() -> dict | None:
+    if MODEL_BUNDLE_FILE.exists():
+        try:
+            data = load(MODEL_BUNDLE_FILE)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            log.warning("Model bundle load failed %s: %s", MODEL_BUNDLE_FILE, e)
+
+    if MODEL_FILE.exists() and SCALER_FILE.exists():
+        try:
+            model = load(MODEL_FILE)
+            scaler = load(SCALER_FILE)
+            return {
+                "created_ts": int(time.time()),
+                "training_basis": "legacy-single-model",
+                "global": {
+                    "model": model,
+                    "scaler": scaler,
+                    "meta": {
+                        "sample_count": 0,
+                        "feature_count": len(FEATURE_COLS),
+                        "train_score": None,
+                        "estimators_used": int(getattr(model, "n_estimators_", getattr(model, "n_estimators", 0)) or 0),
+                    },
+                },
+                "regimes": {},
+            }
+        except Exception as e:
+            log.warning("Legacy model load failed: %s", e)
+    return None
+
+
+def predict_residual_with_bundle(
+    bundle: dict | None,
+    X_pred: pd.DataFrame,
+    target_regime: str,
+    regime_confidence: float = 1.0,
+) -> tuple[np.ndarray, dict]:
+    if not bundle or not isinstance(bundle, dict):
+        return np.zeros(len(X_pred), dtype=float), {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
+
+    global_block = bundle.get("global") or {}
+    global_model = global_block.get("model")
+    global_scaler = global_block.get("scaler")
+    if global_model is None or global_scaler is None:
+        return np.zeros(len(X_pred), dtype=float), {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
+
+    X_global = global_scaler.transform(X_pred)
+    global_pred = np.asarray(global_model.predict(X_global), dtype=float)
+    regime_block = ((bundle.get("regimes") or {}).get(target_regime) or {})
+    regime_model = regime_block.get("model")
+    regime_scaler = regime_block.get("scaler")
+    if regime_model is None or regime_scaler is None:
+        return global_pred, {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
+
+    X_regime = regime_scaler.transform(X_pred)
+    regime_pred = np.asarray(regime_model.predict(X_regime), dtype=float)
+    regime_meta = regime_block.get("meta") or {}
+    regime_days = int(regime_meta.get("day_count", 0))
+    blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
+    blend = min(blend, REGIME_BLEND_MAX)
+    blend *= float(np.clip(regime_confidence, 0.60, 1.0))
+    return ((1.0 - blend) * global_pred + blend * regime_pred), {
+        "target_regime": target_regime,
+        "used_regime_model": True,
+        "blend": float(blend),
+        "regime_days": regime_days,
+        "regime_samples": int(regime_meta.get("sample_count", 0)),
+    }
+
+
 def train_model(today: date) -> bool:
     """Train (or retrain) the residual correction model."""
     history_days = collect_history_days(today, max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS))
@@ -2201,33 +2875,51 @@ def train_model(today: date) -> bool:
     if X is None:
         return False
 
-    scaler = RobustScaler()
-    X_sc   = scaler.fit_transform(X)
+    global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
+    bundle = {
+        "created_ts": int(time.time()),
+        "training_basis": "actual archived weather + actual generation",
+        "history_days": int(len(history_days)),
+        "global": {
+            "model": global_model,
+            "scaler": global_scaler,
+            "meta": dict(global_meta),
+        },
+        "regimes": {},
+    }
 
-    model = GradientBoostingRegressor(
-        n_estimators      = 500,
-        learning_rate     = 0.025,
-        max_depth         = 4,
-        min_samples_split = 15,
-        min_samples_leaf  = 8,
-        subsample         = 0.8,
-        max_features      = 0.75,
-        random_state      = 42,
-        loss              = "huber",
-        alpha             = 0.85,
-        validation_fraction = 0.1,
-        n_iter_no_change  = 30,
-        tol               = 1e-4,
-    )
-    model.fit(X_sc, y, sample_weight=sample_weight)
+    for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
+        regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
+        if regime_days < REGIME_MODEL_MIN_DAYS:
+            continue
+        X_reg, y_reg, w_reg = collect_training_data_hardened(today, history_days, day_regime=regime)
+        if X_reg is None or len(y_reg) < REGIME_MODEL_MIN_SAMPLES:
+            continue
+        regime_model, regime_scaler, regime_meta = fit_residual_model(X_reg, y_reg, w_reg)
+        regime_meta["day_count"] = int(regime_days)
+        bundle["regimes"][regime] = {
+            "model": regime_model,
+            "scaler": regime_scaler,
+            "meta": regime_meta,
+        }
+        log.info(
+            "Regime model trained [%s] - days=%d samples=%d train_score=%s",
+            regime,
+            regime_days,
+            int(regime_meta.get("sample_count", 0)),
+            f"{float(regime_meta['train_score']):.4f}" if regime_meta.get("train_score") is not None else "n/a",
+        )
 
-    dump(model,  MODEL_FILE)
-    dump(scaler, SCALER_FILE)
+    dump(global_model, MODEL_FILE)
+    dump(global_scaler, SCALER_FILE)
+    save_model_bundle(bundle)
     save_forecast_artifacts(build_forecast_artifacts(history_days))
+    save_weather_bias_artifact(build_weather_bias_artifact(today))
     log.info(
-        "Model trained â€“ estimators used: %d  train_score: %.4f",
-        model.n_estimators_,
-        model.train_score_[-1],
+        "Model trained - global_estimators=%d global_train_score=%s regime_models=%d",
+        int(global_meta.get("estimators_used", 0)),
+        f"{float(global_meta['train_score']):.4f}" if global_meta.get("train_score") is not None else "n/a",
+        int(len(bundle["regimes"])),
     )
     return True
 
@@ -2248,7 +2940,7 @@ def apply_ramp_limit(arr: np.ndarray, max_step: float = 320.0) -> np.ndarray:
     return arr
 
 
-def residual_blend_vector(w5: pd.DataFrame, day: str) -> np.ndarray:
+def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float = 1.0) -> np.ndarray:
     """
     Compute per-slot ML blending factor [ML_BLEND_MIN..ML_BLEND_MAX].
     Lower blending is applied under high weather uncertainty:
@@ -2295,7 +2987,8 @@ def residual_blend_vector(w5: pd.DataFrame, day: str) -> np.ndarray:
     )
     uncertainty = np.clip(uncertainty, 0.0, 1.0)
 
-    blend = solar_conf * (1.0 - ML_BLEND_ALPHA * uncertainty)
+    confidence_scale = float(np.clip(regime_confidence, 0.60, 1.0))
+    blend = solar_conf * (1.0 - ML_BLEND_ALPHA * uncertainty) * confidence_scale
     blend = np.clip(blend, ML_BLEND_MIN, ML_BLEND_MAX)
     blend[:SOLAR_START_SLOT] = 0.0
     blend[SOLAR_END_SLOT:] = 0.0
@@ -2310,6 +3003,7 @@ def confidence_bands(
     values: np.ndarray,
     w5: pd.DataFrame,
     day: str,
+    regime_confidence: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Per-slot confidence bands based on:
@@ -2321,6 +3015,7 @@ def confidence_bands(
     stats = analyse_weather_day(day, w5)
     lo    = np.zeros(SLOTS_DAY)
     hi    = np.zeros(SLOTS_DAY)
+    confidence_penalty = float(np.clip(1.0 - float(regime_confidence), 0.0, 0.4))
 
     geo   = solar_geometry(day)
     solar_prog = np.clip(
@@ -2337,7 +3032,7 @@ def confidence_bands(
         cloud_i  = w5["cloud"].values[i]
         # Additional uncertainty from cloud layer presence
         cloud_unc = CONF_CLOUD_ADD * np.clip((cloud_i - 30) / 70.0, 0, 1)
-        conf      = (CONF_CLEAR_BASE + cloud_unc) * tod_factor[i]
+        conf      = (CONF_CLEAR_BASE + cloud_unc + confidence_penalty * 0.12) * tod_factor[i]
         conf      = min(conf, 0.40)   # cap at Â±40%
 
         lo[i] = v * (1.0 - conf)
@@ -2421,10 +3116,19 @@ def to_ui_series(
     ]
 
 
-def _ensure_forecast_table(conn: sqlite3.Connection) -> None:
+def _forecast_table_name_for_key(key: str) -> str | None:
+    mapping = {
+        "PacEnergy_DayAhead": "forecast_dayahead",
+        "PacEnergy_IntradayAdjusted": "forecast_intraday_adjusted",
+    }
+    return mapping.get(str(key or "").strip())
+
+
+def _ensure_forecast_table(conn: sqlite3.Connection, table_name: str) -> None:
+    index_prefix = "fd" if table_name == "forecast_dayahead" else "fia"
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS forecast_dayahead (
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
             date       TEXT NOT NULL,
             ts         INTEGER NOT NULL,
             slot       INTEGER NOT NULL,
@@ -2438,12 +3142,8 @@ def _ensure_forecast_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_fd_ts ON forecast_dayahead(ts)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_fd_date_ts ON forecast_dayahead(date, ts)"
-    )
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_ts ON {table_name}(ts)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_date_ts ON {table_name}(date, ts)")
 
 
 def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
@@ -2451,7 +3151,8 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
     Persist day-ahead slots to SQLite so forecast data is unified with AppData DB.
     Keeps file write path for compatibility while DB is now the source of truth.
     """
-    if key != "PacEnergy_DayAhead":
+    table_name = _forecast_table_name_for_key(key)
+    if table_name is None:
         return True
     if not series:
         return True
@@ -2490,12 +3191,12 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
     for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
         try:
             with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
-                _ensure_forecast_table(conn)
+                _ensure_forecast_table(conn, table_name)
                 cur = conn.cursor()
-                cur.execute("DELETE FROM forecast_dayahead WHERE date=?", (str(day),))
+                cur.execute(f"DELETE FROM {table_name} WHERE date=?", (str(day),))
                 cur.executemany(
-                    """
-                    INSERT INTO forecast_dayahead
+                    f"""
+                    INSERT INTO {table_name}
                     (date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(date, slot) DO UPDATE SET
@@ -2511,20 +3212,21 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
                 )
                 conn.commit()
             clear_forecast_data_cache()
-            log.info("Wrote forecast DB [%s] - %d slots", day, len(rows))
+            log.info("Wrote forecast DB [%s:%s] - %d slots", key, day, len(rows))
             return True
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
                 log.warning(
-                    "DB forecast write retry %d/%d for %s: %s",
+                    "DB forecast write retry %d/%d for %s:%s: %s",
                     attempt,
                     SQLITE_RETRY_ATTEMPTS,
+                    key,
                     day,
                     e,
                 )
                 _sleep_sqlite_retry(attempt)
                 continue
-            log.error("DB forecast write failed for %s: %s", day, e)
+            log.error("DB forecast write failed for %s:%s: %s", key, day, e)
             return False
 
 
@@ -2540,6 +3242,125 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
     elif ok_file and not ok_db:
         log.warning("Forecast DB write failed for %s; legacy JSON fallback succeeded.", day)
     return bool(ok_db or ok_file)
+
+
+def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
+    snap = load_forecast_weather_snapshot(day)
+    if snap:
+        applied = _weather_records_to_frame(list(snap.get("applied_hourly") or []), day)
+        if not applied.empty:
+            return applied
+        raw = _weather_records_to_frame(list(snap.get("raw_hourly") or []), day)
+        if not raw.empty:
+            return raw
+    source = "forecast" if not _is_past_day(day) else "archive"
+    return fetch_weather(day, source=source)
+
+
+def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict]:
+    day_s = day.isoformat()
+    dayahead, _ = load_dayahead_with_presence(day_s)
+    actual, actual_present = load_actual_with_presence(day_s)
+    meta = {
+        "day": day_s,
+        "observed_slots": 0,
+        "last_observed_slot": None,
+        "global_ratio": 1.0,
+        "recent_ratio": 1.0,
+        "strength": 0.0,
+    }
+    if dayahead is None or actual is None or actual_present is None:
+        return None, meta
+
+    solar_obs = np.where(np.asarray(actual_present, dtype=bool)[SOLAR_START_SLOT:SOLAR_END_SLOT])[0] + SOLAR_START_SLOT
+    if solar_obs.size < INTRADAY_MIN_OBS_SLOTS:
+        meta["observed_slots"] = int(solar_obs.size)
+        return None, meta
+
+    observed_slots = solar_obs[-min(int(solar_obs.size), INTRADAY_MAX_OBS_SLOTS):]
+    last_observed_slot = int(observed_slots[-1])
+    obs_mask = np.zeros(SLOTS_DAY, dtype=bool)
+    obs_mask[observed_slots] = True
+    adjusted = np.asarray(dayahead, dtype=float).copy()
+    adjusted[np.asarray(actual_present, dtype=bool)] = np.asarray(actual, dtype=float)[np.asarray(actual_present, dtype=bool)]
+
+    dayahead_obs_total = float(np.asarray(dayahead, dtype=float)[obs_mask].sum())
+    actual_obs_total = float(np.asarray(actual, dtype=float)[obs_mask].sum())
+    global_ratio = float(np.clip(actual_obs_total / max(dayahead_obs_total, 1.0), INTRADAY_RATIO_CLIP[0], INTRADAY_RATIO_CLIP[1]))
+
+    recent_slots = observed_slots[-12:]
+    recent_mask = np.zeros(SLOTS_DAY, dtype=bool)
+    recent_mask[recent_slots] = True
+    dayahead_recent_total = float(np.asarray(dayahead, dtype=float)[recent_mask].sum())
+    actual_recent_total = float(np.asarray(actual, dtype=float)[recent_mask].sum())
+    recent_ratio = float(np.clip(actual_recent_total / max(dayahead_recent_total, 1.0), INTRADAY_RECENT_RATIO_CLIP[0], INTRADAY_RECENT_RATIO_CLIP[1]))
+    strength = float(min(INTRADAY_BLEND_MAX, 0.24 + 0.02 * len(observed_slots)))
+
+    cap_slot = slot_cap_kwh(False)
+    for step, slot in enumerate(range(last_observed_slot + 1, SOLAR_END_SLOT)):
+        fade = min(1.0, step / 24.0)
+        target_ratio = (1.0 - fade) * recent_ratio + fade * global_ratio
+        factor = 1.0 + strength * (target_ratio - 1.0)
+        adjusted[slot] = float(np.clip(np.asarray(dayahead, dtype=float)[slot] * factor, 0.0, cap_slot))
+
+    for slot in range(max(SOLAR_START_SLOT + 1, last_observed_slot + 1), SOLAR_END_SLOT):
+        upper = adjusted[slot - 1] + 320.0
+        lower = max(0.0, adjusted[slot - 1] - 320.0)
+        adjusted[slot] = float(np.clip(adjusted[slot], lower, upper))
+
+    adjusted[:SOLAR_START_SLOT] = 0.0
+    adjusted[SOLAR_END_SLOT:] = 0.0
+
+    weather_hourly = load_forecast_weather_for_day(day_s)
+    if weather_hourly is not None and not weather_hourly.empty:
+        w5 = interpolate_5min(weather_hourly, day_s)
+    else:
+        w5 = pd.DataFrame({
+            "cloud": np.zeros(SLOTS_DAY),
+            "cloud_low": np.zeros(SLOTS_DAY),
+            "cloud_mid": np.zeros(SLOTS_DAY),
+            "cloud_high": np.zeros(SLOTS_DAY),
+            "rad": np.zeros(SLOTS_DAY),
+            "rh": np.zeros(SLOTS_DAY),
+            "temp": np.zeros(SLOTS_DAY),
+            "wind": np.zeros(SLOTS_DAY),
+            "precip": np.zeros(SLOTS_DAY),
+            "cape": np.zeros(SLOTS_DAY),
+        })
+    lo, hi = confidence_bands(adjusted, w5, day_s)
+
+    meta.update({
+        "observed_slots": int(len(observed_slots)),
+        "last_observed_slot": last_observed_slot,
+        "global_ratio": global_ratio,
+        "recent_ratio": recent_ratio,
+        "strength": strength,
+    })
+    return to_ui_series(adjusted, lo, hi, day_s), meta
+
+
+def run_intraday_adjusted(day: date) -> bool:
+    series, meta = build_intraday_adjusted_forecast(day)
+    day_s = day.isoformat()
+    if not series:
+        log.info(
+            "Intraday-adjusted skipped [%s] - observed_slots=%d",
+            day_s,
+            int(meta.get("observed_slots", 0)),
+        )
+        return False
+    ok = write_forecast("PacEnergy_IntradayAdjusted", day_s, series)
+    if ok:
+        log.info(
+            "Intraday-adjusted updated [%s] - observed_slots=%d last_slot=%s global_ratio=%.3f recent_ratio=%.3f strength=%.2f",
+            day_s,
+            int(meta.get("observed_slots", 0)),
+            meta.get("last_observed_slot"),
+            float(meta.get("global_ratio", 1.0)),
+            float(meta.get("recent_ratio", 1.0)),
+            float(meta.get("strength", 0.0)),
+        )
+    return ok
 
 
 # ============================================================================
@@ -2565,22 +3386,49 @@ def run_dayahead(target_date: date, today: date) -> bool:
     log.info("â”€â”€ Day-Ahead Forecast  target=%s â”€â”€", target_s)
 
     # 1. Weather
-    wdata = fetch_weather(target_s)
-    if wdata is None:
+    weather_source = "forecast"
+    raw_hourly = pd.DataFrame()
+    if target_date < today:
+        snap = load_forecast_weather_snapshot(target_s)
+        if snap:
+            raw_hourly = _weather_records_to_frame(list(snap.get("raw_hourly") or []), target_s)
+            weather_source = "snapshot"
+        if raw_hourly.empty:
+            log.warning("Past target %s has no saved forecast snapshot - using archive weather fallback.", target_s)
+            fetched = fetch_weather(target_s, source="archive")
+            raw_hourly = fetched if fetched is not None else pd.DataFrame()
+            weather_source = "archive-fallback"
+    else:
+        fetched = fetch_weather(target_s, source="forecast")
+        raw_hourly = fetched if fetched is not None else pd.DataFrame()
+
+    if raw_hourly.empty:
         log.error("Cannot run forecast â€“ weather unavailable for %s", target_s)
         return False
 
-    w5   = interpolate_5min(wdata, target_s)
+    weather_bias = load_weather_bias_artifact(today, allow_build=True)
+    hourly_applied, bias_meta = apply_weather_bias_adjustment(raw_hourly, target_s, weather_bias)
+    w5   = interpolate_5min(hourly_applied, target_s)
     ok_w5, reason_w5 = validate_weather_5min(target_s, w5)
     if not ok_w5:
         log.error("Cannot run forecast â€“ weather quality failed for %s: %s", target_s, reason_w5)
         return False
     stats = analyse_weather_day(target_s, w5)
+    target_regime = classify_day_regime(stats)
     log.info(
         "Target weather: sky=%-14s  cloud=%.0f%%  rad_peak=%.0f W/mÂ²  "
         "RH=%.0f%%  convective=%s  rainy=%s",
         stats["sky_class"], stats["cloud_mean"], stats["rad_peak"],
         stats["rh_mean"], stats["convective"], stats["rainy"],
+    )
+    log.info(
+        "Weather bias: source=%s matches=%d regime=%s conf=%.2f rad_factor=%.3f shift_slots=%.1f",
+        weather_source,
+        int(bias_meta.get("matches", 0)),
+        bias_meta.get("day_regime"),
+        float(bias_meta.get("regime_confidence", 1.0)),
+        float(bias_meta.get("mean_rad_factor", 1.0)),
+        float(bias_meta.get("morning_shift_slots", 0.0)),
     )
 
     # 2. Physics baseline
@@ -2589,14 +3437,17 @@ def run_dayahead(target_date: date, today: date) -> bool:
 
     # 3. ML residual correction
     ml_residual = np.zeros(SLOTS_DAY)
-    if MODEL_FILE.exists() and SCALER_FILE.exists():
+    model_bundle = load_model_bundle()
+    if model_bundle:
         try:
-            model  = load(MODEL_FILE)
-            scaler = load(SCALER_FILE)
             feat   = build_features(w5, target_s)
             X_pred = feat[FEATURE_COLS]
-            X_sc   = scaler.transform(X_pred)
-            raw_residual          = model.predict(X_sc)
+            raw_residual, model_meta = predict_residual_with_bundle(
+                model_bundle,
+                X_pred,
+                target_regime,
+                regime_confidence=float(bias_meta.get("regime_confidence", 1.0)),
+            )
             ml_residual           = np.zeros(SLOTS_DAY)
             ml_residual[:] = raw_residual
 
@@ -2610,7 +3461,7 @@ def run_dayahead(target_date: date, today: date) -> bool:
             ml_residual = np.clip(ml_residual, -cap_kwh * 0.5, cap_kwh * 0.5)
 
             # Weather-adaptive blending: trust ML less in volatile/rainy slots.
-            blend = residual_blend_vector(w5, target_s)
+            blend = residual_blend_vector(w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
             ml_residual = ml_residual * blend
             ml_residual = (
                 pd.Series(ml_residual)
@@ -2625,6 +3476,14 @@ def run_dayahead(target_date: date, today: date) -> bool:
                 ml_residual[SOLAR_START_SLOT:SOLAR_END_SLOT].std(),
                 np.percentile(np.abs(ml_residual[SOLAR_START_SLOT:SOLAR_END_SLOT]), 95),
                 blend[SOLAR_START_SLOT:SOLAR_END_SLOT].mean(),
+            )
+            log.info(
+                "ML routing: target_regime=%s regime_model=%s blend=%.2f regime_days=%d regime_samples=%d",
+                model_meta.get("target_regime"),
+                bool(model_meta.get("used_regime_model")),
+                float(model_meta.get("blend", 0.0)),
+                int(model_meta.get("regime_days", 0)),
+                int(model_meta.get("regime_samples", 0)),
             )
         except Exception as e:
             log.error("ML prediction failed â€“ falling back to physics only: %s", e)
@@ -2667,20 +3526,21 @@ def run_dayahead(target_date: date, today: date) -> bool:
     forecast[SOLAR_END_SLOT:]   = 0.0
 
     forecast, shape_meta = apply_hour_shape_correction(forecast, target_s, w5, artifacts)
-    forecast, activity_meta = apply_activity_hysteresis(forecast, target_s, w5, artifacts)
+    forecast, activity_meta = apply_activity_hysteresis(forecast, target_s, w5, artifacts, bias_meta=bias_meta)
     forecast, staging_meta = apply_block_staging(forecast, w5)
     forecast = np.clip(forecast, 0.0, cap_slot)
     forecast[:SOLAR_START_SLOT] = 0.0
     forecast[SOLAR_END_SLOT:]   = 0.0
 
     log.info(
-        "Hardening: shape_hours=%d avg_shape_matches=%.1f avg_shape_score=%s  start=%s end=%s hist_window=%d  staged_slots=%d node_step=%.2f",
+        "Hardening: shape_hours=%d avg_shape_matches=%.1f avg_shape_score=%s  start=%s end=%s hist_window=%d bias_shift=%d staged_slots=%d node_step=%.2f",
         int(shape_meta.get("hours_shaped", 0)),
         float(shape_meta.get("avg_matches", 0.0)),
         f"{float(shape_meta['avg_score']):.2f}" if shape_meta.get("avg_score") is not None else "n/a",
         activity_meta.get("first_slot"),
         activity_meta.get("last_slot"),
         int(activity_meta.get("history_matches", 0)),
+        int(activity_meta.get("bias_shift_slots", 0)),
         int(staging_meta.get("staged_slots", 0)),
         float(staging_meta.get("node_step_kwh", 0.0)),
     )
@@ -2700,7 +3560,7 @@ def run_dayahead(target_date: date, today: date) -> bool:
         )
         forecast *= max_kwh_day / forecast.sum()
     # 6. Confidence bands
-    lo, hi = confidence_bands(forecast, w5, target_s)
+    lo, hi = confidence_bands(forecast, w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
 
     # 7. Summary log
     log.info(
@@ -2715,7 +3575,20 @@ def run_dayahead(target_date: date, today: date) -> bool:
 
     # 8. Write
     series = to_ui_series(forecast, lo, hi, target_s)
-    return write_forecast("PacEnergy_DayAhead", target_s, series)
+    ok = write_forecast("PacEnergy_DayAhead", target_s, series)
+    if ok and weather_source in {"forecast", "snapshot"}:
+        save_forecast_weather_snapshot(
+            target_s,
+            raw_hourly,
+            hourly_applied,
+            provider="open-meteo",
+            meta={
+                "weather_source": weather_source,
+                "bias_meta": bias_meta,
+                "target_regime": target_regime,
+            },
+        )
+    return ok
 
 
 # ============================================================================
@@ -2760,6 +3633,8 @@ def run_manual_generation(dates: list[date]) -> bool:
     ok_all = True
     for d in dates:
         ok = run_dayahead(d, today_ref)
+        if ok and d == today_ref:
+            run_intraday_adjusted(d)
         ok_all = ok_all and ok
         if ok:
             log.info("Manual generation OK: %s", d.isoformat())
@@ -2850,6 +3725,7 @@ def main() -> None:
     log.info("=" * 70)
 
     last_run_hour = -1   # track which hour we last ran in
+    last_intraday_slot_key = ""
 
     while True:
         try:
@@ -2906,6 +3782,13 @@ def main() -> None:
 
             else:
                 log.debug("No forecast action needed (hour=%02d)", now_h)
+
+            if SOLAR_START_H <= now_h < SOLAR_END_H:
+                slot_idx = int((now_h * 60 + now.minute) // SLOT_MIN)
+                intraday_slot_key = f"{today_s}:{slot_idx:03d}"
+                if intraday_slot_key != last_intraday_slot_key:
+                    run_intraday_adjusted(today)
+                    last_intraday_slot_key = intraday_slot_key
 
             time.sleep(60)   # check every minute
 

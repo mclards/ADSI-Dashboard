@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.18",
+  "version": "2.2.19",
   "description": "Dashboard V2 for industrial inverter monitoring, analytics, forecasting, and remote replication.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -8,6 +8,8 @@
     "start": "node start-electron.js",
     "dev": "set NODE_ENV=development && node start-electron.js",
     "server": "node server/index.js",
+    "rebuild:native:node": "npm rebuild better-sqlite3",
+    "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
     "build:win": "electron-builder --win nsis portable --x64",
     "build:installer": "electron-builder --win nsis --x64",

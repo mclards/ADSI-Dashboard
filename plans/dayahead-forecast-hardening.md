@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in core forecast generation for Phases `1-4`.
+Implemented in core forecast generation for Phases `1-6`.
 
 Current implementation status:
 
@@ -12,8 +12,9 @@ Current implementation status:
 - done: historical hour-preserving `5-minute` shape correction
 - done: startup / shutdown hysteresis from learned activity windows
 - done: conservative low-power node staging
-- pending: separate forecast-provider bias layer
-- pending: separate intraday rebias product
+- done: separate forecast-provider bias layer with persisted forecast-weather snapshots
+- done: regime-aware residual model routing
+- done: separate intraday rebias product
 
 This document is an implementation plan for improving free day-ahead forecast precision when the primary weather feed is hourly, but the dashboard output must remain a `5-minute` series over the `05:00-18:00` operating window.
 
@@ -618,23 +619,21 @@ implemented in the current forecast engine
 - richer feature set
 
 Status:
-partially implemented
+implemented in the current forecast engine
 
 Implemented now:
 
 - richer temporal / shoulder-period features
 - recency-weighted sample weighting instead of row duplication
-
-Still pending:
-
-- explicit separate regime models or a richer regime-routing layer
+- explicit separate regime models with conservative blending against the global residual model
+- richer day-regime and seasonal feature enrichment
 
 ### Phase 6
 
 - intraday rebias as a separate operational forecast layer
 
 Status:
-not implemented
+implemented in the current forecast engine
 
 ## Validation Plan
 

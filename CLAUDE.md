@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.18` in `package.json`
+- Current repo version baseline: `2.2.19` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -220,6 +220,7 @@ Availability:
 Run from repo root:
 
 ```powershell
+npm run rebuild:native:electron
 npm run build:installer
 npm run build:portable
 ```
@@ -247,6 +248,9 @@ node --check electron/preload.js
 ## Service EXE Build Rule
 
 - `npm run build:win` only packages the existing `dist/InverterCoreService.exe` and `dist/ForecastCoreService.exe`. It does not rebuild them.
+- `better-sqlite3` is runtime-ABI specific:
+  - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
+  - use `npm run rebuild:native:electron` before Electron run/build/release workflows
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.
