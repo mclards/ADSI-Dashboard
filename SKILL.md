@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.17` in `package.json`
+- Current repo version baseline: `2.2.18` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -361,3 +361,11 @@ git diff -- public/index.html public/css/style.css
 
 - Fix actionable build warnings.
 - Do not waste time over-fixing non-fatal electron-builder scanner noise when artifacts are valid.
+
+## Service EXE Build Rule
+
+- `npm run build:win` only packages the existing `dist/InverterCoreService.exe` and `dist/ForecastCoreService.exe`. It does not rebuild them.
+- Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
+- If both Python services changed, rebuild both EXEs first, then run the Electron build.
+- Do not publish or hand off app EXEs if they were built against stale Python service binaries.
+- Release hygiene still applies: clean `release/` before building and remove prior release leftovers after publish.

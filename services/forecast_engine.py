@@ -30,7 +30,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -58,6 +58,7 @@ HISTORY_CTX   = BASE / "history/context/global/global.json"
 FORECAST_CTX  = BASE / "forecast/context/global/global.json"
 MODEL_FILE    = BASE / "forecast/pv_dayahead_model.joblib"
 SCALER_FILE   = BASE / "forecast/pv_dayahead_scaler.joblib"
+ARTIFACT_FILE = BASE / "forecast/pv_dayahead_artifacts.joblib"
 WEATHER_DIR   = BASE / "weather"
 IPCONFIG_FILE = (PORTABLE_ROOT / "config" / "ipconfig.json") if PORTABLE_ROOT is not None else (BASE / "ipconfig.json")
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
@@ -123,12 +124,27 @@ GAMMA_TC      = -0.004 # power temp coeff (/Â°C) â€“ typical Si module
 # ============================================================================
 # ML & TRAINING
 # ============================================================================
-N_TRAIN_DAYS   = 14    # rolling training window (days)
-MIN_TRAIN_DAYS = 3     # minimum days before ML is used
-RECENCY_BASE   = 1.6   # weight multiplier per day closer to today
+N_TRAIN_DAYS   = 45    # rolling training window (days)
+MIN_TRAIN_DAYS = 5     # minimum days before ML is used
 MIN_SAMPLES    = 60    # minimum usable slots per training day
+RECENCY_BASE = 1.0     # legacy compatibility; hardened path uses sample weights
 MIN_HISTORY_SOLAR_SLOTS = MIN_SAMPLES
 MIN_DAYAHEAD_SOLAR_SLOTS = max(24, MIN_SAMPLES // 2)
+TRAIN_WEIGHT_HALF_LIFE_DAYS = 14.0
+TRAIN_WEIGHT_FLOOR = 0.18
+SHAPE_LOOKBACK_DAYS = 45
+SHAPE_MIN_MATCHES = 4
+SHAPE_TOP_K = 6
+SHAPE_BLEND_MIN = 0.42
+SHAPE_BLEND_MAX = 0.78
+ACTIVITY_SUSTAIN_SLOTS = 2
+STARTUP_RAD_WM2 = 80.0
+STOPPING_RAD_WM2 = 28.0
+ACTIVITY_MIN_FRACTION = 0.0022
+LOW_POWER_STAGE_FRACTION = 0.16
+STAGING_BLEND_MAX = 0.72
+MODULES_PER_INVERTER = 4
+NODE_KW_NOMINAL = 226.73
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -491,6 +507,85 @@ def slot_cap_kwh(dependable: bool = True) -> float:
     """
     cap_kw = plant_capacity_kw(dependable)
     return cap_kw * SLOT_MIN / 60.0
+
+
+def plant_node_count() -> int:
+    """Return enabled power-module count across the plant."""
+    profile = plant_capacity_profile()
+    enabled_nodes = int(profile.get("enabled_nodes") or 0)
+    if enabled_nodes > 0:
+        return enabled_nodes
+    fallback = int(round(max(profile.get("max_kw", 0.0), plant_capacity_kw(False)) / max(NODE_KW_NOMINAL, 1.0)))
+    return max(1, fallback)
+
+
+def node_slot_kwh() -> float:
+    """Approximate per-node 5-minute energy step used for low-power staging."""
+    node_count = max(1, plant_node_count())
+    return plant_capacity_kw(True) * SLOT_MIN / 60.0 / node_count
+
+
+def activity_threshold_kwh() -> float:
+    """
+    Minimum meaningful slot energy used for activity detection.
+
+    This stays small enough for dawn pickup but large enough to suppress
+    tiny non-zero artifacts created by interpolated weather.
+    """
+    return max(1.0, min(node_slot_kwh() * 0.18, slot_cap_kwh(True) * ACTIVITY_MIN_FRACTION))
+
+
+def _solar_hour_bounds(hour: int) -> tuple[int, int]:
+    start = int(hour) * 60 // SLOT_MIN
+    end = start + (60 // SLOT_MIN)
+    return max(0, start), min(SLOTS_DAY, end)
+
+
+def _season_bucket_from_day(day: str) -> str:
+    try:
+        month = datetime.strptime(day, "%Y-%m-%d").month
+    except Exception:
+        month = datetime.now().month
+    return "dry" if month in (12, 1, 2, 3, 4, 5) else "wet"
+
+
+def _normalize_profile(values: np.ndarray) -> np.ndarray:
+    arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
+    if arr.size == 0:
+        return np.array([], dtype=float)
+    arr = pd.Series(arr).rolling(3, min_periods=1, center=True).mean().values
+    total = float(arr.sum())
+    if total <= 0:
+        return np.full(arr.size, 1.0 / arr.size, dtype=float)
+    return arr / total
+
+
+def _find_first_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
+    arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
+    threshold = activity_threshold_kwh() if threshold is None else float(threshold)
+    sustain = max(1, int(sustain_slots))
+    for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT - sustain + 1):
+        window = arr[slot:slot + sustain]
+        if window.size and float(window.mean()) >= threshold and np.all(window >= threshold * 0.55):
+            return slot
+    return None
+
+
+def _find_last_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
+    arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
+    threshold = activity_threshold_kwh() if threshold is None else float(threshold)
+    sustain = max(1, int(sustain_slots))
+    for slot in range(SOLAR_END_SLOT - sustain, SOLAR_START_SLOT - 1, -1):
+        window = arr[slot:slot + sustain]
+        if window.size and float(window.mean()) >= threshold and np.all(window >= threshold * 0.45):
+            return slot + window.size - 1
+    return None
+
+
+def _sample_weight_for_days_ago(days_ago: int) -> float:
+    days = max(0.0, float(days_ago) - 1.0)
+    weight = 0.5 ** (days / max(TRAIN_WEIGHT_HALF_LIFE_DAYS, 1e-6))
+    return float(np.clip(weight, TRAIN_WEIGHT_FLOOR, 1.0))
 
 
 # ============================================================================
@@ -919,6 +1014,61 @@ def analyse_weather_day(day: str, w5: pd.DataFrame, actual: np.ndarray | None = 
     return stats
 
 
+def classify_hour_regime(
+    cloud_mean: float,
+    cloud_std: float,
+    kt_mean: float,
+    precip_total: float,
+    cape_max: float,
+) -> str:
+    """Classify the forecast context for a single hour."""
+    if precip_total >= 0.2 or (cloud_mean >= 82.0 and cape_max >= 650.0):
+        return "rainy"
+    if kt_mean >= 0.70 and cloud_mean < 28.0 and cloud_std < 18.0:
+        return "clear"
+    if kt_mean >= 0.42 and cloud_mean < 72.0:
+        return "mixed"
+    return "overcast"
+
+
+def hour_weather_signature(day: str, w5: pd.DataFrame, hour: int, csi_arr: np.ndarray | None = None) -> dict:
+    """Summarize the weather pattern for a single forecast hour."""
+    start, end = _solar_hour_bounds(hour)
+    if csi_arr is None:
+        rh_arr = pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values
+        csi_arr = clear_sky_radiation(day, rh_arr[:SLOTS_DAY])
+
+    rad = pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values[start:end]
+    cloud = pd.to_numeric(w5["cloud"], errors="coerce").fillna(0.0).values[start:end]
+    rh = pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values[start:end]
+    precip = pd.to_numeric(w5["precip"], errors="coerce").fillna(0.0).values[start:end]
+    cape = pd.to_numeric(w5["cape"], errors="coerce").fillna(0.0).values[start:end]
+    clear_hour = np.asarray(csi_arr[start:end], dtype=float)
+
+    cloud_mean = float(np.mean(cloud)) if cloud.size else 0.0
+    cloud_std = float(np.std(cloud)) if cloud.size else 0.0
+    rh_mean = float(np.mean(rh)) if rh.size else 0.0
+    rad_mean = float(np.mean(rad)) if rad.size else 0.0
+    vol_index = float(np.mean(np.abs(np.diff(rad, prepend=rad[0])) > 120.0)) if rad.size else 0.0
+    kt_mean = float(rad_mean / max(float(np.mean(clear_hour)) if clear_hour.size else 0.0, 1.0))
+    precip_total = float(np.sum(precip)) if precip.size else 0.0
+    cape_max = float(np.max(cape)) if cape.size else 0.0
+
+    return {
+        "hour": int(hour),
+        "season": _season_bucket_from_day(day),
+        "cloud_mean": cloud_mean,
+        "cloud_std": cloud_std,
+        "rh_mean": rh_mean,
+        "rad_mean": rad_mean,
+        "kt_mean": float(np.clip(kt_mean, 0.0, 1.2)),
+        "vol_index": vol_index,
+        "precip_total": precip_total,
+        "cape_max": cape_max,
+        "regime": classify_hour_regime(cloud_mean, cloud_std, kt_mean, precip_total, cape_max),
+    }
+
+
 def is_anomalous_day(stats: dict) -> tuple[bool, str]:
     """
     Return (True, reason) if the day looks like bad training data.
@@ -933,6 +1083,41 @@ def is_anomalous_day(stats: dict) -> tuple[bool, str]:
     corr = stats.get("rad_gen_corr", 1.0)
     if stats.get("rad_mean", 0) > 100 and corr < ANOM_RAD_CORR:
         return True, f"Rad-gen correlation too low ({corr:.2f}) â€“ inconsistent data"
+
+    return False, ""
+
+
+def training_day_rejection(
+    stats: dict,
+    actual: np.ndarray,
+    baseline: np.ndarray,
+) -> tuple[bool, str]:
+    """Stricter training-day filter used by the hardened residual model."""
+    bad, reason = is_anomalous_day(stats)
+    if bad:
+        return bad, reason
+
+    solar_actual = np.clip(np.asarray(actual, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+    solar_base = np.clip(np.asarray(baseline, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+    cap_slot = max(slot_cap_kwh(False), 1.0)
+    peak_ratio = float(solar_actual.max() / cap_slot) if solar_actual.size else 0.0
+    if peak_ratio > 1.10:
+        return True, f"Peak slot exceeds physical max ({peak_ratio:.2f}x)"
+
+    threshold = activity_threshold_kwh()
+    active = solar_actual[solar_actual >= threshold]
+    if active.size >= 18:
+        diff = np.abs(np.diff(active))
+        flat_tol = max(0.30, float(np.nanmedian(active)) * 0.015)
+        flatline_ratio = float(np.mean(diff <= flat_tol)) if diff.size else 0.0
+        if flatline_ratio > 0.96 and stats.get("rad_gen_corr", 1.0) < 0.80:
+            return True, f"Active period is implausibly flat ({flatline_ratio:.2f})"
+
+    base_total = float(solar_base.sum())
+    if base_total > 0 and stats.get("rad_mean", 0) > 180 and not stats.get("rainy", False):
+        energy_ratio = float(solar_actual.sum() / base_total)
+        if energy_ratio < 0.08:
+            return True, f"Generation far below physics baseline ({energy_ratio:.2f})"
 
     return False, ""
 
@@ -995,6 +1180,10 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
     slot_angle = 2 * np.pi * (idx / SLOTS_DAY)
     tod_sin = np.sin(slot_angle)
     tod_cos = np.cos(slot_angle)
+    slot_in_hour = (idx % (60 // SLOT_MIN)) / max((60 // SLOT_MIN) - 1, 1)
+    slot_in_hour_angle = 2 * np.pi * slot_in_hour
+    slot_in_hour_sin = np.sin(slot_in_hour_angle)
+    slot_in_hour_cos = np.cos(slot_in_hour_angle)
 
     try:
         doy = datetime.strptime(day, "%Y-%m-%d").timetuple().tm_yday
@@ -1024,6 +1213,13 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
     )
 
     cap_kw = plant_capacity_kw(True)
+    sunrise_slots = np.clip(idx - SOLAR_START_SLOT, 0, SOLAR_SLOTS)
+    sunset_slots = np.clip((SOLAR_END_SLOT - 1) - idx, 0, SOLAR_SLOTS)
+    sunrise_rel = sunrise_slots / max(SOLAR_SLOTS, 1)
+    sunset_rel = sunset_slots / max(SOLAR_SLOTS, 1)
+    shoulder_flag = ((sunrise_slots < 18) | (sunset_slots < 18)).astype(float)
+    node_count = max(1, plant_node_count())
+    expected_nodes = np.clip((cap_kw * np.clip(kt, 0.0, 1.0)) / max(NODE_KW_NOMINAL, 1.0), 0.0, float(node_count))
 
     df = pd.DataFrame({
         # Radiation
@@ -1066,9 +1262,15 @@ def build_features(w5: pd.DataFrame, day: str) -> pd.DataFrame:
         "solar_prog_sin": solar_rel_sin,
         "tod_sin":       tod_sin,
         "tod_cos":       tod_cos,
+        "slot_in_hour_sin": slot_in_hour_sin,
+        "slot_in_hour_cos": slot_in_hour_cos,
+        "sunrise_rel":   sunrise_rel,
+        "sunset_rel":    sunset_rel,
+        "shoulder_flag": shoulder_flag,
         "doy_sin":       doy_sin,
         "doy_cos":       doy_cos,
         # Plant
+        "expected_nodes": expected_nodes,
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
     })
 
@@ -1082,8 +1284,10 @@ FEATURE_COLS = [
     "precip", "precip_1h", "cape", "cape_sqrt",
     "temp", "temp_hot", "temp_delta", "rh", "rh_sq", "wind", "wind_sq",
     "cos_z", "air_mass",
-    "solar_prog", "solar_prog_sq", "solar_prog_sin", "tod_sin", "tod_cos", "doy_sin", "doy_cos",
-    "cap_kw",
+    "solar_prog", "solar_prog_sq", "solar_prog_sin", "tod_sin", "tod_cos",
+    "slot_in_hour_sin", "slot_in_hour_cos", "sunrise_rel", "sunset_rel", "shoulder_flag",
+    "doy_sin", "doy_cos",
+    "expected_nodes", "cap_kw",
 ]
 
 
@@ -1313,7 +1517,7 @@ def load_dayahead(day: str) -> np.ndarray | None:
 # ERROR MEMORY  (rolling bias correction)
 # ============================================================================
 
-def compute_error_memory(today: datetime.date, w_today_5: pd.DataFrame) -> np.ndarray:
+def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     """
     Compute a weighted-average error correction vector from recent days.
 
@@ -1365,11 +1569,463 @@ def compute_error_memory(today: datetime.date, w_today_5: pd.DataFrame) -> np.nd
     return mem_err
 
 
+def collect_history_days(today: date, lookback_days: int) -> list[dict]:
+    """
+    Build the historical basis for training and intra-hour hardening.
+
+    Historical samples always pair actual generation with archive weather for
+    that same day. This keeps plant-response learning separate from any
+    forecast-provider bias.
+    """
+    history = []
+    log.info(
+        "Collecting history basis from last %d days using actual archived weather + actual generation",
+        lookback_days,
+    )
+
+    for days_ago in range(1, lookback_days + 1):
+        day = (today - timedelta(days=days_ago)).isoformat()
+        actual = load_actual(day)
+        wdata = fetch_weather(day)
+        if actual is None or wdata is None:
+            log.debug("  Skip %s - missing history basis", day)
+            continue
+
+        w5 = interpolate_5min(wdata, day)
+        ok_w5, reason_w5 = validate_weather_5min(day, w5)
+        if not ok_w5:
+            log.warning("  Reject %s - weather quality failed: %s", day, reason_w5)
+            continue
+
+        baseline = physics_baseline(day, w5)
+        stats = analyse_weather_day(day, w5, actual)
+        bad, reason = training_day_rejection(stats, actual, baseline)
+        if bad:
+            log.warning("  Reject %s - %s", day, reason)
+            continue
+
+        history.append({
+            "day": day,
+            "days_ago": days_ago,
+            "actual": np.asarray(actual, dtype=float),
+            "weather": w5,
+            "baseline": np.asarray(baseline, dtype=float),
+            "stats": stats,
+            "season": _season_bucket_from_day(day),
+            "first_active_slot": _find_first_active_slot(actual),
+            "last_active_slot": _find_last_active_slot(actual),
+        })
+
+    log.info("History basis accepted: %d day(s)", len(history))
+    return history
+
+
+def build_forecast_artifacts(history_days: list[dict]) -> dict:
+    """Build derived artifacts for shape correction and activity gating."""
+    shape_records = []
+    activity_records = []
+    threshold = activity_threshold_kwh()
+
+    for sample in history_days:
+        day = str(sample["day"])
+        actual = np.asarray(sample["actual"], dtype=float)
+        w5 = sample["weather"]
+        stats = sample["stats"]
+        first_slot = sample.get("first_active_slot")
+        last_slot = sample.get("last_active_slot")
+        csi_arr = clear_sky_radiation(day, pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values)
+
+        if first_slot is not None and last_slot is not None:
+            activity_records.append({
+                "day": day,
+                "days_ago": int(sample["days_ago"]),
+                "season": sample.get("season") or _season_bucket_from_day(day),
+                "sky_class": stats.get("sky_class"),
+                "rainy": bool(stats.get("rainy")),
+                "cloud_mean": float(stats.get("cloud_mean", 0.0)),
+                "rh_mean": float(stats.get("rh_mean", 0.0)),
+                "vol_index": float(stats.get("vol_index", 0.0)),
+                "first_slot": int(first_slot),
+                "last_slot": int(last_slot),
+            })
+
+        for hour in range(SOLAR_START_H, SOLAR_END_H):
+            start, end = _solar_hour_bounds(hour)
+            hour_total = float(actual[start:end].sum())
+            if hour_total < threshold * 1.5:
+                continue
+
+            meta = hour_weather_signature(day, w5, hour, csi_arr)
+            shape_records.append({
+                "day": day,
+                "days_ago": int(sample["days_ago"]),
+                "hour": int(hour),
+                "season": meta["season"],
+                "regime": meta["regime"],
+                "cloud_mean": float(meta["cloud_mean"]),
+                "rh_mean": float(meta["rh_mean"]),
+                "kt_mean": float(meta["kt_mean"]),
+                "vol_index": float(meta["vol_index"]),
+                "profile": _normalize_profile(actual[start:end]).astype(np.float32),
+            })
+
+    return {
+        "created_ts": int(time.time()),
+        "training_basis": "actual archived weather + actual generation",
+        "lookback_days": int(SHAPE_LOOKBACK_DAYS),
+        "history_days": int(len(history_days)),
+        "shape_records": shape_records,
+        "activity_records": activity_records,
+    }
+
+
+def save_forecast_artifacts(artifact: dict) -> bool:
+    try:
+        ARTIFACT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dump(artifact, ARTIFACT_FILE)
+        return True
+    except Exception as e:
+        log.error("Artifact save failed %s: %s", ARTIFACT_FILE, e)
+        return False
+
+
+def load_forecast_artifacts(today: date | None = None, allow_build: bool = False) -> dict | None:
+    if ARTIFACT_FILE.exists():
+        try:
+            data = load(ARTIFACT_FILE)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            log.warning("Artifact load failed %s: %s", ARTIFACT_FILE, e)
+
+    if allow_build and today is not None:
+        history_days = collect_history_days(today, SHAPE_LOOKBACK_DAYS)
+        if not history_days:
+            return None
+        artifact = build_forecast_artifacts(history_days)
+        save_forecast_artifacts(artifact)
+        return artifact
+
+    return None
+
+
+def _shape_similarity_score(record: dict, target_meta: dict) -> float:
+    if int(record.get("hour", -1)) != int(target_meta.get("hour", -2)):
+        return float("inf")
+
+    score = 0.0
+    if record.get("season") != target_meta.get("season"):
+        score += 0.55
+    if record.get("regime") != target_meta.get("regime"):
+        score += 1.25
+    score += abs(float(record.get("cloud_mean", 0.0)) - float(target_meta.get("cloud_mean", 0.0))) / 28.0
+    score += abs(float(record.get("rh_mean", 0.0)) - float(target_meta.get("rh_mean", 0.0))) / 24.0
+    score += abs(float(record.get("kt_mean", 0.0)) - float(target_meta.get("kt_mean", 0.0))) / 0.22
+    score += abs(float(record.get("vol_index", 0.0)) - float(target_meta.get("vol_index", 0.0))) / 0.18
+    score += min(float(record.get("days_ago", SHAPE_LOOKBACK_DAYS)), float(SHAPE_LOOKBACK_DAYS)) / max(float(SHAPE_LOOKBACK_DAYS), 1.0) * 0.30
+    return score
+
+
+def select_shape_profile(shape_records: list[dict], target_meta: dict, fallback_profile: np.ndarray) -> tuple[np.ndarray, int, float | None]:
+    fallback = _normalize_profile(fallback_profile)
+    if not shape_records:
+        return fallback, 0, None
+
+    hour_records = [r for r in shape_records if int(r.get("hour", -1)) == int(target_meta.get("hour", -2))]
+    if not hour_records:
+        return fallback, 0, None
+
+    exact = [
+        r for r in hour_records
+        if r.get("season") == target_meta.get("season") and r.get("regime") == target_meta.get("regime")
+    ]
+    pool = exact if len(exact) >= SHAPE_MIN_MATCHES else hour_records
+
+    scored = []
+    for record in pool:
+        score = _shape_similarity_score(record, target_meta)
+        if not math.isfinite(score):
+            continue
+        scored.append((score, record))
+    if not scored:
+        return fallback, 0, None
+
+    scored.sort(key=lambda item: item[0])
+    top = scored[:SHAPE_TOP_K]
+    weights = np.array([1.0 / ((0.25 + score) ** 2) for score, _ in top], dtype=float)
+    profiles = np.array([np.asarray(record["profile"], dtype=float) for _, record in top], dtype=float)
+    history_profile = np.average(profiles, axis=0, weights=weights)
+    history_profile = _normalize_profile(history_profile)
+
+    blend = SHAPE_BLEND_MIN + 0.08 * max(0, len(top) - 1)
+    blend = min(blend, SHAPE_BLEND_MAX)
+    best_score = float(top[0][0])
+    if best_score > 2.0:
+        blend *= 0.82
+    if len(exact) >= SHAPE_MIN_MATCHES:
+        blend = min(SHAPE_BLEND_MAX, blend + 0.06)
+
+    final_profile = blend * history_profile + (1.0 - blend) * fallback
+    return _normalize_profile(final_profile), len(top), best_score
+
+
+def apply_hour_shape_correction(
+    forecast: np.ndarray,
+    day: str,
+    w5: pd.DataFrame,
+    artifacts: dict | None,
+) -> tuple[np.ndarray, dict]:
+    shape_records = list((artifacts or {}).get("shape_records") or [])
+    if not shape_records:
+        return np.asarray(forecast, dtype=float).copy(), {
+            "hours_shaped": 0,
+            "avg_matches": 0.0,
+            "avg_score": None,
+        }
+
+    out = np.clip(np.asarray(forecast, dtype=float), 0.0, None).copy()
+    csi_arr = clear_sky_radiation(day, pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values)
+    match_counts = []
+    best_scores = []
+
+    for hour in range(SOLAR_START_H, SOLAR_END_H):
+        start, end = _solar_hour_bounds(hour)
+        hour_total = float(out[start:end].sum())
+        if hour_total <= 0:
+            continue
+
+        target_meta = hour_weather_signature(day, w5, hour, csi_arr)
+        fallback = out[start:end]
+        profile, matches, best_score = select_shape_profile(shape_records, target_meta, fallback)
+        out[start:end] = hour_total * profile
+        if matches > 0:
+            match_counts.append(matches)
+        if best_score is not None and math.isfinite(best_score):
+            best_scores.append(best_score)
+
+    return out, {
+        "hours_shaped": int(sum(1 for hour in range(SOLAR_START_H, SOLAR_END_H) if out[_solar_hour_bounds(hour)[0]:_solar_hour_bounds(hour)[1]].sum() > 0)),
+        "avg_matches": float(np.mean(match_counts)) if match_counts else 0.0,
+        "avg_score": float(np.mean(best_scores)) if best_scores else None,
+    }
+
+
+def _activity_similarity_score(record: dict, target: dict) -> float:
+    score = 0.0
+    if record.get("season") != target.get("season"):
+        score += 0.55
+    if record.get("sky_class") != target.get("sky_class"):
+        score += 0.95
+    if bool(record.get("rainy")) != bool(target.get("rainy")):
+        score += 0.75
+    score += abs(float(record.get("cloud_mean", 0.0)) - float(target.get("cloud_mean", 0.0))) / 30.0
+    score += abs(float(record.get("rh_mean", 0.0)) - float(target.get("rh_mean", 0.0))) / 25.0
+    score += abs(float(record.get("vol_index", 0.0)) - float(target.get("vol_index", 0.0))) / 0.20
+    score += min(float(record.get("days_ago", SHAPE_LOOKBACK_DAYS)), float(SHAPE_LOOKBACK_DAYS)) / max(float(SHAPE_LOOKBACK_DAYS), 1.0) * 0.20
+    return score
+
+
+def estimate_activity_window(
+    day: str,
+    w5: pd.DataFrame,
+    forecast: np.ndarray,
+    artifacts: dict | None,
+) -> dict:
+    stats = analyse_weather_day(day, w5)
+    target = {
+        "season": _season_bucket_from_day(day),
+        "sky_class": stats.get("sky_class"),
+        "rainy": bool(stats.get("rainy")),
+        "cloud_mean": float(stats.get("cloud_mean", 0.0)),
+        "rh_mean": float(stats.get("rh_mean", 0.0)),
+        "vol_index": float(stats.get("vol_index", 0.0)),
+    }
+    records = list((artifacts or {}).get("activity_records") or [])
+
+    forecast_arr = np.clip(np.asarray(forecast, dtype=float), 0.0, None)
+    forecast_smooth = pd.Series(forecast_arr).rolling(3, min_periods=1, center=True).mean().values
+    rad_smooth = pd.Series(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values).rolling(3, min_periods=1, center=True).mean().values
+    threshold = activity_threshold_kwh()
+
+    weather_first = _find_first_active_slot(forecast_smooth, threshold * 0.80, sustain_slots=ACTIVITY_SUSTAIN_SLOTS)
+    if weather_first is None:
+        for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT - ACTIVITY_SUSTAIN_SLOTS + 1):
+            if (
+                float(np.mean(rad_smooth[slot:slot + ACTIVITY_SUSTAIN_SLOTS])) >= STARTUP_RAD_WM2
+                and float(np.mean(forecast_smooth[slot:slot + ACTIVITY_SUSTAIN_SLOTS])) >= threshold * 0.55
+            ):
+                weather_first = slot
+                break
+    if weather_first is None:
+        weather_first = SOLAR_START_SLOT
+
+    weather_last = _find_last_active_slot(forecast_smooth, threshold * 0.70, sustain_slots=ACTIVITY_SUSTAIN_SLOTS)
+    if weather_last is None:
+        for slot in range(SOLAR_END_SLOT - ACTIVITY_SUSTAIN_SLOTS, SOLAR_START_SLOT - 1, -1):
+            if (
+                float(np.mean(rad_smooth[slot:slot + ACTIVITY_SUSTAIN_SLOTS])) >= STOPPING_RAD_WM2
+                and float(np.mean(forecast_smooth[slot:slot + ACTIVITY_SUSTAIN_SLOTS])) >= threshold * 0.40
+            ):
+                weather_last = slot + ACTIVITY_SUSTAIN_SLOTS - 1
+                break
+    if weather_last is None:
+        weather_last = SOLAR_END_SLOT - 1
+
+    hist_first = None
+    hist_last = None
+    match_count = 0
+    if records:
+        scored = sorted(
+            (
+                (_activity_similarity_score(record, target), record)
+                for record in records
+            ),
+            key=lambda item: item[0],
+        )[:SHAPE_TOP_K]
+        if scored:
+            weights = np.array([1.0 / ((0.25 + score) ** 2) for score, _ in scored], dtype=float)
+            hist_first = float(np.average([record["first_slot"] for _, record in scored], weights=weights))
+            hist_last = float(np.average([record["last_slot"] for _, record in scored], weights=weights))
+            match_count = len(scored)
+
+    first_slot = int(weather_first)
+    last_slot = int(weather_last)
+    if hist_first is not None:
+        first_slot = int(round(max(weather_first, 0.45 * weather_first + 0.55 * hist_first)))
+    if hist_last is not None:
+        last_slot = int(round(0.60 * weather_last + 0.40 * hist_last))
+
+    first_slot = int(np.clip(first_slot, SOLAR_START_SLOT, SOLAR_END_SLOT - 1))
+    last_slot = int(np.clip(last_slot, first_slot, SOLAR_END_SLOT - 1))
+    return {
+        "first_slot": first_slot,
+        "last_slot": last_slot,
+        "weather_first": int(weather_first),
+        "weather_last": int(weather_last),
+        "history_matches": match_count,
+    }
+
+
+def _redistribute_hour_energy(hour_values: np.ndarray, allowed_mask: np.ndarray, rising: bool) -> np.ndarray:
+    values = np.clip(np.asarray(hour_values, dtype=float), 0.0, None)
+    allowed = np.asarray(allowed_mask, dtype=bool)
+    total = float(values.sum())
+    if total <= 0 or not np.any(allowed):
+        return np.zeros_like(values)
+
+    weights = values.copy()
+    ramp = np.linspace(0.60, 1.25, values.size) if rising else np.linspace(1.25, 0.60, values.size)
+    weights = weights * ramp
+    weights[~allowed] = 0.0
+    if float(weights.sum()) <= 0:
+        weights = ramp
+        weights[~allowed] = 0.0
+    weights = _normalize_profile(weights)
+    return total * weights
+
+
+def apply_activity_hysteresis(
+    forecast: np.ndarray,
+    day: str,
+    w5: pd.DataFrame,
+    artifacts: dict | None,
+) -> tuple[np.ndarray, dict]:
+    out = np.clip(np.asarray(forecast, dtype=float), 0.0, None).copy()
+    if float(out.sum()) <= 0:
+        return out, {"first_slot": None, "last_slot": None, "history_matches": 0}
+
+    window = estimate_activity_window(day, w5, out, artifacts)
+    first_slot = int(window["first_slot"])
+    last_slot = int(window["last_slot"])
+    first_hour = first_slot // (60 // SLOT_MIN)
+    last_hour = last_slot // (60 // SLOT_MIN)
+
+    out[:first_hour * (60 // SLOT_MIN)] = 0.0
+    out[(last_hour + 1) * (60 // SLOT_MIN):] = 0.0
+
+    if first_hour == last_hour:
+        start, end = _solar_hour_bounds(first_hour)
+        slots = np.arange(start, end)
+        allowed = (slots >= first_slot) & (slots <= last_slot)
+        out[start:end] = _redistribute_hour_energy(out[start:end], allowed, rising=True)
+    else:
+        start, end = _solar_hour_bounds(first_hour)
+        out[start:end] = _redistribute_hour_energy(out[start:end], np.arange(start, end) >= first_slot, rising=True)
+        start, end = _solar_hour_bounds(last_hour)
+        out[start:end] = _redistribute_hour_energy(out[start:end], np.arange(start, end) <= last_slot, rising=False)
+
+    out[:first_slot] = 0.0
+    out[last_slot + 1:] = 0.0
+    return out, window
+
+
+def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndarray, dict]:
+    """
+    Add conservative modular pickup at low power while preserving hourly totals.
+
+    This does not fully quantize the plant. It only nudges low-power periods
+    toward node-like staging so dawn and dusk do not stay perfectly smooth.
+    """
+    out = np.clip(np.asarray(forecast, dtype=float), 0.0, None)
+    staged = out.copy()
+    node_count = max(1, plant_node_count())
+    node_step = max(node_slot_kwh(), 0.1)
+    stage_limit = slot_cap_kwh(True) * LOW_POWER_STAGE_FRACTION
+    threshold = activity_threshold_kwh()
+    if stage_limit <= 0:
+        return out.copy(), {"node_step_kwh": node_step, "staged_slots": 0}
+
+    rad = pd.Series(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values).rolling(3, min_periods=1, center=True).mean().values
+    active_nodes = 0
+    staged_slots = 0
+
+    for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+        value = float(out[slot])
+        if value <= 0:
+            active_nodes = 0
+            staged[slot] = 0.0
+            continue
+        if value > stage_limit:
+            active_nodes = min(node_count, max(active_nodes, int(round(value / node_step))))
+            staged[slot] = value
+            continue
+
+        desired_nodes = int(np.clip(round(value / node_step), 0, node_count))
+        if value >= threshold and desired_nodes < 1:
+            desired_nodes = 1
+
+        if desired_nodes > active_nodes:
+            active_nodes = desired_nodes
+        elif desired_nodes < active_nodes - 1:
+            active_nodes = desired_nodes
+        elif desired_nodes == 0 and value < threshold * 0.85 and rad[slot] < STARTUP_RAD_WM2 * 0.60:
+            active_nodes = 0
+
+        staged_value = active_nodes * node_step
+        blend = STAGING_BLEND_MAX * np.clip(1.0 - (value / max(stage_limit, 1e-6)), 0.0, 1.0)
+        staged[slot] = (1.0 - blend) * value + blend * staged_value
+        staged_slots += 1
+
+    for hour in range(SOLAR_START_H, SOLAR_END_H):
+        start, end = _solar_hour_bounds(hour)
+        orig_total = float(out[start:end].sum())
+        new_total = float(staged[start:end].sum())
+        if orig_total > 0 and new_total > 0:
+            staged[start:end] *= orig_total / new_total
+
+    staged[:SOLAR_START_SLOT] = 0.0
+    staged[SOLAR_END_SLOT:] = 0.0
+    return staged, {
+        "node_step_kwh": float(node_step),
+        "staged_slots": int(staged_slots),
+    }
+
+
 # ============================================================================
 # MODEL TRAINING
 # ============================================================================
 
-def collect_training_data(today: datetime.date) -> tuple[pd.DataFrame, np.ndarray] | tuple[None, None]:
+def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tuple[None, None]:
     """
     Collect and validate training data from the last N_TRAIN_DAYS days.
 
@@ -1456,9 +2112,92 @@ def collect_training_data(today: datetime.date) -> tuple[pd.DataFrame, np.ndarra
     return X_train, y_train
 
 
-def train_model(today: datetime.date) -> bool:
+def collect_training_data_hardened(
+    today: date,
+    history_days: list[dict] | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray] | tuple[None, None, None]:
+    """
+    Build the residual-training set from the hardened historical basis.
+
+    The model learns residual plant response from actual archived weather and
+    actual generation. Forecast weather is used only at inference time.
+    """
+    samples = list(history_days or collect_history_days(today, N_TRAIN_DAYS))
+    samples = [sample for sample in samples if int(sample.get("days_ago", N_TRAIN_DAYS + 1)) <= N_TRAIN_DAYS]
+
+    X_parts = []
+    y_parts = []
+    weight_parts = []
+
+    log.info("Collecting residual training samples from %d accepted history day(s)", len(samples))
+
+    for sample in samples:
+        day = str(sample["day"])
+        actual = np.asarray(sample["actual"], dtype=float)
+        w5 = sample["weather"]
+        base = np.asarray(sample["baseline"], dtype=float)
+        stats = sample["stats"]
+
+        feat = build_features(w5, day)
+        curtailed = curtailed_mask(actual, base)
+        mask = (
+            (base > 0) &
+            (actual >= 0) &
+            (~curtailed) &
+            (feat["rad"].values >= RAD_MIN_WM2) &
+            (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
+            (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+        )
+
+        usable = int(np.count_nonzero(mask))
+        if usable < MIN_SAMPLES:
+            log.warning("  Reject %s - too few usable slots (%d)", day, usable)
+            continue
+
+        residual = np.clip(actual - base, -500.0, 500.0)
+        X = feat.loc[mask, FEATURE_COLS]
+        y = residual[mask]
+
+        recency_weight = _sample_weight_for_days_ago(int(sample.get("days_ago", N_TRAIN_DAYS)))
+        corr = float(stats.get("rad_gen_corr", 0.0))
+        quality_weight = float(np.clip(0.70 + 0.30 * max(corr, 0.0), 0.55, 1.0))
+        sample_weight = np.full(len(y), recency_weight * quality_weight, dtype=float)
+
+        X_parts.append(X)
+        y_parts.append(y)
+        weight_parts.append(sample_weight)
+
+        log.info(
+            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d",
+            day,
+            stats["sky_class"],
+            stats["capacity_factor"],
+            corr,
+            float(sample_weight[0]) if len(sample_weight) else 0.0,
+            usable,
+        )
+
+    valid_days = len(X_parts)
+    if valid_days < MIN_TRAIN_DAYS:
+        log.warning("Only %d valid training days - minimum is %d", valid_days, MIN_TRAIN_DAYS)
+        return None, None, None
+
+    X_train = pd.concat(X_parts, ignore_index=True)
+    y_train = np.concatenate(y_parts)
+    w_train = np.concatenate(weight_parts)
+    log.info(
+        "Training set: %d samples from %d days (mean sample weight=%.3f)",
+        len(y_train),
+        valid_days,
+        float(np.mean(w_train)),
+    )
+    return X_train, y_train, w_train
+
+
+def train_model(today: date) -> bool:
     """Train (or retrain) the residual correction model."""
-    X, y = collect_training_data(today)
+    history_days = collect_history_days(today, max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS))
+    X, y, sample_weight = collect_training_data_hardened(today, history_days)
     if X is None:
         return False
 
@@ -1480,10 +2219,11 @@ def train_model(today: datetime.date) -> bool:
         n_iter_no_change  = 30,
         tol               = 1e-4,
     )
-    model.fit(X_sc, y)
+    model.fit(X_sc, y, sample_weight=sample_weight)
 
     dump(model,  MODEL_FILE)
     dump(scaler, SCALER_FILE)
+    save_forecast_artifacts(build_forecast_artifacts(history_days))
     log.info(
         "Model trained â€“ estimators used: %d  train_score: %.4f",
         model.n_estimators_,
@@ -1610,7 +2350,7 @@ def confidence_bands(
 # FORECAST QUALITY METRICS  (logged after each run)
 # ============================================================================
 
-def forecast_qa(today: datetime.date) -> None:
+def forecast_qa(today: date) -> None:
     """
     Compute and log MAPE, MBE, skill score vs persistence for yesterday.
     Persistence forecast = yesterday's actual shifted to today.
@@ -1806,7 +2546,7 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
 # CORE FORECAST FUNCTION
 # ============================================================================
 
-def run_dayahead(target_date: datetime.date, today: datetime.date) -> bool:
+def run_dayahead(target_date: date, today: date) -> bool:
     """
     Generate and persist the day-ahead forecast for *target_date*.
 
@@ -1845,6 +2585,7 @@ def run_dayahead(target_date: datetime.date, today: datetime.date) -> bool:
 
     # 2. Physics baseline
     baseline = physics_baseline(target_s, w5)
+    artifacts = load_forecast_artifacts(today, allow_build=True)
 
     # 3. ML residual correction
     ml_residual = np.zeros(SLOTS_DAY)
@@ -1925,6 +2666,25 @@ def run_dayahead(target_date: datetime.date, today: datetime.date) -> bool:
     forecast[:SOLAR_START_SLOT] = 0.0
     forecast[SOLAR_END_SLOT:]   = 0.0
 
+    forecast, shape_meta = apply_hour_shape_correction(forecast, target_s, w5, artifacts)
+    forecast, activity_meta = apply_activity_hysteresis(forecast, target_s, w5, artifacts)
+    forecast, staging_meta = apply_block_staging(forecast, w5)
+    forecast = np.clip(forecast, 0.0, cap_slot)
+    forecast[:SOLAR_START_SLOT] = 0.0
+    forecast[SOLAR_END_SLOT:]   = 0.0
+
+    log.info(
+        "Hardening: shape_hours=%d avg_shape_matches=%.1f avg_shape_score=%s  start=%s end=%s hist_window=%d  staged_slots=%d node_step=%.2f",
+        int(shape_meta.get("hours_shaped", 0)),
+        float(shape_meta.get("avg_matches", 0.0)),
+        f"{float(shape_meta['avg_score']):.2f}" if shape_meta.get("avg_score") is not None else "n/a",
+        activity_meta.get("first_slot"),
+        activity_meta.get("last_slot"),
+        int(activity_meta.get("history_matches", 0)),
+        int(staging_meta.get("staged_slots", 0)),
+        float(staging_meta.get("node_step_kwh", 0.0)),
+    )
+
     # Ramp rate limit
     forecast = apply_ramp_limit(forecast)
 
@@ -1962,14 +2722,14 @@ def run_dayahead(target_date: datetime.date, today: datetime.date) -> bool:
 # MANUAL GENERATION (CLI)
 # ============================================================================
 
-def _parse_iso_date_safe(value: str) -> datetime.date:
+def _parse_iso_date_safe(value: str) -> date:
     try:
         return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
     except Exception as e:
         raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.") from e
 
 
-def _iter_days(start_date: datetime.date, end_date: datetime.date) -> list[datetime.date]:
+def _iter_days(start_date: date, end_date: date) -> list[date]:
     if end_date < start_date:
         raise ValueError("End date must be on or after start date.")
     days = []
@@ -1980,7 +2740,7 @@ def _iter_days(start_date: datetime.date, end_date: datetime.date) -> list[datet
     return days
 
 
-def run_manual_generation(dates: list[datetime.date]) -> bool:
+def run_manual_generation(dates: list[date]) -> bool:
     dates = sorted(set(dates))
     if not dates:
         log.error("Manual generation: no target dates provided.")

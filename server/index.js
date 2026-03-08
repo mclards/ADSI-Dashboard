@@ -3762,6 +3762,20 @@ function parseHmsOnDay(day, timeText) {
   return new Date(y, mo, d, hh, mm, ss, 0).getTime();
 }
 
+function getForecastSolarWindowBounds(day) {
+  const raw = String(day || localDateStr()).trim();
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : localDateStr();
+  const hh = (n) => String(Math.trunc(Number(n) || 0)).padStart(2, "0");
+  return {
+    startTs: new Date(
+      `${d}T${hh(SOLCAST_SOLAR_START_H)}:00:00.000`,
+    ).getTime(),
+    endTs: new Date(
+      `${d}T${hh(SOLCAST_SOLAR_END_H)}:00:00.000`,
+    ).getTime(),
+  };
+}
+
 function getDayAheadRowsForDate(day) {
   const dayKey = String(day || "").trim();
   if (!dayKey) return [];
@@ -4687,11 +4701,12 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
 async function generateDayAheadWithMl(dayCount) {
   const args = ["--generate-days", String(dayCount)];
   const result = await runForecastGenerator(args);
-  if (Number(result?.code || -1) !== 0) {
+  const exitCode = Number(result?.code ?? -1);
+  if (exitCode !== 0) {
     const details = String(result?.stderr || result?.stdout || "")
       .trim()
       .slice(-2000);
-    throw new Error(`ML forecast generator failed (code ${Number(result?.code || -1)}). ${details || ""}`.trim());
+    throw new Error(`ML forecast generator failed (code ${exitCode}). ${details || ""}`.trim());
   }
   try {
     syncDayAheadFromContextIfNewer(true);
@@ -7179,14 +7194,18 @@ app.get("/api/analytics/dayahead", (req, res) => {
   const targetDate = String(
     date || (Number.isFinite(parsedStart) ? localDateStr(parsedStart) : localDateStr()),
   ).trim();
+  const solarWindow = getForecastSolarWindowBounds(targetDate);
 
   let rows = getDayAheadRowsForDate(targetDate);
   const s = Number.isFinite(parsedStart)
-    ? parsedStart
-    : new Date(`${targetDate}T00:00:00.000`).getTime();
+    ? Math.max(parsedStart, solarWindow.startTs)
+    : solarWindow.startTs;
   const e = Number.isFinite(parsedEnd)
-    ? parsedEnd
-    : new Date(`${targetDate}T23:59:59.999`).getTime();
+    ? Math.min(parsedEnd, solarWindow.endTs)
+    : solarWindow.endTs;
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e < s) {
+    return res.json([]);
+  }
   rows = rows.filter((r) => {
     const ts = Number(r?.ts || 0);
     return ts >= s && ts <= e;

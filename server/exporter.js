@@ -56,6 +56,21 @@ function startOfLocalDay(ts) {
   return d.getTime();
 }
 
+function getSolarWindowBoundsForTs(ts) {
+  const day = fmtDate(ts);
+  return {
+    startTs: new Date(`${day}T05:00:00.000`).getTime(),
+    endTs: new Date(`${day}T18:00:00.000`).getTime(),
+  };
+}
+
+function isWithinSolarWindowTs(ts) {
+  const n = Number(ts || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const { startTs, endTs } = getSolarWindowBoundsForTs(n);
+  return n >= startTs && n <= endTs;
+}
+
 function formatDurationMs(ms) {
   const totalSec = Math.max(0, Math.floor(Number(ms || 0) / 1000));
   const days = Math.floor(totalSec / 86400);
@@ -1192,8 +1207,10 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   const actualRaw = queryEnergy5minRangeAll(s, e).map((r) => ({
     ts: Number(r?.ts || 0),
     kwh_inc: Number(r?.kwh_inc || 0),
-  }));
-  const dayAheadRaw = collectDayAheadRowsForRange(s, e);
+  })).filter((r) => isWithinSolarWindowTs(r.ts));
+  const dayAheadRaw = collectDayAheadRowsForRange(s, e).filter((r) =>
+    isWithinSolarWindowTs(r.ts),
+  );
 
   const actualAgg = aggregateKwhByResolution(actualRaw, spec);
   const dayAheadAgg = aggregateKwhByResolution(dayAheadRaw, spec);

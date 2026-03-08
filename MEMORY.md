@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.17
+- **Version:** 2.2.18
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -45,6 +45,9 @@ Real-time monitoring, 5-min energy resolution, AI solar forecasting, alarm manag
 electron-builder: NSIS installer + portable exe. Output: release/
 Extraresources: InverterCoreService.exe, ForecastCoreService.exe (PyInstaller from ADSI_*.py)
 Release size: ~228 MB each
+- Important: `npm run build:win` packages the existing `dist/InverterCoreService.exe` and `dist/ForecastCoreService.exe`; it does not rebuild them
+- Rule: whenever Python service code or the PyInstaller specs change, rebuild the affected service EXE in `dist/` before any Electron build or release
+- Release hygiene: clean `release/` before building and remove old release leftovers after publish
 
 ## Completed Overhaul (2026-02)
 Full 4-phase in-place overhaul completed. Key changes:
@@ -104,6 +107,12 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Renderer sync refinement:** `public/js/app.js` now tracks `chatPendingClear`, disables chat actions while clearing, handles `chat_clear` WebSocket events, preserves unsent drafts, and resets the thread state cleanly without reopening transport logic
 - **Chat responsiveness:** Hidden-panel thread rerenders stay suppressed, sender labels remain limited to `Operator Name - Server/Remote`, and clear-state updates keep the panel operational without extra churn
 - **Release hygiene:** Version baseline moved to `2.2.17`; release builds must clean `release/` before build and keep only current release artifacts after publish
+
+## v2.2.18 Changes (2026-03-08)
+- **Day-ahead window enforcement:** Analytics fetch/export and server-side day-ahead normalization now clamp to the `05:00-18:00` operating window
+- **Forecast hardening:** `services/forecast_engine.py` now uses a hardened historical basis from actual archived weather plus actual generation, learned intra-hour shape correction, startup/shutdown activity gating, and conservative low-power node staging
+- **ML fallback correctness:** `server/index.js` now treats forecast generator exit code `0` correctly, so successful physics-fallback day-ahead runs no longer report false `code -1` failures
+- **Build rule:** project docs now explicitly require rebuilding `dist/ForecastCoreService.exe` and/or `dist/InverterCoreService.exe` whenever the corresponding Python service code or PyInstaller spec changes before any Electron build or release
 
 ## v2.2.16 Changes (2026-03-08)
 - **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, soft inbound-only Web Audio notification, and sender labels limited to `Operator Name - Server/Remote`

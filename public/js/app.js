@@ -872,6 +872,30 @@ function localDateEndMs(dateText) {
   return new Date(`${d}T23:59:59.999`).getTime();
 }
 
+function localDateTimeMs(dateText, hour = 0, minute = 0, second = 0, ms = 0) {
+  const d = sanitizeDateInputValue(dateText);
+  if (!d) return NaN;
+  return new Date(
+    `${d}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}.${String(ms)
+      .padStart(3, "0")
+      .slice(0, 3)}`,
+  ).getTime();
+}
+
+function getAnalyticsSolarWindowBounds(dateText = "") {
+  const day = sanitizeDateInputValue(dateText) || today();
+  return {
+    startTs: localDateTimeMs(day, ANALYTICS_VIEW_START_HOUR, 0, 0, 0),
+    endTs: localDateTimeMs(
+      day,
+      ANALYTICS_VIEW_END_HOUR,
+      ANALYTICS_VIEW_END_MIN,
+      0,
+      0,
+    ),
+  };
+}
+
 function clampExportNumberValue(id, value) {
   const rule = EXPORT_NUM_FIELD_RULES[id];
   if (!rule) return null;
@@ -6831,8 +6855,7 @@ async function loadAnalytics(options = {}) {
     if ($("anaDate")) $("anaDate").value = date;
   }
   const intervalMin = Number($("anaInterval")?.value || 5);
-  const sTs = localDateStartMs(date);
-  const eTs = localDateEndMs(date);
+  const { startTs: sTs, endTs: eTs } = getAnalyticsSolarWindowBounds(date);
   try {
     const qs = new URLSearchParams({
       date,
@@ -7724,12 +7747,7 @@ function buildAnalyticsDisplayTimeline(intervalMin = 5) {
   const d = String($("anaDate")?.value || today()).trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return [];
   const stepMs = Math.max(1, Number(intervalMin) || 5) * 60000;
-  const startTs = new Date(
-    `${d}T${pad2(ANALYTICS_VIEW_START_HOUR)}:00:00`,
-  ).getTime();
-  const endTs = new Date(
-    `${d}T${pad2(ANALYTICS_VIEW_END_HOUR)}:${pad2(ANALYTICS_VIEW_END_MIN)}:00`,
-  ).getTime();
+  const { startTs, endTs } = getAnalyticsSolarWindowBounds(d);
   if (
     !Number.isFinite(startTs) ||
     !Number.isFinite(endTs) ||
@@ -8003,8 +8021,9 @@ async function runForecastActualExport() {
   setExportButtonState("btnRunForecastExport", "loading");
   const controller = new AbortController();
   registerExportAbortController("btnCancelForecastExport", controller);
-  const startTs = day ? localDateStartMs(day) : undefined;
-  const endTs = day ? localDateEndMs(day) : undefined;
+  const bounds = day ? getAnalyticsSolarWindowBounds(day) : null;
+  const startTs = bounds?.startTs;
+  const endTs = bounds?.endTs;
   try {
     const r = await api("/api/export/forecast-actual", "POST", {
       startTs,
@@ -8050,8 +8069,9 @@ function getAnalyticsForecastExportResolution() {
 async function runAnalyticsDayAheadExport() {
   const day = String($("anaDate")?.value || today()).trim();
   const res = $("genDayResult");
-  const startTs = day ? localDateStartMs(day) : undefined;
-  const endTs = day ? localDateEndMs(day) : undefined;
+  const bounds = day ? getAnalyticsSolarWindowBounds(day) : null;
+  const startTs = bounds?.startTs;
+  const endTs = bounds?.endTs;
   const resolution = getAnalyticsForecastExportResolution();
 
   if (res) {
