@@ -777,6 +777,9 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
     # separate radiation cols (need pchip) from rest
     rad_cols  = ["rad", "rad_direct", "rad_diffuse"]
     rest_cols = [c for c in df.columns if c not in rad_cols]
+    numeric_cols = [c for c in df.columns if c != "time"]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if day:
         idx5 = pd.date_range(f"{day} 00:00:00", periods=SLOTS_DAY, freq="5min")
@@ -795,8 +798,13 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
         .reindex(df.index.union(idx5))
         .interpolate(method="linear")
         .reindex(idx5)
-        .clip(lower=0)
     )
+    # Keep interpolation numeric-only so sparse Open-Meteo nulls do not leave
+    # object dtypes behind and crash downstream comparisons/clipping.
+    rest_interp = rest_interp.apply(pd.to_numeric, errors="coerce")
+    for col in ["cloud", "cloud_low", "cloud_mid", "cloud_high", "rh", "wind", "precip", "cape"]:
+        if col in rest_interp.columns:
+            rest_interp[col] = rest_interp[col].clip(lower=0)
 
     out = pd.concat([rad_interp, rest_interp], axis=1).reset_index(drop=True)
 

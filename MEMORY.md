@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.19
+- **Version:** 2.2.20
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -119,6 +119,11 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Server forecast support:** `server/db.js` and `server/index.js` now persist, replicate, and expose `forecast_intraday_adjusted`, while `/api/analytics/dayahead` can return the separate intraday-adjusted product when requested
 - **Native module workflow:** `package.json` now includes `rebuild:native:node` and `rebuild:native:electron` scripts so `better-sqlite3` can be rebuilt explicitly for shell-Node checks or Electron release/runtime use without ABI confusion
 - **Release readiness verification:** `dist/ForecastCoreService.exe` was rebuilt after the forecast changes, direct `server/db.js` loads were verified in shell Node, and a live Electron startup smoke test reached `/api/settings` successfully
+
+## v2.2.20 Changes (2026-03-08)
+- **Forecast crash fix:** `services/forecast_engine.py` now coerces hourly weather columns to numeric before interpolation so sparse Open-Meteo `None` values no longer break manual day-ahead generation with `'>=' not supported between instances of 'NoneType' and 'float'`
+- **Pandas warning cleanup:** the 5-minute weather interpolation path now avoids object-dtype interpolation/clipping in the failing non-radiation columns, removing the warning-prone path that was surfacing during manual generation
+- **Service binary refreshed:** `dist/ForecastCoreService.exe` was rebuilt after the forecast fix and revalidated with `--generate-date`
 
 ## v2.2.16 Changes (2026-03-08)
 - **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, soft inbound-only Web Audio notification, and sender labels limited to `Operator Name - Server/Remote`
