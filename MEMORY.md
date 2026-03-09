@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.20
+- **Version:** 2.2.21
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -45,9 +45,6 @@ Real-time monitoring, 5-min energy resolution, AI solar forecasting, alarm manag
 electron-builder: NSIS installer + portable exe. Output: release/
 Extraresources: InverterCoreService.exe, ForecastCoreService.exe (PyInstaller from ADSI_*.py)
 Release size: ~228 MB each
-- Important: `npm run build:win` packages the existing `dist/InverterCoreService.exe` and `dist/ForecastCoreService.exe`; it does not rebuild them
-- Rule: whenever Python service code or the PyInstaller specs change, rebuild the affected service EXE in `dist/` before any Electron build or release
-- Release hygiene: clean `release/` before building and remove old release leftovers after publish
 
 ## Completed Overhaul (2026-02)
 Full 4-phase in-place overhaul completed. Key changes:
@@ -102,35 +99,19 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loading…" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
 - **public/js/app.js (DocumentFragment):** renderAlarmTable, renderAuditTable, renderReportTable, renderEnergyTable all now use DocumentFragment + single `tbody.textContent=""` + `appendChild(frag)` instead of per-row `appendChild`
 
-## v2.2.17 Changes (2026-03-08)
-- **Clear thread control:** Operator Messages now includes a confirmed clear action that removes the shared message history through local `POST /api/chat/clear` routing and gateway-backed canonical deletion
-- **Renderer sync refinement:** `public/js/app.js` now tracks `chatPendingClear`, disables chat actions while clearing, handles `chat_clear` WebSocket events, preserves unsent drafts, and resets the thread state cleanly without reopening transport logic
-- **Chat responsiveness:** Hidden-panel thread rerenders stay suppressed, sender labels remain limited to `Operator Name - Server/Remote`, and clear-state updates keep the panel operational without extra churn
-- **Release hygiene:** Version baseline moved to `2.2.17`; release builds must clean `release/` before build and keep only current release artifacts after publish
-
-## v2.2.18 Changes (2026-03-08)
-- **Day-ahead window enforcement:** Analytics fetch/export and server-side day-ahead normalization now clamp to the `05:00-18:00` operating window
-- **Forecast hardening:** `services/forecast_engine.py` now uses a hardened historical basis from actual archived weather plus actual generation, learned intra-hour shape correction, startup/shutdown activity gating, and conservative low-power node staging
-- **ML fallback correctness:** `server/index.js` now treats forecast generator exit code `0` correctly, so successful physics-fallback day-ahead runs no longer report false `code -1` failures
-- **Build rule:** project docs now explicitly require rebuilding `dist/ForecastCoreService.exe` and/or `dist/InverterCoreService.exe` whenever the corresponding Python service code or PyInstaller spec changes before any Electron build or release
-
-## v2.2.19 Changes (2026-03-08)
-- **Forecast hardening completed:** `services/forecast_engine.py` now fully implements the remaining day-ahead hardening phases with strict archive-vs-forecast weather separation, persisted forecast-weather snapshots, a separate weather-bias layer, regime-aware residual model routing, and a distinct `PacEnergy_IntradayAdjusted` forecast product
-- **Server forecast support:** `server/db.js` and `server/index.js` now persist, replicate, and expose `forecast_intraday_adjusted`, while `/api/analytics/dayahead` can return the separate intraday-adjusted product when requested
-- **Native module workflow:** `package.json` now includes `rebuild:native:node` and `rebuild:native:electron` scripts so `better-sqlite3` can be rebuilt explicitly for shell-Node checks or Electron release/runtime use without ABI confusion
-- **Release readiness verification:** `dist/ForecastCoreService.exe` was rebuilt after the forecast changes, direct `server/db.js` loads were verified in shell Node, and a live Electron startup smoke test reached `/api/settings` successfully
-
-## v2.2.20 Changes (2026-03-08)
-- **Forecast crash fix:** `services/forecast_engine.py` now coerces hourly weather columns to numeric before interpolation so sparse Open-Meteo `None` values no longer break manual day-ahead generation with `'>=' not supported between instances of 'NoneType' and 'float'`
-- **Pandas warning cleanup:** the 5-minute weather interpolation path now avoids object-dtype interpolation/clipping in the failing non-radiation columns, removing the warning-prone path that was surfacing during manual generation
-- **Service binary refreshed:** `dist/ForecastCoreService.exe` was rebuilt after the forecast fix and revalidated with `--generate-date`
+## v2.2.21 Changes — Authoritative Pull/Push Hardening + Transfer Monitor Polish (2026-03-09)
+- **Authoritative merge:** `mergeAppendReplicationRow` and `mergeUpdatedReplicationRow` now accept `authoritative` flag; in auth mode, LWW `WHERE COALESCE(excluded.updated_ts,0) >= ...` guards are removed for all tables (`readings`, `energy_5min`, `settings`, `forecast_dayahead`, `forecast_intraday_adjusted`, `daily_report`, `daily_readings_summary`, `alarms`). Separate `stmtCached` keys used (e.g. `"merge:daily_report:auth"`) to avoid poisoning LWW cache entries. `audit_log` stays append-only. `REMOTE_REPLICATION_PRESERVE_SETTING_KEYS` always wins even in auth mode.
+- **Reconcile-before-pull:** `runManualPullSync` now runs a reconcile step (Step 0) before the authoritative pull — pushes local-newer data to gateway first; if reconcile push fails and local is newer, throws `LOCAL_NEWER_PUSH_FAILED` (code) with `canForcePull: true`; accepts `forcePull` param to skip reconcile gate.
+- **`LOCAL_NEWER_PUSH_FAILED` background gap fix:** `startManualReplicationJob` catch block now stores `errorCode: String(err?.code || "")` in failed job. `handleReplicationJobUpdate` detects `job.errorCode === "LOCAL_NEWER_PUSH_FAILED" && job.action === "pull"` and shows "Force Pull?" confirm dialog instead of plain error.
+- **xfer_progress labels:** `pushDeltaInChunks`, `runRemoteIncrementalReplication`, `runRemoteCatchUpReplication` accept `opts.label`; all manual pull/push/reconcile/archive call sites pass descriptive labels ("Reconciling with gateway", "Applying gateway data", "Pushing local data", "Pulling final gateway state", "Downloading/Uploading archive files").
+- **Transfer Monitor phase badge:** `#xferPhaseBadge` span added to `.xfer-panel-row` in `index.html`. `getXferPhaseBadge(x)` helper maps label+phase to badge text/class. Seven CSS classes: `xfer-phase-pull/push/reconcile/applying/archive/done/error`.
+- **Pull/push confirm dialogs:** Updated to explicitly state gateway-overwrites-local semantics and list preserved local-only settings.
+- **`/api/replication/pull-now`:** Destructures `forcePull` from body; passes to `runManualPullSync`; sync path returns HTTP 409 with `code:"LOCAL_NEWER_PUSH_FAILED"` on reconcile failure.
+- **Startup auto-sync and live bridge polling keep LWW** (`authoritative: false`); only manual pull is authoritative.
 
 ## v2.2.16 Changes (2026-03-08)
-- **Operator messaging panel:** Compact bottom-right operator message bubble + slide-in panel added to the dashboard; latest 20 notes, unread badge, auto-open on inbound, 30 s auto-dismiss, draft-safe hold, soft inbound-only Web Audio notification, and sender labels limited to `Operator Name - Server/Remote`
-- **Gateway canonical chat storage:** `server/db.js` now provisions `chat_messages` with monotonic `id`, explicit `from_machine` / `to_machine`, `read_ts`, and 500-row retention pruning
-- **Gateway/remote transport:** `server/index.js` adds local `/api/chat/send`, `/api/chat/messages`, and `/api/chat/read` routes; remote mode forwards sends/reads to the gateway and runs a 5 s inbox poll loop that rebroadcasts inbound rows over the local WebSocket
-- **Renderer chat state:** `public/js/app.js` now merges chat rows by `id`, loads thread history through the local server, marks inbound rows read only on actual panel open/read, and keeps failed remote drafts intact
-- **Operational copy polish:** Main dashboard, login/loading, IP config, and topology copy were tightened to be more specific and professional without exposing unnecessary internal detail
+- **Operator messaging panel:** `chat_messages` table on gateway (500-row retention); 3 API routes `/api/chat/send|messages|read`; remote proxy + 5 s poll loop; floating `#chatBubble` + slide-in `#chatPanel`; `appConfirm`-style UX; `playChatSound()` via shared `getOrCreateAlarmAudioCtx()`; `markChatRead` in-flight guard + pending queue; alarm bell left / chat bubble right — no overlap
+- **`renderChatThread` DocumentFragment:** converted to match `renderAlarmTable` / `renderReportTable` pattern
 
 ## v2.2.15 Changes (2026-03-08)
 - **Availability fix:** `/api/report/daily` range handler now splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range — fixes stale persisted value

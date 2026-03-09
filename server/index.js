@@ -382,6 +382,7 @@ function createManualReplicationJobState() {
     updatedAt: 0,
     finishedAt: 0,
     error: "",
+    errorCode: "",
     summary: "",
     needsRestart: false,
     result: null,
@@ -980,6 +981,7 @@ function snapshotManualReplicationJob() {
     updatedAt: Number(manualReplicationJobState.updatedAt || 0),
     finishedAt: Number(manualReplicationJobState.finishedAt || 0),
     error: String(manualReplicationJobState.error || ""),
+    errorCode: String(manualReplicationJobState.errorCode || ""),
     summary: String(manualReplicationJobState.summary || ""),
     needsRestart: Boolean(manualReplicationJobState.needsRestart),
     result:
@@ -1271,30 +1273,45 @@ function stmtCached(key, sql) {
   return REPLICATION_STMT_CACHE[key];
 }
 
-function mergeAppendReplicationRow(tableName, payload, cols) {
+function mergeAppendReplicationRow(tableName, payload, cols, authoritative = false) {
   if (tableName === "readings") {
     if (Number(payload?.ts || 0) < getTelemetryHotCutoffTs()) {
       archiveReadingsRows([payload]);
       return true;
     }
-    const exists = stmtCached(
-      "exists:readings:ts_inv_unit",
-      `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
-    ).get(payload.ts, payload.inverter, payload.unit);
-    if (exists?.id) return false;
-    const sql = `INSERT INTO readings (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        unit=excluded.unit,
-        pac=excluded.pac,
-        kwh=excluded.kwh,
-        alarm=excluded.alarm,
-        online=excluded.online
-      WHERE COALESCE(excluded.ts,0) >= COALESCE(readings.ts,0)`;
-    stmtCached("merge:readings", sql).run(payload);
+    if (authoritative) {
+      // Authoritative: overwrite existing row, insert if absent.
+      const upd = stmtCached(
+        "update:readings:auth",
+        `UPDATE readings SET pac=@pac, kwh=@kwh, alarm=@alarm, online=@online WHERE ts=@ts AND inverter=@inverter AND unit=@unit`,
+      ).run(payload);
+      if (upd.changes > 0) return true;
+      // No existing row — fall through to INSERT.
+    } else {
+      const exists = stmtCached(
+        "exists:readings:ts_inv_unit",
+        `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
+      ).get(payload.ts, payload.inverter, payload.unit);
+      if (exists?.id) return false;
+    }
+    const colList = cols.join(", ");
+    const valList = cols.map((c) => "@" + c).join(", ");
+    if (authoritative) {
+      stmtCached("merge:readings:auth",
+        "INSERT INTO readings (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET" +
+        " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+        " pac=excluded.pac, kwh=excluded.kwh, alarm=excluded.alarm, online=excluded.online",
+      ).run(payload);
+    } else {
+      stmtCached("merge:readings",
+        "INSERT INTO readings (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET" +
+        " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+        " pac=excluded.pac, kwh=excluded.kwh, alarm=excluded.alarm, online=excluded.online" +
+        " WHERE COALESCE(excluded.ts,0) >= COALESCE(readings.ts,0)",
+      ).run(payload);
+    }
     return true;
   }
 
@@ -1303,34 +1320,47 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
       archiveEnergyRows([payload]);
       return true;
     }
-    const existingRow = stmtCached(
-      "exists:energy_5min:ts_inv",
-      `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
-    ).get(payload.ts, payload.inverter);
-    if (existingRow?.id) {
-      // Row exists for this (ts, inverter). Update kwh_inc if the incoming value differs â€”
-      // this corrects stale local rows that were written with a lower value (e.g., from a
-      // previous partial bucket or a prior diverged local-gateway state).
-      const incomingKwh = Number(payload.kwh_inc || 0);
-      const existingKwh = Number(existingRow.kwh_inc || 0);
-      if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
-        stmtCached(
-          "update:energy_5min:kwh_inc_by_id",
-          `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
-        ).run(incomingKwh, existingRow.id);
-        return true;
+    if (authoritative) {
+      // Authoritative: overwrite existing row, insert if absent.
+      const upd = stmtCached(
+        "update:energy_5min:auth",
+        `UPDATE energy_5min SET kwh_inc=@kwh_inc WHERE ts=@ts AND inverter=@inverter`,
+      ).run(payload);
+      if (upd.changes > 0) return true;
+      // No existing row — fall through to INSERT.
+    } else {
+      const existingRow = stmtCached(
+        "exists:energy_5min:ts_inv",
+        `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
+      ).get(payload.ts, payload.inverter);
+      if (existingRow?.id) {
+        // Row exists. Update kwh_inc if the incoming value differs — corrects stale local rows.
+        const incomingKwh = Number(payload.kwh_inc || 0);
+        const existingKwh = Number(existingRow.kwh_inc || 0);
+        if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
+          stmtCached(
+            "update:energy_5min:kwh_inc_by_id",
+            `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
+          ).run(incomingKwh, existingRow.id);
+          return true;
+        }
+        return false; // identical — no change needed
       }
-      return false; // identical â€” no change needed
     }
-    const sql = `INSERT INTO energy_5min (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        kwh_inc=excluded.kwh_inc
-      WHERE COALESCE(excluded.ts,0) >= COALESCE(energy_5min.ts,0)`;
-    stmtCached("merge:energy_5min", sql).run(payload);
+    const colList = cols.join(", ");
+    const valList = cols.map((c) => "@" + c).join(", ");
+    if (authoritative) {
+      stmtCached("merge:energy_5min:auth",
+        "INSERT INTO energy_5min (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, inverter=excluded.inverter, kwh_inc=excluded.kwh_inc",
+      ).run(payload);
+    } else {
+      stmtCached("merge:energy_5min",
+        "INSERT INTO energy_5min (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, inverter=excluded.inverter, kwh_inc=excluded.kwh_inc" +
+        " WHERE COALESCE(excluded.ts,0) >= COALESCE(energy_5min.ts,0)",
+      ).run(payload);
+    }
     return true;
   }
 
@@ -1376,125 +1406,95 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
   return true;
 }
 
-function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings = true) {
+function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings = true, authoritative = false) {
   if (tableName === "settings") {
     const k = String(payload?.key || "").trim();
     if (preserveSettings && REMOTE_REPLICATION_PRESERVE_SETTING_KEYS.has(k)) {
       return false;
     }
-    const sql = `INSERT INTO settings (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(key) DO UPDATE SET
-        value=excluded.value,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(settings.updated_ts,0)`;
-    stmtCached("merge:settings:lww", sql).run(payload);
+    // In authoritative mode the gateway value always wins; no timestamp guard.
+    const sColList = cols.join(", ");
+    const sValList = cols.map((c) => "@" + c).join(", ");
+    const sBase = "INSERT INTO settings (" + sColList + ") VALUES (" + sValList + ")" +
+      " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts";
+    const sSql = authoritative ? sBase : sBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(settings.updated_ts,0)";
+    stmtCached(authoritative ? "merge:settings:auth" : "merge:settings:lww", sSql).run(payload);
     return true;
   }
 
   if (tableName === "forecast_dayahead") {
-    const sql = `INSERT INTO forecast_dayahead (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, slot) DO UPDATE SET
-        ts=excluded.ts,
-        time_hms=excluded.time_hms,
-        kwh_inc=excluded.kwh_inc,
-        kwh_lo=excluded.kwh_lo,
-        kwh_hi=excluded.kwh_hi,
-        source=excluded.source,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)`;
-    stmtCached("merge:forecast_dayahead:lww", sql).run(payload);
+    const fdColList = cols.join(", ");
+    const fdValList = cols.map((c) => "@" + c).join(", ");
+    const fdBase = "INSERT INTO forecast_dayahead (" + fdColList + ") VALUES (" + fdValList + ")" +
+      " ON CONFLICT(date, slot) DO UPDATE SET" +
+      " ts=excluded.ts, time_hms=excluded.time_hms," +
+      " kwh_inc=excluded.kwh_inc, kwh_lo=excluded.kwh_lo, kwh_hi=excluded.kwh_hi," +
+      " source=excluded.source, updated_ts=excluded.updated_ts";
+    const fdSql = authoritative ? fdBase : fdBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)";
+    stmtCached(authoritative ? "merge:forecast_dayahead:auth" : "merge:forecast_dayahead:lww", fdSql).run(payload);
     return true;
   }
 
   if (tableName === "forecast_intraday_adjusted") {
-    const sql = `INSERT INTO forecast_intraday_adjusted (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, slot) DO UPDATE SET
-        ts=excluded.ts,
-        time_hms=excluded.time_hms,
-        kwh_inc=excluded.kwh_inc,
-        kwh_lo=excluded.kwh_lo,
-        kwh_hi=excluded.kwh_hi,
-        source=excluded.source,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_intraday_adjusted.updated_ts,0)`;
-    stmtCached("merge:forecast_intraday_adjusted:lww", sql).run(payload);
+    const fiColList = cols.join(", ");
+    const fiValList = cols.map((c) => "@" + c).join(", ");
+    const fiBase = "INSERT INTO forecast_intraday_adjusted (" + fiColList + ") VALUES (" + fiValList + ")" +
+      " ON CONFLICT(date, slot) DO UPDATE SET" +
+      " ts=excluded.ts, time_hms=excluded.time_hms," +
+      " kwh_inc=excluded.kwh_inc, kwh_lo=excluded.kwh_lo, kwh_hi=excluded.kwh_hi," +
+      " source=excluded.source, updated_ts=excluded.updated_ts";
+    const fiSql = authoritative ? fiBase : fiBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_intraday_adjusted.updated_ts,0)";
+    stmtCached(authoritative ? "merge:forecast_intraday_adjusted:auth" : "merge:forecast_intraday_adjusted:lww", fiSql).run(payload);
     return true;
   }
 
   if (tableName === "daily_report") {
-    // Exclude surrogate `id` â€” local DB assigns its own AUTOINCREMENT id.
+    // Exclude surrogate `id` — local DB assigns its own AUTOINCREMENT id.
     // Business key is (date, inverter); including gateway's id causes a PK
     // conflict when the client already holds a different row with that id.
     const drCols = cols.filter((c) => c !== "id");
     const drPayload = Object.fromEntries(
       Object.entries(payload).filter(([k]) => k !== "id"),
     );
-    const sql = `INSERT INTO daily_report (${drCols.join(", ")}) VALUES (${drCols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, inverter) DO UPDATE SET
-        kwh_total=excluded.kwh_total,
-        pac_peak=excluded.pac_peak,
-        pac_avg=excluded.pac_avg,
-        uptime_s=excluded.uptime_s,
-        alarm_count=excluded.alarm_count,
-        control_count=excluded.control_count,
-        availability_pct=excluded.availability_pct,
-        performance_pct=excluded.performance_pct,
-        node_uptime_s=excluded.node_uptime_s,
-        expected_node_uptime_s=excluded.expected_node_uptime_s,
-        expected_nodes=excluded.expected_nodes,
-        rated_kw=excluded.rated_kw,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)`;
-    stmtCached("merge:daily_report:lww", sql).run(drPayload);
+    const drColList = drCols.join(", ");
+    const drValList = drCols.map((c) => "@" + c).join(", ");
+    const drBase = "INSERT INTO daily_report (" + drColList + ") VALUES (" + drValList + ")" +
+      " ON CONFLICT(date, inverter) DO UPDATE SET" +
+      " kwh_total=excluded.kwh_total, pac_peak=excluded.pac_peak, pac_avg=excluded.pac_avg," +
+      " uptime_s=excluded.uptime_s, alarm_count=excluded.alarm_count, control_count=excluded.control_count," +
+      " availability_pct=excluded.availability_pct, performance_pct=excluded.performance_pct," +
+      " node_uptime_s=excluded.node_uptime_s, expected_node_uptime_s=excluded.expected_node_uptime_s," +
+      " expected_nodes=excluded.expected_nodes, rated_kw=excluded.rated_kw, updated_ts=excluded.updated_ts";
+    const drSql = authoritative ? drBase : drBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)";
+    stmtCached(authoritative ? "merge:daily_report:auth" : "merge:daily_report:lww", drSql).run(drPayload);
     return true;
   }
 
   if (tableName === "daily_readings_summary") {
-    const sql = `INSERT INTO daily_readings_summary (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, inverter, unit) DO UPDATE SET
-        sample_count=excluded.sample_count,
-        online_samples=excluded.online_samples,
-        pac_online_sum=excluded.pac_online_sum,
-        pac_online_count=excluded.pac_online_count,
-        pac_peak=excluded.pac_peak,
-        first_ts=excluded.first_ts,
-        last_ts=excluded.last_ts,
-        first_kwh=excluded.first_kwh,
-        last_kwh=excluded.last_kwh,
-        last_online=excluded.last_online,
-        intervals_json=excluded.intervals_json,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_readings_summary.updated_ts,0)`;
-    stmtCached("merge:daily_readings_summary:lww", sql).run(payload);
+    const drsColList = cols.join(", ");
+    const drsValList = cols.map((c) => "@" + c).join(", ");
+    const drsBase = "INSERT INTO daily_readings_summary (" + drsColList + ") VALUES (" + drsValList + ")" +
+      " ON CONFLICT(date, inverter, unit) DO UPDATE SET" +
+      " sample_count=excluded.sample_count, online_samples=excluded.online_samples," +
+      " pac_online_sum=excluded.pac_online_sum, pac_online_count=excluded.pac_online_count," +
+      " pac_peak=excluded.pac_peak, first_ts=excluded.first_ts, last_ts=excluded.last_ts," +
+      " first_kwh=excluded.first_kwh, last_kwh=excluded.last_kwh, last_online=excluded.last_online," +
+      " intervals_json=excluded.intervals_json, updated_ts=excluded.updated_ts";
+    const drsSql = authoritative ? drsBase : drsBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_readings_summary.updated_ts,0)";
+    stmtCached(authoritative ? "merge:daily_readings_summary:auth" : "merge:daily_readings_summary:lww", drsSql).run(payload);
     return true;
   }
 
   if (tableName === "alarms") {
-    const sql = `INSERT INTO alarms (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        unit=excluded.unit,
-        alarm_code=excluded.alarm_code,
-        alarm_value=excluded.alarm_value,
-        severity=excluded.severity,
-        cleared_ts=excluded.cleared_ts,
-        acknowledged=excluded.acknowledged,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)`;
-    stmtCached("merge:alarms:lww", sql).run(payload);
+    const alColList = cols.join(", ");
+    const alValList = cols.map((c) => "@" + c).join(", ");
+    const alBase = "INSERT INTO alarms (" + alColList + ") VALUES (" + alValList + ")" +
+      " ON CONFLICT(id) DO UPDATE SET" +
+      " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+      " alarm_code=excluded.alarm_code, alarm_value=excluded.alarm_value, severity=excluded.severity," +
+      " cleared_ts=excluded.cleared_ts, acknowledged=excluded.acknowledged, updated_ts=excluded.updated_ts";
+    const alSql = authoritative ? alBase : alBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)";
+    stmtCached(authoritative ? "merge:alarms:auth" : "merge:alarms:lww", alSql).run(payload);
     return true;
   }
 
@@ -1509,6 +1509,7 @@ function applyReplicationTableMerge(tablesPayload, options = {}) {
   const tables =
     tablesPayload && typeof tablesPayload === "object" ? tablesPayload : {};
   const preserveSettings = options?.preserveSettings !== false;
+  const authoritative = Boolean(options?.authoritative);
   const runMerge = () => {
     let importedRows = 0;
     let skippedRows = 0;
@@ -1521,12 +1522,13 @@ function applyReplicationTableMerge(tablesPayload, options = {}) {
         const payload = makeReplicationRowPayload(row, def.columns);
         const applied =
           strategy.mode === "append"
-            ? mergeAppendReplicationRow(def.name, payload, def.columns)
+            ? mergeAppendReplicationRow(def.name, payload, def.columns, authoritative)
             : mergeUpdatedReplicationRow(
                 def.name,
                 payload,
                 def.columns,
                 preserveSettings,
+                authoritative,
               );
         if (applied) importedRows += 1;
         else skippedRows += 1;
@@ -1732,7 +1734,7 @@ function buildIncrementalReplicationDelta(clientCursorsRaw) {
   };
 }
 
-function applyIncrementalDbDelta(deltaPayload) {
+function applyIncrementalDbDelta(deltaPayload, opts = {}) {
   const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
   if (!delta || typeof delta !== "object") {
     throw new Error("Invalid incremental replication payload.");
@@ -1745,6 +1747,7 @@ function applyIncrementalDbDelta(deltaPayload) {
     const merged = applyReplicationTableMerge(tables, {
       preserveSettings: true,
       inTransaction: true,
+      authoritative: Boolean(opts?.authoritative),
     });
     const safe = saveReplicationCursorsSetting(nextCursors);
     setSetting("remoteReplicationLastTs", String(Date.now()));
@@ -1815,7 +1818,7 @@ async function reconcileRemoteBeforePull(baseUrl) {
       return { ok: true, pushed: false, rows: 0, localNewer: true };
     }
 
-    const pushed = await pushDeltaInChunks(baseUrl, delta);
+    const pushed = await pushDeltaInChunks(baseUrl, delta, { label: "Reconciling with gateway" });
     remoteBridgeState.lastReconcileTs = Date.now();
     remoteBridgeState.lastReconcileRows = Number(pushed?.importedRows || 0);
     remoteBridgeState.lastSyncDirection = "push-then-pull";
@@ -1894,11 +1897,12 @@ async function runRemoteFullReplication(baseUrl) {
   }
 }
 
-async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
+async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5, opts = {}) {
   if (remoteBridgeState.replicationRunning) return { skipped: true, reason: "in_progress" };
   remoteBridgeState.replicationRunning = true;
   remoteBridgeState.lastReplicationAttemptTs = Date.now();
   remoteBridgeState.lastReplicationError = "";
+  const xferLabel = String(opts?.label || "");
 
   try {
     let batches = 0;
@@ -1910,15 +1914,15 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
       remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     );
 
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0 });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0, label: xferLabel });
 
     do {
       const data = await requestIncrementalDeltaWithRetry(baseUrl, cursors, (bytes) => {
         totalRecvBytes += bytes;
-        broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1 });
+        broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1, label: xferLabel });
       });
 
-      const applied = applyIncrementalDbDelta(data.delta);
+      const applied = applyIncrementalDbDelta(data.delta, opts);
       importedRows += Number(applied.importedRows || 0);
       signature = String(applied.signature || signature || "");
       cursors = normalizeReplicationCursors(applied.nextCursors || cursors);
@@ -1942,10 +1946,10 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
     remoteBridgeState.replicationCursors = cursors;
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastSyncDirection = "pull-incremental";
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: totalRecvBytes, importedRows });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: totalRecvBytes, importedRows, label: xferLabel });
     return { ok: true, importedRows, hasMore, batches, signature, nextCursors: cursors };
   } catch (err) {
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: totalRecvBytes || 0 });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: totalRecvBytes || 0, label: xferLabel });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
     remoteBridgeState.lastSyncDirection = "pull-incremental-failed";
     return { ok: false, error: remoteBridgeState.lastReplicationError };
@@ -1954,7 +1958,7 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
   }
 }
 
-async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses = 8) {
+async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses = 8, opts = {}) {
   const safeBatches = Math.max(1, Number(maxBatches || 1));
   const safePasses = Math.max(1, Number(maxPasses || 1));
   let pass = 0;
@@ -1971,7 +1975,7 @@ async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses 
 
   while (pass < safePasses) {
     pass += 1;
-    const res = await runRemoteIncrementalReplication(baseUrl, safeBatches);
+    const res = await runRemoteIncrementalReplication(baseUrl, safeBatches, opts);
     if (res?.skipped) return { skipped: true, reason: String(res.reason || "in_progress") };
     if (!res?.ok) return { ok: false, pass, error: String(res?.error || "Incremental replication failed.") };
     totalImported += Number(res.importedRows || 0);
@@ -2028,7 +2032,7 @@ async function runRemotePushFull(baseUrl) {
       tables,
     };
 
-    const pushed = await pushDeltaInChunks(baseUrl, delta);
+    const pushed = await pushDeltaInChunks(baseUrl, delta, { label: "Pushing local data" });
     const importedRows = Number(pushed?.importedRows || 0);
     remoteBridgeState.lastReconcileTs = Date.now();
     remoteBridgeState.lastReconcileRows = importedRows;
@@ -2052,14 +2056,34 @@ async function runRemotePushFull(baseUrl) {
   }
 }
 
-async function runManualPullSync(baseUrl, includeArchive = true) {
-  updateManualReplicationJob({
-    summary: "Pulling replicated hot data from gateway in the background.",
-  });
+async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
+  // Step 0 — Reconcile: push any local-newer data up before overwriting local state.
+  updateManualReplicationJob({ summary: "Reconciling with gateway before authoritative pull…" });
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", sentBytes: 0, label: "Reconciling with gateway" });
+  const reconcile = await reconcileRemoteBeforePull(baseUrl);
+  if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
+    broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", sentBytes: 0, label: "Reconcile failed — local newer" });
+    const err = new Error(
+      "Local data is newer than the gateway and could not be pushed during reconciliation. " +
+      "Retry with Force Pull to overwrite local data with gateway state.",
+    );
+    err.code = "LOCAL_NEWER_PUSH_FAILED";
+    err.canForcePull = true;
+    throw err;
+  }
+  if (!reconcile?.ok && !forcePull) {
+    broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", sentBytes: 0, label: "Reconcile failed" });
+    throw new Error(`Reconciliation failed: ${String(reconcile?.error || "unknown error")}. Check gateway connectivity and retry.`);
+  }
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", sentBytes: 0, label: "Reconcile complete" });
+
+  // Step 1 — Authoritative pull: gateway data replaces local data unconditionally.
+  updateManualReplicationJob({ summary: "Applying gateway data (authoritative)…" });
   const hot = await runRemoteCatchUpReplication(
     baseUrl,
     REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
     REMOTE_INCREMENTAL_CATCHUP_PASSES,
+    { authoritative: true, label: "Applying gateway data" },
   );
   if (hot?.skipped) {
     throw new Error("Replication already in progress.");
@@ -2140,6 +2164,7 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
     baseUrl,
     REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
     REMOTE_INCREMENTAL_CATCHUP_PASSES,
+    { label: "Pulling final gateway state" },
   );
   if (hotPull?.skipped) {
     throw new Error("Replication already in progress.");
@@ -2379,13 +2404,14 @@ async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
   throw lastErr || new Error("Push delta request failed.");
 }
 
-async function pushDeltaInChunks(baseUrl, deltaPayload) {
+async function pushDeltaInChunks(baseUrl, deltaPayload, opts = {}) {
   const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
   if (!delta || typeof delta !== "object") {
     throw new Error("Invalid push replication payload.");
   }
   const sourceTables = delta.tables && typeof delta.tables === "object" ? delta.tables : {};
   const totalRows = countReplicationRowsByTables(sourceTables);
+  const xferLabel = String(opts?.label || "Pushing local data");
   if (totalRows <= 0) {
     return {
       importedRows: 0,
@@ -2407,7 +2433,7 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
   let skippedRows = 0;
   let signature = String(delta?.meta?.signature || "");
 
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", totalBytes, sentBytes: 0, chunkCount: chunks.length, totalRows });
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", totalBytes, sentBytes: 0, chunkCount: chunks.length, totalRows, label: xferLabel });
 
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i];
@@ -2420,9 +2446,9 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
       skippedRows += Number(stats?.skippedRows || 0);
       signature = String(stats?.signature || signature || "");
       sentBytes += chunkBytes;
-      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "chunk", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, totalRows });
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "chunk", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, totalRows, label: xferLabel });
     } catch (err) {
-      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length });
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, label: xferLabel });
       const status = Number(err?.httpStatus || 0);
       const baseMsg =
         status === 413
@@ -2435,7 +2461,7 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
     }
   }
 
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", totalBytes, sentBytes, chunkCount: chunks.length, importedRows, totalRows });
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", totalBytes, sentBytes, chunkCount: chunks.length, importedRows, totalRows, label: xferLabel });
 
   return {
     importedRows,
@@ -2865,6 +2891,7 @@ function startManualReplicationJob(action, options, runner) {
         finishedAt: Date.now(),
         summary: `${String(action || "sync")} failed`,
         error: String(err?.message || err),
+        errorCode: String(err?.code || ""),
         needsRestart: false,
         result: null,
       });
@@ -3353,7 +3380,7 @@ function applyRuntimeMode() {
     if (wasRemoteActive && Array.isArray(remoteBridgeState.todayEnergyRows)) {
       updateRemoteTodayEnergyShadow(remoteBridgeState.todayEnergyRows, Date.now());
     }
-    // â”€â”€ Handoff lifecycle: capture per-inverter baselines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Handoff lifecycle: capture per-inverter baselines â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if (wasRemoteActive) {
       const handoffNow = Date.now();
       const handoffDay = localDateStr(handoffNow);
@@ -3371,7 +3398,7 @@ function applyRuntimeMode() {
         .map((r) => `${r.inverter}:${Number(r.total_kwh || 0).toFixed(2)}kWh`)
         .join(", ");
       console.log(
-        `[handoff] Remoteâ†’Gateway started day=${handoffDay}` +
+        `[handoff] Remoteâ†'Gateway started day=${handoffDay}` +
         ` inverters=${capturedRows.length}` +
         ` baselines=[${baselineList}${capturedRows.length > 8 ? " ..." : ""}]`,
       );
@@ -5202,7 +5229,7 @@ function computeSpanSeconds(rows) {
 // For each consecutive pair, the interval is credited only when the starting
 // row is online=1.  Each interval is capped at AVAIL_MAX_GAP_S so that long
 // silent gaps (outages / comms loss that produced no readings) are not
-// mistakenly counted as uptime â€” the old lastTs-firstTs span formula would
+// mistakenly counted as uptime â€" the old lastTs-firstTs span formula would
 // credit the entire gap regardless of what happened inside it.
 function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
@@ -6418,6 +6445,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
   }
   const includeArchive = req?.body?.includeArchive !== false;
   const background = req?.body?.background !== false;
+  const forcePull = Boolean(req?.body?.forcePull);
   try {
     if (background) {
       const started = startManualReplicationJob(
@@ -6425,9 +6453,9 @@ app.post("/api/replication/pull-now", async (req, res) => {
         {
           includeArchive,
           summary: "Queued background pull from gateway.",
-          runningSummary: "Pulling data from gateway in the background.",
+          runningSummary: "Reconciling then applying gateway data (authoritative).",
         },
-        () => runManualPullSync(base, includeArchive),
+        () => runManualPullSync(base, includeArchive, forcePull),
       );
       if (!started?.started) {
         return res.status(202).json({
@@ -6441,21 +6469,31 @@ app.post("/api/replication/pull-now", async (req, res) => {
         ok: true,
         background: true,
         includeArchive,
+        forcePull,
         job: started.job,
         message:
-          "Background pull started. Hot replicated tables and archive DB files will continue syncing while you use the dashboard.",
+          "Background pull started. Local data will be reconciled first, then gateway data applied authoritatively.",
       });
     }
 
-    const result = await runManualPullSync(base, includeArchive);
+    const result = await runManualPullSync(base, includeArchive, forcePull);
     return res.json({
       ok: true,
       background: false,
       includeArchive,
+      forcePull,
       result,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
   } catch (err) {
+    if (err?.code === "LOCAL_NEWER_PUSH_FAILED") {
+      return res.status(409).json({
+        ok: false,
+        code: "LOCAL_NEWER_PUSH_FAILED",
+        canForcePull: true,
+        error: String(err?.message || err),
+      });
+    }
     return res
       .status(500)
       .json({ ok: false, error: String(err?.message || err) });
@@ -7793,9 +7831,9 @@ const httpServer = app.listen(PORT, () => {
   if (process.send) process.send("ready");
 });
 
-// â”€â”€â”€ Cloud Backup API Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€ Cloud Backup API Routes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/** GET /api/backup/settings  â€” return cloud backup settings */
+/** GET /api/backup/settings  â€" return cloud backup settings */
 app.get("/api/backup/settings", (req, res) => {
   try {
     const s = _cloudBackup.getCloudSettingsForClient();
@@ -7805,7 +7843,7 @@ app.get("/api/backup/settings", (req, res) => {
   }
 });
 
-/** POST /api/backup/settings  â€” save cloud backup settings */
+/** POST /api/backup/settings  â€" save cloud backup settings */
 app.post("/api/backup/settings", (req, res) => {
   try {
     const body = req.body && typeof req.body === "object" ? { ...req.body } : {};
@@ -7820,7 +7858,7 @@ app.post("/api/backup/settings", (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/start  â€” begin OAuth flow */
+/** POST /api/backup/auth/:provider/start  â€" begin OAuth flow */
 app.post("/api/backup/auth/:provider/start", (req, res) => {
   const provider = req.params.provider;
   if (provider !== "onedrive" && provider !== "gdrive") {
@@ -7860,7 +7898,7 @@ app.post("/api/backup/auth/:provider/start", (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/callback  â€” complete OAuth token exchange */
+/** POST /api/backup/auth/:provider/callback  â€" complete OAuth token exchange */
 app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   const provider = req.params.provider;
   const { code, state } = req.body || {};
@@ -7889,7 +7927,7 @@ app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/disconnect  â€” revoke stored tokens */
+/** POST /api/backup/auth/:provider/disconnect  â€" revoke stored tokens */
 app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   const provider = req.params.provider;
   try {
@@ -7901,7 +7939,7 @@ app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   }
 });
 
-/** GET /api/backup/status  â€” connection status + progress */
+/** GET /api/backup/status  â€" connection status + progress */
 app.get("/api/backup/status", (req, res) => {
   res.json({
     ok: true,
@@ -7910,12 +7948,12 @@ app.get("/api/backup/status", (req, res) => {
   });
 });
 
-/** GET /api/backup/progress  â€” current operation progress */
+/** GET /api/backup/progress  â€" current operation progress */
 app.get("/api/backup/progress", (req, res) => {
   res.json({ ok: true, progress: _cloudBackup.getProgress() });
 });
 
-/** GET /api/backup/history  â€” local backup history */
+/** GET /api/backup/history  â€" local backup history */
 app.get("/api/backup/history", (req, res) => {
   try {
     const history = _cloudBackup.getHistory().map((h) => ({
@@ -7934,7 +7972,7 @@ app.get("/api/backup/history", (req, res) => {
   }
 });
 
-/** POST /api/backup/now  â€” run backup immediately */
+/** POST /api/backup/now  â€" run backup immediately */
 app.post("/api/backup/now", async (req, res) => {
   const { scope, provider, tag } = req.body || {};
   try {
@@ -7952,7 +7990,7 @@ app.post("/api/backup/now", async (req, res) => {
   }
 });
 
-/** GET /api/backup/cloud/:provider  â€” list cloud backups */
+/** GET /api/backup/cloud/:provider  â€" list cloud backups */
 app.get("/api/backup/cloud/:provider", async (req, res) => {
   const provider = req.params.provider;
   try {
@@ -7963,7 +8001,7 @@ app.get("/api/backup/cloud/:provider", async (req, res) => {
   }
 });
 
-/** POST /api/backup/pull  â€” pull backup from cloud */
+/** POST /api/backup/pull  â€" pull backup from cloud */
 app.post("/api/backup/pull", async (req, res) => {
   const { provider, remoteId, remoteName } = req.body || {};
   if (!provider || !remoteId || !remoteName) {
@@ -7984,7 +8022,7 @@ app.post("/api/backup/pull", async (req, res) => {
   }
 });
 
-/** POST /api/backup/restore/:id  â€” restore a local backup */
+/** POST /api/backup/restore/:id  â€" restore a local backup */
 app.post("/api/backup/restore/:id", async (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   const { skipSafetyBackup } = req.body || {};
@@ -8005,7 +8043,7 @@ app.post("/api/backup/restore/:id", async (req, res) => {
   }
 });
 
-/** DELETE /api/backup/:id  â€” delete a local backup package */
+/** DELETE /api/backup/:id  â€" delete a local backup package */
 app.delete("/api/backup/:id", (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   try {
@@ -8016,7 +8054,7 @@ app.delete("/api/backup/:id", (req, res) => {
   }
 });
 
-// â”€â”€â”€ Graceful Shutdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€ Graceful Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 let _shutdownCalled = false;
 
 function _flushAndClose() {
@@ -8037,7 +8075,7 @@ function gracefulShutdown(reason) {
 }
 
 // Called when running embedded in the Electron main process (packaged mode).
-// Must NOT call process.exit â€” Electron controls the lifecycle.
+// Must NOT call process.exit â€" Electron controls the lifecycle.
 function shutdownEmbedded() {
   if (_shutdownCalled) return;
   _shutdownCalled = true;
@@ -8053,13 +8091,13 @@ process.on("message", (msg) => {
   if (msg && msg.type === "shutdown") gracefulShutdown("ipc");
 });
 
-// â”€â”€â”€ Periodic WAL Checkpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€ Periodic WAL Checkpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.
 setInterval(() => {
   try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
 }, 15 * 60 * 1000).unref();
 
-// â”€â”€â”€ Periodic DB Backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€ Periodic DB Backup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Rotates between 2 backup files every 2 hours. Uses SQLite's online backup API
 // so it never blocks reads/writes and is always consistent.
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
@@ -8079,4 +8117,3 @@ setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
 
 module.exports = { shutdownEmbedded };
-

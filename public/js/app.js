@@ -1391,6 +1391,19 @@ function getVisibleXferSlot() {
   return active[0];
 }
 
+function getXferPhaseBadge(x) {
+  const lbl = String(x?.label || "").trim().toLowerCase();
+  const phase = String(x?.phase || "");
+  if (phase === "done") return { text: "Done", cls: "xfer-phase-done" };
+  if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
+  if (lbl.includes("reconcil")) return { text: "Reconciling", cls: "xfer-phase-reconcile" };
+  if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
+  if (lbl.includes("final") || lbl.includes("final gateway")) return { text: "Finalizing", cls: "xfer-phase-applying" };
+  if (lbl.includes("archive")) return { text: "Archive", cls: "xfer-phase-archive" };
+  if (x?.dir === "tx") return { text: "Pushing", cls: "xfer-phase-push" };
+  return { text: "Pulling", cls: "xfer-phase-pull" };
+}
+
 function getXferScopeInfo(x) {
   const label = String(x?.label || "")
     .trim()
@@ -1449,6 +1462,7 @@ function renderXferPanel() {
   const totalEl = document.getElementById("xferSizeTotal");
   const scopeChipEl = document.getElementById("xferScopeChip");
   const detailEl = document.getElementById("xferDetail");
+  const phaseBadgeEl = document.getElementById("xferPhaseBadge");
 
   if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
   if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
@@ -1500,6 +1514,13 @@ function renderXferPanel() {
     scopeChipEl.className = `xfer-scope-chip xfer-scope-${scopeInfo.cls || "hot"}`;
   }
   if (detailEl) detailEl.textContent = getXferDetailText(x);
+
+  if (phaseBadgeEl) {
+    const badge = getXferPhaseBadge(x);
+    phaseBadgeEl.textContent = badge.text;
+    phaseBadgeEl.className = `xfer-phase-badge ${badge.cls}`;
+    phaseBadgeEl.hidden = false;
+  }
 
   if (pctEl) pctEl.textContent = known || x.phase === "done" ? `${pct}%` : "…";
   if (currEl) currEl.textContent = fmtBytes(done);
@@ -1964,6 +1985,10 @@ async function api(url, method = "GET", body, options = {}) {
         url.includes("/api/replication/reconcile-now")
       ) {
         detailedMsg = String(rawMsg || detailedMsg);
+        const e2 = new Error(detailedMsg);
+        e2.status = r.status;
+        e2.body = parsed;
+        throw e2;
       }
       if (url.includes("/api/chat/")) {
         detailedMsg = String(rawMsg || detailedMsg);
@@ -3223,9 +3248,38 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
       showMsg("replicationMsg", `✔ ${job.summary || "Replication complete."}`, "");
       showToast(job.summary || "Replication complete.", "success", 5200);
     } else if (job.status === "failed") {
-      const msg = job.error || job.summary || "Replication failed.";
-      showMsg("replicationMsg", `✗ ${msg}`, "error");
-      showToast(`Replication failed: ${msg}`, "warning", 6000);
+      if (job.errorCode === "LOCAL_NEWER_PUSH_FAILED" && job.action === "pull") {
+        showMsg("replicationMsg", "Pull stopped: local data is newer than the gateway.", "error");
+        appConfirm(
+          "Local Data Is Newer — Force Pull?",
+          "Your local data is newer than the gateway but could not be pushed during reconciliation.\n\nForce pull from gateway anyway?\n\nWarning: Any local changes that could not be saved to the gateway will be overwritten.",
+          { ok: "Force Pull", cancel: "Cancel" },
+        ).then(async (force) => {
+          if (!force) {
+            showMsg("replicationMsg", "Pull cancelled. Your local data was not changed.", "");
+            return;
+          }
+          const includeArchive = isManualArchiveSyncSelected();
+          try {
+            const result2 = await api("/api/replication/pull-now", "POST", {
+              background: true,
+              includeArchive,
+              forcePull: true,
+            });
+            const job2 = result2?.job || null;
+            if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
+            showMsg("replicationMsg", "Force pull started. Applying gateway data authoritatively.", "");
+            await refreshReplicationHealth(true);
+            await refreshRuntimePerf(true);
+          } catch (e2) {
+            showMsg("replicationMsg", `✗ ${e2.message}`, "error");
+          }
+        }).catch(() => {});
+      } else {
+        const msg = job.error || job.summary || "Replication failed.";
+        showMsg("replicationMsg", `✗ ${msg}`, "error");
+        showToast(`Replication failed: ${msg}`, "warning", 6000);
+      }
     }
   }
   if (job.status === "completed") {
@@ -3486,18 +3540,24 @@ function ensureRemoteModeForReplicationActions() {
 async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
+  const archiveLine = includeArchive
+    ? "\n\nArchive files: Monthly archive DB files will be included after hot data syncs. Expect a longer transfer."
+    : "\n\nArchive files: Skipped for this run.";
   const _pullOk = await appConfirm(
-    "Start Background Pull",
-    includeArchive
-      ? "Start background pull from server now?\n\nThis will sync replicated hot tables first, then monthly archive DB files from the gateway while you continue using the dashboard.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
-      : "Start background pull from server now?\n\nThis will sync replicated hot tables from the gateway while you continue using the dashboard.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
+    "Start Authoritative Pull",
+    "Gateway data will overwrite your local copy of all replicated tables.\n\n" +
+    "Before pulling, local data will be reconciled with the gateway to protect any newer local changes. " +
+    "After reconciliation, the gateway state is applied authoritatively — gateway rows replace local rows regardless of local timestamp.\n\n" +
+    "Local-only settings (operation mode, gateway URL, export path, replication cursors, and handoff state) are always preserved." +
+    archiveLine +
+    "\n\nYou will be prompted to restart after completion.",
     { ok: "Start Pull" },
   );
   if (!_pullOk) return;
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Starting background pull from server...", "");
+  showMsg("replicationMsg", "Reconciling with gateway, then applying authoritative pull…", "");
   try {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
@@ -3508,13 +3568,42 @@ async function runReplicationPullNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background pull started. Hot data is syncing first, then archive DB files if needed."
-        : "Background pull started. Hot data is syncing while you continue normal operation.",
+        ? "Background pull started. Reconciling first, then applying gateway data authoritatively. Archive files will follow."
+        : "Background pull started. Reconciling first, then applying gateway data authoritatively.",
       "",
     );
     await refreshReplicationHealth(true);
     await refreshRuntimePerf(true);
   } catch (e) {
+    if (e?.status === 409 && e?.body?.canForcePull) {
+      // Pre-pull reconciliation could not push local-newer data to gateway.
+      const force = await appConfirm(
+        "Local Data Is Newer — Force Pull?",
+        "Your local data is newer than the gateway but could not be pushed during reconciliation.\n\n" +
+        "Force pull from gateway anyway?\n\n" +
+        "Warning: Any local changes that could not be saved to the gateway will be overwritten.",
+        { ok: "Force Pull", cancel: "Cancel" },
+      );
+      if (!force) {
+        showMsg("replicationMsg", "Pull cancelled. Your local data was not changed.", "");
+        return;
+      }
+      try {
+        const result2 = await api("/api/replication/pull-now", "POST", {
+          background: true,
+          includeArchive,
+          forcePull: true,
+        });
+        const job2 = result2?.job || null;
+        if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
+        showMsg("replicationMsg", "Force pull started. Applying gateway data authoritatively.", "");
+        await refreshReplicationHealth(true);
+        await refreshRuntimePerf(true);
+      } catch (e2) {
+        showMsg("replicationMsg", `✗ ${e2.message}`, "error");
+      }
+      return;
+    }
     showMsg("replicationMsg", `✗ ${e.message}`, "error");
   } finally {
     if (btn) btn.disabled = false;
@@ -3524,18 +3613,22 @@ async function runReplicationPullNow() {
 async function runReplicationPushNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
+  const archiveLine = includeArchive
+    ? "\n\nArchive files: Local monthly archive DB files will be uploaded to the gateway, then any remaining gateway archive files pulled back."
+    : "\n\nArchive files: Skipped for this run.";
   const _pushOk = await appConfirm(
     "Start Background Push",
-    includeArchive
-      ? "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway first, uploads monthly archive DB files when needed, then pulls the final gateway state back for consistency.\n\nArchive transfer can take longer because the files may be large.\n\nYou will be prompted to restart after completion."
-      : "Start background push to server now?\n\nThis sends local replicated hot tables to the gateway, then pulls the final gateway state back for consistency.\n\nArchive DB files will be skipped for this run.\n\nYou will be prompted to restart after completion.",
+    "Your local replicated tables will be sent to the gateway. The gateway will then send its authoritative state back to this machine for final consistency.\n\n" +
+    "Local-only settings (operation mode, gateway URL, export path, replication cursors, and handoff state) are always preserved." +
+    archiveLine +
+    "\n\nYou will be prompted to restart after completion.",
     { ok: "Start Push" },
   );
   if (!_pushOk) return;
 
   const btn = $("btnRunReplicationPush");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Starting background push to server...", "");
+  showMsg("replicationMsg", "Starting background push to gateway…", "");
   try {
     const result = await api("/api/replication/push-now", "POST", {
       background: true,
@@ -3546,8 +3639,8 @@ async function runReplicationPushNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background push started. Hot data is syncing first, then archive DB files if needed."
-        : "Background push started. Hot data is syncing while you continue normal operation.",
+        ? "Background push started. Sending local data to gateway, then pulling final gateway state. Archive files included."
+        : "Background push started. Sending local data to gateway, then pulling final gateway state.",
       "",
     );
     await refreshReplicationHealth(true);
