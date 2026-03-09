@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.24
+- **Version:** 2.2.25
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,13 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.25 Changes — Replication Separation, Transfer Integrity, and Solcast Snapshot Persistence (2026-03-10)
+- **Pull and Push are now strictly separated:** manual `Pull` is download-only, manual `Push` is upload-only, and startup auto-sync uses the same read-only local-newer check instead of auto-pushing gateway changes as a side effect. The leftover `/api/replication/reconcile-now` path was also hardened so it no longer modifies gateway data before a catch-up pull.
+- **Transfer integrity is validated before apply:** main-DB and archive transfers now carry SHA-256 headers, downloaded/staged files are verified against size and hash, and staged SQLite replacements must pass header validation plus `PRAGMA quick_check(1)` before they can replace the live DB on restart.
+- **Remote shutdown and health state were hardened:** embedded shutdown now stops the remote bridge before DB close, and reconcile health fields are updated by the new read-only pre-pull checks so status panels do not keep stale push-era state.
+- **Solcast snapshots are now persisted:** toolkit/API fetches now normalize `PT5M` forecast and estimated-actual values into the new `solcast_snapshots` table, storing both raw `MW` and slot `kWh` for preview, export, reproducible day-ahead traces, and future ML hybrid work.
+- **Release verification was expanded:** isolated server smoke confirmed pull stays read-only, push stays upload-only, reconcile-now no longer pushes, and live Electron startup smoke reached `/api/settings` before packaging.
 
 ## v2.2.24 Changes — Solcast Toolkit, Export Rehab, Remote Hardening, and Faster Replication (2026-03-09)
 - **Solcast toolkit workflow added and hardened:** the Forecast settings now support `Toolkit Login` as a first-class Solcast access mode with chart URL, email, and password. Toolkit test, preview, and XLSX export stay local even in Remote mode, and the preview charts/export support `PT5M`, `05:00-18:00`, `1-7` selected days, and both `MWh` and raw `MW` values.

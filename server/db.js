@@ -203,6 +203,44 @@ function stagePendingMainDbReplacement({
   return staged;
 }
 
+function validateSqliteFileSync(filePath) {
+  const target = String(filePath || "").trim();
+  if (!target || !fs.existsSync(target)) {
+    throw new Error("SQLite file is missing.");
+  }
+  const fd = fs.openSync(target, "r");
+  let probe;
+  try {
+    probe = Buffer.alloc(16);
+    const bytesRead = fs.readSync(fd, probe, 0, probe.length, 0);
+    if (bytesRead < 16 || probe.toString("utf8", 0, 16) !== "SQLite format 3\u0000") {
+      throw new Error("SQLite header is invalid.");
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  let verifyDb = null;
+  try {
+    verifyDb = new Database(target, { readonly: true, fileMustExist: true });
+    const quickCheck = String(
+      verifyDb.prepare("PRAGMA quick_check(1)").pluck().get() || "",
+    )
+      .trim()
+      .toLowerCase();
+    if (quickCheck !== "ok") {
+      throw new Error(`SQLite quick_check failed: ${quickCheck || "unknown error"}`);
+    }
+  } finally {
+    try {
+      verifyDb?.close();
+    } catch (_) {
+      // Ignore validation close failures.
+    }
+  }
+  return true;
+}
+
 function applyPendingMainDbReplacementFileSync() {
   const pending = readPendingMainDbReplacement();
   if (!pending) return { applied: 0, failed: 0, pending: 0 };
@@ -220,6 +258,7 @@ function applyPendingMainDbReplacementFileSync() {
     };
   }
   try {
+    validateSqliteFileSync(tempPath);
     for (const suffix of ["-wal", "-shm", ""]) {
       try {
         fs.unlinkSync(`${DB_PATH}${suffix}`);
@@ -391,6 +430,27 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_fia_ts      ON forecast_intraday_adjusted(ts);
   CREATE INDEX IF NOT EXISTS idx_fia_date_ts ON forecast_intraday_adjusted(date, ts);
+
+  CREATE TABLE IF NOT EXISTS solcast_snapshots (
+    forecast_day    TEXT    NOT NULL,
+    slot            INTEGER NOT NULL,
+    ts_local        INTEGER NOT NULL,
+    period_end_utc  TEXT,
+    period          TEXT,
+    forecast_mw     REAL,
+    forecast_lo_mw  REAL,
+    forecast_hi_mw  REAL,
+    est_actual_mw   REAL,
+    forecast_kwh    REAL,
+    forecast_lo_kwh REAL,
+    forecast_hi_kwh REAL,
+    est_actual_kwh  REAL,
+    pulled_ts       INTEGER NOT NULL,
+    source          TEXT    NOT NULL,
+    updated_ts      INTEGER NOT NULL,
+    PRIMARY KEY (forecast_day, slot)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ss_day ON solcast_snapshots(forecast_day);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -787,6 +847,43 @@ const stmts = {
       source=excluded.source,
       updated_ts=excluded.updated_ts
   `),
+  upsertSolcastSnapshot: db.prepare(`
+    INSERT INTO solcast_snapshots(
+      forecast_day, slot, ts_local, period_end_utc, period,
+      forecast_mw, forecast_lo_mw, forecast_hi_mw, est_actual_mw,
+      forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, est_actual_kwh,
+      pulled_ts, source, updated_ts
+    ) VALUES(
+      @forecast_day, @slot, @ts_local, @period_end_utc, @period,
+      @forecast_mw, @forecast_lo_mw, @forecast_hi_mw, @est_actual_mw,
+      @forecast_kwh, @forecast_lo_kwh, @forecast_hi_kwh, @est_actual_kwh,
+      @pulled_ts, @source, @updated_ts
+    )
+    ON CONFLICT(forecast_day, slot) DO UPDATE SET
+      ts_local=excluded.ts_local,
+      period_end_utc=excluded.period_end_utc,
+      period=excluded.period,
+      forecast_mw=excluded.forecast_mw,
+      forecast_lo_mw=excluded.forecast_lo_mw,
+      forecast_hi_mw=excluded.forecast_hi_mw,
+      est_actual_mw=excluded.est_actual_mw,
+      forecast_kwh=excluded.forecast_kwh,
+      forecast_lo_kwh=excluded.forecast_lo_kwh,
+      forecast_hi_kwh=excluded.forecast_hi_kwh,
+      est_actual_kwh=excluded.est_actual_kwh,
+      pulled_ts=excluded.pulled_ts,
+      source=excluded.source,
+      updated_ts=excluded.updated_ts
+  `),
+  getSolcastSnapshotDay: db.prepare(
+    `SELECT forecast_day, slot, ts_local, period_end_utc, period,
+            forecast_mw, forecast_lo_mw, forecast_hi_mw, est_actual_mw,
+            forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, est_actual_kwh,
+            pulled_ts, source, updated_ts
+       FROM solcast_snapshots
+      WHERE forecast_day = ?
+      ORDER BY slot ASC`,
+  ),
   deleteForecastDayAheadDate: db.prepare(
     `DELETE FROM forecast_dayahead WHERE date=?`,
   ),
@@ -912,6 +1009,34 @@ const bulkUpsertForecastIntradayAdjusted = db.transaction((date, rows, source = 
     });
   }
 });
+
+const bulkUpsertSolcastSnapshot = db.transaction((day, rows, source, pulledTs) => {
+  const now = Date.now();
+  for (const r of rows || []) {
+    stmts.upsertSolcastSnapshot.run({
+      forecast_day:    String(day || ""),
+      slot:            Number(r.slot),
+      ts_local:        Number(r.ts_local),
+      period_end_utc:  r.period_end_utc != null ? String(r.period_end_utc) : null,
+      period:          r.period         != null ? String(r.period)         : null,
+      forecast_mw:     r.forecast_mw     != null ? Number(r.forecast_mw)     : null,
+      forecast_lo_mw:  r.forecast_lo_mw  != null ? Number(r.forecast_lo_mw)  : null,
+      forecast_hi_mw:  r.forecast_hi_mw  != null ? Number(r.forecast_hi_mw)  : null,
+      est_actual_mw:   r.est_actual_mw   != null ? Number(r.est_actual_mw)   : null,
+      forecast_kwh:    r.forecast_kwh    != null ? Number(r.forecast_kwh)    : null,
+      forecast_lo_kwh: r.forecast_lo_kwh != null ? Number(r.forecast_lo_kwh) : null,
+      forecast_hi_kwh: r.forecast_hi_kwh != null ? Number(r.forecast_hi_kwh) : null,
+      est_actual_kwh:  r.est_actual_kwh  != null ? Number(r.est_actual_kwh)  : null,
+      pulled_ts:       Number(pulledTs || now),
+      source:          String(source || "toolkit"),
+      updated_ts:      now,
+    });
+  }
+});
+
+function getSolcastSnapshotForDay(day) {
+  return stmts.getSolcastSnapshotDay.all(String(day || ""));
+}
 
 function getSetting(key, def = null) {
   const row = stmts.getSetting.get(key);
@@ -1640,6 +1765,8 @@ module.exports = {
   bulkInsert,
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
+  bulkUpsertSolcastSnapshot,
+  getSolcastSnapshotForDay,
   getSetting,
   setSetting,
   pruneOldData,
@@ -1666,6 +1793,7 @@ module.exports = {
   readPendingMainDbReplacement,
   beginArchiveDbReplacement,
   endArchiveDbReplacement,
+  validateSqliteFileSync,
   insertChatMessage,
   getChatThread,
   getChatInboxAfterId,

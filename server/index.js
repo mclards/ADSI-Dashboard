@@ -27,6 +27,7 @@ const {
   bulkInsert,
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
+  bulkUpsertSolcastSnapshot,
   closeDb,
   getTelemetryHotCutoffTs,
   queryReadingsRangeAll,
@@ -42,6 +43,7 @@ const {
   closeArchiveDbForMonth,
   stagePendingMainDbReplacement,
   beginArchiveDbReplacement,
+  validateSqliteFileSync,
   endArchiveDbReplacement,
   insertChatMessage,
   getChatThread,
@@ -1212,6 +1214,7 @@ function applyPendingArchiveReplacementsSync() {
     if (!fs.existsSync(tempPath)) continue;
     beginArchiveDbReplacement(monthKey);
     try {
+      validateSqliteFileSync(tempPath);
       try {
         fs.unlinkSync(finalPath);
       } catch (_) {
@@ -2183,10 +2186,9 @@ function applyReplicationPushDelta(deltaPayload) {
   };
 }
 
-async function reconcileRemoteBeforePull(baseUrl) {
+async function checkLocalNewerBeforePull(baseUrl) {
   remoteBridgeState.lastReconcileError = "";
   remoteBridgeState.lastReconcileRows = 0;
-  let localNewerDetected = false;
   try {
     const summaryRes = await fetchWithRetry(
       `${baseUrl}/api/replication/summary`,
@@ -2207,47 +2209,18 @@ async function reconcileRemoteBeforePull(baseUrl) {
     if (!summaryData?.ok || !summaryData?.summary) {
       throw new Error(String(summaryData?.error || "Invalid replication summary payload."));
     }
-
     const gatewaySummary = normalizeReplicationSummary(summaryData.summary);
     const localSummary = buildReplicationSummary();
     const localNewer = hasLocalNewerReplicationData(localSummary, gatewaySummary);
-    localNewerDetected = localNewer;
-    if (!localNewer) {
-      remoteBridgeState.lastReconcileTs = Date.now();
-      remoteBridgeState.lastSyncDirection = "pull-only";
-      return { ok: true, pushed: false, rows: 0, localNewer: false };
-    }
-
-    const delta = buildPushDeltaAgainstSummary(gatewaySummary);
-    const expectedRows = Number(delta?.meta?.totalRows || 0);
-    if (expectedRows <= 0) {
-      remoteBridgeState.lastReconcileTs = Date.now();
-      remoteBridgeState.lastSyncDirection = "pull-only";
-      return { ok: true, pushed: false, rows: 0, localNewer: true };
-    }
-
-    const pushed = await pushDeltaInChunks(baseUrl, delta, { label: "Reconciling with gateway" });
     remoteBridgeState.lastReconcileTs = Date.now();
-    remoteBridgeState.lastReconcileRows = Number(pushed?.importedRows || 0);
-    remoteBridgeState.lastSyncDirection = "push-then-pull";
-    return {
-      ok: true,
-      pushed: true,
-      rows: Number(pushed?.importedRows || 0),
-      skipped: Number(pushed?.skippedRows || 0),
-      chunks: Number(pushed?.chunkCount || 0),
-      localNewer: true,
-    };
+    remoteBridgeState.lastReconcileError = "";
+    if (localNewer) {
+      remoteBridgeState.lastSyncDirection = "pull-check-local-newer";
+    }
+    return { ok: true, localNewer };
   } catch (err) {
     remoteBridgeState.lastReconcileError = String(err?.message || err);
-    if (localNewerDetected) {
-      remoteBridgeState.lastSyncDirection = "push-failed";
-    }
-    return {
-      ok: false,
-      error: remoteBridgeState.lastReconcileError,
-      localNewer: localNewerDetected,
-    };
+    return { ok: false, error: remoteBridgeState.lastReconcileError };
   }
 }
 
@@ -2291,9 +2264,7 @@ async function runRemoteFullReplication(baseUrl, opts = {}) {
     );
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastIncrementalTs = Date.now();
-    if (remoteBridgeState.lastSyncDirection !== "push-then-pull") {
-      remoteBridgeState.lastSyncDirection = "pull-full";
-    }
+    remoteBridgeState.lastSyncDirection = "pull-full";
     broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: 0, importedRows: Number(stats.importedRows || 0), label: xferLabel });
 
     return { ok: true, mode: "full", ...stats };
@@ -2469,25 +2440,23 @@ async function runRemotePushFull(baseUrl) {
 }
 
 async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
-  // Step 0 — Reconcile: push any local-newer data up before overwriting local state.
-  updateManualReplicationJob({ summary: "Reconciling with gateway before main DB pull…" });
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", sentBytes: 0, label: "Reconciling with gateway" });
-  const reconcile = await reconcileRemoteBeforePull(baseUrl);
-  if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
-    broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", sentBytes: 0, label: "Reconcile failed — local newer" });
-    const err = new Error(
-      "Local data is newer than the gateway and could not be pushed during reconciliation. " +
-      "Retry with Force Pull to overwrite local data with gateway state.",
-    );
-    err.code = "LOCAL_NEWER_PUSH_FAILED";
-    err.canForcePull = true;
-    throw err;
+  // Step 0 — Check: if local data is newer than the gateway, stop unless forcePull.
+  if (!forcePull) {
+    updateManualReplicationJob({ summary: "Checking gateway state before main DB pull…" });
+    const check = await checkLocalNewerBeforePull(baseUrl);
+    if (!check?.ok) {
+      throw new Error(`Gateway state check failed: ${String(check?.error || "unknown error")}. Check gateway connectivity and retry.`);
+    }
+    if (check.localNewer) {
+      const err = new Error(
+        "Local data is newer than the gateway. Use Push first to send local changes to the gateway, " +
+        "or use Force Pull to overwrite local data with the gateway state.",
+      );
+      err.code = "LOCAL_NEWER_PUSH_FAILED";
+      err.canForcePull = true;
+      throw err;
+    }
   }
-  if (!reconcile?.ok && !forcePull) {
-    broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", sentBytes: 0, label: "Reconcile failed" });
-    throw new Error(`Reconciliation failed: ${String(reconcile?.error || "unknown error")}. Check gateway connectivity and retry.`);
-  }
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", sentBytes: 0, label: "Reconcile complete" });
 
   // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
   updateManualReplicationJob({ summary: "Pulling fresh gateway main database…" });
@@ -2541,7 +2510,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
 
 async function runManualPushSync(baseUrl, includeArchive = true) {
   updateManualReplicationJob({
-    summary: "Pushing local replicated hot data to gateway in the background.",
+    summary: "Pushing local replicated hot data to gateway.",
   });
   const pushed = await runRemotePushFull(baseUrl);
   if (pushed?.skipped) {
@@ -2568,64 +2537,19 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
     archivePush = await pushArchiveFilesToRemote(baseUrl);
   }
 
-  updateManualReplicationJob({
-    summary: "Pulling the latest gateway main database back for final consistency.",
-  });
-  const mainDb = await pullMainDbFromRemote(baseUrl, {
-    label: "Pulling final gateway database",
-    syncDirection: "push-then-pull-main-db-staged",
-    failureDirection: "push-then-pull-main-db-failed",
-  });
-  if (mainDb?.skipped) {
-    throw new Error("Replication already in progress.");
-  }
-  if (!mainDb?.ok) {
-    throw new Error(
-      `Consistency main DB pull failed: ${String(
-        mainDb?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-    );
-  }
-
-  let archivePull = {
-    ok: true,
-    availableFiles: 0,
-    transferredFiles: 0,
-    skippedFiles: 0,
-    totalBytes: 0,
-    transferredBytes: 0,
-    files: [],
-    unsupported: false,
-  };
-  if (includeArchive) {
-    updateManualReplicationJob({
-      summary: "Final gateway main DB staged. Pulling gateway archive files for local consistency.",
-    });
-    archivePull = await pullArchiveFilesFromRemote(baseUrl);
-  }
-
-  const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
   const archivePushSummary = includeArchive
     ? archivePush.unsupported
       ? "archive upload skipped"
-      : `archive staged on gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()} (applied after restart)`
-    : "archive skipped";
-  const archivePullSummary = includeArchive
-    ? archivePull.unsupported
-      ? "archive pull skipped"
-      : `archive staged=${Number(archivePull.transferredFiles || 0).toLocaleString()} (applied after restart)`
+      : `archive sent to gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
     : "archive skipped";
   return {
-    needsRestart: true,
+    needsRestart: false,
+    mode: "push",
     direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     pushedRows: Number(pushed.importedRows || 0),
-    pulledRows: 0,
     pushChunks: Number(pushed.chunkCount || 0),
-    mode: "main-db",
-    mainDb,
     archivePush,
-    archivePull,
-    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} | ${mainDbSummary} | ${archivePushSummary} | ${archivePullSummary}. Restart the app to apply the refreshed gateway database.`,
+    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} rows in ${Number(pushed.chunkCount || 0)} chunk(s) | ${archivePushSummary}. Local database was not changed.`,
   };
 }
 
@@ -2733,6 +2657,16 @@ function createTransferWriteStream(filePath) {
   return fs.createWriteStream(filePath, { highWaterMark: REPLICATION_TRANSFER_STREAM_HWM });
 }
 
+async function hashFileSha256(filePath) {
+  return await new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = createTransferReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 function createReplicationGzipStream() {
   return zlib.createGzip({
     level: zlib.constants.Z_BEST_SPEED,
@@ -2782,6 +2716,23 @@ function encodeJsonRequestBody(payload, { gzipThreshold = REPLICATION_JSON_GZIP_
   headers["Content-Length"] = String(gz.length);
   headers["x-json-size"] = String(raw.length);
   return { headers, body: gz };
+}
+
+async function verifyTransferredFile(filePath, { expectedSize = 0, expectedSha256 = "" } = {}) {
+  const stat = await fs.promises.stat(filePath);
+  const actualSize = Math.max(0, Number(stat?.size || 0));
+  const sizeTarget = Math.max(0, Number(expectedSize || 0));
+  if (sizeTarget > 0 && actualSize !== sizeTarget) {
+    throw new Error(`Transfer size mismatch. Expected ${sizeTarget} bytes, received ${actualSize}.`);
+  }
+  const hashTarget = String(expectedSha256 || "").trim().toLowerCase();
+  if (hashTarget) {
+    const actualSha256 = String(await hashFileSha256(filePath) || "").trim().toLowerCase();
+    if (!actualSha256 || actualSha256 !== hashTarget) {
+      throw new Error("Transfer integrity check failed (SHA-256 mismatch).");
+    }
+  }
+  return { size: actualSize };
 }
 
 async function runTasksWithConcurrency(items, limit, handler) {
@@ -3022,10 +2973,12 @@ async function createGatewayMainDbSnapshotForTransfer() {
   }
   await db.backup(tempPath);
   const stat = await fs.promises.stat(tempPath);
+  const sha256 = await hashFileSha256(tempPath);
   return {
     tempPath,
     size: Math.max(0, Number(stat?.size || 0)),
     mtimeMs: Math.max(0, Number(stat?.mtimeMs || Date.now())),
+    sha256,
   };
 }
 
@@ -3044,6 +2997,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
   const tempPath = path.join(DATA_DIR, `adsi.db.download-${Date.now()}.tmp`);
   let recvBytes = 0;
   let totalBytes = 0;
+  let expectedSha256 = "";
 
   try {
     await fs.promises.mkdir(DATA_DIR, { recursive: true });
@@ -3071,6 +3025,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       0,
       Number(r.headers.get("x-main-db-mtime") || Date.now()),
     );
+    expectedSha256 = String(r.headers.get("x-main-db-sha256") || "").trim().toLowerCase();
     const body = r.body;
     if (!body) {
       throw new Error("Main DB pull returned an empty body.");
@@ -3103,13 +3058,17 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
     });
 
     await pipeline(body, createTransferWriteStream(tempPath));
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: totalBytes > 0 ? totalBytes : recvBytes,
+      expectedSha256,
+    });
     if (targetMtimeMs > 0) {
       const mtime = new Date(targetMtimeMs);
       await fs.promises.utimes(tempPath, mtime, mtime);
     }
     const staged = stagePendingMainDbReplacement({
       tempName: path.basename(tempPath),
-      size: totalBytes > 0 ? totalBytes : recvBytes,
+      size: Math.max(0, Number(verified?.size || totalBytes || recvBytes || 0)),
       mtimeMs: targetMtimeMs,
       preservedSettings: preserveRows,
     });
@@ -3230,6 +3189,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
   closeArchiveDbForMonth(monthKey);
 
   let body = null;
+  let expectedSha256 = "";
   try {
     const targetUrl = `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`;
     const r = await fetch(
@@ -3243,6 +3203,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
     if (!r.ok) {
       throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
     }
+    expectedSha256 = String(r.headers.get("x-archive-sha256") || "").trim().toLowerCase();
     body = r.body;
     if (!body) {
       throw new Error("Archive download returned an empty body.");
@@ -3252,6 +3213,10 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
       if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
     });
     await pipeline(body, createTransferWriteStream(tempPath));
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: Math.max(0, Number(fileMeta?.size || 0)),
+      expectedSha256,
+    });
     const targetMtimeMs = Math.max(0, Number(fileMeta?.mtimeMs || 0));
     if (targetMtimeMs > 0) {
       const mtime = new Date(targetMtimeMs);
@@ -3261,7 +3226,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
       name,
       monthKey,
       tempName: path.basename(tempPath),
-      size: Math.max(0, Number(fileMeta?.size || 0)),
+      size: Math.max(0, Number(verified?.size || fileMeta?.size || 0)),
       mtimeMs: targetMtimeMs,
     });
   } catch (err) {
@@ -3291,6 +3256,7 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
   const filePath = resolved.path;
   closeArchiveDbForMonth(monthKey);
   const stat = await fs.promises.stat(filePath);
+  const sha256 = await hashFileSha256(filePath);
   const targetUrl = `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`;
   const stream = createTransferReadStream(filePath);
   stream.on("data", (chunk) => {
@@ -3310,6 +3276,7 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
         "x-archive-mtime": String(
           Math.max(0, Number(fileMeta?.mtimeMs || stat.mtimeMs || Date.now())),
         ),
+        "x-archive-sha256": sha256,
       },
       body: stream,
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
@@ -3855,22 +3822,29 @@ function startRemoteChatBridge() {
 }
 
 async function runRemoteStartupAutoSync(baseUrl) {
-  const reconcile = await reconcileRemoteBeforePull(baseUrl);
-  if (!reconcile?.ok) {
-    const reason = String(reconcile?.error || "Reconciliation failed.");
-    if (reconcile?.localNewer) {
-      remoteBridgeState.lastReplicationError =
-        `Startup auto sync blocked: local data is newer but push reconciliation failed (${reason}).`;
-    } else {
-      remoteBridgeState.lastReplicationError = `Startup reconciliation failed: ${reason}`;
-      remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
-    }
+  const check = await checkLocalNewerBeforePull(baseUrl);
+  if (!check?.ok) {
+    remoteBridgeState.lastReplicationError =
+      `Startup gateway state check failed: ${String(check?.error || "unknown error")}`;
+    remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
     return {
       ok: false,
-      stage: "reconcile",
-      localNewer: Boolean(reconcile?.localNewer),
+      stage: "check",
+      localNewer: false,
       error: remoteBridgeState.lastReplicationError,
-      reconcile,
+      check,
+    };
+  }
+  if (check.localNewer) {
+    remoteBridgeState.lastReplicationError =
+      "Startup auto sync blocked: local data is newer than the gateway. Run Push first or use manual Force Pull if you want to overwrite local state.";
+    remoteBridgeState.lastSyncDirection = "startup-auto-sync-blocked-local-newer";
+    return {
+      ok: false,
+      stage: "check",
+      localNewer: true,
+      error: remoteBridgeState.lastReplicationError,
+      check,
     };
   }
 
@@ -3885,7 +3859,7 @@ async function runRemoteStartupAutoSync(baseUrl) {
       stage: "incremental",
       skipped: true,
       error: String(inc?.reason || "Replication already in progress."),
-      reconcile,
+      check,
       incremental: inc,
     };
   }
@@ -3898,13 +3872,13 @@ async function runRemoteStartupAutoSync(baseUrl) {
       ok: false,
       stage: "incremental",
       error: remoteBridgeState.lastReplicationError,
-      reconcile,
+      check,
       incremental: inc,
     };
   }
 
   remoteBridgeState.lastReplicationError = "";
-  return { ok: true, stage: "complete", reconcile, incremental: inc };
+  return { ok: true, stage: "complete", check, incremental: inc };
 }
 
 async function pollRemoteLiveOnce() {
@@ -4053,7 +4027,7 @@ function stopRemoteBridge() {
   remoteBridgeState.liveFailureCount = 0;
   remoteBridgeState.lastFailureTs = 0;
   remoteBridgeState.replicationRunning = false;
-  if (!isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
+  if (_shutdownCalled || !isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
 
 function startRemoteBridge() {
@@ -6025,6 +5999,132 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
   return rows;
 }
 
+function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const slotMs = SOLCAST_SLOT_MIN * 60000;
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const KWH_PER_MW = 1000 * (SOLCAST_SLOT_MIN / 60);
+
+  // Per-slot accumulators for forecast (MW weighted by overlap hours)
+  const slotData = new Array(288).fill(null).map(() => ({
+    sumMwH: 0, sumLoH: 0, sumHiH: 0, overlapH: 0,
+    period_end_utc: null, period: null,
+  }));
+
+  // Build estActual MW map keyed by slot index
+  const estActualMwBySlot = new Map();
+  for (const rec of estActuals || []) {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) continue;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.date !== day || p.minuteOfDay < startMin || p.minuteOfDay >= endMin) continue;
+    const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+    const mw = convertSolcastPowerToMw(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
+      accessMode,
+    );
+    if (mw != null) estActualMwBySlot.set(slot, mw);
+  }
+
+  // Accumulate forecast records into per-slot MW*h buckets
+  let matched = 0;
+  for (const rec of records || []) {
+    const periodEndRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(periodEndRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) continue;
+    const durMin = parseIsoDurationToMinutes(
+      rec?.period ?? rec?.period_duration ?? rec?.duration,
+      30,
+    );
+    if (!Number.isFinite(durMin) || durMin <= 0) continue;
+    const startTs = endTs - durMin * 60000;
+    const mw = convertSolcastPowerToMw(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
+      accessMode,
+    );
+    const loMw = convertSolcastPowerToMw(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      accessMode,
+    ) ?? mw;
+    const hiMw = convertSolcastPowerToMw(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      accessMode,
+    ) ?? mw;
+    if (mw == null && loMw == null && hiMw == null) continue;
+
+    let segStart = startTs;
+    while (segStart < endTs) {
+      const boundary = Math.min(endTs, (Math.floor(segStart / slotMs) + 1) * slotMs);
+      const segEnd = boundary > segStart ? boundary : Math.min(endTs, segStart + slotMs);
+      const midTs = segStart + Math.floor((segEnd - segStart) / 2);
+      const p = getTzParts(midTs, cfg.timeZone);
+      if (p.date === day && p.minuteOfDay >= startMin && p.minuteOfDay < endMin) {
+        const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+        const overlapH = (segEnd - segStart) / 3600000;
+        const d = slotData[slot];
+        if (mw   != null) d.sumMwH += mw   * overlapH;
+        if (loMw != null) d.sumLoH += loMw * overlapH;
+        if (hiMw != null) d.sumHiH += hiMw * overlapH;
+        d.overlapH += overlapH;
+        d.period_end_utc = String(periodEndRaw);
+        d.period = rec?.period ?? rec?.period_duration ?? rec?.duration ?? null;
+        matched += 1;
+      }
+      segStart = segEnd;
+    }
+  }
+
+  if (!matched) {
+    throw new Error(
+      `No Solcast samples matched ${day} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
+    );
+  }
+
+  const rows = [];
+  for (let slot = startMin / SOLCAST_SLOT_MIN; slot < endMin / SOLCAST_SLOT_MIN; slot++) {
+    const hh = Math.floor((slot * SOLCAST_SLOT_MIN) / 60);
+    const mm = (slot * SOLCAST_SLOT_MIN) % 60;
+    const ts_local = zonedDateTimeToUtcMs(day, hh, mm, 0, cfg.timeZone);
+    const d = slotData[slot];
+    const oh = d.overlapH > 0 ? d.overlapH : 0;
+    const forecast_mw    = oh > 0 ? Number((d.sumMwH / oh).toFixed(6)) : null;
+    const forecast_lo_mw = oh > 0 ? Number((d.sumLoH / oh).toFixed(6)) : null;
+    const forecast_hi_mw = oh > 0 ? Number((d.sumHiH / oh).toFixed(6)) : null;
+    const est_actual_mw  = estActualMwBySlot.has(slot)
+      ? Number(estActualMwBySlot.get(slot).toFixed(6)) : null;
+    rows.push({
+      slot,
+      ts_local: Number.isFinite(ts_local) ? Number(ts_local) : 0,
+      period_end_utc: d.period_end_utc,
+      period: d.period,
+      forecast_mw,
+      forecast_lo_mw,
+      forecast_hi_mw,
+      est_actual_mw,
+      forecast_kwh:    forecast_mw    != null ? Number((forecast_mw    * KWH_PER_MW).toFixed(6)) : null,
+      forecast_lo_kwh: forecast_lo_mw != null ? Number((forecast_lo_mw * KWH_PER_MW).toFixed(6)) : null,
+      forecast_hi_kwh: forecast_hi_mw != null ? Number((forecast_hi_mw * KWH_PER_MW).toFixed(6)) : null,
+      est_actual_kwh:  est_actual_mw  != null ? Number((est_actual_mw  * KWH_PER_MW).toFixed(6)) : null,
+    });
+  }
+  return rows;
+}
+
+function persistSolcastSnapshot(day, rows, source, pulledTs) {
+  if (!Array.isArray(rows) || !rows.length) return 0;
+  try {
+    bulkUpsertSolcastSnapshot(String(day || ""), rows, source, pulledTs);
+    return rows.length;
+  } catch (err) {
+    console.warn(`[solcast-snapshot] persist failed for ${day}:`, err.message);
+    return 0;
+  }
+}
+
 function classifyDailySky(row) {
   const cloud = Number(row?.cloud_pct || 0);
   const rain = Number(row?.precip_mm || 0);
@@ -6300,12 +6400,17 @@ async function generateDayAheadWithSolcast(dates) {
       "Solcast API mode is selected but the API key, resource ID, or base URL is incomplete. Switch Access Mode to Toolkit Login if you want to use only the toolkit URL, email, and password.",
     );
   }
-  const { endpoint, records, accessMode } = await fetchSolcastForecastRecords(cfg);
+  const { endpoint, records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
+  const pulledTs = Date.now();
   let writtenRows = 0;
   for (const day of dates) {
     const rows = buildDayAheadRowsFromSolcast(day, records, cfg);
     bulkUpsertForecastDayAhead(day, rows, "solcast");
     writtenRows += Number(rows.length || 0);
+    try {
+      const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
+      persistSolcastSnapshot(day, snapshotRows, accessMode, pulledTs);
+    } catch (_) {}
   }
   const normalizedRows = normalizeForecastDbWindow();
   return {
@@ -7623,9 +7728,11 @@ app.get("/api/replication/archive-download", async (req, res) => {
       throw new Error("Archive file not found.");
     }
     const totalBytes = Math.max(0, Number(resolved.size || 0));
+    const sha256 = await hashFileSha256(resolved.path);
     const useGzip = shouldGzipReplicationStream(req, totalBytes);
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-archive-size", String(totalBytes));
+    res.setHeader("x-archive-sha256", sha256);
     res.setHeader(
       "x-archive-mtime",
       String(Math.max(0, Number(resolved.mtimeMs || 0))),
@@ -7654,6 +7761,7 @@ app.post("/api/replication/archive-upload", async (req, res) => {
   const tempPath = path.join(ARCHIVE_DIR, `${fileName}.upload-${Date.now()}.tmp`);
   const expectedSize = Math.max(0, Number(req.headers["x-archive-size"] || 0));
   const expectedMtimeMs = Math.max(0, Number(req.headers["x-archive-mtime"] || Date.now()));
+  const expectedSha256 = String(req.headers["x-archive-sha256"] || "").trim().toLowerCase();
   let recvBytes = 0;
   try {
     await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
@@ -7681,13 +7789,17 @@ app.post("/api/replication/archive-upload", async (req, res) => {
       });
     });
     await pipeline(req, createTransferWriteStream(tempPath));
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: expectedSize > 0 ? expectedSize : recvBytes,
+      expectedSha256,
+    });
     const mtime = new Date(expectedMtimeMs);
     await fs.promises.utimes(tempPath, mtime, mtime);
     stagePendingArchiveReplacement({
       name: fileName,
       monthKey,
       tempName: path.basename(tempPath),
-      size: expectedSize > 0 ? expectedSize : recvBytes,
+      size: Math.max(0, Number(verified?.size || expectedSize || recvBytes || 0)),
       mtimeMs: expectedMtimeMs,
     });
     broadcastUpdate({
@@ -7777,6 +7889,7 @@ app.get("/api/replication/main-db", async (req, res) => {
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-main-db-size", String(totalBytes));
     res.setHeader("x-main-db-mtime", String(targetMtimeMs));
+    res.setHeader("x-main-db-sha256", String(snapshot?.sha256 || ""));
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     if (!useGzip) {
       res.setHeader("Content-Length", String(totalBytes));
@@ -8036,7 +8149,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
         {
           includeArchive,
           summary: "Queued background pull from gateway.",
-          runningSummary: "Reconciling then pulling the staged gateway main database.",
+          runningSummary: "Checking gateway state, then pulling and staging the gateway main database.",
         },
         () => runManualPullSync(base, includeArchive, forcePull),
       );
@@ -8055,7 +8168,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
         forcePull,
         job: started.job,
         message:
-          "Background pull started. Local data will be reconciled first, then the gateway main database will be staged for restart-safe replacement.",
+          "Background pull started. Gateway state will be checked first, then the gateway main database will be staged for restart-safe replacement.",
       });
     }
 
@@ -8111,7 +8224,7 @@ app.post("/api/replication/push-now", async (req, res) => {
         {
           includeArchive,
           summary: "Queued background push to gateway.",
-          runningSummary: "Pushing local data to gateway, then staging the final gateway main database.",
+          runningSummary: "Pushing local replicated data to gateway. Local database will not be changed.",
         },
         () => runManualPushSync(base, includeArchive),
       );
@@ -8129,7 +8242,7 @@ app.post("/api/replication/push-now", async (req, res) => {
         includeArchive,
         job: started.job,
         message:
-          "Background push started. Local hot data will be sent first, then the final gateway main database will be staged back to this machine.",
+          "Background push started. Local replicated data will be sent to the gateway. Local database will not be changed.",
       });
     }
 
@@ -8177,27 +8290,27 @@ app.post("/api/replication/reconcile-now", async (req, res) => {
 
   const forcePull = Boolean(req?.body?.forcePull);
   try {
-    const reconcile = await reconcileRemoteBeforePull(base);
-    if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
+    const check = await checkLocalNewerBeforePull(base);
+    if (!check?.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: String(check?.error || "Gateway state check failed."),
+        check,
+        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      });
+    }
+    if (check.localNewer && !forcePull) {
       return res.status(409).json({
         ok: false,
         code: "LOCAL_NEWER_PUSH_FAILED",
         canForcePull: true,
         error:
-          "Local data appears newer, but push reconciliation failed. Retry with forcePull to pull from gateway anyway.",
-        reconcile,
+          "Local data is newer than the gateway. Use Push first, or retry with forcePull to overwrite local data from the gateway.",
+        check,
         direction: String(remoteBridgeState.lastSyncDirection || "idle"),
       });
     }
-    if (!reconcile?.ok && !forcePull) {
-      return res.status(502).json({
-        ok: false,
-        error: String(reconcile?.error || "Reconciliation failed."),
-        reconcile,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (!reconcile?.ok && forcePull) {
+    if (forcePull) {
       remoteBridgeState.lastSyncDirection = "pull-only";
     }
 
@@ -8209,7 +8322,7 @@ app.post("/api/replication/reconcile-now", async (req, res) => {
     if (incremental?.ok) {
       return res.json({
         ok: true,
-        reconcile,
+        check,
         mode: String(incremental.mode || "incremental"),
         incremental,
         direction: String(remoteBridgeState.lastSyncDirection || "idle"),
@@ -8218,10 +8331,10 @@ app.post("/api/replication/reconcile-now", async (req, res) => {
 
     return res.status(502).json({
       ok: false,
-      error: `Reconcile pull failed: ${String(
+      error: `Manual catch-up pull failed: ${String(
         incremental?.error || "unknown error",
       )}. Ensure gateway and client are on the same build.`,
-      reconcile,
+      check,
       incremental,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
@@ -9098,6 +9211,10 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     } catch (err) {
       warning = String(err?.message || err || "").slice(0, 240);
     }
+    try {
+      const snapshotRows = buildSolcastSnapshotRows(tomorrowTz, records, estActuals || [], cfg);
+      persistSolcastSnapshot(tomorrowTz, snapshotRows, accessMode, started);
+    } catch (_) {}
 
     return res.json({
       ok: true,
@@ -9186,6 +9303,12 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       estActuals || [],
       cfg,
     );
+    try {
+      for (const day of (preview.selectedDays?.length ? preview.selectedDays : [preview.day])) {
+        const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
+        persistSolcastSnapshot(day, snapshotRows, accessMode, started);
+      }
+    } catch (_) {}
     return res.json({
       ok: true,
       provider: "solcast",
@@ -9991,6 +10114,7 @@ function shutdownEmbedded() {
   if (_shutdownCalled) return;
   _shutdownCalled = true;
   console.log("[Server] Embedded shutdown: flushing DB...");
+  stopRemoteBridge();
   stopRemoteChatBridge();
   try { poller.stop(); } catch (_) {}
   try {

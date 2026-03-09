@@ -10,14 +10,19 @@ Already in place:
 - done: direct Solcast-backed day-ahead write path in `generateDayAheadWithSolcast(...)`
 - done: toolkit preview chart and XLSX export over the `05:00-18:00` window
 - done: raw `PT5M` `MW` values exposed in preview payload, chart hover, and export
+- done: `solcast_snapshots` table in `server/db.js` with `PRIMARY KEY (forecast_day, slot)` and `idx_ss_day` index
+- done: `bulkUpsertSolcastSnapshot` transaction and `getSolcastSnapshotForDay` read helper exported from `server/db.js`
+- done: `buildSolcastSnapshotRows(day, records, estActuals, cfg)` and `persistSolcastSnapshot(day, rows, source, pulledTs)` in `server/index.js`
+- done: snapshot persisted on Solcast test, preview, and day-ahead generation; `estActuals` stored where available (toolkit mode); null for API mode
 
 Still pending:
 
-- pending: persistent normalized Solcast snapshot storage for training and backtesting
-- pending: hybrid `ml_local + Solcast` inference path
-- pending: Solcast-aware residual training in `services/forecast_engine.py`
-- pending: Solcast-specific bias and reliability scoring
-- pending: rollout validation and promotion rules
+- pending: Phase 2 — refactor direct Solcast generation to read from persisted snapshot first; apply inverter startup/shutdown gating and low-power staging; store provenance linking day-ahead row to snapshot version
+- pending: Phase 3 — add `solcast_snapshots` DB reader to `services/forecast_engine.py`; expose slot arrays without requiring Solcast credentials in Python
+- pending: Phase 4 — `solcast_prior_from_snapshot` and `blend_physics_with_solcast` hybrid baseline in `services/forecast_engine.py`
+- pending: Phase 5 — retrain residual ML against hybrid baseline with Solcast feature columns
+- pending: Phase 6 — Solcast-specific bias and reliability artifact in `services/forecast_engine.py`
+- pending: Phase 7 — production routing (`ml_local` with usable snapshot → hybrid path; fallback to current `ml_local`); log which path was used
 
 This plan defines how the Solcast toolkit feed should improve:
 
@@ -656,8 +661,11 @@ This plan is successful when all of the following are true:
 
 ## Immediate Next Step
 
-The correct first implementation step is:
+Phase 1 is complete. The next step is Phase 2:
 
-- persist normalized Solcast toolkit snapshots in the local DB with provenance and retention
+- refactor `generateDayAheadWithSolcast` to read the persisted snapshot first before falling back to a live fetch
+- apply inverter-aware startup and shutdown gating to the Solcast output slots
+- apply low-power node staging at the final output layer
+- store provenance on the written `forecast_dayahead` rows linking them to the snapshot `pulled_ts`
 
-Without that, Solcast can improve direct live generation, but it cannot reliably improve ML training, backtesting, or bias learning over time.
+This makes the direct Solcast provider reproducible and operationally safe before the ML hybrid path (Phases 3–7) is ready.

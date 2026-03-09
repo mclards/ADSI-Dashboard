@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.24` in `package.json`
+- Current repo version baseline: `2.2.25` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -83,11 +83,13 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 
 - Replicate `daily_report` and `daily_readings_summary` between machines.
 - Prefer incremental cursor-based pull.
-- Remote startup reconcile must happen before pull.
-- If local data is newer and reconciliation push fails, do not force pull.
+- Remote startup auto-sync must also stay read-only toward the gateway: it may check whether local data is newer, but it must not auto-push local data as a side effect of startup pull behavior.
+- Manual `Pull` is download-only: check for local-newer data and stop with `LOCAL_NEWER_PUSH_FAILED` if found — never push as a side effect. If allowed, stage the gateway `adsi.db` for restart-safe local replacement so stale remote state is removed.
+- Manual `Push` is upload-only: send local hot-data delta (and optionally archive files) to the gateway. Push must not pull the gateway DB back or stage a local DB replacement. Push does not require restart.
+- If local data is newer before a manual pull, return `LOCAL_NEWER_PUSH_FAILED` and allow `Force Pull` only on explicit operator choice.
 - Use chunked push uploads to avoid HTTP `413`.
 - Protect local-only settings during merge/import.
-- Startup and live remote sync should stay incremental/LWW, but manual `Pull` in Remote mode must stage the gateway `adsi.db` for restart-safe local replacement so stale remote state is removed.
+- Startup and live remote sync should stay incremental/LWW.
 - Never stream the live gateway `adsi.db` file directly. Flush pending in-memory telemetry, create a transactionally consistent SQLite snapshot from the running gateway DB, and transfer that snapshot file instead.
 - During a staged gateway main-DB replacement, preserve only the client-local remote settings: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
 - Keep replication transport optimized by default:

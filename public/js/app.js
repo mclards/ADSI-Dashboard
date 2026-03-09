@@ -3637,7 +3637,6 @@ function formatSyncDirection(value) {
     "pull-only": "Pull only",
     "pull-live": "Live pull",
     "pull-live-failed": "Live pull failed",
-    "push-then-pull": "Push then pull",
     "push-full": "Push full",
     "push-full-failed": "Push full failed",
     "push-failed": "Push failed",
@@ -3746,7 +3745,7 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
         showMsg("replicationMsg", "Pull stopped: local data is newer than the gateway.", "error");
         appConfirm(
           "Local Data Is Newer — Force Pull?",
-          "Your local data is newer than the gateway but could not be pushed during reconciliation.\n\nForce pull from gateway anyway?\n\nWarning: Any local changes that could not be saved to the gateway will be overwritten.",
+          "Your local data is newer than the gateway.\n\nUse Push first if you want to send local changes to the gateway before pulling.\n\nForce pull from gateway anyway?\n\nWarning: Local data will be overwritten by the gateway state.",
           { ok: "Force Pull", cancel: "Cancel" },
         ).then(async (force) => {
           if (!force) {
@@ -4041,8 +4040,8 @@ async function runReplicationPullNow() {
   const _pullOk = await appConfirm(
     "Start Authoritative Pull",
     "The gateway main database will replace your local main database on restart.\n\n" +
-    "Before pulling, local data will be reconciled with the gateway to protect any newer local changes. " +
-    "After reconciliation, this machine downloads a fresh gateway `adsi.db` snapshot and stages it for restart-safe replacement.\n\n" +
+    "This is a download-only operation. No local data will be sent to the gateway during pull.\n\n" +
+    "If local data is newer than the gateway, pull will stop and you will be asked whether to Force Pull or Push first.\n\n" +
     "Local-only settings (operation mode, remote auto-sync, gateway URL/token, tailnet hint, and export path) are preserved on this machine." +
     archiveLine +
     "\n\nYou will be prompted to restart after completion.",
@@ -4052,7 +4051,7 @@ async function runReplicationPullNow() {
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Reconciling with gateway, then pulling the gateway main database…", "");
+  showMsg("replicationMsg", "Checking gateway state, then pulling the gateway main database…", "");
   try {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
@@ -4063,8 +4062,8 @@ async function runReplicationPullNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background pull started. Reconciling first, then staging the gateway main database. Archive files will follow."
-        : "Background pull started. Reconciling first, then staging the gateway main database.",
+        ? "Background pull started. Staging the gateway main database. Archive files will follow."
+        : "Background pull started. Staging the gateway main database.",
       "",
     );
     await refreshReplicationHealth(true);
@@ -4074,9 +4073,10 @@ async function runReplicationPullNow() {
       // Pre-pull reconciliation could not push local-newer data to gateway.
       const force = await appConfirm(
         "Local Data Is Newer — Force Pull?",
-        "Your local data is newer than the gateway but could not be pushed during reconciliation.\n\n" +
+        "Your local data is newer than the gateway.\n\n" +
+        "Use Push first if you want to send local changes to the gateway before pulling.\n\n" +
         "Force pull from gateway anyway?\n\n" +
-        "Warning: Any local changes that could not be saved to the gateway will be overwritten.",
+        "Warning: Local data will be overwritten by the gateway state.",
         { ok: "Force Pull", cancel: "Cancel" },
       );
       if (!force) {
@@ -4109,14 +4109,14 @@ async function runReplicationPushNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
   const archiveLine = includeArchive
-    ? "\n\nArchive files: Local monthly archive DB files will be uploaded to the gateway, then any remaining gateway archive files pulled back."
+    ? "\n\nArchive files: Local monthly archive DB files will be uploaded to the gateway."
     : "\n\nArchive files: Skipped for this run.";
   const _pushOk = await appConfirm(
     "Start Background Push",
-    "Your local hot-data delta will be sent to the gateway. The gateway will then send a fresh main database snapshot back to this machine for final consistency.\n\n" +
-    "Local-only settings (operation mode, remote auto-sync, gateway URL/token, tailnet hint, and export path) are preserved on this machine." +
-    archiveLine +
-    "\n\nYou will be prompted to restart after completion.",
+    "Your local replicated hot-data will be sent to the gateway.\n\n" +
+    "This is an upload-only operation. Your local database will not be changed.\n\n" +
+    "No restart is required after push." +
+    archiveLine,
     { ok: "Start Push" },
   );
   if (!_pushOk) return;
@@ -4134,8 +4134,8 @@ async function runReplicationPushNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background push started. Sending local data to gateway, then staging the final gateway main database. Archive files included."
-        : "Background push started. Sending local data to gateway, then staging the final gateway main database.",
+        ? "Background push started. Sending local data to gateway. Archive files included. Local database will not be changed."
+        : "Background push started. Sending local data to gateway. Local database will not be changed.",
       "",
     );
     await refreshReplicationHealth(true);

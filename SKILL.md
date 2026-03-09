@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.24` in `package.json`
+- Current repo version baseline: `2.2.25` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -92,9 +92,10 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
 
 - Replicate `daily_report` and `daily_readings_summary` so historical reporting survives across machines.
 - Startup and live remote sync should keep the incremental cursor-based replication model.
-- Manual `Pull` in Remote mode must treat the gateway main DB as the source of truth: reconcile local-newer hot data first, then download a transactionally consistent gateway `adsi.db` snapshot and stage it for restart-safe local replacement.
-- Remote startup reconcile must happen before pull.
-- If local data is newer and reconciliation push fails, do not force pull.
+- Manual `Pull` is download-only: check if local data is newer than the gateway, and if so stop with `LOCAL_NEWER_PUSH_FAILED` — never push data to the gateway as a side effect of pull. If allowed to proceed, download a transactionally consistent gateway `adsi.db` snapshot and stage it for restart-safe local replacement.
+- Manual `Push` is upload-only: send local replicated hot-data delta to the gateway, and if requested upload local archive files. Push must not pull the gateway DB back down or stage a local DB replacement. Push does not require restart.
+- Remote startup auto-sync must also stay read-only toward the gateway: it may check whether local data is newer, but it must not auto-push local data as a side effect of startup pull behavior.
+- If local data is newer before a manual pull, return `LOCAL_NEWER_PUSH_FAILED` with `canForcePull: true`. Do not auto-push. Allow `Force Pull` only if the operator explicitly chooses it.
 - Use chunked push uploads to avoid HTTP `413`.
 - When replacing the main DB from the gateway, preserve only the explicit local-only remote settings on the client machine: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
 - Never copy the live gateway `adsi.db` file directly. Flush pending in-memory telemetry first, then export a consistent SQLite snapshot from the running gateway DB and transfer that snapshot file instead.
