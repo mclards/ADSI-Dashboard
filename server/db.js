@@ -65,6 +65,7 @@ const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;
 const ARCHIVE_BATCH_SIZE = 5000;
 const ARCHIVE_DB_CACHE = new Map();
+const ARCHIVE_DB_REPLACE_LOCKS = new Set();
 const STARTUP_COMPACT_MAX_BYTES = 64 * 1024 * 1024;
 const READING_STORAGE_COLUMNS = [
   "id",
@@ -834,9 +835,16 @@ function createArchiveEntry(filePath) {
   return entry;
 }
 
+function normalizeArchiveMonthKey(monthKey) {
+  return String(monthKey || "")
+    .trim()
+    .replace(/\.db$/i, "");
+}
+
 function getArchiveEntry(monthKey, createIfMissing = false) {
-  const key = String(monthKey || "").trim();
+  const key = normalizeArchiveMonthKey(monthKey);
   if (!key) return null;
+  if (ARCHIVE_DB_REPLACE_LOCKS.has(key)) return null;
   if (ARCHIVE_DB_CACHE.has(key)) return ARCHIVE_DB_CACHE.get(key);
   const filePath = path.join(ARCHIVE_DIR, `${key}.db`);
   if (!createIfMissing && !fs.existsSync(filePath)) return null;
@@ -846,9 +854,7 @@ function getArchiveEntry(monthKey, createIfMissing = false) {
 }
 
 function closeArchiveDbForMonth(monthKey) {
-  const key = String(monthKey || "")
-    .trim()
-    .replace(/\.db$/i, "");
+  const key = normalizeArchiveMonthKey(monthKey);
   if (!key) return false;
   const entry = ARCHIVE_DB_CACHE.get(key);
   if (!entry) return false;
@@ -864,6 +870,20 @@ function closeArchiveDbForMonth(monthKey) {
   }
   ARCHIVE_DB_CACHE.delete(key);
   return true;
+}
+
+function beginArchiveDbReplacement(monthKey) {
+  const key = normalizeArchiveMonthKey(monthKey);
+  if (!key) return "";
+  ARCHIVE_DB_REPLACE_LOCKS.add(key);
+  closeArchiveDbForMonth(key);
+  return key;
+}
+
+function endArchiveDbReplacement(monthKey) {
+  const key = normalizeArchiveMonthKey(monthKey);
+  if (!key) return false;
+  return ARCHIVE_DB_REPLACE_LOCKS.delete(key);
 }
 
 function parseIntervalsJson(text) {
@@ -1426,6 +1446,8 @@ module.exports = {
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  beginArchiveDbReplacement,
+  endArchiveDbReplacement,
   insertChatMessage,
   getChatThread,
   getChatInboxAfterId,

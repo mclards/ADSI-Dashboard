@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.21
+- **Version:** 2.2.22
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -98,6 +98,11 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **public/js/app.js (stale tab cache):** `State.tabFetchTs{}` + `TAB_STALE_MS=60000`; initAlarmsPage/initEnergyPage/initAuditPage/initReportPage skip re-fetch and re-render from State if data is <60s old; `State.tabFetching{}` in-flight guard
 - **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loading…" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
 - **public/js/app.js (DocumentFragment):** renderAlarmTable, renderAuditTable, renderReportTable, renderEnergyTable all now use DocumentFragment + single `tbody.textContent=""` + `appendChild(frag)` instead of per-row `appendChild`
+
+## v2.2.22 Changes — Restart-Safe Archive Apply (2026-03-09)
+- **Archive staging instead of live swap:** manual archive pull/upload now keeps the current monthly `.db` live while the app is running, stages the downloaded/uploaded replacement in `archive/*.tmp`, and applies it only on the next restart.
+- **Restart apply path:** startup now applies pending staged archive replacements before the server begins serving requests, so the newer archive file becomes active immediately after restart without the Windows `EPERM` rename race.
+- **Manifest/transfer consistency:** archive manifest and archive download now surface the staged replacement immediately, so follow-up sync decisions and archive transfers see the newest content even before restart.
 
 ## v2.2.21 Changes — Authoritative Pull/Push Hardening + Transfer Monitor Polish (2026-03-09)
 - **Authoritative merge:** `mergeAppendReplicationRow` and `mergeUpdatedReplicationRow` now accept `authoritative` flag; in auth mode, LWW `WHERE COALESCE(excluded.updated_ts,0) >= ...` guards are removed for all tables (`readings`, `energy_5min`, `settings`, `forecast_dayahead`, `forecast_intraday_adjusted`, `daily_report`, `daily_readings_summary`, `alarms`). Separate `stmtCached` keys used (e.g. `"merge:daily_report:auth"`) to avoid poisoning LWW cache entries. `audit_log` stays append-only. `REMOTE_REPLICATION_PRESERVE_SETTING_KEYS` always wins even in auth mode.

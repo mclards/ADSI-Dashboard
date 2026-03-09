@@ -34,6 +34,8 @@ const {
   getDailyReadingsSummaryRows,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  beginArchiveDbReplacement,
+  endArchiveDbReplacement,
   insertChatMessage,
   getChatThread,
   getChatInboxAfterId,
@@ -105,6 +107,10 @@ const FORECAST_CTX_PATH = path.join(
   "global.json",
 );
 const FORECAST_CTX_MTIME_KEY = "forecastCtxMtimeMs";
+const ARCHIVE_PENDING_REPLACEMENTS_PATH = path.join(
+  ARCHIVE_DIR,
+  ".pending-archive-replacements.json",
+);
 const ROOT_DIR = path.join(__dirname, "..");
 const INVERTER_ENGINE_BASE_URL = "http://127.0.0.1:9100";
 const FORECAST_EXE_NAMES = ["ForecastCoreService.exe"];
@@ -892,37 +898,219 @@ function monthKeyFromArchiveFileName(fileName) {
   return safe ? safe.slice(0, 7) : "";
 }
 
-function listLocalArchiveManifest() {
-  let names = [];
+function readPendingArchiveReplacements() {
   try {
-    names = fs
+    if (!fs.existsSync(ARCHIVE_PENDING_REPLACEMENTS_PATH)) return [];
+    const parsed = JSON.parse(
+      fs.readFileSync(ARCHIVE_PENDING_REPLACEMENTS_PATH, "utf8"),
+    );
+    if (!Array.isArray(parsed)) return [];
+    const deduped = new Map();
+    for (const entry of parsed) {
+      const name = sanitizeArchiveFileName(entry?.name || "");
+      const monthKey = monthKeyFromArchiveFileName(name);
+      const tempName = path.basename(String(entry?.tempName || "").trim());
+      if (!name || !monthKey || !tempName) continue;
+      deduped.set(name, {
+        name,
+        monthKey,
+        tempName,
+        size: Math.max(0, Number(entry?.size || 0)),
+        mtimeMs: Math.max(0, Number(entry?.mtimeMs || 0)),
+        stagedAt: Math.max(0, Number(entry?.stagedAt || 0)),
+      });
+    }
+    return Array.from(deduped.values()).sort((a, b) =>
+      String(a?.name || "").localeCompare(String(b?.name || "")),
+    );
+  } catch (_) {
+    return [];
+  }
+}
+
+function writePendingArchiveReplacements(entriesRaw) {
+  const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+  if (!entries.length) {
+    try {
+      fs.unlinkSync(ARCHIVE_PENDING_REPLACEMENTS_PATH);
+    } catch (_) {
+      // Ignore missing manifest cleanup failures.
+    }
+    return;
+  }
+  fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  const tempPath = `${ARCHIVE_PENDING_REPLACEMENTS_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(entries, null, 2));
+  fs.renameSync(tempPath, ARCHIVE_PENDING_REPLACEMENTS_PATH);
+}
+
+function stagePendingArchiveReplacement({
+  name,
+  monthKey,
+  tempName,
+  size = 0,
+  mtimeMs = 0,
+}) {
+  const safeName = sanitizeArchiveFileName(name || "");
+  const safeMonthKey = monthKeyFromArchiveFileName(
+    safeName || `${String(monthKey || "").trim()}.db`,
+  );
+  const safeTempName = path.basename(String(tempName || "").trim());
+  if (!safeName || !safeMonthKey || !safeTempName) {
+    throw new Error("Invalid staged archive replacement payload.");
+  }
+  const nextEntries = [];
+  for (const entry of readPendingArchiveReplacements()) {
+    if (String(entry?.name || "") !== safeName) {
+      nextEntries.push(entry);
+      continue;
+    }
+    const oldTempName = path.basename(String(entry?.tempName || "").trim());
+    if (oldTempName && oldTempName !== safeTempName && /\.tmp$/i.test(oldTempName)) {
+      try {
+        fs.unlinkSync(path.join(ARCHIVE_DIR, oldTempName));
+      } catch (_) {
+        // Ignore stale temp cleanup failures.
+      }
+    }
+  }
+  const staged = {
+    name: safeName,
+    monthKey: safeMonthKey,
+    tempName: safeTempName,
+    size: Math.max(0, Number(size || 0)),
+    mtimeMs: Math.max(0, Number(mtimeMs || 0)),
+    stagedAt: Date.now(),
+  };
+  nextEntries.push(staged);
+  writePendingArchiveReplacements(nextEntries);
+  return staged;
+}
+
+function getPendingArchiveReplacement(name) {
+  const safeName = sanitizeArchiveFileName(name || "");
+  if (!safeName) return null;
+  return (
+    readPendingArchiveReplacements().find(
+      (entry) => String(entry?.name || "") === safeName,
+    ) || null
+  );
+}
+
+function resolveArchiveFileForTransfer(fileName) {
+  const safeName = sanitizeArchiveFileName(fileName || "");
+  if (!safeName) return null;
+  const pending = getPendingArchiveReplacement(safeName);
+  if (pending?.tempName) {
+    const tempPath = path.join(ARCHIVE_DIR, pending.tempName);
+    if (fs.existsSync(tempPath)) {
+      const stat = fs.statSync(tempPath);
+      return {
+        path: tempPath,
+        size: Math.max(0, Number(stat.size || pending?.size || 0)),
+        mtimeMs: Math.max(0, Number(pending?.mtimeMs || stat.mtimeMs || 0)),
+        pendingApply: true,
+      };
+    }
+  }
+  const finalPath = path.join(ARCHIVE_DIR, safeName);
+  const stat = fs.statSync(finalPath);
+  return {
+    path: finalPath,
+    size: Math.max(0, Number(stat.size || 0)),
+    mtimeMs: Math.max(0, Number(stat.mtimeMs || 0)),
+    pendingApply: false,
+  };
+}
+
+function applyPendingArchiveReplacementsSync() {
+  const pendingEntries = readPendingArchiveReplacements();
+  if (!pendingEntries.length) return { applied: 0, failed: 0, pending: 0 };
+  let applied = 0;
+  let failed = 0;
+  const remaining = [];
+  for (const entry of pendingEntries) {
+    const name = sanitizeArchiveFileName(entry?.name || "");
+    const monthKey = monthKeyFromArchiveFileName(name);
+    const tempName = path.basename(String(entry?.tempName || "").trim());
+    const tempPath = path.join(ARCHIVE_DIR, tempName);
+    const finalPath = path.join(ARCHIVE_DIR, name);
+    if (!name || !monthKey || !tempName) continue;
+    if (!fs.existsSync(tempPath)) continue;
+    beginArchiveDbReplacement(monthKey);
+    try {
+      try {
+        fs.unlinkSync(finalPath);
+      } catch (_) {
+        // Ignore missing prior archive file.
+      }
+      fs.renameSync(tempPath, finalPath);
+      const targetMtimeMs = Math.max(0, Number(entry?.mtimeMs || 0));
+      if (targetMtimeMs > 0) {
+        const mtime = new Date(targetMtimeMs);
+        fs.utimesSync(finalPath, mtime, mtime);
+      }
+      applied += 1;
+    } catch (err) {
+      failed += 1;
+      remaining.push(entry);
+      console.warn(
+        `[archive] pending replacement apply failed for ${name}:`,
+        err?.message || err,
+      );
+    } finally {
+      endArchiveDbReplacement(monthKey);
+    }
+  }
+  writePendingArchiveReplacements(remaining);
+  return { applied, failed, pending: remaining.length };
+}
+
+function listLocalArchiveManifest() {
+  const manifestMap = new Map();
+  try {
+    const names = fs
       .readdirSync(ARCHIVE_DIR, { withFileTypes: true })
       .filter((entry) => entry?.isFile?.())
       .map((entry) => String(entry.name || ""))
       .filter((name) => Boolean(sanitizeArchiveFileName(name)))
       .sort((a, b) => a.localeCompare(b));
-  } catch (_) {
-    names = [];
-  }
-  return names.map((name) => {
-    const filePath = path.join(ARCHIVE_DIR, name);
-    let size = 0;
-    let mtimeMs = 0;
-    try {
-      const stat = fs.statSync(filePath);
-      size = Math.max(0, Number(stat.size || 0));
-      mtimeMs = Math.max(0, Number(stat.mtimeMs || 0));
-    } catch (_) {
-      size = 0;
-      mtimeMs = 0;
+    for (const name of names) {
+      const filePath = path.join(ARCHIVE_DIR, name);
+      let size = 0;
+      let mtimeMs = 0;
+      try {
+        const stat = fs.statSync(filePath);
+        size = Math.max(0, Number(stat.size || 0));
+        mtimeMs = Math.max(0, Number(stat.mtimeMs || 0));
+      } catch (_) {
+        size = 0;
+        mtimeMs = 0;
+      }
+      manifestMap.set(name, {
+        name,
+        monthKey: monthKeyFromArchiveFileName(name),
+        size,
+        mtimeMs,
+      });
     }
-    return {
+  } catch (_) {
+    // Ignore manifest read failures and fall back to any staged replacements.
+  }
+  for (const pending of readPendingArchiveReplacements()) {
+    const name = sanitizeArchiveFileName(pending?.name || "");
+    if (!name) continue;
+    manifestMap.set(name, {
       name,
       monthKey: monthKeyFromArchiveFileName(name),
-      size,
-      mtimeMs,
-    };
-  });
+      size: Math.max(0, Number(pending?.size || 0)),
+      mtimeMs: Math.max(0, Number(pending?.mtimeMs || 0)),
+      pendingApply: true,
+    });
+  }
+  return Array.from(manifestMap.values()).sort((a, b) =>
+    String(a?.name || "").localeCompare(String(b?.name || "")),
+  );
 }
 
 function summarizeArchiveManifest(manifestRaw) {
@@ -2115,7 +2303,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
   const archiveSummary = includeArchive
     ? archive.unsupported
       ? "archive skipped (remote build has no archive sync)"
-      : `archive files pulled=${Number(archive.transferredFiles || 0).toLocaleString()}`
+      : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
     : "archive skipped";
   return {
     needsRestart: true,
@@ -2197,12 +2385,12 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
   const archivePushSummary = includeArchive
     ? archivePush.unsupported
       ? "archive upload skipped"
-      : `archive pushed=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
+      : `archive staged on gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()} (applied after restart)`
     : "archive skipped";
   const archivePullSummary = includeArchive
     ? archivePull.unsupported
       ? "archive pull skipped"
-      : `archive pulled=${Number(archivePull.transferredFiles || 0).toLocaleString()}`
+      : `archive staged=${Number(archivePull.transferredFiles || 0).toLocaleString()} (applied after restart)`
     : "archive skipped";
   return {
     needsRestart: true,
@@ -2532,7 +2720,6 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
   if (!name) throw new Error("Invalid archive file name.");
   const monthKey = monthKeyFromArchiveFileName(name);
   const tempPath = path.join(ARCHIVE_DIR, `${name}.download-${Date.now()}.tmp`);
-  const finalPath = path.join(ARCHIVE_DIR, name);
   await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
   closeArchiveDbForMonth(monthKey);
 
@@ -2558,18 +2745,18 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
       if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
     });
     await pipeline(body, fs.createWriteStream(tempPath));
-    closeArchiveDbForMonth(monthKey);
-    try {
-      await fs.promises.unlink(finalPath);
-    } catch (_) {
-      // Ignore missing existing archive file.
-    }
-    await fs.promises.rename(tempPath, finalPath);
     const targetMtimeMs = Math.max(0, Number(fileMeta?.mtimeMs || 0));
     if (targetMtimeMs > 0) {
       const mtime = new Date(targetMtimeMs);
-      await fs.promises.utimes(finalPath, mtime, mtime);
+      await fs.promises.utimes(tempPath, mtime, mtime);
     }
+    stagePendingArchiveReplacement({
+      name,
+      monthKey,
+      tempName: path.basename(tempPath),
+      size: Math.max(0, Number(fileMeta?.size || 0)),
+      mtimeMs: targetMtimeMs,
+    });
   } catch (err) {
     try {
       await fs.promises.unlink(tempPath);
@@ -2590,7 +2777,11 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
   const name = sanitizeArchiveFileName(fileMeta?.name || "");
   if (!name) throw new Error("Invalid archive file name.");
   const monthKey = monthKeyFromArchiveFileName(name);
-  const filePath = path.join(ARCHIVE_DIR, name);
+  const resolved = resolveArchiveFileForTransfer(name);
+  if (!resolved?.path) {
+    throw new Error("Archive file not found.");
+  }
+  const filePath = resolved.path;
   closeArchiveDbForMonth(monthKey);
   const stat = await fs.promises.stat(filePath);
   const stream = fs.createReadStream(filePath);
@@ -6147,15 +6338,23 @@ app.get("/api/replication/archive-download", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid archive file." });
   }
   const monthKey = monthKeyFromArchiveFileName(fileName);
-  const filePath = path.join(ARCHIVE_DIR, fileName);
   closeArchiveDbForMonth(monthKey);
   try {
-    const stat = await fs.promises.stat(filePath);
+    const resolved = resolveArchiveFileForTransfer(fileName);
+    if (!resolved?.path) {
+      throw new Error("Archive file not found.");
+    }
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Length", String(Math.max(0, Number(stat.size || 0))));
-    res.setHeader("x-archive-mtime", String(Math.max(0, Number(stat.mtimeMs || 0))));
+    res.setHeader(
+      "Content-Length",
+      String(Math.max(0, Number(resolved.size || 0))),
+    );
+    res.setHeader(
+      "x-archive-mtime",
+      String(Math.max(0, Number(resolved.mtimeMs || 0))),
+    );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-    fs.createReadStream(filePath).pipe(res);
+    fs.createReadStream(resolved.path).pipe(res);
   } catch (err) {
     return res.status(404).json({ ok: false, error: "Archive file not found." });
   }
@@ -6167,7 +6366,6 @@ app.post("/api/replication/archive-upload", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid archive file." });
   }
   const monthKey = monthKeyFromArchiveFileName(fileName);
-  const targetPath = path.join(ARCHIVE_DIR, fileName);
   const tempPath = path.join(ARCHIVE_DIR, `${fileName}.upload-${Date.now()}.tmp`);
   const expectedSize = Math.max(0, Number(req.headers["x-archive-size"] || 0));
   const expectedMtimeMs = Math.max(0, Number(req.headers["x-archive-mtime"] || Date.now()));
@@ -6198,15 +6396,15 @@ app.post("/api/replication/archive-upload", async (req, res) => {
       });
     });
     await pipeline(req, fs.createWriteStream(tempPath));
-    closeArchiveDbForMonth(monthKey);
-    try {
-      await fs.promises.unlink(targetPath);
-    } catch (_) {
-      // Ignore missing prior archive file.
-    }
-    await fs.promises.rename(tempPath, targetPath);
     const mtime = new Date(expectedMtimeMs);
-    await fs.promises.utimes(targetPath, mtime, mtime);
+    await fs.promises.utimes(tempPath, mtime, mtime);
+    stagePendingArchiveReplacement({
+      name: fileName,
+      monthKey,
+      tempName: path.basename(tempPath),
+      size: expectedSize > 0 ? expectedSize : recvBytes,
+      mtimeMs: expectedMtimeMs,
+    });
     broadcastUpdate({
       type: "xfer_progress",
       dir: "rx",
@@ -6224,6 +6422,7 @@ app.post("/api/replication/archive-upload", async (req, res) => {
         monthKey,
         size: expectedSize > 0 ? expectedSize : recvBytes,
         mtimeMs: expectedMtimeMs,
+        staged: true,
       },
     });
   } catch (err) {
@@ -7796,6 +7995,18 @@ cron.schedule("5 18 * * *", () => {
     console.warn("[Cron] Daily report generation failed:", e.message);
   }
 });
+
+const pendingArchiveApplyResult = applyPendingArchiveReplacementsSync();
+if (Number(pendingArchiveApplyResult?.applied || 0) > 0) {
+  console.log(
+    `[archive] Applied ${Number(pendingArchiveApplyResult.applied || 0)} staged archive replacement(s) on startup.`,
+  );
+}
+if (Number(pendingArchiveApplyResult?.failed || 0) > 0) {
+  console.warn(
+    `[archive] ${Number(pendingArchiveApplyResult.failed || 0)} staged archive replacement(s) still pending after startup.`,
+  );
+}
 
 const httpServer = app.listen(PORT, () => {
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
