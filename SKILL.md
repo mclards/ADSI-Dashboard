@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.20` in `package.json`
+- Current repo version baseline: `2.2.23` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -91,14 +91,21 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
 ### Replication and Archive Guardrails
 
 - Replicate `daily_report` and `daily_readings_summary` so historical reporting survives across machines.
-- Incremental cursor-based pull remains the preferred replication model.
+- Startup and live remote sync should keep the incremental cursor-based replication model.
+- Manual `Pull` in Remote mode must treat the gateway main DB as the source of truth: reconcile local-newer hot data first, then download a transactionally consistent gateway `adsi.db` snapshot and stage it for restart-safe local replacement.
 - Remote startup reconcile must happen before pull.
 - If local data is newer and reconciliation push fails, do not force pull.
 - Use chunked push uploads to avoid HTTP `413`.
-- Protect local-only settings during merge/import.
+- When replacing the main DB from the gateway, preserve only the explicit local-only remote settings on the client machine: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
+- Never copy the live gateway `adsi.db` file directly. Flush pending in-memory telemetry first, then export a consistent SQLite snapshot from the running gateway DB and transfer that snapshot file instead.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated `readings` or `energy_5min` rows are already older than local `retainDays`, write them directly into the local archive instead of the hot DB.
-- Archive DB files themselves are local artifacts unless a deliberate archive-file replication design is implemented later.
+- Archive DB file transfer is now implemented, but monthly archive `.db` replacement must be restart-safe:
+  - never rename or overwrite a live archive DB in place while the app is running
+  - stage pulled or uploaded archive replacements as temp files first
+  - apply staged archive replacements only during startup / restart before the server begins serving requests
+  - if an archive replacement is staged, archive manifest and archive download logic must expose the staged version immediately so follow-up sync decisions see the newest content
+  - manual pull/push messaging must state that staged archive DB changes apply after restart
 
 ## UX and Theming Rules
 
@@ -184,6 +191,7 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
 
 - Always bump `package.json` version before building any release EXE.
 - Keep visible version text aligned with `package.json`.
+- Keep `SKILL.md`, `CLAUDE.md`, and `MEMORY.md` aligned with the current released version whenever a release baseline changes.
 - Keep default plant-name fallbacks aligned with the current baseline: `ADSI Plant`.
 - Keep updater compatibility intact:
   - app ID stays `com.engr-m.inverter-dashboard`
@@ -191,11 +199,14 @@ Confidential or local-only examples to keep out of GitHub unless there is a deli
   - GitHub release channel remains `mclards/ADSI-Dashboard`
 - Never publish new installer or portable artifacts under an unchanged version.
 - Every build release must append the latest app version to the release artifacts and release metadata.
+- Never ship a release when the repo docs still describe an older baseline or older runtime behavior.
 - When the user says `publish release`, the agent should perform the release workflow directly:
   - build the required artifacts if needed
   - create or upload the GitHub release itself
   - avoid stopping at copy-paste commands unless GitHub auth, repo permissions, or network access blocks execution
 - If release publishing is blocked by auth, permissions, or network issues, state the exact blocker and then provide the minimal command(s) needed for the user to finish it.
+- Push the release commit and the release tag before creating the GitHub release so the published tag always resolves to the intended commit.
+- If a GitHub release create/upload call times out, inspect GitHub release state before retrying. Do not blindly rerun release creation and risk duplicate or broken draft state.
 
 ## Build and Artifact Rules
 
@@ -210,6 +221,12 @@ Do not include local-only license-generator builds in GitHub app releases unless
 
 - Before every release build, clean the workspace `release/` folder so old EXEs, blockmaps, unpacked folders, and transient build leftovers do not stack up.
 - After publishing the latest release, remove previous build leftovers from `release/` and keep only the current release assets when they still need to be referenced locally.
+- Do not assume a cleanup command worked. Verify the `release/` folder contents before and after build/publish.
+- The post-publish `release/` folder should contain only:
+  - `Inverter-Dashboard-Setup-<version>.exe`
+  - `Inverter-Dashboard-Setup-<version>.exe.blockmap`
+  - `Inverter-Dashboard-Portable-<version>.exe`
+  - `latest.yml`
 
 Build commands:
 
@@ -369,6 +386,9 @@ git diff -- public/index.html public/css/style.css
 - `better-sqlite3` is runtime-ABI specific:
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
+- Before any EXE build, run the required smoke test for the changed surface and do not skip it unless the user explicitly says to skip smoke testing.
+  - backend / DB / replication / archive changes: isolated server smoke test
+  - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.

@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.22
+- **Version:** 2.2.23
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -45,6 +45,15 @@ Real-time monitoring, 5-min energy resolution, AI solar forecasting, alarm manag
 electron-builder: NSIS installer + portable exe. Output: release/
 Extraresources: InverterCoreService.exe, ForecastCoreService.exe (PyInstaller from ADSI_*.py)
 Release size: ~228 MB each
+- Hard rule: bump `package.json`, visible version text, and the baseline/version notes in `SKILL.md`, `CLAUDE.md`, and `MEMORY.md` together before a release.
+- Hard rule: before any EXE build, run the smoke test that matches the changed surface; backend/DB/replication/archive changes require an isolated server smoke test, and Electron/startup changes require a live Electron startup smoke test too.
+- Hard rule: push the release commit and release tag before `gh release create`; if GitHub upload/create times out, inspect release state before retrying.
+- Hard rule: verify `release/` cleanup instead of assuming it worked; after publish keep only installer, portable exe, blockmap, and `latest.yml`.
+
+## Archive Replication Rule
+- Manual archive pull/upload must stage monthly archive `.db` replacements while the app is running and apply them only on restart.
+- Never overwrite or rename a live monthly archive DB in place during runtime.
+- If a newer archive replacement is staged, archive manifest and archive download should expose that staged version immediately so later sync logic sees the newest content before restart.
 
 ## Completed Overhaul (2026-02)
 Full 4-phase in-place overhaul completed. Key changes:
@@ -99,6 +108,13 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loading…" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
 - **public/js/app.js (DocumentFragment):** renderAlarmTable, renderAuditTable, renderReportTable, renderEnergyTable all now use DocumentFragment + single `tbody.textContent=""` + `appendChild(frag)` instead of per-row `appendChild`
 
+## v2.2.23 Changes — Gateway Main-DB Pull + Hot Transfer Monitor Hardening (2026-03-09)
+- **Manual pull now stages the gateway main DB:** `runManualPullSync` reconciles local-newer hot data first, then downloads a fresh gateway `adsi.db` snapshot, stages it locally, and applies it on restart instead of mutating the live remote DB table by table.
+- **Gateway DB snapshot stays consistent while the server is running:** the gateway flushes pending poller telemetry and exports the main DB through SQLite's online backup API before streaming it, so the pulled file is a transactionally consistent snapshot rather than a direct copy of the live `adsi.db`.
+- **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
+- **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
+- **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
 ## v2.2.22 Changes — Restart-Safe Archive Apply (2026-03-09)
 - **Archive staging instead of live swap:** manual archive pull/upload now keeps the current monthly `.db` live while the app is running, stages the downloaded/uploaded replacement in `archive/*.tmp`, and applies it only on the next restart.
 - **Restart apply path:** startup now applies pending staged archive replacements before the server begins serving requests, so the newer archive file becomes active immediately after restart without the Windows `EPERM` rename race.
@@ -113,6 +129,8 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Pull/push confirm dialogs:** Updated to explicitly state gateway-overwrites-local semantics and list preserved local-only settings.
 - **`/api/replication/pull-now`:** Destructures `forcePull` from body; passes to `runManualPullSync`; sync path returns HTTP 409 with `code:"LOCAL_NEWER_PUSH_FAILED"` on reconcile failure.
 - **Startup auto-sync and live bridge polling keep LWW** (`authoritative: false`); only manual pull is authoritative.
+- **Manual pull is now staged main-DB replace:** `runManualPullSync` reconciles local-newer hot data first, then downloads a transactionally consistent gateway `adsi.db` snapshot through `/api/replication/main-db`, stages it locally, and applies it on restart. The live remote DB stays unchanged until restart. Only the client-local remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored after the gateway DB takes over.
+- **Gateway main DB export is snapshot-based:** the server flushes pending poller telemetry, creates a consistent SQLite snapshot with `db.backup(...)`, and streams that snapshot file. It does not stream the live `adsi.db` file directly while the gateway is running.
 
 ## v2.2.16 Changes (2026-03-08)
 - **Operator messaging panel:** `chat_messages` table on gateway (500-row retention); 3 API routes `/api/chat/send|messages|read`; remote proxy + 5 s poll loop; floating `#chatBubble` + slide-in `#chatPanel`; `appConfirm`-style UX; `playChatSound()` via shared `getOrCreateAlarmAudioCtx()`; `markChatRead` in-flight guard + pending queue; alarm bell left / chat bubble right — no overlap

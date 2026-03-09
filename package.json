@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.22",
+  "version": "2.2.23",
   "description": "Dashboard V2 for industrial inverter monitoring, analytics, forecasting, and remote replication.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",

@@ -34,6 +34,7 @@ const {
   getDailyReadingsSummaryRows,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  stagePendingMainDbReplacement,
   beginArchiveDbReplacement,
   endArchiveDbReplacement,
   insertChatMessage,
@@ -178,6 +179,7 @@ const MAX_SHADOW_AGE_MS = CORE_MAX_SHADOW_AGE_MS; // 4h stale same-day shadow pr
 const MAX_HANDOFF_ACTIVE_MS = 4 * 60 * 60 * 1000; // 4h hard cap for active handoff
 const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "operationMode",
+  "remoteAutoSync",
   "remoteGatewayUrl",
   "remoteApiToken",
   "tailscaleDeviceHint",
@@ -188,6 +190,15 @@ const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "remoteReplicationLastSignature",
   REMOTE_TODAY_SHADOW_SETTING_KEY,
   REMOTE_GATEWAY_HANDOFF_SETTING_KEY,
+]);
+const REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS = new Set([
+  "operationMode",
+  "remoteAutoSync",
+  "remoteGatewayUrl",
+  "remoteApiToken",
+  "tailscaleDeviceHint",
+  "wireguardInterface",
+  "csvSavePath",
 ]);
 const REPLICATION_TABLE_DEFS = [
   {
@@ -1138,8 +1149,8 @@ function buildManualReplicationScope() {
     background: true,
     includeArchiveOptional: true,
     defaultIncludeArchive: false,
-    hotTables: REPLICATION_TABLE_DEFS.map((def) => def.name),
-    preservedSettings: Array.from(REMOTE_REPLICATION_PRESERVE_SETTING_KEYS),
+    hotTables: ["adsi.db (main database snapshot)"],
+    preservedSettings: Array.from(REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS),
     archive: {
       ...archiveSummary,
       optional: true,
@@ -1147,13 +1158,13 @@ function buildManualReplicationScope() {
     notes: {
       transport: "Manual sync uses the configured remote gateway URL over Tailscale/reachable network path.",
       push:
-        "Push sends the local replicated hot tables first, then returns to the gateway as source of truth and pulls back the latest state.",
+        "Push sends the local hot table delta first, then returns to the gateway as source of truth and stages the latest gateway main DB back to this machine.",
       pull:
-        "Pull fetches the gateway replicated hot tables and, when enabled, the monthly archive DB files.",
+        "Pull downloads a fresh gateway main DB snapshot and stages it for restart-safe local replacement. Optional monthly archive DB files can follow.",
       liveBridge:
         "Live bridge polling stays lightweight. Archive transfer is manual-only and does not run on the automatic live sync loop.",
       hotPriority:
-        "Hot replicated tables are always prioritized. Archive DB files are optional and intended for historical catch-up only.",
+        "The gateway main DB snapshot is always staged first. Archive DB files are optional and intended for historical catch-up only.",
     },
   };
 }
@@ -1418,6 +1429,10 @@ function buildPushDeltaChunks(deltaPayload) {
   const chunkCount = rawChunks.length;
   const totalRowsFromMeta = Number(sourceMeta?.totalRows || 0);
   const totalRows = totalRowsFromMeta > 0 ? totalRowsFromMeta : countReplicationRowsByTables(inTables);
+  const totalBytes = rawChunks.reduce(
+    (sum, chunk) => sum + Math.max(0, Number(chunk?.bytes || 0)),
+    0,
+  );
   const baseMode = String(sourceMeta?.mode || "push").trim() || "push";
   const baseSignature = String(sourceMeta?.signature || "").trim();
 
@@ -1433,6 +1448,7 @@ function buildPushDeltaChunks(deltaPayload) {
         mode: `${baseMode}-chunk`,
         signature: baseSignature,
         totalRows,
+        totalBytes,
         chunkCount,
         chunkIndex: idx + 1,
         chunkRows: Number(chunk.rows || 0),
@@ -1791,17 +1807,52 @@ function capturePreservedLocalSettings() {
   }));
 }
 
-function applyFullDbSnapshot(snapshot) {
+function capturePreservedMainDbSettings() {
+  const keys = Array.from(REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS);
+  if (!keys.length) return [];
+  const placeholders = keys.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
+    .all(...keys);
+  return rows.map((r) => ({
+    key: String(r?.key || "").trim(),
+    value: String(r?.value ?? ""),
+  }));
+}
+
+function clearReplicatedTablesForFullReplace(preserveSettings = true) {
+  for (const def of REPLICATION_TABLE_DEFS) {
+    if (def.name === "settings" && preserveSettings) {
+      const keys = Array.from(REMOTE_REPLICATION_PRESERVE_SETTING_KEYS);
+      if (!keys.length) {
+        db.prepare("DELETE FROM settings").run();
+        continue;
+      }
+      const placeholders = keys.map(() => "?").join(", ");
+      db.prepare(`DELETE FROM settings WHERE key NOT IN (${placeholders})`).run(...keys);
+      continue;
+    }
+    db.prepare(`DELETE FROM ${def.name}`).run();
+  }
+}
+
+function applyFullDbSnapshot(snapshot, opts = {}) {
   const snap = snapshot && typeof snapshot === "object" ? snapshot : null;
   if (!snap || typeof snap !== "object") throw new Error("Invalid replication snapshot payload.");
   const tables = snap.tables && typeof snap.tables === "object" ? snap.tables : null;
   if (!tables) throw new Error("Invalid replication snapshot tables.");
 
   const preserveRows = capturePreservedLocalSettings();
+  const replace = Boolean(opts?.replace);
+  const authoritative = Boolean(opts?.authoritative);
   const importTx = db.transaction(() => {
+    if (replace) {
+      clearReplicatedTablesForFullReplace(true);
+    }
     const merged = applyReplicationTableMerge(tables, {
       preserveSettings: true,
       inTransaction: true,
+      authoritative,
     });
 
     for (const kv of preserveRows) {
@@ -2031,13 +2082,15 @@ async function reconcileRemoteBeforePull(baseUrl) {
   }
 }
 
-async function runRemoteFullReplication(baseUrl) {
+async function runRemoteFullReplication(baseUrl, opts = {}) {
   if (remoteBridgeState.replicationRunning) return { skipped: true, reason: "in_progress" };
   remoteBridgeState.replicationRunning = true;
   remoteBridgeState.lastReplicationAttemptTs = Date.now();
   remoteBridgeState.lastReplicationError = "";
+  const xferLabel = String(opts?.label || "");
 
   try {
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0, label: xferLabel });
     const r = await fetch(`${baseUrl}/api/replication/full`, {
       method: "GET",
       headers: buildRemoteProxyHeaders(),
@@ -2051,7 +2104,7 @@ async function runRemoteFullReplication(baseUrl) {
       throw new Error(String(data?.error || "Gateway returned invalid replication payload."));
     }
 
-    const stats = applyFullDbSnapshot(data.snapshot);
+    const stats = applyFullDbSnapshot(data.snapshot, opts);
     ensurePersistedSettings();
     try {
       const cfg = loadIpConfigFromDb();
@@ -2072,9 +2125,11 @@ async function runRemoteFullReplication(baseUrl) {
     if (remoteBridgeState.lastSyncDirection !== "push-then-pull") {
       remoteBridgeState.lastSyncDirection = "pull-full";
     }
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: 0, importedRows: Number(stats.importedRows || 0), label: xferLabel });
 
-    return { ok: true, ...stats };
+    return { ok: true, mode: "full", ...stats };
   } catch (err) {
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: 0, label: xferLabel });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
     if (remoteBridgeState.lastSyncDirection !== "push-failed") {
       remoteBridgeState.lastSyncDirection = "pull-full-failed";
@@ -2246,7 +2301,7 @@ async function runRemotePushFull(baseUrl) {
 
 async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
   // Step 0 — Reconcile: push any local-newer data up before overwriting local state.
-  updateManualReplicationJob({ summary: "Reconciling with gateway before authoritative pull…" });
+  updateManualReplicationJob({ summary: "Reconciling with gateway before main DB pull…" });
   broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", sentBytes: 0, label: "Reconciling with gateway" });
   const reconcile = await reconcileRemoteBeforePull(baseUrl);
   if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
@@ -2265,21 +2320,20 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
   }
   broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", sentBytes: 0, label: "Reconcile complete" });
 
-  // Step 1 — Authoritative pull: gateway data replaces local data unconditionally.
-  updateManualReplicationJob({ summary: "Applying gateway data (authoritative)…" });
-  const hot = await runRemoteCatchUpReplication(
-    baseUrl,
-    REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-    REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    { authoritative: true, label: "Applying gateway data" },
-  );
-  if (hot?.skipped) {
+  // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
+  updateManualReplicationJob({ summary: "Pulling fresh gateway main database…" });
+  const mainDb = await pullMainDbFromRemote(baseUrl, {
+    label: "Pulling main database",
+    syncDirection: "pull-main-db-staged",
+    failureDirection: "pull-main-db-failed",
+  });
+  if (mainDb?.skipped) {
     throw new Error("Replication already in progress.");
   }
-  if (!hot?.ok) {
+  if (!mainDb?.ok) {
     throw new Error(
-      `Incremental pull failed: ${String(
-        hot?.error || "unknown error",
+      `Main DB pull failed: ${String(
+        mainDb?.error || "unknown error",
       )}. Ensure gateway and client are on the same build.`,
     );
   }
@@ -2296,10 +2350,11 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
   };
   if (includeArchive) {
     updateManualReplicationJob({
-      summary: "Hot pull finished. Downloading archive DB files from gateway.",
+      summary: "Main DB staged. Downloading archive DB files from gateway.",
     });
     archive = await pullArchiveFilesFromRemote(baseUrl);
   }
+  const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
   const archiveSummary = includeArchive
     ? archive.unsupported
       ? "archive skipped (remote build has no archive sync)"
@@ -2308,11 +2363,10 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
   return {
     needsRestart: true,
     direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-    mode: String(hot.mode || "incremental"),
-    importedRows: Number(hot.importedRows || 0),
-    batches: Number(hot.batches || 0),
+    mode: "main-db",
+    mainDb,
     archive,
-    summary: `Pull complete | imported=${Number(hot.importedRows || 0).toLocaleString()} | ${archiveSummary}. Restart the app to refresh runtime state.`,
+    summary: `Pull complete | ${mainDbSummary} | ${archiveSummary}. Restart the app to apply the new gateway database.`,
   };
 }
 
@@ -2346,21 +2400,20 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
   }
 
   updateManualReplicationJob({
-    summary: "Pulling the latest gateway state back for final consistency.",
+    summary: "Pulling the latest gateway main database back for final consistency.",
   });
-  const hotPull = await runRemoteCatchUpReplication(
-    baseUrl,
-    REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-    REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    { label: "Pulling final gateway state" },
-  );
-  if (hotPull?.skipped) {
+  const mainDb = await pullMainDbFromRemote(baseUrl, {
+    label: "Pulling final gateway database",
+    syncDirection: "push-then-pull-main-db-staged",
+    failureDirection: "push-then-pull-main-db-failed",
+  });
+  if (mainDb?.skipped) {
     throw new Error("Replication already in progress.");
   }
-  if (!hotPull?.ok) {
+  if (!mainDb?.ok) {
     throw new Error(
-      `Consistency pull failed: ${String(
-        hotPull?.error || "unknown error",
+      `Consistency main DB pull failed: ${String(
+        mainDb?.error || "unknown error",
       )}. Ensure gateway and client are on the same build.`,
     );
   }
@@ -2377,11 +2430,12 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
   };
   if (includeArchive) {
     updateManualReplicationJob({
-      summary: "Final hot pull finished. Pulling gateway archive files for local consistency.",
+      summary: "Final gateway main DB staged. Pulling gateway archive files for local consistency.",
     });
     archivePull = await pullArchiveFilesFromRemote(baseUrl);
   }
 
+  const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
   const archivePushSummary = includeArchive
     ? archivePush.unsupported
       ? "archive upload skipped"
@@ -2396,12 +2450,13 @@ async function runManualPushSync(baseUrl, includeArchive = true) {
     needsRestart: true,
     direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     pushedRows: Number(pushed.importedRows || 0),
-    pulledRows: Number(hotPull.importedRows || 0),
+    pulledRows: 0,
     pushChunks: Number(pushed.chunkCount || 0),
-    mode: String(hotPull.mode || "incremental"),
+    mode: "main-db",
+    mainDb,
     archivePush,
     archivePull,
-    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} pulled=${Number(hotPull.importedRows || 0).toLocaleString()} | ${archivePushSummary} | ${archivePullSummary}. Restart the app to refresh runtime state.`,
+    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} | ${mainDbSummary} | ${archivePushSummary} | ${archivePullSummary}. Restart the app to apply the refreshed gateway database.`,
   };
 }
 
@@ -2658,6 +2713,166 @@ async function pushDeltaInChunks(baseUrl, deltaPayload, opts = {}) {
     totalRows,
     signature,
   };
+}
+
+async function createGatewayMainDbSnapshotForTransfer() {
+  await fs.promises.mkdir(DATA_DIR, { recursive: true });
+  const tempPath = path.join(
+    DATA_DIR,
+    `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
+  );
+  try {
+    poller.flushPending();
+  } catch (_) {
+    // Best effort only; backup still produces a consistent snapshot.
+  }
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch (_) {
+    // Ignore checkpoint failures before snapshot export.
+  }
+  await db.backup(tempPath);
+  const stat = await fs.promises.stat(tempPath);
+  return {
+    tempPath,
+    size: Math.max(0, Number(stat?.size || 0)),
+    mtimeMs: Math.max(0, Number(stat?.mtimeMs || Date.now())),
+  };
+}
+
+async function pullMainDbFromRemote(baseUrl, opts = {}) {
+  if (remoteBridgeState.replicationRunning) {
+    return { skipped: true, reason: "in_progress" };
+  }
+  remoteBridgeState.replicationRunning = true;
+  remoteBridgeState.lastReplicationAttemptTs = Date.now();
+  remoteBridgeState.lastReplicationError = "";
+
+  const xferLabel = String(opts?.label || "Pulling main database");
+  const nextSyncDirection = String(opts?.syncDirection || "pull-main-db-staged");
+  const failureDirection = String(opts?.failureDirection || "pull-main-db-failed");
+  const preserveRows = capturePreservedMainDbSettings();
+  const tempPath = path.join(DATA_DIR, `adsi.db.download-${Date.now()}.tmp`);
+  let recvBytes = 0;
+  let totalBytes = 0;
+
+  try {
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    const r = await fetch(`${baseUrl}/api/replication/main-db`, {
+      method: "GET",
+      headers: buildRemoteProxyHeaders(),
+      timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    });
+    if (!r.ok) {
+      if (Number(r.status || 0) === 404) {
+        throw new Error("Gateway build does not expose main DB pull.");
+      }
+      throw new Error(`Main DB pull HTTP ${r.status} ${r.statusText}`);
+    }
+    totalBytes = Math.max(
+      0,
+      Number(
+        r.headers.get("x-main-db-size") ||
+          r.headers.get("content-length") ||
+          0,
+      ),
+    );
+    const targetMtimeMs = Math.max(
+      0,
+      Number(r.headers.get("x-main-db-mtime") || Date.now()),
+    );
+    const body = r.body;
+    if (!body) {
+      throw new Error("Main DB pull returned an empty body.");
+    }
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes,
+      chunkCount: 1,
+      label: xferLabel,
+    });
+
+    body.on("data", (chunk) => {
+      const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      if (bytes <= 0) return;
+      recvBytes += bytes;
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes,
+        totalBytes,
+        chunk: 1,
+        chunkCount: 1,
+        label: xferLabel,
+      });
+    });
+
+    await pipeline(body, fs.createWriteStream(tempPath));
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      await fs.promises.utimes(tempPath, mtime, mtime);
+    }
+    const staged = stagePendingMainDbReplacement({
+      tempName: path.basename(tempPath),
+      size: totalBytes > 0 ? totalBytes : recvBytes,
+      mtimeMs: targetMtimeMs,
+      preservedSettings: preserveRows,
+    });
+
+    remoteBridgeState.lastReplicationTs = Date.now();
+    remoteBridgeState.lastReplicationRows = 0;
+    remoteBridgeState.lastReplicationSignature = "";
+    remoteBridgeState.lastReplicationError = "";
+    remoteBridgeState.lastSyncDirection = nextSyncDirection;
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes,
+      totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: xferLabel,
+    });
+
+    return {
+      ok: true,
+      staged: true,
+      size: Math.max(0, Number(staged?.size || recvBytes || 0)),
+      mtimeMs: Math.max(0, Number(staged?.mtimeMs || targetMtimeMs || 0)),
+      preservedSettings: preserveRows
+        .map((row) => String(row?.key || ""))
+        .filter(Boolean),
+    };
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "error",
+      recvBytes,
+      totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+      chunkCount: 1,
+      label: xferLabel,
+    });
+    remoteBridgeState.lastReplicationError = String(err?.message || err);
+    if (remoteBridgeState.lastSyncDirection !== "push-failed") {
+      remoteBridgeState.lastSyncDirection = failureDirection;
+    }
+    return { ok: false, error: remoteBridgeState.lastReplicationError };
+  } finally {
+    remoteBridgeState.replicationRunning = false;
+  }
 }
 
 function shouldPullArchiveFile(remoteMeta, localMeta) {
@@ -6444,6 +6659,91 @@ app.post("/api/replication/archive-upload", async (req, res) => {
   }
 });
 
+app.get("/api/replication/main-db", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+
+  let snapshot = null;
+  let sentBytes = 0;
+  try {
+    snapshot = await createGatewayMainDbSnapshotForTransfer();
+    const fileName = "adsi.db";
+    const totalBytes = Math.max(0, Number(snapshot?.size || 0));
+    const targetMtimeMs = Math.max(0, Number(snapshot?.mtimeMs || Date.now()));
+    const stream = fs.createReadStream(snapshot.tempPath);
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "start",
+      sentBytes: 0,
+      totalBytes,
+      chunkCount: 1,
+      label: "Sending main database",
+    });
+
+    stream.on("data", (chunk) => {
+      sentBytes += Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "tx",
+        phase: "chunk",
+        sentBytes,
+        totalBytes,
+        chunk: 1,
+        chunkCount: 1,
+        label: "Sending main database",
+      });
+    });
+
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(totalBytes));
+    res.setHeader("x-main-db-size", String(totalBytes));
+    res.setHeader("x-main-db-mtime", String(targetMtimeMs));
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    await pipeline(stream, res);
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "done",
+      sentBytes,
+      totalBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: "Sending main database",
+    });
+  } catch (err) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "error",
+      sentBytes,
+      totalBytes: Math.max(0, Number(snapshot?.size || sentBytes || 0)),
+      chunkCount: 1,
+      label: "Sending main database",
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  } finally {
+    if (snapshot?.tempPath) {
+      try {
+        await fs.promises.unlink(snapshot.tempPath);
+      } catch (_) {
+        // Ignore temp snapshot cleanup failures.
+      }
+    }
+  }
+});
+
 app.get("/api/replication/summary", async (req, res) => {
   if (isRemotePullOnlyMode()) {
     return res.status(409).json({
@@ -6517,6 +6817,7 @@ app.post("/api/replication/push", async (req, res) => {
     const chunkIndex = Math.max(0, Number(meta?.chunkIndex || 0));
     const chunkCount = Math.max(0, Number(meta?.chunkCount || 0));
     const totalRows = Math.max(0, Number(meta?.totalRows || 0));
+    const totalBytes = Math.max(0, Number(meta?.totalBytes || 0));
     const signature = String(meta?.signature || "");
     const chunkBytesFromMeta = Math.max(0, Number(meta?.chunkBytes || 0));
     const reqBytes = Buffer.byteLength(JSON.stringify(req?.body || {}), "utf8");
@@ -6533,6 +6834,7 @@ app.post("/api/replication/push", async (req, res) => {
           dir: "rx",
           phase: "start",
           recvBytes: 0,
+          totalBytes,
           chunkCount,
           totalRows,
           label: "Receiving push",
@@ -6544,6 +6846,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "chunk",
         recvBytes: inboundPushRxProgress.recvBytes,
+        totalBytes,
         batch: chunkIndex > 0 ? chunkIndex : 1,
         chunkCount,
         totalRows,
@@ -6555,6 +6858,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "start",
         recvBytes: 0,
+        totalBytes,
         label: "Receiving push",
       });
       broadcastUpdate({
@@ -6562,6 +6866,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "chunk",
         recvBytes: Math.max(0, recvBytes),
+        totalBytes,
         batch: 1,
         chunkCount: 1,
         totalRows,
@@ -6586,6 +6891,7 @@ app.post("/api/replication/push", async (req, res) => {
           dir: "rx",
           phase: "done",
           recvBytes: Math.max(0, Number(inboundPushRxProgress.recvBytes || 0)),
+          totalBytes,
           chunkCount,
           totalRows,
           importedRows: Number(stats?.importedRows || 0),
@@ -6601,6 +6907,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "done",
         recvBytes: Math.max(0, recvBytes),
+        totalBytes,
         importedRows: Number(stats?.importedRows || 0),
         label: "Receiving push",
       });
@@ -6614,6 +6921,7 @@ app.post("/api/replication/push", async (req, res) => {
       dir: "rx",
       phase: "error",
       recvBytes,
+      totalBytes,
       label: "Receiving push",
     });
     inboundPushRxProgress.active = false;
@@ -6652,7 +6960,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
         {
           includeArchive,
           summary: "Queued background pull from gateway.",
-          runningSummary: "Reconciling then applying gateway data (authoritative).",
+          runningSummary: "Reconciling then pulling the staged gateway main database.",
         },
         () => runManualPullSync(base, includeArchive, forcePull),
       );
@@ -6671,7 +6979,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
         forcePull,
         job: started.job,
         message:
-          "Background pull started. Local data will be reconciled first, then gateway data applied authoritatively.",
+          "Background pull started. Local data will be reconciled first, then the gateway main database will be staged for restart-safe replacement.",
       });
     }
 
@@ -6727,7 +7035,7 @@ app.post("/api/replication/push-now", async (req, res) => {
         {
           includeArchive,
           summary: "Queued background push to gateway.",
-          runningSummary: "Pushing local data to gateway in the background.",
+          runningSummary: "Pushing local data to gateway, then staging the final gateway main database.",
         },
         () => runManualPushSync(base, includeArchive),
       );
@@ -6745,7 +7053,7 @@ app.post("/api/replication/push-now", async (req, res) => {
         includeArchive,
         job: started.job,
         message:
-          "Background push started. Hot replicated tables and archive DB files will continue syncing while you use the dashboard.",
+          "Background push started. Local hot data will be sent first, then the final gateway main database will be staged back to this machine.",
       });
     }
 

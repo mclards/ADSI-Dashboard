@@ -1398,6 +1398,7 @@ function getXferPhaseBadge(x) {
   if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
   if (lbl.includes("reconcil")) return { text: "Reconciling", cls: "xfer-phase-reconcile" };
   if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
+  if (lbl.includes("main database") && lbl.includes("final")) return { text: "Finalizing", cls: "xfer-phase-applying" };
   if (lbl.includes("final") || lbl.includes("final gateway")) return { text: "Finalizing", cls: "xfer-phase-applying" };
   if (lbl.includes("archive")) return { text: "Archive", cls: "xfer-phase-archive" };
   if (x?.dir === "tx") return { text: "Pushing", cls: "xfer-phase-push" };
@@ -1408,6 +1409,9 @@ function getXferScopeInfo(x) {
   const label = String(x?.label || "")
     .trim()
     .toLowerCase();
+  if (label.includes("main database") || label.includes("gateway database")) {
+    return { text: "Main DB", cls: "hot" };
+  }
   if (label.includes("archive")) {
     return { text: "Archive DB", cls: "archive" };
   }
@@ -3268,7 +3272,7 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
             });
             const job2 = result2?.job || null;
             if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
-            showMsg("replicationMsg", "Force pull started. Applying gateway data authoritatively.", "");
+            showMsg("replicationMsg", "Force pull started. Pulling and staging the gateway main database.", "");
             await refreshReplicationHealth(true);
             await refreshRuntimePerf(true);
           } catch (e2) {
@@ -3426,8 +3430,8 @@ async function refreshReplicationHealth(silent = true) {
           ? "Available only in Remote mode."
           : "A manual replication job is already running."
         : isManualArchiveSyncSelected()
-          ? "Start a background pull from the gateway, including archive DB files."
-          : "Start a background pull from the gateway using hot replicated data only.";
+          ? "Start a background pull from the gateway main database, including archive DB files."
+          : "Start a background pull from the gateway main database only.";
     }
     if (pushBtn) {
       pushBtn.disabled = manualDisabled;
@@ -3436,8 +3440,8 @@ async function refreshReplicationHealth(silent = true) {
           ? "Available only in Remote mode."
           : "A manual replication job is already running."
         : isManualArchiveSyncSelected()
-          ? "Start a background push to the gateway, including archive DB files, then pull back the final gateway state."
-          : "Start a background push to the gateway using hot replicated data only, then pull back the final gateway state.";
+          ? "Start a background push to the gateway, including archive DB files, then stage the final gateway main database back locally."
+          : "Start a background push to the gateway, then stage the final gateway main database back locally.";
     }
     if (archiveToggle) {
       archiveToggle.disabled = manualDisabled;
@@ -3545,10 +3549,10 @@ async function runReplicationPullNow() {
     : "\n\nArchive files: Skipped for this run.";
   const _pullOk = await appConfirm(
     "Start Authoritative Pull",
-    "Gateway data will overwrite your local copy of all replicated tables.\n\n" +
+    "The gateway main database will replace your local main database on restart.\n\n" +
     "Before pulling, local data will be reconciled with the gateway to protect any newer local changes. " +
-    "After reconciliation, the gateway state is applied authoritatively — gateway rows replace local rows regardless of local timestamp.\n\n" +
-    "Local-only settings (operation mode, gateway URL, export path, replication cursors, and handoff state) are always preserved." +
+    "After reconciliation, this machine downloads a fresh gateway `adsi.db` snapshot and stages it for restart-safe replacement.\n\n" +
+    "Local-only settings (operation mode, remote auto-sync, gateway URL/token, tailnet hint, and export path) are preserved on this machine." +
     archiveLine +
     "\n\nYou will be prompted to restart after completion.",
     { ok: "Start Pull" },
@@ -3557,7 +3561,7 @@ async function runReplicationPullNow() {
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Reconciling with gateway, then applying authoritative pull…", "");
+  showMsg("replicationMsg", "Reconciling with gateway, then pulling the gateway main database…", "");
   try {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
@@ -3568,8 +3572,8 @@ async function runReplicationPullNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background pull started. Reconciling first, then applying gateway data authoritatively. Archive files will follow."
-        : "Background pull started. Reconciling first, then applying gateway data authoritatively.",
+        ? "Background pull started. Reconciling first, then staging the gateway main database. Archive files will follow."
+        : "Background pull started. Reconciling first, then staging the gateway main database.",
       "",
     );
     await refreshReplicationHealth(true);
@@ -3596,7 +3600,7 @@ async function runReplicationPullNow() {
         });
         const job2 = result2?.job || null;
         if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
-        showMsg("replicationMsg", "Force pull started. Applying gateway data authoritatively.", "");
+        showMsg("replicationMsg", "Force pull started. Pulling and staging the gateway main database.", "");
         await refreshReplicationHealth(true);
         await refreshRuntimePerf(true);
       } catch (e2) {
@@ -3618,8 +3622,8 @@ async function runReplicationPushNow() {
     : "\n\nArchive files: Skipped for this run.";
   const _pushOk = await appConfirm(
     "Start Background Push",
-    "Your local replicated tables will be sent to the gateway. The gateway will then send its authoritative state back to this machine for final consistency.\n\n" +
-    "Local-only settings (operation mode, gateway URL, export path, replication cursors, and handoff state) are always preserved." +
+    "Your local hot-data delta will be sent to the gateway. The gateway will then send a fresh main database snapshot back to this machine for final consistency.\n\n" +
+    "Local-only settings (operation mode, remote auto-sync, gateway URL/token, tailnet hint, and export path) are preserved on this machine." +
     archiveLine +
     "\n\nYou will be prompted to restart after completion.",
     { ok: "Start Push" },
@@ -3639,8 +3643,8 @@ async function runReplicationPushNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background push started. Sending local data to gateway, then pulling final gateway state. Archive files included."
-        : "Background push started. Sending local data to gateway, then pulling final gateway state.",
+        ? "Background push started. Sending local data to gateway, then staging the final gateway main database. Archive files included."
+        : "Background push started. Sending local data to gateway, then staging the final gateway main database.",
       "",
     );
     await refreshReplicationHealth(true);

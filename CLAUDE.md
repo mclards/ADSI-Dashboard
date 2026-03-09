@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.20` in `package.json`
+- Current repo version baseline: `2.2.23` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -87,9 +87,17 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - If local data is newer and reconciliation push fails, do not force pull.
 - Use chunked push uploads to avoid HTTP `413`.
 - Protect local-only settings during merge/import.
+- Startup and live remote sync should stay incremental/LWW, but manual `Pull` in Remote mode must stage the gateway `adsi.db` for restart-safe local replacement so stale remote state is removed.
+- Never stream the live gateway `adsi.db` file directly. Flush pending in-memory telemetry, create a transactionally consistent SQLite snapshot from the running gateway DB, and transfer that snapshot file instead.
+- During a staged gateway main-DB replacement, preserve only the client-local remote settings: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated raw `readings` or `energy_5min` are older than local `retainDays`, write them directly into the local archive instead of the hot DB.
-- Archive DB files themselves are local artifacts unless a deliberate archive-file replication design is added later.
+- Archive DB file transfer is implemented, but monthly archive `.db` replacement must be restart-safe:
+  - never rename or overwrite a live archive DB in place while the app is running
+  - stage pulled or uploaded archive replacements as temp files first
+  - apply staged archive replacements only during startup / restart before the server begins serving requests
+  - if an archive replacement is staged, archive manifest and archive download logic must expose the staged version immediately so follow-up sync decisions see the newest content
+  - manual pull/push messaging must state that staged archive DB changes apply after restart
 
 ## UX and Theming Rules
 
@@ -120,6 +128,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 
 - Always bump `package.json` version before every EXE release build.
 - Keep visible version text aligned with `package.json`.
+- Keep `SKILL.md`, `CLAUDE.md`, and `MEMORY.md` aligned with the current released version whenever a release baseline changes.
 - Keep default plant-name fallbacks aligned with the current baseline: `ADSI Plant`.
 - Preserve updater compatibility:
   - app ID stays `com.engr-m.inverter-dashboard`
@@ -129,11 +138,14 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
     - `Inverter-Dashboard-Portable-<version>.exe`
 - Keep Windows build icon usage aligned with `icon-256.png`.
 - If visible branding changes, audit header, about, footer, and build metadata together.
+- Never ship a release when the repo docs still describe an older baseline or older runtime behavior.
 - When the user says `publish release`, Claude should execute the release workflow directly:
   - build artifacts if needed
   - create or upload the GitHub release itself
   - do not stop at providing commands unless auth, permissions, or network access prevent publishing
 - If publishing is blocked, report the exact blocker and then provide only the minimum command(s) the user needs to run.
+- Push the release commit and release tag before creating the GitHub release so the published tag resolves to the intended commit.
+- If a GitHub release create/upload call times out, inspect GitHub release state before retrying. Do not blindly rerun release creation and risk duplicate or broken draft state.
 
 ## Storage and Compatibility Paths
 
@@ -251,7 +263,16 @@ node --check electron/preload.js
 - `better-sqlite3` is runtime-ABI specific:
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
+- Before any EXE build, run the required smoke test for the changed surface and do not skip it unless the user explicitly says to skip smoke testing.
+  - backend / DB / replication / archive changes: isolated server smoke test
+  - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.
 - Release hygiene still applies: clean `release/` before building and remove prior release leftovers after publish.
+- Do not assume release-folder cleanup worked. Verify the `release/` folder contents before and after build/publish.
+- The post-publish `release/` folder should contain only:
+  - `Inverter-Dashboard-Setup-<version>.exe`
+  - `Inverter-Dashboard-Setup-<version>.exe.blockmap`
+  - `Inverter-Dashboard-Portable-<version>.exe`
+  - `latest.yml`

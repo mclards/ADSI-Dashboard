@@ -59,6 +59,10 @@ const DATA_DIR = resolveDataDir();
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, "adsi.db");
+const MAIN_DB_PENDING_REPLACEMENT_PATH = path.join(
+  DATA_DIR,
+  ".pending-main-db-replacement.json",
+);
 const ARCHIVE_DIR = path.join(DATA_DIR, "archive");
 const SUMMARY_SOLAR_START_H = 5;
 const SUMMARY_SOLAR_END_H = 18;
@@ -101,6 +105,152 @@ const ARCHIVE_READING_TABLE_DDL = `
 `;
 
 fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+
+function sanitizePreservedSettings(entriesRaw) {
+  const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+  const deduped = new Map();
+  for (const entry of entries) {
+    const key = String(entry?.key || "").trim().slice(0, 128);
+    if (!key) continue;
+    deduped.set(key, {
+      key,
+      value: String(entry?.value ?? ""),
+    });
+  }
+  return Array.from(deduped.values()).sort((a, b) =>
+    String(a?.key || "").localeCompare(String(b?.key || "")),
+  );
+}
+
+function readPendingMainDbReplacement() {
+  try {
+    if (!fs.existsSync(MAIN_DB_PENDING_REPLACEMENT_PATH)) return null;
+    const parsed = JSON.parse(
+      fs.readFileSync(MAIN_DB_PENDING_REPLACEMENT_PATH, "utf8"),
+    );
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      tempName: path.basename(String(parsed?.tempName || "").trim()),
+      size: Math.max(0, Number(parsed?.size || 0)),
+      mtimeMs: Math.max(0, Number(parsed?.mtimeMs || 0)),
+      stagedAt: Math.max(0, Number(parsed?.stagedAt || 0)),
+      fileApplied: Boolean(parsed?.fileApplied),
+      fileAppliedAt: Math.max(0, Number(parsed?.fileAppliedAt || 0)),
+      preservedSettings: sanitizePreservedSettings(parsed?.preservedSettings),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writePendingMainDbReplacement(entryRaw) {
+  const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : null;
+  if (!entry) {
+    try {
+      fs.unlinkSync(MAIN_DB_PENDING_REPLACEMENT_PATH);
+    } catch (_) {
+      // Ignore missing manifest cleanup failures.
+    }
+    return;
+  }
+  const payload = {
+    tempName: path.basename(String(entry?.tempName || "").trim()),
+    size: Math.max(0, Number(entry?.size || 0)),
+    mtimeMs: Math.max(0, Number(entry?.mtimeMs || 0)),
+    stagedAt: Math.max(0, Number(entry?.stagedAt || 0)),
+    fileApplied: Boolean(entry?.fileApplied),
+    fileAppliedAt: Math.max(0, Number(entry?.fileAppliedAt || 0)),
+    preservedSettings: sanitizePreservedSettings(entry?.preservedSettings),
+  };
+  const tempPath = `${MAIN_DB_PENDING_REPLACEMENT_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2));
+  fs.renameSync(tempPath, MAIN_DB_PENDING_REPLACEMENT_PATH);
+}
+
+function stagePendingMainDbReplacement({
+  tempName,
+  size = 0,
+  mtimeMs = 0,
+  preservedSettings = [],
+}) {
+  const safeTempName = path.basename(String(tempName || "").trim());
+  if (!safeTempName) {
+    throw new Error("Invalid staged main DB replacement payload.");
+  }
+  const previous = readPendingMainDbReplacement();
+  const oldTempName = path.basename(String(previous?.tempName || "").trim());
+  if (
+    oldTempName &&
+    oldTempName !== safeTempName &&
+    /\.tmp$/i.test(oldTempName)
+  ) {
+    try {
+      fs.unlinkSync(path.join(DATA_DIR, oldTempName));
+    } catch (_) {
+      // Ignore stale temp cleanup failures.
+    }
+  }
+  const staged = {
+    tempName: safeTempName,
+    size: Math.max(0, Number(size || 0)),
+    mtimeMs: Math.max(0, Number(mtimeMs || 0)),
+    stagedAt: Date.now(),
+    fileApplied: false,
+    fileAppliedAt: 0,
+    preservedSettings: sanitizePreservedSettings(preservedSettings),
+  };
+  writePendingMainDbReplacement(staged);
+  return staged;
+}
+
+function applyPendingMainDbReplacementFileSync() {
+  const pending = readPendingMainDbReplacement();
+  if (!pending) return { applied: 0, failed: 0, pending: 0 };
+  if (pending.fileApplied) {
+    return { applied: 0, failed: 0, pending: 1, awaitingSettingsRestore: true };
+  }
+  const tempName = path.basename(String(pending?.tempName || "").trim());
+  const tempPath = path.join(DATA_DIR, tempName);
+  if (!tempName || !fs.existsSync(tempPath)) {
+    return {
+      applied: 0,
+      failed: 1,
+      pending: 1,
+      error: "Staged main DB snapshot is missing.",
+    };
+  }
+  try {
+    for (const suffix of ["-wal", "-shm", ""]) {
+      try {
+        fs.unlinkSync(`${DB_PATH}${suffix}`);
+      } catch (_) {
+        // Ignore missing current DB files.
+      }
+    }
+    fs.renameSync(tempPath, DB_PATH);
+    const targetMtimeMs = Math.max(0, Number(pending?.mtimeMs || 0));
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      fs.utimesSync(DB_PATH, mtime, mtime);
+    }
+    writePendingMainDbReplacement({
+      ...pending,
+      tempName: "",
+      fileApplied: true,
+      fileAppliedAt: Date.now(),
+    });
+    return { applied: 1, failed: 0, pending: 1, awaitingSettingsRestore: true };
+  } catch (err) {
+    return {
+      applied: 0,
+      failed: 1,
+      pending: 1,
+      error: String(err?.message || err),
+    };
+  }
+}
+
+const pendingMainDbFileApplyResult = applyPendingMainDbReplacementFileSync();
 
 const db = new Database(DB_PATH);
 
@@ -242,6 +392,56 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fia_ts      ON forecast_intraday_adjusted(ts);
   CREATE INDEX IF NOT EXISTS idx_fia_date_ts ON forecast_intraday_adjusted(date, ts);
 `);
+
+function finalizePendingMainDbReplacementSync(database) {
+  const pending = readPendingMainDbReplacement();
+  if (!pending?.fileApplied) {
+    return {
+      applied: Number(pendingMainDbFileApplyResult?.applied || 0),
+      settingsRestored: 0,
+      failed: Number(pendingMainDbFileApplyResult?.failed || 0),
+      pending: Number(pendingMainDbFileApplyResult?.pending || 0),
+      awaitingSettingsRestore: false,
+      error: String(pendingMainDbFileApplyResult?.error || ""),
+    };
+  }
+  try {
+    const rows = sanitizePreservedSettings(pending?.preservedSettings);
+    if (rows.length > 0) {
+      const now = Date.now();
+      const upsert = database.prepare(
+        `INSERT INTO settings(key,value,updated_ts) VALUES(?,?,?)
+         ON CONFLICT(key) DO UPDATE SET
+           value=excluded.value,
+           updated_ts=excluded.updated_ts`,
+      );
+      const tx = database.transaction((entries) => {
+        for (const row of entries) {
+          upsert.run(row.key, row.value, now);
+        }
+      });
+      tx(rows);
+    }
+    writePendingMainDbReplacement(null);
+    return {
+      applied: Number(pendingMainDbFileApplyResult?.applied || 0),
+      settingsRestored: rows.length,
+      failed: Number(pendingMainDbFileApplyResult?.failed || 0),
+      pending: 0,
+      awaitingSettingsRestore: false,
+      error: "",
+    };
+  } catch (err) {
+    return {
+      applied: Number(pendingMainDbFileApplyResult?.applied || 0),
+      settingsRestored: 0,
+      failed: 1,
+      pending: 1,
+      awaitingSettingsRestore: true,
+      error: String(err?.message || err),
+    };
+  }
+}
 
 function getTableColumns(database, tableName) {
   return database
@@ -431,6 +631,22 @@ db.exec(`
      WHERE date = NEW.date AND inverter = NEW.inverter AND unit = NEW.unit;
   END;
 `);
+
+const pendingMainDbFinalizeResult = finalizePendingMainDbReplacementSync(db);
+if (Number(pendingMainDbFinalizeResult?.applied || 0) > 0) {
+  console.log("[DB] Applied staged main DB replacement on startup.");
+}
+if (Number(pendingMainDbFinalizeResult?.settingsRestored || 0) > 0) {
+  console.log(
+    `[DB] Restored ${Number(pendingMainDbFinalizeResult.settingsRestored || 0)} preserved local setting(s) after main DB replacement.`,
+  );
+}
+if (Number(pendingMainDbFinalizeResult?.failed || 0) > 0) {
+  console.warn(
+    "[DB] Staged main DB replacement is still pending:",
+    String(pendingMainDbFinalizeResult?.error || "unknown error"),
+  );
+}
 
 const stmts = {
   insertReading: db.prepare(`
@@ -1446,6 +1662,8 @@ module.exports = {
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  stagePendingMainDbReplacement,
+  readPendingMainDbReplacement,
   beginArchiveDbReplacement,
   endArchiveDbReplacement,
   insertChatMessage,
