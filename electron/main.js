@@ -1968,7 +1968,12 @@ function startEmbeddedServer(serverEntry) {
     serverBootError = "";
     return true;
   } catch (err) {
-    serverBootError = String(err?.message || err || "unknown error");
+    const code = String(err?.code || "").trim().toUpperCase();
+    const baseMsg = String(err?.message || err || "unknown error");
+    serverBootError =
+      code === "EADDRINUSE"
+        ? `Port ${SERVER_PORT} is already in use. Close any previous dashboard or local server process that is still bound to localhost:${SERVER_PORT}, then retry.`
+        : baseMsg;
     console.error("[main] Embedded web server start failed:", serverBootError);
     return false;
   }
@@ -2017,39 +2022,15 @@ function startServer() {
     return;
   }
 
-  // Packaged app: run the Express server in-process for startup reliability.
-  if (app.isPackaged) {
-    const ok = startEmbeddedServer(serverEntry);
-    if (!ok) {
-      showLoadingErrorMessage(
-        `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
-      );
-      return;
-    }
-    pollUntilReady();
+  // Run the Express server in-process for both packaged and workspace runs.
+  // This avoids stale detached dev server processes serving old backend code.
+  const ok = startEmbeddedServer(serverEntry);
+  if (!ok) {
+    showLoadingErrorMessage(
+      `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
+    );
     return;
   }
-
-  const runtimeBin = process.execPath;
-  console.log("[main] Spawning web server:", runtimeBin, serverEntry);
-  webProc = spawn(runtimeBin, [serverEntry], {
-    cwd: path.dirname(serverEntry),
-    stdio: ["inherit", "inherit", "inherit", "ipc"],
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      ELECTRON_RUN_AS_NODE: "1",
-    },
-    shell: false,
-  });
-  webProc.on("error", (err) => {
-    console.error("[main] Web server spawn error:", err.message);
-  });
-  webProc.on("exit", (code, signal) => {
-    console.warn("[main] Web server exited - code=" + code + " signal=" + signal);
-  });
-
-  // Poll HTTP until server is ready
   pollUntilReady();
 }
 
@@ -2411,9 +2392,29 @@ function createMainWindow() {
 
 function loadMainUrlWithRetry() {
   if (!mainWin || mainWin.isDestroyed()) return;
-  mainWin.loadURL(SERVER_URL).catch((err) => {
-    console.error("[main] loadURL error:", err.message);
-  });
+  const doLoad = () => {
+    if (!mainWin || mainWin.isDestroyed()) return;
+    mainWin.loadURL(SERVER_URL).catch((err) => {
+      console.error("[main] loadURL error:", err.message);
+    });
+  };
+  if (mainWin.__cacheClearedOnce) {
+    doLoad();
+    return;
+  }
+  mainWin.__cacheClearedOnce = true;
+  const ses = mainWin.webContents?.session || null;
+  if (!ses) {
+    doLoad();
+    return;
+  }
+  Promise.resolve()
+    .then(() => ses.clearCache())
+    .then(() => ses.clearStorageData({ storages: ["cache"] }))
+    .catch((err) => {
+      console.warn("[main] cache clear before load failed:", err.message);
+    })
+    .finally(doLoad);
 }
 
 function focusWindow(win) {
@@ -3113,6 +3114,16 @@ function killServer() {
   forceKillProc(forecastProc, "forecast");
   backendProc = null;
   forecastProc = null;
+
+  if (embeddedServerStarted && embeddedServerModule?.shutdownEmbedded) {
+    try {
+      embeddedServerModule.shutdownEmbedded();
+    } catch (err) {
+      console.warn("[main] embedded web server shutdown failed:", err.message);
+    }
+  }
+  embeddedServerStarted = false;
+  embeddedServerModule = null;
 
   // Ask the web server (Node.js child) to flush the DB and exit cleanly,
   // then force-kill it if it hasn't gone away within 1.5 s.

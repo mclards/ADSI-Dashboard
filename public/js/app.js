@@ -42,8 +42,12 @@ const State = {
     csvSavePath: "C:\\Logs\\InverterDashboard",
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: "toolkit",
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
     solcastTimezone: "Asia/Manila",
     invGridLayout: "4",
     exportUiState: {},
@@ -140,6 +144,14 @@ const State = {
     job: null,
     scope: null,
     restartPromptedJobId: "",
+  },
+  solcastPreview: {
+    day: "",
+    days: [],
+    dayCount: 1,
+    selectedDays: [],
+    rangeLabel: "",
+    loaded: false,
   },
   xfer: {
     slots: {
@@ -761,6 +773,11 @@ function getChartPalette() {
     actualFill: cssVar("--chart-actual-fill", "rgba(34,211,238,.14)"),
     ahead: cssVar("--chart-ahead", "#f59e0b"),
     aheadFill: cssVar("--chart-ahead-fill", "rgba(245,158,11,.10)"),
+    bandBorder: cssVar("--chart-band-border", "rgba(245,158,11,.36)"),
+    bandFill: cssVar("--chart-band-fill", "rgba(245,158,11,.16)"),
+    tooltipBg: cssVar("--forecast-preview-tooltip-bg", "rgba(24,28,36,.96)"),
+    tooltipBorder: cssVar("--forecast-preview-tooltip-border", "rgba(36,52,79,.84)"),
+    tooltipText: cssVar("--forecast-preview-tooltip-text", "#dce8fa"),
   };
 }
 
@@ -771,6 +788,12 @@ function refreshChartsTheme() {
     const opts = chart.options || {};
     if (opts.plugins?.legend?.labels) {
       opts.plugins.legend.labels.color = pal.legend;
+    }
+    if (opts.plugins?.tooltip) {
+      opts.plugins.tooltip.backgroundColor = pal.tooltipBg;
+      opts.plugins.tooltip.borderColor = pal.tooltipBorder;
+      opts.plugins.tooltip.titleColor = pal.tooltipText;
+      opts.plugins.tooltip.bodyColor = pal.tooltipText;
     }
     if (opts.scales?.x?.ticks) opts.scales.x.ticks.color = pal.tick;
     if (opts.scales?.x?.grid) opts.scales.x.grid.color = pal.grid;
@@ -786,6 +809,26 @@ function refreshChartsTheme() {
       if (chart.data.datasets[1]) {
         chart.data.datasets[1].borderColor = pal.ahead;
         chart.data.datasets[1].backgroundColor = pal.aheadFill;
+      }
+    }
+    if (key === "solcastPreview" && Array.isArray(chart.data?.datasets)) {
+      if (chart.data.datasets[0]) {
+        chart.data.datasets[0].borderColor = "rgba(0,0,0,0)";
+        chart.data.datasets[0].backgroundColor = "rgba(0,0,0,0)";
+      }
+      if (chart.data.datasets[1]) {
+        chart.data.datasets[1].borderColor = pal.bandBorder;
+        chart.data.datasets[1].backgroundColor = pal.bandFill;
+      }
+      if (chart.data.datasets[2]) {
+        chart.data.datasets[2].borderColor = pal.actual;
+        chart.data.datasets[2].backgroundColor = pal.actualFill;
+        chart.data.datasets[2].pointBackgroundColor = pal.actual;
+      }
+      if (chart.data.datasets[3]) {
+        chart.data.datasets[3].borderColor = pal.ahead;
+        chart.data.datasets[3].backgroundColor = pal.aheadFill;
+        chart.data.datasets[3].pointBackgroundColor = pal.ahead;
       }
     }
     chart.update("none");
@@ -1930,6 +1973,17 @@ function getDetailedErrorMessage(status, errorMsg) {
   return errorMsg || "Request failed. Please try again.";
 }
 
+function shouldPreserveServerErrorMessage(url = "") {
+  const u = String(url || "");
+  return (
+    u.includes("/api/runtime/network") ||
+    u.includes("/api/settings") ||
+    u.includes("/api/replication/") ||
+    u.includes("/api/forecast/solcast/") ||
+    u.includes("/api/export/solcast-preview")
+  );
+}
+
 function shouldShowProgress(url, method = "GET", options = {}) {
   if (Object.prototype.hasOwnProperty.call(options || {}, "progress")) {
     return Boolean(options.progress);
@@ -1966,6 +2020,9 @@ async function api(url, method = "GET", body, options = {}) {
         (text && text.trim()) ||
         `HTTP ${r.status}`;
       let detailedMsg = getDetailedErrorMessage(r.status, rawMsg);
+      if (shouldPreserveServerErrorMessage(url) && rawMsg) {
+        detailedMsg = String(rawMsg);
+      }
       if (
         url.includes("/api/forecast/generate") &&
         Number(r.status) >= 500
@@ -2111,9 +2168,18 @@ function applyRemoteGatewayInputNormalization() {
   return normalized;
 }
 
+function getSelectedOperationModeClient() {
+  return normalizeOperationModeValue(
+    $("setOperationMode")?.value || State.settings?.operationMode,
+  );
+}
+
+function getActiveOperationModeClient() {
+  return normalizeOperationModeValue(State.settings?.operationMode);
+}
+
 function isClientModeActive() {
-  const modeSetting = $("setOperationMode")?.value || State.settings?.operationMode;
-  return String(modeSetting || "gateway").trim().toLowerCase() === "remote";
+  return getActiveOperationModeClient() === "remote";
 }
 
 function syncDayAheadGeneratorAvailability() {
@@ -2249,6 +2315,13 @@ function switchPage(page) {
     refreshLicenseSection().catch(() => {});
     startReplicationHealthPolling();
     cbLoadSettings().catch(() => {});
+    const useToolkitPreview =
+      String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
+        .trim()
+        .toLowerCase() === "toolkit";
+    if (useToolkitPreview) {
+      loadSolcastPreview({ silent: true }).catch(() => {});
+    }
   }
 }
 
@@ -2404,10 +2477,13 @@ async function loadSettings() {
     $("setCsvPath").value = s.csvSavePath || "";
     $("setRetainDays").value = s.retainDays || 90;
     $("setForecastProvider").value = s.forecastProvider || "ml_local";
-    $("setSolcastBaseUrl").value =
-      s.solcastBaseUrl || "https://api.solcast.com.au";
+    $("setSolcastBaseUrl").value = s.solcastBaseUrl || "https://api.solcast.com.au";
+    $("setSolcastAccessMode").value = s.solcastAccessMode || "toolkit";
     $("setSolcastApiKey").value = s.solcastApiKey || "";
     $("setSolcastResourceId").value = s.solcastResourceId || "";
+    $("setSolcastToolkitEmail").value = s.solcastToolkitEmail || "";
+    $("setSolcastToolkitPassword").value = s.solcastToolkitPassword || "";
+    $("setSolcastToolkitSiteRef").value = s.solcastToolkitSiteRef || "";
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
     if ($("setPlantLatitude"))  $("setPlantLatitude").value  = s.plantLatitude  ?? "";
     if ($("setPlantLongitude")) $("setPlantLongitude").value = s.plantLongitude ?? "";
@@ -2422,6 +2498,11 @@ async function loadSettings() {
     if (providerSel && providerSel.dataset.bound !== "1") {
       providerSel.dataset.bound = "1";
       providerSel.addEventListener("change", syncForecastProviderUi);
+    }
+    const accessSel = $("setSolcastAccessMode");
+    if (accessSel && accessSel.dataset.bound !== "1") {
+      accessSel.dataset.bound = "1";
+      accessSel.addEventListener("change", syncForecastProviderUi);
     }
     applyExportUiStateToInputs(State.settings.exportUiState);
     unlockSettingsInputs();
@@ -2448,24 +2529,425 @@ function syncForecastProviderUi() {
   const provider = String($("setForecastProvider")?.value || "ml_local")
     .trim()
     .toLowerCase();
-  const useSolcast = provider === "solcast";
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
+    .trim()
+    .toLowerCase() === "api"
+    ? "api"
+    : "toolkit";
+  const apiMode = accessMode === "api";
+  const apiPanel = $("forecastSection")?.querySelector(".forecast-api-panel");
+  const toolkitPanel = $("forecastSection")?.querySelector(".forecast-toolkit-panel");
+  if (apiPanel) apiPanel.hidden = !apiMode;
+  if (toolkitPanel) toolkitPanel.hidden = apiMode;
+  ["setSolcastBaseUrl", "setSolcastAccessMode", "setSolcastTimezone"].forEach((id) => {
+    const ctrl = $(id);
+    if (!ctrl) return;
+    ctrl.disabled = false;
+  });
+  ["setSolcastApiKey", "setSolcastResourceId"].forEach((id) => {
+    const ctrl = $(id);
+    if (!ctrl) return;
+    ctrl.disabled = !apiMode;
+  });
   [
-    "setSolcastBaseUrl",
-    "setSolcastApiKey",
-    "setSolcastResourceId",
-    "setSolcastTimezone",
+    "setSolcastToolkitSiteRef",
+    "setSolcastToolkitEmail",
+    "setSolcastToolkitPassword",
   ].forEach((id) => {
     const ctrl = $(id);
     if (!ctrl) return;
-    ctrl.disabled = !useSolcast;
+    ctrl.disabled = apiMode;
+  });
+  const previewPanel = $("solcastPreviewPanel");
+  if (previewPanel) {
+    previewPanel.hidden = apiMode;
+  }
+  const previewDay = $("solcastPreviewDay");
+  const previewDayCount = $("solcastPreviewDayCount");
+  const previewBtn = $("btnSolcastPreviewRefresh");
+  const previewExportBtn = $("btnSolcastPreviewExport");
+  if (previewDay) previewDay.disabled = apiMode;
+  if (previewDayCount) previewDayCount.disabled = apiMode;
+  if (previewBtn) previewBtn.disabled = apiMode;
+  if (previewExportBtn) previewExportBtn.disabled = apiMode;
+  if (apiMode) clearSolcastPreview(false);
+}
+
+function readSolcastSettingsForm() {
+  return {
+    solcastBaseUrl: $("setSolcastBaseUrl")?.value || "https://api.solcast.com.au",
+    solcastAccessMode: $("setSolcastAccessMode")?.value || "toolkit",
+    solcastApiKey: $("setSolcastApiKey")?.value || "",
+    solcastResourceId: $("setSolcastResourceId")?.value || "",
+    solcastToolkitEmail: $("setSolcastToolkitEmail")?.value || "",
+    solcastToolkitPassword: $("setSolcastToolkitPassword")?.value || "",
+    solcastToolkitSiteRef: $("setSolcastToolkitSiteRef")?.value || "",
+    solcastTimezone: $("setSolcastTimezone")?.value || "",
+  };
+}
+
+function destroyChartByKey(key) {
+  const chart = State.charts[key];
+  if (!chart) return;
+  try {
+    chart.destroy();
+  } catch (_) {}
+  delete State.charts[key];
+}
+
+function fillSolcastPreviewDayOptions(days, selectedDay) {
+  const sel = $("solcastPreviewDay");
+  if (!sel) return;
+  const safeDays = Array.isArray(days) ? days.filter(Boolean) : [];
+  sel.innerHTML = "";
+  if (!safeDays.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No preview days";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  safeDays.forEach((day) => {
+    const opt = document.createElement("option");
+    opt.value = day;
+    opt.textContent = day;
+    if (day === selectedDay) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.disabled = false;
+}
+
+function normalizeSolcastPreviewDayCountClient(value) {
+  const n = Math.trunc(Number(value || 1));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(7, Math.max(1, n));
+}
+
+function syncSolcastPreviewDayCountOptions(days, selectedDay, selectedCount) {
+  const sel = $("solcastPreviewDayCount");
+  if (!sel) return;
+  const safeDays = Array.isArray(days) ? days.filter(Boolean) : [];
+  const idx = Math.max(0, safeDays.indexOf(String(selectedDay || "").trim()));
+  const maxAllowed = safeDays.length
+    ? Math.min(7, Math.max(1, safeDays.length - idx))
+    : 1;
+  Array.from(sel.options).forEach((opt) => {
+    const count = normalizeSolcastPreviewDayCountClient(opt.value);
+    opt.disabled = count > maxAllowed;
+  });
+  sel.value = String(Math.min(normalizeSolcastPreviewDayCountClient(selectedCount), maxAllowed));
+  sel.disabled = safeDays.length === 0;
+}
+
+function setSolcastPreviewTotals(
+  forecastText = "—",
+  actualText = "—",
+  rangeText = "—",
+  windowText = "05:00-18:00",
+) {
+  if ($("solcastPreviewForecastTotal")) {
+    $("solcastPreviewForecastTotal").textContent = forecastText;
+  }
+  if ($("solcastPreviewActualTotal")) {
+    $("solcastPreviewActualTotal").textContent = actualText;
+  }
+  if ($("solcastPreviewRange")) {
+    $("solcastPreviewRange").textContent = rangeText;
+  }
+  if ($("solcastPreviewWindow")) {
+    $("solcastPreviewWindow").textContent = windowText;
+  }
+}
+
+function clearSolcastPreview(resetDays = false) {
+  State.solcastPreview.loaded = false;
+  if (resetDays) {
+    State.solcastPreview.days = [];
+    State.solcastPreview.day = "";
+    State.solcastPreview.dayCount = 1;
+    State.solcastPreview.selectedDays = [];
+    State.solcastPreview.rangeLabel = "";
+    fillSolcastPreviewDayOptions([], "");
+    syncSolcastPreviewDayCountOptions([], "", 1);
+  }
+  setSolcastPreviewTotals("—", "—", "—", "05:00-18:00");
+  destroyChartByKey("solcastPreview");
+}
+
+function buildSolcastPreviewChart(payload) {
+  const canvas = $("solcastPreviewChart");
+  if (!canvas) return;
+  const pal = getChartPalette();
+  const uiFont = cssVar("--font-main", "Sora");
+  const labels = Array.isArray(payload?.labels) ? payload.labels : [];
+  const forecast = Array.isArray(payload?.forecastMwh) ? payload.forecastMwh : [];
+  const forecastLo = Array.isArray(payload?.forecastLoMwh) ? payload.forecastLoMwh : [];
+  const forecastHi = Array.isArray(payload?.forecastHiMwh) ? payload.forecastHiMwh : [];
+  const actual = Array.isArray(payload?.actualMwh) ? payload.actualMwh : [];
+  const forecastMw = Array.isArray(payload?.forecastMw) ? payload.forecastMw : [];
+  const forecastLoMw = Array.isArray(payload?.forecastLoMw) ? payload.forecastLoMw : [];
+  const forecastHiMw = Array.isArray(payload?.forecastHiMw) ? payload.forecastHiMw : [];
+  const actualMw = Array.isArray(payload?.actualMw) ? payload.actualMw : [];
+  const opts = chartOpts("MWh", true);
+  opts.layout.padding = { top: 2, right: 6, bottom: 2, left: 2 };
+  opts.plugins.legend.position = "top";
+  opts.plugins.legend.align = "center";
+  opts.plugins.legend.labels = {
+    ...opts.plugins.legend.labels,
+    usePointStyle: true,
+    pointStyle: "line",
+    boxWidth: 28,
+    boxHeight: 8,
+    padding: 14,
+    color: pal.legend,
+    font: { family: uiFont, size: 11, weight: "700" },
+  };
+  opts.plugins.tooltip = {
+    backgroundColor: pal.tooltipBg,
+    borderColor: pal.tooltipBorder,
+    borderWidth: 1,
+    titleColor: pal.tooltipText,
+    bodyColor: pal.tooltipText,
+    titleFont: { family: uiFont, size: 11, weight: "700" },
+    bodyFont: { family: uiFont, size: 11, weight: "600" },
+    padding: 10,
+    cornerRadius: 10,
+    displayColors: true,
+    boxPadding: 4,
+    callbacks: {
+      title(items) {
+        const raw = String(items?.[0]?.label || "").trim();
+        return raw.replace(/^(\d{2}-\d{2})\s/, "$1 · ");
+      },
+      label(ctx) {
+        const label = String(ctx.dataset?.label || "")
+          .replace(/^_+/, "")
+          .trim();
+        const value = Number(ctx.parsed?.y);
+        if (!Number.isFinite(value)) return `${label}: —`;
+        const mwValue = Number(ctx.dataset?.rawMwData?.[ctx.dataIndex]);
+        if (Number.isFinite(mwValue)) {
+          return `${label}: ${value.toFixed(3)} MWh | ${mwValue.toFixed(3)} MW`;
+        }
+        return `${label}: ${value.toFixed(3)} MWh`;
+      },
+    },
+  };
+  if (opts.scales?.x?.ticks) {
+    opts.scales.x.ticks.padding = 8;
+    opts.scales.x.ticks.font = { family: uiFont, size: 9, weight: "600" };
+  }
+  if (opts.scales?.x?.grid) {
+    opts.scales.x.grid.color = pal.grid;
+    opts.scales.x.grid.drawTicks = false;
+  }
+  if (opts.scales?.x) {
+    opts.scales.x.border = { display: false };
+  }
+  if (opts.scales?.y?.ticks) {
+    opts.scales.y.ticks.padding = 6;
+    opts.scales.y.ticks.font = { family: uiFont, size: 10, weight: "600" };
+  }
+  if (opts.scales?.y?.grid) {
+    opts.scales.y.grid.color = pal.grid;
+    opts.scales.y.grid.drawTicks = false;
+  }
+  if (opts.scales?.y?.title) {
+    opts.scales.y.title.font = { family: uiFont, size: 10, weight: "700" };
+  }
+  if (opts.scales?.y) {
+    opts.scales.y.border = { display: false };
+  }
+  opts.plugins.legend.labels.filter = (item) =>
+    !String(item?.text || "").startsWith("_");
+
+  const datasets = [
+    {
+      label: "_Forecast Band Lower",
+      data: forecastLo,
+      borderColor: "rgba(0,0,0,0)",
+      backgroundColor: "rgba(0,0,0,0)",
+      borderWidth: 0,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      tension: 0.18,
+      fill: false,
+      rawMwData: forecastLoMw,
+    },
+    {
+      label: "_Forecast Band Upper",
+      data: forecastHi,
+      borderColor: pal.bandBorder,
+      backgroundColor: pal.bandFill,
+      borderWidth: 1,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      tension: 0.18,
+      fill: "-1",
+      rawMwData: forecastHiMw,
+    },
+    {
+      label: "Estimated Actual",
+      data: actual,
+      borderColor: pal.actual,
+      backgroundColor: pal.actualFill,
+      borderWidth: 2.35,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      pointBorderWidth: 0,
+      pointBackgroundColor: pal.actual,
+      tension: 0.24,
+      cubicInterpolationMode: "monotone",
+      fill: false,
+      rawMwData: actualMw,
+    },
+    {
+      label: "Forecast",
+      data: forecast,
+      borderColor: pal.ahead,
+      backgroundColor: pal.aheadFill,
+      borderWidth: 2.35,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      pointBorderWidth: 0,
+      pointBackgroundColor: pal.ahead,
+      tension: 0.24,
+      cubicInterpolationMode: "monotone",
+      borderDash: [8, 5],
+      fill: false,
+      rawMwData: forecastMw,
+    },
+  ];
+
+  const chart = State.charts.solcastPreview;
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets = datasets;
+    chart.options = opts;
+    chart.update("none");
+    return;
+  }
+
+  State.charts.solcastPreview = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: opts,
   });
 }
 
-function syncOperationModeUi() {
-  const mode = String($("setOperationMode")?.value || "gateway")
+function applySolcastPreviewPayload(payload) {
+  const days = Array.isArray(payload?.daysCovered) ? payload.daysCovered : [];
+  const day = String(payload?.day || "").trim();
+  const dayCount = normalizeSolcastPreviewDayCountClient(payload?.dayCount || 1);
+  State.solcastPreview.days = days;
+  State.solcastPreview.day = day;
+  State.solcastPreview.dayCount = dayCount;
+  State.solcastPreview.selectedDays = Array.isArray(payload?.selectedDays)
+    ? payload.selectedDays.filter(Boolean)
+    : [];
+  State.solcastPreview.rangeLabel = String(payload?.rangeLabel || "").trim();
+  State.solcastPreview.loaded = true;
+  fillSolcastPreviewDayOptions(days, day);
+  syncSolcastPreviewDayCountOptions(days, day, dayCount);
+  setSolcastPreviewTotals(
+    `${Number(payload?.forecastTotalMwh || 0).toFixed(3)} MWh`,
+    Number(payload?.actualTotalMwh || 0) > 0
+      ? `${Number(payload?.actualTotalMwh || 0).toFixed(3)} MWh`
+      : "No estimated actuals",
+    String(payload?.rangeLabel || payload?.day || "—").trim() || "—",
+    `${payload?.startTime || "05:00"}-${payload?.endTime || "18:00"}`,
+  );
+  buildSolcastPreviewChart(payload);
+}
+
+async function loadSolcastPreview(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
     .trim()
     .toLowerCase();
-  const remote = mode === "remote";
+  if (accessMode !== "toolkit") {
+    clearSolcastPreview(false);
+    return null;
+  }
+  const btn = $("btnSolcastPreviewRefresh");
+  const payload = {
+    ...readSolcastSettingsForm(),
+    day:
+      opts.day !== undefined
+        ? opts.day
+        : $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
+    dayCount:
+      opts.dayCount !== undefined
+        ? opts.dayCount
+        : $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+  };
+  if (btn) btn.disabled = true;
+  showMsg(
+    "solcastPreviewMsg",
+    opts.silent ? "Loading preview..." : "Loading Solcast toolkit preview...",
+    "",
+  );
+  try {
+    const preview = await api("/api/forecast/solcast/preview", "POST", payload);
+    applySolcastPreviewPayload(preview);
+    showMsg(
+      "solcastPreviewMsg",
+      `✔ Preview loaded for ${preview.rangeLabel || preview.day} (${preview.startTime}-${preview.endTime})`,
+      "",
+    );
+    return preview;
+  } catch (err) {
+    clearSolcastPreview(false);
+    showMsg("solcastPreviewMsg", `✗ Preview failed: ${err.message}`, "error");
+    throw err;
+  } finally {
+    if (btn) btn.disabled = false;
+    syncForecastProviderUi();
+  }
+}
+
+async function exportSolcastPreviewXlsx() {
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
+    .trim()
+    .toLowerCase();
+  if (accessMode !== "toolkit") {
+    showMsg("solcastPreviewMsg", "Toolkit preview export is available only in Toolkit Login mode.", "error");
+    return;
+  }
+  const btn = $("btnSolcastPreviewExport");
+  if (btn) btn.disabled = true;
+  showMsg("solcastPreviewMsg", "Exporting Solcast preview to Excel...", "");
+  try {
+    const payload = {
+      ...readSolcastSettingsForm(),
+      day: $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
+      dayCount:
+        $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+    };
+    const result = await api("/api/export/solcast-preview", "POST", payload);
+    showMsg("solcastPreviewMsg", `✔ Saved: ${result.path}`, "");
+    await openExportPathFolder(result.path);
+    return result;
+  } catch (err) {
+    showMsg("solcastPreviewMsg", `✗ Export failed: ${err.message}`, "error");
+    throw err;
+  } finally {
+    if (btn) btn.disabled = false;
+    syncForecastProviderUi();
+  }
+}
+
+function syncOperationModeUi() {
+  const selectedMode = getSelectedOperationModeClient();
+  const activeMode = getActiveOperationModeClient();
+  const remote = activeMode === "remote";
   // Keep connectivity inputs editable in both modes so users can preconfigure
   // remote access while staying in Gateway mode.
   ["setRemoteGatewayUrl", "setRemoteApiToken", "setTailscaleDeviceHint"].forEach(
@@ -2478,9 +2960,11 @@ function syncOperationModeUi() {
   );
   showMsg(
     "networkMsg",
-    remote
-      ? `Remote mode selected. ${$("setRemoteAutoSync")?.checked ? "Startup Auto Sync is enabled." : "Startup Auto Sync is disabled; use manual Pull/Push."}`
-      : "Gateway mode selected. Local polling is active; remote/Tailscale fields are optional.",
+    selectedMode !== activeMode
+      ? `Selected mode is ${selectedMode === "remote" ? "Remote" : "Gateway"}, but the active runtime mode is still ${activeMode === "remote" ? "Remote" : "Gateway"}. Save Settings to apply the mode change.`
+      : remote
+        ? `Remote mode active. ${$("setRemoteAutoSync")?.checked ? "Startup Auto Sync is enabled." : "Startup Auto Sync is disabled; use manual Pull/Push."}`
+        : "Gateway mode active. Local polling is active; remote/Tailscale fields are optional.",
     "",
   );
   syncDayAheadGeneratorAvailability();
@@ -2519,10 +3003,18 @@ function pickSettingsConfigFields(src) {
     out.forecastProvider = String(src.forecastProvider ?? "");
   if (hasOwn(src, "solcastBaseUrl"))
     out.solcastBaseUrl = String(src.solcastBaseUrl ?? "");
+  if (hasOwn(src, "solcastAccessMode"))
+    out.solcastAccessMode = String(src.solcastAccessMode ?? "");
   if (hasOwn(src, "solcastApiKey"))
     out.solcastApiKey = String(src.solcastApiKey ?? "");
   if (hasOwn(src, "solcastResourceId"))
     out.solcastResourceId = String(src.solcastResourceId ?? "");
+  if (hasOwn(src, "solcastToolkitEmail"))
+    out.solcastToolkitEmail = String(src.solcastToolkitEmail ?? "");
+  if (hasOwn(src, "solcastToolkitPassword"))
+    out.solcastToolkitPassword = String(src.solcastToolkitPassword ?? "");
+  if (hasOwn(src, "solcastToolkitSiteRef"))
+    out.solcastToolkitSiteRef = String(src.solcastToolkitSiteRef ?? "");
   if (hasOwn(src, "solcastTimezone"))
     out.solcastTimezone = String(src.solcastTimezone ?? "");
   if (hasOwn(src, "invGridLayout"))
@@ -2954,6 +3446,7 @@ async function saveSettings() {
   const prevMode = State.settings.operationMode;
   const prevRetainDays = Math.max(1, Number(State.settings.retainDays || 90));
   const normalizedGateway = applyRemoteGatewayInputNormalization();
+  const solcastConfig = readSolcastSettingsForm();
   const body = {
     plantName: $("setPlantName").value,
     operatorName: $("setOperatorName").value,
@@ -2970,10 +3463,7 @@ async function saveSettings() {
     csvSavePath: $("setCsvPath").value,
     retainDays: Number($("setRetainDays").value),
     forecastProvider: $("setForecastProvider").value,
-    solcastBaseUrl: $("setSolcastBaseUrl").value,
-    solcastApiKey: $("setSolcastApiKey").value,
-    solcastResourceId: $("setSolcastResourceId").value,
-    solcastTimezone: $("setSolcastTimezone").value,
+    ...solcastConfig,
     plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
     plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
     inverterPollConfig: {
@@ -3527,13 +4017,14 @@ async function refreshRuntimePerf(silent = true) {
 }
 
 function ensureRemoteModeForReplicationActions() {
-  const mode = String($("setOperationMode")?.value || State.settings.operationMode || "gateway")
-    .trim()
-    .toLowerCase();
-  if (mode !== "remote") {
+  const activeMode = getActiveOperationModeClient();
+  const selectedMode = getSelectedOperationModeClient();
+  if (activeMode !== "remote") {
     showMsg(
       "replicationMsg",
-      "Replication actions are available only in Remote mode.",
+      selectedMode === "remote"
+        ? "Replication actions require active Remote mode. Save Settings first to apply the mode change."
+        : "Replication actions are available only in Remote mode.",
       "error",
     );
     return false;
@@ -3658,12 +4149,7 @@ async function runReplicationPushNow() {
 
 async function testSolcastConnection() {
   const btn = $("btnSolcastTest");
-  const payload = {
-    solcastBaseUrl: $("setSolcastBaseUrl")?.value || "",
-    solcastApiKey: $("setSolcastApiKey")?.value || "",
-    solcastResourceId: $("setSolcastResourceId")?.value || "",
-    solcastTimezone: $("setSolcastTimezone")?.value || "",
-  };
+  const payload = readSolcastSettingsForm();
 
   if (btn) btn.disabled = true;
   showMsg("solcastTestMsg", "Testing Solcast connection...", "");
@@ -3672,11 +4158,18 @@ async function testSolcastConnection() {
     const covered = Array.isArray(r?.daysCovered) ? r.daysCovered.length : 0;
     const slots = Number(r?.dayAheadPreview?.slots || 0);
     const mwh = Number(r?.dayAheadPreview?.totalMwh || 0).toFixed(6);
+    const modeLabel =
+      String(r?.accessMode || payload.solcastAccessMode || "").trim().toLowerCase() === "api"
+        ? "API"
+        : "Toolkit";
     const msg =
-      `✔ Solcast connected | records=${Number(r?.records || 0)} | days=${covered} | next-day slots=${slots} | next-day MWh=${mwh}`;
+      `✔ Solcast ${modeLabel} connected | records=${Number(r?.records || 0)} | days=${covered} | next-day slots=${slots} | next-day MWh=${mwh}`;
     showMsg("solcastTestMsg", msg, "");
     if (r?.warning) {
       showToast(`Solcast warning: ${r.warning}`, "warning", 4200);
+    }
+    if (String(r?.accessMode || payload.solcastAccessMode || "").trim().toLowerCase() === "toolkit") {
+      loadSolcastPreview({ silent: true }).catch(() => {});
     }
   } catch (e) {
     showMsg("solcastTestMsg", `✗ Solcast test failed: ${e.message}`, "error");
@@ -8908,6 +9401,26 @@ function bindEventHandlers() {
   // Settings page
   $("btnSolcastSaveTest")?.addEventListener("click", saveAndTestSolcast);
   $("btnSolcastTest")?.addEventListener("click", testSolcastConnection);
+  $("btnSolcastPreviewRefresh")?.addEventListener("click", () =>
+    loadSolcastPreview({ silent: false }).catch(() => {}),
+  );
+  $("btnSolcastPreviewExport")?.addEventListener("click", () =>
+    exportSolcastPreviewXlsx().catch(() => {}),
+  );
+  $("solcastPreviewDay")?.addEventListener("change", (event) => {
+    const nextDay = String(event?.target?.value || "").trim();
+    if (!nextDay) return;
+    syncSolcastPreviewDayCountOptions(
+      State.solcastPreview.days,
+      nextDay,
+      $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+    );
+    loadSolcastPreview({ day: nextDay, silent: true }).catch(() => {});
+  });
+  $("solcastPreviewDayCount")?.addEventListener("change", (event) => {
+    const nextCount = normalizeSolcastPreviewDayCountClient(event?.target?.value || 1);
+    loadSolcastPreview({ dayCount: nextCount, silent: true }).catch(() => {});
+  });
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
   $("btnSaveSettings")?.addEventListener("click", saveSettings);

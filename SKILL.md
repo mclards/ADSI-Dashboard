@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.23` in `package.json`
+- Current repo version baseline: `2.2.24` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -98,6 +98,12 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
 - Use chunked push uploads to avoid HTTP `413`.
 - When replacing the main DB from the gateway, preserve only the explicit local-only remote settings on the client machine: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
 - Never copy the live gateway `adsi.db` file directly. Flush pending in-memory telemetry first, then export a consistent SQLite snapshot from the running gateway DB and transfer that snapshot file instead.
+- Keep replication transport optimized by default:
+  - reuse HTTP connections for gateway transfer requests
+  - allow gzip compression for large replication JSON payloads and large main-DB / archive downloads
+  - keep push uploads chunked and allow gzip request bodies for large JSON push batches
+  - archive pull/push may run with small bounded concurrency, but do not remove restart-safe staging
+- Do not silently revert transfer optimization settings without measuring the impact on slow links first.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated `readings` or `energy_5min` rows are already older than local `retainDays`, write them directly into the local archive instead of the hot DB.
 - Archive DB file transfer is now implemented, but monthly archive `.db` replacement must be restart-safe:
@@ -106,6 +112,7 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
   - apply staged archive replacements only during startup / restart before the server begins serving requests
   - if an archive replacement is staged, archive manifest and archive download logic must expose the staged version immediately so follow-up sync decisions see the newest content
   - manual pull/push messaging must state that staged archive DB changes apply after restart
+  - bounded parallel archive transfer must still keep transfer-monitor progress accurate and failure handling deterministic
 
 ## UX and Theming Rules
 
@@ -256,11 +263,15 @@ If a visible product rename affects install directory behavior, assess updater i
 
 - `gateway`
   - polls plant locally
-  - can generate day-ahead forecast
+  - is the authoritative source of truth for live data, reports, forecasts, chat, and replication snapshots
+  - is the only mode allowed to generate day-ahead and intraday-adjusted forecast data
 - `remote`
-  - pulls live data from gateway
+  - uses the local DB as its working copy after pull and live sync
+  - manual `Pull` stages and replaces the local main DB from the gateway so stale client data is cleared safely
+  - continues mirroring inbound hot data locally from the gateway after pull so exports, reports, and later mode switches keep using local state
   - can run replication workflows
-  - must not run day-ahead generation
+  - may run local remote-side utilities such as Solcast toolkit test / preview / export
+  - must not run day-ahead generation while active in `remote` mode
 
 ## Operator Messaging Rules
 

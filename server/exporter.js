@@ -15,6 +15,7 @@ const {
   queryReadingsRange,
   queryEnergy5minRange,
   queryEnergy5minRangeAll,
+  sumEnergy5minByInverterRange,
 } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
@@ -347,7 +348,7 @@ function normalizeFormat(format) {
   return f === 'xlsx' ? 'xlsx' : 'csv';
 }
 
-async function writeExport(headers, rows, dir, filenameBase, format) {
+async function writeExport(headers, rows, dir, filenameBase, format, options = {}) {
   const fmt = normalizeFormat(format);
   if (fmt === 'xlsx') {
     const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
@@ -363,7 +364,7 @@ async function writeExport(headers, rows, dir, filenameBase, format) {
       ws.addRow(keys.map((k) => r[k] ?? ''));
     }
 
-    if (keys.length) {
+    if (keys.length && options?.autoFilter !== false) {
       ws.autoFilter = {
         from: { row: 1, column: 1 },
         to: { row: 1, column: keys.length },
@@ -656,12 +657,6 @@ function resolveAuditIp(ipMap, inverter, currentIp) {
   return String(ipMap[inv] || '').trim();
 }
 
-function endOfLocalDay(startTs) {
-  const d = new Date(Number(startTs || 0));
-  d.setHours(23, 59, 59, 999);
-  return d.getTime();
-}
-
 function summarizeReadingsForEnergy(rowsRaw) {
   const rows = annotateReadingsWithComputedEnergy(rowsRaw);
   const states = new Map();
@@ -697,107 +692,123 @@ function summarizeReadingsForEnergy(rowsRaw) {
   return states;
 }
 
-function getSummaryEnergyKwh(row) {
-  const first = Number(row?.first_kwh || 0);
-  const last = Number(row?.last_kwh || first);
-  const diff = last - first;
-  if (Number.isFinite(diff) && diff > 0) return diff;
-  return Math.max(0, Number(last || 0));
+function buildTodaySupplementMap(rowsRaw) {
+  const out = new Map();
+  for (const row of rowsRaw || []) {
+    const inv = Number(row?.inverter || 0);
+    const totalKwh = Number(row?.total_kwh || 0);
+    if (!(inv > 0) || !(totalKwh >= 0)) continue;
+    out.set(inv, Math.max(0, Number(totalKwh.toFixed(6))));
+  }
+  return out;
 }
 
-function collectEnergyExportRows(startTs, endTs, inverter) {
+function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
   const { invCount, units: invUnits } = readInverterConfig();
   const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
   const mapped = [];
+  const today = fmtDate(Date.now());
+  const supplementalTodayMap = buildTodaySupplementMap(options?.supplementalTodayRows);
+  const rangeRows = invNum
+    ? queryReadingsRange(invNum, s, e)
+    : queryReadingsRangeAll(s, e);
+  const rowsByDay = new Map();
+  for (const row of rangeRows) {
+    const ts = Number(row?.ts || 0);
+    if (!(ts > 0)) continue;
+    const day = fmtDate(ts);
+    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+    rowsByDay.get(day).push(row);
+  }
 
   for (const day of iterateLocalDates(s, e)) {
-    const summaryRows = stmts.getDailyReadingsSummaryDay
-      .all(day)
-      .filter((row) => !invNum || Number(row?.inverter || 0) === invNum);
-    const summaryMap = new Map(
-      summaryRows.map((row) => [`${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`, row]),
-    );
-
-    let fallbackMap = null;
-    const needsFallback = selectedInvs.some((inv) =>
-      (invUnits[inv] || []).some((unit) => !summaryMap.has(`${inv}|${unit}`)),
-    );
-    if (needsFallback) {
-      const dayStart = new Date(`${day}T00:00:00`).getTime();
-      const dayEnd = endOfLocalDay(dayStart);
-      const rows = invNum
-        ? queryReadingsRange(invNum, dayStart, dayEnd)
-        : queryReadingsRangeAll(dayStart, dayEnd);
-      fallbackMap = summarizeReadingsForEnergy(rows);
+    const dayRows = rowsByDay.get(day) || [];
+    const dayMap = summarizeReadingsForEnergy(dayRows);
+    let dayTotalMwh = 0;
+    const dayStart = new Date(`${day}T00:00:00.000`).getTime();
+    const dayEnd = new Date(`${day}T23:59:59.999`).getTime();
+    const dayRangeStart = Math.max(s, dayStart);
+    const dayRangeEnd = Math.min(e, dayEnd);
+    const authoritativeByInv = sumEnergy5minByInverterRange(dayRangeStart, dayRangeEnd);
+    if (day === today && dayRangeStart === dayStart && supplementalTodayMap.size) {
+      for (const [inv, totalKwh] of supplementalTodayMap.entries()) {
+        authoritativeByInv.set(inv, Math.max(authoritativeByInv.get(inv) || 0, totalKwh));
+      }
     }
 
     for (const inv of selectedInvs) {
       const units = (invUnits[inv] || []).slice().sort((a, b) => a - b);
-      let subtotalKwh = 0;
+      const detailRows = [];
+      let rawSubtotalKwh = 0;
       for (const unit of units) {
         const key = `${inv}|${unit}`;
-        const summary = summaryMap.get(key);
-        const fallback = fallbackMap?.get(key) || null;
-        const firstTs = Number(summary?.first_ts || fallback?.first_ts || 0);
-        const lastTs = Number(summary?.last_ts || fallback?.last_ts || 0);
-        const sampleCount = Math.max(
-          0,
-          Math.trunc(Number(summary?.sample_count || fallback?.sample_count || 0)),
-        );
-        const onlineSamples = Math.max(
-          0,
-          Math.trunc(Number(summary?.online_samples || fallback?.online_samples || 0)),
-        );
-        const pacPeakW = Math.max(0, Number(summary?.pac_peak || fallback?.pac_peak || 0));
-        const energyKwh = summary
-          ? Math.max(0, getSummaryEnergyKwh(summary))
-          : Math.max(0, Number(fallback?.energy_kwh || 0));
-        subtotalKwh += energyKwh;
-        mapped.push({
+        const summary = dayMap.get(key) || null;
+        if (!summary) continue;
+        const firstTs = Number(summary?.first_ts || 0);
+        const lastTs = Number(summary?.last_ts || 0);
+        const pacPeakW = Math.max(0, Number(summary?.pac_peak || 0));
+        const energyKwh = Math.max(0, Number(summary?.energy_kwh || 0));
+        rawSubtotalKwh += energyKwh;
+        detailRows.push({
           Date: day,
-          Inverter: `INV-${String(inv).padStart(2, '0')}`,
-          Node: unit,
+          Inverter_Number: inv,
+          Node_Number: unit,
           First_Seen: firstTs ? fmtTime(firstTs) : '',
           Last_Seen: lastTs ? fmtTime(lastTs) : '',
-          Samples: sampleCount,
-          Online_Samples: onlineSamples,
-          Peak_Pac_kW: (pacPeakW / 1000).toFixed(3),
-          Energy_kWh: Number(energyKwh).toFixed(3),
-          Energy_MWh: Number(energyKwh / 1000).toFixed(6),
-          Status: energyKwh > 0 || onlineSamples > 0 ? 'ACTIVE' : 'INACTIVE',
+          Peak_Pac_kW: Number((pacPeakW / 1000).toFixed(3)),
+          rawEnergyKwh: energyKwh,
         });
       }
 
+      const authoritativeKwh = Math.max(0, Number(authoritativeByInv.get(inv) || 0));
+      if (!(authoritativeKwh > 0) && !detailRows.length) continue;
+
+      const scale =
+        authoritativeKwh > 0 && rawSubtotalKwh > 0
+          ? authoritativeKwh / rawSubtotalKwh
+          : 1;
+      let subtotalMwh = 0;
+      for (const row of detailRows) {
+        const energyMwh = (Number(row.rawEnergyKwh || 0) * scale) / 1000;
+        subtotalMwh += energyMwh;
+        mapped.push({
+          Date: row.Date,
+          Inverter_Number: row.Inverter_Number,
+          Node_Number: row.Node_Number,
+          First_Seen: row.First_Seen,
+          Last_Seen: row.Last_Seen,
+          Peak_Pac_kW: row.Peak_Pac_kW,
+          Total_MWh: Number(energyMwh.toFixed(6)),
+        });
+      }
+      if (authoritativeKwh > 0) {
+        subtotalMwh = authoritativeKwh / 1000;
+      }
+      dayTotalMwh += subtotalMwh;
+
       mapped.push({
-        Date: `Total for ${day} (Inverter ${inv})`,
-        Inverter: '',
-        Node: '',
+        Date: day,
+        Inverter_Number: inv,
+        Node_Number: 'TOTAL',
         First_Seen: '',
         Last_Seen: '',
-        Samples: '',
-        Online_Samples: '',
         Peak_Pac_kW: '',
-        Energy_kWh: Number(subtotalKwh).toFixed(3),
-        Energy_MWh: Number(subtotalKwh / 1000).toFixed(6),
-        Status: subtotalKwh > 0 ? 'ACTIVE' : 'INACTIVE',
-      });
-      mapped.push({
-        Date: '',
-        Inverter: '',
-        Node: '',
-        First_Seen: '',
-        Last_Seen: '',
-        Samples: '',
-        Online_Samples: '',
-        Peak_Pac_kW: '',
-        Energy_kWh: '',
-        Energy_MWh: '',
-        Status: '',
+        Total_MWh: Number(subtotalMwh.toFixed(6)),
       });
     }
+
+    mapped.push({
+      Date: day,
+      Inverter_Number: 'DAY TOTAL',
+      Node_Number: '',
+      First_Seen: '',
+      Last_Seen: '',
+      Peak_Pac_kW: '',
+      Total_MWh: Number(dayTotalMwh.toFixed(6)),
+    });
   }
 
   return mapped;
@@ -872,50 +883,39 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
 // Per-unit (node) rows showing computed energy only.
 // Energy is derived from PAC trapezoidal integration with a 30 000 ms gap cap,
 // aligned with the poller and energy_5min computation path.
-async function exportEnergy({ startTs, endTs, inverter, format }) {
-  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
-
+function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
   const s = startTs || Date.now() - 86400000;
-  const e = endTs   || Date.now();
-  const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
-  const mapped = collectEnergyExportRows(s, e, inverter);
-  const grandComp = mapped.reduce((sum, row) => {
-    if (String(row?.Date || '').startsWith('Total for ')) {
-      return sum + Math.max(0, safeNum(row?.Energy_kWh));
-    }
-    return sum;
-  }, 0);
-
-  mapped.push({
-    Date:       `GRAND TOTAL ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (${invNum ? `INVERTER ${invNum}` : 'ALL INVERTERS'})`,
-    Inverter:   '',
-    Node:       '',
-    First_Seen: '',
-    Last_Seen: '',
-    Samples: '',
-    Online_Samples: '',
-    Peak_Pac_kW: '',
-    Energy_kWh: Number(grandComp).toFixed(3),
-    Energy_MWh: Number((grandComp / 1000).toFixed(6)),
-    Status:     '',
-  });
-
+  const e = endTs || Date.now();
+  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
   const headers = [
     { key: 'Date',       label: 'Date' },
-    { key: 'Inverter',   label: 'Inverter' },
-    { key: 'Node',       label: 'Node' },
-    { key: 'First_Seen', label: 'First Seen' },
+    { key: 'Inverter_Number',   label: 'Inverter Number' },
+    { key: 'Node_Number',       label: 'Node Number' },
+    { key: 'First_Seen', label: '1st Seen' },
     { key: 'Last_Seen', label: 'Last Seen' },
-    { key: 'Samples', label: 'Samples' },
-    { key: 'Online_Samples', label: 'Online Samples' },
     { key: 'Peak_Pac_kW', label: 'Peak Pac (kW)' },
-    { key: 'Energy_kWh', label: 'Computed PAC (kWh)' },
-    { key: 'Energy_MWh', label: 'Computed PAC (MWh)' },
-    { key: 'Status',     label: 'Status' },
+    { key: 'Total_MWh', label: 'Total MWh' },
   ];
 
   const fileBase = exportFileBase(s, e, inverter, 'Recorded Energy');
-  return await writeExport(headers, mapped, dir, fileBase, format);
+  return writeExport(headers, Array.isArray(rows) ? rows : [], dir, fileBase, format, {
+    autoFilter: false,
+  });
+}
+
+async function exportEnergy({ startTs, endTs, inverter, format, supplementalTodayRows }) {
+  const s = startTs || Date.now() - 86400000;
+  const e = endTs || Date.now();
+  const mapped = buildEnergySummaryExportRows(s, e, inverter, {
+    supplementalTodayRows,
+  });
+  return await writeEnergySummaryExport({
+    startTs: s,
+    endTs: e,
+    inverter,
+    format,
+    rows: mapped,
+  });
 }
 
 // Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€ Inverter Data (raw readings) Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
@@ -1268,12 +1268,92 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
+function parseIsoDayStart(day) {
+  const s = String(day || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return 0;
+  return new Date(`${s}T00:00:00`).getTime();
+}
+
+async function exportSolcastPreview({ rows, startDay, endDay, format }) {
+  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const mapped = safeRows.map((row) => ({
+    Date: String(row?.date || '').trim(),
+    Time: String(row?.time || '').trim(),
+    Period: String(row?.period || 'PT5M').trim() || 'PT5M',
+    ForecastMW:
+      row?.forecastMw == null || row?.forecastMw === ''
+        ? ''
+        : Number(row.forecastMw).toFixed(6),
+    ForecastLowMW:
+      row?.forecastLoMw == null || row?.forecastLoMw === ''
+        ? ''
+        : Number(row.forecastLoMw).toFixed(6),
+    ForecastHighMW:
+      row?.forecastHiMw == null || row?.forecastHiMw === ''
+        ? ''
+        : Number(row.forecastHiMw).toFixed(6),
+    EstimatedActualMW:
+      row?.actualMw == null || row?.actualMw === ''
+        ? ''
+        : Number(row.actualMw).toFixed(6),
+    ForecastMWh:
+      row?.forecastMwh == null || row?.forecastMwh === ''
+        ? ''
+        : Number(row.forecastMwh).toFixed(6),
+    ForecastLowMWh:
+      row?.forecastLoMwh == null || row?.forecastLoMwh === ''
+        ? ''
+        : Number(row.forecastLoMwh).toFixed(6),
+    ForecastHighMWh:
+      row?.forecastHiMwh == null || row?.forecastHiMwh === ''
+        ? ''
+        : Number(row.forecastHiMwh).toFixed(6),
+    EstimatedActualMWh:
+      row?.actualMwh == null || row?.actualMwh === ''
+        ? ''
+        : Number(row.actualMwh).toFixed(6),
+  }));
+
+  const headers = [
+    { key: 'Date', label: 'Date' },
+    { key: 'Time', label: 'Time' },
+    { key: 'Period', label: 'Period' },
+    { key: 'ForecastMW', label: 'Forecast (MW)' },
+    { key: 'ForecastLowMW', label: 'Forecast Low (MW)' },
+    { key: 'ForecastHighMW', label: 'Forecast High (MW)' },
+    { key: 'EstimatedActualMW', label: 'Estimated Actual (MW)' },
+    { key: 'ForecastMWh', label: 'Forecast (MWh)' },
+    { key: 'ForecastLowMWh', label: 'Forecast Low (MWh)' },
+    { key: 'ForecastHighMWh', label: 'Forecast High (MWh)' },
+    { key: 'EstimatedActualMWh', label: 'Estimated Actual (MWh)' },
+  ];
+  const headerKeys = headers.map((h) => h.key);
+  const sortedRows = sortRowsDateInverterTime(mapped, {
+    dateKey: 'Date',
+    inverterKey: 'Period',
+    timeKey: 'Time',
+  });
+  const finalRows = insertBlankRowsByGroup(sortedRows, {
+    groupKeys: ['Date'],
+    headerKeys,
+  });
+
+  const s = parseIsoDayStart(startDay) || Date.now();
+  const e = parseIsoDayStart(endDay || startDay) || s;
+  const fileBase = exportFileBase(s, e, 'all', 'Solcast Toolkit PT5M 05-18');
+  return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
+}
+
 module.exports = {
   exportAlarms,
   exportEnergy,
+  buildEnergySummaryExportRows,
+  writeEnergySummaryExport,
   exportInverterData,
   export5min,
   exportAudit,
   exportDailyReport,
   exportForecastActual,
+  exportSolcastPreview,
 };

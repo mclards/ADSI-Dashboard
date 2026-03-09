@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.23
+- **Version:** 2.2.24
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -54,6 +54,12 @@ Release size: ~228 MB each
 - Manual archive pull/upload must stage monthly archive `.db` replacements while the app is running and apply them only on restart.
 - Never overwrite or rename a live monthly archive DB in place during runtime.
 - If a newer archive replacement is staged, archive manifest and archive download should expose that staged version immediately so later sync logic sees the newest content before restart.
+
+## Replication Transport Rule
+- Keep remote replication fast by default: reuse HTTP connections, gzip large replication JSON payloads, and gzip large main-DB / archive downloads when the peer accepts it.
+- Keep hot-data push uploads chunked; large JSON push batches may be gzip-compressed in transit.
+- Archive pull/push may run with small bounded concurrency, but restart-safe staging and deterministic failure handling still take priority over raw throughput.
+- Transfer-monitor semantics must remain accurate after transport changes. Byte progress and phase reporting are part of the contract.
 
 ## Completed Overhaul (2026-02)
 Full 4-phase in-place overhaul completed. Key changes:
@@ -114,6 +120,14 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.24 Changes — Solcast Toolkit, Export Rehab, Remote Hardening, and Faster Replication (2026-03-09)
+- **Solcast toolkit workflow added and hardened:** the Forecast settings now support `Toolkit Login` as a first-class Solcast access mode with chart URL, email, and password. Toolkit test, preview, and XLSX export stay local even in Remote mode, and the preview charts/export support `PT5M`, `05:00-18:00`, `1-7` selected days, and both `MWh` and raw `MW` values.
+- **Solcast preview UI improved:** the settings layout and preview chart styling were cleaned up, the preview is no longer hidden just because runtime forecast provider stays on `Local ML`, and the export path now writes the currently displayed toolkit range.
+- **Energy Summary export rehabilitated:** the export now follows the stricter output format, writes numeric XLSX values, uses PAC-based energy logic, and in Remote workflows relies on the local DB working copy after pull/live mirror instead of direct gateway fetch at export time.
+- **Remote-mode behavior hardened:** operation-mode handling now respects the active saved mode, remote URL validation is stricter, remote live data mirrors locally after pull, and manual pull keeps the local DB as the machine's working copy while replacing stale state safely from the gateway snapshot.
+- **Replication transport speed-up:** `server/index.js` now uses keep-alive HTTP/HTTPS agents for gateway transfer requests, larger incremental/push chunk sizes, gzip on large replication JSON payloads, gzip on large main-DB and archive downloads, gzip request bodies for large JSON push batches, and small bounded archive transfer concurrency.
+- **Transfer path validation:** isolated smoke tests confirmed gzipped incremental pull, gzipped main-DB transfer, gzipped archive download, gzipped push request handling, and live Electron startup smoke reached `/api/settings`.
 
 ## v2.2.22 Changes — Restart-Safe Archive Apply (2026-03-09)
 - **Archive staging instead of live swap:** manual archive pull/upload now keeps the current monthly `.db` live while the app is running, stages the downloaded/uploaded replacement in `archive/*.tmp`, and applies it only on the next restart.

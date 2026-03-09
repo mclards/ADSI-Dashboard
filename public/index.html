@@ -127,7 +127,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.23</span></div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.24</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and controlled multi-machine synchronization for the plant.</div>
             <a
               class="side-about-link"
@@ -1373,27 +1373,34 @@
           </div>
           <div class="sgroup settings-card" id="forecastSection">
             <div class="sgroup-title"><span class="mdi mdi-weather-partly-cloudy icon-inline" aria-hidden="true"></span> Forecast</div>
-            <p class="settings-section-copy">Manage the active forecast source and validate external provider settings without exposing stored credentials on-screen.</p>
-            <div class="settings-subsection">
+            <p class="settings-section-copy">Manage the active forecast source and validate external provider settings from one place, including Solcast API access or authenticated toolkit login.</p>
+            <div class="settings-subsection forecast-provider-panel">
               <div class="settings-subtitle">Provider</div>
               <div class="srow">
                 <label
                   >Forecast Source
                   <select id="setForecastProvider" class="sel">
                     <option value="ml_local">Local ML (Current)</option>
-                    <option value="solcast">Solcast API</option>
+                    <option value="solcast">Solcast</option>
                   </select></label
                 >
               </div>
               <div class="sinfo" style="margin-top: 8px">
                 <div>
-                   Local forecasting remains the standard runtime source. External provider settings are stored here so they can be validated before use.
+                   Local forecasting remains the standard runtime source. Solcast can run either through the standard API or through the authenticated 5-minute toolkit chart feed.
                 </div>
               </div>
             </div>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Solcast Configuration</div>
+            <div class="settings-subsection forecast-access-panel">
+              <div class="settings-subtitle">Solcast Access</div>
               <div class="srow">
+                <label
+                  >Access Mode
+                  <select id="setSolcastAccessMode" class="sel">
+                    <option value="toolkit">Toolkit Login</option>
+                    <option value="api">API Key</option>
+                  </select>
+                </label>
                 <label
                   >Solcast Base URL<input
                     type="text"
@@ -1401,21 +1408,8 @@
                     class="inp inp-lg"
                     placeholder="https://api.solcast.com.au"
                 /></label>
-                <label
-                  >Solcast API Key<input
-                    type="password"
-                    id="setSolcastApiKey"
-                    class="inp inp-lg"
-                    autocomplete="off"
-                    placeholder="Stored API key"
-                /></label>
-                <label
-                  >Resource ID<input
-                    type="text"
-                    id="setSolcastResourceId"
-                    class="inp"
-                    placeholder="Configured resource ID"
-                /></label>
+              </div>
+              <div class="srow">
                 <label
                   >Timezone<input
                     type="text"
@@ -1424,13 +1418,152 @@
                     placeholder="Asia/Manila"
                 /></label>
               </div>
+              <div class="sinfo" style="margin-top: 8px">
+                <div>
+                  Choose `Toolkit Login` when you want to use only the Solcast chart link with your toolkit account. Choose `API Key` only when you have the formal Solcast API credentials.
+                </div>
+              </div>
+            </div>
+            <div class="settings-subsection forecast-api-panel">
+              <div class="settings-subtitle">Solcast API</div>
+              <div class="srow">
+                <label
+                  >Solcast API Key<input
+                    type="text"
+                    id="setSolcastApiKey"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Stored Solcast API key"
+                /></label>
+                <label
+                  >Resource ID<input
+                    type="text"
+                    id="setSolcastResourceId"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Configured site or resource ID"
+                /></label>
+              </div>
+              <div class="sinfo" style="margin-top: 8px">
+                <div>
+                  API mode reads the standard Solcast forecast endpoint. Use this only when a formal API key and resource ID are available.
+                </div>
+              </div>
+            </div>
+            <div class="settings-subsection forecast-toolkit-panel">
+              <div class="settings-subtitle">Solcast Toolkit</div>
+              <div class="srow">
+                <label
+                  >Toolkit Chart URL<input
+                    type="text"
+                    id="setSolcastToolkitSiteRef"
+                    class="inp inp-lg"
+                    placeholder="https://api.solcast.com.au/utility_scale_sites/.../recent?view=Toolkit&theme=light&hours=48&period=PT5M"
+                /></label>
+                <label
+                  >Toolkit Email<input
+                    type="email"
+                    id="setSolcastToolkitEmail"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Stored toolkit account email"
+                /></label>
+                <label
+                  >Toolkit Password<input
+                    type="password"
+                    id="setSolcastToolkitPassword"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Stored toolkit account password"
+                /></label>
+              </div>
+              <div class="sinfo" style="margin-top: 8px">
+                <div>
+                  Paste the exact toolkit chart link. Toolkit mode signs in with the stored account and reads that same recent-view feed directly, without requiring API key or resource ID values.
+                </div>
+              </div>
+            </div>
+            <div class="settings-subsection forecast-preview-panel" id="solcastPreviewPanel" hidden>
+              <div class="settings-subtitle">Toolkit Preview</div>
+              <div class="srow forecast-preview-toolbar">
+                <label
+                  >Start Day
+                  <select id="solcastPreviewDay" class="sel"></select>
+                </label>
+                <label
+                  >Days to Display
+                  <select id="solcastPreviewDayCount" class="sel">
+                    <option value="1">1 Day</option>
+                    <option value="2">2 Days</option>
+                    <option value="3">3 Days</option>
+                    <option value="4">4 Days</option>
+                    <option value="5">5 Days</option>
+                    <option value="6">6 Days</option>
+                    <option value="7">7 Days</option>
+                  </select>
+                </label>
+                <div class="forecast-preview-toolbar-action"
+                  ><span>Preview Actions</span>
+                  <button
+                    id="btnSolcastPreviewRefresh"
+                    class="btn btn-outline"
+                    type="button"
+                    title="Reload the Solcast preview for the selected date range using the current form values."
+                    aria-label="Refresh Solcast preview"
+                  >
+                    <span class="mdi mdi-chart-line-variant" aria-hidden="true"></span><span>Refresh Preview</span>
+                  </button>
+                  <button
+                    id="btnSolcastPreviewExport"
+                    class="btn btn-outline"
+                    type="button"
+                    title="Export the selected Solcast toolkit preview range to Excel."
+                    aria-label="Export Solcast preview to Excel"
+                  >
+                    <span class="mdi mdi-file-excel-outline" aria-hidden="true"></span><span>Export XLSX</span>
+                  </button>
+                </div>
+              </div>
+              <div class="sinfo forecast-preview-copy">
+                <div>
+                  Displays the Solcast toolkit feed at `PT5M` for the selected date range using the local `05:00 AM` to `06:00 PM` operating window. The chart is plotted in `MWh` per 5-minute slot, while hover details and the Excel export also include the raw toolkit `MW` values for each slot. Estimated actuals and forecast bands are shown when the source provides them.
+                </div>
+              </div>
+              <div class="forecast-preview-metrics" id="solcastPreviewMetrics">
+                <div class="forecast-preview-metric">
+                  <div class="forecast-preview-label">Forecast Total</div>
+                  <div class="forecast-preview-value" id="solcastPreviewForecastTotal">—</div>
+                </div>
+                <div class="forecast-preview-metric">
+                  <div class="forecast-preview-label">Estimated Actual</div>
+                  <div class="forecast-preview-value" id="solcastPreviewActualTotal">—</div>
+                </div>
+                <div class="forecast-preview-metric">
+                  <div class="forecast-preview-label">Selected Range</div>
+                  <div class="forecast-preview-value" id="solcastPreviewRange">—</div>
+                </div>
+                <div class="forecast-preview-metric">
+                  <div class="forecast-preview-label">Window</div>
+                  <div class="forecast-preview-value" id="solcastPreviewWindow">05:00-18:00</div>
+                </div>
+              </div>
+              <div class="forecast-preview-chart-wrap">
+                <div class="forecast-preview-chart-head">
+                  <div class="forecast-preview-chart-title">Solcast PT5M Outlook</div>
+                  <div class="forecast-preview-chart-note">05:00-18:00 local window · hover for MW and MWh</div>
+                </div>
+                <div class="forecast-preview-chart-canvas">
+                  <canvas id="solcastPreviewChart" height="210"></canvas>
+                </div>
+              </div>
+              <span class="smsg" id="solcastPreviewMsg"></span>
             </div>
             <div class="sgroup-actions">
               <button
                 id="btnSolcastSaveTest"
                 class="btn btn-accent"
                 type="button"
-                title="Save the Solcast settings first, then test the connection with the saved values."
+                title="Save the active Solcast settings first, then test the selected access mode with the saved values."
                 aria-label="Save and test Solcast settings"
               >
                 <span class="mdi mdi-content-save-check-outline" aria-hidden="true"></span><span>Save and Test Solcast</span>
@@ -1439,7 +1572,7 @@
                 id="btnSolcastTest"
                 class="btn btn-outline"
                 type="button"
-                title="Test the current Solcast endpoint and credentials without changing any saved settings."
+                title="Test the current Solcast settings for the selected access mode without changing any saved settings."
                 aria-label="Test Solcast connection"
               >
                 <span class="mdi mdi-cloud-check-outline" aria-hidden="true"></span><span>Test Solcast Connection</span>
@@ -1843,7 +1976,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.23</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.24</span></div>
             <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -1984,7 +2117,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.2.23 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.24 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

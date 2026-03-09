@@ -4,8 +4,12 @@ const expressWs = require("express-ws");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const os = require("os");
 const crypto = require("crypto");
+const vm = require("vm");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
 const { spawnSync } = require("child_process");
 const { pipeline } = require("stream/promises");
@@ -20,6 +24,7 @@ const {
   db,
   DATA_DIR,
   ARCHIVE_DIR,
+  bulkInsert,
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
   closeDb,
@@ -32,6 +37,7 @@ const {
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,
+  ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
   stagePendingMainDbReplacement,
@@ -91,10 +97,20 @@ app.use((err, req, res, next) => {
   }
   return next(err);
 });
-app.use("/assets", express.static(path.join(__dirname, "../assets")));
-app.use(express.static(path.join(__dirname, "../public")));
+const staticNoCache = {
+  etag: false,
+  lastModified: false,
+  setHeaders(res) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  },
+};
+app.use("/assets", express.static(path.join(__dirname, "../assets"), staticNoCache));
+app.use(express.static(path.join(__dirname, "../public"), staticNoCache));
 app.use("/api", remoteApiTokenGate);
-const PORT = 3500;
+const PORT = Math.max(1, Math.min(65535, Number(process.env.ADSI_SERVER_PORT || 3500) || 3500));
 const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
 const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
@@ -135,6 +151,17 @@ const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
 const SOLCAST_SOLAR_END_H = 18;
 const SOLCAST_UNIT_KW_MAX = 997.0;
+const SOLCAST_ACCESS_MODE_API = "api";
+const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
+const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
+const SOLCAST_TOOLKIT_PERIOD = "PT5M";
+const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 7;
+const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 192;
+const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
+  "utility_scale_sites",
+  "rooftop_sites",
+  "sites",
+]);
 const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
 const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
@@ -144,6 +171,8 @@ const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallb
 const REMOTE_BRIDGE_INTERVAL_MS = 1200;
 const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
 const REMOTE_ENERGY_POLL_INTERVAL_MS = 30000; // today-energy endpoint is rate-limited to 30 s
+const REMOTE_DB_MIN_PERSIST_MS = 1000;
+const REMOTE_DB_PAC_DELTA_PERSIST_W = 250;
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
 const REMOTE_CHAT_POLL_INTERVAL_MS = 5000;
 const REMOTE_CHAT_POLL_LIMIT = 50;
@@ -155,10 +184,10 @@ const REMOTE_LIVE_DEGRADED_GRACE_MS = 45000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
-const REMOTE_INCREMENTAL_APPEND_LIMIT = 10000;
+const REMOTE_INCREMENTAL_APPEND_LIMIT = 25000;
 const REMOTE_PUSH_DELTA_LIMIT = 50000;
-const REMOTE_PUSH_CHUNK_MAX_ROWS = 3000;
-const REMOTE_PUSH_CHUNK_TARGET_BYTES = 2 * 1024 * 1024;
+const REMOTE_PUSH_CHUNK_MAX_ROWS = 6000;
+const REMOTE_PUSH_CHUNK_TARGET_BYTES = 4 * 1024 * 1024;
 const REMOTE_PUSH_FETCH_RETRIES = 3;
 const REMOTE_PUSH_FETCH_RETRY_BASE_MS = 1200;
 const REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES = 200;
@@ -171,6 +200,12 @@ const CHAT_THREAD_LIMIT = 20;
 const CHAT_RETENTION_COUNT = 500;
 const CHAT_MESSAGE_MAX_LEN = 500;
 const CHAT_PROXY_TIMEOUT_MS = 8000;
+const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 2;
+const REPLICATION_TRANSFER_STREAM_HWM = 512 * 1024;
+const REPLICATION_JSON_GZIP_MIN_BYTES = 96 * 1024;
+const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
+const REMOTE_FETCH_KEEPALIVE_MSECS = 8000;
+const REMOTE_FETCH_MAX_SOCKETS = 8;
 const LIVE_FRESH_MS = 20000;
 const REMOTE_CLIENT_PULL_ONLY = false;
 const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
@@ -358,6 +393,8 @@ const remoteBridgeState = {
   lastSyncDirection: "idle",
   autoSyncAttempted: false,
 };
+const remoteBridgePersistState = Object.create(null); // per-node persisted hot-data cadence
+const remoteBridgeEnergyMirrorState = Object.create(null); // per-inverter 5-min bucket mirror
 const remoteChatBridgeState = {
   running: false,
   lastInboundId: 0,
@@ -499,7 +536,7 @@ function _cleanOauthPending() {
   }
 }
 
-const OAUTH_REDIRECT_BASE = `http://localhost:${3500}/oauth/callback`;
+const OAUTH_REDIRECT_BASE = `http://localhost:${PORT}/oauth/callback`;
 
 function sanitizeOperationMode(value, def = "gateway") {
   const v = String(value || def)
@@ -606,6 +643,7 @@ function shouldProxyApiPath(pathname) {
   const p = String(pathname || "");
   if (p === "/backup" || p.startsWith("/backup/")) return false;
   if (p === "/chat" || p.startsWith("/chat/")) return false;
+  if (p === "/forecast/solcast" || p.startsWith("/forecast/solcast/")) return false;
   if (p === "/settings" || p.startsWith("/settings/")) return false;
   if (p === "/runtime/network" || p.startsWith("/runtime/network/")) return false;
   if (p === "/runtime/perf" || p.startsWith("/runtime/perf/")) return false;
@@ -765,6 +803,130 @@ function syncRemoteBridgeAlarmTransitions(nextLiveData) {
 
   if (raised.length) {
     broadcastUpdate({ type: "alarm", alarms: raised });
+  }
+}
+
+function clearRemoteBridgePersistState() {
+  for (const key of Object.keys(remoteBridgePersistState)) {
+    delete remoteBridgePersistState[key];
+  }
+  for (const key of Object.keys(remoteBridgeEnergyMirrorState)) {
+    delete remoteBridgeEnergyMirrorState[key];
+  }
+}
+
+function floorToFiveMinute(ts) {
+  const fiveMinMs = 5 * 60 * 1000;
+  return Math.floor(Number(ts || 0) / fiveMinMs) * fiveMinMs;
+}
+
+function isSolarWindowNow(ts = Date.now()) {
+  const d = new Date(Number(ts || Date.now()));
+  const hour = d.getHours();
+  return hour >= SOLCAST_SOLAR_START_H && hour < SOLCAST_SOLAR_END_H;
+}
+
+function normalizeRemoteLiveReading(row, fallbackTs = Date.now()) {
+  const inverter = Math.trunc(Number(row?.inverter || 0));
+  const unit = Math.trunc(Number(row?.unit || 0));
+  if (!(inverter > 0) || !(unit > 0)) return null;
+  const ts = Math.max(0, Number(row?.ts || fallbackTs) || fallbackTs);
+  return {
+    ts,
+    inverter,
+    unit,
+    pac: Math.max(0, Number(row?.pac || 0)),
+    kwh: Math.max(0, Number(row?.kwh || 0)),
+    alarm: Math.max(0, Number(row?.alarm || 0)),
+    on_off: Number(row?.on_off ?? row?.onOff ?? 0) === 1 ? 1 : 0,
+    online: Number(row?.online ?? 1) === 1 ? 1 : 0,
+  };
+}
+
+function persistRemoteLiveRows(nextLiveData, syncedAt = Date.now()) {
+  if (!isRemoteMode()) return;
+  const rows = nextLiveData && typeof nextLiveData === "object" ? nextLiveData : {};
+  const batch = [];
+  const alarmBatch = [];
+
+  for (const [key, rawRow] of Object.entries(rows)) {
+    const parsed = normalizeRemoteLiveReading(rawRow, syncedAt);
+    if (!parsed) continue;
+    const prev = remoteBridgePersistState[key];
+    const forcePersist =
+      !prev ||
+      Number(parsed.alarm || 0) !== Number(prev.alarm || 0) ||
+      Number(parsed.on_off || 0) !== Number(prev.on_off || 0) ||
+      Number(parsed.online || 0) !== Number(prev.online || 0);
+    const elapsedMs = !prev
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, Number(parsed.ts || 0) - Number(prev.ts || 0));
+    const pacDelta = !prev
+      ? Number.MAX_SAFE_INTEGER
+      : Math.abs(Number(parsed.pac || 0) - Number(prev.pac || 0));
+    const shouldPersist =
+      forcePersist ||
+      (isSolarWindowNow(parsed.ts) &&
+        (elapsedMs >= REMOTE_DB_MIN_PERSIST_MS ||
+          pacDelta >= REMOTE_DB_PAC_DELTA_PERSIST_W));
+
+    if (!prev || Number(parsed.ts || 0) >= Number(prev.ts || 0)) {
+      remoteBridgePersistState[key] = {
+        ts: Number(parsed.ts || 0),
+        pac: Number(parsed.pac || 0),
+        alarm: Number(parsed.alarm || 0),
+        on_off: Number(parsed.on_off || 0),
+        online: Number(parsed.online || 0),
+      };
+    }
+
+    if (!shouldPersist) continue;
+    batch.push({
+      ts: Number(parsed.ts || 0),
+      inverter: Number(parsed.inverter || 0),
+      unit: Number(parsed.unit || 0),
+      pac: Number(parsed.pac || 0),
+      kwh: Number(parsed.kwh || 0),
+      alarm: Number(parsed.alarm || 0),
+      online: Number(parsed.online || 0) === 1 ? 1 : 0,
+    });
+    alarmBatch.push(parsed);
+  }
+
+  if (batch.length) {
+    bulkInsert(batch);
+    ingestDailyReadingsSummary(batch);
+  }
+  if (alarmBatch.length) {
+    checkAlarms(alarmBatch);
+  }
+}
+
+function mirrorRemoteTodayEnergyRowsToLocal(rowsRaw, syncedAt = Date.now()) {
+  if (!isRemoteMode()) return;
+  const rows = normalizeTodayEnergyRows(rowsRaw);
+  if (!rows.length) return;
+  const day = localDateStr(syncedAt);
+  const bucketStart = floorToFiveMinute(syncedAt);
+
+  for (const row of rows) {
+    const inverter = Number(row?.inverter || 0);
+    const totalKwh = Math.max(0, Number(row?.total_kwh || 0));
+    if (!(inverter > 0)) continue;
+    const key = String(inverter);
+    const prev = remoteBridgeEnergyMirrorState[key];
+    if (!prev || String(prev.day || "") !== day || totalKwh < Number(prev.totalKwh || 0)) {
+      remoteBridgeEnergyMirrorState[key] = { day, bucketStart, totalKwh };
+      continue;
+    }
+    if (bucketStart <= Number(prev.bucketStart || 0)) continue;
+    const inc = Math.max(0, totalKwh - Number(prev.totalKwh || 0));
+    try {
+      stmts.insertEnergy5.run(bucketStart, inverter, Number(inc.toFixed(6)));
+    } catch (err) {
+      console.warn("[remote-energy] mirror insert failed:", err.message);
+    }
+    remoteBridgeEnergyMirrorState[key] = { day, bucketStart, totalKwh };
   }
 }
 
@@ -2026,11 +2188,18 @@ async function reconcileRemoteBeforePull(baseUrl) {
   remoteBridgeState.lastReconcileRows = 0;
   let localNewerDetected = false;
   try {
-    const summaryRes = await fetch(`${baseUrl}/api/replication/summary`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-    });
+    const summaryRes = await fetchWithRetry(
+      `${baseUrl}/api/replication/summary`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
     if (!summaryRes.ok) {
       throw new Error(`Summary HTTP ${summaryRes.status} ${summaryRes.statusText}`);
     }
@@ -2526,13 +2695,130 @@ function hasRecentRemoteBridgeSuccess(nowTs = Date.now()) {
   return nowTs - lastSuccessTs < REMOTE_LIVE_DEGRADED_GRACE_MS;
 }
 
+const REMOTE_HTTP_AGENT = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS / 2)),
+});
+
+const REMOTE_HTTPS_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS / 2)),
+});
+
+function getFetchAgentForUrl(targetUrl) {
+  try {
+    const protocol = String(new URL(String(targetUrl || "")).protocol || "").toLowerCase();
+    return protocol === "https:" ? REMOTE_HTTPS_AGENT : REMOTE_HTTP_AGENT;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function buildRemoteFetchOptions(targetUrl, options = {}) {
+  const next = options && typeof options === "object" ? { ...options } : {};
+  if (next.agent == null) next.agent = getFetchAgentForUrl(targetUrl);
+  if (next.compress == null) next.compress = true;
+  return next;
+}
+
+function createTransferReadStream(filePath) {
+  return fs.createReadStream(filePath, { highWaterMark: REPLICATION_TRANSFER_STREAM_HWM });
+}
+
+function createTransferWriteStream(filePath) {
+  return fs.createWriteStream(filePath, { highWaterMark: REPLICATION_TRANSFER_STREAM_HWM });
+}
+
+function createReplicationGzipStream() {
+  return zlib.createGzip({
+    level: zlib.constants.Z_BEST_SPEED,
+    chunkSize: REPLICATION_TRANSFER_STREAM_HWM,
+  });
+}
+
+function requestAcceptsGzip(req) {
+  const acceptEncoding = String(req?.headers?.["accept-encoding"] || "").toLowerCase();
+  return acceptEncoding.includes("gzip");
+}
+
+function shouldGzipReplicationJson(req, rawBytes) {
+  return requestAcceptsGzip(req) && Number(rawBytes || 0) >= REPLICATION_JSON_GZIP_MIN_BYTES;
+}
+
+function shouldGzipReplicationStream(req, rawBytes) {
+  return requestAcceptsGzip(req) && Number(rawBytes || 0) >= REPLICATION_STREAM_GZIP_MIN_BYTES;
+}
+
+function sendJsonMaybeGzip(req, res, payload) {
+  const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (!shouldGzipReplicationJson(req, raw.length)) {
+    res.setHeader("Content-Length", String(raw.length));
+    res.end(raw);
+    return;
+  }
+  const gz = zlib.gzipSync(raw, { level: zlib.constants.Z_BEST_SPEED });
+  res.setHeader("Content-Encoding", "gzip");
+  res.setHeader("Content-Length", String(gz.length));
+  res.setHeader("Vary", "Accept-Encoding");
+  res.end(gz);
+}
+
+function encodeJsonRequestBody(payload, { gzipThreshold = REPLICATION_JSON_GZIP_MIN_BYTES } = {}) {
+  const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
+  const headers = {
+    "Content-Type": "application/json",
+  };
+  if (raw.length < Math.max(1024, Number(gzipThreshold || 0))) {
+    headers["Content-Length"] = String(raw.length);
+    return { headers, body: raw };
+  }
+  const gz = zlib.gzipSync(raw, { level: zlib.constants.Z_BEST_SPEED });
+  headers["Content-Encoding"] = "gzip";
+  headers["Content-Length"] = String(gz.length);
+  headers["x-json-size"] = String(raw.length);
+  return { headers, body: gz };
+}
+
+async function runTasksWithConcurrency(items, limit, handler) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length <= 0) return [];
+  const safeLimit = Math.max(1, Math.min(list.length, Number(limit || 1) || 1));
+  const results = new Array(list.length);
+  let cursor = 0;
+  let firstErr = null;
+
+  async function worker() {
+    while (true) {
+      if (firstErr) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= list.length) return;
+      try {
+        results[index] = await handler(list[index], index);
+      } catch (err) {
+        firstErr = firstErr || err;
+        return;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  if (firstErr) throw firstErr;
+  return results;
+}
+
 async function fetchWithRetry(url, options = {}, retryOptions = {}) {
   const attempts = Math.max(1, Number(retryOptions?.attempts || 1));
   const baseDelay = Math.max(0, Number(retryOptions?.baseDelayMs || 0));
   let lastErr = null;
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      return await fetch(url, options);
+      return await fetch(url, buildRemoteFetchOptions(url, options));
     } catch (err) {
       lastErr = err;
       const shouldRetry = i < attempts && isRetryableNetworkError(err);
@@ -2548,10 +2834,11 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
 async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
   const attempts = Math.max(1, Number(REMOTE_INCREMENTAL_FETCH_RETRIES || 1));
   let lastErr = null;
+  const targetUrl = `${baseUrl}/api/replication/incremental`;
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(`${baseUrl}/api/replication/incremental`, {
+      const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2559,7 +2846,7 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
         },
         body: JSON.stringify({ cursors }),
         timeout: REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS,
-      });
+      }));
       if (!r.ok) {
         const err = new Error(`Incremental replication HTTP ${r.status} ${r.statusText}`);
         err.httpStatus = Number(r.status || 0);
@@ -2593,18 +2880,20 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
 async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
   const attempts = Math.max(1, Number(REMOTE_PUSH_FETCH_RETRIES || 1));
   let lastErr = null;
+  const targetUrl = `${baseUrl}/api/replication/push`;
+  const encodedBody = encodeJsonRequestBody({ delta: deltaPayload });
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(`${baseUrl}/api/replication/push`, {
+      const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           ...buildRemoteProxyHeaders(),
+          ...encodedBody.headers,
         },
-        body: JSON.stringify({ delta: deltaPayload }),
+        body: encodedBody.body,
         timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-      });
+      }));
       if (!r.ok) {
         let detail = "";
         try {
@@ -2758,11 +3047,12 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
 
   try {
     await fs.promises.mkdir(DATA_DIR, { recursive: true });
-    const r = await fetch(`${baseUrl}/api/replication/main-db`, {
+    const targetUrl = `${baseUrl}/api/replication/main-db`;
+    const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
       method: "GET",
       headers: buildRemoteProxyHeaders(),
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-    });
+    }));
     if (!r.ok) {
       if (Number(r.status || 0) === 404) {
         throw new Error("Gateway build does not expose main DB pull.");
@@ -2812,7 +3102,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       });
     });
 
-    await pipeline(body, fs.createWriteStream(tempPath));
+    await pipeline(body, createTransferWriteStream(tempPath));
     if (targetMtimeMs > 0) {
       const mtime = new Date(targetMtimeMs);
       await fs.promises.utimes(tempPath, mtime, mtime);
@@ -2897,11 +3187,12 @@ function shouldPushArchiveFile(localMeta, remoteMeta) {
 }
 
 async function fetchRemoteArchiveManifest(baseUrl) {
-  const r = await fetch(`${baseUrl}/api/replication/archive-manifest`, {
+  const targetUrl = `${baseUrl}/api/replication/archive-manifest`;
+  const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
     method: "GET",
     headers: buildRemoteProxyHeaders(),
     timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-  });
+  }));
   if (!r.ok) {
     if (Number(r.status || 0) === 404) {
       return { ok: false, unsupported: true, error: "Remote build does not expose archive sync." };
@@ -2940,13 +3231,14 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
 
   let body = null;
   try {
+    const targetUrl = `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`;
     const r = await fetch(
-      `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`,
-      {
+      targetUrl,
+      buildRemoteFetchOptions(targetUrl, {
         method: "GET",
         headers: buildRemoteProxyHeaders(),
         timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-      },
+      }),
     );
     if (!r.ok) {
       throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
@@ -2959,7 +3251,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
       const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
       if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
     });
-    await pipeline(body, fs.createWriteStream(tempPath));
+    await pipeline(body, createTransferWriteStream(tempPath));
     const targetMtimeMs = Math.max(0, Number(fileMeta?.mtimeMs || 0));
     if (targetMtimeMs > 0) {
       const mtime = new Date(targetMtimeMs);
@@ -2999,15 +3291,16 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
   const filePath = resolved.path;
   closeArchiveDbForMonth(monthKey);
   const stat = await fs.promises.stat(filePath);
-  const stream = fs.createReadStream(filePath);
+  const targetUrl = `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`;
+  const stream = createTransferReadStream(filePath);
   stream.on("data", (chunk) => {
     const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
     if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
   });
 
   const r = await fetch(
-    `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`,
-    {
+    targetUrl,
+    buildRemoteFetchOptions(targetUrl, {
       method: "POST",
       headers: {
         ...buildRemoteProxyHeaders(),
@@ -3020,7 +3313,7 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
       },
       body: stream,
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-    },
+    }),
   );
   if (!r.ok) {
     let detail = "";
@@ -3078,6 +3371,7 @@ async function pullArchiveFilesFromRemote(baseUrl) {
   );
   let transferredBytes = 0;
   let transferredFiles = 0;
+  const transferredNames = [];
   if (toPull.length > 0) {
     broadcastUpdate({
       type: "xfer_progress",
@@ -3091,23 +3385,38 @@ async function pullArchiveFilesFromRemote(baseUrl) {
   }
 
   try {
-    for (let i = 0; i < toPull.length; i += 1) {
-      const fileMeta = toPull[i];
-      await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
-        transferredBytes += Math.max(0, Number(bytes || 0));
+    await runTasksWithConcurrency(
+      toPull,
+      REMOTE_ARCHIVE_TRANSFER_CONCURRENCY,
+      async (fileMeta) => {
+        await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
+          transferredBytes += Math.max(0, Number(bytes || 0));
+          const activeStep = Math.min(toPull.length, Math.max(1, transferredFiles + 1));
+          broadcastUpdate({
+            type: "xfer_progress",
+            dir: "rx",
+            phase: "chunk",
+            recvBytes: transferredBytes,
+            totalBytes,
+            chunk: activeStep,
+            chunkCount: toPull.length,
+            label: "Pulling archive",
+          });
+        });
+        transferredFiles += 1;
+        transferredNames.push(fileMeta.name);
         broadcastUpdate({
           type: "xfer_progress",
           dir: "rx",
           phase: "chunk",
           recvBytes: transferredBytes,
           totalBytes,
-          chunk: i + 1,
+          chunk: transferredFiles,
           chunkCount: toPull.length,
-          label: `Pulling archive ${fileMeta.name}`,
+          label: "Pulling archive",
         });
-      });
-      transferredFiles += 1;
-    }
+      },
+    );
   } catch (err) {
     if (toPull.length > 0) {
       broadcastUpdate({
@@ -3142,7 +3451,7 @@ async function pullArchiveFilesFromRemote(baseUrl) {
     skippedFiles: Math.max(0, remoteManifest.length - transferredFiles),
     totalBytes,
     transferredBytes,
-    files: toPull.map((entry) => entry.name),
+    files: transferredNames,
   };
 }
 
@@ -3177,6 +3486,7 @@ async function pushArchiveFilesToRemote(baseUrl) {
   );
   let transferredBytes = 0;
   let transferredFiles = 0;
+  const transferredNames = [];
   if (toPush.length > 0) {
     broadcastUpdate({
       type: "xfer_progress",
@@ -3190,23 +3500,38 @@ async function pushArchiveFilesToRemote(baseUrl) {
   }
 
   try {
-    for (let i = 0; i < toPush.length; i += 1) {
-      const fileMeta = toPush[i];
-      await uploadArchiveFileToRemote(baseUrl, fileMeta, (bytes) => {
-        transferredBytes += Math.max(0, Number(bytes || 0));
+    await runTasksWithConcurrency(
+      toPush,
+      REMOTE_ARCHIVE_TRANSFER_CONCURRENCY,
+      async (fileMeta) => {
+        await uploadArchiveFileToRemote(baseUrl, fileMeta, (bytes) => {
+          transferredBytes += Math.max(0, Number(bytes || 0));
+          const activeStep = Math.min(toPush.length, Math.max(1, transferredFiles + 1));
+          broadcastUpdate({
+            type: "xfer_progress",
+            dir: "tx",
+            phase: "chunk",
+            sentBytes: transferredBytes,
+            totalBytes,
+            chunk: activeStep,
+            chunkCount: toPush.length,
+            label: "Pushing archive",
+          });
+        });
+        transferredFiles += 1;
+        transferredNames.push(fileMeta.name);
         broadcastUpdate({
           type: "xfer_progress",
           dir: "tx",
           phase: "chunk",
           sentBytes: transferredBytes,
           totalBytes,
-          chunk: i + 1,
+          chunk: transferredFiles,
           chunkCount: toPush.length,
-          label: `Pushing archive ${fileMeta.name}`,
+          label: "Pushing archive",
         });
-      });
-      transferredFiles += 1;
-    }
+      },
+    );
   } catch (err) {
     if (toPush.length > 0) {
       broadcastUpdate({
@@ -3241,7 +3566,7 @@ async function pushArchiveFilesToRemote(baseUrl) {
     skippedFiles: Math.max(0, localManifest.length - transferredFiles),
     totalBytes,
     transferredBytes,
-    files: toPush.map((entry) => entry.name),
+    files: transferredNames,
   };
 }
 
@@ -3341,6 +3666,7 @@ async function proxyToRemote(req, res, tokenOverride = "") {
     const p = String(u.pathname || "").toLowerCase();
     if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 600000);
     else if (p.startsWith("/api/report/")) timeoutMs = Math.max(timeoutMs, 45000);
+    else if (p.startsWith("/api/replication/")) timeoutMs = Math.max(timeoutMs, 45000);
     else if (
       p.startsWith("/api/analytics/") ||
       p.startsWith("/api/energy/5min") ||
@@ -3358,12 +3684,12 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   const hasBody = !["GET", "HEAD"].includes(method);
   if (hasBody) headers["Content-Type"] = "application/json";
   try {
-    const upstream = await fetch(target, {
+    const upstream = await fetch(target, buildRemoteFetchOptions(target, {
       method,
       headers,
       body: hasBody ? JSON.stringify(req.body || {}) : undefined,
       timeout: timeoutMs,
-    });
+    }));
     const contentType = String(upstream.headers.get("content-type") || "");
     const bodyText = await upstream.text();
     res.status(upstream.status);
@@ -3628,10 +3954,10 @@ async function pollRemoteLiveOnce() {
     const data = await r.json();
     remoteBridgeState.liveData =
       data && typeof data === "object" ? data : {};
+    persistRemoteLiveRows(remoteBridgeState.liveData, Date.now());
     remoteBridgeState.totals = computeTotalsFromLiveData(
       remoteBridgeState.liveData,
     );
-    syncRemoteBridgeAlarmTransitions(remoteBridgeState.liveData);
     remoteBridgeState.connected = true;
     remoteBridgeState.liveFailureCount = 0;
     remoteBridgeState.lastFailureTs = 0;
@@ -3668,6 +3994,7 @@ async function pollRemoteLiveOnce() {
             const normalizedRows = normalizeTodayEnergyRows(rows);
             remoteBridgeState.todayEnergyRows = normalizedRows;
             updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
+            mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, Date.now());
             todayEnergyCache.ts = 0; // force next request to re-read with new data
           }
           remoteBridgeState.lastTodayEnergyFetchTs = Date.now();
@@ -3720,6 +4047,7 @@ function stopRemoteBridge() {
     remoteBridgeTimer = null;
   }
   resetRemoteBridgeAlarmState();
+  clearRemoteBridgePersistState();
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
   remoteBridgeState.liveFailureCount = 0;
@@ -3730,6 +4058,7 @@ function stopRemoteBridge() {
 
 function startRemoteBridge() {
   if (remoteBridgeState.running) return;
+  clearRemoteBridgePersistState();
   remoteBridgeState.running = true;
   remoteBridgeState.autoSyncAttempted = false;
   remoteBridgeState.liveFailureCount = 0;
@@ -4539,8 +4868,12 @@ function ensurePersistedSettings() {
     retainDays: "90",
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
     solcastTimezone: "Asia/Manila",
     plantLatitude: String(WEATHER_LAT),
     plantLongitude: String(WEATHER_LON),
@@ -4595,8 +4928,12 @@ function buildDefaultSettingsSnapshot() {
     retainDays: 90,
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
     solcastTimezone: "Asia/Manila",
     plantLatitude: WEATHER_LAT,
     plantLongitude: WEATHER_LON,
@@ -4640,10 +4977,25 @@ function buildSettingsSnapshot() {
         ? "solcast"
         : "ml_local",
     solcastBaseUrl: getSetting("solcastBaseUrl", defaults.solcastBaseUrl),
+    solcastAccessMode: normalizeSolcastAccessMode(
+      getSetting("solcastAccessMode", defaults.solcastAccessMode),
+    ),
     solcastApiKey: getSetting("solcastApiKey", defaults.solcastApiKey),
     solcastResourceId: getSetting(
       "solcastResourceId",
       defaults.solcastResourceId,
+    ),
+    solcastToolkitEmail: getSetting(
+      "solcastToolkitEmail",
+      defaults.solcastToolkitEmail,
+    ),
+    solcastToolkitPassword: getSetting(
+      "solcastToolkitPassword",
+      defaults.solcastToolkitPassword,
+    ),
+    solcastToolkitSiteRef: getSetting(
+      "solcastToolkitSiteRef",
+      defaults.solcastToolkitSiteRef,
     ),
     solcastTimezone: getSetting(
       "solcastTimezone",
@@ -4788,39 +5140,105 @@ function readForecastProvider() {
     : "ml_local";
 }
 
+function normalizeSolcastAccessMode(value) {
+  return String(value || SOLCAST_ACCESS_MODE_TOOLKIT)
+    .trim()
+    .toLowerCase() === SOLCAST_ACCESS_MODE_TOOLKIT
+    ? SOLCAST_ACCESS_MODE_TOOLKIT
+    : SOLCAST_ACCESS_MODE_API;
+}
+
+function resolveSolcastAccessMode(rawMode, candidate = null) {
+  const src = candidate && typeof candidate === "object" ? candidate : {};
+  const hasToolkit = !!(
+    String(src.toolkitEmail || "").trim() &&
+    String(src.toolkitPassword || "").trim() &&
+    String(src.toolkitSiteRef || "").trim()
+  );
+  const hasApi = !!(
+    String(src.apiKey || "").trim() &&
+    String(src.resourceId || "").trim()
+  );
+  const explicit = String(rawMode ?? "").trim();
+  if (!explicit) {
+    return hasToolkit ? SOLCAST_ACCESS_MODE_TOOLKIT : SOLCAST_ACCESS_MODE_API;
+  }
+  const normalized = normalizeSolcastAccessMode(explicit);
+  if (normalized === SOLCAST_ACCESS_MODE_API && hasToolkit && !hasApi) {
+    return SOLCAST_ACCESS_MODE_TOOLKIT;
+  }
+  return normalized;
+}
+
 function getSolcastConfig() {
-  return {
+  const cfg = {
     baseUrl: String(
       getSetting("solcastBaseUrl", "https://api.solcast.com.au") || "",
     ).trim() || "https://api.solcast.com.au",
+    accessMode: String(
+      getSetting("solcastAccessMode", SOLCAST_ACCESS_MODE_TOOLKIT) || "",
+    ).trim(),
     apiKey: String(getSetting("solcastApiKey", "") || "").trim(),
     resourceId: String(getSetting("solcastResourceId", "") || "").trim(),
+    toolkitEmail: String(getSetting("solcastToolkitEmail", "") || "").trim(),
+    toolkitPassword: String(
+      getSetting("solcastToolkitPassword", "") || "",
+    ).trim(),
+    toolkitSiteRef: String(
+      getSetting("solcastToolkitSiteRef", "") || "",
+    ).trim(),
     timeZone:
       String(getSetting("solcastTimezone", WEATHER_TZ) || "").trim() ||
       WEATHER_TZ,
   };
+  cfg.accessMode = resolveSolcastAccessMode(cfg.accessMode, cfg);
+  return cfg;
 }
 
 function buildSolcastConfigFromInput(input = null) {
   const base = getSolcastConfig();
   const src = input && typeof input === "object" ? input : {};
-  return {
+  const cfg = {
     baseUrl: String(
       src.solcastBaseUrl ?? src.baseUrl ?? base.baseUrl ?? "",
     ).trim() || "https://api.solcast.com.au",
+    accessMode: String(
+      src.solcastAccessMode ?? src.accessMode ?? base.accessMode ?? "",
+    ).trim(),
     apiKey: String(src.solcastApiKey ?? src.apiKey ?? base.apiKey ?? "").trim(),
     resourceId: String(
       src.solcastResourceId ?? src.resourceId ?? base.resourceId ?? "",
+    ).trim(),
+    toolkitEmail: String(
+      src.solcastToolkitEmail ?? src.toolkitEmail ?? base.toolkitEmail ?? "",
+    ).trim(),
+    toolkitPassword: String(
+      src.solcastToolkitPassword ??
+        src.toolkitPassword ??
+        base.toolkitPassword ??
+        "",
+    ).trim(),
+    toolkitSiteRef: String(
+      src.solcastToolkitSiteRef ??
+        src.toolkitSiteRef ??
+        base.toolkitSiteRef ??
+        "",
     ).trim(),
     timeZone: String(
       src.solcastTimezone ?? src.timeZone ?? base.timeZone ?? "",
     ).trim() || WEATHER_TZ,
   };
+  cfg.accessMode = resolveSolcastAccessMode(cfg.accessMode, cfg);
+  return cfg;
 }
 
 function hasUsableSolcastConfig(cfg = null) {
   const c = cfg || getSolcastConfig();
-  return !!(c.apiKey && c.resourceId && isHttpUrl(c.baseUrl));
+  if (!isHttpUrl(c.baseUrl)) return false;
+  if (normalizeSolcastAccessMode(c.accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return !!(c.toolkitEmail && c.toolkitPassword && c.toolkitSiteRef);
+  }
+  return !!(c.apiKey && c.resourceId);
 }
 
 function computePlantMaxKwFromConfig() {
@@ -4838,7 +5256,7 @@ function computeSlotCapKwh() {
   return (computePlantMaxKwFromConfig() * SOLCAST_SLOT_MIN) / 60;
 }
 
-async function fetchSolcastForecastRecords(cfg) {
+async function fetchSolcastApiForecastRecords(cfg) {
   const base = String(cfg.baseUrl || "").replace(/\/+$/, "");
   const rid = encodeURIComponent(String(cfg.resourceId || "").trim());
   const candidates = [
@@ -4881,6 +5299,634 @@ async function fetchSolcastForecastRecords(cfg) {
   );
 }
 
+function normalizeSolcastToolkitRecentHours(value, fallback = SOLCAST_TOOLKIT_RECENT_HOURS) {
+  const n = Math.max(1, Math.trunc(Number(value || fallback)));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, n);
+}
+
+function buildSolcastToolkitRecentUrl(
+  origin,
+  siteType,
+  siteId,
+  hours = SOLCAST_TOOLKIT_RECENT_HOURS,
+  period = SOLCAST_TOOLKIT_PERIOD,
+) {
+  const safeType = String(siteType || "").trim().toLowerCase();
+  const safeId = encodeURIComponent(String(siteId || "").trim());
+  const safeHours = normalizeSolcastToolkitRecentHours(hours, SOLCAST_TOOLKIT_RECENT_HOURS);
+  const safePeriod = String(period || SOLCAST_TOOLKIT_PERIOD).trim() || SOLCAST_TOOLKIT_PERIOD;
+  return new URL(
+    `/${safeType}/${safeId}/recent?view=Toolkit&theme=light&hours=${safeHours}&period=${encodeURIComponent(safePeriod)}`,
+    origin,
+  ).toString();
+}
+
+function parseSolcastToolkitSiteRef(value, baseUrl, options = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    throw new Error("Solcast toolkit site URL or site ID is required.");
+  }
+  const recentHours = normalizeSolcastToolkitRecentHours(
+    options?.recentHours,
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+  );
+  const period = String(options?.period || SOLCAST_TOOLKIT_PERIOD).trim() || SOLCAST_TOOLKIT_PERIOD;
+  let origin = "";
+  try {
+    origin = new URL(String(baseUrl || "https://api.solcast.com.au")).origin;
+  } catch {
+    throw new Error("Invalid Solcast Base URL.");
+  }
+
+  const parseSitePath = (input) => {
+    const cleaned = String(input || "").replace(/^\/+|\/+$/g, "");
+    const m = /^(utility_scale_sites|rooftop_sites|sites)\/([^/?#]+)/i.exec(
+      cleaned,
+    );
+    if (!m) return null;
+    const siteType = String(m[1] || "").trim().toLowerCase();
+    if (!SOLCAST_TOOLKIT_SITE_TYPES.has(siteType)) return null;
+    return {
+      siteType,
+      siteId: decodeURIComponent(String(m[2] || "").trim()),
+    };
+  };
+
+  if (/^https?:\/\//i.test(raw)) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(raw);
+    } catch {
+      throw new Error("Invalid Solcast toolkit site URL.");
+    }
+    const parsed = parseSitePath(parsedUrl.pathname);
+    if (!parsed) {
+      throw new Error(
+        "Solcast toolkit URL must include /utility_scale_sites/<id>, /rooftop_sites/<id>, or /sites/<id>.",
+      );
+    }
+    return {
+      ...parsed,
+      origin: parsedUrl.origin,
+      pageUrl: buildSolcastToolkitRecentUrl(
+        parsedUrl.origin,
+        parsed.siteType,
+        parsed.siteId,
+        recentHours,
+        period,
+      ),
+    };
+  }
+
+  const parsed = parseSitePath(raw);
+  if (parsed) {
+    return {
+      ...parsed,
+      origin,
+      pageUrl: buildSolcastToolkitRecentUrl(
+        origin,
+        parsed.siteType,
+        parsed.siteId,
+        recentHours,
+        period,
+      ),
+    };
+  }
+
+  if (!/^[A-Za-z0-9._-]+$/.test(raw)) {
+    throw new Error(
+      "Solcast toolkit site reference must be a site URL, site path, or site ID.",
+    );
+  }
+  return {
+    siteType: "utility_scale_sites",
+    siteId: raw,
+    origin,
+    pageUrl: buildSolcastToolkitRecentUrl(
+      origin,
+      "utility_scale_sites",
+      raw,
+      recentHours,
+      period,
+    ),
+  };
+}
+
+function mergeCookiesIntoJar(jar, response) {
+  if (!jar || !response?.headers || typeof response.headers.raw !== "function") {
+    return;
+  }
+  const setCookies = response.headers.raw()["set-cookie"] || [];
+  for (const entry of setCookies) {
+    const first = String(entry || "").split(";")[0] || "";
+    const eq = first.indexOf("=");
+    if (eq <= 0) continue;
+    const name = first.slice(0, eq).trim();
+    const value = first.slice(eq + 1).trim();
+    if (!name) continue;
+    if (!value) {
+      jar.delete(name);
+    } else {
+      jar.set(name, value);
+    }
+  }
+}
+
+function buildCookieHeader(jar) {
+  if (!(jar instanceof Map) || !jar.size) return "";
+  return Array.from(jar.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function escapeRegex(source) {
+  return String(source || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractJsArrayLiteralByName(html, name) {
+  const src = String(html || "");
+  const re = new RegExp(`\\b${escapeRegex(name)}\\b\\s*=\\s*\\[`, "i");
+  const match = re.exec(src);
+  if (!match) return "";
+  const start = src.indexOf("[", match.index);
+  if (start < 0) return "";
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (ch === "'" || ch === "\"" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return src.slice(start, i + 1);
+      }
+    }
+  }
+  return "";
+}
+
+function extractJsonParseArrayByName(html, name) {
+  const src = String(html || "");
+  const re = new RegExp(
+    `\\b${escapeRegex(name)}\\b\\s*=\\s*JSON\\.parse\\((['"])([\\s\\S]*?)\\1\\)`,
+    "i",
+  );
+  const match = re.exec(src);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[2]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    throw new Error(
+      `Unable to parse Solcast toolkit ${name} JSON payload: ${err.message}`,
+    );
+  }
+}
+
+function evaluateJsArrayLiteral(literal, label) {
+  if (!literal) return [];
+  try {
+    const result = vm.runInNewContext(`(${literal})`, Object.create(null), {
+      timeout: 1000,
+    });
+    return Array.isArray(result) ? result : [];
+  } catch (err) {
+    throw new Error(`Unable to parse Solcast toolkit ${label} payload: ${err.message}`);
+  }
+}
+
+function parseSolcastToolkitHtml(html) {
+  const forecastsLiteral = extractJsArrayLiteralByName(html, "forecasts");
+  const estActualsLiteral = extractJsArrayLiteralByName(html, "estActuals");
+  const forecasts = forecastsLiteral
+    ? evaluateJsArrayLiteral(forecastsLiteral, "forecasts")
+    : extractJsonParseArrayByName(html, "forecasts");
+  const estActuals = estActualsLiteral
+    ? evaluateJsArrayLiteral(estActualsLiteral, "estimated actuals")
+    : extractJsonParseArrayByName(html, "estActuals");
+  if (!forecasts.length) {
+    if (/auth\/credentials|name=\"userName\"|type=\"password\"/i.test(String(html || ""))) {
+      throw new Error("Solcast toolkit login failed. Check the email and password.");
+    }
+    throw new Error("Solcast toolkit page did not expose forecast data.");
+  }
+  return {
+    forecasts,
+    estActuals,
+    yLabelMw: /Power Output\s*\(MW\)/i.test(String(html || "")),
+  };
+}
+
+function normalizeToolkitPowerValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Number(n.toFixed(6));
+}
+
+function normalizeSolcastToolkitForecastRecords(records) {
+  const out = [];
+  for (const rec of records || []) {
+    if (!rec || typeof rec !== "object") continue;
+    const pvEstimate = normalizeToolkitPowerValue(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean,
+    );
+    const pvEstimate10 = normalizeToolkitPowerValue(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+    );
+    const pvEstimate90 = normalizeToolkitPowerValue(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+    );
+    out.push({
+      ...rec,
+      period_end:
+        rec?.period_end ??
+        rec?.periodEnd ??
+        rec?.period_end_utc ??
+        rec?.periodEndUtc,
+      period: rec?.period || SOLCAST_TOOLKIT_PERIOD,
+      pv_estimate: pvEstimate,
+      pv_estimate10:
+        pvEstimate10 ?? (pvEstimate != null ? pvEstimate : null),
+      pv_estimate90:
+        pvEstimate90 ?? (pvEstimate != null ? pvEstimate : null),
+    });
+  }
+  return out;
+}
+
+async function fetchSolcastToolkitForecastRecords(cfg, options = {}) {
+  const site = parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl, {
+    recentHours: options?.toolkitHours,
+    period: options?.toolkitPeriod,
+  });
+  const cookieJar = new Map();
+  const buildHeaders = (extra = {}) => {
+    const headers = { ...extra };
+    const cookie = buildCookieHeader(cookieJar);
+    if (cookie) headers.Cookie = cookie;
+    return headers;
+  };
+
+  const landing = await fetch(site.pageUrl, {
+    timeout: SOLCAST_TIMEOUT_MS,
+    headers: buildHeaders({
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }),
+  });
+  mergeCookiesIntoJar(cookieJar, landing);
+
+  const authUrl = new URL("/auth/credentials", site.origin).toString();
+  const authBody = new URLSearchParams({
+    userName: cfg.toolkitEmail,
+    password: cfg.toolkitPassword,
+    rememberMe: "false",
+    continue: site.pageUrl,
+  }).toString();
+  const authResp = await fetch(authUrl, {
+    method: "POST",
+    timeout: SOLCAST_TIMEOUT_MS,
+    redirect: "manual",
+    headers: buildHeaders({
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: site.pageUrl,
+    }),
+    body: authBody,
+  });
+  mergeCookiesIntoJar(cookieJar, authResp);
+  if (authResp.status >= 400) {
+    const detail = String(await authResp.text().catch(() => "") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+    throw new Error(
+      `Solcast toolkit login failed (HTTP ${authResp.status}${detail ? ` - ${detail}` : ""}).`,
+    );
+  }
+
+  const pageResp = await fetch(site.pageUrl, {
+    timeout: SOLCAST_TIMEOUT_MS,
+    headers: buildHeaders({
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: site.pageUrl,
+    }),
+  });
+  mergeCookiesIntoJar(cookieJar, pageResp);
+  if (!pageResp.ok) {
+    const detail = String(await pageResp.text().catch(() => "") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+    throw new Error(
+      `Solcast toolkit page fetch failed (HTTP ${pageResp.status}${detail ? ` - ${detail}` : ""}).`,
+    );
+  }
+  const html = await pageResp.text();
+  const parsed = parseSolcastToolkitHtml(html);
+  const records = normalizeSolcastToolkitForecastRecords(parsed.forecasts);
+  if (!records.length) {
+    throw new Error("Solcast toolkit page returned no forecast records.");
+  }
+  return {
+    endpoint: site.pageUrl,
+    records,
+    estActuals: parsed.estActuals,
+    accessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
+    siteType: site.siteType,
+    siteId: site.siteId,
+    units: parsed.yLabelMw
+      ? "MW-average (converted to interval MWh / stored slot kWh)"
+      : "toolkit chart power",
+  };
+}
+
+async function fetchSolcastForecastRecords(cfg, options = {}) {
+  return normalizeSolcastAccessMode(cfg.accessMode) ===
+    SOLCAST_ACCESS_MODE_TOOLKIT
+    ? fetchSolcastToolkitForecastRecords(cfg, options)
+    : fetchSolcastApiForecastRecords(cfg);
+}
+
+function convertSolcastPowerToMwh(powerValue, durMin, accessMode) {
+  const power = Number(powerValue);
+  const minutes = Number(durMin);
+  if (!Number.isFinite(power) || !Number.isFinite(minutes) || power <= 0 || minutes <= 0) {
+    return null;
+  }
+  if (normalizeSolcastAccessMode(accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return Number((power * (minutes / 60)).toFixed(6));
+  }
+  return Number(((power * (minutes / 60)) / 1000).toFixed(6));
+}
+
+function convertSolcastPowerToMw(powerValue, accessMode) {
+  const power = Number(powerValue);
+  if (!Number.isFinite(power) || power <= 0) return null;
+  if (normalizeSolcastAccessMode(accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return Number(power.toFixed(6));
+  }
+  return Number((power / 1000).toFixed(6));
+}
+
+function normalizeSolcastPreviewDayCount(value) {
+  const n = Math.trunc(Number(value || 1));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.max(1, n));
+}
+
+function computeSolcastPreviewHours(dayCount) {
+  const count = normalizeSolcastPreviewDayCount(dayCount);
+  return Math.max(
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+    Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, (count + 1) * 24),
+  );
+}
+
+function listSolcastPreviewDays(forecastRecords, actualRecords, cfg) {
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const daySet = new Set();
+  const pushDay = (rec) => {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) return;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.minuteOfDay < startMin || p.minuteOfDay > endMin) return;
+    daySet.add(p.date);
+  };
+
+  for (const rec of forecastRecords || []) pushDay(rec);
+  for (const rec of actualRecords || []) pushDay(rec);
+  return Array.from(daySet).sort();
+}
+
+function buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg) {
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const actualMwhMap = new Map();
+  const actualMwMap = new Map();
+  const forecastMwhMap = new Map();
+  const forecastMwMap = new Map();
+  const forecastLoMwhMap = new Map();
+  const forecastLoMwMap = new Map();
+  const forecastHiMwhMap = new Map();
+  const forecastHiMwMap = new Map();
+  const pushRow = (rec, kind) => {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) return;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.date !== day || p.minuteOfDay < startMin || p.minuteOfDay > endMin) return;
+    const label = p.time.slice(0, 5);
+    const durMin = parseIsoDurationToMinutes(
+      rec?.period ?? rec?.period_duration ?? rec?.duration,
+      SOLCAST_SLOT_MIN,
+    );
+    const mid = convertSolcastPowerToMwh(
+      rec?.pv_estimate ??
+        rec?.pvEstimate ??
+        rec?.pv_estimate_mean ??
+        rec?.pv_estimate_median,
+      durMin,
+      accessMode,
+    );
+    const midMw = convertSolcastPowerToMw(
+      rec?.pv_estimate ??
+        rec?.pvEstimate ??
+        rec?.pv_estimate_mean ??
+        rec?.pv_estimate_median,
+      accessMode,
+    );
+    if (kind !== "forecast") {
+      if (mid != null) actualMwhMap.set(label, mid);
+      if (midMw != null) actualMwMap.set(label, midMw);
+      return;
+    }
+    if (mid != null) forecastMwhMap.set(label, mid);
+    if (midMw != null) forecastMwMap.set(label, midMw);
+    const lo = convertSolcastPowerToMwh(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      durMin,
+      accessMode,
+    );
+    const loMw = convertSolcastPowerToMw(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      accessMode,
+    );
+    const hi = convertSolcastPowerToMwh(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      durMin,
+      accessMode,
+    );
+    const hiMw = convertSolcastPowerToMw(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      accessMode,
+    );
+    if (lo != null) forecastLoMwhMap.set(label, lo);
+    if (loMw != null) forecastLoMwMap.set(label, loMw);
+    if (hi != null) forecastHiMwhMap.set(label, hi);
+    if (hiMw != null) forecastHiMwMap.set(label, hiMw);
+  };
+
+  for (const rec of forecastRecords || []) pushRow(rec, "forecast");
+  for (const rec of actualRecords || []) pushRow(rec, "actual");
+
+  const rows = [];
+  let forecastTotalMwh = 0;
+  let actualTotalMwh = 0;
+  for (let minute = startMin; minute <= endMin; minute += SOLCAST_SLOT_MIN) {
+    const hh = Math.floor(minute / 60);
+    const mm = minute % 60;
+    const label = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    const forecastVal = forecastMwhMap.has(label)
+      ? Number(forecastMwhMap.get(label))
+      : null;
+    const loVal = forecastLoMwhMap.has(label)
+      ? Number(forecastLoMwhMap.get(label))
+      : null;
+    const hiVal = forecastHiMwhMap.has(label)
+      ? Number(forecastHiMwhMap.get(label))
+      : null;
+    const actualVal = actualMwhMap.has(label) ? Number(actualMwhMap.get(label)) : null;
+    const forecastMw = forecastMwMap.has(label)
+      ? Number(forecastMwMap.get(label))
+      : null;
+    const forecastLoMw = forecastLoMwMap.has(label)
+      ? Number(forecastLoMwMap.get(label))
+      : null;
+    const forecastHiMw = forecastHiMwMap.has(label)
+      ? Number(forecastHiMwMap.get(label))
+      : null;
+    const actualMw = actualMwMap.has(label)
+      ? Number(actualMwMap.get(label))
+      : null;
+    rows.push({
+      date: day,
+      time: label,
+      period: SOLCAST_TOOLKIT_PERIOD,
+      chartLabel: `${day.slice(5)} ${label}`,
+      forecastMwh: forecastVal,
+      forecastLoMwh: loVal,
+      forecastHiMwh: hiVal,
+      actualMwh: actualVal,
+      forecastMw,
+      forecastLoMw,
+      forecastHiMw,
+      actualMw,
+    });
+    if (forecastVal != null) forecastTotalMwh += forecastVal;
+    if (actualVal != null) actualTotalMwh += actualVal;
+  }
+
+  return {
+    day,
+    rows,
+    forecastTotalMwh: Number(forecastTotalMwh.toFixed(6)),
+    actualTotalMwh: Number(actualTotalMwh.toFixed(6)),
+    startTime: "05:00",
+    endTime: "18:00",
+  };
+}
+
+function buildSolcastPreviewSeries(startDay, dayCount, forecastRecords, actualRecords, cfg) {
+  const availableDays = listSolcastPreviewDays(forecastRecords, actualRecords, cfg);
+  const todayTz = localDateStrInTz(Date.now(), cfg.timeZone);
+  const requestedStartDay = String(startDay || "").trim();
+  const normalizedCount = normalizeSolcastPreviewDayCount(dayCount);
+  const effectiveStartDay =
+    requestedStartDay && availableDays.includes(requestedStartDay)
+      ? requestedStartDay
+      : availableDays.includes(todayTz)
+        ? todayTz
+        : availableDays[0] || requestedStartDay || todayTz;
+  const startIdx = Math.max(0, availableDays.indexOf(effectiveStartDay));
+  const selectedDays = availableDays.slice(startIdx, startIdx + normalizedCount);
+  if (!selectedDays.length) {
+    throw new Error("No Solcast samples are available inside the 05:00-18:00 window.");
+  }
+
+  const daySeries = selectedDays.map((day) =>
+    buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg),
+  );
+  const rows = daySeries.flatMap((entry) => entry.rows || []);
+  if (!rows.length) {
+    throw new Error(
+      `No Solcast samples matched ${selectedDays[0]} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
+    );
+  }
+
+  const labels = rows.map((row) => row.chartLabel);
+  const forecastMwh = rows.map((row) => row.forecastMwh);
+  const forecastLoMwh = rows.map((row) => row.forecastLoMwh);
+  const forecastHiMwh = rows.map((row) => row.forecastHiMwh);
+  const actualMwh = rows.map((row) => row.actualMwh);
+  const forecastMw = rows.map((row) => row.forecastMw);
+  const forecastLoMw = rows.map((row) => row.forecastLoMw);
+  const forecastHiMw = rows.map((row) => row.forecastHiMw);
+  const actualMw = rows.map((row) => row.actualMw);
+  const forecastTotalMwh = daySeries.reduce(
+    (sum, entry) => sum + Number(entry?.forecastTotalMwh || 0),
+    0,
+  );
+  const actualTotalMwh = daySeries.reduce(
+    (sum, entry) => sum + Number(entry?.actualTotalMwh || 0),
+    0,
+  );
+  const rangeStartDay = selectedDays[0];
+  const rangeEndDay = selectedDays[selectedDays.length - 1];
+
+  return {
+    day: rangeStartDay,
+    dayCount: selectedDays.length,
+    selectedDays,
+    daysCovered: availableDays,
+    rangeStartDay,
+    rangeEndDay,
+    rangeLabel:
+      rangeStartDay === rangeEndDay
+        ? rangeStartDay
+        : `${rangeStartDay} to ${rangeEndDay}`,
+    labels,
+    forecastMwh,
+    forecastLoMwh,
+    forecastHiMwh,
+    actualMwh,
+    forecastMw,
+    forecastLoMw,
+    forecastHiMw,
+    actualMw,
+    rows,
+    forecastTotalMwh: Number(forecastTotalMwh.toFixed(6)),
+    actualTotalMwh: Number(actualTotalMwh.toFixed(6)),
+    startTime: "05:00",
+    endTime: "18:00",
+  };
+}
+
 function buildDayAheadRowsFromSolcast(day, records, cfg) {
   const slotKwh = new Array(288).fill(0);
   const slotLo = new Array(288).fill(0);
@@ -4889,6 +5935,15 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
   const slotMs = SOLCAST_SLOT_MIN * 60000;
   const startMin = SOLCAST_SOLAR_START_H * 60;
   const endMin = SOLCAST_SOLAR_END_H * 60;
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const powerToKwh = (value, hours) => {
+    const power = Number(value);
+    if (!Number.isFinite(power) || power <= 0 || !(hours > 0)) return 0;
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      return power * hours * 1000;
+    }
+    return power * hours;
+  };
 
   for (const rec of records || []) {
     const periodEndRaw =
@@ -4933,9 +5988,9 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
       if (p.date === day && p.minuteOfDay >= startMin && p.minuteOfDay < endMin) {
         const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
         const overlapH = (segEnd - segStart) / 3600000;
-        slotKwh[slot] += Math.max(0, Number.isFinite(kw) ? kw : 0) * overlapH;
-        slotLo[slot] += Math.max(0, Number.isFinite(kwLo) ? kwLo : 0) * overlapH;
-        slotHi[slot] += Math.max(0, Number.isFinite(kwHi) ? kwHi : 0) * overlapH;
+        slotKwh[slot] += powerToKwh(kw, overlapH);
+        slotLo[slot] += powerToKwh(kwLo, overlapH);
+        slotHi[slot] += powerToKwh(kwHi, overlapH);
         matched += 1;
       }
       segStart = segEnd;
@@ -5236,9 +6291,16 @@ async function generateDayAheadWithMl(dayCount) {
 async function generateDayAheadWithSolcast(dates) {
   const cfg = getSolcastConfig();
   if (!hasUsableSolcastConfig(cfg)) {
-    throw new Error("Solcast is selected but API key/resource/base URL are incomplete.");
+    if (normalizeSolcastAccessMode(cfg.accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      throw new Error(
+        "Solcast toolkit mode is selected but the site reference, email, or password is incomplete.",
+      );
+    }
+    throw new Error(
+      "Solcast API mode is selected but the API key, resource ID, or base URL is incomplete. Switch Access Mode to Toolkit Login if you want to use only the toolkit URL, email, and password.",
+    );
   }
-  const { endpoint, records } = await fetchSolcastForecastRecords(cfg);
+  const { endpoint, records, accessMode } = await fetchSolcastForecastRecords(cfg);
   let writtenRows = 0;
   for (const day of dates) {
     const rows = buildDayAheadRowsFromSolcast(day, records, cfg);
@@ -5248,6 +6310,7 @@ async function generateDayAheadWithSolcast(dates) {
   const normalizedRows = normalizeForecastDbWindow();
   return {
     providerUsed: "solcast",
+    accessMode,
     endpoint,
     writtenRows,
     normalizedRows,
@@ -6537,7 +7600,7 @@ app.get("/api/replication/job-status", (req, res) => {
 app.get("/api/replication/archive-manifest", (req, res) => {
   try {
     const manifest = listLocalArchiveManifest();
-    res.json({
+    sendJsonMaybeGzip(req, res, {
       ok: true,
       manifest,
       summary: summarizeArchiveManifest(manifest),
@@ -6559,17 +7622,24 @@ app.get("/api/replication/archive-download", async (req, res) => {
     if (!resolved?.path) {
       throw new Error("Archive file not found.");
     }
+    const totalBytes = Math.max(0, Number(resolved.size || 0));
+    const useGzip = shouldGzipReplicationStream(req, totalBytes);
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader(
-      "Content-Length",
-      String(Math.max(0, Number(resolved.size || 0))),
-    );
+    res.setHeader("x-archive-size", String(totalBytes));
     res.setHeader(
       "x-archive-mtime",
       String(Math.max(0, Number(resolved.mtimeMs || 0))),
     );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-    fs.createReadStream(resolved.path).pipe(res);
+    if (!useGzip) {
+      res.setHeader("Content-Length", String(totalBytes));
+      await pipeline(createTransferReadStream(resolved.path), res);
+      return;
+    }
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    await pipeline(createTransferReadStream(resolved.path), createReplicationGzipStream(), res);
+    return;
   } catch (err) {
     return res.status(404).json({ ok: false, error: "Archive file not found." });
   }
@@ -6610,7 +7680,7 @@ app.post("/api/replication/archive-upload", async (req, res) => {
         label: `Receiving archive ${fileName}`,
       });
     });
-    await pipeline(req, fs.createWriteStream(tempPath));
+    await pipeline(req, createTransferWriteStream(tempPath));
     const mtime = new Date(expectedMtimeMs);
     await fs.promises.utimes(tempPath, mtime, mtime);
     stagePendingArchiveReplacement({
@@ -6677,7 +7747,8 @@ app.get("/api/replication/main-db", async (req, res) => {
     const fileName = "adsi.db";
     const totalBytes = Math.max(0, Number(snapshot?.size || 0));
     const targetMtimeMs = Math.max(0, Number(snapshot?.mtimeMs || Date.now()));
-    const stream = fs.createReadStream(snapshot.tempPath);
+    const stream = createTransferReadStream(snapshot.tempPath);
+    const useGzip = shouldGzipReplicationStream(req, totalBytes);
 
     broadcastUpdate({
       type: "xfer_progress",
@@ -6704,12 +7775,17 @@ app.get("/api/replication/main-db", async (req, res) => {
     });
 
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Length", String(totalBytes));
     res.setHeader("x-main-db-size", String(totalBytes));
     res.setHeader("x-main-db-mtime", String(targetMtimeMs));
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-
-    await pipeline(stream, res);
+    if (!useGzip) {
+      res.setHeader("Content-Length", String(totalBytes));
+      await pipeline(stream, res);
+    } else {
+      res.setHeader("Content-Encoding", "gzip");
+      res.setHeader("Vary", "Accept-Encoding");
+      await pipeline(stream, createReplicationGzipStream(), res);
+    }
     broadcastUpdate({
       type: "xfer_progress",
       dir: "tx",
@@ -6756,7 +7832,7 @@ app.get("/api/replication/summary", async (req, res) => {
   }
   try {
     const summary = buildReplicationSummary();
-    res.json({ ok: true, summary });
+    sendJsonMaybeGzip(req, res, { ok: true, summary });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -6774,7 +7850,7 @@ app.get("/api/replication/full", async (req, res) => {
   }
   try {
     const snapshot = buildFullDbSnapshot();
-    res.json({ ok: true, snapshot });
+    sendJsonMaybeGzip(req, res, { ok: true, snapshot });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -6793,7 +7869,7 @@ app.post("/api/replication/incremental", async (req, res) => {
   try {
     const cursors = normalizeReplicationCursors(req?.body?.cursors || {});
     const delta = buildIncrementalReplicationDelta(cursors);
-    res.json({ ok: true, delta });
+    sendJsonMaybeGzip(req, res, { ok: true, delta });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -7308,8 +8384,12 @@ app.post("/api/settings", (req, res) => {
     retainDays,
     forecastProvider,
     solcastBaseUrl,
+    solcastAccessMode,
     solcastApiKey,
     solcastResourceId,
+    solcastToolkitEmail,
+    solcastToolkitPassword,
+    solcastToolkitSiteRef,
     solcastTimezone,
     exportUiState,
     inverterPollConfig,
@@ -7412,6 +8492,16 @@ app.post("/api/settings", (req, res) => {
     }
     updates.solcastBaseUrl = base || "https://api.solcast.com.au";
   }
+  if (solcastAccessMode !== undefined) {
+    const mode = normalizeSolcastAccessMode(solcastAccessMode);
+    if (
+      mode !== SOLCAST_ACCESS_MODE_API &&
+      mode !== SOLCAST_ACCESS_MODE_TOOLKIT
+    ) {
+      return res.status(400).json({ ok: false, error: "Invalid solcastAccessMode" });
+    }
+    updates.solcastAccessMode = mode;
+  }
   if (solcastApiKey !== undefined) {
     const key = String(solcastApiKey || "").trim();
     updates.solcastApiKey = key.slice(0, 256);
@@ -7419,6 +8509,37 @@ app.post("/api/settings", (req, res) => {
   if (solcastResourceId !== undefined) {
     const rid = String(solcastResourceId || "").trim();
     updates.solcastResourceId = rid.slice(0, 120);
+  }
+  const effectiveSolcastBaseUrl =
+    String(
+      updates.solcastBaseUrl ??
+        getSetting("solcastBaseUrl", "https://api.solcast.com.au") ??
+        "https://api.solcast.com.au",
+    ).trim() || "https://api.solcast.com.au";
+  if (solcastToolkitEmail !== undefined) {
+    const email = String(solcastToolkitEmail || "").trim();
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return res.status(400).json({ ok: false, error: "Invalid solcastToolkitEmail" });
+    }
+    updates.solcastToolkitEmail = email.slice(0, 200);
+  }
+  if (solcastToolkitPassword !== undefined) {
+    const pwd = String(solcastToolkitPassword || "").trim();
+    updates.solcastToolkitPassword = pwd.slice(0, 256);
+  }
+  if (solcastToolkitSiteRef !== undefined) {
+    const ref = String(solcastToolkitSiteRef || "").trim();
+    if (ref) {
+      try {
+        parseSolcastToolkitSiteRef(ref, effectiveSolcastBaseUrl);
+      } catch (err) {
+        return res.status(400).json({
+          ok: false,
+          error: `Invalid solcastToolkitSiteRef: ${err.message}`,
+        });
+      }
+    }
+    updates.solcastToolkitSiteRef = ref.slice(0, 500);
   }
   if (solcastTimezone !== undefined) {
     const tz = String(solcastTimezone || "").trim();
@@ -7444,6 +8565,32 @@ app.post("/api/settings", (req, res) => {
   }
   if (inverterPollConfig !== undefined) {
     updates.inverterPollConfig = JSON.stringify(sanitizePollConfig(inverterPollConfig));
+  }
+
+  const effectiveMode = sanitizeOperationMode(
+    updates.operationMode !== undefined ? updates.operationMode : modeBefore,
+    modeBefore,
+  );
+  const effectiveRemoteGatewayUrl = String(
+    updates.remoteGatewayUrl !== undefined
+      ? updates.remoteGatewayUrl
+      : remoteGatewayBefore,
+  ).trim();
+  if (effectiveMode === "remote") {
+    if (!effectiveRemoteGatewayUrl) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Remote mode requires a configured Remote Gateway URL. Enter the gateway address first, then save again.",
+      });
+    }
+    if (isUnsafeRemoteLoop(effectiveRemoteGatewayUrl)) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Remote mode cannot use localhost or 127.0.0.1 as the gateway URL. Use the gateway workstation IP, hostname, or Tailscale address.",
+      });
+    }
   }
 
   db.transaction(() => {
@@ -7575,7 +8722,7 @@ app.post("/api/runtime/network/test", async (req, res) => {
       {
         method: "GET",
         headers: buildRemoteProxyHeaders(token),
-        timeout: REMOTE_FETCH_TIMEOUT_MS,
+        timeout: Math.max(REMOTE_FETCH_TIMEOUT_MS, 15000),
       },
       {
         attempts: REMOTE_LIVE_FETCH_RETRIES,
@@ -7877,18 +9024,53 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     if (!isHttpUrl(cfg.baseUrl)) {
       return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
     }
-    if (!cfg.apiKey) {
-      return res.status(400).json({ ok: false, error: "Solcast API key is required." });
-    }
-    if (!cfg.resourceId) {
-      return res.status(400).json({ ok: false, error: "Solcast resource ID is required." });
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit email is required.",
+        });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit password is required.",
+        });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit site URL or site ID is required.",
+        });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
     }
     if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
       return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
     }
 
     const started = Date.now();
-    const { endpoint, records } = await fetchSolcastForecastRecords(cfg);
+    const { endpoint, records, estActuals, units } = await fetchSolcastForecastRecords(cfg);
     const validTs = [];
     const daySet = new Set();
     for (const rec of records || []) {
@@ -7920,9 +9102,12 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     return res.json({
       ok: true,
       provider: "solcast",
+      accessMode,
       endpoint,
       durationMs: Date.now() - started,
       records: Number(records.length || 0),
+      estimatedActuals: Number(estActuals?.length || 0),
+      units: String(units || "").trim() || "provider payload",
       timezone: cfg.timeZone,
       firstPeriodEndIso: validTs.length ? new Date(validTs[0]).toISOString() : "",
       lastPeriodEndIso: validTs.length
@@ -7931,6 +9116,178 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
       daysCovered: Array.from(daySet).sort(),
       dayAheadPreview: preview,
       warning,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/forecast/solcast/preview", async (req, res) => {
+  try {
+    const cfg = buildSolcastConfigFromInput(req.body || {});
+    if (!isHttpUrl(cfg.baseUrl)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
+    }
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit email is required.",
+        });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit password is required.",
+        });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit site URL or site ID is required.",
+        });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
+    }
+    if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
+    }
+
+    const requestedDay = String(req.body?.day || "").trim();
+    const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
+    const started = Date.now();
+    const { endpoint, records, estActuals, units } = await fetchSolcastForecastRecords(cfg, {
+      toolkitHours: computeSolcastPreviewHours(requestedDayCount),
+    });
+    const preview = buildSolcastPreviewSeries(
+      requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
+      requestedDayCount,
+      records,
+      estActuals || [],
+      cfg,
+    );
+    return res.json({
+      ok: true,
+      provider: "solcast",
+      accessMode,
+      endpoint,
+      durationMs: Date.now() - started,
+      units: String(units || "").trim() || "provider payload",
+      timezone: cfg.timeZone,
+      day: preview.day,
+      dayCount: preview.dayCount,
+      selectedDays: preview.selectedDays,
+      rangeStartDay: preview.rangeStartDay,
+      rangeEndDay: preview.rangeEndDay,
+      rangeLabel: preview.rangeLabel,
+      daysCovered: preview.daysCovered,
+      startTime: preview.startTime,
+      endTime: preview.endTime,
+      labels: preview.labels,
+      forecastMwh: preview.forecastMwh,
+      forecastLoMwh: preview.forecastLoMwh,
+      forecastHiMwh: preview.forecastHiMwh,
+      actualMwh: preview.actualMwh,
+      forecastMw: preview.forecastMw,
+      forecastLoMw: preview.forecastLoMw,
+      forecastHiMw: preview.forecastHiMw,
+      actualMw: preview.actualMw,
+      rows: preview.rows,
+      forecastTotalMwh: preview.forecastTotalMwh,
+      actualTotalMwh: preview.actualTotalMwh,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/export/solcast-preview", async (req, res) => {
+  try {
+    const cfg = buildSolcastConfigFromInput(req.body || {});
+    if (!isHttpUrl(cfg.baseUrl)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
+    }
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({ ok: false, error: "Solcast toolkit email is required." });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({ ok: false, error: "Solcast toolkit password is required." });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({ ok: false, error: "Solcast toolkit site URL or site ID is required." });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
+    }
+    if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
+    }
+
+    const requestedDay = String(req.body?.day || "").trim();
+    const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
+    const { records, estActuals } = await fetchSolcastForecastRecords(cfg, {
+      toolkitHours: computeSolcastPreviewHours(requestedDayCount),
+    });
+    const preview = buildSolcastPreviewSeries(
+      requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
+      requestedDayCount,
+      records,
+      estActuals || [],
+      cfg,
+    );
+    const outPath = await exporter.exportSolcastPreview({
+      rows: preview.rows,
+      startDay: preview.rangeStartDay,
+      endDay: preview.rangeEndDay,
+      format: "xlsx",
+    });
+    return res.json({
+      ok: true,
+      path: outPath,
+      day: preview.day,
+      dayCount: preview.dayCount,
+      rangeStartDay: preview.rangeStartDay,
+      rangeEndDay: preview.rangeEndDay,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
@@ -8203,6 +9560,34 @@ app.get("/api/report/latest-date", (req, res) => {
   }
 });
 
+function getEnergySummarySupplementRowsForRange(startTs, endTs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const today = localDateStr();
+  const todayStart = new Date(`${today}T00:00:00.000`).getTime();
+  const todayEnd = new Date(`${today}T23:59:59.999`).getTime();
+  if (e < todayStart || s > todayEnd) return [];
+  return getTodayEnergySupplementRows(today);
+}
+
+function buildEnergySummarySourceRows(payload = {}) {
+  const s = Number(payload?.startTs || 0) || Date.now() - 86400000;
+  const e = Number(payload?.endTs || 0) || Date.now();
+  return exporter.buildEnergySummaryExportRows(s, e, payload?.inverter, {
+    supplementalTodayRows: getEnergySummarySupplementRowsForRange(s, e),
+  });
+}
+
+app.post("/api/energy/summary-source", async (req, res) => {
+  try {
+    const rows = buildEnergySummarySourceRows(req.body || {});
+    return res.json({ ok: true, rows });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/export/alarms", async (req, res) => {
   try {
     const outPath = await exporter.exportAlarms(req.body || {});
@@ -8213,10 +9598,17 @@ app.post("/api/export/alarms", async (req, res) => {
 });
 app.post("/api/export/energy", async (req, res) => {
   try {
-    const outPath = await exporter.exportEnergy(req.body || {});
-    res.json({ ok: true, path: outPath });
+    const payload = req.body || {};
+    const outPath = await exporter.exportEnergy({
+      ...payload,
+      supplementalTodayRows: getEnergySummarySupplementRowsForRange(
+        payload?.startTs,
+        payload?.endTs,
+      ),
+    });
+    return res.json({ ok: true, path: outPath });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 app.post("/api/export/inverter-data", async (req, res) => {
@@ -8601,7 +9993,13 @@ function shutdownEmbedded() {
   console.log("[Server] Embedded shutdown: flushing DB...");
   stopRemoteChatBridge();
   try { poller.stop(); } catch (_) {}
-  _flushAndClose();
+  try {
+    httpServer.close(() => { _flushAndClose(); });
+  } catch (_) {
+    _flushAndClose();
+    return;
+  }
+  setTimeout(() => { _flushAndClose(); }, 2000).unref();
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

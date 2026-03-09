@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.23` in `package.json`
+- Current repo version baseline: `2.2.24` in `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -90,6 +90,12 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Startup and live remote sync should stay incremental/LWW, but manual `Pull` in Remote mode must stage the gateway `adsi.db` for restart-safe local replacement so stale remote state is removed.
 - Never stream the live gateway `adsi.db` file directly. Flush pending in-memory telemetry, create a transactionally consistent SQLite snapshot from the running gateway DB, and transfer that snapshot file instead.
 - During a staged gateway main-DB replacement, preserve only the client-local remote settings: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
+- Keep replication transport optimized by default:
+  - reuse HTTP connections for gateway transfer requests
+  - gzip large replication JSON payloads and large main-DB / archive downloads when the peer accepts it
+  - keep push uploads chunked and allow gzip request bodies for large JSON push batches
+  - allow only small bounded archive concurrency; do not trade restart-safe staging for raw throughput
+- Do not remove transfer-speed optimizations casually. Measure first if a rollback is really needed.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated raw `readings` or `energy_5min` are older than local `retainDays`, write them directly into the local archive instead of the hot DB.
 - Archive DB file transfer is implemented, but monthly archive `.db` replacement must be restart-safe:
@@ -98,6 +104,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
   - apply staged archive replacements only during startup / restart before the server begins serving requests
   - if an archive replacement is staged, archive manifest and archive download logic must expose the staged version immediately so follow-up sync decisions see the newest content
   - manual pull/push messaging must state that staged archive DB changes apply after restart
+  - bounded parallel archive transfer must still keep transfer-monitor progress accurate and failure handling deterministic
 
 ## UX and Theming Rules
 
@@ -165,11 +172,15 @@ Preserve these unless a deliberate migration is implemented:
 
 - `gateway`
   - polls plant locally
-  - can generate day-ahead forecast
+  - is the authoritative source of truth for live data, reports, forecasts, chat, and replication snapshots
+  - is the only mode allowed to generate day-ahead and intraday-adjusted forecast data
 - `remote`
-  - pulls live data from gateway
+  - uses the local DB as its working copy after pull and live sync
+  - manual `Pull` stages and replaces the local main DB from the gateway so stale client data is cleared safely
+  - continues mirroring inbound hot data locally from the gateway after pull so exports, reports, and later mode switches keep using local state
   - can run replication workflows
-  - must not run day-ahead generation
+  - may run local remote-side utilities such as Solcast toolkit test / preview / export
+  - must not run day-ahead generation while active in `remote` mode
 
 ## Operator Messaging
 
