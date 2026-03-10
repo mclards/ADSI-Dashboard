@@ -210,6 +210,9 @@ const REPLICATION_JSON_GZIP_MIN_BYTES = 96 * 1024;
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
 const REMOTE_FETCH_KEEPALIVE_MSECS = 8000;
 const REMOTE_FETCH_MAX_SOCKETS = 8;
+const REMOTE_FETCH_MAX_SOCKETS_REPLICATION = 16;
+const CHAT_RATE_LIMIT_WINDOW_MS = 60000;
+const CHAT_RATE_LIMIT_MAX = 10;
 const LIVE_FRESH_MS = 20000;
 const REMOTE_CLIENT_PULL_ONLY = false;
 const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
@@ -961,6 +964,26 @@ function sanitizeChatMessageText(raw) {
     throw err;
   }
   return normalized;
+}
+
+const _chatRateBuckets = new Map(); // key: machine → { timestamps[] }
+
+function checkChatRateLimit(machine) {
+  const key = String(machine || "local");
+  const now = Date.now();
+  let bucket = _chatRateBuckets.get(key);
+  if (!bucket) {
+    bucket = { timestamps: [] };
+    _chatRateBuckets.set(key, bucket);
+  }
+  // Prune entries outside the window.
+  bucket.timestamps = bucket.timestamps.filter((ts) => now - ts < CHAT_RATE_LIMIT_WINDOW_MS);
+  if (bucket.timestamps.length >= CHAT_RATE_LIMIT_MAX) {
+    const err = new Error(`Rate limit exceeded. Maximum ${CHAT_RATE_LIMIT_MAX} messages per minute.`);
+    err.httpStatus = 429;
+    throw err;
+  }
+  bucket.timestamps.push(now);
 }
 
 function normalizeChatRow(row) {
@@ -2689,117 +2712,127 @@ async function runRemotePushFull(baseUrl) {
 }
 
 async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
-  // Step 0 — Check: if local data is newer than the gateway, stop unless forcePull.
-  if (!forcePull) {
-    updateManualReplicationJob({ summary: "Checking gateway state before main DB pull…" });
-    const check = await checkLocalNewerBeforePull(baseUrl);
-    if (!check?.ok) {
-      throw new Error(`Gateway state check failed: ${String(check?.error || "unknown error")}. Check gateway connectivity and retry.`);
+  boostSocketPoolForReplication();
+  try {
+    // Step 0 — Check: if local data is newer than the gateway, stop unless forcePull.
+    if (!forcePull) {
+      updateManualReplicationJob({ summary: "Checking gateway state before main DB pull…" });
+      const check = await checkLocalNewerBeforePull(baseUrl);
+      if (!check?.ok) {
+        throw new Error(`Gateway state check failed: ${String(check?.error || "unknown error")}. Check gateway connectivity and retry.`);
+      }
+      if (check.localNewer) {
+        const err = new Error(
+          "Local data is newer than the gateway. Use Push first to send local changes to the gateway, " +
+          "or use Force Pull to overwrite local data with the gateway state.",
+        );
+        err.code = "LOCAL_NEWER_PUSH_FAILED";
+        err.canForcePull = true;
+        throw err;
+      }
     }
-    if (check.localNewer) {
-      const err = new Error(
-        "Local data is newer than the gateway. Use Push first to send local changes to the gateway, " +
-        "or use Force Pull to overwrite local data with the gateway state.",
-      );
-      err.code = "LOCAL_NEWER_PUSH_FAILED";
-      err.canForcePull = true;
-      throw err;
-    }
-  }
 
-  // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
-  updateManualReplicationJob({ summary: "Pulling fresh gateway main database…" });
-  const mainDb = await pullMainDbFromRemote(baseUrl, {
-    label: "Pulling main database",
-    syncDirection: "pull-main-db-staged",
-    failureDirection: "pull-main-db-failed",
-  });
-  if (mainDb?.skipped) {
-    throw new Error("Replication already in progress.");
-  }
-  if (!mainDb?.ok) {
-    throw new Error(
-      `Main DB pull failed: ${String(
-        mainDb?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-    );
-  }
-
-  let archive = {
-    ok: true,
-    availableFiles: 0,
-    transferredFiles: 0,
-    skippedFiles: 0,
-    totalBytes: 0,
-    transferredBytes: 0,
-    files: [],
-    unsupported: false,
-  };
-  if (includeArchive) {
-    updateManualReplicationJob({
-      summary: "Main DB staged. Downloading archive DB files from gateway.",
+    // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
+    updateManualReplicationJob({ summary: "Pulling fresh gateway main database…" });
+    const mainDb = await pullMainDbFromRemote(baseUrl, {
+      label: "Pulling main database",
+      syncDirection: "pull-main-db-staged",
+      failureDirection: "pull-main-db-failed",
     });
-    archive = await pullArchiveFilesFromRemote(baseUrl);
+    if (mainDb?.skipped) {
+      throw new Error("Replication already in progress.");
+    }
+    if (!mainDb?.ok) {
+      throw new Error(
+        `Main DB pull failed: ${String(
+          mainDb?.error || "unknown error",
+        )}. Ensure gateway and client are on the same build.`,
+      );
+    }
+
+    let archive = {
+      ok: true,
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      unsupported: false,
+    };
+    if (includeArchive) {
+      updateManualReplicationJob({
+        summary: "Main DB staged. Downloading archive DB files from gateway.",
+      });
+      archive = await pullArchiveFilesFromRemote(baseUrl);
+    }
+    const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
+    const archiveSummary = includeArchive
+      ? archive.unsupported
+        ? "archive skipped (remote build has no archive sync)"
+        : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
+      : "archive skipped";
+    return {
+      needsRestart: true,
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      mode: "main-db",
+      mainDb,
+      archive,
+      summary: `Pull complete | ${mainDbSummary} | ${archiveSummary}. Restart the app to apply the new gateway database.`,
+    };
+  } finally {
+    restoreSocketPoolAfterReplication();
   }
-  const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
-  const archiveSummary = includeArchive
-    ? archive.unsupported
-      ? "archive skipped (remote build has no archive sync)"
-      : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
-    : "archive skipped";
-  return {
-    needsRestart: true,
-    direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-    mode: "main-db",
-    mainDb,
-    archive,
-    summary: `Pull complete | ${mainDbSummary} | ${archiveSummary}. Restart the app to apply the new gateway database.`,
-  };
 }
 
 async function runManualPushSync(baseUrl, includeArchive = true) {
-  updateManualReplicationJob({
-    summary: "Pushing local replicated hot data to gateway.",
-  });
-  const pushed = await runRemotePushFull(baseUrl);
-  if (pushed?.skipped) {
-    throw new Error("Replication already in progress.");
-  }
-  if (!pushed?.ok) {
-    throw new Error(String(pushed?.error || "Full push failed."));
-  }
-
-  let archivePush = {
-    ok: true,
-    availableFiles: 0,
-    transferredFiles: 0,
-    skippedFiles: 0,
-    totalBytes: 0,
-    transferredBytes: 0,
-    files: [],
-    unsupported: false,
-  };
-  if (includeArchive) {
+  boostSocketPoolForReplication();
+  try {
     updateManualReplicationJob({
-      summary: "Hot push finished. Uploading local archive DB files to gateway.",
+      summary: "Pushing local replicated hot data to gateway.",
     });
-    archivePush = await pushArchiveFilesToRemote(baseUrl);
-  }
+    const pushed = await runRemotePushFull(baseUrl);
+    if (pushed?.skipped) {
+      throw new Error("Replication already in progress.");
+    }
+    if (!pushed?.ok) {
+      throw new Error(String(pushed?.error || "Full push failed."));
+    }
 
-  const archivePushSummary = includeArchive
-    ? archivePush.unsupported
-      ? "archive upload skipped"
-      : `archive sent to gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
-    : "archive skipped";
-  return {
-    needsRestart: false,
-    mode: "push",
-    direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-    pushedRows: Number(pushed.importedRows || 0),
-    pushChunks: Number(pushed.chunkCount || 0),
-    archivePush,
-    summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} rows in ${Number(pushed.chunkCount || 0)} chunk(s) | ${archivePushSummary}. Local database was not changed.`,
-  };
+    let archivePush = {
+      ok: true,
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      unsupported: false,
+    };
+    if (includeArchive) {
+      updateManualReplicationJob({
+        summary: "Hot push finished. Uploading local archive DB files to gateway.",
+      });
+      archivePush = await pushArchiveFilesToRemote(baseUrl);
+    }
+
+    const archivePushSummary = includeArchive
+      ? archivePush.unsupported
+        ? "archive upload skipped"
+        : `archive sent to gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
+      : "archive skipped";
+    return {
+      needsRestart: false,
+      mode: "push",
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      pushedRows: Number(pushed.importedRows || 0),
+      pushChunks: Number(pushed.chunkCount || 0),
+      archivePush,
+      summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} rows in ${Number(pushed.chunkCount || 0)} chunk(s) | ${archivePushSummary}. Local database was not changed.`,
+    };
+  } finally {
+    restoreSocketPoolAfterReplication();
+  }
 }
 
 function isUnsafeRemoteLoop(baseUrl) {
@@ -2881,6 +2914,23 @@ const REMOTE_HTTPS_AGENT = new https.Agent({
   maxSockets: REMOTE_FETCH_MAX_SOCKETS,
   maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS / 2)),
 });
+
+function setRemoteAgentMaxSockets(maxSockets) {
+  const ms = Math.max(4, Math.min(32, Number(maxSockets) || REMOTE_FETCH_MAX_SOCKETS));
+  const free = Math.max(2, Math.floor(ms / 2));
+  REMOTE_HTTP_AGENT.maxSockets = ms;
+  REMOTE_HTTP_AGENT.maxFreeSockets = free;
+  REMOTE_HTTPS_AGENT.maxSockets = ms;
+  REMOTE_HTTPS_AGENT.maxFreeSockets = free;
+}
+
+function boostSocketPoolForReplication() {
+  setRemoteAgentMaxSockets(REMOTE_FETCH_MAX_SOCKETS_REPLICATION);
+}
+
+function restoreSocketPoolAfterReplication() {
+  setRemoteAgentMaxSockets(REMOTE_FETCH_MAX_SOCKETS);
+}
 
 function getFetchAgentForUrl(targetUrl) {
   try {
@@ -3023,7 +3073,7 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
       lastErr = err;
       const shouldRetry = i < attempts && isRetryableNetworkError(err);
       if (!shouldRetry) throw err;
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = baseDelay * i + jitter;
       await waitMs(delay);
     }
@@ -3068,7 +3118,7 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
       if (!retryable || i >= attempts) {
         throw err;
       }
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS * i + jitter;
       await waitMs(delay);
     }
@@ -3127,7 +3177,7 @@ async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
       if (!retryable || i >= attempts) {
         throw err;
       }
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = REMOTE_PUSH_FETCH_RETRY_BASE_MS * i + jitter;
       await waitMs(delay);
     }
@@ -3275,6 +3325,16 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       Number(r.headers.get("x-main-db-mtime") || Date.now()),
     );
     expectedSha256 = String(r.headers.get("x-main-db-sha256") || "").trim().toLowerCase();
+
+    // Read gateway cursors so we can converge sync state after pull.
+    let gatewayCursors = null;
+    try {
+      const cursorsRaw = String(r.headers.get("x-main-db-cursors") || "").trim();
+      if (cursorsRaw && cursorsRaw !== "{}") {
+        gatewayCursors = normalizeReplicationCursors(JSON.parse(cursorsRaw));
+      }
+    } catch (_) { /* ignore malformed cursor header */ }
+
     const body = r.body;
     if (!body) {
       throw new Error("Main DB pull returned an empty body.");
@@ -3327,6 +3387,12 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
     remoteBridgeState.lastReplicationSignature = "";
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastSyncDirection = nextSyncDirection;
+
+    // Converge replication cursors with gateway so incremental sync starts fresh.
+    if (gatewayCursors) {
+      remoteBridgeState.replicationCursors = gatewayCursors;
+      try { saveReplicationCursorsSetting(gatewayCursors); } catch (_) { /* non-fatal */ }
+    }
 
     broadcastUpdate({
       type: "xfer_progress",
@@ -3437,31 +3503,99 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
   await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
   closeArchiveDbForMonth(monthKey);
 
-  let body = null;
+  const RESUME_MAX_ATTEMPTS = 3;
   let expectedSha256 = "";
+  let resumeOffset = 0;
+
   try {
-    const targetUrl = `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`;
-    const r = await fetch(
-      targetUrl,
-      buildRemoteFetchOptions(targetUrl, {
-        method: "GET",
-        headers: buildRemoteProxyHeaders(),
-        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-      }),
-    );
-    if (!r.ok) {
-      throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
+    for (let attempt = 1; attempt <= RESUME_MAX_ATTEMPTS; attempt += 1) {
+      const targetUrl = `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`;
+      const reqHeaders = { ...buildRemoteProxyHeaders() };
+
+      // On retry, try to resume from where we left off.
+      if (resumeOffset > 0) {
+        reqHeaders["Range"] = `bytes=${resumeOffset}-`;
+      }
+
+      let r;
+      try {
+        r = await fetch(
+          targetUrl,
+          buildRemoteFetchOptions(targetUrl, {
+            method: "GET",
+            headers: reqHeaders,
+            timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+          }),
+        );
+      } catch (fetchErr) {
+        // On network error, check partial file size for resume.
+        if (attempt < RESUME_MAX_ATTEMPTS && isRetryableNetworkError(fetchErr)) {
+          try {
+            const partialStat = await fs.promises.stat(tempPath);
+            resumeOffset = Math.max(0, Number(partialStat.size || 0));
+          } catch (_) {
+            resumeOffset = 0;
+          }
+          const jitter = Math.floor(Math.random() * 500 * attempt);
+          await waitMs(1000 * attempt + jitter);
+          continue;
+        }
+        throw fetchErr;
+      }
+
+      // If server doesn't support range (416 or 200 on range request), restart from scratch.
+      if (resumeOffset > 0 && r.status === 416) {
+        resumeOffset = 0;
+        try { await fs.promises.unlink(tempPath); } catch (_) { /* ignore */ }
+        continue;
+      }
+      if (resumeOffset > 0 && r.status === 200) {
+        // Server ignored Range header — restart from scratch.
+        resumeOffset = 0;
+        try { await fs.promises.unlink(tempPath); } catch (_) { /* ignore */ }
+      }
+
+      if (!r.ok && r.status !== 206) {
+        throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
+      }
+      expectedSha256 = String(r.headers.get("x-archive-sha256") || "").trim().toLowerCase();
+      const body = r.body;
+      if (!body) {
+        throw new Error("Archive download returned an empty body.");
+      }
+      body.on("data", (chunk) => {
+        const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+        if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
+      });
+
+      // On 206 Partial Content, append to existing temp file; otherwise overwrite.
+      const writeFlags = r.status === 206 ? "a" : "w";
+      const writeStream = fs.createWriteStream(tempPath, {
+        flags: writeFlags,
+        highWaterMark: REPLICATION_TRANSFER_STREAM_HWM,
+      });
+
+      try {
+        await pipeline(body, writeStream);
+      } catch (streamErr) {
+        if (attempt < RESUME_MAX_ATTEMPTS && isRetryableNetworkError(streamErr)) {
+          try {
+            const partialStat = await fs.promises.stat(tempPath);
+            resumeOffset = Math.max(0, Number(partialStat.size || 0));
+          } catch (_) {
+            resumeOffset = 0;
+          }
+          const jitter = Math.floor(Math.random() * 500 * attempt);
+          await waitMs(1000 * attempt + jitter);
+          continue;
+        }
+        throw streamErr;
+      }
+
+      // Download completed — break out of retry loop.
+      break;
     }
-    expectedSha256 = String(r.headers.get("x-archive-sha256") || "").trim().toLowerCase();
-    body = r.body;
-    if (!body) {
-      throw new Error("Archive download returned an empty body.");
-    }
-    body.on("data", (chunk) => {
-      const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
-      if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
-    });
-    await pipeline(body, createTransferWriteStream(tempPath));
+
     const verified = await verifyTransferredFile(tempPath, {
       expectedSize: Math.max(0, Number(fileMeta?.size || 0)),
       expectedSha256,
@@ -3861,6 +3995,32 @@ function buildRemoteProxyHeaders(tokenOverride = "") {
   return headers;
 }
 
+// Centralized proxy timeout rules: [pathPrefix, timeoutMs]
+// Ordered from most specific to least specific; first match wins.
+const PROXY_TIMEOUT_RULES = [
+  ["/api/export/",       600000],  // 10 min — large CSV/Excel exports
+  ["/api/report/",        45000],  // 45 s  — daily report generation
+  ["/api/replication/",    45000],  // 45 s  — replication sync
+  ["/api/analytics/",      20000],  // 20 s  — analytics queries
+  ["/api/energy/5min",     20000],  // 20 s  — energy range queries
+  ["/api/alarms",          20000],  // 20 s  — alarm queries
+  ["/api/audit",           20000],  // 20 s  — audit queries
+  ["/api/chat/",           10000],  // 10 s  — chat messaging
+  ["/api/backup/",         60000],  // 60 s  — cloud backup operations
+];
+
+function resolveProxyTimeout(targetUrl) {
+  try {
+    const p = String(new URL(String(targetUrl || "")).pathname || "").toLowerCase();
+    for (const [prefix, ms] of PROXY_TIMEOUT_RULES) {
+      if (p.startsWith(prefix)) return Math.max(REMOTE_FETCH_TIMEOUT_MS, ms);
+    }
+  } catch (_) {
+    // Malformed URL — fall through to default.
+  }
+  return REMOTE_FETCH_TIMEOUT_MS;
+}
+
 async function proxyToRemote(req, res, tokenOverride = "") {
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
@@ -3876,24 +4036,7 @@ async function proxyToRemote(req, res, tokenOverride = "") {
 
   const target = `${base}${req.originalUrl}`;
   const method = String(req.method || "GET").toUpperCase();
-  let timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
-  try {
-    const u = new URL(target);
-    const p = String(u.pathname || "").toLowerCase();
-    if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 600000);
-    else if (p.startsWith("/api/report/")) timeoutMs = Math.max(timeoutMs, 45000);
-    else if (p.startsWith("/api/replication/")) timeoutMs = Math.max(timeoutMs, 45000);
-    else if (
-      p.startsWith("/api/analytics/") ||
-      p.startsWith("/api/energy/5min") ||
-      p.startsWith("/api/alarms") ||
-      p.startsWith("/api/audit")
-    ) {
-      timeoutMs = Math.max(timeoutMs, 20000);
-    }
-  } catch (_) {
-    timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
-  }
+  const timeoutMs = resolveProxyTimeout(target);
   const headers = {
     ...buildRemoteProxyHeaders(tokenOverride),
   };
@@ -7973,6 +8116,8 @@ app.post("/api/chat/send", async (req, res) => {
   let message = "";
   try {
     message = sanitizeChatMessageText(req?.body?.message);
+    const rateMachine = isRemoteMode() ? "remote" : (readOperationMode() || "gateway");
+    checkChatRateLimit(rateMachine);
     if (isRemoteMode()) {
       const identity = buildLocalChatIdentity("remote");
       const payload = await requestRemoteChat("/api/chat/send", {
@@ -8175,7 +8320,6 @@ app.get("/api/replication/archive-download", async (req, res) => {
     }
     const totalBytes = Math.max(0, Number(resolved.size || 0));
     const sha256 = await hashFileSha256(resolved.path);
-    const useGzip = shouldGzipReplicationStream(req, totalBytes);
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-archive-size", String(totalBytes));
     res.setHeader("x-archive-sha256", sha256);
@@ -8184,6 +8328,31 @@ app.get("/api/replication/archive-download", async (req, res) => {
       String(Math.max(0, Number(resolved.mtimeMs || 0))),
     );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Accept-Ranges", "bytes");
+
+    // Support HTTP Range requests for resumable downloads.
+    const rangeHeader = String(req.headers.range || "").trim();
+    if (rangeHeader && totalBytes > 0) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
+      if (match) {
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? Math.min(parseInt(match[2], 10), totalBytes - 1) : totalBytes - 1;
+        if (start >= totalBytes || start > end) {
+          res.setHeader("Content-Range", `bytes */${totalBytes}`);
+          return res.status(416).end();
+        }
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${totalBytes}`);
+        res.setHeader("Content-Length", String(end - start + 1));
+        res.status(206);
+        await pipeline(
+          fs.createReadStream(resolved.path, { start, end, highWaterMark: REPLICATION_TRANSFER_STREAM_HWM }),
+          res,
+        );
+        return;
+      }
+    }
+
+    const useGzip = shouldGzipReplicationStream(req, totalBytes);
     if (!useGzip) {
       res.setHeader("Content-Length", String(totalBytes));
       await pipeline(createTransferReadStream(resolved.path), res);
@@ -8332,10 +8501,17 @@ app.get("/api/replication/main-db", async (req, res) => {
       });
     });
 
+    // Include gateway cursors so the remote side can converge after pull.
+    let gatewayCursorsJson = "{}";
+    try {
+      gatewayCursorsJson = JSON.stringify(buildCurrentReplicationCursors());
+    } catch (_) { /* non-fatal */ }
+
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-main-db-size", String(totalBytes));
     res.setHeader("x-main-db-mtime", String(targetMtimeMs));
     res.setHeader("x-main-db-sha256", String(snapshot?.sha256 || ""));
+    res.setHeader("x-main-db-cursors", gatewayCursorsJson);
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     if (!useGzip) {
       res.setHeader("Content-Length", String(totalBytes));
@@ -9182,11 +9358,16 @@ app.post("/api/settings", (req, res) => {
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
   }
-  let retentionApplied = null;
+  let retentionScheduled = false;
   if (updates.retainDays !== undefined) {
     const retainDaysAfter = Math.max(1, Number(updates.retainDays || retainDaysBefore));
     if (retainDaysAfter !== retainDaysBefore) {
-      retentionApplied = pruneOldData({ vacuum: retainDaysAfter < retainDaysBefore });
+      retentionScheduled = true;
+      // Fire-and-forget: pruneOldData is async and yields between batches to avoid
+      // blocking the event loop. Don't await it — respond to the client immediately.
+      pruneOldData({ vacuum: retainDaysAfter < retainDaysBefore }).catch((err) => {
+        console.error("[settings] background pruneOldData failed:", err.message);
+      });
     }
   }
   const snapshot = buildSettingsSnapshot();
@@ -9195,7 +9376,7 @@ app.post("/api/settings", (req, res) => {
     csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     exportDirCreated,
     settings: snapshot,
-    retentionApplied,
+    retentionApplied: retentionScheduled ? { ok: true, scheduled: true } : null,
   });
 });
 
@@ -10296,6 +10477,8 @@ app.post("/api/export/daily-report", async (req, res) => {
             persist: true,
             includeTodayPartial: day === today,
           });
+          // Yield between days to prevent event loop starvation on wide date ranges.
+          await new Promise((resolve) => setImmediate(resolve));
         }
       }
     }

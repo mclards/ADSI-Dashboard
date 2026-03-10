@@ -294,7 +294,7 @@ const pendingMainDbFileApplyResult = applyPendingMainDbReplacementFileSync();
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
-db.pragma("synchronous = FULL");   // fsync every WAL commit — safe on hard power cut
+db.pragma("synchronous = NORMAL");  // WAL+NORMAL is crash-safe; FULL adds fsync per commit that blocks the event loop
 db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
@@ -970,6 +970,42 @@ const bulkInsert = db.transaction((rows) => {
       stmts.insertReading.run(row);
     } catch (err) {
       console.error("[DB] bulkInsert row failed:", err.message, row);
+    }
+  }
+});
+
+// Combined transaction: insert readings + update daily summary in one commit.
+// Halves fsync cost compared to running bulkInsert then ingestDailyReadingsSummary separately.
+const bulkInsertWithSummary = db.transaction((rows) => {
+  for (const row of rows) {
+    try {
+      stmts.insertReading.run(row);
+    } catch (err) {
+      console.error("[DB] bulkInsertWithSummary row failed:", err.message, row);
+    }
+  }
+  // Inline the summary ingestion within the same transaction.
+  const states = new Map();
+  for (const row of rows) {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!(ts > 0) || !(inverter > 0) || !(unit > 0)) continue;
+    const day = localDateStr(ts);
+    const key = `${day}|${inverter}|${unit}`;
+    let state = states.get(key);
+    if (!state) {
+      const existing = stmts.getDailyReadingsSummaryOne.get(day, inverter, unit);
+      state = createSummaryState(day, inverter, unit, existing);
+      states.set(key, state);
+    }
+    applyReadingToSummaryState(state, row);
+  }
+  if (states.size) {
+    const now = Date.now();
+    const payloads = Array.from(states.values()).map((s) => summaryStateToPayload(s, now));
+    for (const payload of payloads) {
+      stmts.upsertDailyReadingsSummary.run(payload);
     }
   }
 });
@@ -1652,7 +1688,11 @@ function getTelemetryHotCutoffTs(now = Date.now()) {
   return Number(now || Date.now()) - retainDays * 24 * 60 * 60 * 1000;
 }
 
-function archiveTelemetryBeforeCutoff(cutoffTs) {
+function _yieldEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function archiveTelemetryBeforeCutoff(cutoffTs) {
   const cutoff = Number(cutoffTs || 0);
   const stats = { readings: 0, energy5: 0 };
   if (!(cutoff > 0)) return stats;
@@ -1663,6 +1703,7 @@ function archiveTelemetryBeforeCutoff(cutoffTs) {
     archiveRowsByMonth(rows, "readings");
     deleteReadingsBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
     stats.readings += rows.length;
+    await _yieldEventLoop(); // let polling, WS, and HTTP continue between batches
   }
 
   while (true) {
@@ -1671,12 +1712,13 @@ function archiveTelemetryBeforeCutoff(cutoffTs) {
     archiveRowsByMonth(rows, "energy");
     deleteEnergyBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
     stats.energy5 += rows.length;
+    await _yieldEventLoop();
   }
 
   return stats;
 }
 
-function pruneOldData(options = {}) {
+async function pruneOldData(options = {}) {
   const opts =
     options && typeof options === "object" ? options : {};
   try {
@@ -1686,15 +1728,22 @@ function pruneOldData(options = {}) {
     const auditCutoff = Date.now() - auditRetainDays * 24 * 60 * 60 * 1000;
     const mainDbBytesBefore = safeFileSize(DB_PATH);
     const archiveBefore = getArchiveDirStats();
-    const archived = archiveTelemetryBeforeCutoff(cutoff);
+    const archived = await archiveTelemetryBeforeCutoff(cutoff);
+    await _yieldEventLoop();
     db.prepare("DELETE FROM alarms WHERE ts < ? AND cleared_ts IS NOT NULL").run(cutoff);
+    await _yieldEventLoop();
     db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
-    checkpointArchiveDbs("TRUNCATE");
-    const checkpointed = checkpointMainDb("TRUNCATE");
+    await _yieldEventLoop();
+    checkpointArchiveDbs("PASSIVE");
+    const checkpointed = checkpointMainDb("PASSIVE");
     const vacuumRequested =
       !!opts.vacuum && (archived.readings > 0 || archived.energy5 > 0 || !!opts.forceVacuum);
-    const vacuumed = vacuumRequested ? vacuumMainDb() : false;
-    if (vacuumed) checkpointMainDb("TRUNCATE");
+    let vacuumed = false;
+    if (vacuumRequested) {
+      await _yieldEventLoop();
+      vacuumed = vacuumMainDb();
+      if (vacuumed) checkpointMainDb("PASSIVE");
+    }
     const mainDbBytesAfter = safeFileSize(DB_PATH);
     const archiveAfter = getArchiveDirStats();
     const result = {
@@ -1763,6 +1812,7 @@ module.exports = {
   db,
   stmts,
   bulkInsert,
+  bulkInsertWithSummary,
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
   bulkUpsertSolcastSnapshot,

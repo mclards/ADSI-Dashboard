@@ -1,5 +1,5 @@
 const fetch = require('node-fetch');
-const { bulkInsert, stmts, getSetting, ingestDailyReadingsSummary } = require('./db');
+const { bulkInsert, bulkInsertWithSummary, stmts, getSetting, ingestDailyReadingsSummary } = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
 
@@ -473,8 +473,7 @@ async function poll() {
 
   if (batch.length) {
     try {
-      bulkInsert(batch);
-      ingestDailyReadingsSummary(batch);
+      bulkInsertWithSummary(batch); // single transaction: insert readings + update summary → 1 fsync
       pollStats.dbBulkInsertCount += 1;
     } catch (e) {
       console.error('[DB]', e.message);

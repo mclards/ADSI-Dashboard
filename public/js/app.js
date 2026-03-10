@@ -6281,7 +6281,8 @@ function connectWS() {
     State.wsConnecting = false;
     _clearWsHeartbeat();
     setWsState(false, "RECONNECT");
-    const delay = Math.min(5000, 500 * ++State.wsRetries);
+    const retries = ++State.wsRetries;
+    const delay = Math.min(30000, Math.floor(500 * Math.pow(1.5, retries) + Math.random() * 500 * retries));
     const delaySeconds = Math.ceil(delay / 1000);
     showOfflineIndicator(true, `Reconnecting in ${delaySeconds}s...`);
     setTimeout(connectWS, delay);
