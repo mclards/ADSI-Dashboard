@@ -16,6 +16,19 @@
   --red2: #b82048;
   --orange: #f09000;
   --cyan: #07b5d6;
+  --status-high: #00cf00;
+  --status-moderate: #e8e800;
+  --status-mild: #ffa500;
+  --status-critical: #ff0000;
+  --status-isolated: #455b7d;
+  --status-critical-bg: rgba(255, 0, 0, 0.24);
+  --status-critical-border: #ff0000;
+  --status-acked-bg: rgba(170, 0, 0, 0.2);
+  --status-acked-border: #ff4d4d;
+  --xfer-done: #22c55e;
+  --xfer-error: #ef4444;
+  --flash-rx: #22f5ff;
+  --flash-tx: #ffbb35;
   --top-scale: 1.5;
   --progress-h: 10px;
   --header-h: calc(58px * var(--top-scale));
@@ -71,6 +84,19 @@
   --red2: #972a45;
   --orange: #c97d00;
   --cyan: #0c88a4;
+  --status-high: #0a8a3e;
+  --status-moderate: #9e8c00;
+  --status-mild: #b87400;
+  --status-critical: #cc2244;
+  --status-isolated: #7b8fa8;
+  --status-critical-bg: rgba(186, 53, 85, 0.16);
+  --status-critical-border: var(--red);
+  --status-acked-bg: rgba(186, 53, 85, 0.10);
+  --status-acked-border: var(--red2);
+  --xfer-done: #15803d;
+  --xfer-error: #dc2626;
+  --flash-rx: #0891b2;
+  --flash-tx: #d97706;
   --chart-tick: #5f5546;
   --chart-grid: rgba(112, 98, 76, 0.26);
   --chart-legend: #564c3e;
@@ -811,12 +837,12 @@ body.license-notice-open .side-nav {
 .xfer-size-total { color: var(--text3); }
 
 .xfer-panel-done .xfer-bar-fill {
-  background: linear-gradient(90deg, #22c55e, #4ade80);
+  background: var(--xfer-done);
   box-shadow: 0 0 6px rgba(34, 197, 94, 0.42);
 }
 
 .xfer-panel-error .xfer-bar-fill {
-  background: linear-gradient(90deg, #ef4444, #f87171);
+  background: var(--xfer-error);
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.42);
 }
 
@@ -841,17 +867,17 @@ body.license-notice-open .side-nav {
 .xfer-phase-reconcile { color: var(--yellow); }
 .xfer-phase-applying  { color: var(--accent); }
 .xfer-phase-archive   { color: var(--yellow); }
-.xfer-phase-done      { color: #22c55e; }
-.xfer-phase-error     { color: #ef4444; }
+.xfer-phase-done      { color: var(--xfer-done); }
+.xfer-phase-error     { color: var(--xfer-error); }
 
 /* Active flash when bytes are flowing */
 .net-io-row.active .net-io-rx-arrow {
-  color: #22f5ff;
+  color: var(--flash-rx);
   text-shadow: 0 0 8px var(--cyan), 0 0 2px #fff;
 }
 
 .net-io-row.active .net-io-tx-arrow {
-  color: #ffbb35;
+  color: var(--flash-tx);
   text-shadow: 0 0 8px var(--orange), 0 0 2px #fff;
 }
 
@@ -2035,6 +2061,7 @@ label[data-required]::after {
 
 .card-table tbody tr {
   height: var(--card-row-h);
+  transition: filter 0.12s, background 0.12s;
 }
 
 .card-table tbody td:first-child {
@@ -2098,6 +2125,7 @@ label[data-required]::after {
   border-radius: 2px;
   border: 1px solid rgba(135, 164, 204, 0.45);
   background: #2a3f5f;
+  transition: background 0.2s, border-color 0.2s;
   box-shadow: 0 0 0 1px rgba(8, 16, 30, 0.45);
   flex: 0 0 6px;
   box-sizing: border-box;
@@ -2105,34 +2133,34 @@ label[data-required]::after {
 }
 
 .node-power-indicator.node-ind-high {
-  background: #00cf00;
-  border-color: #00cf00;
+  background: var(--status-high);
+  border-color: var(--status-high);
 }
 
 .node-power-indicator.node-ind-mid {
-  background: #ffff00;
-  border-color: #ffff00;
+  background: var(--status-moderate);
+  border-color: var(--status-moderate);
 }
 
 .node-power-indicator.node-ind-low {
-  background: #ffa500;
-  border-color: #ffa500;
+  background: var(--status-mild);
+  border-color: var(--status-mild);
 }
 
 .node-power-indicator.node-ind-off {
-  background: #ff0000;
-  border-color: #ff0000;
+  background: var(--status-critical);
+  border-color: var(--status-critical);
 }
 
 .node-power-indicator.node-ind-alarm {
-  background: #ff0000;
-  border-color: #ff0000;
+  background: var(--status-critical);
+  border-color: var(--status-critical);
   animation: alarmBlink 1s ease-in-out infinite;
 }
 
 .node-power-indicator.node-ind-isolated {
-  background: #455b7d;
-  border-color: #5d7396;
+  background: var(--status-isolated);
+  border-color: var(--status-isolated);
 }
 
 /* ── PAC Legend (inverter toolbar) ─────────────────────────────────────────── */
@@ -2170,6 +2198,11 @@ label[data-required]::after {
   border-radius: 2px;
   flex-shrink: 0;
 }
+.pac-leg-high     { background: var(--status-high); }
+.pac-leg-moderate { background: var(--status-moderate); }
+.pac-leg-mild     { background: var(--status-mild); }
+.pac-leg-low      { background: var(--status-critical); }
+.pac-leg-alarm    { background: var(--status-critical); }
 .pac-leg-blink {
   animation: alarmBlink 1s ease-in-out infinite;
 }
@@ -2199,6 +2232,7 @@ label[data-required]::after {
   font-weight: 700;
   letter-spacing: 0.6px;
   text-align: center;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
 .cell-alarm.no-alarm {
@@ -2235,27 +2269,27 @@ label[data-required]::after {
 }
 
 .card-table tr.row-alarm-unacked td {
-  background: rgba(255, 0, 0, 0.24) !important;
-  color: #ffffff !important;
-  box-shadow: inset 0 0 0 1px #ff0000;
+  background: var(--status-critical-bg) !important;
+  color: var(--text) !important;
+  box-shadow: inset 0 0 0 1px var(--status-critical-border);
 }
 
 .card-table tr.row-alarm-acked td {
-  background: rgba(170, 0, 0, 0.2) !important;
-  color: #ffffff !important;
-  box-shadow: inset 0 0 0 1px #ff4d4d;
+  background: var(--status-acked-bg) !important;
+  color: var(--text) !important;
+  box-shadow: inset 0 0 0 1px var(--status-acked-border);
 }
 
 .card-table tr.row-alarm-unacked td .cell-alarm,
 .card-table tr.row-alarm-acked td .cell-alarm {
-  background: rgba(33, 10, 17, 0.84) !important;
-  color: #ffffff !important;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  box-shadow: inset 0 0 0 1px var(--border2);
 }
 
 .card-table tr.row-alarm-unacked td:first-child,
 .card-table tr.row-alarm-acked td:first-child {
-  color: #ffffff !important;
+  color: var(--text) !important;
   font-weight: 700;
 }
 
@@ -3094,6 +3128,9 @@ label[data-required]::after {
   background: var(--green);
   transition: width 0.3s;
 }
+.perf-fill-good { background: var(--green); }
+.perf-fill-warn { background: var(--orange); }
+.perf-fill-poor { background: var(--red); }
 
 .export-grid {
   flex: 1;
@@ -3278,12 +3315,13 @@ label[data-required]::after {
 }
 
 .sgroup-actions {
-  margin-top: 4px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
+.ml-8 { margin-left: 8px; }
 
 .license-grid {
   display: grid;
@@ -3455,7 +3493,10 @@ label[data-required]::after {
   gap: 5px;
   font-size: 11px;
   color: var(--text2);
+  margin-top: 8px;
 }
+.sinfo + .srow,
+.sinfo + .sgroup-actions { margin-top: 8px; }
 
 .sinfo b {
   color: var(--text);
@@ -5491,6 +5532,19 @@ label[data-required]::after {
   --text3: #526a92;
   --accent: #2d7ef7;
   --accent2: #1a60d0;
+  --status-high: #00cf00;
+  --status-moderate: #e8e800;
+  --status-mild: #ffa500;
+  --status-critical: #ff3333;
+  --status-isolated: #3a5278;
+  --status-critical-bg: rgba(255, 50, 80, 0.20);
+  --status-critical-border: #ff3333;
+  --status-acked-bg: rgba(200, 30, 60, 0.16);
+  --status-acked-border: #ff5566;
+  --xfer-done: #22c55e;
+  --xfer-error: #ef4444;
+  --flash-rx: #22f5ff;
+  --flash-tx: #ffbb35;
   --chart-tick: #6b82a8;
   --chart-grid: rgba(30, 45, 71, 0.6);
   --chart-legend: #6b82a8;

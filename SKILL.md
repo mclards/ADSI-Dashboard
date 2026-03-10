@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.32` in `package.json`
+- Current repo version baseline: `2.2.33` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -420,6 +420,7 @@ git diff -- public/index.html public/css/style.css
 - `better-sqlite3` is runtime-ABI specific:
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
+  - **After any Node-ABI smoke test, always run `npm run rebuild:native:electron`** before launching or building the Electron app. The smoke test rebuilds `better-sqlite3` for plain Node (different ABI), which breaks Electron until restored.
 - Before any EXE build, run the required smoke test for the changed surface and do not skip it unless the user explicitly says to skip smoke testing.
   - backend / DB / replication / archive changes: isolated server smoke test
   - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test

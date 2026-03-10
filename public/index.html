@@ -198,11 +198,11 @@
             </label>
           </div>
           <div class="tl-center pac-legend-wrap">
-            <span class="pac-leg"><span class="pac-leg-ind" style="background:#00cf00"></span>&#x2265;90%&nbsp;High</span>
-            <span class="pac-leg"><span class="pac-leg-ind" style="background:#ffff00"></span>&gt;70%&nbsp;Moderate</span>
-            <span class="pac-leg"><span class="pac-leg-ind" style="background:#ffa500"></span>&gt;40%&nbsp;Mild</span>
-            <span class="pac-leg"><span class="pac-leg-ind" style="background:#ff0000"></span>&#x2264;40%&nbsp;Low</span>
-            <span class="pac-leg"><span class="pac-leg-ind pac-leg-blink" style="background:#ff0000"></span>Alarm</span>
+            <span class="pac-leg"><span class="pac-leg-ind pac-leg-high"></span>&#x2265;90%&nbsp;High</span>
+            <span class="pac-leg"><span class="pac-leg-ind pac-leg-moderate"></span>&gt;70%&nbsp;Moderate</span>
+            <span class="pac-leg"><span class="pac-leg-ind pac-leg-mild"></span>&gt;40%&nbsp;Mild</span>
+            <span class="pac-leg"><span class="pac-leg-ind pac-leg-low"></span>&#x2264;40%&nbsp;Low</span>
+            <span class="pac-leg"><span class="pac-leg-ind pac-leg-blink pac-leg-alarm"></span>Alarm</span>
           </div>
           <div class="tl-right">
             <div class="stat-chip count-chip">Inverters <b id="metricInvCount">—</b><span class="count-total" id="metricInvTotal">/ —</span></div>
@@ -1180,18 +1180,18 @@
                     placeholder="plant-gateway"
                 /></label>
               </div>
-              <div class="sinfo" style="margin-top: 8px">
+              <div class="sinfo">
                 <div>
                    Use Gateway mode on the workstation connected to the plant network. Use Remote mode on monitoring workstations that connect through the approved secure path.
                 </div>
               </div>
-              <div class="srow" style="margin-top: 8px">
+              <div class="srow">
                 <label class="chk-inline">
                   <input type="checkbox" id="setRemoteAutoSync" />
                   <span>Run automatic synchronization at startup (Remote mode)</span>
                 </label>
               </div>
-              <div class="sgroup-actions" style="margin-top: 8px">
+              <div class="sgroup-actions">
                 <button id="btnTestRemoteGateway" class="btn btn-outline" type="button" title="Check whether the configured remote gateway URL is reachable and responding." aria-label="Test remote gateway">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span><span>Test Remote Gateway</span>
                 </button>
@@ -1309,7 +1309,7 @@
                   </div>
                 </div>
               </div>
-              <div class="srow" style="margin-top: 8px">
+              <div class="srow">
                 <label class="chk-inline" title="Optional: include archived monthly files in the next manual synchronization. Current operational data remains the priority path.">
                   <input type="checkbox" id="setReplicationIncludeArchive" />
                   <span>Include archived files in the next manual sync</span>
@@ -1407,7 +1407,7 @@
                   </select></label
                 >
               </div>
-              <div class="sinfo" style="margin-top: 8px">
+              <div class="sinfo">
                 <div>
                    Local forecasting remains the standard runtime source. Solcast can run either through the standard API or through the authenticated 5-minute toolkit chart feed.
                 </div>
@@ -1440,7 +1440,7 @@
                     placeholder="Asia/Manila"
                 /></label>
               </div>
-              <div class="sinfo" style="margin-top: 8px">
+              <div class="sinfo">
                 <div>
                   Choose `Toolkit Login` when you want to use only the Solcast chart link with your toolkit account. Choose `API Key` only when you have the formal Solcast API credentials.
                 </div>
@@ -1466,7 +1466,7 @@
                     placeholder="Configured site or resource ID"
                 /></label>
               </div>
-              <div class="sinfo" style="margin-top: 8px">
+              <div class="sinfo">
                 <div>
                   API mode reads the standard Solcast forecast endpoint. Use this only when a formal API key and resource ID are available.
                 </div>
@@ -1499,7 +1499,7 @@
                     placeholder="Stored toolkit account password"
                 /></label>
               </div>
-              <div class="sinfo" style="margin-top: 8px">
+              <div class="sinfo">
                 <div>
                   Paste the exact toolkit chart link. Toolkit mode signs in with the stored account and reads that same recent-view feed directly, without requiring API key or resource ID values.
                 </div>
@@ -1673,7 +1673,7 @@
                 <div id="updStatusText" class="license-value">—</div>
               </div>
             </div>
-            <div class="sinfo" style="margin-top:8px">
+            <div class="sinfo">
               <div id="updStatusDetail">Use "Check for Updates" to confirm release availability.</div>
             </div>
             <div class="sgroup-actions">
@@ -1728,7 +1728,7 @@
                 <div class="cb-provider-help">
                   <a href="#" id="cbOneDriveSetupLink" class="cb-setup-link">Open Azure setup guide &rarr;</a>
                 </div>
-                <div class="sgroup-actions" style="margin-top:6px">
+                <div class="sgroup-actions">
                   <button id="btnConnectOneDrive" class="btn btn-outline" type="button" title="Open Microsoft sign-in to authorize this app to upload and restore backups from OneDrive." aria-label="Connect Microsoft OneDrive">
                     <span class="mdi mdi-link-variant" aria-hidden="true"></span><span>Authorize OneDrive</span>
                   </button>
@@ -1761,7 +1761,7 @@
                 <div class="cb-provider-help">
                   <a href="#" id="cbGDriveSetupLink" class="cb-setup-link">Open Google setup guide &rarr;</a>
                 </div>
-                <div class="sgroup-actions" style="margin-top:6px">
+                <div class="sgroup-actions">
                   <button id="btnConnectGDrive" class="btn btn-outline" type="button" title="Open Google sign-in to authorize this app to upload and restore backups from Google Drive." aria-label="Connect Google Drive">
                     <span class="mdi mdi-link-variant" aria-hidden="true"></span><span>Authorize Google Drive</span>
                   </button>
@@ -1823,7 +1823,7 @@
             </div>
 
             <!-- Actions -->
-            <div class="sgroup-actions" style="margin-top:8px">
+            <div class="sgroup-actions">
               <button id="btnSaveCloudSettings" class="btn btn-outline" type="button" title="Save the selected cloud backup provider, scope, and schedule settings." aria-label="Save cloud backup settings"><span class="mdi mdi-content-save-outline" aria-hidden="true"></span><span>Save Backup Settings</span></button>
               <button id="btnBackupNow" class="btn btn-accent" type="button" title="Create a backup package now and upload it using the current cloud backup provider settings." aria-label="Run backup now"><span class="mdi mdi-cloud-upload-outline" aria-hidden="true"></span><span>Backup Now</span></button>
               <button id="btnListCloudBackups" class="btn btn-outline" type="button" title="Refresh the list of available cloud backup packages for restore or download." aria-label="List cloud backups"><span class="mdi mdi-format-list-bulleted-square" aria-hidden="true"></span><span>Refresh Cloud List</span></button>
@@ -1833,7 +1833,7 @@
             <!-- Backup History Table -->
             <div class="cb-subsection">
               <div class="cb-sub-title">Backup Activity
-                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs" type="button" style="margin-left:8px" title="Refresh the cloud backup history and restore list." aria-label="Refresh backup history"><span class="mdi mdi-refresh" aria-hidden="true"></span></button>
+                <button id="btnRefreshBackupHistory" class="btn btn-outline btn-xs ml-8" type="button" title="Refresh the cloud backup history and restore list." aria-label="Refresh backup history"><span class="mdi mdi-refresh" aria-hidden="true"></span></button>
               </div>
               <div class="cb-restore-date-row">
                 <label>Filter by date

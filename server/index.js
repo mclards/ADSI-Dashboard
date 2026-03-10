@@ -912,6 +912,20 @@ function shouldProxyApiPath(pathname) {
   return true;
 }
 
+/**
+ * Read-only API paths that can fall back to local DB when gateway is offline.
+ * These all have local route handlers defined below the catch-all proxy middleware.
+ */
+function canFallbackToLocal(pathname) {
+  const p = String(pathname || "");
+  if (p === "/report" || p.startsWith("/report/")) return true;
+  if (p === "/energy" || p.startsWith("/energy/")) return true;
+  if (p === "/analytics" || p.startsWith("/analytics/")) return true;
+  if (p === "/alarms" || p.startsWith("/alarms/")) return true;
+  if (p === "/audit" || p.startsWith("/audit/")) return true;
+  return false;
+}
+
 function normalizeChatMachine(value, def = "gateway") {
   const v = String(value || def)
     .trim()
@@ -6941,7 +6955,51 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
   });
 }
 
+/**
+ * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
+ * Silently returns { pulled: false } if Solcast is not configured or fetch fails.
+ */
+async function autoFetchSolcastSnapshots(dates) {
+  try {
+    const cfg = getSolcastConfig();
+    if (!hasUsableSolcastConfig(cfg)) {
+      return { pulled: false, reason: "not_configured" };
+    }
+    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
+    const pulledTs = Date.now();
+    const warnings = [];
+    let persisted = 0;
+    for (const day of dates) {
+      const snap = buildAndPersistSolcastSnapshot(
+        day,
+        records,
+        estActuals || [],
+        cfg,
+        accessMode,
+        pulledTs,
+      );
+      persisted += Number(snap?.persistedRows || 0);
+      if (!snap?.ok && snap?.warning) {
+        warnings.push(String(snap.warning));
+      }
+    }
+    console.log(
+      `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted`,
+    );
+    return { pulled: true, persisted, warnings };
+  } catch (err) {
+    console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
+    return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300) };
+  }
+}
+
 async function generateDayAheadWithMl(dayCount) {
+  // Auto-pull fresh Solcast snapshots before spawning Python ML generator
+  const tomorrow = addDaysIso(localDateStr(), 1);
+  const lastDay = addDaysIso(tomorrow, dayCount - 1);
+  const dates = daysInclusive(tomorrow, lastDay);
+  const solcastPull = await autoFetchSolcastSnapshots(dates);
+
   const args = ["--generate-days", String(dayCount)];
   const result = await runForecastGenerator(args);
   const exitCode = Number(result?.code ?? -1);
@@ -6961,6 +7019,7 @@ async function generateDayAheadWithMl(dayCount) {
     providerUsed: "ml_local",
     durationMs: Number(result.durationMs || 0),
     normalizedRows,
+    solcastPull,
   };
 }
 
@@ -9525,6 +9584,11 @@ app.post("/api/runtime/network/reconnect", async (req, res) => {
 app.use("/api", async (req, res, next) => {
   if (!isRemoteMode()) return next();
   if (!shouldProxyApiPath(req.path)) return next();
+  // When gateway is offline, serve read-only data from local DB instead of 502
+  if (!remoteBridgeState.connected && canFallbackToLocal(req.path)) {
+    res.setHeader("X-Data-Source", "local-fallback");
+    return next();
+  }
   return proxyToRemote(req, res);
 });
 
@@ -10214,6 +10278,7 @@ app.post("/api/forecast/generate", async (req, res) => {
         ? generation.snapshotWarnings
         : [],
       endpoint: generation.endpoint || "",
+      solcastPull: generation.solcastPull || null,
       attempts,
     });
   } catch (e) {

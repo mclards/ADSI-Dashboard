@@ -2061,6 +2061,14 @@ async function api(url, method = "GET", body, options = {}) {
       }
       throw new Error(String(detailedMsg));
     }
+    // Detect local-fallback when gateway is offline in remote mode
+    if (
+      r.headers.get("X-Data-Source") === "local-fallback" &&
+      !State._localFallbackNotified
+    ) {
+      State._localFallbackNotified = true;
+      showToast("Showing locally cached data \u2014 gateway is offline", "warn");
+    }
     ok = true;
     progressDoneLabel = "Done";
     return parsed ?? {};
@@ -2215,6 +2223,10 @@ function normalizeRemoteHealthClient(raw = null) {
 
 function applyRemoteHealthClient(raw = null) {
   State.remoteHealth = normalizeRemoteHealthClient(raw);
+  // Reset local-fallback toast when gateway reconnects
+  if (State.remoteHealth.state === "connected") {
+    State._localFallbackNotified = false;
+  }
   return State.remoteHealth;
 }
 
@@ -6059,22 +6071,33 @@ function renderInverterDetailStats(inv) {
   if (!el) return;
 
   const todayStr = today();
-  const pac = Number(State.totals?.[inv]?.pac || 0);
-  const kwh = Number(State.invDetailKwh || 0);
+
+  // Today Energy — prefer live WS totals (same poller accumulator that writes energy_5min);
+  // fall back to 60s API-polled value if WS data hasn't arrived yet
+  const kwhLive = Number(State.totals?.[inv]?.kwh || 0) / 1000; // Wh → kWh
+  const kwh = kwhLive > 0 ? kwhLive : Number(State.invDetailKwh || 0);
+
+  // DC Power — live from WS (not shown elsewhere; replaces redundant AC Output chip)
+  const pdc = Number(State.totals?.[inv]?.pdc || 0);
+
+  // Today Availability — from daily_report via 60s API poll (same source as exports)
   const todayReport = State.invDetailReportRows.find((r) => r.date === todayStr && r.inverter === inv);
-  // Availability: treat as unknown ("—") if uptime_s is 0 and kwh_total is 0 (no data yet for today)
   let availPct = null;
   if (todayReport) {
     const hasSomeData = Number(todayReport.uptime_s || 0) > 0 || Number(todayReport.kwh_total || 0) > 0;
     availPct = hasSomeData ? Number(todayReport.availability_pct ?? 0) : null;
   }
-  const activeAlarmCount = State.invDetailAlarmRows.filter((r) => !r.cleared_ts).length;
+
+  // Active Nodes — live count of online nodes for this inverter
+  const allInvKeys = Object.entries(State.liveData || {}).filter(([, d]) => Number(d?.inverter) === inv);
+  const totalNodes = allInvKeys.length || 4; // fall back to expected 4 if liveData not populated
+  const nodeCount = allInvKeys.filter(([, d]) => d?.online).length;
 
   const chips = [
-    { label: "Today Energy", value: kwh.toFixed(2),               unit: "kWh" },
-    { label: "Live AC Output", value: (pac / 1000).toFixed(2),    unit: "kW"  },
+    { label: "Today Energy", value: kwh.toFixed(2),                unit: "kWh" },
+    { label: "DC Power",     value: (pdc / 1000).toFixed(2),       unit: "kW"  },
     { label: "Today Availability", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
-    { label: "Active Alarms", value: String(activeAlarmCount),    unit: activeAlarmCount === 1 ? "alarm" : "alarms" },
+    { label: "Active Nodes", value: String(nodeCount),             unit: "/ " + totalNodes },
   ];
 
   el.innerHTML = chips.map((c) => `
@@ -7610,13 +7633,13 @@ function renderReportTable(rows, totalRows = rows.length) {
       <td class="${r.alarm_count > 0 ? "text-red" : ""}">${r.alarm_count || 0}</td>
       <td>
         <div class="perf-bar">
-          <div class="perf-track"><div class="perf-fill" style="width:${avail}%;background:${avail > 80 ? "var(--green)" : avail > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
+          <div class="perf-track"><div class="perf-fill ${avail > 80 ? "perf-fill-good" : avail > 50 ? "perf-fill-warn" : "perf-fill-poor"}" style="width:${avail}%"></div></div>
           <span>${avail.toFixed(1)}%</span>
         </div>
       </td>
       <td>
         <div class="perf-bar">
-          <div class="perf-track"><div class="perf-fill" style="width:${perf}%;background:${perf > 80 ? "var(--green)" : perf > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
+          <div class="perf-track"><div class="perf-fill ${perf > 80 ? "perf-fill-good" : perf > 50 ? "perf-fill-warn" : "perf-fill-poor"}" style="width:${perf}%"></div></div>
           <span>${perf.toFixed(1)}%</span>
         </div>
       </td>`;
@@ -9061,9 +9084,13 @@ async function runDayAheadGeneration() {
         .replace("ml_local", "Local ML")
         .replace("solcast", "Solcast");
       const fb = r?.fallbackUsed ? " (fallback)" : "";
-      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${fb}`;
+      const solcastInfo = r?.solcastPull?.pulled ? " + Solcast" : "";
+      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${solcastInfo}${fb}`;
       if (r?.fallbackUsed && r?.fallbackReason) {
         showToast(`Forecast fallback: ${r.fallbackReason}`, "warning", 5000);
+      }
+      if (r?.solcastPull?.pulled === false && r?.solcastPull?.reason && r.solcastPull.reason !== "not_configured") {
+        showToast(`Solcast auto-pull skipped: ${r.solcastPull.reason}`, "info", 4000);
       }
       showSnapshotWarningToast("Forecast snapshot", r?.snapshotWarnings || []);
     }

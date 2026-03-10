@@ -170,7 +170,7 @@ SOLCAST_MIN_USABLE_SLOTS = 48
 SOLCAST_RELIABILITY_LOOKBACK_DAYS = 30
 SOLCAST_RELIABILITY_MIN_DAYS = 5
 SOLCAST_PRIOR_BLEND_MIN = 0.28
-SOLCAST_PRIOR_BLEND_MAX = 0.76
+SOLCAST_PRIOR_BLEND_MAX = 0.92
 SOLCAST_PRIOR_SPREAD_FRAC_CLIP = 1.25
 SOLCAST_BIAS_RATIO_CLIP = (0.82, 1.18)
 
@@ -1987,6 +1987,14 @@ def solcast_prior_from_snapshot(
         "overcast": 0.58,
         "rainy": 0.46,
     }.get(regime, 0.44)
+    # Solcast-primary: when coverage is high and reliability is reasonable,
+    # elevate base blend so Solcast becomes the primary forecast baseline.
+    if coverage_ratio >= 0.80 and reliability_score >= 0.50:
+        base_by_regime = max(base_by_regime, 0.82)
+        log.info(
+            "Solcast-primary mode activated: coverage=%.2f reliability=%.2f base_blend=%.2f",
+            coverage_ratio, reliability_score, base_by_regime,
+        )
     spread_weight = 1.0 - 0.42 * np.clip(spread_frac / max(SOLCAST_PRIOR_SPREAD_FRAC_CLIP, 0.1), 0.0, 1.0)
     blend = base_by_regime * reliability_score * (0.55 + 0.45 * coverage_ratio) * spread_weight * solar_weight
     blend = np.clip(blend, SOLCAST_PRIOR_BLEND_MIN, SOLCAST_PRIOR_BLEND_MAX)
@@ -3884,9 +3892,15 @@ def run_dayahead(target_date: date, today: date) -> bool:
     solcast_prior = solcast_prior_from_snapshot(target_s, w5, solcast_snapshot, solcast_reliability)
     hybrid_baseline, solcast_meta = blend_physics_with_solcast(baseline, solcast_prior)
     artifacts = load_forecast_artifacts(today, allow_build=True)
+    solcast_primary = bool(
+        solcast_meta.get("used_solcast")
+        and float(solcast_meta.get("coverage_ratio", 0)) >= 0.80
+        and float(solcast_meta.get("mean_blend", 0)) >= 0.75
+    )
     log.info(
-        "Solcast prior: used=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f bias_ratio=%.3f source=%s",
+        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f bias_ratio=%.3f source=%s",
         bool(solcast_meta.get("used_solcast")),
+        solcast_primary,
         solcast_meta.get("regime"),
         float(solcast_meta.get("coverage_ratio", 0.0)),
         float(solcast_meta.get("mean_blend", 0.0)),
