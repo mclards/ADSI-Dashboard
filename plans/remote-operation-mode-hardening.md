@@ -2,7 +2,7 @@
 
 ## Status
 
-- Implemented in `v2.2.28`:
+- Implemented in `v2.2.29`:
   - Phase 1: server-side remote health model
   - Phase 2: explicit live-bridge failure classification
   - Phase 3: bounded stale snapshot retention for remote live data

@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.28
+- **Version:** 2.2.29
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,11 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.29 Changes — Remote Gateway Link Hotfix (2026-03-10)
+- **Remote live bridge no longer self-fails after a successful gateway fetch:** `server/index.js` now imports `checkAlarms` before the remote live-ingest path calls it, which fixes the runtime `checkAlarms is not defined` fault.
+- **Gateway Link now reports the real live state again:** because the post-fetch ingest no longer throws, `/api/runtime/perf`, `/api/runtime/network/reconnect`, and the Settings health panel can stay `connected` instead of falling back to `disconnected`.
+- **Inverter cards receive live remote rows again:** the remote bridge now finishes the live broadcast path, so retained/live remote node data reaches `/api/live` and the renderer repopulates the inverter cards instead of staying blank/offline.
 
 ## v2.2.28 Changes — Remote Operation Mode Health Hardening (2026-03-10)
 - **Remote health model is now explicit:** `server/index.js` now classifies remote live-bridge runtime as `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error` instead of only exposing a binary connected flag.

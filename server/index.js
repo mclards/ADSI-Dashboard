@@ -59,6 +59,7 @@ const {
   decodeAlarm,
   getTopSeverity,
   formatAlarmHex,
+  checkAlarms,
   logControlAction,
   getAuditLog,
 } = require("./alarms");
