@@ -5096,8 +5096,7 @@ const EXPORT_UI_DATE_KEYS = [
   "reportDate",
   "expAlarmStart",
   "expAlarmEnd",
-  "expEnergyStart",
-  "expEnergyEnd",
+  "expEnergyDate",
   "expForecastDate",
   "expInvDataStart",
   "expInvDataEnd",
@@ -5114,12 +5113,17 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function sanitizeExportUiState(input) {
   const out = {};
   if (!input || typeof input !== "object") return out;
+  const energyDate =
+    String(input.expEnergyDate || "").trim() ||
+    String(input.expEnergyEnd || "").trim() ||
+    String(input.expEnergyStart || "").trim();
   for (const key of EXPORT_UI_DATE_KEYS) {
     const raw = input[key];
     if (raw === undefined || raw === null || raw === "") continue;
     const v = String(raw).trim();
     if (ISO_DATE_RE.test(v)) out[key] = v;
   }
+  if (ISO_DATE_RE.test(energyDate)) out.expEnergyDate = energyDate;
   Object.entries(EXPORT_UI_NUMERIC_KEYS).forEach(([key, cfg]) => {
     const raw = input[key];
     if (raw === undefined || raw === null || raw === "") return;
@@ -5168,8 +5172,7 @@ function buildDefaultExportUiState() {
     reportDate: end,
     expAlarmStart: start,
     expAlarmEnd: end,
-    expEnergyStart: start,
-    expEnergyEnd: end,
+    expEnergyDate: end,
     expForecastDate: end,
     genDayCount: 1,
     expInvDataStart: start,

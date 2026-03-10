@@ -432,6 +432,13 @@ function exportFileBase(startTs, endTs, inverter, suffix) {
   return base.length > 200 ? base.slice(0, 200) : base;
 }
 
+function exportSingleDateFileBase(dayTs, inverter, suffix) {
+  const day = fmtDDMMYY(dayTs);
+  const target = exportTargetName(inverter);
+  const base = `${day} ${target} ${suffix}`;
+  return base.length > 200 ? base.slice(0, 200) : base;
+}
+
 function normalizeEnergyResolution(resolution) {
   const raw = String(resolution || '5min').trim().toLowerCase().replace(/\s+/g, '');
   if (raw === '15' || raw === '15min' || raw === '15m') {
@@ -789,15 +796,6 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
       }
       dayTotalMwh += subtotalMwh;
 
-      mapped.push({
-        Date: day,
-        Inverter_Number: inv,
-        Node_Number: 'TOTAL',
-        First_Seen: '',
-        Last_Seen: '',
-        Peak_Pac_kW: '',
-        Total_MWh: Number(subtotalMwh.toFixed(6)),
-      });
     }
 
     mapped.push({
@@ -897,7 +895,10 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
     { key: 'Total_MWh', label: 'Total MWh' },
   ];
 
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Energy');
+  const fileBase =
+    fmtDate(s) === fmtDate(e)
+      ? exportSingleDateFileBase(s, inverter, 'Energy Summary')
+      : exportFileBase(s, e, inverter, 'Energy Summary');
   return writeExport(headers, Array.isArray(rows) ? rows : [], dir, fileBase, format, {
     autoFilter: false,
   });

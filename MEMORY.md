@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.30
+- **Version:** 2.2.31
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,12 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.31 Changes — Energy Summary Export Cleanup (2026-03-10)
+- **Header icon-only controls were diagnosed as CDN-font dependent:** the top-right alarm/menu controls are icon-only MDI buttons, so when the icon stylesheet is unavailable they render as empty squares instead of showing a visible fallback.
+- **Energy Summary export dropped per-inverter subtotal rows:** the export now keeps node detail rows and the bottom `DAY TOTAL` row while removing the extra per-inverter `TOTAL` lines.
+- **Energy Summary export now uses a single date selector:** the export card and persisted export UI state were migrated from `From`/`To` to one `Date` field, with legacy saved values collapsing safely into the new single-day control.
+- **Energy Summary filenames now match single-day exports:** same-day exports now write `DDMMYY <target> Energy Summary` instead of the generic date-range `Recorded Energy` naming.
 
 ## v2.2.30 Changes — Solcast Toolkit Preview Date-Range Fix (2026-03-10)
 - **Start Day and Days to Display now follow actual toolkit feed dates:** the Solcast preview/export server path now sizes the toolkit `recent` fetch horizon from the selected start day plus the requested display span, instead of only from the display count.

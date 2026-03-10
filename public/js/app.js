@@ -879,8 +879,7 @@ const EXPORT_DATE_FIELD_IDS = [
   "reportDate",
   "expAlarmStart",
   "expAlarmEnd",
-  "expEnergyStart",
-  "expEnergyEnd",
+  "expEnergyDate",
   "expForecastDate",
   "expInvDataStart",
   "expInvDataEnd",
@@ -951,10 +950,15 @@ function clampExportNumberValue(id, value) {
 function sanitizeExportUiStateClient(input) {
   const out = {};
   const src = input && typeof input === "object" ? input : {};
+  const energyDate =
+    sanitizeDateInputValue(src.expEnergyDate) ||
+    sanitizeDateInputValue(src.expEnergyEnd) ||
+    sanitizeDateInputValue(src.expEnergyStart);
   EXPORT_DATE_FIELD_IDS.forEach((id) => {
     const v = sanitizeDateInputValue(src[id]);
     if (v) out[id] = v;
   });
+  if (energyDate) out.expEnergyDate = energyDate;
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
     out[id] = clampExportNumberValue(id, src[id]);
   });
@@ -1054,11 +1058,11 @@ function bindExportNumberValidators() {
 
 const EXPORT_DATE_RANGE_IDS = [
   ["expAlarmStart", "expAlarmEnd"],
-  ["expEnergyStart", "expEnergyEnd"],
   ["expInvDataStart", "expInvDataEnd"],
   ["expAuditStart", "expAuditEnd"],
   ["expReportStart", "expReportEnd"],
 ];
+const EXPORT_SINGLE_DATE_IDS = ["expEnergyDate", "expForecastDate"];
 
 function clampExportDateToToday(value) {
   const v = sanitizeDateInputValue(value);
@@ -1116,7 +1120,9 @@ function normalizeAllExportDateInputs(options = {}) {
   EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
     normalizeExportDatePair(startId, endId, options);
   });
-  normalizeExportSingleDateInput("expForecastDate", options);
+  EXPORT_SINGLE_DATE_IDS.forEach((inputId) => {
+    normalizeExportSingleDateInput(inputId, options);
+  });
 }
 
 function bindExportDateValidators() {
@@ -1149,16 +1155,17 @@ function bindExportDateValidators() {
     }
   });
 
-  const forecastInput = $("expForecastDate");
-  if (forecastInput && forecastInput.dataset.exportDateBound !== "1") {
-    forecastInput.dataset.exportDateBound = "1";
-    const syncForecast = () => {
-      normalizeExportSingleDateInput("expForecastDate", { forceDefault: true });
+  EXPORT_SINGLE_DATE_IDS.forEach((inputId) => {
+    const input = $(inputId);
+    if (!input || input.dataset.exportDateBound === "1") return;
+    input.dataset.exportDateBound = "1";
+    const syncSingle = () => {
+      normalizeExportSingleDateInput(inputId, { forceDefault: true });
       queuePersistExportUiState();
     };
-    forecastInput.addEventListener("change", syncForecast);
-    forecastInput.addEventListener("input", syncForecast);
-  }
+    input.addEventListener("change", syncSingle);
+    input.addEventListener("input", syncSingle);
+  });
 }
 
 function setupExportUiStateFlush() {
@@ -8873,16 +8880,54 @@ async function runExport(
 }
 
 async function runEnergyExport() {
-  await runExport(
-    "energy",
-    "expEnergyInv",
-    "expEnergyStart",
-    "expEnergyEnd",
-    "expEnergyResult",
-    {},
-    "btnRunEnergyExport",
-    "btnCancelEnergyExport",
-  );
+  normalizeExportSingleDateInput("expEnergyDate", { forceDefault: true });
+  await persistExportUiState().catch(() => {});
+  const day = $("expEnergyDate")?.value || today();
+  if (!$("expEnergyDate")?.value && $("expEnergyDate")) $("expEnergyDate").value = day;
+  const inv = $("expEnergyInv")?.value;
+  const format = $("expEnergyFormat")?.value || "xlsx";
+  const res = $("expEnergyResult");
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+  setExportButtonState("btnRunEnergyExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelEnergyExport", controller);
+  try {
+    const startTs = localDateStartMs(day);
+    const endTs = localDateEndMs(day);
+    const r = await api("/api/export/energy", "POST", {
+      inverter: inv,
+      startTs,
+      endTs,
+      format,
+    }, {
+      signal: controller.signal,
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = "✔ Saved: " + r.path;
+    }
+    await openExportPathFolder(r.path);
+    setExportButtonState("btnRunEnergyExport", "ok");
+  } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunEnergyExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunEnergyExport", "fail");
+    }
+  } finally {
+    releaseExportAbortController("btnCancelEnergyExport");
+  }
 }
 
 async function runForecastActualExport() {
