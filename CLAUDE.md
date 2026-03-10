@@ -56,6 +56,14 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
   - `daily_readings_summary`
   - alarms, audit, forecast, settings, and other operational tables
 
+### SQLite Performance Rules
+
+- The hot DB uses WAL mode with `synchronous = NORMAL`. Do not change this to `FULL` — WAL+NORMAL is already crash-safe and FULL adds costly fsync on every commit.
+- The poller uses `bulkInsertWithSummary()` to combine reading inserts and daily summary upserts in a single transaction. Do not split these back into separate transactions — each transaction commit fsyncs in WAL mode.
+- `pruneOldData()` and `archiveTelemetryBeforeCutoff()` are async and yield the event loop (`setImmediate`) between batches of 5,000 rows. Do not convert these back to synchronous blocking loops.
+- Routine WAL checkpoints during operation must use `PASSIVE` mode (non-blocking). Only use `TRUNCATE` during `closeDb()` at app shutdown.
+- Long-running DB operations (archival, multi-day report generation, vacuum) must yield control between batches so the event loop can process WebSocket frames and HTTP requests.
+
 ### Retention
 
 - `retainDays` controls how long raw `readings` and `energy_5min` remain in the hot DB.
@@ -97,6 +105,9 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
   - gzip large replication JSON payloads and large main-DB / archive downloads when the peer accepts it
   - keep push uploads chunked and allow gzip request bodies for large JSON push batches
   - allow only small bounded archive concurrency; do not trade restart-safe staging for raw throughput
+- Boost HTTP socket pool to `REMOTE_FETCH_MAX_SOCKETS_REPLICATION` (16) during manual pull/push, restore default (8) afterward via `boostSocketPoolForReplication()` / `restoreSocketPoolAfterReplication()` in try/finally.
+- Archive file downloads support HTTP Range requests (resume-on-failure). Gateway serves `Accept-Ranges: bytes` + 206 Partial Content. Client retries up to 3 times, resuming from partial temp file.
+- After a main-DB pull, the gateway sends replication cursors via the `x-main-db-cursors` response header. The remote must persist these so incremental sync converges correctly.
 - Do not remove transfer-speed optimizations casually. Measure first if a rollback is really needed.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated raw `readings` or `energy_5min` are older than local `retainDays`, write them directly into the local archive instead of the hot DB.
@@ -131,6 +142,8 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - **Startup tab prefetch**: `prefetchAllTabs()` fires 2 s after `init()` and pre-warms all 4 tabs in parallel. `TAB_STALE_MS = 60000`.
 - **PAC indicator thresholds**: `getPacRowClass()` uses `NODE_RATED_W = 249,250 W`. ≥90% → High (green), >70% → Moderate (yellow), >40% → Mild (orange), ≤40% → Low (red). Static `.pac-legend-wrap` in inverter toolbar.
 - **App confirm modal**: `appConfirm(title, body, {ok, cancel})` → `Promise<boolean>`. Replaces all native `confirm()` and `alert()` calls. `#appConfirmModal` + `.confirm-dialog` CSS. `initConfirmModal()` called from `init()`.
+- **WebSocket reconnect**: Exponential backoff with jitter: `Math.min(30000, 500 * 1.5^retries + random * 500 * retries)`. Do not revert to linear — prevents thundering herd with multiple remote clients.
+- **Proxy timeouts**: Centralized in `PROXY_TIMEOUT_RULES` array + `resolveProxyTimeout()`. Add new proxy route timeouts there, not inline.
 - **Availability today**: `/api/report/daily` range handler splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range. Detail panel 60 s refresh also fetches today's report rows to keep availability chip current.
 
 ## Version, Branding, and Release Compatibility
@@ -197,6 +210,7 @@ Preserve these unless a deliberate migration is implemented:
 - The panel should expose an explicit clear-thread action with confirmation and sync it through the shared gateway-backed history.
 - Chat notification sound is inbound-only, stays silent for self-send echoes, and depends on the shared browser audio context already being unlocked by user interaction.
 - Keep visible UI wording operational and reserved. Do not expose transport details, tokens, or server terminology.
+- Chat send rate is limited to 10 messages per 60 s per machine, enforced server-side via a sliding-window bucket (`_chatRateBuckets`). Do not remove this rate limiter.
 
 ## Current Metrics Guardrails
 

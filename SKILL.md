@@ -60,6 +60,14 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
   - `daily_readings_summary`
   - alarms, audit, forecast, settings, and other operational tables
 
+### SQLite Performance Rules
+
+- The hot DB uses WAL mode with `synchronous = NORMAL`. Do not change this to `FULL` — WAL+NORMAL is already crash-safe and FULL adds costly fsync on every commit.
+- The poller uses `bulkInsertWithSummary()` to combine reading inserts and daily summary upserts in a single transaction. Do not split these back into separate transactions — each transaction commit fsyncs in WAL mode.
+- `pruneOldData()` and `archiveTelemetryBeforeCutoff()` are async and yield the event loop (`setImmediate`) between batches of 5,000 rows. Do not convert these back to synchronous blocking loops.
+- Routine WAL checkpoints during operation must use `PASSIVE` mode (non-blocking). Only use `TRUNCATE` during `closeDb()` at app shutdown.
+- Long-running DB operations (archival, multi-day report generation, vacuum) must yield control between batches so the event loop can process WebSocket frames and HTTP requests.
+
 ### Retention
 
 - `retainDays` controls how long raw `readings` and `energy_5min` stay hot in the main DB.
@@ -104,6 +112,9 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
   - allow gzip compression for large replication JSON payloads and large main-DB / archive downloads
   - keep push uploads chunked and allow gzip request bodies for large JSON push batches
   - archive pull/push may run with small bounded concurrency, but do not remove restart-safe staging
+- Boost HTTP socket pool to `REMOTE_FETCH_MAX_SOCKETS_REPLICATION` (16) during manual pull/push operations, and restore the default (8) afterward. Use `boostSocketPoolForReplication()` / `restoreSocketPoolAfterReplication()` in a try/finally around replication workflows.
+- Archive file downloads must support HTTP Range requests (resume-on-failure). The gateway serves `Accept-Ranges: bytes` and responds with 206 Partial Content when a `Range` header is present. The client retries up to 3 times, resuming from the partial temp file.
+- After a main-DB pull, the gateway sends replication cursors via the `x-main-db-cursors` response header. The remote must persist these cursors so incremental sync converges correctly from the pulled state.
 - Do not silently revert transfer optimization settings without measuring the impact on slow links first.
 - Never rehydrate the hot DB with inbound telemetry older than the local hot cutoff.
 - If replicated `readings` or `energy_5min` rows are already older than local `retainDays`, write them directly into the local archive instead of the hot DB.
@@ -292,6 +303,7 @@ If a visible product rename affects install directory behavior, assess updater i
   - the sound depends on the browser audio context already being unlocked by a user gesture
   - no token, transport, or server-internal wording exposed in the renderer
   - no overlap with the alarm notification control
+- Chat send rate is limited to `CHAT_RATE_LIMIT_MAX` (10) messages per `CHAT_RATE_LIMIT_WINDOW_MS` (60 s) per machine, enforced server-side via a sliding-window bucket (`_chatRateBuckets`). Do not remove this rate limiter.
 
 ## Current Metrics Guardrails
 
@@ -357,6 +369,14 @@ A compact static legend (`.pac-legend-wrap`) sits in the inverter toolbar betwee
 ### Availability Computation
 
 Availability for today is computed live via `getDailyReportRowsForDay(today, { includeTodayPartial: true })`. The `/api/report/daily?start&end` range endpoint detects when today falls in the requested range and splices in the live result rather than serving the stale persisted row. The detail panel 60 s refresh timer fetches `/api/report/daily?date=<today>` and merges the fresh rows into `State.invDetailReportRows` so the availability chip stays current.
+
+### WebSocket Reconnection
+
+The frontend uses exponential backoff with jitter for WebSocket reconnection: `Math.min(30000, 500 * 1.5^retries + random * 500 * retries)`. Do not revert to linear backoff — it causes thundering herd on gateway restarts with multiple remote clients.
+
+### Proxy Timeout Rules
+
+Remote-to-gateway proxy timeouts are centralized in the `PROXY_TIMEOUT_RULES` array and resolved via `resolveProxyTimeout(method, path)`. When adding new proxy routes, add a matching rule to the array instead of inline if/else logic.
 
 ### Weather Offline Hardening
 
