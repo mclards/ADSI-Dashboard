@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.25
+- **Version:** 2.2.26
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,12 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.26 Changes — Forecast Integrity and Solcast-Aware ML Local Forecasting (2026-03-10)
+- `ml_local` now consumes `solcast_snapshots` as a prior when available, builds a hybrid baseline, and preserves native Solcast PT5M shape instead of treating Solcast as a separate disconnected provider only.
+- Forecast analytics reads are now DB-only. `/api/analytics/dayahead` and intraday-adjusted reads no longer mutate the DB by pulling from the Python context file during GET requests.
+- Startup legacy context import is now guarded: it only runs when `forecast_dayahead` is empty, which prevents stored DB forecasts from being overwritten on restart.
+- Solcast snapshot failures are now surfaced back to the operator as non-fatal warnings in test / preview / generate paths instead of being silently swallowed.
 
 ## v2.2.25 Changes — Replication Separation, Transfer Integrity, and Solcast Snapshot Persistence (2026-03-10)
 - **Pull and Push are now strictly separated:** manual `Pull` is download-only, manual `Push` is upload-only, and startup auto-sync uses the same read-only local-newer check instead of auto-pushing gateway changes as a side effect. The leftover `/api/replication/reconcile-now` path was also hardened so it no longer modifies gateway data before a catch-up pull.

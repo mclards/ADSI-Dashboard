@@ -105,6 +105,9 @@
         <button class="nav-btn" data-page="analytics">
           <span class="nav-icon"><span class="mdi mdi-chart-line"></span></span><span>ANALYTICS</span>
         </button>
+        <button class="nav-btn" data-page="forecast">
+          <span class="nav-icon"><span class="mdi mdi-weather-partly-cloudy"></span></span><span>FORECAST</span>
+        </button>
         <button class="nav-btn" data-page="alarms">
           <span class="nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span><span>ALARMS</span>
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
@@ -127,7 +130,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.25</span></div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.2.26</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and controlled multi-machine synchronization for the plant.</div>
             <a
               class="side-about-link"
@@ -898,6 +901,32 @@
         </div>
       </section>
 
+      <!-- --- PAGE: FORECAST ------------------------------------------------------- -->
+      <section id="page-forecast" class="page">
+        <div class="forecast-shell">
+          <div class="forecast-main">
+            <div class="forecast-main-header">
+              <div class="forecast-main-topbar">
+                <div>
+                  <div class="forecast-main-eyebrow">Dedicated Forecast Workspace</div>
+                  <div class="forecast-main-title">Forecast</div>
+                </div>
+                <div class="forecast-main-actions">
+                  <div class="forecast-page-current-chip" id="forecastSidebarCurrentChip">Forecast Workspace</div>
+                  <button id="btnSaveForecastSettings" class="btn btn-accent" type="button">
+                    <span class="mdi mdi-content-save-outline" aria-hidden="true"></span>
+                    <span>Save Forecast Settings</span>
+                  </button>
+                </div>
+              </div>
+              <span class="smsg" id="forecastPageMsg"></span>
+            </div>
+
+            <div class="forecast-page-sections" id="forecastPageSections"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->
       <section id="page-settings" class="page">
         <div class="settings-shell">
@@ -921,10 +950,6 @@
                 <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">
                   <span class="settings-menu-label">Connectivity &amp; Sync</span>
                   <span class="settings-menu-copy">Gateway mode, remote access, synchronization, and diagnostics.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="forecastSection">
-                  <span class="settings-menu-label">Forecast</span>
-                  <span class="settings-menu-copy">Forecast source selection and external provider validation.</span>
                 </button>
                 <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">
                   <span class="settings-menu-label">License</span>
@@ -1502,9 +1527,15 @@
                     <option value="7">7 Days</option>
                   </select>
                 </label>
+                <label
+                  >Chart Unit
+                  <select id="solcastPreviewUnit" class="sel">
+                    <option value="mwh">MWh</option>
+                    <option value="mw">MW</option>
+                  </select>
+                </label>
                 <div class="forecast-preview-toolbar-action"
-                  ><span>Preview Actions</span>
-                  <button
+                  ><button
                     id="btnSolcastPreviewRefresh"
                     class="btn btn-outline"
                     type="button"
@@ -1522,11 +1553,6 @@
                   >
                     <span class="mdi mdi-file-excel-outline" aria-hidden="true"></span><span>Export XLSX</span>
                   </button>
-                </div>
-              </div>
-              <div class="sinfo forecast-preview-copy">
-                <div>
-                  Displays the Solcast toolkit feed at `PT5M` for the selected date range using the local `05:00 AM` to `06:00 PM` operating window. The chart is plotted in `MWh` per 5-minute slot, while hover details and the Excel export also include the raw toolkit `MW` values for each slot. Estimated actuals and forecast bands are shown when the source provides them.
                 </div>
               </div>
               <div class="forecast-preview-metrics" id="solcastPreviewMetrics">
@@ -1549,11 +1575,14 @@
               </div>
               <div class="forecast-preview-chart-wrap">
                 <div class="forecast-preview-chart-head">
-                  <div class="forecast-preview-chart-title">Solcast PT5M Outlook</div>
-                  <div class="forecast-preview-chart-note">05:00-18:00 local window · hover for MW and MWh</div>
+                  <div class="forecast-preview-chart-heading">
+                    <div class="forecast-preview-chart-title">Solcast PT5M Outlook</div>
+                    <div class="forecast-preview-chart-note" id="solcastPreviewChartNote">05:00-18:00 local window · displaying MWh per 5-minute slot</div>
+                  </div>
+                  <div class="forecast-preview-chart-emphasis" id="solcastPreviewChartEmphasis">Chart Unit: MWh</div>
                 </div>
                 <div class="forecast-preview-chart-canvas">
-                  <canvas id="solcastPreviewChart" height="210"></canvas>
+                  <canvas id="solcastPreviewChart" height="320"></canvas>
                 </div>
               </div>
               <span class="smsg" id="solcastPreviewMsg"></span>
@@ -1976,7 +2005,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.25</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.2.26</span></div>
             <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -2117,7 +2146,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.2.25 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.2.26 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

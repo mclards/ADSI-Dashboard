@@ -4541,36 +4541,32 @@ function getForecastSolarWindowBounds(day) {
   };
 }
 
+function countStoredForecastRows(tableName) {
+  const target =
+    tableName === "forecast_intraday_adjusted"
+      ? "forecast_intraday_adjusted"
+      : "forecast_dayahead";
+  try {
+    const row = stmtCached(
+      `count:${target}`,
+      `SELECT COUNT(*) AS cnt FROM ${target}`,
+    ).get();
+    return Math.max(0, Number(row?.cnt || 0));
+  } catch (err) {
+    console.warn(`[forecast] count failed for ${target}:`, err.message);
+    return 0;
+  }
+}
+
 function getDayAheadRowsForDate(day) {
   const dayKey = String(day || "").trim();
   if (!dayKey) return [];
-  try {
-    if (readForecastProvider() !== "solcast") {
-      syncDayAheadFromContextIfNewer(false);
-    }
-  } catch (err) {
-    console.warn("[forecast] context sync failed:", err.message);
-  }
   let dbRows = [];
   try {
     dbRows = stmts.getForecastDayAheadDate.all(dayKey);
   } catch (err) {
     console.error("[forecast] DB read failed:", err.message);
     dbRows = [];
-  }
-  if (!dbRows.length) {
-    const ctx = readForecastContext();
-    const root = ctx && typeof ctx === "object" ? ctx.PacEnergy_DayAhead : null;
-    const series =
-      root && typeof root === "object" ? root[dayKey] : null;
-    if (Array.isArray(series) && series.length) {
-      try {
-        upsertDayAheadSeriesToDb(dayKey, series, "legacy-fallback");
-        dbRows = stmts.getForecastDayAheadDate.all(dayKey);
-      } catch (err) {
-        console.warn("[forecast] legacy fallback upsert failed:", err.message);
-      }
-    }
   }
   if (!dbRows.length) return [];
   return dbRows.map((r) => {
@@ -4592,24 +4588,6 @@ function getIntradayAdjustedRowsForDate(day) {
   } catch (err) {
     console.error("[forecast] intraday DB read failed:", err.message);
     dbRows = [];
-  }
-  if (!dbRows.length) {
-    const ctx = readForecastContext();
-    const root =
-      ctx && typeof ctx === "object" ? ctx.PacEnergy_IntradayAdjusted : null;
-    const series =
-      root && typeof root === "object" ? root[dayKey] : null;
-    if (Array.isArray(series) && series.length) {
-      try {
-        upsertIntradayAdjustedSeriesToDb(dayKey, series, "legacy-fallback");
-        dbRows = stmts.getForecastIntradayAdjustedDate.all(dayKey);
-      } catch (err) {
-        console.warn(
-          "[forecast] intraday legacy fallback upsert failed:",
-          err.message,
-        );
-      }
-    }
   }
   if (!dbRows.length) return [];
   return dbRows.map((r) => {
@@ -6125,6 +6103,38 @@ function persistSolcastSnapshot(day, rows, source, pulledTs) {
   }
 }
 
+function buildAndPersistSolcastSnapshot(day, records, estActuals, cfg, source, pulledTs) {
+  try {
+    const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
+    const persistedRows = persistSolcastSnapshot(day, snapshotRows, source, pulledTs);
+    if (snapshotRows.length && persistedRows !== snapshotRows.length) {
+      return {
+        ok: false,
+        builtRows: Number(snapshotRows.length || 0),
+        persistedRows: Number(persistedRows || 0),
+        warning:
+          `Solcast snapshot persist failed for ${day} ` +
+          `(${Number(persistedRows || 0)}/${Number(snapshotRows.length || 0)} rows saved).`,
+      };
+    }
+    return {
+      ok: true,
+      builtRows: Number(snapshotRows.length || 0),
+      persistedRows: Number(persistedRows || 0),
+      warning: "",
+    };
+  } catch (err) {
+    const msg = String(err?.message || err || "unknown snapshot error").trim();
+    console.warn(`[solcast-snapshot] ${day}:`, msg);
+    return {
+      ok: false,
+      builtRows: 0,
+      persistedRows: 0,
+      warning: `Solcast snapshot skipped for ${day}: ${msg}`,
+    };
+  }
+}
+
 function classifyDailySky(row) {
   const cloud = Number(row?.cloud_pct || 0);
   const rain = Number(row?.precip_mm || 0);
@@ -6403,14 +6413,24 @@ async function generateDayAheadWithSolcast(dates) {
   const { endpoint, records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
   const pulledTs = Date.now();
   let writtenRows = 0;
+  let snapshotRowsPersisted = 0;
+  const snapshotWarnings = [];
   for (const day of dates) {
     const rows = buildDayAheadRowsFromSolcast(day, records, cfg);
     bulkUpsertForecastDayAhead(day, rows, "solcast");
     writtenRows += Number(rows.length || 0);
-    try {
-      const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
-      persistSolcastSnapshot(day, snapshotRows, accessMode, pulledTs);
-    } catch (_) {}
+    const snapshotResult = buildAndPersistSolcastSnapshot(
+      day,
+      records,
+      estActuals || [],
+      cfg,
+      accessMode,
+      pulledTs,
+    );
+    snapshotRowsPersisted += Number(snapshotResult?.persistedRows || 0);
+    if (!snapshotResult?.ok && snapshotResult?.warning) {
+      snapshotWarnings.push(String(snapshotResult.warning));
+    }
   }
   const normalizedRows = normalizeForecastDbWindow();
   return {
@@ -6418,6 +6438,8 @@ async function generateDayAheadWithSolcast(dates) {
     accessMode,
     endpoint,
     writtenRows,
+    snapshotRowsPersisted,
+    snapshotWarnings,
     normalizedRows,
   };
 }
@@ -9211,10 +9233,14 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     } catch (err) {
       warning = String(err?.message || err || "").slice(0, 240);
     }
-    try {
-      const snapshotRows = buildSolcastSnapshotRows(tomorrowTz, records, estActuals || [], cfg);
-      persistSolcastSnapshot(tomorrowTz, snapshotRows, accessMode, started);
-    } catch (_) {}
+    const snapshotResult = buildAndPersistSolcastSnapshot(
+      tomorrowTz,
+      records,
+      estActuals || [],
+      cfg,
+      accessMode,
+      started,
+    );
 
     return res.json({
       ok: true,
@@ -9231,6 +9257,9 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
         ? new Date(validTs[validTs.length - 1]).toISOString()
         : "",
       daysCovered: Array.from(daySet).sort(),
+      snapshotOk: !!snapshotResult?.ok,
+      snapshotRowsPersisted: Number(snapshotResult?.persistedRows || 0),
+      snapshotWarning: String(snapshotResult?.warning || ""),
       dayAheadPreview: preview,
       warning,
     });
@@ -9303,12 +9332,22 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       estActuals || [],
       cfg,
     );
-    try {
-      for (const day of (preview.selectedDays?.length ? preview.selectedDays : [preview.day])) {
-        const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
-        persistSolcastSnapshot(day, snapshotRows, accessMode, started);
+    let snapshotRowsPersisted = 0;
+    const snapshotWarnings = [];
+    for (const day of (preview.selectedDays?.length ? preview.selectedDays : [preview.day])) {
+      const snapshotResult = buildAndPersistSolcastSnapshot(
+        day,
+        records,
+        estActuals || [],
+        cfg,
+        accessMode,
+        started,
+      );
+      snapshotRowsPersisted += Number(snapshotResult?.persistedRows || 0);
+      if (!snapshotResult?.ok && snapshotResult?.warning) {
+        snapshotWarnings.push(String(snapshotResult.warning));
       }
-    } catch (_) {}
+    }
     return res.json({
       ok: true,
       provider: "solcast",
@@ -9338,6 +9377,9 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       rows: preview.rows,
       forecastTotalMwh: preview.forecastTotalMwh,
       actualTotalMwh: preview.actualTotalMwh,
+      snapshotOk: snapshotWarnings.length === 0,
+      snapshotRowsPersisted,
+      snapshotWarnings,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
@@ -9521,6 +9563,10 @@ app.post("/api/forecast/generate", async (req, res) => {
       durationMs: Number(generation.durationMs || 0),
       normalizedRows: Number(generation.normalizedRows || 0),
       writtenRows: Number(generation.writtenRows || 0),
+      snapshotRowsPersisted: Number(generation.snapshotRowsPersisted || 0),
+      snapshotWarnings: Array.isArray(generation.snapshotWarnings)
+        ? generation.snapshotWarnings
+        : [],
       endpoint: generation.endpoint || "",
       attempts,
     });
@@ -9844,10 +9890,17 @@ const httpServer = app.listen(PORT, () => {
   }
   try {
     if (readForecastProvider() !== "solcast") {
-      const r = syncDayAheadFromContextIfNewer(true);
-      if (r?.changed) {
+      const storedRows = countStoredForecastRows("forecast_dayahead");
+      if (storedRows <= 0) {
+        const r = syncDayAheadFromContextIfNewer(true);
+        if (r?.changed) {
+          console.log(
+            `[Forecast] Day-ahead sync -> DB: days=${Number(r.days || 0)} rows=${Number(r.rows || 0)}`,
+          );
+        }
+      } else {
         console.log(
-          `[Forecast] Day-ahead sync -> DB: days=${Number(r.days || 0)} rows=${Number(r.rows || 0)}`,
+          `[Forecast] Startup legacy context import skipped; forecast_dayahead already has ${storedRows} stored row(s).`,
         );
       }
     } else {

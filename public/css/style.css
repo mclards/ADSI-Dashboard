@@ -6266,6 +6266,238 @@ label[data-required]::after {
 /* Settings Rehab: focused section flow */
 
 /* Settings rehab: replace duplicated top bars with one sidebar workspace. */
+#page-forecast {
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+#page-forecast .forecast-shell {
+  display: block;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+#page-forecast .forecast-main-header,
+#page-forecast .forecast-page-sections > .sgroup.settings-card {
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+#page-forecast .forecast-page-kicker,
+#page-forecast .forecast-main-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.85px;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.88;
+}
+
+#page-forecast .forecast-page-current-title,
+#page-forecast .forecast-main-title {
+  margin-top: 2px;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+#page-forecast .forecast-page-current-copy,
+#page-forecast .forecast-main-copy {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text2);
+}
+
+#page-forecast .forecast-page-current-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.015) 100%);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+#page-forecast .forecast-main {
+  min-height: 0;
+  overflow: visible;
+  padding-right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+#page-forecast .forecast-main-header {
+  padding: 10px 16px;
+}
+
+#page-forecast .forecast-main-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+#page-forecast .forecast-main-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+#page-forecast .forecast-page-current-chip {
+  margin-top: 0;
+}
+
+#page-forecast #forecastPageMsg {
+  margin-top: 6px;
+  min-height: 16px;
+  display: flex;
+  align-items: center;
+}
+
+#page-forecast .forecast-page-sections > .sgroup.settings-card {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  align-content: start;
+  margin: 0;
+  padding: 18px;
+  overflow: visible;
+}
+
+#page-forecast #forecastSection {
+  grid-auto-flow: dense;
+}
+
+#page-forecast #forecastSection > .sgroup-title,
+#page-forecast #forecastSection > .settings-section-copy {
+  display: none;
+}
+
+#page-forecast #forecastSection .forecast-preview-panel {
+  order: 1;
+  margin-top: 0;
+}
+
+#page-forecast #forecastSection .forecast-provider-panel {
+  order: 2;
+}
+
+#page-forecast #forecastSection .forecast-access-panel {
+  order: 3;
+}
+
+#page-forecast #forecastSection .forecast-api-panel,
+#page-forecast #forecastSection .forecast-toolkit-panel {
+  order: 4;
+}
+
+#page-forecast #forecastSection > .sgroup-actions {
+  order: 5;
+}
+
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-title {
+  grid-column: 1 / -1;
+  position: static;
+  margin: 0;
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--accent);
+}
+
+#page-forecast .settings-section-copy {
+  grid-column: 1 / -1;
+  margin: 2px 0 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text2);
+  max-width: 72ch;
+}
+
+#page-forecast .settings-card .settings-subsection {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%);
+}
+
+#page-forecast .settings-card .settings-subsection:first-of-type {
+  margin-top: 8px;
+}
+
+#page-forecast .settings-card .settings-subtitle {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .sinfo,
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-actions {
+  grid-column: 1 / -1;
+}
+
+#page-forecast .forecast-page-sections .srow {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 10px 12px;
+  align-items: flex-start;
+}
+
+#page-forecast .forecast-page-sections .srow label {
+  grid-column: span 6;
+  min-width: 0;
+}
+
+#page-forecast .forecast-page-sections .srow > small {
+  grid-column: span 6;
+  margin-top: -6px;
+  margin-bottom: 2px;
+  font-size: 10px;
+  color: var(--text3);
+  line-height: 1.3;
+}
+
+#page-forecast .forecast-page-sections .srow .inp,
+#page-forecast .forecast-page-sections .srow .sel {
+  width: 100%;
+  min-height: 34px;
+}
+
+#page-forecast .forecast-page-sections .sgroup-actions {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  gap: 8px;
+}
+
 #page-settings {
   overflow: hidden;
 }
@@ -6711,38 +6943,38 @@ label[data-required]::after {
   grid-column: 1 / -1;
 }
 
-#page-settings #forecastSection .forecast-provider-panel {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel {
   grid-column: span 4;
 }
 
-#page-settings #forecastSection .forecast-access-panel,
-#page-settings #forecastSection .forecast-api-panel {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+:is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
   grid-column: span 4;
 }
 
-#page-settings #forecastSection .forecast-toolkit-panel {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
   grid-column: 1 / -1;
 }
 
-#page-settings #forecastSection .forecast-access-panel .srow label,
-#page-settings #forecastSection .forecast-api-panel .srow label {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel .srow label,
+:is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel .srow label {
   grid-column: span 6;
 }
 
-#page-settings #forecastSection .forecast-provider-panel .srow label {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel .srow label {
   grid-column: 1 / -1;
 }
 
-#page-settings #forecastSection .forecast-toolkit-panel .srow label {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel .srow label {
   grid-column: span 4;
 }
 
-#page-settings #forecastSection .forecast-preview-panel,
-#page-settings #forecastSection > .sgroup-actions {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-panel,
+:is(#page-settings, #page-forecast) #forecastSection > .sgroup-actions {
   grid-column: 1 / -1;
 }
 
-#page-settings #forecastSection .forecast-preview-panel {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-panel {
   position: relative;
   overflow: hidden;
   isolation: isolate;
@@ -6751,12 +6983,12 @@ label[data-required]::after {
   box-shadow: var(--forecast-preview-shadow);
 }
 
-#page-settings #forecastSection .forecast-preview-panel > * {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-panel > * {
   position: relative;
   z-index: 1;
 }
 
-#page-settings #forecastSection .forecast-preview-panel::before {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-panel::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -6767,7 +6999,7 @@ label[data-required]::after {
   opacity: 0.7;
 }
 
-#page-settings #forecastSection .forecast-preview-panel::after {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-panel::after {
   content: "";
   position: absolute;
   width: 240px;
@@ -6780,23 +7012,23 @@ label[data-required]::after {
   opacity: 0.95;
 }
 
-#page-settings #forecastSection .forecast-preview-toolbar label,
-#page-settings #forecastSection .forecast-preview-toolbar .forecast-preview-toolbar-action {
-  grid-column: span 4;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar label,
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar .forecast-preview-toolbar-action {
+  grid-column: span 3;
 }
 
-#page-settings #forecastSection .forecast-preview-toolbar-action {
-  align-self: end;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action {
+  align-self: flex-end;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-#page-settings #forecastSection .forecast-preview-toolbar-action .btn {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action .btn {
   margin-right: 0;
 }
 
-#page-settings #forecastSection .forecast-preview-toolbar-action > span {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action > span {
   display: block;
   margin-bottom: 6px;
   color: var(--text3);
@@ -6805,30 +7037,36 @@ label[data-required]::after {
   letter-spacing: 0.2px;
 }
 
-#page-settings #forecastSection .forecast-preview-copy {
-  margin-top: 10px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-copy {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--forecast-preview-panel-border) 62%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--forecast-preview-chart-inner-bg) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
-#page-settings #forecastSection .forecast-preview-metrics {
-  margin-top: 12px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metrics {
+  margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
 }
 
-#page-settings #forecastSection .forecast-preview-metric {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metric {
   position: relative;
   overflow: hidden;
-  padding: 10px 12px;
+  min-height: 62px;
+  padding: 8px 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--forecast-preview-metric-bg);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 8px 18px rgba(0, 0, 0, 0.08);
 }
 
-#page-settings #forecastSection .forecast-preview-metric::before {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metric::before {
   content: "";
   position: absolute;
   left: 12px;
@@ -6840,19 +7078,19 @@ label[data-required]::after {
   opacity: 0.9;
 }
 
-#page-settings #forecastSection .forecast-preview-metric:nth-child(1)::before {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metric:nth-child(1)::before {
   background: linear-gradient(90deg, var(--chart-ahead), transparent);
 }
 
-#page-settings #forecastSection .forecast-preview-metric:nth-child(2)::before {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metric:nth-child(2)::before {
   background: linear-gradient(90deg, var(--chart-actual), transparent);
 }
 
-#page-settings #forecastSection .forecast-preview-metric:nth-child(4)::before {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metric:nth-child(4)::before {
   background: linear-gradient(90deg, var(--green), transparent);
 }
 
-#page-settings #forecastSection .forecast-preview-label {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-label {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.7px;
@@ -6860,63 +7098,83 @@ label[data-required]::after {
   color: var(--text3);
 }
 
-#page-settings #forecastSection .forecast-preview-value {
-  margin-top: 6px;
-  font-size: 16px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-value {
+  margin-top: 4px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.02em;
 }
 
-#page-settings #forecastSection .forecast-preview-chart-wrap {
-  margin-top: 12px;
-  min-height: 286px;
-  padding: 14px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-wrap {
+  margin-top: 10px;
+  min-height: 0;
+  padding: 12px;
   border: 1px solid var(--forecast-preview-panel-border);
-  border-radius: 18px;
+  border-radius: 16px;
   background: var(--forecast-preview-chart-bg);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 10px 24px rgba(0, 0, 0, 0.1);
+    0 14px 30px rgba(0, 0, 0, 0.14);
 }
 
-#page-settings #forecastSection .forecast-preview-chart-head {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
+  gap: 14px;
+  margin-bottom: 10px;
 }
 
-#page-settings #forecastSection .forecast-preview-chart-title {
-  font-size: 12px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-title {
+  font-size: 13px;
   font-weight: 800;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text);
 }
 
-#page-settings #forecastSection .forecast-preview-chart-note {
-  font-size: 10px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-note {
+  font-size: 11px;
   font-weight: 600;
   color: var(--text3);
-  text-align: right;
 }
 
-#page-settings #forecastSection .forecast-preview-chart-canvas {
-  min-height: 228px;
-  padding: 10px 12px 12px;
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-emphasis {
+  align-self: center;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--forecast-preview-panel-border) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--forecast-preview-metric-bg) 72%, transparent);
+  color: var(--text2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-canvas {
+  min-height: 240px;
+  height: clamp(240px, 36vh, 400px);
+  padding: 10px 14px 14px;
   border: 1px solid color-mix(in srgb, var(--forecast-preview-panel-border) 78%, transparent);
   border-radius: 14px;
   background: var(--forecast-preview-chart-inner-bg);
 }
 
-#page-settings #forecastSection .forecast-preview-chart-canvas canvas {
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-canvas canvas {
   width: 100% !important;
-  height: 236px !important;
+  height: 100% !important;
 }
 
-#page-settings #forecastSection #solcastPreviewMsg {
+:is(#page-settings, #page-forecast) #forecastSection #solcastPreviewMsg {
   display: inline-flex;
   margin-top: 10px;
 }
@@ -6970,17 +7228,17 @@ label[data-required]::after {
     grid-column: span 6;
   }
 
-  #page-settings #forecastSection .forecast-provider-panel,
-  #page-settings #forecastSection .forecast-access-panel,
-  #page-settings #forecastSection .forecast-api-panel {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
     grid-column: span 6;
   }
 
-  #page-settings #forecastSection .forecast-toolkit-panel .srow label {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel .srow label {
     grid-column: span 6;
   }
 
-  #page-settings #forecastSection .forecast-toolkit-panel .srow label:last-child {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel .srow label:last-child {
     grid-column: 1 / -1;
   }
 
@@ -7010,6 +7268,10 @@ label[data-required]::after {
     overflow: visible;
     padding-right: 0;
   }
+
+  #page-forecast .forecast-main {
+    overflow: visible;
+  }
 }
 
 @media (max-width: 760px) {
@@ -7026,6 +7288,20 @@ label[data-required]::after {
   #page-settings .settings-main-header,
   #page-settings .settings-sidebar-card {
     padding: 14px;
+  }
+
+  #page-forecast .forecast-page-sections > .sgroup.settings-card,
+  #page-forecast .forecast-main-header {
+    padding: 14px;
+  }
+
+  #page-forecast .forecast-main-topbar {
+    flex-direction: column;
+  }
+
+  #page-forecast .forecast-main-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   #page-settings .settings-sections .srow {
@@ -7045,6 +7321,16 @@ label[data-required]::after {
     grid-template-columns: 1fr;
   }
 
+  #page-forecast .forecast-page-sections .srow {
+    grid-template-columns: 1fr;
+  }
+
+  #page-forecast .forecast-page-sections .srow label,
+  #page-forecast .forecast-page-sections .srow > small,
+  #page-forecast .forecast-page-sections .forecast-preview-toolbar .forecast-preview-toolbar-action {
+    grid-column: 1;
+  }
+
   #page-settings .settings-sections .license-grid,
   #page-settings .settings-sections .rep-health-grid {
     grid-template-columns: 1fr;
@@ -7058,20 +7344,42 @@ label[data-required]::after {
   #page-settings #connectivitySection .settings-subsection:nth-of-type(4),
   #page-settings #cloudBackupSection .cb-subsection:nth-of-type(2),
   #page-settings #cloudBackupSection .cb-subsection:nth-of-type(3),
-  #page-settings #forecastSection .forecast-provider-panel,
-  #page-settings #forecastSection .forecast-access-panel,
-  #page-settings #forecastSection .forecast-api-panel,
-  #page-settings #forecastSection .forecast-toolkit-panel {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
     grid-column: 1 / -1;
   }
 
-  #page-settings #forecastSection .forecast-preview-metrics {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-metrics {
     grid-template-columns: 1fr;
+  }
+
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-emphasis {
+    align-self: flex-start;
   }
 
   /* Mode & Remote Access labels back to full-width at narrow screens */
   #page-settings #connectivitySection .settings-subsection:nth-of-type(2) .srow label:not(.chk-inline) {
     grid-column: span 6;
+  }
+}
+
+@media (max-width: 640px) {
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-wrap {
+    padding: 14px;
+    min-height: 320px;
+  }
+
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-canvas {
+    min-height: 280px;
+    height: clamp(280px, 44vh, 380px);
+    padding: 10px 10px 12px;
   }
 }
 
