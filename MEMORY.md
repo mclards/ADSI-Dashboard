@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.29
+- **Version:** 2.2.30
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,11 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.30 Changes — Solcast Toolkit Preview Date-Range Fix (2026-03-10)
+- **Start Day and Days to Display now follow actual toolkit feed dates:** the Solcast preview/export server path now sizes the toolkit `recent` fetch horizon from the selected start day plus the requested display span, instead of only from the display count.
+- **Later preview start dates no longer get clipped to the first returned day:** preview and XLSX export now fetch enough hours to enumerate the feed's available days before slicing the selected range.
+- **Existing client-side day-count limits now work against real returned availability:** once the server returns the full day list, the `Start Day` and `Days to Display` selectors correctly clamp to the dates actually exposed by the Solcast URL.
 
 ## v2.2.29 Changes — Remote Gateway Link Hotfix (2026-03-10)
 - **Remote live bridge no longer self-fails after a successful gateway fetch:** `server/index.js` now imports `checkAlarms` before the remote live-ingest path calls it, which fixes the runtime `checkAlarms is not defined` fault.

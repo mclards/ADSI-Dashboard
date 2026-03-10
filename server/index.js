@@ -6035,6 +6035,46 @@ function computeSolcastPreviewHours(dayCount) {
   );
 }
 
+function parseIsoDateParts(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { year, month, day };
+}
+
+function diffIsoDays(aDateStr, bDateStr) {
+  const a = parseIsoDateParts(aDateStr);
+  const b = parseIsoDateParts(bDateStr);
+  if (!a || !b) return 0;
+  const aUtc = Date.UTC(a.year, a.month - 1, a.day);
+  const bUtc = Date.UTC(b.year, b.month - 1, b.day);
+  return Math.round((aUtc - bUtc) / 86400000);
+}
+
+function computeSolcastPreviewHoursForRequest(
+  startDay,
+  dayCount,
+  cfg,
+  availableSpanDayCount = dayCount,
+) {
+  const count = normalizeSolcastPreviewDayCount(dayCount);
+  const availableSpan = normalizeSolcastPreviewDayCount(availableSpanDayCount);
+  const todayTz = localDateStrInTz(Date.now(), cfg?.timeZone || WEATHER_TZ);
+  const requestedStartDay = String(startDay || "").trim();
+  const startOffsetDays = Math.max(0, diffIsoDays(requestedStartDay, todayTz));
+  const neededHours = (startOffsetDays + Math.max(count, availableSpan) + 1) * 24;
+  return Math.max(
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+    Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, neededHours),
+  );
+}
+
 function listSolcastPreviewDays(forecastRecords, actualRecords, cfg) {
   const startMin = SOLCAST_SOLAR_START_H * 60;
   const endMin = SOLCAST_SOLAR_END_H * 60;
@@ -9735,7 +9775,12 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
     const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
     const started = Date.now();
     const { endpoint, records, estActuals, units } = await fetchSolcastForecastRecords(cfg, {
-      toolkitHours: computeSolcastPreviewHours(requestedDayCount),
+      toolkitHours: computeSolcastPreviewHoursForRequest(
+        requestedDay,
+        requestedDayCount,
+        cfg,
+        SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+      ),
     });
     const preview = buildSolcastPreviewSeries(
       requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
@@ -9843,7 +9888,12 @@ app.post("/api/export/solcast-preview", async (req, res) => {
     const requestedDay = String(req.body?.day || "").trim();
     const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
     const { records, estActuals } = await fetchSolcastForecastRecords(cfg, {
-      toolkitHours: computeSolcastPreviewHours(requestedDayCount),
+      toolkitHours: computeSolcastPreviewHoursForRequest(
+        requestedDay,
+        requestedDayCount,
+        cfg,
+        SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+      ),
     });
     const preview = buildSolcastPreviewSeries(
       requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
