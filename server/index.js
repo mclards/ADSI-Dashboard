@@ -4015,6 +4015,73 @@ async function pollRemoteLiveOnce() {
   }
 }
 
+async function kickRemoteBridgeNow(reason = "manual-reconnect") {
+  if (!isRemoteMode()) {
+    return {
+      ok: false,
+      error: "Live bridge refresh is available only in Remote mode.",
+      connected: false,
+      liveNodeCount: 0,
+    };
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    return {
+      ok: false,
+      error: remoteBridgeState.lastError,
+      connected: false,
+      liveNodeCount: 0,
+    };
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.lastError =
+      "Remote gateway URL cannot be localhost in remote mode.";
+    return {
+      ok: false,
+      error: remoteBridgeState.lastError,
+      connected: false,
+      liveNodeCount: 0,
+    };
+  }
+  if (!remoteBridgeState.running) {
+    startRemoteBridge();
+  }
+  remoteBridgeState.lastSyncDirection = String(reason || "manual-reconnect");
+  remoteBridgeState.lastAttemptTs = Date.now();
+  remoteBridgeState.liveFailureCount = 0;
+  try {
+    await pollRemoteLiveOnce();
+    const liveNodeCount = Math.max(
+      0,
+      Object.values(remoteBridgeState.liveData || {}).filter(
+        (row) => row && typeof row === "object",
+      ).length,
+    );
+    return {
+      ok: Boolean(remoteBridgeState.connected),
+      connected: Boolean(remoteBridgeState.connected),
+      liveNodeCount,
+      lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
+      lastError: String(remoteBridgeState.lastError || ""),
+    };
+  } catch (err) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.lastFailureTs = Date.now();
+    remoteBridgeState.lastError = String(err?.message || err || "Remote bridge refresh failed.");
+    return {
+      ok: false,
+      error: remoteBridgeState.lastError,
+      connected: false,
+      liveNodeCount: 0,
+      lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
+      lastError: remoteBridgeState.lastError,
+    };
+  }
+}
+
 function stopRemoteBridge() {
   if (remoteBridgeTimer) {
     clearTimeout(remoteBridgeTimer);
@@ -8742,6 +8809,11 @@ app.post("/api/settings", (req, res) => {
     applyRuntimeMode();
     todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
     broadcastUpdate({ type: "configChanged" }); // tell clients to reload settings + rebuild UI
+    if (modeAfter === "remote") {
+      setTimeout(() => {
+        kickRemoteBridgeNow("settings-refresh").catch(() => {});
+      }, 25);
+    }
   }
   if (
     updates.inverterCount !== undefined ||
@@ -8884,6 +8956,30 @@ app.post("/api/runtime/network/test", async (req, res) => {
       .status(502)
       .json({ ok: false, error: `Gateway test failed: ${err.message}` });
   }
+});
+
+app.post("/api/runtime/network/reconnect", async (req, res) => {
+  const result = await kickRemoteBridgeNow("manual-reconnect");
+  if (!result?.ok) {
+    const status = /available only in Remote mode/i.test(String(result?.error || ""))
+      ? 400
+      : 502;
+    return res.status(status).json({
+      ok: false,
+      error: String(result?.error || "Remote bridge refresh failed."),
+      connected: false,
+      liveNodeCount: Number(result?.liveNodeCount || 0),
+      lastSuccessTs: Number(result?.lastSuccessTs || 0),
+      lastError: String(result?.lastError || result?.error || ""),
+    });
+  }
+  return res.json({
+    ok: true,
+    connected: Boolean(result.connected),
+    liveNodeCount: Number(result.liveNodeCount || 0),
+    lastSuccessTs: Number(result.lastSuccessTs || 0),
+    lastError: String(result.lastError || ""),
+  });
 });
 
 app.use("/api", async (req, res, next) => {

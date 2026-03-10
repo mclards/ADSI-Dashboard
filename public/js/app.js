@@ -3544,11 +3544,52 @@ async function handleOperationModeTransition(
   });
 }
 
+function hasUnsavedRemoteConnectivityChanges(normalizedGateway = "") {
+  const formGateway = String(
+    normalizedGateway || $("setRemoteGatewayUrl")?.value || "",
+  ).trim();
+  const savedGateway = String(State.settings.remoteGatewayUrl || "").trim();
+  const formToken = String($("setRemoteApiToken")?.value || "").trim();
+  const savedToken = String(State.settings.remoteApiToken || "").trim();
+  return formGateway !== savedGateway || formToken !== savedToken;
+}
+
+async function refreshRemoteBridgeNow(silent = false) {
+  const activeMode = getActiveOperationModeClient();
+  if (activeMode !== "remote") return null;
+  try {
+    const result = await api("/api/runtime/network/reconnect", "POST", {}, {
+      progress: false,
+    });
+    await refreshReplicationHealth(true).catch(() => {});
+    if (!silent) {
+      const nodes = Number(result?.liveNodeCount || 0);
+      showMsg(
+        "networkMsg",
+        `✔ Live bridge refreshed (${nodes} node(s) visible).`,
+        "",
+      );
+    }
+    return result;
+  } catch (err) {
+    await refreshReplicationHealth(true).catch(() => {});
+    if (!silent) {
+      showMsg(
+        "networkMsg",
+        `✗ Live bridge refresh failed: ${err.message}`,
+        "error",
+      );
+    }
+    return null;
+  }
+}
+
 async function saveSettings() {
   const prevMode = State.settings.operationMode;
   const prevRetainDays = Math.max(1, Number(State.settings.retainDays || 90));
   const normalizedGateway = applyRemoteGatewayInputNormalization();
   const settingsMsgId = getSettingsMessageTargetId();
+  const remoteConnectivityChanged = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
   const solcastConfig = readSolcastSettingsForm();
   const body = {
     plantName: $("setPlantName").value,
@@ -3646,6 +3687,12 @@ async function saveSettings() {
       startReplicationHealthPolling();
       refreshReplicationHealth(true).catch(() => {});
     }
+    if (
+      normalizeOperationModeValue(body.operationMode) === "remote" &&
+      (normalizeOperationModeValue(prevMode) !== "remote" || remoteConnectivityChanged)
+    ) {
+      refreshRemoteBridgeNow(true).catch(() => {});
+    }
     return true;
   } catch (e) {
     showMsg(settingsMsgId, "✗ Save failed: " + e.message, "error");
@@ -3672,8 +3719,20 @@ async function testRemoteGateway() {
       `✔ Remote gateway reachable (${nodes} node(s), ${latency} ms)`,
       "",
     );
+    const unsavedConnectivity = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
+    if (unsavedConnectivity) {
+      showToast(
+        "Gateway test used unsaved URL/token values. Save Settings to apply them to the live bridge.",
+        "warning",
+        5200,
+      );
+    } else if (getActiveOperationModeClient() === "remote") {
+      await refreshRemoteBridgeNow(true);
+    }
+    await refreshReplicationHealth(true).catch(() => {});
   } catch (e) {
     showMsg("networkMsg", `✗ ${e.message}`, "error");
+    await refreshReplicationHealth(true).catch(() => {});
   } finally {
     if (btn) btn.disabled = false;
   }
