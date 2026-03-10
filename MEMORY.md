@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.27
+- **Version:** 2.2.28
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
@@ -120,6 +120,13 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
+
+## v2.2.28 Changes — Remote Operation Mode Health Hardening (2026-03-10)
+- **Remote health model is now explicit:** `server/index.js` now classifies remote live-bridge runtime as `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error` instead of only exposing a binary connected flag.
+- **Short outages no longer blank the plant view immediately:** the remote bridge retains the last-good live snapshot for a bounded stale window, keeps `/api/live` populated from that retained snapshot, and marks the UI as degraded or stale instead of dropping straight to empty cards.
+- **Failure reasons are operator-safe and specific:** live-bridge failures are classified into URL/config issues, auth failures, timeouts, connection refusal, DNS/route failures, socket resets, and bad payloads so `Gateway Link` and `Last Errors` can show the real cause.
+- **Manual reconnect is no longer falsely green:** `/api/runtime/network/reconnect` now reports degraded/stale reconnects honestly, and the frontend surfaces that instead of treating every retained-snapshot refresh as a full recovery.
+- **Inverter cards now distinguish stale from offline:** `public/js/app.js` and `public/css/style.css` add bounded stale rendering with a dedicated `STALE` badge and stale card styling, while preserving offline as the hard-disconnect state.
 
 ## v2.2.27 Changes — Remote Live Bridge Reconnect Hardening (2026-03-10)
 - `Test Remote Gateway` and remote settings save now refresh the live remote bridge immediately instead of waiting for the next backoff tick.

@@ -145,6 +145,7 @@ const State = {
     scope: null,
     restartPromptedJobId: "",
   },
+  remoteHealth: {},
   solcastPreview: {
     day: "",
     days: [],
@@ -2179,6 +2180,73 @@ function isClientModeActive() {
   return getActiveOperationModeClient() === "remote";
 }
 
+function normalizeRemoteHealthClient(raw = null) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const activeMode = getActiveOperationModeClient();
+  const fallbackState = activeMode === "remote" ? "disconnected" : "gateway-local";
+  const liveFreshMsRaw = src?.liveFreshMs;
+  return {
+    mode: normalizeOperationModeValue(src?.mode || activeMode),
+    state: String(src?.state || fallbackState).trim().toLowerCase() || fallbackState,
+    reasonCode: String(src?.reasonCode || "").trim(),
+    reasonText: String(src?.reasonText || "").trim(),
+    hasUsableSnapshot: Boolean(src?.hasUsableSnapshot),
+    snapshotRetainMs: Math.max(0, Number(src?.snapshotRetainMs || 0)),
+    liveFreshMs:
+      liveFreshMsRaw == null || liveFreshMsRaw === ""
+        ? null
+        : Math.max(0, Number(liveFreshMsRaw || 0)),
+    lastAttemptTs: Math.max(0, Number(src?.lastAttemptTs || 0)),
+    lastSuccessTs: Math.max(0, Number(src?.lastSuccessTs || 0)),
+    lastFailureTs: Math.max(0, Number(src?.lastFailureTs || 0)),
+    failureStreak: Math.max(0, Number(src?.failureStreak || 0)),
+    backoffMs: Math.max(0, Number(src?.backoffMs || 0)),
+    lastLatencyMs: Math.max(0, Number(src?.lastLatencyMs || 0)),
+    liveNodeCount: Math.max(0, Number(src?.liveNodeCount || 0)),
+  };
+}
+
+function applyRemoteHealthClient(raw = null) {
+  State.remoteHealth = normalizeRemoteHealthClient(raw);
+  return State.remoteHealth;
+}
+
+function getRemoteHealthDisplay(healthRaw = null, modeRaw = "") {
+  const mode = normalizeOperationModeValue(modeRaw || getActiveOperationModeClient());
+  const health = normalizeRemoteHealthClient(healthRaw || State.remoteHealth);
+  if (mode !== "remote") {
+    return { text: "Gateway local polling", cls: "" };
+  }
+  switch (String(health.state || "").trim().toLowerCase()) {
+    case "connected":
+      return { text: "Connected", cls: "ok" };
+    case "degraded":
+      return { text: "Degraded", cls: "warn" };
+    case "stale":
+      return { text: "Stale snapshot", cls: "warn" };
+    case "auth-error":
+      return {
+        text: health.hasUsableSnapshot ? "Auth error (stale data)" : "Auth error",
+        cls: "error",
+      };
+    case "config-error":
+      return {
+        text: health.hasUsableSnapshot ? "Config error (stale data)" : "Config error",
+        cls: "error",
+      };
+    default:
+      return {
+        text: health.hasUsableSnapshot ? "Disconnected (stale data)" : "Disconnected",
+        cls: health.hasUsableSnapshot ? "warn" : "error",
+      };
+  }
+}
+
+function isRemoteSnapshotRetainedClient(healthRaw = null) {
+  const health = normalizeRemoteHealthClient(healthRaw || State.remoteHealth);
+  return getActiveOperationModeClient() === "remote" && Boolean(health.hasUsableSnapshot);
+}
+
 function syncDayAheadGeneratorAvailability() {
   const isClient = isClientModeActive();
   const input = $("genDayCount");
@@ -3512,6 +3580,9 @@ async function handleOperationModeTransition(
   State.analyticsDailyTotalMwh = null;
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
+  State.remoteHealth = normalizeRemoteHealthClient({
+    state: nextMode === "remote" ? "disconnected" : "gateway-local",
+  });
   resetChatState();
   scheduleInverterCardsUpdate(true);
 
@@ -3561,14 +3632,25 @@ async function refreshRemoteBridgeNow(silent = false) {
     const result = await api("/api/runtime/network/reconnect", "POST", {}, {
       progress: false,
     });
+    if (result?.remoteHealth) applyRemoteHealthClient(result.remoteHealth);
     await refreshReplicationHealth(true).catch(() => {});
     if (!silent) {
       const nodes = Number(result?.liveNodeCount || 0);
-      showMsg(
-        "networkMsg",
-        `✔ Live bridge refreshed (${nodes} node(s) visible).`,
-        "",
-      );
+      const health = normalizeRemoteHealthClient(result?.remoteHealth || State.remoteHealth);
+      if (result?.ok) {
+        showMsg(
+          "networkMsg",
+          `✔ Live bridge refreshed (${nodes} node(s) visible).`,
+          "",
+        );
+      } else {
+        const reason = String(result?.error || health.reasonText || "Live bridge is using the last retained snapshot.").trim();
+        showMsg(
+          "networkMsg",
+          `✗ Live bridge not fully healthy: ${reason}`,
+          "error",
+        );
+      }
     }
     return result;
   } catch (err) {
@@ -4006,30 +4088,14 @@ async function refreshReplicationHealth(silent = true) {
       .trim()
       .toLowerCase();
     const pullOnly = Boolean(n?.remotePullOnly);
-    const connected = Boolean(n?.remoteConnected);
-    const liveFailureCount = Math.max(0, Number(n?.remoteLiveFailureCount || 0));
-    const bridgeStatus =
-      mode === "remote"
-        ? connected
-          ? liveFailureCount > 0
-            ? "Connected (recovering)"
-            : "Connected"
-          : "Disconnected"
-        : "Gateway local polling";
-    const bridgeStatusClass =
-      mode === "remote"
-        ? connected
-          ? liveFailureCount > 0
-            ? "warn"
-            : "ok"
-          : "error"
-        : "";
+    const health = applyRemoteHealthClient(n?.remoteHealth || null);
+    const bridgeMeta = getRemoteHealthDisplay(health, mode);
     setReplicationField("repModeVal", mode === "remote" ? "Remote" : "Gateway");
     setReplicationField(
       "repGatewayVal",
       String(n?.remoteGatewayUrl || "—").trim() || "—",
     );
-    setReplicationField("repConnectedVal", bridgeStatus, bridgeStatusClass);
+    setReplicationField("repConnectedVal", bridgeMeta.text, bridgeMeta.cls);
     const tailscaleState = formatTailscaleStatus(n?.tailscale || {});
     setReplicationField("repTailnetVal", tailscaleState.text, tailscaleState.cls);
     const directionRaw = pullOnly
@@ -4071,11 +4137,17 @@ async function refreshReplicationHealth(silent = true) {
     const bridgeErr = String(n?.remoteLastError || "").trim();
     const repErr = String(n?.remoteLastReplicationError || "").trim();
     const recErr = String(n?.remoteLastReconcileError || "").trim();
-    const allErr = [bridgeErr, repErr, recErr].filter(Boolean);
+    const allErr = Array.from(
+      new Set([health.reasonText, bridgeErr, repErr, recErr].filter(Boolean)),
+    );
     setReplicationField(
       "repErrorsVal",
       allErr.length ? allErr.join(" | ") : "None",
-      allErr.length ? "warn" : "ok",
+      allErr.length
+        ? health.state === "auth-error" || health.state === "config-error"
+          ? "error"
+          : "warn"
+        : "ok",
     );
     setReplicationField("repScopeVal", formatReplicationScopeText(scope));
     setReplicationField("repArchiveScopeVal", formatArchiveScopeText(scope));
@@ -5013,6 +5085,12 @@ function updateInverterCards() {
   const now = Date.now();
   const nodeCount = Number(State.settings.nodeCount || 4);
   const invCount = Number(State.settings.inverterCount || 27);
+  const remoteMode = getActiveOperationModeClient() === "remote";
+  const remoteHealth = normalizeRemoteHealthClient(State.remoteHealth);
+  const retainRemoteSnapshot = remoteMode && Boolean(remoteHealth.hasUsableSnapshot);
+  const remoteDisplayHoldMs = retainRemoteSnapshot
+    ? Math.max(CARD_OFFLINE_HOLD_MS, Number(remoteHealth.snapshotRetainMs || 0))
+    : CARD_OFFLINE_HOLD_MS;
 
   // Build lightweight lookup indexes once per render tick.
   const unitsByInv = Array.from({ length: invCount + 1 }, () => []);
@@ -5060,21 +5138,27 @@ function updateInverterCards() {
     const freshUnits = units.filter(
       (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS,
     );
+    const visibleUnits = units.filter(
+      (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS + remoteDisplayHoldMs,
+    );
     const activeAlarmEntries = (activeAlarmsByInv[inv] || []).filter(
       (a) =>
         Number(a.inverter) === inv && configuredSet.has(Number(a.unit || 0)),
     );
     const hasFreshData = freshUnits.length > 0;
     if (hasFreshData) State.invLastFresh[inv] = now;
+    const staleSnapshot = retainRemoteSnapshot && !hasFreshData && visibleUnits.length > 0;
     const inHold =
       !hasFreshData &&
+      !staleSnapshot &&
       now - Number(State.invLastFresh[inv] || 0) <= CARD_OFFLINE_HOLD_MS;
-    const anyOnline = hasFreshData || inHold;
+    const anyOnline = hasFreshData || staleSnapshot || inHold;
+    const unitsForDisplay = staleSnapshot ? visibleUnits : freshUnits;
     const anyAlarm =
-      freshUnits.some((d) => d.alarm && d.alarm !== 0) ||
+      unitsForDisplay.some((d) => d.alarm && d.alarm !== 0) ||
       activeAlarmEntries.length > 0;
     const topSev = higherSeverity(
-      getTopSev(freshUnits),
+      getTopSev(unitsForDisplay),
       activeAlarmEntries.reduce(
         (best, a) => higherSeverity(best, a?.severity || "fault"),
         null,
@@ -5094,6 +5178,9 @@ function updateInverterCards() {
     if (!anyOnline) {
       card.classList.add("offline");
       offline++;
+    } else if (staleSnapshot) {
+      card.classList.add("stale");
+      online++;
     } else if (topSev === "critical") {
       card.classList.add("critical");
       alarmed++;
@@ -5108,6 +5195,7 @@ function updateInverterCards() {
     if (iconEl) {
       iconEl.className = "card-inv-icon";
       if (!anyOnline) iconEl.classList.add("offline");
+      else if (staleSnapshot) iconEl.classList.add("stale");
       else if (topSev === "critical" || anyAlarm) iconEl.classList.add("alarm");
     }
 
@@ -5115,6 +5203,9 @@ function updateInverterCards() {
     if (!anyOnline) {
       badge.className = "badge badge-offline";
       badge.textContent = "OFFLINE";
+    } else if (staleSnapshot) {
+      badge.className = "badge badge-stale";
+      badge.textContent = "STALE";
     } else if (topSev === "critical") {
       badge.className = "badge badge-critical";
       badge.textContent = "CRITICAL";
@@ -5182,16 +5273,20 @@ function updateInverterCards() {
       }
 
       const d = invUnitMap[n];
-      const rowFresh =
+      const rowVisible =
         d &&
         d.online &&
-        now - Number(d.ts || 0) <= DATA_FRESH_MS + CARD_OFFLINE_HOLD_MS;
+        now - Number(d.ts || 0) <= DATA_FRESH_MS + remoteDisplayHoldMs;
       const nodeReachable =
         d && d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS;
+      const rowStale = staleSnapshot && rowVisible && !nodeReachable;
       if (nodeReachable) activeNodes++;
-      const nodeOn = nodeReachable && Number(d.on_off) === 1 ? 1 : 0;
+      const nodeOn =
+        (staleSnapshot ? rowVisible : nodeReachable) && Number(d?.on_off) === 1
+          ? 1
+          : 0;
       const activeAlarm = State.activeAlarms[key] || null;
-      const liveAlarmValue = rowFresh ? Number(d?.alarm || 0) : 0;
+      const liveAlarmValue = rowVisible ? Number(d?.alarm || 0) : 0;
       const persistedAlarmValue = Number(activeAlarm?.alarm_value || 0);
       // Alarm cell source-of-truth: use live tracker first when available,
       // then fallback to persisted active-alarm row.
@@ -5225,21 +5320,21 @@ function updateInverterCards() {
           : "cell-alarm no-alarm";
       }
       if (pdcEl)
-        pdcEl.textContent = rowFresh && d.pdc != null ? fmtNum(d.pdc, 0) : "—";
+        pdcEl.textContent = rowVisible && d.pdc != null ? fmtNum(d.pdc, 0) : "—";
       if (rpacEl) {
-        const pacVal = rowFresh && d.pac != null ? Number(d.pac) : 0;
-        rpacEl.textContent = rowFresh && d.pac != null ? fmtNum(d.pac, 0) : "—";
+        const pacVal = rowVisible && d.pac != null ? Number(d.pac) : 0;
+        rpacEl.textContent = rowVisible && d.pac != null ? fmtNum(d.pac, 0) : "—";
         rpacEl.className = "mono";
         if (nindEl) {
           const pacIndicatorClass = getPacIndicatorClass(
             pacVal,
             hasActiveAlarm,
-            rowFresh,
+            rowVisible,
           );
           nindEl.className = `node-power-indicator ${pacIndicatorClass}`;
         }
       }
-      if (rtsEl) rtsEl.textContent = rowFresh && d.ts ? fmtTime(d.ts) : "—";
+      if (rtsEl) rtsEl.textContent = rowVisible && d.ts ? fmtTime(d.ts) : "—";
       State.nodeStates[key] = nodeOn;
       if (rowEl) {
         rowEl.classList.remove("row-node-disabled");
@@ -5256,6 +5351,7 @@ function updateInverterCards() {
           hasActiveAlarm && !alarmAcked,
         );
         rowEl.classList.toggle("row-alarm-acked", hasActiveAlarm && alarmAcked);
+        rowEl.classList.toggle("row-stale-snapshot", rowStale);
       }
       if (nbtnEl) {
         setNodeButtonVisual(nbtnEl, n, !!nodeOn, false);
@@ -6194,6 +6290,7 @@ function connectWS() {
 
 function handleWS(msg) {
   if (msg.type === "init" || msg.type === "live") {
+    if (msg.remoteHealth) applyRemoteHealthClient(msg.remoteHealth);
     if (msg.data) State.liveData = sanitizeLiveDataByConfig(msg.data);
     if (msg.totals) State.totals = msg.totals;
     integrateTodayFromPac();
@@ -6209,6 +6306,13 @@ function handleWS(msg) {
     syncAlarmStateFromLiveData().catch((err) => {
       console.warn("[app] live alarm sync failed:", err.message);
     });
+  }
+  if (msg.type === "remote_health") {
+    applyRemoteHealthClient(msg.health || msg.remoteHealth || null);
+    scheduleInverterCardsUpdate(true);
+    if (State.currentPage === "settings") {
+      refreshReplicationHealth(true).catch(() => {});
+    }
   }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;

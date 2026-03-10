@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.27` in `package.json`
+- Current repo version baseline: `2.2.28` in `package.json`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
@@ -270,6 +270,8 @@ If a visible product rename affects install directory behavior, assess updater i
   - uses the local DB as its working copy after pull and live sync
   - manual `Pull` stages and replaces the local main DB from the gateway so stale client data is cleared safely
   - continues mirroring inbound hot data locally from the gateway after pull so exports, reports, and later mode switches keep using local state
+  - live bridge health is stateful: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error`
+  - short live-bridge failures must retain the last-good snapshot for a bounded window and mark inverter cards stale instead of blanking them immediately
   - can run replication workflows
   - may run local remote-side utilities such as Solcast toolkit test / preview / export
   - must not run day-ahead generation while active in `remote` mode

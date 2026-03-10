@@ -183,6 +183,7 @@ const REMOTE_LIVE_FETCH_RETRY_BASE_MS = 350;
 const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 4;
 const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC = 8;
 const REMOTE_LIVE_DEGRADED_GRACE_MS = 45000;
+const REMOTE_LIVE_STALE_RETENTION_MS = 120000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
@@ -377,6 +378,10 @@ const remoteBridgeState = {
   liveFailureCount: 0,
   lastFailureTs: 0,
   lastError: "",
+  lastReasonCode: "",
+  lastReasonClass: "",
+  lastLatencyMs: 0,
+  lastLiveNodeCount: 0,
   liveData: {},
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
@@ -394,6 +399,7 @@ const remoteBridgeState = {
   lastReconcileError: "",
   lastSyncDirection: "idle",
   autoSyncAttempted: false,
+  lastHealthBroadcastKey: "",
 };
 const remoteBridgePersistState = Object.create(null); // per-node persisted hot-data cadence
 const remoteBridgeEnergyMirrorState = Object.create(null); // per-inverter 5-min bucket mirror
@@ -634,11 +640,252 @@ function resolveRequestToken(req) {
 function broadcastRemoteOfflineLiveState() {
   remoteBridgeState.liveData = {};
   remoteBridgeState.totals = { pac: 0, kwh: 0 };
+  remoteBridgeState.lastLiveNodeCount = 0;
   broadcastUpdate({
     type: "live",
     data: remoteBridgeState.liveData,
     totals: remoteBridgeState.totals,
+    remoteHealth: buildRemoteHealthSnapshot(),
   });
+}
+
+function countRemoteLiveNodes(data = remoteBridgeState.liveData) {
+  if (!data || typeof data !== "object") return 0;
+  return Object.values(data).filter((row) => row && typeof row === "object").length;
+}
+
+function getRemoteSnapshotAgeMs(nowTs = Date.now()) {
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  if (!lastSuccessTs) return Number.POSITIVE_INFINITY;
+  return Math.max(0, nowTs - lastSuccessTs);
+}
+
+function hasUsableRemoteLiveSnapshot(nowTs = Date.now()) {
+  return (
+    countRemoteLiveNodes(remoteBridgeState.liveData) > 0 &&
+    getRemoteSnapshotAgeMs(nowTs) <= REMOTE_LIVE_STALE_RETENTION_MS
+  );
+}
+
+function classifyRemoteBridgeFailure(err) {
+  const status = Number(err?.httpStatus || 0);
+  if (status === 401) {
+    return {
+      reasonCode: "HTTP_401",
+      reasonClass: "auth-error",
+      reasonText: "Gateway rejected the remote API token (401 Unauthorized).",
+    };
+  }
+  if (status === 403) {
+    return {
+      reasonCode: "HTTP_403",
+      reasonClass: "auth-error",
+      reasonText: "Gateway rejected the remote API token (403 Forbidden).",
+    };
+  }
+  if (status === 400) {
+    return {
+      reasonCode: "HTTP_400",
+      reasonClass: "config-error",
+      reasonText: "Gateway rejected the live request due to invalid remote settings.",
+    };
+  }
+  if (status === 404) {
+    return {
+      reasonCode: "HTTP_404",
+      reasonClass: "disconnected",
+      reasonText: "Gateway live endpoint was not found (404).",
+    };
+  }
+  if (status > 0) {
+    return {
+      reasonCode: `HTTP_${status}`,
+      reasonClass: "disconnected",
+      reasonText: `Gateway live request failed with HTTP ${status}.`,
+    };
+  }
+
+  const code = String(err?.code || err?.type || "")
+    .trim()
+    .toUpperCase();
+  const msg = String(err?.message || err || "")
+    .trim()
+    .toLowerCase();
+
+  if (msg.includes("remote gateway url is not configured")) {
+    return {
+      reasonCode: "MISSING_URL",
+      reasonClass: "config-error",
+      reasonText: "Remote gateway URL is not configured.",
+    };
+  }
+  if (msg.includes("cannot be localhost in remote mode")) {
+    return {
+      reasonCode: "LOOPBACK_URL",
+      reasonClass: "config-error",
+      reasonText: "Remote gateway URL cannot be localhost in Remote mode.",
+    };
+  }
+  if (
+    code === "ETIMEDOUT" ||
+    code === "ESOCKETTIMEDOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    msg.includes("network timeout") ||
+    msg.includes("timed out")
+  ) {
+    return {
+      reasonCode: "TIMEOUT",
+      reasonClass: "disconnected",
+      reasonText: "Gateway live request timed out.",
+    };
+  }
+  if (code === "ECONNREFUSED" || msg.includes("econnrefused")) {
+    return {
+      reasonCode: "ECONNREFUSED",
+      reasonClass: "disconnected",
+      reasonText: "Gateway connection was refused.",
+    };
+  }
+  if (
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    msg.includes("enotfound") ||
+    msg.includes("getaddrinfo")
+  ) {
+    return {
+      reasonCode: "DNS_FAILURE",
+      reasonClass: "disconnected",
+      reasonText: "Gateway host could not be resolved.",
+    };
+  }
+  if (
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    msg.includes("host unreachable") ||
+    msg.includes("network unreachable")
+  ) {
+    return {
+      reasonCode: "NETWORK_UNREACHABLE",
+      reasonClass: "disconnected",
+      reasonText: "Gateway route is unreachable.",
+    };
+  }
+  if (
+    code === "ECONNRESET" ||
+    code === "UND_ERR_SOCKET" ||
+    msg.includes("socket hang up") ||
+    msg.includes("read econnreset")
+  ) {
+    return {
+      reasonCode: "SOCKET_RESET",
+      reasonClass: "disconnected",
+      reasonText: "Gateway connection was reset during the live request.",
+    };
+  }
+  if (
+    code === "BAD_JSON" ||
+    msg.includes("invalid live json") ||
+    msg.includes("unexpected token")
+  ) {
+    return {
+      reasonCode: "BAD_PAYLOAD",
+      reasonClass: "disconnected",
+      reasonText: "Gateway returned an invalid live payload.",
+    };
+  }
+  return {
+    reasonCode: code || "LIVE_FETCH_FAILED",
+    reasonClass: "disconnected",
+    reasonText: String(err?.message || err || "Gateway live request failed."),
+  };
+}
+
+function getRemoteBridgeNextDelayMs(nowTs = Date.now()) {
+  const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+  const fastRetry = Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess(nowTs);
+  if (fastRetry || failures <= 1) return REMOTE_BRIDGE_INTERVAL_MS;
+  return Math.min(
+    REMOTE_BRIDGE_MAX_BACKOFF_MS,
+    REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1),
+  );
+}
+
+function buildRemoteHealthSnapshot(nowTs = Date.now()) {
+  const mode = readOperationMode();
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  const lastFailureTs = Number(remoteBridgeState.lastFailureTs || 0);
+  const liveFreshMs = lastSuccessTs
+    ? Math.max(0, nowTs - lastSuccessTs)
+    : Number.POSITIVE_INFINITY;
+  const hasSnapshot = hasUsableRemoteLiveSnapshot(nowTs);
+  const reasonCode = String(remoteBridgeState.lastReasonCode || "").trim();
+  const reasonClass = String(remoteBridgeState.lastReasonClass || "").trim();
+  let reasonText = String(remoteBridgeState.lastError || "").trim();
+  let state = "disconnected";
+  let effectiveReasonCode = reasonCode;
+
+  if (mode !== "remote") {
+    state = "gateway-local";
+    effectiveReasonCode = "";
+    reasonText = "";
+  } else if (reasonClass === "config-error") {
+    state = "config-error";
+  } else if (reasonClass === "auth-error") {
+    state = "auth-error";
+  } else if (
+    Boolean(remoteBridgeState.connected) &&
+    Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)) <= 0
+  ) {
+    state = "connected";
+  } else if (hasSnapshot && liveFreshMs <= REMOTE_LIVE_DEGRADED_GRACE_MS) {
+    state = "degraded";
+  } else if (hasSnapshot) {
+    state = "stale";
+  } else {
+    state = "disconnected";
+  }
+
+  return {
+    mode,
+    state,
+    reasonCode: effectiveReasonCode,
+    reasonText,
+    hasUsableSnapshot: hasSnapshot,
+    snapshotRetainMs: REMOTE_LIVE_STALE_RETENTION_MS,
+    liveFreshMs: Number.isFinite(liveFreshMs) ? liveFreshMs : null,
+    lastAttemptTs: Number(remoteBridgeState.lastAttemptTs || 0),
+    lastSuccessTs,
+    lastFailureTs,
+    failureStreak: Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)),
+    backoffMs:
+      mode === "remote" && remoteBridgeState.running
+        ? getRemoteBridgeNextDelayMs(nowTs)
+        : 0,
+    lastLatencyMs: Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0)),
+    liveNodeCount:
+      hasSnapshot || Boolean(remoteBridgeState.connected)
+        ? Math.max(
+            0,
+            Number(remoteBridgeState.lastLiveNodeCount || countRemoteLiveNodes()),
+          )
+        : 0,
+  };
+}
+
+function broadcastRemoteHealthUpdate(force = false) {
+  const health = buildRemoteHealthSnapshot();
+  const key = JSON.stringify([
+    health.state,
+    health.reasonCode,
+    health.hasUsableSnapshot,
+    health.failureStreak,
+    health.lastSuccessTs,
+    health.lastFailureTs,
+    health.liveNodeCount,
+  ]);
+  if (!force && remoteBridgeState.lastHealthBroadcastKey === key) return;
+  remoteBridgeState.lastHealthBroadcastKey = key;
+  broadcastUpdate({ type: "remote_health", health });
 }
 
 function shouldProxyApiPath(pathname) {
@@ -976,6 +1223,7 @@ function getRuntimePerfSnapshot() {
     remote: {
       connected: Boolean(remoteBridgeState.connected),
       running: Boolean(remoteBridgeState.running),
+      health: buildRemoteHealthSnapshot(),
       replicationRunning: Boolean(remoteBridgeState.replicationRunning),
       lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
       lastError: String(remoteBridgeState.lastError || ""),
@@ -3888,23 +4136,34 @@ async function pollRemoteLiveOnce() {
       typeof remoteBridgeState.liveData === "object" &&
       Object.keys(remoteBridgeState.liveData).length,
   );
-  remoteBridgeState.lastAttemptTs = Date.now();
+  const startedAt = Date.now();
+  remoteBridgeState.lastAttemptTs = startedAt;
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
     remoteBridgeState.liveFailureCount += 1;
-    remoteBridgeState.lastFailureTs = Date.now();
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
     remoteBridgeState.lastError = "Remote gateway URL is not configured.";
-    if (wasConnected || hadLiveData) broadcastRemoteOfflineLiveState();
+    if (!hasUsableRemoteLiveSnapshot(startedAt) && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
     return;
   }
   if (isUnsafeRemoteLoop(base)) {
     remoteBridgeState.connected = false;
     remoteBridgeState.liveFailureCount += 1;
-    remoteBridgeState.lastFailureTs = Date.now();
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
     remoteBridgeState.lastError =
       "Remote gateway URL cannot be localhost in remote mode.";
-    if (wasConnected || hadLiveData) broadcastRemoteOfflineLiveState();
+    if (!hasUsableRemoteLiveSnapshot(startedAt) && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
     return;
   }
   try {
@@ -3925,29 +4184,43 @@ async function pollRemoteLiveOnce() {
       err.httpStatus = Number(r.status || 0);
       throw err;
     }
-    const data = await r.json();
+    let data;
+    try {
+      data = await r.json();
+    } catch (parseErr) {
+      const err = new Error("Gateway returned invalid live JSON.");
+      err.code = "BAD_JSON";
+      throw err;
+    }
     remoteBridgeState.liveData =
       data && typeof data === "object" ? data : {};
-    persistRemoteLiveRows(remoteBridgeState.liveData, Date.now());
+    const successTs = Date.now();
+    remoteBridgeState.lastLatencyMs = Math.max(0, successTs - startedAt);
+    remoteBridgeState.lastLiveNodeCount = countRemoteLiveNodes(remoteBridgeState.liveData);
+    persistRemoteLiveRows(remoteBridgeState.liveData, successTs);
     remoteBridgeState.totals = computeTotalsFromLiveData(
       remoteBridgeState.liveData,
     );
     remoteBridgeState.connected = true;
     remoteBridgeState.liveFailureCount = 0;
     remoteBridgeState.lastFailureTs = 0;
-    remoteBridgeState.lastSuccessTs = Date.now();
+    remoteBridgeState.lastSuccessTs = successTs;
+    remoteBridgeState.lastReasonCode = "";
+    remoteBridgeState.lastReasonClass = "";
     remoteBridgeState.lastError = "";
     broadcastUpdate({
       type: "live",
       data: remoteBridgeState.liveData,
       totals: remoteBridgeState.totals,
+      remoteHealth: buildRemoteHealthSnapshot(successTs),
     });
+    remoteBridgeState.lastHealthBroadcastKey = "";
     remoteBridgeState.lastSyncDirection = "pull-live";
 
     // Piggyback today's energy totals so /api/energy/today matches gateway exactly.
     // Rate-limited: only fetch when stale (>30 s) to avoid hammering the gateway
     // on every 1.2 s bridge tick.
-    const energyAgeMs = Date.now() - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
+    const energyAgeMs = successTs - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
     if (energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS) {
       try {
         const et = await fetchWithRetry(
@@ -3967,11 +4240,11 @@ async function pollRemoteLiveOnce() {
           if (Array.isArray(rows)) {
             const normalizedRows = normalizeTodayEnergyRows(rows);
             remoteBridgeState.todayEnergyRows = normalizedRows;
-            updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
-            mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, Date.now());
+            updateRemoteTodayEnergyShadow(normalizedRows, successTs);
+            mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, successTs);
             todayEnergyCache.ts = 0; // force next request to re-read with new data
           }
-          remoteBridgeState.lastTodayEnergyFetchTs = Date.now();
+          remoteBridgeState.lastTodayEnergyFetchTs = successTs;
         }
       } catch (_) {
         // Non-fatal; stale todayEnergyRows will be used until next tick.
@@ -3990,10 +4263,13 @@ async function pollRemoteLiveOnce() {
       });
     }
   } catch (err) {
-    remoteBridgeState.liveFailureCount += 1;
-    remoteBridgeState.lastFailureTs = Date.now();
-    remoteBridgeState.lastError = String(err.message || err);
+    const failure = classifyRemoteBridgeFailure(err);
     const nowTs = Date.now();
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = nowTs;
+    remoteBridgeState.lastReasonCode = failure.reasonCode;
+    remoteBridgeState.lastReasonClass = failure.reasonClass;
+    remoteBridgeState.lastError = failure.reasonText;
     const lastSuccessAgeMs = remoteBridgeState.lastSuccessTs
       ? nowTs - Number(remoteBridgeState.lastSuccessTs || 0)
       : Number.POSITIVE_INFINITY;
@@ -4006,12 +4282,14 @@ async function pollRemoteLiveOnce() {
       remoteBridgeState.liveFailureCount >= failureThreshold ||
       lastSuccessAgeMs >= REMOTE_LIVE_DEGRADED_GRACE_MS;
     remoteBridgeState.connected = !shouldMarkOffline && wasConnected;
-    if (shouldMarkOffline && (wasConnected || hadLiveData)) {
+    const keepSnapshot = hasUsableRemoteLiveSnapshot(nowTs);
+    if (shouldMarkOffline && !keepSnapshot && (wasConnected || hadLiveData)) {
       broadcastRemoteOfflineLiveState();
     }
     if (shouldMarkOffline && wasConnected) {
       remoteBridgeState.lastSyncDirection = "pull-live-failed";
     }
+    broadcastRemoteHealthUpdate(true);
   }
 }
 
@@ -4022,28 +4300,37 @@ async function kickRemoteBridgeNow(reason = "manual-reconnect") {
       error: "Live bridge refresh is available only in Remote mode.",
       connected: false,
       liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
     };
   }
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
     remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    broadcastRemoteHealthUpdate(true);
     return {
       ok: false,
       error: remoteBridgeState.lastError,
       connected: false,
       liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
     };
   }
   if (isUnsafeRemoteLoop(base)) {
     remoteBridgeState.connected = false;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
     remoteBridgeState.lastError =
       "Remote gateway URL cannot be localhost in remote mode.";
+    broadcastRemoteHealthUpdate(true);
     return {
       ok: false,
       error: remoteBridgeState.lastError,
       connected: false,
       liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
     };
   }
   if (!remoteBridgeState.running) {
@@ -4054,6 +4341,7 @@ async function kickRemoteBridgeNow(reason = "manual-reconnect") {
   remoteBridgeState.liveFailureCount = 0;
   try {
     await pollRemoteLiveOnce();
+    const remoteHealth = buildRemoteHealthSnapshot();
     const liveNodeCount = Math.max(
       0,
       Object.values(remoteBridgeState.liveData || {}).filter(
@@ -4061,16 +4349,28 @@ async function kickRemoteBridgeNow(reason = "manual-reconnect") {
       ).length,
     );
     return {
-      ok: Boolean(remoteBridgeState.connected),
-      connected: Boolean(remoteBridgeState.connected),
+      ok: remoteHealth.state === "connected",
+      degraded:
+        remoteHealth.state === "degraded" || remoteHealth.state === "stale",
+      connected: remoteHealth.state === "connected",
       liveNodeCount,
       lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
       lastError: String(remoteBridgeState.lastError || ""),
+      error:
+        remoteHealth.state === "connected"
+          ? ""
+          : String(remoteHealth.reasonText || "Live bridge is not fully healthy."),
+      remoteHealth,
     };
   } catch (err) {
     remoteBridgeState.connected = false;
     remoteBridgeState.lastFailureTs = Date.now();
-    remoteBridgeState.lastError = String(err?.message || err || "Remote bridge refresh failed.");
+    const failure = classifyRemoteBridgeFailure(err);
+    remoteBridgeState.lastReasonCode = failure.reasonCode;
+    remoteBridgeState.lastReasonClass = failure.reasonClass;
+    remoteBridgeState.lastError = failure.reasonText;
+    const remoteHealth = buildRemoteHealthSnapshot();
+    broadcastRemoteHealthUpdate(true);
     return {
       ok: false,
       error: remoteBridgeState.lastError,
@@ -4078,6 +4378,7 @@ async function kickRemoteBridgeNow(reason = "manual-reconnect") {
       liveNodeCount: 0,
       lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
       lastError: remoteBridgeState.lastError,
+      remoteHealth,
     };
   }
 }
@@ -4093,6 +4394,11 @@ function stopRemoteBridge() {
   remoteBridgeState.connected = false;
   remoteBridgeState.liveFailureCount = 0;
   remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.lastHealthBroadcastKey = "";
   remoteBridgeState.replicationRunning = false;
   if (_shutdownCalled || !isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
@@ -4104,6 +4410,10 @@ function startRemoteBridge() {
   remoteBridgeState.autoSyncAttempted = false;
   remoteBridgeState.liveFailureCount = 0;
   remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.lastHealthBroadcastKey = "";
   if (isRemotePullOnlyMode()) {
     remoteBridgeState.replicationCursors = normalizeReplicationCursors({});
   } else {
@@ -4118,15 +4428,7 @@ function startRemoteBridge() {
     await pollRemoteLiveOnce().catch(() => {});
     // Keep fast retry while the bridge is still connected or has a recent
     // successful poll. Only apply exponential backoff after a real disconnect.
-    const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
-    const fastRetry =
-      Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess();
-    const nextDelay = fastRetry || failures <= 1
-      ? REMOTE_BRIDGE_INTERVAL_MS
-      : Math.min(
-          REMOTE_BRIDGE_MAX_BACKOFF_MS,
-          REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1),
-        );
+    const nextDelay = getRemoteBridgeNextDelayMs();
     remoteBridgeTimer = setTimeout(tick, Math.round(nextDelay));
   };
   tick();
@@ -4147,7 +4449,12 @@ function applyRuntimeMode() {
     poller.markAllOffline();
     // Broadcast the all-offline state immediately so clients don't keep showing
     // stale gateway live data while waiting for the first remote-bridge push.
-    broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: { pac: 0, kwh: 0 } });
+    broadcastUpdate({
+      type: "live",
+      data: poller.getLiveData(),
+      totals: { pac: 0, kwh: 0 },
+      remoteHealth: buildRemoteHealthSnapshot(),
+    });
     startRemoteBridge();
     startRemoteChatBridge();
   } else {
@@ -4188,7 +4495,12 @@ function applyRuntimeMode() {
     if (wasRemoteActive) {
       // Clear stale remote values on clients before local poller publishes fresh rows.
       poller.markAllOffline();
-      broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: {} });
+      broadcastUpdate({
+        type: "live",
+        data: poller.getLiveData(),
+        totals: {},
+        remoteHealth: buildRemoteHealthSnapshot(),
+      });
     }
     poller.start();
   }
@@ -7562,6 +7874,7 @@ app.ws("/ws", (ws) => {
     JSON.stringify({
       type: "init",
       data: getRuntimeLiveData(),
+      remoteHealth: buildRemoteHealthSnapshot(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
         plantName: getSetting("plantName", "ADSI Plant"),
@@ -8874,6 +9187,7 @@ app.get("/api/runtime/network", (req, res) => {
     remoteLastReconcileRows: Number(remoteBridgeState.lastReconcileRows || 0),
     remoteLastReconcileError: String(remoteBridgeState.lastReconcileError || ""),
     remoteLastSyncDirection: String(remoteBridgeState.lastSyncDirection || "idle"),
+    remoteHealth: buildRemoteHealthSnapshot(),
     remoteReplicationCursors: normalizeReplicationCursors(
       isRemotePullOnlyMode()
         ? {}
@@ -8960,25 +9274,26 @@ app.post("/api/runtime/network/test", async (req, res) => {
 
 app.post("/api/runtime/network/reconnect", async (req, res) => {
   const result = await kickRemoteBridgeNow("manual-reconnect");
-  if (!result?.ok) {
-    const status = /available only in Remote mode/i.test(String(result?.error || ""))
-      ? 400
-      : 502;
-    return res.status(status).json({
+  if (/available only in Remote mode/i.test(String(result?.error || ""))) {
+    return res.status(400).json({
       ok: false,
       error: String(result?.error || "Remote bridge refresh failed."),
       connected: false,
       liveNodeCount: Number(result?.liveNodeCount || 0),
       lastSuccessTs: Number(result?.lastSuccessTs || 0),
       lastError: String(result?.lastError || result?.error || ""),
+      remoteHealth: result?.remoteHealth || buildRemoteHealthSnapshot(),
     });
   }
   return res.json({
-    ok: true,
-    connected: Boolean(result.connected),
-    liveNodeCount: Number(result.liveNodeCount || 0),
-    lastSuccessTs: Number(result.lastSuccessTs || 0),
-    lastError: String(result.lastError || ""),
+    ok: Boolean(result?.ok),
+    degraded: Boolean(result?.degraded),
+    error: String(result?.error || ""),
+    connected: Boolean(result?.connected),
+    liveNodeCount: Number(result?.liveNodeCount || 0),
+    lastSuccessTs: Number(result?.lastSuccessTs || 0),
+    lastError: String(result?.lastError || ""),
+    remoteHealth: result?.remoteHealth || buildRemoteHealthSnapshot(),
   });
 });
 
