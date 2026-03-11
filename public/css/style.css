@@ -864,7 +864,7 @@ body.license-notice-open .side-nav {
 }
 .xfer-phase-pull      { color: var(--cyan); }
 .xfer-phase-push      { color: var(--orange); }
-.xfer-phase-reconcile { color: var(--yellow); }
+/* .xfer-phase-reconcile removed — viewer model has no reconciliation */
 .xfer-phase-applying  { color: var(--accent); }
 .xfer-phase-archive   { color: var(--yellow); }
 .xfer-phase-done      { color: var(--xfer-done); }

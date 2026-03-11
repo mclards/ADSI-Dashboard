@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.3.1` in `package.json`
+- Current repo version baseline: `2.3.2` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -192,15 +192,19 @@ Preserve these unless a deliberate migration is implemented:
   - polls plant locally
   - is the authoritative source of truth for live data, reports, forecasts, chat, and replication snapshots
   - is the only mode allowed to generate day-ahead and intraday-adjusted forecast data
-- `remote`
-  - uses the local DB as its working copy after pull and live sync
-  - manual `Pull` stages and replaces the local main DB from the gateway so stale client data is cleared safely
-  - continues mirroring inbound hot data locally from the gateway after pull so exports, reports, and later mode switches keep using local state
+- `remote` (viewer model)
+  - is a gateway-backed viewer, not a replicated working copy
+  - displays live gateway data in-memory only — no local DB persistence from the live stream
+  - historical views, reports, analytics, and exports are served from the gateway via proxy
+  - manual Pull ("Refresh Standby DB") downloads the gateway main DB for local standby use (applied after restart, for later `gateway`-mode use)
+  - push, reconciliation, and startup auto-sync are disabled
+  - forecast generation (day-ahead and intraday-adjusted) does not run in any layer
+  - when gateway is unavailable, historical pages show "Gateway unavailable" instead of stale local data
   - live bridge health is stateful: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error`
-  - short live-bridge failures must retain the last-good snapshot for a bounded window and mark inverter cards stale instead of blanking them immediately
-  - can run replication workflows
+  - short live-bridge failures retain the last-good in-memory snapshot for a bounded window and mark inverter cards stale
+  - inverter on/off write control stays enabled via gateway proxy
   - may run local remote-side utilities such as Solcast toolkit test / preview / export
-  - must not run day-ahead generation while active in `remote` mode
+  - switching from remote to gateway warns about stale local DB
 
 ## Operator Messaging
 

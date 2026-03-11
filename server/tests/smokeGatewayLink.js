@@ -90,7 +90,12 @@ setTimeout(async () => {
     check("Adaptive polling (latency*2)", src.includes("latency * 2"));
     check("Bridge interval 800ms", src.includes("const REMOTE_BRIDGE_INTERVAL_MS = 800"));
     check("Bridge warmup 8s", src.includes("const REMOTE_BRIDGE_WARMUP_MS = 8000"));
-    check("Warmup skips local fallback", src.includes("if (isRemoteBridgeWarmupActive(nowTs)) return false;"));
+    check(
+      "Viewer mode disables local fallback",
+      src.includes("Viewer model: remote mode never falls back to local DB for historical reads.") &&
+        src.includes("function shouldServeLocalFallback(pathname, nowTs = Date.now())") &&
+        src.includes("return false;"),
+    );
     check("Energy fetch stamps success only", src.includes("lastTodayEnergyFetchTs = ts"));
     check("Offline threshold 6", src.includes("FAILURES_BEFORE_OFFLINE = 6"));
     check("Sync threshold 10", src.includes("BEFORE_OFFLINE_DURING_SYNC = 10"));
@@ -111,8 +116,8 @@ setTimeout(async () => {
       appSrc.includes("summarizeLiveRows(unitsForDisplay)"),
     );
     check(
-      "Detail live kWh uses kWh units directly",
-      appSrc.includes("const kwhLive = Number(liveTotals.kwh || 0);"),
+      "Detail today energy uses authoritative todayEnergyByInv state",
+      appSrc.includes("const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);"),
     );
   } catch (e) {
     results.push("ERROR: " + e.message);

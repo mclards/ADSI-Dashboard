@@ -130,8 +130,8 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.3.1</span></div>
-            <div class="side-about-desc">Operational monitoring, performance review, forecast support, and controlled multi-machine synchronization for the plant.</div>
+            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.3.2</span></div>
+            <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
               href="https://www.alterpowerdigos.com/"
@@ -946,7 +946,7 @@
                 </button>
                 <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">
                   <span class="settings-menu-label">Connectivity &amp; Sync</span>
-                  <span class="settings-menu-copy">Gateway mode, remote access, synchronization, and diagnostics.</span>
+                  <span class="settings-menu-copy">Gateway mode, remote access, gateway link status, and diagnostics.</span>
                 </button>
                 <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">
                   <span class="settings-menu-label">License</span>
@@ -1146,7 +1146,7 @@
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
             <div class="sgroup-title"><span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span> Connectivity &amp; Sync</div>
-            <p class="settings-section-copy">Define whether this workstation acts as the plant gateway or a supervised remote station, then review synchronization and runtime health.</p>
+            <p class="settings-section-copy">Define whether this workstation acts as the plant gateway or a supervised remote station, then review gateway link status and runtime health.</p>
             <div class="settings-subsection">
               <div class="settings-subtitle">Mode &amp; Remote Access</div>
               <div class="srow">
@@ -1185,12 +1185,6 @@
                    Use Gateway mode on the workstation connected to the plant network. Use Remote mode on monitoring workstations that connect through the approved secure path.
                 </div>
               </div>
-              <div class="srow">
-                <label class="chk-inline">
-                  <input type="checkbox" id="setRemoteAutoSync" />
-                  <span>Run automatic synchronization at startup (Remote mode)</span>
-                </label>
-              </div>
               <div class="sgroup-actions">
                 <button id="btnTestRemoteGateway" class="btn btn-outline" type="button" title="Check whether the configured remote gateway URL is reachable and responding." aria-label="Test remote gateway">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span><span>Test Remote Gateway</span>
@@ -1202,7 +1196,7 @@
               </div>
             </div>
             <div class="settings-subsection">
-              <div class="settings-subtitle">Replication Health</div>
+              <div class="settings-subtitle">Gateway Link</div>
               <div class="rep-health-grid">
                 <div class="license-item">
                   <div class="license-label">Mode</div>
@@ -1221,7 +1215,7 @@
                   <div id="repTailnetVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
-                  <div class="license-label">Last Sync Activity</div>
+                  <div class="license-label">Gateway Live Link</div>
                   <div id="repDirectionVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
@@ -1229,7 +1223,7 @@
                   <div id="repLastSuccessVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
-                  <div class="license-label">Last Replication Run</div>
+                  <div class="license-label">Last Standby Refresh</div>
                   <div id="repLastReplicationVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
@@ -1237,40 +1231,29 @@
                   <div id="repLastRowsVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
-                  <div class="license-label">Last Reconciliation</div>
+                  <div class="license-label">Last Standby DB Pull</div>
                   <div id="repLastReconcileVal" class="license-value">—</div>
-                </div>
-                <div class="license-item">
-                  <div class="license-label">Rows Sent</div>
-                  <div id="repLastReconcileRowsVal" class="license-value">—</div>
-                </div>
-                <div class="license-item">
-                  <div class="license-label">State Signature</div>
-                  <div id="repSignatureVal" class="license-value">—</div>
                 </div>
                 <div class="license-item">
                   <div class="license-label">Background Job</div>
                   <div id="repJobStatusVal" class="license-value">Idle</div>
                 </div>
               </div>
-              <div class="rep-health-cursors">
-                  <div class="license-label">Sync Markers</div>
-                <code id="repCursorsVal">—</code>
-              </div>
+              <!-- Sync markers removed — viewer model uses gateway as authority -->
               <div class="rep-health-errors">
                 <div class="license-label">Last Errors</div>
                 <div id="repErrorsVal" class="license-value">—</div>
               </div>
               <div class="rep-health-errors">
-                <div class="license-label">Manual Sync Scope</div>
+                <div class="license-label">Standby DB Scope</div>
                 <div id="repScopeVal" class="license-value">
-                  Current-data tables only. Refresh to display the latest manual sync scope.
+                  Full gateway database snapshot. Refresh to display the latest scope.
                 </div>
               </div>
               <div class="rep-health-errors">
                 <div class="license-label">Archive Scope</div>
                 <div id="repArchiveScopeVal" class="license-value">
-                  Archive transfer can be included in manual sync runs when historical records are required.
+                  Archive transfer can be included in standby DB refresh runs when historical records are required.
                 </div>
               </div>
               <div class="replication-transfer-wrap">
@@ -1291,12 +1274,12 @@
                     <div class="xfer-panel-row">
                       <span id="xferDirIcon" class="xfer-dir-icon xfer-dir-tx">&#8593;</span>
                       <span id="xferPhaseBadge" class="xfer-phase-badge xfer-phase-pull" hidden></span>
-                      <span id="xferLabel" class="xfer-label">Starting sync...</span>
+                      <span id="xferLabel" class="xfer-label">Starting transfer...</span>
                       <span id="xferPct" class="xfer-pct">0%</span>
                     </div>
                     <div class="xfer-meta-row">
                       <span id="xferScopeChip" class="xfer-scope-chip xfer-scope-hot">Current data</span>
-                      <span id="xferDetail" class="xfer-detail">Preparing synchronization…</span>
+                      <span id="xferDetail" class="xfer-detail">Preparing standby refresh…</span>
                     </div>
                     <div class="xfer-bar-track">
                       <div id="xferBarFill" class="xfer-bar-fill"></div>
@@ -1310,21 +1293,18 @@
                 </div>
               </div>
               <div class="srow">
-                <label class="chk-inline" title="Optional: include archived monthly files in the next manual synchronization. Current operational data remains the priority path.">
+                <label class="chk-inline" title="Optional: include archived monthly files in the next standby DB refresh. The gateway main database always stages first.">
                   <input type="checkbox" id="setReplicationIncludeArchive" />
-                  <span>Include archived files in the next manual sync</span>
+                  <span>Include archived files in the next standby DB refresh</span>
                 </label>
-                <small id="replicationArchiveHint">Optional. Leave disabled for faster current-data sync. Enable only when historical archive files are required.</small>
+                <small id="replicationArchiveHint">Optional. Leave disabled for faster standby DB refresh. Enable when historical archive files are needed.</small>
               </div>
               <div class="sgroup-actions">
-                <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh replication health, sync counters, and transfer diagnostics." aria-label="Refresh replication health">
+                <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh gateway link status, standby refresh counters, and transfer diagnostics." aria-label="Refresh gateway link status">
                   <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
                 </button>
-                <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Start a background pull from the gateway. Hot tables and archive DB files continue syncing while you use the dashboard.">
-                  Run Pull Sync
-                </button>
-                <button id="btnRunReplicationPush" class="btn btn-outline" type="button" title="Start a background push to the gateway, then pull back the final gateway state for consistency.">
-                  Run Push Sync
+                <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Download the gateway database for local standby use. Requires restart to apply.">
+                  Refresh Standby DB
                 </button>
                 <span class="smsg" id="replicationMsg"></span>
               </div>
@@ -2002,7 +1982,7 @@
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.3.1</span></div>
+            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.3.2</span></div>
             <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -2033,7 +2013,7 @@
             </div>
             <div class="guide-visual-item">
               <span class="mdi mdi-server-network guide-visual-icon"></span>
-              <div class="guide-visual-text">Controlled remote synchronization through the gateway</div>
+              <div class="guide-visual-text">Controlled remote viewing and control through the gateway</div>
             </div>
           </div>
 
@@ -2110,13 +2090,14 @@
               </ul>
             </details>
             <details>
-              <summary>8. Remote Replication</summary>
+              <summary>8. Remote Viewer Mode</summary>
               <ul>
-                <li>Remote mode retrieves approved data from the gateway and should not replace the gateway as the operational source.</li>
-                <li>Manual pull and push actions are available when supervised synchronization is required.</li>
-                <li>Transfer progress, status, and recent errors are shown in the synchronization diagnostics area.</li>
-                <li>Archive synchronization can be included intentionally when historical records are required.</li>
-                <li>If connectivity is interrupted, synchronization can be retried after the secure network path is restored.</li>
+                <li>Remote mode displays live gateway data without storing it in the local database.</li>
+                <li>Historical views, reports, and exports are served from the gateway in real time.</li>
+                <li>Inverter on/off control remains available in Remote mode through the gateway command path.</li>
+                <li>Standby refresh downloads the gateway database for local standby use (requires restart to apply).</li>
+                <li>Archive files can be included in standby refresh when historical records are needed for later gateway-mode use.</li>
+                <li>If connectivity is interrupted, live viewing resumes when the secure network path returns and standby refresh can be retried afterward.</li>
               </ul>
             </details>
             <details>
@@ -2143,7 +2124,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.3.1 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            Dashboard V2 v2.3.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

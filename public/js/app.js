@@ -256,8 +256,8 @@ const SETTINGS_SECTION_META = {
     copy: "Review operational endpoints, export storage, and polling timing from one controlled section.",
   },
   connectivitySection: {
-    title: "Connectivity & Sync",
-    copy: "Define gateway or remote operation, then review synchronization and runtime health.",
+    title: "Connectivity & Gateway Link",
+    copy: "Define gateway or remote operation, then review gateway link status and runtime health.",
   },
   licenseSection: {
     title: "License",
@@ -1448,13 +1448,12 @@ function getXferPhaseBadge(x) {
   const phase = String(x?.phase || "");
   if (phase === "done") return { text: "Done", cls: "xfer-phase-done" };
   if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
-  if (lbl.includes("reconcil")) return { text: "Reconciling", cls: "xfer-phase-reconcile" };
   if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
   if (lbl.includes("main database") && lbl.includes("final")) return { text: "Finalizing", cls: "xfer-phase-applying" };
   if (lbl.includes("final") || lbl.includes("final gateway")) return { text: "Finalizing", cls: "xfer-phase-applying" };
   if (lbl.includes("archive")) return { text: "Archive", cls: "xfer-phase-archive" };
-  if (x?.dir === "tx") return { text: "Pushing", cls: "xfer-phase-push" };
-  return { text: "Pulling", cls: "xfer-phase-pull" };
+  if (x?.dir === "tx") return { text: "Uploading", cls: "xfer-phase-push" };
+  return { text: "Downloading", cls: "xfer-phase-pull" };
 }
 
 function getXferScopeInfo(x) {
@@ -1462,18 +1461,18 @@ function getXferScopeInfo(x) {
     .trim()
     .toLowerCase();
   if (label.includes("main database") || label.includes("gateway database")) {
-    return { text: "Main DB", cls: "hot" };
+    return { text: "Standby DB", cls: "hot" };
   }
   if (label.includes("archive")) {
     return { text: "Archive DB", cls: "archive" };
   }
   if (label.includes("receiving push")) {
-    return { text: "Hot data RX", cls: "hot" };
+    return { text: "Incoming data", cls: "hot" };
   }
   if (x?.dir === "tx") {
-    return { text: "Hot data TX", cls: "hot" };
+    return { text: "Upload", cls: "hot" };
   }
-  return { text: "Hot data RX", cls: "hot" };
+  return { text: "Standby DB", cls: "hot" };
 }
 
 function getXferDetailText(x) {
@@ -1552,15 +1551,15 @@ function renderXferPanel() {
             : "";
       labelEl.textContent = `${custom}${suffix}`;
     } else if (x.phase === "done") {
-      labelEl.textContent = x.dir === "tx" ? "Push complete" : "Pull complete";
+      labelEl.textContent = x.dir === "tx" ? "Upload complete" : "Download complete";
     } else if (x.phase === "error") {
-      labelEl.textContent = x.dir === "tx" ? "Push failed" : "Pull failed";
+      labelEl.textContent = x.dir === "tx" ? "Upload failed" : "Download failed";
     } else if (x.dir === "tx") {
       const cStr = x.chunkCount > 1 ? ` · chunk ${x.chunkDone}/${x.chunkCount}` : "";
-      labelEl.textContent = `Pushing${cStr}`;
+      labelEl.textContent = `Uploading${cStr}`;
     } else {
       const bStr = x.chunkDone > 0 ? ` · batch ${x.chunkDone}` : "";
-      labelEl.textContent = `Pulling${bStr}`;
+      labelEl.textContent = `Downloading${bStr}`;
     }
   }
 
@@ -2055,6 +2054,7 @@ function getDetailedErrorMessage(status, errorMsg) {
 function shouldPreserveServerErrorMessage(url = "") {
   const u = String(url || "");
   return (
+    u.includes("/api/write") ||
     u.includes("/api/runtime/network") ||
     u.includes("/api/settings") ||
     u.includes("/api/replication/") ||
@@ -3260,7 +3260,7 @@ function syncOperationModeUi() {
     selectedMode !== activeMode
       ? `Selected mode is ${selectedMode === "remote" ? "Remote" : "Gateway"}, but the active runtime mode is still ${activeMode === "remote" ? "Remote" : "Gateway"}. Save Settings to apply the mode change.`
       : remote
-        ? `Remote mode active. ${$("setRemoteAutoSync")?.checked ? "Startup Auto Sync is enabled." : "Startup Auto Sync is disabled; use manual Pull/Push."}`
+        ? "Remote mode active. Live data is streamed from the gateway. Use Refresh Standby DB when you need a fresh local database copy before switching to Gateway mode."
         : "Gateway mode active. Local polling is active; remote/Tailscale fields are optional.",
     "",
   );
@@ -3807,11 +3807,11 @@ async function saveSettings() {
   const settingsMsgId = getSettingsMessageTargetId();
   const remoteConnectivityChanged = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
   const solcastConfig = readSolcastSettingsForm();
+  const remoteAutoSyncCtrl = $("setRemoteAutoSync");
   const body = {
     plantName: $("setPlantName").value,
     operatorName: $("setOperatorName").value,
     operationMode: $("setOperationMode").value,
-    remoteAutoSync: Boolean($("setRemoteAutoSync")?.checked),
     remoteGatewayUrl:
       normalizedGateway || String($("setRemoteGatewayUrl").value || "").trim(),
     remoteApiToken: $("setRemoteApiToken").value,
@@ -3832,6 +3832,21 @@ async function saveSettings() {
       readSpacing:    Number($("setPollReadSpacing")?.value    ?? 0.005),
     },
   };
+  if (remoteAutoSyncCtrl) {
+    body.remoteAutoSync = Boolean(remoteAutoSyncCtrl.checked);
+  }
+  // Viewer model: warn when switching from remote to gateway about stale local DB.
+  const nextMode = normalizeOperationModeValue(body.operationMode);
+  if (normalizeOperationModeValue(prevMode) === "remote" && nextMode === "gateway") {
+    const proceed = await appConfirm(
+      "Switch to Gateway Mode",
+      "Remote mode does not keep the local database current.\n\n" +
+      "Run Refresh Standby DB first if you need fresh local history before switching to Gateway mode.\n\n" +
+      "Continue switching to Gateway mode?",
+      { ok: "Switch to Gateway", cancel: "Cancel" },
+    );
+    if (!proceed) return false;
+  }
   try {
     if (Number(body.retainDays || prevRetainDays) < prevRetainDays) {
       showMsg(
@@ -4020,18 +4035,21 @@ function formatSyncDirection(value) {
     .toLowerCase();
   const map = {
     idle: "Idle",
-    "startup-auto-sync": "Startup auto sync",
-    "startup-auto-sync-failed": "Startup auto sync failed",
-    "pull-only": "Pull only",
-    "pull-live": "Live pull",
-    "pull-live-failed": "Live pull failed",
-    "push-full": "Push full",
-    "push-full-failed": "Push full failed",
-    "push-failed": "Push failed",
-    "pull-full": "Full pull",
-    "pull-full-failed": "Full pull failed",
-    "pull-incremental": "Incremental pull",
-    "pull-incremental-failed": "Incremental pull failed",
+    "startup-auto-sync": "Standby DB refresh",
+    "startup-auto-sync-failed": "Standby DB refresh failed",
+    "pull-only": "Standby DB refresh",
+    "pull-live": "Live stream",
+    "pull-live-only": "Live stream",
+    "pull-live-failed": "Live stream failed",
+    "pull-full": "Standby DB refresh",
+    "pull-full-failed": "Standby DB refresh failed",
+    "pull-main-db-staged": "Standby DB staged",
+    "pull-main-db-failed": "Standby DB refresh failed",
+    "pull-incremental": "Standby DB catch-up",
+    "pull-incremental-failed": "Standby DB catch-up failed",
+    "push-full": "Push disabled",
+    "push-full-failed": "Push disabled",
+    "push-failed": "Push disabled",
   };
   return map[v] || (v ? v.replace(/[-_]/g, " ") : "—");
 }
@@ -4054,8 +4072,8 @@ function formatTailscaleStatus(ts) {
 
 function formatReplicationScopeText(scope) {
   const hotTables = Array.isArray(scope?.hotTables) ? scope.hotTables : [];
-  if (!hotTables.length) return "Hot replicated tables are not available.";
-  return `Hot-data scope (always first): ${hotTables.join(", ")}.`;
+  if (!hotTables.length) return "Gateway standby database scope is not available.";
+  return `Standby DB source: ${hotTables.join(", ")}. Standby refresh replaces the local standby database with the latest gateway snapshot.`;
 }
 
 function formatArchiveScopeText(scope) {
@@ -4063,17 +4081,18 @@ function formatArchiveScopeText(scope) {
   const count = Math.max(0, Number(archive?.fileCount || 0));
   const totalBytes = Math.max(0, Number(archive?.totalBytes || 0));
   const selected = isManualArchiveSyncSelected();
-  return `${selected ? "Archive sync is enabled for the next manual run." : "Archive sync is optional and currently off, so hot data stays the priority path."} Monthly archive DB files available locally: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Operation mode, gateway URL/token, Tailscale hint, export path, replication cursors, and live handoff state stay local for mode compatibility.`;
+  return `${selected ? "Archive download is enabled for the next standby DB refresh." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
 }
 
 function formatReplicationJobStatus(job) {
   const j = job && typeof job === "object" ? job : null;
   if (!j) return { text: "Idle", cls: "" };
   const status = String(j.status || "idle").trim().toLowerCase();
-  const action = String(j.action || "sync").trim();
+  const actionKey = String(j.action || "sync").trim().toLowerCase();
+  const action = actionKey === "pull" ? "standby refresh" : actionKey;
   if (status === "running" || status === "queued") {
     return {
-      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · hot + archive" : " · hot only"}`,
+      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · db + archive" : " · db only"}`,
       cls: status === "queued" ? "warn" : "ok",
     };
   }
@@ -4096,8 +4115,8 @@ async function promptReplicationRestart(job) {
   State.replication.restartPromptedJobId = j.id;
   const summary = String(j.summary || "").trim();
   const ok = await appConfirm(
-    "Replication Complete",
-    `Replication finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
+    "Standby DB Refresh Complete",
+    `Standby DB refresh finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
     { ok: "Restart Now", cancel: "Later" },
   );
   if (!ok) return;
@@ -4109,7 +4128,7 @@ async function promptReplicationRestart(job) {
       }
       return;
     }
-    showToast("Restart the desktop app manually to reload the synced data.", "info", 5000);
+    showToast("Restart the desktop app manually to reload the refreshed standby data.", "info", 5000);
   } catch (err) {
     showToast(`Restart request failed: ${err.message}`, "warning", 5000);
   }
@@ -4124,43 +4143,18 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
   if (!job) return;
   if (opts.showMessage !== false) {
     if (job.status === "running" || job.status === "queued") {
-      showMsg("replicationMsg", `Background ${job.action} started. You can return to normal operation.`, "");
+      const actionLabel =
+        String(job.action || "").trim().toLowerCase() === "pull"
+          ? "standby DB refresh"
+          : String(job.action || "job").trim();
+      showMsg("replicationMsg", `Background ${actionLabel} started. You can return to normal operation.`, "");
     } else if (job.status === "completed") {
-      showMsg("replicationMsg", `✔ ${job.summary || "Replication complete."}`, "");
-      showToast(job.summary || "Replication complete.", "success", 5200);
+      showMsg("replicationMsg", `✔ ${job.summary || "Standby DB refresh complete."}`, "");
+      showToast(job.summary || "Standby DB refresh complete.", "success", 5200);
     } else if (job.status === "failed") {
-      if (job.errorCode === "LOCAL_NEWER_PUSH_FAILED" && job.action === "pull") {
-        showMsg("replicationMsg", "Pull stopped: local data is newer than the gateway.", "error");
-        appConfirm(
-          "Local Data Is Newer — Force Pull?",
-          "Your local data is newer than the gateway.\n\nUse Push first if you want to send local changes to the gateway before pulling.\n\nForce pull from gateway anyway?\n\nWarning: Local data will be overwritten by the gateway state.",
-          { ok: "Force Pull", cancel: "Cancel" },
-        ).then(async (force) => {
-          if (!force) {
-            showMsg("replicationMsg", "Pull cancelled. Your local data was not changed.", "");
-            return;
-          }
-          const includeArchive = isManualArchiveSyncSelected();
-          try {
-            const result2 = await api("/api/replication/pull-now", "POST", {
-              background: true,
-              includeArchive,
-              forcePull: true,
-            });
-            const job2 = result2?.job || null;
-            if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
-            showMsg("replicationMsg", "Force pull started. Pulling and staging the gateway main database.", "");
-            await refreshReplicationHealth(true);
-            await refreshRuntimePerf(true);
-          } catch (e2) {
-            showMsg("replicationMsg", `✗ ${e2.message}`, "error");
-          }
-        }).catch(() => {});
-      } else {
-        const msg = job.error || job.summary || "Replication failed.";
-        showMsg("replicationMsg", `✗ ${msg}`, "error");
-        showToast(`Replication failed: ${msg}`, "warning", 6000);
-      }
+      const msg = job.error || job.summary || "Download failed.";
+      showMsg("replicationMsg", `✗ ${msg}`, "error");
+      showToast(`Download failed: ${msg}`, "warning", 6000);
     }
   }
   if (job.status === "completed") {
@@ -4173,8 +4167,8 @@ function updateReplicationArchiveSelectionUi(silent = false) {
   const hint = $("replicationArchiveHint");
   if (hint) {
     hint.textContent = checked
-      ? "Archive copy is enabled for the next manual sync. Expect a longer transfer because monthly archive DB files can be large."
-      : "Optional. Leave this off for faster hot-data sync. Enable it only when you need historical archive files copied too.";
+      ? "Archive download is enabled for the next standby DB refresh. Expect a longer transfer because monthly archive DB files can be large."
+      : "Optional. Leave this off for a faster standby DB refresh. Enable it only when you need historical archive files copied too.";
   }
   if (State.replication.scope) {
     setReplicationField(
@@ -4186,8 +4180,8 @@ function updateReplicationArchiveSelectionUi(silent = false) {
     showMsg(
       "replicationMsg",
       checked
-        ? "Archive sync enabled for the next manual run. Expect a longer transfer."
-        : "Archive sync disabled. Manual pull/push will prioritize hot data only.",
+        ? "Archive download enabled for the next standby DB refresh. Expect a longer transfer."
+        : "Archive download disabled. Only the gateway standby database will be refreshed.",
       checked ? "error" : "",
     );
   }
@@ -4238,7 +4232,9 @@ async function refreshReplicationHealth(silent = true) {
     const directionClass =
       /failed/i.test(directionRaw)
         ? "error"
-        : /push|pull/i.test(directionRaw)
+        : /^push/i.test(directionRaw)
+          ? "warn"
+          : /pull|live/i.test(directionRaw)
           ? "ok"
           : "";
     setReplicationField(
@@ -4257,17 +4253,8 @@ async function refreshReplicationHealth(silent = true) {
     );
     setReplicationField(
       "repLastReconcileVal",
-      fmtTsWithAge(n?.remoteLastReconcileTs || 0),
+      fmtTsWithAge(n?.remoteLastReplicationTs || n?.remoteLastReconcileTs || 0),
     );
-    setReplicationField(
-      "repLastReconcileRowsVal",
-      Number(n?.remoteLastReconcileRows || 0).toLocaleString(),
-    );
-    const sig = String(n?.remoteLastReplicationSignature || "").trim();
-    setReplicationField("repSignatureVal", sig ? `${sig.slice(0, 16)}…` : "—");
-    const cursors = n?.remoteReplicationCursors || {};
-    const cNode = $("repCursorsVal");
-    if (cNode) cNode.textContent = pullOnly ? "N/A (pull-only)" : JSON.stringify(cursors);
     const bridgeErr = String(n?.remoteLastError || "").trim();
     const repErr = String(n?.remoteLastReplicationError || "").trim();
     const recErr = String(n?.remoteLastReconcileError || "").trim();
@@ -4287,7 +4274,6 @@ async function refreshReplicationHealth(silent = true) {
     setReplicationField("repArchiveScopeVal", formatArchiveScopeText(scope));
     handleReplicationJobUpdate(job, { showMessage: false });
     const pullBtn = $("btnRunReplicationPull");
-    const pushBtn = $("btnRunReplicationPush");
     const archiveToggle = $("setReplicationIncludeArchive");
     const manualDisabled = mode !== "remote" || Boolean(job?.running);
     if (pullBtn) {
@@ -4295,26 +4281,14 @@ async function refreshReplicationHealth(silent = true) {
       pullBtn.title = manualDisabled
         ? mode !== "remote"
           ? "Available only in Remote mode."
-          : "A manual replication job is already running."
-        : isManualArchiveSyncSelected()
-          ? "Start a background pull from the gateway main database, including archive DB files."
-          : "Start a background pull from the gateway main database only.";
-    }
-    if (pushBtn) {
-      pushBtn.disabled = manualDisabled;
-      pushBtn.title = manualDisabled
-        ? mode !== "remote"
-          ? "Available only in Remote mode."
-          : "A manual replication job is already running."
-        : isManualArchiveSyncSelected()
-          ? "Start a background push to the gateway, including archive DB files, then stage the final gateway main database back locally."
-          : "Start a background push to the gateway, then stage the final gateway main database back locally.";
+          : "A download is already running."
+        : "Download the gateway database for local standby use. Requires restart to apply.";
     }
     if (archiveToggle) {
       archiveToggle.disabled = manualDisabled;
     }
     if (!silent) {
-      showMsg("replicationMsg", "✔ Replication health refreshed", "");
+      showMsg("replicationMsg", "✔ Gateway link status refreshed", "");
     }
   } catch (e) {
     if (!silent) showMsg("replicationMsg", `✗ ${e.message}`, "error");
@@ -4400,8 +4374,8 @@ function ensureRemoteModeForReplicationActions() {
     showMsg(
       "replicationMsg",
       selectedMode === "remote"
-        ? "Replication actions require active Remote mode. Save Settings first to apply the mode change."
-        : "Replication actions are available only in Remote mode.",
+        ? "Standby DB refresh actions require active Remote mode. Save Settings first to apply the mode change."
+        : "Standby DB refresh is available only in Remote mode.",
       "error",
     );
     return false;
@@ -4413,23 +4387,22 @@ async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
   const archiveLine = includeArchive
-    ? "\n\nArchive files: Monthly archive DB files will be included after hot data syncs. Expect a longer transfer."
+    ? "\n\nArchive files will be included. Expect a longer transfer."
     : "\n\nArchive files: Skipped for this run.";
   const _pullOk = await appConfirm(
-    "Start Authoritative Pull",
-    "The gateway main database will replace your local main database on restart.\n\n" +
-    "This is a download-only operation. No local data will be sent to the gateway during pull.\n\n" +
-    "If local data is newer than the gateway, pull will stop and you will be asked whether to Force Pull or Push first.\n\n" +
-    "Local-only settings (operation mode, remote auto-sync, gateway URL/token, tailnet hint, and export path) are preserved on this machine." +
+    "Refresh Standby Database",
+    "Download the gateway database for local standby use.\n\n" +
+    "The gateway snapshot will replace your local database on restart.\n\n" +
+    "Local-only settings (operation mode, gateway URL/token, tailnet hint, and export path) are preserved." +
     archiveLine +
     "\n\nYou will be prompted to restart after completion.",
-    { ok: "Start Pull" },
+    { ok: "Start Download" },
   );
   if (!_pullOk) return;
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Checking gateway state, then pulling the gateway main database…", "");
+  showMsg("replicationMsg", "Downloading the gateway main database…", "");
   try {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
@@ -4440,89 +4413,22 @@ async function runReplicationPullNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background pull started. Staging the gateway main database. Archive files will follow."
-        : "Background pull started. Staging the gateway main database.",
+        ? "Background download started. Staging the gateway database. Archive files will follow."
+        : "Background download started. Staging the gateway database.",
       "",
     );
     await refreshReplicationHealth(true);
     await refreshRuntimePerf(true);
   } catch (e) {
-    if (e?.status === 409 && e?.body?.canForcePull) {
-      // Pre-pull reconciliation could not push local-newer data to gateway.
-      const force = await appConfirm(
-        "Local Data Is Newer — Force Pull?",
-        "Your local data is newer than the gateway.\n\n" +
-        "Use Push first if you want to send local changes to the gateway before pulling.\n\n" +
-        "Force pull from gateway anyway?\n\n" +
-        "Warning: Local data will be overwritten by the gateway state.",
-        { ok: "Force Pull", cancel: "Cancel" },
-      );
-      if (!force) {
-        showMsg("replicationMsg", "Pull cancelled. Your local data was not changed.", "");
-        return;
-      }
-      try {
-        const result2 = await api("/api/replication/pull-now", "POST", {
-          background: true,
-          includeArchive,
-          forcePull: true,
-        });
-        const job2 = result2?.job || null;
-        if (job2) handleReplicationJobUpdate(job2, { showMessage: false });
-        showMsg("replicationMsg", "Force pull started. Pulling and staging the gateway main database.", "");
-        await refreshReplicationHealth(true);
-        await refreshRuntimePerf(true);
-      } catch (e2) {
-        showMsg("replicationMsg", `✗ ${e2.message}`, "error");
-      }
-      return;
-    }
     showMsg("replicationMsg", `✗ ${e.message}`, "error");
   } finally {
     if (btn) btn.disabled = false;
   }
 }
 
+// Viewer model: push is disabled — remote mode is a gateway-backed viewer.
 async function runReplicationPushNow() {
-  if (!ensureRemoteModeForReplicationActions()) return;
-  const includeArchive = isManualArchiveSyncSelected();
-  const archiveLine = includeArchive
-    ? "\n\nArchive files: Local monthly archive DB files will be uploaded to the gateway."
-    : "\n\nArchive files: Skipped for this run.";
-  const _pushOk = await appConfirm(
-    "Start Background Push",
-    "Your local replicated hot-data will be sent to the gateway.\n\n" +
-    "This is an upload-only operation. Your local database will not be changed.\n\n" +
-    "No restart is required after push." +
-    archiveLine,
-    { ok: "Start Push" },
-  );
-  if (!_pushOk) return;
-
-  const btn = $("btnRunReplicationPush");
-  if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Starting background push to gateway…", "");
-  try {
-    const result = await api("/api/replication/push-now", "POST", {
-      background: true,
-      includeArchive,
-    });
-    const job = result?.job || null;
-    if (job) handleReplicationJobUpdate(job, { showMessage: false });
-    showMsg(
-      "replicationMsg",
-      includeArchive
-        ? "Background push started. Sending local data to gateway. Archive files included. Local database will not be changed."
-        : "Background push started. Sending local data to gateway. Local database will not be changed.",
-      "",
-    );
-    await refreshReplicationHealth(true);
-    await refreshRuntimePerf(true);
-  } catch (e) {
-    showMsg("replicationMsg", `✗ ${e.message}`, "error");
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+  showMsg("replicationMsg", "Push is disabled. Remote mode is a gateway-backed viewer.", "error");
 }
 
 async function testSolcastConnection() {
@@ -5747,6 +5653,34 @@ async function authorizeBulkCommand(action, scopeLabel, totalTargets) {
   return await requestBulkAuthorization(action, scopeLabel, totalTargets);
 }
 
+async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
+  const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
+  if (!tasks.length) return [];
+  const safeLimit = Math.max(1, Math.min(tasks.length, Number(limit || 1) || 1));
+  const results = new Array(tasks.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= tasks.length) return;
+      const task = tasks[index];
+      try {
+        const value = await api("/api/write", "POST", task?.body || {}, {
+          progress: false,
+        });
+        results[index] = { status: "fulfilled", value };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  return results;
+}
+
 // ─── Node Control ─────────────────────────────────────────────────────────────
 async function toggleNode(inv, node, btnEl) {
   if (!isConfiguredNodeClient(inv, node)) return;
@@ -5761,6 +5695,7 @@ async function toggleNode(inv, node, btnEl) {
       unit: node,
       value: newState,
       scope: "single",
+      priority: "high",
       operator: currentOperator(),
     });
     State.nodeStates[key] = newState;
@@ -5794,18 +5729,18 @@ async function sendAllNodesInv(inv, val) {
     tasks.push({
       inverter: inv,
       node: n,
-      req: api("/api/write", "POST", {
+      body: {
         inverter: inv,
         node: n,
         unit: n,
         value: val,
         scope: "inverter",
         operator: currentOperator(),
-      }),
+      },
     });
   }
 
-  const results = await Promise.allSettled(tasks.map((t) => t.req));
+  const results = await runControlTasksWithConcurrency(tasks, 2);
   let ok = 0;
   let fail = 0;
 
@@ -5998,7 +5933,7 @@ async function sendSelectedNodes(val) {
       tasks.push({
         inverter: inv,
         node: n,
-        req: api("/api/write", "POST", {
+        body: {
           inverter: inv,
           node: n,
           unit: n,
@@ -6006,12 +5941,12 @@ async function sendSelectedNodes(val) {
           scope: "selected",
           authKey,
           operator: currentOperator(),
-        }),
+        },
       });
     }
   });
 
-  const results = await Promise.allSettled(tasks.map((t) => t.req));
+  const results = await runControlTasksWithConcurrency(tasks, 2);
   let ok = 0;
   let fail = 0;
   results.forEach((r, i) => {
@@ -9968,14 +9903,14 @@ function bindEventHandlers() {
     refreshRuntimePerf(false),
   );
   $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
-  $("btnRunReplicationPush")?.addEventListener("click", runReplicationPushNow);
+  // Push button removed — viewer model has no outbound data flows.
   $("setReplicationIncludeArchive")?.addEventListener("change", async (event) => {
     const target = event?.target;
     if (!target) return;
     if (target.checked) {
       const ok = await appConfirm(
         "Include Archive DB Files",
-        "Include archive DB files in the next manual pull/push?\n\nThis can take significantly longer because monthly archive files may be large. Hot data will still sync first.",
+        "Include archive DB files in the next standby DB refresh?\n\nThis can take significantly longer because monthly archive files may be large. The gateway main database will still stage first.",
         { ok: "Include" },
       );
       if (!ok) {
@@ -9984,7 +9919,7 @@ function bindEventHandlers() {
         return;
       }
       showToast(
-        "Archive sync enabled. Expect a longer transfer if monthly archive DB files are large.",
+        "Archive download enabled. Expect a longer transfer if monthly archive DB files are large.",
         "warning",
         5200,
       );

@@ -4153,6 +4153,14 @@ def parse_cli_args():
 
 def run_cli_generation(args) -> int:
     try:
+        if (
+            args.generate_date
+            or args.generate_range
+            or args.generate_days is not None
+        ) and _read_operation_mode() == "remote":
+            log.error("Manual forecast generation is disabled in remote mode")
+            return 2
+
         if args.generate_date:
             day = _parse_iso_date_safe(args.generate_date)
             ok = run_manual_generation([day])
@@ -4185,6 +4193,21 @@ def run_cli_generation(args) -> int:
 # MAIN SERVICE LOOP
 # ============================================================================
 
+def _read_operation_mode() -> str:
+    """Read operationMode from the settings table. Returns 'gateway' or 'remote'."""
+    try:
+        conn = _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True)
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = 'operationMode' LIMIT 1"
+            ).fetchone()
+            return str(row[0]).strip().lower() if row else "gateway"
+        finally:
+            conn.close()
+    except Exception:
+        return "gateway"
+
+
 def main() -> None:
     profile = plant_capacity_profile()
     cap_dep = float(profile["dependable_kw"])
@@ -4212,6 +4235,12 @@ def main() -> None:
 
     while True:
         try:
+            # Viewer model: skip all forecast generation in remote mode.
+            if _read_operation_mode() == "remote":
+                log.debug("Remote mode — skipping forecast generation (viewer model)")
+                time.sleep(60)
+                continue
+
             now        = datetime.now()
             today      = now.date()
             today_s    = today.isoformat()
