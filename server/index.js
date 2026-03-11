@@ -425,6 +425,10 @@ const remoteTodayEnergyShadow = {
   syncedAt: 0,
 };
 const remoteBridgeAlarmState = Object.create(null);
+const remoteTodayCarryState = {
+  day: "",
+  byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
+};
 const gatewayTodayCarryState = {
   day: "",
   byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
@@ -654,6 +658,7 @@ function broadcastRemoteOfflineLiveState() {
     type: "live",
     data: remoteBridgeState.liveData,
     totals: remoteBridgeState.totals,
+    todayEnergy: getTodayEnergyRowsForWs(),
     remoteHealth: buildRemoteHealthSnapshot(),
   });
 }
@@ -1168,6 +1173,28 @@ function normalizeRemoteLiveReading(row, fallbackTs = Date.now()) {
   };
 }
 
+function buildRemoteLiveSnapshot(rowsRaw, syncedAt = Date.now()) {
+  const rows = rowsRaw && typeof rowsRaw === "object" ? rowsRaw : {};
+  const out = {};
+  for (const [key, rawRow] of Object.entries(rows)) {
+    const parsed = normalizeRemoteLiveReading(rawRow, syncedAt);
+    if (!parsed) continue;
+    out[String(key || `${parsed.inverter}_${parsed.unit}`)] = {
+      ...(rawRow && typeof rawRow === "object" ? rawRow : {}),
+      ...parsed,
+      // Preserve the gateway sample ts for persistence/history while using a
+      // bridge-local freshness ts for runtime liveness on remote clients.
+      sourceTs: Number(parsed.ts || 0),
+      bridgeTs: Math.max(0, Number(syncedAt || Date.now())),
+    };
+  }
+  return out;
+}
+
+function getRuntimeFreshTs(row) {
+  return Math.max(0, Number(row?.bridgeTs || row?.ts || 0));
+}
+
 function persistRemoteLiveRows(nextLiveData, syncedAt = Date.now()) {
   if (!isRemoteMode()) return;
   const rows = nextLiveData && typeof nextLiveData === "object" ? nextLiveData : {};
@@ -1319,7 +1346,7 @@ function computeTotalsFromLiveData(data) {
   for (const row of rows) {
     const inv = Number(row?.inverter || 0);
     if (!inv) continue;
-    const ts = Number(row?.ts || 0);
+    const ts = getRuntimeFreshTs(row);
     const online = Number(row?.online || 0) === 1;
     if (!online || !ts || now - ts > LIVE_FRESH_MS) continue;
     if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
@@ -2843,6 +2870,10 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       summary: `Pull complete | ${mainDbSummary} | ${archiveSummary}. Restart the app to apply the new gateway database.`,
     };
   } finally {
+    // Force immediate energy refresh after pull so the TODAY MWh metric
+    // recovers without waiting for the next 30 s piggyback cycle.
+    todayEnergyCache.ts = 0;
+    remoteBridgeState.lastTodayEnergyFetchTs = 0;
     restoreSocketPoolAfterReplication();
   }
 }
@@ -4412,9 +4443,8 @@ async function pollRemoteLiveOnce() {
       err.code = "BAD_JSON";
       throw err;
     }
-    remoteBridgeState.liveData =
-      data && typeof data === "object" ? data : {};
     const successTs = Date.now();
+    remoteBridgeState.liveData = buildRemoteLiveSnapshot(data, successTs);
     remoteBridgeState.lastLatencyMs = Math.max(0, successTs - startedAt);
     remoteBridgeState.lastLiveNodeCount = countRemoteLiveNodes(remoteBridgeState.liveData);
     persistRemoteLiveRows(remoteBridgeState.liveData, successTs);
@@ -4432,6 +4462,7 @@ async function pollRemoteLiveOnce() {
       type: "live",
       data: remoteBridgeState.liveData,
       totals: remoteBridgeState.totals,
+      todayEnergy: getTodayEnergyRowsForWs(),
       remoteHealth: buildRemoteHealthSnapshot(successTs),
     });
     remoteBridgeState.lastHealthBroadcastKey = "";
@@ -4488,8 +4519,9 @@ async function pollRemoteLiveOnce() {
           mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, ts);
           todayEnergyCache.ts = 0; // force next request to re-read with new data
         })
-        .catch(() => {
+        .catch((err) => {
           // Non-fatal; stale todayEnergyRows will be used until next tick.
+          console.warn("[remote-energy] piggyback fetch failed:", err?.message || err);
         })
         .finally(() => {
           if (
@@ -4649,6 +4681,8 @@ function stopRemoteBridge() {
   remoteBridgeState.lastLatencyMs = 0;
   remoteBridgeState.lastLiveNodeCount = 0;
   remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteTodayCarryState.day = "";
+  remoteTodayCarryState.byInv = Object.create(null);
   remoteBridgeState.todayEnergyFetchRequestId =
     Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
   remoteBridgeState.lastHealthBroadcastKey = "";
@@ -4659,6 +4693,8 @@ function stopRemoteBridge() {
 function startRemoteBridge() {
   if (remoteBridgeState.running) return;
   clearRemoteBridgePersistState();
+  remoteTodayCarryState.day = "";
+  remoteTodayCarryState.byInv = Object.create(null);
   remoteBridgeState.running = true;
   remoteBridgeState.startedAtTs = Date.now();
   remoteBridgeState.bridgeSessionId =
@@ -4968,12 +5004,30 @@ function _checkHandoffCompletion(pollerMap, day) {
 function getTodayEnergySupplementRows(day = localDateStr()) {
   if (isRemoteMode()) {
     // Keep remote today-energy metrics near real time between the 30 s
-    // gateway /api/energy/today syncs by merging fresh live kWh totals.
-    return mergeTodayEnergyRowsMax(
+    // gateway /api/energy/today syncs. Use carry-forward instead of a raw
+    // max() merge so live kWh deltas can continue from the last gateway total
+    // even if the gateway poller restarted and its in-memory kWh counters are
+    // lower than the day-total snapshot.
+    const liveRows = computeTodayEnergyRowsFromLiveData(remoteBridgeState.liveData);
+    const shadowRows = mergeTodayEnergyRowsMax(
       remoteBridgeState.todayEnergyRows || [],
-      computeTodayEnergyRowsFromLiveData(remoteBridgeState.liveData),
       getRemoteTodayEnergyShadowRows(day),
     );
+    if (!shadowRows.length) {
+      remoteTodayCarryState.day = day;
+      remoteTodayCarryState.byInv = Object.create(null);
+      return liveRows;
+    }
+    if (remoteTodayCarryState.day !== day) {
+      remoteTodayCarryState.day = day;
+      remoteTodayCarryState.byInv = Object.create(null);
+    }
+    const { rows: out } = applyGatewayCarryRows({
+      pollerRows: liveRows,
+      shadowRows,
+      carryByInv: remoteTodayCarryState.byInv,
+    });
+    return out;
   }
 
   const pollerRows = normalizeTodayEnergyRows(
@@ -5020,6 +5074,16 @@ function getTodayEnergySupplementRows(day = localDateStr()) {
   _checkHandoffCompletion(pollerMap, day);
 
   return out;
+}
+
+function getTodayEnergyRowsForWs(day = localDateStr()) {
+  // Remote-mode header updates should follow the live bridge tick, not the
+  // DB-oriented /api/energy/today cache path. Gateway mode keeps the existing
+  // DB-backed behavior for init payloads.
+  if (isRemoteMode()) {
+    return getTodayEnergySupplementRows(day);
+  }
+  return getTodayPacTotalsFromDbCached();
 }
 
 function todayEnergyRowsEqual(aRaw, bRaw) {
@@ -8225,6 +8289,7 @@ app.ws("/ws", (ws) => {
     JSON.stringify({
       type: "init",
       data: getRuntimeLiveData(),
+      todayEnergy: getTodayEnergyRowsForWs(),
       remoteHealth: buildRemoteHealthSnapshot(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),

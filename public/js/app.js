@@ -128,6 +128,10 @@ const State = {
     lastTotalPacW: 0,
     totalKwh: 0,
   },
+  todayEnergyByInv: {},
+  todayMwh: {
+    wsAuthoritative: false,
+  },
   netIO: {
     rxBytes: 0,        // cumulative bytes received (WS + HTTP response bodies)
     txBytes: 0,        // cumulative bytes sent (HTTP request bodies)
@@ -1862,6 +1866,7 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
   State.pacToday.totalKwh = 0;
+  State.todayMwh.wsAuthoritative = false;
 }
 
 function summarizeLiveRows(rowsRaw = []) {
@@ -1879,7 +1884,7 @@ function buildFreshLiveTotalsByInverter(now = Date.now()) {
   const out = {};
   Object.values(State.liveData || {}).forEach((d) => {
     const inv = Number(d?.inverter || 0);
-    const isFresh = d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS;
+    const isFresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
     if (!inv || !isFresh) return;
     if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
     out[inv].pac += Number(d?.pac || 0);
@@ -1896,17 +1901,51 @@ function getCurrentFreshTotalPacW(now = Date.now()) {
   );
 }
 
-function applySyncedTodayKwh(totalKwh, syncedAt = Date.now()) {
+function getLiveFreshTsClient(row) {
+  return Math.max(0, Number(row?.bridgeTs || row?.ts || 0));
+}
+
+function setTodayEnergyRowsClient(rowsRaw) {
+  const next = {};
+  const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  rows.forEach((row) => {
+    const inv = Math.floor(Number(row?.inverter || 0));
+    const totalKwh = Number(row?.total_kwh || 0);
+    if (!(inv > 0) || !Number.isFinite(totalKwh) || totalKwh < 0) return;
+    next[inv] = totalKwh;
+  });
+  State.todayEnergyByInv = next;
+}
+
+function resetTodayMwhAuthority() {
+  State.todayMwh.wsAuthoritative = false;
+}
+
+function canApplyTodayMwhSync(source = "sync", { allowRemoteFallback = false } = {}) {
+  const src = String(source || "sync").trim().toLowerCase();
+  if (getActiveOperationModeClient() !== "remote") return true;
+  if (src === "ws") return true;
+  return Boolean(allowRemoteFallback) && !State.todayMwh.wsAuthoritative;
+}
+
+function applySyncedTodayKwh(totalKwh, syncedAt = Date.now(), opts = {}) {
+  const source = String(opts?.source || "sync").trim().toLowerCase();
+  const allowRemoteFallback = Boolean(opts?.allowRemoteFallback);
   resetPacTodayIfNeeded(syncedAt);
+  if (!canApplyTodayMwhSync(source, { allowRemoteFallback })) return false;
   const serverKwh = Math.max(0, Number(totalKwh) || 0);
   // Keep header strictly server-authoritative so it matches report/analytics totals.
   State.pacToday.totalKwh = serverKwh;
   State.pacToday.lastTs         = syncedAt;
   State.pacToday.lastTotalPacW  = getCurrentFreshTotalPacW(syncedAt);
+  if (source === "ws") {
+    State.todayMwh.wsAuthoritative = true;
+  }
   const meter = $("totalKwh");
   if (meter) {
     meter.title = `Synced: ${fmtDateTime(syncedAt)}`;
   }
+  return true;
 }
 
 function integrateTodayFromPac() {
@@ -1935,29 +1974,39 @@ async function fetchTodayEnergyTotalsRaw() {
 async function seedTodayEnergyFromDb() {
   try {
     const rows = await fetchTodayEnergyTotalsRaw();
+    setTodayEnergyRowsClient(rows);
     const totalKwh = (rows || []).reduce(
       (sum, r) => sum + Number(r?.total_kwh || 0),
       0,
     );
-    applySyncedTodayKwh(totalKwh, Date.now());
-    renderTodayKwhFromPac();
+    const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+      source: "seed",
+      allowRemoteFallback: true,
+    });
+    if (applied) renderTodayKwhFromPac();
   } catch (e) {
     console.warn("seedTodayEnergyFromDb:", e?.message || e);
   }
 }
 
-async function syncTodayMwhFromServer() {
+async function syncTodayMwhFromServer(opts = {}) {
   try {
     const rows = await fetchTodayEnergyTotalsRaw();
+    setTodayEnergyRowsClient(rows);
     const totalKwh = (rows || []).reduce(
       (sum, r) => sum + Number(r?.total_kwh || 0),
       0,
     );
-    applySyncedTodayKwh(totalKwh, Date.now());
-    renderTodayKwhFromPac();
+    const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+      source: "http",
+      allowRemoteFallback: Boolean(opts?.allowRemoteFallback),
+    });
+    if (applied) renderTodayKwhFromPac();
+    return applied;
   } catch (e) {
     // Non-fatal: next sync tick will refresh the metric.
     console.warn("syncTodayMwhFromServer:", e?.message || e);
+    return false;
   }
 }
 
@@ -1970,6 +2019,9 @@ function stopTodayMwhSyncTimer() {
 
 function startTodayMwhSyncTimer() {
   stopTodayMwhSyncTimer();
+  // In remote mode, TODAY MWh is driven by WS todayEnergy updates to avoid
+  // racing the bridge feed with parallel HTTP/report refreshes.
+  if (getActiveOperationModeClient() === "remote") return;
   syncTodayMwhFromServer().catch(() => {});
   State.todayMwhSyncTimer = setInterval(() => {
     syncTodayMwhFromServer().catch(() => {});
@@ -3655,19 +3707,26 @@ async function handleOperationModeTransition(
   State.analyticsDailyTotalMwh = null;
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
+  resetTodayMwhAuthority();
   State.remoteHealth = normalizeRemoteHealthClient({
     state: nextMode === "remote" ? "disconnected" : "gateway-local",
   });
   resetChatState();
   scheduleInverterCardsUpdate(true);
 
-  // Re-seed canonical today MWh for the new mode source.
-  await syncTodayMwhFromServer().catch((err) => {
-    console.warn(
-      `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
-      err?.message || err,
-    );
-  });
+  if (nextMode === "remote") {
+    stopTodayMwhSyncTimer();
+    // Allow a one-time HTTP seed while waiting for the first WS todayEnergy
+    // payload after entering remote mode. Ongoing remote updates stay WS-only.
+    await syncTodayMwhFromServer({ allowRemoteFallback: true }).catch((err) => {
+      console.warn(
+        `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
+        err?.message || err,
+      );
+    });
+  } else {
+    startTodayMwhSyncTimer();
+  }
   renderTodayKwhFromPac();
 
   // Refresh currently visible data views so numbers align with the new mode immediately.
@@ -5206,10 +5265,10 @@ function updateInverterCards() {
     );
     const invUnitMap = unitMapByInv[inv] || Object.create(null);
     const freshUnits = units.filter(
-      (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS,
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
     );
     const visibleUnits = units.filter(
-      (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS + remoteDisplayHoldMs,
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS + remoteDisplayHoldMs,
     );
     const activeAlarmEntries = (activeAlarmsByInv[inv] || []).filter(
       (a) =>
@@ -5348,9 +5407,9 @@ function updateInverterCards() {
       const rowVisible =
         d &&
         d.online &&
-        now - Number(d.ts || 0) <= DATA_FRESH_MS + remoteDisplayHoldMs;
+        now - getLiveFreshTsClient(d) <= DATA_FRESH_MS + remoteDisplayHoldMs;
       const nodeReachable =
-        d && d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS;
+        d && d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
       const rowStale = staleSnapshot && rowVisible && !nodeReachable;
       if (nodeReachable) activeNodes++;
       const nodeOn =
@@ -5502,7 +5561,7 @@ function applyNodeRowOrdering(inv, rowStateMap) {
 
 async function updateTodayKwh() {
   // Backward-compatible hook: force immediate server sync + render.
-  await syncTodayMwhFromServer();
+  await syncTodayMwhFromServer({ allowRemoteFallback: true });
   renderTodayKwhFromPac();
 }
 
@@ -6154,10 +6213,10 @@ function renderInverterDetailStats(inv) {
   const liveTotalsByInv = buildFreshLiveTotalsByInverter(now);
   const liveTotals = liveTotalsByInv[inv] || { pac: 0, pdc: 0, kwh: 0 };
 
-  // Today Energy — prefer fresh live WS totals (same poller accumulator that writes energy_5min);
-  // fall back to 60s API-polled value if WS data hasn't arrived yet
-  const kwhLive = Number(liveTotals.kwh || 0);
-  const kwh = kwhLive > 0 ? kwhLive : Number(State.invDetailKwh || 0);
+  // Today Energy — use server-authoritative per-inverter totals tracked from
+  // /api/energy/today or WS todayEnergy rows so restart-safe persisted totals
+  // are not replaced by the poller's volatile in-memory kWh counters.
+  const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);
 
   // DC Power — live from WS (not shown elsewhere; replaces redundant AC Output chip)
   const pdc = Number(liveTotals.pdc || 0);
@@ -6177,7 +6236,7 @@ function renderInverterDetailStats(inv) {
     Number(State.settings.nodeCount || 4) ||
     4;
   const nodeCount = allInvKeys.filter(
-    ([, d]) => d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS,
+    ([, d]) => d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
   ).length;
 
   const chips = [
@@ -6412,6 +6471,18 @@ function handleWS(msg) {
     if (msg.data) State.liveData = sanitizeLiveDataByConfig(msg.data);
     if (msg.totals) State.totals = msg.totals;
     integrateTodayFromPac();
+    // Apply server-authoritative today energy from WS so the header metric
+    // updates on every bridge tick without depending on the HTTP sync timer.
+    if (Array.isArray(msg.todayEnergy) && msg.todayEnergy.length) {
+      setTodayEnergyRowsClient(msg.todayEnergy);
+      const totalKwh = msg.todayEnergy.reduce(
+        (sum, r) => sum + Number(r?.total_kwh || 0), 0
+      );
+      const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+        source: "ws",
+      });
+      if (applied) renderTodayKwhFromPac();
+    }
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
       State.settings.plantName = msg.settings.plantName || "ADSI Plant";
@@ -6455,7 +6526,7 @@ function handleWS(msg) {
     const d = State.liveData[msg.key];
     if (d) {
       // Short debounce only: ignore only very-late races, not true offline transitions.
-      if (Date.now() - Number(d.ts || 0) <= 2000) return;
+      if (Date.now() - getLiveFreshTsClient(d) <= 2000) return;
       d.online = 0;
       integrateTodayFromPac();
       scheduleInverterCardsUpdate();
@@ -7410,8 +7481,10 @@ async function fetchReportSummary(date) {
     if (sanitizeDateInputValue(date) === today()) {
       const totalKwh = Number(summary?.daily?.total_kwh);
       if (Number.isFinite(totalKwh)) {
-        applySyncedTodayKwh(totalKwh, Date.now());
-        renderTodayKwhFromPac();
+        const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+          source: "report",
+        });
+        if (applied) renderTodayKwhFromPac();
       }
     }
   } catch (e) {
@@ -8023,7 +8096,7 @@ function mergeRealtimeOverlay(baseRows, intervalMin) {
   Object.values(State.liveData || {}).forEach((d) => {
     const inv = Number(d?.inverter || 0);
     if (!inv) return;
-    const fresh = d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS;
+    const fresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
     if (!fresh) return;
     livePacByInv[inv] = (livePacByInv[inv] || 0) + Number(d?.pac || 0); // W
   });
@@ -8125,7 +8198,7 @@ function ensureAnalyticsRealtime() {
     let s = 0;
     const now = Date.now();
     Object.values(State.liveData || {}).forEach((d) => {
-      if (d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS) {
+      if (d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS) {
         s += Number(d.pac || 0) * Number(d.inverter || 0);
       }
     });
