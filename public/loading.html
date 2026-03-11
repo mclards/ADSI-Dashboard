@@ -1,215 +1,540 @@
-﻿<!doctype html>
+<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ADSI Inverter Dashboard</title>
+    <link rel="icon" type="image/png" href="../assets/icon-256.png" />
     <style>
+      :root {
+        --bg-top: #07111e;
+        --bg-bottom: #040814;
+        --panel: rgba(7, 17, 32, 0.86);
+        --panel-border: rgba(120, 164, 255, 0.16);
+        --text: #ebf3ff;
+        --muted: #8ea6ca;
+        --accent: #4da3ff;
+        --accent-2: #ffd34d;
+        --ok: #31cb88;
+        --error-bg: rgba(156, 32, 55, 0.18);
+        --error-border: rgba(255, 102, 132, 0.35);
+      }
+
       * {
+        box-sizing: border-box;
         margin: 0;
         padding: 0;
-        box-sizing: border-box;
       }
+
+      html,
       body {
-        background: #0f1117;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        min-height: 100%;
+      }
+
+      body {
+        overflow: hidden;
+        font-family: "Segoe UI", "Segoe UI Variable", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top, rgba(77, 163, 255, 0.18), transparent 34%),
+          radial-gradient(circle at 18% 82%, rgba(255, 211, 77, 0.12), transparent 28%),
+          linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+      }
+
+      .shell {
+        position: relative;
+        display: grid;
+        place-items: center;
         min-height: 100vh;
-        padding: 16px;
-        overflow: auto;
-        font-family: "Segoe UI", sans-serif;
-        color: #e2e8f0;
+        padding: 24px;
       }
-      .wrap {
+
+      .shell::before,
+      .shell::after {
+        content: "";
+        position: absolute;
+        border-radius: 999px;
+        pointer-events: none;
+        filter: blur(10px);
+      }
+
+      .shell::before {
+        width: 210px;
+        height: 210px;
+        top: 34px;
+        right: -42px;
+        background: rgba(77, 163, 255, 0.12);
+      }
+
+      .shell::after {
+        width: 180px;
+        height: 180px;
+        left: -36px;
+        bottom: 18px;
+        background: rgba(255, 211, 77, 0.08);
+      }
+
+      .card {
+        position: relative;
+        width: min(100%, 560px);
+        padding: 28px 30px 24px;
+        border: 1px solid var(--panel-border);
+        border-radius: 22px;
+        background:
+          linear-gradient(180deg, rgba(10, 22, 42, 0.96), rgba(6, 12, 24, 0.96));
+        box-shadow:
+          0 26px 70px rgba(0, 0, 0, 0.45),
+          inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        overflow: hidden;
+      }
+
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(135deg, rgba(77, 163, 255, 0.06), transparent 34%),
+          linear-gradient(315deg, rgba(255, 211, 77, 0.06), transparent 26%);
+        pointer-events: none;
+      }
+
+      .brand {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
         text-align: center;
-        max-width: 480px;
-        width: 100%;
-        padding: 16px;
-        border-radius: 8px;
-        background: rgba(23, 13, 18, 0.5);
-        max-height: calc(100vh - 32px);
-        overflow: auto;
+        z-index: 1;
       }
-      .icon {
-        width: 48px;
-        height: 48px;
-        object-fit: contain;
-        margin-bottom: 10px;
-        filter: drop-shadow(0 0 8px rgba(245, 197, 24, 0.35));
+
+      .icon-ring {
+        position: relative;
+        width: 90px;
+        height: 90px;
+        display: grid;
+        place-items: center;
+        margin-bottom: 14px;
       }
-      .title {
-        font-size: 22px;
-        font-weight: 700;
-        color: #f5c518;
-        letter-spacing: 1px;
-      }
-      .sub {
-        font-size: 12px;
-        color: #94a3b8;
-        margin-top: 4px;
-      }
-      .spinner {
-        width: 36px;
-        height: 36px;
-        margin: 16px auto 0;
-        border: 3px solid #2e3350;
-        border-top-color: #f5c518;
+
+      .icon-ring::before {
+        content: "";
+        position: absolute;
+        inset: 4px;
         border-radius: 50%;
-        animation: spin 0.8s linear infinite;
+        background:
+          radial-gradient(circle at center, rgba(77, 163, 255, 0.24), transparent 62%);
+        filter: blur(3px);
       }
-      @keyframes spin {
+
+      .icon-ring::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(77, 163, 255, 0.18);
+        box-shadow:
+          0 0 22px rgba(77, 163, 255, 0.12),
+          inset 0 0 18px rgba(255, 211, 77, 0.08);
+      }
+
+      .app-icon {
+        position: relative;
+        width: 62px;
+        height: 62px;
+        object-fit: contain;
+        filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.35));
+      }
+
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+      }
+
+      .title {
+        margin-top: 8px;
+        font-size: 31px;
+        font-weight: 800;
+        line-height: 1.08;
+        letter-spacing: 0.01em;
+      }
+
+      .sub {
+        max-width: 390px;
+        margin-top: 10px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+
+      .status-row {
+        position: relative;
+        z-index: 1;
+        margin-top: 24px;
+      }
+
+      .status-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 10px;
+      }
+
+      .status-label {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #c9dcff;
+      }
+
+      .status-text {
+        font-size: 13px;
+        color: #dfe9ff;
+      }
+
+      .progress {
+        position: relative;
+        height: 12px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(133, 156, 198, 0.14);
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+      }
+
+      .progress-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background:
+          linear-gradient(90deg, var(--accent), #79c4ff 55%, var(--accent-2));
+        box-shadow: 0 0 18px rgba(77, 163, 255, 0.22);
+        transition: width 0.35s ease;
+      }
+
+      .progress-fill::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        animation: sheen 1.8s linear infinite;
+      }
+
+      @keyframes sheen {
+        from {
+          transform: translateX(-100%);
+        }
         to {
-          transform: rotate(360deg);
+          transform: translateX(100%);
         }
       }
+
+      .spinner {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 14px;
+        color: #b9cff2;
+        font-size: 12px;
+      }
+
+      .spinner-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--accent-2);
+        box-shadow: 0 0 14px rgba(255, 211, 77, 0.42);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(0.82);
+          opacity: 0.72;
+        }
+        50% {
+          transform: scale(1.18);
+          opacity: 1;
+        }
+      }
+
       .steps {
-        margin-top: 16px;
-        padding: 12px 8px;
-        font-size: 9px;
-        text-align: left;
-        opacity: 0.7;
-        background: rgba(46, 51, 80, 0.3);
-        border-radius: 4px;
-        line-height: 1.3;
+        position: relative;
+        z-index: 1;
+        margin-top: 20px;
+        padding: 14px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(134, 156, 198, 0.12);
       }
+
       .step {
-        padding: 2px 0;
-        color: #94a3b8;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 2px;
+        color: var(--muted);
+        font-size: 12px;
       }
+
+      .step + .step {
+        border-top: 1px solid rgba(134, 156, 198, 0.09);
+      }
+
+      .step-bullet {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-size: 11px;
+        font-weight: 700;
+        color: #0a1221;
+        background: rgba(142, 166, 202, 0.32);
+        transition: all 0.2s ease;
+      }
+
       .step.active {
-        color: #f5c518;
-        font-weight: 600;
+        color: var(--text);
       }
+
+      .step.active .step-bullet {
+        background: var(--accent-2);
+        box-shadow: 0 0 14px rgba(255, 211, 77, 0.26);
+      }
+
       .step.done {
-        color: #10b370;
+        color: #cfe9dc;
       }
-      .step.done::before {
-        content: "✓ ";
+
+      .step.done .step-bullet {
+        color: #08151f;
+        background: var(--ok);
+        box-shadow: 0 0 14px rgba(49, 203, 136, 0.24);
       }
+
+      .step.done .step-bullet::before {
+        content: "✓";
+      }
+
       .error-panel {
         display: none;
-        margin-top: 16px;
-        padding: 10px;
-        background-color: rgba(224, 53, 96, 0.12);
-        border: 1px solid var(--red, #e03560);
-        border-radius: 6px;
-        color: #ffc0cb;
-        font-size: 10px;
-        line-height: 1.4;
+        position: relative;
+        z-index: 1;
+        margin-top: 18px;
+        padding: 15px 16px 14px;
+        border-radius: 16px;
+        background: var(--error-bg);
+        border: 1px solid var(--error-border);
       }
+
       .error-title {
-        font-weight: 700;
-        color: #e03560;
-        margin-bottom: 4px;
+        font-size: 13px;
+        font-weight: 800;
+        color: #ffafbf;
       }
-      .retry-btn {
+
+      .error-text {
         margin-top: 8px;
-        padding: 5px 10px;
-        background-color: #c05b7c;
-        border: none;
-        border-radius: 4px;
-        color: #fff;
-        font-size: 10px;
-        font-weight: 600;
+        color: #ffd8df;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+
+      .error-actions {
+        margin-top: 12px;
+        display: flex;
+        justify-content: flex-start;
+      }
+
+      .retry-btn {
+        border: 0;
+        border-radius: 999px;
+        padding: 9px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #08111f;
+        background: linear-gradient(180deg, #ffd874, #ffbf3d);
         cursor: pointer;
-        transition: opacity 0.15s ease;
+        box-shadow: 0 8px 22px rgba(255, 191, 61, 0.22);
       }
+
       .retry-btn:hover {
-        opacity: 0.84;
+        filter: brightness(1.03);
       }
+
       .retry-btn:active {
-        opacity: 0.7;
+        transform: translateY(1px);
       }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <img class="icon" src="../assets/logo.png" alt="Dashboard V2" />
-      <div class="title">Dashboard V2</div>
-      <div class="sub" id="statusText">Starting application services. Please wait…</div>
-      <div class="spinner" id="spinner"></div>
+    <div class="shell">
+      <div class="card">
+        <div class="brand">
+          <div class="icon-ring">
+            <img
+              id="brandIcon"
+              class="app-icon"
+              src="../assets/icon-256.png"
+              alt="ADSI Inverter Dashboard"
+            />
+          </div>
+          <div class="eyebrow">Authorized Workstation</div>
+          <div class="title">ADSI Inverter Dashboard</div>
+          <div class="sub">
+            Preparing monitoring, control, and data services. This usually completes
+            within a few moments.
+          </div>
+        </div>
 
-      <div class="steps">
-        <div class="step active" id="step1">Starting application services…</div>
-        <div class="step" id="step2">Verifying license state…</div>
-        <div class="step" id="step3">Loading operating configuration…</div>
-        <div class="step" id="step4">Bringing services online…</div>
-      </div>
+        <div class="status-row">
+          <div class="status-head">
+            <div class="status-label">Startup Status</div>
+            <div class="status-text" id="statusText">Initializing application services...</div>
+          </div>
+          <div class="progress" aria-hidden="true">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="spinner" id="spinner">
+            <div class="spinner-dot"></div>
+            <span>Connecting to the local dashboard service...</span>
+          </div>
+        </div>
 
-      <div class="error-panel" id="errorPanel">
-        <div class="error-title">Startup Check Required</div>
-        <div id="errorMsg">The application did not finish starting. Verify that the required services are available, then try again.</div>
-        <button class="retry-btn" onclick="location.reload()">Try Again</button>
+        <div class="steps" id="stepsPanel">
+          <div class="step active" id="step1">
+            <div class="step-bullet">1</div>
+            <div>Initializing application shell</div>
+          </div>
+          <div class="step" id="step2">
+            <div class="step-bullet">2</div>
+            <div>Validating license and workstation state</div>
+          </div>
+          <div class="step" id="step3">
+            <div class="step-bullet">3</div>
+            <div>Loading plant configuration and runtime settings</div>
+          </div>
+          <div class="step" id="step4">
+            <div class="step-bullet">4</div>
+            <div>Bringing dashboard services online</div>
+          </div>
+        </div>
+
+        <div class="error-panel" id="errorPanel">
+          <div class="error-title">Startup Check Required</div>
+          <div class="error-text" id="errorMsg">
+            The application did not finish starting. Verify the local services and try again.
+          </div>
+          <div class="error-actions">
+            <button class="retry-btn" type="button" onclick="location.reload()">Retry Startup</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <script>
-      const STARTUP_TIMEOUT = 120000;  // 2 minutes
+      const STARTUP_TIMEOUT = 120000;
+      const STEP_TIMELINE = [
+        { at: 0, step: 1, progress: 14, text: "Initializing application services..." },
+        { at: 2200, step: 2, progress: 38, text: "Validating license and workstation state..." },
+        { at: 7000, step: 3, progress: 66, text: "Loading plant configuration and runtime settings..." },
+        { at: 14000, step: 4, progress: 90, text: "Bringing dashboard services online..." },
+      ];
+
       let startTime = Date.now();
       let currentStep = 1;
 
-      function updateStep(stepNum, isDone) {
-        const el = document.getElementById(`step${stepNum}`);
-        if (el) {
-          el.classList.remove("active");
-          if (isDone) {
-            el.classList.add("done");
-          } else {
-            el.classList.add("active");
-          }
-        }
+      const progressFill = document.getElementById("progressFill");
+      const statusText = document.getElementById("statusText");
+      const spinner = document.getElementById("spinner");
+      const errorPanel = document.getElementById("errorPanel");
+      const errorMsg = document.getElementById("errorMsg");
+      const brandIcon = document.getElementById("brandIcon");
+
+      if (brandIcon) {
+        brandIcon.addEventListener("error", () => {
+          brandIcon.src = "../assets/adsi_logo.png";
+        }, { once: true });
       }
 
-      function showError(message) {
-        document.getElementById("spinner").style.display = "none";
-        document.getElementById("statusText").textContent = "Startup requires attention";
-        document.getElementById("errorMsg").textContent = message;
-        document.getElementById("errorPanel").style.display = "block";
+      function setProgress(percent) {
+        if (!progressFill) return;
+        const safe = Math.max(0, Math.min(100, Number(percent) || 0));
+        progressFill.style.width = `${safe}%`;
       }
+
+      function markStep(stepNum, state) {
+        const el = document.getElementById(`step${stepNum}`);
+        if (!el) return;
+        el.classList.remove("active", "done");
+        if (state) el.classList.add(state);
+      }
+
+      function applyTimeline(elapsed) {
+        let active = STEP_TIMELINE[0];
+        for (const item of STEP_TIMELINE) {
+          if (elapsed >= item.at) active = item;
+        }
+
+        if (active.step !== currentStep) {
+          for (let i = 1; i < active.step; i += 1) markStep(i, "done");
+          markStep(active.step, "active");
+          for (let i = active.step + 1; i <= STEP_TIMELINE.length; i += 1) markStep(i, "");
+          currentStep = active.step;
+        }
+
+        statusText.textContent = active.text;
+        setProgress(active.progress);
+      }
+
+      function showStartupError(message) {
+        if (spinner) spinner.style.display = "none";
+        if (statusText) statusText.textContent = "Startup requires attention";
+        setProgress(100);
+        for (let i = 1; i <= STEP_TIMELINE.length; i += 1) {
+          markStep(i, i < currentStep ? "done" : "");
+        }
+        if (errorMsg) errorMsg.textContent = String(message || "The dashboard could not finish starting.");
+        if (errorPanel) errorPanel.style.display = "block";
+      }
+
+      window.showStartupError = showStartupError;
 
       function checkServerReady() {
         const elapsed = Date.now() - startTime;
+        applyTimeline(elapsed);
 
-        // Update progress steps based on elapsed time
-        if (elapsed > 2000 && currentStep === 1) {
-          updateStep(1, true);
-          updateStep(2, false);
-          currentStep = 2;
-        }
-        if (elapsed > 8000 && currentStep === 2) {
-          updateStep(2, true);
-          updateStep(3, false);
-          currentStep = 3;
-        }
-        if (elapsed > 15000 && currentStep === 3) {
-          updateStep(3, true);
-          updateStep(4, false);
-          currentStep = 4;
-        }
-
-        // Timeout check
         if (elapsed > STARTUP_TIMEOUT) {
-          showError(
-            "Startup is taking longer than expected. If this is the first launch after an update, maintenance may still be finishing. Verify configuration and required services, then try again."
+          showStartupError(
+            "Startup is taking longer than expected. If this is the first launch after an update, database maintenance may still be finishing. Verify the required services, then retry."
           );
           return;
         }
 
-        // Check if main page is accessible
         fetch("/", { method: "HEAD" })
           .then((r) => {
             if (r.ok) {
+              setProgress(100);
               window.location.href = "/";
-            } else {
-              setTimeout(checkServerReady, 500);
+              return;
             }
+            setTimeout(checkServerReady, 500);
           })
           .catch(() => {
             setTimeout(checkServerReady, 500);
           });
       }
 
-      // Start checking after a brief delay
-      setTimeout(checkServerReady, 100);
+      applyTimeline(0);
+      setTimeout(checkServerReady, 120);
     </script>
   </body>
 </html>

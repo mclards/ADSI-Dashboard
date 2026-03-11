@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard V2</title>
+    <title>ADSI Inverter Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700&display=swap"
@@ -26,7 +26,7 @@
             <img
               id="logo-img"
               src="/assets/adsi_logo.png"
-              alt="Dashboard V2"
+              alt="ADSI Inverter Dashboard"
             />
             <span id="logo-text" class="logo-fallback" style="display: none"
               >IM</span
@@ -130,7 +130,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>Dashboard V2</b> <span class="side-about-ver">v2.3.2</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.3.3</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -272,9 +272,8 @@
               </select></label
             >
             <label
-              >From <input type="date" id="alarmStart" class="inp"
+              >Date <input type="date" id="alarmDate" class="inp"
             /></label>
-            <label>To <input type="date" id="alarmEnd" class="inp" /></label>
             <button id="btnFetchAlarms" class="btn btn-accent">
               Load Records
             </button>
@@ -318,9 +317,8 @@
               </select></label
             >
             <label
-              >From <input type="date" id="energyStart" class="inp"
+              >Date <input type="date" id="energyDate" class="inp"
             /></label>
-            <label>To <input type="date" id="energyEnd" class="inp" /></label>
             <label
               >Resolution
               <select id="energyRes" class="sel">
@@ -335,7 +333,7 @@
         </div>
         <div id="energySummary" class="energy-summary">
           <div class="energy-kpi">
-            <div class="energy-kpi-label">Range Total</div>
+            <div class="energy-kpi-label">Date Total</div>
             <div class="energy-kpi-value" id="energyTotalMwh">— MWh</div>
           </div>
           <div class="energy-kpi">
@@ -382,9 +380,8 @@
               </select></label
             >
             <label
-              >From <input type="date" id="auditStart" class="inp"
+              >Date <input type="date" id="auditDate" class="inp"
             /></label>
-            <label>To <input type="date" id="auditEnd" class="inp" /></label>
             <button id="btnFetchAudit" class="btn btn-accent">Load Records</button>
           </div>
           <div class="tl-right">
@@ -644,7 +641,7 @@
             <div class="exp-icon exp-icon-alarm"><span class="mdi mdi-bell-alert-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Alarm History Export</div>
             <div class="exp-desc">
-              Alarm records for the selected range, including code, severity,
+              Alarm records for the selected date, including code, severity,
               duration, and acknowledgement state.
             </div>
             <div class="exp-form">
@@ -654,10 +651,7 @@
                 </select></label
               >
               <label
-                >From<input type="date" id="expAlarmStart" class="inp"
-              /></label>
-              <label
-                >To<input type="date" id="expAlarmEnd" class="inp"
+                >Date<input type="date" id="expAlarmDate" class="inp"
               /></label>
               <label
                 >Format
@@ -671,7 +665,7 @@
               <button
                 id="btnExportAlarms"
                 class="btn btn-accent btn-full"
-                title="Export alarm history for the selected date range and selected file format."
+                title="Export alarm history for the selected date and selected file format."
               >
                 <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Alarm History</span>
               </button>
@@ -766,7 +760,7 @@
             <div class="exp-icon exp-icon-energy"><span class="mdi mdi-database-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Operational Data Export</div>
             <div class="exp-desc">
-              Interval-sampled inverter operating data for analysis,
+              Interval-sampled inverter operating data for the selected date, analysis,
               troubleshooting, and controlled operational record sharing.
             </div>
             <div class="exp-form">
@@ -776,10 +770,7 @@
                 </select></label
               >
               <label
-                >From<input type="date" id="expInvDataStart" class="inp"
-              /></label>
-              <label
-                >To<input type="date" id="expInvDataEnd" class="inp"
+                >Date<input type="date" id="expInvDataDate" class="inp"
               /></label>
               <label
                 >Interval (min)<input
@@ -818,7 +809,7 @@
             <div class="exp-icon exp-icon-audit"><span class="mdi mdi-clipboard-text-clock-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Operator Audit Export</div>
             <div class="exp-desc">
-              Operator command history with timestamp, scope, result, and
+              Operator command history for the selected date with timestamp, scope, result, and
               affected equipment.
             </div>
             <div class="exp-form">
@@ -828,10 +819,7 @@
                 </select></label
               >
               <label
-                >From<input type="date" id="expAuditStart" class="inp"
-              /></label>
-              <label
-                >To<input type="date" id="expAuditEnd" class="inp"
+                >Date<input type="date" id="expAuditDate" class="inp"
               /></label>
               <label
                 >Format
@@ -1297,7 +1285,7 @@
                   <input type="checkbox" id="setReplicationIncludeArchive" />
                   <span>Include archived files in the next standby DB refresh</span>
                 </label>
-                <small id="replicationArchiveHint">Optional. Leave disabled for faster standby DB refresh. Enable when historical archive files are needed.</small>
+                <small id="replicationArchiveHint">Optional. Leave disabled for faster standby DB refresh. Enable when you want the gateway monthly archive DB files staged too.</small>
               </div>
               <div class="sgroup-actions">
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh gateway link status, standby refresh counters, and transfer diagnostics." aria-label="Refresh gateway link status">
@@ -1976,13 +1964,13 @@
     <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
       <div class="guide-modal-card">
         <div class="guide-modal-head">
-          <div class="guide-modal-title">Dashboard V2 — Operator Guide</div>
+          <div class="guide-modal-title">ADSI Inverter Dashboard — Operator Guide</div>
           <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">&times;</button>
         </div>
         <div class="guide-modal-body">
 
           <div class="guide-author-banner">
-            <div class="guide-author-app">Dashboard V2 <span class="guide-author-ver">v2.3.2</span></div>
+            <div class="guide-author-app">ADSI Inverter Dashboard <span class="guide-author-ver">v2.3.3</span></div>
             <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
             <div class="guide-author-credit">
               Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
@@ -2021,7 +2009,7 @@
             <details open>
               <summary>1. Overview &amp; Purpose</summary>
               <ul>
-                <li>Dashboard V2 provides centralized operational visibility for the configured inverter fleet.</li>
+                <li>ADSI Inverter Dashboard provides centralized operational visibility for the configured inverter fleet.</li>
                 <li>The application consolidates live status, interval energy, alarms, audit activity, and formal reporting in one workstation interface.</li>
                 <li>Forecast and comparison tools support day-ahead review and daily performance assessment.</li>
                 <li>Gateway and remote operating modes allow controlled access from more than one machine while preserving a single operational source of truth.</li>
@@ -2124,7 +2112,7 @@
           </div>
 
           <div class="guide-footer-credit">
-            Dashboard V2 v2.3.2 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
+            ADSI Inverter Dashboard v2.3.3 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
           </div>
         </div>
       </div>

@@ -6,7 +6,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 
 ## Project Identity
 
-- User-facing product name: `Dashboard V2`
+- User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
 - Current repo version baseline: `2.3.2` in `package.json`

@@ -23,6 +23,8 @@ function createXferSlot(dir) {
   };
 }
 
+const REPLICATION_INCLUDE_ARCHIVE_PREF_KEY = "replicationIncludeArchiveNext";
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
   liveData: {}, // key: `${inv}_${unit}` → parsed row
@@ -91,6 +93,7 @@ const State = {
     rows: [],
     page: 1,
     pageSize: 180,
+    queryKey: "",
   },
   energyView: {
     page: 1,
@@ -99,6 +102,7 @@ const State = {
     rows: [],
     summary: null,
     serverPaged: true,
+    queryKey: "",
   },
   auditView: {
     rows: [],
@@ -106,6 +110,7 @@ const State = {
     sortDir: "desc",
     page: 1,
     pageSize: 200,
+    queryKey: "",
   },
   reportView: {
     rows: [],
@@ -148,6 +153,7 @@ const State = {
     job: null,
     scope: null,
     restartPromptedJobId: "",
+    includeArchiveNext: false,
   },
   remoteHealth: {},
   solcastPreview: {
@@ -395,6 +401,29 @@ function fmtRemaining(msLeft) {
   return `${mins}m`;
 }
 
+function licenseStatusLabel(status) {
+  if (!status) return "Unknown";
+  if (status.valid) {
+    if (status.lifetime) return "Valid (Lifetime)";
+    if (status.nearExpiry) return "Valid (Expiring Soon)";
+    return "Valid";
+  }
+  switch (String(status.code || "").toLowerCase()) {
+    case "trial_not_started":
+      return "Trial Not Started";
+    case "trial_expired":
+      return "Expired (Trial)";
+    case "license_expired":
+      return "Expired";
+    case "device_mismatch":
+      return "Invalid (Device Mismatch)";
+    case "license_error":
+      return "License Error";
+    default:
+      return "Expired / Invalid";
+  }
+}
+
 function renderLicenseNotice(status) {
   const host = $("licenseNotice");
   const textEl = $("licenseNoticeText");
@@ -405,7 +434,7 @@ function renderLicenseNotice(status) {
     document.body.classList.remove("license-notice-open");
     return;
   }
-  const remaining = fmtRemaining(Number(status?.msLeft || 0));
+  const remaining = String(status?.remainingText || "").trim() || fmtRemaining(Number(status?.msLeft || 0));
   const sourceLabel = status?.source === "trial" ? "Trial" : "License";
   textEl.textContent = `${sourceLabel} expires in ${remaining}. Upload a new license to avoid interruption.`;
   host.classList.remove("hidden");
@@ -480,14 +509,7 @@ function renderLicenseSummary() {
     return;
   }
 
-  let statusText = "Invalid";
-  if (status.valid) {
-    if (status.lifetime) statusText = "Valid (Lifetime)";
-    else if (status.nearExpiry) statusText = "Valid (Expiring Soon)";
-    else statusText = "Valid";
-  } else {
-    statusText = "Expired / Invalid";
-  }
+  const statusText = licenseStatusLabel(status);
   statusEl.textContent = statusText;
   if (status.valid && !status.nearExpiry) statusEl.classList.add("ok");
   else if (status.valid && status.nearExpiry) statusEl.classList.add("warn");
@@ -526,15 +548,18 @@ function renderLicenseSummary() {
   }
 
   expiryEl.textContent = fmtDateTime(exp);
-  const dLeft = Math.max(0, Math.floor((exp - Date.now()) / 86400000));
+  const dLeft = Number.isFinite(Number(status.daysLeft))
+    ? Math.max(0, Number(status.daysLeft))
+    : Math.max(0, Math.ceil((exp - Date.now()) / 86400000));
   daysEl.textContent = `${dLeft}`;
   if (aboutEl) {
     const prefix = sourceText === "License" ? "" : `${sourceText}: `;
+    const remaining = String(status?.remainingText || "").trim() || fmtRemaining(Number(status.msLeft || 0));
     aboutEl.textContent = status.valid
       ? status.nearExpiry
-        ? `${prefix}Expiring in ${fmtRemaining(Number(status.msLeft || 0))}`
+        ? `${prefix}Expiring in ${remaining}`
         : `${prefix}${dLeft} day(s) left`
-      : statusText;
+      : String(status.message || statusText);
   }
 }
 
@@ -881,14 +906,11 @@ function initThemeToggle() {
 }
 const EXPORT_DATE_FIELD_IDS = [
   "reportDate",
-  "expAlarmStart",
-  "expAlarmEnd",
+  "expAlarmDate",
   "expEnergyDate",
   "expForecastDate",
-  "expInvDataStart",
-  "expInvDataEnd",
-  "expAuditStart",
-  "expAuditEnd",
+  "expInvDataDate",
+  "expAuditDate",
   "expReportStart",
   "expReportEnd",
 ];
@@ -954,15 +976,23 @@ function clampExportNumberValue(id, value) {
 function sanitizeExportUiStateClient(input) {
   const out = {};
   const src = input && typeof input === "object" ? input : {};
-  const energyDate =
-    sanitizeDateInputValue(src.expEnergyDate) ||
-    sanitizeDateInputValue(src.expEnergyEnd) ||
-    sanitizeDateInputValue(src.expEnergyStart);
   EXPORT_DATE_FIELD_IDS.forEach((id) => {
     const v = sanitizeDateInputValue(src[id]);
     if (v) out[id] = v;
   });
-  if (energyDate) out.expEnergyDate = energyDate;
+  const migratedSingleDateFields = {
+    expAlarmDate: ["expAlarmDate", "expAlarmStart", "expAlarmEnd"],
+    expEnergyDate: ["expEnergyDate", "expEnergyEnd", "expEnergyStart"],
+    expForecastDate: ["expForecastDate"],
+    expInvDataDate: ["expInvDataDate", "expInvDataStart", "expInvDataEnd"],
+    expAuditDate: ["expAuditDate", "expAuditStart", "expAuditEnd"],
+  };
+  Object.entries(migratedSingleDateFields).forEach(([targetId, sourceIds]) => {
+    const value = sourceIds
+      .map((id) => sanitizeDateInputValue(src[id]))
+      .find(Boolean);
+    if (value) out[targetId] = value;
+  });
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
     out[id] = clampExportNumberValue(id, src[id]);
   });
@@ -1061,12 +1091,15 @@ function bindExportNumberValidators() {
 }
 
 const EXPORT_DATE_RANGE_IDS = [
-  ["expAlarmStart", "expAlarmEnd"],
-  ["expInvDataStart", "expInvDataEnd"],
-  ["expAuditStart", "expAuditEnd"],
   ["expReportStart", "expReportEnd"],
 ];
-const EXPORT_SINGLE_DATE_IDS = ["expEnergyDate", "expForecastDate"];
+const EXPORT_SINGLE_DATE_IDS = [
+  "expAlarmDate",
+  "expEnergyDate",
+  "expForecastDate",
+  "expInvDataDate",
+  "expAuditDate",
+];
 
 function clampExportDateToToday(value) {
   const v = sanitizeDateInputValue(value);
@@ -2657,8 +2690,12 @@ function startClock() {
       initAllTabDatesToToday();
       State.tabFetchTs = {};
       State.alarmView.rows  = [];
+      State.alarmView.queryKey = "";
       State.energyView.rows = [];
+      State.energyView.queryKey = "";
+      State.energyView.summary = null;
       State.auditView.rows  = [];
+      State.auditView.queryKey = "";
       State.reportView.rows = [];
     }
   }
@@ -3697,14 +3734,21 @@ async function handleOperationModeTransition(
   const prevMode = normalizeOperationModeValue(prevModeRaw);
   const nextMode = normalizeOperationModeValue(nextModeRaw);
   if (prevMode === nextMode) return;
+  const preserveAnalyticsView = State.currentPage === "analytics";
+
+  // Invalidate in-flight analytics reads so older mode responses cannot win.
+  State.analyticsReqId = (State.analyticsReqId || 0) + 1;
 
   // Clear mode-specific runtime views immediately to avoid stale carry-over.
   State.liveData = {};
   State.totals = {};
   State.invLastFresh = {};
-  State.analyticsBaseRows = [];
-  State.analyticsDayAheadBaseRows = [];
-  State.analyticsDailyTotalMwh = null;
+  if (!preserveAnalyticsView) {
+    State.analyticsBaseRows = [];
+    State.analyticsDayAheadBaseRows = [];
+    State.analyticsDayAheadCache = null;
+    State.analyticsDailyTotalMwh = null;
+  }
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
   resetTodayMwhAuthority();
@@ -4054,8 +4098,40 @@ function formatSyncDirection(value) {
   return map[v] || (v ? v.replace(/[-_]/g, " ") : "—");
 }
 
+function loadReplicationArchiveSelectionPreference() {
+  try {
+    return localStorage.getItem(REPLICATION_INCLUDE_ARCHIVE_PREF_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function persistReplicationArchiveSelectionPreference(value) {
+  try {
+    localStorage.setItem(
+      REPLICATION_INCLUDE_ARCHIVE_PREF_KEY,
+      value ? "1" : "0",
+    );
+  } catch (_) {
+    // Ignore local preference persistence failures.
+  }
+}
+
+function setManualArchiveSyncSelected(checked, { persist = true, syncDom = true } = {}) {
+  const next = Boolean(checked);
+  State.replication.includeArchiveNext = next;
+  if (syncDom) {
+    const toggle = $("setReplicationIncludeArchive");
+    if (toggle) toggle.checked = next;
+  }
+  if (persist) {
+    persistReplicationArchiveSelectionPreference(next);
+  }
+  return next;
+}
+
 function isManualArchiveSyncSelected() {
-  return Boolean($("setReplicationIncludeArchive")?.checked);
+  return Boolean(State.replication.includeArchiveNext);
 }
 
 function formatTailscaleStatus(ts) {
@@ -4081,7 +4157,7 @@ function formatArchiveScopeText(scope) {
   const count = Math.max(0, Number(archive?.fileCount || 0));
   const totalBytes = Math.max(0, Number(archive?.totalBytes || 0));
   const selected = isManualArchiveSyncSelected();
-  return `${selected ? "Archive download is enabled for the next standby DB refresh." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
+  return `${selected ? "Archive download is enabled for the next standby DB refresh and will stage the gateway monthly archive DB files." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
 }
 
 function formatReplicationJobStatus(job) {
@@ -4167,8 +4243,8 @@ function updateReplicationArchiveSelectionUi(silent = false) {
   const hint = $("replicationArchiveHint");
   if (hint) {
     hint.textContent = checked
-      ? "Archive download is enabled for the next standby DB refresh. Expect a longer transfer because monthly archive DB files can be large."
-      : "Optional. Leave this off for a faster standby DB refresh. Enable it only when you need historical archive files copied too.";
+      ? "Archive download is enabled for the next standby DB refresh. All gateway monthly archive DB files will be staged, so expect a longer transfer."
+      : "Optional. Leave this off for a faster standby DB refresh. Enable it only when you need the gateway archive DB files staged too.";
   }
   if (State.replication.scope) {
     setReplicationField(
@@ -4180,7 +4256,7 @@ function updateReplicationArchiveSelectionUi(silent = false) {
     showMsg(
       "replicationMsg",
       checked
-        ? "Archive download enabled for the next standby DB refresh. Expect a longer transfer."
+        ? "Archive download enabled for the next standby DB refresh. All gateway archive DB files will be staged."
         : "Archive download disabled. Only the gateway standby database will be refreshed.",
       checked ? "error" : "",
     );
@@ -4285,6 +4361,7 @@ async function refreshReplicationHealth(silent = true) {
         : "Download the gateway database for local standby use. Requires restart to apply.";
     }
     if (archiveToggle) {
+      archiveToggle.checked = isManualArchiveSyncSelected();
       archiveToggle.disabled = manualDisabled;
     }
     if (!silent) {
@@ -4387,7 +4464,7 @@ async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
   const archiveLine = includeArchive
-    ? "\n\nArchive files will be included. Expect a longer transfer."
+    ? "\n\nGateway archive DB files will be included. Expect a longer transfer."
     : "\n\nArchive files: Skipped for this run.";
   const _pullOk = await appConfirm(
     "Refresh Standby Database",
@@ -4410,10 +4487,12 @@ async function runReplicationPullNow() {
     });
     const job = result?.job || null;
     if (job) handleReplicationJobUpdate(job, { showMessage: false });
+    setManualArchiveSyncSelected(false);
+    updateReplicationArchiveSelectionUi(true);
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background download started. Staging the gateway database. Archive files will follow."
+        ? "Background download started. Staging the gateway database. Gateway archive DB files will follow."
         : "Background download started. Staging the gateway database.",
       "",
     );
@@ -6619,20 +6698,36 @@ function closeNotif() {
   $("notifPanel")?.classList.add("hidden");
 }
 
+function buildAlarmViewQueryKey() {
+  const date = sanitizeDateInputValue($("alarmDate")?.value) || today();
+  const inv = String($("alarmInv")?.value || "all").trim() || "all";
+  return `${date}|${inv}`;
+}
+
+function buildEnergyViewQueryKey() {
+  const date = sanitizeDateInputValue($("energyDate")?.value) || today();
+  const inv = String($("energyInv")?.value || "all").trim() || "all";
+  const resolution = String($("energyRes")?.value || "5min").trim() || "5min";
+  return `${date}|${inv}|${resolution}`;
+}
+
+function buildAuditViewQueryKey() {
+  const date = sanitizeDateInputValue($("auditDate")?.value) || today();
+  const inv = String($("auditInv")?.value || "all").trim() || "all";
+  return `${date}|${inv}`;
+}
+
 // ─── Alarms Page ──────────────────────────────────────────────────────────────
 function initAlarmsPage() {
-  if (!$("alarmStart").value) {
-    const s = new Date(Date.now() - 7 * 86400000);
-    s.setHours(0, 0, 0, 0);
-    $("alarmStart").value = dateStr(s);
-    $("alarmEnd").value = today();
-  }
+  if (!$("alarmDate").value) $("alarmDate").value = today();
   if (!Number.isFinite(Number(State.alarmView.page)) || State.alarmView.page < 1) {
     State.alarmView.page = 1;
   }
+  const queryKey = buildAlarmViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.alarmView.rows.length > 0 &&
+    State.alarmView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.alarms || 0) < TAB_STALE_MS
   ) {
     applyAlarmTableView();
@@ -6646,10 +6741,13 @@ async function fetchAlarms() {
   State.tabFetching.alarms = true;
   showTableLoading("alarmBody", 10);
   const inv = $("alarmInv").value;
-  const start = $("alarmStart").value;
-  const end = $("alarmEnd").value;
-  const startMs = start ? new Date(`${start}T00:00:00`).getTime() : "";
-  const endMs = end ? new Date(`${end}T23:59:59.999`).getTime() : "";
+  let date = sanitizeDateInputValue($("alarmDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("alarmDate")) $("alarmDate").value = date;
+  }
+  const startMs = localDateStartMs(date);
+  const endMs = localDateEndMs(date);
   const qs = new URLSearchParams({
     start: String(startMs),
     end: String(endMs),
@@ -6660,6 +6758,7 @@ async function fetchAlarms() {
     const rows = Array.isArray(raw) ? raw : [];
     State.alarmView.rows = rows;
     State.alarmView.page = 1;
+    State.alarmView.queryKey = buildAlarmViewQueryKey();
     State.tabFetchTs.alarms = Date.now();
     applyAlarmTableView();
     refreshAlarmBadge();
@@ -6698,7 +6797,7 @@ function renderAlarmTable(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
   if (!safeRows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 10, "No alarm records for the selected filter.");
+    renderEmptyRow(tbody, 10, "No alarm records for the selected date.");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -6823,19 +6922,23 @@ async function ackAll() {
 
 // ─── Energy Page ──────────────────────────────────────────────────────────────
 function initEnergyPage() {
-  if (!$("energyStart").value) {
-    $("energyStart").value = today();
-    $("energyEnd").value = today();
-  }
+  if (!$("energyDate").value) $("energyDate").value = today();
   if (!Number.isFinite(Number(State.energyView.page)) || State.energyView.page < 1) {
     State.energyView.page = 1;
   }
+  const queryKey = buildEnergyViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.energyView.rows.length > 0 &&
+    State.energyView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.energy || 0) < TAB_STALE_MS
   ) {
     renderEnergyTable(State.energyView.rows);
+    if (State.energyView.summary) {
+      renderEnergySummaryFromStats(State.energyView.summary);
+    } else {
+      renderEnergySummary(State.energyView.rows);
+    }
     return;
   }
   fetchEnergy({ page: State.energyView.page });
@@ -6843,10 +6946,13 @@ function initEnergyPage() {
 
 async function fetchEnergy(options = {}) {
   const inv = $("energyInv").value;
-  const start = $("energyStart").value;
-  const end = $("energyEnd").value;
-  const sTs = localDateStartMs(start);
-  const eTs = localDateEndMs(end);
+  let date = sanitizeDateInputValue($("energyDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("energyDate")) $("energyDate").value = date;
+  }
+  const sTs = localDateStartMs(date);
+  const eTs = localDateEndMs(date);
   const requestedPage = Math.max(
     1,
     Math.trunc(Number(options?.page ?? State.energyView.page) || 1),
@@ -6893,6 +6999,7 @@ async function fetchEnergy(options = {}) {
     State.energyView.summary =
       raw?.summary && typeof raw.summary === "object" ? raw.summary : null;
     State.energyView.serverPaged = serverPaged;
+    State.energyView.queryKey = buildEnergyViewQueryKey();
     State.tabFetchTs.energy = Date.now();
     renderEnergyTable(rows);
     if (State.energyView.summary) {
@@ -6931,7 +7038,7 @@ function renderEnergyTable(rows) {
     renderEmptyRow(
       tbody,
       4,
-      "No 5-minute energy records for the selected range.",
+      "No 5-minute energy records for the selected date.",
     );
     return;
   }
@@ -7041,14 +7148,12 @@ function renderEnergySummary(rows) {
 // ─── Audit Log Page ───────────────────────────────────────────────────────────
 function initAuditPage() {
   setupAuditTableControls();
-  if (!$("auditStart").value) {
-    const s = new Date(Date.now() - 7 * 86400000);
-    $("auditStart").value = dateStr(s);
-    $("auditEnd").value = today();
-  }
+  if (!$("auditDate").value) $("auditDate").value = today();
+  const queryKey = buildAuditViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.auditView.rows.length > 0 &&
+    State.auditView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.audit || 0) < TAB_STALE_MS
   ) {
     applyAuditTableView();
@@ -7062,16 +7167,13 @@ async function fetchAudit() {
   State.tabFetching.audit = true;
   showTableLoading("auditBody", 8);
   const inv = $("auditInv").value;
-  const start = $("auditStart").value;
-  const end = $("auditEnd").value;
-  const hasValidDates = Boolean(start && end);
-  if (hasValidDates && start > end) {
-    showToast("Audit date range is invalid (From is after To).", "warning", 2600);
-    State.tabFetching.audit = false;
-    return;
+  let date = sanitizeDateInputValue($("auditDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("auditDate")) $("auditDate").value = date;
   }
-  const startMs = start ? new Date(`${start}T00:00:00`).getTime() : "";
-  const endMs = end ? new Date(`${end}T23:59:59.999`).getTime() : "";
+  const startMs = localDateStartMs(date);
+  const endMs = localDateEndMs(date);
   const qs = new URLSearchParams({
     start: String(startMs),
     end: String(endMs),
@@ -7082,6 +7184,7 @@ async function fetchAudit() {
     const rows = await api(`/api/audit?${qs}`);
     State.auditView.rows = Array.isArray(rows) ? rows : [];
     State.auditView.page = 1;
+    State.auditView.queryKey = buildAuditViewQueryKey();
     State.tabFetchTs.audit = Date.now();
     applyAuditTableView();
   } catch (e) {
@@ -7096,7 +7199,7 @@ function renderAuditTable(rows) {
   if (!tbody) return;
   if (!rows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 8, "No audit records for the selected filter.");
+    renderEmptyRow(tbody, 8, "No audit records for the selected date.");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -7879,6 +7982,7 @@ async function loadAnalytics(options = {}) {
         ),
       ]);
     } catch (err) {
+      if (isClientModeActive()) throw err;
       // Backward fallback for older backend versions.
       console.warn("[app] analytics v2 endpoint failed, using legacy:", err.message);
       rows = await api(`/api/energy/5min?${qs}`);
@@ -8660,19 +8764,11 @@ function renderAnalyticsSummary(
   const computedTotalMwh = Number(
     numericTotalValues.reduce((s, v) => s + Number(v || 0), 0).toFixed(6),
   );
-  let totalMwh = computedTotalMwh;
-  const selectedDate = String($("anaDate")?.value || today()).trim();
-  if (selectedDate === today()) {
-    // Keep today's analytics total aligned with header/report canonical total.
-    totalMwh = Number(
-      (Math.max(0, Number(State.pacToday.totalKwh || 0)) / 1000).toFixed(6),
-    );
-  } else {
-    const summaryMwh = Number(State.analyticsDailyTotalMwh);
-    if (Number.isFinite(summaryMwh) && summaryMwh >= 0) {
-      totalMwh = Number(summaryMwh.toFixed(6));
-    }
-  }
+  const summaryMwh = Number(State.analyticsDailyTotalMwh);
+  const totalMwh =
+    Number.isFinite(summaryMwh) && summaryMwh >= 0
+      ? Number(summaryMwh.toFixed(6))
+      : computedTotalMwh;
   const peakRaw = (totalValues || []).map((v) =>
     v !== null && v !== undefined && Number.isFinite(Number(v))
       ? Number(v)
@@ -8998,6 +9094,74 @@ async function runExport(
   }
 }
 
+async function runSingleDateExport(
+  type,
+  invId,
+  dateId,
+  resultId,
+  extraBody = {},
+  btnId = "",
+  cancelBtnId = "",
+) {
+  normalizeExportSingleDateInput(dateId, { forceDefault: true });
+  await persistExportUiState().catch(() => {});
+  const dateInput = $(dateId);
+  const day = dateInput?.value || today();
+  if (dateInput && !dateInput.value) dateInput.value = day;
+  const inv = invId ? $(invId)?.value : undefined;
+  const formatIdMap = {
+    expAlarmInv: "expAlarmFormat",
+    expEnergyInv: "expEnergyFormat",
+    expInvDataInv: "expInvDataFormat",
+    expAuditInv: "expAuditFormat",
+  };
+  const format = $(formatIdMap[invId])?.value || "xlsx";
+  const res = $(resultId);
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+  setExportButtonState(btnId, "loading");
+  const controller = new AbortController();
+  registerExportAbortController(cancelBtnId, controller);
+  const startTs = localDateStartMs(day);
+  const endTs = localDateEndMs(day);
+  const body = {
+    ...(invId ? { inverter: inv } : {}),
+    startTs,
+    endTs,
+    format,
+    ...extraBody,
+  };
+  try {
+    const r = await api(`/api/export/${type}`, "POST", body, {
+      signal: controller.signal,
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = "✔ Saved: " + r.path;
+    }
+    await openExportPathFolder(r.path);
+    setExportButtonState(btnId, "ok");
+  } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState(btnId, "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState(btnId, "fail");
+    }
+  } finally {
+    releaseExportAbortController(cancelBtnId);
+  }
+}
+
 async function runEnergyExport() {
   normalizeExportSingleDateInput("expEnergyDate", { forceDefault: true });
   await persistExportUiState().catch(() => {});
@@ -9202,11 +9366,10 @@ async function runDayAheadGeneration() {
 
 async function runInverterDataExport() {
   normalizeExportNumberInput("expInvDataInterval");
-  await runExport(
+  await runSingleDateExport(
     "inverter-data",
     "expInvDataInv",
-    "expInvDataStart",
-    "expInvDataEnd",
+    "expInvDataDate",
     "expInvDataResult",
     { intervalMin: normalizeExportNumberInput("expInvDataInterval") || 1 },
     "btnRunInvDataExport",
@@ -9811,11 +9974,10 @@ function bindEventHandlers() {
 
   // Export page
   $("btnExportAlarms")?.addEventListener("click", () =>
-    runExport(
+    runSingleDateExport(
       "alarms",
       "expAlarmInv",
-      "expAlarmStart",
-      "expAlarmEnd",
+      "expAlarmDate",
       "expAlarmResult",
       {},
       "btnExportAlarms",
@@ -9825,11 +9987,10 @@ function bindEventHandlers() {
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
   $("btnExportAudit")?.addEventListener("click", () =>
-    runExport(
+    runSingleDateExport(
       "audit",
       "expAuditInv",
-      "expAuditStart",
-      "expAuditEnd",
+      "expAuditDate",
       "expAuditResult",
       {},
       "btnExportAudit",
@@ -9910,19 +10071,22 @@ function bindEventHandlers() {
     if (target.checked) {
       const ok = await appConfirm(
         "Include Archive DB Files",
-        "Include archive DB files in the next standby DB refresh?\n\nThis can take significantly longer because monthly archive files may be large. The gateway main database will still stage first.",
+        "Include gateway archive DB files in the next standby DB refresh?\n\nThis stages the gateway monthly archive DB files after the main database and can take significantly longer.",
         { ok: "Include" },
       );
       if (!ok) {
-        target.checked = false;
+        setManualArchiveSyncSelected(false);
         updateReplicationArchiveSelectionUi(true);
         return;
       }
+      setManualArchiveSyncSelected(true, { syncDom: false });
       showToast(
-        "Archive download enabled. Expect a longer transfer if monthly archive DB files are large.",
+        "Archive download enabled. The next standby DB refresh will also stage the gateway monthly archive DB files.",
         "warning",
         5200,
       );
+    } else {
+      setManualArchiveSyncSelected(false, { syncDom: false });
     }
     updateReplicationArchiveSelectionUi();
     refreshReplicationHealth(true).catch(() => {});
@@ -10057,12 +10221,11 @@ function bindEventHandlers() {
 // any stale exportUiState) and automatically by startClock on day rollover.
 function initAllTabDatesToToday() {
   const d = today();
-  const weekStart = dateStr(new Date(Date.now() - 7 * 86400000));
   if ($("anaDate"))     $("anaDate").value = d;
   if ($("reportDate"))  $("reportDate").value = d;
-  if ($("alarmStart"))  { $("alarmStart").value = weekStart; $("alarmEnd").value  = d; }
-  if ($("energyStart")) { $("energyStart").value = d;        $("energyEnd").value = d; }
-  if ($("auditStart"))  { $("auditStart").value = weekStart; $("auditEnd").value  = d; }
+  if ($("alarmDate"))   $("alarmDate").value = d;
+  if ($("energyDate"))  $("energyDate").value = d;
+  if ($("auditDate"))   $("auditDate").value = d;
   State.lastDateInitDay = d;
 }
 
@@ -10160,6 +10323,9 @@ async function init() {
   renderChatSendState();
   renderChatBadge();
   renderChatThread();
+  setManualArchiveSyncSelected(loadReplicationArchiveSelectionPreference(), {
+    persist: false,
+  });
   updateReplicationArchiveSelectionUi(true);
   // Restore alarm sound mute preference
   try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}

@@ -550,6 +550,71 @@ function enqueueCloudOp(label, fn) {
   };
 }
 
+const GATEWAY_EXPORT_QUEUE_LIMIT = 3;
+let _gatewayExportRunnerBusy = false;
+const _gatewayExportQueue = [];
+
+function _scheduleGatewayExportRun() {
+  setImmediate(_runNextGatewayExportJob);
+}
+
+async function _runNextGatewayExportJob() {
+  if (_gatewayExportRunnerBusy) return;
+  const job = _gatewayExportQueue.shift();
+  if (!job) return;
+  _gatewayExportRunnerBusy = true;
+  try {
+    const startedAt = Date.now();
+    const result = await job.fn();
+    job.resolve(result);
+    console.log(
+      `[ExportQueue] completed "${job.label}" in ${Date.now() - startedAt} ms`,
+    );
+  } catch (err) {
+    job.reject(err);
+    console.warn(
+      `[ExportQueue] "${job.label}" failed:`,
+      String(err?.message || err || "unknown error"),
+    );
+  } finally {
+    _gatewayExportRunnerBusy = false;
+    if (_gatewayExportQueue.length > 0) {
+      _scheduleGatewayExportRun();
+    }
+  }
+}
+
+function enqueueGatewayExportJob(label, fn) {
+  const pending = _gatewayExportQueue.length + (_gatewayExportRunnerBusy ? 1 : 0);
+  if (pending >= GATEWAY_EXPORT_QUEUE_LIMIT) {
+    const err = new Error(
+      "Gateway export queue is busy. Wait for the current export to finish and try again.",
+    );
+    err.code = "EXPORT_QUEUE_BUSY";
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    _gatewayExportQueue.push({
+      label: String(label || "export"),
+      fn,
+      resolve,
+      reject,
+    });
+    _scheduleGatewayExportRun();
+  });
+}
+
+function isExportQueueBusyError(err) {
+  return String(err?.code || "").toUpperCase() === "EXPORT_QUEUE_BUSY";
+}
+
+async function runGatewayExportJob(label, fn) {
+  return enqueueGatewayExportJob(label, async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return fn();
+  });
+}
+
 const _writeQueueStates = new Map();
 
 function normalizeWriteScope(scopeRaw = "single") {
@@ -2890,7 +2955,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       updateManualReplicationJob({
         summary: "Main DB staged. Downloading archive DB files from gateway.",
       });
-      archive = await pullArchiveFilesFromRemote(baseUrl);
+      archive = await pullArchiveFilesFromRemote(baseUrl, { forceAll: true });
     }
     const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
     const archiveSummary = includeArchive
@@ -3850,7 +3915,8 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
   };
 }
 
-async function pullArchiveFilesFromRemote(baseUrl) {
+async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
+  const forceAll = Boolean(options?.forceAll);
   const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
   if (!remoteManifestRes.ok) {
     return {
@@ -3872,9 +3938,11 @@ async function pullArchiveFilesFromRemote(baseUrl) {
   const localMap = new Map(
     listLocalArchiveManifest().map((entry) => [String(entry.name || ""), entry]),
   );
-  const toPull = remoteManifest.filter((entry) =>
-    shouldPullArchiveFile(entry, localMap.get(String(entry.name || ""))),
-  );
+  const toPull = forceAll
+    ? remoteManifest.slice()
+    : remoteManifest.filter((entry) =>
+        shouldPullArchiveFile(entry, localMap.get(String(entry.name || ""))),
+      );
   const totalBytes = toPull.reduce(
     (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
     0,
@@ -9828,6 +9896,9 @@ app.get("/api/audit", (req, res) => {
 });
 
 app.get("/api/energy/5min", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const _t0 = Date.now();
   const { inverter, start, end, paged, limit, offset } = req.query;
   const s = start ? Number(start) : Date.now() - 86400000;
@@ -9917,6 +9988,9 @@ app.get("/api/energy/5min", (req, res) => {
 // Analytics-specific energy source:
 // Always PAC-integrated kWh buckets (never register kWh deltas).
 app.get("/api/analytics/energy", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const { inverter, start, end, bucketMin } = req.query;
   const s = start ? Number(start) : Date.now() - 86400000;
   const e = end ? Number(end) : Date.now();
@@ -9965,6 +10039,9 @@ app.get("/api/analytics/energy", (req, res) => {
 });
 
 app.get("/api/analytics/dayahead", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const { date, start, end, bucketMin, product } = req.query;
   const parsedStart = parseDateMs(start, NaN, false);
   const parsedEnd = parseDateMs(end, NaN, true);
@@ -10015,6 +10092,9 @@ app.get("/api/analytics/dayahead", (req, res) => {
 });
 
 app.get("/api/weather/weekly", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
     const rows = await getWeeklyWeather(day);
@@ -10321,12 +10401,14 @@ app.post("/api/export/solcast-preview", async (req, res) => {
       estActuals || [],
       cfg,
     );
-    const outPath = await exporter.exportSolcastPreview({
-      rows: preview.rows,
-      startDay: preview.rangeStartDay,
-      endDay: preview.rangeEndDay,
-      format: "xlsx",
-    });
+    const outPath = await runGatewayExportJob("solcast-preview", () =>
+      exporter.exportSolcastPreview({
+        rows: preview.rows,
+        startDay: preview.rangeStartDay,
+        endDay: preview.rangeEndDay,
+        format: "xlsx",
+      }),
+    );
     return res.json({
       ok: true,
       path: outPath,
@@ -10336,7 +10418,7 @@ app.post("/api/export/solcast-preview", async (req, res) => {
       rangeEndDay: preview.rangeEndDay,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 
@@ -10691,6 +10773,17 @@ function buildExportResult(outPath) {
   };
 }
 
+function sendExportRouteError(res, err) {
+  const status = isExportQueueBusyError(err) ? 429 : 500;
+  if (status === 429) {
+    res.setHeader("Retry-After", "5");
+  }
+  return res.status(status).json({
+    ok: false,
+    error: String(err?.message || err || "Export failed."),
+  });
+}
+
 async function fetchRemoteExportJson(routePath, payload = {}) {
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
@@ -10838,10 +10931,12 @@ app.post("/api/export/alarms", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/alarms", req.body || {}));
     }
-    const outPath = await exporter.exportAlarms(req.body || {});
+    const outPath = await runGatewayExportJob("alarms", () =>
+      exporter.exportAlarms(req.body || {}),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/energy", async (req, res) => {
@@ -10850,16 +10945,18 @@ app.post("/api/export/energy", async (req, res) => {
       return res.json(await downloadRemoteExportToLocal("/api/export/energy", req.body || {}));
     }
     const payload = req.body || {};
-    const outPath = await exporter.exportEnergy({
-      ...payload,
-      supplementalTodayRows: getEnergySummarySupplementRowsForRange(
-        payload?.startTs,
-        payload?.endTs,
-      ),
-    });
+    const outPath = await runGatewayExportJob("energy", () =>
+      exporter.exportEnergy({
+        ...payload,
+        supplementalTodayRows: getEnergySummarySupplementRowsForRange(
+          payload?.startTs,
+          payload?.endTs,
+        ),
+      }),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/inverter-data", async (req, res) => {
@@ -10869,10 +10966,12 @@ app.post("/api/export/inverter-data", async (req, res) => {
         await downloadRemoteExportToLocal("/api/export/inverter-data", req.body || {}),
       );
     }
-    const outPath = await exporter.exportInverterData(req.body || {});
+    const outPath = await runGatewayExportJob("inverter-data", () =>
+      exporter.exportInverterData(req.body || {}),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/5min", async (req, res) => {
@@ -10880,10 +10979,12 @@ app.post("/api/export/5min", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/5min", req.body || {}));
     }
-    const outPath = await exporter.export5min(req.body || {});
+    const outPath = await runGatewayExportJob("energy-5min", () =>
+      exporter.export5min(req.body || {}),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/audit", async (req, res) => {
@@ -10891,10 +10992,12 @@ app.post("/api/export/audit", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/audit", req.body || {}));
     }
-    const outPath = await exporter.exportAudit(req.body || {});
+    const outPath = await runGatewayExportJob("audit", () =>
+      exporter.exportAudit(req.body || {}),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/daily-report", async (req, res) => {
@@ -10905,39 +11008,41 @@ app.post("/api/export/daily-report", async (req, res) => {
       );
     }
     const payload = req.body || {};
-    const dateText = String(payload?.date || "").trim();
-    if (dateText) {
-      try {
-        const day = parseIsoDateStrict(dateText, "date");
-        buildDailyReportRowsForDate(day, {
-          persist: true,
-          includeTodayPartial: day === localDateStr(),
-        });
-      } catch (_) {
-        // Exporter handles fallback/defaults.
-      }
-    } else {
-      const s = Number(payload?.startTs || 0);
-      const e = Number(payload?.endTs || 0);
-      if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
-        const startDay = fmtDate(s);
-        const endDay = fmtDate(e);
-        const today = localDateStr();
-        for (const day of daysInclusive(startDay, endDay)) {
-          if (day > today) continue;
+    const outPath = await runGatewayExportJob("daily-report", async () => {
+      const dateText = String(payload?.date || "").trim();
+      if (dateText) {
+        try {
+          const day = parseIsoDateStrict(dateText, "date");
           buildDailyReportRowsForDate(day, {
             persist: true,
-            includeTodayPartial: day === today,
+            includeTodayPartial: day === localDateStr(),
           });
-          // Yield between days to prevent event loop starvation on wide date ranges.
-          await new Promise((resolve) => setImmediate(resolve));
+        } catch (_) {
+          // Exporter handles fallback/defaults.
+        }
+      } else {
+        const s = Number(payload?.startTs || 0);
+        const e = Number(payload?.endTs || 0);
+        if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
+          const startDay = fmtDate(s);
+          const endDay = fmtDate(e);
+          const today = localDateStr();
+          for (const day of daysInclusive(startDay, endDay)) {
+            if (day > today) continue;
+            buildDailyReportRowsForDate(day, {
+              persist: true,
+              includeTodayPartial: day === today,
+            });
+            // Yield between days so live/control traffic can keep flowing.
+            await new Promise((resolve) => setImmediate(resolve));
+          }
         }
       }
-    }
-    const outPath = await exporter.exportDailyReport(req.body || {});
+      return exporter.exportDailyReport(req.body || {});
+    });
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/forecast-actual", async (req, res) => {
@@ -10947,10 +11052,12 @@ app.post("/api/export/forecast-actual", async (req, res) => {
         await downloadRemoteExportToLocal("/api/export/forecast-actual", req.body || {}),
       );
     }
-    const outPath = await exporter.exportForecastActual(req.body || {});
+    const outPath = await runGatewayExportJob("forecast-actual", () =>
+      exporter.exportForecastActual(req.body || {}),
+    );
     return res.json(buildExportResult(outPath));
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 

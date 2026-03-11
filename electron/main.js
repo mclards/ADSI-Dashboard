@@ -1,6 +1,6 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for Dashboard V2
+ * main.js - Electron entry point for ADSI Inverter Dashboard
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
  */
 
@@ -101,8 +101,9 @@ const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
 const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
+const DAY_MS = 24 * 60 * 60 * 1000;
 const TRIAL_DAYS = 7;
-const LICENSE_WARN_MS = 24 * 60 * 60 * 1000; // 1 day
+const LICENSE_WARN_MS = DAY_MS; // 1 day
 const LICENSE_CHECK_INTERVAL_MS = 5 * 1000;
 const LICENSE_PUBLIC_KEY_PATH = String(process.env.ADSI_LICENSE_PUBLIC_KEY_PATH || "").trim();
 const LICENSE_PUBLIC_KEY_PEM = String(process.env.ADSI_LICENSE_PUBLIC_KEY || "").trim();
@@ -817,7 +818,7 @@ app.whenReady().then(async () => {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
-  app.setName("Dashboard V2");
+  app.setName("ADSI Inverter Dashboard");
   migrateLegacyUserDataIfNeeded();
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
@@ -882,18 +883,20 @@ function showLoadingWindow() {
     return;
   }
   loadingWin = new BrowserWindow({
-    width: 500,
-    height: 420,
-    minWidth: 500,
-    minHeight: 420,
+    width: 600,
+    height: 720,
+    minWidth: 600,
+    minHeight: 500,
     useContentSize: true,
+    title: "ADSI Inverter Dashboard",
     icon: APP_ICON,
     frame: false,
     resizable: false,
+    autoHideMenuBar: true,
     // No alwaysOnTop: loading should be visible during startup but must not trap
     // clicks on other OS windows (e.g. the user's taskbar or other apps).
     center: true,
-    backgroundColor: "#0f1117",
+    backgroundColor: "#07111e",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
   });
   loadingWin.loadFile(path.join(PUBLIC_DIR, "loading.html"));
@@ -1134,6 +1137,20 @@ function parseDateMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
+function parseLicenseExpiryMs(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+  const raw = String(v || "").trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const t = new Date(`${raw}T23:59:59.999`).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  const t = new Date(raw).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
 function readWindowsMachineGuid() {
   try {
     const out = execFileSync(
@@ -1185,6 +1202,19 @@ function writeRegistryValue(regPath, valueName, value) {
   }
 }
 
+function deleteRegistryValue(regPath, valueName) {
+  try {
+    execFileSync(
+      "reg",
+      ["delete", regPath, "/v", valueName, "/f"],
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function pickEarliestTimestamp(...values) {
   const items = values
     .map((v) => parseDateMs(v))
@@ -1199,6 +1229,11 @@ function loadLicenseRegistryMarker() {
     firstInstallAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "FirstInstallAt")),
     trialAcceptedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialAcceptedAt")),
     trialExpiresAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt")),
+    licenseFingerprint: String(readRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint") || "").trim(),
+    licenseActivatedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt")),
+    licenseExpiresAt: parseLicenseExpiryMs(readRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt")),
+    licenseType: String(readRegistryValue(LICENSE_REG_PATH, "LicenseType") || "").trim().toLowerCase(),
+    licenseLifetime: String(readRegistryValue(LICENSE_REG_PATH, "LicenseLifetime") || "").trim() === "1",
   };
 }
 
@@ -1220,6 +1255,35 @@ function saveLicenseRegistryMarker(state) {
   if (Number.isFinite(trialExpiresAt) && trialExpiresAt > 0) {
     writeRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt", String(trialExpiresAt));
   }
+
+  const lic = normalizeStoredLicense(state?.license);
+  if (lic?.fingerprint) {
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint", lic.fingerprint);
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseLifetime", lic.lifetime ? "1" : "0");
+    if (lic.type) writeRegistryValue(LICENSE_REG_PATH, "LicenseType", lic.type);
+    else deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+
+    const activatedAt = parseDateMs(lic.activatedAt);
+    if (Number.isFinite(activatedAt) && activatedAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt", String(activatedAt));
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+    }
+
+    const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+    if (!lic.lifetime && Number.isFinite(expiresAt) && expiresAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt", String(expiresAt));
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+    }
+    return;
+  }
+
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseLifetime");
 }
 
 // ─── Credential Encryption ─────────────────────────────────────────────────
@@ -1292,6 +1356,11 @@ function stripLicenseSignature(payload) {
   delete clone._signature;
   delete clone.sig;
   return clone;
+}
+
+function buildLicensePayloadFingerprint(payload) {
+  const canonical = stableStringify(stripLicenseSignature(payload));
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 function extractLicenseSignature(payload) {
@@ -1406,6 +1475,99 @@ function verifyLicenseSignature(payload) {
   return { ok: false, error: "License signature verification failed." };
 }
 
+function normalizeStoredLicense(value) {
+  if (!value || typeof value !== "object") return null;
+  const fingerprint = String(value.fingerprint || value.identity || "").trim();
+  const activatedAt = parseDateMs(value.activatedAt);
+  const expiresAt = parseLicenseExpiryMs(value.expiresAt);
+  const rawType = String(value.type || "").trim().toLowerCase();
+  const lifetime = !!value.lifetime || rawType === "lifetime";
+  return {
+    ...value,
+    fingerprint,
+    activatedAt: Number.isFinite(activatedAt) && activatedAt > 0 ? Math.trunc(activatedAt) : null,
+    expiresAt: !lifetime && Number.isFinite(expiresAt) && expiresAt > 0 ? Math.trunc(expiresAt) : null,
+    type: lifetime ? "lifetime" : rawType,
+    lifetime,
+    metadata: value.metadata && typeof value.metadata === "object" ? { ...value.metadata } : {},
+  };
+}
+
+function buildRegistryLicenseSnapshot(regState) {
+  const fingerprint = String(regState?.licenseFingerprint || "").trim();
+  if (!fingerprint) return null;
+  return normalizeStoredLicense({
+    fingerprint,
+    activatedAt: regState?.licenseActivatedAt,
+    expiresAt: regState?.licenseExpiresAt,
+    type: regState?.licenseType || "",
+    lifetime: !!regState?.licenseLifetime,
+    metadata: {},
+  });
+}
+
+function mergeLicenseRecords(primary, secondary) {
+  const a = normalizeStoredLicense(primary);
+  const b = normalizeStoredLicense(secondary);
+  if (!a) return b;
+  if (!b) return a;
+  if (a.fingerprint && b.fingerprint && a.fingerprint !== b.fingerprint) return a;
+  return normalizeStoredLicense({
+    ...b,
+    ...a,
+    fingerprint: a.fingerprint || b.fingerprint || "",
+    activatedAt: pickEarliestTimestamp(a.activatedAt, b.activatedAt) || a.activatedAt || b.activatedAt || null,
+    expiresAt:
+      a.lifetime || b.lifetime
+        ? null
+        : pickEarliestTimestamp(a.expiresAt, b.expiresAt) || a.expiresAt || b.expiresAt || null,
+    type: a.type || b.type || "",
+    lifetime: !!(a.lifetime || b.lifetime),
+    metadata: {
+      ...(b.metadata && typeof b.metadata === "object" ? b.metadata : {}),
+      ...(a.metadata && typeof a.metadata === "object" ? a.metadata : {}),
+    },
+  });
+}
+
+function resolveLicenseActivationAnchor(priorLicense, nextFingerprint, durationMs) {
+  const prior = normalizeStoredLicense(priorLicense);
+  if (!prior || !Number.isFinite(durationMs) || durationMs <= 0) return null;
+  if (prior.fingerprint && nextFingerprint && prior.fingerprint !== nextFingerprint) return null;
+  const activatedAt = parseDateMs(prior.activatedAt);
+  if (Number.isFinite(activatedAt) && activatedAt > 0) return Math.trunc(activatedAt);
+  const expiresAt = parseLicenseExpiryMs(prior.expiresAt);
+  if (Number.isFinite(expiresAt) && expiresAt > 0) {
+    return Math.trunc(expiresAt - durationMs);
+  }
+  return null;
+}
+
+function tryRestoreMirroredLicense(priorLicense) {
+  try {
+    if (!fs.existsSync(LICENSE_FILE_MIRROR)) return null;
+    const raw = fs.readFileSync(LICENSE_FILE_MIRROR, "utf8").replace(/^\uFEFF/, "");
+    const payload = JSON.parse(raw);
+    const normalized = normalizeLicensePayload(payload, LICENSE_FILE_MIRROR, priorLicense);
+    return normalized.ok ? normalized.license : null;
+  } catch (err) {
+    console.warn("[license] mirror restore failed:", err.message);
+    return null;
+  }
+}
+
+function resolvePersistedLicense(rawLicense, regState) {
+  const regLicense = buildRegistryLicenseSnapshot(regState);
+  const merged = mergeLicenseRecords(rawLicense, regLicense);
+  if (merged?.fingerprint) return { license: merged, restoredFromMirror: false };
+  const restored = tryRestoreMirroredLicense(merged || regLicense);
+  if (!restored) return { license: merged, restoredFromMirror: false };
+  return {
+    license: mergeLicenseRecords(restored, merged),
+    restoredFromMirror: true,
+  };
+}
+
 function defaultLicenseState() {
   return {
     schema: 1,
@@ -1442,6 +1604,7 @@ function loadLicenseState() {
   const regState = loadLicenseRegistryMarker();
   try {
     if (!fs.existsSync(LICENSE_STATE_PATH)) {
+      const resolved = resolvePersistedLicense(null, regState);
       const def = defaultLicenseState();
       const state = {
         ...def,
@@ -1449,6 +1612,7 @@ function loadLicenseState() {
         firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
         trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
         trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+        license: resolved.license,
       };
       state.audit = normalizeLicenseAudit([
         {
@@ -1457,6 +1621,16 @@ function loadLicenseState() {
           level: "info",
           details: "License state created on this device.",
         },
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
       ]);
       fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
@@ -1464,6 +1638,7 @@ function loadLicenseState() {
       return state;
     }
     const raw = JSON.parse(fs.readFileSync(LICENSE_STATE_PATH, "utf8"));
+    const resolved = resolvePersistedLicense(raw?.license, regState);
     const def = defaultLicenseState();
     const state = {
       schema: Number(raw?.schema || 1),
@@ -1471,8 +1646,20 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(raw?.firstInstallAt, regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(raw?.trialAcceptedAt, regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(raw?.trialExpiresAt, regState.trialExpiresAt),
-      license: raw?.license && typeof raw.license === "object" ? raw.license : null,
-      audit: normalizeLicenseAudit(raw?.audit),
+      license: resolved.license,
+      audit: normalizeLicenseAudit([
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
+        ...(Array.isArray(raw?.audit) ? raw.audit : []),
+      ]),
     };
     fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
     saveLicenseRegistryMarker(state);
@@ -1480,6 +1667,7 @@ function loadLicenseState() {
     return state;
   } catch (err) {
     console.error("[license] state load failed:", err.message);
+    const resolved = resolvePersistedLicense(null, regState);
     const def = defaultLicenseState();
     const state = {
       ...def,
@@ -1487,6 +1675,27 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+      license: resolved.license,
+      audit: normalizeLicenseAudit(
+        [
+          {
+            ts: Date.now(),
+            action: "state_reinitialized",
+            level: "warning",
+            details: `License state was reinitialized after a read error: ${err.message}`,
+          },
+          ...(resolved.restoredFromMirror
+            ? [
+                {
+                  ts: Date.now(),
+                  action: "license_restored",
+                  level: "success",
+                  details: "Recovered current license from the mirrored license file.",
+                },
+              ]
+            : []),
+        ],
+      ),
     };
     try {
       fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
@@ -1532,7 +1741,7 @@ function getLicenseAuditRows() {
   return normalizeLicenseAudit(state.audit);
 }
 
-function normalizeLicensePayload(payload, sourcePath) {
+function normalizeLicensePayload(payload, sourcePath, priorLicense = null) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "License file must contain a JSON object." };
   }
@@ -1543,6 +1752,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   }
 
   const now = Date.now();
+  const prior = normalizeStoredLicense(priorLicense);
   const fp = getDeviceFingerprint();
   const boundDevice = String(
     payload.deviceFingerprint ||
@@ -1567,6 +1777,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   );
   const durationHours = Number(payload.duration_hours ?? payload.durationHours ?? NaN);
   const durationMsField = Number(payload.duration_ms ?? payload.durationMs ?? NaN);
+  const fingerprint = buildLicensePayloadFingerprint(payload);
   let durationMs = null;
   if (Number.isFinite(durationMsField) && durationMsField > 0) {
     durationMs = Math.trunc(durationMsField);
@@ -1576,7 +1787,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     durationMs = Math.trunc(durationDays * 24 * 60 * 60 * 1000);
   }
 
-  const explicitExpiry = parseDateMs(
+  const explicitExpiry = parseLicenseExpiryMs(
     payload.expiresAt ||
       payload.expires_at ||
       payload.validUntil ||
@@ -1586,7 +1797,8 @@ function normalizeLicensePayload(payload, sourcePath) {
       payload.endAt ||
       payload.end_at,
   );
-  const activatedAt = now;
+  const activatedAt =
+    resolveLicenseActivationAnchor(prior, fingerprint, durationMs) || now;
   const expiresAt = lifetime
     ? null
     : Number.isFinite(explicitExpiry)
@@ -1606,6 +1818,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     sourcePath: String(sourcePath || ""),
     importedAt: now,
     activatedAt,
+    fingerprint,
     type: lifetime ? "lifetime" : Number.isFinite(durationMs) && !Number.isFinite(explicitExpiry) ? "duration" : "datetime",
     lifetime: !!lifetime,
     expiresAt: Number.isFinite(expiresAt) ? Math.trunc(expiresAt) : null,
@@ -1629,13 +1842,13 @@ function installLicenseFromFile(filePath) {
     if (!fullPath) return { ok: false, error: "No license file selected." };
     const raw = fs.readFileSync(fullPath, "utf8").replace(/^\uFEFF/, "");
     const payload = JSON.parse(raw);
-    const normalized = normalizeLicensePayload(payload, fullPath);
+    const state = loadLicenseState();
+    const normalized = normalizeLicensePayload(payload, fullPath, state.license);
     if (!normalized.ok) {
       appendLicenseAudit("license_import_failed", normalized.error || "Invalid license payload.", "error");
       return normalized;
     }
 
-    const state = loadLicenseState();
     state.deviceFingerprint = getDeviceFingerprint();
     state.license = normalized.license;
     if (!state.firstInstallAt) state.firstInstallAt = Date.now();
@@ -1677,7 +1890,7 @@ function activateTrialNow() {
   state.deviceFingerprint = getDeviceFingerprint();
   state.firstInstallAt = state.firstInstallAt || now;
   state.trialAcceptedAt = now;
-  state.trialExpiresAt = now + TRIAL_DAYS * 24 * 60 * 60 * 1000;
+  state.trialExpiresAt = now + TRIAL_DAYS * DAY_MS;
   saveLicenseState(state);
   appendLicenseAudit(
     "trial_started",
@@ -1698,62 +1911,53 @@ function humanRemaining(msLeft) {
   return `${Math.max(1, mins)}m`;
 }
 
-function evaluateLicense(now = Date.now()) {
-  const state = licenseStateCache || loadLicenseState();
-  const fp = getDeviceFingerprint();
-  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
-  if (mismatch) {
-    return {
-      valid: false,
-      source: "device",
-      code: "device_mismatch",
-      expiresAt: null,
-      msLeft: 0,
-      nearExpiry: false,
-      message: "License storage belongs to another device fingerprint.",
-    };
-  }
+function calcRemainingDays(msLeft) {
+  if (!Number.isFinite(msLeft) || msLeft <= 0) return 0;
+  return Math.max(1, Math.ceil(msLeft / DAY_MS));
+}
 
-  const lic = state.license && typeof state.license === "object" ? state.license : null;
-  if (lic) {
-    const expiresAt = parseDateMs(lic.expiresAt);
-    if (lic.lifetime || lic.type === "lifetime") {
-      return {
-        valid: true,
-        source: "license",
-        code: "lifetime",
-        lifetime: true,
-        expiresAt: null,
-        msLeft: Number.POSITIVE_INFINITY,
-        nearExpiry: false,
-        message: "Lifetime license active.",
-      };
-    }
-    if (Number.isFinite(expiresAt) && expiresAt > now) {
-      const msLeft = expiresAt - now;
-      return {
-        valid: true,
-        source: "license",
-        code: "licensed",
-        lifetime: false,
-        expiresAt,
-        msLeft,
-        nearExpiry: msLeft <= LICENSE_WARN_MS,
-        message: `License expires in ${humanRemaining(msLeft)}.`,
-      };
-    }
+function evaluateStoredLicenseEntitlement(license, now) {
+  const lic = normalizeStoredLicense(license);
+  if (!lic) return null;
+  const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+  if (lic.lifetime || lic.type === "lifetime") {
     return {
-      valid: false,
+      valid: true,
       source: "license",
-      code: "license_expired",
-      lifetime: false,
-      expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
-      msLeft: 0,
+      code: "lifetime",
+      lifetime: true,
+      expiresAt: null,
+      msLeft: Number.POSITIVE_INFINITY,
       nearExpiry: false,
-      message: "License expired.",
+      message: "Lifetime license active.",
     };
   }
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    const msLeft = expiresAt - now;
+    return {
+      valid: true,
+      source: "license",
+      code: "licensed",
+      lifetime: false,
+      expiresAt,
+      msLeft,
+      nearExpiry: msLeft <= LICENSE_WARN_MS,
+      message: `License expires in ${humanRemaining(msLeft)}.`,
+    };
+  }
+  return {
+    valid: false,
+    source: "license",
+    code: "license_expired",
+    lifetime: false,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
+    msLeft: 0,
+    nearExpiry: false,
+    message: "License expired.",
+  };
+}
 
+function evaluateTrialEntitlement(state, now) {
   const trialAcceptedAt = parseDateMs(state.trialAcceptedAt);
   const trialExpiresAt = parseDateMs(state.trialExpiresAt);
   if (trialAcceptedAt && trialExpiresAt && trialExpiresAt > now) {
@@ -1793,16 +1997,44 @@ function evaluateLicense(now = Date.now()) {
   };
 }
 
+function evaluateLicense(now = Date.now()) {
+  const state = licenseStateCache || loadLicenseState();
+  const fp = getDeviceFingerprint();
+  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
+  if (mismatch) {
+    return {
+      valid: false,
+      source: "device",
+      code: "device_mismatch",
+      expiresAt: null,
+      msLeft: 0,
+      nearExpiry: false,
+      message: "License storage belongs to another device fingerprint.",
+    };
+  }
+
+  const licenseStatus = evaluateStoredLicenseEntitlement(state.license, now);
+  if (licenseStatus?.valid) return licenseStatus;
+  const trialStatus = evaluateTrialEntitlement(state, now);
+  if (trialStatus?.valid) return trialStatus;
+  return licenseStatus || trialStatus;
+}
+
 function buildLicensePublicStatus() {
   const v = evaluateLicense();
+  const expiresAt = Number.isFinite(v.expiresAt) ? v.expiresAt : null;
+  const msLeft = Number.isFinite(v.msLeft) ? v.msLeft : null;
+  const daysLeft = expiresAt == null ? null : calcRemainingDays(msLeft || 0);
   return {
     valid: !!v.valid,
     source: v.source || "trial",
     code: v.code || "",
     lifetime: !!v.lifetime,
-    expiresAt: Number.isFinite(v.expiresAt) ? v.expiresAt : null,
-    expiresAtIso: Number.isFinite(v.expiresAt) ? new Date(v.expiresAt).toISOString() : null,
-    msLeft: Number.isFinite(v.msLeft) ? v.msLeft : null,
+    expiresAt,
+    expiresAtIso: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+    msLeft,
+    daysLeft,
+    remainingText: v.lifetime ? "lifetime" : msLeft && msLeft > 0 ? humanRemaining(msLeft) : "",
     nearExpiry: !!v.nearExpiry,
     message: String(v.message || ""),
   };
@@ -1825,6 +2057,8 @@ function broadcastLicenseStatus(force = false) {
     status.code,
     status.lifetime,
     status.expiresAtIso,
+    status.daysLeft,
+    status.remainingText,
     status.nearExpiry,
   ]);
   if (!force && signature === lastBroadcastLicenseSignature) return status;
@@ -1861,7 +2095,7 @@ async function ensureLicenseAtStartup() {
         defaultId: 0,
         cancelId: 2,
         title: "License Required",
-        message: "Welcome to Dashboard V2",
+        message: "Welcome to ADSI Inverter Dashboard",
         detail:
           "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
       });
@@ -1981,13 +2215,19 @@ function startEmbeddedServer(serverEntry) {
 
 function showLoadingErrorMessage(message) {
   if (!loadingWin || loadingWin.isDestroyed()) return;
-  const safe = String(message || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/\r?\n/g, "<br/>");
+  const safeMessage = String(message || "").replace(/<br\s*\/?>/gi, "\n");
+  const fallbackHtml = `<div style="font-family:Segoe UI,sans-serif;color:#ffd8df;padding:20px;text-align:center;line-height:1.6;background:#09121f">${safeMessage
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\r?\n/g, "<br/>")}</div>`;
   loadingWin.webContents
     .executeJavaScript(
-      `document.body.innerHTML='<div style="font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45">${safe}</div>';`,
+      `if (typeof window.showStartupError === "function") {
+         window.showStartupError(${JSON.stringify(safeMessage)});
+       } else {
+         document.body.innerHTML = ${JSON.stringify(fallbackHtml)};
+       }`,
     )
     .catch(() => {});
 }
@@ -2340,13 +2580,9 @@ function createMainWindow() {
     if (mainPageLoadedOnce) return;
     if (initialLoadRetries >= INITIAL_LOAD_RETRY_MAX) {
       console.error("[main] Initial load retries exhausted.");
-      if (loadingWin && !loadingWin.isDestroyed()) {
-        loadingWin.webContents
-          .executeJavaScript(
-            "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Unable to connect to backend on localhost:3500.<br/>Please check InverterCoreService.exe and retry.</div>';",
-          )
-          .catch(() => {});
-      }
+      showLoadingErrorMessage(
+        "Unable to connect to the local dashboard backend on localhost:3500.\nPlease verify InverterCoreService.exe and retry.",
+      );
       return;
     }
     initialLoadRetries += 1;
@@ -2374,7 +2610,7 @@ function createMainWindow() {
       defaultId: 0,
       cancelId: 0,
       title: "Confirm Exit",
-      message: "Exit Dashboard V2?",
+      message: "Exit ADSI Inverter Dashboard?",
       detail: "This will stop local services and close the dashboard.",
     });
     if (choice !== 1) {
@@ -2777,6 +3013,8 @@ ipcMain.handle("license-get-status", async () => {
       expiresAt: null,
       expiresAtIso: null,
       msLeft: null,
+      daysLeft: null,
+      remainingText: "",
       nearExpiry: false,
       message: "Unable to read license status.",
     };

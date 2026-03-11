@@ -6,6 +6,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { once } = require('events');
 const ExcelJS = require('exceljs');
 const {
   db,
@@ -32,6 +33,10 @@ const FORECAST_CTX_PATH = path.join(
 );
 
 function ensureDir(dir) { fs.mkdirSync(dir, { recursive: true }); }
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 function pad2(n) { return String(n).padStart(2,'0'); }
 
@@ -202,6 +207,13 @@ function toCsv(headers, rows) {
   return [headerRow, ...rows.map(r => keys.map(k => escape(r[k])).join(','))].join('\r\n');
 }
 
+function escapeCsvCell(v) {
+  const s = String(v ?? '');
+  return (s.includes(',') || s.includes('"') || s.includes('\n'))
+    ? `"${s.replace(/"/g, '""')}"`
+    : s;
+}
+
 function parseDateSortValue(v) {
   const s = String(v ?? '').trim();
   if (!s) return Number.POSITIVE_INFINITY;
@@ -348,58 +360,162 @@ function normalizeFormat(format) {
   return f === 'xlsx' ? 'xlsx' : 'csv';
 }
 
+const EXPORT_WRITE_YIELD_EVERY = 250;
+const XLSX_NUMERIC_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
+
+async function writeCsvExport(headers, rows, csvPath) {
+  const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
+  const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
+  const stream = fs.createWriteStream(csvPath, { encoding: 'utf8' });
+  const done = new Promise((resolve, reject) => {
+    stream.on('finish', resolve);
+    stream.on('error', reject);
+  });
+  const writeChunk = async (chunk) => {
+    if (!stream.write(chunk)) {
+      await once(stream, 'drain');
+    }
+  };
+
+  try {
+    await writeChunk('\uFEFF');
+    await writeChunk(`${labels.join(',')}\r\n`);
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] || {};
+      const line = `${keys.map((k) => escapeCsvCell(row[k])).join(',')}\r\n`;
+      await writeChunk(line);
+      if ((i + 1) % EXPORT_WRITE_YIELD_EVERY === 0) {
+        await yieldToEventLoop();
+      }
+    }
+    stream.end();
+    await done;
+    return csvPath;
+  } catch (err) {
+    stream.destroy(err);
+    throw err;
+  }
+}
+
+function inferXlsxNumericFormat(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return null;
+  const raw = String(value ?? '').trim();
+  if (!XLSX_NUMERIC_RE.test(raw)) return null;
+  const normalized = raw.replace(/^[+-]/, '');
+  if (!normalized.includes('.')) return '0';
+  const decimals = normalized.split('.')[1] || '';
+  return decimals.length > 0 ? `0.${'0'.repeat(decimals.length)}` : '0';
+}
+
+function normalizeXlsxCellValue(value, header = null) {
+  const forceText = String(header?.xlsxType || '').trim().toLowerCase() === 'string';
+  if (forceText) {
+    return { value: value ?? '', numFmt: null };
+  }
+  if (typeof value === 'number') {
+    return {
+      value: Number.isFinite(value) ? value : '',
+      numFmt: Number.isFinite(value) ? null : null,
+    };
+  }
+  if (typeof value === 'string') {
+    const raw = value.trim();
+    if (!raw) return { value: '', numFmt: null };
+    if (XLSX_NUMERIC_RE.test(raw)) {
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric)) {
+        return {
+          value: numeric,
+          numFmt: inferXlsxNumericFormat(value),
+        };
+      }
+    }
+    return { value, numFmt: null };
+  }
+  return { value: value ?? '', numFmt: null };
+}
+
+async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
+  const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
+  const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
+  const widths = labels.map((label) =>
+    Math.min(64, Math.max(10, String(label ?? '').length + 2)),
+  );
+
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: xlsxPath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  const ws = wb.addWorksheet('Export', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  ws.columns = keys.map((key, idx) => ({
+    key,
+    width: widths[idx],
+    style: { alignment: { horizontal: 'center', vertical: 'middle' } },
+  }));
+
+  const headerRow = ws.addRow(
+    Object.fromEntries(keys.map((key, idx) => [key, labels[idx]])),
+  );
+  headerRow.font = { bold: true };
+  headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+  headerRow.commit();
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || {};
+    const xlsxRow = {};
+    const numFmts = new Map();
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const key = keys[colIdx];
+      const normalized = normalizeXlsxCellValue(row[key], headers[colIdx]);
+      xlsxRow[key] = normalized.value;
+      if (normalized.numFmt) {
+        numFmts.set(colIdx + 1, normalized.numFmt);
+      }
+    }
+    const worksheetRow = ws.addRow(xlsxRow);
+    for (const [colIdx, numFmt] of numFmts.entries()) {
+      worksheetRow.getCell(colIdx).numFmt = numFmt;
+    }
+    worksheetRow.commit();
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const valueLen = String(row[keys[colIdx]] ?? '').length + 2;
+      if (valueLen > widths[colIdx]) {
+        widths[colIdx] = Math.min(64, Math.max(widths[colIdx], valueLen));
+      }
+    }
+    if ((i + 1) % EXPORT_WRITE_YIELD_EVERY === 0) {
+      await yieldToEventLoop();
+    }
+  }
+
+  if (keys.length && options?.autoFilter !== false) {
+    ws.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: keys.length },
+    };
+  }
+  widths.forEach((width, idx) => {
+    ws.getColumn(idx + 1).width = width;
+  });
+
+  ws.commit();
+  await wb.commit();
+  return xlsxPath;
+}
+
 async function writeExport(headers, rows, dir, filenameBase, format, options = {}) {
   const fmt = normalizeFormat(format);
   if (fmt === 'xlsx') {
-    const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
-    const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
-
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Export', {
-      views: [{ state: 'frozen', ySplit: 1 }],
-    });
-
-    ws.addRow(labels);
-    for (const r of rows) {
-      ws.addRow(keys.map((k) => r[k] ?? ''));
-    }
-
-    if (keys.length && options?.autoFilter !== false) {
-      ws.autoFilter = {
-        from: { row: 1, column: 1 },
-        to: { row: 1, column: keys.length },
-      };
-    }
-
-    // Center all cells; bold and center header row.
-    ws.eachRow((row, rowNumber) => {
-      row.eachCell((cell) => {
-        cell.alignment = { horizontal: 'center', vertical: 'middle' };
-        if (rowNumber === 1) {
-          cell.font = { bold: true };
-        }
-      });
-    });
-
-    // Auto-fit column widths based on header + content length.
-    keys.forEach((k, idx) => {
-      const headerLen = String(labels[idx] ?? '').length;
-      const dataLen = rows.reduce((max, r) => {
-        const len = String(r[k] ?? '').length;
-        return len > max ? len : max;
-      }, 0);
-      const width = Math.min(64, Math.max(10, Math.max(headerLen, dataLen) + 2));
-      ws.getColumn(idx + 1).width = width;
-    });
-
     const xlsxPath = path.join(dir, `${filenameBase}.xlsx`);
-    await wb.xlsx.writeFile(xlsxPath);
-    return xlsxPath;
+    return writeXlsxExport(headers, rows, xlsxPath, options);
   }
 
   const csvPath = path.join(dir, `${filenameBase}.csv`);
-  fs.writeFileSync(csvPath, '\uFEFF' + toCsv(headers, rows)); // BOM for Excel
-  return csvPath;
+  return writeCsvExport(headers, rows, csvPath);
 }
 
 const EXPORT_FOLDERS = {
@@ -437,6 +553,14 @@ function exportSingleDateFileBase(dayTs, inverter, suffix) {
   const target = exportTargetName(inverter);
   const base = `${day} ${target} ${suffix}`;
   return base.length > 200 ? base.slice(0, 200) : base;
+}
+
+function exportDateAwareFileBase(startTs, endTs, inverter, suffix) {
+  const s = Number(startTs || 0) || Date.now();
+  const e = Number(endTs || 0) || s;
+  return fmtDate(s) === fmtDate(e)
+    ? exportSingleDateFileBase(s, inverter, suffix)
+    : exportFileBase(s, e, inverter, suffix);
 }
 
 function normalizeEnergyResolution(resolution) {
@@ -873,7 +997,7 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     headerKeys,
   });
 
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Alarms');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Recorded Alarms');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
@@ -895,10 +1019,7 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
     { key: 'Total_MWh', label: 'Total MWh' },
   ];
 
-  const fileBase =
-    fmtDate(s) === fmtDate(e)
-      ? exportSingleDateFileBase(s, inverter, 'Energy Summary')
-      : exportFileBase(s, e, inverter, 'Energy Summary');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Energy Summary');
   return writeExport(headers, Array.isArray(rows) ? rows : [], dir, fileBase, format, {
     autoFilter: false,
   });
@@ -993,7 +1114,7 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
     headerKeys,
   });
 
-  const fileBase = exportFileBase(s, e, inverter, interval.suffix);
+  const fileBase = exportDateAwareFileBase(s, e, inverter, interval.suffix);
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
@@ -1054,7 +1175,7 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
     groupKeys: ['Date', 'Inverter'],
     headerKeys,
   });
-  const fileBase = exportFileBase(s, e, inverter, spec.suffix);
+  const fileBase = exportDateAwareFileBase(s, e, inverter, spec.suffix);
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
@@ -1095,7 +1216,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
     groupKeys: ['Date', 'Inverter'],
     headerKeys,
   });
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Audits');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Recorded Audits');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
@@ -1196,7 +1317,7 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
     }
   }
 
-  const fileBase = exportFileBase(s, e, 'all', 'Daily Report');
+  const fileBase = exportDateAwareFileBase(s, e, 'all', 'Daily Report');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 async function exportForecastActual({ startTs, endTs, format, resolution }) {
@@ -1265,7 +1386,7 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   });
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
-  const fileBase = exportFileBase(s, e, 'all', `Day-Ahead vs Actual ${resLabel}`);
+  const fileBase = exportDateAwareFileBase(s, e, 'all', `Day-Ahead vs Actual ${resLabel}`);
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
@@ -1342,7 +1463,7 @@ async function exportSolcastPreview({ rows, startDay, endDay, format }) {
 
   const s = parseIsoDayStart(startDay) || Date.now();
   const e = parseIsoDayStart(endDay || startDay) || s;
-  const fileBase = exportFileBase(s, e, 'all', 'Solcast Toolkit PT5M 05-18');
+  const fileBase = exportDateAwareFileBase(s, e, 'all', 'Solcast Toolkit PT5M 05-18');
   return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
 
