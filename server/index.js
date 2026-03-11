@@ -171,8 +171,9 @@ const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
 const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
 const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
-const REMOTE_BRIDGE_INTERVAL_MS = 1200;
+const REMOTE_BRIDGE_INTERVAL_MS = 800;
 const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
+const REMOTE_BRIDGE_WARMUP_MS = 8000; // allow the live bridge to establish before local fallback kicks in
 const REMOTE_ENERGY_POLL_INTERVAL_MS = 30000; // today-energy endpoint is rate-limited to 30 s
 const REMOTE_DB_MIN_PERSIST_MS = 1000;
 const REMOTE_DB_PAC_DELTA_PERSIST_W = 250;
@@ -377,6 +378,7 @@ let remoteChatPollTimer = null;
 const remoteBridgeState = {
   running: false,
   connected: false,
+  startedAtTs: 0,
   lastAttemptTs: 0,
   lastSuccessTs: 0,
   liveFailureCount: 0,
@@ -809,15 +811,23 @@ function classifyRemoteBridgeFailure(err) {
   };
 }
 
-function getRemoteBridgeNextDelayMs(nowTs = Date.now()) {
+function getRemoteBridgeNextDelayMs(nowTs = Date.now(), pollElapsedMs = 0) {
+  const elapsedMs = Math.max(0, Number(pollElapsedMs || 0));
+  return Math.max(0, getRemoteBridgeTargetIntervalMs(nowTs) - elapsedMs);
+}
+
+function getRemoteBridgeTargetIntervalMs(nowTs = Date.now()) {
   const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
   const fastRetry = Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess(nowTs);
   if (fastRetry || failures <= 1) {
     // Adapt polling interval to gateway latency — if the gateway is slow,
-    // give it breathing room instead of hammering at 1.2 s.
+    // give it breathing room instead of hammering at the base bridge cadence.
     const latency = Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0));
     if (latency > 400) {
-      return Math.min(REMOTE_BRIDGE_MAX_BACKOFF_MS, Math.max(REMOTE_BRIDGE_INTERVAL_MS, latency * 2));
+      return Math.min(
+        REMOTE_BRIDGE_MAX_BACKOFF_MS,
+        Math.max(REMOTE_BRIDGE_INTERVAL_MS, latency * 2),
+      );
     }
     return REMOTE_BRIDGE_INTERVAL_MS;
   }
@@ -849,6 +859,8 @@ function buildRemoteHealthSnapshot(nowTs = Date.now()) {
     state = "config-error";
   } else if (reasonClass === "auth-error") {
     state = "auth-error";
+  } else if (isRemoteBridgeWarmupActive(nowTs)) {
+    state = "connecting";
   } else if (
     Boolean(remoteBridgeState.connected) &&
     Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)) <= 0
@@ -937,6 +949,19 @@ function canFallbackToLocal(pathname) {
   if (p === "/alarms" || p.startsWith("/alarms/")) return true;
   if (p === "/audit" || p.startsWith("/audit/")) return true;
   return false;
+}
+
+function shouldServeLocalFallback(pathname, nowTs = Date.now()) {
+  if (!isRemoteMode() || !canFallbackToLocal(pathname)) return false;
+  if (remoteBridgeState.connected) return false;
+  const reasonClass = String(remoteBridgeState.lastReasonClass || "").trim().toLowerCase();
+  if (reasonClass === "config-error" || reasonClass === "auth-error") return true;
+  if (isRemoteBridgeWarmupActive(nowTs)) return false;
+  const failureStreak = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+  if (hasRecentRemoteBridgeSuccess(nowTs) && failureStreak < getRemoteOfflineFailureThreshold()) {
+    return false;
+  }
+  return failureStreak > 0 || hasUsableRemoteLiveSnapshot(nowTs);
 }
 
 function normalizeChatMachine(value, def = "gateway") {
@@ -2939,6 +2964,18 @@ function hasRecentRemoteBridgeSuccess(nowTs = Date.now()) {
   return nowTs - lastSuccessTs < REMOTE_LIVE_DEGRADED_GRACE_MS;
 }
 
+function isRemoteBridgeWarmupActive(nowTs = Date.now()) {
+  if (!isRemoteMode()) return false;
+  if (remoteBridgeState.connected) return false;
+  if (Number(remoteBridgeState.lastSuccessTs || 0) > 0) return false;
+  if (!remoteBridgeState.running) return false;
+  const startedAtTs = Math.max(0, Number(remoteBridgeState.startedAtTs || 0));
+  if (!startedAtTs) return false;
+  const warmupAgeMs = Math.max(0, nowTs - startedAtTs);
+  const failureStreak = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+  return warmupAgeMs < REMOTE_BRIDGE_WARMUP_MS && failureStreak <= 1;
+}
+
 const REMOTE_HTTP_AGENT = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
@@ -4604,6 +4641,7 @@ function stopRemoteBridge() {
   clearRemoteBridgePersistState();
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
+  remoteBridgeState.startedAtTs = 0;
   remoteBridgeState.liveFailureCount = 0;
   remoteBridgeState.lastFailureTs = 0;
   remoteBridgeState.lastReasonCode = "";
@@ -4622,6 +4660,7 @@ function startRemoteBridge() {
   if (remoteBridgeState.running) return;
   clearRemoteBridgePersistState();
   remoteBridgeState.running = true;
+  remoteBridgeState.startedAtTs = Date.now();
   remoteBridgeState.bridgeSessionId =
     Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0)) + 1;
   remoteBridgeState.autoSyncAttempted = false;
@@ -4643,10 +4682,13 @@ function startRemoteBridge() {
       stopRemoteBridge();
       return;
     }
+    const tickStartedAt = Date.now();
     await pollRemoteLiveOnce().catch(() => {});
     // Keep fast retry while the bridge is still connected or has a recent
     // successful poll. Only apply exponential backoff after a real disconnect.
-    const nextDelay = getRemoteBridgeNextDelayMs();
+    // Schedule from poll-start time so remote mode does not add fetch latency
+    // on top of the target bridge cadence.
+    const nextDelay = getRemoteBridgeNextDelayMs(Date.now(), Date.now() - tickStartedAt);
     remoteBridgeTimer = setTimeout(tick, Math.round(nextDelay));
   };
   tick();
@@ -9664,7 +9706,7 @@ app.use("/api", async (req, res, next) => {
   if (!isRemoteMode()) return next();
   if (!shouldProxyApiPath(req.path)) return next();
   // When gateway is offline, serve read-only data from local DB instead of 502
-  if (!remoteBridgeState.connected && canFallbackToLocal(req.path)) {
+  if (shouldServeLocalFallback(req.path, Date.now())) {
     res.setHeader("X-Data-Source", "local-fallback");
     return next();
   }

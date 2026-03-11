@@ -88,6 +88,9 @@ setTimeout(async () => {
       "utf8",
     );
     check("Adaptive polling (latency*2)", src.includes("latency * 2"));
+    check("Bridge interval 800ms", src.includes("const REMOTE_BRIDGE_INTERVAL_MS = 800"));
+    check("Bridge warmup 8s", src.includes("const REMOTE_BRIDGE_WARMUP_MS = 8000"));
+    check("Warmup skips local fallback", src.includes("if (isRemoteBridgeWarmupActive(nowTs)) return false;"));
     check("Energy fetch stamps success only", src.includes("lastTodayEnergyFetchTs = ts"));
     check("Offline threshold 6", src.includes("FAILURES_BEFORE_OFFLINE = 6"));
     check("Sync threshold 10", src.includes("BEFORE_OFFLINE_DURING_SYNC = 10"));

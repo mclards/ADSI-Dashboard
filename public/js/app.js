@@ -2291,6 +2291,8 @@ function getRemoteHealthDisplay(healthRaw = null, modeRaw = "") {
     return { text: "Gateway local polling", cls: "" };
   }
   switch (String(health.state || "").trim().toLowerCase()) {
+    case "connecting":
+      return { text: "Connecting", cls: "warn" };
     case "connected":
       return { text: "Connected", cls: "ok" };
     case "degraded":
