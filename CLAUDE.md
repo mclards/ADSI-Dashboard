@@ -9,7 +9,8 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.33` in `package.json`
+- Current repo version baseline: `2.2.34` in `package.json`
+- Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
   - Electron desktop app
@@ -19,6 +20,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
   - SQLite via `better-sqlite3`
 
 Do not casually rename updater identifiers. Visible branding may change, but old installed versions must still detect updates unless a deliberate migration is implemented.
+Do not treat hardcoded footer/about version strings as source of truth. `package.json` is the repo version source of truth, and deployed server/runtime versions may legitimately lag it.
 
 ## Repo Layout Rules
 
@@ -144,6 +146,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - **App confirm modal**: `appConfirm(title, body, {ok, cancel})` → `Promise<boolean>`. Replaces all native `confirm()` and `alert()` calls. `#appConfirmModal` + `.confirm-dialog` CSS. `initConfirmModal()` called from `init()`.
 - **WebSocket reconnect**: Exponential backoff with jitter: `Math.min(30000, 500 * 1.5^retries + random * 500 * retries)`. Do not revert to linear — prevents thundering herd with multiple remote clients.
 - **Proxy timeouts**: Centralized in `PROXY_TIMEOUT_RULES` array + `resolveProxyTimeout()`. Add new proxy route timeouts there, not inline.
+- **Gateway link stability**: Adaptive polling (`max(1200, latency×2)` when >400 ms), gateway `/api/live` ETag support for direct consumers, guarded fire-and-forget energy piggyback, gateway `keepAliveTimeout=30s` (must stay > client keepAlive 15s), failure thresholds 6/10/60s/180s. Do not lower thresholds or revert to fixed polling.
 - **Availability today**: `/api/report/daily` range handler splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range. Detail panel 60 s refresh also fetches today's report rows to keep availability chip current.
 
 ## Version, Branding, and Release Compatibility
@@ -293,9 +296,19 @@ node --check electron/preload.js
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
   - **After any Node-ABI smoke test, always run `npm run rebuild:native:electron`** before launching or building the Electron app. The smoke test rebuilds `better-sqlite3` for plain Node (different ABI), which breaks Electron until restored.
+- Some shells in this workspace export `ELECTRON_RUN_AS_NODE=1`.
+  - Direct `electron.exe ...` launches and Playwright/Electron probes will behave like plain Node unless that env var is removed.
+  - This can produce misleading errors such as `Unable to find Electron app ...`.
+  - Clear `ELECTRON_RUN_AS_NODE` or launch through `start-electron.js` semantics before any Electron/UI smoke.
 - Before any EXE build, run the required smoke test for the changed surface and do not skip it unless the user explicitly says to skip smoke testing.
   - backend / DB / replication / archive changes: isolated server smoke test
   - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test
+- Browser-side / live Electron UI verification is available via:
+  - `npx playwright test server/tests/electronUiSmoke.spec.js --reporter=line`
+  - This smoke covers dashboard metrics, the Energy Summary Export single-date UI, and Settings connectivity health in the real Electron window.
+- Inverter detail panel rule:
+  - Do not block initial detail rendering on the 7-day `/api/report/daily` history fetch.
+  - Stats and alarms should render first; recent-history loading must be best-effort and bounded by a timeout.
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.

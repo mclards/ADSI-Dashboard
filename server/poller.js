@@ -61,9 +61,14 @@ let apiOfflineBroadcasted = false;
 
 function updateLiveSnapshotCache() {
   try {
-    liveJsonCache = JSON.stringify(liveData);
-    liveJsonCacheTs = Date.now();
-    pollStats.lastCacheUpdateTs = liveJsonCacheTs;
+    const next = JSON.stringify(liveData);
+    // Only bump the cache timestamp when the serialized payload actually changed.
+    // This keeps /api/live ETag responses meaningful for direct conditional GETs.
+    if (next !== liveJsonCache) {
+      liveJsonCache = next;
+      liveJsonCacheTs = Date.now();
+      pollStats.lastCacheUpdateTs = liveJsonCacheTs;
+    }
   } catch (err) {
     // Keep last good snapshot; avoid throwing in hot path.
     console.warn("[poller] live snapshot cache failed:", err.message);

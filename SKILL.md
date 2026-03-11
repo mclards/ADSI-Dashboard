@@ -9,11 +9,13 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `Dashboard V2`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.2.33` in `package.json`
+- Current repo version baseline: `2.2.34` in `package.json`
+- Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 
 Do not casually rename internal updater identifiers. Visible branding may change, but updater compatibility with installed legacy builds must remain intact unless a deliberate migration is implemented.
+Do not treat hardcoded footer/about version strings as source of truth. `package.json` is the repo version source of truth, and deployed server/runtime versions may legitimately lag it.
 
 ## Core Stack
 
@@ -374,6 +376,16 @@ Availability for today is computed live via `getDailyReportRowsForDay(today, { i
 
 The frontend uses exponential backoff with jitter for WebSocket reconnection: `Math.min(30000, 500 * 1.5^retries + random * 500 * retries)`. Do not revert to linear backoff — it causes thundering herd on gateway restarts with multiple remote clients.
 
+### Gateway Link Stability
+
+The remote bridge polls the gateway `/api/live` endpoint and must stay resilient over VPN/Tailscale links:
+
+- **Adaptive polling interval:** `getRemoteBridgeNextDelayMs()` scales to `max(1200, latency×2)` when gateway latency exceeds 400 ms. Do not revert to a fixed interval — it causes request pileup on slow links.
+- **Gateway `/api/live` ETag support:** Gateway `/api/live` returns a timestamp-based `ETag` via raw `writeHead`/`end` (bypasses Express ETag) for direct conditional GET consumers. The remote bridge still performs full live polls so downstream clients keep fresh timestamps and totals; do not reintroduce bridge-side `304` skipping unless freshness semantics are redesigned first.
+- **Non-blocking energy piggyback:** The `/api/energy/today` fetch inside `pollRemoteLiveOnce()` is fire-and-forget (`.then()` chain). It must not block the bridge tick, but it must only stamp `lastTodayEnergyFetchTs` after a successful payload and must ignore stale responses from an older bridge session.
+- **Gateway `keepAliveTimeout`:** Set to 30 s (`headersTimeout` 35 s). Must stay above the client `REMOTE_FETCH_KEEPALIVE_MSECS` (15 s) to prevent the gateway from closing idle sockets that the client thinks are alive.
+- **Failure thresholds:** `REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 6` (10 during sync). `REMOTE_LIVE_DEGRADED_GRACE_MS = 60000`. `REMOTE_LIVE_STALE_RETENTION_MS = 180000`. Do not lower these — they prevent UI flicker on intermittent drops.
+
 ### Proxy Timeout Rules
 
 Remote-to-gateway proxy timeouts are centralized in the `PROXY_TIMEOUT_RULES` array and resolved via `resolveProxyTimeout(method, path)`. When adding new proxy routes, add a matching rule to the array instead of inline if/else logic.
@@ -421,9 +433,19 @@ git diff -- public/index.html public/css/style.css
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
   - **After any Node-ABI smoke test, always run `npm run rebuild:native:electron`** before launching or building the Electron app. The smoke test rebuilds `better-sqlite3` for plain Node (different ABI), which breaks Electron until restored.
+- Some shells in this workspace export `ELECTRON_RUN_AS_NODE=1`.
+  - Direct `electron.exe ...` launches and Playwright/Electron probes will behave like plain Node unless that env var is removed.
+  - This can produce misleading errors such as `Unable to find Electron app ...`.
+  - Clear `ELECTRON_RUN_AS_NODE` or launch through `start-electron.js` semantics before any Electron/UI smoke.
 - Before any EXE build, run the required smoke test for the changed surface and do not skip it unless the user explicitly says to skip smoke testing.
   - backend / DB / replication / archive changes: isolated server smoke test
   - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test
+- Browser-side / live Electron UI verification is available via:
+  - `npx playwright test server/tests/electronUiSmoke.spec.js --reporter=line`
+  - This smoke covers dashboard metrics, the Energy Summary Export single-date UI, and Settings connectivity health in the real Electron window.
+- Inverter detail panel rule:
+  - Do not block initial detail rendering on the 7-day `/api/report/daily` history fetch.
+  - Stats and alarms should render first; recent-history loading must be best-effort and bounded by a timeout.
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.

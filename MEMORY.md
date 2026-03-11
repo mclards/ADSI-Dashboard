@@ -2,10 +2,12 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Version:** 2.2.31
+- **Repo/package version baseline:** 2.2.34
+- **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
+- **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
 
 ## Architecture
 - **Electron main process:** electron/main.js — windows, IPC, license, process management
@@ -49,6 +51,19 @@ Release size: ~228 MB each
 - Hard rule: before any EXE build, run the smoke test that matches the changed surface; backend/DB/replication/archive changes require an isolated server smoke test, and Electron/startup changes require a live Electron startup smoke test too.
 - Hard rule: push the release commit and release tag before `gh release create`; if GitHub upload/create times out, inspect release state before retrying.
 - Hard rule: verify `release/` cleanup instead of assuming it worked; after publish keep only installer, portable exe, blockmap, and `latest.yml`.
+- `better-sqlite3` is runtime-ABI specific:
+  - `npm run rebuild:native:node` for plain Node shell checks
+  - `npm run rebuild:native:electron` before Electron launch/build after any Node-ABI rebuild
+- Some shells in this workspace export `ELECTRON_RUN_AS_NODE=1`.
+  - Direct `electron.exe ...` launches and Playwright/Electron probes will act like plain Node unless that env var is removed.
+  - This can surface misleading launch errors like `Unable to find Electron app ...`.
+  - Clear the env var or use `start-electron.js`-style launch semantics for Electron UI work.
+- Live Electron UI smoke:
+  - `npx playwright test server/tests/electronUiSmoke.spec.js --reporter=line`
+  - Covers dashboard metrics, Energy Summary Export single-date UI, and Settings connectivity rendering in the real Electron window.
+- Inverter detail panel rule:
+  - Do not block initial detail stats/alarms on the 7-day `/api/report/daily` history fetch.
+  - Recent history is best-effort and should use a bounded timeout.
 
 ## Archive Replication Rule
 - Manual archive pull/upload must stage monthly archive `.db` replacements while the app is running and apply them only on restart.

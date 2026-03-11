@@ -1864,14 +1864,36 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   State.pacToday.totalKwh = 0;
 }
 
-function getCurrentFreshTotalPacW(now = Date.now()) {
-  let totalPacW = 0;
-  Object.values(State.liveData || {}).forEach((d) => {
-    const isFresh = now - Number(d?.ts || 0) <= DATA_FRESH_MS;
-    if (!d?.online || !isFresh) return;
-    totalPacW += Number(d?.pac || 0);
+function summarizeLiveRows(rowsRaw = []) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  const out = { pac: 0, pdc: 0, kwh: 0 };
+  rows.forEach((d) => {
+    out.pac += Number(d?.pac || 0);
+    out.pdc += Number(d?.pdc || 0);
+    out.kwh += Number(d?.kwh || 0);
   });
-  return totalPacW;
+  return out;
+}
+
+function buildFreshLiveTotalsByInverter(now = Date.now()) {
+  const out = {};
+  Object.values(State.liveData || {}).forEach((d) => {
+    const inv = Number(d?.inverter || 0);
+    const isFresh = d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS;
+    if (!inv || !isFresh) return;
+    if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
+    out[inv].pac += Number(d?.pac || 0);
+    out[inv].pdc += Number(d?.pdc || 0);
+    out[inv].kwh += Number(d?.kwh || 0);
+  });
+  return out;
+}
+
+function getCurrentFreshTotalPacW(now = Date.now()) {
+  return Object.values(buildFreshLiveTotalsByInverter(now)).reduce(
+    (sum, totals) => sum + Number(totals?.pac || 0),
+    0,
+  );
 }
 
 function applySyncedTodayKwh(totalKwh, syncedAt = Date.now()) {
@@ -2002,6 +2024,7 @@ async function api(url, method = "GET", body, options = {}) {
   const showProgress = shouldShowProgress(url, method, options);
   if (showProgress) beginProgress(getProgressLabel(url, method));
   const opts = { method, headers: { "Content-Type": "application/json" } };
+  const abortMessage = String(options?.abortMessage || "").trim();
   if (body) opts.body = JSON.stringify(body);
   if (options?.signal) opts.signal = options.signal;
   if (opts.body) netIOTrackTx(opts.body.length);
@@ -2076,7 +2099,7 @@ async function api(url, method = "GET", body, options = {}) {
     // Network error or parsing failure
     if (err?.name === "AbortError") {
       progressDoneLabel = "Cancelled";
-      throw new Error("Export cancelled.");
+      throw new Error(abortMessage || "Request cancelled.");
     }
     if (err instanceof TypeError) {
       console.warn("[app] Network error:", err.message);
@@ -2085,6 +2108,37 @@ async function api(url, method = "GET", body, options = {}) {
     throw err;
   } finally {
     if (showProgress) endProgress(progressDoneLabel);
+  }
+}
+
+async function apiWithTimeout(
+  url,
+  timeoutMs,
+  abortMessage,
+  method = "GET",
+  body,
+  options = {},
+) {
+  const controller = new AbortController();
+  const timeout = Math.max(1, Number(timeoutMs || 0));
+  const timer = setTimeout(() => controller.abort(), timeout);
+  const parentSignal = options?.signal || null;
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else {
+      parentSignal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
+  try {
+    return await api(url, method, body, {
+      ...options,
+      signal: controller.signal,
+      abortMessage,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -5100,7 +5154,6 @@ function scheduleInverterCardsUpdate(force = false) {
 
 function updateInverterCards() {
   const data = State.liveData;
-  const totals = State.totals;
   const now = Date.now();
   const nodeCount = Number(State.settings.nodeCount || 4);
   const invCount = Number(State.settings.inverterCount || 27);
@@ -5144,10 +5197,6 @@ function updateInverterCards() {
     const configuredUnits = getConfiguredUnits(inv, nodeCount);
     const configuredSet = new Set(configuredUnits);
     totalNodes += configuredUnits.length;
-    const t = totals[inv];
-    if (t) {
-      totalPac += t.pac || 0;
-    }
 
     // Aggregate units for this inverter
     const units = (unitsByInv[inv] || []).filter(
@@ -5173,6 +5222,10 @@ function updateInverterCards() {
       now - Number(State.invLastFresh[inv] || 0) <= CARD_OFFLINE_HOLD_MS;
     const anyOnline = hasFreshData || staleSnapshot || inHold;
     const unitsForDisplay = staleSnapshot ? visibleUnits : freshUnits;
+    const displayTotals = summarizeLiveRows(unitsForDisplay);
+    const pac = Number(displayTotals.pac || 0);
+    const pdc = Number(displayTotals.pdc || 0);
+    totalPac += pac;
     const anyAlarm =
       unitsForDisplay.some((d) => d.alarm && d.alarm !== 0) ||
       activeAlarmEntries.length > 0;
@@ -5237,8 +5290,6 @@ function updateInverterCards() {
     }
 
     // PAC
-    const pac = t ? t.pac : 0;
-    const pdc = t ? t.pdc : 0;
     const pacKw = (pac / 1000).toFixed(2);
     pacEl.innerHTML = `${pacKw}<span class="pac-unit">kW</span>`;
     pacEl.className = "pac-val" + (pac === 0 ? " zero" : " active");
@@ -6015,26 +6066,48 @@ async function loadInverterDetail(inv) {
   const sevenDayStart = dateStr(new Date(now - 7 * 86400000));
 
   try {
-    const [alarmsResp, reportResp, todayEnergyResp] = await Promise.all([
-      api(`/api/alarms?inverter=${inv}&start=${Math.floor(todayStartMs)}&end=${now}`).catch(() => []),
-      api(`/api/report/daily?start=${sevenDayStart}&end=${todayStr}`).catch(() => []),
-      api(`/api/energy/today`).catch(() => []),
+    const reportReq = apiWithTimeout(
+      `/api/report/daily?start=${sevenDayStart}&end=${todayStr}`,
+      15000,
+      "Timed out while loading recent history.",
+    ).catch((err) => {
+      console.warn("loadInverterDetail report:", err?.message || err);
+      return [];
+    });
+
+    const [alarmsResp, todayEnergyResp] = await Promise.all([
+      api(`/api/alarms?inverter=${inv}&start=${Math.floor(todayStartMs)}&end=${now}`).catch((err) => {
+        console.warn("loadInverterDetail alarms:", err?.message || err);
+        return [];
+      }),
+      api(`/api/energy/today`).catch((err) => {
+        console.warn("loadInverterDetail energy:", err?.message || err);
+        return [];
+      }),
     ]);
 
     if (State.invDetailInv !== inv) return; // selection changed while fetching
 
     const alarmRows  = Array.isArray(alarmsResp) ? alarmsResp : (Array.isArray(alarmsResp?.rows) ? alarmsResp.rows : []);
-    const reportRows = Array.isArray(reportResp) ? reportResp : (Array.isArray(reportResp?.rows) ? reportResp.rows : []);
     const todayRows  = Array.isArray(todayEnergyResp) ? todayEnergyResp : [];
 
     // Store for live refresh
     State.invDetailAlarmRows  = alarmRows;
-    State.invDetailReportRows = reportRows;
     State.invDetailKwh = Number(todayRows.find((r) => Number(r.inverter) === inv)?.total_kwh || 0);
 
     renderInverterDetailStats(inv);
     renderInverterDetailAlarms(alarmRows);
+
+    const reportResp = await reportReq;
+    if (State.invDetailInv !== inv) return;
+    const reportRows = Array.isArray(reportResp)
+      ? reportResp
+      : Array.isArray(reportResp?.rows)
+        ? reportResp.rows
+        : [];
+    State.invDetailReportRows = reportRows;
     renderInverterDetailHistory(inv, reportRows);
+    renderInverterDetailStats(inv);
 
     // Refresh kWh and availability every 60 s.
     // /api/report/daily?date=today recomputes the partial-day window live so
@@ -6046,7 +6119,11 @@ async function loadInverterDetail(inv) {
       try {
         const [energyRows, reportRows] = await Promise.all([
           api(`/api/energy/today`).catch(() => null),
-          api(`/api/report/daily?date=${today()}`).catch(() => null),
+          apiWithTimeout(
+            `/api/report/daily?date=${today()}`,
+            10000,
+            "Timed out while refreshing today's summary.",
+          ).catch(() => null),
         ]);
         if (Array.isArray(energyRows)) {
           State.invDetailKwh = Number(energyRows.find((r) => Number(r.inverter) === curInv)?.total_kwh || 0);
@@ -6071,14 +6148,17 @@ function renderInverterDetailStats(inv) {
   if (!el) return;
 
   const todayStr = today();
+  const now = Date.now();
+  const liveTotalsByInv = buildFreshLiveTotalsByInverter(now);
+  const liveTotals = liveTotalsByInv[inv] || { pac: 0, pdc: 0, kwh: 0 };
 
-  // Today Energy — prefer live WS totals (same poller accumulator that writes energy_5min);
+  // Today Energy — prefer fresh live WS totals (same poller accumulator that writes energy_5min);
   // fall back to 60s API-polled value if WS data hasn't arrived yet
-  const kwhLive = Number(State.totals?.[inv]?.kwh || 0) / 1000; // Wh → kWh
+  const kwhLive = Number(liveTotals.kwh || 0);
   const kwh = kwhLive > 0 ? kwhLive : Number(State.invDetailKwh || 0);
 
   // DC Power — live from WS (not shown elsewhere; replaces redundant AC Output chip)
-  const pdc = Number(State.totals?.[inv]?.pdc || 0);
+  const pdc = Number(liveTotals.pdc || 0);
 
   // Today Availability — from daily_report via 60s API poll (same source as exports)
   const todayReport = State.invDetailReportRows.find((r) => r.date === todayStr && r.inverter === inv);
@@ -6090,8 +6170,13 @@ function renderInverterDetailStats(inv) {
 
   // Active Nodes — live count of online nodes for this inverter
   const allInvKeys = Object.entries(State.liveData || {}).filter(([, d]) => Number(d?.inverter) === inv);
-  const totalNodes = allInvKeys.length || 4; // fall back to expected 4 if liveData not populated
-  const nodeCount = allInvKeys.filter(([, d]) => d?.online).length;
+  const totalNodes =
+    getConfiguredUnits(inv, Number(State.settings.nodeCount || 4)).length ||
+    Number(State.settings.nodeCount || 4) ||
+    4;
+  const nodeCount = allInvKeys.filter(
+    ([, d]) => d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS,
+  ).length;
 
   const chips = [
     { label: "Today Energy", value: kwh.toFixed(2),                unit: "kWh" },

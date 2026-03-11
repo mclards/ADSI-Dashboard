@@ -181,10 +181,10 @@ const REMOTE_CHAT_POLL_INTERVAL_MS = 5000;
 const REMOTE_CHAT_POLL_LIMIT = 50;
 const REMOTE_LIVE_FETCH_RETRIES = 2;
 const REMOTE_LIVE_FETCH_RETRY_BASE_MS = 350;
-const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 4;
-const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC = 8;
-const REMOTE_LIVE_DEGRADED_GRACE_MS = 45000;
-const REMOTE_LIVE_STALE_RETENTION_MS = 120000;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 6;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC = 10;
+const REMOTE_LIVE_DEGRADED_GRACE_MS = 60000;
+const REMOTE_LIVE_STALE_RETENTION_MS = 180000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
@@ -208,12 +208,12 @@ const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 2;
 const REPLICATION_TRANSFER_STREAM_HWM = 512 * 1024;
 const REPLICATION_JSON_GZIP_MIN_BYTES = 96 * 1024;
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
-const REMOTE_FETCH_KEEPALIVE_MSECS = 8000;
+const REMOTE_FETCH_KEEPALIVE_MSECS = 15000;
 const REMOTE_FETCH_MAX_SOCKETS = 8;
 const REMOTE_FETCH_MAX_SOCKETS_REPLICATION = 16;
 const CHAT_RATE_LIMIT_WINDOW_MS = 60000;
 const CHAT_RATE_LIMIT_MAX = 10;
-const LIVE_FRESH_MS = 20000;
+const LIVE_FRESH_MS = 15000; // keep live metric freshness aligned with renderer semantics
 const REMOTE_CLIENT_PULL_ONLY = false;
 const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
 const REMOTE_GATEWAY_HANDOFF_SETTING_KEY = "remoteGatewayHandoffMeta";
@@ -390,6 +390,9 @@ const remoteBridgeState = {
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
   lastTodayEnergyFetchTs: 0, // ts of last successful today-energy fetch (rate-limited)
+  todayEnergyFetchInFlight: false,
+  todayEnergyFetchRequestId: 0,
+  bridgeSessionId: 0,
   replicationRunning: false,
   lastReplicationAttemptTs: 0,
   lastReplicationTs: 0,
@@ -776,9 +779,11 @@ function classifyRemoteBridgeFailure(err) {
   }
   if (
     code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
     code === "UND_ERR_SOCKET" ||
     msg.includes("socket hang up") ||
-    msg.includes("read econnreset")
+    msg.includes("read econnreset") ||
+    msg.includes("econnaborted")
   ) {
     return {
       reasonCode: "SOCKET_RESET",
@@ -807,7 +812,15 @@ function classifyRemoteBridgeFailure(err) {
 function getRemoteBridgeNextDelayMs(nowTs = Date.now()) {
   const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
   const fastRetry = Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess(nowTs);
-  if (fastRetry || failures <= 1) return REMOTE_BRIDGE_INTERVAL_MS;
+  if (fastRetry || failures <= 1) {
+    // Adapt polling interval to gateway latency — if the gateway is slow,
+    // give it breathing room instead of hammering at 1.2 s.
+    const latency = Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0));
+    if (latency > 400) {
+      return Math.min(REMOTE_BRIDGE_MAX_BACKOFF_MS, Math.max(REMOTE_BRIDGE_INTERVAL_MS, latency * 2));
+    }
+    return REMOTE_BRIDGE_INTERVAL_MS;
+  }
   return Math.min(
     REMOTE_BRIDGE_MAX_BACKOFF_MS,
     REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1),
@@ -1290,6 +1303,16 @@ function computeTotalsFromLiveData(data) {
     out[inv].kwh += Number(row?.kwh || 0);
   }
   return out;
+}
+
+function computeTodayEnergyRowsFromLiveData(data) {
+  return Object.entries(computeTotalsFromLiveData(data))
+    .map(([inverter, totals]) => ({
+      inverter: Number(inverter || 0),
+      total_kwh: Number(Number(totals?.kwh || 0).toFixed(6)),
+    }))
+    .filter((row) => row.inverter > 0 && row.total_kwh > 0)
+    .sort((a, b) => a.inverter - b.inverter);
 }
 
 function normalizeReplicationCursors(raw) {
@@ -2863,6 +2886,7 @@ function isRetryableNetworkError(err) {
   const code = String(err?.code || "").trim().toUpperCase();
   if (
     code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
     code === "ETIMEDOUT" ||
     code === "ESOCKETTIMEDOUT" ||
     code === "ECONNREFUSED" ||
@@ -4296,6 +4320,7 @@ async function pollRemoteLiveOnce() {
   );
   const startedAt = Date.now();
   remoteBridgeState.lastAttemptTs = startedAt;
+  const bridgeSessionId = Number(remoteBridgeState.bridgeSessionId || 0);
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
@@ -4378,35 +4403,64 @@ async function pollRemoteLiveOnce() {
     // Piggyback today's energy totals so /api/energy/today matches gateway exactly.
     // Rate-limited: only fetch when stale (>30 s) to avoid hammering the gateway
     // on every 1.2 s bridge tick.
+    // Fire-and-forget: don't block the bridge tick, but only record success after
+    // rows were actually received so transient failures retry immediately.
     const energyAgeMs = successTs - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
-    if (energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS) {
-      try {
-        const et = await fetchWithRetry(
-          `${base}/api/energy/today`,
-          {
-            method: "GET",
-            headers: buildRemoteProxyHeaders(),
-            timeout: REMOTE_FETCH_TIMEOUT_MS,
-          },
-          {
-            attempts: REMOTE_LIVE_FETCH_RETRIES,
-            baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
-          },
-        );
-        if (et.ok) {
+    if (
+      energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS &&
+      !remoteBridgeState.todayEnergyFetchInFlight
+    ) {
+      remoteBridgeState.todayEnergyFetchInFlight = true;
+      const requestId =
+        Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
+      remoteBridgeState.todayEnergyFetchRequestId = requestId;
+      fetchWithRetry(
+        `${base}/api/energy/today`,
+        {
+          method: "GET",
+          headers: buildRemoteProxyHeaders(),
+          timeout: REMOTE_FETCH_TIMEOUT_MS,
+        },
+        {
+          attempts: 1, // single attempt — next bridge tick will retry if needed
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      )
+        .then(async (et) => {
+          if (!et.ok) return;
           const rows = await et.json();
-          if (Array.isArray(rows)) {
-            const normalizedRows = normalizeTodayEnergyRows(rows);
-            remoteBridgeState.todayEnergyRows = normalizedRows;
-            updateRemoteTodayEnergyShadow(normalizedRows, successTs);
-            mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, successTs);
-            todayEnergyCache.ts = 0; // force next request to re-read with new data
+          const isCurrentRequest =
+            requestId === Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0));
+          const isCurrentSession =
+            bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+          if (
+            !isCurrentRequest ||
+            !isCurrentSession ||
+            !remoteBridgeState.running ||
+            !isRemoteMode() ||
+            getRemoteGatewayBaseUrl() !== base ||
+            !Array.isArray(rows)
+          ) {
+            return;
           }
-          remoteBridgeState.lastTodayEnergyFetchTs = successTs;
-        }
-      } catch (_) {
-        // Non-fatal; stale todayEnergyRows will be used until next tick.
-      }
+          const normalizedRows = normalizeTodayEnergyRows(rows);
+          remoteBridgeState.todayEnergyRows = normalizedRows;
+          const ts = Date.now();
+          remoteBridgeState.lastTodayEnergyFetchTs = ts;
+          updateRemoteTodayEnergyShadow(normalizedRows, ts);
+          mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, ts);
+          todayEnergyCache.ts = 0; // force next request to re-read with new data
+        })
+        .catch(() => {
+          // Non-fatal; stale todayEnergyRows will be used until next tick.
+        })
+        .finally(() => {
+          if (
+            requestId === Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0))
+          ) {
+            remoteBridgeState.todayEnergyFetchInFlight = false;
+          }
+        });
     }
     if (isRemotePullOnlyMode()) {
       remoteBridgeState.replicationRunning = false;
@@ -4556,6 +4610,9 @@ function stopRemoteBridge() {
   remoteBridgeState.lastReasonClass = "";
   remoteBridgeState.lastLatencyMs = 0;
   remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.todayEnergyFetchRequestId =
+    Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
   remoteBridgeState.lastHealthBroadcastKey = "";
   remoteBridgeState.replicationRunning = false;
   if (_shutdownCalled || !isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
@@ -4565,12 +4622,15 @@ function startRemoteBridge() {
   if (remoteBridgeState.running) return;
   clearRemoteBridgePersistState();
   remoteBridgeState.running = true;
+  remoteBridgeState.bridgeSessionId =
+    Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0)) + 1;
   remoteBridgeState.autoSyncAttempted = false;
   remoteBridgeState.liveFailureCount = 0;
   remoteBridgeState.lastFailureTs = 0;
   remoteBridgeState.lastReasonCode = "";
   remoteBridgeState.lastReasonClass = "";
   remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
   remoteBridgeState.lastHealthBroadcastKey = "";
   if (isRemotePullOnlyMode()) {
     remoteBridgeState.replicationCursors = normalizeReplicationCursors({});
@@ -4865,8 +4925,11 @@ function _checkHandoffCompletion(pollerMap, day) {
 
 function getTodayEnergySupplementRows(day = localDateStr()) {
   if (isRemoteMode()) {
+    // Keep remote today-energy metrics near real time between the 30 s
+    // gateway /api/energy/today syncs by merging fresh live kWh totals.
     return mergeTodayEnergyRowsMax(
       remoteBridgeState.todayEnergyRows || [],
+      computeTodayEnergyRowsFromLiveData(remoteBridgeState.liveData),
       getRemoteTodayEnergyShadowRows(day),
     );
   }
@@ -8131,11 +8194,27 @@ app.ws("/ws", (ws) => {
 
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
+  // Supports ETag for direct consumers that can tolerate cached heartbeat data.
+  // The remote bridge still uses full polls so downstream clients keep fresh
+  // timestamps/totals for accuracy and stale-card avoidance.
+  // Uses res.writeHead()+res.end() to bypass Express's own ETag generation
+  // which would overwrite our timestamp-based ETag.
   if (!isRemoteMode() && typeof poller.getLiveSnapshotJson === "function") {
     const snap = poller.getLiveSnapshotJson();
     if (snap && typeof snap.json === "string") {
-      res.set("Content-Type", "application/json; charset=utf-8");
-      return res.send(snap.json);
+      const etag = `"live-${snap.ts}"`;
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { "ETag": etag });
+        return res.end();
+      }
+      const buf = Buffer.from(snap.json, "utf8");
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": String(buf.length),
+        "ETag": etag,
+        "Cache-Control": "no-cache",
+      });
+      return res.end(buf);
     }
   }
   return res.json(getRuntimeLiveData());
@@ -10591,6 +10670,11 @@ if (Number(pendingArchiveApplyResult?.failed || 0) > 0) {
 }
 
 const httpServer = app.listen(PORT, () => {
+  // Keep gateway sockets alive longer so remote bridge keep-alive connections
+  // don't hit a server-side close between polls. Node defaults to 5 s which is
+  // shorter than the client's keepAliveMsecs (15 s), causing spurious ECONNRESET.
+  httpServer.keepAliveTimeout = 30000;   // 30 s — well above client keepAlive
+  httpServer.headersTimeout = 35000;     // must be > keepAliveTimeout per Node docs
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
   loadRemoteTodayEnergyShadowFromSettings();
   loadGatewayHandoffMetaFromSettings();
