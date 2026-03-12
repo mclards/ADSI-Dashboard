@@ -13,6 +13,7 @@ const zlib = require("zlib");
 const { spawn } = require("child_process");
 const { spawnSync } = require("child_process");
 const { pipeline } = require("stream/promises");
+const WebSocket = require("ws");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
 
@@ -389,6 +390,7 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
 };
 
 let remoteBridgeTimer = null;
+let remoteBridgeSocket = null;
 let remoteChatPollTimer = null;
 const remoteBridgeState = {
   running: false,
@@ -407,6 +409,7 @@ const remoteBridgeState = {
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
   lastTodayEnergyFetchTs: 0, // ts of last successful today-energy fetch (rate-limited)
+  lastTodayEnergyShadowPersistTs: 0,
   todayEnergyFetchInFlight: false,
   todayEnergyFetchRequestId: 0,
   bridgeSessionId: 0,
@@ -1085,6 +1088,7 @@ function pauseRemoteLiveBridgeForPriorityTransfer(reason = "standby-refresh") {
     clearTimeout(remoteBridgeTimer);
     remoteBridgeTimer = null;
   }
+  closeRemoteBridgeSocket();
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
   remoteBridgeState.todayEnergyFetchInFlight = false;
@@ -4923,6 +4927,258 @@ async function runRemoteStartupAutoSync(baseUrl) {
   return { ok: true, stage: "complete", check, incremental: inc };
 }
 
+function closeRemoteBridgeSocket({ preserveHandlers = false } = {}) {
+  const ws = remoteBridgeSocket;
+  remoteBridgeSocket = null;
+  if (!ws) return;
+  try {
+    if (!preserveHandlers && typeof ws.removeAllListeners === "function") {
+      ws.removeAllListeners();
+    }
+    if (typeof ws.terminate === "function") {
+      ws.terminate();
+      return;
+    }
+    if (typeof ws.close === "function") {
+      ws.close();
+    }
+  } catch (_) {}
+}
+
+function buildRemoteBridgeWsUrl(baseUrl, pathname = "/ws") {
+  const u = new URL(String(baseUrl || "").trim());
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = pathname;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+function shouldPersistRemoteTodayEnergyShadow(nowTs = Date.now()) {
+  return (
+    nowTs - Number(remoteBridgeState.lastTodayEnergyShadowPersistTs || 0) >=
+    REMOTE_ENERGY_POLL_INTERVAL_MS
+  );
+}
+
+function isCurrentRemoteBridgeContext({
+  bridgeSessionId,
+  livePauseGeneration,
+  base,
+} = {}) {
+  const isCurrentBridgeSession =
+    bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+  const isCurrentPauseGeneration =
+    livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+  return Boolean(
+    isCurrentBridgeSession &&
+      isCurrentPauseGeneration &&
+      !isRemoteLiveBridgePausedForTransfer() &&
+      remoteBridgeState.running &&
+      isRemoteMode() &&
+      getRemoteGatewayBaseUrl() === base
+  );
+}
+
+function applyRemoteBridgeLiveFrame(payload, context = {}) {
+  const msg = payload && typeof payload === "object" ? payload : {};
+  const data = msg.data && typeof msg.data === "object" ? msg.data : null;
+  if (!data) return false;
+  if (!isCurrentRemoteBridgeContext(context)) return false;
+
+  const successTs = Date.now();
+  remoteBridgeState.liveData = buildRemoteLiveSnapshot(data, successTs);
+  remoteBridgeState.lastLatencyMs = Math.max(
+    0,
+    Number(context?.startedAt ? successTs - Number(context.startedAt || 0) : 0),
+  );
+  remoteBridgeState.lastLiveNodeCount = countRemoteLiveNodes(remoteBridgeState.liveData);
+  remoteBridgeState.totals =
+    msg.totals && typeof msg.totals === "object"
+      ? {
+          pac: Math.max(0, Number(msg.totals.pac || 0)),
+          kwh: Math.max(0, Number(msg.totals.kwh || 0)),
+        }
+      : computeTotalsFromLiveData(remoteBridgeState.liveData);
+  remoteBridgeState.connected = true;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastSuccessTs = successTs;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastError = "";
+  if (Array.isArray(msg.todayEnergy)) {
+    const normalizedRows = normalizeTodayEnergyRows(msg.todayEnergy);
+    remoteBridgeState.todayEnergyRows = normalizedRows;
+    remoteBridgeState.lastTodayEnergyFetchTs = successTs;
+    if (shouldPersistRemoteTodayEnergyShadow(successTs)) {
+      updateRemoteTodayEnergyShadow(normalizedRows, successTs);
+      remoteBridgeState.lastTodayEnergyShadowPersistTs = successTs;
+    }
+    todayEnergyCache.ts = 0;
+  }
+  broadcastUpdate({
+    type: "live",
+    data: remoteBridgeState.liveData,
+    totals: remoteBridgeState.totals,
+    todayEnergy: getTodayEnergyRowsForWs(),
+    remoteHealth: buildRemoteHealthSnapshot(successTs),
+  });
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  remoteBridgeState.lastSyncDirection = "stream-live";
+  return true;
+}
+
+function handleRemoteBridgeStreamFailure(err, context = {}) {
+  const wasConnected = Boolean(remoteBridgeState.connected);
+  const hadLiveData = Boolean(
+    remoteBridgeState.liveData &&
+      typeof remoteBridgeState.liveData === "object" &&
+      Object.keys(remoteBridgeState.liveData).length,
+  );
+  if (!isCurrentRemoteBridgeContext(context)) return;
+  const failure = classifyRemoteBridgeFailure(err);
+  const nowTs = Date.now();
+  remoteBridgeState.connected = false;
+  remoteBridgeState.liveFailureCount += 1;
+  remoteBridgeState.lastFailureTs = nowTs;
+  remoteBridgeState.lastReasonCode = failure.reasonCode;
+  remoteBridgeState.lastReasonClass = failure.reasonClass;
+  remoteBridgeState.lastError = failure.reasonText;
+  if (!hasUsableRemoteLiveSnapshot(nowTs) && (wasConnected || hadLiveData)) {
+    broadcastRemoteOfflineLiveState();
+  }
+  if (wasConnected) {
+    remoteBridgeState.lastSyncDirection = "stream-live-failed";
+  }
+  broadcastRemoteHealthUpdate(true);
+}
+
+function scheduleRemoteBridgeReconnect() {
+  if (!remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer() || !isRemoteMode()) {
+    return;
+  }
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  const nextDelay = getRemoteBridgeNextDelayMs(Date.now(), 0);
+  remoteBridgeTimer = setTimeout(() => {
+    remoteBridgeTimer = null;
+    connectRemoteBridgeSocket();
+  }, Math.round(nextDelay));
+}
+
+function connectRemoteBridgeSocket() {
+  if (!remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer() || !isRemoteMode()) {
+    return;
+  }
+  const startedAt = Date.now();
+  remoteBridgeState.lastAttemptTs = startedAt;
+  const bridgeSessionId = Number(remoteBridgeState.bridgeSessionId || 0);
+  const livePauseGeneration = Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
+    scheduleRemoteBridgeReconnect();
+    return;
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError = "Remote gateway URL cannot be localhost in remote mode.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
+    return;
+  }
+
+  let wsUrl = "";
+  try {
+    wsUrl = buildRemoteBridgeWsUrl(base, "/ws");
+  } catch (err) {
+    handleRemoteBridgeStreamFailure(err, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
+    });
+    scheduleRemoteBridgeReconnect();
+    return;
+  }
+
+  closeRemoteBridgeSocket();
+  const ws = new WebSocket(wsUrl, {
+    headers: buildRemoteProxyHeaders(),
+    handshakeTimeout: REMOTE_FETCH_TIMEOUT_MS,
+  });
+  remoteBridgeSocket = ws;
+
+  const failOnce = (err) => {
+    if (ws._bridgeFailureHandled) return;
+    ws._bridgeFailureHandled = true;
+    if (remoteBridgeSocket === ws) remoteBridgeSocket = null;
+    handleRemoteBridgeStreamFailure(err, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
+    });
+    scheduleRemoteBridgeReconnect();
+  };
+
+  ws.on("open", () => {
+    if (!isCurrentRemoteBridgeContext({ bridgeSessionId, livePauseGeneration, base })) {
+      closeRemoteBridgeSocket();
+      return;
+    }
+    remoteBridgeState.lastLatencyMs = Math.max(0, Date.now() - startedAt);
+    remoteBridgeState.lastSyncDirection = "stream-live-connect";
+    broadcastRemoteHealthUpdate(true);
+  });
+
+  ws.on("message", (raw) => {
+    if (!isCurrentRemoteBridgeContext({ bridgeSessionId, livePauseGeneration, base })) {
+      return;
+    }
+    let msg = null;
+    try {
+      msg = JSON.parse(String(raw || ""));
+    } catch (err) {
+      failOnce(new Error("Gateway live stream returned invalid JSON."));
+      return;
+    }
+    const type = String(msg?.type || "").trim().toLowerCase();
+    if (type !== "init" && type !== "live") return;
+    applyRemoteBridgeLiveFrame(msg, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
+      startedAt,
+    });
+  });
+
+  ws.on("error", (err) => {
+    failOnce(err instanceof Error ? err : new Error(String(err || "Live stream error.")));
+  });
+
+  ws.on("close", (code) => {
+    const suffix = code ? ` (${code})` : "";
+    failOnce(new Error(`Gateway live stream closed${suffix}.`));
+  });
+}
+
 async function pollRemoteLiveOnce() {
   const wasConnected = Boolean(remoteBridgeState.connected);
   const hadLiveData = Boolean(
@@ -5180,52 +5436,44 @@ async function kickRemoteBridgeNow(reason = "manual-reconnect") {
   }
   if (!remoteBridgeState.running) {
     startRemoteBridge();
+  } else {
+    if (remoteBridgeTimer) {
+      clearTimeout(remoteBridgeTimer);
+      remoteBridgeTimer = null;
+    }
+    connectRemoteBridgeSocket();
   }
+  const reconnectStartedAt = Date.now();
   remoteBridgeState.lastSyncDirection = String(reason || "manual-reconnect");
-  remoteBridgeState.lastAttemptTs = Date.now();
+  remoteBridgeState.lastAttemptTs = reconnectStartedAt;
   remoteBridgeState.liveFailureCount = 0;
-  try {
-    await pollRemoteLiveOnce();
-    const remoteHealth = buildRemoteHealthSnapshot();
-    const liveNodeCount = Math.max(
-      0,
-      Object.values(remoteBridgeState.liveData || {}).filter(
-        (row) => row && typeof row === "object",
-      ).length,
-    );
-    return {
-      ok: remoteHealth.state === "connected",
-      degraded:
-        remoteHealth.state === "degraded" || remoteHealth.state === "stale",
-      connected: remoteHealth.state === "connected",
-      liveNodeCount,
-      lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
-      lastError: String(remoteBridgeState.lastError || ""),
-      error:
-        remoteHealth.state === "connected"
-          ? ""
-          : String(remoteHealth.reasonText || "Live bridge is not fully healthy."),
-      remoteHealth,
-    };
-  } catch (err) {
-    remoteBridgeState.connected = false;
-    remoteBridgeState.lastFailureTs = Date.now();
-    const failure = classifyRemoteBridgeFailure(err);
-    remoteBridgeState.lastReasonCode = failure.reasonCode;
-    remoteBridgeState.lastReasonClass = failure.reasonClass;
-    remoteBridgeState.lastError = failure.reasonText;
-    const remoteHealth = buildRemoteHealthSnapshot();
-    broadcastRemoteHealthUpdate(true);
-    return {
-      ok: false,
-      error: remoteBridgeState.lastError,
-      connected: false,
-      liveNodeCount: 0,
-      lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
-      lastError: remoteBridgeState.lastError,
-      remoteHealth,
-    };
+  const deadline = reconnectStartedAt + Math.max(3000, REMOTE_FETCH_TIMEOUT_MS + 2000);
+  while (Date.now() < deadline) {
+    if (Number(remoteBridgeState.lastSuccessTs || 0) >= reconnectStartedAt) break;
+    if (Number(remoteBridgeState.lastFailureTs || 0) >= reconnectStartedAt) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  const remoteHealth = buildRemoteHealthSnapshot();
+  const liveNodeCount = Math.max(
+    0,
+    Object.values(remoteBridgeState.liveData || {}).filter(
+      (row) => row && typeof row === "object",
+    ).length,
+  );
+  return {
+    ok: remoteHealth.state === "connected",
+    degraded:
+      remoteHealth.state === "degraded" || remoteHealth.state === "stale",
+    connected: remoteHealth.state === "connected",
+    liveNodeCount,
+    lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
+    lastError: String(remoteBridgeState.lastError || ""),
+    error:
+      remoteHealth.state === "connected"
+        ? ""
+        : String(remoteHealth.reasonText || "Live bridge is not fully healthy."),
+    remoteHealth,
+  };
 }
 
 function stopRemoteBridge() {
@@ -5233,6 +5481,7 @@ function stopRemoteBridge() {
     clearTimeout(remoteBridgeTimer);
     remoteBridgeTimer = null;
   }
+  closeRemoteBridgeSocket();
   resetRemoteBridgeAlarmState();
   clearRemoteBridgePersistState();
   remoteBridgeState.running = false;
@@ -5244,6 +5493,7 @@ function stopRemoteBridge() {
   remoteBridgeState.lastReasonClass = "";
   remoteBridgeState.lastLatencyMs = 0;
   remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
   remoteBridgeState.todayEnergyFetchInFlight = false;
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
@@ -5262,6 +5512,11 @@ function stopRemoteBridge() {
 
 function startRemoteBridge() {
   if (remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer()) return;
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  closeRemoteBridgeSocket();
   clearRemoteBridgePersistState();
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
@@ -5275,6 +5530,7 @@ function startRemoteBridge() {
   remoteBridgeState.lastReasonCode = "";
   remoteBridgeState.lastReasonClass = "";
   remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
   remoteBridgeState.todayEnergyFetchInFlight = false;
   remoteBridgeState.lastHealthBroadcastKey = "";
   if (isRemotePullOnlyMode()) {
@@ -5282,22 +5538,7 @@ function startRemoteBridge() {
   } else {
     remoteBridgeState.replicationCursors = readReplicationCursorsSetting();
   }
-  const tick = async () => {
-    if (!remoteBridgeState.running) return;
-    if (!isRemoteMode()) {
-      stopRemoteBridge();
-      return;
-    }
-    const tickStartedAt = Date.now();
-    await pollRemoteLiveOnce().catch(() => {});
-    // Keep fast retry while the bridge is still connected or has a recent
-    // successful poll. Only apply exponential backoff after a real disconnect.
-    // Schedule from poll-start time so remote mode does not add fetch latency
-    // on top of the target bridge cadence.
-    const nextDelay = getRemoteBridgeNextDelayMs(Date.now(), Date.now() - tickStartedAt);
-    remoteBridgeTimer = setTimeout(tick, Math.round(nextDelay));
-  };
-  tick();
+  connectRemoteBridgeSocket();
 }
 
 function applyRuntimeMode() {

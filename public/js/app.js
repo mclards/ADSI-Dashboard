@@ -2089,11 +2089,20 @@ function resetTodayMwhAuthority() {
   State.todayMwh.wsAuthoritative = false;
 }
 
+function hasTodayMwhWsAuthority() {
+  return Boolean(
+    State.todayMwh.wsAuthoritative &&
+      State.ws &&
+      Number(State.ws.readyState) === 1,
+  );
+}
+
 function canApplyTodayMwhSync(source = "sync", { allowRemoteFallback = false } = {}) {
   const src = String(source || "sync").trim().toLowerCase();
-  if (getActiveOperationModeClient() !== "remote") return true;
   if (src === "ws") return true;
-  return Boolean(allowRemoteFallback) && !State.todayMwh.wsAuthoritative;
+  if (hasTodayMwhWsAuthority()) return false;
+  if (getActiveOperationModeClient() !== "remote") return true;
+  return Boolean(allowRemoteFallback);
 }
 
 function applySyncedTodayKwh(totalKwh, syncedAt = Date.now(), opts = {}) {
@@ -2158,6 +2167,9 @@ async function seedTodayEnergyFromDb() {
 }
 
 async function syncTodayMwhFromServer(opts = {}) {
+  if (!Boolean(opts?.force) && hasTodayMwhWsAuthority()) {
+    return false;
+  }
   try {
     const rows = await fetchTodayEnergyTotalsRaw();
     setTodayEnergyRowsClient(rows);
@@ -6630,6 +6642,7 @@ function connectWS() {
 
   ws.onopen = () => {
     State.wsConnecting = false;
+    resetTodayMwhAuthority();
     setWsState(true, "ONLINE");
     State.wsRetries = 0;
     showOfflineIndicator(false);  // Clear offline banner on reconnect
@@ -6649,6 +6662,7 @@ function connectWS() {
 
   ws.onclose = () => {
     State.wsConnecting = false;
+    resetTodayMwhAuthority();
     _clearWsHeartbeat();
     setWsState(false, "RECONNECT");
     const retries = ++State.wsRetries;
@@ -6660,6 +6674,7 @@ function connectWS() {
 
   ws.onerror = () => {
     State.wsConnecting = false;
+    resetTodayMwhAuthority();
     _clearWsHeartbeat();
     showOfflineIndicator(true, "Connection lost. Retrying...");
     ws.close();
