@@ -5656,13 +5656,24 @@ function getTodayEnergyRowsForWs(day = localDateStr()) {
   return getTodayPacTotalsFromDbCached();
 }
 
+function getTodayEnergyRowsForLivePayload(day = localDateStr()) {
+  const liveRows = getTodayEnergySupplementRows(day);
+  if (isRemoteMode()) return liveRows;
+  const cachedRows =
+    todayEnergyCache.day === day && Array.isArray(todayEnergyCache.rows)
+      ? todayEnergyCache.rows
+      : [];
+  if (!cachedRows.length) return liveRows;
+  return mergeTodayEnergyRowsMax(cachedRows, liveRows);
+}
+
 setBroadcastPayloadEnricher((payload) => {
   if (!payload || typeof payload !== "object") return payload;
   if (String(payload.type || "").trim().toLowerCase() !== "live") return payload;
   if (Object.prototype.hasOwnProperty.call(payload, "todayEnergy")) return payload;
   return {
     ...payload,
-    todayEnergy: getTodayEnergyRowsForWs(),
+    todayEnergy: getTodayEnergyRowsForLivePayload(),
   };
 });
 
