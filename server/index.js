@@ -159,6 +159,7 @@ const SOLCAST_ACCESS_MODE_API = "api";
 const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
 const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
 const SOLCAST_TOOLKIT_PERIOD = "PT5M";
+const SOLCAST_PREVIEW_RESOLUTIONS = new Set(["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"]);
 const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 7;
 const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 192;
 const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
@@ -6919,6 +6920,140 @@ function normalizeSolcastPreviewDayCount(value) {
   return Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.max(1, n));
 }
 
+function normalizeSolcastPreviewResolution(value) {
+  const raw = String(value || SOLCAST_TOOLKIT_PERIOD)
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  return SOLCAST_PREVIEW_RESOLUTIONS.has(raw) ? raw : SOLCAST_TOOLKIT_PERIOD;
+}
+
+function getSolcastPreviewBucketMinutes(resolution) {
+  const normalized = normalizeSolcastPreviewResolution(resolution);
+  const minutes = Number.parseInt(
+    normalized.replace(/^PT/i, "").replace(/M$/i, ""),
+    10,
+  );
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : SOLCAST_SLOT_MIN;
+}
+
+function parseSolcastPreviewMinuteOfDay(timeText) {
+  const raw = String(timeText || "").trim();
+  const match = /^(\d{2}):(\d{2})$/.exec(raw);
+  if (!match) return -1;
+  const hh = Number(match[1] || 0);
+  const mm = Number(match[2] || 0);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return -1;
+  return hh * 60 + mm;
+}
+
+function formatSolcastPreviewBucketTime(minuteOfDay) {
+  const minute = Math.max(0, Math.trunc(Number(minuteOfDay || 0)));
+  const hh = Math.floor(minute / 60);
+  const mm = minute % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+function sumSolcastPreviewNumbers(values) {
+  let total = 0;
+  let seen = false;
+  for (const raw of values || []) {
+    const num = Number(raw);
+    if (!Number.isFinite(num)) continue;
+    total += num;
+    seen = true;
+  }
+  return seen ? Number(total.toFixed(6)) : null;
+}
+
+function averageSolcastPreviewNumbers(values) {
+  let total = 0;
+  let count = 0;
+  for (const raw of values || []) {
+    const num = Number(raw);
+    if (!Number.isFinite(num)) continue;
+    total += num;
+    count += 1;
+  }
+  return count > 0 ? Number((total / count).toFixed(6)) : null;
+}
+
+function aggregateSolcastPreviewRows(rows, resolution) {
+  const displayPeriod = normalizeSolcastPreviewResolution(resolution);
+  const bucketMinutes = getSolcastPreviewBucketMinutes(displayPeriod);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (bucketMinutes <= SOLCAST_SLOT_MIN) {
+    return {
+      rows: safeRows.map((row) => ({
+        ...row,
+        period: displayPeriod,
+      })),
+      displayPeriod,
+      bucketMinutes,
+    };
+  }
+
+  const grouped = new Map();
+  for (const row of safeRows) {
+    const date = String(row?.date || "").trim();
+    const minuteOfDay = parseSolcastPreviewMinuteOfDay(row?.time);
+    if (!date || minuteOfDay < 0) continue;
+    const bucketStart = Math.floor(minuteOfDay / bucketMinutes) * bucketMinutes;
+    const key = `${date}|${bucketStart}`;
+    let entry = grouped.get(key);
+    if (!entry) {
+      const bucketTime = formatSolcastPreviewBucketTime(bucketStart);
+      entry = {
+        date,
+        time: bucketTime,
+        period: displayPeriod,
+        chartLabel: `${date.slice(5)} ${bucketTime}`,
+        forecastMwh: [],
+        forecastLoMwh: [],
+        forecastHiMwh: [],
+        actualMwh: [],
+        forecastMw: [],
+        forecastLoMw: [],
+        forecastHiMw: [],
+        actualMw: [],
+      };
+      grouped.set(key, entry);
+    }
+    entry.forecastMwh.push(row?.forecastMwh);
+    entry.forecastLoMwh.push(row?.forecastLoMwh);
+    entry.forecastHiMwh.push(row?.forecastHiMwh);
+    entry.actualMwh.push(row?.actualMwh);
+    entry.forecastMw.push(row?.forecastMw);
+    entry.forecastLoMw.push(row?.forecastLoMw);
+    entry.forecastHiMw.push(row?.forecastHiMw);
+    entry.actualMw.push(row?.actualMw);
+  }
+
+  return {
+    rows: Array.from(grouped.values())
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        return a.time.localeCompare(b.time);
+      })
+      .map((entry) => ({
+        date: entry.date,
+        time: entry.time,
+        period: displayPeriod,
+        chartLabel: entry.chartLabel,
+        forecastMwh: sumSolcastPreviewNumbers(entry.forecastMwh),
+        forecastLoMwh: sumSolcastPreviewNumbers(entry.forecastLoMwh),
+        forecastHiMwh: sumSolcastPreviewNumbers(entry.forecastHiMwh),
+        actualMwh: sumSolcastPreviewNumbers(entry.actualMwh),
+        forecastMw: averageSolcastPreviewNumbers(entry.forecastMw),
+        forecastLoMw: averageSolcastPreviewNumbers(entry.forecastLoMw),
+        forecastHiMw: averageSolcastPreviewNumbers(entry.forecastHiMw),
+        actualMw: averageSolcastPreviewNumbers(entry.actualMw),
+      })),
+    displayPeriod,
+    bucketMinutes,
+  };
+}
+
 function computeSolcastPreviewHours(dayCount) {
   const count = normalizeSolcastPreviewDayCount(dayCount);
   return Math.max(
@@ -7116,11 +7251,19 @@ function buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg) 
   };
 }
 
-function buildSolcastPreviewSeries(startDay, dayCount, forecastRecords, actualRecords, cfg) {
+function buildSolcastPreviewSeries(
+  startDay,
+  dayCount,
+  forecastRecords,
+  actualRecords,
+  cfg,
+  resolution,
+) {
   const availableDays = listSolcastPreviewDays(forecastRecords, actualRecords, cfg);
   const todayTz = localDateStrInTz(Date.now(), cfg.timeZone);
   const requestedStartDay = String(startDay || "").trim();
   const normalizedCount = normalizeSolcastPreviewDayCount(dayCount);
+  const displayPeriod = normalizeSolcastPreviewResolution(resolution);
   const effectiveStartDay =
     requestedStartDay && availableDays.includes(requestedStartDay)
       ? requestedStartDay
@@ -7136,12 +7279,14 @@ function buildSolcastPreviewSeries(startDay, dayCount, forecastRecords, actualRe
   const daySeries = selectedDays.map((day) =>
     buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg),
   );
-  const rows = daySeries.flatMap((entry) => entry.rows || []);
-  if (!rows.length) {
+  const rawRows = daySeries.flatMap((entry) => entry.rows || []);
+  if (!rawRows.length) {
     throw new Error(
       `No Solcast samples matched ${selectedDays[0]} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
     );
   }
+  const aggregated = aggregateSolcastPreviewRows(rawRows, displayPeriod);
+  const rows = aggregated.rows;
 
   const labels = rows.map((row) => row.chartLabel);
   const forecastMwh = rows.map((row) => row.forecastMwh);
@@ -7170,6 +7315,9 @@ function buildSolcastPreviewSeries(startDay, dayCount, forecastRecords, actualRe
     daysCovered: availableDays,
     rangeStartDay,
     rangeEndDay,
+    sourcePeriod: SOLCAST_TOOLKIT_PERIOD,
+    displayPeriod: aggregated.displayPeriod,
+    bucketMinutes: aggregated.bucketMinutes,
     rangeLabel:
       rangeStartDay === rangeEndDay
         ? rangeStartDay
@@ -7183,6 +7331,7 @@ function buildSolcastPreviewSeries(startDay, dayCount, forecastRecords, actualRe
     forecastLoMw,
     forecastHiMw,
     actualMw,
+    rawRows,
     rows,
     forecastTotalMwh: Number(forecastTotalMwh.toFixed(6)),
     actualTotalMwh: Number(actualTotalMwh.toFixed(6)),
@@ -10645,6 +10794,7 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       records,
       estActuals || [],
       cfg,
+      SOLCAST_TOOLKIT_PERIOD,
     );
     let snapshotRowsPersisted = 0;
     const snapshotWarnings = [];
@@ -10675,6 +10825,9 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       selectedDays: preview.selectedDays,
       rangeStartDay: preview.rangeStartDay,
       rangeEndDay: preview.rangeEndDay,
+      sourcePeriod: preview.sourcePeriod,
+      displayPeriod: preview.displayPeriod,
+      bucketMinutes: preview.bucketMinutes,
       rangeLabel: preview.rangeLabel,
       daysCovered: preview.daysCovered,
       startTime: preview.startTime,
@@ -10744,6 +10897,9 @@ app.post("/api/export/solcast-preview", async (req, res) => {
 
     const requestedDay = String(req.body?.day || "").trim();
     const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
+    const requestedResolution = normalizeSolcastPreviewResolution(
+      req.body?.resolution || SOLCAST_TOOLKIT_PERIOD,
+    );
     const { records, estActuals } = await fetchSolcastForecastRecords(cfg, {
       toolkitHours: computeSolcastPreviewHoursForRequest(
         requestedDay,
@@ -10758,12 +10914,16 @@ app.post("/api/export/solcast-preview", async (req, res) => {
       records,
       estActuals || [],
       cfg,
+      requestedResolution,
     );
     const outPath = await runGatewayExportJob("solcast-preview", () =>
       exporter.exportSolcastPreview({
+        rawRows: preview.rawRows,
         rows: preview.rows,
         startDay: preview.rangeStartDay,
         endDay: preview.rangeEndDay,
+        resolution: preview.displayPeriod,
+        exportFormat: req.body?.exportFormat,
         format: "xlsx",
       }),
     );

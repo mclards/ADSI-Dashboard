@@ -492,12 +492,6 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
     }
   }
 
-  if (keys.length && options?.autoFilter !== false) {
-    ws.autoFilter = {
-      from: { row: 1, column: 1 },
-      to: { row: 1, column: keys.length },
-    };
-  }
   widths.forEach((width, idx) => {
     ws.getColumn(idx + 1).width = width;
   });
@@ -1396,10 +1390,41 @@ function parseIsoDayStart(day) {
   return new Date(`${s}T00:00:00`).getTime();
 }
 
-async function exportSolcastPreview({ rows, startDay, endDay, format }) {
-  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+const SOLCAST_PREVIEW_RESOLUTIONS = new Set(['PT5M', 'PT10M', 'PT15M', 'PT30M', 'PT60M']);
+const SOLCAST_AVERAGE_TABLE_MINUTES = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+
+function normalizeSolcastPreviewResolution(value) {
+  const raw = String(value || 'PT5M')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+  return SOLCAST_PREVIEW_RESOLUTIONS.has(raw) ? raw : 'PT5M';
+}
+
+function getSolcastPreviewBucketMinutes(resolution) {
+  const normalized = normalizeSolcastPreviewResolution(resolution);
+  const minutes = Number.parseInt(
+    normalized.replace(/^PT/i, '').replace(/M$/i, ''),
+    10,
+  );
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+}
+
+function normalizeSolcastPreviewExportFormat(value) {
+  const raw = String(value || 'standard')
+    .trim()
+    .toLowerCase();
+  return raw === 'average-table' ? 'average-table' : 'standard';
+}
+
+function roundSolcastExportNumber(value, digits = 6) {
+  const num = Number(value);
+  return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
+}
+
+function buildSolcastPreviewStandardRows(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
-  const mapped = safeRows.map((row) => ({
+  return safeRows.map((row) => ({
     Date: String(row?.date || '').trim(),
     Time: String(row?.time || '').trim(),
     Period: String(row?.period || 'PT5M').trim() || 'PT5M',
@@ -1436,6 +1461,247 @@ async function exportSolcastPreview({ rows, startDay, endDay, format }) {
         ? ''
         : Number(row.actualMwh).toFixed(6),
   }));
+}
+
+function buildSolcastPreviewFileBase(startDay, endDay, resolution, exportFormat) {
+  const s = parseIsoDayStart(startDay) || Date.now();
+  const e = parseIsoDayStart(endDay || startDay) || s;
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  const suffix =
+    normalizedExportFormat === 'average-table'
+      ? `Solcast Toolkit ${normalizedResolution} AvgTable 05-18`
+      : `Solcast Toolkit ${normalizedResolution} 05-18`;
+  return exportDateAwareFileBase(s, e, 'all', suffix);
+}
+
+function buildSolcastAverageTableBuckets(values, bucketMinutes) {
+  const span = Math.max(1, Math.floor(bucketMinutes / 5));
+  const ordered = SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) => values.get(minute));
+  const buckets = [];
+  for (let i = 0; i < ordered.length; i += span) {
+    const slice = ordered
+      .slice(i, i + span)
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+    if (!slice.length) continue;
+    const avg = slice.reduce((sum, value) => sum + value, 0) / slice.length;
+    buckets.push(avg);
+  }
+  if (!buckets.length) return null;
+  return roundSolcastExportNumber(
+    buckets.reduce((sum, value) => sum + value, 0) / buckets.length,
+  );
+}
+
+function buildSolcastAverageTableDays(rawRows, resolution) {
+  const bucketMinutes = getSolcastPreviewBucketMinutes(resolution);
+  const grouped = new Map();
+  for (const row of Array.isArray(rawRows) ? rawRows : []) {
+    const day = String(row?.date || '').trim();
+    const time = String(row?.time || '').trim();
+    const match = /^(\d{2}):(\d{2})$/.exec(time);
+    if (!day || !match) continue;
+    const hour = Number(match[1] || 0);
+    const minuteRaw = Number(match[2] || 0);
+    const hourLabel = hour === 0 ? 24 : hour;
+    const minuteLabel = minuteRaw === 0 ? 60 : minuteRaw;
+    if (!SOLCAST_AVERAGE_TABLE_MINUTES.includes(minuteLabel)) continue;
+    let dayEntry = grouped.get(day);
+    if (!dayEntry) {
+      dayEntry = {
+        day,
+        hours: Array.from({ length: 24 }, (_, idx) => ({
+          hour: idx + 1,
+          values: new Map(),
+        })),
+        totalMwh: 0,
+      };
+      grouped.set(day, dayEntry);
+    }
+    const hourEntry = dayEntry.hours[hourLabel - 1];
+    const forecastMw = roundSolcastExportNumber(row?.forecastMw);
+    if (forecastMw != null) {
+      hourEntry.values.set(minuteLabel, forecastMw);
+    }
+    const forecastMwh = Number(row?.forecastMwh);
+    if (Number.isFinite(forecastMwh)) {
+      dayEntry.totalMwh += forecastMwh;
+    }
+  }
+
+  return Array.from(grouped.values())
+    .sort((a, b) => a.day.localeCompare(b.day))
+    .map((entry) => ({
+      day: entry.day,
+      totalMwh: roundSolcastExportNumber(entry.totalMwh),
+      rows: entry.hours.map((hourEntry) => ({
+        hour: hourEntry.hour,
+        values: SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) =>
+          hourEntry.values.has(minute) ? hourEntry.values.get(minute) : null,
+        ),
+        average: buildSolcastAverageTableBuckets(hourEntry.values, bucketMinutes),
+      })),
+    }));
+}
+
+function solcastAverageTableRowHasNonZeroValue(row) {
+  const values = Array.isArray(row?.values) ? row.values : [];
+  for (const value of values) {
+    const num = Number(value);
+    if (Number.isFinite(num) && Math.abs(num) > 1e-12) return true;
+  }
+  const avg = Number(row?.average);
+  return Number.isFinite(avg) && Math.abs(avg) > 1e-12;
+}
+
+async function writeSolcastAverageTableXlsx(rawRows, startDay, endDay, resolution, exportFormat) {
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const days = buildSolcastAverageTableDays(rawRows, normalizedResolution);
+  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+  const fileBase = buildSolcastPreviewFileBase(
+    startDay,
+    endDay,
+    normalizedResolution,
+    exportFormat,
+  );
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const wb = new ExcelJS.Workbook();
+  const headerFill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF4B183' },
+  };
+  const subHeaderFill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFCE4D6' },
+  };
+  const totalFill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFEB84' },
+  };
+  const border = {
+    top: { style: 'thin', color: { argb: 'FF808080' } },
+    left: { style: 'thin', color: { argb: 'FF808080' } },
+    bottom: { style: 'thin', color: { argb: 'FF808080' } },
+    right: { style: 'thin', color: { argb: 'FF808080' } },
+  };
+
+  for (const dayEntry of days.length ? days : [{ day: startDay || fmtDate(Date.now()), rows: Array.from({ length: 24 }, (_, idx) => ({ hour: idx + 1, values: Array(12).fill(null), average: null })), totalMwh: 0 }]) {
+    const ws = wb.addWorksheet(String(dayEntry.day || 'Solcast').slice(0, 31), {
+      views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
+    });
+    ws.columns = [
+      { width: 10 },
+      ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: 10 })),
+      { width: 18 },
+    ];
+
+    ws.mergeCells(1, 1, 2, 1);
+    ws.getCell(1, 1).value = 'HOURS';
+    ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.getCell(1, 1).font = { bold: true };
+    ws.getCell(1, 1).fill = headerFill;
+    ws.getCell(1, 1).border = border;
+
+    ws.mergeCells(1, 2, 1, 13);
+    ws.getCell(1, 2).value = String(dayEntry.day || '').trim();
+    ws.getCell(1, 2).alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.getCell(1, 2).font = { bold: true };
+    ws.getCell(1, 2).fill = headerFill;
+    ws.getCell(1, 2).border = border;
+
+    ws.mergeCells(1, 14, 2, 14);
+    ws.getCell(1, 14).value = `${normalizedResolution} Average`;
+    ws.getCell(1, 14).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    ws.getCell(1, 14).font = { bold: true };
+    ws.getCell(1, 14).fill = headerFill;
+    ws.getCell(1, 14).border = border;
+
+    SOLCAST_AVERAGE_TABLE_MINUTES.forEach((minute, idx) => {
+      const cell = ws.getCell(2, idx + 2);
+      cell.value = minute;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.font = { bold: true };
+      cell.fill = subHeaderFill;
+      cell.border = border;
+    });
+
+    const lastNonZeroRowIndex = dayEntry.rows.reduce(
+      (lastIdx, row, idx) => (solcastAverageTableRowHasNonZeroValue(row) ? idx : lastIdx),
+      -1,
+    );
+    const renderedRows =
+      lastNonZeroRowIndex >= 0
+        ? dayEntry.rows.slice(0, lastNonZeroRowIndex + 1)
+        : [];
+
+    renderedRows.forEach((row, idx) => {
+      const rowIndex = idx + 3;
+      const hourCell = ws.getCell(rowIndex, 1);
+      hourCell.value = row.hour;
+      hourCell.alignment = { horizontal: 'center', vertical: 'middle' };
+      hourCell.border = border;
+      row.values.forEach((value, valueIdx) => {
+        const cell = ws.getCell(rowIndex, valueIdx + 2);
+        cell.value = value == null ? '' : value;
+        cell.numFmt = value == null ? 'General' : '0.000000';
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = border;
+      });
+      const avgCell = ws.getCell(rowIndex, 14);
+      avgCell.value = row.average == null ? '' : row.average;
+      avgCell.numFmt = row.average == null ? 'General' : '0.000000';
+      avgCell.alignment = { horizontal: 'center', vertical: 'middle' };
+      avgCell.border = border;
+    });
+
+    const totalRowIndex = renderedRows.length + 4;
+    ws.mergeCells(totalRowIndex, 1, totalRowIndex, 13);
+    const totalLabelCell = ws.getCell(totalRowIndex, 1);
+    totalLabelCell.value = 'GENERATION FORECAST (MWh)';
+    totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    totalLabelCell.font = { bold: true };
+    totalLabelCell.fill = totalFill;
+    totalLabelCell.border = border;
+    const totalValueCell = ws.getCell(totalRowIndex, 14);
+    totalValueCell.value = dayEntry.totalMwh == null ? 0 : dayEntry.totalMwh;
+    totalValueCell.numFmt = '0.000000';
+    totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    totalValueCell.font = { bold: true };
+    totalValueCell.fill = totalFill;
+    totalValueCell.border = border;
+  }
+
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
+}
+
+async function exportSolcastPreview({
+  rawRows,
+  rows,
+  startDay,
+  endDay,
+  resolution,
+  exportFormat,
+  format,
+}) {
+  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  if (normalizedExportFormat === 'average-table') {
+    return writeSolcastAverageTableXlsx(
+      Array.isArray(rawRows) && rawRows.length ? rawRows : rows,
+      startDay,
+      endDay,
+      normalizedResolution,
+      normalizedExportFormat,
+    );
+  }
+
+  const mapped = buildSolcastPreviewStandardRows(rows);
 
   const headers = [
     { key: 'Date', label: 'Date' },
@@ -1461,9 +1727,12 @@ async function exportSolcastPreview({ rows, startDay, endDay, format }) {
     headerKeys,
   });
 
-  const s = parseIsoDayStart(startDay) || Date.now();
-  const e = parseIsoDayStart(endDay || startDay) || s;
-  const fileBase = exportDateAwareFileBase(s, e, 'all', 'Solcast Toolkit PT5M 05-18');
+  const fileBase = buildSolcastPreviewFileBase(
+    startDay,
+    endDay,
+    normalizedResolution,
+    normalizedExportFormat,
+  );
   return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
 

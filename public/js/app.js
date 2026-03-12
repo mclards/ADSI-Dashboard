@@ -177,7 +177,9 @@ const State = {
     rangeLabel: "",
     loaded: false,
     payload: null,
+    resolution: "PT5M",
     unit: "mwh",
+    exportFormat: "standard",
   },
   xfer: {
     slots: {
@@ -358,6 +360,40 @@ const fmtTime = (ts) => {
   const d = new Date(ts);
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 };
+const SOLCAST_PREVIEW_RESOLUTIONS = ["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"];
+
+function normalizeSolcastPreviewResolutionClient(value) {
+  const raw = String(value || "PT5M")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  return SOLCAST_PREVIEW_RESOLUTIONS.includes(raw) ? raw : "PT5M";
+}
+
+function getSolcastPreviewBucketMinutesClient(value) {
+  const resolution = normalizeSolcastPreviewResolutionClient(value);
+  const minutes = Number.parseInt(resolution.replace(/^PT/i, "").replace(/M$/i, ""), 10);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+}
+
+function normalizeSolcastPreviewExportFormatClient(value) {
+  const raw = String(value || "standard")
+    .trim()
+    .toLowerCase();
+  return raw === "average-table" ? "average-table" : "standard";
+}
+
+function getSelectedSolcastPreviewResolution() {
+  return normalizeSolcastPreviewResolutionClient(
+    $("solcastPreviewResolution")?.value || State.solcastPreview.resolution || "PT5M",
+  );
+}
+
+function getSelectedSolcastPreviewExportFormat() {
+  return normalizeSolcastPreviewExportFormatClient(
+    $("solcastPreviewExportFormat")?.value || State.solcastPreview.exportFormat || "standard",
+  );
+}
 
 function normalizeInvGridLayout(value) {
   const v = String(value || "")
@@ -2930,12 +2966,16 @@ function syncForecastProviderUi() {
   }
   const previewDay = $("solcastPreviewDay");
   const previewDayCount = $("solcastPreviewDayCount");
+  const previewResolution = $("solcastPreviewResolution");
   const previewUnit = $("solcastPreviewUnit");
+  const previewExportFormat = $("solcastPreviewExportFormat");
   const previewBtn = $("btnSolcastPreviewRefresh");
   const previewExportBtn = $("btnSolcastPreviewExport");
   if (previewDay) previewDay.disabled = apiMode;
   if (previewDayCount) previewDayCount.disabled = apiMode;
+  if (previewResolution) previewResolution.disabled = apiMode;
   if (previewUnit) previewUnit.disabled = apiMode;
+  if (previewExportFormat) previewExportFormat.disabled = apiMode;
   if (previewBtn) previewBtn.disabled = apiMode;
   if (previewExportBtn) previewExportBtn.disabled = apiMode;
   if (apiMode) clearSolcastPreview(false);
@@ -3042,12 +3082,18 @@ function clearSolcastPreview(resetDays = false) {
     State.solcastPreview.dayCount = 1;
     State.solcastPreview.selectedDays = [];
     State.solcastPreview.rangeLabel = "";
+    State.solcastPreview.resolution = "PT5M";
     State.solcastPreview.unit = "mwh";
+    State.solcastPreview.exportFormat = "standard";
     fillSolcastPreviewDayOptions([], "");
     syncSolcastPreviewDayCountOptions([], "", 1);
   }
+  const resolutionSel = $("solcastPreviewResolution");
   const unitSel = $("solcastPreviewUnit");
+  const exportFormatSel = $("solcastPreviewExportFormat");
+  if (resolutionSel && resetDays) resolutionSel.value = "PT5M";
   if (unitSel && resetDays) unitSel.value = "mwh";
+  if (exportFormatSel && resetDays) exportFormatSel.value = "standard";
   updateSolcastPreviewUnitUi();
   setSolcastPreviewTotals("—", "—", "—", "05:00-18:00");
   destroyChartByKey("solcastPreview");
@@ -3062,8 +3108,12 @@ function getSelectedSolcastPreviewUnit() {
 
 function updateSolcastPreviewUnitUi() {
   const unit = getSelectedSolcastPreviewUnit();
+  const title = $("solcastPreviewChartTitle");
   const note = $("solcastPreviewChartNote");
   const emphasis = $("solcastPreviewChartEmphasis");
+  if (title) {
+    title.textContent = "Solcast PT5M Outlook";
+  }
   if (note) {
     note.textContent =
       unit === "mw"
@@ -3361,6 +3411,7 @@ async function exportSolcastPreviewXlsx() {
   }
   const btn = $("btnSolcastPreviewExport");
   if (btn) btn.disabled = true;
+  State.solcastPreview.exportFormat = getSelectedSolcastPreviewExportFormat();
   showMsg("solcastPreviewMsg", "Exporting Solcast preview to Excel...", "");
   try {
     const payload = {
@@ -3368,6 +3419,8 @@ async function exportSolcastPreviewXlsx() {
       day: $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
       dayCount:
         $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+      resolution: getSelectedSolcastPreviewResolution(),
+      exportFormat: getSelectedSolcastPreviewExportFormat(),
     };
     const result = await api("/api/export/solcast-preview", "POST", payload);
     showMsg("solcastPreviewMsg", `✔ Saved: ${result.path}`, "");
@@ -10234,8 +10287,18 @@ function bindEventHandlers() {
     const nextCount = normalizeSolcastPreviewDayCountClient(event?.target?.value || 1);
     loadSolcastPreview({ dayCount: nextCount, silent: true }).catch(() => {});
   });
+  $("solcastPreviewResolution")?.addEventListener("change", (event) => {
+    State.solcastPreview.resolution = normalizeSolcastPreviewResolutionClient(
+      event?.target?.value || "PT5M",
+    );
+  });
   $("solcastPreviewUnit")?.addEventListener("change", () => {
     rerenderSolcastPreviewChartFromState();
+  });
+  $("solcastPreviewExportFormat")?.addEventListener("change", (event) => {
+    State.solcastPreview.exportFormat = normalizeSolcastPreviewExportFormatClient(
+      event?.target?.value || "standard",
+    );
   });
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);

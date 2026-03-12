@@ -1476,11 +1476,11 @@
             <div class="settings-subsection forecast-preview-panel" id="solcastPreviewPanel" hidden>
               <div class="settings-subtitle">Toolkit Preview</div>
               <div class="srow forecast-preview-toolbar">
-                <label
+                <label class="forecast-preview-field-day"
                   >Start Day
                   <select id="solcastPreviewDay" class="sel"></select>
                 </label>
-                <label
+                <label class="forecast-preview-field-days"
                   >Days to Display
                   <select id="solcastPreviewDayCount" class="sel">
                     <option value="1">1 Day</option>
@@ -1492,14 +1492,31 @@
                     <option value="7">7 Days</option>
                   </select>
                 </label>
-                <label
+                <label class="forecast-preview-field-unit"
                   >Chart Unit
                   <select id="solcastPreviewUnit" class="sel">
                     <option value="mwh">MWh</option>
                     <option value="mw">MW</option>
                   </select>
                 </label>
-                <div class="forecast-preview-toolbar-action"
+                <label class="forecast-preview-field-resolution"
+                  >Export Resolution
+                  <select id="solcastPreviewResolution" class="sel">
+                    <option value="PT5M">PT5M</option>
+                    <option value="PT10M">PT10M</option>
+                    <option value="PT15M">PT15M</option>
+                    <option value="PT30M">PT30M</option>
+                    <option value="PT60M">PT60M</option>
+                  </select>
+                </label>
+                <label class="forecast-preview-field-format"
+                  >Export Format
+                  <select id="solcastPreviewExportFormat" class="sel">
+                    <option value="standard">Standard</option>
+                    <option value="average-table">Average Table</option>
+                  </select>
+                </label>
+                <div class="forecast-preview-toolbar-action forecast-preview-toolbar-buttons"
                   ><button
                     id="btnSolcastPreviewRefresh"
                     class="btn btn-outline"
@@ -1541,7 +1558,7 @@
               <div class="forecast-preview-chart-wrap">
                 <div class="forecast-preview-chart-head">
                   <div class="forecast-preview-chart-heading">
-                    <div class="forecast-preview-chart-title">Solcast PT5M Outlook</div>
+                    <div class="forecast-preview-chart-title" id="solcastPreviewChartTitle">Solcast PT5M Outlook</div>
                     <div class="forecast-preview-chart-note" id="solcastPreviewChartNote">05:00-18:00 local window · displaying MWh per 5-minute slot</div>
                   </div>
                   <div class="forecast-preview-chart-emphasis" id="solcastPreviewChartEmphasis">Chart Unit: MWh</div>

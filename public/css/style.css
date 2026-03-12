@@ -7095,18 +7095,77 @@ label[data-required]::after {
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar label,
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar .forecast-preview-toolbar-action {
-  grid-column: span 3;
+  grid-column: span 2;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-day {
+  grid-column: span 2;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-days,
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-unit {
+  grid-column: span 1;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-resolution {
+  grid-column: span 1;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-format {
+  grid-column: span 2;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-buttons {
+  grid-column: span 5;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action {
   align-self: flex-end;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  justify-content: stretch;
   gap: 8px;
+  min-width: 0;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar label .sel {
+  min-height: 36px;
+  border-radius: 8px;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action .btn {
   margin-right: 0;
+  flex: 1 1 0;
+  min-width: 120px;
+  min-height: 36px;
+  justify-content: center;
+  padding: 0 14px;
+  border-radius: 9px;
+  font-size: 11px;
+  letter-spacing: 0.24px;
+  box-shadow:
+    inset 0 1px 0 var(--btn-shine, rgba(162, 191, 231, 0.15)),
+    0 3px 10px rgba(0, 0, 0, 0.22);
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action .btn .mdi {
+  font-size: 13px;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection #btnSolcastPreviewRefresh {
+  --btn-color: #fff;
+  --btn-border: rgba(74, 119, 198, 0.94);
+  --btn-bg-1: rgba(70, 118, 202, 0.96);
+  --btn-bg-2: rgba(36, 65, 120, 0.96);
+  --btn-shine: rgba(214, 230, 255, 0.24);
+}
+
+:is(#page-settings, #page-forecast) #forecastSection #btnSolcastPreviewExport {
+  --btn-color: color-mix(in srgb, var(--text) 96%, #ffffff 4%);
+  --btn-border: color-mix(in srgb, var(--border2) 84%, rgba(118, 175, 255, 0.48));
+  --btn-bg-1: rgba(24, 17, 30, 0.94);
+  --btn-bg-2: rgba(16, 11, 21, 0.94);
+  --btn-shine: rgba(205, 220, 255, 0.12);
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action > span {
