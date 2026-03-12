@@ -168,6 +168,13 @@ const State = {
     restartPromptedJobId: "",
     includeArchiveNext: false,
   },
+  modeTransition: {
+    active: false,
+    targetMode: "",
+    startedAt: 0,
+    detail: "",
+    liveWaiters: [],
+  },
   remoteHealth: {},
   solcastPreview: {
     day: "",
@@ -2376,6 +2383,167 @@ async function apiWithTimeout(
   }
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function rejectModeTransitionLiveWaiters(reason = "Mode transition cancelled.") {
+  const waiters = Array.isArray(State.modeTransition?.liveWaiters)
+    ? State.modeTransition.liveWaiters.splice(0)
+    : [];
+  waiters.forEach((entry) => {
+    if (!entry) return;
+    try { clearTimeout(entry.timer); } catch (_) {}
+    try { entry.reject(new Error(reason)); } catch (_) {}
+  });
+}
+
+function resolveModeTransitionLiveWaiters(payload = null) {
+  const waiters = Array.isArray(State.modeTransition?.liveWaiters)
+    ? State.modeTransition.liveWaiters.splice(0)
+    : [];
+  waiters.forEach((entry) => {
+    if (!entry) return;
+    try { clearTimeout(entry.timer); } catch (_) {}
+    try { entry.resolve(payload); } catch (_) {}
+  });
+}
+
+function isGatewayModeRestartCapable() {
+  return Boolean(window.electronAPI?.restartApp);
+}
+
+function buildModeTransitionDetail(targetMode, detail = "") {
+  const custom = String(detail || "").trim();
+  if (custom) return custom;
+  return targetMode === "remote"
+    ? "Waiting for the first live snapshot from the gateway before re-enabling the dashboard."
+    : "Waiting for the local poller to complete its first cycle before re-enabling the dashboard.";
+}
+
+function syncModeTransitionUi() {
+  const active = Boolean(State.modeTransition?.active);
+  const targetMode = normalizeOperationModeValue(State.modeTransition?.targetMode);
+  const overlay = $("modeTransitionOverlay");
+  const titleEl = $("modeTransitionTitle");
+  const bodyEl = $("modeTransitionBody");
+  const saveBtn = $("btnSaveSettings");
+  const modeSelect = $("setOperationMode");
+  const testBtn = $("btnTestRemoteGateway");
+  const tailscaleBtn = $("btnCheckTailscale");
+  const standbyBtn = $("btnRunReplicationPull");
+  const refreshBtn = $("btnRefreshReplicationHealth");
+
+  if (overlay) {
+    overlay.classList.toggle("hidden", !active);
+    overlay.setAttribute("aria-hidden", active ? "false" : "true");
+  }
+  if (titleEl) {
+    titleEl.textContent = targetMode === "remote"
+      ? "Switching to Remote Mode"
+      : "Switching to Gateway Mode";
+  }
+  if (bodyEl) {
+    bodyEl.textContent = buildModeTransitionDetail(
+      targetMode,
+      State.modeTransition?.detail || "",
+    );
+  }
+  document.body.classList.toggle("mode-transition-active", active);
+  [saveBtn, modeSelect, testBtn, tailscaleBtn, standbyBtn, refreshBtn].forEach((ctrl) => {
+    if (!ctrl) return;
+    ctrl.disabled = active;
+  });
+}
+
+function setModeTransitionState(active, targetMode = "", detail = "") {
+  if (!active) {
+    rejectModeTransitionLiveWaiters();
+  }
+  State.modeTransition.active = Boolean(active);
+  State.modeTransition.targetMode = active
+    ? normalizeOperationModeValue(targetMode || State.settings.operationMode)
+    : "";
+  State.modeTransition.startedAt = active ? Date.now() : 0;
+  State.modeTransition.detail = active
+    ? buildModeTransitionDetail(targetMode, detail)
+    : "";
+  syncModeTransitionUi();
+}
+
+function updateModeTransitionDetail(detail = "") {
+  if (!State.modeTransition?.active) return;
+  State.modeTransition.detail = buildModeTransitionDetail(
+    State.modeTransition.targetMode,
+    detail,
+  );
+  syncModeTransitionUi();
+}
+
+function waitForModeTransitionLiveFrame(timeoutMs = 12000) {
+  if (
+    !State.modeTransition?.active ||
+    normalizeOperationModeValue(State.modeTransition.targetMode) !== "remote"
+  ) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = State.modeTransition.liveWaiters.indexOf(entry);
+      if (idx >= 0) State.modeTransition.liveWaiters.splice(idx, 1);
+      reject(new Error("Timed out waiting for a live gateway snapshot."));
+    }, Math.max(1000, Number(timeoutMs || 0)));
+    const entry = { resolve, reject, timer };
+    State.modeTransition.liveWaiters.push(entry);
+  });
+}
+
+async function waitForRemoteModeReady(readyStartedAt = Date.now(), timeoutMs = 12000) {
+  const startedAt = Math.max(0, Number(readyStartedAt || 0));
+  const liveFramePromise = waitForModeTransitionLiveFrame(timeoutMs).catch(() => null);
+  await refreshRemoteBridgeNow(true).catch(() => null);
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+  let lastReason = "";
+
+  while (Date.now() < deadline) {
+    const snap = await api("/api/runtime/network", "GET", null, { progress: false });
+    const health = normalizeRemoteHealthClient(snap?.remoteHealth || null);
+    lastReason = String(health.reasonText || snap?.remoteLastError || "").trim();
+    if (health.state === "auth-error" || health.state === "config-error") {
+      throw new Error(lastReason || "Remote gateway configuration is not ready.");
+    }
+    if (
+      Number(snap?.remoteLastSuccessTs || 0) >= startedAt &&
+      (health.state === "connected" || health.state === "degraded" || health.state === "stale")
+    ) {
+      await liveFramePromise;
+      return snap;
+    }
+    await waitMs(450);
+  }
+
+  throw new Error(lastReason || "Timed out waiting for gateway live data.");
+}
+
+async function waitForGatewayModeReady(readyStartedAt = Date.now(), timeoutMs = 12000) {
+  const startedAt = Math.max(0, Number(readyStartedAt || 0));
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+
+  while (Date.now() < deadline) {
+    const perf = await api("/api/runtime/perf", "GET", null, { progress: false });
+    const poll = perf?.poller && typeof perf.poller === "object" ? perf.poller : {};
+    if (
+      Boolean(poll?.running) &&
+      Number(poll?.lastPollStartedTs || 0) >= startedAt
+    ) {
+      return perf;
+    }
+    await waitMs(400);
+  }
+
+  throw new Error("Timed out waiting for local polling to restart.");
+}
+
 // ─── Window controls (Electron) ───────────────────────────────────────────────
 function winCtrl(a) {
   if (window.electronAPI) {
@@ -2918,6 +3086,7 @@ async function loadSettings() {
     mountForecastSection();
     unlockSettingsInputs();
     syncOperationModeUi();
+    syncModeTransitionUi();
     syncForecastProviderUi();
     updateForecastSidebarSummary();
     refreshLicenseSection().catch(() => {});
@@ -3453,6 +3622,7 @@ function syncOperationModeUi() {
   const selectedMode = getSelectedOperationModeClient();
   const activeMode = getActiveOperationModeClient();
   const remote = activeMode === "remote";
+  const restartCapable = isGatewayModeRestartCapable();
   // Keep connectivity inputs editable in both modes so users can preconfigure
   // remote access while staying in Gateway mode.
   ["setRemoteGatewayUrl", "setRemoteApiToken", "setTailscaleDeviceHint"].forEach(
@@ -3466,7 +3636,9 @@ function syncOperationModeUi() {
   showMsg(
     "networkMsg",
     selectedMode !== activeMode
-      ? `Selected mode is ${selectedMode === "remote" ? "Remote" : "Gateway"}, but the active runtime mode is still ${activeMode === "remote" ? "Remote" : "Gateway"}. Save Settings to apply the mode change.`
+      ? selectedMode === "gateway" && activeMode === "remote"
+        ? `Selected mode is Gateway, but the active runtime mode is still Remote. Save Settings to apply the mode change.${restartCapable ? " The app will restart for a clean Gateway startup." : " Restart the app after saving for a clean Gateway startup."}`
+        : `Selected mode is ${selectedMode === "remote" ? "Remote" : "Gateway"}, but the active runtime mode is still ${activeMode === "remote" ? "Remote" : "Gateway"}. Save Settings to apply the mode change.`
       : remote
         ? "Remote mode active. Live data is streamed from the gateway. Use Refresh Standby DB when you need a fresh local database copy before switching to Gateway mode."
         : "Gateway mode active. Local polling is active; remote/Tailscale fields are optional.",
@@ -3705,11 +3877,17 @@ async function disconnectCloudProvidersForConfigChange() {
 async function refreshAfterSettingsConfigApply(prevMode, reason) {
   await loadSettings();
   await cbLoadSettings();
-  await handleOperationModeTransition(
-    prevMode,
-    State.settings.operationMode,
-    reason,
-  );
+  try {
+    await handleOperationModeTransition(
+      prevMode,
+      State.settings.operationMode,
+      reason,
+    );
+  } catch (err) {
+    const msg = String(err?.message || err || "unknown error");
+    console.warn("[app] settings-config mode transition wait failed:", msg);
+    showToast(`Mode applied, but runtime startup is still settling: ${msg}`, "warning", 6200);
+  }
   buildInverterGrid();
   scheduleInverterCardsUpdate(true);
   buildSelects();
@@ -3906,78 +4084,89 @@ async function handleOperationModeTransition(
   const nextMode = normalizeOperationModeValue(nextModeRaw);
   if (prevMode === nextMode) return;
   const preserveAnalyticsView = State.currentPage === "analytics";
+  const readinessStartedAt = Date.now();
 
-  // Invalidate in-flight analytics reads so older mode responses cannot win.
-  State.analyticsReqId = (State.analyticsReqId || 0) + 1;
-  State.alarmReqId = (State.alarmReqId || 0) + 1;
-  State.energyReqId = (State.energyReqId || 0) + 1;
-  State.auditReqId = (State.auditReqId || 0) + 1;
-  State.reportReqId = (State.reportReqId || 0) + 1;
+  setModeTransitionState(true, nextMode);
+  try {
+    // Invalidate in-flight analytics reads so older mode responses cannot win.
+    State.analyticsReqId = (State.analyticsReqId || 0) + 1;
+    State.alarmReqId = (State.alarmReqId || 0) + 1;
+    State.energyReqId = (State.energyReqId || 0) + 1;
+    State.auditReqId = (State.auditReqId || 0) + 1;
+    State.reportReqId = (State.reportReqId || 0) + 1;
 
-  // Clear mode-specific runtime views immediately to avoid stale carry-over.
-  State.liveData = {};
-  State.totals = {};
-  State.invLastFresh = {};
-  State.alarmView.queryKey = "";
-  State.energyView.queryKey = "";
-  State.auditView.queryKey = "";
-  State.reportView.queryKey = "";
-  if (!preserveAnalyticsView) {
-    State.analyticsBaseRows = [];
-    State.analyticsDayAheadBaseRows = [];
-    State.analyticsDayAheadCache = null;
-    State.analyticsDailyTotalMwh = null;
+    // Clear mode-specific runtime views immediately to avoid stale carry-over.
+    State.liveData = {};
+    State.totals = {};
+    State.invLastFresh = {};
+    State.alarmView.queryKey = "";
+    State.energyView.queryKey = "";
+    State.auditView.queryKey = "";
+    State.reportView.queryKey = "";
+    if (!preserveAnalyticsView) {
+      State.analyticsBaseRows = [];
+      State.analyticsDayAheadBaseRows = [];
+      State.analyticsDayAheadCache = null;
+      State.analyticsDailyTotalMwh = null;
+    }
+    State.pacToday.lastTs = 0;
+    State.pacToday.lastTotalPacW = 0;
+    resetTodayMwhAuthority();
+    State.remoteHealth = normalizeRemoteHealthClient({
+      state: nextMode === "remote" ? "disconnected" : "gateway-local",
+    });
+    resetChatState();
+    scheduleInverterCardsUpdate(true);
+
+    if (nextMode === "remote") {
+      stopTodayMwhSyncTimer();
+      updateModeTransitionDetail("Waiting for the first live snapshot from the gateway...");
+      // Allow a one-time HTTP seed while waiting for the first WS todayEnergy
+      // payload after entering remote mode. Ongoing remote updates stay WS-only.
+      await syncTodayMwhFromServer({ allowRemoteFallback: true }).catch((err) => {
+        console.warn(
+          `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
+          err?.message || err,
+        );
+      });
+      renderTodayKwhFromPac();
+      await waitForRemoteModeReady(readinessStartedAt);
+    } else {
+      startTodayMwhSyncTimer();
+      renderTodayKwhFromPac();
+      updateModeTransitionDetail("Waiting for the local poller to complete its first cycle...");
+      await waitForGatewayModeReady(readinessStartedAt);
+    }
+
+    // Refresh currently visible data views only after the target runtime is ready.
+    if (State.currentPage === "analytics") {
+      await loadAnalytics({ force: true }).catch((err) => {
+        console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "alarms") {
+      await fetchAlarms({ force: true }).catch((err) => {
+        console.warn("[app] mode transition alarms refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "report") {
+      await fetchReport({ force: true }).catch((err) => {
+        console.warn("[app] mode transition report refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "energy") {
+      await fetchEnergy({ force: true }).catch((err) => {
+        console.warn("[app] mode transition energy refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "audit") {
+      await fetchAudit({ force: true }).catch((err) => {
+        console.warn("[app] mode transition audit refresh failed:", err?.message || err);
+      });
+    }
+
+    await loadChatHistory({ silent: true }).catch((err) => {
+      console.warn("[app] mode transition chat refresh failed:", err?.message || err);
+    });
+  } finally {
+    setModeTransitionState(false);
   }
-  State.pacToday.lastTs = 0;
-  State.pacToday.lastTotalPacW = 0;
-  resetTodayMwhAuthority();
-  State.remoteHealth = normalizeRemoteHealthClient({
-    state: nextMode === "remote" ? "disconnected" : "gateway-local",
-  });
-  resetChatState();
-  scheduleInverterCardsUpdate(true);
-
-  if (nextMode === "remote") {
-    stopTodayMwhSyncTimer();
-    // Allow a one-time HTTP seed while waiting for the first WS todayEnergy
-    // payload after entering remote mode. Ongoing remote updates stay WS-only.
-    await syncTodayMwhFromServer({ allowRemoteFallback: true }).catch((err) => {
-      console.warn(
-        `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
-        err?.message || err,
-      );
-    });
-  } else {
-    startTodayMwhSyncTimer();
-  }
-  renderTodayKwhFromPac();
-
-  // Refresh currently visible data views so numbers align with the new mode immediately.
-  if (State.currentPage === "analytics") {
-    await loadAnalytics({ force: true }).catch((err) => {
-      console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
-    });
-  } else if (State.currentPage === "alarms") {
-    await fetchAlarms({ force: true }).catch((err) => {
-      console.warn("[app] mode transition alarms refresh failed:", err?.message || err);
-    });
-  } else if (State.currentPage === "report") {
-    await fetchReport({ force: true }).catch((err) => {
-      console.warn("[app] mode transition report refresh failed:", err?.message || err);
-    });
-  } else if (State.currentPage === "energy") {
-    await fetchEnergy({ force: true }).catch((err) => {
-      console.warn("[app] mode transition energy refresh failed:", err?.message || err);
-    });
-  } else if (State.currentPage === "audit") {
-    await fetchAudit({ force: true }).catch((err) => {
-      console.warn("[app] mode transition audit refresh failed:", err?.message || err);
-    });
-  }
-
-  await loadChatHistory({ silent: true }).catch((err) => {
-    console.warn("[app] mode transition chat refresh failed:", err?.message || err);
-  });
 }
 
 function hasUnsavedRemoteConnectivityChanges(normalizedGateway = "") {
@@ -4031,6 +4220,36 @@ async function refreshRemoteBridgeNow(silent = false) {
   }
 }
 
+async function confirmGatewayModeSwitch(nextMode, prevMode) {
+  if (
+    normalizeOperationModeValue(prevMode) !== "remote" ||
+    normalizeOperationModeValue(nextMode) !== "gateway"
+  ) {
+    return true;
+  }
+
+  await refreshReplicationHealth(true).catch(() => {});
+  const job = State.replication.job && typeof State.replication.job === "object"
+    ? State.replication.job
+    : null;
+  const stagedStandbyReady =
+    Boolean(job?.needsRestart) &&
+    String(job?.status || "").trim().toLowerCase() === "completed";
+  const restartCapable = isGatewayModeRestartCapable();
+  const bodyText = stagedStandbyReady
+    ? "A refreshed standby database is already staged locally.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts from the staged local database.\n\nContinue with the Gateway mode switch?"
+    : "Remote mode does not keep the local database current.\n\nRun Refresh Standby DB first if you need current local history before switching to Gateway mode.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts cleanly.\n\nContinue with the Gateway mode switch?";
+
+  return appConfirm(
+    "Switch to Gateway Mode",
+    bodyText,
+    {
+      ok: restartCapable ? "Save & Restart" : "Save Mode",
+      cancel: "Cancel",
+    },
+  );
+}
+
 async function saveSettings() {
   const prevMode = State.settings.operationMode;
   const prevRetainDays = Math.max(1, Number(State.settings.retainDays || 90));
@@ -4066,18 +4285,12 @@ async function saveSettings() {
   if (remoteAutoSyncCtrl) {
     body.remoteAutoSync = Boolean(remoteAutoSyncCtrl.checked);
   }
-  // Viewer model: warn when switching from remote to gateway about stale local DB.
   const nextMode = normalizeOperationModeValue(body.operationMode);
-  if (normalizeOperationModeValue(prevMode) === "remote" && nextMode === "gateway") {
-    const proceed = await appConfirm(
-      "Switch to Gateway Mode",
-      "Remote mode does not keep the local database current.\n\n" +
-      "Run Refresh Standby DB first if you need fresh local history before switching to Gateway mode.\n\n" +
-      "Continue switching to Gateway mode?",
-      { ok: "Switch to Gateway", cancel: "Cancel" },
-    );
-    if (!proceed) return false;
-  }
+  const gatewayRestartPreferred =
+    normalizeOperationModeValue(prevMode) === "remote" &&
+    nextMode === "gateway";
+  const proceed = await confirmGatewayModeSwitch(nextMode, prevMode);
+  if (!proceed) return false;
   try {
     if (Number(body.retainDays || prevRetainDays) < prevRetainDays) {
       showMsg(
@@ -4102,9 +4315,37 @@ async function saveSettings() {
       ...(savedSettings || {}),
       csvSavePath: nextCsvPath,
     };
-    await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
     if ($("plantNameDisplay"))
       $("plantNameDisplay").textContent = State.settings.plantName || body.plantName;
+    let transitionWarning = "";
+    if (gatewayRestartPreferred && isGatewayModeRestartCapable()) {
+      showMsg(
+        settingsMsgId,
+        "Gateway mode saved. Restarting the desktop app for a clean local startup...",
+        "",
+      );
+      try {
+        const restartResult = await window.electronAPI.restartApp();
+        if (restartResult?.ok === false) {
+          transitionWarning =
+            ` Restart request failed: ${String(restartResult.error || "unknown error")}. Runtime switched without a full restart.`;
+          console.warn("[app] gateway mode restart request failed:", restartResult.error);
+        } else {
+          return true;
+        }
+      } catch (err) {
+        transitionWarning =
+          ` Restart request failed: ${String(err?.message || err || "unknown error")}. Runtime switched without a full restart.`;
+        console.warn("[app] gateway mode restart threw:", err?.message || err);
+      }
+    }
+    try {
+      await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
+    } catch (err) {
+      transitionWarning =
+        ` Mode applied, but the runtime is still settling: ${String(err?.message || err || "unknown error")}.`;
+      console.warn("[app] mode transition wait failed:", err?.message || err);
+    }
     let saveMsg = saved?.exportDirCreated
       ? "✔ Settings saved. Export folder created."
       : "✔ Settings saved";
@@ -4124,6 +4365,12 @@ async function saveSettings() {
           saveMsg += ` Retention applied: no telemetry older than ${State.settings.retainDays} day(s) was found.`;
         }
       }
+    }
+    if (gatewayRestartPreferred && !isGatewayModeRestartCapable()) {
+      transitionWarning += " Restart the desktop app now to start Gateway mode cleanly.";
+    }
+    if (transitionWarning) {
+      saveMsg += transitionWarning;
     }
     showMsg(
       settingsMsgId,
@@ -4148,6 +4395,9 @@ async function saveSettings() {
     if (State.currentPage === "settings") {
       startReplicationHealthPolling();
       refreshReplicationHealth(true).catch(() => {});
+    }
+    if (transitionWarning) {
+      showToast(transitionWarning.trim(), "warning", 6200);
     }
     if (
       normalizeOperationModeValue(body.operationMode) === "remote" &&
@@ -5347,7 +5597,7 @@ function buildNodeRows(inv, nodeCount) {
     const btnClass = nodeConfigured
       ? `node-btn ${state ? "cmd-stop" : "cmd-start"}`
       : "node-btn node-disabled";
-    const btnText = nodeConfigured ? (state ? "STOP" : "START") : "ISOLATED";
+    const btnText = nodeConfigured ? (state ? "STOP" : "START") : "N/A";
     const btnTitle = nodeConfigured ? btnText : "Isolated";
     const btnAria = `Node ${n} ${nodeConfigured ? btnText : "Isolated"}`;
     html += `
@@ -5789,7 +6039,7 @@ function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
 }
 
 function nodeButtonText(isOn, isIsolated = false) {
-  if (isIsolated) return "ISOLATED";
+  if (isIsolated) return "N/A";
   return isOn ? "STOP" : "START";
 }
 
@@ -6681,6 +6931,12 @@ function connectWS() {
 
 function handleWS(msg) {
   if (msg.type === "init" || msg.type === "live") {
+    if (
+      State.modeTransition?.active &&
+      normalizeOperationModeValue(State.modeTransition.targetMode) === "remote"
+    ) {
+      resolveModeTransitionLiveWaiters(msg);
+    }
     if (msg.remoteHealth) applyRemoteHealthClient(msg.remoteHealth);
     if (msg.data) State.liveData = sanitizeLiveDataByConfig(msg.data);
     if (msg.totals) State.totals = msg.totals;

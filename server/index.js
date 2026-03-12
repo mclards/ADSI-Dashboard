@@ -258,6 +258,10 @@ const REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS = new Set([
   "tailscaleDeviceHint",
   "wireguardInterface",
   "csvSavePath",
+  // Preserve the latest same-day gateway today-energy baseline so a staged
+  // standby DB replacement can bridge current-day totals immediately after
+  // restart, before the local poller catches up.
+  REMOTE_TODAY_SHADOW_SETTING_KEY,
 ]);
 const REPLICATION_TABLE_DEFS = [
   {
@@ -405,6 +409,7 @@ const remoteBridgeState = {
   lastReasonClass: "",
   lastLatencyMs: 0,
   lastLiveNodeCount: 0,
+  currentBase: "",
   liveData: {},
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
@@ -446,6 +451,7 @@ const remoteTodayEnergyShadow = {
   day: "",
   rows: [],
   syncedAt: 0,
+  sourceKey: "",
 };
 const remoteBridgeAlarmState = Object.create(null);
 const remoteTodayCarryState = {
@@ -3479,6 +3485,21 @@ async function buildGatewayMainDbSnapshotForTransfer() {
     } catch (_) {
       // Best effort only; backup still produces a consistent snapshot.
     }
+    try {
+      // Persist the gateway's current-day report rows before snapshotting so a
+      // standby refresh carries the same partial-day baseline the gateway UI is
+      // already serving, not only the last completed DB bucket.
+      buildDailyReportRowsForDate(localDateStr(), {
+        persist: true,
+        includeTodayPartial: true,
+        refresh: true,
+      });
+    } catch (err) {
+      console.warn(
+        "[replication] standby snapshot today-report refresh failed:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
     await maybeCheckpointGatewayMainDbBeforeSnapshot();
     await db.backup(tempPath);
     const stat = await fs.promises.stat(tempPath);
@@ -3814,6 +3835,68 @@ async function createGatewayMainDbSnapshotForTransfer() {
   }
 }
 
+async function refreshStandbyTodayShadowFromGateway(baseUrl) {
+  const base = getRemoteTodayEnergySourceKey(baseUrl);
+  if (!base) {
+    return { ok: false, rows: [], error: "Remote gateway URL is not configured." };
+  }
+  const targetUrl = `${base}/api/energy/today`;
+  try {
+    const r = await fetchWithRetry(
+      targetUrl,
+      buildReplicationTransferFetchOptions(targetUrl, {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: Math.min(REMOTE_REPLICATION_TIMEOUT_MS, 15000),
+      }),
+      {
+        attempts: Math.max(1, Number(REMOTE_LIVE_FETCH_RETRIES || 1)),
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
+    if (!r.ok) {
+      const err = new Error(`Standby today-energy HTTP ${r.status} ${r.statusText}`);
+      err.httpStatus = Number(r.status || 0);
+      throw err;
+    }
+    const rows = normalizeTodayEnergyRows(await r.json());
+    if (!rows.length) {
+      return { ok: false, rows: [], error: "Gateway returned no today-energy rows." };
+    }
+    const syncedAt = Date.now();
+    remoteBridgeState.todayEnergyRows = rows;
+    remoteBridgeState.lastTodayEnergyFetchTs = syncedAt;
+    remoteBridgeState.lastTodayEnergyShadowPersistTs = syncedAt;
+    updateRemoteTodayEnergyShadow(rows, syncedAt, { sourceKey: base });
+    return { ok: true, rows, syncedAt, fallbackUsed: false };
+  } catch (err) {
+    let fallbackRows = normalizeTodayEnergyRows(remoteBridgeState.todayEnergyRows);
+    if (!fallbackRows.length) {
+      fallbackRows = getRemoteTodayEnergyShadowRows(localDateStr(), {
+        requireSourceMatch: true,
+        sourceKey: base,
+      });
+    }
+    if (fallbackRows.length) {
+      const syncedAt = Date.now();
+      updateRemoteTodayEnergyShadow(fallbackRows, syncedAt, { sourceKey: base });
+      return {
+        ok: false,
+        rows: fallbackRows,
+        syncedAt,
+        error: String(err?.message || err || "Standby today-energy refresh failed."),
+        fallbackUsed: true,
+      };
+    }
+    return {
+      ok: false,
+      rows: [],
+      error: String(err?.message || err || "Standby today-energy refresh failed."),
+      fallbackUsed: false,
+    };
+  }
+}
+
 async function pullMainDbFromRemote(baseUrl, opts = {}) {
   if (remoteBridgeState.replicationRunning) {
     return { skipped: true, reason: "in_progress" };
@@ -3825,11 +3908,12 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
   const xferLabel = String(opts?.label || "Downloading main database");
   const nextSyncDirection = String(opts?.syncDirection || "pull-main-db-staged");
   const failureDirection = String(opts?.failureDirection || "pull-main-db-failed");
-  const preserveRows = capturePreservedMainDbSettings();
   const tempPath = path.join(DATA_DIR, `adsi.db.download-${Date.now()}.tmp`);
   let recvBytes = 0;
   let totalBytes = 0;
   let expectedSha256 = "";
+  let preserveRows = [];
+  let standbyTodayShadow = null;
   const transferMeta = {
     priorityMode: Boolean(opts?.priorityMode),
     livePaused: Boolean(opts?.livePaused),
@@ -3839,6 +3923,14 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
 
   try {
     await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    standbyTodayShadow = await refreshStandbyTodayShadowFromGateway(baseUrl);
+    if (!standbyTodayShadow?.ok && !standbyTodayShadow?.fallbackUsed) {
+      console.warn(
+        "[replication] standby today-energy baseline refresh failed:",
+        String(standbyTodayShadow?.error || "unknown error"),
+      );
+    }
+    preserveRows = capturePreservedMainDbSettings();
     const targetUrl = `${baseUrl}/api/replication/main-db`;
     const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
       method: "GET",
@@ -3952,6 +4044,17 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       staged: true,
       size: Math.max(0, Number(staged?.size || recvBytes || 0)),
       mtimeMs: Math.max(0, Number(staged?.mtimeMs || targetMtimeMs || 0)),
+      standbyTodayShadow:
+        standbyTodayShadow && typeof standbyTodayShadow === "object"
+          ? {
+              ok: Boolean(standbyTodayShadow.ok),
+              rows: Array.isArray(standbyTodayShadow.rows)
+                ? Number(standbyTodayShadow.rows.length || 0)
+                : 0,
+              fallbackUsed: Boolean(standbyTodayShadow.fallbackUsed),
+              error: String(standbyTodayShadow.error || ""),
+            }
+          : null,
       preservedSettings: preserveRows
         .map((row) => String(row?.key || ""))
         .filter(Boolean),
@@ -5105,6 +5208,10 @@ function connectRemoteBridgeSocket() {
     broadcastRemoteHealthUpdate(true);
     return;
   }
+  if (String(remoteBridgeState.currentBase || "").trim() !== base) {
+    resetRemoteBridgeLiveSessionState(base);
+    broadcastRemoteOfflineLiveState();
+  }
 
   let wsUrl = "";
   try {
@@ -5217,6 +5324,12 @@ async function pollRemoteLiveOnce() {
     }
     broadcastRemoteHealthUpdate(true);
     return;
+  }
+  if (String(remoteBridgeState.currentBase || "").trim() !== base) {
+    resetRemoteBridgeLiveSessionState(base);
+    if (wasConnected || hadLiveData) {
+      broadcastRemoteOfflineLiveState();
+    }
   }
   try {
     const r = await fetchWithRetry(
@@ -5493,6 +5606,8 @@ function stopRemoteBridge() {
   remoteBridgeState.lastReasonClass = "";
   remoteBridgeState.lastLatencyMs = 0;
   remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.currentBase = "";
+  remoteBridgeState.lastTodayEnergyFetchTs = 0;
   remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
   remoteBridgeState.todayEnergyFetchInFlight = false;
   remoteTodayCarryState.day = "";
@@ -5520,6 +5635,7 @@ function startRemoteBridge() {
   clearRemoteBridgePersistState();
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
+  resetRemoteBridgeLiveSessionState(getRemoteGatewayBaseUrl());
   remoteBridgeState.running = true;
   remoteBridgeState.startedAtTs = Date.now();
   remoteBridgeState.bridgeSessionId =
@@ -5567,30 +5683,37 @@ function applyRuntimeMode() {
   } else {
     const wasRemoteActive =
       Boolean(remoteBridgeState.running) || Boolean(remoteBridgeState.connected);
-    if (wasRemoteActive && Array.isArray(remoteBridgeState.todayEnergyRows)) {
-      updateRemoteTodayEnergyShadow(remoteBridgeState.todayEnergyRows, Date.now());
-    }
     // â"€â"€ Handoff lifecycle: capture per-inverter baselines â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if (wasRemoteActive) {
       const handoffNow = Date.now();
       const handoffDay = localDateStr(handoffNow);
+      const capturedRows = normalizeTodayEnergyRows(
+        getTodayEnergySupplementRows(handoffDay),
+      );
+      if (capturedRows.length) {
+        updateRemoteTodayEnergyShadow(capturedRows, handoffNow, {
+          sourceKey: getRemoteTodayEnergySourceKey(),
+        });
+      }
       gatewayHandoffMeta.active = true;
       gatewayHandoffMeta.startedAt = handoffNow;
       gatewayHandoffMeta.day = handoffDay;
       gatewayHandoffMeta.baselines = Object.create(null);
-      const capturedRows = normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
-      for (const row of capturedRows) {
+      const baselineRows = capturedRows.length
+        ? capturedRows
+        : getRemoteTodayEnergyShadowRows(handoffDay);
+      for (const row of baselineRows) {
         const inv = Number(row?.inverter || 0);
         if (inv > 0) gatewayHandoffMeta.baselines[inv] = Number(row?.total_kwh || 0);
       }
-      const baselineList = capturedRows
+      const baselineList = baselineRows
         .slice(0, 8)
         .map((r) => `${r.inverter}:${Number(r.total_kwh || 0).toFixed(2)}kWh`)
         .join(", ");
       console.log(
         `[handoff] Remoteâ†'Gateway started day=${handoffDay}` +
-        ` inverters=${capturedRows.length}` +
-        ` baselines=[${baselineList}${capturedRows.length > 8 ? " ..." : ""}]`,
+        ` inverters=${baselineRows.length}` +
+        ` baselines=[${baselineList}${baselineRows.length > 8 ? " ..." : ""}]`,
       );
       persistGatewayHandoffMeta();
     }
@@ -5721,44 +5844,70 @@ function mergeTodayEnergyRowsMax(...lists) {
   return mergeTodayEnergyRowsMaxCore(...lists);
 }
 
-function updateRemoteTodayEnergyShadow(rowsRaw, syncedAt = Date.now()) {
+function getRemoteTodayEnergySourceKey(base = null) {
+  const normalizedBase =
+    base === null || base === undefined
+      ? getRemoteGatewayBaseUrl()
+      : normalizeGatewayUrl(base);
+  return String(normalizedBase || "").trim();
+}
+
+function resetRemoteTodayEnergyShadow(persist = false) {
+  remoteTodayEnergyShadow.day = "";
+  remoteTodayEnergyShadow.rows = [];
+  remoteTodayEnergyShadow.syncedAt = 0;
+  remoteTodayEnergyShadow.sourceKey = "";
+  if (persist) persistRemoteTodayEnergyShadow();
+}
+
+function updateRemoteTodayEnergyShadow(rowsRaw, syncedAt = Date.now(), options = {}) {
   const day = localDateStr(syncedAt);
   const incoming = normalizeTodayEnergyRows(rowsRaw);
-  let changed = false;
-  if (remoteTodayEnergyShadow.day !== day) {
-    remoteTodayEnergyShadow.day = day;
-    remoteTodayEnergyShadow.rows = incoming;
-    remoteTodayEnergyShadow.syncedAt = Number(syncedAt || Date.now());
-    changed = true;
-    persistRemoteTodayEnergyShadow();
-    return remoteTodayEnergyShadow.rows;
+  if (!incoming.length) {
+    return normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
   }
-  const merged = mergeTodayEnergyRowsMax(
-    remoteTodayEnergyShadow.rows,
-    incoming,
+  const nextSourceKey = getRemoteTodayEnergySourceKey(
+    options?.sourceKey ?? null,
   );
-  changed = !todayEnergyRowsEqual(remoteTodayEnergyShadow.rows, merged);
-  remoteTodayEnergyShadow.rows = merged;
-  remoteTodayEnergyShadow.syncedAt = Math.max(
-    Number(remoteTodayEnergyShadow.syncedAt || 0),
-    Number(syncedAt || Date.now()),
-  );
+  const nextSyncedAt = Math.max(0, Number(syncedAt || Date.now()));
+  const changed =
+    remoteTodayEnergyShadow.day !== day ||
+    remoteTodayEnergyShadow.sourceKey !== nextSourceKey ||
+    Number(remoteTodayEnergyShadow.syncedAt || 0) !== nextSyncedAt ||
+    !todayEnergyRowsEqual(remoteTodayEnergyShadow.rows, incoming);
+  remoteTodayEnergyShadow.day = day;
+  remoteTodayEnergyShadow.rows = incoming;
+  remoteTodayEnergyShadow.syncedAt = nextSyncedAt;
+  remoteTodayEnergyShadow.sourceKey = nextSourceKey;
   if (changed) persistRemoteTodayEnergyShadow();
   return remoteTodayEnergyShadow.rows;
 }
 
-function getRemoteTodayEnergyShadowRows(day = localDateStr()) {
+function getRemoteTodayEnergyShadowRows(day = localDateStr(), options = {}) {
+  const requireSourceMatch = options?.requireSourceMatch === true;
+  const requiredSourceKey = requireSourceMatch
+    ? getRemoteTodayEnergySourceKey(options?.sourceKey ?? null)
+    : "";
   if (gatewayHandoffMeta.day && gatewayHandoffMeta.day !== day) {
     resetGatewayHandoffMeta(true);
   }
   if (remoteTodayEnergyShadow.day !== day) {
     if (remoteTodayEnergyShadow.day) {
-      remoteTodayEnergyShadow.day = "";
-      remoteTodayEnergyShadow.rows = [];
-      remoteTodayEnergyShadow.syncedAt = 0;
-      persistRemoteTodayEnergyShadow();
+      resetRemoteTodayEnergyShadow(true);
     }
     return [];
+  }
+  if (requireSourceMatch) {
+    const shadowSourceKey = String(remoteTodayEnergyShadow.sourceKey || "").trim();
+    if (!requiredSourceKey || !shadowSourceKey || shadowSourceKey !== requiredSourceKey) {
+      if (shadowSourceKey && requiredSourceKey && shadowSourceKey !== requiredSourceKey) {
+        console.warn(
+          `[shadow] source mismatch discarded: stored=${shadowSourceKey} current=${requiredSourceKey}`,
+        );
+      }
+      resetRemoteTodayEnergyShadow(true);
+      return [];
+    }
   }
   // Stale-shadow protection: if the handoff is not currently active and the
   // shadow is older than MAX_SHADOW_AGE_MS, discard it to prevent stale data
@@ -5770,13 +5919,24 @@ function getRemoteTodayEnergyShadowRows(day = localDateStr()) {
       `[shadow] stale shadow discarded: age=${Math.round(shadowAgeMs / 60000)}min` +
       ` day=${day} syncedAt=${new Date(remoteTodayEnergyShadow.syncedAt).toISOString()}`,
     );
-    remoteTodayEnergyShadow.day = "";
-    remoteTodayEnergyShadow.rows = [];
-    remoteTodayEnergyShadow.syncedAt = 0;
-    persistRemoteTodayEnergyShadow();
+    resetRemoteTodayEnergyShadow(true);
     return [];
   }
   return normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
+}
+
+function resetRemoteBridgeLiveSessionState(nextBase = "") {
+  remoteBridgeState.connected = false;
+  remoteBridgeState.liveData = {};
+  remoteBridgeState.totals = {};
+  remoteBridgeState.todayEnergyRows = [];
+  remoteBridgeState.lastSuccessTs = 0;
+  remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.lastTodayEnergyFetchTs = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.currentBase = String(nextBase || "").trim();
+  todayEnergyCache.ts = 0;
 }
 
 // Checks whether per-inverter baselines have been surpassed by local data and
@@ -5815,15 +5975,14 @@ function _checkHandoffCompletion(pollerMap, day) {
 function getTodayEnergySupplementRows(day = localDateStr()) {
   if (isRemoteMode()) {
     // Keep remote today-energy metrics near real time between the 30 s
-    // gateway /api/energy/today syncs. Use carry-forward instead of a raw
-    // max() merge so live kWh deltas can continue from the last gateway total
-    // even if the gateway poller restarted and its in-memory kWh counters are
-    // lower than the day-total snapshot.
+    // gateway /api/energy/today syncs. Fresh gateway rows stay authoritative;
+    // the local shadow is only a same-source fallback when the current remote
+    // session has not fetched today-energy yet.
     const liveRows = computeTodayEnergyRowsFromLiveData(remoteBridgeState.liveData);
-    const shadowRows = mergeTodayEnergyRowsMax(
-      remoteBridgeState.todayEnergyRows || [],
-      getRemoteTodayEnergyShadowRows(day),
-    );
+    const gatewayRows = normalizeTodayEnergyRows(remoteBridgeState.todayEnergyRows);
+    const shadowRows = gatewayRows.length
+      ? gatewayRows
+      : getRemoteTodayEnergyShadowRows(day, { requireSourceMatch: true });
     if (!shadowRows.length) {
       remoteTodayCarryState.day = day;
       remoteTodayCarryState.byInv = Object.create(null);
@@ -6011,6 +6170,7 @@ function persistRemoteTodayEnergyShadow() {
         day: String(remoteTodayEnergyShadow.day || ""),
         rows: normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows),
         syncedAt: Number(remoteTodayEnergyShadow.syncedAt || 0),
+        sourceKey: String(remoteTodayEnergyShadow.sourceKey || ""),
       }),
     );
   } catch (err) {
@@ -6026,6 +6186,10 @@ function loadRemoteTodayEnergyShadowFromSettings() {
     const day = String(parsed?.day || "").trim();
     const syncedAt = Number(parsed?.syncedAt || 0);
     const rows = normalizeTodayEnergyRows(parsed?.rows);
+    const rawSourceKey = String(parsed?.sourceKey || "").trim();
+    const sourceKey = rawSourceKey
+      ? getRemoteTodayEnergySourceKey(rawSourceKey)
+      : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !rows.length) return;
     if (day !== localDateStr()) {
       // Keep shadow strictly scoped to the current day.
@@ -6035,6 +6199,7 @@ function loadRemoteTodayEnergyShadowFromSettings() {
     remoteTodayEnergyShadow.day = day;
     remoteTodayEnergyShadow.rows = rows;
     remoteTodayEnergyShadow.syncedAt = Number.isFinite(syncedAt) ? syncedAt : 0;
+    remoteTodayEnergyShadow.sourceKey = sourceKey;
   } catch (err) {
     console.warn("[shadow] load remote today-energy failed:", err?.message || err);
   }
@@ -8348,10 +8513,13 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 }
 
 function buildTodayPacTotalsFromDb() {
+  const day = localDateStr();
+  if (isRemoteMode()) {
+    return normalizeTodayEnergyRows(getTodayEnergySupplementRows(day));
+  }
   // Use energy_5min (completed 5-min buckets) as primary source, supplemented by
   // the poller's live PAC accumulator for the current partial bucket.
   // This is reliable, fast, and resets automatically at midnight via timestamp boundary.
-  const day = localDateStr();
   const startTs = new Date(`${day}T00:00:00.000`).getTime();
   const endTs = Date.now();
 
