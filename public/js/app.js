@@ -66,7 +66,7 @@ const State = {
   alarmFilter: "all",
   ws: null,
   wsConnecting: false,
-  _wsHeartbeatTimer: null,
+  wsReconnectTimer: null,
   charts: {},
   currentPage: "inverters",
   wsRetries: 0,
@@ -6610,30 +6610,25 @@ function showOfflineIndicator(show, message) {
   }
 }
 
-// If no WS message arrives for this long, force a reconnect.
-// The server sends a WS-level ping every 25 s, so a 60 s silence
-// means the connection is genuinely dead (not just idle).
-const WS_HEARTBEAT_TIMEOUT_MS = 60000;
-
-function _clearWsHeartbeat() {
-  if (State._wsHeartbeatTimer) {
-    clearTimeout(State._wsHeartbeatTimer);
-    State._wsHeartbeatTimer = null;
+function _clearWsReconnectTimer() {
+  if (State.wsReconnectTimer) {
+    clearTimeout(State.wsReconnectTimer);
+    State.wsReconnectTimer = null;
   }
-}
-
-function _resetWsHeartbeat(ws) {
-  _clearWsHeartbeat();
-  State._wsHeartbeatTimer = setTimeout(() => {
-    console.warn("[ws] heartbeat timeout — forcing reconnect");
-    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-  }, WS_HEARTBEAT_TIMEOUT_MS);
 }
 
 function connectWS() {
   if (State.wsConnecting) return;
+  const current = State.ws;
+  if (
+    current &&
+    (current.readyState === WebSocket.OPEN ||
+      current.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
   State.wsConnecting = true;
-  _clearWsHeartbeat();
+  _clearWsReconnectTimer();
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = `${wsProto}://${location.host}/ws`;
@@ -6646,11 +6641,9 @@ function connectWS() {
     setWsState(true, "ONLINE");
     State.wsRetries = 0;
     showOfflineIndicator(false);  // Clear offline banner on reconnect
-    _resetWsHeartbeat(ws);
   };
 
   ws.onmessage = ({ data }) => {
-    _resetWsHeartbeat(ws); // any incoming message keeps the connection alive
     netIOTrackRx(typeof data === "string" ? data.length : (data.byteLength || 0));
     try {
       const msg = JSON.parse(data);
@@ -6662,22 +6655,27 @@ function connectWS() {
 
   ws.onclose = () => {
     State.wsConnecting = false;
+    if (State.ws === ws) State.ws = null;
     resetTodayMwhAuthority();
-    _clearWsHeartbeat();
     setWsState(false, "RECONNECT");
     const retries = ++State.wsRetries;
     const delay = Math.min(30000, Math.floor(500 * Math.pow(1.5, retries) + Math.random() * 500 * retries));
     const delaySeconds = Math.ceil(delay / 1000);
     showOfflineIndicator(true, `Reconnecting in ${delaySeconds}s...`);
-    setTimeout(connectWS, delay);
+    _clearWsReconnectTimer();
+    State.wsReconnectTimer = setTimeout(() => {
+      State.wsReconnectTimer = null;
+      connectWS();
+    }, delay);
   };
 
   ws.onerror = () => {
     State.wsConnecting = false;
     resetTodayMwhAuthority();
-    _clearWsHeartbeat();
     showOfflineIndicator(true, "Connection lost. Retrying...");
-    ws.close();
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
   };
 }
 
