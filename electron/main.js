@@ -84,6 +84,7 @@ const INITIAL_LOAD_RETRY_DELAY = 1200;
 const INITIAL_LOAD_RETRY_MAX = 8;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
+const FORECAST_MODE_SYNC_MS = 10000;
 const IS_DEV = process.env.NODE_ENV === "development";
 const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
@@ -141,6 +142,9 @@ let initialLoadRetryTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
 let forecastRestartAttempts = 0;
+let forecastModeSyncTimer = null;
+let forecastModeSyncInFlight = false;
+let forecastStopExpected = false;
 let lastForecastLaunch = null;
 let hasAuthenticated = false;
 let bootStarted = false;
@@ -2253,7 +2257,6 @@ function startServer() {
   killImageNames(FORECAST_EXE_NAMES);
 
   startBackendProcess();
-  startForecastProcess();
 
   const serverEntry = resolveServerEntry();
   if (!serverEntry) {
@@ -2379,6 +2382,7 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     cwd: forecastLaunch.cwd,
   };
   clearForecastRestartTimer();
+  forecastStopExpected = false;
   console.log(logPrefix, forecastLaunch.cmd, ...forecastLaunch.args);
   forecastProc = spawn(forecastLaunch.cmd, forecastLaunch.args, {
     cwd: forecastLaunch.cwd,
@@ -2397,7 +2401,13 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     forecastRestartAttempts = 0;
   });
   forecastProc.on("exit", (code, signal) => {
+    const expectedStop = forecastStopExpected;
+    forecastStopExpected = false;
     forecastProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Forecast stopped - code=" + code + " signal=" + signal);
+      return;
+    }
     console.warn("[main] Forecast exited - code=" + code + " signal=" + signal);
     scheduleForecastRestart(`exit code=${code} signal=${signal}`);
   });
@@ -2414,6 +2424,7 @@ function startBackendProcess() {
 }
 
 function startForecastProcess() {
+  if (forecastProc && !forecastProc.killed) return true;
   const launch = resolveForecastLaunch();
   if (!launch) {
     console.warn("[main] Forecast service not found. Skipping day-ahead background process.");
@@ -2421,6 +2432,21 @@ function startForecastProcess() {
   }
   spawnForecastProcess(launch);
   return true;
+}
+
+function stopForecastProcess(reason = "") {
+  clearForecastRestartTimer();
+  forecastRestartAttempts = 0;
+  if (!forecastProc || forecastProc.killed) {
+    forecastProc = null;
+    return;
+  }
+  forecastStopExpected = true;
+  if (reason) {
+    console.log(`[main] Stopping forecast service (${reason})`);
+  }
+  forceKillProc(forecastProc, "forecast");
+  forecastProc = null;
 }
 
 function clearForecastRestartTimer() {
@@ -2444,12 +2470,9 @@ function scheduleForecastRestart(reason) {
   forecastRestartTimer = setTimeout(() => {
     forecastRestartTimer = null;
     if (isAppShuttingDown) return;
-    const launch = resolveForecastLaunch() || lastForecastLaunch;
-    if (!launch) {
-      console.error("[main] Forecast restart failed: launch target not found.");
-      return;
-    }
-    spawnForecastProcess(launch, "[main] Restarting forecast:");
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast restart sync failed:", err?.message || err);
+    });
   }, delay);
 }
 
@@ -2511,6 +2534,7 @@ function onServerReady() {
   if (serverReadyFired) return;
   serverReadyFired = true;
   registerShortcutsOnce();
+  startForecastModeSync();
   console.log("[main] Server ready - opening main window");
   createMainWindow();
 }
@@ -2783,7 +2807,7 @@ function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
   });
 }
 
-async function getCurrentOperationMode(timeoutMs = 1500) {
+async function tryGetCurrentOperationMode(timeoutMs = 1500) {
   try {
     const settings = await requestServerJson(
       "GET",
@@ -2796,8 +2820,49 @@ async function getCurrentOperationMode(timeoutMs = 1500) {
       .toLowerCase();
     return mode === "remote" ? "remote" : "gateway";
   } catch {
-    return "gateway";
+    return null;
   }
+}
+
+async function getCurrentOperationMode(timeoutMs = 1500) {
+  return (await tryGetCurrentOperationMode(timeoutMs)) || "gateway";
+}
+
+async function syncForecastProcessForCurrentMode(timeoutMs = 1500) {
+  if (isAppShuttingDown || !serverReadyFired || forecastModeSyncInFlight) {
+    return false;
+  }
+  forecastModeSyncInFlight = true;
+  try {
+    const mode = await tryGetCurrentOperationMode(timeoutMs);
+    if (!mode) return false;
+    if (mode === "remote") {
+      stopForecastProcess("remote mode active");
+      return false;
+    }
+    return startForecastProcess();
+  } finally {
+    forecastModeSyncInFlight = false;
+  }
+}
+
+function startForecastModeSync() {
+  if (forecastModeSyncTimer) return;
+  syncForecastProcessForCurrentMode().catch((err) => {
+    console.warn("[main] Initial forecast mode sync failed:", err?.message || err);
+  });
+  forecastModeSyncTimer = setInterval(() => {
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast mode sync failed:", err?.message || err);
+    });
+  }, FORECAST_MODE_SYNC_MS);
+}
+
+function stopForecastModeSync() {
+  if (!forecastModeSyncTimer) return;
+  clearInterval(forecastModeSyncTimer);
+  forecastModeSyncTimer = null;
+  forecastModeSyncInFlight = false;
 }
 
 async function ensureGatewayModeForWindow(featureLabel, ownerWin) {
@@ -3345,11 +3410,12 @@ function forceKillProc(proc, label) {
 
 function killServer() {
   isAppShuttingDown = true;
+  stopForecastModeSync();
   clearForecastRestartTimer();
 
   // Always force-kill Python processes (no graceful shutdown path)
   forceKillProc(backendProc, "backend");
-  forceKillProc(forecastProc, "forecast");
+  stopForecastProcess("application shutdown");
   backendProc = null;
   forecastProc = null;
 

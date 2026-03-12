@@ -41,6 +41,7 @@ const {
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  prepareArchiveDbForTransfer,
   stagePendingMainDbReplacement,
   beginArchiveDbReplacement,
   validateSqliteFileSync,
@@ -205,10 +206,13 @@ const CHAT_THREAD_LIMIT = 20;
 const CHAT_RETENTION_COUNT = 500;
 const CHAT_MESSAGE_MAX_LEN = 500;
 const CHAT_PROXY_TIMEOUT_MS = 8000;
-const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 2;
-const REPLICATION_TRANSFER_STREAM_HWM = 512 * 1024;
-const REPLICATION_JSON_GZIP_MIN_BYTES = 96 * 1024;
+const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 1; // default low-impact archive transfer lane
+const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 2;
+const REPLICATION_TRANSFER_STREAM_HWM = 1024 * 1024;
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
+const GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
+const GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS = 10 * 60 * 1000;
+const REPLICATION_HASH_CACHE_LIMIT = 256;
 const REMOTE_FETCH_KEEPALIVE_MSECS = 15000;
 const REMOTE_FETCH_MAX_SOCKETS = 8;
 const REMOTE_FETCH_MAX_SOCKETS_REPLICATION = 16;
@@ -413,6 +417,11 @@ const remoteBridgeState = {
   lastSyncDirection: "idle",
   autoSyncAttempted: false,
   lastHealthBroadcastKey: "",
+  livePauseActive: false,
+  livePauseReason: "",
+  livePauseSince: 0,
+  livePauseResumeWanted: false,
+  livePauseGeneration: 0,
 };
 const remoteBridgePersistState = Object.create(null); // per-node persisted hot-data cadence
 const remoteBridgeEnergyMirrorState = Object.create(null); // per-inverter 5-min bucket mirror
@@ -464,6 +473,8 @@ function createManualReplicationJobState() {
     errorCode: "",
     summary: "",
     needsRestart: false,
+    priorityMode: false,
+    livePaused: false,
     result: null,
   };
 }
@@ -553,6 +564,10 @@ function enqueueCloudOp(label, fn) {
 const GATEWAY_EXPORT_QUEUE_LIMIT = 3;
 let _gatewayExportRunnerBusy = false;
 const _gatewayExportQueue = [];
+let _gatewayMainDbSnapshot = null;
+let _gatewayMainDbSnapshotBuildPromise = null;
+let _gatewayMainDbSnapshotLastCheckpointTs = 0;
+const _replicationFileHashCache = new Map();
 
 function _scheduleGatewayExportRun() {
   setImmediate(_runNextGatewayExportJob);
@@ -1047,6 +1062,72 @@ function getRemoteBridgeTargetIntervalMs(nowTs = Date.now()) {
   );
 }
 
+function isRemoteLiveBridgePausedForTransfer() {
+  return Boolean(remoteBridgeState.livePauseActive);
+}
+
+function pauseRemoteLiveBridgeForPriorityTransfer(reason = "standby-refresh") {
+  const wasRunning = Boolean(remoteBridgeState.running);
+  remoteBridgeState.livePauseActive = true;
+  remoteBridgeState.livePauseReason = String(reason || "standby-refresh");
+  remoteBridgeState.livePauseSince = Date.now();
+  remoteBridgeState.livePauseResumeWanted = wasRunning;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  remoteBridgeState.running = false;
+  remoteBridgeState.connected = false;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.todayEnergyFetchRequestId =
+    Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
+  remoteBridgeState.lastSyncDirection = "pull-priority-paused";
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  broadcastRemoteHealthUpdate(true);
+  return {
+    bridgeWasRunning: wasRunning,
+    reason: remoteBridgeState.livePauseReason,
+    pausedAt: remoteBridgeState.livePauseSince,
+  };
+}
+
+function resumeRemoteLiveBridgeAfterPriorityTransfer(token = null) {
+  const shouldResume = Boolean(
+    token?.bridgeWasRunning ?? remoteBridgeState.livePauseResumeWanted,
+  );
+  remoteBridgeState.livePauseActive = false;
+  remoteBridgeState.livePauseReason = "";
+  remoteBridgeState.livePauseSince = 0;
+  remoteBridgeState.livePauseResumeWanted = false;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  if (shouldResume && isRemoteMode()) {
+    startRemoteBridge();
+    return;
+  }
+  broadcastRemoteHealthUpdate(true);
+}
+
+function buildPriorityTransferNote(includeArchive = false) {
+  return includeArchive
+    ? "Remote live stream paused to prioritize standby DB and archive download."
+    : "Remote live stream paused to prioritize standby DB download.";
+}
+
+function buildReplicationTransferFetchOptions(targetUrl, options = {}) {
+  const next = options && typeof options === "object" ? { ...options } : {};
+  next.compress = false;
+  next.headers =
+    next.headers && typeof next.headers === "object" ? { ...next.headers } : {};
+  if (next.headers["Accept-Encoding"] == null && next.headers["accept-encoding"] == null) {
+    next.headers["Accept-Encoding"] = "identity";
+  }
+  return buildRemoteFetchOptions(targetUrl, next);
+}
+
 function buildRemoteHealthSnapshot(nowTs = Date.now()) {
   const mode = readOperationMode();
   const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
@@ -1065,6 +1146,13 @@ function buildRemoteHealthSnapshot(nowTs = Date.now()) {
     state = "gateway-local";
     effectiveReasonCode = "";
     reasonText = "";
+  } else if (isRemoteLiveBridgePausedForTransfer()) {
+    state = "paused";
+    effectiveReasonCode = "PRIORITY_PULL";
+    reasonText =
+      String(remoteBridgeState.livePauseReason || "").trim() === "standby-refresh"
+        ? "Live bridge paused during standby refresh."
+        : String(remoteBridgeState.livePauseReason || "Live bridge paused during transfer.");
   } else if (reasonClass === "config-error") {
     state = "config-error";
   } else if (reasonClass === "auth-error") {
@@ -1097,7 +1185,7 @@ function buildRemoteHealthSnapshot(nowTs = Date.now()) {
     lastFailureTs,
     failureStreak: Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)),
     backoffMs:
-      mode === "remote" && remoteBridgeState.running
+      mode === "remote" && remoteBridgeState.running && !isRemoteLiveBridgePausedForTransfer()
         ? getRemoteBridgeNextDelayMs(nowTs)
         : 0,
     lastLatencyMs: Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0)),
@@ -1108,6 +1196,9 @@ function buildRemoteHealthSnapshot(nowTs = Date.now()) {
             Number(remoteBridgeState.lastLiveNodeCount || countRemoteLiveNodes()),
           )
         : 0,
+    pausedForPriorityTransfer: isRemoteLiveBridgePausedForTransfer(),
+    pauseReason: String(remoteBridgeState.livePauseReason || ""),
+    pauseSince: Math.max(0, Number(remoteBridgeState.livePauseSince || 0)),
   };
 }
 
@@ -1792,7 +1883,7 @@ function buildManualReplicationScope() {
     background: true,
     includeArchiveOptional: true,
     defaultIncludeArchive: false,
-    hotTables: ["adsi.db (main database snapshot)"],
+    hotTables: ["main database snapshot"],
     preservedSettings: Array.from(REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS),
     archive: {
       ...archiveSummary,
@@ -1803,9 +1894,9 @@ function buildManualReplicationScope() {
       push:
         "Push is disabled in the viewer model. Gateway remains the only authoritative source for shared data.",
       pull:
-        "Pull downloads a fresh gateway main DB snapshot and stages it for restart-safe local replacement. Optional monthly archive DB files can follow.",
+        "Pull downloads a fresh gateway main DB snapshot and stages it for restart-safe local replacement. Optional monthly archive DB files can follow. During manual standby refresh, the remote live bridge pauses temporarily so the transfer gets priority.",
       liveBridge:
-        "Live bridge polling stays lightweight. Archive transfer is manual-only and does not run on the live viewer loop.",
+        "Live bridge polling stays lightweight. Manual standby refresh temporarily pauses the viewer-side live bridge, then resumes it automatically when the transfer finishes.",
       hotPriority:
         "The gateway main DB snapshot is always staged first. Archive DB files are optional and intended for historical catch-up only.",
     },
@@ -1826,6 +1917,8 @@ function snapshotManualReplicationJob() {
     errorCode: String(manualReplicationJobState.errorCode || ""),
     summary: String(manualReplicationJobState.summary || ""),
     needsRestart: Boolean(manualReplicationJobState.needsRestart),
+    priorityMode: Boolean(manualReplicationJobState.priorityMode),
+    livePaused: Boolean(manualReplicationJobState.livePaused),
     result:
       manualReplicationJobState.result &&
       typeof manualReplicationJobState.result === "object"
@@ -2919,16 +3012,25 @@ async function runRemotePushFull(baseUrl) {
 
 async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
   boostSocketPoolForReplication();
+  const priorityPause = pauseRemoteLiveBridgeForPriorityTransfer("standby-refresh");
+  const priorityNote = buildPriorityTransferNote(includeArchive);
   try {
     // Viewer model: pull is unconditional — the local DB is standby-only.
     // No LOCAL_NEWER pre-check, no Force Pull flow. Pull always overwrites.
 
     // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
-    updateManualReplicationJob({ summary: "Downloading fresh gateway main database…" });
+    updateManualReplicationJob({
+      summary: `Downloading fresh gateway main database. ${priorityNote}`,
+      priorityMode: true,
+      livePaused: true,
+    });
     const mainDb = await pullMainDbFromRemote(baseUrl, {
       label: "Downloading main database",
       syncDirection: "pull-main-db-staged",
       failureDirection: "pull-main-db-failed",
+      priorityMode: true,
+      livePaused: true,
+      note: priorityNote,
     });
     if (mainDb?.skipped) {
       throw new Error("Replication already in progress.");
@@ -2953,9 +3055,17 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
     };
     if (includeArchive) {
       updateManualReplicationJob({
-        summary: "Main DB staged. Downloading archive DB files from gateway.",
+        summary: `Main DB staged. Downloading archive DB files from gateway. ${priorityNote}`,
+        priorityMode: true,
+        livePaused: true,
       });
-      archive = await pullArchiveFilesFromRemote(baseUrl, { forceAll: true });
+      archive = await pullArchiveFilesFromRemote(baseUrl, {
+        forceAll: true,
+        concurrency: PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY,
+        priorityMode: true,
+        livePaused: true,
+        note: priorityNote,
+      });
     }
     const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
     const archiveSummary = includeArchive
@@ -2969,13 +3079,15 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       mode: "main-db",
       mainDb,
       archive,
-      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}. Restart the app to apply the new gateway database.`,
+      priorityMode: true,
+      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}. Remote live stream resumes automatically. Restart the app to apply the new gateway database.`,
     };
   } finally {
     // Force immediate energy refresh after pull so the TODAY MWh metric
     // recovers without waiting for the next 30 s piggyback cycle.
     todayEnergyCache.ts = 0;
     remoteBridgeState.lastTodayEnergyFetchTs = 0;
+    resumeRemoteLiveBridgeAfterPriorityTransfer(priorityPause);
     restoreSocketPoolAfterReplication();
   }
 }
@@ -3191,6 +3303,194 @@ async function hashFileSha256(filePath) {
   });
 }
 
+function buildReplicationHashCacheKey(filePath, size = 0, mtimeMs = 0) {
+  return [
+    path.resolve(String(filePath || "")).toLowerCase(),
+    Math.max(0, Number(size || 0)),
+    Math.max(0, Number(mtimeMs || 0)),
+  ].join("|");
+}
+
+function pruneReplicationHashCache() {
+  while (_replicationFileHashCache.size > REPLICATION_HASH_CACHE_LIMIT) {
+    const oldest = _replicationFileHashCache.keys().next();
+    if (oldest.done) break;
+    _replicationFileHashCache.delete(oldest.value);
+  }
+}
+
+async function getCachedFileSha256(filePath, statHint = null) {
+  const stat = statHint || await fs.promises.stat(filePath);
+  const size = Math.max(0, Number(stat?.size || 0));
+  const mtimeMs = Math.max(0, Number(stat?.mtimeMs || 0));
+  const cacheKey = buildReplicationHashCacheKey(filePath, size, mtimeMs);
+  const cached = _replicationFileHashCache.get(cacheKey);
+  if (cached?.sha256) {
+    _replicationFileHashCache.delete(cacheKey);
+    _replicationFileHashCache.set(cacheKey, cached);
+    return String(cached.sha256);
+  }
+  const sha256 = await hashFileSha256(filePath);
+  _replicationFileHashCache.set(cacheKey, { sha256 });
+  pruneReplicationHashCache();
+  return sha256;
+}
+
+function isGatewayMainDbSnapshotUsable(snapshot, nowTs = Date.now()) {
+  return Boolean(
+    snapshot?.tempPath &&
+    Number(snapshot?.expiresAt || 0) > nowTs &&
+    fs.existsSync(snapshot.tempPath),
+  );
+}
+
+async function disposeGatewayMainDbSnapshot(snapshot) {
+  if (!snapshot) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  if (Number(snapshot.refCount || 0) > 0) {
+    scheduleGatewayMainDbSnapshotCleanup(snapshot, GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS);
+    return;
+  }
+  if (_gatewayMainDbSnapshot === snapshot) {
+    const remainingMs = Math.max(0, Number(snapshot.expiresAt || 0) - Date.now());
+    if (remainingMs > 0) {
+      scheduleGatewayMainDbSnapshotCleanup(snapshot, remainingMs);
+      return;
+    }
+    _gatewayMainDbSnapshot = null;
+  }
+  try {
+    await fs.promises.unlink(snapshot.tempPath);
+  } catch (err) {
+    const code = String(err?.code || "").trim().toUpperCase();
+    if (code !== "ENOENT") {
+      console.warn(
+        "[replication] failed to clean up cached main DB snapshot:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
+  }
+}
+
+function scheduleGatewayMainDbSnapshotCleanup(snapshot, delayMs = 0) {
+  if (!snapshot) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  const delay = Math.max(1000, Number(delayMs || 0));
+  const timer = setTimeout(() => {
+    disposeGatewayMainDbSnapshot(snapshot).catch((err) => {
+      console.warn(
+        "[replication] cached main DB snapshot cleanup failed:",
+        String(err?.message || err || "unknown error"),
+      );
+    });
+  }, delay);
+  if (timer.unref) timer.unref();
+  snapshot.cleanupTimer = timer;
+}
+
+function retainGatewayMainDbSnapshot(snapshot) {
+  if (!snapshot) return null;
+  snapshot.refCount = Math.max(0, Number(snapshot.refCount || 0)) + 1;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  return snapshot;
+}
+
+function releaseGatewayMainDbSnapshotForTransfer(snapshot) {
+  if (!snapshot) return;
+  snapshot.refCount = Math.max(0, Number(snapshot.refCount || 0) - 1);
+  if (Number(snapshot.refCount || 0) > 0) return;
+  if (_gatewayMainDbSnapshot === snapshot) {
+    _gatewayMainDbSnapshot = null;
+  }
+  disposeGatewayMainDbSnapshot(snapshot).catch((err) => {
+    console.warn(
+      "[replication] main DB snapshot release cleanup failed:",
+      String(err?.message || err || "unknown error"),
+    );
+  });
+}
+
+function cleanupGatewayMainDbSnapshotSync() {
+  const snapshot = _gatewayMainDbSnapshot;
+  _gatewayMainDbSnapshot = null;
+  if (!snapshot?.tempPath) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  try {
+    fs.unlinkSync(snapshot.tempPath);
+  } catch (err) {
+    const code = String(err?.code || "").trim().toUpperCase();
+    if (code !== "ENOENT") {
+      console.warn(
+        "[replication] failed to remove cached main DB snapshot during shutdown:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
+  }
+}
+
+async function maybeCheckpointGatewayMainDbBeforeSnapshot() {
+  const nowTs = Date.now();
+  if (
+    nowTs - Number(_gatewayMainDbSnapshotLastCheckpointTs || 0) <
+    GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS
+  ) {
+    return;
+  }
+  _gatewayMainDbSnapshotLastCheckpointTs = nowTs;
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch (_) {
+    _gatewayMainDbSnapshotLastCheckpointTs = 0;
+  }
+}
+
+async function buildGatewayMainDbSnapshotForTransfer() {
+  await fs.promises.mkdir(DATA_DIR, { recursive: true });
+  const tempPath = path.join(
+    DATA_DIR,
+    `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
+  );
+  try {
+    try {
+      poller.flushPending();
+    } catch (_) {
+      // Best effort only; backup still produces a consistent snapshot.
+    }
+    await maybeCheckpointGatewayMainDbBeforeSnapshot();
+    await db.backup(tempPath);
+    const stat = await fs.promises.stat(tempPath);
+    const sha256 = await getCachedFileSha256(tempPath, stat);
+    return {
+      tempPath,
+      size: Math.max(0, Number(stat?.size || 0)),
+      mtimeMs: Math.max(0, Number(stat?.mtimeMs || Date.now())),
+      sha256,
+      expiresAt: Date.now() + GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS,
+      refCount: 0,
+      cleanupTimer: null,
+    };
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures after snapshot build errors.
+    }
+    throw err;
+  }
+}
+
 function createReplicationGzipStream() {
   return zlib.createGzip({
     level: zlib.constants.Z_BEST_SPEED,
@@ -3203,10 +3503,6 @@ function requestAcceptsGzip(req) {
   return acceptEncoding.includes("gzip");
 }
 
-function shouldGzipReplicationJson(req, rawBytes) {
-  return requestAcceptsGzip(req) && Number(rawBytes || 0) >= REPLICATION_JSON_GZIP_MIN_BYTES;
-}
-
 function shouldGzipReplicationStream(req, rawBytes) {
   return requestAcceptsGzip(req) && Number(rawBytes || 0) >= REPLICATION_STREAM_GZIP_MIN_BYTES;
 }
@@ -3214,32 +3510,21 @@ function shouldGzipReplicationStream(req, rawBytes) {
 function sendJsonMaybeGzip(req, res, payload) {
   const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  if (!shouldGzipReplicationJson(req, raw.length)) {
-    res.setHeader("Content-Length", String(raw.length));
-    res.end(raw);
-    return;
-  }
-  const gz = zlib.gzipSync(raw, { level: zlib.constants.Z_BEST_SPEED });
-  res.setHeader("Content-Encoding", "gzip");
-  res.setHeader("Content-Length", String(gz.length));
-  res.setHeader("Vary", "Accept-Encoding");
-  res.end(gz);
+  // Keep replication JSON uncompressed so all gateway<->remote transfer lanes
+  // follow the same low-CPU identity behavior.
+  res.setHeader("Content-Length", String(raw.length));
+  res.end(raw);
 }
 
-function encodeJsonRequestBody(payload, { gzipThreshold = REPLICATION_JSON_GZIP_MIN_BYTES } = {}) {
+function encodeJsonRequestBody(payload) {
   const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
-  const headers = {
+  return {
+    headers: {
     "Content-Type": "application/json",
+      "Content-Length": String(raw.length),
+    },
+    body: raw,
   };
-  if (raw.length < Math.max(1024, Number(gzipThreshold || 0))) {
-    headers["Content-Length"] = String(raw.length);
-    return { headers, body: raw };
-  }
-  const gz = zlib.gzipSync(raw, { level: zlib.constants.Z_BEST_SPEED });
-  headers["Content-Encoding"] = "gzip";
-  headers["Content-Length"] = String(gz.length);
-  headers["x-json-size"] = String(raw.length);
-  return { headers, body: gz };
 }
 
 async function verifyTransferredFile(filePath, { expectedSize = 0, expectedSha256 = "" } = {}) {
@@ -3310,16 +3595,17 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
   const attempts = Math.max(1, Number(REMOTE_INCREMENTAL_FETCH_RETRIES || 1));
   let lastErr = null;
   const targetUrl = `${baseUrl}/api/replication/incremental`;
+  const encodedBody = encodeJsonRequestBody({ cursors });
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
+      const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           ...buildRemoteProxyHeaders(),
+          ...encodedBody.headers,
         },
-        body: JSON.stringify({ cursors }),
+        body: encodedBody.body,
         timeout: REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS,
       }));
       if (!r.ok) {
@@ -3360,7 +3646,7 @@ async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
+      const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
         method: "POST",
         headers: {
           ...buildRemoteProxyHeaders(),
@@ -3480,30 +3766,41 @@ async function pushDeltaInChunks(baseUrl, deltaPayload, opts = {}) {
 }
 
 async function createGatewayMainDbSnapshotForTransfer() {
-  await fs.promises.mkdir(DATA_DIR, { recursive: true });
-  const tempPath = path.join(
-    DATA_DIR,
-    `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
-  );
-  try {
-    poller.flushPending();
-  } catch (_) {
-    // Best effort only; backup still produces a consistent snapshot.
+  const nowTs = Date.now();
+  if (
+    isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs) &&
+    Number(_gatewayMainDbSnapshot?.refCount || 0) > 0
+  ) {
+    return retainGatewayMainDbSnapshot(_gatewayMainDbSnapshot);
   }
-  try {
-    db.pragma("wal_checkpoint(PASSIVE)");
-  } catch (_) {
-    // Ignore checkpoint failures before snapshot export.
+  if (
+    _gatewayMainDbSnapshot &&
+    isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs) &&
+    Number(_gatewayMainDbSnapshot?.refCount || 0) <= 0
+  ) {
+    disposeGatewayMainDbSnapshot(_gatewayMainDbSnapshot).catch(() => {});
   }
-  await db.backup(tempPath);
-  const stat = await fs.promises.stat(tempPath);
-  const sha256 = await hashFileSha256(tempPath);
-  return {
-    tempPath,
-    size: Math.max(0, Number(stat?.size || 0)),
-    mtimeMs: Math.max(0, Number(stat?.mtimeMs || Date.now())),
-    sha256,
-  };
+  if (_gatewayMainDbSnapshot && !isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs)) {
+    disposeGatewayMainDbSnapshot(_gatewayMainDbSnapshot).catch(() => {});
+  }
+  if (_gatewayMainDbSnapshotBuildPromise) {
+    return retainGatewayMainDbSnapshot(await _gatewayMainDbSnapshotBuildPromise);
+  }
+  _gatewayMainDbSnapshotBuildPromise = (async () => {
+    const previousSnapshot = _gatewayMainDbSnapshot;
+    const nextSnapshot = await buildGatewayMainDbSnapshotForTransfer();
+    _gatewayMainDbSnapshot = nextSnapshot;
+    if (previousSnapshot && previousSnapshot !== nextSnapshot) {
+      previousSnapshot.expiresAt = 0;
+      disposeGatewayMainDbSnapshot(previousSnapshot).catch(() => {});
+    }
+    return nextSnapshot;
+  })();
+  try {
+    return retainGatewayMainDbSnapshot(await _gatewayMainDbSnapshotBuildPromise);
+  } finally {
+    _gatewayMainDbSnapshotBuildPromise = null;
+  }
 }
 
 async function pullMainDbFromRemote(baseUrl, opts = {}) {
@@ -3522,11 +3819,17 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
   let recvBytes = 0;
   let totalBytes = 0;
   let expectedSha256 = "";
+  const transferMeta = {
+    priorityMode: Boolean(opts?.priorityMode),
+    livePaused: Boolean(opts?.livePaused),
+    stage: "main-db",
+    note: String(opts?.note || "").trim(),
+  };
 
   try {
     await fs.promises.mkdir(DATA_DIR, { recursive: true });
     const targetUrl = `${baseUrl}/api/replication/main-db`;
-    const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
+    const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
       method: "GET",
       headers: buildRemoteProxyHeaders(),
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
@@ -3573,6 +3876,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       totalBytes,
       chunkCount: 1,
       label: xferLabel,
+      ...transferMeta,
     });
 
     body.on("data", (chunk) => {
@@ -3588,6 +3892,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
         chunk: 1,
         chunkCount: 1,
         label: xferLabel,
+        ...transferMeta,
       });
     });
 
@@ -3628,6 +3933,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       chunkCount: 1,
       importedRows: 1,
       label: xferLabel,
+      ...transferMeta,
     });
 
     return {
@@ -3653,6 +3959,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
       chunkCount: 1,
       label: xferLabel,
+      ...transferMeta,
     });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
     if (remoteBridgeState.lastSyncDirection !== "push-failed") {
@@ -3720,7 +4027,7 @@ async function fetchRemoteArchiveManifest(baseUrl) {
   };
 }
 
-async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
+async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options = {}) {
   const name = sanitizeArchiveFileName(fileMeta?.name || "");
   if (!name) throw new Error("Invalid archive file name.");
   const monthKey = monthKeyFromArchiveFileName(name);
@@ -3746,7 +4053,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes) {
       try {
         r = await fetch(
           targetUrl,
-          buildRemoteFetchOptions(targetUrl, {
+          buildReplicationTransferFetchOptions(targetUrl, {
             method: "GET",
             headers: reqHeaders,
             timeout: REMOTE_REPLICATION_TIMEOUT_MS,
@@ -3862,9 +4169,9 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
     throw new Error("Archive file not found.");
   }
   const filePath = resolved.path;
-  closeArchiveDbForMonth(monthKey);
+  prepareArchiveDbForTransfer(monthKey);
   const stat = await fs.promises.stat(filePath);
-  const sha256 = await hashFileSha256(filePath);
+  const sha256 = await getCachedFileSha256(filePath, stat);
   const targetUrl = `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`;
   const stream = createTransferReadStream(filePath);
   stream.on("data", (chunk) => {
@@ -3917,6 +4224,16 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
 
 async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
   const forceAll = Boolean(options?.forceAll);
+  const concurrency = Math.max(
+    1,
+    Math.min(4, Number(options?.concurrency || REMOTE_ARCHIVE_TRANSFER_CONCURRENCY) || 1),
+  );
+  const transferMeta = {
+    priorityMode: Boolean(options?.priorityMode),
+    livePaused: Boolean(options?.livePaused),
+    stage: "archive",
+    note: String(options?.note || "").trim(),
+  };
   const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
   if (!remoteManifestRes.ok) {
     return {
@@ -3959,13 +4276,14 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
       totalBytes,
       chunkCount: toPull.length,
       label: "Downloading archive",
+      ...transferMeta,
     });
   }
 
   try {
     await runTasksWithConcurrency(
       toPull,
-      REMOTE_ARCHIVE_TRANSFER_CONCURRENCY,
+      concurrency,
       async (fileMeta) => {
         await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
           transferredBytes += Math.max(0, Number(bytes || 0));
@@ -3979,8 +4297,9 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
             chunk: activeStep,
             chunkCount: toPull.length,
             label: "Downloading archive",
+            ...transferMeta,
           });
-        });
+        }, options);
         transferredFiles += 1;
         transferredNames.push(fileMeta.name);
         broadcastUpdate({
@@ -3992,6 +4311,7 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
           chunk: transferredFiles,
           chunkCount: toPull.length,
           label: "Downloading archive",
+          ...transferMeta,
         });
       },
     );
@@ -4005,6 +4325,7 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
         totalBytes,
         chunkCount: toPull.length,
         label: "Downloading archive",
+        ...transferMeta,
       });
     }
     throw err;
@@ -4019,6 +4340,7 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
       totalBytes,
       chunkCount: toPull.length,
       label: "Downloading archive",
+      ...transferMeta,
     });
   }
 
@@ -4188,6 +4510,7 @@ function startManualReplicationJob(action, options, runner) {
         ),
         error: "",
         needsRestart: Boolean(result?.needsRestart),
+        livePaused: false,
         result:
           result && typeof result === "object"
             ? { ...result }
@@ -4202,6 +4525,7 @@ function startManualReplicationJob(action, options, runner) {
         error: String(err?.message || err),
         errorCode: String(err?.code || ""),
         needsRestart: false,
+        livePaused: false,
         result: null,
       });
     }
@@ -4602,6 +4926,7 @@ async function pollRemoteLiveOnce() {
   const startedAt = Date.now();
   remoteBridgeState.lastAttemptTs = startedAt;
   const bridgeSessionId = Number(remoteBridgeState.bridgeSessionId || 0);
+  const livePauseGeneration = Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
@@ -4655,6 +4980,20 @@ async function pollRemoteLiveOnce() {
       const err = new Error("Gateway returned invalid live JSON.");
       err.code = "BAD_JSON";
       throw err;
+    }
+    const isCurrentBridgeSession =
+      bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+    const isCurrentPauseGeneration =
+      livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+    if (
+      !isCurrentBridgeSession ||
+      !isCurrentPauseGeneration ||
+      isRemoteLiveBridgePausedForTransfer() ||
+      !remoteBridgeState.running ||
+      !isRemoteMode() ||
+      getRemoteGatewayBaseUrl() !== base
+    ) {
+      return;
     }
     const successTs = Date.now();
     remoteBridgeState.liveData = buildRemoteLiveSnapshot(data, successTs);
@@ -4749,6 +5088,19 @@ async function pollRemoteLiveOnce() {
     // Viewer model: no startup auto-sync, no incremental replication.
     // Remote mode is a gateway-backed viewer — manual Pull is the only DB refresh path.
   } catch (err) {
+    const isCurrentBridgeSession =
+      bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+    const isCurrentPauseGeneration =
+      livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+    if (
+      !isCurrentBridgeSession ||
+      !isCurrentPauseGeneration ||
+      isRemoteLiveBridgePausedForTransfer() ||
+      !isRemoteMode() ||
+      getRemoteGatewayBaseUrl() !== base
+    ) {
+      return;
+    }
     const failure = classifyRemoteBridgeFailure(err);
     const nowTs = Date.now();
     remoteBridgeState.liveFailureCount += 1;
@@ -4892,11 +5244,17 @@ function stopRemoteBridge() {
     Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
   remoteBridgeState.lastHealthBroadcastKey = "";
   remoteBridgeState.replicationRunning = false;
+  remoteBridgeState.livePauseActive = false;
+  remoteBridgeState.livePauseReason = "";
+  remoteBridgeState.livePauseSince = 0;
+  remoteBridgeState.livePauseResumeWanted = false;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
   if (_shutdownCalled || !isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
 
 function startRemoteBridge() {
-  if (remoteBridgeState.running) return;
+  if (remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer()) return;
   clearRemoteBridgePersistState();
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
@@ -8762,14 +9120,17 @@ app.get("/api/replication/archive-download", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid archive file." });
   }
   const monthKey = monthKeyFromArchiveFileName(fileName);
-  closeArchiveDbForMonth(monthKey);
+  prepareArchiveDbForTransfer(monthKey);
   try {
     const resolved = resolveArchiveFileForTransfer(fileName);
     if (!resolved?.path) {
       throw new Error("Archive file not found.");
     }
     const totalBytes = Math.max(0, Number(resolved.size || 0));
-    const sha256 = await hashFileSha256(resolved.path);
+    const sha256 = await getCachedFileSha256(resolved.path, {
+      size: totalBytes,
+      mtimeMs: Math.max(0, Number(resolved.mtimeMs || 0)),
+    });
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-archive-size", String(totalBytes));
     res.setHeader("x-archive-sha256", sha256);
@@ -8995,13 +9356,7 @@ app.get("/api/replication/main-db", async (req, res) => {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
   } finally {
-    if (snapshot?.tempPath) {
-      try {
-        await fs.promises.unlink(snapshot.tempPath);
-      } catch (_) {
-        // Ignore temp snapshot cleanup failures.
-      }
-    }
+    releaseGatewayMainDbSnapshotForTransfer(snapshot);
   }
 });
 
@@ -9714,6 +10069,9 @@ app.get("/api/runtime/network", (req, res) => {
     remoteLastReconcileRows: Number(remoteBridgeState.lastReconcileRows || 0),
     remoteLastReconcileError: String(remoteBridgeState.lastReconcileError || ""),
     remoteLastSyncDirection: String(remoteBridgeState.lastSyncDirection || "idle"),
+    remoteLivePausedForTransfer: Boolean(remoteBridgeState.livePauseActive),
+    remoteLivePauseReason: String(remoteBridgeState.livePauseReason || ""),
+    remoteLivePauseSince: Number(remoteBridgeState.livePauseSince || 0),
     remoteHealth: buildRemoteHealthSnapshot(),
     remoteReplicationCursors: normalizeReplicationCursors(
       isRemotePullOnlyMode()
@@ -11367,6 +11725,7 @@ let _shutdownCalled = false;
 
 function _flushAndClose() {
   try { poller.flushPending(); } catch (_) {}   // recover last ~1 s of readings
+  cleanupGatewayMainDbSnapshotSync();
   closeDb();                                      // WAL checkpoint + db.close
 }
 

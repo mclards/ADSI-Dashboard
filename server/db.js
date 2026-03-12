@@ -295,6 +295,7 @@ const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");  // WAL+NORMAL is crash-safe; FULL adds fsync per commit that blocks the event loop
+db.pragma("busy_timeout = 5000");
 db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
@@ -1010,6 +1011,50 @@ const bulkInsertWithSummary = db.transaction((rows) => {
   }
 });
 
+const bulkInsertPollerBatch = db.transaction((readingRows, energyRows = []) => {
+  for (const row of readingRows || []) {
+    try {
+      stmts.insertReading.run(row);
+    } catch (err) {
+      console.error("[DB] bulkInsertPollerBatch reading row failed:", err.message, row);
+    }
+  }
+  for (const row of energyRows || []) {
+    try {
+      stmts.insertEnergy5.run(
+        Number(row?.ts || 0),
+        Number(row?.inverter || 0),
+        Number(row?.kwh_inc || 0),
+      );
+    } catch (err) {
+      console.error("[DB] bulkInsertPollerBatch energy row failed:", err.message, row);
+    }
+  }
+  const states = new Map();
+  for (const row of readingRows || []) {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!(ts > 0) || !(inverter > 0) || !(unit > 0)) continue;
+    const day = localDateStr(ts);
+    const key = `${day}|${inverter}|${unit}`;
+    let state = states.get(key);
+    if (!state) {
+      const existing = stmts.getDailyReadingsSummaryOne.get(day, inverter, unit);
+      state = createSummaryState(day, inverter, unit, existing);
+      states.set(key, state);
+    }
+    applyReadingToSummaryState(state, row);
+  }
+  if (states.size) {
+    const now = Date.now();
+    const payloads = Array.from(states.values()).map((s) => summaryStateToPayload(s, now));
+    for (const payload of payloads) {
+      stmts.upsertDailyReadingsSummary.run(payload);
+    }
+  }
+});
+
 const bulkUpsertForecastDayAhead = db.transaction((date, rows, source = "service") => {
   stmts.deleteForecastDayAheadDate.run(String(date || ""));
   const now = Date.now();
@@ -1144,6 +1189,7 @@ function clearAllChatMessages() {
 function ensureArchiveSchema(archiveDb) {
   archiveDb.pragma("journal_mode = WAL");
   archiveDb.pragma("synchronous = NORMAL");
+  archiveDb.pragma("busy_timeout = 5000");
   archiveDb.pragma("temp_store = memory");
   archiveDb.exec(`
     CREATE TABLE IF NOT EXISTS readings (
@@ -1247,6 +1293,42 @@ function closeArchiveDbForMonth(monthKey) {
   }
   ARCHIVE_DB_CACHE.delete(key);
   return true;
+}
+
+function prepareArchiveDbForTransfer(monthKey) {
+  const key = normalizeArchiveMonthKey(monthKey);
+  if (!key) return { closed: false, checkpointed: false, walBytes: 0 };
+  const entry = ARCHIVE_DB_CACHE.get(key);
+  if (!entry) return { closed: false, checkpointed: false, walBytes: 0 };
+  const filePath = path.join(ARCHIVE_DIR, `${key}.db`);
+  const walPath = `${filePath}-wal`;
+  let walBytes = 0;
+  try {
+    walBytes = Math.max(0, Number(fs.statSync(walPath).size || 0));
+  } catch (_) {
+    walBytes = 0;
+  }
+  if (!(walBytes > 0)) {
+    return { closed: false, checkpointed: false, walBytes: 0 };
+  }
+  try {
+    entry.db.pragma("wal_checkpoint(PASSIVE)");
+  } catch (_) {
+    // Ignore passive checkpoint failures; we may still need a targeted close.
+  }
+  try {
+    walBytes = Math.max(0, Number(fs.statSync(walPath).size || 0));
+  } catch (_) {
+    walBytes = 0;
+  }
+  if (!(walBytes > 0)) {
+    return { closed: false, checkpointed: true, walBytes: 0 };
+  }
+  return {
+    closed: closeArchiveDbForMonth(key),
+    checkpointed: true,
+    walBytes,
+  };
 }
 
 function beginArchiveDbReplacement(monthKey) {
@@ -1813,6 +1895,7 @@ module.exports = {
   stmts,
   bulkInsert,
   bulkInsertWithSummary,
+  bulkInsertPollerBatch,
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
   bulkUpsertSolcastSnapshot,
@@ -1839,6 +1922,7 @@ module.exports = {
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
+  prepareArchiveDbForTransfer,
   stagePendingMainDbReplacement,
   readPendingMainDbReplacement,
   beginArchiveDbReplacement,

@@ -1,5 +1,5 @@
 const fetch = require('node-fetch');
-const { bulkInsert, bulkInsertWithSummary, stmts, getSetting, ingestDailyReadingsSummary } = require('./db');
+const { bulkInsertPollerBatch, getSetting } = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
 
@@ -21,11 +21,15 @@ const API_FETCH_TIMEOUT_MS = 5000;
 const IPCONFIG_CACHE_MS = 5000;
 const DB_MIN_PERSIST_MS = 1000;
 const DB_PAC_DELTA_PERSIST_W = 250;
+const DB_READING_BACKLOG_MAX_ROWS = 120000;
+const DB_ENERGY_BACKLOG_MAX_ROWS = 12000;
 
 let pollTimer = null;
 let running   = false;
 let liveJsonCache = "{}";
 let liveJsonCacheTs = Date.now();
+const pendingReadingQueue = new Map();
+const pendingEnergyQueue = new Map();
 const pollStats = {
   startedAt: Date.now(),
   tickCount: 0,
@@ -46,6 +50,15 @@ const pollStats = {
   rowsPersistSkippedCadence: 0,
   dbBulkInsertCount: 0,
   dbInsertErrorCount: 0,
+  dbPersistRetryCount: 0,
+  dbPersistDroppedReadingCount: 0,
+  dbPersistDroppedEnergyCount: 0,
+  pendingReadingQueueSize: 0,
+  pendingEnergyQueueSize: 0,
+  pendingReadingQueueHighWater: 0,
+  pendingEnergyQueueHighWater: 0,
+  lastDbPersistError: "",
+  lastDbPersistOkTs: 0,
   offlineMarkCount: 0,
   lastCacheUpdateTs: Date.now(),
 };
@@ -302,7 +315,7 @@ function floorToFiveMinute(ts) {
   return Math.floor(ts / FIVE) * FIVE;
 }
 
-function update5minBucket(parsed) {
+function update5minBucket(parsed, energyRows) {
   const key = String(parsed.inverter);
   const now = parsed.ts || Date.now();
   const bucketStart = floorToFiveMinute(now);
@@ -320,8 +333,109 @@ function update5minBucket(parsed) {
   // Persist exactly on wall-clock 5-minute boundaries (:00/:05/:10/...),
   // derived from PAC integration only (not register kWh).
   const inc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
-  stmts.insertEnergy5.run(bucketStart, parsed.inverter, inc);
+  energyRows.push({
+    ts: bucketStart,
+    inverter: parsed.inverter,
+    kwh_inc: Number(inc.toFixed(6)),
+  });
   energyBuckets[key] = { bucketStart, kwhStart: kwhNow, day: dKey };
+}
+
+function readingQueueKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`;
+}
+
+function energyQueueKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}`;
+}
+
+function syncPendingQueueStats() {
+  pollStats.pendingReadingQueueSize = pendingReadingQueue.size;
+  pollStats.pendingEnergyQueueSize = pendingEnergyQueue.size;
+  if (pendingReadingQueue.size > pollStats.pendingReadingQueueHighWater) {
+    pollStats.pendingReadingQueueHighWater = pendingReadingQueue.size;
+  }
+  if (pendingEnergyQueue.size > pollStats.pendingEnergyQueueHighWater) {
+    pollStats.pendingEnergyQueueHighWater = pendingEnergyQueue.size;
+  }
+}
+
+function enqueueBounded(map, key, row, maxRows, dropCounterField, label) {
+  if (map.has(key)) {
+    map.set(key, row);
+    return;
+  }
+  map.set(key, row);
+  while (map.size > maxRows) {
+    const oldestKey = map.keys().next();
+    if (oldestKey.done) break;
+    map.delete(oldestKey.value);
+    pollStats[dropCounterField] += 1;
+    const dropped = Number(pollStats[dropCounterField] || 0);
+    if (dropped === 1 || dropped % 500 === 0) {
+      console.warn(
+        `[poller] ${label} backlog cap reached; dropped ${dropped} oldest queued row(s).`,
+      );
+    }
+  }
+}
+
+function enqueuePendingPersist(readingRows = [], energyRows = []) {
+  for (const row of readingRows) {
+    enqueueBounded(
+      pendingReadingQueue,
+      readingQueueKey(row),
+      row,
+      DB_READING_BACKLOG_MAX_ROWS,
+      "dbPersistDroppedReadingCount",
+      "reading",
+    );
+  }
+  for (const row of energyRows) {
+    enqueueBounded(
+      pendingEnergyQueue,
+      energyQueueKey(row),
+      row,
+      DB_ENERGY_BACKLOG_MAX_ROWS,
+      "dbPersistDroppedEnergyCount",
+      "energy_5min",
+    );
+  }
+  syncPendingQueueStats();
+}
+
+function flushPersistBacklog(reason = "tick") {
+  if (!pendingReadingQueue.size && !pendingEnergyQueue.size) {
+    pollStats.lastDbPersistError = "";
+    syncPendingQueueStats();
+    return true;
+  }
+  const readingRows = Array.from(pendingReadingQueue.values()).sort((a, b) =>
+    Number(a.ts || 0) - Number(b.ts || 0) ||
+    Number(a.inverter || 0) - Number(b.inverter || 0) ||
+    Number(a.unit || 0) - Number(b.unit || 0),
+  );
+  const energyRows = Array.from(pendingEnergyQueue.values()).sort((a, b) =>
+    Number(a.ts || 0) - Number(b.ts || 0) ||
+    Number(a.inverter || 0) - Number(b.inverter || 0),
+  );
+  try {
+    bulkInsertPollerBatch(readingRows, energyRows);
+    pendingReadingQueue.clear();
+    pendingEnergyQueue.clear();
+    pollStats.dbBulkInsertCount += 1;
+    pollStats.lastDbPersistError = "";
+    pollStats.lastDbPersistOkTs = Date.now();
+    syncPendingQueueStats();
+    return true;
+  } catch (err) {
+    pollStats.dbInsertErrorCount += 1;
+    pollStats.dbPersistRetryCount += 1;
+    pollStats.lastDbPersistError = String(err?.message || err || "");
+    syncPendingQueueStats();
+    console.error(`[poller] DB persist failed (${reason}):`, pollStats.lastDbPersistError);
+    return false;
+  }
 }
 
 function buildTotals(now) {
@@ -363,6 +477,7 @@ async function poll() {
   let noChangeThisTick = 0;
   let persistedThisTick = 0;
   let skippedCadenceThisTick = 0;
+  const energyBatch = [];
 
   const apiUrl = getSetting('apiUrl', 'http://127.0.0.1:9100/data');
   const ipConfig = loadIpConfigSnapshot();
@@ -373,11 +488,15 @@ async function poll() {
   let fetchOk = false;
   try {
     const res = await fetch(apiUrl, { timeout: API_FETCH_TIMEOUT_MS });
+    if (!res.ok) {
+      throw new Error(`Gateway poll HTTP ${res.status}`);
+    }
     rows = await res.json();
     if (!Array.isArray(rows)) rows = [];
     fetchOk = true;
     pollStats.fetchOkCount += 1;
     pollStats.rowsFetched += rows.length;
+    pollStats.lastFetchError = "";
     apiFailMs = 0;
     apiOfflineBroadcasted = false;
   } catch (e) {
@@ -389,6 +508,7 @@ async function poll() {
 
   // Avoid flapping all cards on short API hiccups.
   if (!fetchOk) {
+    flushPersistBacklog("fetch-error-retry");
     if (apiFailMs >= OFFLINE_MS && !apiOfflineBroadcasted) {
       markAllOffline();
       apiOfflineBroadcasted = true;
@@ -462,7 +582,7 @@ async function poll() {
 
     if (shouldPersist) {
       batch.push(toPersistedReadingRow(parsed));
-      update5minBucket(parsed);
+      update5minBucket(parsed, energyBatch);
       lastPersistState[key] = {
         ts: Number(parsed.ts || 0),
         pac: Number(parsed.pac || 0),
@@ -476,15 +596,8 @@ async function poll() {
 
   }
 
-  if (batch.length) {
-    try {
-      bulkInsertWithSummary(batch); // single transaction: insert readings + update summary → 1 fsync
-      pollStats.dbBulkInsertCount += 1;
-    } catch (e) {
-      console.error('[DB]', e.message);
-      pollStats.dbInsertErrorCount += 1;
-    }
-  }
+  enqueuePendingPersist(batch, energyBatch);
+  flushPersistBacklog("tick");
 
   if (alarmBatch.length) {
     try {
@@ -540,10 +653,12 @@ function start() {
   running = true;
   (function tick() {
     if (!running) return;
+    const tickStartedAt = Date.now();
     poll()
       .catch((err) => console.error("[poller] unhandled poll error:", err.message))
       .finally(() => {
-        pollTimer = setTimeout(tick, POLL_MS);
+        const delay = Math.max(0, POLL_MS - (Date.now() - tickStartedAt));
+        pollTimer = setTimeout(tick, delay);
       });
   })();
 }
@@ -568,9 +683,8 @@ function flushPending() {
       alarm: Number(d.alarm || 0), on_off: Number(d.on_off || 0),
     };
   }
-  if (batch.length) {
-    try { bulkInsert(batch); } catch (err) { console.error('[poller] flushPending failed:', err.message); }
-  }
+  enqueuePendingPersist(batch, []);
+  flushPersistBacklog("shutdown");
 }
 
 function getLiveData() { return liveData; }

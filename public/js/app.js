@@ -18,6 +18,14 @@ function createXferSlot(dir) {
     chunkDone: 0,
     totalRows: 0,
     importedRows: 0,
+    priorityMode: false,
+    livePaused: false,
+    stage: "",
+    note: "",
+    rateBps: 0,
+    peakBps: 0,
+    lastSampleBytes: 0,
+    lastSampleTs: 0,
     hideTimer: null,
     updatedAt: 0,
   };
@@ -64,6 +72,10 @@ const State = {
   wsRetries: 0,
   invLastFresh: {}, // key: inverter -> last fresh timestamp
   analyticsReqId: 0,
+  alarmReqId: 0,
+  energyReqId: 0,
+  auditReqId: 0,
+  reportReqId: 0,
   analyticsRealtimeTimer: null,
   analyticsFetchTimer: null,
   analyticsFetchInFlight: false,
@@ -119,6 +131,7 @@ const State = {
     summary: null,
     page: 1,
     pageSize: 120,
+    queryKey: "",
   },
   progressUi: {
     activeCount: 0,
@@ -1319,9 +1332,47 @@ function endProgress(doneLabel = "Done") {
 
 // ─── Network I/O Tracking ─────────────────────────────────────────────────────
 function fmtBps(bps) {
-  if (bps < 1024) return `${Math.round(bps)} B/s`;
-  if (bps < 1048576) return `${(bps / 1024).toFixed(1)} KB/s`;
-  return `${(bps / 1048576).toFixed(2)} MB/s`;
+  const rate = Math.max(0, Number(bps || 0));
+  if (rate < 1024) return `${Math.round(rate)} B/s`;
+  if (rate < 1048576) return `${(rate / 1024).toFixed(1)} KB/s`;
+  return `${(rate / 1048576).toFixed(2)} MB/s`;
+}
+
+function fmtEtaSec(totalSec) {
+  const sec = Math.max(0, Math.ceil(Number(totalSec || 0)));
+  if (!(sec > 0)) return "0s";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function resetXferRateState(slot, now = Date.now()) {
+  slot.rateBps = 0;
+  slot.peakBps = 0;
+  slot.lastSampleBytes = Math.max(0, Number(slot.doneBytes || 0));
+  slot.lastSampleTs = now;
+}
+
+function updateXferRateState(slot, nextDoneBytes, now = Date.now()) {
+  const nextDone = Math.max(0, Number(nextDoneBytes || 0));
+  const lastTs = Math.max(0, Number(slot.lastSampleTs || 0));
+  const lastBytes = Math.max(0, Number(slot.lastSampleBytes || 0));
+  if (lastTs > 0 && now > lastTs && nextDone >= lastBytes) {
+    const elapsedSec = (now - lastTs) / 1000;
+    const instantBps = elapsedSec > 0 ? (nextDone - lastBytes) / elapsedSec : 0;
+    if (instantBps > 0) {
+      slot.rateBps =
+        Number(slot.rateBps || 0) > 0
+          ? Number(slot.rateBps || 0) * 0.55 + instantBps * 0.45
+          : instantBps;
+      slot.peakBps = Math.max(Number(slot.peakBps || 0), instantBps);
+    }
+  }
+  slot.lastSampleBytes = nextDone;
+  slot.lastSampleTs = now;
 }
 
 function _netIOFlash(rowId, timerKey) {
@@ -1401,7 +1452,12 @@ function handleXferProgress(msg) {
     slot.chunkDone = chunkOrd;
     slot.totalRows = totalRows;
     slot.importedRows = 0;
+    slot.priorityMode = Boolean(msg?.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused);
+    slot.stage = String(msg?.stage || "").trim().toLowerCase();
+    slot.note = String(msg?.note || "").trim();
     slot.updatedAt = now;
+    resetXferRateState(slot, now);
     renderXferPanel();
     return;
   }
@@ -1415,6 +1471,10 @@ function handleXferProgress(msg) {
     if (chunkOrd > 0) slot.chunkDone = chunkOrd;
     if (totalRows > 0) slot.totalRows = totalRows;
     if (importedRows > 0) slot.importedRows = importedRows;
+    slot.priorityMode = Boolean(msg?.priorityMode || slot.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused || slot.livePaused);
+    if (msg?.stage) slot.stage = String(msg.stage || "").trim().toLowerCase();
+    if (msg?.note) slot.note = String(msg.note || "").trim();
 
     let prevDone = Math.max(0, Number(slot.doneBytes || 0));
     let nextDone = rawDoneBytes;
@@ -1425,6 +1485,7 @@ function handleXferProgress(msg) {
     }
     if (nextDone < prevDone) nextDone = prevDone;
     slot.doneBytes = nextDone;
+    updateXferRateState(slot, nextDone, now);
 
     const delta = nextDone - prevDone;
     if (delta > 0) {
@@ -1446,6 +1507,11 @@ function handleXferProgress(msg) {
     if (totalRows > 0) slot.totalRows = totalRows;
     if (importedRows > 0) slot.importedRows = importedRows;
     if (rawDoneBytes > 0) slot.doneBytes = Math.max(slot.doneBytes, rawDoneBytes);
+    slot.priorityMode = Boolean(msg?.priorityMode || slot.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused || slot.livePaused);
+    if (msg?.stage) slot.stage = String(msg.stage || "").trim().toLowerCase();
+    if (msg?.note) slot.note = String(msg.note || "").trim();
+    updateXferRateState(slot, slot.doneBytes, now);
     if (phase === "done" && slot.totalBytes <= 0 && slot.doneBytes > 0) {
       slot.totalBytes = slot.doneBytes;
     }
@@ -1454,6 +1520,14 @@ function handleXferProgress(msg) {
       slot.active = false;
       slot.phase = "idle";
       slot.label = "";
+      slot.priorityMode = false;
+      slot.livePaused = false;
+      slot.stage = "";
+      slot.note = "";
+      slot.rateBps = 0;
+      slot.peakBps = 0;
+      slot.lastSampleBytes = 0;
+      slot.lastSampleTs = 0;
       slot.updatedAt = Date.now();
       slot.hideTimer = null;
       renderXferPanel();
@@ -1481,6 +1555,7 @@ function getXferPhaseBadge(x) {
   const phase = String(x?.phase || "");
   if (phase === "done") return { text: "Done", cls: "xfer-phase-done" };
   if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
+  if (x?.priorityMode || x?.livePaused) return { text: "Priority", cls: "xfer-phase-priority" };
   if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
   if (lbl.includes("main database") && lbl.includes("final")) return { text: "Finalizing", cls: "xfer-phase-applying" };
   if (lbl.includes("final") || lbl.includes("final gateway")) return { text: "Finalizing", cls: "xfer-phase-applying" };
@@ -1490,6 +1565,12 @@ function getXferPhaseBadge(x) {
 }
 
 function getXferScopeInfo(x) {
+  if (x?.priorityMode || x?.livePaused) {
+    if (String(x?.stage || "").trim().toLowerCase() === "archive") {
+      return { text: "Priority archive", cls: "priority" };
+    }
+    return { text: "Priority pull", cls: "priority" };
+  }
   const label = String(x?.label || "")
     .trim()
     .toLowerCase();
@@ -1510,16 +1591,34 @@ function getXferScopeInfo(x) {
 
 function getXferDetailText(x) {
   const parts = [];
+  if (x.livePaused) {
+    parts.push("live stream paused");
+  }
   if (x.chunkCount > 1) {
     parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}/${Math.max(0, Number(x.chunkCount || 0))}`);
   } else if (x.chunkDone > 0) {
     parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}`);
+  }
+  if (Number(x.rateBps || 0) > 0 && x.phase !== "done" && x.phase !== "error") {
+    parts.push(fmtBps(x.rateBps));
+  }
+  const remainingBytes =
+    Math.max(0, Number(x.totalBytes || 0)) - Math.max(0, Number(x.doneBytes || 0));
+  if (
+    remainingBytes > 0 &&
+    Number(x.rateBps || 0) > 0 &&
+    x.phase !== "done" &&
+    x.phase !== "error"
+  ) {
+    parts.push(`ETA ${fmtEtaSec(remainingBytes / Math.max(1, Number(x.rateBps || 0)))}`);
   }
   if (Number(x.totalRows || 0) > 0) {
     const imported = Math.max(0, Number(x.importedRows || 0));
     const totalRows = Math.max(0, Number(x.totalRows || 0));
     if (imported > 0) parts.push(`${imported.toLocaleString()} row${imported === 1 ? "" : "s"} applied`);
     else parts.push(`${totalRows.toLocaleString()} row${totalRows === 1 ? "" : "s"} scheduled`);
+  } else if (x.note && !x.livePaused) {
+    parts.push(String(x.note || "").trim());
   } else if (x.phase === "done") {
     parts.push("transfer finished");
   } else if (x.phase === "error") {
@@ -2357,6 +2456,9 @@ function normalizeRemoteHealthClient(raw = null) {
     backoffMs: Math.max(0, Number(src?.backoffMs || 0)),
     lastLatencyMs: Math.max(0, Number(src?.lastLatencyMs || 0)),
     liveNodeCount: Math.max(0, Number(src?.liveNodeCount || 0)),
+    pausedForPriorityTransfer: Boolean(src?.pausedForPriorityTransfer),
+    pauseReason: String(src?.pauseReason || "").trim(),
+    pauseSince: Math.max(0, Number(src?.pauseSince || 0)),
   };
 }
 
@@ -2376,6 +2478,8 @@ function getRemoteHealthDisplay(healthRaw = null, modeRaw = "") {
     return { text: "Gateway local polling", cls: "" };
   }
   switch (String(health.state || "").trim().toLowerCase()) {
+    case "paused":
+      return { text: "Paused for standby refresh", cls: "warn" };
     case "connecting":
       return { text: "Connecting", cls: "warn" };
     case "connected":
@@ -3738,11 +3842,19 @@ async function handleOperationModeTransition(
 
   // Invalidate in-flight analytics reads so older mode responses cannot win.
   State.analyticsReqId = (State.analyticsReqId || 0) + 1;
+  State.alarmReqId = (State.alarmReqId || 0) + 1;
+  State.energyReqId = (State.energyReqId || 0) + 1;
+  State.auditReqId = (State.auditReqId || 0) + 1;
+  State.reportReqId = (State.reportReqId || 0) + 1;
 
   // Clear mode-specific runtime views immediately to avoid stale carry-over.
   State.liveData = {};
   State.totals = {};
   State.invLastFresh = {};
+  State.alarmView.queryKey = "";
+  State.energyView.queryKey = "";
+  State.auditView.queryKey = "";
+  State.reportView.queryKey = "";
   if (!preserveAnalyticsView) {
     State.analyticsBaseRows = [];
     State.analyticsDayAheadBaseRows = [];
@@ -3778,13 +3890,21 @@ async function handleOperationModeTransition(
     await loadAnalytics({ force: true }).catch((err) => {
       console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
     });
+  } else if (State.currentPage === "alarms") {
+    await fetchAlarms({ force: true }).catch((err) => {
+      console.warn("[app] mode transition alarms refresh failed:", err?.message || err);
+    });
   } else if (State.currentPage === "report") {
-    await fetchReport().catch((err) => {
+    await fetchReport({ force: true }).catch((err) => {
       console.warn("[app] mode transition report refresh failed:", err?.message || err);
     });
   } else if (State.currentPage === "energy") {
-    await fetchEnergy().catch((err) => {
+    await fetchEnergy({ force: true }).catch((err) => {
       console.warn("[app] mode transition energy refresh failed:", err?.message || err);
+    });
+  } else if (State.currentPage === "audit") {
+    await fetchAudit({ force: true }).catch((err) => {
+      console.warn("[app] mode transition audit refresh failed:", err?.message || err);
     });
   }
 
@@ -4085,6 +4205,7 @@ function formatSyncDirection(value) {
     "pull-live": "Live stream",
     "pull-live-only": "Live stream",
     "pull-live-failed": "Live stream failed",
+    "pull-priority-paused": "Priority standby refresh",
     "pull-full": "Standby DB refresh",
     "pull-full-failed": "Standby DB refresh failed",
     "pull-main-db-staged": "Standby DB staged",
@@ -4149,7 +4270,7 @@ function formatTailscaleStatus(ts) {
 function formatReplicationScopeText(scope) {
   const hotTables = Array.isArray(scope?.hotTables) ? scope.hotTables : [];
   if (!hotTables.length) return "Gateway standby database scope is not available.";
-  return `Standby DB source: ${hotTables.join(", ")}. Standby refresh replaces the local standby database with the latest gateway snapshot.`;
+  return `Standby DB source: ${hotTables.join(", ")}. Standby refresh replaces the local standby database with the latest gateway snapshot. During a manual refresh, the remote live stream pauses temporarily so the download gets priority.`;
 }
 
 function formatArchiveScopeText(scope) {
@@ -4157,7 +4278,7 @@ function formatArchiveScopeText(scope) {
   const count = Math.max(0, Number(archive?.fileCount || 0));
   const totalBytes = Math.max(0, Number(archive?.totalBytes || 0));
   const selected = isManualArchiveSyncSelected();
-  return `${selected ? "Archive download is enabled for the next standby DB refresh and will stage the gateway monthly archive DB files." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling does not transfer archive files. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
+  return `${selected ? "Archive download is enabled for the next standby DB refresh and will stage the gateway monthly archive DB files." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling never transfers archive files, and a manual standby refresh temporarily pauses the live stream so the DB download gets priority. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
 }
 
 function formatReplicationJobStatus(job) {
@@ -4167,8 +4288,10 @@ function formatReplicationJobStatus(job) {
   const actionKey = String(j.action || "sync").trim().toLowerCase();
   const action = actionKey === "pull" ? "standby refresh" : actionKey;
   if (status === "running" || status === "queued") {
+    const priorityLabel = j.priorityMode ? " · priority download" : "";
+    const livePauseLabel = j.livePaused ? " · live paused" : "";
     return {
-      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · db + archive" : " · db only"}`,
+      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · db + archive" : " · db only"}${priorityLabel}${livePauseLabel}`,
       cls: status === "queued" ? "warn" : "ok",
     };
   }
@@ -4223,7 +4346,11 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
         String(job.action || "").trim().toLowerCase() === "pull"
           ? "standby DB refresh"
           : String(job.action || "job").trim();
-      showMsg("replicationMsg", `Background ${actionLabel} started. You can return to normal operation.`, "");
+      const priorityNote =
+        job.priorityMode || job.livePaused
+          ? " Live stream is paused temporarily so the download gets priority."
+          : "";
+      showMsg("replicationMsg", `Background ${actionLabel} started.${priorityNote}`, "");
     } else if (job.status === "completed") {
       showMsg("replicationMsg", `✔ ${job.summary || "Standby DB refresh complete."}`, "");
       showToast(job.summary || "Standby DB refresh complete.", "success", 5200);
@@ -4243,8 +4370,8 @@ function updateReplicationArchiveSelectionUi(silent = false) {
   const hint = $("replicationArchiveHint");
   if (hint) {
     hint.textContent = checked
-      ? "Archive download is enabled for the next standby DB refresh. All gateway monthly archive DB files will be staged, so expect a longer transfer."
-      : "Optional. Leave this off for a faster standby DB refresh. Enable it only when you need the gateway archive DB files staged too.";
+      ? "Archive download is enabled for the next standby DB refresh. All gateway monthly archive DB files will be staged, so expect a longer transfer while the remote live stream is paused."
+      : "Optional. Leave this off for the fastest standby DB refresh. Enable it only when you need the gateway archive DB files staged too. The remote live stream still pauses during the transfer.";
   }
   if (State.replication.scope) {
     setReplicationField(
@@ -4256,8 +4383,8 @@ function updateReplicationArchiveSelectionUi(silent = false) {
     showMsg(
       "replicationMsg",
       checked
-        ? "Archive download enabled for the next standby DB refresh. All gateway archive DB files will be staged."
-        : "Archive download disabled. Only the gateway standby database will be refreshed.",
+        ? "Archive download enabled for the next standby DB refresh. All gateway archive DB files will be staged while the remote live stream is paused."
+        : "Archive download disabled. Only the gateway standby database will be refreshed, with the remote live stream paused during the transfer.",
       checked ? "error" : "",
     );
   }
@@ -4470,6 +4597,7 @@ async function runReplicationPullNow() {
     "Refresh Standby Database",
     "Download the gateway database for local standby use.\n\n" +
     "The gateway snapshot will replace your local database on restart.\n\n" +
+    "While the standby refresh is running, the remote live stream will pause temporarily so the download gets priority.\n\n" +
     "Local-only settings (operation mode, gateway URL/token, tailnet hint, and export path) are preserved." +
     archiveLine +
     "\n\nYou will be prompted to restart after completion.",
@@ -4479,7 +4607,11 @@ async function runReplicationPullNow() {
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Downloading the gateway main database…", "");
+  showMsg(
+    "replicationMsg",
+    "Starting priority standby refresh. Remote live stream will pause during the download…",
+    "",
+  );
   try {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
@@ -4492,8 +4624,8 @@ async function runReplicationPullNow() {
     showMsg(
       "replicationMsg",
       includeArchive
-        ? "Background download started. Staging the gateway database. Gateway archive DB files will follow."
-        : "Background download started. Staging the gateway database.",
+        ? "Priority download started. Staging the gateway database first. Gateway archive DB files will follow while live streaming is paused."
+        : "Priority download started. Staging the gateway database while live streaming is paused.",
       "",
     );
     await refreshReplicationHealth(true);
@@ -6698,23 +6830,34 @@ function closeNotif() {
   $("notifPanel")?.classList.add("hidden");
 }
 
+function buildModeAwareQueryKey(parts = []) {
+  const mode = getActiveOperationModeClient();
+  return [mode, ...parts.map((part) => String(part ?? "").trim())].join("|");
+}
+
 function buildAlarmViewQueryKey() {
   const date = sanitizeDateInputValue($("alarmDate")?.value) || today();
   const inv = String($("alarmInv")?.value || "all").trim() || "all";
-  return `${date}|${inv}`;
+  return buildModeAwareQueryKey([date, inv]);
 }
 
 function buildEnergyViewQueryKey() {
   const date = sanitizeDateInputValue($("energyDate")?.value) || today();
   const inv = String($("energyInv")?.value || "all").trim() || "all";
   const resolution = String($("energyRes")?.value || "5min").trim() || "5min";
-  return `${date}|${inv}|${resolution}`;
+  return buildModeAwareQueryKey([date, inv, resolution]);
 }
 
 function buildAuditViewQueryKey() {
   const date = sanitizeDateInputValue($("auditDate")?.value) || today();
   const inv = String($("auditInv")?.value || "all").trim() || "all";
-  return `${date}|${inv}`;
+  return buildModeAwareQueryKey([date, inv]);
+}
+
+function buildReportViewQueryKey(dateOverride = "") {
+  const date =
+    sanitizeDateInputValue(dateOverride || $("reportDate")?.value) || today();
+  return buildModeAwareQueryKey([date]);
 }
 
 // ─── Alarms Page ──────────────────────────────────────────────────────────────
@@ -6736,9 +6879,12 @@ function initAlarmsPage() {
   fetchAlarms();
 }
 
-async function fetchAlarms() {
-  if (State.tabFetching.alarms) return;
+async function fetchAlarms(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.alarms && !force) return;
   State.tabFetching.alarms = true;
+  const reqId = (State.alarmReqId || 0) + 1;
+  State.alarmReqId = reqId;
   showTableLoading("alarmBody", 10);
   const inv = $("alarmInv").value;
   let date = sanitizeDateInputValue($("alarmDate")?.value);
@@ -6755,6 +6901,7 @@ async function fetchAlarms() {
   });
   try {
     const raw = await api(`/api/alarms?${qs}`);
+    if (reqId !== State.alarmReqId) return;
     const rows = Array.isArray(raw) ? raw : [];
     State.alarmView.rows = rows;
     State.alarmView.page = 1;
@@ -6765,7 +6912,9 @@ async function fetchAlarms() {
   } catch (e) {
     console.error("fetchAlarms:", e);
   } finally {
-    State.tabFetching.alarms = false;
+    if (reqId === State.alarmReqId) {
+      State.tabFetching.alarms = false;
+    }
   }
 }
 
@@ -6945,6 +7094,11 @@ function initEnergyPage() {
 }
 
 async function fetchEnergy(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.energy && !force) return;
+  State.tabFetching.energy = true;
+  const reqId = (State.energyReqId || 0) + 1;
+  State.energyReqId = reqId;
   const inv = $("energyInv").value;
   let date = sanitizeDateInputValue($("energyDate")?.value);
   if (!date) {
@@ -6972,6 +7126,7 @@ async function fetchEnergy(options = {}) {
   });
   try {
     const raw = await api(`/api/energy/5min?${qs}`);
+    if (reqId !== State.energyReqId) return;
     const serverPaged = !Array.isArray(raw) && Array.isArray(raw?.rows);
     const fullRows = Array.isArray(raw)
       ? raw
@@ -7027,6 +7182,10 @@ async function fetchEnergy(options = {}) {
     });
   } catch (e) {
     console.error("fetchEnergy:", e);
+  } finally {
+    if (reqId === State.energyReqId) {
+      State.tabFetching.energy = false;
+    }
   }
 }
 
@@ -7162,9 +7321,12 @@ function initAuditPage() {
   fetchAudit();
 }
 
-async function fetchAudit() {
-  if (State.tabFetching.audit) return;
+async function fetchAudit(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.audit && !force) return;
   State.tabFetching.audit = true;
+  const reqId = (State.auditReqId || 0) + 1;
+  State.auditReqId = reqId;
   showTableLoading("auditBody", 8);
   const inv = $("auditInv").value;
   let date = sanitizeDateInputValue($("auditDate")?.value);
@@ -7182,6 +7344,7 @@ async function fetchAudit() {
   });
   try {
     const rows = await api(`/api/audit?${qs}`);
+    if (reqId !== State.auditReqId) return;
     State.auditView.rows = Array.isArray(rows) ? rows : [];
     State.auditView.page = 1;
     State.auditView.queryKey = buildAuditViewQueryKey();
@@ -7190,7 +7353,9 @@ async function fetchAudit() {
   } catch (e) {
     console.error("fetchAudit:", e);
   } finally {
-    State.tabFetching.audit = false;
+    if (reqId === State.auditReqId) {
+      State.tabFetching.audit = false;
+    }
   }
 }
 
@@ -7441,6 +7606,7 @@ function initReportPage() {
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.reportView.rows.length > 0 &&
+    State.reportView.queryKey === buildReportViewQueryKey() &&
     Date.now() - (State.tabFetchTs.report || 0) < TAB_STALE_MS
   ) {
     applyReportTableView();
@@ -7449,17 +7615,25 @@ function initReportPage() {
   fetchReport();
 }
 
-async function fetchReport() {
-  if (State.tabFetching.report) return;
+async function fetchReport(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.report && !force) return;
   State.tabFetching.report = true;
+  const reqId = (State.reportReqId || 0) + 1;
+  State.reportReqId = reqId;
   showTableLoading("reportBody", 14);
-  const date = $("reportDate").value;
+  let date = sanitizeDateInputValue($("reportDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("reportDate")) $("reportDate").value = date;
+  }
   queuePersistExportUiState();
   try {
     let rows = [];
     let summary = null;
     try {
       const payload = await api(`/api/report/payload?date=${encodeURIComponent(date)}`);
+      if (reqId !== State.reportReqId) return;
       rows = Array.isArray(payload?.rows) ? payload.rows : [];
       summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : null;
       const finalDate = String(payload?.date || "").trim();
@@ -7474,13 +7648,16 @@ async function fetchReport() {
     } catch (payloadErr) {
       console.warn("fetchReport payload:", payloadErr?.message || payloadErr);
       rows = await api(`/api/report/daily?date=${date}`);
+      if (reqId !== State.reportReqId) return;
       if ((!Array.isArray(rows) || rows.length === 0) && date) {
         try {
           const latest = await api("/api/report/latest-date");
+          if (reqId !== State.reportReqId) return;
           const latestDate = String(latest?.latestDate || "").trim();
           if (latestDate && latestDate !== date) {
             $("reportDate").value = latestDate;
             rows = await api(`/api/report/daily?date=${latestDate}`);
+            if (reqId !== State.reportReqId) return;
             showToast(
               `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
               "warning",
@@ -7491,29 +7668,41 @@ async function fetchReport() {
           // Non-fatal fallback; keep original empty result.
         }
       }
-      summary = await fetchReportSummary($("reportDate").value || date);
+      summary = await fetchReportSummary($("reportDate").value || date, {
+        requestId: reqId,
+      });
     }
+    if (reqId !== State.reportReqId) return;
     State.reportView.rows = Array.isArray(rows) ? rows.map((r) => toReportViewRow(r)) : [];
     State.reportView.summary = summary;
     State.reportView.page = 1;
+    State.reportView.queryKey = buildReportViewQueryKey();
     State.tabFetchTs.report = Date.now();
     applyReportTableView();
     renderReportKpis();
   } catch (e) {
+    if (reqId !== State.reportReqId) return;
     console.error("fetchReport:", e);
     State.reportView.rows = [];
     State.reportView.summary = null;
+    State.reportView.queryKey = buildReportViewQueryKey();
     applyReportTableView();
     renderReportKpis();
     showToast(`Report load failed: ${e.message}`, "error", 4200);
   } finally {
-    State.tabFetching.report = false;
+    if (reqId === State.reportReqId) {
+      State.tabFetching.report = false;
+    }
   }
 }
 
-async function fetchReportSummary(date) {
+async function fetchReportSummary(date, options = {}) {
+  const requestId = Number(options?.requestId || 0);
   try {
     const summary = await api(`/api/report/summary?date=${date}`);
+    if (requestId > 0 && requestId !== State.reportReqId) {
+      return null;
+    }
     State.reportView.summary =
       summary && typeof summary === "object" ? summary : null;
     if (sanitizeDateInputValue(date) === today()) {
@@ -7526,8 +7715,14 @@ async function fetchReportSummary(date) {
       }
     }
   } catch (e) {
+    if (requestId > 0 && requestId !== State.reportReqId) {
+      return null;
+    }
     console.warn("fetchReportSummary:", e?.message || e);
     State.reportView.summary = null;
+  }
+  if (requestId > 0 && requestId !== State.reportReqId) {
+    return null;
   }
   renderReportKpis();
   return State.reportView.summary;

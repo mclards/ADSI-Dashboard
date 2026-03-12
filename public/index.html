@@ -1235,13 +1235,13 @@
               <div class="rep-health-errors">
                 <div class="license-label">Standby DB Scope</div>
                 <div id="repScopeVal" class="license-value">
-                  Full gateway database snapshot. Refresh to display the latest scope.
+                  Full gateway database snapshot. Manual standby refresh pauses the remote live stream temporarily so the download gets priority.
                 </div>
               </div>
               <div class="rep-health-errors">
                 <div class="license-label">Archive Scope</div>
                 <div id="repArchiveScopeVal" class="license-value">
-                  Archive transfer can be included in standby DB refresh runs when historical records are required.
+                  Archive transfer can be included in standby DB refresh runs when historical records are required. The remote live stream pauses temporarily while the transfer is running.
                 </div>
               </div>
               <div class="replication-transfer-wrap">
@@ -1267,7 +1267,7 @@
                     </div>
                     <div class="xfer-meta-row">
                       <span id="xferScopeChip" class="xfer-scope-chip xfer-scope-hot">Current data</span>
-                      <span id="xferDetail" class="xfer-detail">Preparing standby refresh…</span>
+                      <span id="xferDetail" class="xfer-detail">Preparing priority standby refresh…</span>
                     </div>
                     <div class="xfer-bar-track">
                       <div id="xferBarFill" class="xfer-bar-fill"></div>
@@ -1285,7 +1285,7 @@
                   <input type="checkbox" id="setReplicationIncludeArchive" />
                   <span>Include archived files in the next standby DB refresh</span>
                 </label>
-                <small id="replicationArchiveHint">Optional. Leave disabled for faster standby DB refresh. Enable when you want the gateway monthly archive DB files staged too.</small>
+                <small id="replicationArchiveHint">Optional. Leave disabled for the fastest standby DB refresh. Enable when you want the gateway monthly archive DB files staged too. The remote live stream pauses during the transfer.</small>
               </div>
               <div class="sgroup-actions">
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh gateway link status, standby refresh counters, and transfer diagnostics." aria-label="Refresh gateway link status">
