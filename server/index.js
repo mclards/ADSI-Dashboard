@@ -11279,7 +11279,7 @@ function resolveLocalExportPath(relativePath, fallbackPath = "") {
   return absolute;
 }
 
-function buildExportResult(outPath) {
+function buildExportResult(outPath, extra = {}) {
   const absolute = path.resolve(String(outPath || ""));
   const base = getConfiguredExportRoot();
   const relativePath = normalizeExportRelativePath("", absolute).replace(/\\/g, "/");
@@ -11288,7 +11288,14 @@ function buildExportResult(outPath) {
     path: absolute,
     relativePath,
     basePath: base,
+    ...(extra && typeof extra === "object" ? extra : {}),
   };
+}
+
+function normalizeAlarmExportMinDurationSecServer(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(86400, Math.max(0, Math.trunc(raw)));
 }
 
 function sendExportRouteError(res, err) {
@@ -11348,6 +11355,19 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
   }
 
   const exportResult = await fetchRemoteExportJson(routePath, payload);
+  if (String(routePath || "").trim() === "/api/export/alarms") {
+    const requestedMinDurationSec = normalizeAlarmExportMinDurationSecServer(
+      payload?.minAlarmDurationSec,
+    );
+    const appliedMinDurationSec = normalizeAlarmExportMinDurationSecServer(
+      exportResult?.appliedFilters?.minAlarmDurationSec,
+    );
+    if (requestedMinDurationSec > 0 && appliedMinDurationSec !== requestedMinDurationSec) {
+      throw new Error(
+        "Gateway alarm export did not confirm the requested minimum duration filter. Update and restart the gateway app, then export again.",
+      );
+    }
+  }
   const relativePath = normalizeExportRelativePath(
     exportResult?.relativePath,
     exportResult?.path,
@@ -11446,13 +11466,23 @@ app.post("/api/export/artifact", async (req, res) => {
 
 app.post("/api/export/alarms", async (req, res) => {
   try {
+    const payload = req.body || {};
+    const minAlarmDurationSec = normalizeAlarmExportMinDurationSecServer(
+      payload?.minAlarmDurationSec,
+    );
     if (isRemoteMode()) {
-      return res.json(await downloadRemoteExportToLocal("/api/export/alarms", req.body || {}));
+      return res.json(await downloadRemoteExportToLocal("/api/export/alarms", payload));
     }
     const outPath = await runGatewayExportJob("alarms", () =>
-      exporter.exportAlarms(req.body || {}),
+      exporter.exportAlarms(payload),
     );
-    return res.json(buildExportResult(outPath));
+    return res.json(
+      buildExportResult(outPath, {
+        appliedFilters: {
+          minAlarmDurationSec,
+        },
+      }),
+    );
   } catch (e) {
     return sendExportRouteError(res, e);
   }

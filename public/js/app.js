@@ -965,6 +965,7 @@ const EXPORT_DATE_FIELD_IDS = [
 ];
 const EXPORT_NUM_FIELD_RULES = {
   genDayCount: { min: 1, max: 31, fallback: 1 },
+  expAlarmMinDurationSec: { min: 0, max: 86400, fallback: 0 },
   expInvDataInterval: { min: 1, max: 60, fallback: 1 },
 };
 const EXPORT_NUM_FIELD_IDS = Object.keys(EXPORT_NUM_FIELD_RULES);
@@ -2226,6 +2227,7 @@ function shouldPreserveServerErrorMessage(url = "") {
     u.includes("/api/runtime/network") ||
     u.includes("/api/settings") ||
     u.includes("/api/replication/") ||
+    u.includes("/api/export/") ||
     u.includes("/api/forecast/solcast/") ||
     u.includes("/api/export/solcast-preview")
   );
@@ -10227,7 +10229,9 @@ function bindEventHandlers() {
       "expAlarmInv",
       "expAlarmDate",
       "expAlarmResult",
-      {},
+      {
+        minAlarmDurationSec: normalizeExportNumberInput("expAlarmMinDurationSec"),
+      },
       "btnExportAlarms",
       "btnCancelAlarmExport",
     ));

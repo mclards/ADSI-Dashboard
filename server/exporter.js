@@ -931,12 +931,19 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Alarms CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-async function exportAlarms({ startTs, endTs, inverter, format }) {
+function normalizeAlarmExportMinDurationSec(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(86400, Math.max(0, Math.trunc(raw)));
+}
+
+async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDurationSec }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.alarms);
 
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
   const nowTs = Date.now();
+  const minDurationSec = normalizeAlarmExportMinDurationSec(minAlarmDurationSec);
 
   const raw = inverter && inverter !== 'all'
     ? db.prepare('SELECT * FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
@@ -949,6 +956,7 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     const status = clearedTs ? 'CLEARED' : 'ACTIVE';
     const durationEndTs = clearedTs || nowTs;
     const durationMs = occurredTs ? Math.max(0, durationEndTs - occurredTs) : 0;
+    const durationSec = Math.floor(durationMs / 1000);
     return ({
     Date:         fmtDate(occurredTs),
     Time:         fmtTime(occurredTs),
@@ -963,11 +971,13 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     Description:  decodeAlarm(r.alarm_value).map(b=>b.label).join('; ') || 'No alarm',
     ClearedDate:  clearedTs ? fmtDate(clearedTs)  : '',
     ClearedTime:  clearedTs ? fmtTime(clearedTs)  : '',
+    Duration_sec: durationSec,
     Duration:     formatDurationMs(durationMs),
     Duration_min: Number((durationMs / 60000).toFixed(2)),
     Status:       status,
     Acknowledged: r.acknowledged ? 'YES' : 'NO',
-  })});
+  })}).filter((row) => Number(row.Duration_sec || 0) >= minDurationSec)
+    .map(({ Duration_sec, ...row }) => row);
 
   const headers = [
     {key:'Date',label:'Date'},{key:'Time',label:'Time'},{key:'Plant',label:'Plant'},
