@@ -171,8 +171,16 @@ SOLCAST_RELIABILITY_LOOKBACK_DAYS = 30
 SOLCAST_RELIABILITY_MIN_DAYS = 5
 SOLCAST_PRIOR_BLEND_MIN = 0.28
 SOLCAST_PRIOR_BLEND_MAX = 0.92
+SOLCAST_PRIMARY_COVERAGE_MIN = 0.80
+SOLCAST_PRIMARY_RELIABILITY_MIN = 0.50
+SOLCAST_PRIMARY_BLEND_FLOOR_MIN = 0.76
+SOLCAST_PRIMARY_BLEND_FLOOR_MAX = 0.90
+SOLCAST_PRIOR_TOTAL_RATIO_CLIP = (0.65, 1.70)
 SOLCAST_PRIOR_SPREAD_FRAC_CLIP = 1.25
 SOLCAST_BIAS_RATIO_CLIP = (0.82, 1.18)
+SOLCAST_RESIDUAL_DAMP_MIN = 0.18
+SOLCAST_RESIDUAL_DAMP_MAX = 0.72
+SOLCAST_RESIDUAL_PRIMARY_CAP = 0.40
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -1987,9 +1995,13 @@ def solcast_prior_from_snapshot(
         "overcast": 0.58,
         "rainy": 0.46,
     }.get(regime, 0.44)
+    primary_mode = bool(
+        coverage_ratio >= SOLCAST_PRIMARY_COVERAGE_MIN
+        and reliability_score >= SOLCAST_PRIMARY_RELIABILITY_MIN
+    )
     # Solcast-primary: when coverage is high and reliability is reasonable,
     # elevate base blend so Solcast becomes the primary forecast baseline.
-    if coverage_ratio >= 0.80 and reliability_score >= 0.50:
+    if primary_mode:
         base_by_regime = max(base_by_regime, 0.82)
         log.info(
             "Solcast-primary mode activated: coverage=%.2f reliability=%.2f base_blend=%.2f",
@@ -1997,6 +2009,30 @@ def solcast_prior_from_snapshot(
         )
     spread_weight = 1.0 - 0.42 * np.clip(spread_frac / max(SOLCAST_PRIOR_SPREAD_FRAC_CLIP, 0.1), 0.0, 1.0)
     blend = base_by_regime * reliability_score * (0.55 + 0.45 * coverage_ratio) * spread_weight * solar_weight
+    if primary_mode:
+        rel_norm = np.clip(
+            (reliability_score - SOLCAST_PRIMARY_RELIABILITY_MIN)
+            / max(1.0 - SOLCAST_PRIMARY_RELIABILITY_MIN, 1e-6),
+            0.0,
+            1.0,
+        )
+        cov_norm = np.clip(
+            (coverage_ratio - SOLCAST_PRIMARY_COVERAGE_MIN)
+            / max(1.0 - SOLCAST_PRIMARY_COVERAGE_MIN, 1e-6),
+            0.0,
+            1.0,
+        )
+        primary_floor = (
+            SOLCAST_PRIMARY_BLEND_FLOOR_MIN
+            + 0.08 * rel_norm
+            + 0.06 * cov_norm
+        )
+        primary_floor = np.clip(
+            primary_floor * (0.92 + 0.08 * spread_weight) * (0.96 + 0.04 * solar_weight),
+            SOLCAST_PRIMARY_BLEND_FLOOR_MIN,
+            SOLCAST_PRIMARY_BLEND_FLOOR_MAX,
+        )
+        blend = np.maximum(blend, primary_floor)
     blend = np.clip(blend, SOLCAST_PRIOR_BLEND_MIN, SOLCAST_PRIOR_BLEND_MAX)
     blend[~present] = 0.0
     blend[:SOLAR_START_SLOT] = 0.0
@@ -2014,6 +2050,7 @@ def solcast_prior_from_snapshot(
         "coverage_ratio": coverage_ratio,
         "bias_ratio": bias_ratio,
         "reliability": reliability_score,
+        "primary_mode": primary_mode,
         "regime": regime,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
@@ -2038,8 +2075,25 @@ def blend_physics_with_solcast(
     prior = np.clip(np.asarray(solcast_prior["prior_kwh"], dtype=float), 0.0, None)
     blend = np.clip(np.asarray(solcast_prior["blend"], dtype=float), 0.0, 1.0)
     present = np.asarray(solcast_prior["present"], dtype=bool)
+    adjusted_prior = prior.copy()
+    solar_present = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    base_solar = base[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    prior_solar = prior[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    base_total = float(base_solar.sum())
+    prior_total = float(prior_solar[solar_present].sum()) if np.any(solar_present) else 0.0
+    raw_ratio = float(prior_total / max(base_total, 1.0)) if base_total > 0 else 1.0
+    applied_ratio = float(np.clip(raw_ratio, *SOLCAST_PRIOR_TOTAL_RATIO_CLIP))
+    if base_total > 0.0 and prior_total > 0.0 and np.any(solar_present):
+        # Keep Solcast's intra-day shape, but constrain its daily energy against
+        # the plant-aware physics baseline so raw provider totals do not dominate.
+        solar_profile = np.zeros_like(prior_solar)
+        solar_profile[solar_present] = prior_solar[solar_present] / max(prior_total, 1.0)
+        adjusted_total = base_total * applied_ratio
+        adjusted_prior[SOLAR_START_SLOT:SOLAR_END_SLOT] = solar_profile * adjusted_total
+        adjusted_prior[:SOLAR_START_SLOT] = 0.0
+        adjusted_prior[SOLAR_END_SLOT:] = 0.0
     out = base.copy()
-    out[present] = (1.0 - blend[present]) * base[present] + blend[present] * prior[present]
+    out[present] = (1.0 - blend[present]) * base[present] + blend[present] * adjusted_prior[present]
     out[:SOLAR_START_SLOT] = 0.0
     out[SOLAR_END_SLOT:] = 0.0
     return out, {
@@ -2048,6 +2102,11 @@ def blend_physics_with_solcast(
         "mean_blend": float(np.mean(blend[SOLAR_START_SLOT:SOLAR_END_SLOT][present[SOLAR_START_SLOT:SOLAR_END_SLOT]])) if np.any(present[SOLAR_START_SLOT:SOLAR_END_SLOT]) else 0.0,
         "bias_ratio": float(solcast_prior.get("bias_ratio", 1.0)),
         "reliability": float(solcast_prior.get("reliability", 0.0)),
+        "primary_mode": bool(solcast_prior.get("primary_mode", False)),
+        "raw_prior_total_kwh": prior_total,
+        "applied_prior_total_kwh": float(adjusted_prior[SOLAR_START_SLOT:SOLAR_END_SLOT].sum()),
+        "raw_prior_ratio": raw_ratio,
+        "applied_prior_ratio": applied_ratio,
         "regime": str(solcast_prior.get("regime") or ""),
         "source": str(solcast_prior.get("source") or "solcast"),
         "pulled_ts": int(solcast_prior.get("pulled_ts", 0) or 0),
@@ -3449,6 +3508,20 @@ def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float =
     return blend
 
 
+def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
+    if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
+        return 1.0
+
+    mean_blend = float(np.clip(solcast_meta.get("mean_blend", 0.0), 0.0, 1.0))
+    reliability = float(np.clip(solcast_meta.get("reliability", 0.0), 0.0, 1.0))
+    coverage = float(np.clip(solcast_meta.get("coverage_ratio", 0.0), 0.0, 1.0))
+    damp = 1.0 - 0.70 * mean_blend * (0.35 + 0.65 * reliability) * (0.55 + 0.45 * coverage)
+    damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
+    if bool(solcast_meta.get("primary_mode")):
+        damp = min(damp, SOLCAST_RESIDUAL_PRIMARY_CAP)
+    return float(damp)
+
+
 # ============================================================================
 # CONFIDENCE BANDS
 # ============================================================================
@@ -3894,11 +3967,13 @@ def run_dayahead(target_date: date, today: date) -> bool:
     artifacts = load_forecast_artifacts(today, allow_build=True)
     solcast_primary = bool(
         solcast_meta.get("used_solcast")
-        and float(solcast_meta.get("coverage_ratio", 0)) >= 0.80
-        and float(solcast_meta.get("mean_blend", 0)) >= 0.75
+        and (
+            bool(solcast_meta.get("primary_mode"))
+            or float(solcast_meta.get("mean_blend", 0)) >= 0.75
+        )
     )
     log.info(
-        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f bias_ratio=%.3f source=%s",
+        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f bias_ratio=%.3f ratio=%.2f->%.2f source=%s",
         bool(solcast_meta.get("used_solcast")),
         solcast_primary,
         solcast_meta.get("regime"),
@@ -3906,6 +3981,8 @@ def run_dayahead(target_date: date, today: date) -> bool:
         float(solcast_meta.get("mean_blend", 0.0)),
         float(solcast_meta.get("reliability", 0.0)),
         float(solcast_meta.get("bias_ratio", 1.0)),
+        float(solcast_meta.get("raw_prior_ratio", 1.0)),
+        float(solcast_meta.get("applied_prior_ratio", 1.0)),
         solcast_meta.get("source"),
     )
 
@@ -3943,13 +4020,17 @@ def run_dayahead(target_date: date, today: date) -> bool:
                 .mean()
                 .values
             )
+            solcast_residual_scale = solcast_residual_damp_factor(solcast_meta)
+            if solcast_residual_scale < 0.999:
+                ml_residual = ml_residual * solcast_residual_scale
 
             log.info(
-                "ML residual: mean=%.2f  std=%.2f  p95=%.2f kWh/slot  blend_mean=%.2f",
+                "ML residual: mean=%.2f  std=%.2f  p95=%.2f kWh/slot  blend_mean=%.2f  solcast_scale=%.2f",
                 ml_residual[SOLAR_START_SLOT:SOLAR_END_SLOT].mean(),
                 ml_residual[SOLAR_START_SLOT:SOLAR_END_SLOT].std(),
                 np.percentile(np.abs(ml_residual[SOLAR_START_SLOT:SOLAR_END_SLOT]), 95),
                 blend[SOLAR_START_SLOT:SOLAR_END_SLOT].mean(),
+                solcast_residual_scale,
             )
             log.info(
                 "ML routing: target_regime=%s regime_model=%s blend=%.2f regime_days=%d regime_samples=%d",
