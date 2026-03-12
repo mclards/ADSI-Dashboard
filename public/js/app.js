@@ -6674,7 +6674,7 @@ function handleWS(msg) {
     integrateTodayFromPac();
     // Apply server-authoritative today energy from WS so the header metric
     // updates on every bridge tick without depending on the HTTP sync timer.
-    if (Array.isArray(msg.todayEnergy) && msg.todayEnergy.length) {
+    if (Array.isArray(msg.todayEnergy)) {
       setTodayEnergyRowsClient(msg.todayEnergy);
       const totalKwh = msg.todayEnergy.reduce(
         (sum, r) => sum + Number(r?.total_kwh || 0), 0

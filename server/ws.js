@@ -2,6 +2,7 @@
 // WebSocket client registry and broadcaster for live dashboard updates.
 
 const clients = new Set();
+let payloadEnricher = null;
 const wsStats = {
   startedAt: Date.now(),
   totalConnections: 0,
@@ -33,7 +34,16 @@ function registerClient(ws) {
 }
 
 function broadcastUpdate(payload) {
-  const msg = JSON.stringify(payload);
+  let finalPayload = payload;
+  if (typeof payloadEnricher === "function") {
+    try {
+      const enriched = payloadEnricher(payload);
+      if (enriched && typeof enriched === "object") finalPayload = enriched;
+    } catch (err) {
+      console.warn("[WS] payload enrich failed:", err.message);
+    }
+  }
+  const msg = JSON.stringify(finalPayload);
   wsStats.lastPayloadBytes = Buffer.byteLength(msg, "utf8");
   for (const ws of clients) {
     try {
@@ -58,6 +68,10 @@ function broadcastUpdate(payload) {
       console.warn("[WS] send failed, client removed:", err.message);
     }
   }
+}
+
+function setBroadcastPayloadEnricher(fn) {
+  payloadEnricher = typeof fn === "function" ? fn : null;
 }
 
 function startKeepAlive() {
@@ -102,4 +116,12 @@ function getStats() {
   };
 }
 
-module.exports = { clients, registerClient, broadcastUpdate, startKeepAlive, stopKeepAlive, getStats };
+module.exports = {
+  clients,
+  registerClient,
+  broadcastUpdate,
+  setBroadcastPayloadEnricher,
+  startKeepAlive,
+  stopKeepAlive,
+  getStats,
+};

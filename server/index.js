@@ -52,7 +52,13 @@ const {
   markChatReadUpToId,
   clearAllChatMessages,
 } = require("./db");
-const { registerClient, broadcastUpdate, startKeepAlive, getStats: getWsStats } = require("./ws");
+const {
+  registerClient,
+  broadcastUpdate,
+  setBroadcastPayloadEnricher,
+  startKeepAlive,
+  getStats: getWsStats,
+} = require("./ws");
 const poller = require("./poller");
 const exporter = require("./exporter");
 const {
@@ -5649,6 +5655,16 @@ function getTodayEnergyRowsForWs(day = localDateStr()) {
   }
   return getTodayPacTotalsFromDbCached();
 }
+
+setBroadcastPayloadEnricher((payload) => {
+  if (!payload || typeof payload !== "object") return payload;
+  if (String(payload.type || "").trim().toLowerCase() !== "live") return payload;
+  if (Object.prototype.hasOwnProperty.call(payload, "todayEnergy")) return payload;
+  return {
+    ...payload,
+    todayEnergy: getTodayEnergyRowsForWs(),
+  };
+});
 
 function todayEnergyRowsEqual(aRaw, bRaw) {
   return todayEnergyRowsEqualCore(aRaw, bRaw);
