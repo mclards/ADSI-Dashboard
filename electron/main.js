@@ -85,6 +85,8 @@ const INITIAL_LOAD_RETRY_MAX = 8;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
 const FORECAST_MODE_SYNC_MS = 10000;
+const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
+const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
 const IS_DEV = process.env.NODE_ENV === "development";
 const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
@@ -121,6 +123,8 @@ const UPDATE_CHECK_TIMEOUT_MS = 10000;
 const LEGACY_USERDATA_DIR_NAMES = [
   "adsi-dashboard",
   "adsi-inverter-dashboard",
+  "inverter dashboard",
+  "dashboard v2",
 ];
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -154,6 +158,9 @@ let licenseCheckerTimer = null;
 let licenseShutdownTriggered = false;
 let lastBroadcastLicenseSignature = "";
 let allowMainWindowClose = false;
+let appShutdownPromise = null;
+let appShutdownBypassQuit = false;
+let appShutdownFinalAction = { type: "quit", exitCode: 0 };
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
 let appUpdateBridgeBound = false;
@@ -184,6 +191,8 @@ function configurePortableDataPaths() {
     fs.mkdirSync(dbDir, { recursive: true });
     fs.mkdirSync(cfgDir, { recursive: true });
     app.setPath("userData", userDataDir);
+    process.env.IM_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
+    process.env.IM_DATA_DIR = dbDir;
     process.env.ADSI_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
     process.env.ADSI_DATA_DIR = dbDir;
     console.log("[main] Portable data root:", PORTABLE_DATA_DIR);
@@ -768,19 +777,17 @@ async function installAppUpdateNow() {
     message: "Restarting app to install update...",
     checking: false,
   });
-  setTimeout(() => {
-    try {
-      allowMainWindowClose = true;
-      autoUpdater.quitAndInstall(false, true);
-    } catch (err) {
-      setAppUpdateState({
-        mode: "installer",
-        status: "error",
-        message: `Install failed: ${err.message}`,
-        error: String(err.message || "Install failed"),
-      });
-    }
-  }, 150);
+  requestAppShutdown({
+    reason: "install downloaded update",
+    action: { type: "install" },
+  }).catch((err) => {
+    setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      message: `Install failed: ${err.message}`,
+      error: String(err.message || "Install failed"),
+    });
+  });
   return { ok: true, state: buildPublicAppUpdateState() };
 }
 
@@ -815,6 +822,187 @@ function getUpdateErrorMessage(err) {
     return "Update feed returned 404. Verify publish URL and release assets.";
   }
   return raw;
+}
+
+function normalizeAppShutdownAction(action) {
+  const type = String(action?.type || "quit").trim().toLowerCase();
+  if (type === "install") return { type: "install", exitCode: 0 };
+  if (type === "relaunch") return { type: "relaunch", exitCode: 0 };
+  if (type === "exit") {
+    const exitCode = Number.isInteger(action?.exitCode) ? action.exitCode : 0;
+    return { type: "exit", exitCode };
+  }
+  return { type: "quit", exitCode: 0 };
+}
+
+function getAppShutdownActionRank(action) {
+  const type = String(action?.type || "quit");
+  if (type === "install") return 4;
+  if (type === "relaunch") return 3;
+  if (type === "exit") return 2;
+  return 1;
+}
+
+function mergeAppShutdownAction(nextAction) {
+  const next = normalizeAppShutdownAction(nextAction);
+  if (getAppShutdownActionRank(next) >= getAppShutdownActionRank(appShutdownFinalAction)) {
+    appShutdownFinalAction = next;
+  }
+  return appShutdownFinalAction;
+}
+
+function waitForChildExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    if (!proc || proc.killed) {
+      resolve(true);
+      return;
+    }
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      try {
+        proc.removeListener("exit", onExit);
+      } catch (_) {}
+      clearTimeout(timer);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    proc.once("exit", onExit);
+  });
+}
+
+async function stopTrackedProcess(proc, label) {
+  if (!proc || proc.killed) return;
+  forceKillProc(proc, label);
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+  if (!exited) {
+    console.warn(`[main] ${label} did not exit within ${APP_SHUTDOWN_FORCE_KILL_WAIT_MS}ms`);
+  }
+}
+
+async function shutdownEmbeddedServerGracefully(serverModule) {
+  if (!serverModule || typeof serverModule.shutdownEmbedded !== "function") return;
+  let shutdownPromise;
+  try {
+    shutdownPromise = Promise.resolve(serverModule.shutdownEmbedded());
+  } catch (err) {
+    console.warn("[main] embedded web server shutdown failed:", err.message);
+    return;
+  }
+  let timeoutId = null;
+  const outcome = await Promise.race([
+    shutdownPromise
+      .then(() => "done")
+      .catch((err) => {
+        console.warn("[main] embedded web server shutdown failed:", err.message);
+        return "done";
+      }),
+    new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve("timeout"), APP_SHUTDOWN_WEB_TIMEOUT_MS);
+      if (timeoutId && typeof timeoutId.unref === "function") timeoutId.unref();
+    }),
+  ]);
+  if (timeoutId) clearTimeout(timeoutId);
+  if (outcome === "timeout") {
+    console.warn(`[main] embedded web server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms`);
+  }
+}
+
+async function shutdownChildWebServerGracefully(proc) {
+  if (!proc || proc.killed) return;
+  try {
+    proc.send({ type: "shutdown" });
+  } catch (_) {}
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_WEB_TIMEOUT_MS);
+  if (exited) return;
+  console.warn(`[main] web-server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms; forcing exit`);
+  forceKillProc(proc, "web-server");
+  await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+}
+
+async function stopRuntimeServices(reason = "application shutdown") {
+  isAppShuttingDown = true;
+  allowMainWindowClose = true;
+  stopForecastModeSync();
+  clearForecastRestartTimer();
+  if (appUpdateAutoCheckTimer) {
+    clearTimeout(appUpdateAutoCheckTimer);
+    appUpdateAutoCheckTimer = null;
+  }
+  if (licenseCheckerTimer) {
+    clearInterval(licenseCheckerTimer);
+    licenseCheckerTimer = null;
+  }
+
+  const embeddedModule = embeddedServerStarted ? embeddedServerModule : null;
+  const childWebProc = webProc;
+  const backend = backendProc;
+  const forecast = forecastProc;
+
+  embeddedServerStarted = false;
+  embeddedServerModule = null;
+  webProc = null;
+  backendProc = null;
+  forecastProc = null;
+  forecastStopExpected = true;
+
+  const tasks = [];
+  if (backend && !backend.killed) tasks.push(stopTrackedProcess(backend, "backend"));
+  if (forecast && !forecast.killed) tasks.push(stopTrackedProcess(forecast, "forecast"));
+  if (embeddedModule && typeof embeddedModule.shutdownEmbedded === "function") {
+    tasks.push(shutdownEmbeddedServerGracefully(embeddedModule));
+  }
+  if (childWebProc && !childWebProc.killed) {
+    tasks.push(shutdownChildWebServerGracefully(childWebProc));
+  }
+
+  if (!tasks.length) return;
+  console.log(`[main] Stopping runtime services (${reason})...`);
+  await Promise.allSettled(tasks);
+}
+
+function finalizeAppShutdown() {
+  appShutdownBypassQuit = true;
+  allowMainWindowClose = true;
+  const action = normalizeAppShutdownAction(appShutdownFinalAction);
+  if (action.type === "install") {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+      return;
+    } catch (err) {
+      console.error("[main] quitAndInstall failed:", err.message);
+      app.exit(1);
+      return;
+    }
+  }
+  if (action.type === "relaunch") {
+    app.relaunch();
+    app.quit();
+    return;
+  }
+  if (action.type === "exit") {
+    app.exit(action.exitCode || 0);
+    return;
+  }
+  app.quit();
+}
+
+function requestAppShutdown(options = {}) {
+  const reason = String(options?.reason || "application shutdown").trim() || "application shutdown";
+  mergeAppShutdownAction(options?.action);
+  if (appShutdownPromise) return appShutdownPromise;
+  console.log(`[main] Shutdown requested (${reason})`);
+  appShutdownPromise = stopRuntimeServices(reason)
+    .catch((err) => {
+      console.error("[main] Shutdown sequence failed:", err?.message || err);
+    })
+    .finally(() => {
+      finalizeAppShutdown();
+    });
+  return appShutdownPromise;
 }
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
@@ -859,22 +1047,17 @@ app.on("activate", async () => {
   else if (bootStarted) showLoadingWindow();
 });
 
-app.on("before-quit", () => {
-  allowMainWindowClose = true;
-  isAppShuttingDown = true;
-  if (appUpdateAutoCheckTimer) {
-    clearTimeout(appUpdateAutoCheckTimer);
-    appUpdateAutoCheckTimer = null;
-  }
-  if (licenseCheckerTimer) {
-    clearInterval(licenseCheckerTimer);
-    licenseCheckerTimer = null;
-  }
-  // Embedded mode (packaged): server runs in-process — call its shutdown directly.
-  if (embeddedServerModule && typeof embeddedServerModule.shutdownEmbedded === "function") {
-    try { embeddedServerModule.shutdownEmbedded(); } catch (_) {}
-  }
-  killServer();
+app.on("before-quit", (event) => {
+  if (appShutdownBypassQuit) return;
+  event.preventDefault();
+  requestAppShutdown({
+    reason: "before-quit",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] before-quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 });
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
@@ -2161,8 +2344,14 @@ function enforceLicenseShutdown(status) {
       ? "Trial/license expired while dashboard is running. Services will stop now."
       : "License expired while dashboard is running. Services will stop now.";
   dialog.showErrorBox("License Expired", `${detail}\n\nPlease upload a valid license and restart the dashboard.`);
-  killServer();
-  app.exit(0);
+  requestAppShutdown({
+    reason: "runtime license expired",
+    action: { type: "exit", exitCode: 0 },
+  }).catch((err) => {
+    console.error("[main] license shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }
 
 function handleLicenseRuntimeTick() {
@@ -3145,10 +3334,14 @@ ipcMain.handle("app-update-install", async () => {
 
 ipcMain.handle("app-restart", async () => {
   try {
-    allowMainWindowClose = true;
-    app.relaunch();
-    killServer();
-    app.exit(0);
+    requestAppShutdown({
+      reason: "manual app restart",
+      action: { type: "relaunch" },
+    }).catch((err) => {
+      console.error("[main] restart shutdown failed:", err?.message || err);
+      appShutdownBypassQuit = true;
+      app.exit(1);
+    });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
@@ -3408,40 +3601,17 @@ function forceKillProc(proc, label) {
   });
 }
 
-function killServer() {
-  isAppShuttingDown = true;
-  stopForecastModeSync();
-  clearForecastRestartTimer();
-
-  // Always force-kill Python processes (no graceful shutdown path)
-  forceKillProc(backendProc, "backend");
-  stopForecastProcess("application shutdown");
-  backendProc = null;
-  forecastProc = null;
-
-  if (embeddedServerStarted && embeddedServerModule?.shutdownEmbedded) {
-    try {
-      embeddedServerModule.shutdownEmbedded();
-    } catch (err) {
-      console.warn("[main] embedded web server shutdown failed:", err.message);
-    }
-  }
-  embeddedServerStarted = false;
-  embeddedServerModule = null;
-
-  // Ask the web server (Node.js child) to flush the DB and exit cleanly,
-  // then force-kill it if it hasn't gone away within 1.5 s.
-  const wp = webProc;
-  webProc = null;
-  if (!wp || wp.killed) return;
-  try { wp.send({ type: "shutdown" }); } catch (_) {}
-  const deadline = setTimeout(() => forceKillProc(wp, "web-server"), 1500);
-  if (deadline.unref) deadline.unref();
-  wp.once("exit", () => clearTimeout(deadline));
+function killServer(reason = "application shutdown") {
+  return stopRuntimeServices(reason);
 }
 
 function quit() {
-  allowMainWindowClose = true;
-  killServer();
-  app.quit();
+  requestAppShutdown({
+    reason: "quit requested",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }

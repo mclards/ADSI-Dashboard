@@ -92,8 +92,16 @@ def inverter_number_from_ip(ip):
 #   Configuration  —  paths & tunables
 # -------------------------------------------------
 
-PORTABLE_ROOT = str(os.getenv("IM_PORTABLE_DATA_DIR") or "").strip()
-EXPLICIT_DATA_DIR = str(os.getenv("IM_DATA_DIR") or "").strip()
+PORTABLE_ROOT = str(
+    os.getenv("IM_PORTABLE_DATA_DIR")
+    or os.getenv("ADSI_PORTABLE_DATA_DIR")
+    or ""
+).strip()
+EXPLICIT_DATA_DIR = str(
+    os.getenv("IM_DATA_DIR")
+    or os.getenv("ADSI_DATA_DIR")
+    or ""
+).strip()
 
 if PORTABLE_ROOT:
     PROGRAMDATA_DIR = Path(PORTABLE_ROOT) / "programdata"

@@ -8,6 +8,7 @@ const fs   = require('fs');
 const path = require('path');
 const { once } = require('events');
 const ExcelJS = require('exceljs');
+const { getPortableDataRoot } = require('./runtimeEnvPaths');
 const {
   db,
   stmts,
@@ -20,7 +21,7 @@ const {
 } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
-const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || '').trim();
+const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, 'programdata')
   : path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'InverterDashboard');

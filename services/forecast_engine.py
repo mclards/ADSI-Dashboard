@@ -45,9 +45,17 @@ from sklearn.preprocessing import RobustScaler
 # ============================================================================
 # PATHS
 # ============================================================================
-PORTABLE_ROOT_RAW = str(os.getenv("IM_PORTABLE_DATA_DIR") or "").strip()
+PORTABLE_ROOT_RAW = str(
+    os.getenv("IM_PORTABLE_DATA_DIR")
+    or os.getenv("ADSI_PORTABLE_DATA_DIR")
+    or ""
+).strip()
 PORTABLE_ROOT = Path(PORTABLE_ROOT_RAW) if PORTABLE_ROOT_RAW else None
-EXPLICIT_DATA_DIR = str(os.getenv("IM_DATA_DIR") or "").strip()
+EXPLICIT_DATA_DIR = str(
+    os.getenv("IM_DATA_DIR")
+    or os.getenv("ADSI_DATA_DIR")
+    or ""
+).strip()
 
 if PORTABLE_ROOT is not None:
     BASE = PORTABLE_ROOT / "programdata"

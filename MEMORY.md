@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.3.13
+- **Repo/package version baseline:** 2.3.14
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
@@ -118,6 +118,13 @@ Remote→Gateway mode switch continuity hardened:
 - `applyRuntimeMode()` — captures per-inverter baselines on Remote→Gateway switch; logs handoff start
 - Test harness: `server/tests/mwhHandoff.test.js` (24 passing: Scenarios A-E, including timeout)
 - `server/mwhHandoffCore.js` — shared pure logic imported by tests (created by user)
+
+## v2.3.14 Changes - Update Install Metrics Recovery + Safer Shutdown (2026-03-13)
+- **Update install now waits for runtime shutdown:** `electron/main.js` routes normal exit, restart, license shutdown, and updater install through one coordinated shutdown path so the app does not exit before the local server flushes SQLite and closes cleanly.
+- **Embedded server shutdown is now awaitable:** `server/index.js` returns a promise from the embedded shutdown path and guards double-close so updater-triggered restarts can wait for DB flush completion instead of racing the process exit.
+- **Legacy data-path compatibility was restored:** the runtime now accepts both `IM_*` and `ADSI_*` data-dir env names across Electron, Node, and Python service layers, preventing updated builds from reading a different DB/config location than the shell configured.
+- **Older userData folders now migrate forward:** Electron now also checks legacy `Inverter Dashboard` / `Dashboard V2` userData folder names so auth and config files are not stranded after branding-era updates.
+- **Regression coverage was added for env-path compatibility:** `server/tests/dbPathEnvCompat.test.js` verifies the new env-resolution fallback and precedence rules.
 
 ## v2.3.13 Changes - Forecast Backtest + Refined Forecast Export (2026-03-13)
 - **Day-ahead forecast replay/backtest was added:** `services/forecast_engine.py` now exposes replay-oriented training state reuse, richer forecast metrics, and CLI backtest modes (`--backtest-range`, `--backtest-days`) that score historical day-ahead runs against saved forecast-weather snapshots without overwriting live forecast rows.

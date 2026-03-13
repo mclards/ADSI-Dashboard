@@ -16,6 +16,7 @@ const { pipeline } = require("stream/promises");
 const WebSocket = require("ws");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
+const { getPortableDataRoot } = require("./runtimeEnvPaths");
 
 const {
   getSetting,
@@ -123,7 +124,7 @@ app.use(express.static(path.join(__dirname, "../public"), staticNoCache));
 app.use("/api", remoteApiTokenGate);
 const PORT = Math.max(1, Math.min(65535, Number(process.env.ADSI_SERVER_PORT || 3500) || 3500));
 const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
-const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
+const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
   : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "InverterDashboard");
@@ -12348,41 +12349,65 @@ app.delete("/api/backup/:id", (req, res) => {
 
 // â"€â"€â"€ Graceful Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 let _shutdownCalled = false;
+let _shutdownPromise = null;
+let _flushClosed = false;
 
 function _flushAndClose() {
+  if (_flushClosed) return;
+  _flushClosed = true;
   try { poller.flushPending(); } catch (_) {}   // recover last ~1 s of readings
   cleanupGatewayMainDbSnapshotSync();
   closeDb();                                      // WAL checkpoint + db.close
 }
 
-// Called when running as a spawned child process (dev mode or future use).
-function gracefulShutdown(reason) {
-  if (_shutdownCalled) return;
+function _beginShutdown(mode, reason) {
+  if (_shutdownPromise) return _shutdownPromise;
   _shutdownCalled = true;
-  console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
+  if (mode === "embedded") {
+    console.log("[Server] Embedded shutdown: flushing DB...");
+  } else {
+    console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
+  }
+  stopRemoteBridge();
   stopRemoteChatBridge();
   try { poller.stop(); } catch (_) {}
-  httpServer.close(() => { _flushAndClose(); process.exit(0); });
+
+  _shutdownPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      _flushAndClose();
+      resolve();
+    };
+    let deadline = null;
+    try {
+      deadline = setTimeout(finish, 2000);
+      if (deadline && typeof deadline.unref === "function") deadline.unref();
+      httpServer.close(() => {
+        if (deadline) clearTimeout(deadline);
+        finish();
+      });
+    } catch (_) {
+      if (deadline) clearTimeout(deadline);
+      finish();
+    }
+  });
+  return _shutdownPromise;
+}
+
+// Called when running as a spawned child process (dev mode or future use).
+function gracefulShutdown(reason) {
+  const shutdownPromise = _beginShutdown("child", reason);
+  shutdownPromise.finally(() => process.exit(0));
   // Safety: if httpServer doesn't drain within 2 s, force-close and exit.
-  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2000).unref();
+  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2500).unref();
 }
 
 // Called when running embedded in the Electron main process (packaged mode).
 // Must NOT call process.exit â€" Electron controls the lifecycle.
 function shutdownEmbedded() {
-  if (_shutdownCalled) return;
-  _shutdownCalled = true;
-  console.log("[Server] Embedded shutdown: flushing DB...");
-  stopRemoteBridge();
-  stopRemoteChatBridge();
-  try { poller.stop(); } catch (_) {}
-  try {
-    httpServer.close(() => { _flushAndClose(); });
-  } catch (_) {
-    _flushAndClose();
-    return;
-  }
-  setTimeout(() => { _flushAndClose(); }, 2000).unref();
+  return _beginShutdown("embedded");
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

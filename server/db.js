@@ -8,9 +8,10 @@ const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const { getExplicitDataDir, getPortableDataRoot } = require("./runtimeEnvPaths");
 
-const EXPLICIT_DATA_DIR = String(process.env.IM_DATA_DIR || "").trim();
-const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
+const EXPLICIT_DATA_DIR = getExplicitDataDir();
+const PORTABLE_ROOT = getPortableDataRoot();
 function resolveDataDir() {
   if (EXPLICIT_DATA_DIR) return EXPLICIT_DATA_DIR;
   if (PORTABLE_ROOT) return path.join(PORTABLE_ROOT, "db");
