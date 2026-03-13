@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially implemented.
+Partially implemented as of `v2.3.11`.
 
 Already in place:
 
@@ -23,6 +23,10 @@ Still pending:
 - pending: Phase 5 — retrain residual ML against hybrid baseline with Solcast feature columns
 - pending: Phase 6 — Solcast-specific bias and reliability artifact in `services/forecast_engine.py`
 - pending: Phase 7 — production routing (`ml_local` with usable snapshot → hybrid path; fallback to current `ml_local`); log which path was used
+
+Related note:
+
+- completed elsewhere: the Solcast preview/export resolution selector work (`PT5M` / `PT10M` / `PT15M` / `PT30M` / `PT60M` plus export format selection) is already implemented and no longer needs a separate plan file
 
 This plan defines how the Solcast toolkit feed should improve:
 

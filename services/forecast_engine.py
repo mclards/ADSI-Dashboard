@@ -3272,6 +3272,71 @@ def fit_residual_model(
     return model, scaler, meta
 
 
+def build_training_state(today: date) -> dict | None:
+    """Build the in-memory model/artifact state for a given training cut-off date."""
+    history_days = collect_history_days(today, max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS))
+    solcast_reliability = build_solcast_reliability_artifact(today)
+    X, y, sample_weight = collect_training_data_hardened(
+        today,
+        history_days,
+        solcast_reliability=solcast_reliability,
+    )
+    if X is None:
+        return None
+
+    global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
+    bundle = {
+        "created_ts": int(time.time()),
+        "training_basis": "actual archived weather + actual generation (+ Solcast prior when available)",
+        "history_days": int(len(history_days)),
+        "feature_cols": list(X.columns),
+        "global": {
+            "model": global_model,
+            "scaler": global_scaler,
+            "meta": dict(global_meta),
+        },
+        "regimes": {},
+    }
+
+    for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
+        regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
+        if regime_days < REGIME_MODEL_MIN_DAYS:
+            continue
+        X_reg, y_reg, w_reg = collect_training_data_hardened(
+            today,
+            history_days,
+            day_regime=regime,
+            solcast_reliability=solcast_reliability,
+        )
+        if X_reg is None or len(y_reg) < REGIME_MODEL_MIN_SAMPLES:
+            continue
+        regime_model, regime_scaler, regime_meta = fit_residual_model(X_reg, y_reg, w_reg)
+        regime_meta["day_count"] = int(regime_days)
+        bundle["regimes"][regime] = {
+            "model": regime_model,
+            "scaler": regime_scaler,
+            "meta": regime_meta,
+        }
+        log.info(
+            "Regime model trained [%s] - days=%d samples=%d train_score=%s",
+            regime,
+            regime_days,
+            int(regime_meta.get("sample_count", 0)),
+            f"{float(regime_meta['train_score']):.4f}" if regime_meta.get("train_score") is not None else "n/a",
+        )
+
+    return {
+        "created_ts": int(time.time()),
+        "training_date": today.isoformat(),
+        "history_days": history_days,
+        "model_bundle": bundle,
+        "forecast_artifacts": build_forecast_artifacts(history_days),
+        "weather_bias": build_weather_bias_artifact(today),
+        "solcast_reliability": solcast_reliability,
+        "global_meta": dict(global_meta),
+    }
+
+
 def save_model_bundle(bundle: dict) -> bool:
     try:
         MODEL_BUNDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -3370,69 +3435,27 @@ def predict_residual_with_bundle(
 
 def train_model(today: date) -> bool:
     """Train (or retrain) the residual correction model."""
-    history_days = collect_history_days(today, max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS))
-    solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
-    X, y, sample_weight = collect_training_data_hardened(
-        today,
-        history_days,
-        solcast_reliability=solcast_reliability,
-    )
-    if X is None:
+    state = build_training_state(today)
+    if not state:
         return False
 
-    global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
-    bundle = {
-        "created_ts": int(time.time()),
-        "training_basis": "actual archived weather + actual generation (+ Solcast prior when available)",
-        "history_days": int(len(history_days)),
-        "feature_cols": list(X.columns),
-        "global": {
-            "model": global_model,
-            "scaler": global_scaler,
-            "meta": dict(global_meta),
-        },
-        "regimes": {},
-    }
-
-    for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
-        regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
-        if regime_days < REGIME_MODEL_MIN_DAYS:
-            continue
-        X_reg, y_reg, w_reg = collect_training_data_hardened(
-            today,
-            history_days,
-            day_regime=regime,
-            solcast_reliability=solcast_reliability,
-        )
-        if X_reg is None or len(y_reg) < REGIME_MODEL_MIN_SAMPLES:
-            continue
-        regime_model, regime_scaler, regime_meta = fit_residual_model(X_reg, y_reg, w_reg)
-        regime_meta["day_count"] = int(regime_days)
-        bundle["regimes"][regime] = {
-            "model": regime_model,
-            "scaler": regime_scaler,
-            "meta": regime_meta,
-        }
-        log.info(
-            "Regime model trained [%s] - days=%d samples=%d train_score=%s",
-            regime,
-            regime_days,
-            int(regime_meta.get("sample_count", 0)),
-            f"{float(regime_meta['train_score']):.4f}" if regime_meta.get("train_score") is not None else "n/a",
-        )
-
+    bundle = state["model_bundle"]
+    global_block = bundle.get("global") or {}
+    global_model = global_block.get("model")
+    global_scaler = global_block.get("scaler")
+    global_meta = dict(global_block.get("meta") or {})
     dump(global_model, MODEL_FILE)
     dump(global_scaler, SCALER_FILE)
     save_model_bundle(bundle)
-    save_forecast_artifacts(build_forecast_artifacts(history_days))
-    save_weather_bias_artifact(build_weather_bias_artifact(today))
-    save_solcast_reliability_artifact(solcast_reliability)
+    save_forecast_artifacts(state.get("forecast_artifacts") or {})
+    save_weather_bias_artifact(state.get("weather_bias") or {})
+    save_solcast_reliability_artifact(state.get("solcast_reliability"))
     log.info(
         "Model trained - global_estimators=%d global_train_score=%s regime_models=%d solcast_reliability_days=%d",
         int(global_meta.get("estimators_used", 0)),
         f"{float(global_meta['train_score']):.4f}" if global_meta.get("train_score") is not None else "n/a",
         int(len(bundle["regimes"])),
-        int((solcast_reliability or {}).get("day_count", 0)),
+        int(((state.get("solcast_reliability") or {}).get("day_count", 0))),
     )
     return True
 
@@ -3572,9 +3595,64 @@ def confidence_bands(
 # FORECAST QUALITY METRICS  (logged after each run)
 # ============================================================================
 
+def compute_forecast_metrics(actual: np.ndarray | None, forecast: np.ndarray | None) -> dict | None:
+    """Compute solar-window forecast accuracy metrics for slot-level generation."""
+    if actual is None or forecast is None:
+        return None
+
+    actual_arr = np.nan_to_num(np.asarray(actual, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    forecast_arr = np.nan_to_num(np.asarray(forecast, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if actual_arr.size < SLOTS_DAY or forecast_arr.size < SLOTS_DAY:
+        return None
+
+    solar_mask = (
+        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
+        (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+    )
+    if not np.any(solar_mask):
+        return None
+
+    act_s = np.clip(actual_arr[solar_mask], 0.0, None)
+    fc_s = np.clip(forecast_arr[solar_mask], 0.0, None)
+    err = fc_s - act_s
+    abs_err = np.abs(err)
+    actual_total = float(act_s.sum())
+    forecast_total = float(fc_s.sum())
+
+    first_actual = _find_first_active_slot(actual_arr)
+    first_forecast = _find_first_active_slot(forecast_arr)
+    last_actual = _find_last_active_slot(actual_arr)
+    last_forecast = _find_last_active_slot(forecast_arr)
+
+    return {
+        "slot_count": int(np.count_nonzero(solar_mask)),
+        "actual_total_kwh": actual_total,
+        "forecast_total_kwh": forecast_total,
+        "abs_error_sum_kwh": float(abs_err.sum()),
+        "mae_kwh": float(np.mean(abs_err)),
+        "mbe_kwh": float(np.mean(err)),
+        "rmse_kwh": float(np.sqrt(np.mean(err ** 2))),
+        "mape_pct": float(np.mean(abs_err / np.maximum(act_s, 1.0)) * 100.0),
+        "wape_pct": float((abs_err.sum() / max(actual_total, 1.0)) * 100.0),
+        "total_ape_pct": float((abs(forecast_total - actual_total) / max(actual_total, 1.0)) * 100.0),
+        "first_active_slot_actual": first_actual,
+        "first_active_slot_forecast": first_forecast,
+        "last_active_slot_actual": last_actual,
+        "last_active_slot_forecast": last_forecast,
+        "first_active_error_min": None if first_actual is None or first_forecast is None else int((first_forecast - first_actual) * SLOT_MIN),
+        "last_active_error_min": None if last_actual is None or last_forecast is None else int((last_forecast - last_actual) * SLOT_MIN),
+    }
+
+
+def _format_minutes(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{int(value):+d}m"
+
+
 def forecast_qa(today: date) -> None:
     """
-    Compute and log MAPE, MBE, skill score vs persistence for yesterday.
+    Compute and log forecast accuracy and skill score vs persistence for yesterday.
     Persistence forecast = yesterday's actual shifted to today.
     """
     yesterday = (today - timedelta(days=1)).isoformat()
@@ -3588,32 +3666,27 @@ def forecast_qa(today: date) -> None:
         log.info("QA: no data for %s", yesterday)
         return
 
-    mask = (
-        (actual > 0) &
-        (fc > 0) &
-        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
-        (np.arange(SLOTS_DAY) <  SOLAR_END_SLOT)
-    )
-    if mask.sum() == 0:
+    metrics = compute_forecast_metrics(actual, fc)
+    if metrics is None:
         return
 
-    act_s = actual[mask]
-    fc_s  = fc[mask]
-
-    mape = float(np.mean(np.abs(act_s - fc_s) / np.maximum(act_s, 1)) * 100)
-    mbe  = float(np.mean(fc_s - act_s))
-    rmse = float(np.sqrt(np.mean((fc_s - act_s) ** 2)))
-
-    if pers is not None and pers[mask].std() > 0:
-        pers_s   = pers[mask]
-        rmse_pers = float(np.sqrt(np.mean((pers_s - act_s) ** 2)))
-        skill     = 1.0 - rmse / max(rmse_pers, 1)
+    pers_metrics = compute_forecast_metrics(actual, pers) if pers is not None else None
+    if pers_metrics is not None and pers_metrics["rmse_kwh"] > 0:
+        skill = 1.0 - metrics["rmse_kwh"] / max(pers_metrics["rmse_kwh"], 1.0)
     else:
         skill = float("nan")
 
     log.info(
-        "QA [%s]  MAPE=%.1f%%  MBE=%.1f kWh/slot  RMSE=%.1f kWh/slot  Skill=%.3f",
-        yesterday, mape, mbe, rmse, skill
+        "QA [%s] WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
+        yesterday,
+        metrics["wape_pct"],
+        metrics["mape_pct"],
+        metrics["total_ape_pct"],
+        metrics["mbe_kwh"],
+        metrics["rmse_kwh"],
+        _format_minutes(metrics["first_active_error_min"]),
+        _format_minutes(metrics["last_active_error_min"]),
+        skill,
     )
 
 
@@ -3894,9 +3967,15 @@ def run_intraday_adjusted(day: date) -> bool:
 # CORE FORECAST FUNCTION
 # ============================================================================
 
-def run_dayahead(target_date: date, today: date) -> bool:
+def run_dayahead(
+    target_date: date,
+    today: date,
+    runtime_state: dict | None = None,
+    persist: bool = True,
+    require_saved_snapshot_for_past: bool = False,
+) -> bool | dict:
     """
-    Generate and persist the day-ahead forecast for *target_date*.
+    Generate the day-ahead forecast for *target_date*.
 
     Pipeline:
         1. Fetch weather for target day
@@ -3905,9 +3984,9 @@ def run_dayahead(target_date: date, today: date) -> bool:
         4. Apply error memory bias correction
         5. Clip to slot capacity, enforce ramp limits
         6. Compute confidence bands
-        7. Write to forecast context
+        7. Optionally write to forecast context
 
-    Returns True on success.
+    Returns a boolean when `persist=True`, otherwise a result payload.
     """
     target_s = target_date.isoformat()
     log.info("â”€â”€ Day-Ahead Forecast  target=%s â”€â”€", target_s)
@@ -3915,12 +3994,18 @@ def run_dayahead(target_date: date, today: date) -> bool:
     # 1. Weather
     weather_source = "forecast"
     raw_hourly = pd.DataFrame()
-    if target_date < today:
+    historical_snapshot_mode = bool(
+        require_saved_snapshot_for_past and target_date < datetime.now().date()
+    )
+    if target_date < today or historical_snapshot_mode:
         snap = load_forecast_weather_snapshot(target_s)
         if snap:
             raw_hourly = _weather_records_to_frame(list(snap.get("raw_hourly") or []), target_s)
             weather_source = "snapshot"
         if raw_hourly.empty:
+            if require_saved_snapshot_for_past:
+                log.warning("Past target %s has no saved forecast snapshot - skipping strict day-ahead replay.", target_s)
+                return False if persist else None
             log.warning("Past target %s has no saved forecast snapshot - using archive weather fallback.", target_s)
             fetched = fetch_weather(target_s, source="archive")
             raw_hourly = fetched if fetched is not None else pd.DataFrame()
@@ -3929,14 +4014,24 @@ def run_dayahead(target_date: date, today: date) -> bool:
         fetched = fetch_weather(target_s, source="forecast")
         raw_hourly = fetched if fetched is not None else pd.DataFrame()
 
+    if raw_hourly.empty and not persist:
+        log.error("Cannot run forecast - weather unavailable for %s", target_s)
+        return None
+
     if raw_hourly.empty:
         log.error("Cannot run forecast â€“ weather unavailable for %s", target_s)
         return False
 
-    weather_bias = load_weather_bias_artifact(today, allow_build=True)
+    if runtime_state is not None and "weather_bias" in runtime_state:
+        weather_bias = runtime_state.get("weather_bias")
+    else:
+        weather_bias = load_weather_bias_artifact(today, allow_build=True)
     hourly_applied, bias_meta = apply_weather_bias_adjustment(raw_hourly, target_s, weather_bias)
     w5   = interpolate_5min(hourly_applied, target_s)
     ok_w5, reason_w5 = validate_weather_5min(target_s, w5)
+    if (not ok_w5) and (not persist):
+        log.error("Cannot run forecast - weather quality failed for %s: %s", target_s, reason_w5)
+        return None
     if not ok_w5:
         log.error("Cannot run forecast â€“ weather quality failed for %s: %s", target_s, reason_w5)
         return False
@@ -3961,10 +4056,16 @@ def run_dayahead(target_date: date, today: date) -> bool:
     # 2. Physics baseline
     baseline = physics_baseline(target_s, w5)
     solcast_snapshot = load_solcast_snapshot(target_s)
-    solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
+    if runtime_state is not None and "solcast_reliability" in runtime_state:
+        solcast_reliability = runtime_state.get("solcast_reliability")
+    else:
+        solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
     solcast_prior = solcast_prior_from_snapshot(target_s, w5, solcast_snapshot, solcast_reliability)
     hybrid_baseline, solcast_meta = blend_physics_with_solcast(baseline, solcast_prior)
-    artifacts = load_forecast_artifacts(today, allow_build=True)
+    if runtime_state is not None and "forecast_artifacts" in runtime_state:
+        artifacts = runtime_state.get("forecast_artifacts")
+    else:
+        artifacts = load_forecast_artifacts(today, allow_build=True)
     solcast_primary = bool(
         solcast_meta.get("used_solcast")
         and (
@@ -3988,7 +4089,10 @@ def run_dayahead(target_date: date, today: date) -> bool:
 
     # 3. ML residual correction
     ml_residual = np.zeros(SLOTS_DAY)
-    model_bundle = load_model_bundle()
+    if runtime_state is not None and "model_bundle" in runtime_state:
+        model_bundle = runtime_state.get("model_bundle")
+    else:
+        model_bundle = load_model_bundle()
     if model_bundle:
         try:
             feat   = build_features(w5, target_s, solcast_prior)
@@ -4137,8 +4241,31 @@ def run_dayahead(target_date: date, today: date) -> bool:
         bias_correction.sum(),
     )
 
-    # 8. Write
     series = to_ui_series(forecast, lo, hi, target_s)
+    if not persist:
+        return {
+            "day": target_s,
+            "series": series,
+            "forecast": forecast,
+            "lo": lo,
+            "hi": hi,
+            "weather_source": weather_source,
+            "raw_hourly": raw_hourly,
+            "hourly_applied": hourly_applied,
+            "target_regime": target_regime,
+            "bias_meta": bias_meta,
+            "solcast_meta": solcast_meta,
+            "shape_meta": shape_meta,
+            "activity_meta": activity_meta,
+            "staging_meta": staging_meta,
+            "baseline_total_kwh": float(baseline.sum()),
+            "hybrid_total_kwh": float(hybrid_baseline.sum()),
+            "forecast_total_kwh": float(forecast.sum()),
+            "ml_total_kwh": float(ml_residual.sum()),
+            "bias_total_kwh": float(bias_correction.sum()),
+        }
+
+    # 8. Write
     ok = write_forecast("PacEnergy_DayAhead", target_s, series)
     if ok and weather_source in {"forecast", "snapshot"}:
         save_forecast_weather_snapshot(
@@ -4208,6 +4335,128 @@ def run_manual_generation(dates: list[date]) -> bool:
     return ok_all
 
 
+def run_backtest(dates: list[date]) -> bool:
+    """
+    Replay historical day-ahead forecasts over a date range.
+
+    This mode requires saved forecast-weather snapshots for past targets so the
+    scored forecast reflects true day-ahead inputs instead of hindsight weather.
+    """
+    dates = sorted(set(dates))
+    if not dates:
+        log.error("Backtest: no target dates provided.")
+        return False
+
+    clear_forecast_data_cache()
+    log.info(
+        "Backtest start: %d date(s), range=%s..%s, strict_snapshots=true",
+        len(dates),
+        dates[0].isoformat(),
+        dates[-1].isoformat(),
+    )
+
+    rows: list[dict] = []
+    skipped_actual = 0
+    skipped_snapshot = 0
+    skipped_training = 0
+    skipped_forecast = 0
+
+    for target_date in dates:
+        target_s = target_date.isoformat()
+        actual = load_actual(target_s)
+        if actual is None:
+            skipped_actual += 1
+            log.warning("Backtest skip [%s] - actual 5-minute history unavailable", target_s)
+            continue
+
+        if not load_forecast_weather_snapshot(target_s):
+            skipped_snapshot += 1
+            log.warning("Backtest skip [%s] - saved forecast weather snapshot unavailable", target_s)
+            continue
+
+        reference_day = target_date - timedelta(days=1)
+        runtime_state = build_training_state(reference_day)
+        if not runtime_state:
+            skipped_training += 1
+            log.warning("Backtest skip [%s] - training state unavailable at reference=%s", target_s, reference_day.isoformat())
+            continue
+
+        result = run_dayahead(
+            target_date,
+            reference_day,
+            runtime_state=runtime_state,
+            persist=False,
+            require_saved_snapshot_for_past=True,
+        )
+        if not isinstance(result, dict):
+            skipped_forecast += 1
+            log.warning("Backtest skip [%s] - forecast replay failed", target_s)
+            continue
+
+        metrics = compute_forecast_metrics(actual, np.asarray(result["forecast"], dtype=float))
+        if metrics is None:
+            skipped_forecast += 1
+            log.warning("Backtest skip [%s] - forecast metrics unavailable", target_s)
+            continue
+
+        rows.append({
+            "day": target_s,
+            "reference_day": reference_day.isoformat(),
+            "weather_source": str(result.get("weather_source") or ""),
+            "target_regime": str(result.get("target_regime") or ""),
+            "solcast_used": bool((result.get("solcast_meta") or {}).get("used_solcast")),
+            "solcast_blend": float((result.get("solcast_meta") or {}).get("mean_blend", 0.0)),
+            **metrics,
+        })
+        log.info(
+            "Backtest [%s] WAPE=%.1f%% TotalAPE=%.1f%% MAPE=%.1f%% RMSE=%.1f kWh/slot First=%s Last=%s regime=%s solcast=%s blend=%.2f",
+            target_s,
+            metrics["wape_pct"],
+            metrics["total_ape_pct"],
+            metrics["mape_pct"],
+            metrics["rmse_kwh"],
+            _format_minutes(metrics["first_active_error_min"]),
+            _format_minutes(metrics["last_active_error_min"]),
+            result.get("target_regime"),
+            bool((result.get("solcast_meta") or {}).get("used_solcast")),
+            float((result.get("solcast_meta") or {}).get("mean_blend", 0.0)),
+        )
+
+    if not rows:
+        log.error(
+            "Backtest produced no scored days (skipped: actual=%d snapshot=%d training=%d forecast=%d)",
+            skipped_actual,
+            skipped_snapshot,
+            skipped_training,
+            skipped_forecast,
+        )
+        return False
+
+    actual_total = float(sum(row["actual_total_kwh"] for row in rows))
+    abs_error_total = float(sum(row["abs_error_sum_kwh"] for row in rows))
+    overall_wape = float((abs_error_total / max(actual_total, 1.0)) * 100.0)
+    mean_daily_wape = float(np.mean([row["wape_pct"] for row in rows]))
+    median_daily_wape = float(np.median([row["wape_pct"] for row in rows]))
+    mean_total_ape = float(np.mean([row["total_ape_pct"] for row in rows]))
+    mean_mape = float(np.mean([row["mape_pct"] for row in rows]))
+
+    log.info(
+        "Backtest summary: scored=%d/%d overall_WAPE=%.1f%% mean_daily_WAPE=%.1f%% median_daily_WAPE=%.1f%% mean_total_APE=%.1f%% mean_MAPE=%.1f%% skipped(actual=%d snapshot=%d training=%d forecast=%d)",
+        len(rows),
+        len(dates),
+        overall_wape,
+        mean_daily_wape,
+        median_daily_wape,
+        mean_total_ape,
+        mean_mape,
+        skipped_actual,
+        skipped_snapshot,
+        skipped_training,
+        skipped_forecast,
+    )
+    return True
+
+
 def parse_cli_args():
     parser = argparse.ArgumentParser(
         description="Inverter Dashboard Forecast Service - daemon mode or manual day-ahead generation",
@@ -4228,6 +4477,18 @@ def parse_cli_args():
         type=int,
         metavar="N",
         help="Generate day-ahead for N consecutive days starting tomorrow and exit.",
+    )
+    parser.add_argument(
+        "--backtest-range",
+        nargs=2,
+        metavar=("START_YYYY-MM-DD", "END_YYYY-MM-DD"),
+        help="Replay historical day-ahead forecasts over an inclusive date range using saved forecast weather snapshots.",
+    )
+    parser.add_argument(
+        "--backtest-days",
+        type=int,
+        metavar="N",
+        help="Replay historical day-ahead forecasts for the last N completed days using saved forecast weather snapshots.",
     )
     return parser.parse_args()
 
@@ -4262,6 +4523,24 @@ def run_cli_generation(args) -> int:
             start_d = datetime.now().date() + timedelta(days=1)
             days = [start_d + timedelta(days=i) for i in range(count)]
             ok = run_manual_generation(days)
+            return 0 if ok else 2
+
+        if args.backtest_range:
+            start_s, end_s = args.backtest_range
+            start_d = _parse_iso_date_safe(start_s)
+            end_d = _parse_iso_date_safe(end_s)
+            days = _iter_days(start_d, end_d)
+            ok = run_backtest(days)
+            return 0 if ok else 2
+
+        if args.backtest_days is not None:
+            count = int(args.backtest_days)
+            if count < 1:
+                raise ValueError("--backtest-days must be >= 1")
+            end_d = datetime.now().date() - timedelta(days=1)
+            start_d = end_d - timedelta(days=count - 1)
+            days = _iter_days(start_d, end_d)
+            ok = run_backtest(days)
             return 0 if ok else 2
 
         return -1  # no CLI generation mode requested

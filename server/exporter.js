@@ -435,20 +435,14 @@ function normalizeXlsxCellValue(value, header = null) {
   return { value: value ?? '', numFmt: null };
 }
 
-async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
+async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
   const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
   const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
   const widths = labels.map((label) =>
     Math.min(64, Math.max(10, String(label ?? '').length + 2)),
   );
-
-  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
-    filename: xlsxPath,
-    useStyles: true,
-    useSharedStrings: false,
-  });
-  const ws = wb.addWorksheet('Export', {
-    views: [{ state: 'frozen', ySplit: 1 }],
+  const ws = wb.addWorksheet(String(sheetName || 'Export').slice(0, 31), {
+    views: [{ state: 'frozen', ySplit: Number(options?.freezeHeader ? 1 : 0) }],
   });
 
   ws.columns = keys.map((key, idx) => ({
@@ -497,6 +491,39 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
   });
 
   ws.commit();
+}
+
+async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: xlsxPath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+
+  const summaryHeaders = Array.isArray(options?.summaryHeaders)
+    ? options.summaryHeaders
+    : null;
+  const summaryRows = Array.isArray(options?.summaryRows)
+    ? options.summaryRows
+    : null;
+  if (summaryHeaders && summaryRows && summaryRows.length) {
+    await writeXlsxWorksheet(
+      wb,
+      options?.summarySheetName || 'Summary',
+      summaryHeaders,
+      summaryRows,
+      { freezeHeader: true },
+    );
+  }
+
+  await writeXlsxWorksheet(
+    wb,
+    options?.dataSheetName || 'Export',
+    headers,
+    rows,
+    { freezeHeader: true },
+  );
+
   await wb.commit();
   return xlsxPath;
 }
@@ -1351,7 +1378,11 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   const rows = allTs.map((ts) => {
     const actualKwh   = Math.max(0, safeNum(actualMap.get(ts)));
     const dayAheadKwh = Math.max(0, safeNum(dayAheadMap.get(ts)));
-    const deltaKwh    = actualKwh - dayAheadKwh;          // can be negative (under-forecast)
+    const deltaKwh    = actualKwh - dayAheadKwh;          // negative = over-forecast
+    const absDeltaKwh = Math.abs(deltaKwh);
+    const apePct = actualKwh > 0
+      ? (absDeltaKwh / actualKwh) * 100
+      : null;
     return {
       Date:        fmtDate(ts),
       Time:        spec.mode === 'day' ? 'Daily' : fmtTime(ts),
@@ -1363,20 +1394,58 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
       DayAheadMWh: (dayAheadKwh / 1000).toFixed(6),
       DeltaKWh:    deltaKwh.toFixed(6),
       DeltaMWh:    (deltaKwh    / 1000).toFixed(6),
+      AbsDeltaKWh: absDeltaKwh.toFixed(6),
+      AbsDeltaMWh: (absDeltaKwh / 1000).toFixed(6),
+      ErrorPct:    apePct == null ? '' : apePct.toFixed(3),
     };
   });
+
+  const actualTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.ActualKWh), 0);
+  const dayAheadTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.DayAheadKWh), 0);
+  const varianceTotalKwh = actualTotalKwh - dayAheadTotalKwh;
+  const absErrorTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.AbsDeltaKWh), 0);
+  const mapeValues = rows
+    .map((row) => safeNum(row.ErrorPct, Number.NaN))
+    .filter((value) => Number.isFinite(value));
+  const peakRow = rows.reduce((best, row) =>
+    safeNum(row.ActualKWh) >= safeNum(best?.ActualKWh) ? row : best,
+  null);
+  const summaryHeaders = [
+    { key: 'Metric', label: 'Metric', xlsxType: 'string' },
+    { key: 'Value', label: 'Value', xlsxType: 'string' },
+  ];
+  const summaryRows = [
+    { Metric: 'Plant', Value: plantName },
+    { Metric: 'Range Start', Value: fmtDateTime(s) },
+    { Metric: 'Range End', Value: fmtDateTime(e) },
+    { Metric: 'Resolution', Value: spec.mode === 'day' ? 'Daily' : spec.label },
+    { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Day-Ahead Total (MWh)', Value: (dayAheadTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Absolute Error Total (MWh)', Value: (absErrorTotalKwh / 1000).toFixed(6) },
+    {
+      Metric: 'WAPE (%)',
+      Value: actualTotalKwh > 0 ? ((absErrorTotalKwh / actualTotalKwh) * 100).toFixed(3) : '',
+    },
+    {
+      Metric: 'Mean APE (%)',
+      Value: mapeValues.length ? (mapeValues.reduce((sum, value) => sum + value, 0) / mapeValues.length).toFixed(3) : '',
+    },
+    { Metric: 'Peak Interval Actual (MWh)', Value: peakRow ? safeNum(peakRow.ActualMWh).toFixed(6) : '' },
+    { Metric: 'Peak Interval Time', Value: peakRow ? String(peakRow.Time || '') : '' },
+    { Metric: 'Data Rows', Value: String(rows.length) },
+  ];
 
   const headers = [
     { key: 'Date',        label: 'Date' },
     { key: 'Time',        label: 'Time' },
     { key: 'Resolution',  label: 'Resolution' },
     { key: 'Plant',       label: 'Plant' },
-    { key: 'ActualKWh',   label: 'Actual (kWh)' },
     { key: 'ActualMWh',   label: 'Actual (MWh)' },
-    { key: 'DayAheadKWh', label: 'Day-Ahead (kWh)' },
     { key: 'DayAheadMWh', label: 'Day-Ahead (MWh)' },
-    { key: 'DeltaKWh',    label: 'Delta (kWh)' },
     { key: 'DeltaMWh',    label: 'Delta (MWh)' },
+    { key: 'AbsDeltaMWh', label: 'Absolute Delta (MWh)' },
+    { key: 'ErrorPct',    label: 'Absolute Error (%)' },
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(rows, {
@@ -1391,7 +1460,12 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
   const fileBase = exportDateAwareFileBase(s, e, 'all', `Day-Ahead vs Actual ${resLabel}`);
-  return await writeExport(headers, finalRows, dir, fileBase, format);
+  return await writeExport(headers, finalRows, dir, fileBase, format, {
+    summaryHeaders,
+    summaryRows,
+    summarySheetName: 'Summary',
+    dataSheetName: 'Intervals',
+  });
 }
 
 function parseIsoDayStart(day) {

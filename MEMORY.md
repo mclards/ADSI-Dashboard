@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.3.2
+- **Repo/package version baseline:** 2.3.13
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
@@ -118,6 +118,18 @@ Remote→Gateway mode switch continuity hardened:
 - `applyRuntimeMode()` — captures per-inverter baselines on Remote→Gateway switch; logs handoff start
 - Test harness: `server/tests/mwhHandoff.test.js` (24 passing: Scenarios A-E, including timeout)
 - `server/mwhHandoffCore.js` — shared pure logic imported by tests (created by user)
+
+## v2.3.13 Changes - Forecast Backtest + Refined Forecast Export (2026-03-13)
+- **Day-ahead forecast replay/backtest was added:** `services/forecast_engine.py` now exposes replay-oriented training state reuse, richer forecast metrics, and CLI backtest modes (`--backtest-range`, `--backtest-days`) that score historical day-ahead runs against saved forecast-weather snapshots without overwriting live forecast rows.
+- **Forecast QA now logs more decision-useful metrics:** daily QA includes `WAPE`, `MAPE`, total-energy absolute percentage error, and first/last active-slot timing error instead of only `MAPE`, `MBE`, and `RMSE`.
+- **Forecast export XLSX now carries a summary sheet:** `server/exporter.js` now writes a `Summary` worksheet for day-ahead vs actual exports so the file includes actual total, day-ahead total, variance, peak interval, absolute error total, `WAPE`, and mean absolute percentage error alongside the interval table.
+- **Forecast interval export was simplified to MWh-only columns:** the analytics day-ahead export now omits `kWh` columns and keeps the interval sheet focused on `MWh` values, absolute `MWh` delta, and absolute error percentage.
+
+## v2.3.11 Changes - Guarded Mode Switching + Standby Baseline Handoff (2026-03-12)
+- **Mode changes are now guarded in the UI:** `public/js/app.js`, `public/index.html`, and `public/css/style.css` add a blocking transition overlay and readiness waits so the dashboard does not keep serving normal actions while switching between `gateway` and `remote`.
+- **Remote Today MWh is gateway-authoritative again:** `server/index.js` now treats fresh gateway `todayEnergy` rows as authoritative in `remote` mode, scopes the fallback shadow to the active gateway source, and clears stale bridge state when the source changes.
+- **Standby refresh now carries the current-day gateway baseline:** before a standby snapshot is transferred, the gateway persists today's partial report state; the remote also refreshes and preserves the current-day gateway today-energy shadow so `Refresh Standby DB -> Restart -> Gateway` does not fall back to older partial-day totals while the local poller catches up.
+- **Regression coverage expanded:** `server/tests/remoteTodayShadow.test.js` now covers same-source fallback, cross-gateway shadow rejection, remote-display handoff capture, and preserved shadow behavior after standby restart.
 
 ## Performance Optimization (2026-03-05)
 Tab-switch "Not Responding" eliminated. Key changes:
