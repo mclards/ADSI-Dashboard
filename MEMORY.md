@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.3.14
+- **Repo/package version baseline:** 2.3.15
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
@@ -118,6 +118,10 @@ Remote→Gateway mode switch continuity hardened:
 - `applyRuntimeMode()` — captures per-inverter baselines on Remote→Gateway switch; logs handoff start
 - Test harness: `server/tests/mwhHandoff.test.js` (24 passing: Scenarios A-E, including timeout)
 - `server/mwhHandoffCore.js` — shared pure logic imported by tests (created by user)
+
+## v2.3.15 Changes - Gateway Today-MWh Release Guardrails (2026-03-13)
+- **Gateway live TODAY MWh regression guard was added:** `server/tests/smokeGatewayLink.js` now asserts that gateway-mode live WS payloads are enriched with `todayEnergy`, that the server merges cached DB totals with live supplement rows, and that the client keeps WS `todayEnergy` authoritative once live updates start.
+- **Empty WS todayEnergy payloads stay valid:** the release guard also checks that the renderer accepts an empty `todayEnergy` array instead of treating it as “missing”, which prevents stale non-WS fallback logic from reclaiming TODAY MWh authority.
 
 ## v2.3.14 Changes - Update Install Metrics Recovery + Safer Shutdown (2026-03-13)
 - **Update install now waits for runtime shutdown:** `electron/main.js` routes normal exit, restart, license shutdown, and updater install through one coordinated shutdown path so the app does not exit before the local server flushes SQLite and closes cleanly.

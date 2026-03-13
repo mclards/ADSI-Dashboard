@@ -119,6 +119,25 @@ setTimeout(async () => {
       "Detail today energy uses authoritative todayEnergyByInv state",
       appSrc.includes("const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);"),
     );
+    check(
+      "Gateway live payload enriches todayEnergy",
+      src.includes("setBroadcastPayloadEnricher((payload) => {") &&
+        src.includes("todayEnergy: getTodayEnergyRowsForLivePayload()"),
+    );
+    check(
+      "Gateway live payload merges DB cache with live supplement",
+      src.includes("function getTodayEnergyRowsForLivePayload(day = localDateStr())") &&
+        src.includes("return mergeTodayEnergyRowsMax(cachedRows, liveRows);"),
+    );
+    check(
+      "Client keeps WS todayEnergy authoritative once live",
+      appSrc.includes("if (hasTodayMwhWsAuthority()) return false;"),
+    );
+    check(
+      "Client accepts empty todayEnergy WS payloads",
+      appSrc.includes("if (Array.isArray(msg.todayEnergy)) {") &&
+        !appSrc.includes("if (Array.isArray(msg.todayEnergy) && msg.todayEnergy.length) {"),
+    );
   } catch (e) {
     results.push("ERROR: " + e.message);
   }
