@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.0
+- **Repo/package version baseline:** 2.4.1
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.1 Changes - Dense Grid Card Auto-Height and Table Compaction (2026-03-15)
+- **Dense inverter-grid cards now collapse to real content height:** in `5`, `6`, and `7` column layouts the inverter cards no longer keep a fixed blank lower area once the node table is shorter than the old card frame.
+- **Dense-grid table spacing was compacted without shrinking text:** the node-table header/row heights, cell padding, indicator spacing, and control-cell padding were tightened while leaving the existing font scale intact.
+- **Dense-grid width regression was corrected before release:** the temporary `flex: 0 0 auto` wrapper override caused the node table to resolve to an absurd width and visually blank the rows; the final shipped fix keeps the wrapper at `width: 100%` so the table tracks the card width again.
+- **Smoke validation:** the live Electron Playwright smoke (`server/tests/electronUiSmoke.spec.js`) passed after the dense-grid CSS changes.
 
 ## v2.4.0 Changes - Plant Cap, Remote Proxying, and Forecast/UI Refinements (2026-03-14)
 - **Plant output cap controller added:** the Inverters page now has a gateway-side plant-wide MW cap workflow with upper/lower MW banding, whole-inverter sequential stop/start decisions, exemption lists, preview/status reporting, authorization, and controller-owned release handling.
@@ -130,8 +136,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.0`
-- Current repo/package baseline: `v2.4.0`
+- Current latest published GitHub release: `v2.4.1`
+- Current repo/package baseline: `v2.4.1`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

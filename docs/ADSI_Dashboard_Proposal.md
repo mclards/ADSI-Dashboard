@@ -1,7 +1,7 @@
 # ADSI Inverter Dashboard Proposal
 
 This file contains the updated presentation copy for [ADSI_Dashboard_Proposal.pptx](d:/ADSI-Dashboard/ADSI_Dashboard_Proposal.pptx). The wording has been revised to be more professional, concise, and easier for non-technical audiences to understand.
-This copy is aligned with the current `v2.4.0` project baseline.
+This copy is aligned with the current `v2.4.1` project baseline.
 
 ## Slide 1: Cover
 
