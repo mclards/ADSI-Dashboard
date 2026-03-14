@@ -139,6 +139,13 @@ LEGACY_IPCONFIG_PATHS = [
     Path.cwd() / "ipconfig.json",
 ]
 AUTORESET_PATH = PROGRAMDATA_DIR / "autoreset.json"
+SERVICE_STOP_FILE_RAW = str(
+    os.getenv("IM_SERVICE_STOP_FILE")
+    or os.getenv("ADSI_SERVICE_STOP_FILE")
+    or ""
+).strip()
+SERVICE_STOP_FILE = Path(SERVICE_STOP_FILE_RAW) if SERVICE_STOP_FILE_RAW else None
+SERVICE_STOP_POLL_SEC = 0.25
 
 DEFAULT_INTERVAL  = 0.05   # default poll interval per inverter
 MIN_POLL_INTERVAL = 0.05   # keep poll cadence close to configured interval
@@ -177,6 +184,28 @@ executor = ThreadPoolExecutor(max_workers=16)
 WRITE_WAIT_TIMEOUT_MIN_SEC = 8.0
 WRITE_WAIT_TIMEOUT_MAX_SEC = 20.0
 WRITE_QUEUE_SLOT_SEC = 1.5
+
+
+def service_stop_requested():
+    try:
+        return bool(SERVICE_STOP_FILE and SERVICE_STOP_FILE.exists())
+    except Exception:
+        return False
+
+
+def clear_service_stop_file():
+    if not SERVICE_STOP_FILE:
+        return
+    try:
+        SERVICE_STOP_FILE.unlink(missing_ok=True)
+    except TypeError:
+        try:
+            if SERVICE_STOP_FILE.exists():
+                SERVICE_STOP_FILE.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _resolve_future_threadsafe(loop, fut, value):
@@ -692,8 +721,6 @@ async def read_fast_async(client, unit, ip):
 
     return {
         "ts":       int(time.time() * 1000),
-        "kwh_high": reg(0),
-        "kwh_low":  reg(1),
         "alarm":    reg(7),
         "vdc":      reg(8),
         "idc":      reg(9),
@@ -938,7 +965,6 @@ async def ipconfig_watcher():
 
 metrics_state = {
     "pacEnergy":        {},   # nk -> {lastPacRaw, lastPacChangeTime, lastTime, totalWh, date}
-    "energyData":       {},   # nk -> {prevkWh, actualkWh, date}
     "pdcData":          {},   # nk -> {lastPdcRaw}
     "uiAlarm":          {},   # nk -> {AlarmValue, AlarmText}
     "lastUpdate":       {},   # nk -> timestamp ms
@@ -975,31 +1001,10 @@ def _update_metrics_from_frame(frame: dict):
     pac_cand = pac_reg * 10 if pac_reg * 10 <= 260_000 else 0
     pac_raw  = 0.0 if (vdc == 0 or idc == 0) else pac_cand
 
-    # Register kWh
-    hi = int(frame.get("kwh_high") or 0) & 0xFFFF
-    lo = int(frame.get("kwh_low")  or 0) & 0xFFFF
-    current_kwh = ((hi << 16) & 0xFFFFFFFF) + lo
-
     y  = frame.get("year")   or 0
     mo = frame.get("month")  or 0
     dy = frame.get("day")    or 0
     formatted_date = f"{y}-{_pad2(mo)}-{_pad2(dy)}" if y else time.strftime("%Y-%m-%d")
-
-    ed = ms["energyData"].get(nk)
-    if not ed:
-        ms["energyData"][nk] = {
-            "prevkWh": current_kwh, "firstkWh": current_kwh,
-            "actualkWh": 0.0, "date": formatted_date,
-        }
-    else:
-        if ed["date"] != formatted_date or current_kwh < ed["prevkWh"]:
-            ed.update({"prevkWh": current_kwh, "firstkWh": current_kwh,
-                        "actualkWh": 0.0, "date": formatted_date})
-        else:
-            diff = current_kwh - ed["prevkWh"]
-            if diff >= 0:
-                ed["actualkWh"] = round(ed["actualkWh"] + diff, 6)
-            ed["prevkWh"] = current_kwh
 
     pe = ms["pacEnergy"].get(nk)
     if not pe:
@@ -1036,7 +1041,7 @@ def _update_metrics_from_frame(frame: dict):
 def _build_metrics() -> list:
     """
     Replicates the Node-RED ENGINE NODE output exactly.
-    Returns list of dicts: Inverter, Module, Pac, Pdc, kWh, kWh_Pac,
+    Returns list of dicts: Inverter, Module, Pac, Pdc,
                            ONLINE, AlarmValue, Alarm, on_off, Date, Time
     """
     ms  = metrics_state
@@ -1078,9 +1083,6 @@ def _build_metrics() -> list:
         display_pac = 0.0 if (not online or pac_frozen) else pac_raw
         display_pdc = 0.0 if (not online or pac_frozen) else pdc_raw
 
-        reg_kwh = ms["energyData"].get(nk, {}).get("actualkWh", 0.0)
-        kwh_pac = pe.get("totalWh", 0.0) / 1000.0
-
         alarm_info = ms["uiAlarm"].get(nk, {"AlarmValue": 0, "AlarmText": "00000H"})
 
         lt  = pe.get("lastTime", now)
@@ -1095,8 +1097,6 @@ def _build_metrics() -> list:
             "Time":       time_str,
             "Pac":        round(display_pac, 2),
             "Pdc":        round(display_pdc, 2),
-            "kWh":        round(reg_kwh, 3),
-            "kWh_Pac":    round(kwh_pac, 3),
             "ONLINE":     online,
             "lastUpdate": last_seen,
             "AlarmValue": alarm_info.get("AlarmValue", 0),
@@ -1127,7 +1127,7 @@ def get_metrics():
     """
     Return processed inverter metrics — mirrors Node-RED engine output.
     Fields per node: Inverter, Module, Date, Time, Pac(W), Pdc(W),
-                     kWh, kWh_Pac, ONLINE, AlarmValue, Alarm, on_off
+                     ONLINE, AlarmValue, Alarm, on_off
     """
     return _build_metrics()
 
@@ -1202,6 +1202,7 @@ async def main():
     if os.name == "nt":
         free_engine_port()
 
+    clear_service_stop_file()
     load_autoreset_config()
     auto_reset_state.clear()
 
@@ -1219,7 +1220,27 @@ async def main():
         access_log=False,
     )
     server = uvicorn.Server(config)
-    await server.serve()
+    stop_task = None
+    try:
+        if SERVICE_STOP_FILE is not None:
+            async def watch_service_stop():
+                while not server.should_exit:
+                    if service_stop_requested():
+                        print("[ENGINE] Soft stop requested - shutting down...")
+                        server.should_exit = True
+                        return
+                    await asyncio.sleep(SERVICE_STOP_POLL_SEC)
+
+            stop_task = asyncio.create_task(watch_service_stop())
+        await server.serve()
+    finally:
+        if stop_task is not None:
+            stop_task.cancel()
+            try:
+                await stop_task
+            except asyncio.CancelledError:
+                pass
+        clear_service_stop_file()
 
 
 if __name__ == "__main__":

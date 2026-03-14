@@ -4,11 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ADSI Inverter Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <script src="/vendor/chart.umd.min.js"></script>
     <link
       rel="stylesheet"
@@ -36,13 +31,13 @@
 
         <div class="tb-metrics-center">
           <div class="metric-pill">
-            <div class="metric-label">TOTAL PAC</div>
+            <div class="metric-label">TOTAL POWER OUTPUT (Pac)</div>
             <div class="metric-value" id="totalPac" aria-live="polite">
               —<span class="unit">kW</span>
             </div>
           </div>
           <div class="metric-pill">
-            <div class="metric-label">TODAY MWh</div>
+            <div class="metric-label">TOTAL ENERGY GENERATED</div>
             <div class="metric-value" id="totalKwh" aria-live="polite">
               —<span class="unit">MWh</span>
             </div>
@@ -196,6 +191,16 @@
                 <option value="7">7 Columns</option>
               </select>
             </label>
+            <button
+              id="btnPlantCapToolbarToggle"
+              class="btn btn-outline btn-xs inv-toolbar-cap-toggle"
+              type="button"
+              aria-controls="plantCapPanel"
+              aria-expanded="false"
+              title="Show plant output cap panel"
+            >
+              Show Cap
+            </button>
           </div>
           <div class="tl-center pac-legend-wrap">
             <span class="pac-leg"><span class="pac-leg-ind pac-leg-high"></span>&#x2265;90%&nbsp;High</span>
@@ -723,10 +728,10 @@
 
           <div class="exp-card">
             <div class="exp-icon exp-icon-report"><span class="mdi mdi-chart-timeline-variant" aria-hidden="true"></span></div>
-            <div class="exp-title">Day-Ahead Comparison Export</div>
+            <div class="exp-title">Day-Ahead Forecast Export</div>
             <div class="exp-desc">
-              Interval-based comparison between measured plant energy and the
-              approved day-ahead forecast for the selected date.
+              Export either the standard day-ahead comparison workbook or the
+              clean average-table day-ahead forecast for the selected date.
             </div>
             <div class="exp-form">
               <label
@@ -743,6 +748,13 @@
                 </select>
               </label>
               <label
+                >Export Format
+                <select id="expForecastExportFormat" class="sel">
+                  <option value="standard" selected>Standard</option>
+                  <option value="average-table">Average Table</option>
+                </select>
+              </label>
+              <label
                 >Format
                 <select id="expForecastFormat" class="sel">
                   <option value="xlsx" selected>Excel (.xlsx)</option>
@@ -756,7 +768,7 @@
                 class="btn btn-accent btn-full"
                 type="button"
               >
-                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Day-Ahead Comparison</span>
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Day-Ahead Forecast</span>
               </button>
               <button id="btnCancelForecastExport" class="btn btn-outline exp-cancel-btn" type="button" disabled>
                 <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
@@ -1140,6 +1152,24 @@
                 <small>Short pause between register groups to reduce device communication pressure.</small>
               </div>
             </div>
+            <div class="settings-subsection plant-cap-settings-subsection">
+              <div class="settings-subtitle">Plant Output Cap Defaults</div>
+              <div class="srow">
+                <label title="Default upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">Upper Limit (MW)<input type="number" id="setPlantCapUpperMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default upper MW threshold for plant output capping." /></label>
+                <label title="Default lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">Lower Limit (MW)<input type="number" id="setPlantCapLowerMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default lower MW threshold for safe restart decisions." /></label>
+                <label title="Default candidate selection mode. Exemption skips the listed inverter numbers and uses ascending order for the remaining inverters.">Sequence
+                  <select id="setPlantCapSequenceMode" class="sel" title="Choose the default selection mode for automatic stop decisions.">
+                    <option value="ascending">Ascending</option>
+                    <option value="descending">Descending</option>
+                    <option value="exemption">Exemption</option>
+                  </select>
+                </label>
+                <label id="setPlantCapSequenceCustomWrap" hidden title="Default exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">Exempted Inverter Numbers<input type="text" id="setPlantCapSequenceCustom" class="inp inp-lg" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." /></label>
+                <label title="Default cooldown or settling time in seconds after each stop or restart action.">Cooldown (s)<input type="number" id="setPlantCapCooldownSec" class="inp inp-sm" min="5" max="600" step="1" inputmode="numeric" title="Default settling time in seconds after each controller action." /></label>
+              </div>
+              <small title="These settings are saved as the default plant cap band, selection mode, exemption list, and cooldown for the live controller.">Saved here as the default band and selection mode for the live Plant Output Cap controller. Tight bands can cause whole-inverter stop/start hunting.</small>
+              <div id="setPlantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the saved default cap band, node mix, and exemption list."></div>
+            </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
             <div class="sgroup-title"><span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span> Connectivity &amp; Sync</div>
@@ -1302,6 +1332,9 @@
                 </button>
                 <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Download the gateway database for local standby use. Requires restart to apply.">
                   Refresh Standby DB
+                </button>
+                <button id="btnCancelReplicationJob" class="btn btn-outline rep-cancel-btn" type="button" title="Force-cancel the current standby DB refresh and clean up staged partial transfer files." disabled>
+                  Force Cancel
                 </button>
                 <span class="smsg" id="replicationMsg"></span>
               </div>

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.3.15` in `package.json`
+- Current repo version baseline: `2.4.0` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -21,6 +21,32 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 
 Do not casually rename updater identifiers. Visible branding may change, but old installed versions must still detect updates unless a deliberate migration is implemented.
 Do not treat hardcoded footer/about version strings as source of truth. `package.json` is the repo version source of truth, and deployed server/runtime versions may legitimately lag it.
+
+## Default Credentials and Access Keys
+
+Internal note. Keep this aligned with the actual implementation and do not mirror it into public docs unless explicitly requested.
+
+- Login default username: `admin`
+- Login default password: `1234`
+- Login admin auth key for credential change/reset: `ADSI-2026`
+- Login reset behavior: `ADSI-2026` restores `admin` / `1234`
+- Bulk selected inverter control auth key: `sacupsMM`
+  - `MM` is the current minute
+  - previous minute is also accepted
+  - applies only to `START SELECTED` / `STOP SELECTED`
+  - per-node and per-inverter controls remain unauthenticated
+- Topology and IP Configuration auth gate key: `adsiM` or `adsiMM`
+  - current minute in unpadded or zero-padded form
+  - IP Configuration gate keeps a 1-hour window session
+  - Topology gate keeps a 10-minute window session
+- No built-in default exists for:
+  - remote gateway API token
+  - Solcast API/toolkit credentials
+  - OneDrive / Google Drive OAuth credentials
+  - cloud-backup provider credentials
+- Secret handling rule:
+  - do not place live passwords or toolkit credentials in tracked markdown
+  - if the user explicitly wants a markdown record, keep it only in a git-ignored location such as `private/*.md`
 
 ## Repo Layout Rules
 
@@ -57,6 +83,31 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
   - `daily_report`
   - `daily_readings_summary`
   - alarms, audit, forecast, settings, and other operational tables
+
+### Current-Day Energy Authority
+
+- `TODAY MWh`, analytics `ACTUAL MWh`, and per-inverter `TODAY ENERGY` must be derived only from server-side `PAC x elapsed time`.
+- Do not treat Python/modbus register kWh, inverter lifetime-energy registers, or Python `/metrics` energy fields as authoritative for current-day energy totals.
+- For this area, Python is only the raw telemetry source; Node owns current-day energy computation, persistence, summary generation, and UI/export authority.
+- Keep current-day display, analytics, and export totals aligned by using the same Node-computed current-day snapshot backed by persisted `energy_5min` plus live PAC supplement rows.
+- If Python ever exposes energy-like diagnostics again, keep them explicitly non-authoritative unless the project rule is deliberately changed.
+
+### Solar Window Persistence Rule
+
+- Polling continues outside the solar window so live plant visibility and alarm detection remain available.
+- Raw poll persistence for `readings` and `energy_5min` must remain inside the solar window only.
+- Shutdown flush behavior must obey the same solar-window gate; do not write off-window raw telemetry during graceful exit.
+- Alarm and audit persistence remain operationally independent from the solar-window raw-telemetry rule.
+
+### Alarm Episode and Sound Rules
+
+- Alarm audio must ignore short alarm occurrences that clear in under 5 seconds.
+- Sound is tied to a sustained unacknowledged active alarm episode, not every individual alarm-value mutation.
+- If a node already has an active nonzero alarm and a new nonzero alarm value is added or changed on that same node, treat it as the same active episode:
+  - update the existing active alarm row in place
+  - preserve its acknowledged state
+  - do not emit a fresh raise event just because the active bitmask changed
+  - do not retrigger the alarm sound
 
 ### SQLite Performance Rules
 
@@ -97,6 +148,9 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Manual `Pull` is download-only: check for local-newer data and stop with `LOCAL_NEWER_PUSH_FAILED` if found — never push as a side effect. If allowed, stage the gateway `adsi.db` for restart-safe local replacement so stale remote state is removed.
 - Manual `Push` is upload-only: send local hot-data delta (and optionally archive files) to the gateway. Push must not pull the gateway DB back or stage a local DB replacement. Push does not require restart.
 - If local data is newer before a manual pull, return `LOCAL_NEWER_PUSH_FAILED` and allow `Force Pull` only on explicit operator choice.
+- The local-newer manual-pull guard must compare replicated operational data only. Local-only remote-client `settings` drift must not trigger `LOCAL_NEWER_PUSH_FAILED`.
+- Manual-pull preflight must finish before pausing the live stream or starting any main-DB or archive transfer. A blocked pull should fail fast and stay low-impact on the gateway.
+- If the operator explicitly chooses `Force Pull`, reuse the successful preflight when available and skip redundant gateway-summary round trips so standby refresh adds the minimum extra load to the gateway.
 - Use chunked push uploads to avoid HTTP `413`.
 - Protect local-only settings during merge/import.
 - Startup and live remote sync should stay incremental/LWW.
@@ -120,6 +174,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
   - if an archive replacement is staged, archive manifest and archive download logic must expose the staged version immediately so follow-up sync decisions see the newest content
   - manual pull/push messaging must state that staged archive DB changes apply after restart
   - bounded parallel archive transfer must still keep transfer-monitor progress accurate and failure handling deterministic
+- Any failed or cancelled standby pull must discard staged main-DB and archive replacement manifests plus temp downloads immediately. Do not leave pending replacements behind after a bad transfer.
 
 ## UX and Theming Rules
 
@@ -131,6 +186,14 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Any non-obvious or icon-only control should expose short hover help, tooltip text, or helper text.
 - Do not hide critical safety or destructive behavior behind hover-only messaging.
 - Keep analytics quick actions close to the chart they affect. The day-ahead generator area should keep `Generate` and `Export` together, and the quick export should use the currently selected analytics date and interval.
+
+### Inverter Card UI Baseline
+
+- Keep the inverter card hierarchy explicit: `INVERTER XX` title first, compact `Pdc` / `Pac` summary second, node-table data third.
+- The PAC strip should remain short: left side keeps horizontal card `Start` / `Stop`, right side uses separate inline `Pdc:` and `Pac:` cells without a `|` separator.
+- Do not let node-table typography visually outrank the PAC summary totals.
+- PAC legend indicators are fixed signal colors across `dark`, `light`, and `classic`: green, yellow, orange, red, and blinking red for alarm.
+- After inverter-card CSS/HTML changes, run the live Electron Playwright smoke before handoff.
 
 ### Scrollable Page Body Pattern
 
@@ -154,23 +217,27 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Always bump `package.json` version before every EXE release build.
 - Keep visible version text aligned with `package.json`.
 - Keep `SKILL.md`, `CLAUDE.md`, and `MEMORY.md` aligned with the current released version whenever a release baseline changes.
+- Always update the markdown docs after the latest release is published so version baselines, release workflow notes, and recent-change records stay current.
 - Keep default plant-name fallbacks aligned with the current baseline: `ADSI Plant`.
 - Preserve updater compatibility:
   - app ID stays `com.engr-m.inverter-dashboard`
   - GitHub repo stays `mclards/ADSI-Dashboard`
-  - release asset names stay:
+  - release asset name stays compatible:
     - `Inverter-Dashboard-Setup-<version>.exe`
-    - `Inverter-Dashboard-Portable-<version>.exe`
 - Keep Windows build icon usage aligned with `icon-256.png`.
 - If visible branding changes, audit header, about, footer, and build metadata together.
 - Never ship a release when the repo docs still describe an older baseline or older runtime behavior.
-- When the user says `publish release`, Claude should execute the release workflow directly:
-  - build artifacts if needed
+- When the user says `publish release` or `publish latest release`, Claude should execute the release workflow directly:
+  - rebuild only the affected program EXEs if needed
+  - build installer artifacts
   - create or upload the GitHub release itself
   - do not stop at providing commands unless auth, permissions, or network access prevent publishing
 - If publishing is blocked, report the exact blocker and then provide only the minimum command(s) the user needs to run.
 - Push the release commit and release tag before creating the GitHub release so the published tag resolves to the intended commit.
 - If a GitHub release create/upload call times out, inspect GitHub release state before retrying. Do not blindly rerun release creation and risk duplicate or broken draft state.
+- Default `publish latest release` behavior:
+  - publish installer assets to GitHub
+  - do not expect or publish a portable EXE from the current package config
 
 ## Storage and Compatibility Paths
 
@@ -183,8 +250,17 @@ Preserve these unless a deliberate migration is implemented:
 - Server and export root: `C:\ProgramData\InverterDashboard`
 - Archive root: `C:\ProgramData\InverterDashboard\archive`
 - Default export path: `C:\Logs\InverterDashboard`
-- Portable data root: `<portable exe dir>\InverterDashboardData`
+- Forecast analytics export subfolder: `C:\Logs\InverterDashboard\All Inverters\Forecast\Analytics`
+- Forecast Solcast export subfolder: `C:\Logs\InverterDashboard\All Inverters\Forecast\Solcast`
+- Forecast export policy: both `Standard` and `Average Table` analytics day-ahead exports belong under `...\Forecast\Analytics`; legacy flat `...\Forecast\<file>` results should be relocated into the matching forecast subfolder automatically.
+- Legacy portable data root for older deployments only: `<portable exe dir>\InverterDashboardData`
 - Cloud provider folder: `InverterDashboardBackups`
+
+## Windows Elevation Rule
+
+- The installed Windows app executable must keep `requestedExecutionLevel = requireAdministrator` in `package.json`.
+- Treat this as executable-manifest policy, not a shortcut-only preference. The built installed app should always launch elevated by default.
+- If this is changed later, call out the operational impact on device access, local service control, and protected-path writes.
 
 ## Operating Modes
 
@@ -206,6 +282,22 @@ Preserve these unless a deliberate migration is implemented:
   - may run local remote-side utilities such as Solcast toolkit test / preview / export
   - switching from remote to gateway warns about stale local DB and should prefer `Refresh Standby DB` plus restart before local gateway use
   - mode changes should stay guarded until the target runtime is actually ready: first remote live snapshot for `remote`, first local poll cycle for `gateway`
+  - switching to `gateway` must immediately stop upstream gateway traffic: abort any in-flight remote live/chat/today-energy fetches, close the remote live WebSocket, and stop remote chat polling so the local gateway does not keep listening to another gateway device
+  - manual standby pull must stay low-impact on the gateway: reuse the cached main-DB snapshot inside its TTL, avoid forcing a raw-reading day-summary rebuild on every `/api/replication/main-db` request, and keep priority archive pull concurrency at a single file unless there is a measured reason to raise it
+  - if a standby pull is blocked by newer local replicated data, fail before the live stream pause and before any heavyweight gateway transfer starts
+
+## Plant Output Cap Rules
+
+- Plant output cap control executes on the `gateway` only. Do not run the controller loop locally on a `remote` workstation.
+- In `remote` mode, `/api/plant-cap/status`, `/api/plant-cap/preview`, `/api/plant-cap/enable`, `/api/plant-cap/disable`, and `/api/plant-cap/release` should proxy to the gateway.
+- The Inverters-page `Show Cap` toggle must stay usable in `remote` mode because operators still need to inspect status and invoke proxied plant-cap actions.
+- If a remote operator sees `404` or `Cannot POST /api/plant-cap/...`, assume an outdated gateway build or a wrong `Remote Gateway URL` / upstream target before changing client logic.
+- The current planner is whole-inverter sequential control only.
+- Use live inverter `Pac` as the primary shed estimate, and scale the `997.0 kW` rated plus `917.0 kW` dependable baselines by enabled node count for plant-cap planning and stability warnings.
+- Exempted inverter numbers must be excluded from automatic stop selection and controllable-step math.
+- Only controller-owned stopped inverters may be auto-started again. Manual operator stops remain manual.
+- The plant-cap panel defaults collapsed behind the inverter-toolbar `Show Cap` button.
+- Plant-cap UI must use shared theme tokens in `dark`, `light`, and `classic`, and plant-cap controls, metrics, warnings, and preview headers should expose hover descriptions.
 
 ## Operator Messaging
 
@@ -271,11 +363,13 @@ Run from repo root:
 ```powershell
 npm run rebuild:native:electron
 npm run build:installer
-npm run build:portable
 ```
 
 - Before every release build, clean the workspace `release/` folder so old EXEs, blockmaps, unpacked folders, and transient build leftovers do not accumulate.
-- After publishing the latest release, remove prior build leftovers from `release/` and keep only the current release assets when they still need to remain local.
+- `npm run build:win` and `npm run build:installer` are both installer-only.
+- After publishing the latest release, remove prior build leftovers from `release/` and keep only the current installer release assets locally by default.
+- Clean installer builds must not embed workstation-local runtime state. Do not package `adsi.db`, `archive/`, `auth/`, `cloud_backups/`, Chromium cache/storage folders, or customer exports into the app build.
+- After a clean local installer build, `release/` should contain only the installer EXE, blockmap, and `latest.yml`. Move or remove transient build folders such as `win-unpacked` and `.icon-ico` from `release/`.
 
 Useful checks after JS edits:
 
@@ -294,13 +388,26 @@ node --check electron/preload.js
 - Address actionable build warnings.
 - Do not over-fix non-fatal electron-builder dependency-scanner warnings when artifacts build successfully.
 
+## Runtime Shutdown and Update Install Rule
+
+- Normal quit, restart, license-expiry shutdown, and `Restart & Install` must use one coordinated shutdown path.
+- Do not reintroduce unconditional child-process `taskkill` during restart/update flows. Electron must request a soft stop first and only force-kill as a bounded fallback.
+- The shutdown/update contract is:
+  - Electron writes a per-service stop file and passes both `IM_SERVICE_STOP_FILE` and `ADSI_SERVICE_STOP_FILE` env vars to child services.
+  - The inverter backend must honor the stop file and exit `uvicorn` cleanly.
+  - The forecast service must honor the stop file during loop sleeps and before write-heavy forecast steps.
+  - Force-kill is allowed only after the bounded grace window expires.
+- This protects against stale forecast/runtime state and partial child-service writes during restart or updater install.
+
 ## Service EXE Build Rule
 
 - `npm run build:win` only packages the existing `dist/InverterCoreService.exe` and `dist/ForecastCoreService.exe`. It does not rebuild them.
+- `npm run build:win` is installer-only and should produce the same artifact set as `npm run build:installer`.
 - `better-sqlite3` is runtime-ABI specific:
   - use `npm run rebuild:native:node` before direct shell-Node checks that load `server/db.js`
   - use `npm run rebuild:native:electron` before Electron run/build/release workflows
   - **After any Node-ABI smoke test, always run `npm run rebuild:native:electron`** before launching or building the Electron app. The smoke test rebuilds `better-sqlite3` for plain Node (different ABI), which breaks Electron until restored.
+  - if desktop startup reports a `NODE_MODULE_VERSION` mismatch for `better-sqlite3`, fix it with `npm run rebuild:native:electron`
 - Some shells in this workspace export `ELECTRON_RUN_AS_NODE=1`.
   - Direct `electron.exe ...` launches and Playwright/Electron probes will behave like plain Node unless that env var is removed.
   - This can produce misleading errors such as `Unable to find Electron app ...`.
@@ -309,18 +416,40 @@ node --check electron/preload.js
   - backend / DB / replication / archive changes: isolated server smoke test
   - Electron shell / preload / startup / packaging-sensitive changes: live Electron startup smoke test
 - Browser-side / live Electron UI verification is available via:
-  - `npx playwright test server/tests/electronUiSmoke.spec.js --reporter=line`
+  - `Push-Location server/tests`
+  - `npx playwright test electronUiSmoke.spec.js --reporter=line`
+  - `Pop-Location`
+  - Run the Playwright smoke from `server/tests` so duplicate scratch specs under `.tmp/` do not get discovered.
   - This smoke covers dashboard metrics, the Energy Summary Export single-date UI, and Settings connectivity health in the real Electron window.
+- Gateway metric authority changes (`TODAY MWh`, `ACTUAL MWh`, WS/HTTP fallback, analytics summary reconciliation) require this exact smoke sequence:
+  - `npm run rebuild:native:node`
+  - `node server/tests/smokeGatewayLink.js`
+  - `node server/tests/modeIsolation.test.js`
+  - `npm run rebuild:native:electron`
+  - `Push-Location server/tests`
+  - `npx playwright test electronUiSmoke.spec.js --reporter=line`
+  - `Pop-Location`
+- `server/tests/modeIsolation.test.js` proves the mode handoff contract:
+  - `remote` mode must open the upstream gateway live WebSocket and chat polling transport
+  - switching back to `gateway` must close that WebSocket and stop upstream chat polling/fetches immediately
+- Restart/update shutdown changes touching `electron/main.js`, `services/inverter_engine.py`, or `services/forecast_engine.py` require:
+  - `node server/tests/serviceSoftStopSource.test.js`
+  - `npm run rebuild:native:electron`
+  - the Electron Playwright smoke if startup/update behavior or packaging was touched
 - Inverter detail panel rule:
   - Do not block initial detail rendering on the 7-day `/api/report/daily` history fetch.
   - Stats and alarms should render first; recent-history loading must be best-effort and bounded by a timeout.
 - Whenever changes are made to `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `drivers/modbus_tcp.py`, or either PyInstaller spec, rebuild the affected Python service EXE in `dist/` before any Electron build or release.
+- Rebuild only the changed service EXE by default:
+  - inverter-service changes -> rebuild `dist/InverterCoreService.exe`
+  - forecast-service changes -> rebuild `dist/ForecastCoreService.exe`
+  - shared changes that affect both services -> rebuild both EXEs
 - If both Python services changed, rebuild both EXEs first, then run the Electron build.
 - Do not publish or hand off app EXEs if they were built against stale Python service binaries.
 - Release hygiene still applies: clean `release/` before building and remove prior release leftovers after publish.
 - Do not assume release-folder cleanup worked. Verify the `release/` folder contents before and after build/publish.
-- The post-publish `release/` folder should contain only:
+- The default post-publish `release/` folder should contain only:
   - `Inverter-Dashboard-Setup-<version>.exe`
   - `Inverter-Dashboard-Setup-<version>.exe.blockmap`
-  - `Inverter-Dashboard-Portable-<version>.exe`
   - `latest.yml`
+- For `publish latest release`, upload only the installer EXE, blockmap, and `latest.yml` to GitHub.

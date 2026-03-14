@@ -436,11 +436,130 @@ function normalizeXlsxCellValue(value, header = null) {
   return { value: value ?? '', numFmt: null };
 }
 
+const XLSX_THEME = {
+  headerFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF24435C' },
+  },
+  headerFont: {
+    bold: true,
+    color: { argb: 'FFFFFFFF' },
+  },
+  headerBorder: {
+    top: { style: 'thin', color: { argb: 'FF1B3145' } },
+    left: { style: 'thin', color: { argb: 'FF1B3145' } },
+    bottom: { style: 'medium', color: { argb: 'FF1B3145' } },
+    right: { style: 'thin', color: { argb: 'FF1B3145' } },
+  },
+  cellBorder: {
+    top: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    left: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    bottom: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    right: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+  },
+  altRowFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF7FAFD' },
+  },
+  summaryMetricFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFEAF1F8' },
+  },
+  summaryValueFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFCFDFE' },
+  },
+  highlightFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF2CC' },
+  },
+  separatorFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF2F4F7' },
+  },
+};
+
+function setWorkbookMetadata(wb, title = 'ADSI Dashboard Export') {
+  if (!wb) return;
+  wb.creator = 'ADSI Inverter Dashboard';
+  wb.lastModifiedBy = 'ADSI Inverter Dashboard';
+  wb.created = new Date();
+  wb.modified = new Date();
+  wb.subject = title;
+  wb.company = 'ADSI Plant';
+}
+
+function columnNumberToLetter(colNumber) {
+  let n = Math.max(1, Number(colNumber || 1));
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+function isBlankXlsxRow(row, keys) {
+  return keys.every((key) => String(row?.[key] ?? '').trim() === '');
+}
+
+function isHighlightXlsxRow(row, keys, options = {}) {
+  if (options?.worksheetKind === 'summary') return false;
+  return keys.some((key) => /^(TOTAL|DAY TOTAL|SUBTOTAL)$/i.test(String(row?.[key] ?? '').trim()));
+}
+
+function isSummaryHighlightMetric(metricLabel) {
+  return /(total|variance|absolute error|wape|mean ape|peak interval|data rows)/i.test(
+    String(metricLabel || '').trim(),
+  );
+}
+
+function inferXlsxColumnWidth(value, header, options = {}) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '');
+  const needsWideText = /(description|message|notes?|reason|status|path|url|range|label|site|operator|plant)/i.test(label);
+  const maxWidth = needsWideText ? 72 : 44;
+  const minWidth = options?.worksheetKind === 'summary' ? 16 : 10;
+  return Math.min(maxWidth, Math.max(minWidth, raw.length + 2, label.length + 2));
+}
+
+function inferXlsxCellAlignment(value, header, options = {}) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '').trim();
+  const isNumeric = typeof value === 'number' || XLSX_NUMERIC_RE.test(raw);
+  if (options?.worksheetKind === 'summary' && label === 'Metric') {
+    return { horizontal: 'left', vertical: 'middle' };
+  }
+  if (!raw) {
+    return { horizontal: 'center', vertical: 'middle' };
+  }
+  if (isNumeric) {
+    return { horizontal: 'right', vertical: 'middle' };
+  }
+  if (/(date|time|period|duration|status|severity|resolution|unit|node|inverter|plant|operator|acknowledged|window)/i.test(label)) {
+    return { horizontal: 'center', vertical: 'middle' };
+  }
+  return { horizontal: 'left', vertical: 'middle' };
+}
+
+function shouldWrapXlsxCell(value, header) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '');
+  return /(description|message|notes?|reason|path|url|range)/i.test(label) && raw.length > 28;
+}
+
 async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
   const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
   const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
   const widths = labels.map((label) =>
-    Math.min(64, Math.max(10, String(label ?? '').length + 2)),
+    inferXlsxColumnWidth(label, label, options),
   );
   const ws = wb.addWorksheet(String(sheetName || 'Export').slice(0, 31), {
     views: [{ state: 'frozen', ySplit: Number(options?.freezeHeader ? 1 : 0) }],
@@ -449,20 +568,36 @@ async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
   ws.columns = keys.map((key, idx) => ({
     key,
     width: widths[idx],
-    style: { alignment: { horizontal: 'center', vertical: 'middle' } },
+    style: { alignment: { horizontal: 'left', vertical: 'middle' } },
   }));
+  ws.properties.defaultRowHeight = 20;
+  if (options?.autoFilter !== false && keys.length > 0) {
+    ws.autoFilter = `A1:${columnNumberToLetter(keys.length)}1`;
+  }
 
   const headerRow = ws.addRow(
     Object.fromEntries(keys.map((key, idx) => [key, labels[idx]])),
   );
-  headerRow.font = { bold: true };
-  headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+  headerRow.height = 22;
+  for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+    const cell = headerRow.getCell(colIdx + 1);
+    cell.font = XLSX_THEME.headerFont;
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.fill = XLSX_THEME.headerFill;
+    cell.border = XLSX_THEME.headerBorder;
+  }
   headerRow.commit();
 
+  let visibleRowCount = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] || {};
     const xlsxRow = {};
     const numFmts = new Map();
+    const blankSeparator = isBlankXlsxRow(row, keys);
+    const highlightRow = isHighlightXlsxRow(row, keys, options);
+    const summaryHighlight =
+      options?.worksheetKind === 'summary' &&
+      isSummaryHighlightMetric(row?.[keys[0]]);
     for (let colIdx = 0; colIdx < keys.length; colIdx++) {
       const key = keys[colIdx];
       const normalized = normalizeXlsxCellValue(row[key], headers[colIdx]);
@@ -472,16 +607,53 @@ async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
       }
     }
     const worksheetRow = ws.addRow(xlsxRow);
-    for (const [colIdx, numFmt] of numFmts.entries()) {
-      worksheetRow.getCell(colIdx).numFmt = numFmt;
-    }
-    worksheetRow.commit();
+    worksheetRow.height = blankSeparator ? 8 : 20;
+    const rowIsStriped =
+      !blankSeparator &&
+      !highlightRow &&
+      options?.worksheetKind !== 'summary' &&
+      visibleRowCount % 2 === 1;
     for (let colIdx = 0; colIdx < keys.length; colIdx++) {
-      const valueLen = String(row[keys[colIdx]] ?? '').length + 2;
-      if (valueLen > widths[colIdx]) {
-        widths[colIdx] = Math.min(64, Math.max(widths[colIdx], valueLen));
+      const cell = worksheetRow.getCell(colIdx + 1);
+      const header = headers[colIdx];
+      const value = xlsxRow[keys[colIdx]];
+      if (numFmts.has(colIdx + 1)) {
+        cell.numFmt = numFmts.get(colIdx + 1);
+      }
+      cell.border = XLSX_THEME.cellBorder;
+      cell.alignment = {
+        ...inferXlsxCellAlignment(value, header, options),
+        wrapText: shouldWrapXlsxCell(value, header),
+      };
+
+      if (blankSeparator) {
+        cell.fill = XLSX_THEME.separatorFill;
+      } else if (options?.worksheetKind === 'summary') {
+        if (summaryHighlight) {
+          cell.fill = XLSX_THEME.highlightFill;
+          cell.font = { bold: true };
+        } else if (colIdx === 0) {
+          cell.fill = XLSX_THEME.summaryMetricFill;
+          cell.font = { bold: true };
+        } else {
+          cell.fill = XLSX_THEME.summaryValueFill;
+        }
+      } else if (highlightRow) {
+        cell.fill = XLSX_THEME.highlightFill;
+        cell.font = { bold: true };
+      } else if (rowIsStriped) {
+        cell.fill = XLSX_THEME.altRowFill;
       }
     }
+
+    worksheetRow.commit();
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const inferredWidth = inferXlsxColumnWidth(row[keys[colIdx]], headers[colIdx], options);
+      if (inferredWidth > widths[colIdx]) {
+        widths[colIdx] = inferredWidth;
+      }
+    }
+    if (!blankSeparator) visibleRowCount += 1;
     if ((i + 1) % EXPORT_WRITE_YIELD_EVERY === 0) {
       await yieldToEventLoop();
     }
@@ -500,6 +672,7 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
     useStyles: true,
     useSharedStrings: false,
   });
+  setWorkbookMetadata(wb, options?.title || 'ADSI Dashboard Export');
 
   const summaryHeaders = Array.isArray(options?.summaryHeaders)
     ? options.summaryHeaders
@@ -513,7 +686,7 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
       options?.summarySheetName || 'Summary',
       summaryHeaders,
       summaryRows,
-      { freezeHeader: true },
+      { freezeHeader: true, autoFilter: false, worksheetKind: 'summary' },
     );
   }
 
@@ -522,7 +695,11 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
     options?.dataSheetName || 'Export',
     headers,
     rows,
-    { freezeHeader: true },
+    {
+      freezeHeader: true,
+      autoFilter: options?.autoFilter !== false,
+      worksheetKind: options?.worksheetKind || 'data',
+    },
   );
 
   await wb.commit();
@@ -548,6 +725,77 @@ const EXPORT_FOLDERS = {
   daily: 'Daily Report',
   forecast: 'Forecast',
 };
+const FORECAST_EXPORT_SUBFOLDERS = {
+  analytics: 'Analytics',
+  solcast: 'Solcast',
+};
+
+function normalizeForecastExportSubfolder(subFolder) {
+  const raw = String(subFolder || '').trim().toLowerCase();
+  if (raw === 'analytics') return FORECAST_EXPORT_SUBFOLDERS.analytics;
+  if (raw === 'solcast') return FORECAST_EXPORT_SUBFOLDERS.solcast;
+  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(String(subFolder || '').trim())) {
+    return String(subFolder || '').trim();
+  }
+  throw new Error(`[exporter] Invalid forecast export subfolder: "${subFolder}"`);
+}
+
+function isPathInsideBase(baseDir, targetPath) {
+  const base = path.resolve(String(baseDir || ''));
+  const target = path.resolve(String(targetPath || ''));
+  const rel = path.relative(base, target);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function rewriteForecastExportRelativePath(relativePath, subFolder) {
+  const normalizedSubFolder = normalizeForecastExportSubfolder(subFolder);
+  const parts = String(relativePath || '')
+    .trim()
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  if (!parts.length) return '';
+
+  const forecastRootIdx = parts.findIndex((part) => part === EXPORT_FOLDERS.forecast);
+  if (forecastRootIdx < 0) {
+    return path.normalize(parts.join(path.sep));
+  }
+
+  const nextPart = parts[forecastRootIdx + 1] || '';
+  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(nextPart)) {
+    parts[forecastRootIdx + 1] = normalizedSubFolder;
+  } else {
+    parts.splice(forecastRootIdx + 1, 0, normalizedSubFolder);
+  }
+  return path.normalize(parts.join(path.sep));
+}
+
+async function ensureForecastExportSubfolder(outPath, subFolder) {
+  const absolute = path.resolve(String(outPath || ''));
+  if (!absolute) throw new Error('[exporter] Forecast export path is missing.');
+
+  const base = path.resolve(
+    String(getSetting('csvSavePath', 'C:\\Logs\\InverterDashboard') || 'C:\\Logs\\InverterDashboard'),
+  );
+  if (!isPathInsideBase(base, absolute)) {
+    return absolute;
+  }
+
+  const relative = path.relative(base, absolute);
+  const targetRelative = rewriteForecastExportRelativePath(relative, subFolder);
+  const targetAbsolute = path.resolve(base, targetRelative);
+  if (!targetRelative || targetAbsolute === absolute) {
+    return absolute;
+  }
+
+  await fs.promises.mkdir(path.dirname(targetAbsolute), { recursive: true });
+  try {
+    await fs.promises.unlink(targetAbsolute);
+  } catch (err) {
+    if (String(err?.code || '').toUpperCase() !== 'ENOENT') throw err;
+  }
+  await fs.promises.rename(absolute, targetAbsolute);
+  return targetAbsolute;
+}
 
 function inverterFolderLabel(inverter) {
   if (!inverter || inverter === 'all') return 'All Inverters';
@@ -755,6 +1003,22 @@ function resolveExportDir(inverter, categoryFolder) {
   return target;
 }
 
+function resolveExportSubDir(inverter, categoryFolder, subFolder = '') {
+  const baseDir = resolveExportDir(inverter, categoryFolder);
+  const normalizedSubFolder = String(subFolder || '').trim();
+  if (!normalizedSubFolder) return baseDir;
+  if (normalizedSubFolder.includes('\\') || normalizedSubFolder.includes('/')) {
+    throw new Error(`[exporter] Invalid export subfolder: "${subFolder}"`);
+  }
+  const target = path.join(baseDir, normalizedSubFolder);
+  ensureDir(target);
+  return target;
+}
+
+function resolveForecastExportDir(subFolder) {
+  return resolveExportSubDir('all', EXPORT_FOLDERS.forecast, subFolder);
+}
+
 function readInverterIpMap() {
   try {
     const raw = JSON.parse(String(getSetting('ipConfigJson', '{}') || '{}'));
@@ -856,6 +1120,27 @@ function buildTodaySupplementMap(rowsRaw) {
   return out;
 }
 
+function buildAuthoritativeTodayRangeMap(startTs, rowsRaw) {
+  const todayMap = buildTodaySupplementMap(rowsRaw);
+  if (!todayMap.size) return todayMap;
+
+  const today = fmtDate(Date.now());
+  const dayStartTs = new Date(`${today}T00:00:00.000`).getTime();
+  const rangeStartTs = Number(startTs || 0);
+  if (!(rangeStartTs > dayStartTs)) return todayMap;
+
+  const beforeRangeMap = sumEnergy5minByInverterRange(
+    dayStartTs,
+    Math.max(dayStartTs, rangeStartTs - 1),
+  );
+  for (const [inv, totalKwh] of todayMap.entries()) {
+    const adjusted = Math.max(0, totalKwh - Number(beforeRangeMap.get(inv) || 0));
+    todayMap.set(inv, Number(adjusted.toFixed(6)));
+  }
+
+  return todayMap;
+}
+
 function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
@@ -864,7 +1149,6 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
   const mapped = [];
   const today = fmtDate(Date.now());
-  const supplementalTodayMap = buildTodaySupplementMap(options?.supplementalTodayRows);
   const rangeRows = invNum
     ? queryReadingsRange(invNum, s, e)
     : queryReadingsRangeAll(s, e);
@@ -886,7 +1170,11 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
     const dayRangeStart = Math.max(s, dayStart);
     const dayRangeEnd = Math.min(e, dayEnd);
     const authoritativeByInv = sumEnergy5minByInverterRange(dayRangeStart, dayRangeEnd);
-    if (day === today && dayRangeStart === dayStart && supplementalTodayMap.size) {
+    if (day === today) {
+      const supplementalTodayMap = buildAuthoritativeTodayRangeMap(
+        dayRangeStart,
+        options?.supplementalTodayRows,
+      );
       for (const [inv, totalKwh] of supplementalTodayMap.entries()) {
         authoritativeByInv.set(inv, Math.max(authoritativeByInv.get(inv) || 0, totalKwh));
       }
@@ -1253,7 +1541,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Daily Generation Report CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-async function exportDailyReport({ startTs, endTs, date, format }) {
+async function exportDailyReport({ startTs, endTs, date, format, rowsByDate }) {
   const dir = resolveExportDir('all', EXPORT_FOLDERS.daily);
   const { invCount } = readInverterConfig();
   const plantName = getSetting('plantName', 'ADSI Plant');
@@ -1262,7 +1550,10 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
   let s;
   let e;
   if (date) {
-    dbRows = stmts.getDailyReport.all(date);
+    const overrideRows = rowsByDate && typeof rowsByDate === 'object'
+      ? rowsByDate[date]
+      : null;
+    dbRows = Array.isArray(overrideRows) ? overrideRows : stmts.getDailyReport.all(date);
     s = new Date(`${date}T00:00:00`).getTime();
     e = s;
   } else {
@@ -1297,10 +1588,19 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
 
   for (let dayIdx = 0; dayIdx < reportDates.length; dayIdx++) {
     const d = reportDates[dayIdx];
+    const overrideRows = rowsByDate && typeof rowsByDate === 'object'
+      ? rowsByDate[d]
+      : null;
+    const overrideByInv = Array.isArray(overrideRows)
+      ? new Map(
+        overrideRows.map((row) => [Number(row?.inverter || 0), row]),
+      )
+      : null;
     const dayRows = [];
     for (let inv = 1; inv <= invCount; inv++) {
       const key = `${d}|${inv}`;
       dayRows.push(
+        (overrideByInv && overrideByInv.get(inv)) ||
         existing.get(key) || {
           date: d,
           inverter: inv,
@@ -1352,16 +1652,34 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
   const fileBase = exportDateAwareFileBase(s, e, 'all', 'Daily Report');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
-async function exportForecastActual({ startTs, endTs, format, resolution }) {
-  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+async function exportForecastActual({
+  startTs,
+  endTs,
+  format,
+  resolution,
+  exportFormat,
+  supplementalActualRows,
+}) {
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.analytics);
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
   const spec = normalizeEnergyResolution(resolution);
+  const extraActualRows = Array.isArray(supplementalActualRows)
+    ? supplementalActualRows
+    : [];
 
-  const actualRaw = queryEnergy5minRangeAll(s, e).map((r) => ({
-    ts: Number(r?.ts || 0),
-    kwh_inc: Number(r?.kwh_inc || 0),
-  })).filter((r) => isWithinSolarWindowTs(r.ts));
+  const actualRaw = queryEnergy5minRangeAll(s, e)
+    .map((r) => ({
+      ts: Number(r?.ts || 0),
+      kwh_inc: Number(r?.kwh_inc || 0),
+    }))
+    .concat(
+      extraActualRows.map((r) => ({
+        ts: Number(r?.ts || 0),
+        kwh_inc: Number(r?.kwh_inc || 0),
+      })),
+    )
+    .filter((r) => isWithinSolarWindowTs(r.ts));
   const dayAheadRaw = collectDayAheadRowsForRange(s, e).filter((r) =>
     isWithinSolarWindowTs(r.ts),
   );
@@ -1415,11 +1733,14 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
     { key: 'Metric', label: 'Metric', xlsxType: 'string' },
     { key: 'Value', label: 'Value', xlsxType: 'string' },
   ];
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  const useAverageTable = normalizedExportFormat === 'average-table' && spec.mode !== 'day';
   const summaryRows = [
     { Metric: 'Plant', Value: plantName },
     { Metric: 'Range Start', Value: fmtDateTime(s) },
     { Metric: 'Range End', Value: fmtDateTime(e) },
     { Metric: 'Resolution', Value: spec.mode === 'day' ? 'Daily' : spec.label },
+    { Metric: 'Export Format', Value: useAverageTable ? 'Average Table' : 'Standard' },
     { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(6) },
     { Metric: 'Day-Ahead Total (MWh)', Value: (dayAheadTotalKwh / 1000).toFixed(6) },
     { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(6) },
@@ -1460,7 +1781,24 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   });
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
-  const fileBase = exportDateAwareFileBase(s, e, 'all', `Day-Ahead vs Actual ${resLabel}`);
+  const averageResolutionCode = `PT${Math.max(5, Number(spec.minutes || 5))}M`;
+  const fileBase = exportDateAwareFileBase(
+    s,
+    e,
+    'all',
+    useAverageTable
+      ? `Day-Ahead ${averageResolutionCode} AvgTable 05-18`
+      : `Day-Ahead vs Actual ${resLabel}`,
+  );
+  if (useAverageTable) {
+    return writeDayAheadAverageTableXlsx({
+      startTs: s,
+      endTs: e,
+      resolution: averageResolutionCode,
+      fileBase,
+      dayAheadRawRows: dayAheadRaw,
+    });
+  }
   return await writeExport(headers, finalRows, dir, fileBase, format, {
     summaryHeaders,
     summaryRows,
@@ -1630,7 +1968,56 @@ function buildSolcastAverageTableDays(rawRows, resolution) {
     }));
 }
 
-function solcastAverageTableRowHasNonZeroValue(row) {
+const AVERAGE_TABLE_HEADER_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFF4B183' },
+};
+const AVERAGE_TABLE_SUB_HEADER_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFCE4D6' },
+};
+const AVERAGE_TABLE_TOTAL_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFEB84' },
+};
+const AVERAGE_TABLE_SIDE_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFDEBD3' },
+};
+const AVERAGE_TABLE_ALT_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFFAF2' },
+};
+const AVERAGE_TABLE_AVG_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFF1DF' },
+};
+const AVERAGE_TABLE_BORDER = {
+  top: { style: 'thin', color: { argb: 'FF808080' } },
+  left: { style: 'thin', color: { argb: 'FF808080' } },
+  bottom: { style: 'thin', color: { argb: 'FF808080' } },
+  right: { style: 'thin', color: { argb: 'FF808080' } },
+};
+
+function createAverageTableDayEntry(dayLabel = '') {
+  return {
+    day: String(dayLabel || fmtDate(Date.now())).trim(),
+    rows: Array.from({ length: 24 }, (_, idx) => ({
+      hour: idx + 1,
+      values: Array(12).fill(null),
+      average: null,
+    })),
+    totalMwh: 0,
+  };
+}
+
+function averageTableRowHasNonZeroValue(row) {
   const values = Array.isArray(row?.values) ? row.values : [];
   for (const value of values) {
     const num = Number(value);
@@ -1640,10 +2027,134 @@ function solcastAverageTableRowHasNonZeroValue(row) {
   return Number.isFinite(avg) && Math.abs(avg) > 1e-12;
 }
 
+function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
+  const resolvedDayEntry =
+    dayEntry && Array.isArray(dayEntry?.rows)
+      ? dayEntry
+      : createAverageTableDayEntry(options?.dayLabel || '');
+  const dayLabel = String(options?.dayLabel || resolvedDayEntry.day || '').trim();
+  const sheetName = String(options?.sheetName || dayLabel || 'Average Table').slice(0, 31);
+  const averageLabel = String(options?.averageLabel || 'Average').trim() || 'Average';
+  const totalLabel = String(options?.totalLabel || 'TOTAL (MWh)').trim() || 'TOTAL (MWh)';
+
+  const ws = wb.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
+  });
+  ws.columns = [
+    { width: 10 },
+    ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: 11 })),
+    { width: 18 },
+  ];
+  ws.properties.defaultRowHeight = 20;
+  ws.getRow(1).height = 24;
+  ws.getRow(2).height = 21;
+
+  ws.mergeCells(1, 1, 2, 1);
+  ws.getCell(1, 1).value = 'HOURS';
+  ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 1).font = { bold: true };
+  ws.getCell(1, 1).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 1).border = AVERAGE_TABLE_BORDER;
+
+  ws.mergeCells(1, 2, 1, 13);
+  ws.getCell(1, 2).value = dayLabel;
+  ws.getCell(1, 2).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 2).font = { bold: true };
+  ws.getCell(1, 2).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 2).border = AVERAGE_TABLE_BORDER;
+
+  ws.mergeCells(1, 14, 2, 14);
+  ws.getCell(1, 14).value = averageLabel;
+  ws.getCell(1, 14).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  ws.getCell(1, 14).font = { bold: true };
+  ws.getCell(1, 14).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 14).border = AVERAGE_TABLE_BORDER;
+
+  SOLCAST_AVERAGE_TABLE_MINUTES.forEach((minute, idx) => {
+    const cell = ws.getCell(2, idx + 2);
+    cell.value = minute;
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    cell.font = { bold: true };
+    cell.fill = AVERAGE_TABLE_SUB_HEADER_FILL;
+    cell.border = AVERAGE_TABLE_BORDER;
+  });
+
+  const lastNonZeroRowIndex = resolvedDayEntry.rows.reduce(
+    (lastIdx, row, idx) => (averageTableRowHasNonZeroValue(row) ? idx : lastIdx),
+    -1,
+  );
+  const renderedRows =
+    lastNonZeroRowIndex >= 0
+      ? resolvedDayEntry.rows.slice(0, lastNonZeroRowIndex + 1)
+      : [];
+
+  renderedRows.forEach((row, idx) => {
+    const rowIndex = idx + 3;
+    const hourCell = ws.getCell(rowIndex, 1);
+    hourCell.value = row.hour;
+    hourCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    hourCell.border = AVERAGE_TABLE_BORDER;
+    hourCell.fill = AVERAGE_TABLE_SIDE_FILL;
+    const rowStripeFill = idx % 2 === 1 ? AVERAGE_TABLE_ALT_FILL : null;
+    row.values.forEach((value, valueIdx) => {
+      const cell = ws.getCell(rowIndex, valueIdx + 2);
+      cell.value = value == null ? '' : value;
+      cell.numFmt = value == null ? 'General' : '0.000000';
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.border = AVERAGE_TABLE_BORDER;
+      if (rowStripeFill) cell.fill = rowStripeFill;
+    });
+    const avgCell = ws.getCell(rowIndex, 14);
+    avgCell.value = row.average == null ? '' : row.average;
+    avgCell.numFmt = row.average == null ? 'General' : '0.000000';
+    avgCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    avgCell.border = AVERAGE_TABLE_BORDER;
+    avgCell.fill = AVERAGE_TABLE_AVG_FILL;
+  });
+
+  const totalRowIndex = renderedRows.length + 4;
+  ws.getRow(totalRowIndex).height = 22;
+  ws.mergeCells(totalRowIndex, 1, totalRowIndex, 13);
+  const totalLabelCell = ws.getCell(totalRowIndex, 1);
+  totalLabelCell.value = totalLabel;
+  totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  totalLabelCell.font = { bold: true };
+  totalLabelCell.fill = AVERAGE_TABLE_TOTAL_FILL;
+  totalLabelCell.border = AVERAGE_TABLE_BORDER;
+
+  const totalValueCell = ws.getCell(totalRowIndex, 14);
+  totalValueCell.value = resolvedDayEntry.totalMwh == null ? 0 : resolvedDayEntry.totalMwh;
+  totalValueCell.numFmt = '0.000000';
+  totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  totalValueCell.font = { bold: true };
+  totalValueCell.fill = AVERAGE_TABLE_TOTAL_FILL;
+  totalValueCell.border = AVERAGE_TABLE_BORDER;
+}
+
+function buildForecastActualAverageTableRows(rawRows) {
+  const dedupedRows = aggregateKwhByResolution(
+    Array.isArray(rawRows) ? rawRows : [],
+    { minutes: 5, mode: 'interval' },
+  );
+  return dedupedRows
+    .map((row) => {
+      const ts = Number(row?.ts || 0);
+      const kwh = Math.max(0, safeNum(row?.kwh_inc));
+      if (!(ts > 0) || !isWithinSolarWindowTs(ts)) return null;
+      return {
+        date: fmtDate(ts),
+        time: fmtTime(ts).slice(0, 5),
+        forecastMw: roundSolcastExportNumber((kwh * 12) / 1000),
+        forecastMwh: roundSolcastExportNumber(kwh / 1000),
+      };
+    })
+    .filter(Boolean);
+}
+
 async function writeSolcastAverageTableXlsx(rawRows, startDay, endDay, resolution, exportFormat) {
   const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
   const days = buildSolcastAverageTableDays(rawRows, normalizedResolution);
-  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
   const fileBase = buildSolcastPreviewFileBase(
     startDay,
     endDay,
@@ -1652,112 +2163,58 @@ async function writeSolcastAverageTableXlsx(rawRows, startDay, endDay, resolutio
   );
   const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
   const wb = new ExcelJS.Workbook();
-  const headerFill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFF4B183' },
-  };
-  const subHeaderFill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFFCE4D6' },
-  };
-  const totalFill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFFFEB84' },
-  };
-  const border = {
-    top: { style: 'thin', color: { argb: 'FF808080' } },
-    left: { style: 'thin', color: { argb: 'FF808080' } },
-    bottom: { style: 'thin', color: { argb: 'FF808080' } },
-    right: { style: 'thin', color: { argb: 'FF808080' } },
-  };
+  setWorkbookMetadata(wb, 'Solcast Average Table Export');
 
-  for (const dayEntry of days.length ? days : [{ day: startDay || fmtDate(Date.now()), rows: Array.from({ length: 24 }, (_, idx) => ({ hour: idx + 1, values: Array(12).fill(null), average: null })), totalMwh: 0 }]) {
-    const ws = wb.addWorksheet(String(dayEntry.day || 'Solcast').slice(0, 31), {
-      views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
+  for (const dayEntry of days.length ? days : [createAverageTableDayEntry(startDay || fmtDate(Date.now()))]) {
+    renderAverageTableDayWorksheet(wb, dayEntry, {
+      sheetName: String(dayEntry.day || 'Solcast').slice(0, 31),
+      dayLabel: String(dayEntry.day || '').trim(),
+      averageLabel: `${normalizedResolution} Average`,
+      totalLabel: 'GENERATION FORECAST (MWh)',
     });
-    ws.columns = [
-      { width: 10 },
-      ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: 10 })),
-      { width: 18 },
-    ];
+  }
 
-    ws.mergeCells(1, 1, 2, 1);
-    ws.getCell(1, 1).value = 'HOURS';
-    ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
-    ws.getCell(1, 1).font = { bold: true };
-    ws.getCell(1, 1).fill = headerFill;
-    ws.getCell(1, 1).border = border;
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
+}
 
-    ws.mergeCells(1, 2, 1, 13);
-    ws.getCell(1, 2).value = String(dayEntry.day || '').trim();
-    ws.getCell(1, 2).alignment = { horizontal: 'center', vertical: 'middle' };
-    ws.getCell(1, 2).font = { bold: true };
-    ws.getCell(1, 2).fill = headerFill;
-    ws.getCell(1, 2).border = border;
+async function writeDayAheadAverageTableXlsx({
+  startTs,
+  endTs,
+  resolution,
+  fileBase,
+  dayAheadRawRows,
+}) {
+  const startDay = fmtDate(startTs || Date.now());
+  const endDay = fmtDate(endTs || startTs || Date.now());
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const dayAheadDays = buildSolcastAverageTableDays(
+    buildForecastActualAverageTableRows(dayAheadRawRows),
+    normalizedResolution,
+  );
+  const dayAheadDayMap = new Map(dayAheadDays.map((entry) => [String(entry.day || '').trim(), entry]));
+  const allDays = Array.from(
+    new Set([
+      ...dayAheadDayMap.keys(),
+      ...iterateLocalDates(startTs, endTs),
+    ]),
+  )
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
 
-    ws.mergeCells(1, 14, 2, 14);
-    ws.getCell(1, 14).value = `${normalizedResolution} Average`;
-    ws.getCell(1, 14).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-    ws.getCell(1, 14).font = { bold: true };
-    ws.getCell(1, 14).fill = headerFill;
-    ws.getCell(1, 14).border = border;
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.analytics);
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const wb = new ExcelJS.Workbook();
+  setWorkbookMetadata(wb, 'Day-Ahead Average Table Export');
 
-    SOLCAST_AVERAGE_TABLE_MINUTES.forEach((minute, idx) => {
-      const cell = ws.getCell(2, idx + 2);
-      cell.value = minute;
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
-      cell.font = { bold: true };
-      cell.fill = subHeaderFill;
-      cell.border = border;
+  for (const day of allDays.length ? allDays : [startDay || endDay || fmtDate(Date.now())]) {
+    const dayAheadEntry = dayAheadDayMap.get(day) || createAverageTableDayEntry(day);
+    renderAverageTableDayWorksheet(wb, dayAheadEntry, {
+      sheetName: day,
+      dayLabel: day,
+      averageLabel: `${normalizedResolution} Average`,
+      totalLabel: 'GENERATION FORECAST (MWh)',
     });
-
-    const lastNonZeroRowIndex = dayEntry.rows.reduce(
-      (lastIdx, row, idx) => (solcastAverageTableRowHasNonZeroValue(row) ? idx : lastIdx),
-      -1,
-    );
-    const renderedRows =
-      lastNonZeroRowIndex >= 0
-        ? dayEntry.rows.slice(0, lastNonZeroRowIndex + 1)
-        : [];
-
-    renderedRows.forEach((row, idx) => {
-      const rowIndex = idx + 3;
-      const hourCell = ws.getCell(rowIndex, 1);
-      hourCell.value = row.hour;
-      hourCell.alignment = { horizontal: 'center', vertical: 'middle' };
-      hourCell.border = border;
-      row.values.forEach((value, valueIdx) => {
-        const cell = ws.getCell(rowIndex, valueIdx + 2);
-        cell.value = value == null ? '' : value;
-        cell.numFmt = value == null ? 'General' : '0.000000';
-        cell.alignment = { horizontal: 'center', vertical: 'middle' };
-        cell.border = border;
-      });
-      const avgCell = ws.getCell(rowIndex, 14);
-      avgCell.value = row.average == null ? '' : row.average;
-      avgCell.numFmt = row.average == null ? 'General' : '0.000000';
-      avgCell.alignment = { horizontal: 'center', vertical: 'middle' };
-      avgCell.border = border;
-    });
-
-    const totalRowIndex = renderedRows.length + 4;
-    ws.mergeCells(totalRowIndex, 1, totalRowIndex, 13);
-    const totalLabelCell = ws.getCell(totalRowIndex, 1);
-    totalLabelCell.value = 'GENERATION FORECAST (MWh)';
-    totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    totalLabelCell.font = { bold: true };
-    totalLabelCell.fill = totalFill;
-    totalLabelCell.border = border;
-    const totalValueCell = ws.getCell(totalRowIndex, 14);
-    totalValueCell.value = dayEntry.totalMwh == null ? 0 : dayEntry.totalMwh;
-    totalValueCell.numFmt = '0.000000';
-    totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    totalValueCell.font = { bold: true };
-    totalValueCell.fill = totalFill;
-    totalValueCell.border = border;
   }
 
   await wb.xlsx.writeFile(xlsxPath);
@@ -1773,7 +2230,7 @@ async function exportSolcastPreview({
   exportFormat,
   format,
 }) {
-  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
   const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
   const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
   if (normalizedExportFormat === 'average-table') {
@@ -1825,6 +2282,10 @@ module.exports = {
   exportAlarms,
   exportEnergy,
   buildEnergySummaryExportRows,
+  buildForecastActualAverageTableRows,
+  buildSolcastAverageTableDays,
+  rewriteForecastExportRelativePath,
+  ensureForecastExportSubfolder,
   writeEnergySummaryExport,
   exportInverterData,
   export5min,

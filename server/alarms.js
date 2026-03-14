@@ -7,6 +7,7 @@
 
 const { db, stmts, getSetting } = require("./db");
 const { broadcastUpdate } = require("./ws");
+const { classifyAlarmTransition } = require("./alarmEpisodeCore");
 
 // ─── 16-bit alarm bitfield ───────────────────────────────────────────────────
 const ALARM_BITS = [
@@ -320,33 +321,47 @@ function checkAlarms(batch) {
       continue;
     }
 
-    if (cur !== prev) {
-      // Close prior active alarm episode whenever alarm value changes
-      // (nonzero->nonzero or nonzero->zero). This prevents multiple
-      // simultaneous active rows for one node.
-      if (prev !== 0) {
-        stmts.clearAlarm.run(now, row.inverter, row.unit);
-      }
+    const transition = classifyAlarmTransition(prev, cur);
+    if (transition === "noop") continue;
 
-      // New alarm raised (new active episode)
-      if (cur !== 0) {
-        const severity = getTopSeverity(cur) || "fault";
-        stmts.insertAlarm.run({
-          ts: now,
-          inverter: row.inverter,
-          unit: row.unit,
-          alarm_code: formatAlarmHex(cur),
-          alarm_value: cur,
-          severity,
-        });
-        newAlarms.push({
-          inverter: row.inverter,
-          unit: row.unit,
-          alarm_value: cur,
-          severity,
-          decoded: decodeAlarm(cur),
-        });
-      }
+    if (transition === "clear") {
+      stmts.clearAlarm.run(now, row.inverter, row.unit);
+      activeAlarmState[key] = 0;
+      continue;
+    }
+
+    if (transition === "update_active") {
+      const severity = getTopSeverity(cur) || "fault";
+      stmts.updateActiveAlarm.run(
+        formatAlarmHex(cur),
+        cur,
+        severity,
+        row.inverter,
+        row.unit,
+      );
+      activeAlarmState[key] = cur;
+      continue;
+    }
+
+    if (transition === "raise") {
+      const severity = getTopSeverity(cur) || "fault";
+      const info = stmts.insertAlarm.run({
+        ts: now,
+        inverter: row.inverter,
+        unit: row.unit,
+        alarm_code: formatAlarmHex(cur),
+        alarm_value: cur,
+        severity,
+      });
+      newAlarms.push({
+        id: Number(info?.lastInsertRowid || 0),
+        inverter: row.inverter,
+        unit: row.unit,
+        alarm_value: cur,
+        severity,
+        decoded: decodeAlarm(cur),
+        ts: now,
+      });
       activeAlarmState[key] = cur;
     }
   }
@@ -475,5 +490,6 @@ module.exports = {
   getAuditLog,
   ALARM_BITS,
   STOP_REASONS,
+  classifyAlarmTransition,
 };
 

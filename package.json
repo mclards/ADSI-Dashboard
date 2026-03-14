@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.3.15",
+  "version": "2.4.0",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -11,9 +11,8 @@
     "rebuild:native:node": "npm rebuild better-sqlite3",
     "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-builder --win nsis portable --x64",
-    "build:installer": "electron-builder --win nsis --x64",
-    "build:portable": "electron-builder --win portable --x64"
+    "build:win": "electron-builder --win nsis --x64",
+    "build:installer": "electron-builder --win nsis --x64"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
@@ -62,15 +61,10 @@
     ],
     "win": {
       "icon": "icon-256.png",
+      "requestedExecutionLevel": "requireAdministrator",
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -82,9 +76,6 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
-    },
-    "portable": {
-      "artifactName": "Inverter-Dashboard-Portable-${version}.${ext}"
     },
     "publish": [
       {

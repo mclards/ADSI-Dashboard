@@ -1,7 +1,15 @@
 const fetch = require('node-fetch');
-const { bulkInsertPollerBatch, getSetting } = require('./db');
+const {
+  bulkInsertPollerBatch,
+  getSetting,
+  sumEnergy5minByInverterRange,
+} = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
+const {
+  normalizeTodayEnergyRows,
+  evaluateTodayEnergyHealth,
+} = require("./todayEnergyHealthCore");
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -66,6 +74,24 @@ const pollStats = {
 // Pac-based daily energy integrator (independent from kWh register).
 const pacTodayByInverter = {}; // key: inverter -> kWh
 const pacIntegratorState = {}; // key: `${inv}_${unit}` -> { ts, pac }
+let todayEnergyHealthState = {
+  byInv: Object.create(null),
+  summary: {
+    state: "idle",
+    reasonCode: "inactive",
+    reasonText: "Today-energy health has not been evaluated yet.",
+    checkedAt: 0,
+    activeInverterCount: 0,
+    fallbackActiveCount: 0,
+    staleCount: 0,
+    mismatchCount: 0,
+    selectedSource: "pac",
+  },
+};
+let todayEnergySelectedRows = [];
+let todayEnergyBaselineDay = "";
+let todayEnergyBaselineByInv = new Map();
+let todayEnergyBaselineSeededAt = 0;
 let pacDayKey = '';
 let ipConfigCache = null;
 let ipConfigCacheTs = 0;
@@ -95,6 +121,12 @@ function isSolarWindow() {
   return h >= SOLAR_HOUR_START && h < SOLAR_HOUR_END;
 }
 
+function isSolarWindowAt(ts = Date.now()) {
+  const d = new Date(ts);
+  const h = d.getHours();
+  return h >= SOLAR_HOUR_START && h < SOLAR_HOUR_END;
+}
+
 function dayKey(ts = Date.now()) {
   const d = new Date(ts);
   const y = d.getFullYear();
@@ -109,10 +141,61 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   pacDayKey = k;
   for (const key of Object.keys(pacTodayByInverter)) delete pacTodayByInverter[key];
   for (const key of Object.keys(pacIntegratorState)) delete pacIntegratorState[key];
+  todayEnergySelectedRows = [];
+  todayEnergyBaselineDay = "";
+  todayEnergyBaselineByInv = new Map();
+  todayEnergyBaselineSeededAt = 0;
+  todayEnergyHealthState = {
+    byInv: Object.create(null),
+    summary: {
+      state: "idle",
+      reasonCode: "day_reset",
+      reasonText: "Today-energy health was reset for the new local day.",
+      checkedAt: Math.max(0, Number(ts || Date.now())),
+      activeInverterCount: 0,
+      fallbackActiveCount: 0,
+      staleCount: 0,
+      mismatchCount: 0,
+      selectedSource: "pac",
+    },
+  };
 }
 
 function roundKwh(value) {
   return Number((Math.max(0, Number(value) || 0)).toFixed(6));
+}
+
+function resolveFrameDay(row, ts = Date.now()) {
+  const year = Math.floor(Number(row?.year || 0));
+  const month = Math.floor(Number(row?.month || 0));
+  const day = Math.floor(Number(row?.day || 0));
+  if (year >= 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  return dayKey(ts);
+}
+
+function localDayStartTs(dayText) {
+  return new Date(`${String(dayText || dayKey()).trim()}T00:00:00.000`).getTime();
+}
+
+function ensureTodayEnergyBaseline(ts = Date.now()) {
+  const day = dayKey(ts);
+  if (
+    todayEnergyBaselineDay === day &&
+    todayEnergyBaselineSeededAt > 0 &&
+    todayEnergyBaselineByInv instanceof Map
+  ) {
+    return todayEnergyBaselineByInv;
+  }
+  const seeded = sumEnergy5minByInverterRange(
+    localDayStartTs(day),
+    Math.max(localDayStartTs(day), Number(ts || Date.now())),
+  );
+  todayEnergyBaselineDay = day;
+  todayEnergyBaselineByInv = seeded instanceof Map ? seeded : new Map();
+  todayEnergyBaselineSeededAt = Date.now();
+  return todayEnergyBaselineByInv;
 }
 
 function integratePacToday(parsed) {
@@ -168,9 +251,11 @@ function parseRow(row) {
 
   const sourceTs = Number(row.ts || row.timestamp || Date.now());
   const ts = Number.isFinite(sourceTs) && sourceTs > 0 ? sourceTs : Date.now();
+  const day = resolveFrameDay(row, ts);
 
   return {
     ts,
+    day,
     inverter, unit,
     vdc, idc,
     vac1, vac2, vac3,
@@ -452,6 +537,62 @@ function buildTotals(now) {
   return totals;
 }
 
+function getTodayPacRowsRaw() {
+  resetPacTodayIfNeeded(Date.now());
+  const baseline = ensureTodayEnergyBaseline(Date.now());
+  const invSet = new Set([
+    ...Array.from(baseline.keys()),
+    ...Object.keys(pacTodayByInverter).map((inv) => Number(inv || 0)),
+  ]);
+  return Array.from(invSet)
+    .filter((inv) => Number(inv || 0) > 0)
+    .map((inv) => ({
+      inverter: Number(inv),
+      total_kwh: Number(
+        (
+          Number(baseline.get(Number(inv)) || 0) +
+          Number(pacTodayByInverter[inv] || 0)
+        ).toFixed(6),
+      ),
+    }))
+    .filter((row) => row.total_kwh > 0)
+    .sort((a, b) => a.inverter - b.inverter);
+}
+
+function updateTodayEnergyHealthFromTotals(totals, now = Date.now()) {
+  const result = evaluateTodayEnergyHealth({
+    pacRows: getTodayPacRowsRaw(),
+    liveTotalsByInv: totals,
+    prevState: todayEnergyHealthState,
+    now,
+    solarActive: isSolarWindow(),
+  });
+  todayEnergyHealthState = result.nextState;
+  todayEnergySelectedRows = normalizeTodayEnergyRows(result.rows);
+  for (const evt of result.events || []) {
+    if (!evt || typeof evt !== "object") continue;
+    if (evt.type === "source_change") {
+      console.log(
+        `[today-energy] inv=${evt.inverter} source=${evt.source}` +
+        ` reason=${evt.reasonCode}` +
+        ` pac=${Number(evt.pacKwh || 0).toFixed(3)}kWh` +
+        ` livePac=${Number(evt.livePacW || 0).toFixed(0)}W`,
+      );
+      continue;
+    }
+    if (evt.type === "summary_change") {
+      const health = evt.health || {};
+      console.log(
+        `[today-energy] state=${String(health.state || "unknown")}` +
+        ` reason=${String(health.reasonCode || "")}` +
+        ` fallback=${Number(health.fallbackActiveCount || 0)}` +
+        ` stale=${Number(health.staleCount || 0)}` +
+        ` mismatch=${Number(health.mismatchCount || 0)}`,
+      );
+    }
+  }
+}
+
 function markAllOffline() {
   for (const [key, d] of Object.entries(liveData)) {
     if (!d) continue;
@@ -515,6 +656,7 @@ async function poll() {
     }
     updateLiveSnapshotCache();
     const totals = buildTotals(now);
+    updateTodayEnergyHealthFromTotals(totals, now);
     broadcastUpdate({ type: 'live', data: liveData, totals });
     const pollEndedAt = Date.now();
     const dur = Math.max(0, pollEndedAt - pollStartedAt);
@@ -556,6 +698,7 @@ async function poll() {
       prev.ts = parsed.ts;
       prev.online = 1;
       prev.kwh = parsed.kwh;
+      prev.day = parsed.day;
       noChangeThisTick += 1;
       continue;
     }
@@ -577,7 +720,7 @@ async function poll() {
       ? Number.MAX_SAFE_INTEGER
       : Math.abs(Number(parsed.pac || 0) - Number(persistPrev.pac || 0));
     const shouldPersist =
-      isSolarWindow() &&
+      isSolarWindowAt(parsed.ts) &&
       (forcePersist || elapsedMs >= DB_MIN_PERSIST_MS || pacDelta >= DB_PAC_DELTA_PERSIST_W);
 
     if (shouldPersist) {
@@ -629,6 +772,7 @@ async function poll() {
   }
 
   const totals = buildTotals(now);
+  updateTodayEnergyHealthFromTotals(totals, now);
   updateLiveSnapshotCache();
   broadcastUpdate({ type: 'live', data: liveData, totals });
 
@@ -674,6 +818,7 @@ function flushPending() {
   const batch = [];
   for (const d of Object.values(liveData)) {
     if (!d || !d.ts) continue;
+    if (!isSolarWindowAt(d.ts)) continue;
     const key = `${d.inverter}_${d.unit}`;
     const prev = lastPersistState[key];
     if (prev && Number(d.ts) <= Number(prev.ts)) continue;
@@ -697,13 +842,24 @@ function getLiveSnapshotJson() {
 }
 
 function getTodayPacKwh() {
-  resetPacTodayIfNeeded(Date.now());
-  return Object.keys(pacTodayByInverter)
-    .map((inv) => ({
-      inverter: Number(inv),
-      total_kwh: Number((pacTodayByInverter[inv] || 0).toFixed(6)),
-    }))
-    .sort((a, b) => a.inverter - b.inverter);
+  if (Array.isArray(todayEnergySelectedRows) && todayEnergySelectedRows.length) {
+    return normalizeTodayEnergyRows(todayEnergySelectedRows);
+  }
+  return getTodayPacRowsRaw();
+}
+
+function getTodayPacRawKwh() {
+  return getTodayPacRowsRaw();
+}
+
+function getTodayEnergyHealth() {
+  return {
+    ...(todayEnergyHealthState?.summary || {}),
+    sourceRows: {
+      pac: getTodayPacRowsRaw(),
+      selected: normalizeTodayEnergyRows(todayEnergySelectedRows),
+    },
+  };
 }
 
 function getPerfStats() {
@@ -715,6 +871,11 @@ function getPerfStats() {
     expectedSuppressedKeyCount: Object.keys(unreachableState).length,
     ...pollStats,
     avgPollDurationMs: Number(Number(pollStats.avgPollDurationMs || 0).toFixed(3)),
+    todayEnergyHealth: todayEnergyHealthState?.summary || {
+      state: "idle",
+      reasonCode: "inactive",
+      reasonText: "Today-energy health has not been evaluated yet.",
+    },
   };
 }
 
@@ -726,6 +887,8 @@ module.exports = {
   getLiveData,
   getLiveSnapshotJson,
   getTodayPacKwh,
+  getTodayPacRawKwh,
+  getTodayEnergyHealth,
   setIpConfigSnapshot,
   getPerfStats,
 };

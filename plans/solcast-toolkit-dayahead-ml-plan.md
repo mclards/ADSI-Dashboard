@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially implemented as of `v2.3.11`.
+Partially implemented as of `v2.4.0`.
 
 Already in place:
 
@@ -27,6 +27,10 @@ Still pending:
 Related note:
 
 - completed elsewhere: the Solcast preview/export resolution selector work (`PT5M` / `PT10M` / `PT15M` / `PT30M` / `PT60M` plus export format selection) is already implemented and no longer needs a separate plan file
+- completed elsewhere: current-day `Actual MWh` display and export actual totals now use the unified Node current-day snapshot backed by PAC-integrated day energy, so Solcast comparisons are measured against the same live authoritative actuals used in the dashboard
+- completed elsewhere: alarm audio now ignores sub-5-second alarm blips and same-node active alarm expansions do not retrigger sound, which reduces nuisance noise during live Solcast/actual comparison work
+- completed elsewhere: the forecast engine now honors app restart/update soft-stop requests through the shared service-stop-file contract, so local restart/install flows no longer depend only on hard-killing forecast work mid-run
+- completed elsewhere: inverter-card UI polish now keeps the live `Pdc` / `Pac` summaries compact, readable, and above the row table, while PAC legend colors stay fixed across themes during live forecast-versus-actual review
 
 This plan defines how the Solcast toolkit feed should improve:
 

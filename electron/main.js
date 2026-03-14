@@ -161,6 +161,7 @@ let allowMainWindowClose = false;
 let appShutdownPromise = null;
 let appShutdownBypassQuit = false;
 let appShutdownFinalAction = { type: "quit", exitCode: 0 };
+let backendStopExpected = false;
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
 let appUpdateBridgeBound = false;
@@ -179,6 +180,13 @@ let appUpdateState = {
   checkedAt: 0,
   error: "",
 };
+
+const SERVICE_SOFT_STOP_FILE_NAMES = Object.freeze({
+  backend: "backend.stop",
+  forecast: "forecast.stop",
+});
+const BACKEND_SOFT_STOP_WAIT_MS = 8000;
+const FORECAST_SOFT_STOP_WAIT_MS = 25000;
 
 function configurePortableDataPaths() {
   if (!PORTABLE_DATA_DIR) return;
@@ -851,9 +859,85 @@ function mergeAppShutdownAction(nextAction) {
   return appShutdownFinalAction;
 }
 
+function normalizeSoftStopServiceName(serviceName) {
+  return String(serviceName || "").trim().toLowerCase() === "forecast"
+    ? "forecast"
+    : "backend";
+}
+
+function getRuntimeControlDir() {
+  let baseDir = "";
+  try {
+    baseDir = app.getPath("userData");
+  } catch (_) {
+    baseDir = "";
+  }
+  if (!baseDir) {
+    baseDir = PORTABLE_DATA_DIR || process.cwd();
+  }
+  return path.join(baseDir, "runtime-control");
+}
+
+function getServiceSoftStopFile(serviceName) {
+  const normalized = normalizeSoftStopServiceName(serviceName);
+  return path.join(
+    getRuntimeControlDir(),
+    SERVICE_SOFT_STOP_FILE_NAMES[normalized],
+  );
+}
+
+function clearServiceSoftStopFile(stopFilePath) {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return;
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch (err) {
+    console.warn("[main] Failed to clear service stop file:", filePath, err.message);
+  }
+}
+
+function writeServiceSoftStopFile(stopFilePath, label, reason = "shutdown requested") {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return false;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          label: String(label || "service"),
+          reason: String(reason || "shutdown requested"),
+          requestedAt: Date.now(),
+          pid: process.pid,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    return true;
+  } catch (err) {
+    console.warn("[main] Failed to write service stop file:", filePath, err.message);
+    return false;
+  }
+}
+
+function attachServiceSoftStopMeta(proc, serviceName, waitMs) {
+  if (!proc) return proc;
+  proc._softStopFile = getServiceSoftStopFile(serviceName);
+  proc._softStopWaitMs = Math.max(0, Number(waitMs || 0));
+  clearServiceSoftStopFile(proc._softStopFile);
+  return proc;
+}
+
 function waitForChildExit(proc, timeoutMs) {
   return new Promise((resolve) => {
-    if (!proc || proc.killed) {
+    if (
+      !proc ||
+      proc.killed ||
+      proc.exitCode !== null ||
+      proc.signalCode !== null
+    ) {
       resolve(true);
       return;
     }
@@ -876,8 +960,19 @@ function waitForChildExit(proc, timeoutMs) {
 
 async function stopTrackedProcess(proc, label) {
   if (!proc || proc.killed) return;
+  const softStopFile = String(proc._softStopFile || "").trim();
+  const softStopWaitMs = Math.max(0, Number(proc._softStopWaitMs || 0));
+  if (softStopFile && writeServiceSoftStopFile(softStopFile, label, "app shutdown")) {
+    const exitedSoft = await waitForChildExit(proc, softStopWaitMs);
+    clearServiceSoftStopFile(softStopFile);
+    if (exitedSoft) return;
+    console.warn(
+      `[main] ${label} did not exit within ${softStopWaitMs}ms after soft-stop; forcing exit`,
+    );
+  }
   forceKillProc(proc, label);
   const exited = await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+  clearServiceSoftStopFile(softStopFile);
   if (!exited) {
     console.warn(`[main] ${label} did not exit within ${APP_SHUTDOWN_FORCE_KILL_WAIT_MS}ms`);
   }
@@ -947,6 +1042,7 @@ async function stopRuntimeServices(reason = "application shutdown") {
   webProc = null;
   backendProc = null;
   forecastProc = null;
+  backendStopExpected = true;
   forecastStopExpected = true;
 
   const tasks = [];
@@ -2546,6 +2642,8 @@ function buildLaunch(targetPath) {
 }
 
 function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend:") {
+  const stopFile = getServiceSoftStopFile("backend");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, backendLaunch.cmd, ...backendLaunch.args);
   backendProc = spawn(backendLaunch.cmd, backendLaunch.args, {
     cwd: backendLaunch.cwd,
@@ -2553,13 +2651,23 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
   });
+  attachServiceSoftStopMeta(backendProc, "backend", BACKEND_SOFT_STOP_WAIT_MS);
   backendProc.on("error", (err) => {
     console.error("[main] Backend spawn error:", err.message);
   });
   backendProc.on("exit", (code, signal) => {
+    const expectedStop = backendStopExpected;
+    backendStopExpected = false;
+    backendProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Backend stopped - code=" + code + " signal=" + signal);
+      return;
+    }
     console.warn("[main] Backend exited - code=" + code + " signal=" + signal);
   });
 }
@@ -2572,6 +2680,8 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
   };
   clearForecastRestartTimer();
   forecastStopExpected = false;
+  const stopFile = getServiceSoftStopFile("forecast");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, forecastLaunch.cmd, ...forecastLaunch.args);
   forecastProc = spawn(forecastLaunch.cmd, forecastLaunch.args, {
     cwd: forecastLaunch.cwd,
@@ -2579,9 +2689,12 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
   });
+  attachServiceSoftStopMeta(forecastProc, "forecast", FORECAST_SOFT_STOP_WAIT_MS);
   forecastProc.on("error", (err) => {
     console.error("[main] Forecast spawn error:", err.message);
     scheduleForecastRestart("spawn error");

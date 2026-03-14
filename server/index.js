@@ -44,10 +44,14 @@ const {
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
   prepareArchiveDbForTransfer,
+  createSqliteTransferSnapshot,
+  disposeSqliteTransferSnapshot,
   stagePendingMainDbReplacement,
+  discardPendingMainDbReplacement,
   beginArchiveDbReplacement,
   validateSqliteFileSync,
   endArchiveDbReplacement,
+  upsertDailyReportRowsToSnapshot,
   insertChatMessage,
   getChatThread,
   getChatInboxAfterId,
@@ -72,6 +76,16 @@ const {
   logControlAction,
   getAuditLog,
 } = require("./alarms");
+const {
+  isValidPlantWideAuthKey,
+  issuePlantWideAuthSession,
+  isValidPlantWideAuthSession,
+} = require("./bulkControlAuth");
+const {
+  normalizeSequenceMode: normalizePlantCapSequenceMode,
+  normalizeSequenceCustom: normalizePlantCapSequenceCustom,
+  PlantCapController,
+} = require("./plantCapController");
 
 // â”€â”€â”€ Cloud Backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TokenStore = require("./tokenStore");
@@ -87,8 +101,14 @@ const {
   applyGatewayCarryRows,
   evaluateHandoffProgress,
 } = require("./mwhHandoffCore");
+const {
+  summarizeCurrentDayEnergyRows,
+  mergeCurrentDaySummaryIntoReportSummary,
+  buildCurrentDayActualSupplementRows,
+} = require("./currentDayEnergyCore");
 
 const app = express();
+let plantCapController = null;
 expressWs(app);
 const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
 app.use(
@@ -216,7 +236,10 @@ const CHAT_RETENTION_COUNT = 500;
 const CHAT_MESSAGE_MAX_LEN = 500;
 const CHAT_PROXY_TIMEOUT_MS = 8000;
 const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 1; // default low-impact archive transfer lane
-const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 2;
+// Keep priority standby pulls low-impact on the gateway. The viewer-side live
+// bridge is already paused, so preserving gateway responsiveness matters more
+// than maximum archive throughput.
+const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 1;
 const REPLICATION_TRANSFER_STREAM_HWM = 1024 * 1024;
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
 const GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
@@ -234,6 +257,9 @@ const REMOTE_CLIENT_PULL_ONLY = false;
 const WRITE_ENGINE_TIMEOUT_MS = 25000;
 const WRITE_QUEUE_MAX_PENDING = 512;
 const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
+const MANUAL_REPLICATION_CANCEL_CODE = "MANUAL_REPLICATION_CANCELLED";
+const MANUAL_PULL_LOCAL_NEWER_CODE = "LOCAL_NEWER_PUSH_FAILED";
+const MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE = "GATEWAY_STATE_CHECK_FAILED";
 const REMOTE_GATEWAY_HANDOFF_SETTING_KEY = "remoteGatewayHandoffMeta";
 const MAX_SHADOW_AGE_MS = CORE_MAX_SHADOW_AGE_MS; // 4h stale same-day shadow protection
 const MAX_HANDOFF_ACTIVE_MS = 4 * 60 * 60 * 1000; // 4h hard cap for active handoff
@@ -364,6 +390,12 @@ const REPLICATION_TABLE_DEFS = [
     columns: ["key", "value", "updated_ts"],
   },
 ];
+const REPLICATION_LOCAL_NEWER_IGNORE_TABLES = new Set([
+  // Manual pull should protect newer replicated data, not standby-client config
+  // drift. Settings differ by design in remote mode and should not block a
+  // source-of-truth gateway refresh.
+  "settings",
+]);
 const REPLICATION_DEF_MAP = Object.fromEntries(
   REPLICATION_TABLE_DEFS.map((x) => [x.name, x]),
 );
@@ -397,6 +429,9 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
 let remoteBridgeTimer = null;
 let remoteBridgeSocket = null;
 let remoteChatPollTimer = null;
+let remoteLiveFetchController = null;
+let remoteTodayEnergyFetchController = null;
+let remoteChatFetchController = null;
 const remoteBridgeState = {
   running: false,
   connected: false,
@@ -492,10 +527,12 @@ function createManualReplicationJobState() {
     needsRestart: false,
     priorityMode: false,
     livePaused: false,
+    cancelRequested: false,
     result: null,
   };
 }
 const manualReplicationJobState = createManualReplicationJobState();
+let manualReplicationRunControl = null;
 let cpuSampleTs = Date.now();
 let cpuSampleUsage = process.cpuUsage();
 
@@ -651,7 +688,14 @@ const _writeQueueStates = new Map();
 
 function normalizeWriteScope(scopeRaw = "single") {
   const scope = String(scopeRaw || "single").trim().toLowerCase();
-  if (scope === "all" || scope === "selected" || scope === "inverter") return scope;
+  if (
+    scope === "all" ||
+    scope === "selected" ||
+    scope === "inverter" ||
+    scope === "plant-cap"
+  ) {
+    return scope;
+  }
   return "single";
 }
 
@@ -662,6 +706,8 @@ function resolveWritePriority(scopeRaw = "single", priorityRaw = "") {
   }
   switch (normalizeWriteScope(scopeRaw)) {
     case "single":
+      return 0;
+    case "plant-cap":
       return 0;
     case "inverter":
       return 1;
@@ -1937,12 +1983,66 @@ function snapshotManualReplicationJob() {
     needsRestart: Boolean(manualReplicationJobState.needsRestart),
     priorityMode: Boolean(manualReplicationJobState.priorityMode),
     livePaused: Boolean(manualReplicationJobState.livePaused),
+    cancelRequested: Boolean(manualReplicationJobState.cancelRequested),
     result:
       manualReplicationJobState.result &&
       typeof manualReplicationJobState.result === "object"
         ? { ...manualReplicationJobState.result }
         : null,
   };
+}
+
+function createManualReplicationAbortError(message = "Standby DB refresh cancelled.") {
+  const err = new Error(String(message || "Standby DB refresh cancelled."));
+  err.name = "AbortError";
+  err.code = MANUAL_REPLICATION_CANCEL_CODE;
+  return err;
+}
+
+function createManualPullLocalNewerError(
+  message = "Manual pull blocked: local standby data is newer than the gateway.",
+) {
+  const err = new Error(
+    String(message || "Manual pull blocked: local standby data is newer than the gateway."),
+  );
+  err.code = MANUAL_PULL_LOCAL_NEWER_CODE;
+  err.canForcePull = true;
+  return err;
+}
+
+function createManualPullGatewayCheckError(
+  message = "Gateway state check failed.",
+) {
+  const err = new Error(String(message || "Gateway state check failed."));
+  err.code = MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE;
+  return err;
+}
+
+function isManualReplicationAbortError(err) {
+  return (
+    isAbortError(err) ||
+    String(err?.code || "").trim().toUpperCase() === MANUAL_REPLICATION_CANCEL_CODE
+  );
+}
+
+function throwIfManualReplicationAborted(signal, message = "Standby DB refresh cancelled.") {
+  if (signal?.aborted) {
+    throw createManualReplicationAbortError(message);
+  }
+}
+
+function isTransferStreamAbortError(err) {
+  if (isManualReplicationAbortError(err)) return true;
+  const code = String(err?.code || "").trim().toUpperCase();
+  if (
+    code === "ERR_STREAM_PREMATURE_CLOSE" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE"
+  ) {
+    return true;
+  }
+  const msg = String(err?.message || err || "").trim().toLowerCase();
+  return msg.includes("premature close") || msg.includes("request aborted");
 }
 
 function updateManualReplicationJob(patch = {}, options = {}) {
@@ -1965,6 +2065,106 @@ function resetManualReplicationJob() {
 
 function isManualReplicationJobRunning() {
   return Boolean(manualReplicationJobState.running);
+}
+
+function createManualReplicationRunControl(jobId = "", action = "sync") {
+  return {
+    jobId: String(jobId || "").trim(),
+    action: String(action || "sync").trim(),
+    controller: new AbortController(),
+    cancelRequested: false,
+    stagedMainTempName: "",
+    stagedArchiveEntries: new Map(),
+  };
+}
+
+function trackManualReplicationStagedMainDb(runControl, tempName = "") {
+  if (!runControl || typeof runControl !== "object") return;
+  runControl.stagedMainTempName = path.basename(String(tempName || "").trim());
+}
+
+function trackManualReplicationStagedArchive(runControl, name = "", tempName = "") {
+  if (!runControl || !(runControl.stagedArchiveEntries instanceof Map)) return;
+  const safeName = sanitizeArchiveFileName(name || "");
+  const safeTempName = path.basename(String(tempName || "").trim());
+  if (!safeName || !safeTempName) return;
+  runControl.stagedArchiveEntries.set(safeName, safeTempName);
+}
+
+function discardPendingArchiveReplacement(name = "", tempName = "") {
+  const safeName = sanitizeArchiveFileName(name || "");
+  if (!safeName) return { cleared: false, tempRemoved: false };
+  const expectedTempName = path.basename(String(tempName || "").trim());
+  const remaining = [];
+  let cleared = false;
+  let tempRemoved = false;
+  for (const entry of readPendingArchiveReplacements()) {
+    if (String(entry?.name || "") !== safeName) {
+      remaining.push(entry);
+      continue;
+    }
+    const pendingTempName = path.basename(String(entry?.tempName || "").trim());
+    if (expectedTempName && pendingTempName && pendingTempName !== expectedTempName) {
+      remaining.push(entry);
+      continue;
+    }
+    cleared = true;
+    if (pendingTempName) {
+      try {
+        fs.unlinkSync(path.join(ARCHIVE_DIR, pendingTempName));
+        tempRemoved = true;
+      } catch (_) {
+        tempRemoved = false;
+      }
+    }
+  }
+  if (cleared) writePendingArchiveReplacements(remaining);
+  return { cleared, tempRemoved };
+}
+
+function discardTrackedManualReplicationArtifacts(runControl) {
+  if (!runControl || typeof runControl !== "object") return;
+  if (runControl.stagedMainTempName) {
+    try {
+      discardPendingMainDbReplacement(runControl.stagedMainTempName);
+    } catch (_) {}
+    runControl.stagedMainTempName = "";
+  }
+  if (runControl.stagedArchiveEntries instanceof Map) {
+    for (const [name, tempName] of runControl.stagedArchiveEntries.entries()) {
+      try {
+        discardPendingArchiveReplacement(name, tempName);
+      } catch (_) {}
+    }
+    runControl.stagedArchiveEntries.clear();
+  }
+}
+
+function requestManualReplicationCancel(
+  message = "Force-cancelling standby DB refresh...",
+) {
+  const runControl = manualReplicationRunControl;
+  if (!runControl || !isManualReplicationJobRunning()) {
+    return {
+      ok: false,
+      error: "No standby DB refresh is currently running.",
+      job: snapshotManualReplicationJob(),
+    };
+  }
+  runControl.cancelRequested = true;
+  updateManualReplicationJob({
+    status: "cancelling",
+    cancelRequested: true,
+    summary: String(message || "Force-cancelling standby DB refresh..."),
+    error: "",
+    errorCode: "",
+  });
+  try {
+    runControl.controller.abort(
+      createManualReplicationAbortError("Standby DB refresh cancelled by operator."),
+    );
+  } catch (_) {}
+  return { ok: true, job: snapshotManualReplicationJob() };
 }
 
 function buildReplicationSummary() {
@@ -2052,6 +2252,7 @@ function hasLocalNewerReplicationData(localSummaryRaw, gatewaySummaryRaw) {
   const local = normalizeReplicationSummary(localSummaryRaw);
   const remote = normalizeReplicationSummary(gatewaySummaryRaw);
   for (const def of REPLICATION_TABLE_DEFS) {
+    if (REPLICATION_LOCAL_NEWER_IGNORE_TABLES.has(def.name)) continue;
     const a = Number(local.tables?.[def.name]?.watermark || 0);
     const b = Number(remote.tables?.[def.name]?.watermark || 0);
     if (a > b) return true;
@@ -2813,6 +3014,74 @@ async function checkLocalNewerBeforePull(baseUrl) {
   }
 }
 
+async function evaluateManualPullPreflight(baseUrl, forcePull = false) {
+  const check = await checkLocalNewerBeforePull(baseUrl);
+  if (!check?.ok) {
+    const message = `Gateway state check failed: ${String(check?.error || "unknown error")}`;
+    remoteBridgeState.lastReplicationError = message;
+    remoteBridgeState.lastSyncDirection = "pull-check-failed";
+    return {
+      ok: false,
+      localNewer: false,
+      check,
+      error: createManualPullGatewayCheckError(message),
+    };
+  }
+  if (check.localNewer && !forcePull) {
+    const message =
+      "Manual pull blocked: local standby data is newer than the gateway. Use Force Pull only if you intentionally want to overwrite the newer local data.";
+    remoteBridgeState.lastReplicationError = message;
+    remoteBridgeState.lastSyncDirection = "pull-check-blocked-local-newer";
+    return {
+      ok: false,
+      localNewer: true,
+      check,
+      error: createManualPullLocalNewerError(message),
+    };
+  }
+  remoteBridgeState.lastReplicationError = "";
+  if (check.localNewer && forcePull) {
+    remoteBridgeState.lastSyncDirection = "pull-check-force-local-newer";
+  }
+  return {
+    ok: true,
+    localNewer: Boolean(check.localNewer),
+    check,
+  };
+}
+
+async function assertManualPullPreflight(baseUrl, forcePull = false) {
+  const preflight = await evaluateManualPullPreflight(baseUrl, forcePull);
+  if (!preflight?.ok) {
+    throw preflight?.error || new Error("Standby DB refresh preflight failed.");
+  }
+  return preflight;
+}
+
+function buildManualPullErrorPayload(err) {
+  const code = String(err?.code || "").trim().toUpperCase();
+  const payload = {
+    ok: false,
+    error: String(err?.message || err || "Standby DB refresh failed."),
+  };
+  if (code) payload.errorCode = code;
+  if (code === MANUAL_PULL_LOCAL_NEWER_CODE) {
+    payload.canForcePull = true;
+  }
+  return payload;
+}
+
+function sendManualPullErrorResponse(res, err) {
+  const code = String(err?.code || "").trim().toUpperCase();
+  if (code === MANUAL_PULL_LOCAL_NEWER_CODE) {
+    return res.status(409).json(buildManualPullErrorPayload(err));
+  }
+  if (code === MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE) {
+    return res.status(502).json(buildManualPullErrorPayload(err));
+  }
+  return res.status(500).json(buildManualPullErrorPayload(err));
+}
+
 async function runRemoteFullReplication(baseUrl, opts = {}) {
   if (remoteBridgeState.replicationRunning) return { skipped: true, reason: "in_progress" };
   remoteBridgeState.replicationRunning = true;
@@ -3028,14 +3297,28 @@ async function runRemotePushFull(baseUrl) {
   }
 }
 
-async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false) {
+async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  const preflight = options?.preflight && typeof options.preflight === "object"
+    ? options.preflight
+    : null;
+  throwIfManualReplicationAborted(signal);
+  if (preflight?.ok) {
+    remoteBridgeState.lastReplicationError = "";
+    if (preflight.localNewer && forcePull) {
+      remoteBridgeState.lastSyncDirection = "pull-check-force-local-newer";
+    }
+  } else if (forcePull) {
+    remoteBridgeState.lastReplicationError = "";
+  } else {
+    await assertManualPullPreflight(baseUrl, forcePull);
+  }
+  throwIfManualReplicationAborted(signal);
   boostSocketPoolForReplication();
   const priorityPause = pauseRemoteLiveBridgeForPriorityTransfer("standby-refresh");
   const priorityNote = buildPriorityTransferNote(includeArchive);
   try {
-    // Viewer model: pull is unconditional — the local DB is standby-only.
-    // No LOCAL_NEWER pre-check, no Force Pull flow. Pull always overwrites.
-
     // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
     updateManualReplicationJob({
       summary: `Downloading fresh gateway main database. ${priorityNote}`,
@@ -3049,6 +3332,8 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       priorityMode: true,
       livePaused: true,
       note: priorityNote,
+      signal,
+      runControl,
     });
     if (mainDb?.skipped) {
       throw new Error("Replication already in progress.");
@@ -3072,6 +3357,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       unsupported: false,
     };
     if (includeArchive) {
+      throwIfManualReplicationAborted(signal);
       updateManualReplicationJob({
         summary: `Main DB staged. Downloading archive DB files from gateway. ${priorityNote}`,
         priorityMode: true,
@@ -3083,6 +3369,8 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
         priorityMode: true,
         livePaused: true,
         note: priorityNote,
+        signal,
+        runControl,
       });
     }
     const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
@@ -3168,6 +3456,10 @@ function isUnsafeRemoteLoop(baseUrl) {
 
 function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+function isAbortError(err) {
+  return String(err?.name || "").trim() === "AbortError";
 }
 
 function isRetryableNetworkError(err) {
@@ -3426,9 +3718,6 @@ function releaseGatewayMainDbSnapshotForTransfer(snapshot) {
   if (!snapshot) return;
   snapshot.refCount = Math.max(0, Number(snapshot.refCount || 0) - 1);
   if (Number(snapshot.refCount || 0) > 0) return;
-  if (_gatewayMainDbSnapshot === snapshot) {
-    _gatewayMainDbSnapshot = null;
-  }
   disposeGatewayMainDbSnapshot(snapshot).catch((err) => {
     console.warn(
       "[replication] main DB snapshot release cleanup failed:",
@@ -3480,6 +3769,7 @@ async function buildGatewayMainDbSnapshotForTransfer() {
     DATA_DIR,
     `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
   );
+  let todayReportRows = [];
   try {
     try {
       poller.flushPending();
@@ -3487,22 +3777,32 @@ async function buildGatewayMainDbSnapshotForTransfer() {
       // Best effort only; backup still produces a consistent snapshot.
     }
     try {
-      // Persist the gateway's current-day report rows before snapshotting so a
-      // standby refresh carries the same partial-day baseline the gateway UI is
-      // already serving, not only the last completed DB bucket.
-      buildDailyReportRowsForDate(localDateStr(), {
-        persist: true,
+      // Refresh standby DB should stay read-only against the gateway's live DB.
+      // Compute current-day report rows in memory, then apply them only to the
+      // temporary snapshot so the downloaded file stays aligned with the UI.
+      todayReportRows = buildDailyReportRowsForDate(localDateStr(), {
+        persist: false,
         includeTodayPartial: true,
-        refresh: true,
+        refresh: false,
       });
     } catch (err) {
       console.warn(
-        "[replication] standby snapshot today-report refresh failed:",
+        "[replication] standby snapshot today-report compute failed:",
         String(err?.message || err || "unknown error"),
       );
     }
     await maybeCheckpointGatewayMainDbBeforeSnapshot();
     await db.backup(tempPath);
+    if (Array.isArray(todayReportRows) && todayReportRows.length > 0) {
+      try {
+        upsertDailyReportRowsToSnapshot(tempPath, todayReportRows);
+      } catch (err) {
+        console.warn(
+          "[replication] standby snapshot today-report apply failed:",
+          String(err?.message || err || "unknown error"),
+        );
+      }
+    }
     const stat = await fs.promises.stat(tempPath);
     const sha256 = await getCachedFileSha256(tempPath, stat);
     return {
@@ -3800,18 +4100,8 @@ async function pushDeltaInChunks(baseUrl, deltaPayload, opts = {}) {
 
 async function createGatewayMainDbSnapshotForTransfer() {
   const nowTs = Date.now();
-  if (
-    isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs) &&
-    Number(_gatewayMainDbSnapshot?.refCount || 0) > 0
-  ) {
+  if (isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs)) {
     return retainGatewayMainDbSnapshot(_gatewayMainDbSnapshot);
-  }
-  if (
-    _gatewayMainDbSnapshot &&
-    isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs) &&
-    Number(_gatewayMainDbSnapshot?.refCount || 0) <= 0
-  ) {
-    disposeGatewayMainDbSnapshot(_gatewayMainDbSnapshot).catch(() => {});
   }
   if (_gatewayMainDbSnapshot && !isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs)) {
     disposeGatewayMainDbSnapshot(_gatewayMainDbSnapshot).catch(() => {});
@@ -3836,7 +4126,9 @@ async function createGatewayMainDbSnapshotForTransfer() {
   }
 }
 
-async function refreshStandbyTodayShadowFromGateway(baseUrl) {
+async function refreshStandbyTodayShadowFromGateway(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  throwIfManualReplicationAborted(signal);
   const base = getRemoteTodayEnergySourceKey(baseUrl);
   if (!base) {
     return { ok: false, rows: [], error: "Remote gateway URL is not configured." };
@@ -3849,6 +4141,7 @@ async function refreshStandbyTodayShadowFromGateway(baseUrl) {
         method: "GET",
         headers: buildRemoteProxyHeaders(),
         timeout: Math.min(REMOTE_REPLICATION_TIMEOUT_MS, 15000),
+        signal,
       }),
       {
         attempts: Math.max(1, Number(REMOTE_LIVE_FETCH_RETRIES || 1)),
@@ -3871,6 +4164,11 @@ async function refreshStandbyTodayShadowFromGateway(baseUrl) {
     updateRemoteTodayEnergyShadow(rows, syncedAt, { sourceKey: base });
     return { ok: true, rows, syncedAt, fallbackUsed: false };
   } catch (err) {
+    if (isManualReplicationAbortError(err)) {
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
+    }
     let fallbackRows = normalizeTodayEnergyRows(remoteBridgeState.todayEnergyRows);
     if (!fallbackRows.length) {
       fallbackRows = getRemoteTodayEnergyShadowRows(localDateStr(), {
@@ -3899,6 +4197,9 @@ async function refreshStandbyTodayShadowFromGateway(baseUrl) {
 }
 
 async function pullMainDbFromRemote(baseUrl, opts = {}) {
+  const signal = opts?.signal || null;
+  const runControl = opts?.runControl || null;
+  throwIfManualReplicationAborted(signal);
   if (remoteBridgeState.replicationRunning) {
     return { skipped: true, reason: "in_progress" };
   }
@@ -3915,6 +4216,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
   let expectedSha256 = "";
   let preserveRows = [];
   let standbyTodayShadow = null;
+  let stagedTempName = "";
   const transferMeta = {
     priorityMode: Boolean(opts?.priorityMode),
     livePaused: Boolean(opts?.livePaused),
@@ -3924,7 +4226,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
 
   try {
     await fs.promises.mkdir(DATA_DIR, { recursive: true });
-    standbyTodayShadow = await refreshStandbyTodayShadowFromGateway(baseUrl);
+    standbyTodayShadow = await refreshStandbyTodayShadowFromGateway(baseUrl, { signal });
     if (!standbyTodayShadow?.ok && !standbyTodayShadow?.fallbackUsed) {
       console.warn(
         "[replication] standby today-energy baseline refresh failed:",
@@ -3937,6 +4239,7 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       method: "GET",
       headers: buildRemoteProxyHeaders(),
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      signal,
     }));
     if (!r.ok) {
       if (Number(r.status || 0) === 404) {
@@ -4015,6 +4318,9 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       mtimeMs: targetMtimeMs,
       preservedSettings: preserveRows,
     });
+    stagedTempName = String(staged?.tempName || path.basename(tempPath)).trim();
+    trackManualReplicationStagedMainDb(runControl, stagedTempName);
+    throwIfManualReplicationAborted(signal);
 
     remoteBridgeState.lastReplicationTs = Date.now();
     remoteBridgeState.lastReplicationRows = 0;
@@ -4061,10 +4367,43 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
         .filter(Boolean),
     };
   } catch (err) {
+    if (stagedTempName) {
+      try {
+        discardPendingMainDbReplacement(stagedTempName);
+      } catch (_) {
+        // Ignore staged manifest cleanup failures.
+      }
+      if (
+        runControl &&
+        typeof runControl === "object" &&
+        String(runControl.stagedMainTempName || "").trim() === stagedTempName
+      ) {
+        runControl.stagedMainTempName = "";
+      }
+    }
     try {
       await fs.promises.unlink(tempPath);
     } catch (_) {
       // Ignore temp cleanup failures.
+    }
+    if (isManualReplicationAbortError(err)) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "cancelled",
+        recvBytes,
+        totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+        chunkCount: 1,
+        label: xferLabel,
+        ...transferMeta,
+      });
+      remoteBridgeState.lastReplicationError = "Standby DB refresh cancelled by operator.";
+      if (remoteBridgeState.lastSyncDirection !== "push-failed") {
+        remoteBridgeState.lastSyncDirection = "pull-main-db-cancelled";
+      }
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
     }
     broadcastUpdate({
       type: "xfer_progress",
@@ -4107,12 +4446,15 @@ function shouldPushArchiveFile(localMeta, remoteMeta) {
   return localMtime > remoteMtime + 2000;
 }
 
-async function fetchRemoteArchiveManifest(baseUrl) {
+async function fetchRemoteArchiveManifest(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  throwIfManualReplicationAborted(signal);
   const targetUrl = `${baseUrl}/api/replication/archive-manifest`;
   const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
     method: "GET",
     headers: buildRemoteProxyHeaders(),
     timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    signal,
   }));
   if (!r.ok) {
     if (Number(r.status || 0) === 404) {
@@ -4143,6 +4485,9 @@ async function fetchRemoteArchiveManifest(baseUrl) {
 }
 
 async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  throwIfManualReplicationAborted(signal);
   const name = sanitizeArchiveFileName(fileMeta?.name || "");
   if (!name) throw new Error("Invalid archive file name.");
   const monthKey = monthKeyFromArchiveFileName(name);
@@ -4153,6 +4498,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options
   const RESUME_MAX_ATTEMPTS = 3;
   let expectedSha256 = "";
   let resumeOffset = 0;
+  let stagedTempName = "";
 
   try {
     for (let attempt = 1; attempt <= RESUME_MAX_ATTEMPTS; attempt += 1) {
@@ -4172,6 +4518,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options
             method: "GET",
             headers: reqHeaders,
             timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+            signal,
           }),
         );
       } catch (fetchErr) {
@@ -4202,6 +4549,7 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options
         try { await fs.promises.unlink(tempPath); } catch (_) { /* ignore */ }
       }
 
+      throwIfManualReplicationAborted(signal);
       if (!r.ok && r.status !== 206) {
         throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
       }
@@ -4252,14 +4600,31 @@ async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options
       const mtime = new Date(targetMtimeMs);
       await fs.promises.utimes(tempPath, mtime, mtime);
     }
-    stagePendingArchiveReplacement({
+    const staged = stagePendingArchiveReplacement({
       name,
       monthKey,
       tempName: path.basename(tempPath),
       size: Math.max(0, Number(verified?.size || fileMeta?.size || 0)),
       mtimeMs: targetMtimeMs,
     });
+    stagedTempName = String(staged?.tempName || path.basename(tempPath)).trim();
+    trackManualReplicationStagedArchive(
+      runControl,
+      name,
+      stagedTempName,
+    );
+    throwIfManualReplicationAborted(signal);
   } catch (err) {
+    if (stagedTempName) {
+      try {
+        discardPendingArchiveReplacement(name, stagedTempName);
+      } catch (_) {
+        // Ignore staged archive cleanup failures.
+      }
+      if (runControl?.stagedArchiveEntries instanceof Map) {
+        runControl.stagedArchiveEntries.delete(name);
+      }
+    }
     try {
       await fs.promises.unlink(tempPath);
     } catch (_) {
@@ -4338,6 +4703,9 @@ async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
 }
 
 async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  throwIfManualReplicationAborted(signal);
   const forceAll = Boolean(options?.forceAll);
   const concurrency = Math.max(
     1,
@@ -4349,7 +4717,7 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
     stage: "archive",
     note: String(options?.note || "").trim(),
   };
-  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
+  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl, { signal });
   if (!remoteManifestRes.ok) {
     return {
       ok: false,
@@ -4400,6 +4768,7 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
       toPull,
       concurrency,
       async (fileMeta) => {
+        throwIfManualReplicationAborted(signal);
         await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
           transferredBytes += Math.max(0, Number(bytes || 0));
           const activeStep = Math.min(toPull.length, Math.max(1, transferredFiles + 1));
@@ -4414,7 +4783,11 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
             label: "Downloading archive",
             ...transferMeta,
           });
-        }, options);
+        }, {
+          ...options,
+          signal,
+          runControl,
+        });
         transferredFiles += 1;
         transferredNames.push(fileMeta.name);
         broadcastUpdate({
@@ -4431,6 +4804,23 @@ async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
       },
     );
   } catch (err) {
+    if (isManualReplicationAbortError(err)) {
+      if (toPull.length > 0) {
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "cancelled",
+          recvBytes: transferredBytes,
+          totalBytes,
+          chunkCount: toPull.length,
+          label: "Downloading archive",
+          ...transferMeta,
+        });
+      }
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
+    }
     if (toPull.length > 0) {
       broadcastUpdate({
         type: "xfer_progress",
@@ -4594,6 +4984,8 @@ function startManualReplicationJob(action, options, runner) {
     };
   }
   const jobId = `${String(action || "sync")}-${Date.now()}`;
+  const runControl = createManualReplicationRunControl(jobId, action);
+  manualReplicationRunControl = runControl;
   updateManualReplicationJob({
     id: jobId,
     action: String(action || "sync"),
@@ -4605,16 +4997,22 @@ function startManualReplicationJob(action, options, runner) {
     error: "",
     summary: String(options?.summary || "Queued"),
     needsRestart: false,
+    cancelRequested: false,
     result: null,
   });
 
   setTimeout(async () => {
-    updateManualReplicationJob({
-      status: "running",
-      summary: String(options?.runningSummary || "Running"),
-    });
     try {
-      const result = await runner();
+      throwIfManualReplicationAborted(
+        runControl?.controller?.signal || null,
+        "Standby DB refresh cancelled by operator.",
+      );
+      updateManualReplicationJob({
+        status: "running",
+        cancelRequested: false,
+        summary: String(options?.runningSummary || "Running"),
+      });
+      const result = await runner(runControl);
       updateManualReplicationJob({
         status: "completed",
         running: false,
@@ -4624,14 +5022,33 @@ function startManualReplicationJob(action, options, runner) {
             `${String(action || "sync")} complete. Restart the app to refresh in-memory state.`,
         ),
         error: "",
+        errorCode: "",
         needsRestart: Boolean(result?.needsRestart),
         livePaused: false,
+        cancelRequested: false,
         result:
           result && typeof result === "object"
             ? { ...result }
             : null,
       });
     } catch (err) {
+      if (isManualReplicationAbortError(err)) {
+        discardTrackedManualReplicationArtifacts(runControl);
+        updateManualReplicationJob({
+          status: "cancelled",
+          running: false,
+          finishedAt: Date.now(),
+          summary: String(err?.message || "Standby DB refresh cancelled."),
+          error: "",
+          errorCode: MANUAL_REPLICATION_CANCEL_CODE,
+          needsRestart: false,
+          livePaused: false,
+          cancelRequested: false,
+          result: null,
+        });
+        return;
+      }
+      discardTrackedManualReplicationArtifacts(runControl);
       updateManualReplicationJob({
         status: "failed",
         running: false,
@@ -4641,8 +5058,13 @@ function startManualReplicationJob(action, options, runner) {
         errorCode: String(err?.code || ""),
         needsRestart: false,
         livePaused: false,
+        cancelRequested: false,
         result: null,
       });
+    } finally {
+      if (manualReplicationRunControl === runControl) {
+        manualReplicationRunControl = null;
+      }
     }
   }, 25);
 
@@ -4668,6 +5090,7 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/export/",       600000],  // 10 min — large CSV/Excel exports
   ["/api/report/",        45000],  // 45 s  — daily report generation
   ["/api/replication/",    45000],  // 45 s  — replication sync
+  ["/api/plant-cap/",      60000],  // 60 s  — sequential plant cap release/control actions
   ["/api/analytics/",      20000],  // 20 s  — analytics queries
   ["/api/energy/5min",     20000],  // 20 s  — energy range queries
   ["/api/alarms",          20000],  // 20 s  — alarm queries
@@ -4807,7 +5230,9 @@ async function performLocalWriteRequest(url, upstreamPayload) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       throw new Error(
-        data.error || `Upstream write failed (${r.status} ${r.statusText})`,
+        data.error ||
+          data.msg ||
+          `Upstream write failed (${r.status} ${r.statusText})`,
       );
     }
     return data;
@@ -4825,11 +5250,137 @@ async function performLocalWriteRequest(url, upstreamPayload) {
   }
 }
 
+function isAuthorizedPlantWideControl({ authKey, authToken } = {}) {
+  return (
+    isValidPlantWideAuthSession(authToken) || isValidPlantWideAuthKey(authKey)
+  );
+}
+
+function getWriteActionLabel(value) {
+  const numeric = Number(value);
+  if (numeric === 1) return "START";
+  if (numeric === 0) return "STOP";
+  if (numeric === 2) return "RESET";
+  return "WRITE";
+}
+
+async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
+  const {
+    inverter,
+    node,
+    unit,
+    value,
+    scope,
+    operator,
+    authKey,
+    authToken,
+    priority,
+  } = bodyRaw || {};
+  const skipBulkAuth = Boolean(options?.skipBulkAuth);
+  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
+  const invNum = Number(inverter);
+  const unitNum = Number(unit ?? node);
+  const valueNum = Number(value);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+
+  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
+    const err = new Error("Invalid inverter");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) {
+    const err = new Error("Invalid unit/node");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
+    const err = new Error("Invalid value");
+    err.status = 400;
+    throw err;
+  }
+
+  const scopeNorm = normalizeWriteScope(scope || "single");
+  const isBulkScope =
+    scopeNorm === "all" || scopeNorm === "selected" || scopeNorm === "plant-cap";
+  if (
+    !skipBulkAuth &&
+    isBulkScope &&
+    !isAuthorizedPlantWideControl({ authKey, authToken })
+  ) {
+    const err = new Error("Unauthorized bulk command");
+    err.status = 403;
+    throw err;
+  }
+
+  const operatorName =
+    String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
+  const cfg = loadIpConfigFromDb();
+  const targetIp = String(
+    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
+  ).trim();
+  const ip = targetIp || "";
+  const upstreamPayload = { inverter: invNum, unit: unitNum, value: valueNum };
+  const action = getWriteActionLabel(valueNum);
+  try {
+    const data = await enqueueWriteCommand(
+      scopeNorm,
+      () => performLocalWriteRequest(url, upstreamPayload),
+      { priority, queueKey: ip || `inv-${invNum}` },
+    );
+    logControlAction({
+      operator: operatorName,
+      inverter: invNum,
+      node: unitNum || 0,
+      action,
+      scope: scopeNorm,
+      result: "ok",
+      ip,
+    });
+    if (
+      plantCapController &&
+      scopeNorm !== "plant-cap" &&
+      typeof plantCapController.handleManualWrite === "function"
+    ) {
+      plantCapController.handleManualWrite({
+        scope: scopeNorm,
+        inverter: invNum,
+        unit: unitNum,
+        value: valueNum,
+        operator: operatorName,
+      });
+    }
+    return {
+      ok: true,
+      data,
+      inverter: invNum,
+      unit: unitNum,
+      scope: scopeNorm,
+      action,
+      operator: operatorName,
+      ip,
+    };
+  } catch (e) {
+    logControlAction({
+      operator: operatorName,
+      inverter: invNum,
+      node: unitNum || 0,
+      action,
+      scope: scopeNorm,
+      result: `error:${e.message}`,
+      ip,
+    });
+    if (!Number(e?.status || 0)) e.status = 502;
+    throw e;
+  }
+}
+
 async function requestRemoteChat(pathname, {
   method = "GET",
   body = null,
   timeout = CHAT_PROXY_TIMEOUT_MS,
   retry = null,
+  signal = null,
 } = {}) {
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
@@ -4854,6 +5405,7 @@ async function requestRemoteChat(pathname, {
     headers,
     body: hasBody ? JSON.stringify(body || {}) : undefined,
     timeout: Math.max(1000, Number(timeout || CHAT_PROXY_TIMEOUT_MS)),
+    signal: signal || undefined,
   };
   const response = retry
     ? await fetchWithRetry(target, fetchOptions, retry)
@@ -4882,13 +5434,14 @@ function warnRemoteChatPoll(message) {
   console.warn("[chat] remote poll failed:", String(message || "unknown error"));
 }
 
-async function primeRemoteChatCursor() {
+async function primeRemoteChatCursor(signal = null) {
   if (!isRemoteMode()) return 0;
   const payload = await requestRemoteChat(
     `/api/chat/messages?mode=thread&limit=${CHAT_THREAD_LIMIT}`,
     {
       method: "GET",
       timeout: CHAT_PROXY_TIMEOUT_MS,
+      signal,
       retry: {
         attempts: 2,
         baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
@@ -4904,42 +5457,55 @@ async function primeRemoteChatCursor() {
 
 async function pollRemoteChatOnce() {
   if (!isRemoteMode()) return;
-  if (!remoteChatBridgeState.primed) {
-    await primeRemoteChatCursor();
-  }
-  const afterId = Math.max(0, Number(remoteChatBridgeState.lastInboundId || 0));
-  const qs = new URLSearchParams({
-    mode: "inbox",
-    machine: "remote",
-    afterId: String(afterId),
-    limit: String(REMOTE_CHAT_POLL_LIMIT),
-  });
-  const payload = await requestRemoteChat(`/api/chat/messages?${qs.toString()}`, {
-    method: "GET",
-    timeout: CHAT_PROXY_TIMEOUT_MS,
-    retry: {
-      attempts: 2,
-      baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
-    },
-  });
-  const rows = normalizeChatRows(payload?.rows);
-  if (!rows.length) {
-    remoteChatBridgeState.lastError = "";
-    return;
-  }
-  for (const row of rows) {
-    if (row.id > Number(remoteChatBridgeState.lastInboundId || 0)) {
-      remoteChatBridgeState.lastInboundId = row.id;
+  const controller = new AbortController();
+  remoteChatFetchController = controller;
+  try {
+    if (!remoteChatBridgeState.primed) {
+      await primeRemoteChatCursor(controller.signal);
     }
-    broadcastUpdate({ type: "chat", row });
+    const afterId = Math.max(0, Number(remoteChatBridgeState.lastInboundId || 0));
+    const qs = new URLSearchParams({
+      mode: "inbox",
+      machine: "remote",
+      afterId: String(afterId),
+      limit: String(REMOTE_CHAT_POLL_LIMIT),
+    });
+    const payload = await requestRemoteChat(`/api/chat/messages?${qs.toString()}`, {
+      method: "GET",
+      timeout: CHAT_PROXY_TIMEOUT_MS,
+      signal: controller.signal,
+      retry: {
+        attempts: 2,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    });
+    const rows = normalizeChatRows(payload?.rows);
+    if (!rows.length) {
+      remoteChatBridgeState.lastError = "";
+      return;
+    }
+    for (const row of rows) {
+      if (row.id > Number(remoteChatBridgeState.lastInboundId || 0)) {
+        remoteChatBridgeState.lastInboundId = row.id;
+      }
+      broadcastUpdate({ type: "chat", row });
+    }
+    remoteChatBridgeState.lastError = "";
+  } finally {
+    if (remoteChatFetchController === controller) {
+      remoteChatFetchController = null;
+    }
   }
-  remoteChatBridgeState.lastError = "";
 }
 
 function stopRemoteChatBridge() {
   if (remoteChatPollTimer) {
     clearTimeout(remoteChatPollTimer);
     remoteChatPollTimer = null;
+  }
+  if (remoteChatFetchController) {
+    try { remoteChatFetchController.abort(); } catch (_) {}
+    remoteChatFetchController = null;
   }
   remoteChatBridgeState.running = false;
   remoteChatBridgeState.primed = false;
@@ -4962,6 +5528,9 @@ function startRemoteChatBridge() {
     try {
       await pollRemoteChatOnce();
     } catch (err) {
+      if (!remoteChatBridgeState.running || !isRemoteMode() || isAbortError(err)) {
+        return;
+      }
       remoteChatBridgeState.lastError = String(err?.message || err);
       warnRemoteChatPoll(remoteChatBridgeState.lastError);
     }
@@ -5332,6 +5901,8 @@ async function pollRemoteLiveOnce() {
       broadcastRemoteOfflineLiveState();
     }
   }
+  const liveController = new AbortController();
+  remoteLiveFetchController = liveController;
   try {
     const r = await fetchWithRetry(
       `${base}/api/live`,
@@ -5339,6 +5910,7 @@ async function pollRemoteLiveOnce() {
         method: "GET",
         headers: buildRemoteProxyHeaders(),
         timeout: REMOTE_FETCH_TIMEOUT_MS,
+        signal: liveController.signal,
       },
       {
         attempts: REMOTE_LIVE_FETCH_RETRIES,
@@ -5412,12 +5984,15 @@ async function pollRemoteLiveOnce() {
       const requestId =
         Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
       remoteBridgeState.todayEnergyFetchRequestId = requestId;
+      const todayController = new AbortController();
+      remoteTodayEnergyFetchController = todayController;
       fetchWithRetry(
         `${base}/api/energy/today`,
         {
           method: "GET",
           headers: buildRemoteProxyHeaders(),
           timeout: REMOTE_FETCH_TIMEOUT_MS,
+          signal: todayController.signal,
         },
         {
           attempts: 1, // single attempt — next bridge tick will retry if needed
@@ -5451,10 +6026,14 @@ async function pollRemoteLiveOnce() {
           todayEnergyCache.ts = 0; // force next request to re-read with new data
         })
         .catch((err) => {
+          if (isAbortError(err)) return;
           // Non-fatal; stale todayEnergyRows will be used until next tick.
           console.warn("[remote-energy] piggyback fetch failed:", err?.message || err);
         })
         .finally(() => {
+          if (remoteTodayEnergyFetchController === todayController) {
+            remoteTodayEnergyFetchController = null;
+          }
           if (
             requestId === Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0))
           ) {
@@ -5465,6 +6044,9 @@ async function pollRemoteLiveOnce() {
     // Viewer model: no startup auto-sync, no incremental replication.
     // Remote mode is a gateway-backed viewer — manual Pull is the only DB refresh path.
   } catch (err) {
+    if (isAbortError(err)) {
+      return;
+    }
     const isCurrentBridgeSession =
       bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
     const isCurrentPauseGeneration =
@@ -5505,6 +6087,10 @@ async function pollRemoteLiveOnce() {
       remoteBridgeState.lastSyncDirection = "pull-live-failed";
     }
     broadcastRemoteHealthUpdate(true);
+  } finally {
+    if (remoteLiveFetchController === liveController) {
+      remoteLiveFetchController = null;
+    }
   }
 }
 
@@ -5594,6 +6180,14 @@ function stopRemoteBridge() {
   if (remoteBridgeTimer) {
     clearTimeout(remoteBridgeTimer);
     remoteBridgeTimer = null;
+  }
+  if (remoteLiveFetchController) {
+    try { remoteLiveFetchController.abort(); } catch (_) {}
+    remoteLiveFetchController = null;
+  }
+  if (remoteTodayEnergyFetchController) {
+    try { remoteTodayEnergyFetchController.abort(); } catch (_) {}
+    remoteTodayEnergyFetchController = null;
   }
   closeRemoteBridgeSocket();
   resetRemoteBridgeAlarmState();
@@ -6071,11 +6665,26 @@ function getTodayEnergyRowsForLivePayload(day = localDateStr()) {
 setBroadcastPayloadEnricher((payload) => {
   if (!payload || typeof payload !== "object") return payload;
   if (String(payload.type || "").trim().toLowerCase() !== "live") return payload;
-  if (Object.prototype.hasOwnProperty.call(payload, "todayEnergy")) return payload;
-  return {
-    ...payload,
-    todayEnergy: getTodayEnergyRowsForLivePayload(),
-  };
+  const todayEnergy = Object.prototype.hasOwnProperty.call(payload, "todayEnergy")
+    ? normalizeTodayEnergyRows(payload.todayEnergy)
+    : getTodayEnergyRowsForLivePayload();
+  const enriched = { ...payload, todayEnergy };
+  if (!Object.prototype.hasOwnProperty.call(enriched, "todaySummary")) {
+    enriched.todaySummary = buildCurrentDayEnergySnapshot({
+      asOfTs: Date.now(),
+      todayEnergyRows: todayEnergy,
+    }).todaySummary;
+  }
+  if (
+    plantCapController &&
+    !Object.prototype.hasOwnProperty.call(enriched, "plantCap")
+  ) {
+    enriched.plantCap = plantCapController.getStatus({
+      refresh: true,
+      includePreview: false,
+    });
+  }
+  return enriched;
 });
 
 function todayEnergyRowsEqual(aRaw, bRaw) {
@@ -6536,6 +7145,11 @@ function ensurePersistedSettings() {
     solcastTimezone: "Asia/Manila",
     plantLatitude: String(WEATHER_LAT),
     plantLongitude: String(WEATHER_LON),
+    plantCapUpperMw: "",
+    plantCapLowerMw: "",
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustomJson: "[]",
+    plantCapCooldownSec: String(30),
     remoteReplicationCursors: JSON.stringify(normalizeReplicationCursors({})),
     inverterPollConfig: JSON.stringify(DEFAULT_POLL_CFG),
   };
@@ -6596,6 +7210,11 @@ function buildDefaultSettingsSnapshot() {
     solcastTimezone: "Asia/Manila",
     plantLatitude: WEATHER_LAT,
     plantLongitude: WEATHER_LON,
+    plantCapUpperMw: null,
+    plantCapLowerMw: null,
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustom: [],
+    plantCapCooldownSec: 30,
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     dataDir: DATA_DIR,
@@ -6662,6 +7281,31 @@ function buildSettingsSnapshot() {
     ),
     plantLatitude: Number(getSetting("plantLatitude", WEATHER_LAT)),
     plantLongitude: Number(getSetting("plantLongitude", WEATHER_LON)),
+    plantCapUpperMw: (() => {
+      const raw = String(getSetting("plantCapUpperMw", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    })(),
+    plantCapLowerMw: (() => {
+      const raw = String(getSetting("plantCapLowerMw", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    })(),
+    plantCapSequenceMode: normalizePlantCapSequenceMode(
+      getSetting("plantCapSequenceMode", defaults.plantCapSequenceMode),
+    ),
+    plantCapSequenceCustom: normalizePlantCapSequenceCustom(
+      readJsonSetting("plantCapSequenceCustomJson", defaults.plantCapSequenceCustom),
+      Number(getSetting("inverterCount", defaults.inverterCount)),
+    ),
+    plantCapCooldownSec: clampInt(
+      getSetting("plantCapCooldownSec", defaults.plantCapCooldownSec),
+      5,
+      600,
+      defaults.plantCapCooldownSec,
+    ),
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", defaults.exportUiState),
     ),
@@ -8417,25 +9061,6 @@ function enrichAlarmRow(row, nowTs = Date.now()) {
   };
 }
 
-const PLANT_WIDE_AUTH_PREFIX = "sacups";
-function getPlantWideAuthKeys() {
-  const now = new Date();
-  const prev = new Date(now.getTime() - 60000);
-  const nowMM = String(now.getMinutes()).padStart(2, "0");
-  const prevMM = String(prev.getMinutes()).padStart(2, "0");
-  return new Set([
-    `${PLANT_WIDE_AUTH_PREFIX}${nowMM}`,
-    `${PLANT_WIDE_AUTH_PREFIX}${prevMM}`,
-  ]);
-}
-function isValidPlantWideAuthKey(v) {
-  const key = String(v || "")
-    .trim()
-    .toLowerCase();
-  if (!key) return false;
-  return getPlantWideAuthKeys().has(key);
-}
-
 function startOfLocalDayMs(ts = Date.now()) {
   const d = new Date(ts);
   d.setHours(0, 0, 0, 0);
@@ -8570,6 +9195,121 @@ function getTodayPacTotalsFromDbCached() {
   todayEnergyCache.ts = now;
   todayEnergyCache.rows = Array.isArray(rows) ? rows : [];
   return todayEnergyCache.rows;
+}
+
+function buildCurrentDayEnergySnapshot(options = {}) {
+  const asOfTs = Number(options?.asOfTs || Date.now());
+  const day = localDateStr(asOfTs);
+  const rows = normalizeTodayEnergyRows(
+    Array.isArray(options?.todayEnergyRows)
+      ? options.todayEnergyRows
+      : getTodayPacTotalsFromDbCached(),
+  );
+  const todaySummary = {
+    day,
+    as_of_ts: asOfTs,
+    ...summarizeCurrentDayEnergyRows(rows),
+  };
+  const snapshot = {
+    day,
+    asOfTs,
+    rows,
+    todaySummary,
+  };
+
+  if (options?.includeDailyReportRows === true) {
+    snapshot.dailyReportRows = buildDailyReportRowsForDate(day, {
+      persist: false,
+      refresh: false,
+      includeTodayPartial: true,
+      todayEnergyRows: rows,
+    });
+  }
+
+  return snapshot;
+}
+
+function buildReportSummaryWithCurrentDaySnapshot(day, baseSummary, currentDaySnapshot, todayRows) {
+  const today = localDateStr();
+  if (!currentDaySnapshot || currentDaySnapshot.day !== today) {
+    return baseSummary;
+  }
+
+  const selectedDay = String(day || "").trim();
+  const summary = mergeCurrentDaySummaryIntoReportSummary(
+    baseSummary,
+    currentDaySnapshot.todaySummary,
+    {
+      replaceDaily: selectedDay === today,
+      replaceWeekly:
+        String(baseSummary?.week_start || "") <= today &&
+        String(baseSummary?.week_end || "") >= today,
+      baseTodayDailyTotalKwh: summarizeDailyReportRows(todayRows).total_kwh,
+    },
+  );
+
+  if (
+    selectedDay === today &&
+    Array.isArray(currentDaySnapshot.dailyReportRows) &&
+    currentDaySnapshot.dailyReportRows.length > 0
+  ) {
+    summary.current_day.daily_report_rows = cloneDailyReportRows(
+      currentDaySnapshot.dailyReportRows,
+    );
+  }
+
+  return summary;
+}
+
+function sumEnergyRowsKwh(rows) {
+  return (Array.isArray(rows) ? rows : []).reduce(
+    (sum, row) => sum + Math.max(0, Number(row?.kwh_inc || 0)),
+    0,
+  );
+}
+
+function buildForecastActualSupplementRowsForRange(
+  startTs,
+  endTs,
+  currentDaySnapshot = null,
+) {
+  const snapshot =
+    currentDaySnapshot &&
+    currentDaySnapshot.day === localDateStr() &&
+    currentDaySnapshot.todaySummary
+      ? currentDaySnapshot
+      : buildCurrentDayEnergySnapshot();
+  const s = Number(startTs || 0) || Date.now() - 86400000;
+  const e = Number(endTs || 0) || Date.now();
+  const day = String(snapshot.day || localDateStr());
+  const dayStartTs = new Date(`${day}T00:00:00.000`).getTime();
+  const dayEndTs = new Date(`${day}T23:59:59.999`).getTime();
+  const overlapStartTs = Math.max(s, dayStartTs);
+  const overlapEndTs = Math.min(e, dayEndTs, Number(snapshot.asOfTs || Date.now()));
+  if (!(overlapEndTs >= overlapStartTs)) return [];
+
+  const persistedBeforeRangeKwh =
+    overlapStartTs > dayStartTs
+      ? sumEnergyRowsKwh(
+          queryEnergy5minRangeAll(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
+        )
+      : 0;
+  const persistedRangeKwh = sumEnergyRowsKwh(
+    queryEnergy5minRangeAll(overlapStartTs, overlapEndTs),
+  );
+
+  return buildCurrentDayActualSupplementRows({
+    startTs: s,
+    endTs: e,
+    rangeStartTs: overlapStartTs,
+    rangeEndTs: overlapEndTs,
+    dayStartTs,
+    dayEndTs,
+    asOfTs: Number(snapshot.asOfTs || Date.now()),
+    authoritativeTotalKwh: Number(snapshot.todaySummary?.total_kwh || 0),
+    persistedBeforeRangeKwh,
+    persistedRangeKwh,
+  });
 }
 
 function cloneDailyReportRows(rowsRaw) {
@@ -8919,12 +9659,19 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
     includeTodayPartial && day === localDateStr()
       ? Math.min(dayEndTs, Date.now())
       : dayEndTs;
+  const currentDayEnergyRows =
+    day === localDateStr() && includeTodayPartial && Array.isArray(options?.todayEnergyRows)
+      ? normalizeTodayEnergyRows(options.todayEnergyRows)
+      : null;
 
   const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
   const pacKwhByInv = sumEnergy5minByInverterRange(startTs, endTs);
 
   if (day === localDateStr() && includeTodayPartial) {
-    const supplementalRows = getTodayEnergySupplementRows(day);
+    const supplementalRows =
+      currentDayEnergyRows && currentDayEnergyRows.length
+        ? currentDayEnergyRows
+        : getTodayEnergySupplementRows(day);
     for (const { inverter, total_kwh } of supplementalRows) {
       const inv = Number(inverter || 0);
       if (inv <= 0 || !(total_kwh > 0)) continue;
@@ -9190,6 +9937,10 @@ function summarizeDailyReportRows(rows) {
 function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const day = parseIsoDateStrict(targetDateText || localDateStr(), "date");
   const refreshDay = options.refreshDay === true;
+  const currentDaySnapshot =
+    options.currentDaySnapshot && typeof options.currentDaySnapshot === "object"
+      ? options.currentDaySnapshot
+      : null;
   const today = localDateStr();
   const selectedDate = new Date(`${day}T00:00:00.000`);
   const dow = selectedDate.getDay(); // 0=Sunday ... 6=Saturday
@@ -9224,13 +9975,19 @@ function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   }
 
   const weeklyRows = dates.flatMap((d) => byDateRows.get(d) || []);
-  const summary = {
+  const baseSummary = {
     date: day,
     week_start: weekStart,
     week_end: weekEnd,
     daily: summarizeDailyReportRows(dailyRows),
     weekly: summarizeDailyReportRows(weeklyRows),
   };
+  const summary = buildReportSummaryWithCurrentDaySnapshot(
+    day,
+    baseSummary,
+    currentDaySnapshot,
+    byDateRows.get(today) || [],
+  );
   if (canCacheSummary) setPastReportSummaryCache(day, summary);
   return summary;
 }
@@ -9373,6 +10130,17 @@ function getConfiguredNodeSet(cfg = null) {
   return set;
 }
 
+plantCapController = new PlantCapController({
+  getLiveData: () => getRuntimeLiveData(),
+  getIpConfig: () => loadIpConfigFromDb(),
+  getSettings: () => buildSettingsSnapshot(),
+  isRemoteMode: () => isRemoteMode(),
+  executeWrite: (body) => executeLocalControlWriteRequest(body, { skipBulkAuth: true }),
+  broadcast: (payload) => broadcastUpdate(payload),
+  liveFreshMs: LIVE_FRESH_MS,
+  operatorName: "PLANT CAP",
+});
+
 function isHttpUrl(v) {
   try {
     const u = new URL(String(v));
@@ -9434,16 +10202,25 @@ ensurePersistedSettings();
 
 app.ws("/ws", (ws) => {
   registerClient(ws);
+  const todayEnergy = getTodayEnergyRowsForWs();
+  const plantCap =
+    plantCapController &&
+    plantCapController.getStatus({ refresh: true, includePreview: false });
   ws.send(
     JSON.stringify({
       type: "init",
       data: getRuntimeLiveData(),
-      todayEnergy: getTodayEnergyRowsForWs(),
+      todayEnergy,
+      todaySummary: buildCurrentDayEnergySnapshot({
+        asOfTs: Date.now(),
+        todayEnergyRows: todayEnergy,
+      }).todaySummary,
       remoteHealth: buildRemoteHealthSnapshot(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
         plantName: getSetting("plantName", "ADSI Plant"),
       },
+      plantCap: plantCap || null,
     }),
   );
 });
@@ -9687,6 +10464,14 @@ app.get("/api/replication/job-status", (req, res) => {
   res.json({ ok: true, job: snapshotManualReplicationJob() });
 });
 
+app.post("/api/replication/cancel", (req, res) => {
+  const result = requestManualReplicationCancel();
+  if (!result.ok) {
+    return res.status(409).json(result);
+  }
+  return res.json(result);
+});
+
 app.get("/api/replication/archive-manifest", (req, res) => {
   try {
     const manifest = listLocalArchiveManifest();
@@ -9707,22 +10492,28 @@ app.get("/api/replication/archive-download", async (req, res) => {
   }
   const monthKey = monthKeyFromArchiveFileName(fileName);
   prepareArchiveDbForTransfer(monthKey);
+  let snapshot = null;
   try {
     const resolved = resolveArchiveFileForTransfer(fileName);
     if (!resolved?.path) {
       throw new Error("Archive file not found.");
     }
-    const totalBytes = Math.max(0, Number(resolved.size || 0));
-    const sha256 = await getCachedFileSha256(resolved.path, {
-      size: totalBytes,
+    snapshot = await createSqliteTransferSnapshot(resolved.path, {
+      targetDir: ARCHIVE_DIR,
+      prefix: `${fileName}.transfer-snapshot`,
       mtimeMs: Math.max(0, Number(resolved.mtimeMs || 0)),
+    });
+    const totalBytes = Math.max(0, Number(snapshot?.size || resolved.size || 0));
+    const sha256 = await getCachedFileSha256(snapshot.tempPath, {
+      size: totalBytes,
+      mtimeMs: Math.max(0, Number(snapshot?.mtimeMs || resolved.mtimeMs || 0)),
     });
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("x-archive-size", String(totalBytes));
     res.setHeader("x-archive-sha256", sha256);
     res.setHeader(
       "x-archive-mtime",
-      String(Math.max(0, Number(resolved.mtimeMs || 0))),
+      String(Math.max(0, Number(snapshot?.mtimeMs || resolved.mtimeMs || 0))),
     );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     res.setHeader("Accept-Ranges", "bytes");
@@ -9742,7 +10533,11 @@ app.get("/api/replication/archive-download", async (req, res) => {
         res.setHeader("Content-Length", String(end - start + 1));
         res.status(206);
         await pipeline(
-          fs.createReadStream(resolved.path, { start, end, highWaterMark: REPLICATION_TRANSFER_STREAM_HWM }),
+          fs.createReadStream(snapshot.tempPath, {
+            start,
+            end,
+            highWaterMark: REPLICATION_TRANSFER_STREAM_HWM,
+          }),
           res,
         );
         return;
@@ -9752,15 +10547,30 @@ app.get("/api/replication/archive-download", async (req, res) => {
     const useGzip = shouldGzipReplicationStream(req, totalBytes);
     if (!useGzip) {
       res.setHeader("Content-Length", String(totalBytes));
-      await pipeline(createTransferReadStream(resolved.path), res);
+      await pipeline(createTransferReadStream(snapshot.tempPath), res);
       return;
     }
     res.setHeader("Content-Encoding", "gzip");
     res.setHeader("Vary", "Accept-Encoding");
-    await pipeline(createTransferReadStream(resolved.path), createReplicationGzipStream(), res);
+    await pipeline(
+      createTransferReadStream(snapshot.tempPath),
+      createReplicationGzipStream(),
+      res,
+    );
     return;
   } catch (err) {
     return res.status(404).json({ ok: false, error: "Archive file not found." });
+  } finally {
+    if (snapshot?.tempPath) {
+      try {
+        await disposeSqliteTransferSnapshot(snapshot);
+      } catch (err) {
+        console.warn(
+          "[replication] failed to clean up archive transfer snapshot:",
+          String(err?.message || err || "unknown error"),
+        );
+      }
+    }
   }
 });
 
@@ -9929,15 +10739,19 @@ app.get("/api/replication/main-db", async (req, res) => {
       label: "Sending main database",
     });
   } catch (err) {
+    const cancelled = isTransferStreamAbortError(err);
     broadcastUpdate({
       type: "xfer_progress",
       dir: "tx",
-      phase: "error",
+      phase: cancelled ? "cancelled" : "error",
       sentBytes,
       totalBytes: Math.max(0, Number(snapshot?.size || sentBytes || 0)),
       chunkCount: 1,
       label: "Sending main database",
     });
+    if (cancelled) {
+      return;
+    }
     if (!res.headersSent) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -10156,6 +10970,13 @@ app.post("/api/replication/pull-now", async (req, res) => {
   const background = req?.body?.background !== false;
   const forcePull = Boolean(req?.body?.forcePull);
   try {
+    let preflight = null;
+    if (background && !forcePull) {
+      preflight = await evaluateManualPullPreflight(base, forcePull);
+      if (!preflight?.ok) {
+        return sendManualPullErrorResponse(res, preflight?.error);
+      }
+    }
     if (background) {
       const started = startManualReplicationJob(
         "pull",
@@ -10164,7 +10985,12 @@ app.post("/api/replication/pull-now", async (req, res) => {
           summary: "Queued standby DB refresh from gateway.",
           runningSummary: "Downloading and staging the gateway main database for standby use.",
         },
-        () => runManualPullSync(base, includeArchive, forcePull),
+        (runControl) =>
+          runManualPullSync(base, includeArchive, forcePull, {
+            signal: runControl?.controller?.signal || null,
+            runControl,
+            preflight,
+          }),
       );
       if (!started?.started) {
         return res.status(202).json({
@@ -10195,9 +11021,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    return sendManualPullErrorResponse(res, err);
   }
 });
 
@@ -10221,63 +11045,119 @@ app.post("/api/write", async (req, res) => {
   if (isRemoteMode()) {
     return proxyWriteToRemote(req, res);
   }
-  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
-  const { inverter, node, unit, value, scope, operator, authKey, priority } = req.body || {};
-  const invNum = Number(inverter);
-  const unitNum = Number(unit ?? node);
-  const valueNum = Number(value);
-  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
-  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
-
-  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
-    return res.status(400).json({ ok: false, error: "Invalid inverter" });
-  }
-  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) {
-    return res.status(400).json({ ok: false, error: "Invalid unit/node" });
-  }
-  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
-    return res.status(400).json({ ok: false, error: "Invalid value" });
-  }
-  const scopeNorm = normalizeWriteScope(scope || "single");
-  const isBulkScope = scopeNorm === "all" || scopeNorm === "selected";
-  if (isBulkScope && !isValidPlantWideAuthKey(authKey)) {
-    return res.status(403).json({ ok: false, error: "Unauthorized bulk command" });
-  }
-
-  const upstreamPayload = { inverter: invNum, unit: unitNum, value: valueNum };
-  const operatorName = String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
-  const cfg = loadIpConfigFromDb();
-  const targetIp = String(
-    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
-  ).trim();
-  const ip = targetIp || "";
   try {
-    const data = await enqueueWriteCommand(
-      scopeNorm,
-      () => performLocalWriteRequest(url, upstreamPayload),
-      { priority, queueKey: ip || `inv-${invNum}` },
-    );
-    logControlAction({
-      operator: operatorName,
-      inverter: invNum,
-      node: unitNum || 0,
-      action: valueNum === 1 ? "START" : "STOP",
-      scope: scope || "single",
-      result: "ok",
-      ip,
-    });
-    res.json({ ok: true, data });
+    const result = await executeLocalControlWriteRequest(req.body || {});
+    res.json(result);
   } catch (e) {
-    logControlAction({
-      operator: operatorName,
-      inverter: invNum,
-      node: unitNum || 0,
-      action: valueNum === 1 ? "START" : "STOP",
-      scope: scope || "single",
-      result: `error:${e.message}`,
-      ip,
+    res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/write/auth/bulk", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const { authKey } = req.body || {};
+  if (!isValidPlantWideAuthKey(authKey)) {
+    return res.status(403).json({ ok: false, error: "Authorization failed. Invalid auth key." });
+  }
+  const session = issuePlantWideAuthSession();
+  return res.json({
+    ok: true,
+    token: session.token,
+    issuedAt: session.issuedAt,
+    expiresAt: session.expiresAt,
+    ttlMs: session.ttlMs,
+  });
+});
+
+app.get("/api/plant-cap/status", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  return res.json({
+    ok: true,
+    status:
+      plantCapController &&
+      plantCapController.getStatus({ refresh: true, includePreview: true }),
+  });
+});
+
+app.post("/api/plant-cap/preview", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const preview =
+      plantCapController && plantCapController.buildPreview(req.body || {});
+    return res.json({
+      ok: true,
+      preview,
+      status:
+        plantCapController &&
+        plantCapController.getStatus({ refresh: true, includePreview: false }),
     });
-    res.status(502).json({ ok: false, error: e.message });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/enable", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  try {
+    const status =
+      plantCapController &&
+      (await plantCapController.enable(req.body || {}));
+    return res.json({ ok: true, status });
+  } catch (err) {
+    return res
+      .status(Number(err?.status || 400))
+      .json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/disable", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  const status =
+    plantCapController &&
+    plantCapController.disable(
+      "disabled",
+      "Plant-wide capping monitoring was disabled by an authorized operator.",
+    );
+  return res.json({ ok: true, status });
+});
+
+app.post("/api/plant-cap/release", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  try {
+    const result =
+      plantCapController && (await plantCapController.releaseControlled());
+    return res.json(result || { ok: false, error: "Plant cap controller unavailable." });
+  } catch (err) {
+    return res
+      .status(Number(err?.status || 500))
+      .json({ ok: false, error: err.message });
   }
 });
 
@@ -10373,6 +11253,11 @@ app.post("/api/settings", (req, res) => {
     inverterPollConfig,
     plantLatitude,
     plantLongitude,
+    plantCapUpperMw,
+    plantCapLowerMw,
+    plantCapSequenceMode,
+    plantCapSequenceCustom,
+    plantCapCooldownSec,
   } =
     req.body || {};
 
@@ -10538,6 +11423,86 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ ok: false, error: "plantLongitude must be between -180 and 180" });
     updates.plantLongitude = String(lon);
   }
+  if (plantCapUpperMw !== undefined) {
+    const rawUpper = String(plantCapUpperMw ?? "").trim();
+    if (!rawUpper) {
+      updates.plantCapUpperMw = "";
+    } else {
+      const upper = Number(rawUpper);
+      if (!Number.isFinite(upper) || upper <= 0) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapUpperMw must be greater than 0",
+        });
+      }
+      updates.plantCapUpperMw = String(upper);
+    }
+  }
+  if (plantCapLowerMw !== undefined) {
+    const rawLower = String(plantCapLowerMw ?? "").trim();
+    if (!rawLower) {
+      updates.plantCapLowerMw = "";
+    } else {
+      const lower = Number(rawLower);
+      if (!Number.isFinite(lower) || lower < 0) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapLowerMw must be 0 or higher",
+        });
+      }
+      updates.plantCapLowerMw = String(lower);
+    }
+  }
+  if (plantCapSequenceMode !== undefined) {
+    updates.plantCapSequenceMode = normalizePlantCapSequenceMode(
+      plantCapSequenceMode,
+    );
+  }
+  if (plantCapSequenceCustom !== undefined) {
+    updates.plantCapSequenceCustomJson = JSON.stringify(
+      normalizePlantCapSequenceCustom(
+        plantCapSequenceCustom,
+        clampInt(
+          inverterCount !== undefined
+            ? inverterCount
+            : getSetting("inverterCount", 27),
+          1,
+          200,
+          27,
+        ),
+      ),
+    );
+  }
+  if (plantCapCooldownSec !== undefined) {
+    updates.plantCapCooldownSec = String(
+      clampInt(plantCapCooldownSec, 5, 600, 30),
+    );
+  }
+  if (
+    updates.plantCapUpperMw !== undefined ||
+    updates.plantCapLowerMw !== undefined
+  ) {
+    const upperValue = String(
+      updates.plantCapUpperMw !== undefined
+        ? updates.plantCapUpperMw
+        : getSetting("plantCapUpperMw", ""),
+    ).trim();
+    const lowerValue = String(
+      updates.plantCapLowerMw !== undefined
+        ? updates.plantCapLowerMw
+        : getSetting("plantCapLowerMw", ""),
+    ).trim();
+    if (upperValue && lowerValue) {
+      const upper = Number(upperValue);
+      const lower = Number(lowerValue);
+      if (Number.isFinite(upper) && Number.isFinite(lower) && !(lower < upper)) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapLowerMw must be less than plantCapUpperMw",
+        });
+      }
+    }
+  }
   if (exportUiState !== undefined) {
     updates.exportUiState = JSON.stringify(sanitizeExportUiState(exportUiState));
   }
@@ -10672,6 +11637,31 @@ app.get("/api/runtime/network", (req, res) => {
 
 app.get("/api/runtime/perf", (req, res) => {
   res.json(getRuntimePerfSnapshot());
+});
+
+app.get("/api/runtime/data-health", (req, res) => {
+  const todayEnergy =
+    typeof poller.getTodayEnergyHealth === "function"
+      ? poller.getTodayEnergyHealth()
+      : {};
+  const pollerStats =
+    typeof poller.getPerfStats === "function"
+      ? poller.getPerfStats()
+      : {};
+  res.json({
+    ok: true,
+    operationMode: isRemoteMode() ? "remote" : "gateway",
+    todayEnergy,
+    poller: {
+      running: Boolean(pollerStats?.running),
+      lastPollStartedTs: Number(pollerStats?.lastPollStartedTs || 0),
+      lastPollEndedTs: Number(pollerStats?.lastPollEndedTs || 0),
+      lastDbPersistOkTs: Number(pollerStats?.lastDbPersistOkTs || 0),
+      fetchOkCount: Number(pollerStats?.fetchOkCount || 0),
+      fetchErrorCount: Number(pollerStats?.fetchErrorCount || 0),
+      lastFetchError: String(pollerStats?.lastFetchError || ""),
+    },
+  });
 });
 
 app.get("/api/tailscale/status", (req, res) => {
@@ -11353,7 +12343,7 @@ app.post("/api/export/solcast-preview", async (req, res) => {
       cfg,
       requestedResolution,
     );
-    const outPath = await runGatewayExportJob("solcast-preview", () =>
+    const rawOutPath = await runGatewayExportJob("solcast-preview", () =>
       exporter.exportSolcastPreview({
         rawRows: preview.rawRows,
         rows: preview.rows,
@@ -11364,14 +12354,13 @@ app.post("/api/export/solcast-preview", async (req, res) => {
         format: "xlsx",
       }),
     );
-    return res.json({
-      ok: true,
-      path: outPath,
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast");
+    return res.json(buildExportResult(outPath, {
       day: preview.day,
       dayCount: preview.dayCount,
       rangeStartDay: preview.rangeStartDay,
       rangeEndDay: preview.rangeEndDay,
-    });
+    }));
   } catch (e) {
     return sendExportRouteError(res, e);
   }
@@ -11498,7 +12487,7 @@ app.post("/api/forecast/generate", async (req, res) => {
 
 app.get("/api/energy/today", (req, res) => {
   try {
-    const rows = getTodayPacTotalsFromDbCached();
+    const rows = buildCurrentDayEnergySnapshot().rows;
     // Keep this endpoint strictly aligned with logged daily report rows.
     return res.json(rows);
   } catch (e) {
@@ -11513,6 +12502,7 @@ app.get("/api/report/daily", (req, res) => {
   }
   const _t0 = Date.now();
   try {
+    const currentDaySnapshot = buildCurrentDayEnergySnapshot();
     const { date, start, end, refresh } = req.query;
     const refreshRequested = ["1", "true", "yes", "on"].includes(
       String(refresh || "")
@@ -11597,6 +12587,7 @@ app.get("/api/report/payload", (req, res) => {
 
     const summary = buildDailyWeeklyReportSummary(date, {
       refreshDay: refreshRequested && date === requestedDate,
+      currentDaySnapshot,
     });
     res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
     return res.json({
@@ -11619,13 +12610,17 @@ app.get("/api/report/summary", (req, res) => {
   }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
+    const currentDaySnapshot = buildCurrentDayEnergySnapshot();
     const refreshRequested = ["1", "true", "yes", "on"].includes(
       String(req.query?.refresh || "")
         .trim()
         .toLowerCase(),
     );
     return res.json(
-      buildDailyWeeklyReportSummary(day, { refreshDay: refreshRequested }),
+      buildDailyWeeklyReportSummary(day, {
+        refreshDay: refreshRequested,
+        currentDaySnapshot,
+      }),
     );
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
@@ -11648,7 +12643,11 @@ app.get("/api/report/latest-date", (req, res) => {
   }
 });
 
-function getEnergySummarySupplementRowsForRange(startTs, endTs) {
+function getEnergySummarySupplementRowsForRange(
+  startTs,
+  endTs,
+  currentDaySnapshot = null,
+) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   if (!(e >= s)) return [];
@@ -11656,15 +12655,39 @@ function getEnergySummarySupplementRowsForRange(startTs, endTs) {
   const todayStart = new Date(`${today}T00:00:00.000`).getTime();
   const todayEnd = new Date(`${today}T23:59:59.999`).getTime();
   if (e < todayStart || s > todayEnd) return [];
-  return getTodayEnergySupplementRows(today);
+  if (currentDaySnapshot && currentDaySnapshot.day === today) {
+    return normalizeTodayEnergyRows(currentDaySnapshot.rows);
+  }
+  return buildCurrentDayEnergySnapshot().rows;
 }
 
 function buildEnergySummarySourceRows(payload = {}) {
   const s = Number(payload?.startTs || 0) || Date.now() - 86400000;
   const e = Number(payload?.endTs || 0) || Date.now();
+  const currentDaySnapshot = buildCurrentDayEnergySnapshot();
   return exporter.buildEnergySummaryExportRows(s, e, payload?.inverter, {
-    supplementalTodayRows: getEnergySummarySupplementRowsForRange(s, e),
+    supplementalTodayRows: getEnergySummarySupplementRowsForRange(
+      s,
+      e,
+      currentDaySnapshot,
+    ),
   });
+}
+
+function exportTouchesCurrentDay(payload = {}) {
+  const today = localDateStr();
+  const dateText = String(payload?.date || "").trim();
+  if (dateText) return dateText === today;
+
+  const s = Number(payload?.startTs || 0);
+  const e = Number(payload?.endTs || 0);
+  if (Number.isFinite(s) && s > 0 && Number.isFinite(e) && e >= s) {
+    const todayStart = new Date(`${today}T00:00:00.000`).getTime();
+    const todayEnd = new Date(`${today}T23:59:59.999`).getTime();
+    return e >= todayStart && s <= todayEnd;
+  }
+
+  return true;
 }
 
 function getConfiguredExportRoot() {
@@ -11704,6 +12727,17 @@ function normalizeExportRelativePath(relativePath, fallbackPath = "") {
     throw new Error("Invalid export relative path.");
   }
   return normalized;
+}
+
+function normalizeForecastExportRelativePathForRoute(routePath, relativePath) {
+  const route = String(routePath || "").trim();
+  if (route === "/api/export/forecast-actual") {
+    return exporter.rewriteForecastExportRelativePath(relativePath, "Analytics");
+  }
+  if (route === "/api/export/solcast-preview") {
+    return exporter.rewriteForecastExportRelativePath(relativePath, "Solcast");
+  }
+  return relativePath;
 }
 
 function resolveLocalExportPath(relativePath, fallbackPath = "") {
@@ -11805,11 +12839,15 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
       );
     }
   }
-  const relativePath = normalizeExportRelativePath(
+  const remoteRelativePath = normalizeExportRelativePath(
     exportResult?.relativePath,
     exportResult?.path,
   );
-  const localPath = resolveLocalExportPath(relativePath, exportResult?.path);
+  const localRelativePath = normalizeForecastExportRelativePathForRoute(
+    routePath,
+    remoteRelativePath,
+  );
+  const localPath = resolveLocalExportPath(localRelativePath, exportResult?.path);
   await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
 
   const artifactUrl = `${base}/api/export/artifact`;
@@ -11821,7 +12859,7 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
         "Content-Type": "application/json",
         ...buildRemoteProxyHeaders(),
       },
-      body: JSON.stringify({ relativePath }),
+      body: JSON.stringify({ relativePath: remoteRelativePath }),
       timeout: REMOTE_REPLICATION_TIMEOUT_MS,
     }));
     if (!response.ok || !response.body) {
@@ -11930,12 +12968,16 @@ app.post("/api/export/energy", async (req, res) => {
       return res.json(await downloadRemoteExportToLocal("/api/export/energy", req.body || {}));
     }
     const payload = req.body || {};
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot()
+      : null;
     const outPath = await runGatewayExportJob("energy", () =>
       exporter.exportEnergy({
         ...payload,
         supplementalTodayRows: getEnergySummarySupplementRowsForRange(
           payload?.startTs,
           payload?.endTs,
+          currentDaySnapshot,
         ),
       }),
     );
@@ -11993,15 +13035,20 @@ app.post("/api/export/daily-report", async (req, res) => {
       );
     }
     const payload = req.body || {};
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot({ includeDailyReportRows: true })
+      : null;
     const outPath = await runGatewayExportJob("daily-report", async () => {
       const dateText = String(payload?.date || "").trim();
       if (dateText) {
         try {
           const day = parseIsoDateStrict(dateText, "date");
-          buildDailyReportRowsForDate(day, {
-            persist: true,
-            includeTodayPartial: day === localDateStr(),
-          });
+          if (day !== localDateStr()) {
+            buildDailyReportRowsForDate(day, {
+              persist: true,
+              includeTodayPartial: false,
+            });
+          }
         } catch (_) {
           // Exporter handles fallback/defaults.
         }
@@ -12013,17 +13060,25 @@ app.post("/api/export/daily-report", async (req, res) => {
           const endDay = fmtDate(e);
           const today = localDateStr();
           for (const day of daysInclusive(startDay, endDay)) {
-            if (day > today) continue;
+            if (day > today || day === today) continue;
             buildDailyReportRowsForDate(day, {
               persist: true,
-              includeTodayPartial: day === today,
+              includeTodayPartial: false,
             });
-            // Yield between days so live/control traffic can keep flowing.
             await new Promise((resolve) => setImmediate(resolve));
           }
         }
       }
-      return exporter.exportDailyReport(req.body || {});
+      const rowsByDate =
+        currentDaySnapshot &&
+        Array.isArray(currentDaySnapshot.dailyReportRows) &&
+        currentDaySnapshot.dailyReportRows.length
+          ? { [currentDaySnapshot.day]: currentDaySnapshot.dailyReportRows }
+          : null;
+      return exporter.exportDailyReport({
+        ...payload,
+        rowsByDate,
+      });
     });
     return res.json(buildExportResult(outPath));
   } catch (e) {
@@ -12037,9 +13092,21 @@ app.post("/api/export/forecast-actual", async (req, res) => {
         await downloadRemoteExportToLocal("/api/export/forecast-actual", req.body || {}),
       );
     }
-    const outPath = await runGatewayExportJob("forecast-actual", () =>
-      exporter.exportForecastActual(req.body || {}),
+    const payload = req.body || {};
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot()
+      : null;
+    const rawOutPath = await runGatewayExportJob("forecast-actual", () =>
+      exporter.exportForecastActual({
+        ...payload,
+        supplementalActualRows: buildForecastActualSupplementRowsForRange(
+          payload?.startTs,
+          payload?.endTs,
+          currentDaySnapshot,
+        ),
+      }),
     );
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Analytics");
     return res.json(buildExportResult(outPath));
   } catch (e) {
     return sendExportRouteError(res, e);
@@ -12120,6 +13187,9 @@ const httpServer = app.listen(PORT, () => {
     console.warn("[Forecast] startup sync failed:", e.message);
   }
   startKeepAlive();
+  if (plantCapController) {
+    plantCapController.start();
+  }
   applyRuntimeMode();
   if (process.send) process.send("ready");
 });
@@ -12370,6 +13440,11 @@ function _beginShutdown(mode, reason) {
   }
   stopRemoteBridge();
   stopRemoteChatBridge();
+  if (plantCapController) {
+    try {
+      plantCapController.stop();
+    } catch (_) {}
+  }
   try { poller.stop(); } catch (_) {}
 
   _shutdownPromise = new Promise((resolve) => {

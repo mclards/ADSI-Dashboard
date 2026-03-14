@@ -122,7 +122,13 @@ setTimeout(async () => {
     check(
       "Gateway live payload enriches todayEnergy",
       src.includes("setBroadcastPayloadEnricher((payload) => {") &&
-        src.includes("todayEnergy: getTodayEnergyRowsForLivePayload()"),
+        src.includes("const todayEnergy = Object.prototype.hasOwnProperty.call(payload, \"todayEnergy\")") &&
+        src.includes("const enriched = { ...payload, todayEnergy };"),
+    );
+    check(
+      "Gateway live payload enriches todaySummary",
+      src.includes("todaySummary = buildCurrentDayEnergySnapshot({") ||
+        src.includes("enriched.todaySummary = buildCurrentDayEnergySnapshot({"),
     );
     check(
       "Gateway live payload merges DB cache with live supplement",
@@ -137,6 +143,11 @@ setTimeout(async () => {
       "Client accepts empty todayEnergy WS payloads",
       appSrc.includes("if (Array.isArray(msg.todayEnergy)) {") &&
         !appSrc.includes("if (Array.isArray(msg.todayEnergy) && msg.todayEnergy.length) {"),
+    );
+    check(
+      "Client consumes live todaySummary",
+      appSrc.includes("if (msg.todaySummary && typeof msg.todaySummary === \"object\") {") &&
+        appSrc.includes("applyCurrentDaySummaryClient(msg.todaySummary, { source: \"ws\" });"),
     );
   } catch (e) {
     results.push("ERROR: " + e.message);

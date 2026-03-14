@@ -74,6 +74,13 @@ FORECAST_SNAPSHOT_DIR = BASE / "forecast/snapshots"
 WEATHER_DIR   = BASE / "weather"
 IPCONFIG_FILE = (PORTABLE_ROOT / "config" / "ipconfig.json") if PORTABLE_ROOT is not None else (BASE / "ipconfig.json")
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
+SERVICE_STOP_FILE_RAW = str(
+    os.getenv("IM_SERVICE_STOP_FILE")
+    or os.getenv("ADSI_SERVICE_STOP_FILE")
+    or ""
+).strip()
+SERVICE_STOP_FILE = Path(SERVICE_STOP_FILE_RAW) if SERVICE_STOP_FILE_RAW else None
+SERVICE_STOP_POLL_SEC = 0.5
 
 if EXPLICIT_DATA_DIR:
     APP_DB_FILE = Path(EXPLICIT_DATA_DIR) / "adsi.db"
@@ -91,6 +98,39 @@ SQLITE_RETRY_BACKOFF_SEC = 0.35
 
 for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
     _d.mkdir(parents=True, exist_ok=True)
+
+
+def _service_stop_requested() -> bool:
+    try:
+        return bool(SERVICE_STOP_FILE and SERVICE_STOP_FILE.exists())
+    except Exception:
+        return False
+
+
+def _clear_service_stop_file() -> None:
+    if SERVICE_STOP_FILE is None:
+        return
+    try:
+        SERVICE_STOP_FILE.unlink(missing_ok=True)
+    except TypeError:
+        try:
+            if SERVICE_STOP_FILE.exists():
+                SERVICE_STOP_FILE.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _sleep_with_service_stop(total_sec: float) -> None:
+    deadline = time.monotonic() + max(0.0, float(total_sec or 0.0))
+    while True:
+        if _service_stop_requested():
+            raise KeyboardInterrupt
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(SERVICE_STOP_POLL_SEC, remaining))
 
 # ============================================================================
 # LOGGING
@@ -2513,20 +2553,35 @@ def load_forecast_weather_snapshot(day: str) -> dict | None:
     return payload if isinstance(payload, dict) and payload else None
 
 
-def _hourly_series_by_hour(df: pd.DataFrame, column: str, day: str) -> np.ndarray:
-    out = np.zeros(SOLAR_END_H - SOLAR_START_H, dtype=float)
+def _weather_bias_frame_5min(df: pd.DataFrame, day: str) -> pd.DataFrame:
     frame = _slice_weather_day(df, day)
-    if frame.empty or "time" not in frame.columns or column not in frame.columns:
-        return out
-    frame = frame.copy()
-    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
-    frame = frame.dropna(subset=["time"])
-    for _, row in frame.iterrows():
-        hour = int(pd.Timestamp(row["time"]).hour)
-        if SOLAR_START_H <= hour < SOLAR_END_H:
-            value = pd.to_numeric(row.get(column), errors="coerce")
-            out[hour - SOLAR_START_H] = float(value) if pd.notna(value) and math.isfinite(float(value)) else 0.0
-    return out
+    if frame.empty:
+        return pd.DataFrame()
+    w5 = interpolate_5min(frame, day)
+    ok, reason = validate_weather_5min(day, w5)
+    if not ok:
+        log.warning("Weather-bias 5-minute frame invalid [%s]: %s", day, reason)
+        return pd.DataFrame()
+    return w5
+
+
+def _weather_bias_slot_series_from_record(record: dict, key: str, default: float = 0.0) -> np.ndarray:
+    raw = np.asarray(record.get(key, []), dtype=float).reshape(-1)
+    if raw.size == SOLAR_SLOTS:
+        return raw.astype(float)
+    if raw.size == SLOTS_DAY:
+        return raw[SOLAR_START_SLOT:SOLAR_END_SLOT].astype(float)
+
+    legacy_hour_points = SOLAR_END_H - SOLAR_START_H
+    if raw.size == legacy_hour_points:
+        return np.repeat(raw.astype(float), 60 // SLOT_MIN)[:SOLAR_SLOTS]
+
+    if raw.size <= 0:
+        return np.full(SOLAR_SLOTS, default, dtype=float)
+
+    src_idx = np.linspace(0.0, 1.0, num=raw.size)
+    dst_idx = np.linspace(0.0, 1.0, num=SOLAR_SLOTS)
+    return np.interp(dst_idx, src_idx, raw.astype(float)).astype(float)
 
 
 def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_LOOKBACK_DAYS) -> dict:
@@ -2542,13 +2597,34 @@ def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_L
         actual_hourly = fetch_weather(day, source="archive")
         if actual_hourly is None or actual_hourly.empty:
             continue
+        raw_w5 = _weather_bias_frame_5min(raw_hourly, day)
+        actual_w5 = _weather_bias_frame_5min(actual_hourly, day)
+        if raw_w5.empty or actual_w5.empty:
+            continue
 
         raw_sig = snap.get("signature") if isinstance(snap.get("signature"), dict) else weather_day_signature(day, raw_hourly)
         actual_sig = weather_day_signature(day, actual_hourly)
-        forecast_rad = _hourly_series_by_hour(raw_hourly, "rad", day)
-        actual_rad = _hourly_series_by_hour(actual_hourly, "rad", day)
-        forecast_cloud = _hourly_series_by_hour(raw_hourly, "cloud", day)
-        actual_cloud = _hourly_series_by_hour(actual_hourly, "cloud", day)
+        solar_slice = slice(SOLAR_START_SLOT, SOLAR_END_SLOT)
+        forecast_rad = np.clip(
+            pd.to_numeric(raw_w5["rad"], errors="coerce").fillna(0.0).values[solar_slice],
+            0.0,
+            None,
+        )
+        actual_rad = np.clip(
+            pd.to_numeric(actual_w5["rad"], errors="coerce").fillna(0.0).values[solar_slice],
+            0.0,
+            None,
+        )
+        forecast_cloud = np.clip(
+            pd.to_numeric(raw_w5["cloud"], errors="coerce").fillna(0.0).values[solar_slice],
+            0.0,
+            100.0,
+        )
+        actual_cloud = np.clip(
+            pd.to_numeric(actual_w5["cloud"], errors="coerce").fillna(0.0).values[solar_slice],
+            0.0,
+            100.0,
+        )
 
         rad_ratio = np.ones_like(forecast_rad, dtype=float)
         for idx, (f_rad, a_rad) in enumerate(zip(forecast_rad, actual_rad)):
@@ -2568,7 +2644,7 @@ def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_L
         actual_start = next((idx for idx, value in enumerate(actual_rad) if value >= STARTUP_RAD_WM2), None)
         morning_shift_slots = 0.0
         if forecast_start is not None and actual_start is not None:
-            morning_shift_slots = float((actual_start - forecast_start) * (60 // SLOT_MIN))
+            morning_shift_slots = float(actual_start - forecast_start)
 
         records.append({
             "day": day,
@@ -2589,6 +2665,10 @@ def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_L
     return {
         "created_ts": int(time.time()),
         "lookback_days": int(lookback_days),
+        "resolution_minutes": int(SLOT_MIN),
+        "slot_start": int(SOLAR_START_SLOT),
+        "slot_end": int(SOLAR_END_SLOT),
+        "slot_count": int(SOLAR_SLOTS),
         "record_count": int(len(records)),
         "records": records,
     }
@@ -2609,6 +2689,18 @@ def load_weather_bias_artifact(today: date | None = None, allow_build: bool = Fa
         try:
             data = load(WEATHER_BIAS_FILE)
             if isinstance(data, dict):
+                if _weather_bias_artifact_needs_upgrade(data):
+                    if allow_build and today is not None:
+                        log.info(
+                            "Weather-bias artifact uses legacy resolution; rebuilding at %d-minute solar slots.",
+                            SLOT_MIN,
+                        )
+                        artifact = build_weather_bias_artifact(today)
+                        save_weather_bias_artifact(artifact)
+                        return artifact
+                    log.warning(
+                        "Weather-bias artifact uses legacy hourly resolution; compatibility upsampling will be used until rebuilt."
+                    )
                 return data
         except Exception as e:
             log.warning("Weather-bias artifact load failed %s: %s", WEATHER_BIAS_FILE, e)
@@ -2619,6 +2711,22 @@ def load_weather_bias_artifact(today: date | None = None, allow_build: bool = Fa
         return artifact
 
     return None
+
+
+def _weather_bias_artifact_needs_upgrade(artifact: dict | None) -> bool:
+    if not isinstance(artifact, dict):
+        return True
+    if int(artifact.get("resolution_minutes", 0) or 0) != int(SLOT_MIN):
+        return True
+    if int(artifact.get("slot_count", 0) or 0) != int(SOLAR_SLOTS):
+        return True
+
+    for record in list(artifact.get("records") or []):
+        rad_ratio = np.asarray(record.get("rad_ratio", []), dtype=float).reshape(-1)
+        cloud_delta = np.asarray(record.get("cloud_delta", []), dtype=float).reshape(-1)
+        if rad_ratio.size != SOLAR_SLOTS or cloud_delta.size != SOLAR_SLOTS:
+            return True
+    return False
 
 
 def _weather_bias_similarity_score(record: dict, target: dict) -> float:
@@ -2676,33 +2784,60 @@ def apply_weather_bias_adjustment(
     scored.sort(key=lambda item: item[0])
     top = scored[:WEATHER_BIAS_TOP_K]
     weights = np.array([1.0 / ((0.25 + score) ** 2) for score, _ in top], dtype=float)
-    rad_ratio = np.average(np.array([np.asarray(record["rad_ratio"], dtype=float) for _, record in top], dtype=float), axis=0, weights=weights)
-    cloud_delta = np.average(np.array([np.asarray(record["cloud_delta"], dtype=float) for _, record in top], dtype=float), axis=0, weights=weights)
+    rad_ratio = np.average(
+        np.array(
+            [_weather_bias_slot_series_from_record(record, "rad_ratio", 1.0) for _, record in top],
+            dtype=float,
+        ),
+        axis=0,
+        weights=weights,
+    )
+    cloud_delta = np.average(
+        np.array(
+            [_weather_bias_slot_series_from_record(record, "cloud_delta", 0.0) for _, record in top],
+            dtype=float,
+        ),
+        axis=0,
+        weights=weights,
+    )
     confidence = float(np.clip(np.average([float(record.get("confidence", 1.0)) for _, record in top], weights=weights), 0.55, 1.0))
     morning_shift = float(np.average([float(record.get("morning_shift_slots", 0.0)) for _, record in top], weights=weights))
 
-    adjusted = frame.copy()
+    adjusted = _weather_bias_frame_5min(frame, day)
+    if adjusted.empty:
+        return frame.copy(), {
+            **default_meta,
+            "day_regime": target.get("day_regime"),
+        }
+
     def safe_num(value) -> float:
         try:
             num = float(pd.to_numeric(value, errors="coerce"))
         except Exception:
             return 0.0
         return num if math.isfinite(num) else 0.0
+
     adjusted["time"] = pd.to_datetime(adjusted["time"], errors="coerce")
     rad_factors = []
     for idx, row in adjusted.iterrows():
         ts = pd.Timestamp(row["time"])
-        hour = int(ts.hour)
-        if hour < SOLAR_START_H or hour >= SOLAR_END_H:
+        slot = int((int(ts.hour) * 60 + int(ts.minute)) // SLOT_MIN)
+        if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
             continue
-        hour_idx = hour - SOLAR_START_H
-        raw_factor = 1.0 + WEATHER_BIAS_RAD_BLEND * (float(rad_ratio[hour_idx]) - 1.0)
+        slot_idx = slot - SOLAR_START_SLOT
+        raw_factor = 1.0 + WEATHER_BIAS_RAD_BLEND * float(rad_ratio[slot_idx] - 1.0)
         factor = float(np.clip(raw_factor, WEATHER_BIAS_FACTOR_CLIP[0], WEATHER_BIAS_FACTOR_CLIP[1]))
         rad_factors.append(factor)
         for col in ("rad", "rad_direct", "rad_diffuse"):
             adjusted.at[idx, col] = max(0.0, safe_num(row.get(col)) * factor)
 
-        delta = float(np.clip(WEATHER_BIAS_CLOUD_BLEND * float(cloud_delta[hour_idx]), WEATHER_BIAS_CLOUD_DELTA_CLIP[0], WEATHER_BIAS_CLOUD_DELTA_CLIP[1]))
+        delta = float(
+            np.clip(
+                WEATHER_BIAS_CLOUD_BLEND * float(cloud_delta[slot_idx]),
+                WEATHER_BIAS_CLOUD_DELTA_CLIP[0],
+                WEATHER_BIAS_CLOUD_DELTA_CLIP[1],
+            )
+        )
         base_cloud = safe_num(row.get("cloud"))
         target_cloud = float(np.clip(base_cloud + delta, 0.0, 100.0))
         adjusted.at[idx, "cloud"] = target_cloud
@@ -4577,6 +4712,7 @@ def _read_operation_mode() -> str:
 
 
 def main() -> None:
+    _clear_service_stop_file()
     profile = plant_capacity_profile()
     cap_dep = float(profile["dependable_kw"])
     cap_max = float(profile["max_kw"])
@@ -4603,10 +4739,12 @@ def main() -> None:
 
     while True:
         try:
+            if _service_stop_requested():
+                raise KeyboardInterrupt
             # Viewer model: skip all forecast generation in remote mode.
             if _read_operation_mode() == "remote":
                 log.debug("Remote mode — skipping forecast generation (viewer model)")
-                time.sleep(60)
+                _sleep_with_service_stop(60)
                 continue
 
             now        = datetime.now()
@@ -4638,14 +4776,20 @@ def main() -> None:
                     run_scheduled, run_missing,
                 )
                 clear_forecast_data_cache()
+                if _service_stop_requested():
+                    raise KeyboardInterrupt
 
                 # (Re)train model before forecast
                 trained = train_model(today)
+                if _service_stop_requested():
+                    raise KeyboardInterrupt
                 if not trained:
                     log.warning("Model training skipped â€“ will use existing model or physics")
 
                 # Forecast quality audit of yesterday
                 forecast_qa(today)
+                if _service_stop_requested():
+                    raise KeyboardInterrupt
 
                 # Generate tomorrow's day-ahead
                 ok = run_dayahead(target, today)
@@ -4658,6 +4802,8 @@ def main() -> None:
             elif run_recovery:
                 log.warning("Recovery: today %s missing day-ahead â€“ generating now", today_s)
                 clear_forecast_data_cache()
+                if _service_stop_requested():
+                    raise KeyboardInterrupt
                 run_dayahead(today, today)
 
             else:
@@ -4667,17 +4813,25 @@ def main() -> None:
                 slot_idx = int((now_h * 60 + now.minute) // SLOT_MIN)
                 intraday_slot_key = f"{today_s}:{slot_idx:03d}"
                 if intraday_slot_key != last_intraday_slot_key:
+                    if _service_stop_requested():
+                        raise KeyboardInterrupt
                     run_intraday_adjusted(today)
                     last_intraday_slot_key = intraday_slot_key
 
-            time.sleep(60)   # check every minute
+            _sleep_with_service_stop(60)   # check every minute
 
         except KeyboardInterrupt:
             log.info("Shutdown requested â€“ exiting")
             break
         except Exception:
             log.critical("Unhandled exception in main loop", exc_info=True)
-            time.sleep(60)
+            try:
+                _sleep_with_service_stop(60)
+            except KeyboardInterrupt:
+                log.info("Shutdown requested Ã¢â‚¬â€œ exiting")
+                break
+
+    _clear_service_stop_file()
 
 
 if __name__ == "__main__":

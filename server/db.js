@@ -204,6 +204,29 @@ function stagePendingMainDbReplacement({
   return staged;
 }
 
+function discardPendingMainDbReplacement(tempName = "") {
+  const pending = readPendingMainDbReplacement();
+  if (!pending) {
+    return { cleared: false, tempRemoved: false };
+  }
+  const expectedTempName = path.basename(String(tempName || "").trim());
+  const pendingTempName = path.basename(String(pending?.tempName || "").trim());
+  if (expectedTempName && pendingTempName && pendingTempName !== expectedTempName) {
+    return { cleared: false, tempRemoved: false, skipped: true };
+  }
+  let tempRemoved = false;
+  if (pendingTempName) {
+    try {
+      fs.unlinkSync(path.join(DATA_DIR, pendingTempName));
+      tempRemoved = true;
+    } catch (_) {
+      tempRemoved = false;
+    }
+  }
+  writePendingMainDbReplacement(null);
+  return { cleared: true, tempRemoved };
+}
+
 function validateSqliteFileSync(filePath) {
   const target = String(filePath || "").trim();
   if (!target || !fs.existsSync(target)) {
@@ -719,6 +742,13 @@ const stmts = {
     INSERT INTO alarms (ts,inverter,unit,alarm_code,alarm_value,severity)
     VALUES (@ts,@inverter,@unit,@alarm_code,@alarm_value,@severity)
   `),
+  updateActiveAlarm: db.prepare(
+    `UPDATE alarms
+       SET alarm_code=?,
+           alarm_value=?,
+           severity=?
+     WHERE inverter=? AND unit=? AND cleared_ts IS NULL`,
+  ),
   clearAlarm: db.prepare(
     `UPDATE alarms SET cleared_ts=? WHERE inverter=? AND unit=? AND cleared_ts IS NULL`,
   ),
@@ -1332,6 +1362,150 @@ function prepareArchiveDbForTransfer(monthKey) {
   };
 }
 
+async function createSqliteTransferSnapshot(
+  sourcePath,
+  { targetDir = "", prefix = "", mtimeMs = 0 } = {},
+) {
+  const resolvedSource = path.resolve(String(sourcePath || "").trim());
+  if (!resolvedSource || !fs.existsSync(resolvedSource)) {
+    throw new Error("SQLite snapshot source file is missing.");
+  }
+  const snapshotDir = String(targetDir || path.dirname(resolvedSource)).trim() ||
+    path.dirname(resolvedSource);
+  await fs.promises.mkdir(snapshotDir, { recursive: true });
+  const sourceBase = path.basename(resolvedSource, path.extname(resolvedSource)) || "sqlite";
+  const safePrefix = String(prefix || `${sourceBase}.snapshot`)
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "") || `${sourceBase}.snapshot`;
+  const tempPath = path.join(
+    snapshotDir,
+    `${safePrefix}-${Date.now()}-${process.pid}.tmp`,
+  );
+  let sourceDb = null;
+  try {
+    sourceDb = new Database(resolvedSource, { fileMustExist: true });
+    try { sourceDb.pragma("busy_timeout = 5000"); } catch (_) {}
+    await sourceDb.backup(tempPath);
+    const stat = await fs.promises.stat(tempPath);
+    const targetMtimeMs = Math.max(0, Number(mtimeMs || stat?.mtimeMs || Date.now()));
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      await fs.promises.utimes(tempPath, mtime, mtime);
+    }
+    return {
+      tempPath,
+      size: Math.max(0, Number(stat?.size || 0)),
+      mtimeMs: targetMtimeMs,
+    };
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures after snapshot build errors.
+    }
+    throw err;
+  } finally {
+    if (sourceDb) {
+      try { sourceDb.close(); } catch (_) {}
+    }
+  }
+}
+
+async function disposeSqliteTransferSnapshot(snapshotOrPath) {
+  const tempPath =
+    typeof snapshotOrPath === "string"
+      ? String(snapshotOrPath || "").trim()
+      : String(snapshotOrPath?.tempPath || "").trim();
+  if (!tempPath) return false;
+  try {
+    await fs.promises.unlink(tempPath);
+    return true;
+  } catch (err) {
+    if (String(err?.code || "").trim().toUpperCase() === "ENOENT") return false;
+    throw err;
+  }
+}
+
+function upsertDailyReportRowsToSnapshot(snapshotPath, rowsRaw = []) {
+  const targetPath = String(snapshotPath || "").trim();
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    throw new Error("Snapshot file is missing.");
+  }
+  const rows = Array.isArray(rowsRaw)
+    ? rowsRaw
+      .map((row) => ({
+        date: String(row?.date || "").trim(),
+        inverter: Math.max(0, Number(row?.inverter || 0)),
+        kwh_total: Number(row?.kwh_total || 0),
+        pac_peak: Number(row?.pac_peak || 0),
+        pac_avg: Number(row?.pac_avg || 0),
+        uptime_s: Math.max(0, Math.round(Number(row?.uptime_s || 0))),
+        alarm_count: Math.max(0, Math.trunc(Number(row?.alarm_count || 0))),
+        control_count: Math.max(0, Math.trunc(Number(row?.control_count || 0))),
+        availability_pct: Number(row?.availability_pct || 0),
+        performance_pct: Number(row?.performance_pct || 0),
+        node_uptime_s: Math.max(0, Math.round(Number(row?.node_uptime_s || 0))),
+        expected_node_uptime_s: Math.max(0, Math.round(Number(row?.expected_node_uptime_s || 0))),
+        expected_nodes: Math.max(0, Math.trunc(Number(row?.expected_nodes || 0))),
+        rated_kw: Number(row?.rated_kw || 0),
+      }))
+      .filter((row) => row.date && row.inverter > 0)
+    : [];
+  if (!rows.length) return 0;
+
+  const snapshotDb = new Database(targetPath, { fileMustExist: true });
+  try {
+    try { snapshotDb.pragma("journal_mode = DELETE"); } catch (_) {}
+    try { snapshotDb.pragma("synchronous = NORMAL"); } catch (_) {}
+    const upsert = snapshotDb.prepare(`
+      INSERT INTO daily_report(
+        date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,control_count,
+        availability_pct,performance_pct,node_uptime_s,expected_node_uptime_s,expected_nodes,rated_kw,updated_ts
+      )
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+      ON CONFLICT(date,inverter) DO UPDATE SET
+        kwh_total=excluded.kwh_total,
+        pac_peak=excluded.pac_peak,
+        pac_avg=excluded.pac_avg,
+        uptime_s=excluded.uptime_s,
+        alarm_count=excluded.alarm_count,
+        control_count=excluded.control_count,
+        availability_pct=excluded.availability_pct,
+        performance_pct=excluded.performance_pct,
+        node_uptime_s=excluded.node_uptime_s,
+        expected_node_uptime_s=excluded.expected_node_uptime_s,
+        expected_nodes=excluded.expected_nodes,
+        rated_kw=excluded.rated_kw,
+        updated_ts=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    `);
+    const tx = snapshotDb.transaction((entries) => {
+      for (const row of entries) {
+        upsert.run(
+          row.date,
+          row.inverter,
+          row.kwh_total,
+          row.pac_peak,
+          row.pac_avg,
+          row.uptime_s,
+          row.alarm_count,
+          row.control_count,
+          row.availability_pct,
+          row.performance_pct,
+          row.node_uptime_s,
+          row.expected_node_uptime_s,
+          row.expected_nodes,
+          row.rated_kw,
+        );
+      }
+    });
+    tx(rows);
+    return rows.length;
+  } finally {
+    try { snapshotDb.close(); } catch (_) {}
+  }
+}
+
 function beginArchiveDbReplacement(monthKey) {
   const key = normalizeArchiveMonthKey(monthKey);
   if (!key) return "";
@@ -1924,7 +2098,11 @@ module.exports = {
   rebuildDailyReadingsSummaryForDate,
   closeArchiveDbForMonth,
   prepareArchiveDbForTransfer,
+  createSqliteTransferSnapshot,
+  disposeSqliteTransferSnapshot,
+  upsertDailyReportRowsToSnapshot,
   stagePendingMainDbReplacement,
+  discardPendingMainDbReplacement,
   readPendingMainDbReplacement,
   beginArchiveDbReplacement,
   endArchiveDbReplacement,

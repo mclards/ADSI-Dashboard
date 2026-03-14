@@ -28,6 +28,9 @@ services/__pycache__/
 # Throwaway test / stale files
 test-electron.js
 d*ADSI-Dashboardtest-electron.js
+test-results/
+.tmp/
+release_pre_*/
 
 # Local-only licensing tools
 LICENSE-GENERATOR.md
@@ -57,6 +60,8 @@ userData/
 # Local machine IP config (do not commit)
 ipconfig.json
 server/ipconfig.json
+.vscode/settings.json
+.vscode/.tmp/
 
 # OS
 .DS_Store

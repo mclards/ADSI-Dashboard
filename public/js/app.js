@@ -59,9 +59,19 @@ const State = {
     solcastToolkitPassword: "",
     solcastToolkitSiteRef: "",
     solcastTimezone: "Asia/Manila",
+    plantCapUpperMw: null,
+    plantCapLowerMw: null,
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustom: [],
+    plantCapCooldownSec: 30,
     invGridLayout: "4",
     exportUiState: {},
   },
+  plantCap: {
+    status: null,
+    preview: null,
+  },
+  plantCapPanelCollapsed: true,
   todayKwh: {}, // key: inverter → kWh today
   alarmFilter: "all",
   ws: null,
@@ -76,6 +86,7 @@ const State = {
   energyReqId: 0,
   auditReqId: 0,
   reportReqId: 0,
+  forecastExportFormat: "standard",
   analyticsRealtimeTimer: null,
   analyticsFetchTimer: null,
   analyticsFetchInFlight: false,
@@ -83,6 +94,8 @@ const State = {
   analyticsDayAheadBaseRows: [],
   analyticsIntervalMin: 5,
   analyticsDailyTotalMwh: null,
+  analyticsActualSummarySyncAt: 0,
+  analyticsActualSummarySyncDay: "",
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
   analyticsRenderTimer: null,
@@ -93,6 +106,7 @@ const State = {
   analyticsLastPacSig: "",
   activeAlarms: {}, // key: `${inv}_${unit}` -> active alarm row
   alarmSoundTimer: null,
+  alarmSoundRecheckTimer: null,
   alarmAudioCtx: null,
   alarmSoundMuted: false,
   alarmLiveSig: "",
@@ -147,8 +161,19 @@ const State = {
     totalKwh: 0,
   },
   todayEnergyByInv: {},
+  currentDaySummary: {
+    day: "",
+    asOfTs: 0,
+    totalKwh: null,
+    totalMwh: null,
+    inverterCount: 0,
+  },
   todayMwh: {
     wsAuthoritative: false,
+    wsLastFrameAt: 0,
+    wsLastEnergyAt: 0,
+    wsLastAdvanceAt: 0,
+    wsLastTotalKwh: null,
   },
   netIO: {
     rxBytes: 0,        // cumulative bytes received (WS + HTTP response bodies)
@@ -251,6 +276,7 @@ const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re
 const MAX_INV_UNITS = 4;
 const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
 const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
+const INV_DEPENDABLE_KW = 917;
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
@@ -263,6 +289,12 @@ const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
+const TODAY_MWH_WS_FRAME_STALE_MS = 15000;
+const TODAY_MWH_WS_ENERGY_STALE_MS = 15000;
+const TODAY_MWH_WS_NO_ADVANCE_MS = 30000;
+const TODAY_MWH_WS_ADVANCE_MIN_PAC_W = 20000;
+const ACTUAL_MWH_HTTP_SYNC_INTERVAL_MS = 5000;
+const ALARM_SOUND_MIN_ACTIVE_MS = 5000;
 const CHAT_THREAD_LIMIT = 20;
 const CHAT_DISMISS_MS = 30000;
 const SETTINGS_SECTION_IDS = [
@@ -396,10 +428,43 @@ function getSelectedSolcastPreviewResolution() {
   );
 }
 
-function getSelectedSolcastPreviewExportFormat() {
+function getSharedForecastExportFormat() {
   return normalizeSolcastPreviewExportFormatClient(
-    $("solcastPreviewExportFormat")?.value || State.solcastPreview.exportFormat || "standard",
+    State.forecastExportFormat ||
+      State.solcastPreview.exportFormat ||
+      $("anaDayAheadExportFormat")?.value ||
+      $("expForecastExportFormat")?.value ||
+      $("solcastPreviewExportFormat")?.value ||
+      "standard",
   );
+}
+
+function syncForecastActualFileFormatControl(exportFormat) {
+  const formatSel = $("expForecastFormat");
+  if (!formatSel) return;
+  const normalized = normalizeSolcastPreviewExportFormatClient(exportFormat);
+  const forceXlsx = normalized === "average-table";
+  if (forceXlsx) {
+    formatSel.value = "xlsx";
+  }
+  formatSel.disabled = forceXlsx;
+}
+
+function syncSharedForecastExportFormatControls(value) {
+  const normalized = normalizeSolcastPreviewExportFormatClient(value);
+  State.forecastExportFormat = normalized;
+  State.solcastPreview.exportFormat = normalized;
+  ["solcastPreviewExportFormat", "anaDayAheadExportFormat", "expForecastExportFormat"].forEach((id) => {
+    const input = $(id);
+    if (!input || input.value === normalized) return;
+    input.value = normalized;
+  });
+  syncForecastActualFileFormatControl(normalized);
+  return normalized;
+}
+
+function getSelectedSolcastPreviewExportFormat() {
+  return getSharedForecastExportFormat();
 }
 
 function normalizeInvGridLayout(value) {
@@ -430,6 +495,342 @@ function applyInverterGridLayout(layout) {
   );
   grid.classList.add(`layout-${normalized}`);
   return normalized;
+}
+
+function parseOptionalNumberInputValue(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizePlantCapSequenceModeClient(value) {
+  const mode = String(value || "ascending")
+    .trim()
+    .toLowerCase();
+  if (mode === "custom") return "exemption";
+  if (mode === "descending" || mode === "exemption") return mode;
+  return "ascending";
+}
+
+function parsePlantCapSequenceInputClient(raw, maxInverter = 27) {
+  const text = String(raw ?? "").trim();
+  if (!text) return { ok: true, values: [], error: "" };
+  const tokens = text.split(/[,\s]+/g).filter(Boolean);
+  const values = [];
+  const seen = new Set();
+  const invalid = [];
+  tokens.forEach((token) => {
+    const inv = Number(token);
+    if (
+      !Number.isInteger(inv) ||
+      inv < 1 ||
+      inv > maxInverter ||
+      seen.has(inv)
+    ) {
+      invalid.push(token);
+      return;
+    }
+    seen.add(inv);
+    values.push(inv);
+  });
+  if (invalid.length) {
+    return {
+      ok: false,
+      values: [],
+      error: `Exempted inverter numbers must be a comma-separated list of unique inverter numbers from 1-${maxInverter}. Invalid item(s): ${invalid.join(", ")}.`,
+    };
+  }
+  return { ok: true, values, error: "" };
+}
+
+function formatPlantCapSequenceInputClient(valuesRaw) {
+  const values = Array.isArray(valuesRaw) ? valuesRaw : [];
+  return values
+    .map((item) => Number(item))
+    .filter((item) => Number.isInteger(item) && item > 0)
+    .join(", ");
+}
+
+function getStoredPlantCapPanelCollapsed() {
+  return true;
+}
+
+function syncPlantCapPanelCollapsedUi() {
+  const inverterPage = $("page-inverters");
+  const panel = $("plantCapPanel");
+  const toolbarToggle = $("btnPlantCapToolbarToggle");
+  const collapsed = Boolean(State.plantCapPanelCollapsed);
+  if (inverterPage) {
+    inverterPage.classList.toggle("plant-cap-panel-collapsed", collapsed);
+  }
+  if (panel) {
+    panel.classList.toggle("is-collapsed", collapsed);
+    panel.classList.toggle("is-hidden", collapsed);
+    panel.hidden = collapsed;
+    panel.style.display = collapsed ? "none" : "";
+    panel.setAttribute("aria-hidden", collapsed ? "true" : "false");
+  }
+  if (toolbarToggle) {
+    // Plant cap remains available in Remote mode via gateway proxy, so the
+    // toolbar toggle must always stay usable even if broader control sweeps
+    // temporarily disable nearby buttons.
+    toolbarToggle.disabled = false;
+    toolbarToggle.removeAttribute("disabled");
+    toolbarToggle.setAttribute("aria-disabled", "false");
+    toolbarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    toolbarToggle.textContent = collapsed ? "Show Cap" : "Hide Cap";
+    toolbarToggle.title = collapsed
+      ? "Show plant output cap panel"
+      : "Hide plant output cap panel";
+  }
+}
+
+function setPlantCapPanelCollapsed(collapsed) {
+  State.plantCapPanelCollapsed = !!collapsed;
+  syncPlantCapPanelCollapsedUi();
+}
+
+function togglePlantCapPanelCollapsed() {
+  setPlantCapPanelCollapsed(!State.plantCapPanelCollapsed);
+}
+
+function getPlantCapFieldIds(context = "live") {
+  if (context === "settings") {
+    return {
+      upper: "setPlantCapUpperMw",
+      lower: "setPlantCapLowerMw",
+      sequenceMode: "setPlantCapSequenceMode",
+      sequenceCustom: "setPlantCapSequenceCustom",
+      sequenceCustomWrap: "setPlantCapSequenceCustomWrap",
+      cooldown: "setPlantCapCooldownSec",
+      warnings: "setPlantCapClientWarnings",
+    };
+  }
+  return {
+    upper: "plantCapUpperMw",
+    lower: "plantCapLowerMw",
+    sequenceMode: "plantCapSequenceMode",
+    sequenceCustom: "plantCapSequenceCustom",
+    sequenceCustomWrap: "plantCapSequenceCustomWrap",
+    cooldown: "plantCapCooldownSec",
+    warnings: "plantCapClientWarnings",
+  };
+}
+
+function getPlantCapFormElements(context = "live") {
+  const ids = getPlantCapFieldIds(context);
+  return {
+    upper: $(ids.upper),
+    lower: $(ids.lower),
+    sequenceMode: $(ids.sequenceMode),
+    sequenceCustom: $(ids.sequenceCustom),
+    sequenceCustomWrap: $(ids.sequenceCustomWrap),
+    cooldown: $(ids.cooldown),
+    warnings: $(ids.warnings),
+  };
+}
+
+function readPlantCapFormRawValues(context = "live") {
+  const els = getPlantCapFormElements(context);
+  return {
+    upper: String(els.upper?.value ?? ""),
+    lower: String(els.lower?.value ?? ""),
+    sequenceMode: normalizePlantCapSequenceModeClient(
+      els.sequenceMode?.value || "ascending",
+    ),
+    sequenceCustom: String(els.sequenceCustom?.value ?? ""),
+    cooldown: String(els.cooldown?.value ?? ""),
+  };
+}
+
+function applyPlantCapFormRawValues(
+  values,
+  contexts = ["live", "settings"],
+  options = {},
+) {
+  const skipContext = String(options.skipContext || "").trim().toLowerCase();
+  const payload = values && typeof values === "object" ? values : {};
+  contexts.forEach((contextRaw) => {
+    const context = String(contextRaw || "").trim().toLowerCase();
+    if (!context || context === skipContext) return;
+    const els = getPlantCapFormElements(context);
+    if (els.upper && Object.prototype.hasOwnProperty.call(payload, "upper")) {
+      els.upper.value = String(payload.upper ?? "");
+    }
+    if (els.lower && Object.prototype.hasOwnProperty.call(payload, "lower")) {
+      els.lower.value = String(payload.lower ?? "");
+    }
+    if (
+      els.sequenceMode &&
+      Object.prototype.hasOwnProperty.call(payload, "sequenceMode")
+    ) {
+      els.sequenceMode.value = normalizePlantCapSequenceModeClient(
+        payload.sequenceMode,
+      );
+    }
+    if (
+      els.sequenceCustom &&
+      Object.prototype.hasOwnProperty.call(payload, "sequenceCustom")
+    ) {
+      els.sequenceCustom.value = String(payload.sequenceCustom ?? "");
+    }
+    if (
+      els.cooldown &&
+      Object.prototype.hasOwnProperty.call(payload, "cooldown")
+    ) {
+      els.cooldown.value = String(payload.cooldown ?? "");
+    }
+  });
+  syncPlantCapSequenceVisibility();
+  renderPlantCapClientWarnings();
+}
+
+function readPlantCapRequestValues(context = "live") {
+  const raw = readPlantCapFormRawValues(context);
+  const maxInverter = Number(State.settings.inverterCount || 27);
+  const sequenceMode = normalizePlantCapSequenceModeClient(raw.sequenceMode);
+  const sequenceParsed = parsePlantCapSequenceInputClient(
+    raw.sequenceCustom,
+    maxInverter,
+  );
+  const upperMw = parseOptionalNumberInputValue(raw.upper);
+  const lowerMw = parseOptionalNumberInputValue(raw.lower);
+  const cooldownRaw = parseOptionalNumberInputValue(raw.cooldown);
+  const cooldownSec =
+    cooldownRaw == null ? Number(State.settings.plantCapCooldownSec || 30) : cooldownRaw;
+  return {
+    upperMw,
+    lowerMw,
+    sequenceMode,
+    sequenceCustom: sequenceParsed.values,
+    sequenceCustomText: raw.sequenceCustom,
+    sequenceError: sequenceMode === "exemption" ? sequenceParsed.error : "",
+    cooldownSec: Math.max(5, Math.min(600, Number(cooldownSec || 30))),
+  };
+}
+
+function getClientPlantCapStepMetrics(context = "live", valuesOverride = null) {
+  const invCount = Number(State.settings.inverterCount || 27);
+  const nodeCount = Number(State.settings.nodeCount || 4);
+  const values =
+    valuesOverride && typeof valuesOverride === "object"
+      ? valuesOverride
+      : readPlantCapRequestValues(context);
+  const exempted = new Set(
+    values.sequenceMode === "exemption" ? values.sequenceCustom || [] : [],
+  );
+  const stepsKw = [];
+  const nodeShapes = new Set();
+  for (let inv = 1; inv <= invCount; inv += 1) {
+    if (exempted.has(inv)) continue;
+    const ip = String(
+      State.ipConfig?.inverters?.[inv] ??
+        State.ipConfig?.inverters?.[String(inv)] ??
+        "",
+    ).trim();
+    const configuredUnits = getConfiguredUnits(inv, nodeCount);
+    if (!ip || !configuredUnits.length) continue;
+    const dependableKw = (INV_DEPENDABLE_KW * configuredUnits.length) / MAX_INV_UNITS;
+    stepsKw.push(dependableKw);
+    nodeShapes.add(configuredUnits.length);
+  }
+  const smallestConfiguredStepKw = stepsKw.length ? Math.min(...stepsKw) : null;
+  return {
+    smallestConfiguredStepKw,
+    smallestConfiguredStepMw:
+      smallestConfiguredStepKw != null
+        ? smallestConfiguredStepKw / 1000
+        : null,
+    partialNodeFleet: nodeShapes.size > 1,
+    controllableInverterCount: stepsKw.length,
+  };
+}
+
+function buildPlantCapClientWarningMessages(context = "live") {
+  const values = readPlantCapRequestValues(context);
+  const warnings = [];
+  const metrics = getClientPlantCapStepMetrics(context, values);
+  if (values.sequenceError) {
+    warnings.push(values.sequenceError);
+  }
+  if (
+    values.sequenceMode === "exemption" &&
+    values.sequenceCustom.length &&
+    metrics.controllableInverterCount === 0
+  ) {
+    warnings.push(
+      "Every controllable inverter is currently exempted, so automatic stop selection has no available target.",
+    );
+  }
+  if (values.upperMw == null || values.lowerMw == null) {
+    return warnings;
+  }
+  if (!(values.lowerMw < values.upperMw)) {
+    warnings.push("Lower limit must be less than the upper limit.");
+  }
+  const gapMw = values.upperMw - values.lowerMw;
+  if (metrics.smallestConfiguredStepMw != null) {
+    if (gapMw < metrics.smallestConfiguredStepMw * 0.5) {
+      warnings.push(
+        `Upper and Lower limits are extremely close. The smallest configured inverter step is about ${metrics.smallestConfiguredStepMw.toFixed(3)} MW, so the controller can overshoot the band or repeatedly stop/start inverters before it settles.`,
+      );
+    } else if (gapMw < metrics.smallestConfiguredStepMw) {
+      warnings.push(
+        `Upper and Lower limits are close relative to the smallest configured inverter step of about ${metrics.smallestConfiguredStepMw.toFixed(3)} MW. Increase the band gap to reduce stop/start hunting and operator confusion.`,
+      );
+    }
+  }
+  if (metrics.partialNodeFleet) {
+    warnings.push(
+      "Configured inverters have different enabled node counts, so each inverter shutdown step can remove a different amount of MW.",
+    );
+  }
+  return warnings;
+}
+
+function renderPlantCapClientWarningsForContext(context = "live") {
+  const els = getPlantCapFormElements(context);
+  if (!els.warnings) return;
+  const warnings = buildPlantCapClientWarningMessages(context);
+  if (!warnings.length) {
+    els.warnings.className = "plant-cap-inline-warnings";
+    els.warnings.textContent =
+      "Whole-inverter control uses live PAC plus node-aware dependable capacity to plan each stop/start step. Exemption mode skips the listed inverter numbers during automatic stop selection.";
+    els.warnings.title =
+      "Planner guidance for the current plant cap settings. Exemption mode keeps the listed inverter numbers out of automatic stop selection.";
+    return;
+  }
+  const critical = warnings.some((message) =>
+    /extremely close|must be less/i.test(message),
+  );
+  els.warnings.className = `plant-cap-inline-warnings ${critical ? "critical" : "warning"}`;
+  els.warnings.textContent = warnings[0];
+  els.warnings.title = warnings.join(" ");
+}
+
+function renderPlantCapClientWarnings() {
+  renderPlantCapClientWarningsForContext("live");
+  renderPlantCapClientWarningsForContext("settings");
+}
+
+function syncPlantCapSequenceVisibility() {
+  ["live", "settings"].forEach((context) => {
+    const els = getPlantCapFormElements(context);
+    if (!els.sequenceCustomWrap) return;
+    const show =
+      normalizePlantCapSequenceModeClient(els.sequenceMode?.value || "ascending") ===
+      "exemption";
+    els.sequenceCustomWrap.hidden = !show;
+  });
+}
+
+function syncPlantCapFormContext(sourceContext) {
+  const normalizedContext = String(sourceContext || "").trim().toLowerCase();
+  const raw = readPlantCapFormRawValues(normalizedContext);
+  applyPlantCapFormRawValues(raw, ["live", "settings"], {
+    skipContext: normalizedContext,
+  });
 }
 
 async function setInverterGridLayout(layout, options = {}) {
@@ -845,6 +1246,24 @@ function cssVar(name, fallback = "") {
     console.warn("[app] cssVar failed:", err.message);
     return fallback;
   }
+}
+
+function cssNumberVar(name, fallback = 0) {
+  const raw = parseFloat(cssVar(name, ""));
+  return Number.isFinite(raw) ? raw : fallback;
+}
+
+function getChartTypography() {
+  return {
+    tickX: cssNumberVar("--chart-font-tick-x", 8),
+    tickY: cssNumberVar("--chart-font-tick-y", 9),
+    axis: cssNumberVar("--chart-font-axis", 10),
+    legend: cssNumberVar("--chart-font-legend", 11),
+    tooltip: cssNumberVar("--chart-font-tooltip", 11),
+    legendBoxWidth: cssNumberVar("--chart-legend-box-w", 24),
+    legendBoxHeight: cssNumberVar("--chart-legend-box-h", 8),
+    legendPadding: cssNumberVar("--chart-legend-padding", 10),
+  };
 }
 
 function getChartPalette() {
@@ -1541,7 +1960,7 @@ function handleXferProgress(msg) {
     return;
   }
 
-  if (phase === "done" || phase === "error") {
+  if (phase === "done" || phase === "error" || phase === "cancelled") {
     slot.active = true;
     slot.phase = phase;
     if (msgLabel) slot.label = msgLabel;
@@ -1575,7 +1994,7 @@ function handleXferProgress(msg) {
       slot.updatedAt = Date.now();
       slot.hideTimer = null;
       renderXferPanel();
-    }, phase === "done" ? 3500 : 3000);
+    }, phase === "done" ? 3500 : phase === "cancelled" ? 2200 : 3000);
     renderXferPanel();
     return;
   }
@@ -1598,6 +2017,7 @@ function getXferPhaseBadge(x) {
   const lbl = String(x?.label || "").trim().toLowerCase();
   const phase = String(x?.phase || "");
   if (phase === "done") return { text: "Done", cls: "xfer-phase-done" };
+  if (phase === "cancelled") return { text: "Cancelled", cls: "xfer-phase-cancelled" };
   if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
   if (x?.priorityMode || x?.livePaused) return { text: "Priority", cls: "xfer-phase-priority" };
   if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
@@ -1667,6 +2087,8 @@ function getXferDetailText(x) {
     parts.push("transfer finished");
   } else if (x.phase === "error") {
     parts.push("transfer failed");
+  } else if (x.phase === "cancelled") {
+    parts.push("transfer cancelled");
   } else {
     parts.push("background transfer running");
   }
@@ -1730,6 +2152,8 @@ function renderXferPanel() {
       labelEl.textContent = x.dir === "tx" ? "Upload complete" : "Download complete";
     } else if (x.phase === "error") {
       labelEl.textContent = x.dir === "tx" ? "Upload failed" : "Download failed";
+    } else if (x.phase === "cancelled") {
+      labelEl.textContent = x.dir === "tx" ? "Upload cancelled" : "Download cancelled";
     } else if (x.dir === "tx") {
       const cStr = x.chunkCount > 1 ? ` · chunk ${x.chunkDone}/${x.chunkCount}` : "";
       labelEl.textContent = `Uploading${cStr}`;
@@ -1916,6 +2340,13 @@ function syncActiveAlarmMap(rows) {
   State.activeAlarms = next;
 }
 
+function clearAlarmSoundRecheckTimer() {
+  if (State.alarmSoundRecheckTimer) {
+    clearTimeout(State.alarmSoundRecheckTimer);
+    State.alarmSoundRecheckTimer = null;
+  }
+}
+
 function getOrCreateAlarmAudioCtx() {
   if (State.alarmAudioCtx) return State.alarmAudioCtx;
   try {
@@ -1982,6 +2413,36 @@ function hasUnackedActiveAlarms() {
   );
 }
 
+function getAlarmSoundEligibility(now = Date.now()) {
+  let eligible = false;
+  let nextDelayMs = 0;
+  for (const row of Object.values(State.activeAlarms || {})) {
+    if (!row || row.acknowledged === true) continue;
+    const startedAt = Math.max(0, Number(row.ts || 0));
+    const ageMs = startedAt > 0 ? Math.max(0, now - startedAt) : ALARM_SOUND_MIN_ACTIVE_MS;
+    if (ageMs >= ALARM_SOUND_MIN_ACTIVE_MS) {
+      eligible = true;
+      continue;
+    }
+    const remaining = Math.max(0, ALARM_SOUND_MIN_ACTIVE_MS - ageMs);
+    nextDelayMs =
+      nextDelayMs > 0 ? Math.min(nextDelayMs, remaining) : remaining;
+  }
+  return { eligible, nextDelayMs };
+}
+
+function syncAlarmSoundPlayback() {
+  clearAlarmSoundRecheckTimer();
+  const { eligible, nextDelayMs } = getAlarmSoundEligibility(Date.now());
+  setAlarmSoundActive(eligible);
+  if (!eligible && !State.alarmSoundMuted && nextDelayMs > 0) {
+    State.alarmSoundRecheckTimer = setTimeout(() => {
+      State.alarmSoundRecheckTimer = null;
+      syncAlarmSoundPlayback();
+    }, Math.max(50, nextDelayMs + 25));
+  }
+}
+
 function getLiveAlarmSignature() {
   const parts = [];
   for (const [key, row] of Object.entries(State.liveData || {})) {
@@ -2031,7 +2492,7 @@ function toggleAlarmSound() {
   State.alarmSoundMuted = !State.alarmSoundMuted;
   try { localStorage.setItem("alarmSoundMuted", State.alarmSoundMuted ? "1" : "0"); } catch (_) {}
   // Apply immediately based on current alarm state (no need to wait for next poll tick).
-  setAlarmSoundActive(hasUnackedActiveAlarms());
+  syncAlarmSoundPlayback();
   renderAlarmSoundBtn();
 }
 function resetPacTodayIfNeeded(ts = Date.now()) {
@@ -2041,7 +2502,7 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
   State.pacToday.totalKwh = 0;
-  State.todayMwh.wsAuthoritative = false;
+  resetTodayMwhAuthority();
 }
 
 function summarizeLiveRows(rowsRaw = []) {
@@ -2094,14 +2555,70 @@ function setTodayEnergyRowsClient(rowsRaw) {
 
 function resetTodayMwhAuthority() {
   State.todayMwh.wsAuthoritative = false;
+  State.todayMwh.wsLastFrameAt = 0;
+  State.todayMwh.wsLastEnergyAt = 0;
+  State.todayMwh.wsLastAdvanceAt = 0;
+  State.todayMwh.wsLastTotalKwh = null;
+}
+
+function noteTodayMwhWsFrame(now = Date.now()) {
+  State.todayMwh.wsLastFrameAt = Math.max(0, Number(now) || Date.now());
+}
+
+function noteTodayMwhWsEnergy(totalKwh, now = Date.now()) {
+  const nextNow = Math.max(0, Number(now) || Date.now());
+  const nextTotal = Math.max(0, Number(totalKwh) || 0);
+  const prevTotal = Number(State.todayMwh.wsLastTotalKwh);
+  State.todayMwh.wsLastEnergyAt = nextNow;
+  if (
+    !Number.isFinite(prevTotal) ||
+    Math.abs(nextTotal - prevTotal) > 0.0001
+  ) {
+    State.todayMwh.wsLastAdvanceAt = nextNow;
+  }
+  State.todayMwh.wsLastTotalKwh = nextTotal;
+}
+
+function shouldExpectTodayMwhAdvance(now = Date.now()) {
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  return getCurrentFreshTotalPacW(now) >= TODAY_MWH_WS_ADVANCE_MIN_PAC_W;
+}
+
+function isTodayMwhWsStale(now = Date.now()) {
+  if (!State.todayMwh.wsAuthoritative) return false;
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  const lastFrameAt = Number(State.todayMwh.wsLastFrameAt || 0);
+  if (!lastFrameAt || now - lastFrameAt > TODAY_MWH_WS_FRAME_STALE_MS) {
+    return true;
+  }
+  const lastEnergyAt = Number(State.todayMwh.wsLastEnergyAt || 0);
+  if (!lastEnergyAt || now - lastEnergyAt > TODAY_MWH_WS_ENERGY_STALE_MS) {
+    return true;
+  }
+  if (!shouldExpectTodayMwhAdvance(now)) return false;
+  const lastAdvanceAt = Math.max(
+    Number(State.todayMwh.wsLastAdvanceAt || 0),
+    lastEnergyAt,
+  );
+  return Boolean(
+    lastAdvanceAt &&
+      now - lastAdvanceAt > TODAY_MWH_WS_NO_ADVANCE_MS,
+  );
 }
 
 function hasTodayMwhWsAuthority() {
-  return Boolean(
-    State.todayMwh.wsAuthoritative &&
-      State.ws &&
-      Number(State.ws.readyState) === 1,
-  );
+  if (
+    !State.todayMwh.wsAuthoritative ||
+    !State.ws ||
+    Number(State.ws.readyState) !== 1
+  ) {
+    return false;
+  }
+  if (isTodayMwhWsStale()) {
+    State.todayMwh.wsAuthoritative = false;
+    return false;
+  }
+  return true;
 }
 
 function canApplyTodayMwhSync(source = "sync", { allowRemoteFallback = false } = {}) {
@@ -2124,6 +2641,8 @@ function applySyncedTodayKwh(totalKwh, syncedAt = Date.now(), opts = {}) {
   State.pacToday.lastTotalPacW  = getCurrentFreshTotalPacW(syncedAt);
   if (source === "ws") {
     State.todayMwh.wsAuthoritative = true;
+  } else if (getActiveOperationModeClient() === "gateway") {
+    State.todayMwh.wsAuthoritative = false;
   }
   const meter = $("totalKwh");
   if (meter) {
@@ -2197,6 +2716,135 @@ async function syncTodayMwhFromServer(opts = {}) {
   }
 }
 
+function extractCurrentDaySummary(summaryRaw) {
+  const candidate =
+    summaryRaw && typeof summaryRaw === "object"
+      ? summaryRaw.current_day || summaryRaw.todaySummary || summaryRaw.daily || null
+      : null;
+  if (!candidate || typeof candidate !== "object") return null;
+
+  const day = sanitizeDateInputValue(candidate.day) || today();
+  const totalKwhRaw = Number(candidate.total_kwh);
+  const totalMwhRaw = Number(candidate.total_mwh);
+  const totalKwh = Number.isFinite(totalKwhRaw)
+    ? Number(totalKwhRaw.toFixed(6))
+    : Number.isFinite(totalMwhRaw)
+      ? Number((totalMwhRaw * 1000).toFixed(6))
+      : NaN;
+  const totalMwh = Number.isFinite(totalMwhRaw)
+    ? Number(totalMwhRaw.toFixed(6))
+    : Number.isFinite(totalKwh)
+      ? Number((totalKwh / 1000).toFixed(6))
+      : NaN;
+  if (!Number.isFinite(totalKwh) && !Number.isFinite(totalMwh)) return null;
+
+  return {
+    day,
+    asOfTs: Number(candidate.as_of_ts || candidate.asOfTs || 0),
+    totalKwh: Number.isFinite(totalKwh) ? totalKwh : Number((totalMwh * 1000).toFixed(6)),
+    totalMwh: Number.isFinite(totalMwh) ? totalMwh : Number((totalKwh / 1000).toFixed(6)),
+    inverterCount: Math.max(0, Math.trunc(Number(candidate.inverter_count || 0))),
+  };
+}
+
+function applyCurrentDaySummaryClient(summaryRaw, opts = {}) {
+  const summary = extractCurrentDaySummary(summaryRaw);
+  if (!summary) return false;
+
+  State.currentDaySummary = {
+    day: summary.day,
+    asOfTs: summary.asOfTs,
+    totalKwh: summary.totalKwh,
+    totalMwh: summary.totalMwh,
+    inverterCount: summary.inverterCount,
+  };
+
+  let analyticsChanged = false;
+  if (summary.day === today()) {
+    State.analyticsActualSummarySyncAt = Date.now();
+    State.analyticsActualSummarySyncDay = summary.day;
+    if (isTodayAnalyticsDate()) {
+      const nextMwh = Number(summary.totalMwh.toFixed(6));
+      if (State.analyticsDailyTotalMwh !== nextMwh) {
+        State.analyticsDailyTotalMwh = nextMwh;
+        analyticsChanged = true;
+      }
+    }
+  }
+
+  const reportDay = sanitizeDateInputValue($("reportDate")?.value) || today();
+  if (
+    summary.day === reportDay &&
+    State.reportView.summary &&
+    typeof State.reportView.summary === "object"
+  ) {
+    if (!State.reportView.summary.daily || typeof State.reportView.summary.daily !== "object") {
+      State.reportView.summary.daily = {};
+    }
+    State.reportView.summary.daily.total_kwh = summary.totalKwh;
+    State.reportView.summary.daily.total_mwh = summary.totalMwh;
+    State.reportView.summary.daily.inverter_count = summary.inverterCount;
+    if (summary.asOfTs > 0) {
+      State.reportView.summary.daily.as_of_ts = summary.asOfTs;
+    }
+    State.reportView.summary.current_day = {
+      day: summary.day,
+      as_of_ts: summary.asOfTs,
+      total_kwh: summary.totalKwh,
+      total_mwh: summary.totalMwh,
+      inverter_count: summary.inverterCount,
+    };
+    if (State.currentPage === "report") {
+      renderReportKpis();
+    }
+  }
+
+  if (
+    analyticsChanged &&
+    State.currentPage === "analytics" &&
+    isTodayAnalyticsDate() &&
+    !State.analyticsRealtimeTimer
+  ) {
+    renderAnalyticsFromState();
+  }
+
+  return analyticsChanged;
+}
+
+async function syncAnalyticsActualMwhFromServer(opts = {}) {
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  if (State.currentPage !== "analytics") return false;
+  const day = sanitizeDateInputValue($("anaDate")?.value) || today();
+  if (day !== today()) return false;
+  if (State.analyticsFetchInFlight && !Boolean(opts?.force)) return false;
+  const now = Date.now();
+  if (
+    !Boolean(opts?.force) &&
+    State.analyticsActualSummarySyncDay === day &&
+    now - Number(State.analyticsActualSummarySyncAt || 0) <
+      ACTUAL_MWH_HTTP_SYNC_INTERVAL_MS
+  ) {
+    return false;
+  }
+  try {
+    const summary = await api(`/api/report/summary?date=${encodeURIComponent(day)}`);
+    State.analyticsActualSummarySyncAt = now;
+    State.analyticsActualSummarySyncDay = day;
+    const previous = Number(State.analyticsDailyTotalMwh);
+    const applied = applyCurrentDaySummaryClient(summary, {
+      source: opts?.force ? "http-force" : "http",
+    });
+    if (applied && Number(State.analyticsDailyTotalMwh) !== previous) {
+      renderAnalyticsFromState();
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn("syncAnalyticsActualMwhFromServer:", e?.message || e);
+    return false;
+  }
+}
+
 function stopTodayMwhSyncTimer() {
   if (State.todayMwhSyncTimer) {
     clearInterval(State.todayMwhSyncTimer);
@@ -2210,8 +2858,10 @@ function startTodayMwhSyncTimer() {
   // racing the bridge feed with parallel HTTP/report refreshes.
   if (getActiveOperationModeClient() === "remote") return;
   syncTodayMwhFromServer().catch(() => {});
+  syncAnalyticsActualMwhFromServer().catch(() => {});
   State.todayMwhSyncTimer = setInterval(() => {
     syncTodayMwhFromServer().catch(() => {});
+    syncAnalyticsActualMwhFromServer().catch(() => {});
   }, TODAY_MWH_SYNC_INTERVAL_MS);
 }
 
@@ -3065,6 +3715,26 @@ async function loadSettings() {
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
     if ($("setPlantLatitude"))  $("setPlantLatitude").value  = s.plantLatitude  ?? "";
     if ($("setPlantLongitude")) $("setPlantLongitude").value = s.plantLongitude ?? "";
+    if ($("setPlantCapUpperMw")) {
+      $("setPlantCapUpperMw").value =
+        s.plantCapUpperMw == null ? "" : String(s.plantCapUpperMw);
+    }
+    if ($("setPlantCapLowerMw")) {
+      $("setPlantCapLowerMw").value =
+        s.plantCapLowerMw == null ? "" : String(s.plantCapLowerMw);
+    }
+    if ($("setPlantCapSequenceMode")) {
+      $("setPlantCapSequenceMode").value =
+        s.plantCapSequenceMode || "ascending";
+    }
+    if ($("setPlantCapSequenceCustom")) {
+      $("setPlantCapSequenceCustom").value = formatPlantCapSequenceInputClient(
+        s.plantCapSequenceCustom || [],
+      );
+    }
+    if ($("setPlantCapCooldownSec")) {
+      $("setPlantCapCooldownSec").value = String(s.plantCapCooldownSec ?? 30);
+    }
     $("setDataDir").textContent = s.dataDir || "—";
     const pc = s.inverterPollConfig || {};
     if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
@@ -3089,6 +3759,8 @@ async function loadSettings() {
     syncModeTransitionUi();
     syncForecastProviderUi();
     updateForecastSidebarSummary();
+    syncPlantCapFormsFromSettingsState();
+    refreshPlantCapStatus(true).catch(() => {});
     refreshLicenseSection().catch(() => {});
   } catch (e) {
     console.warn("[Settings] load failed:", e.message);
@@ -3267,16 +3939,13 @@ function clearSolcastPreview(resetDays = false) {
     State.solcastPreview.rangeLabel = "";
     State.solcastPreview.resolution = "PT5M";
     State.solcastPreview.unit = "mwh";
-    State.solcastPreview.exportFormat = "standard";
     fillSolcastPreviewDayOptions([], "");
     syncSolcastPreviewDayCountOptions([], "", 1);
   }
   const resolutionSel = $("solcastPreviewResolution");
   const unitSel = $("solcastPreviewUnit");
-  const exportFormatSel = $("solcastPreviewExportFormat");
   if (resolutionSel && resetDays) resolutionSel.value = "PT5M";
   if (unitSel && resetDays) unitSel.value = "mwh";
-  if (exportFormatSel && resetDays) exportFormatSel.value = "standard";
   updateSolcastPreviewUnitUi();
   setSolcastPreviewTotals("—", "—", "—", "05:00-18:00");
   destroyChartByKey("solcastPreview");
@@ -3312,7 +3981,8 @@ function buildSolcastPreviewChart(payload) {
   const canvas = $("solcastPreviewChart");
   if (!canvas) return;
   const pal = getChartPalette();
-  const uiFont = cssVar("--font-main", "Sora");
+  const uiFont = cssVar("--font-main", "Arial");
+  const chartType = getChartTypography();
   const labels = Array.isArray(payload?.labels) ? payload.labels : [];
   const unit = getSelectedSolcastPreviewUnit();
   const useMw = unit === "mw";
@@ -3349,11 +4019,11 @@ function buildSolcastPreviewChart(payload) {
     ...opts.plugins.legend.labels,
     usePointStyle: true,
     pointStyle: "line",
-    boxWidth: 24,
-    boxHeight: 8,
-    padding: 10,
+    boxWidth: chartType.legendBoxWidth,
+    boxHeight: chartType.legendBoxHeight,
+    padding: chartType.legendPadding,
     color: pal.legend,
-    font: { family: uiFont, size: 11, weight: "700" },
+    font: { family: uiFont, size: chartType.legend, weight: "700" },
   };
   opts.plugins.tooltip = {
     backgroundColor: pal.tooltipBg,
@@ -3361,9 +4031,9 @@ function buildSolcastPreviewChart(payload) {
     borderWidth: 1,
     titleColor: pal.tooltipText,
     bodyColor: pal.tooltipText,
-    titleFont: { family: uiFont, size: 11, weight: "700" },
-    bodyFont: { family: uiFont, size: 11, weight: "600" },
-    padding: 10,
+    titleFont: { family: uiFont, size: chartType.tooltip, weight: "700" },
+    bodyFont: { family: uiFont, size: chartType.tooltip, weight: "600" },
+    padding: chartType.legendPadding,
     cornerRadius: 10,
     displayColors: true,
     boxPadding: 4,
@@ -3512,6 +4182,7 @@ function applySolcastPreviewPayload(payload) {
     : [];
   State.solcastPreview.rangeLabel = String(payload?.rangeLabel || "").trim();
   State.solcastPreview.loaded = true;
+  syncSharedForecastExportFormatControls(State.solcastPreview.exportFormat || "standard");
   updateSolcastPreviewUnitUi();
   fillSolcastPreviewDayOptions(days, day);
   syncSolcastPreviewDayCountOptions(days, day, dayCount);
@@ -3532,6 +4203,19 @@ function rerenderSolcastPreviewChartFromState() {
   updateSolcastPreviewUnitUi();
   buildSolcastPreviewChart(State.solcastPreview.payload);
 }
+
+const rerenderResponsiveChartsDebounced = debounce(() => {
+  if (State.currentPage === "analytics" && State.analyticsBaseRows.length > 0) {
+    renderAnalyticsFromState();
+  }
+  if (
+    (State.currentPage === "forecast" || State.currentPage === "settings") &&
+    State.solcastPreview.loaded &&
+    State.solcastPreview.payload
+  ) {
+    rerenderSolcastPreviewChartFromState();
+  }
+}, 180);
 
 async function loadSolcastPreview(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
@@ -3696,6 +4380,21 @@ function pickSettingsConfigFields(src) {
     out.solcastTimezone = String(src.solcastTimezone ?? "");
   if (hasOwn(src, "invGridLayout"))
     out.invGridLayout = String(src.invGridLayout ?? "");
+  if (hasOwn(src, "plantCapUpperMw"))
+    out.plantCapUpperMw =
+      src.plantCapUpperMw == null ? "" : String(src.plantCapUpperMw ?? "");
+  if (hasOwn(src, "plantCapLowerMw"))
+    out.plantCapLowerMw =
+      src.plantCapLowerMw == null ? "" : String(src.plantCapLowerMw ?? "");
+  if (hasOwn(src, "plantCapSequenceMode"))
+    out.plantCapSequenceMode = String(src.plantCapSequenceMode ?? "");
+  if (hasOwn(src, "plantCapSequenceCustom")) {
+    out.plantCapSequenceCustom = Array.isArray(src.plantCapSequenceCustom)
+      ? src.plantCapSequenceCustom.map((item) => Number(item))
+      : [];
+  }
+  if (hasOwn(src, "plantCapCooldownSec"))
+    out.plantCapCooldownSec = Number(src.plantCapCooldownSec);
   if (
     hasOwn(src, "inverterPollConfig") &&
     src.inverterPollConfig &&
@@ -4108,6 +4807,8 @@ async function handleOperationModeTransition(
       State.analyticsDayAheadBaseRows = [];
       State.analyticsDayAheadCache = null;
       State.analyticsDailyTotalMwh = null;
+      State.analyticsActualSummarySyncAt = 0;
+      State.analyticsActualSummarySyncDay = "";
     }
     State.pacToday.lastTs = 0;
     State.pacToday.lastTotalPacW = 0;
@@ -4257,6 +4958,18 @@ async function saveSettings() {
   const settingsMsgId = getSettingsMessageTargetId();
   const remoteConnectivityChanged = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
   const solcastConfig = readSolcastSettingsForm();
+  const plantCapRaw = readPlantCapFormRawValues("settings");
+  const plantCapSequence = parsePlantCapSequenceInputClient(
+    plantCapRaw.sequenceCustom,
+    Number($("setInverterCount")?.value || State.settings.inverterCount || 27),
+  );
+  if (
+    normalizePlantCapSequenceModeClient(plantCapRaw.sequenceMode) === "exemption" &&
+    !plantCapSequence.ok
+  ) {
+    showMsg(settingsMsgId, plantCapSequence.error, "error");
+    return false;
+  }
   const remoteAutoSyncCtrl = $("setRemoteAutoSync");
   const body = {
     plantName: $("setPlantName").value,
@@ -4276,6 +4989,13 @@ async function saveSettings() {
     ...solcastConfig,
     plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
     plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
+    plantCapUpperMw: String(plantCapRaw.upper || "").trim(),
+    plantCapLowerMw: String(plantCapRaw.lower || "").trim(),
+    plantCapSequenceMode: normalizePlantCapSequenceModeClient(
+      plantCapRaw.sequenceMode,
+    ),
+    plantCapSequenceCustom: plantCapSequence.values,
+    plantCapCooldownSec: Number(plantCapRaw.cooldown || 30),
     inverterPollConfig: {
       modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
       reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
@@ -4315,6 +5035,7 @@ async function saveSettings() {
       ...(savedSettings || {}),
       csvSavePath: nextCsvPath,
     };
+    syncPlantCapFormsFromSettingsState();
     if ($("plantNameDisplay"))
       $("plantNameDisplay").textContent = State.settings.plantName || body.plantName;
     let transitionWarning = "";
@@ -4396,6 +5117,7 @@ async function saveSettings() {
       startReplicationHealthPolling();
       refreshReplicationHealth(true).catch(() => {});
     }
+    refreshPlantCapStatus(true).catch(() => {});
     if (transitionWarning) {
       showToast(transitionWarning.trim(), "warning", 6200);
     }
@@ -4612,16 +5334,63 @@ function formatReplicationJobStatus(job) {
       cls: status === "queued" ? "warn" : "ok",
     };
   }
+  if (status === "cancelling") {
+    return {
+      text: `${action} cancelling${j.includeArchive ? " · db + archive" : " · db only"}`,
+      cls: "warn",
+    };
+  }
   if (status === "completed") {
     return {
       text: `${action} complete${j.needsRestart ? " · restart recommended" : ""}`,
       cls: "ok",
     };
   }
+  if (status === "cancelled") {
+    return { text: `${action} cancelled`, cls: "warn" };
+  }
   if (status === "failed") {
     return { text: `${action} failed`, cls: "error" };
   }
   return { text: "Idle", cls: "" };
+}
+
+function updateReplicationActionButtons(job, mode) {
+  const currentJob = job && typeof job === "object" ? job : null;
+  const activeMode = String(mode || getActiveOperationModeClient() || "gateway")
+    .trim()
+    .toLowerCase();
+  const pullBtn = $("btnRunReplicationPull");
+  const cancelBtn = $("btnCancelReplicationJob");
+  const archiveToggle = $("setReplicationIncludeArchive");
+  const running = Boolean(currentJob?.running);
+  const cancelling = String(currentJob?.status || "").trim().toLowerCase() === "cancelling";
+  const canStartPull = activeMode === "remote" && !running;
+  const canCancel = activeMode === "remote" && running && !cancelling;
+
+  if (pullBtn) {
+    pullBtn.disabled = !canStartPull;
+    pullBtn.title = canStartPull
+      ? "Download the gateway database for local standby use. Requires restart to apply."
+      : activeMode !== "remote"
+        ? "Available only in Remote mode."
+        : "A standby DB refresh is already running.";
+  }
+  if (cancelBtn) {
+    cancelBtn.disabled = !canCancel;
+    cancelBtn.textContent = cancelling ? "Cancelling..." : "Force Cancel";
+    cancelBtn.title = canCancel
+      ? "Force-cancel the current standby DB refresh and clean up staged partial transfer files."
+      : activeMode !== "remote"
+        ? "Available only in Remote mode."
+        : running
+          ? "Cancellation has already been requested."
+          : "No standby DB refresh is running.";
+  }
+  if (archiveToggle) {
+    archiveToggle.checked = isManualArchiveSyncSelected();
+    archiveToggle.disabled = activeMode !== "remote" || running;
+  }
 }
 
 async function promptReplicationRestart(job) {
@@ -4655,6 +5424,7 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
   State.replication.job = job;
   const status = formatReplicationJobStatus(job);
   setReplicationField("repJobStatusVal", status.text, status.cls);
+  updateReplicationActionButtons(job, getActiveOperationModeClient());
 
   if (!job) return;
   if (opts.showMessage !== false) {
@@ -4671,6 +5441,16 @@ function handleReplicationJobUpdate(jobRaw, opts = {}) {
     } else if (job.status === "completed") {
       showMsg("replicationMsg", `✔ ${job.summary || "Standby DB refresh complete."}`, "");
       showToast(job.summary || "Standby DB refresh complete.", "success", 5200);
+    } else if (job.status === "cancelling") {
+      showMsg(
+        "replicationMsg",
+        job.summary || "Force-cancelling standby DB refresh...",
+        "",
+      );
+    } else if (job.status === "cancelled") {
+      const msg = job.summary || "Standby DB refresh cancelled.";
+      showMsg("replicationMsg", msg, "");
+      showToast(msg, "info", 4200);
     } else if (job.status === "failed") {
       const msg = job.error || job.summary || "Download failed.";
       showMsg("replicationMsg", `✗ ${msg}`, "error");
@@ -4793,21 +5573,7 @@ async function refreshReplicationHealth(silent = true) {
     setReplicationField("repScopeVal", formatReplicationScopeText(scope));
     setReplicationField("repArchiveScopeVal", formatArchiveScopeText(scope));
     handleReplicationJobUpdate(job, { showMessage: false });
-    const pullBtn = $("btnRunReplicationPull");
-    const archiveToggle = $("setReplicationIncludeArchive");
-    const manualDisabled = mode !== "remote" || Boolean(job?.running);
-    if (pullBtn) {
-      pullBtn.disabled = manualDisabled;
-      pullBtn.title = manualDisabled
-        ? mode !== "remote"
-          ? "Available only in Remote mode."
-          : "A download is already running."
-        : "Download the gateway database for local standby use. Requires restart to apply.";
-    }
-    if (archiveToggle) {
-      archiveToggle.checked = isManualArchiveSyncSelected();
-      archiveToggle.disabled = manualDisabled;
-    }
+    updateReplicationActionButtons(job, mode);
     if (!silent) {
       showMsg("replicationMsg", "✔ Gateway link status refreshed", "");
     }
@@ -4929,10 +5695,11 @@ async function runReplicationPullNow() {
     "Starting priority standby refresh. Remote live stream will pause during the download…",
     "",
   );
-  try {
+  const startPull = async (forcePull = false) => {
     const result = await api("/api/replication/pull-now", "POST", {
       background: true,
       includeArchive,
+      forcePull,
     });
     const job = result?.job || null;
     if (job) handleReplicationJobUpdate(job, { showMessage: false });
@@ -4940,17 +5707,89 @@ async function runReplicationPullNow() {
     updateReplicationArchiveSelectionUi(true);
     showMsg(
       "replicationMsg",
-      includeArchive
-        ? "Priority download started. Staging the gateway database first. Gateway archive DB files will follow while live streaming is paused."
-        : "Priority download started. Staging the gateway database while live streaming is paused.",
+      forcePull
+        ? includeArchive
+          ? "Force Pull started. The gateway database will overwrite newer local standby data, then gateway archive DB files will be staged while live streaming is paused."
+          : "Force Pull started. The gateway database will overwrite newer local standby data while live streaming is paused."
+        : includeArchive
+          ? "Priority download started. Staging the gateway database first. Gateway archive DB files will follow while live streaming is paused."
+          : "Priority download started. Staging the gateway database while live streaming is paused.",
       "",
     );
     await refreshReplicationHealth(true);
     await refreshRuntimePerf(true);
+  };
+  try {
+    await startPull(false);
   } catch (e) {
+    if (
+      e?.body?.errorCode === "LOCAL_NEWER_PUSH_FAILED" &&
+      e?.body?.canForcePull
+    ) {
+      const conflictMsg = String(
+        e?.body?.error ||
+        e?.message ||
+        "Local standby data is newer than the gateway.",
+      ).trim();
+      const forceOk = await appConfirm(
+        "Force Pull Required",
+        `${conflictMsg}\n\nUse Force Pull only if the gateway is the source of truth and you intentionally want to discard the newer local standby data on this machine.\n\nProceed with Force Pull now?`,
+        { ok: "Force Pull", cancel: "Cancel" },
+      );
+      if (!forceOk) {
+        showMsg("replicationMsg", `✗ ${conflictMsg}`, "error");
+        return;
+      }
+      try {
+        await startPull(true);
+        return;
+      } catch (forceErr) {
+        showMsg("replicationMsg", `✗ ${forceErr.message}`, "error");
+        return;
+      }
+    }
     showMsg("replicationMsg", `✗ ${e.message}`, "error");
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+async function runReplicationCancelNow() {
+  const job = State.replication.job && typeof State.replication.job === "object"
+    ? State.replication.job
+    : null;
+  if (!job?.running) {
+    showMsg("replicationMsg", "No standby DB refresh is currently running.", "error");
+    return;
+  }
+  const status = String(job.status || "").trim().toLowerCase();
+  if (status === "cancelling") {
+    showMsg("replicationMsg", "Cancellation is already in progress.", "");
+    return;
+  }
+  const ok = await appConfirm(
+    "Force Cancel Standby Refresh",
+    "Force-cancel the current standby DB refresh.\n\n" +
+    "Any partially downloaded main DB or archive files from this run will be cleaned up so they are not applied on restart.\n\n" +
+    "Continue with the cancellation?",
+    { ok: "Force Cancel", cancel: "Keep Running" },
+  );
+  if (!ok) return;
+
+  updateReplicationActionButtons(
+    { ...job, status: "cancelling", running: true, cancelRequested: true },
+    getActiveOperationModeClient(),
+  );
+  showMsg("replicationMsg", "Force-cancelling standby DB refresh...", "");
+  try {
+    const result = await api("/api/replication/cancel", "POST", {});
+    if (result?.job) {
+      handleReplicationJobUpdate(result.job, { showMessage: false });
+    }
+    showMsg("replicationMsg", "Force-cancelling standby DB refresh...", "");
+  } catch (err) {
+    updateReplicationActionButtons(job, getActiveOperationModeClient());
+    showMsg("replicationMsg", `✗ ${err.message}`, "error");
   }
 }
 
@@ -5025,6 +5864,361 @@ function showSnapshotWarningToast(prefix, warningInput) {
 }
 
 // ─── Inverter Grid ────────────────────────────────────────────────────────────
+function syncPlantCapFormsFromSettingsState() {
+  applyPlantCapFormRawValues(
+    {
+      upper:
+        State.settings.plantCapUpperMw == null
+          ? ""
+          : String(State.settings.plantCapUpperMw),
+      lower:
+        State.settings.plantCapLowerMw == null
+          ? ""
+          : String(State.settings.plantCapLowerMw),
+      sequenceMode: State.settings.plantCapSequenceMode || "ascending",
+      sequenceCustom: formatPlantCapSequenceInputClient(
+        State.settings.plantCapSequenceCustom || [],
+      ),
+      cooldown: String(State.settings.plantCapCooldownSec ?? 30),
+    },
+    ["live", "settings"],
+  );
+}
+
+function buildPlantCapPanel() {
+  const wrap = el("div", "plant-cap-panel");
+  wrap.id = "plantCapPanel";
+  wrap.title =
+    "Plant-wide MW capping controls. Use this panel to define the output band, review the next planner decision, and enable or release automatic whole-inverter control.";
+  wrap.innerHTML = `
+    <div class="plant-cap-head">
+      <div class="plant-cap-head-main" title="Plant-wide MW capping settings and live controller summary.">
+        <div class="bulk-control-title">Plant Output Cap</div>
+        <div class="plant-cap-title-line">Gateway-directed whole-inverter MW capping</div>
+      </div>
+      <div class="plant-cap-head-actions">
+        <div class="plant-cap-metrics">
+          <div class="plant-cap-metric" title="Current total plant MW from fresh live PAC data. The cap controller uses this as the starting point for stop and restart decisions.">
+            <span>Plant</span>
+            <strong id="plantCapCurrentMw">—</strong>
+          </div>
+          <div class="plant-cap-metric" title="Configured lower and upper MW band for plant-wide capping. The controller tries to keep total plant output inside this range.">
+            <span>Band</span>
+            <strong id="plantCapBandValue">—</strong>
+          </div>
+          <div class="plant-cap-metric" title="Current controller mode. Idle means disabled, Paused means monitoring is blocked by data or safety conditions, and Enabled means the controller is active.">
+            <span>Mode</span>
+            <strong id="plantCapModeValue">Idle</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="plantCapPanelBody" class="plant-cap-panel-body">
+      <div class="plant-cap-form">
+        <label title="Upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">
+          Upper Limit (MW)
+          <input id="plantCapUpperMw" class="inp" type="number" min="0" step="0.001" inputmode="decimal" title="Upper MW threshold for automatic capping decisions." />
+        </label>
+        <label title="Lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">
+          Lower Limit (MW)
+          <input id="plantCapLowerMw" class="inp" type="number" min="0" step="0.001" inputmode="decimal" title="Lower MW threshold for safe controller restart decisions." />
+        </label>
+        <label title="Candidate selection mode. Ascending and Descending walk inverter numbers in order. Exemption skips the listed inverter numbers and uses ascending order for the rest.">
+          Sequence
+          <select id="plantCapSequenceMode" class="sel" title="Choose how the controller selects inverters for automatic stop decisions.">
+            <option value="ascending">Ascending</option>
+            <option value="descending">Descending</option>
+            <option value="exemption">Exemption</option>
+          </select>
+        </label>
+        <label id="plantCapSequenceCustomWrap" hidden title="Exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">
+          Exempted Inverter Numbers
+          <input id="plantCapSequenceCustom" class="inp" type="text" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." />
+        </label>
+        <label title="Cooldown or settling time in seconds after each stop or restart action. The controller waits this long before making another decision.">
+          Cooldown (s)
+          <input id="plantCapCooldownSec" class="inp" type="number" min="5" max="600" step="1" inputmode="numeric" title="Seconds to wait after each controller action before the next plant cap decision." />
+        </label>
+      </div>
+      <div id="plantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the current cap band, node mix, and exemption list."></div>
+      <div class="plant-cap-actions">
+        <button id="btnPlantCapPreview" class="btn btn-outline" type="button" title="Preview the next stop or restart decision using the current band, live PAC, and exemption list.">Preview Plan</button>
+        <button id="btnPlantCapEnable" class="btn btn-red" type="button" title="Enable gateway-side plant output capping with confirmation and authorization.">Enable Cap</button>
+        <button id="btnPlantCapDisable" class="btn btn-outline" type="button" title="Disable automatic plant cap monitoring for the current session without restarting controlled inverters.">Disable Monitoring</button>
+        <button id="btnPlantCapRelease" class="btn btn-green" type="button" title="Restart controller-owned inverters sequentially and release them from plant cap control.">Release Controlled Inverters</button>
+      </div>
+      <div class="plant-cap-status-grid">
+        <div class="plant-cap-status-item" title="Current plant cap controller state.">
+          <span>Status</span>
+          <strong id="plantCapStatusText">Idle</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Primary reason for the current controller state or next recommended action.">
+          <span>Reason</span>
+          <strong id="plantCapReasonText">Plant-wide capping is disabled.</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Inverters currently owned by the plant cap controller because it stopped them earlier in this session.">
+          <span>Controlled</span>
+          <strong id="plantCapOwnedText">None</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Most recent automatic stop or restart action, or the remaining settling time after a recent action.">
+          <span>Last Action</span>
+          <strong id="plantCapLastActionText">—</strong>
+        </div>
+      </div>
+      <div id="plantCapServerWarnings" class="plant-cap-server-warnings" title="Server-side planner warnings, safety blocks, or advisory messages."></div>
+      <div class="plant-cap-preview">
+        <div class="plant-cap-preview-head">
+          <div class="plant-cap-preview-title" title="Preview of the next whole-inverter controller decision based on the current band, live plant MW, and exemption list.">Cap Plan Preview</div>
+          <div id="plantCapPreviewMeta" class="plant-cap-preview-meta" title="Planner summary for the next recommended stop or restart decision.">Preview the next stop/start decision before enabling control.</div>
+        </div>
+        <div class="plant-cap-preview-table-wrap">
+          <table class="plant-cap-preview-table">
+            <thead>
+              <tr>
+                <th title="Inverter number being evaluated by the planner.">Inverter</th>
+                <th title="Configured enabled node count for this inverter.">Nodes</th>
+                <th title="Node-adjusted rated inverter capacity in kW.">Rated kW</th>
+                <th title="Node-adjusted dependable capacity in kW used for conservative planning.">Dependable kW</th>
+                <th id="plantCapPreviewStepHdr" title="Estimated plant MW change if this inverter is stopped, or restart estimate if it is started.">Step kW</th>
+                <th title="Projected total plant MW after applying this stop or restart step.">Projected Plant MW</th>
+                <th title="Why this inverter step is preferred, allowed, or rejected by the planner.">Decision Reason</th>
+              </tr>
+            </thead>
+            <tbody id="plantCapPreviewBody">
+              <tr class="table-empty"><td colspan="7">No plant cap preview yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+  if (State.plantCapPanelCollapsed) {
+    wrap.classList.add("is-collapsed");
+    wrap.classList.add("is-hidden");
+    wrap.hidden = true;
+    wrap.style.display = "none";
+    wrap.setAttribute("aria-hidden", "true");
+  }
+  return wrap;
+}
+
+function normalizePlantCapStatusClient(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    enabled: Boolean(src.enabled),
+    status: String(src.status || "idle"),
+    reasonCode: String(src.reasonCode || "disabled"),
+    reasonText: String(src.reasonText || "Plant-wide capping is disabled."),
+    upperMw: src.upperMw == null ? null : Number(src.upperMw),
+    lowerMw: src.lowerMw == null ? null : Number(src.lowerMw),
+    currentPlantMw: src.currentPlantMw == null ? null : Number(src.currentPlantMw),
+    warnings: Array.isArray(src.warnings) ? src.warnings : [],
+    stepMetrics: src.stepMetrics && typeof src.stepMetrics === "object" ? src.stepMetrics : {},
+    ownedStopped: Array.isArray(src.ownedStopped) ? src.ownedStopped : [],
+    lastDecision: src.lastDecision && typeof src.lastDecision === "object" ? src.lastDecision : null,
+    preview: src.preview && typeof src.preview === "object" ? src.preview : null,
+    cooldownRemainingSec: Number(src.cooldownRemainingSec || 0),
+  };
+}
+
+function formatPlantCapBandLabel(status) {
+  if (status.upperMw == null || status.lowerMw == null) return "—";
+  return `${Number(status.lowerMw).toFixed(3)} - ${Number(status.upperMw).toFixed(3)} MW`;
+}
+
+function renderPlantCapPreviewTable(previewRaw) {
+  const tbody = $("plantCapPreviewBody");
+  const meta = $("plantCapPreviewMeta");
+  const stepHdr = $("plantCapPreviewStepHdr");
+  if (!tbody || !meta || !stepHdr) return;
+  const preview = previewRaw && typeof previewRaw === "object" ? previewRaw : null;
+  if (!preview) {
+    stepHdr.textContent = "Step kW";
+    stepHdr.title =
+      "Estimated plant output change for each candidate step in kW.";
+    meta.textContent =
+      "Preview the next stop/start decision before enabling control.";
+    meta.title = meta.textContent;
+    tbody.innerHTML =
+      '<tr class="table-empty"><td colspan="7">No plant cap preview yet.</td></tr>';
+    return;
+  }
+  const useRestart =
+    preview.currentPlantKw < preview.lowerKw &&
+    Array.isArray(preview.restartPlan) &&
+    preview.restartPlan.length > 0;
+  const rows = useRestart
+    ? preview.restartPlan || []
+    : (preview.stopPlan && preview.stopPlan.length
+      ? preview.stopPlan
+      : preview.restartPlan || []);
+  const selectedInverter = useRestart
+    ? preview.selectedRestart?.inverter
+    : preview.selectedStop?.inverter;
+  stepHdr.textContent = useRestart ? "Restart Est. kW" : "Live Pac kW";
+  stepHdr.title = useRestart
+    ? "Estimated plant output increase in kW if the controller restarts this inverter."
+    : "Current live PAC contribution in kW that would be removed if the controller stops this inverter.";
+  const recommended = String(preview.recommendedAction || "hold").toUpperCase();
+  meta.textContent = `Recommended: ${recommended} · Current ${Number(
+    preview.currentPlantMw || 0,
+  ).toFixed(3)} MW · Band ${Number(preview.lowerMw || 0).toFixed(3)}-${Number(
+    preview.upperMw || 0,
+  ).toFixed(3)} MW`;
+  meta.title = meta.textContent;
+  if (!rows.length) {
+    tbody.innerHTML =
+      '<tr class="table-empty"><td colspan="7">No eligible inverter step is available for the current band.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((row) => {
+      const stepKw = useRestart ? row.restartEstimateKw : row.livePacKw;
+      const selectedClass =
+        Number(row.inverter || 0) === Number(selectedInverter || 0)
+          ? " plant-cap-preview-selected"
+          : "";
+      const reason = String(row.decisionReason || "—");
+      const rowTitle =
+        `INV-${String(row.inverter || 0).padStart(2, "0")} · ` +
+        `Nodes ${Number(row.enabledNodes || 0)} · ` +
+        `Rated ${Number(row.ratedKw || 0).toFixed(1)} kW · ` +
+        `Dependable ${Number(row.dependableKw || 0).toFixed(1)} kW · ` +
+        `${useRestart ? "Restart estimate" : "Live PAC"} ${Number(stepKw || 0).toFixed(1)} kW · ` +
+        `Projected plant ${Number(row.projectedPlantMw || 0).toFixed(3)} MW · ` +
+        reason;
+      return `
+        <tr class="${selectedClass.trim()}" title="${rowTitle}">
+          <td title="Inverter number under evaluation.">INV-${String(row.inverter || 0).padStart(2, "0")}</td>
+          <td title="Configured enabled node count for this inverter.">${Number(row.enabledNodes || 0)}</td>
+          <td title="Node-adjusted rated inverter capacity in kW.">${Number(row.ratedKw || 0).toFixed(1)}</td>
+          <td title="Node-adjusted dependable capacity in kW used for conservative planning.">${Number(row.dependableKw || 0).toFixed(1)}</td>
+          <td title="${useRestart ? "Estimated plant output increase if this inverter is restarted." : "Current live PAC contribution that would be removed if this inverter is stopped."}">${Number(stepKw || 0).toFixed(1)}</td>
+          <td title="Projected total plant output after applying this step.">${Number(row.projectedPlantMw || 0).toFixed(3)}</td>
+          <td title="${reason}">${reason}</td>
+        </tr>`;
+    })
+    .join("");
+}
+
+function renderPlantCapPanel() {
+  syncPlantCapPanelCollapsedUi();
+  const currentMwEl = $("plantCapCurrentMw");
+  const bandEl = $("plantCapBandValue");
+  const modeEl = $("plantCapModeValue");
+  const statusEl = $("plantCapStatusText");
+  const reasonEl = $("plantCapReasonText");
+  const ownedEl = $("plantCapOwnedText");
+  const lastActionEl = $("plantCapLastActionText");
+  const warningsEl = $("plantCapServerWarnings");
+  const releaseBtn = $("btnPlantCapRelease");
+  const previewMetaEl = $("plantCapPreviewMeta");
+  if (!currentMwEl || !bandEl || !modeEl || !statusEl || !reasonEl || !ownedEl || !lastActionEl || !warningsEl) {
+    return;
+  }
+  const status = normalizePlantCapStatusClient(State.plantCap.status || {});
+  currentMwEl.textContent =
+    status.currentPlantMw == null ? "—" : `${Number(status.currentPlantMw).toFixed(3)} MW`;
+  bandEl.textContent = formatPlantCapBandLabel(status);
+  const modeText = status.enabled ? "Enabled" : status.status === "paused" ? "Paused" : "Idle";
+  modeEl.textContent = modeText;
+  statusEl.textContent = String(status.status || "idle").toUpperCase();
+  reasonEl.textContent = status.reasonText || "Plant-wide capping is disabled.";
+  if (status.ownedStopped.length) {
+    ownedEl.textContent = status.ownedStopped
+      .map((entry) => `INV-${String(entry.inverter || 0).padStart(2, "0")}`)
+      .join(", ");
+  } else {
+    ownedEl.textContent = "None";
+  }
+  if (releaseBtn) {
+    releaseBtn.disabled = !status.ownedStopped.length;
+  }
+  if (status.lastDecision) {
+    const stamp = status.lastDecision.at ? fmtDateTime(status.lastDecision.at) : "";
+    const label = String(status.lastDecision.action || "").toUpperCase();
+    lastActionEl.textContent = stamp
+      ? `${label} INV-${String(status.lastDecision.inverter || 0).padStart(2, "0")} @ ${stamp}`
+      : `${label} INV-${String(status.lastDecision.inverter || 0).padStart(2, "0")}`;
+  } else if (status.cooldownRemainingSec > 0) {
+    lastActionEl.textContent = `Settling (${status.cooldownRemainingSec}s remaining)`;
+  } else {
+    lastActionEl.textContent = "—";
+  }
+  currentMwEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    status.currentPlantMw == null
+      ? "Current total plant MW from fresh live PAC data used by the cap controller."
+      : `Current total plant MW from fresh live PAC data: ${Number(status.currentPlantMw).toFixed(3)} MW.`,
+  );
+  bandEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    status.upperMw == null || status.lowerMw == null
+      ? "Configured lower and upper MW cap band."
+      : `Configured plant cap band: ${Number(status.lowerMw).toFixed(3)} to ${Number(status.upperMw).toFixed(3)} MW.`,
+  );
+  modeEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    `Current controller mode: ${modeText}. Idle means disabled, Paused means blocked by safety or freshness checks, and Enabled means active.`,
+  );
+  statusEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    `Current plant cap controller state: ${statusEl.textContent}.`,
+  );
+  reasonEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    `Current controller reason: ${reasonEl.textContent}`,
+  );
+  ownedEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    status.ownedStopped.length
+      ? `Controller-owned stopped inverters: ${ownedEl.textContent}.`
+      : "No inverter is currently owned by the plant cap controller.",
+  );
+  lastActionEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    lastActionEl.textContent === "—"
+      ? "No automatic stop or restart action has been recorded for this session."
+      : `Most recent controller action or settling state: ${lastActionEl.textContent}.`,
+  );
+  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
+  if (!warnings.length) {
+    warningsEl.className = "plant-cap-server-warnings";
+    warningsEl.textContent =
+      "Server-side planner status is normal. Preview or enable the controller to apply the configured cap band.";
+  } else {
+    const critical = warnings.some((warning) => warning?.severity === "critical");
+    warningsEl.className = `plant-cap-server-warnings ${critical ? "critical" : "warning"}`;
+    warningsEl.textContent = warnings
+      .slice(0, 2)
+      .map((warning) => String(warning?.message || "").trim())
+      .filter(Boolean)
+      .join(" ");
+  }
+  warningsEl.title = warnings.length
+    ? warnings
+      .map((warning) => String(warning?.message || "").trim())
+      .filter(Boolean)
+      .join(" ")
+    : "Server-side planner warnings, safety blocks, or advisory messages.";
+  if (previewMetaEl) {
+    previewMetaEl.title = previewMetaEl.textContent || "Planner summary for the next cap decision.";
+  }
+  renderPlantCapPreviewTable(
+    State.plantCap.preview || status.preview || null,
+  );
+}
+
+function applyPlantCapStatusClient(statusRaw, options = {}) {
+  const normalized = normalizePlantCapStatusClient(statusRaw);
+  State.plantCap.status = normalized;
+  if (!options.preservePreview) {
+    State.plantCap.preview = normalized.preview || State.plantCap.preview;
+  } else if (normalized.preview && !State.plantCap.preview) {
+    State.plantCap.preview = normalized.preview;
+  }
+  renderPlantCapPanel();
+}
+
 function buildInverterGrid() {
   const grid = $("invGrid");
   if (!grid) return;
@@ -5033,12 +6227,15 @@ function buildInverterGrid() {
   const count = State.settings.inverterCount;
   const nodes = State.settings.nodeCount || 4;
   const frag = document.createDocumentFragment();
+  frag.appendChild(buildPlantCapPanel());
   for (let i = 1; i <= count; i++) {
     frag.appendChild(buildInverterCard(i, nodes));
   }
   frag.appendChild(buildBulkControlPanel());
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
+  syncPlantCapFormsFromSettingsState();
+  renderPlantCapPanel();
 }
 
 function currentOperator() {
@@ -5564,12 +6761,14 @@ function buildInverterCard(inv, nodeCount) {
         <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop">Stop</button>
       </div>
       <div class="pac-cell">
-        <div class="pac-label">DC POWER</div>
-        <div class="pac-val zero" id="pdcsum-${inv}">0.00<span class="pac-unit">kW</span></div>
+        <span class="pac-label">Pdc:</span>
+        <span class="pac-val zero" id="pdcsum-${inv}">0.00</span>
+        <span class="pac-unit">kW</span>
       </div>
       <div class="pac-cell">
-        <div class="pac-label">AC POWER</div>
-        <div class="pac-val zero" id="pac-${inv}">0.00<span class="pac-unit">kW</span></div>
+        <span class="pac-label">Pac:</span>
+        <span class="pac-val zero" id="pac-${inv}">0.00</span>
+        <span class="pac-unit">kW</span>
       </div>
     </div>
     <div class="card-main">
@@ -5786,10 +6985,10 @@ function updateInverterCards() {
 
     // PAC
     const pacKw = (pac / 1000).toFixed(2);
-    pacEl.innerHTML = `${pacKw}<span class="pac-unit">kW</span>`;
+    pacEl.textContent = pacKw;
     pacEl.className = "pac-val" + (pac === 0 ? " zero" : " active");
     if (pdcSumEl) {
-      pdcSumEl.innerHTML = `${(pdc / 1000).toFixed(2)}<span class="pac-unit">kW</span>`;
+      pdcSumEl.textContent = (pdc / 1000).toFixed(2);
       pdcSumEl.className = "pac-val" + (pdc === 0 ? " zero" : " active");
     }
 
@@ -6059,20 +7258,10 @@ function setNodeButtonVisual(btnEl, node, isOn, isIsolated = false) {
 }
 
 // Bulk command auth is intentionally separate from IP Config/Topology auth.
-const PLANT_WIDE_AUTH_PREFIX = "sacups";
 const BulkAuth = {
   resolver: null,
   open: false,
 };
-
-function getPlantWideAuthKeys() {
-  const now = new Date();
-  const prev = new Date(now.getTime() - 60000);
-  return [
-    `${PLANT_WIDE_AUTH_PREFIX}${pad2(now.getMinutes())}`,
-    `${PLANT_WIDE_AUTH_PREFIX}${pad2(prev.getMinutes())}`,
-  ];
-}
 
 function isBulkAuthOpen() {
   const modal = $("bulkAuthModal");
@@ -6094,10 +7283,6 @@ function validatePlantWideAuthKey(input) {
     .trim()
     .toLowerCase();
   if (!entered) return { ok: false, error: "Auth key is required." };
-  const validKeys = getPlantWideAuthKeys();
-  if (!validKeys.includes(entered)) {
-    return { ok: false, error: "Authorization failed. Invalid auth key." };
-  }
   return { ok: true, key: entered };
 }
 
@@ -6178,7 +7363,233 @@ function requestBulkAuthorization(action, scopeLabel, totalTargets) {
 
 async function authorizeBulkCommand(action, scopeLabel, totalTargets) {
   initBulkAuthModal();
-  return await requestBulkAuthorization(action, scopeLabel, totalTargets);
+  const authKey = await requestBulkAuthorization(action, scopeLabel, totalTargets);
+  if (!authKey) return null;
+  const session = await api(
+    "/api/write/auth/bulk",
+    "POST",
+    { authKey },
+    { progress: false },
+  );
+  const authToken = String(session?.token || "").trim();
+  if (!authToken) {
+    throw new Error("Bulk authorization token was not issued.");
+  }
+  return {
+    authKey,
+    authToken,
+    expiresAt: Number(session?.expiresAt || 0),
+  };
+}
+
+function buildPlantCapRequestBody(context = "live") {
+  const values = readPlantCapRequestValues(context);
+  if (values.upperMw == null) {
+    throw new Error("Upper limit is required.");
+  }
+  if (values.lowerMw == null) {
+    throw new Error("Lower limit is required.");
+  }
+  if (!(values.lowerMw < values.upperMw)) {
+    throw new Error("Lower limit must be less than the upper limit.");
+  }
+  if (values.sequenceMode === "exemption" && values.sequenceError) {
+    throw new Error(values.sequenceError);
+  }
+  return {
+    upperMw: values.upperMw,
+    lowerMw: values.lowerMw,
+    sequenceMode: values.sequenceMode,
+    sequenceCustom: values.sequenceCustom,
+    cooldownSec: values.cooldownSec,
+  };
+}
+
+function countPlantCapTargetsFromPreview(previewRaw) {
+  const preview = previewRaw && typeof previewRaw === "object" ? previewRaw : null;
+  const previewProfiles = Array.isArray(preview?.profiles) ? preview.profiles : [];
+  const controllableNodeCount = previewProfiles
+    .filter((profile) => profile.controllable)
+    .reduce((sum, profile) => sum + Number(profile.enabledNodes || 0), 0);
+  if (controllableNodeCount > 0) return controllableNodeCount;
+  const ownedStopped = Array.isArray(State.plantCap.status?.ownedStopped)
+    ? State.plantCap.status.ownedStopped
+    : [];
+  const ownedNodeCount = ownedStopped.reduce(
+    (sum, entry) => sum + Number(entry.enabledNodes || 0),
+    0,
+  );
+  return Math.max(1, ownedNodeCount || 1);
+}
+
+async function refreshPlantCapStatus(silent = true) {
+  try {
+    const data = await api("/api/plant-cap/status");
+    applyPlantCapStatusClient(data.status || null, { preservePreview: true });
+    return data.status || null;
+  } catch (err) {
+    if (!silent) {
+      showToast(`Plant cap status refresh failed: ${err.message}`, "fault", 5000);
+    }
+    throw err;
+  }
+}
+
+async function previewPlantCap(options = {}) {
+  const context = String(options.context || "live").trim().toLowerCase() || "live";
+  const body = buildPlantCapRequestBody(context);
+  const data = await api("/api/plant-cap/preview", "POST", body, {
+    progress: false,
+  });
+  State.plantCap.preview = data.preview || null;
+  applyPlantCapStatusClient(data.status || null, { preservePreview: true });
+  renderPlantCapPanel();
+  return data.preview || null;
+}
+
+function buildPlantCapEnableConfirmText(preview) {
+  const warnings = Array.isArray(preview?.warnings) ? preview.warnings : [];
+  const warningText = warnings
+    .slice(0, 2)
+    .map((warning) => String(warning?.message || "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const bandText =
+    preview && preview.upperMw != null && preview.lowerMw != null
+      ? `Band: ${Number(preview.lowerMw).toFixed(3)} - ${Number(preview.upperMw).toFixed(3)} MW.`
+      : "Band: not configured.";
+  const plantText =
+    preview && preview.currentPlantMw != null
+      ? `Current plant output: ${Number(preview.currentPlantMw).toFixed(3)} MW.`
+      : "Current plant output is unavailable.";
+  const actionText = String(preview?.recommendedAction || "hold").toUpperCase();
+  const recommendation =
+    actionText === "STOP" && preview?.selectedStop
+      ? `Next stop candidate: INV-${String(preview.selectedStop.inverter || 0).padStart(2, "0")}.`
+      : actionText === "START" && preview?.selectedRestart
+        ? `Next restart candidate: INV-${String(preview.selectedRestart.inverter || 0).padStart(2, "0")}.`
+        : "No immediate inverter action is currently planned.";
+  return [plantText, bandText, `Recommended action: ${actionText}.`, recommendation, warningText]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function enablePlantCapControl() {
+  let preview;
+  try {
+    preview = await previewPlantCap({ context: "live" });
+  } catch (err) {
+    showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  const ok = await appConfirm(
+    "Enable Plant Output Cap",
+    buildPlantCapEnableConfirmText(preview),
+    { ok: "Enable" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      "ENABLE",
+      "plant cap monitoring",
+      countPlantCapTargetsFromPreview(preview),
+    );
+  } catch (err) {
+    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap enable cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/enable",
+      "POST",
+      {
+        ...buildPlantCapRequestBody("live"),
+        authToken: authSession.authToken,
+      },
+      { progress: false },
+    );
+    State.plantCap.preview = response?.status?.preview || State.plantCap.preview;
+    applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
+    showToast("Plant cap monitoring enabled.", "success", 3200);
+  } catch (err) {
+    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function disablePlantCapControl() {
+  const ok = await appConfirm(
+    "Disable Plant Output Cap",
+    "Disable plant-wide capping monitoring?\n\nThis stops automatic control but does not restart any inverter that the controller previously stopped.",
+    { ok: "Disable" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand("DISABLE", "plant cap monitoring", 1);
+  } catch (err) {
+    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap disable cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/disable",
+      "POST",
+      { authToken: authSession.authToken },
+      { progress: false },
+    );
+    applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
+    showToast("Plant cap monitoring disabled.", "success", 3200);
+  } catch (err) {
+    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function releasePlantCapControl() {
+  const ok = await appConfirm(
+    "Release Controlled Inverters",
+    "Start all controller-owned inverters sequentially in reverse stop order?\n\nThis also disables plant-wide capping monitoring for the current session.",
+    { ok: "Release" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      "RELEASE",
+      "controller-owned inverters",
+      countPlantCapTargetsFromPreview(State.plantCap.preview),
+    );
+  } catch (err) {
+    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap release cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/release",
+      "POST",
+      { authToken: authSession.authToken },
+      { progress: false },
+    );
+    if (response?.status) {
+      State.plantCap.preview = response.status.preview || null;
+      applyPlantCapStatusClient(response.status, { preservePreview: true });
+    }
+    showToast("Controller-owned inverters released.", "success", 3600);
+  } catch (err) {
+    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+  }
 }
 
 async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
@@ -6445,12 +7856,18 @@ async function sendSelectedNodes(val) {
     return;
   }
   const action = val ? "START" : "STOP";
-  const authKey = await authorizeBulkCommand(
-    action,
-    `selected inverters (${selected.length})`,
-    totalTargets,
-  );
-  if (!authKey) {
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      action,
+      `selected inverters (${selected.length})`,
+      totalTargets,
+    );
+  } catch (e) {
+    showToast(`${action} failed: ${e.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
     showToast(`${action} cancelled: selected inverters`, "info", 3200);
     return;
   }
@@ -6467,7 +7884,7 @@ async function sendSelectedNodes(val) {
           unit: n,
           value: val,
           scope: "selected",
-          authKey,
+          authToken: authSession.authToken,
           operator: currentOperator(),
         },
       });
@@ -6931,6 +8348,7 @@ function connectWS() {
 
 function handleWS(msg) {
   if (msg.type === "init" || msg.type === "live") {
+    noteTodayMwhWsFrame(Date.now());
     if (
       State.modeTransition?.active &&
       normalizeOperationModeValue(State.modeTransition.targetMode) === "remote"
@@ -6944,20 +8362,40 @@ function handleWS(msg) {
     // Apply server-authoritative today energy from WS so the header metric
     // updates on every bridge tick without depending on the HTTP sync timer.
     if (Array.isArray(msg.todayEnergy)) {
+      const now = Date.now();
       setTodayEnergyRowsClient(msg.todayEnergy);
       const totalKwh = msg.todayEnergy.reduce(
         (sum, r) => sum + Number(r?.total_kwh || 0), 0
       );
-      const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+      noteTodayMwhWsEnergy(totalKwh, now);
+      const applied = applySyncedTodayKwh(totalKwh, now, {
         source: "ws",
       });
       if (applied) renderTodayKwhFromPac();
+      if (!msg.todaySummary || typeof msg.todaySummary !== "object") {
+        applyCurrentDaySummaryClient(
+          {
+            day: today(),
+            as_of_ts: now,
+            total_kwh: totalKwh,
+            total_mwh: totalKwh / 1000,
+            inverter_count: Object.keys(State.todayEnergyByInv || {}).length,
+          },
+          { source: "ws-energy" },
+        );
+      }
+    }
+    if (msg.todaySummary && typeof msg.todaySummary === "object") {
+      applyCurrentDaySummaryClient(msg.todaySummary, { source: "ws" });
     }
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
       State.settings.plantName = msg.settings.plantName || "ADSI Plant";
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
+    }
+    if (msg.plantCap) {
+      applyPlantCapStatusClient(msg.plantCap, { preservePreview: true });
     }
     scheduleInverterCardsUpdate();
     // Keep detail panel stat chips live on every WS tick
@@ -6973,9 +8411,12 @@ function handleWS(msg) {
       refreshReplicationHealth(true).catch(() => {});
     }
   }
+  if (msg.type === "plant_cap_status") {
+    applyPlantCapStatusClient(msg.plantCap || null, { preservePreview: true });
+  }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;
-    loadSettings()
+    Promise.all([loadSettings(), loadIpConfig()])
       .then(async () => {
         await handleOperationModeTransition(
           prevModeWs,
@@ -7031,7 +8472,7 @@ function handleAlarmPush(alarms) {
       alarm_value: Number(a.alarm_value || 0),
       severity: a.severity || "fault",
       acknowledged: false,
-      ts: Date.now(),
+      ts: Number(a.ts || Date.now()),
       alarm_hex: toAlarmHex(a.alarm_value),
     };
 
@@ -7045,7 +8486,7 @@ function handleAlarmPush(alarms) {
     );
   });
 
-  setAlarmSoundActive(true);
+  syncAlarmSoundPlayback();
   scheduleInverterCardsUpdate();
 
   // Badge
@@ -7113,7 +8554,7 @@ async function refreshAlarmBadge() {
       if (bell) bell.classList.add("hidden");
       closeNotif();
     }
-    setAlarmSoundActive(unacked > 0);
+    syncAlarmSoundPlayback();
     scheduleInverterCardsUpdate();
     return true;
   } catch (err) {
@@ -7330,6 +8771,8 @@ async function loadIpConfig() {
   try {
     const cfg = await api("/api/ip-config");
     State.ipConfig = cfg && typeof cfg === "object" ? cfg : null;
+    renderPlantCapClientWarnings();
+    renderPlantCapPanel();
   } catch (e) {
     console.warn("[IPCONFIG] load failed:", e.message);
     State.ipConfig = null;
@@ -7342,10 +8785,18 @@ function getConfiguredUnits(inv, fallbackNodeCount) {
   if (!cfg || typeof cfg !== "object") {
     return Array.from({ length: nodeCount }, (_, i) => i + 1);
   }
-  const unitsRaw = cfg?.units?.[inv] ?? cfg?.units?.[String(inv)] ?? [];
+  const unitsObj =
+    cfg.units && typeof cfg.units === "object" ? cfg.units : null;
+  const hasEntry =
+    !!unitsObj &&
+    (Object.prototype.hasOwnProperty.call(unitsObj, inv) ||
+      Object.prototype.hasOwnProperty.call(unitsObj, String(inv)));
+  const unitsRaw = hasEntry
+    ? unitsObj?.[inv] ?? unitsObj?.[String(inv)] ?? []
+    : Array.from({ length: nodeCount }, (_, i) => i + 1);
   const units = Array.isArray(unitsRaw)
     ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
-    : [];
+    : Array.from({ length: nodeCount }, (_, i) => i + 1);
   return [...new Set(units)];
 }
 
@@ -8030,6 +9481,10 @@ async function fetchReportSummary(date, options = {}) {
     State.reportView.summary =
       summary && typeof summary === "object" ? summary : null;
     if (sanitizeDateInputValue(date) === today()) {
+      const currentDaySummary = extractCurrentDaySummary(summary);
+      if (currentDaySummary) {
+        applyCurrentDaySummaryClient(summary, { source: "report-summary" });
+      }
       const totalKwh = Number(summary?.daily?.total_kwh);
       if (Number.isFinite(totalKwh)) {
         const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
@@ -8514,10 +9969,18 @@ async function loadAnalytics(options = {}) {
     State.analyticsBaseRows = bucketed;
     State.analyticsDayAheadBaseRows = dayAheadBucketed;
     State.analyticsIntervalMin = intervalMin;
-    const summaryMwh = Number(dailySummary?.daily?.total_mwh);
-    State.analyticsDailyTotalMwh = Number.isFinite(summaryMwh)
-      ? Number(summaryMwh.toFixed(6))
-      : null;
+    const currentDaySummary = extractCurrentDaySummary(dailySummary);
+    State.analyticsDailyTotalMwh =
+      currentDaySummary && currentDaySummary.day === date
+        ? Number(currentDaySummary.totalMwh.toFixed(6))
+        : Number.isFinite(Number(dailySummary?.daily?.total_mwh))
+          ? Number(Number(dailySummary?.daily?.total_mwh).toFixed(6))
+          : null;
+    if (currentDaySummary) {
+      applyCurrentDaySummaryClient(dailySummary, { source: "analytics-load" });
+    }
+    State.analyticsActualSummarySyncAt = Date.now();
+    State.analyticsActualSummarySyncDay = date;
     renderAnalyticsFromState();
     ensureAnalyticsRealtime();
     ensureAnalyticsAutoRefresh();
@@ -8760,7 +10223,8 @@ function ensureAnalyticsRealtime() {
         s += Number(d.pac || 0) * Number(d.inverter || 0);
       }
     });
-    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}`;
+    const actualSig = Number(State.analyticsDailyTotalMwh || 0).toFixed(6);
+    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}|${actualSig}`;
     if (sig === State.analyticsLastPacSig) return;
     State.analyticsLastPacSig = sig;
     renderAnalyticsFromState();
@@ -8934,16 +10398,25 @@ function ensureAnalyticsCards() {
     <div class="analytics-gen-wrap">
       <div class="analytics-side-label">Day-ahead Generator</div>
       <div class="analytics-gen-row">
-        <label for="genDayCount" class="analytics-gen-label">Days</label>
-        <input
-          type="number"
-          id="genDayCount"
-          class="inp analytics-gen-input"
-          min="1"
-          max="31"
-          step="1"
-          value="1"
-        />
+        <label for="genDayCount" class="analytics-gen-field">
+          <span class="analytics-gen-label">Days</span>
+          <input
+            type="number"
+            id="genDayCount"
+            class="inp analytics-gen-input"
+            min="1"
+            max="31"
+            step="1"
+            value="1"
+          />
+        </label>
+        <label for="anaDayAheadExportFormat" class="analytics-gen-field analytics-gen-field-format">
+          <span class="analytics-gen-label">Format</span>
+          <select id="anaDayAheadExportFormat" class="sel analytics-gen-select">
+            <option value="standard">Standard</option>
+            <option value="average-table">Average Table</option>
+          </select>
+        </label>
         <div class="analytics-gen-actions">
           <button
             id="btnDayAheadGenerate"
@@ -8980,6 +10453,10 @@ function ensureAnalyticsCards() {
     genInput.value = String(
       Math.min(31, Math.max(1, Math.trunc(savedDayCount))),
     );
+  }
+  const analyticsFormatSel = totalSideCard.querySelector("#anaDayAheadExportFormat");
+  if (analyticsFormatSel) {
+    analyticsFormatSel.value = getSharedForecastExportFormat();
   }
   bindExportUiStatePersistence();
   syncDayAheadGeneratorAvailability();
@@ -9381,6 +10858,8 @@ function buildAnalyticsDisplayTimeline(intervalMin = 5) {
 
 function chartOpts(unit, showLegend) {
   const pal = getChartPalette();
+  const chartType = getChartTypography();
+  const uiFont = cssVar("--font-main", "Arial");
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -9390,7 +10869,13 @@ function chartOpts(unit, showLegend) {
     plugins: {
       legend: {
         display: !!showLegend,
-        labels: { color: pal.legend, font: { family: "'Share Tech Mono'" } },
+        labels: {
+          color: pal.legend,
+          font: { family: uiFont, size: chartType.legend, weight: "600" },
+          boxWidth: chartType.legendBoxWidth,
+          boxHeight: chartType.legendBoxHeight,
+          padding: chartType.legendPadding,
+        },
       },
       decimation: {
         enabled: true,
@@ -9402,7 +10887,7 @@ function chartOpts(unit, showLegend) {
       x: {
         ticks: {
           color: pal.tick,
-          font: { size: 8 },
+          font: { family: uiFont, size: chartType.tickX, weight: "500" },
           autoSkip: false,
           callback(value, index, ticks) {
             const total = Math.max(1, ticks?.length || 1);
@@ -9418,13 +10903,13 @@ function chartOpts(unit, showLegend) {
         grid: { color: pal.grid },
       },
       y: {
-        ticks: { color: pal.tick, font: { size: 9 } },
+        ticks: { color: pal.tick, font: { family: uiFont, size: chartType.tickY, weight: "500" } },
         grid: { color: pal.grid },
         title: {
           display: true,
           text: unit,
           color: pal.tick,
-          font: { size: 10 },
+          font: { family: uiFont, size: chartType.axis, weight: "600" },
         },
       },
     },
@@ -9438,6 +10923,7 @@ function chartOpts(unit, showLegend) {
 // ─── Export Page ──────────────────────────────────────────────────────────────
 function initExportPage() {
   applyExportUiStateToInputs(State.settings.exportUiState || {});
+  syncSharedForecastExportFormatControls(getSharedForecastExportFormat());
   bindExportDateValidators();
   bindExportNumberValidators();
   normalizeAllExportDateInputs({ forceDefault: true, preferred: "start" });
@@ -9736,7 +11222,10 @@ async function runForecastActualExport() {
   normalizeExportSingleDateInput("expForecastDate", { forceDefault: true });
   await persistExportUiState().catch(() => {});
   const day = $("expForecastDate")?.value;
-  const format = $("expForecastFormat")?.value || "xlsx";
+  const exportFormat = getSharedForecastExportFormat();
+  const format = exportFormat === "average-table"
+    ? "xlsx"
+    : ($("expForecastFormat")?.value || "xlsx");
   const resolution = $("expForecastResolution")?.value || "5min";
   const res = $("expForecastResult");
   if (res) {
@@ -9755,12 +11244,14 @@ async function runForecastActualExport() {
       endTs,
       resolution,
       format,
+      exportFormat,
     }, {
       signal: controller.signal,
     });
     if (res) {
       res.className = "exp-result";
-      res.textContent = "✔ Saved: " + r.path;
+      res.textContent =
+        `✔ Saved: ${r.path}${exportFormat === "average-table" ? " (average table)" : " (standard)"}`;
     }
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunForecastExport", "ok");
@@ -9798,6 +11289,7 @@ async function runAnalyticsDayAheadExport() {
   const startTs = bounds?.startTs;
   const endTs = bounds?.endTs;
   const resolution = getAnalyticsForecastExportResolution();
+  const exportFormat = getSharedForecastExportFormat();
 
   if (res) {
     res.className = "exp-result";
@@ -9810,10 +11302,11 @@ async function runAnalyticsDayAheadExport() {
       endTs,
       resolution,
       format: "xlsx",
+      exportFormat,
     });
     if (res) {
       res.className = "exp-result";
-      res.textContent = `✔ Exported ${day} (${resolution})`;
+      res.textContent = `✔ Exported ${day} (${resolution}${exportFormat === "average-table" ? ", average table" : ""})`;
     }
     await openExportPathFolder(r.path);
   } catch (e) {
@@ -10569,9 +12062,10 @@ function bindEventHandlers() {
     rerenderSolcastPreviewChartFromState();
   });
   $("solcastPreviewExportFormat")?.addEventListener("change", (event) => {
-    State.solcastPreview.exportFormat = normalizeSolcastPreviewExportFormatClient(
-      event?.target?.value || "standard",
-    );
+    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
+  });
+  $("expForecastExportFormat")?.addEventListener("change", (event) => {
+    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
   });
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
@@ -10580,6 +12074,17 @@ function bindEventHandlers() {
   $("btnExportSettingsConfig")?.addEventListener("click", exportSettingsConfig);
   $("btnImportSettingsConfig")?.addEventListener("click", importSettingsConfig);
   $("btnResetSettingsDefaults")?.addEventListener("click", resetSettingsToDefaults);
+  [
+    "setPlantCapUpperMw",
+    "setPlantCapLowerMw",
+    "setPlantCapSequenceCustom",
+    "setPlantCapCooldownSec",
+  ].forEach((id) => {
+    $(id)?.addEventListener("input", () => syncPlantCapFormContext("settings"));
+  });
+  $("setPlantCapSequenceMode")?.addEventListener("change", () =>
+    syncPlantCapFormContext("settings"),
+  );
   $("setOperationMode")?.addEventListener("change", () => {
     syncOperationModeUi();
     syncDayAheadGeneratorAvailability();
@@ -10595,6 +12100,7 @@ function bindEventHandlers() {
     refreshRuntimePerf(false),
   );
   $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
+  $("btnCancelReplicationJob")?.addEventListener("click", runReplicationCancelNow);
   // Push button removed — viewer model has no outbound data flows.
   $("setReplicationIncludeArchive")?.addEventListener("change", async (event) => {
     const target = event?.target;
@@ -10648,11 +12154,42 @@ function bindEventHandlers() {
 
   // Bulk command form (static-param buttons built in buildBulkCommandTpl)
   document.addEventListener("click", (e) => {
-    const t = e.target;
-    if (t.id === "btnFillAllTargets") { fillAllCommandTargets(); return; }
-    if (t.id === "btnClearTargets")   { clearCommandTargets();   return; }
-    if (t.id === "btnStartSelected")  { sendSelectedNodes(1);    return; }
-    if (t.id === "btnStopSelected")   { sendSelectedNodes(0);    return; }
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t) return;
+    if (t.closest("#btnPlantCapToolbarToggle")) { togglePlantCapPanelCollapsed(); return; }
+    if (t.closest("#btnFillAllTargets")) { fillAllCommandTargets(); return; }
+    if (t.closest("#btnClearTargets"))   { clearCommandTargets();   return; }
+    if (t.closest("#btnStartSelected"))  { sendSelectedNodes(1);    return; }
+    if (t.closest("#btnStopSelected"))   { sendSelectedNodes(0);    return; }
+    if (t.closest("#btnPlantCapPreview")) {
+      previewPlantCap().catch((err) => {
+        showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+      });
+      return;
+    }
+    if (t.closest("#btnPlantCapEnable"))  { enablePlantCapControl().catch(() => {}); return; }
+    if (t.closest("#btnPlantCapDisable")) { disablePlantCapControl().catch(() => {}); return; }
+    if (t.closest("#btnPlantCapRelease")) { releasePlantCapControl().catch(() => {}); return; }
+  });
+
+  document.addEventListener("input", (e) => {
+    const id = String(e.target?.id || "");
+    if (
+      id === "plantCapUpperMw" ||
+      id === "plantCapLowerMw" ||
+      id === "plantCapSequenceCustom" ||
+      id === "plantCapCooldownSec"
+    ) {
+      syncPlantCapFormContext("live");
+      return;
+    }
+  });
+  document.addEventListener("change", (e) => {
+    const id = String(e.target?.id || "");
+    if (id === "plantCapSequenceMode") {
+      syncPlantCapFormContext("live");
+      return;
+    }
   });
 
   // Inverter grid — card start/stop and node toggle buttons (event delegation)
@@ -10682,8 +12219,18 @@ function bindEventHandlers() {
 
   // Analytics day-ahead buttons (delegated on page container; rendered lazily by ensureAnalyticsCards)
   $("page-analytics")?.addEventListener("click", (e) => {
-    if (e.target.id === "btnDayAheadGenerate") { runDayAheadGeneration();    return; }
-    if (e.target.id === "btnDayAheadExport")   { runAnalyticsDayAheadExport(); }
+    if (e.target.closest("#btnDayAheadGenerate")) {
+      runDayAheadGeneration();
+      return;
+    }
+    if (e.target.closest("#btnDayAheadExport")) {
+      runAnalyticsDayAheadExport();
+    }
+  });
+  $("page-analytics")?.addEventListener("change", (e) => {
+    if (e.target?.id === "anaDayAheadExportFormat") {
+      syncSharedForecastExportFormatControls(e.target.value);
+    }
   });
 
   // Alarm sound toggle
@@ -10825,6 +12372,7 @@ function appConfirm(title, bodyText, { ok = "OK", cancel = "Cancel" } = {}) {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
   initThemeToggle();
+  State.plantCapPanelCollapsed = getStoredPlantCapPanelCollapsed();
   await initLicenseBridge();
   await initAppUpdateBridge();
   startClock();
@@ -10850,7 +12398,9 @@ async function init() {
   };
   document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
   document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
+  window.addEventListener("resize", rerenderResponsiveChartsDebounced, { passive: true });
   bindEventHandlers();
+  syncPlantCapPanelCollapsedUi();
   renderChatSendState();
   renderChatBadge();
   renderChatThread();

@@ -34,6 +34,7 @@ function registerClient(ws) {
 }
 
 function broadcastUpdate(payload) {
+  if (clients.size === 0) return;
   let finalPayload = payload;
   if (typeof payloadEnricher === "function") {
     try {
