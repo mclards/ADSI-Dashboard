@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.1` in `package.json`
+- Current repo version baseline: `2.4.2` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -368,6 +368,7 @@ If a visible product rename affects install directory behavior, assess updater i
   - live bridge health is stateful: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error`
   - short live-bridge failures retain the last-good in-memory snapshot for a bounded window and mark inverter cards stale
   - inverter on/off write control stays enabled via gateway proxy
+  - whole-inverter and selected multi-inverter write actions should batch configured node commands per inverter through `/api/write/batch` so gateway control does not pay one full HTTP round trip per node
   - may run local remote-side utilities such as Solcast toolkit test / preview / export
   - switching from remote to gateway warns about stale local DB and should prefer `Refresh Standby DB` plus restart before local gateway use
   - mode changes should stay guarded until the target runtime is actually ready: first remote live snapshot for `remote`, first local poll cycle for `gateway`

@@ -7606,7 +7606,7 @@ async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
       if (index >= tasks.length) return;
       const task = tasks[index];
       try {
-        const value = await api("/api/write", "POST", task?.body || {}, {
+        const value = await api(String(task?.path || "/api/write"), "POST", task?.body || {}, {
           progress: false,
         });
         results[index] = { status: "fulfilled", value };
@@ -7618,6 +7618,25 @@ async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
 
   await Promise.all(Array.from({ length: safeLimit }, () => worker()));
   return results;
+}
+
+function normalizeBatchWriteResultsClient(expectedUnitsRaw, response) {
+  const expectedUnits = Array.isArray(expectedUnitsRaw)
+    ? expectedUnitsRaw
+        .map((unit) => Number(unit))
+        .filter((unit) => Number.isFinite(unit) && unit > 0)
+    : [];
+  const rawResults = Array.isArray(response?.results) ? response.results : [];
+  return expectedUnits.map((unit) => {
+    const match = rawResults.find((entry) => Number(entry?.unit) === unit);
+    return {
+      unit,
+      ok:
+        match != null
+          ? Boolean(match?.ok)
+          : Boolean(response?.ok) && rawResults.length === 0,
+    };
+  });
 }
 
 // ─── Node Control ─────────────────────────────────────────────────────────────
@@ -7662,63 +7681,62 @@ async function sendAllNodesInv(inv, val) {
   }
   const action = val ? "START" : "STOP";
   const scopeLabel = `INV-${String(inv).padStart(2, "0")}`;
-
-  const tasks = [];
-  for (const n of targetNodes) {
-    tasks.push({
-      inverter: inv,
-      node: n,
-      body: {
+  try {
+    const response = await api(
+      "/api/write/batch",
+      "POST",
+      {
         inverter: inv,
-        node: n,
-        unit: n,
+        units: targetNodes,
         value: val,
         scope: "inverter",
+        priority: "high",
         operator: currentOperator(),
       },
-    });
-  }
-
-  const results = await runControlTasksWithConcurrency(tasks, 2);
-  let ok = 0;
-  let fail = 0;
-
-  results.forEach((r, i) => {
-    const t = tasks[i];
-    if (r.status === "fulfilled") {
-      ok++;
-      const key = `${t.inverter}_${t.node}`;
-      State.nodeStates[key] = val;
-      const btn = $(`nbtn-${t.inverter}-${t.node}`);
-      if (btn) {
-        setNodeButtonVisual(btn, t.node, !!val, false);
-      }
-    } else {
-      fail++;
-    }
-  });
-
-  if (fail === 0) {
-    showToast(
-      `${action} sent: ${scopeLabel} (${ok}/${targetNodes.length} nodes)`,
-      "success",
-      3200,
+      { progress: false },
     );
-  } else if (ok === 0) {
-    const firstErr = results.find((r) => r.status === "rejected");
-    const detail = firstErr?.reason?.message
-      ? `: ${firstErr.reason.message}`
-      : "";
+
+    const unitResults = normalizeBatchWriteResultsClient(targetNodes, response);
+    let ok = 0;
+    let fail = 0;
+
+    unitResults.forEach(({ unit, ok: unitOk }) => {
+      if (unitOk) {
+        ok++;
+        const key = `${inv}_${unit}`;
+        State.nodeStates[key] = val;
+        const btn = $(`nbtn-${inv}-${unit}`);
+        if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+      } else {
+        fail++;
+      }
+    });
+
+    if (fail === 0) {
+      showToast(
+        `${action} sent: ${scopeLabel} (${ok}/${targetNodes.length} nodes)`,
+        "success",
+        3200,
+      );
+    } else if (ok === 0) {
+      const detail = response?.error ? `: ${response.error}` : "";
+      showToast(
+        `${action} failed: ${scopeLabel} (0/${targetNodes.length})${detail}`,
+        "fault",
+        6000,
+      );
+    } else {
+      showToast(
+        `${action} partial: ${scopeLabel} (${ok}/${targetNodes.length})`,
+        "warning",
+        5000,
+      );
+    }
+  } catch (e) {
     showToast(
-      `${action} failed: ${scopeLabel} (0/${targetNodes.length})${detail}`,
+      `${action} failed: ${scopeLabel}: ${e.message}`,
       "fault",
       6000,
-    );
-  } else {
-    showToast(
-      `${action} partial: ${scopeLabel} (${ok}/${targetNodes.length})`,
-      "warning",
-      5000,
     );
   }
 }
@@ -7874,37 +7892,43 @@ async function sendSelectedNodes(val) {
 
   const tasks = [];
   selected.forEach((inv) => {
-    for (const n of getConfiguredUnits(inv, nodeCount)) {
-      tasks.push({
+    const units = getConfiguredUnits(inv, nodeCount);
+    if (!units.length) return;
+    tasks.push({
+      path: "/api/write/batch",
+      inverter: inv,
+      units,
+      body: {
         inverter: inv,
-        node: n,
-        body: {
-          inverter: inv,
-          node: n,
-          unit: n,
-          value: val,
-          scope: "selected",
-          authToken: authSession.authToken,
-          operator: currentOperator(),
-        },
-      });
-    }
+        units,
+        value: val,
+        scope: "selected",
+        authToken: authSession.authToken,
+        priority: "high",
+        operator: currentOperator(),
+      },
+    });
   });
 
-  const results = await runControlTasksWithConcurrency(tasks, 2);
+  const results = await runControlTasksWithConcurrency(tasks, 4);
   let ok = 0;
   let fail = 0;
   results.forEach((r, i) => {
     const t = tasks[i];
     if (r.status === "fulfilled") {
-      ok++;
-      State.nodeStates[`${t.inverter}_${t.node}`] = val;
-      const btn = $(`nbtn-${t.inverter}-${t.node}`);
-      if (btn) {
-        setNodeButtonVisual(btn, t.node, !!val, false);
-      }
+      const unitResults = normalizeBatchWriteResultsClient(t.units, r.value);
+      unitResults.forEach(({ unit, ok: unitOk }) => {
+        if (unitOk) {
+          ok++;
+          State.nodeStates[`${t.inverter}_${unit}`] = val;
+          const btn = $(`nbtn-${t.inverter}-${unit}`);
+          if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+        } else {
+          fail++;
+        }
+      });
     } else {
-      fail++;
+      fail += Array.isArray(t.units) ? t.units.length : 0;
     }
   });
 

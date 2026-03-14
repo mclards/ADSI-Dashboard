@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.1
+- **Repo/package version baseline:** 2.4.2
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.2 Changes - Faster Gateway Inverter Control Batching (2026-03-15)
+- **Whole-inverter and selected multi-inverter commands now batch per inverter:** the renderer groups configured node writes into one `/api/write/batch` request per inverter instead of firing one `/api/write` call per node.
+- **Gateway-mode start/stop latency is lower:** local and proxied gateway control no longer wait through four separate HTTP request/response cycles for a 4-node inverter before the action completes.
+- **The inverter backend now applies batched node writes inside one queued batch job:** `services/inverter_engine.py` exposes `/write/batch`, validates the requested units, and returns per-unit results while keeping the existing queued-write semantics.
+- **Smoke validation:** `python -m py_compile services/inverter_engine.py`, `node --check server/index.js`, `node --check public/js/app.js`, and `server/tests/electronUiSmoke.spec.js` all passed on the release tree.
 
 ## v2.4.1 Changes - Dense Grid Card Auto-Height and Table Compaction (2026-03-15)
 - **Dense inverter-grid cards now collapse to real content height:** in `5`, `6`, and `7` column layouts the inverter cards no longer keep a fixed blank lower area once the node table is shorter than the old card frame.
@@ -136,8 +142,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.1`
-- Current repo/package baseline: `v2.4.1`
+- Current latest published GitHub release: `v2.4.2`
+- Current repo/package baseline: `v2.4.2`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

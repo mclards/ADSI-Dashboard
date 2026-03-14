@@ -440,20 +440,61 @@ def write_worker_loop(ip, lock, q):
                 pending_evt.clear()
             continue
 
-        addr = job["address"]
-        val  = job["value"]
-        unit = job["unit"]
+        steps = job.get("steps")
+        if isinstance(steps, list) and steps:
+            normalized_steps = []
+            for step in steps:
+                try:
+                    normalized_steps.append({
+                        "address": int(step.get("address", 16)),
+                        "value":   int(step.get("value")),
+                        "unit":    int(step.get("unit")),
+                    })
+                except Exception:
+                    continue
+        else:
+            normalized_steps = [{
+                "address": int(job["address"]),
+                "value":   int(job["value"]),
+                "unit":    int(job["unit"]),
+            }]
 
-        ok = False
+        batch_mode = bool(job.get("batch")) or len(normalized_steps) > 1
+        result_payload = [] if batch_mode else False
         try:
             with lock:
-                ok = write_single(client, addr, val, unit)
+                if batch_mode:
+                    result_payload = []
+                    for step in normalized_steps:
+                        step_ok = write_single(
+                            client,
+                            step["address"],
+                            step["value"],
+                            step["unit"],
+                        )
+                        result_payload.append({
+                            "unit": step["unit"],
+                            "ok": bool(step_ok),
+                        })
+                else:
+                    step = normalized_steps[0]
+                    result_payload = write_single(
+                        client,
+                        step["address"],
+                        step["value"],
+                        step["unit"],
+                    )
         except Exception:
-            ok = False
+            result_payload = [] if batch_mode else False
 
         try:
             if loop and not fut.done():
-                loop.call_soon_threadsafe(_resolve_future_threadsafe, loop, fut, ok)
+                loop.call_soon_threadsafe(
+                    _resolve_future_threadsafe,
+                    loop,
+                    fut,
+                    result_payload,
+                )
         except Exception:
             pass
         finally:
@@ -529,7 +570,7 @@ def is_write_pending(ip):
     return bool(evt and evt.is_set())
 
 
-def compute_write_wait_timeout(ip):
+def compute_write_wait_timeout(ip, step_count=1):
     q = write_queues.get(ip)
     lock = thread_locks.get(ip)
     pending = 0
@@ -537,8 +578,12 @@ def compute_write_wait_timeout(ip):
         pending = int(q.qsize()) if q is not None else 0
     except Exception:
         pending = 0
+    try:
+        extra_steps = max(0, int(step_count) - 1)
+    except Exception:
+        extra_steps = 0
     base = max(WRITE_WAIT_TIMEOUT_MIN_SEC, (_modbus_timeout * 4.0) + 2.0)
-    timeout = base + (pending * WRITE_QUEUE_SLOT_SEC)
+    timeout = base + ((pending + extra_steps) * WRITE_QUEUE_SLOT_SEC)
     if lock and lock.locked():
         timeout += max(WRITE_QUEUE_SLOT_SEC, _modbus_timeout * 2.0)
     return max(WRITE_WAIT_TIMEOUT_MIN_SEC, min(WRITE_WAIT_TIMEOUT_MAX_SEC, timeout))
@@ -1138,6 +1183,24 @@ class WriteCommand(BaseModel):
     value:    int
 
 
+class WriteBatchCommand(BaseModel):
+    inverter: int
+    units:    list[int]
+    value:    int
+
+
+def _sanitize_write_units(units_raw):
+    units = []
+    for unit_raw in units_raw if isinstance(units_raw, list) else []:
+        try:
+            unit = int(unit_raw)
+        except Exception:
+            continue
+        if 1 <= unit <= 4 and unit not in units:
+            units.append(unit)
+    return units
+
+
 @app.post("/write")
 async def write_command(cmd: WriteCommand):
     """Queue a single-register write (address 16) for the specified inverter/unit."""
@@ -1175,6 +1238,88 @@ async def write_command(cmd: WriteCommand):
         return JSONResponse({"status": "error", "msg": "write failed"}, 500)
 
     return {"status": "ok"}
+
+
+@app.post("/write/batch")
+async def write_batch_command(cmd: WriteBatchCommand):
+    """Queue a write batch (address 16) for one inverter across multiple units."""
+
+    units = _sanitize_write_units(cmd.units)
+    if not units:
+        return JSONResponse({"status": "error", "msg": "no valid units"}, 400)
+
+    if cmd.value == 2:
+        return {
+            "status":  "skipped",
+            "results": [{"unit": unit, "ok": True} for unit in units],
+        }
+
+    ip = ip_map.get(str(cmd.inverter))
+    if not ip:
+        return JSONResponse({"status": "error", "msg": "invalid inverter"}, 400)
+
+    client = clients.get(ip)
+    if not client:
+        return JSONResponse({"status": "error", "msg": "client not available"}, 400)
+
+    loop = asyncio.get_running_loop()
+    fut  = loop.create_future()
+    mark_write_pending(ip)
+
+    write_queues[ip].put({
+        "steps": [
+            {"address": 16, "value": cmd.value, "unit": unit}
+            for unit in units
+        ],
+        "future": fut,
+        "loop":   loop,
+        "batch":  True,
+    })
+
+    wait_timeout = compute_write_wait_timeout(ip, len(units))
+    try:
+        results = await asyncio.wait_for(asyncio.shield(fut), timeout=wait_timeout)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            {"status": "error", "msg": f"write timeout after {wait_timeout:.1f}s"},
+            500,
+        )
+
+    safe_results = []
+    for unit in units:
+        match = None
+        if isinstance(results, list):
+            match = next(
+                (entry for entry in results if int(entry.get("unit", -1)) == unit),
+                None,
+            )
+        safe_results.append({
+            "unit": unit,
+            "ok": bool(match and match.get("ok")),
+        })
+
+    ok_count = sum(1 for entry in safe_results if entry["ok"])
+    fail_count = len(safe_results) - ok_count
+
+    if ok_count == len(safe_results):
+        return {"status": "ok", "results": safe_results}
+    if ok_count > 0:
+        return {
+            "status":    "partial",
+            "results":   safe_results,
+            "okCount":   ok_count,
+            "failCount": fail_count,
+        }
+    return JSONResponse(
+        {
+            "status":    "error",
+            "msg":       "write failed",
+            "results":   safe_results,
+            "okCount":   0,
+            "failCount": fail_count,
+        },
+        500,
+    )
 
 
 from fastapi import WebSocket, WebSocketDisconnect

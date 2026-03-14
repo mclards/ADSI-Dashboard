@@ -5090,6 +5090,7 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/export/",       600000],  // 10 min — large CSV/Excel exports
   ["/api/report/",        45000],  // 45 s  — daily report generation
   ["/api/replication/",    45000],  // 45 s  — replication sync
+  ["/api/write",          60000],  // 60 s  — control writes, including batched inverter actions
   ["/api/plant-cap/",      60000],  // 60 s  — sequential plant cap release/control actions
   ["/api/analytics/",      20000],  // 20 s  — analytics queries
   ["/api/energy/5min",     20000],  // 20 s  — energy range queries
@@ -5157,7 +5158,7 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   }
 }
 
-async function proxyWriteToRemote(req, res) {
+async function proxyWriteToRemote(req, res, targetPath = "/api/write") {
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     return res
@@ -5170,7 +5171,9 @@ async function proxyWriteToRemote(req, res) {
       .json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
   }
 
-  const target = `${base}/api/write`;
+  const path =
+    String(targetPath || "/api/write").trim() || "/api/write";
+  const target = `${base}${path.startsWith("/") ? path : `/${path}`}`;
   const payload =
     req?.body && typeof req.body === "object"
       ? { ...req.body }
@@ -5250,6 +5253,57 @@ async function performLocalWriteRequest(url, upstreamPayload) {
   }
 }
 
+function resolveBatchWriteUrl(urlRaw) {
+  const fallback = `${INVERTER_ENGINE_BASE_URL}/write/batch`;
+  const raw = String(urlRaw || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw);
+    const pathname = String(parsed.pathname || "");
+    if (/\/write\/?$/i.test(pathname)) {
+      parsed.pathname = pathname.replace(/\/write\/?$/i, "/write/batch");
+    } else {
+      parsed.pathname = `${pathname.replace(/\/+$/, "")}/batch`;
+    }
+    return parsed.toString();
+  } catch (_) {
+    if (/\/write\/?$/i.test(raw)) return raw.replace(/\/write\/?$/i, "/write/batch");
+    return `${raw.replace(/\/+$/, "")}/batch`;
+  }
+}
+
+async function performLocalWriteBatchRequest(url, upstreamPayload) {
+  const batchUrl = resolveBatchWriteUrl(url);
+  try {
+    const r = await fetch(batchUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(upstreamPayload),
+      timeout: WRITE_ENGINE_TIMEOUT_MS,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(
+        data.error ||
+          data.msg ||
+          `Upstream batch write failed (${r.status} ${r.statusText})`,
+      );
+    }
+    return data;
+  } catch (err) {
+    const msg = String(err?.message || err || "").trim();
+    if (/timed out|timeout/i.test(msg)) {
+      throw new Error(
+        `Control engine timeout after ${WRITE_ENGINE_TIMEOUT_MS} ms.`,
+      );
+    }
+    if (/econnrefused|socket hang up|fetch failed/i.test(msg.toLowerCase())) {
+      throw new Error("Control engine is temporarily unavailable.");
+    }
+    throw err;
+  }
+}
+
 function isAuthorizedPlantWideControl({ authKey, authToken } = {}) {
   return (
     isValidPlantWideAuthSession(authToken) || isValidPlantWideAuthKey(authKey)
@@ -5262,6 +5316,30 @@ function getWriteActionLabel(value) {
   if (numeric === 0) return "STOP";
   if (numeric === 2) return "RESET";
   return "WRITE";
+}
+
+function sanitizeWriteUnits(unitsRaw, nodeMax) {
+  const source = Array.isArray(unitsRaw) ? unitsRaw : [];
+  const out = [];
+  for (const unitRaw of source) {
+    const unitNum = Number(unitRaw);
+    if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) continue;
+    const normalized = Math.trunc(unitNum);
+    if (!out.includes(normalized)) out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeBatchWriteResults(units, data) {
+  const safeUnits = Array.isArray(units) ? units : [];
+  const rawResults = Array.isArray(data?.results) ? data.results : [];
+  return safeUnits.map((unit) => {
+    const match = rawResults.find((entry) => Number(entry?.unit) === Number(unit));
+    return {
+      unit: Number(unit),
+      ok: Boolean(match?.ok),
+    };
+  });
 }
 
 async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
@@ -5371,6 +5449,132 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
       ip,
     });
     if (!Number(e?.status || 0)) e.status = 502;
+    throw e;
+  }
+}
+
+async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) {
+  const {
+    inverter,
+    units,
+    value,
+    scope,
+    operator,
+    authKey,
+    authToken,
+    priority,
+  } = bodyRaw || {};
+  const skipBulkAuth = Boolean(options?.skipBulkAuth);
+  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
+  const invNum = Number(inverter);
+  const valueNum = Number(value);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+  const unitList = sanitizeWriteUnits(units, nodeMax);
+
+  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
+    const err = new Error("Invalid inverter");
+    err.status = 400;
+    throw err;
+  }
+  if (!unitList.length) {
+    const err = new Error("No valid units provided");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
+    const err = new Error("Invalid value");
+    err.status = 400;
+    throw err;
+  }
+
+  const scopeNorm = normalizeWriteScope(scope || "inverter");
+  const isBulkScope =
+    scopeNorm === "all" || scopeNorm === "selected" || scopeNorm === "plant-cap";
+  if (
+    !skipBulkAuth &&
+    isBulkScope &&
+    !isAuthorizedPlantWideControl({ authKey, authToken })
+  ) {
+    const err = new Error("Unauthorized bulk command");
+    err.status = 403;
+    throw err;
+  }
+
+  const operatorName =
+    String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
+  const cfg = loadIpConfigFromDb();
+  const targetIp = String(
+    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
+  ).trim();
+  const ip = targetIp || "";
+  const upstreamPayload = { inverter: invNum, units: unitList, value: valueNum };
+  const action = getWriteActionLabel(valueNum);
+
+  try {
+    const data = await enqueueWriteCommand(
+      scopeNorm,
+      () => performLocalWriteBatchRequest(url, upstreamPayload),
+      { priority, queueKey: ip || `inv-${invNum}` },
+    );
+    const results = normalizeBatchWriteResults(unitList, data);
+    let okCount = 0;
+    let failCount = 0;
+    results.forEach(({ unit, ok }) => {
+      if (ok) okCount += 1;
+      else failCount += 1;
+      logControlAction({
+        operator: operatorName,
+        inverter: invNum,
+        node: unit || 0,
+        action,
+        scope: scopeNorm,
+        result: ok ? "ok" : "error",
+        ip,
+      });
+      if (
+        ok &&
+        plantCapController &&
+        scopeNorm !== "plant-cap" &&
+        typeof plantCapController.handleManualWrite === "function"
+      ) {
+        plantCapController.handleManualWrite({
+          scope: scopeNorm,
+          inverter: invNum,
+          unit,
+          value: valueNum,
+          operator: operatorName,
+        });
+      }
+    });
+
+    return {
+      ok: failCount === 0 && okCount > 0,
+      partial: okCount > 0 && failCount > 0,
+      data,
+      inverter: invNum,
+      units: unitList,
+      scope: scopeNorm,
+      action,
+      operator: operatorName,
+      ip,
+      results,
+      successCount: okCount,
+      failureCount: failCount,
+    };
+  } catch (e) {
+    unitList.forEach((unit) => {
+      logControlAction({
+        operator: operatorName,
+        inverter: invNum,
+        node: unit || 0,
+        action,
+        scope: scopeNorm,
+        result: "error",
+        ip,
+        details: String(e?.message || e || ""),
+      });
+    });
     throw e;
   }
 }
@@ -11047,6 +11251,18 @@ app.post("/api/write", async (req, res) => {
   }
   try {
     const result = await executeLocalControlWriteRequest(req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/write/batch", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyWriteToRemote(req, res, "/api/write/batch");
+  }
+  try {
+    const result = await executeLocalBatchControlWriteRequest(req.body || {});
     res.json(result);
   } catch (e) {
     res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });

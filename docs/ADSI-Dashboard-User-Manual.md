@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.1`
+**Applies to:** ADSI Inverter Dashboard `v2.4.2`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -378,6 +378,7 @@ Important behavior:
 - duplicate inverter entries are rejected
 - invalid range tokens are rejected
 - isolated inverters are skipped automatically
+- current builds batch whole-inverter and selected-inverter node writes per inverter so one inverter action does not wait for a separate gateway HTTP request per node
 - selected multi-inverter actions require an authorization key from authorized personnel
 
 ### Plant Output Cap Panel
@@ -1161,6 +1162,7 @@ Important:
 | Day-ahead generation is unavailable | Workstation is in `Remote` mode | Run generation from the gateway workstation |
 | Plant-cap preview or control fails with `Cannot POST /api/plant-cap/...` | The request reached a server that does not expose the plant-cap routes, usually an older gateway build or a wrong remote gateway target | Restart or update the gateway app, then verify `Remote Gateway URL` and token settings |
 | Plant-cap band warning says the limits are too close | Whole-inverter step size is larger than the configured deadband or close to it | Increase the gap between `Lower Limit` and `Upper Limit`, or review exempted inverters and node counts |
+| Whole-inverter `Start` / `Stop` still feels slow on one workstation | The workstation or gateway is still running an older build without batched inverter writes, or the backend link itself is slow | Update both gateway and remote builds to the same release first, then review Python service health and network latency |
 | Cloud restore is unavailable or incomplete | Provider or backup state is not ready | Refresh cloud list and verify provider authorization |
 | IP Configuration or Topology cannot be opened | Current mode is `Remote` or access is restricted | Use the gateway workstation |
 | Alarm sound is silent | Sound is muted or system audio is unavailable | Re-enable alarm sound and check workstation audio |

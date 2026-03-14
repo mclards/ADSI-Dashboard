@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially implemented as of `v2.4.1`.
+Partially implemented as of `v2.4.2`.
 
 Already in place:
 
