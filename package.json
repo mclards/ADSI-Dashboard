@@ -1,21 +1,18 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.10",
-  "description": "Dashboard V2 for industrial inverter monitoring, analytics, forecasting, and remote replication.",
+  "version": "2.4.6",
+  "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
   "scripts": {
     "start": "node start-electron.js",
     "dev": "set NODE_ENV=development && node start-electron.js",
     "server": "node server/index.js",
+    "rebuild:native:node": "npm rebuild better-sqlite3",
+    "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-builder --win nsis portable --x64",
-    "build:installer": "electron-builder --win nsis --x64",
-    "build:portable": "electron-builder --win portable --x64",
-    "build:license-tools": "npx --yes pkg tools/license-generator.js --targets node18-win-x64 --output release/license-tools/LicenseGenerator.exe && npx --yes pkg tools/license-fingerprint.js --targets node18-win-x64 --output release/license-tools/LicenseFingerprint.exe && npx --yes pkg tools/license-keygen.js --targets node18-win-x64 --output release/license-tools/LicenseKeygen.exe",
-    "license:keygen": "node tools/license-keygen.js",
-    "license:generate": "node tools/license-generator.js",
-    "license:fingerprint": "node tools/license-fingerprint.js"
+    "build:win": "electron-builder --win nsis --x64",
+    "build:installer": "electron-builder --win nsis --x64"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
@@ -26,7 +23,8 @@
     "express": "^4.22.1",
     "express-ws": "^5.0.2",
     "node-cron": "^3.0.3",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "ws": "^7.5.10"
   },
   "devDependencies": {
     "electron": "^29.0.0",
@@ -34,7 +32,7 @@
   },
   "build": {
     "appId": "com.engr-m.inverter-dashboard",
-    "productName": "Dashboard V2",
+    "productName": "ADSI Inverter Dashboard",
     "directories": {
       "output": "release",
       "buildResources": "assets"
@@ -63,15 +61,10 @@
     ],
     "win": {
       "icon": "icon-256.png",
+      "requestedExecutionLevel": "requireAdministrator",
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -82,10 +75,8 @@
       "artifactName": "Inverter-Dashboard-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
-    },
-    "portable": {
-      "artifactName": "Inverter-Dashboard-Portable-${version}.${ext}"
+      "deleteAppDataOnUninstall": false,
+      "include": "build/uninstaller.nsh"
     },
     "publish": [
       {

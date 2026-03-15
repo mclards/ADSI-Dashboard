@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Inverter Dashboard</title>
+    <title>ADSI Inverter Dashboard Topology</title>
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
@@ -779,47 +779,47 @@
   <body>
     <div id="auth-gate">
       <div id="auth-card">
-        <div id="auth-title">TOPOLOGY AUTHORIZATION</div>
-        <div id="auth-sub">Enter authorization key to open topology.</div>
-        <input id="auth-input" type="password" autocomplete="off" />
-        <button id="auth-submit">Unlock</button>
+        <div id="auth-title">TOPOLOGY ACCESS</div>
+        <div id="auth-sub">Authorized access is required to open the topology view.</div>
+        <input id="auth-input" type="password" autocomplete="off" placeholder="Authorization key" />
+        <button id="auth-submit">Continue</button>
         <div id="auth-error"></div>
       </div>
     </div>
     <div id="header">
       <div id="header-left">
-        <img id="header-logo" src="/assets/adsi_logo.png" alt="Inverter Dashboard" />
+        <img id="header-logo" src="/assets/adsi_logo.png" alt="ADSI Inverter Dashboard" />
       </div>
       <div id="header-center">
         <div class="metric-pill">
-          <div class="metric-label">Topology View</div>
-          <div class="metric-value">SOLAR PLANT / INVERTER MONITOR</div>
+          <div class="metric-label">Plant Topology</div>
+          <div class="metric-value">INVERTER STATUS OVERVIEW</div>
         </div>
       </div>
       <div id="header-right">
         <div id="clock-wrap">
           <span class="ws-dot"></span>
-          <span class="ws-label">Live</span>
+          <span class="ws-label">Active</span>
           <div id="clock">--:--:--</div>
         </div>
-        <button class="top-btn" id="theme-toggle" title="Toggle dark/light">
+        <button class="top-btn" id="theme-toggle" title="Switch theme">
           <span id="theme-label">Light</span>
         </button>
-        <button class="top-btn" id="fullscreen-btn" title="Toggle fullscreen">
-          Fullscreen
+        <button class="top-btn" id="fullscreen-btn" title="Toggle full-screen view">
+          Full Screen
         </button>
         <button
           class="top-btn"
           id="open-config-btn"
-          title="Open IP Config (Ctrl+I)"
+          title="Open network configuration (Ctrl+I)"
         >
-          IP Config
+          Network Config
         </button>
-        <button class="top-btn" id="scan-btn">Scan All</button>
+        <button class="top-btn" id="scan-btn">Refresh Status</button>
       </div>
     </div>
     <div id="alert-bar">
-      <div class="alert-badge">ALERT</div>
+      <div class="alert-badge">OFFLINE ALERT</div>
       <div id="alert-ticker"></div>
     </div>
     <div id="stats-bar">
@@ -846,25 +846,25 @@
     </div>
     <div id="app">
       <aside id="sidebar">
-        <div class="sidebar-title">INVERTER INDEX</div>
+        <div class="sidebar-title">INVERTER DIRECTORY</div>
         <input
           id="sidebar-search"
           type="text"
           autocomplete="off"
-          placeholder="Search INV or IP"
+          placeholder="Search inverter or IP"
         />
         <div id="sidebar-list"></div>
       </aside>
       <main id="dashboard-area">
         <div id="filter-bar">
-          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn active" data-filter="all">All Devices</button>
           <button class="filter-btn" data-filter="ok">Online</button>
           <button class="filter-btn" data-filter="down">Offline</button>
           <button class="filter-btn" data-filter="unknown">Unknown</button>
-          <button class="meta-btn" id="zoom-out-btn">Zoom -</button>
+          <button class="meta-btn" id="zoom-out-btn">Zoom Out</button>
           <div id="zoom-label">100%</div>
-          <button class="meta-btn" id="zoom-in-btn">Zoom +</button>
-          <button class="meta-btn" id="zoom-fit-btn">Fit</button>
+          <button class="meta-btn" id="zoom-in-btn">Zoom In</button>
+          <button class="meta-btn" id="zoom-fit-btn">Fit View</button>
         </div>
         <div id="svg-stage">
           <div id="svg-canvas">
@@ -1531,8 +1531,8 @@
         <div id="legend">
           <div class="legend-item">Online</div>
           <div class="legend-item">Offline</div>
-          <div class="legend-item">Unknown</div>
-          <div class="legend-item">Block Degraded</div>
+          <div class="legend-item">Status Unknown</div>
+          <div class="legend-item">Block with Partial Outage</div>
         </div>
       </main>
     </div>
@@ -1723,7 +1723,7 @@
         } catch (_) {}
       }
       function updateFullscreenButton() {
-        fullscreenBtn.textContent = isFullscreen() ? "Windowed" : "Fullscreen";
+        fullscreenBtn.textContent = isFullscreen() ? "Exit Full Screen" : "Full Screen";
         fullscreenBtn.classList.toggle("active", isFullscreen());
       }
 
@@ -1748,9 +1748,9 @@
           inv.addEventListener("mouseenter", () => {
             tooltip.innerHTML = `
         <strong>INV ${id}</strong>
-        <div>${inverterIP[id] || "No IP"}</div>
+        <div>${inverterIP[id] || "IP not configured"}</div>
         <div>${(inverterState[id] || "unknown").toUpperCase()}</div>
-        <div>Last seen: ${lastSeenByInv[id] ? lastSeenByInv[id].toLocaleTimeString() : "Never"}</div>`;
+        <div>Last response: ${lastSeenByInv[id] ? lastSeenByInv[id].toLocaleTimeString() : "No response yet"}</div>`;
             tooltip.style.opacity = "1";
           });
           inv.addEventListener("mousemove", (e) => {
@@ -1785,7 +1785,7 @@
 
       function scanAllInverters() {
         scanBtn.classList.add("scanning");
-        scanBtn.textContent = "Scanning...";
+        scanBtn.textContent = "Refreshing...";
         Object.entries(inverterIP).forEach(([id, ip]) => {
           if (!ip) return;
           setInverterStatus(Number(id), "unknown");
@@ -1793,7 +1793,7 @@
         });
         setTimeout(() => {
           scanBtn.classList.remove("scanning");
-          scanBtn.textContent = "Scan All";
+          scanBtn.textContent = "Refresh Status";
         }, 5000);
       }
 
@@ -1886,7 +1886,7 @@
         }
         bar.classList.add("visible");
         const text = downs
-          .map(([id]) => `INV ${id} OFFLINE (${inverterIP[id] || "no IP"})`)
+          .map(([id]) => `INV ${id} offline (${inverterIP[id] || "IP not configured"})`)
           .join(" | ");
         ticker.innerHTML = `<span class="ticker-run">${text}</span>`;
         const span = ticker.querySelector(".ticker-run");
@@ -1999,7 +1999,7 @@
         const ip = inverterIP[id] || "-";
         const seen = lastSeenByInv[id]
           ? lastSeenByInv[id].toLocaleTimeString()
-          : "Never";
+          : "No response yet";
         const hist = historyByInv[id] || [];
         const blockId = Object.keys(BLOCK_MAP).find((b) =>
           BLOCK_MAP[b].includes(id),
@@ -2011,12 +2011,12 @@
         document.getElementById("detail-content").innerHTML = `
     <h2 style="font:700 1.05rem 'JetBrains Mono',monospace">INV ${pad2(id)}</h2>
     <div class="d-badge">${status.toUpperCase()}</div>
-    <div class="d-row"><span>IP</span><span>${ip}</span></div>
-    <div class="d-row"><span>Last Seen</span><span>${seen}</span></div>
-    <div class="d-row"><span>Block</span><span>${blockId || "-"}</span></div>
-    <div class="d-row"><span>Session Uptime</span><span>${uptime}</span></div>
+    <div class="d-row"><span>IP Address</span><span>${ip}</span></div>
+    <div class="d-row"><span>Last Response</span><span>${seen}</span></div>
+    <div class="d-row"><span>Block Group</span><span>${blockId || "-"}</span></div>
+    <div class="d-row"><span>Session Availability</span><span>${uptime}</span></div>
     <button style="margin-top:10px;width:100%;height:33px" onclick="_doOpenIP(${id})">
-      Open Web Interface</button>`;
+      Open Device Page</button>`;
       }
 
       window._doOpenIP = (id) => {
@@ -2090,7 +2090,7 @@
 
       function alertClientModeUnavailable(feature) {
         alert(
-          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+          `${feature} is available only in Gateway mode.\nChange Operation Mode in Settings to continue.`,
         );
       }
 
@@ -2246,7 +2246,7 @@
       openTopologyAfterAuth();
     </script>
     <footer style="text-align:center;padding:8px 16px;font-size:11px;color:#5a7ea8;border-top:1px solid #1a2e4a;margin-top:8px;">
-      Inverter Dashboard v2.2 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
+      ADSI Inverter Dashboard v2.3.3 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
     </footer>
   </body>
 </html>

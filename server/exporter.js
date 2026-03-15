@@ -1,16 +1,27 @@
 'use strict';
 /**
- * exporter.js — Production CSV export engine
+ * exporter.js Ã¢â‚¬â€ Production CSV export engine
  * All exports use plant-standard filename conventions
  */
 
 const fs   = require('fs');
 const path = require('path');
+const { once } = require('events');
 const ExcelJS = require('exceljs');
-const { db, stmts, getSetting } = require('./db');
+const { getPortableDataRoot } = require('./runtimeEnvPaths');
+const {
+  db,
+  stmts,
+  getSetting,
+  queryReadingsRangeAll,
+  queryReadingsRange,
+  queryEnergy5minRange,
+  queryEnergy5minRangeAll,
+  sumEnergy5minByInverterRange,
+} = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
-const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || '').trim();
+const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, 'programdata')
   : path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'InverterDashboard');
@@ -23,6 +34,10 @@ const FORECAST_CTX_PATH = path.join(
 );
 
 function ensureDir(dir) { fs.mkdirSync(dir, { recursive: true }); }
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 function pad2(n) { return String(n).padStart(2,'0'); }
 
@@ -48,6 +63,21 @@ function startOfLocalDay(ts) {
   return d.getTime();
 }
 
+function getSolarWindowBoundsForTs(ts) {
+  const day = fmtDate(ts);
+  return {
+    startTs: new Date(`${day}T05:00:00.000`).getTime(),
+    endTs: new Date(`${day}T18:00:00.000`).getTime(),
+  };
+}
+
+function isWithinSolarWindowTs(ts) {
+  const n = Number(ts || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const { startTs, endTs } = getSolarWindowBoundsForTs(n);
+  return n >= startTs && n <= endTs;
+}
+
 function formatDurationMs(ms) {
   const totalSec = Math.max(0, Math.floor(Number(ms || 0) / 1000));
   const days = Math.floor(totalSec / 86400);
@@ -60,8 +90,42 @@ function formatDurationMs(ms) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
+const COMPUTED_ENERGY_MAX_DT_MS = 30000;
+
+function annotateReadingsWithComputedEnergy(rowsRaw) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw.slice() : [];
+  const lastByKey = new Map();
+  const totalByKey = new Map();
+  return rows.map((row) => {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    const pac = Math.max(0, Number(row?.pac || 0));
+    const day = fmtDate(ts);
+    const key = `${day}|${inverter}|${unit}`;
+    const prev = lastByKey.get(key);
+    let totalKwh = Number(totalByKey.get(key) || 0);
+
+    if (prev && ts > prev.ts) {
+      const dtMs = ts - prev.ts;
+      if (dtMs > 0 && dtMs <= COMPUTED_ENERGY_MAX_DT_MS) {
+        const avgPac = (prev.pac + pac) / 2;
+        totalKwh += (avgPac * dtMs) / 3600000000.0;
+      }
+    }
+
+    totalKwh = Number(totalKwh.toFixed(6));
+    lastByKey.set(key, { ts, pac });
+    totalByKey.set(key, totalKwh);
+    return {
+      ...row,
+      computed_kwh: totalKwh,
+    };
+  });
+}
+
 // Daily report metric constants aligned with dashboard computation semantics.
-const REPORT_SOLAR_WINDOW_H = 13;     // 05:00–18:00
+const REPORT_SOLAR_WINDOW_H = 13;     // 05:00Ã¢â‚¬â€œ18:00
 const REPORT_INVERTER_KW = 997;       // one inverter rated capacity in kW
 
 function clampPct(v) {
@@ -89,6 +153,50 @@ function calcDailyPerformancePct(row) {
   if (!Number.isFinite(denom) || denom <= 0) return 0;
   return clampPct((kwh / denom) * 100);
 }
+function deriveReportRatedKw(row) {
+  const explicit = safeNum(row?.rated_kw);
+  if (explicit > 0) return explicit;
+  const expectedNodes = Math.max(0, Math.trunc(safeNum(row?.expected_nodes)));
+  if (expectedNodes > 0) {
+    return REPORT_INVERTER_KW * (expectedNodes / 4);
+  }
+  return REPORT_INVERTER_KW;
+}
+function buildDailyReportTotalRow(rows, date, plantName) {
+  const dayRows = Array.isArray(rows) ? rows : [];
+  const inverterSlots = dayRows.length;
+  let totalKwh = 0;
+  let totalUptimeS = 0;
+  let totalAlarms = 0;
+  let totalPerfDenom = 0;
+  for (const row of dayRows) {
+    const kwhTotal = Math.max(0, safeNum(row?.kwh_total));
+    const uptimeS = Math.max(0, safeNum(row?.uptime_s));
+    totalKwh += kwhTotal;
+    totalUptimeS += uptimeS;
+    totalAlarms += Math.max(0, Math.trunc(safeNum(row?.alarm_count)));
+    totalPerfDenom += deriveReportRatedKw(row) * (uptimeS / 3600);
+  }
+  const availabilityDenomS = inverterSlots * REPORT_SOLAR_WINDOW_H * 3600;
+  const availabilityPct =
+    availabilityDenomS > 0 ? clampPct((totalUptimeS / availabilityDenomS) * 100) : 0;
+  const performancePct =
+    totalPerfDenom > 0 ? clampPct((totalKwh / totalPerfDenom) * 100) : 0;
+  return {
+    Date:             date,
+    Plant:            plantName,
+    Inverter:         'TOTAL',
+    Energy_kWh:       totalKwh.toFixed(3),
+    Energy_MWh:       (totalKwh / 1000).toFixed(6),
+    Peak_Pac_kW:      '',
+    Avg_Pac_kW:       '',
+    Availability_pct: availabilityPct.toFixed(2),
+    Performance_pct:  performancePct.toFixed(2),
+    Uptime_h:         (totalUptimeS / 3600).toFixed(2),
+    Alarm_Count:      totalAlarms,
+    Status:           'TOTAL',
+  };
+}
 
 function toCsv(headers, rows) {
   const escape = v => {
@@ -98,6 +206,13 @@ function toCsv(headers, rows) {
   const headerRow = headers.map(h => typeof h === 'object' ? h.label : h).join(',');
   const keys      = headers.map(h => typeof h === 'object' ? h.key   : h);
   return [headerRow, ...rows.map(r => keys.map(k => escape(r[k])).join(','))].join('\r\n');
+}
+
+function escapeCsvCell(v) {
+  const s = String(v ?? '');
+  return (s.includes(',') || s.includes('"') || s.includes('\n'))
+    ? `"${s.replace(/"/g, '""')}"`
+    : s;
 }
 
 function parseDateSortValue(v) {
@@ -130,6 +245,14 @@ function parseTimeSortValue(v) {
 }
 
 function parseInverterSortValue(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const s = String(v ?? '').trim();
+  if (!s) return Number.POSITIVE_INFINITY;
+  const m = s.match(/(\d+)/);
+  return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+}
+
+function parseNodeSortValue(v) {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   const s = String(v ?? '').trim();
   if (!s) return Number.POSITIVE_INFINITY;
@@ -238,51 +361,360 @@ function normalizeFormat(format) {
   return f === 'xlsx' ? 'xlsx' : 'csv';
 }
 
-async function writeExport(headers, rows, dir, filenameBase, format) {
-  const fmt = normalizeFormat(format);
-  if (fmt === 'xlsx') {
-    const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
-    const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
+const EXPORT_WRITE_YIELD_EVERY = 250;
+const XLSX_NUMERIC_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
 
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Export', {
-      views: [{ state: 'frozen', ySplit: 1 }],
-    });
+async function writeCsvExport(headers, rows, csvPath) {
+  const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
+  const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
+  const stream = fs.createWriteStream(csvPath, { encoding: 'utf8' });
+  const done = new Promise((resolve, reject) => {
+    stream.on('finish', resolve);
+    stream.on('error', reject);
+  });
+  const writeChunk = async (chunk) => {
+    if (!stream.write(chunk)) {
+      await once(stream, 'drain');
+    }
+  };
 
-    ws.addRow(labels);
-    for (const r of rows) {
-      ws.addRow(keys.map((k) => r[k] ?? ''));
+  try {
+    await writeChunk('\uFEFF');
+    await writeChunk(`${labels.join(',')}\r\n`);
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] || {};
+      const line = `${keys.map((k) => escapeCsvCell(row[k])).join(',')}\r\n`;
+      await writeChunk(line);
+      if ((i + 1) % EXPORT_WRITE_YIELD_EVERY === 0) {
+        await yieldToEventLoop();
+      }
+    }
+    stream.end();
+    await done;
+    return csvPath;
+  } catch (err) {
+    stream.destroy(err);
+    throw err;
+  }
+}
+
+function inferXlsxNumericFormat(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return null;
+  const raw = String(value ?? '').trim();
+  if (!XLSX_NUMERIC_RE.test(raw)) return null;
+  const normalized = raw.replace(/^[+-]/, '');
+  if (!normalized.includes('.')) return '0';
+  const decimals = normalized.split('.')[1] || '';
+  return decimals.length > 0 ? `0.${'0'.repeat(decimals.length)}` : '0';
+}
+
+function normalizeXlsxCellValue(value, header = null) {
+  const forceText = String(header?.xlsxType || '').trim().toLowerCase() === 'string';
+  if (forceText) {
+    return { value: value ?? '', numFmt: null };
+  }
+  if (typeof value === 'number') {
+    return {
+      value: Number.isFinite(value) ? value : '',
+      numFmt: Number.isFinite(value) ? null : null,
+    };
+  }
+  if (typeof value === 'string') {
+    const raw = value.trim();
+    if (!raw) return { value: '', numFmt: null };
+    if (XLSX_NUMERIC_RE.test(raw)) {
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric)) {
+        return {
+          value: numeric,
+          numFmt: inferXlsxNumericFormat(value),
+        };
+      }
+    }
+    return { value, numFmt: null };
+  }
+  return { value: value ?? '', numFmt: null };
+}
+
+const XLSX_THEME = {
+  headerFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF24435C' },
+  },
+  headerFont: {
+    bold: true,
+    color: { argb: 'FFFFFFFF' },
+  },
+  headerBorder: {
+    top: { style: 'thin', color: { argb: 'FF1B3145' } },
+    left: { style: 'thin', color: { argb: 'FF1B3145' } },
+    bottom: { style: 'medium', color: { argb: 'FF1B3145' } },
+    right: { style: 'thin', color: { argb: 'FF1B3145' } },
+  },
+  cellBorder: {
+    top: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    left: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    bottom: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+    right: { style: 'thin', color: { argb: 'FFD4DCE6' } },
+  },
+  altRowFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF7FAFD' },
+  },
+  summaryMetricFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFEAF1F8' },
+  },
+  summaryValueFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFCFDFE' },
+  },
+  highlightFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF2CC' },
+  },
+  separatorFill: {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF2F4F7' },
+  },
+};
+
+function setWorkbookMetadata(wb, title = 'ADSI Dashboard Export') {
+  if (!wb) return;
+  wb.creator = 'ADSI Inverter Dashboard';
+  wb.lastModifiedBy = 'ADSI Inverter Dashboard';
+  wb.created = new Date();
+  wb.modified = new Date();
+  wb.subject = title;
+  wb.company = 'ADSI Plant';
+}
+
+function columnNumberToLetter(colNumber) {
+  let n = Math.max(1, Number(colNumber || 1));
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+function isBlankXlsxRow(row, keys) {
+  return keys.every((key) => String(row?.[key] ?? '').trim() === '');
+}
+
+function isHighlightXlsxRow(row, keys, options = {}) {
+  if (options?.worksheetKind === 'summary') return false;
+  return keys.some((key) => /^(TOTAL|DAY TOTAL|SUBTOTAL)$/i.test(String(row?.[key] ?? '').trim()));
+}
+
+function isSummaryHighlightMetric(metricLabel) {
+  return /(total|variance|absolute error|wape|mean ape|peak interval|data rows)/i.test(
+    String(metricLabel || '').trim(),
+  );
+}
+
+function inferXlsxColumnWidth(value, header, options = {}) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '');
+  const needsWideText = /(description|message|notes?|reason|status|path|url|range|label|site|operator|plant)/i.test(label);
+  const maxWidth = needsWideText ? 72 : 44;
+  const minWidth = options?.worksheetKind === 'summary' ? 16 : 10;
+  return Math.min(maxWidth, Math.max(minWidth, raw.length + 2, label.length + 2));
+}
+
+function inferXlsxCellAlignment(value, header, options = {}) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '').trim();
+  const isNumeric = typeof value === 'number' || XLSX_NUMERIC_RE.test(raw);
+  if (options?.worksheetKind === 'summary' && label === 'Metric') {
+    return { horizontal: 'left', vertical: 'middle' };
+  }
+  if (!raw) {
+    return { horizontal: 'center', vertical: 'middle' };
+  }
+  if (isNumeric) {
+    return { horizontal: 'right', vertical: 'middle' };
+  }
+  if (/(date|time|period|duration|status|severity|resolution|unit|node|inverter|plant|operator|acknowledged|window)/i.test(label)) {
+    return { horizontal: 'center', vertical: 'middle' };
+  }
+  return { horizontal: 'left', vertical: 'middle' };
+}
+
+function shouldWrapXlsxCell(value, header) {
+  const label = String(typeof header === 'object' ? header.label : header || '').trim();
+  const raw = String(value ?? '');
+  return /(description|message|notes?|reason|path|url|range)/i.test(label) && raw.length > 28;
+}
+
+async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
+  const labels = headers.map((h) => (typeof h === 'object' ? h.label : h));
+  const keys = headers.map((h) => (typeof h === 'object' ? h.key : h));
+  const widths = labels.map((label) =>
+    inferXlsxColumnWidth(label, label, options),
+  );
+  const ws = wb.addWorksheet(String(sheetName || 'Export').slice(0, 31), {
+    views: [{ state: 'frozen', ySplit: Number(options?.freezeHeader ? 1 : 0) }],
+  });
+
+  ws.columns = keys.map((key, idx) => ({
+    key,
+    width: widths[idx],
+    style: { alignment: { horizontal: 'left', vertical: 'middle' } },
+  }));
+  ws.properties.defaultRowHeight = 20;
+  if (options?.autoFilter !== false && keys.length > 0) {
+    ws.autoFilter = `A1:${columnNumberToLetter(keys.length)}1`;
+  }
+
+  const headerRow = ws.addRow(
+    Object.fromEntries(keys.map((key, idx) => [key, labels[idx]])),
+  );
+  headerRow.height = 22;
+  for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+    const cell = headerRow.getCell(colIdx + 1);
+    cell.font = XLSX_THEME.headerFont;
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.fill = XLSX_THEME.headerFill;
+    cell.border = XLSX_THEME.headerBorder;
+  }
+  headerRow.commit();
+
+  let visibleRowCount = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || {};
+    const xlsxRow = {};
+    const numFmts = new Map();
+    const blankSeparator = isBlankXlsxRow(row, keys);
+    const highlightRow = isHighlightXlsxRow(row, keys, options);
+    const summaryHighlight =
+      options?.worksheetKind === 'summary' &&
+      isSummaryHighlightMetric(row?.[keys[0]]);
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const key = keys[colIdx];
+      const normalized = normalizeXlsxCellValue(row[key], headers[colIdx]);
+      xlsxRow[key] = normalized.value;
+      if (normalized.numFmt) {
+        numFmts.set(colIdx + 1, normalized.numFmt);
+      }
+    }
+    const worksheetRow = ws.addRow(xlsxRow);
+    worksheetRow.height = blankSeparator ? 8 : 20;
+    const rowIsStriped =
+      !blankSeparator &&
+      !highlightRow &&
+      options?.worksheetKind !== 'summary' &&
+      visibleRowCount % 2 === 1;
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const cell = worksheetRow.getCell(colIdx + 1);
+      const header = headers[colIdx];
+      const value = xlsxRow[keys[colIdx]];
+      if (numFmts.has(colIdx + 1)) {
+        cell.numFmt = numFmts.get(colIdx + 1);
+      }
+      cell.border = XLSX_THEME.cellBorder;
+      cell.alignment = {
+        ...inferXlsxCellAlignment(value, header, options),
+        wrapText: shouldWrapXlsxCell(value, header),
+      };
+
+      if (blankSeparator) {
+        cell.fill = XLSX_THEME.separatorFill;
+      } else if (options?.worksheetKind === 'summary') {
+        if (summaryHighlight) {
+          cell.fill = XLSX_THEME.highlightFill;
+          cell.font = { bold: true };
+        } else if (colIdx === 0) {
+          cell.fill = XLSX_THEME.summaryMetricFill;
+          cell.font = { bold: true };
+        } else {
+          cell.fill = XLSX_THEME.summaryValueFill;
+        }
+      } else if (highlightRow) {
+        cell.fill = XLSX_THEME.highlightFill;
+        cell.font = { bold: true };
+      } else if (rowIsStriped) {
+        cell.fill = XLSX_THEME.altRowFill;
+      }
     }
 
-    // Center all cells; bold and center header row.
-    ws.eachRow((row, rowNumber) => {
-      row.eachCell((cell) => {
-        cell.alignment = { horizontal: 'center', vertical: 'middle' };
-        if (rowNumber === 1) {
-          cell.font = { bold: true };
-        }
-      });
-    });
+    worksheetRow.commit();
+    for (let colIdx = 0; colIdx < keys.length; colIdx++) {
+      const inferredWidth = inferXlsxColumnWidth(row[keys[colIdx]], headers[colIdx], options);
+      if (inferredWidth > widths[colIdx]) {
+        widths[colIdx] = inferredWidth;
+      }
+    }
+    if (!blankSeparator) visibleRowCount += 1;
+    if ((i + 1) % EXPORT_WRITE_YIELD_EVERY === 0) {
+      await yieldToEventLoop();
+    }
+  }
 
-    // Auto-fit column widths based on header + content length.
-    keys.forEach((k, idx) => {
-      const headerLen = String(labels[idx] ?? '').length;
-      const dataLen = rows.reduce((max, r) => {
-        const len = String(r[k] ?? '').length;
-        return len > max ? len : max;
-      }, 0);
-      const width = Math.min(64, Math.max(10, Math.max(headerLen, dataLen) + 2));
-      ws.getColumn(idx + 1).width = width;
-    });
+  widths.forEach((width, idx) => {
+    ws.getColumn(idx + 1).width = width;
+  });
 
+  ws.commit();
+}
+
+async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: xlsxPath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  setWorkbookMetadata(wb, options?.title || 'ADSI Dashboard Export');
+
+  const summaryHeaders = Array.isArray(options?.summaryHeaders)
+    ? options.summaryHeaders
+    : null;
+  const summaryRows = Array.isArray(options?.summaryRows)
+    ? options.summaryRows
+    : null;
+  if (summaryHeaders && summaryRows && summaryRows.length) {
+    await writeXlsxWorksheet(
+      wb,
+      options?.summarySheetName || 'Summary',
+      summaryHeaders,
+      summaryRows,
+      { freezeHeader: true, autoFilter: false, worksheetKind: 'summary' },
+    );
+  }
+
+  await writeXlsxWorksheet(
+    wb,
+    options?.dataSheetName || 'Export',
+    headers,
+    rows,
+    {
+      freezeHeader: true,
+      autoFilter: options?.autoFilter !== false,
+      worksheetKind: options?.worksheetKind || 'data',
+    },
+  );
+
+  await wb.commit();
+  return xlsxPath;
+}
+
+async function writeExport(headers, rows, dir, filenameBase, format, options = {}) {
+  const fmt = normalizeFormat(format);
+  if (fmt === 'xlsx') {
     const xlsxPath = path.join(dir, `${filenameBase}.xlsx`);
-    await wb.xlsx.writeFile(xlsxPath);
-    return xlsxPath;
+    return writeXlsxExport(headers, rows, xlsxPath, options);
   }
 
   const csvPath = path.join(dir, `${filenameBase}.csv`);
-  fs.writeFileSync(csvPath, '\uFEFF' + toCsv(headers, rows)); // BOM for Excel
-  return csvPath;
+  return writeCsvExport(headers, rows, csvPath);
 }
 
 const EXPORT_FOLDERS = {
@@ -293,6 +725,77 @@ const EXPORT_FOLDERS = {
   daily: 'Daily Report',
   forecast: 'Forecast',
 };
+const FORECAST_EXPORT_SUBFOLDERS = {
+  analytics: 'Analytics',
+  solcast: 'Solcast',
+};
+
+function normalizeForecastExportSubfolder(subFolder) {
+  const raw = String(subFolder || '').trim().toLowerCase();
+  if (raw === 'analytics') return FORECAST_EXPORT_SUBFOLDERS.analytics;
+  if (raw === 'solcast') return FORECAST_EXPORT_SUBFOLDERS.solcast;
+  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(String(subFolder || '').trim())) {
+    return String(subFolder || '').trim();
+  }
+  throw new Error(`[exporter] Invalid forecast export subfolder: "${subFolder}"`);
+}
+
+function isPathInsideBase(baseDir, targetPath) {
+  const base = path.resolve(String(baseDir || ''));
+  const target = path.resolve(String(targetPath || ''));
+  const rel = path.relative(base, target);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function rewriteForecastExportRelativePath(relativePath, subFolder) {
+  const normalizedSubFolder = normalizeForecastExportSubfolder(subFolder);
+  const parts = String(relativePath || '')
+    .trim()
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  if (!parts.length) return '';
+
+  const forecastRootIdx = parts.findIndex((part) => part === EXPORT_FOLDERS.forecast);
+  if (forecastRootIdx < 0) {
+    return path.normalize(parts.join(path.sep));
+  }
+
+  const nextPart = parts[forecastRootIdx + 1] || '';
+  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(nextPart)) {
+    parts[forecastRootIdx + 1] = normalizedSubFolder;
+  } else {
+    parts.splice(forecastRootIdx + 1, 0, normalizedSubFolder);
+  }
+  return path.normalize(parts.join(path.sep));
+}
+
+async function ensureForecastExportSubfolder(outPath, subFolder) {
+  const absolute = path.resolve(String(outPath || ''));
+  if (!absolute) throw new Error('[exporter] Forecast export path is missing.');
+
+  const base = path.resolve(
+    String(getSetting('csvSavePath', 'C:\\Logs\\InverterDashboard') || 'C:\\Logs\\InverterDashboard'),
+  );
+  if (!isPathInsideBase(base, absolute)) {
+    return absolute;
+  }
+
+  const relative = path.relative(base, absolute);
+  const targetRelative = rewriteForecastExportRelativePath(relative, subFolder);
+  const targetAbsolute = path.resolve(base, targetRelative);
+  if (!targetRelative || targetAbsolute === absolute) {
+    return absolute;
+  }
+
+  await fs.promises.mkdir(path.dirname(targetAbsolute), { recursive: true });
+  try {
+    await fs.promises.unlink(targetAbsolute);
+  } catch (err) {
+    if (String(err?.code || '').toUpperCase() !== 'ENOENT') throw err;
+  }
+  await fs.promises.rename(absolute, targetAbsolute);
+  return targetAbsolute;
+}
 
 function inverterFolderLabel(inverter) {
   if (!inverter || inverter === 'all') return 'All Inverters';
@@ -313,6 +816,21 @@ function exportFileBase(startTs, endTs, inverter, suffix) {
   const base = `${s}-${e} ${target} ${suffix}`;
   // Truncate to leave buffer under Windows 260-char path limit.
   return base.length > 200 ? base.slice(0, 200) : base;
+}
+
+function exportSingleDateFileBase(dayTs, inverter, suffix) {
+  const day = fmtDDMMYY(dayTs);
+  const target = exportTargetName(inverter);
+  const base = `${day} ${target} ${suffix}`;
+  return base.length > 200 ? base.slice(0, 200) : base;
+}
+
+function exportDateAwareFileBase(startTs, endTs, inverter, suffix) {
+  const s = Number(startTs || 0) || Date.now();
+  const e = Number(endTs || 0) || s;
+  return fmtDate(s) === fmtDate(e)
+    ? exportSingleDateFileBase(s, inverter, suffix)
+    : exportFileBase(s, e, inverter, suffix);
 }
 
 function normalizeEnergyResolution(resolution) {
@@ -339,6 +857,17 @@ function normalizeEnergyResolution(resolution) {
   return { mode: 'bucket', minutes: 5, label: '5min', suffix: 'Recorded Energy 5min' };
 }
 
+function normalizeInverterDataInterval(intervalMin) {
+  const raw = Number(intervalMin);
+  const minutes = Math.min(60, Math.max(1, Math.trunc(Number.isFinite(raw) ? raw : 1)));
+  return {
+    minutes,
+    bucketMs: minutes * 60000,
+    label: `${minutes}min`,
+    suffix: `Recorded Inverter Data ${minutes}min`,
+  };
+}
+
 function aggregateEnergyRows(rows, resolutionSpec, rangeStart) {
   const out = new Map();
   const bucketMs = (resolutionSpec.minutes || 5) * 60000;
@@ -363,6 +892,29 @@ function aggregateEnergyRows(rows, resolutionSpec, rangeStart) {
   }
 
   return Array.from(out.values()).sort((a, b) => (a.inverter - b.inverter) || (a.ts - b.ts));
+}
+
+function sampleReadingsByInterval(rowsRaw, intervalSpec) {
+  const rows = annotateReadingsWithComputedEnergy(rowsRaw);
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const bucketMs = Math.max(60000, Number(intervalSpec?.bucketMs || 60000));
+  const sampled = [];
+  let currentKey = '';
+  let currentRow = null;
+
+  for (const row of rows) {
+    const inv = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    const ts = Number(row?.ts || 0);
+    if (!(inv > 0) || !(unit > 0) || !(ts > 0)) continue;
+    const bucketTs = Math.floor(ts / bucketMs) * bucketMs;
+    const key = `${inv}|${unit}|${bucketTs}`;
+    if (currentKey && key !== currentKey && currentRow) sampled.push(currentRow);
+    currentKey = key;
+    currentRow = row;
+  }
+  if (currentRow) sampled.push(currentRow);
+  return sampled;
 }
 
 function aggregateKwhByResolution(rows, resolutionSpec) {
@@ -433,6 +985,27 @@ function collectDayAheadRowsForRange(startTs, endTs) {
   return out;
 }
 
+function collectSolcastRowsForRange(startTs, endTs) {
+  try {
+    const dbRows = db
+      .prepare(
+        'SELECT ts_local, forecast_kwh FROM solcast_snapshots WHERE ts_local BETWEEN ? AND ? ORDER BY ts_local ASC',
+      )
+      .all(startTs, endTs);
+    if (Array.isArray(dbRows) && dbRows.length) {
+      return dbRows
+        .map((r) => ({
+          ts: Number(r?.ts_local || 0),
+          kwh_inc: Number(Number(r?.forecast_kwh || 0).toFixed(6)),
+        }))
+        .filter((r) => Number(r.ts) > 0);
+    }
+  } catch (err) {
+    console.warn('[exporter] collectSolcastRowsForRange DB query failed:', err.message);
+  }
+  return [];
+}
+
 function resolveExportDir(inverter, categoryFolder) {
   const validFolders = new Set(Object.values(EXPORT_FOLDERS));
   if (!validFolders.has(categoryFolder)) {
@@ -449,6 +1022,22 @@ function resolveExportDir(inverter, categoryFolder) {
   const target = path.join(invDir, categoryFolder);
   ensureDir(target);
   return target;
+}
+
+function resolveExportSubDir(inverter, categoryFolder, subFolder = '') {
+  const baseDir = resolveExportDir(inverter, categoryFolder);
+  const normalizedSubFolder = String(subFolder || '').trim();
+  if (!normalizedSubFolder) return baseDir;
+  if (normalizedSubFolder.includes('\\') || normalizedSubFolder.includes('/')) {
+    throw new Error(`[exporter] Invalid export subfolder: "${subFolder}"`);
+  }
+  const target = path.join(baseDir, normalizedSubFolder);
+  ensureDir(target);
+  return target;
+}
+
+function resolveForecastExportDir(subFolder) {
+  return resolveExportSubDir('all', EXPORT_FOLDERS.forecast, subFolder);
 }
 
 function readInverterIpMap() {
@@ -470,6 +1059,8 @@ function readInverterIpMap() {
 // Returns { invCount, units: { [inv]: number[] } } from ipConfigJson.
 function readInverterConfig() {
   const invCount = Math.max(1, Number(getSetting('inverterCount', 27)) || 27);
+  const defaultNodeCount = Math.max(1, Number(getSetting('nodeCount', 4)) || 4);
+  const defaultUnits = Array.from({ length: defaultNodeCount }, (_, idx) => idx + 1);
   const units = {};
   try {
     const raw = JSON.parse(String(getSetting('ipConfigJson', '{}') || '{}'));
@@ -479,15 +1070,15 @@ function readInverterConfig() {
       const parsed = Array.isArray(unitsRaw)
         ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 16)
         : [];
-      units[inv] = parsed.length ? [...new Set(parsed)] : [1];
+      units[inv] = parsed.length ? [...new Set(parsed)] : defaultUnits.slice();
     }
   } catch {
-    for (let inv = 1; inv <= invCount; inv++) units[inv] = [1];
+    for (let inv = 1; inv <= invCount; inv++) units[inv] = defaultUnits.slice();
   }
   return { invCount, units };
 }
 
-// Safe finite-number helper — never returns NaN or Infinity.
+// Safe finite-number helper Ã¢â‚¬â€ never returns NaN or Infinity.
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -504,13 +1095,192 @@ function resolveAuditIp(ipMap, inverter, currentIp) {
   return String(ipMap[inv] || '').trim();
 }
 
-// ─── Alarms CSV ───────────────────────────────────────────────────────────────
-async function exportAlarms({ startTs, endTs, inverter, format }) {
+function summarizeReadingsForEnergy(rowsRaw) {
+  const rows = annotateReadingsWithComputedEnergy(rowsRaw);
+  const states = new Map();
+  for (const row of rows) {
+    const ts = Number(row?.ts || 0);
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!(ts > 0) || !(inverter > 0) || !(unit > 0)) continue;
+    const key = `${inverter}|${unit}`;
+    let state = states.get(key);
+    if (!state) {
+      state = {
+        inverter,
+        unit,
+        first_ts: ts,
+        last_ts: ts,
+        sample_count: 0,
+        online_samples: 0,
+        pac_peak: 0,
+        energy_kwh: 0,
+      };
+      states.set(key, state);
+    }
+    state.sample_count += 1;
+    if (Number(row?.online || 0) === 1) state.online_samples += 1;
+    state.pac_peak = Math.max(state.pac_peak, Math.max(0, Number(row?.pac || 0)));
+    if (ts < state.first_ts) state.first_ts = ts;
+    if (ts >= state.last_ts) {
+      state.last_ts = ts;
+      state.energy_kwh = Math.max(0, Number(row?.computed_kwh || 0));
+    }
+  }
+  return states;
+}
+
+function buildTodaySupplementMap(rowsRaw) {
+  const out = new Map();
+  for (const row of rowsRaw || []) {
+    const inv = Number(row?.inverter || 0);
+    const totalKwh = Number(row?.total_kwh || 0);
+    if (!(inv > 0) || !(totalKwh >= 0)) continue;
+    out.set(inv, Math.max(0, Number(totalKwh.toFixed(6))));
+  }
+  return out;
+}
+
+function buildAuthoritativeTodayRangeMap(startTs, rowsRaw) {
+  const todayMap = buildTodaySupplementMap(rowsRaw);
+  if (!todayMap.size) return todayMap;
+
+  const today = fmtDate(Date.now());
+  const dayStartTs = new Date(`${today}T00:00:00.000`).getTime();
+  const rangeStartTs = Number(startTs || 0);
+  if (!(rangeStartTs > dayStartTs)) return todayMap;
+
+  const beforeRangeMap = sumEnergy5minByInverterRange(
+    dayStartTs,
+    Math.max(dayStartTs, rangeStartTs - 1),
+  );
+  for (const [inv, totalKwh] of todayMap.entries()) {
+    const adjusted = Math.max(0, totalKwh - Number(beforeRangeMap.get(inv) || 0));
+    todayMap.set(inv, Number(adjusted.toFixed(6)));
+  }
+
+  return todayMap;
+}
+
+function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
+  const { invCount, units: invUnits } = readInverterConfig();
+  const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
+  const mapped = [];
+  const today = fmtDate(Date.now());
+  const rangeRows = invNum
+    ? queryReadingsRange(invNum, s, e)
+    : queryReadingsRangeAll(s, e);
+  const rowsByDay = new Map();
+  for (const row of rangeRows) {
+    const ts = Number(row?.ts || 0);
+    if (!(ts > 0)) continue;
+    const day = fmtDate(ts);
+    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+    rowsByDay.get(day).push(row);
+  }
+
+  for (const day of iterateLocalDates(s, e)) {
+    const dayRows = rowsByDay.get(day) || [];
+    const dayMap = summarizeReadingsForEnergy(dayRows);
+    let dayTotalMwh = 0;
+    const dayStart = new Date(`${day}T00:00:00.000`).getTime();
+    const dayEnd = new Date(`${day}T23:59:59.999`).getTime();
+    const dayRangeStart = Math.max(s, dayStart);
+    const dayRangeEnd = Math.min(e, dayEnd);
+    const authoritativeByInv = sumEnergy5minByInverterRange(dayRangeStart, dayRangeEnd);
+    if (day === today) {
+      const supplementalTodayMap = buildAuthoritativeTodayRangeMap(
+        dayRangeStart,
+        options?.supplementalTodayRows,
+      );
+      for (const [inv, totalKwh] of supplementalTodayMap.entries()) {
+        authoritativeByInv.set(inv, Math.max(authoritativeByInv.get(inv) || 0, totalKwh));
+      }
+    }
+
+    for (const inv of selectedInvs) {
+      const units = (invUnits[inv] || []).slice().sort((a, b) => a - b);
+      const detailRows = [];
+      let rawSubtotalKwh = 0;
+      for (const unit of units) {
+        const key = `${inv}|${unit}`;
+        const summary = dayMap.get(key) || null;
+        if (!summary) continue;
+        const firstTs = Number(summary?.first_ts || 0);
+        const lastTs = Number(summary?.last_ts || 0);
+        const pacPeakW = Math.max(0, Number(summary?.pac_peak || 0));
+        const energyKwh = Math.max(0, Number(summary?.energy_kwh || 0));
+        rawSubtotalKwh += energyKwh;
+        detailRows.push({
+          Date: day,
+          Inverter_Number: inv,
+          Node_Number: unit,
+          First_Seen: firstTs ? fmtTime(firstTs) : '',
+          Last_Seen: lastTs ? fmtTime(lastTs) : '',
+          Peak_Pac_kW: Number((pacPeakW / 1000).toFixed(3)),
+          rawEnergyKwh: energyKwh,
+        });
+      }
+
+      const authoritativeKwh = Math.max(0, Number(authoritativeByInv.get(inv) || 0));
+      if (!(authoritativeKwh > 0) && !detailRows.length) continue;
+
+      const scale =
+        authoritativeKwh > 0 && rawSubtotalKwh > 0
+          ? authoritativeKwh / rawSubtotalKwh
+          : 1;
+      let subtotalMwh = 0;
+      for (const row of detailRows) {
+        const energyMwh = (Number(row.rawEnergyKwh || 0) * scale) / 1000;
+        subtotalMwh += energyMwh;
+        mapped.push({
+          Date: row.Date,
+          Inverter_Number: row.Inverter_Number,
+          Node_Number: row.Node_Number,
+          First_Seen: row.First_Seen,
+          Last_Seen: row.Last_Seen,
+          Peak_Pac_kW: row.Peak_Pac_kW,
+          Total_MWh: Number(energyMwh.toFixed(6)),
+        });
+      }
+      if (authoritativeKwh > 0) {
+        subtotalMwh = authoritativeKwh / 1000;
+      }
+      dayTotalMwh += subtotalMwh;
+
+    }
+
+    mapped.push({
+      Date: day,
+      Inverter_Number: 'DAY TOTAL',
+      Node_Number: '',
+      First_Seen: '',
+      Last_Seen: '',
+      Peak_Pac_kW: '',
+      Total_MWh: Number(dayTotalMwh.toFixed(6)),
+    });
+  }
+
+  return mapped;
+}
+
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Alarms CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+function normalizeAlarmExportMinDurationSec(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(86400, Math.max(0, Math.trunc(raw)));
+}
+
+async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDurationSec }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.alarms);
 
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
   const nowTs = Date.now();
+  const minDurationSec = normalizeAlarmExportMinDurationSec(minAlarmDurationSec);
 
   const raw = inverter && inverter !== 'all'
     ? db.prepare('SELECT * FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
@@ -523,11 +1293,12 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     const status = clearedTs ? 'CLEARED' : 'ACTIVE';
     const durationEndTs = clearedTs || nowTs;
     const durationMs = occurredTs ? Math.max(0, durationEndTs - occurredTs) : 0;
+    const durationSec = Math.floor(durationMs / 1000);
     return ({
     Date:         fmtDate(occurredTs),
     Time:         fmtTime(occurredTs),
     DateTime:     fmtDateTime(occurredTs),
-    Plant:        getSetting('plantName','Solar Plant'),
+    Plant:        getSetting('plantName','ADSI Plant'),
     Operator:     operator,
     Inverter:     `INV-${String(r.inverter).padStart(2,'0')}`,
     Unit:         r.unit,
@@ -537,11 +1308,13 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     Description:  decodeAlarm(r.alarm_value).map(b=>b.label).join('; ') || 'No alarm',
     ClearedDate:  clearedTs ? fmtDate(clearedTs)  : '',
     ClearedTime:  clearedTs ? fmtTime(clearedTs)  : '',
+    Duration_sec: durationSec,
     Duration:     formatDurationMs(durationMs),
     Duration_min: Number((durationMs / 60000).toFixed(2)),
     Status:       status,
     Acknowledged: r.acknowledged ? 'YES' : 'NO',
-  })});
+  })}).filter((row) => Number(row.Duration_sec || 0) >= minDurationSec)
+    .map(({ Duration_sec, ...row }) => row);
 
   const headers = [
     {key:'Date',label:'Date'},{key:'Time',label:'Time'},{key:'Plant',label:'Plant'},
@@ -565,189 +1338,76 @@ async function exportAlarms({ startTs, endTs, inverter, format }) {
     headerKeys,
   });
 
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Alarms');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Recorded Alarms');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
-// ─── Energy CSV ───────────────────────────────────────────────────────────────
-// Per-unit (node) rows showing two independent energy measurements:
-//   Register  — sum of positive consecutive kWh register deltas (LAG), per unit.
-//               Immune to mid-day register resets.
-//   Computed  — PAC trapezoidal integration from readings, per unit.
-//               Gap cap of 30 000 ms mirrors MAX_PAC_DT_S in poller.js.
-// Per-inverter subtotal sums both columns across nodes.
-async function exportEnergy({ startTs, endTs, inverter, format }) {
-  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
-
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Energy CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Per-unit (node) rows showing computed energy only.
+// Energy is derived from PAC trapezoidal integration with a 30 000 ms gap cap,
+// aligned with the poller and energy_5min computation path.
+function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
   const s = startTs || Date.now() - 86400000;
-  const e = endTs   || Date.now();
-  const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
-  const params = invNum ? [s, e, invNum] : [s, e];
-
-  // Register kWh per (day, inverter, unit) — LAG-based consecutive positive deltas.
-  const regSql = `
-    WITH ordered AS (
-      SELECT
-        date(ts/1000, 'unixepoch', 'localtime') AS day,
-        inverter, unit,
-        kwh - LAG(kwh) OVER (PARTITION BY inverter, unit ORDER BY ts) AS kwh_delta
-      FROM readings
-      WHERE ts BETWEEN ? AND ?
-      ${invNum ? 'AND inverter = ?' : ''}
-    )
-    SELECT day, inverter, unit,
-      SUM(CASE WHEN kwh_delta > 0 THEN kwh_delta ELSE 0 END) AS reg_kwh
-    FROM ordered
-    GROUP BY day, inverter, unit
-    ORDER BY day, inverter, unit
-  `;
-
-  // Computed kWh per (day, inverter, unit) — PAC trapezoidal integration.
-  // (pac[i] + pac[i-1]) / 2 * dt_ms / 3 600 000 000  →  kWh
-  const compSql = `
-    WITH ordered AS (
-      SELECT
-        date(ts/1000, 'unixepoch', 'localtime') AS day,
-        inverter, unit, ts, pac,
-        LAG(ts)  OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_ts,
-        LAG(pac) OVER (PARTITION BY inverter, unit ORDER BY ts) AS prev_pac
-      FROM readings
-      WHERE ts BETWEEN ? AND ?
-      ${invNum ? 'AND inverter = ?' : ''}
-    )
-    SELECT day, inverter, unit,
-      SUM(
-        CASE
-          WHEN prev_ts IS NOT NULL AND (ts - prev_ts) <= 30000
-          THEN ((pac + prev_pac) / 2.0) * (ts - prev_ts) / 3600000000.0
-          ELSE 0
-        END
-      ) AS computed_kwh
-    FROM ordered
-    GROUP BY day, inverter, unit
-    ORDER BY day, inverter, unit
-  `;
-
-  const regRows  = db.prepare(regSql).all(...params);
-  const compRows = db.prepare(compSql).all(...params);
-
-  // Both maps keyed by `${day}|${inv}|${unit}`
-  const regMap  = new Map(regRows.map( r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.reg_kwh)]));
-  const compMap = new Map(compRows.map(r => [`${r.day}|${Number(r.inverter)}|${Number(r.unit)}`, safeNum(r.computed_kwh)]));
-
-  // Union of all (day, inverter) combinations; zero-fill every configured inverter.
-  const { invCount, units: invUnits } = readInverterConfig();
-  const invDaySet = new Set();
-  for (const r of regRows)  invDaySet.add(`${r.day}|${Number(r.inverter)}`);
-  for (const r of compRows) invDaySet.add(`${r.day}|${Number(r.inverter)}`);
-  if (!invNum) {
-    for (const d of iterateLocalDates(s, e)) {
-      for (let inv = 1; inv <= invCount; inv++) invDaySet.add(`${d}|${inv}`);
-    }
-  }
-
-  const sortedInvDayKeys = Array.from(invDaySet).sort((a, b) => {
-    const [dayA, invA] = a.split('|');
-    const [dayB, invB] = b.split('|');
-    const dc = parseDateSortValue(dayA) - parseDateSortValue(dayB);
-    return dc !== 0 ? dc : Number(invA) - Number(invB);
-  });
-
-  const mapped = [];
-  let grandReg  = 0;
-  let grandComp = 0;
-
-  for (const key of sortedInvDayKeys) {
-    const [day, invStr] = key.split('|');
-    const inv   = Number(invStr);
-    const units = (invUnits[inv] || [1]).slice().sort((a, b) => a - b);
-    let subReg  = 0;
-    let subComp = 0;
-
-    for (const unit of units) {
-      const uKey    = `${day}|${inv}|${unit}`;
-      const regKwh  = safeNum(regMap.get(uKey));
-      const compKwh = safeNum(compMap.get(uKey));
-      subReg  += regKwh;
-      subComp += compKwh;
-      mapped.push({
-        Date:         day,
-        Inverter:     `INV-${String(inv).padStart(2, '0')}`,
-        Node:         unit,
-        Register_MWh: Number((regKwh  / 1000).toFixed(6)),
-        Computed_MWh: Number((compKwh / 1000).toFixed(6)),
-        Status:       regKwh > 0 || compKwh > 0 ? 'ACTIVE' : 'INACTIVE',
-      });
-    }
-
-    grandReg  += subReg;
-    grandComp += subComp;
-
-    mapped.push({
-      Date:         `Total for ${day} (Inverter ${inv})`,
-      Inverter:     '',
-      Node:         '',
-      Register_MWh: Number((subReg  / 1000).toFixed(6)),
-      Computed_MWh: Number((subComp / 1000).toFixed(6)),
-      Status:       subReg > 0 || subComp > 0 ? 'ACTIVE' : 'INACTIVE',
-    });
-    mapped.push({ Date: '', Inverter: '', Node: '', Register_MWh: '', Computed_MWh: '', Status: '' });
-  }
-
-  mapped.push({
-    Date:         `GRAND TOTAL ${fmtDDMMYY(s)}-${fmtDDMMYY(e)} (ALL INVERTERS)`,
-    Inverter:     '',
-    Node:         '',
-    Register_MWh: Number((grandReg  / 1000).toFixed(6)),
-    Computed_MWh: Number((grandComp / 1000).toFixed(6)),
-    Status:       '',
-  });
-
+  const e = endTs || Date.now();
+  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
   const headers = [
-    { key: 'Date',         label: 'Date' },
-    { key: 'Inverter',     label: 'Inverter' },
-    { key: 'Node',         label: 'Node' },
-    { key: 'Register_MWh', label: 'Register (MWh)' },
-    { key: 'Computed_MWh', label: 'Computed PAC (MWh)' },
-    { key: 'Status',       label: 'Status' },
+    { key: 'Date',       label: 'Date' },
+    { key: 'Inverter_Number',   label: 'Inverter Number' },
+    { key: 'Node_Number',       label: 'Node Number' },
+    { key: 'First_Seen', label: '1st Seen' },
+    { key: 'Last_Seen', label: 'Last Seen' },
+    { key: 'Peak_Pac_kW', label: 'Peak Pac (kW)' },
+    { key: 'Total_MWh', label: 'Total MWh' },
   ];
 
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Energy');
-  return await writeExport(headers, mapped, dir, fileBase, format);
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Energy Summary');
+  return writeExport(headers, Array.isArray(rows) ? rows : [], dir, fileBase, format, {
+    autoFilter: false,
+  });
 }
 
-// ——— Inverter Data (raw readings) ———————————————————————————————————————————
-async function exportInverterData({ startTs, endTs, inverter, format }) {
+async function exportEnergy({ startTs, endTs, inverter, format, supplementalTodayRows }) {
+  const s = startTs || Date.now() - 86400000;
+  const e = endTs || Date.now();
+  const mapped = buildEnergySummaryExportRows(s, e, inverter, {
+    supplementalTodayRows,
+  });
+  return await writeEnergySummaryExport({
+    startTs: s,
+    endTs: e,
+    inverter,
+    format,
+    rows: mapped,
+  });
+}
+
+// Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€ Inverter Data (raw readings) Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
+async function exportInverterData({ startTs, endTs, inverter, format, intervalMin }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.inverterData);
 
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
+  const interval = normalizeInverterDataInterval(intervalMin);
   const invList = (inverter && inverter !== 'all')
     ? [Number(inverter)]
     : [...Array(Number(getSetting('inverterCount', 27)))].map((_, i) => i + 1);
 
   const rowsOut = [];
   for (const inv of invList) {
-    for (const r of stmts.getReadingsRange.all(inv, s, e)) {
+    for (const r of sampleReadingsByInterval(queryReadingsRange(inv, s, e), interval)) {
+      const alarmValue = Number(r.alarm || 0);
       rowsOut.push({
         Date: fmtDate(r.ts),
         Time: fmtTime(r.ts),
-        Plant: getSetting('plantName', 'Solar Plant'),
+        Interval: interval.label,
+        Plant: getSetting('plantName', 'ADSI Plant'),
         Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
         UnitNode: r.unit,
-        Vdc_V: Number(r.vdc || 0).toFixed(1),
-        Idc_A: Number(r.idc || 0).toFixed(2),
-        Vac1_V: Number(r.vac1 || 0).toFixed(1),
-        Vac2_V: Number(r.vac2 || 0).toFixed(1),
-        Vac3_V: Number(r.vac3 || 0).toFixed(1),
-        Iac1_A: Number(r.iac1 || 0).toFixed(2),
-        Iac2_A: Number(r.iac2 || 0).toFixed(2),
-        Iac3_A: Number(r.iac3 || 0).toFixed(2),
         Pac_W: Number(r.pac || 0).toFixed(1),
         Pac_kW: (Number(r.pac || 0) / 1000).toFixed(3),
-        Pdc_W: (Number(r.vdc || 0) * Number(r.idc || 0)).toFixed(1),
-        Energy_kWh: Number(r.kwh || 0).toFixed(3),
-        AlarmCode: formatAlarmHex(r.alarm),
+        Energy_kWh: Number(r.computed_kwh || 0).toFixed(3),
+        AlarmCode: formatAlarmHex(alarmValue),
+        AlarmDescription: decodeAlarm(alarmValue).map((b) => b.label).join('; ') || 'No alarm',
         Online: r.online ? 'YES' : 'NO',
       });
     }
@@ -756,41 +1416,50 @@ async function exportInverterData({ startTs, endTs, inverter, format }) {
   const headers = [
     { key: 'Date', label: 'Date' },
     { key: 'Time', label: 'Time' },
+    { key: 'Interval', label: 'Interval' },
     { key: 'Plant', label: 'Plant' },
     { key: 'Inverter', label: 'Inverter' },
     { key: 'UnitNode', label: 'Unit/Node' },
-    { key: 'Vdc_V', label: 'Vdc (V)' },
-    { key: 'Idc_A', label: 'Idc (A)' },
-    { key: 'Vac1_V', label: 'Vac1 (V)' },
-    { key: 'Vac2_V', label: 'Vac2 (V)' },
-    { key: 'Vac3_V', label: 'Vac3 (V)' },
-    { key: 'Iac1_A', label: 'Iac1 (A)' },
-    { key: 'Iac2_A', label: 'Iac2 (A)' },
-    { key: 'Iac3_A', label: 'Iac3 (A)' },
     { key: 'Pac_W', label: 'Pac (W)' },
     { key: 'Pac_kW', label: 'Pac (kW)' },
-    { key: 'Pdc_W', label: 'Pdc (W)' },
-    { key: 'Energy_kWh', label: 'Energy (kWh)' },
+    { key: 'Energy_kWh', label: 'Computed Energy (kWh)' },
     { key: 'AlarmCode', label: 'Alarm Code' },
+    { key: 'AlarmDescription', label: 'Alarm Description' },
     { key: 'Online', label: 'Online' },
   ];
   const headerKeys = headers.map((h) => h.key);
-  const sortedRows = sortRowsDateInverterTime(rowsOut, {
-    dateKey: 'Date',
-    inverterKey: 'Inverter',
-    timeKey: 'Time',
-    tieBreakerKeys: ['UnitNode'],
-  });
+  const sortedRows = rowsOut
+    .map((row, idx) => ({ row, idx }))
+    .sort((a, b) => {
+      const da = parseDateSortValue(a.row?.Date);
+      const db = parseDateSortValue(b.row?.Date);
+      if (da !== db) return da - db;
+
+      const ia = parseInverterSortValue(a.row?.Inverter);
+      const ib = parseInverterSortValue(b.row?.Inverter);
+      if (ia !== ib) return ia - ib;
+
+      const na = parseNodeSortValue(a.row?.UnitNode);
+      const nb = parseNodeSortValue(b.row?.UnitNode);
+      if (na !== nb) return na - nb;
+
+      const ta = parseTimeSortValue(a.row?.Time);
+      const tb = parseTimeSortValue(b.row?.Time);
+      if (ta !== tb) return ta - tb;
+
+      return a.idx - b.idx;
+    })
+    .map((entry) => entry.row);
   const finalRows = insertBlankRowsByGroup(sortedRows, {
     groupKeys: ['Date', 'Inverter'],
     headerKeys,
   });
 
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Inverter Data');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, interval.suffix);
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
-// ─── 5-min Energy CSV ─────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ 5-min Energy CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
 
@@ -798,8 +1467,8 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const e = endTs   || Date.now();
   const spec = normalizeEnergyResolution(resolution);
   const rows = !inverter || inverter === 'all'
-    ? stmts.get5minRangeAll.all(s, e)
-    : stmts.get5minRange.all(Number(inverter), s, e);
+    ? queryEnergy5minRangeAll(s, e)
+    : queryEnergy5minRange(Number(inverter), s, e);
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
   // For "all inverters" daily-mode export, zero-fill inverters that had no data.
@@ -817,7 +1486,7 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
     aggregated.sort((a, b) => (a.inverter - b.inverter) || (a.ts - b.ts));
   }
 
-  const plantName = getSetting('plantName', 'Solar Plant');
+  const plantName = getSetting('plantName', 'ADSI Plant');
   const mapped = aggregated.map((r) => ({
     Date:          fmtDate(r.ts),
     Time:          fmtTime(r.ts),
@@ -847,11 +1516,11 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
     groupKeys: ['Date', 'Inverter'],
     headerKeys,
   });
-  const fileBase = exportFileBase(s, e, inverter, spec.suffix);
+  const fileBase = exportDateAwareFileBase(s, e, inverter, spec.suffix);
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
-// ─── Audit Log CSV ────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Audit Log CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function exportAudit({ startTs, endTs, inverter, format }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.audits);
 
@@ -864,7 +1533,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
     : db.prepare('SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
 
   const mapped = raw.map(r => ({
-    Date: fmtDate(r.ts), Time: fmtTime(r.ts), Plant: getSetting('plantName','Solar Plant'),
+    Date: fmtDate(r.ts), Time: fmtTime(r.ts), Plant: getSetting('plantName','ADSI Plant'),
     Operator: r.operator || 'OPERATOR',
     Inverter: `INV-${String(r.inverter).padStart(2,'0')}`,
     Node: r.node === 0 ? 'ALL' : `Node-${r.node}`,
@@ -888,21 +1557,24 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
     groupKeys: ['Date', 'Inverter'],
     headerKeys,
   });
-  const fileBase = exportFileBase(s, e, inverter, 'Recorded Audits');
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Recorded Audits');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 
-// ─── Daily Generation Report CSV ──────────────────────────────────────────────
-async function exportDailyReport({ startTs, endTs, date, format }) {
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Daily Generation Report CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+async function exportDailyReport({ startTs, endTs, date, format, rowsByDate }) {
   const dir = resolveExportDir('all', EXPORT_FOLDERS.daily);
   const { invCount } = readInverterConfig();
-  const plantName = getSetting('plantName', 'Solar Plant');
+  const plantName = getSetting('plantName', 'ADSI Plant');
 
   let dbRows;
   let s;
   let e;
   if (date) {
-    dbRows = stmts.getDailyReport.all(date);
+    const overrideRows = rowsByDate && typeof rowsByDate === 'object'
+      ? rowsByDate[date]
+      : null;
+    dbRows = Array.isArray(overrideRows) ? overrideRows : stmts.getDailyReport.all(date);
     s = new Date(`${date}T00:00:00`).getTime();
     e = s;
   } else {
@@ -911,47 +1583,10 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
     dbRows = stmts.getDailyReportRange.all(fmtDate(s), fmtDate(e));
   }
 
-  // Index existing rows by "date|inverter" so we can detect gaps.
   const existing = new Map();
   for (const r of dbRows) {
     existing.set(`${r.date}|${Number(r.inverter)}`, r);
   }
-
-  // Enumerate every date × every configured inverter; zero-fill any gaps.
-  // This ensures inactive inverters always appear with 0 values.
-  const allRows = [];
-  for (const d of iterateLocalDates(s, e)) {
-    for (let inv = 1; inv <= invCount; inv++) {
-      const key = `${d}|${inv}`;
-      const r = existing.get(key) || {
-        date: d, inverter: inv,
-        kwh_total: 0, pac_peak: 0, pac_avg: 0, uptime_s: 0, alarm_count: 0,
-      };
-      allRows.push(r);
-    }
-  }
-
-  const mapped = allRows.map((r) => {
-    const kwhTotal = Math.max(0, safeNum(r.kwh_total));
-    const pacPeakW = Math.max(0, safeNum(r.pac_peak));
-    const pacAvgW  = Math.max(0, safeNum(r.pac_avg));
-    const uptimeS  = Math.max(0, safeNum(r.uptime_s));
-    const alarms   = Math.max(0, Math.trunc(safeNum(r.alarm_count)));
-    return {
-      Date:             r.date,
-      Plant:            plantName,
-      Inverter:         `INV-${String(r.inverter).padStart(2, '0')}`,
-      Energy_kWh:       kwhTotal.toFixed(3),
-      Energy_MWh:       (kwhTotal / 1000).toFixed(6),
-      Peak_Pac_kW:      (pacPeakW / 1000).toFixed(3),
-      Avg_Pac_kW:       (pacAvgW  / 1000).toFixed(3),
-      Availability_pct: calcDailyAvailabilityPct(r).toFixed(2),
-      Performance_pct:  calcDailyPerformancePct(r).toFixed(2),
-      Uptime_h:         (uptimeS / 3600).toFixed(2),
-      Alarm_Count:      alarms,
-      Status:           kwhTotal > 0 || uptimeS > 0 ? 'ACTIVE' : 'INACTIVE',
-    };
-  });
 
   const headers = [
     { key: 'Date',             label: 'Date' },
@@ -968,31 +1603,110 @@ async function exportDailyReport({ startTs, endTs, date, format }) {
     { key: 'Status',           label: 'Status' },
   ];
   const headerKeys = headers.map((h) => h.key);
-  const sortedRows = sortRowsDateInverterTime(mapped, {
-    dateKey: 'Date',
-    inverterKey: 'Inverter',
-    timeKey: null,
-  });
-  const finalRows = insertBlankRowsByGroup(sortedRows, {
-    groupKeys: ['Date'],
-    headerKeys,
-  });
+  const blankRow = Object.fromEntries(headerKeys.map((k) => [k, '']));
+  const finalRows = [];
+  const reportDates = Array.from(iterateLocalDates(s, e));
 
-  const fileBase = exportFileBase(s, e, 'all', 'Daily Report');
+  for (let dayIdx = 0; dayIdx < reportDates.length; dayIdx++) {
+    const d = reportDates[dayIdx];
+    const overrideRows = rowsByDate && typeof rowsByDate === 'object'
+      ? rowsByDate[d]
+      : null;
+    const overrideByInv = Array.isArray(overrideRows)
+      ? new Map(
+        overrideRows.map((row) => [Number(row?.inverter || 0), row]),
+      )
+      : null;
+    const dayRows = [];
+    for (let inv = 1; inv <= invCount; inv++) {
+      const key = `${d}|${inv}`;
+      dayRows.push(
+        (overrideByInv && overrideByInv.get(inv)) ||
+        existing.get(key) || {
+          date: d,
+          inverter: inv,
+          kwh_total: 0,
+          pac_peak: 0,
+          pac_avg: 0,
+          uptime_s: 0,
+          alarm_count: 0,
+        },
+      );
+    }
+
+    const mappedDayRows = sortRowsDateInverterTime(
+      dayRows.map((r) => {
+        const kwhTotal = Math.max(0, safeNum(r.kwh_total));
+        const pacPeakW = Math.max(0, safeNum(r.pac_peak));
+        const pacAvgW = Math.max(0, safeNum(r.pac_avg));
+        const uptimeS = Math.max(0, safeNum(r.uptime_s));
+        const alarms = Math.max(0, Math.trunc(safeNum(r.alarm_count)));
+        return {
+          Date:             r.date,
+          Plant:            plantName,
+          Inverter:         `INV-${String(r.inverter).padStart(2, '0')}`,
+          Energy_kWh:       kwhTotal.toFixed(3),
+          Energy_MWh:       (kwhTotal / 1000).toFixed(6),
+          Peak_Pac_kW:      (pacPeakW / 1000).toFixed(3),
+          Avg_Pac_kW:       (pacAvgW / 1000).toFixed(3),
+          Availability_pct: calcDailyAvailabilityPct(r).toFixed(2),
+          Performance_pct:  calcDailyPerformancePct(r).toFixed(2),
+          Uptime_h:         (uptimeS / 3600).toFixed(2),
+          Alarm_Count:      alarms,
+          Status:           kwhTotal > 0 || uptimeS > 0 ? 'ACTIVE' : 'INACTIVE',
+        };
+      }),
+      {
+        dateKey: 'Date',
+        inverterKey: 'Inverter',
+        timeKey: null,
+      },
+    );
+
+    finalRows.push(...mappedDayRows);
+    finalRows.push(buildDailyReportTotalRow(dayRows, d, plantName));
+    if (dayIdx < reportDates.length - 1) {
+      finalRows.push({ ...blankRow });
+    }
+  }
+
+  const fileBase = exportDateAwareFileBase(s, e, 'all', 'Daily Report');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
-
-async function exportForecastActual({ startTs, endTs, format, resolution }) {
-  const dir = resolveExportDir('all', EXPORT_FOLDERS.forecast);
+async function exportForecastActual({
+  startTs,
+  endTs,
+  format,
+  resolution,
+  exportFormat,
+  supplementalActualRows,
+  source,
+}) {
+  const isSolcast = String(source || '').trim().toLowerCase() === 'solcast';
+  const dir = resolveForecastExportDir(
+    isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics,
+  );
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
   const spec = normalizeEnergyResolution(resolution);
+  const extraActualRows = Array.isArray(supplementalActualRows)
+    ? supplementalActualRows
+    : [];
 
-  const actualRaw = stmts.get5minRangeAll.all(s, e).map((r) => ({
-    ts: Number(r?.ts || 0),
-    kwh_inc: Number(r?.kwh_inc || 0),
-  }));
-  const dayAheadRaw = collectDayAheadRowsForRange(s, e);
+  const actualRaw = queryEnergy5minRangeAll(s, e)
+    .map((r) => ({
+      ts: Number(r?.ts || 0),
+      kwh_inc: Number(r?.kwh_inc || 0),
+    }))
+    .concat(
+      extraActualRows.map((r) => ({
+        ts: Number(r?.ts || 0),
+        kwh_inc: Number(r?.kwh_inc || 0),
+      })),
+    )
+    .filter((r) => isWithinSolarWindowTs(r.ts));
+  const dayAheadRaw = (isSolcast ? collectSolcastRowsForRange(s, e) : collectDayAheadRowsForRange(s, e))
+    .filter((r) => isWithinSolarWindowTs(r.ts));
 
   const actualAgg = aggregateKwhByResolution(actualRaw, spec);
   const dayAheadAgg = aggregateKwhByResolution(dayAheadRaw, spec);
@@ -1003,11 +1717,15 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
     (a, b) => a - b,
   );
 
-  const plantName = getSetting('plantName', 'Solar Plant');
+  const plantName = getSetting('plantName', 'ADSI Plant');
   const rows = allTs.map((ts) => {
     const actualKwh   = Math.max(0, safeNum(actualMap.get(ts)));
     const dayAheadKwh = Math.max(0, safeNum(dayAheadMap.get(ts)));
-    const deltaKwh    = actualKwh - dayAheadKwh;          // can be negative (under-forecast)
+    const deltaKwh    = actualKwh - dayAheadKwh;          // negative = over-forecast
+    const absDeltaKwh = Math.abs(deltaKwh);
+    const apePct = actualKwh > 0
+      ? (absDeltaKwh / actualKwh) * 100
+      : null;
     return {
       Date:        fmtDate(ts),
       Time:        spec.mode === 'day' ? 'Daily' : fmtTime(ts),
@@ -1019,20 +1737,63 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
       DayAheadMWh: (dayAheadKwh / 1000).toFixed(6),
       DeltaKWh:    deltaKwh.toFixed(6),
       DeltaMWh:    (deltaKwh    / 1000).toFixed(6),
+      AbsDeltaKWh: absDeltaKwh.toFixed(6),
+      AbsDeltaMWh: (absDeltaKwh / 1000).toFixed(6),
+      ErrorPct:    apePct == null ? '' : apePct.toFixed(3),
     };
   });
+
+  const actualTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.ActualKWh), 0);
+  const dayAheadTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.DayAheadKWh), 0);
+  const varianceTotalKwh = actualTotalKwh - dayAheadTotalKwh;
+  const absErrorTotalKwh = rows.reduce((sum, row) => sum + safeNum(row.AbsDeltaKWh), 0);
+  const mapeValues = rows
+    .map((row) => safeNum(row.ErrorPct, Number.NaN))
+    .filter((value) => Number.isFinite(value));
+  const peakRow = rows.reduce((best, row) =>
+    safeNum(row.ActualKWh) >= safeNum(best?.ActualKWh) ? row : best,
+  null);
+  const summaryHeaders = [
+    { key: 'Metric', label: 'Metric', xlsxType: 'string' },
+    { key: 'Value', label: 'Value', xlsxType: 'string' },
+  ];
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  const useAverageTable = normalizedExportFormat === 'average-table' && spec.mode !== 'day';
+  const forecastSourceLabel = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
+  const summaryRows = [
+    { Metric: 'Plant', Value: plantName },
+    { Metric: 'Source', Value: forecastSourceLabel },
+    { Metric: 'Range Start', Value: fmtDateTime(s) },
+    { Metric: 'Range End', Value: fmtDateTime(e) },
+    { Metric: 'Resolution', Value: spec.mode === 'day' ? 'Daily' : spec.label },
+    { Metric: 'Export Format', Value: useAverageTable ? 'Average Table' : 'Standard' },
+    { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(6) },
+    { Metric: `${forecastSourceLabel} Total (MWh)`, Value: (dayAheadTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Absolute Error Total (MWh)', Value: (absErrorTotalKwh / 1000).toFixed(6) },
+    {
+      Metric: 'WAPE (%)',
+      Value: actualTotalKwh > 0 ? ((absErrorTotalKwh / actualTotalKwh) * 100).toFixed(3) : '',
+    },
+    {
+      Metric: 'Mean APE (%)',
+      Value: mapeValues.length ? (mapeValues.reduce((sum, value) => sum + value, 0) / mapeValues.length).toFixed(3) : '',
+    },
+    { Metric: 'Peak Interval Actual (MWh)', Value: peakRow ? safeNum(peakRow.ActualMWh).toFixed(6) : '' },
+    { Metric: 'Peak Interval Time', Value: peakRow ? String(peakRow.Time || '') : '' },
+    { Metric: 'Data Rows', Value: String(rows.length) },
+  ];
 
   const headers = [
     { key: 'Date',        label: 'Date' },
     { key: 'Time',        label: 'Time' },
     { key: 'Resolution',  label: 'Resolution' },
     { key: 'Plant',       label: 'Plant' },
-    { key: 'ActualKWh',   label: 'Actual (kWh)' },
     { key: 'ActualMWh',   label: 'Actual (MWh)' },
-    { key: 'DayAheadKWh', label: 'Day-Ahead (kWh)' },
-    { key: 'DayAheadMWh', label: 'Day-Ahead (MWh)' },
-    { key: 'DeltaKWh',    label: 'Delta (kWh)' },
+    { key: 'DayAheadMWh', label: `${forecastSourceLabel} (MWh)` },
     { key: 'DeltaMWh',    label: 'Delta (MWh)' },
+    { key: 'AbsDeltaMWh', label: 'Absolute Delta (MWh)' },
+    { key: 'ErrorPct',    label: 'Absolute Error (%)' },
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(rows, {
@@ -1046,16 +1807,521 @@ async function exportForecastActual({ startTs, endTs, format, resolution }) {
   });
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
-  const fileBase = exportFileBase(s, e, 'all', `Day-Ahead vs Actual ${resLabel}`);
-  return await writeExport(headers, finalRows, dir, fileBase, format);
+  const averageResolutionCode = `PT${Math.max(5, Number(spec.minutes || 5))}M`;
+  const sourceTag = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
+  const fileBase = exportDateAwareFileBase(
+    s,
+    e,
+    'all',
+    useAverageTable
+      ? `${sourceTag} ${averageResolutionCode} AvgTable 05-18`
+      : `${sourceTag} vs Actual ${resLabel}`,
+  );
+  if (useAverageTable) {
+    return writeDayAheadAverageTableXlsx({
+      startTs: s,
+      endTs: e,
+      resolution: averageResolutionCode,
+      fileBase,
+      dayAheadRawRows: dayAheadRaw,
+      isSolcast,
+    });
+  }
+  return await writeExport(headers, finalRows, dir, fileBase, format, {
+    summaryHeaders,
+    summaryRows,
+    summarySheetName: 'Summary',
+    dataSheetName: 'Intervals',
+  });
+}
+
+function parseIsoDayStart(day) {
+  const s = String(day || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return 0;
+  return new Date(`${s}T00:00:00`).getTime();
+}
+
+const SOLCAST_PREVIEW_RESOLUTIONS = new Set(['PT5M', 'PT10M', 'PT15M', 'PT30M', 'PT60M']);
+const SOLCAST_AVERAGE_TABLE_MINUTES = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+
+function normalizeSolcastPreviewResolution(value) {
+  const raw = String(value || 'PT5M')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+  return SOLCAST_PREVIEW_RESOLUTIONS.has(raw) ? raw : 'PT5M';
+}
+
+function getSolcastPreviewBucketMinutes(resolution) {
+  const normalized = normalizeSolcastPreviewResolution(resolution);
+  const minutes = Number.parseInt(
+    normalized.replace(/^PT/i, '').replace(/M$/i, ''),
+    10,
+  );
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+}
+
+function normalizeSolcastPreviewExportFormat(value) {
+  const raw = String(value || 'standard')
+    .trim()
+    .toLowerCase();
+  return raw === 'average-table' ? 'average-table' : 'standard';
+}
+
+function roundSolcastExportNumber(value, digits = 6) {
+  const num = Number(value);
+  return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
+}
+
+function buildSolcastPreviewStandardRows(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  return safeRows.map((row) => ({
+    Date: String(row?.date || '').trim(),
+    Time: String(row?.time || '').trim(),
+    Period: String(row?.period || 'PT5M').trim() || 'PT5M',
+    ForecastMW:
+      row?.forecastMw == null || row?.forecastMw === ''
+        ? ''
+        : Number(row.forecastMw).toFixed(6),
+    ForecastLowMW:
+      row?.forecastLoMw == null || row?.forecastLoMw === ''
+        ? ''
+        : Number(row.forecastLoMw).toFixed(6),
+    ForecastHighMW:
+      row?.forecastHiMw == null || row?.forecastHiMw === ''
+        ? ''
+        : Number(row.forecastHiMw).toFixed(6),
+    EstimatedActualMW:
+      row?.actualMw == null || row?.actualMw === ''
+        ? ''
+        : Number(row.actualMw).toFixed(6),
+    ForecastMWh:
+      row?.forecastMwh == null || row?.forecastMwh === ''
+        ? ''
+        : Number(row.forecastMwh).toFixed(6),
+    ForecastLowMWh:
+      row?.forecastLoMwh == null || row?.forecastLoMwh === ''
+        ? ''
+        : Number(row.forecastLoMwh).toFixed(6),
+    ForecastHighMWh:
+      row?.forecastHiMwh == null || row?.forecastHiMwh === ''
+        ? ''
+        : Number(row.forecastHiMwh).toFixed(6),
+    EstimatedActualMWh:
+      row?.actualMwh == null || row?.actualMwh === ''
+        ? ''
+        : Number(row.actualMwh).toFixed(6),
+  }));
+}
+
+function buildSolcastPreviewFileBase(startDay, endDay, resolution, exportFormat) {
+  const s = parseIsoDayStart(startDay) || Date.now();
+  const e = parseIsoDayStart(endDay || startDay) || s;
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  const suffix =
+    normalizedExportFormat === 'average-table'
+      ? `Solcast Toolkit ${normalizedResolution} AvgTable 05-18`
+      : `Solcast Toolkit ${normalizedResolution} 05-18`;
+  return exportDateAwareFileBase(s, e, 'all', suffix);
+}
+
+function buildSolcastAverageTableBuckets(values, bucketMinutes) {
+  const span = Math.max(1, Math.floor(bucketMinutes / 5));
+  const ordered = SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) => values.get(minute));
+  const buckets = [];
+  for (let i = 0; i < ordered.length; i += span) {
+    const slice = ordered
+      .slice(i, i + span)
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+    if (!slice.length) continue;
+    const avg = slice.reduce((sum, value) => sum + value, 0) / slice.length;
+    buckets.push(avg);
+  }
+  if (!buckets.length) return null;
+  return roundSolcastExportNumber(
+    buckets.reduce((sum, value) => sum + value, 0) / buckets.length,
+  );
+}
+
+function buildSolcastAverageTableDays(rawRows, resolution) {
+  const bucketMinutes = getSolcastPreviewBucketMinutes(resolution);
+  const grouped = new Map();
+  for (const row of Array.isArray(rawRows) ? rawRows : []) {
+    const day = String(row?.date || '').trim();
+    const time = String(row?.time || '').trim();
+    const match = /^(\d{2}):(\d{2})$/.exec(time);
+    if (!day || !match) continue;
+    const hour = Number(match[1] || 0);
+    const minuteRaw = Number(match[2] || 0);
+    const hourLabel = hour === 0 ? 24 : hour;
+    const minuteLabel = minuteRaw === 0 ? 60 : minuteRaw;
+    if (!SOLCAST_AVERAGE_TABLE_MINUTES.includes(minuteLabel)) continue;
+    let dayEntry = grouped.get(day);
+    if (!dayEntry) {
+      dayEntry = {
+        day,
+        hours: Array.from({ length: 24 }, (_, idx) => ({
+          hour: idx + 1,
+          values: new Map(),
+        })),
+        totalMwh: 0,
+      };
+      grouped.set(day, dayEntry);
+    }
+    const hourEntry = dayEntry.hours[hourLabel - 1];
+    const forecastMw = roundSolcastExportNumber(row?.forecastMw);
+    if (forecastMw != null) {
+      hourEntry.values.set(minuteLabel, forecastMw);
+    }
+    const forecastMwh = Number(row?.forecastMwh);
+    if (Number.isFinite(forecastMwh)) {
+      dayEntry.totalMwh += forecastMwh;
+    }
+  }
+
+  return Array.from(grouped.values())
+    .sort((a, b) => a.day.localeCompare(b.day))
+    .map((entry) => ({
+      day: entry.day,
+      totalMwh: roundSolcastExportNumber(entry.totalMwh),
+      rows: entry.hours.map((hourEntry) => ({
+        hour: hourEntry.hour,
+        values: SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) =>
+          hourEntry.values.has(minute) ? hourEntry.values.get(minute) : null,
+        ),
+        average: buildSolcastAverageTableBuckets(hourEntry.values, bucketMinutes),
+      })),
+    }));
+}
+
+const AVERAGE_TABLE_HEADER_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFF4B183' },
+};
+const AVERAGE_TABLE_SUB_HEADER_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFCE4D6' },
+};
+const AVERAGE_TABLE_TOTAL_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFEB84' },
+};
+const AVERAGE_TABLE_SIDE_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFDEBD3' },
+};
+const AVERAGE_TABLE_ALT_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFFAF2' },
+};
+const AVERAGE_TABLE_AVG_FILL = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FFFFF1DF' },
+};
+const AVERAGE_TABLE_BORDER = {
+  top: { style: 'thin', color: { argb: 'FF808080' } },
+  left: { style: 'thin', color: { argb: 'FF808080' } },
+  bottom: { style: 'thin', color: { argb: 'FF808080' } },
+  right: { style: 'thin', color: { argb: 'FF808080' } },
+};
+
+function createAverageTableDayEntry(dayLabel = '') {
+  return {
+    day: String(dayLabel || fmtDate(Date.now())).trim(),
+    rows: Array.from({ length: 24 }, (_, idx) => ({
+      hour: idx + 1,
+      values: Array(12).fill(null),
+      average: null,
+    })),
+    totalMwh: 0,
+  };
+}
+
+function averageTableRowHasNonZeroValue(row) {
+  const values = Array.isArray(row?.values) ? row.values : [];
+  for (const value of values) {
+    const num = Number(value);
+    if (Number.isFinite(num) && Math.abs(num) > 1e-12) return true;
+  }
+  const avg = Number(row?.average);
+  return Number.isFinite(avg) && Math.abs(avg) > 1e-12;
+}
+
+function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
+  const resolvedDayEntry =
+    dayEntry && Array.isArray(dayEntry?.rows)
+      ? dayEntry
+      : createAverageTableDayEntry(options?.dayLabel || '');
+  const dayLabel = String(options?.dayLabel || resolvedDayEntry.day || '').trim();
+  const sheetName = String(options?.sheetName || dayLabel || 'Average Table').slice(0, 31);
+  const averageLabel = String(options?.averageLabel || 'Average').trim() || 'Average';
+  const totalLabel = String(options?.totalLabel || 'TOTAL (MWh)').trim() || 'TOTAL (MWh)';
+
+  const ws = wb.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
+  });
+  ws.columns = [
+    { width: 10 },
+    ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: 11 })),
+    { width: 18 },
+  ];
+  ws.properties.defaultRowHeight = 20;
+  ws.getRow(1).height = 24;
+  ws.getRow(2).height = 21;
+
+  ws.mergeCells(1, 1, 2, 1);
+  ws.getCell(1, 1).value = 'HOURS';
+  ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 1).font = { bold: true };
+  ws.getCell(1, 1).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 1).border = AVERAGE_TABLE_BORDER;
+
+  ws.mergeCells(1, 2, 1, 13);
+  ws.getCell(1, 2).value = dayLabel;
+  ws.getCell(1, 2).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 2).font = { bold: true };
+  ws.getCell(1, 2).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 2).border = AVERAGE_TABLE_BORDER;
+
+  ws.mergeCells(1, 14, 2, 14);
+  ws.getCell(1, 14).value = averageLabel;
+  ws.getCell(1, 14).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  ws.getCell(1, 14).font = { bold: true };
+  ws.getCell(1, 14).fill = AVERAGE_TABLE_HEADER_FILL;
+  ws.getCell(1, 14).border = AVERAGE_TABLE_BORDER;
+
+  SOLCAST_AVERAGE_TABLE_MINUTES.forEach((minute, idx) => {
+    const cell = ws.getCell(2, idx + 2);
+    cell.value = minute;
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    cell.font = { bold: true };
+    cell.fill = AVERAGE_TABLE_SUB_HEADER_FILL;
+    cell.border = AVERAGE_TABLE_BORDER;
+  });
+
+  const lastNonZeroRowIndex = resolvedDayEntry.rows.reduce(
+    (lastIdx, row, idx) => (averageTableRowHasNonZeroValue(row) ? idx : lastIdx),
+    -1,
+  );
+  const renderedRows =
+    lastNonZeroRowIndex >= 0
+      ? resolvedDayEntry.rows.slice(0, lastNonZeroRowIndex + 1)
+      : [];
+
+  renderedRows.forEach((row, idx) => {
+    const rowIndex = idx + 3;
+    const hourCell = ws.getCell(rowIndex, 1);
+    hourCell.value = row.hour;
+    hourCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    hourCell.border = AVERAGE_TABLE_BORDER;
+    hourCell.fill = AVERAGE_TABLE_SIDE_FILL;
+    const rowStripeFill = idx % 2 === 1 ? AVERAGE_TABLE_ALT_FILL : null;
+    row.values.forEach((value, valueIdx) => {
+      const cell = ws.getCell(rowIndex, valueIdx + 2);
+      cell.value = value == null ? '' : value;
+      cell.numFmt = value == null ? 'General' : '0.000000';
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.border = AVERAGE_TABLE_BORDER;
+      if (rowStripeFill) cell.fill = rowStripeFill;
+    });
+    const avgCell = ws.getCell(rowIndex, 14);
+    avgCell.value = row.average == null ? '' : row.average;
+    avgCell.numFmt = row.average == null ? 'General' : '0.000000';
+    avgCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    avgCell.border = AVERAGE_TABLE_BORDER;
+    avgCell.fill = AVERAGE_TABLE_AVG_FILL;
+  });
+
+  const totalRowIndex = renderedRows.length + 4;
+  ws.getRow(totalRowIndex).height = 22;
+  ws.mergeCells(totalRowIndex, 1, totalRowIndex, 13);
+  const totalLabelCell = ws.getCell(totalRowIndex, 1);
+  totalLabelCell.value = totalLabel;
+  totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  totalLabelCell.font = { bold: true };
+  totalLabelCell.fill = AVERAGE_TABLE_TOTAL_FILL;
+  totalLabelCell.border = AVERAGE_TABLE_BORDER;
+
+  const totalValueCell = ws.getCell(totalRowIndex, 14);
+  totalValueCell.value = resolvedDayEntry.totalMwh == null ? 0 : resolvedDayEntry.totalMwh;
+  totalValueCell.numFmt = '0.000000';
+  totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  totalValueCell.font = { bold: true };
+  totalValueCell.fill = AVERAGE_TABLE_TOTAL_FILL;
+  totalValueCell.border = AVERAGE_TABLE_BORDER;
+}
+
+function buildForecastActualAverageTableRows(rawRows) {
+  const dedupedRows = aggregateKwhByResolution(
+    Array.isArray(rawRows) ? rawRows : [],
+    { minutes: 5, mode: 'interval' },
+  );
+  return dedupedRows
+    .map((row) => {
+      const ts = Number(row?.ts || 0);
+      const kwh = Math.max(0, safeNum(row?.kwh_inc));
+      if (!(ts > 0) || !isWithinSolarWindowTs(ts)) return null;
+      return {
+        date: fmtDate(ts),
+        time: fmtTime(ts).slice(0, 5),
+        forecastMw: roundSolcastExportNumber((kwh * 12) / 1000),
+        forecastMwh: roundSolcastExportNumber(kwh / 1000),
+      };
+    })
+    .filter(Boolean);
+}
+
+async function writeSolcastAverageTableXlsx(rawRows, startDay, endDay, resolution, exportFormat) {
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const days = buildSolcastAverageTableDays(rawRows, normalizedResolution);
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
+  const fileBase = buildSolcastPreviewFileBase(
+    startDay,
+    endDay,
+    normalizedResolution,
+    exportFormat,
+  );
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const wb = new ExcelJS.Workbook();
+  setWorkbookMetadata(wb, 'Solcast Average Table Export');
+
+  for (const dayEntry of days.length ? days : [createAverageTableDayEntry(startDay || fmtDate(Date.now()))]) {
+    renderAverageTableDayWorksheet(wb, dayEntry, {
+      sheetName: String(dayEntry.day || 'Solcast').slice(0, 31),
+      dayLabel: String(dayEntry.day || '').trim(),
+      averageLabel: `${normalizedResolution} Average`,
+      totalLabel: 'GENERATION FORECAST (MWh)',
+    });
+  }
+
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
+}
+
+async function writeDayAheadAverageTableXlsx({
+  startTs,
+  endTs,
+  resolution,
+  fileBase,
+  dayAheadRawRows,
+  isSolcast,
+}) {
+  const startDay = fmtDate(startTs || Date.now());
+  const endDay = fmtDate(endTs || startTs || Date.now());
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const dayAheadDays = buildSolcastAverageTableDays(
+    buildForecastActualAverageTableRows(dayAheadRawRows),
+    normalizedResolution,
+  );
+  const dayAheadDayMap = new Map(dayAheadDays.map((entry) => [String(entry.day || '').trim(), entry]));
+  const allDays = Array.from(
+    new Set([
+      ...dayAheadDayMap.keys(),
+      ...iterateLocalDates(startTs, endTs),
+    ]),
+  )
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  const subFolder = isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics;
+  const dir = resolveForecastExportDir(subFolder);
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const metaLabel = isSolcast ? 'Solcast Day-Ahead Average Table Export' : 'Trained Day-Ahead Average Table Export';
+  const wb = new ExcelJS.Workbook();
+  setWorkbookMetadata(wb, metaLabel);
+
+  for (const day of allDays.length ? allDays : [startDay || endDay || fmtDate(Date.now())]) {
+    const dayAheadEntry = dayAheadDayMap.get(day) || createAverageTableDayEntry(day);
+    renderAverageTableDayWorksheet(wb, dayAheadEntry, {
+      sheetName: day,
+      dayLabel: day,
+      averageLabel: `${normalizedResolution} Average`,
+      totalLabel: 'GENERATION FORECAST (MWh)',
+    });
+  }
+
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
+}
+
+async function exportSolcastPreview({
+  rawRows,
+  rows,
+  startDay,
+  endDay,
+  resolution,
+  exportFormat,
+  format,
+}) {
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
+  const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
+  const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  if (normalizedExportFormat === 'average-table') {
+    return writeSolcastAverageTableXlsx(
+      Array.isArray(rawRows) && rawRows.length ? rawRows : rows,
+      startDay,
+      endDay,
+      normalizedResolution,
+      normalizedExportFormat,
+    );
+  }
+
+  const mapped = buildSolcastPreviewStandardRows(rows);
+
+  const headers = [
+    { key: 'Date', label: 'Date' },
+    { key: 'Time', label: 'Time' },
+    { key: 'Period', label: 'Period' },
+    { key: 'ForecastMW', label: 'Forecast (MW)' },
+    { key: 'ForecastLowMW', label: 'Forecast Low (MW)' },
+    { key: 'ForecastHighMW', label: 'Forecast High (MW)' },
+    { key: 'EstimatedActualMW', label: 'Estimated Actual (MW)' },
+    { key: 'ForecastMWh', label: 'Forecast (MWh)' },
+    { key: 'ForecastLowMWh', label: 'Forecast Low (MWh)' },
+    { key: 'ForecastHighMWh', label: 'Forecast High (MWh)' },
+    { key: 'EstimatedActualMWh', label: 'Estimated Actual (MWh)' },
+  ];
+  const headerKeys = headers.map((h) => h.key);
+  const sortedRows = sortRowsDateInverterTime(mapped, {
+    dateKey: 'Date',
+    inverterKey: 'Period',
+    timeKey: 'Time',
+  });
+  const finalRows = insertBlankRowsByGroup(sortedRows, {
+    groupKeys: ['Date'],
+    headerKeys,
+  });
+
+  const fileBase = buildSolcastPreviewFileBase(
+    startDay,
+    endDay,
+    normalizedResolution,
+    normalizedExportFormat,
+  );
+  return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
 
 module.exports = {
   exportAlarms,
   exportEnergy,
+  buildEnergySummaryExportRows,
+  buildForecastActualAverageTableRows,
+  buildSolcastAverageTableDays,
+  rewriteForecastExportRelativePath,
+  ensureForecastExportSubfolder,
+  writeEnergySummaryExport,
   exportInverterData,
   export5min,
   exportAudit,
   exportDailyReport,
   exportForecastActual,
+  exportSolcastPreview,
 };

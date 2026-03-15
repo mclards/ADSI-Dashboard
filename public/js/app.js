@@ -1,6 +1,6 @@
 ﻿"use strict";
 /* ═══════════════════════════════════════════════════════════════════════
-   Inverter Dashboard v2.2 — Main Application
+   Dashboard V2 — Main Application
    WebSocket-driven, real-time inverter monitoring & control
    Designed & Developed by Engr. Clariden Montaño REE (Engr. M.)
    © 2026 Engr. Clariden Montaño REE. All rights reserved.
@@ -18,10 +18,20 @@ function createXferSlot(dir) {
     chunkDone: 0,
     totalRows: 0,
     importedRows: 0,
+    priorityMode: false,
+    livePaused: false,
+    stage: "",
+    note: "",
+    rateBps: 0,
+    peakBps: 0,
+    lastSampleBytes: 0,
+    lastSampleTs: 0,
     hideTimer: null,
     updatedAt: 0,
   };
 }
+
+const REPLICATION_INCLUDE_ARCHIVE_PREF_KEY = "replicationIncludeArchiveNext";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
@@ -37,26 +47,48 @@ const State = {
     tailscaleDeviceHint: "",
     inverterCount: 27,
     nodeCount: 4,
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     csvSavePath: "C:\\Logs\\InverterDashboard",
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: "toolkit",
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: "PT5M",
     solcastTimezone: "Asia/Manila",
+    plantCapUpperMw: null,
+    plantCapLowerMw: null,
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustom: [],
+    plantCapCooldownSec: 30,
     invGridLayout: "4",
     exportUiState: {},
   },
+  plantCap: {
+    status: null,
+    preview: null,
+  },
+  plantCapPanelCollapsed: true,
   todayKwh: {}, // key: inverter → kWh today
   alarmFilter: "all",
   ws: null,
   wsConnecting: false,
+  wsReconnectTimer: null,
   charts: {},
   currentPage: "inverters",
   wsRetries: 0,
   invLastFresh: {}, // key: inverter -> last fresh timestamp
   analyticsReqId: 0,
+  alarmReqId: 0,
+  energyReqId: 0,
+  auditReqId: 0,
+  reportReqId: 0,
+  forecastExportFormat: "standard",
   analyticsRealtimeTimer: null,
   analyticsFetchTimer: null,
   analyticsFetchInFlight: false,
@@ -64,22 +96,32 @@ const State = {
   analyticsDayAheadBaseRows: [],
   analyticsIntervalMin: 5,
   analyticsDailyTotalMwh: null,
+  analyticsActualSummarySyncAt: 0,
+  analyticsActualSummarySyncDay: "",
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
+  analyticsRenderTimer: null,
+  analyticsRenderToken: 0,
   // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
   analyticsDayAheadCache: null,  // { src, intervalMin, result }
   // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
   analyticsLastPacSig: "",
   activeAlarms: {}, // key: `${inv}_${unit}` -> active alarm row
   alarmSoundTimer: null,
+  alarmSoundRecheckTimer: null,
   alarmAudioCtx: null,
   alarmSoundMuted: false,
+  alarmLiveSig: "",
+  alarmLiveSyncing: false,
+  pendingAlarmLiveSig: "",
   exportUiSaveTimer: null,
   exportBtnTimers: {},
+  exportAbortControllers: {},
   alarmView: {
     rows: [],
     page: 1,
     pageSize: 180,
+    queryKey: "",
   },
   energyView: {
     page: 1,
@@ -88,6 +130,7 @@ const State = {
     rows: [],
     summary: null,
     serverPaged: true,
+    queryKey: "",
   },
   auditView: {
     rows: [],
@@ -95,6 +138,7 @@ const State = {
     sortDir: "desc",
     page: 1,
     pageSize: 200,
+    queryKey: "",
   },
   reportView: {
     rows: [],
@@ -103,6 +147,7 @@ const State = {
     summary: null,
     page: 1,
     pageSize: 120,
+    queryKey: "",
   },
   progressUi: {
     activeCount: 0,
@@ -117,6 +162,21 @@ const State = {
     lastTotalPacW: 0,
     totalKwh: 0,
   },
+  todayEnergyByInv: {},
+  currentDaySummary: {
+    day: "",
+    asOfTs: 0,
+    totalKwh: null,
+    totalMwh: null,
+    inverterCount: 0,
+  },
+  todayMwh: {
+    wsAuthoritative: false,
+    wsLastFrameAt: 0,
+    wsLastEnergyAt: 0,
+    wsLastAdvanceAt: 0,
+    wsLastTotalKwh: null,
+  },
   netIO: {
     rxBytes: 0,        // cumulative bytes received (WS + HTTP response bodies)
     txBytes: 0,        // cumulative bytes sent (HTTP request bodies)
@@ -128,6 +188,32 @@ const State = {
     rxFlashTimer: null,
     txFlashTimer: null,
     monitorTimer: null,
+  },
+  replication: {
+    job: null,
+    scope: null,
+    restartPromptedJobId: "",
+    includeArchiveNext: false,
+  },
+  modeTransition: {
+    active: false,
+    targetMode: "",
+    startedAt: 0,
+    detail: "",
+    liveWaiters: [],
+  },
+  remoteHealth: {},
+  solcastPreview: {
+    day: "",
+    days: [],
+    dayCount: 1,
+    selectedDays: [],
+    rangeLabel: "",
+    loaded: false,
+    payload: null,
+    resolution: "PT5M",
+    unit: "mwh",
+    exportFormat: "standard",
   },
   xfer: {
     slots: {
@@ -153,6 +239,18 @@ const State = {
     checkedAt: 0,
     error: "",
   },
+  chatOpen: false,
+  chatUnread: 0,
+  chatMessages: [],
+  chatDismissTimer: null,
+  chatLastReadId: 0,
+  chatLastInboundId: 0,
+  chatPendingSend: false,
+  chatPendingClear: false,
+  chatAudioReady: false,
+  chatReadInFlight: false,
+  chatPendingReadUpToId: 0,
+  chatHistoryLoaded: false,
   clockTimer: null,
   alarmBadgeTimer: null,
   replicationHealthTimer: null,
@@ -166,11 +264,21 @@ const State = {
   tabFetchTs: {},
   // In-flight fetch guard: tab name → true while HTTP request is active.
   tabFetching: {},
+  // Tracks the calendar day when tab dates were last reset to today (YYYY-MM-DD).
+  lastDateInitDay: "",
+  // Single-inverter detail panel state.
+  invDetailInv: 0,
+  invDetailLoading: false,
+  invDetailKwh: 0,          // kWh today for selected inverter (from /api/energy/today)
+  invDetailAlarmRows: [],   // cached alarm rows for live chip refresh
+  invDetailReportRows: [],  // cached report rows for live chip refresh
+  invDetailRefreshTimer: null, // setInterval ref for periodic kWh refresh
 };
-const TAB_STALE_MS = 10000; // skip re-fetch if tab was last loaded within this window
+const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re-fetch after that
 const MAX_INV_UNITS = 4;
 const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
 const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
+const INV_DEPENDABLE_KW = 917;
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
@@ -178,15 +286,23 @@ const TABLE_FILTER_DEBOUNCE_MS = 140;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
+const ANALYTICS_CHART_RENDER_BATCH = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
+const TODAY_MWH_WS_FRAME_STALE_MS = 15000;
+const TODAY_MWH_WS_ENERGY_STALE_MS = 15000;
+const TODAY_MWH_WS_NO_ADVANCE_MS = 30000;
+const TODAY_MWH_WS_ADVANCE_MIN_PAC_W = 20000;
+const ACTUAL_MWH_HTTP_SYNC_INTERVAL_MS = 5000;
+const ALARM_SOUND_MIN_ACTIVE_MS = 5000;
+const CHAT_THREAD_LIMIT = 20;
+const CHAT_DISMISS_MS = 30000;
 const SETTINGS_SECTION_IDS = [
   "plantConfigSection",
   "opsCompactSection",
   "connectivitySection",
-  "forecastSection",
   "licenseSection",
   "appUpdateSection",
   "cloudBackupSection",
@@ -195,31 +311,27 @@ const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const SETTINGS_SECTION_META = {
   plantConfigSection: {
     title: "Plant Configuration",
-    copy: "Configure the plant identity, scale, and core operating values for this dashboard.",
+    copy: "Review site identity, fleet sizing, and the core values used across the dashboard.",
   },
   opsCompactSection: {
     title: "Data & Polling",
-    copy: "Review data endpoints, export storage, and Modbus polling timing in one place.",
+    copy: "Review operational endpoints, export storage, and polling timing from one controlled section.",
   },
   connectivitySection: {
-    title: "Connectivity & Sync",
-    copy: "Choose gateway or remote mode, then manage replication and runtime diagnostics.",
-  },
-  forecastSection: {
-    title: "Forecast",
-    copy: "Manage forecast provider settings and test the configured integration.",
+    title: "Connectivity & Gateway Link",
+    copy: "Define gateway or remote operation, then review gateway link status and runtime health.",
   },
   licenseSection: {
     title: "License",
-    copy: "Review license validity, expiry, and audit history, then replace the active license if needed.",
+    copy: "Review entitlement state, remaining term, and license activity, then replace the current file when needed.",
   },
   appUpdateSection: {
     title: "App Updates",
-    copy: "Check the installed version, compare release status, and run update actions from here.",
+    copy: "Review the installed build, compare it with the release channel, and run update actions from here.",
   },
   cloudBackupSection: {
     title: "Cloud Backup",
-    copy: "Configure providers, backup scope, restore actions, and cloud backup history.",
+    copy: "Configure approved providers, backup scope, restore actions, and backup history.",
   },
 };
 const SETTINGS_CONFIG_KIND = "adsi-settings-config";
@@ -289,6 +401,73 @@ const fmtTime = (ts) => {
   const d = new Date(ts);
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 };
+const SOLCAST_PREVIEW_RESOLUTIONS = ["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"];
+
+function normalizeSolcastPreviewResolutionClient(value) {
+  const raw = String(value || "PT5M")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  return SOLCAST_PREVIEW_RESOLUTIONS.includes(raw) ? raw : "PT5M";
+}
+
+function getSolcastPreviewBucketMinutesClient(value) {
+  const resolution = normalizeSolcastPreviewResolutionClient(value);
+  const minutes = Number.parseInt(resolution.replace(/^PT/i, "").replace(/M$/i, ""), 10);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+}
+
+function normalizeSolcastPreviewExportFormatClient(value) {
+  const raw = String(value || "standard")
+    .trim()
+    .toLowerCase();
+  return raw === "average-table" ? "average-table" : "standard";
+}
+
+function getSelectedSolcastPreviewResolution() {
+  return normalizeSolcastPreviewResolutionClient(
+    $("solcastPreviewResolution")?.value || State.solcastPreview.resolution || "PT5M",
+  );
+}
+
+function getSharedForecastExportFormat() {
+  return normalizeSolcastPreviewExportFormatClient(
+    State.forecastExportFormat ||
+      State.solcastPreview.exportFormat ||
+      $("anaDayAheadExportFormat")?.value ||
+      $("expForecastExportFormat")?.value ||
+      $("solcastPreviewExportFormat")?.value ||
+      "standard",
+  );
+}
+
+function syncForecastActualFileFormatControl(exportFormat) {
+  const formatSel = $("expForecastFormat");
+  if (!formatSel) return;
+  const normalized = normalizeSolcastPreviewExportFormatClient(exportFormat);
+  const forceXlsx = normalized === "average-table";
+  if (forceXlsx) {
+    formatSel.value = "xlsx";
+  }
+  formatSel.disabled = forceXlsx;
+}
+
+function syncSharedForecastExportFormatControls(value) {
+  const normalized = normalizeSolcastPreviewExportFormatClient(value);
+  State.forecastExportFormat = normalized;
+  State.solcastPreview.exportFormat = normalized;
+  ["solcastPreviewExportFormat", "anaDayAheadExportFormat", "expForecastExportFormat"].forEach((id) => {
+    const input = $(id);
+    if (!input || input.value === normalized) return;
+    input.value = normalized;
+  });
+  syncForecastActualFileFormatControl(normalized);
+  return normalized;
+}
+
+function getSelectedSolcastPreviewExportFormat() {
+  return getSharedForecastExportFormat();
+}
 
 function normalizeInvGridLayout(value) {
   const v = String(value || "")
@@ -320,6 +499,342 @@ function applyInverterGridLayout(layout) {
   return normalized;
 }
 
+function parseOptionalNumberInputValue(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizePlantCapSequenceModeClient(value) {
+  const mode = String(value || "ascending")
+    .trim()
+    .toLowerCase();
+  if (mode === "custom") return "exemption";
+  if (mode === "descending" || mode === "exemption") return mode;
+  return "ascending";
+}
+
+function parsePlantCapSequenceInputClient(raw, maxInverter = 27) {
+  const text = String(raw ?? "").trim();
+  if (!text) return { ok: true, values: [], error: "" };
+  const tokens = text.split(/[,\s]+/g).filter(Boolean);
+  const values = [];
+  const seen = new Set();
+  const invalid = [];
+  tokens.forEach((token) => {
+    const inv = Number(token);
+    if (
+      !Number.isInteger(inv) ||
+      inv < 1 ||
+      inv > maxInverter ||
+      seen.has(inv)
+    ) {
+      invalid.push(token);
+      return;
+    }
+    seen.add(inv);
+    values.push(inv);
+  });
+  if (invalid.length) {
+    return {
+      ok: false,
+      values: [],
+      error: `Exempted inverter numbers must be a comma-separated list of unique inverter numbers from 1-${maxInverter}. Invalid item(s): ${invalid.join(", ")}.`,
+    };
+  }
+  return { ok: true, values, error: "" };
+}
+
+function formatPlantCapSequenceInputClient(valuesRaw) {
+  const values = Array.isArray(valuesRaw) ? valuesRaw : [];
+  return values
+    .map((item) => Number(item))
+    .filter((item) => Number.isInteger(item) && item > 0)
+    .join(", ");
+}
+
+function getStoredPlantCapPanelCollapsed() {
+  return true;
+}
+
+function syncPlantCapPanelCollapsedUi() {
+  const inverterPage = $("page-inverters");
+  const panel = $("plantCapPanel");
+  const toolbarToggle = $("btnPlantCapToolbarToggle");
+  const collapsed = Boolean(State.plantCapPanelCollapsed);
+  if (inverterPage) {
+    inverterPage.classList.toggle("plant-cap-panel-collapsed", collapsed);
+  }
+  if (panel) {
+    panel.classList.toggle("is-collapsed", collapsed);
+    panel.classList.toggle("is-hidden", collapsed);
+    panel.hidden = collapsed;
+    panel.style.display = collapsed ? "none" : "";
+    panel.setAttribute("aria-hidden", collapsed ? "true" : "false");
+  }
+  if (toolbarToggle) {
+    // Plant cap remains available in Remote mode via gateway proxy, so the
+    // toolbar toggle must always stay usable even if broader control sweeps
+    // temporarily disable nearby buttons.
+    toolbarToggle.disabled = false;
+    toolbarToggle.removeAttribute("disabled");
+    toolbarToggle.setAttribute("aria-disabled", "false");
+    toolbarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    toolbarToggle.textContent = collapsed ? "Show Cap" : "Hide Cap";
+    toolbarToggle.title = collapsed
+      ? "Show plant output cap panel"
+      : "Hide plant output cap panel";
+  }
+}
+
+function setPlantCapPanelCollapsed(collapsed) {
+  State.plantCapPanelCollapsed = !!collapsed;
+  syncPlantCapPanelCollapsedUi();
+}
+
+function togglePlantCapPanelCollapsed() {
+  setPlantCapPanelCollapsed(!State.plantCapPanelCollapsed);
+}
+
+function getPlantCapFieldIds(context = "live") {
+  if (context === "settings") {
+    return {
+      upper: "setPlantCapUpperMw",
+      lower: "setPlantCapLowerMw",
+      sequenceMode: "setPlantCapSequenceMode",
+      sequenceCustom: "setPlantCapSequenceCustom",
+      sequenceCustomWrap: "setPlantCapSequenceCustomWrap",
+      cooldown: "setPlantCapCooldownSec",
+      warnings: "setPlantCapClientWarnings",
+    };
+  }
+  return {
+    upper: "plantCapUpperMw",
+    lower: "plantCapLowerMw",
+    sequenceMode: "plantCapSequenceMode",
+    sequenceCustom: "plantCapSequenceCustom",
+    sequenceCustomWrap: "plantCapSequenceCustomWrap",
+    cooldown: "plantCapCooldownSec",
+    warnings: "plantCapClientWarnings",
+  };
+}
+
+function getPlantCapFormElements(context = "live") {
+  const ids = getPlantCapFieldIds(context);
+  return {
+    upper: $(ids.upper),
+    lower: $(ids.lower),
+    sequenceMode: $(ids.sequenceMode),
+    sequenceCustom: $(ids.sequenceCustom),
+    sequenceCustomWrap: $(ids.sequenceCustomWrap),
+    cooldown: $(ids.cooldown),
+    warnings: $(ids.warnings),
+  };
+}
+
+function readPlantCapFormRawValues(context = "live") {
+  const els = getPlantCapFormElements(context);
+  return {
+    upper: String(els.upper?.value ?? ""),
+    lower: String(els.lower?.value ?? ""),
+    sequenceMode: normalizePlantCapSequenceModeClient(
+      els.sequenceMode?.value || "ascending",
+    ),
+    sequenceCustom: String(els.sequenceCustom?.value ?? ""),
+    cooldown: String(els.cooldown?.value ?? ""),
+  };
+}
+
+function applyPlantCapFormRawValues(
+  values,
+  contexts = ["live", "settings"],
+  options = {},
+) {
+  const skipContext = String(options.skipContext || "").trim().toLowerCase();
+  const payload = values && typeof values === "object" ? values : {};
+  contexts.forEach((contextRaw) => {
+    const context = String(contextRaw || "").trim().toLowerCase();
+    if (!context || context === skipContext) return;
+    const els = getPlantCapFormElements(context);
+    if (els.upper && Object.prototype.hasOwnProperty.call(payload, "upper")) {
+      els.upper.value = String(payload.upper ?? "");
+    }
+    if (els.lower && Object.prototype.hasOwnProperty.call(payload, "lower")) {
+      els.lower.value = String(payload.lower ?? "");
+    }
+    if (
+      els.sequenceMode &&
+      Object.prototype.hasOwnProperty.call(payload, "sequenceMode")
+    ) {
+      els.sequenceMode.value = normalizePlantCapSequenceModeClient(
+        payload.sequenceMode,
+      );
+    }
+    if (
+      els.sequenceCustom &&
+      Object.prototype.hasOwnProperty.call(payload, "sequenceCustom")
+    ) {
+      els.sequenceCustom.value = String(payload.sequenceCustom ?? "");
+    }
+    if (
+      els.cooldown &&
+      Object.prototype.hasOwnProperty.call(payload, "cooldown")
+    ) {
+      els.cooldown.value = String(payload.cooldown ?? "");
+    }
+  });
+  syncPlantCapSequenceVisibility();
+  renderPlantCapClientWarnings();
+}
+
+function readPlantCapRequestValues(context = "live") {
+  const raw = readPlantCapFormRawValues(context);
+  const maxInverter = Number(State.settings.inverterCount || 27);
+  const sequenceMode = normalizePlantCapSequenceModeClient(raw.sequenceMode);
+  const sequenceParsed = parsePlantCapSequenceInputClient(
+    raw.sequenceCustom,
+    maxInverter,
+  );
+  const upperMw = parseOptionalNumberInputValue(raw.upper);
+  const lowerMw = parseOptionalNumberInputValue(raw.lower);
+  const cooldownRaw = parseOptionalNumberInputValue(raw.cooldown);
+  const cooldownSec =
+    cooldownRaw == null ? Number(State.settings.plantCapCooldownSec || 30) : cooldownRaw;
+  return {
+    upperMw,
+    lowerMw,
+    sequenceMode,
+    sequenceCustom: sequenceParsed.values,
+    sequenceCustomText: raw.sequenceCustom,
+    sequenceError: sequenceMode === "exemption" ? sequenceParsed.error : "",
+    cooldownSec: Math.max(5, Math.min(600, Number(cooldownSec || 30))),
+  };
+}
+
+function getClientPlantCapStepMetrics(context = "live", valuesOverride = null) {
+  const invCount = Number(State.settings.inverterCount || 27);
+  const nodeCount = Number(State.settings.nodeCount || 4);
+  const values =
+    valuesOverride && typeof valuesOverride === "object"
+      ? valuesOverride
+      : readPlantCapRequestValues(context);
+  const exempted = new Set(
+    values.sequenceMode === "exemption" ? values.sequenceCustom || [] : [],
+  );
+  const stepsKw = [];
+  const nodeShapes = new Set();
+  for (let inv = 1; inv <= invCount; inv += 1) {
+    if (exempted.has(inv)) continue;
+    const ip = String(
+      State.ipConfig?.inverters?.[inv] ??
+        State.ipConfig?.inverters?.[String(inv)] ??
+        "",
+    ).trim();
+    const configuredUnits = getConfiguredUnits(inv, nodeCount);
+    if (!ip || !configuredUnits.length) continue;
+    const dependableKw = (INV_DEPENDABLE_KW * configuredUnits.length) / MAX_INV_UNITS;
+    stepsKw.push(dependableKw);
+    nodeShapes.add(configuredUnits.length);
+  }
+  const smallestConfiguredStepKw = stepsKw.length ? Math.min(...stepsKw) : null;
+  return {
+    smallestConfiguredStepKw,
+    smallestConfiguredStepMw:
+      smallestConfiguredStepKw != null
+        ? smallestConfiguredStepKw / 1000
+        : null,
+    partialNodeFleet: nodeShapes.size > 1,
+    controllableInverterCount: stepsKw.length,
+  };
+}
+
+function buildPlantCapClientWarningMessages(context = "live") {
+  const values = readPlantCapRequestValues(context);
+  const warnings = [];
+  const metrics = getClientPlantCapStepMetrics(context, values);
+  if (values.sequenceError) {
+    warnings.push(values.sequenceError);
+  }
+  if (
+    values.sequenceMode === "exemption" &&
+    values.sequenceCustom.length &&
+    metrics.controllableInverterCount === 0
+  ) {
+    warnings.push(
+      "Every controllable inverter is currently exempted, so automatic stop selection has no available target.",
+    );
+  }
+  if (values.upperMw == null || values.lowerMw == null) {
+    return warnings;
+  }
+  if (!(values.lowerMw < values.upperMw)) {
+    warnings.push("Lower limit must be less than the upper limit.");
+  }
+  const gapMw = values.upperMw - values.lowerMw;
+  if (metrics.smallestConfiguredStepMw != null) {
+    if (gapMw < metrics.smallestConfiguredStepMw * 0.5) {
+      warnings.push(
+        `Upper and Lower limits are extremely close. The smallest configured inverter step is about ${metrics.smallestConfiguredStepMw.toFixed(3)} MW, so the controller can overshoot the band or repeatedly stop/start inverters before it settles.`,
+      );
+    } else if (gapMw < metrics.smallestConfiguredStepMw) {
+      warnings.push(
+        `Upper and Lower limits are close relative to the smallest configured inverter step of about ${metrics.smallestConfiguredStepMw.toFixed(3)} MW. Increase the band gap to reduce stop/start hunting and operator confusion.`,
+      );
+    }
+  }
+  if (metrics.partialNodeFleet) {
+    warnings.push(
+      "Configured inverters have different enabled node counts, so each inverter shutdown step can remove a different amount of MW.",
+    );
+  }
+  return warnings;
+}
+
+function renderPlantCapClientWarningsForContext(context = "live") {
+  const els = getPlantCapFormElements(context);
+  if (!els.warnings) return;
+  const warnings = buildPlantCapClientWarningMessages(context);
+  if (!warnings.length) {
+    els.warnings.className = "plant-cap-inline-warnings";
+    els.warnings.textContent =
+      "Whole-inverter control uses live PAC plus node-aware dependable capacity to plan each stop/start step. Exemption mode skips the listed inverter numbers during automatic stop selection.";
+    els.warnings.title =
+      "Planner guidance for the current plant cap settings. Exemption mode keeps the listed inverter numbers out of automatic stop selection.";
+    return;
+  }
+  const critical = warnings.some((message) =>
+    /extremely close|must be less/i.test(message),
+  );
+  els.warnings.className = `plant-cap-inline-warnings ${critical ? "critical" : "warning"}`;
+  els.warnings.textContent = warnings[0];
+  els.warnings.title = warnings.join(" ");
+}
+
+function renderPlantCapClientWarnings() {
+  renderPlantCapClientWarningsForContext("live");
+  renderPlantCapClientWarningsForContext("settings");
+}
+
+function syncPlantCapSequenceVisibility() {
+  ["live", "settings"].forEach((context) => {
+    const els = getPlantCapFormElements(context);
+    if (!els.sequenceCustomWrap) return;
+    const show =
+      normalizePlantCapSequenceModeClient(els.sequenceMode?.value || "ascending") ===
+      "exemption";
+    els.sequenceCustomWrap.hidden = !show;
+  });
+}
+
+function syncPlantCapFormContext(sourceContext) {
+  const normalizedContext = String(sourceContext || "").trim().toLowerCase();
+  const raw = readPlantCapFormRawValues(normalizedContext);
+  applyPlantCapFormRawValues(raw, ["live", "settings"], {
+    skipContext: normalizedContext,
+  });
+}
+
 async function setInverterGridLayout(layout, options = {}) {
   const { persist = true, silent = false } = options;
   const normalized = applyInverterGridLayout(layout);
@@ -345,6 +860,29 @@ function fmtRemaining(msLeft) {
   return `${mins}m`;
 }
 
+function licenseStatusLabel(status) {
+  if (!status) return "Unknown";
+  if (status.valid) {
+    if (status.lifetime) return "Valid (Lifetime)";
+    if (status.nearExpiry) return "Valid (Expiring Soon)";
+    return "Valid";
+  }
+  switch (String(status.code || "").toLowerCase()) {
+    case "trial_not_started":
+      return "Trial Not Started";
+    case "trial_expired":
+      return "Expired (Trial)";
+    case "license_expired":
+      return "Expired";
+    case "device_mismatch":
+      return "Invalid (Device Mismatch)";
+    case "license_error":
+      return "License Error";
+    default:
+      return "Expired / Invalid";
+  }
+}
+
 function renderLicenseNotice(status) {
   const host = $("licenseNotice");
   const textEl = $("licenseNoticeText");
@@ -355,7 +893,7 @@ function renderLicenseNotice(status) {
     document.body.classList.remove("license-notice-open");
     return;
   }
-  const remaining = fmtRemaining(Number(status?.msLeft || 0));
+  const remaining = String(status?.remainingText || "").trim() || fmtRemaining(Number(status?.msLeft || 0));
   const sourceLabel = status?.source === "trial" ? "Trial" : "License";
   textEl.textContent = `${sourceLabel} expires in ${remaining}. Upload a new license to avoid interruption.`;
   host.classList.remove("hidden");
@@ -380,6 +918,7 @@ function bindLicenseNoticeUpload() {
       if (res.status) {
         State.licenseStatus = res.status;
         renderLicenseNotice(res.status);
+        renderLicenseSummary();
       }
     } catch (err) {
       pushToast("error", `License upload failed: ${err.message || err}`);
@@ -414,26 +953,22 @@ function renderLicenseSummary() {
   const sourceEl = $("licenseSourceText");
   const expiryEl = $("licenseExpiryText");
   const daysEl = $("licenseDaysLeftText");
+  const aboutEl = $("aboutLicenseStatus");
   if (!statusEl || !sourceEl || !expiryEl || !daysEl) return;
 
   statusEl.classList.remove("ok", "warn", "error");
+  if (aboutEl) aboutEl.className = "side-about-inline-status";
 
   if (!status) {
     statusEl.textContent = "Unknown";
     sourceEl.textContent = "—";
     expiryEl.textContent = "—";
     daysEl.textContent = "—";
+    if (aboutEl) aboutEl.textContent = "Unknown";
     return;
   }
 
-  let statusText = "Invalid";
-  if (status.valid) {
-    if (status.lifetime) statusText = "Valid (Lifetime)";
-    else if (status.nearExpiry) statusText = "Valid (Expiring Soon)";
-    else statusText = "Valid";
-  } else {
-    statusText = "Expired / Invalid";
-  }
+  const statusText = licenseStatusLabel(status);
   statusEl.textContent = statusText;
   if (status.valid && !status.nearExpiry) statusEl.classList.add("ok");
   else if (status.valid && status.nearExpiry) statusEl.classList.add("warn");
@@ -444,11 +979,22 @@ function renderLicenseSummary() {
     license: "License",
     device: "Device",
   };
-  sourceEl.textContent = sourceMap[String(status.source || "").toLowerCase()] || String(status.source || "—");
+  const sourceText =
+    sourceMap[String(status.source || "").toLowerCase()] || String(status.source || "—");
+  sourceEl.textContent = sourceText;
+  if (aboutEl) {
+    if (status.valid && !status.nearExpiry) aboutEl.classList.add("ok");
+    else if (status.valid && status.nearExpiry) aboutEl.classList.add("warn");
+    else aboutEl.classList.add("error");
+  }
 
   if (status.lifetime) {
     expiryEl.textContent = "Never (Lifetime)";
     daysEl.textContent = "∞";
+    if (aboutEl) {
+      const prefix = sourceText === "License" ? "" : `${sourceText}: `;
+      aboutEl.textContent = `${prefix}Lifetime`;
+    }
     return;
   }
 
@@ -456,12 +1002,24 @@ function renderLicenseSummary() {
   if (!Number.isFinite(exp) || exp <= 0) {
     expiryEl.textContent = "—";
     daysEl.textContent = "—";
+    if (aboutEl) aboutEl.textContent = statusText;
     return;
   }
 
   expiryEl.textContent = fmtDateTime(exp);
-  const dLeft = Math.max(0, Math.floor((exp - Date.now()) / 86400000));
+  const dLeft = Number.isFinite(Number(status.daysLeft))
+    ? Math.max(0, Number(status.daysLeft))
+    : Math.max(0, Math.ceil((exp - Date.now()) / 86400000));
   daysEl.textContent = `${dLeft}`;
+  if (aboutEl) {
+    const prefix = sourceText === "License" ? "" : `${sourceText}: `;
+    const remaining = String(status?.remainingText || "").trim() || fmtRemaining(Number(status.msLeft || 0));
+    aboutEl.textContent = status.valid
+      ? status.nearExpiry
+        ? `${prefix}Expiring in ${remaining}`
+        : `${prefix}${dLeft} day(s) left`
+      : String(status.message || statusText);
+  }
 }
 
 function renderLicenseAuditRows() {
@@ -469,7 +1027,7 @@ function renderLicenseAuditRows() {
   if (!tbody) return;
   const rows = Array.isArray(State.licenseAudit) ? State.licenseAudit : [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="table-empty"><td colspan="4">No license audit entries.</td></tr>';
+    tbody.innerHTML = '<tr class="table-empty"><td colspan="4">No license activity recorded.</td></tr>';
     return;
   }
   tbody.innerHTML = rows
@@ -692,6 +1250,24 @@ function cssVar(name, fallback = "") {
   }
 }
 
+function cssNumberVar(name, fallback = 0) {
+  const raw = parseFloat(cssVar(name, ""));
+  return Number.isFinite(raw) ? raw : fallback;
+}
+
+function getChartTypography() {
+  return {
+    tickX: cssNumberVar("--chart-font-tick-x", 8),
+    tickY: cssNumberVar("--chart-font-tick-y", 9),
+    axis: cssNumberVar("--chart-font-axis", 10),
+    legend: cssNumberVar("--chart-font-legend", 11),
+    tooltip: cssNumberVar("--chart-font-tooltip", 11),
+    legendBoxWidth: cssNumberVar("--chart-legend-box-w", 24),
+    legendBoxHeight: cssNumberVar("--chart-legend-box-h", 8),
+    legendPadding: cssNumberVar("--chart-legend-padding", 10),
+  };
+}
+
 function getChartPalette() {
   return {
     tick: cssVar("--chart-tick", "#6b82a8"),
@@ -701,6 +1277,11 @@ function getChartPalette() {
     actualFill: cssVar("--chart-actual-fill", "rgba(34,211,238,.14)"),
     ahead: cssVar("--chart-ahead", "#f59e0b"),
     aheadFill: cssVar("--chart-ahead-fill", "rgba(245,158,11,.10)"),
+    bandBorder: cssVar("--chart-band-border", "rgba(245,158,11,.36)"),
+    bandFill: cssVar("--chart-band-fill", "rgba(245,158,11,.16)"),
+    tooltipBg: cssVar("--forecast-preview-tooltip-bg", "rgba(24,28,36,.96)"),
+    tooltipBorder: cssVar("--forecast-preview-tooltip-border", "rgba(36,52,79,.84)"),
+    tooltipText: cssVar("--forecast-preview-tooltip-text", "#dce8fa"),
   };
 }
 
@@ -711,6 +1292,12 @@ function refreshChartsTheme() {
     const opts = chart.options || {};
     if (opts.plugins?.legend?.labels) {
       opts.plugins.legend.labels.color = pal.legend;
+    }
+    if (opts.plugins?.tooltip) {
+      opts.plugins.tooltip.backgroundColor = pal.tooltipBg;
+      opts.plugins.tooltip.borderColor = pal.tooltipBorder;
+      opts.plugins.tooltip.titleColor = pal.tooltipText;
+      opts.plugins.tooltip.bodyColor = pal.tooltipText;
     }
     if (opts.scales?.x?.ticks) opts.scales.x.ticks.color = pal.tick;
     if (opts.scales?.x?.grid) opts.scales.x.grid.color = pal.grid;
@@ -726,6 +1313,26 @@ function refreshChartsTheme() {
       if (chart.data.datasets[1]) {
         chart.data.datasets[1].borderColor = pal.ahead;
         chart.data.datasets[1].backgroundColor = pal.aheadFill;
+      }
+    }
+    if (key === "solcastPreview" && Array.isArray(chart.data?.datasets)) {
+      if (chart.data.datasets[0]) {
+        chart.data.datasets[0].borderColor = "rgba(0,0,0,0)";
+        chart.data.datasets[0].backgroundColor = "rgba(0,0,0,0)";
+      }
+      if (chart.data.datasets[1]) {
+        chart.data.datasets[1].borderColor = pal.bandBorder;
+        chart.data.datasets[1].backgroundColor = pal.bandFill;
+      }
+      if (chart.data.datasets[2]) {
+        chart.data.datasets[2].borderColor = pal.actual;
+        chart.data.datasets[2].backgroundColor = pal.actualFill;
+        chart.data.datasets[2].pointBackgroundColor = pal.actual;
+      }
+      if (chart.data.datasets[3]) {
+        chart.data.datasets[3].borderColor = pal.ahead;
+        chart.data.datasets[3].backgroundColor = pal.aheadFill;
+        chart.data.datasets[3].pointBackgroundColor = pal.ahead;
       }
     }
     chart.update("none");
@@ -776,19 +1383,20 @@ function initThemeToggle() {
 }
 const EXPORT_DATE_FIELD_IDS = [
   "reportDate",
-  "expAlarmStart",
-  "expAlarmEnd",
-  "expEnergyStart",
-  "expEnergyEnd",
+  "expAlarmDate",
+  "expEnergyDate",
   "expForecastDate",
-  "expInvDataStart",
-  "expInvDataEnd",
-  "expAuditStart",
-  "expAuditEnd",
+  "expInvDataDate",
+  "expAuditDate",
   "expReportStart",
   "expReportEnd",
 ];
-const EXPORT_NUM_FIELD_IDS = ["genDayCount"];
+const EXPORT_NUM_FIELD_RULES = {
+  genDayCount: { min: 1, max: 31, fallback: 1 },
+  expAlarmMinDurationSec: { min: 0, max: 86400, fallback: 0 },
+  expInvDataInterval: { min: 1, max: 60, fallback: 1 },
+};
+const EXPORT_NUM_FIELD_IDS = Object.keys(EXPORT_NUM_FIELD_RULES);
 const DATE_INPUT_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function sanitizeDateInputValue(v) {
@@ -808,6 +1416,41 @@ function localDateEndMs(dateText) {
   return new Date(`${d}T23:59:59.999`).getTime();
 }
 
+function localDateTimeMs(dateText, hour = 0, minute = 0, second = 0, ms = 0) {
+  const d = sanitizeDateInputValue(dateText);
+  if (!d) return NaN;
+  return new Date(
+    `${d}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}.${String(ms)
+      .padStart(3, "0")
+      .slice(0, 3)}`,
+  ).getTime();
+}
+
+function getAnalyticsSolarWindowBounds(dateText = "") {
+  const day = sanitizeDateInputValue(dateText) || today();
+  return {
+    startTs: localDateTimeMs(day, ANALYTICS_VIEW_START_HOUR, 0, 0, 0),
+    endTs: localDateTimeMs(
+      day,
+      ANALYTICS_VIEW_END_HOUR,
+      ANALYTICS_VIEW_END_MIN,
+      0,
+      0,
+    ),
+  };
+}
+
+function clampExportNumberValue(id, value) {
+  const rule = EXPORT_NUM_FIELD_RULES[id];
+  if (!rule) return null;
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return Number(rule.fallback || rule.min || 1);
+  return Math.min(
+    Number(rule.max || raw),
+    Math.max(Number(rule.min || raw), Math.trunc(raw)),
+  );
+}
+
 function sanitizeExportUiStateClient(input) {
   const out = {};
   const src = input && typeof input === "object" ? input : {};
@@ -815,10 +1458,21 @@ function sanitizeExportUiStateClient(input) {
     const v = sanitizeDateInputValue(src[id]);
     if (v) out[id] = v;
   });
+  const migratedSingleDateFields = {
+    expAlarmDate: ["expAlarmDate", "expAlarmStart", "expAlarmEnd"],
+    expEnergyDate: ["expEnergyDate", "expEnergyEnd", "expEnergyStart"],
+    expForecastDate: ["expForecastDate"],
+    expInvDataDate: ["expInvDataDate", "expInvDataStart", "expInvDataEnd"],
+    expAuditDate: ["expAuditDate", "expAuditStart", "expAuditEnd"],
+  };
+  Object.entries(migratedSingleDateFields).forEach(([targetId, sourceIds]) => {
+    const value = sourceIds
+      .map((id) => sanitizeDateInputValue(src[id]))
+      .find(Boolean);
+    if (value) out[targetId] = value;
+  });
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
-    const n = Number(src[id]);
-    if (!Number.isFinite(n)) return;
-    out[id] = Math.min(31, Math.max(1, Math.trunc(n)));
+    out[id] = clampExportNumberValue(id, src[id]);
   });
   return out;
 }
@@ -848,9 +1502,7 @@ function collectExportUiStateFromInputs() {
   EXPORT_NUM_FIELD_IDS.forEach((id) => {
     const input = $(id);
     if (!input) return;
-    const n = Number(input.value);
-    if (!Number.isFinite(n)) return;
-    out[id] = Math.min(31, Math.max(1, Math.trunc(n)));
+    out[id] = clampExportNumberValue(id, input.value);
   });
   return out;
 }
@@ -891,6 +1543,142 @@ function bindExportUiStatePersistence() {
     input.dataset.exportPersistBound = "1";
     input.addEventListener("change", queuePersistExportUiState);
     input.addEventListener("input", queuePersistExportUiState);
+  });
+}
+
+function normalizeExportNumberInput(id) {
+  const input = $(id);
+  if (!input) return 0;
+  const value = clampExportNumberValue(id, input.value);
+  if (value > 0) input.value = String(value);
+  return value;
+}
+
+function bindExportNumberValidators() {
+  EXPORT_NUM_FIELD_IDS.forEach((id) => {
+    const input = $(id);
+    if (!input || input.dataset.exportNumberBound === "1") return;
+    input.dataset.exportNumberBound = "1";
+    const sync = () => {
+      normalizeExportNumberInput(id);
+      queuePersistExportUiState();
+    };
+    input.addEventListener("change", sync);
+    input.addEventListener("blur", sync);
+  });
+}
+
+const EXPORT_DATE_RANGE_IDS = [
+  ["expReportStart", "expReportEnd"],
+];
+const EXPORT_SINGLE_DATE_IDS = [
+  "expAlarmDate",
+  "expEnergyDate",
+  "expInvDataDate",
+  "expAuditDate",
+];
+
+function clampExportDateToToday(value) {
+  const v = sanitizeDateInputValue(value);
+  if (!v) return "";
+  const maxDate = today();
+  return v > maxDate ? maxDate : v;
+}
+
+function normalizeExportDatePair(startId, endId, options = {}) {
+  const { forceDefault = false, preferred = "start" } = options;
+  const startInput = $(startId);
+  const endInput = $(endId);
+  if (!startInput || !endInput) return { start: "", end: "" };
+
+  const maxDate = today();
+  let startValue = clampExportDateToToday(startInput.value);
+  let endValue = clampExportDateToToday(endInput.value);
+
+  if (forceDefault && !startValue && !endValue) {
+    startValue = maxDate;
+    endValue = maxDate;
+  } else if (!startValue && endValue) {
+    startValue = endValue;
+  } else if (startValue && !endValue) {
+    endValue = startValue;
+  }
+
+  if (startValue && endValue) {
+    if (preferred === "end" && endValue < startValue) startValue = endValue;
+    else if (preferred === "start" && startValue > endValue) endValue = startValue;
+  }
+
+  startInput.max = endValue && endValue < maxDate ? endValue : maxDate;
+  endInput.min = startValue || "";
+  endInput.max = maxDate;
+
+  startInput.value = startValue;
+  endInput.value = endValue;
+  return { start: startValue, end: endValue };
+}
+
+function normalizeExportSingleDateInput(inputId, options = {}) {
+  const { forceDefault = false } = options;
+  const input = $(inputId);
+  if (!input) return "";
+  const maxDate = today();
+  let value = clampExportDateToToday(input.value);
+  if (forceDefault && !value) value = maxDate;
+  input.max = maxDate;
+  input.value = value;
+  return value;
+}
+
+function normalizeAllExportDateInputs(options = {}) {
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
+    normalizeExportDatePair(startId, endId, options);
+  });
+  EXPORT_SINGLE_DATE_IDS.forEach((inputId) => {
+    normalizeExportSingleDateInput(inputId, options);
+  });
+}
+
+function bindExportDateValidators() {
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
+    const startInput = $(startId);
+    const endInput = $(endId);
+    if (startInput && startInput.dataset.exportDateBound !== "1") {
+      startInput.dataset.exportDateBound = "1";
+      const syncFromStart = () => {
+        normalizeExportDatePair(startId, endId, {
+          forceDefault: true,
+          preferred: "start",
+        });
+        queuePersistExportUiState();
+      };
+      startInput.addEventListener("change", syncFromStart);
+      startInput.addEventListener("input", syncFromStart);
+    }
+    if (endInput && endInput.dataset.exportDateBound !== "1") {
+      endInput.dataset.exportDateBound = "1";
+      const syncFromEnd = () => {
+        normalizeExportDatePair(startId, endId, {
+          forceDefault: true,
+          preferred: "end",
+        });
+        queuePersistExportUiState();
+      };
+      endInput.addEventListener("change", syncFromEnd);
+      endInput.addEventListener("input", syncFromEnd);
+    }
+  });
+
+  EXPORT_SINGLE_DATE_IDS.forEach((inputId) => {
+    const input = $(inputId);
+    if (!input || input.dataset.exportDateBound === "1") return;
+    input.dataset.exportDateBound = "1";
+    const syncSingle = () => {
+      normalizeExportSingleDateInput(inputId, { forceDefault: true });
+      queuePersistExportUiState();
+    };
+    input.addEventListener("change", syncSingle);
+    input.addEventListener("input", syncSingle);
   });
 }
 
@@ -1008,9 +1796,47 @@ function endProgress(doneLabel = "Done") {
 
 // ─── Network I/O Tracking ─────────────────────────────────────────────────────
 function fmtBps(bps) {
-  if (bps < 1024) return `${Math.round(bps)} B/s`;
-  if (bps < 1048576) return `${(bps / 1024).toFixed(1)} KB/s`;
-  return `${(bps / 1048576).toFixed(2)} MB/s`;
+  const rate = Math.max(0, Number(bps || 0));
+  if (rate < 1024) return `${Math.round(rate)} B/s`;
+  if (rate < 1048576) return `${(rate / 1024).toFixed(1)} KB/s`;
+  return `${(rate / 1048576).toFixed(2)} MB/s`;
+}
+
+function fmtEtaSec(totalSec) {
+  const sec = Math.max(0, Math.ceil(Number(totalSec || 0)));
+  if (!(sec > 0)) return "0s";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function resetXferRateState(slot, now = Date.now()) {
+  slot.rateBps = 0;
+  slot.peakBps = 0;
+  slot.lastSampleBytes = Math.max(0, Number(slot.doneBytes || 0));
+  slot.lastSampleTs = now;
+}
+
+function updateXferRateState(slot, nextDoneBytes, now = Date.now()) {
+  const nextDone = Math.max(0, Number(nextDoneBytes || 0));
+  const lastTs = Math.max(0, Number(slot.lastSampleTs || 0));
+  const lastBytes = Math.max(0, Number(slot.lastSampleBytes || 0));
+  if (lastTs > 0 && now > lastTs && nextDone >= lastBytes) {
+    const elapsedSec = (now - lastTs) / 1000;
+    const instantBps = elapsedSec > 0 ? (nextDone - lastBytes) / elapsedSec : 0;
+    if (instantBps > 0) {
+      slot.rateBps =
+        Number(slot.rateBps || 0) > 0
+          ? Number(slot.rateBps || 0) * 0.55 + instantBps * 0.45
+          : instantBps;
+      slot.peakBps = Math.max(Number(slot.peakBps || 0), instantBps);
+    }
+  }
+  slot.lastSampleBytes = nextDone;
+  slot.lastSampleTs = now;
 }
 
 function _netIOFlash(rowId, timerKey) {
@@ -1090,7 +1916,12 @@ function handleXferProgress(msg) {
     slot.chunkDone = chunkOrd;
     slot.totalRows = totalRows;
     slot.importedRows = 0;
+    slot.priorityMode = Boolean(msg?.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused);
+    slot.stage = String(msg?.stage || "").trim().toLowerCase();
+    slot.note = String(msg?.note || "").trim();
     slot.updatedAt = now;
+    resetXferRateState(slot, now);
     renderXferPanel();
     return;
   }
@@ -1104,6 +1935,10 @@ function handleXferProgress(msg) {
     if (chunkOrd > 0) slot.chunkDone = chunkOrd;
     if (totalRows > 0) slot.totalRows = totalRows;
     if (importedRows > 0) slot.importedRows = importedRows;
+    slot.priorityMode = Boolean(msg?.priorityMode || slot.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused || slot.livePaused);
+    if (msg?.stage) slot.stage = String(msg.stage || "").trim().toLowerCase();
+    if (msg?.note) slot.note = String(msg.note || "").trim();
 
     let prevDone = Math.max(0, Number(slot.doneBytes || 0));
     let nextDone = rawDoneBytes;
@@ -1114,6 +1949,7 @@ function handleXferProgress(msg) {
     }
     if (nextDone < prevDone) nextDone = prevDone;
     slot.doneBytes = nextDone;
+    updateXferRateState(slot, nextDone, now);
 
     const delta = nextDone - prevDone;
     if (delta > 0) {
@@ -1125,7 +1961,7 @@ function handleXferProgress(msg) {
     return;
   }
 
-  if (phase === "done" || phase === "error") {
+  if (phase === "done" || phase === "error" || phase === "cancelled") {
     slot.active = true;
     slot.phase = phase;
     if (msgLabel) slot.label = msgLabel;
@@ -1135,6 +1971,11 @@ function handleXferProgress(msg) {
     if (totalRows > 0) slot.totalRows = totalRows;
     if (importedRows > 0) slot.importedRows = importedRows;
     if (rawDoneBytes > 0) slot.doneBytes = Math.max(slot.doneBytes, rawDoneBytes);
+    slot.priorityMode = Boolean(msg?.priorityMode || slot.priorityMode);
+    slot.livePaused = Boolean(msg?.livePaused || slot.livePaused);
+    if (msg?.stage) slot.stage = String(msg.stage || "").trim().toLowerCase();
+    if (msg?.note) slot.note = String(msg.note || "").trim();
+    updateXferRateState(slot, slot.doneBytes, now);
     if (phase === "done" && slot.totalBytes <= 0 && slot.doneBytes > 0) {
       slot.totalBytes = slot.doneBytes;
     }
@@ -1143,10 +1984,18 @@ function handleXferProgress(msg) {
       slot.active = false;
       slot.phase = "idle";
       slot.label = "";
+      slot.priorityMode = false;
+      slot.livePaused = false;
+      slot.stage = "";
+      slot.note = "";
+      slot.rateBps = 0;
+      slot.peakBps = 0;
+      slot.lastSampleBytes = 0;
+      slot.lastSampleTs = 0;
       slot.updatedAt = Date.now();
       slot.hideTimer = null;
       renderXferPanel();
-    }, phase === "done" ? 3500 : 3000);
+    }, phase === "done" ? 3500 : phase === "cancelled" ? 2200 : 3000);
     renderXferPanel();
     return;
   }
@@ -1163,6 +2012,88 @@ function getVisibleXferSlot() {
   if (active.length <= 0) return null;
   active.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
   return active[0];
+}
+
+function getXferPhaseBadge(x) {
+  const lbl = String(x?.label || "").trim().toLowerCase();
+  const phase = String(x?.phase || "");
+  if (phase === "done") return { text: "Done", cls: "xfer-phase-done" };
+  if (phase === "cancelled") return { text: "Cancelled", cls: "xfer-phase-cancelled" };
+  if (phase === "error") return { text: "Failed", cls: "xfer-phase-error" };
+  if (x?.priorityMode || x?.livePaused) return { text: "Priority", cls: "xfer-phase-priority" };
+  if (lbl.includes("applying") || lbl.includes("gateway data")) return { text: "Applying", cls: "xfer-phase-applying" };
+  if (lbl.includes("main database") && lbl.includes("final")) return { text: "Finalizing", cls: "xfer-phase-applying" };
+  if (lbl.includes("final") || lbl.includes("final gateway")) return { text: "Finalizing", cls: "xfer-phase-applying" };
+  if (lbl.includes("archive")) return { text: "Archive", cls: "xfer-phase-archive" };
+  if (x?.dir === "tx") return { text: "Uploading", cls: "xfer-phase-push" };
+  return { text: "Downloading", cls: "xfer-phase-pull" };
+}
+
+function getXferScopeInfo(x) {
+  if (x?.priorityMode || x?.livePaused) {
+    if (String(x?.stage || "").trim().toLowerCase() === "archive") {
+      return { text: "Priority archive", cls: "priority" };
+    }
+    return { text: "Priority pull", cls: "priority" };
+  }
+  const label = String(x?.label || "")
+    .trim()
+    .toLowerCase();
+  if (label.includes("main database") || label.includes("gateway database")) {
+    return { text: "Standby DB", cls: "hot" };
+  }
+  if (label.includes("archive")) {
+    return { text: "Archive DB", cls: "archive" };
+  }
+  if (label.includes("receiving push")) {
+    return { text: "Incoming data", cls: "hot" };
+  }
+  if (x?.dir === "tx") {
+    return { text: "Upload", cls: "hot" };
+  }
+  return { text: "Standby DB", cls: "hot" };
+}
+
+function getXferDetailText(x) {
+  const parts = [];
+  if (x.livePaused) {
+    parts.push("live stream paused");
+  }
+  if (x.chunkCount > 1) {
+    parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}/${Math.max(0, Number(x.chunkCount || 0))}`);
+  } else if (x.chunkDone > 0) {
+    parts.push(`step ${Math.max(0, Number(x.chunkDone || 0))}`);
+  }
+  if (Number(x.rateBps || 0) > 0 && x.phase !== "done" && x.phase !== "error") {
+    parts.push(fmtBps(x.rateBps));
+  }
+  const remainingBytes =
+    Math.max(0, Number(x.totalBytes || 0)) - Math.max(0, Number(x.doneBytes || 0));
+  if (
+    remainingBytes > 0 &&
+    Number(x.rateBps || 0) > 0 &&
+    x.phase !== "done" &&
+    x.phase !== "error"
+  ) {
+    parts.push(`ETA ${fmtEtaSec(remainingBytes / Math.max(1, Number(x.rateBps || 0)))}`);
+  }
+  if (Number(x.totalRows || 0) > 0) {
+    const imported = Math.max(0, Number(x.importedRows || 0));
+    const totalRows = Math.max(0, Number(x.totalRows || 0));
+    if (imported > 0) parts.push(`${imported.toLocaleString()} row${imported === 1 ? "" : "s"} applied`);
+    else parts.push(`${totalRows.toLocaleString()} row${totalRows === 1 ? "" : "s"} scheduled`);
+  } else if (x.note && !x.livePaused) {
+    parts.push(String(x.note || "").trim());
+  } else if (x.phase === "done") {
+    parts.push("transfer finished");
+  } else if (x.phase === "error") {
+    parts.push("transfer failed");
+  } else if (x.phase === "cancelled") {
+    parts.push("transfer cancelled");
+  } else {
+    parts.push("background transfer running");
+  }
+  return parts.join(" · ");
 }
 
 function renderXferPanel() {
@@ -1183,9 +2114,13 @@ function renderXferPanel() {
   const fillEl = document.getElementById("xferBarFill");
   const currEl = document.getElementById("xferSizeCurr");
   const totalEl = document.getElementById("xferSizeTotal");
+  const scopeChipEl = document.getElementById("xferScopeChip");
+  const detailEl = document.getElementById("xferDetail");
+  const phaseBadgeEl = document.getElementById("xferPhaseBadge");
 
   if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
   if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
+  panel.className = `xfer-panel xfer-panel-${x.phase || "idle"}`.trim();
 
   const done = Math.max(0, Number(x.doneBytes || 0));
   const total = Math.max(0, Number(x.totalBytes || 0));
@@ -1215,16 +2150,32 @@ function renderXferPanel() {
             : "";
       labelEl.textContent = `${custom}${suffix}`;
     } else if (x.phase === "done") {
-      labelEl.textContent = x.dir === "tx" ? "Push complete" : "Pull complete";
+      labelEl.textContent = x.dir === "tx" ? "Upload complete" : "Download complete";
     } else if (x.phase === "error") {
-      labelEl.textContent = x.dir === "tx" ? "Push failed" : "Pull failed";
+      labelEl.textContent = x.dir === "tx" ? "Upload failed" : "Download failed";
+    } else if (x.phase === "cancelled") {
+      labelEl.textContent = x.dir === "tx" ? "Upload cancelled" : "Download cancelled";
     } else if (x.dir === "tx") {
       const cStr = x.chunkCount > 1 ? ` · chunk ${x.chunkDone}/${x.chunkCount}` : "";
-      labelEl.textContent = `Pushing${cStr}`;
+      labelEl.textContent = `Uploading${cStr}`;
     } else {
       const bStr = x.chunkDone > 0 ? ` · batch ${x.chunkDone}` : "";
-      labelEl.textContent = `Pulling${bStr}`;
+      labelEl.textContent = `Downloading${bStr}`;
     }
+  }
+
+  const scopeInfo = getXferScopeInfo(x);
+  if (scopeChipEl) {
+    scopeChipEl.textContent = scopeInfo.text;
+    scopeChipEl.className = `xfer-scope-chip xfer-scope-${scopeInfo.cls || "hot"}`;
+  }
+  if (detailEl) detailEl.textContent = getXferDetailText(x);
+
+  if (phaseBadgeEl) {
+    const badge = getXferPhaseBadge(x);
+    phaseBadgeEl.textContent = badge.text;
+    phaseBadgeEl.className = `xfer-phase-badge ${badge.cls}`;
+    phaseBadgeEl.hidden = false;
   }
 
   if (pctEl) pctEl.textContent = known || x.phase === "done" ? `${pct}%` : "…";
@@ -1335,8 +2286,8 @@ function renderTablePager({
   });
 }
 
-const applyAuditTableViewDebounced = debounce(() => applyAuditTableView());
-const applyReportTableViewDebounced = debounce(() => applyReportTableView());
+
+
 
 const duration_min = (ts1, ts2) => {
   if (!ts1 || !ts2) return "—";
@@ -1390,12 +2341,20 @@ function syncActiveAlarmMap(rows) {
   State.activeAlarms = next;
 }
 
+function clearAlarmSoundRecheckTimer() {
+  if (State.alarmSoundRecheckTimer) {
+    clearTimeout(State.alarmSoundRecheckTimer);
+    State.alarmSoundRecheckTimer = null;
+  }
+}
+
 function getOrCreateAlarmAudioCtx() {
   if (State.alarmAudioCtx) return State.alarmAudioCtx;
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return null;
     State.alarmAudioCtx = new Ctx();
+    State.chatAudioReady = State.alarmAudioCtx.state === "running";
     return State.alarmAudioCtx;
   } catch (err) {
     console.warn("[app] AudioContext creation failed:", err.message);
@@ -1403,13 +2362,8 @@ function getOrCreateAlarmAudioCtx() {
   }
 }
 
-function playAlarmBeepOnce() {
+function _scheduleAlarmBeep(ctx) {
   try {
-    const ctx = getOrCreateAlarmAudioCtx();
-    if (!ctx) return;
-    if (ctx.state === "suspended") {
-      ctx.resume().catch(() => {});
-    }
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "square";
@@ -1420,6 +2374,22 @@ function playAlarmBeepOnce() {
     const t0 = ctx.currentTime;
     osc.start(t0);
     osc.stop(t0 + 0.16);
+  } catch (err) {
+    console.warn("[app] alarm beep schedule failed:", err.message);
+  }
+}
+
+function playAlarmBeepOnce() {
+  try {
+    const ctx = getOrCreateAlarmAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === "suspended") {
+      // Defer oscillator scheduling until AudioContext is actually running.
+      // Scheduling against a frozen currentTime while suspended produces no sound.
+      ctx.resume().then(() => _scheduleAlarmBeep(ctx)).catch(() => {});
+    } else {
+      _scheduleAlarmBeep(ctx);
+    }
   } catch (err) {
     console.warn("[app] alarm beep failed:", err.message);
   }
@@ -1444,6 +2414,64 @@ function hasUnackedActiveAlarms() {
   );
 }
 
+function getAlarmSoundEligibility(now = Date.now()) {
+  let eligible = false;
+  let nextDelayMs = 0;
+  for (const row of Object.values(State.activeAlarms || {})) {
+    if (!row || row.acknowledged === true) continue;
+    const startedAt = Math.max(0, Number(row.ts || 0));
+    const ageMs = startedAt > 0 ? Math.max(0, now - startedAt) : ALARM_SOUND_MIN_ACTIVE_MS;
+    if (ageMs >= ALARM_SOUND_MIN_ACTIVE_MS) {
+      eligible = true;
+      continue;
+    }
+    const remaining = Math.max(0, ALARM_SOUND_MIN_ACTIVE_MS - ageMs);
+    nextDelayMs =
+      nextDelayMs > 0 ? Math.min(nextDelayMs, remaining) : remaining;
+  }
+  return { eligible, nextDelayMs };
+}
+
+function syncAlarmSoundPlayback() {
+  clearAlarmSoundRecheckTimer();
+  const { eligible, nextDelayMs } = getAlarmSoundEligibility(Date.now());
+  setAlarmSoundActive(eligible);
+  if (!eligible && !State.alarmSoundMuted && nextDelayMs > 0) {
+    State.alarmSoundRecheckTimer = setTimeout(() => {
+      State.alarmSoundRecheckTimer = null;
+      syncAlarmSoundPlayback();
+    }, Math.max(50, nextDelayMs + 25));
+  }
+}
+
+function getLiveAlarmSignature() {
+  const parts = [];
+  for (const [key, row] of Object.entries(State.liveData || {})) {
+    const alarmValue = Number(row?.alarm || 0);
+    if (!alarmValue) continue;
+    parts.push(`${key}:${alarmValue}`);
+  }
+  parts.sort();
+  return parts.join("|");
+}
+
+async function syncAlarmStateFromLiveData() {
+  State.pendingAlarmLiveSig = getLiveAlarmSignature();
+  if (State.alarmLiveSyncing) return;
+
+  State.alarmLiveSyncing = true;
+  try {
+    while (State.pendingAlarmLiveSig !== State.alarmLiveSig) {
+      const targetSig = State.pendingAlarmLiveSig;
+      const ok = await refreshAlarmBadge();
+      if (!ok) break;
+      State.alarmLiveSig = targetSig;
+    }
+  } finally {
+    State.alarmLiveSyncing = false;
+  }
+}
+
 function renderAlarmSoundBtn() {
   const btn = $("btnAlarmSound");
   const icon = $("alarmSoundIcon");
@@ -1465,7 +2493,7 @@ function toggleAlarmSound() {
   State.alarmSoundMuted = !State.alarmSoundMuted;
   try { localStorage.setItem("alarmSoundMuted", State.alarmSoundMuted ? "1" : "0"); } catch (_) {}
   // Apply immediately based on current alarm state (no need to wait for next poll tick).
-  setAlarmSoundActive(hasUnackedActiveAlarms());
+  syncAlarmSoundPlayback();
   renderAlarmSoundBtn();
 }
 function resetPacTodayIfNeeded(ts = Date.now()) {
@@ -1475,29 +2503,153 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   State.pacToday.lastTs = 0;
   State.pacToday.lastTotalPacW = 0;
   State.pacToday.totalKwh = 0;
+  resetTodayMwhAuthority();
+}
+
+function summarizeLiveRows(rowsRaw = []) {
+  const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  const out = { pac: 0, pdc: 0, kwh: 0 };
+  rows.forEach((d) => {
+    out.pac += Number(d?.pac || 0);
+    out.pdc += Number(d?.pdc || 0);
+    out.kwh += Number(d?.kwh || 0);
+  });
+  return out;
+}
+
+function buildFreshLiveTotalsByInverter(now = Date.now()) {
+  const out = {};
+  Object.values(State.liveData || {}).forEach((d) => {
+    const inv = Number(d?.inverter || 0);
+    const isFresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
+    if (!inv || !isFresh) return;
+    if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
+    out[inv].pac += Number(d?.pac || 0);
+    out[inv].pdc += Number(d?.pdc || 0);
+    out[inv].kwh += Number(d?.kwh || 0);
+  });
+  return out;
 }
 
 function getCurrentFreshTotalPacW(now = Date.now()) {
-  let totalPacW = 0;
-  Object.values(State.liveData || {}).forEach((d) => {
-    const isFresh = now - Number(d?.ts || 0) <= DATA_FRESH_MS;
-    if (!d?.online || !isFresh) return;
-    totalPacW += Number(d?.pac || 0);
-  });
-  return totalPacW;
+  return Object.values(buildFreshLiveTotalsByInverter(now)).reduce(
+    (sum, totals) => sum + Number(totals?.pac || 0),
+    0,
+  );
 }
 
-function applySyncedTodayKwh(totalKwh, syncedAt = Date.now()) {
+function getLiveFreshTsClient(row) {
+  return Math.max(0, Number(row?.bridgeTs || row?.ts || 0));
+}
+
+function setTodayEnergyRowsClient(rowsRaw) {
+  const next = {};
+  const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  rows.forEach((row) => {
+    const inv = Math.floor(Number(row?.inverter || 0));
+    const totalKwh = Number(row?.total_kwh || 0);
+    if (!(inv > 0) || !Number.isFinite(totalKwh) || totalKwh < 0) return;
+    next[inv] = totalKwh;
+  });
+  State.todayEnergyByInv = next;
+}
+
+function resetTodayMwhAuthority() {
+  State.todayMwh.wsAuthoritative = false;
+  State.todayMwh.wsLastFrameAt = 0;
+  State.todayMwh.wsLastEnergyAt = 0;
+  State.todayMwh.wsLastAdvanceAt = 0;
+  State.todayMwh.wsLastTotalKwh = null;
+}
+
+function noteTodayMwhWsFrame(now = Date.now()) {
+  State.todayMwh.wsLastFrameAt = Math.max(0, Number(now) || Date.now());
+}
+
+function noteTodayMwhWsEnergy(totalKwh, now = Date.now()) {
+  const nextNow = Math.max(0, Number(now) || Date.now());
+  const nextTotal = Math.max(0, Number(totalKwh) || 0);
+  const prevTotal = Number(State.todayMwh.wsLastTotalKwh);
+  State.todayMwh.wsLastEnergyAt = nextNow;
+  if (
+    !Number.isFinite(prevTotal) ||
+    Math.abs(nextTotal - prevTotal) > 0.0001
+  ) {
+    State.todayMwh.wsLastAdvanceAt = nextNow;
+  }
+  State.todayMwh.wsLastTotalKwh = nextTotal;
+}
+
+function shouldExpectTodayMwhAdvance(now = Date.now()) {
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  return getCurrentFreshTotalPacW(now) >= TODAY_MWH_WS_ADVANCE_MIN_PAC_W;
+}
+
+function isTodayMwhWsStale(now = Date.now()) {
+  if (!State.todayMwh.wsAuthoritative) return false;
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  const lastFrameAt = Number(State.todayMwh.wsLastFrameAt || 0);
+  if (!lastFrameAt || now - lastFrameAt > TODAY_MWH_WS_FRAME_STALE_MS) {
+    return true;
+  }
+  const lastEnergyAt = Number(State.todayMwh.wsLastEnergyAt || 0);
+  if (!lastEnergyAt || now - lastEnergyAt > TODAY_MWH_WS_ENERGY_STALE_MS) {
+    return true;
+  }
+  if (!shouldExpectTodayMwhAdvance(now)) return false;
+  const lastAdvanceAt = Math.max(
+    Number(State.todayMwh.wsLastAdvanceAt || 0),
+    lastEnergyAt,
+  );
+  return Boolean(
+    lastAdvanceAt &&
+      now - lastAdvanceAt > TODAY_MWH_WS_NO_ADVANCE_MS,
+  );
+}
+
+function hasTodayMwhWsAuthority() {
+  if (
+    !State.todayMwh.wsAuthoritative ||
+    !State.ws ||
+    Number(State.ws.readyState) !== 1
+  ) {
+    return false;
+  }
+  if (isTodayMwhWsStale()) {
+    State.todayMwh.wsAuthoritative = false;
+    return false;
+  }
+  return true;
+}
+
+function canApplyTodayMwhSync(source = "sync", { allowRemoteFallback = false } = {}) {
+  const src = String(source || "sync").trim().toLowerCase();
+  if (src === "ws") return true;
+  if (hasTodayMwhWsAuthority()) return false;
+  if (getActiveOperationModeClient() !== "remote") return true;
+  return Boolean(allowRemoteFallback);
+}
+
+function applySyncedTodayKwh(totalKwh, syncedAt = Date.now(), opts = {}) {
+  const source = String(opts?.source || "sync").trim().toLowerCase();
+  const allowRemoteFallback = Boolean(opts?.allowRemoteFallback);
   resetPacTodayIfNeeded(syncedAt);
+  if (!canApplyTodayMwhSync(source, { allowRemoteFallback })) return false;
   const serverKwh = Math.max(0, Number(totalKwh) || 0);
   // Keep header strictly server-authoritative so it matches report/analytics totals.
   State.pacToday.totalKwh = serverKwh;
   State.pacToday.lastTs         = syncedAt;
   State.pacToday.lastTotalPacW  = getCurrentFreshTotalPacW(syncedAt);
+  if (source === "ws") {
+    State.todayMwh.wsAuthoritative = true;
+  } else if (getActiveOperationModeClient() === "gateway") {
+    State.todayMwh.wsAuthoritative = false;
+  }
   const meter = $("totalKwh");
   if (meter) {
     meter.title = `Synced: ${fmtDateTime(syncedAt)}`;
   }
+  return true;
 }
 
 function integrateTodayFromPac() {
@@ -1526,29 +2678,171 @@ async function fetchTodayEnergyTotalsRaw() {
 async function seedTodayEnergyFromDb() {
   try {
     const rows = await fetchTodayEnergyTotalsRaw();
+    setTodayEnergyRowsClient(rows);
     const totalKwh = (rows || []).reduce(
       (sum, r) => sum + Number(r?.total_kwh || 0),
       0,
     );
-    applySyncedTodayKwh(totalKwh, Date.now());
-    renderTodayKwhFromPac();
+    const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+      source: "seed",
+      allowRemoteFallback: true,
+    });
+    if (applied) renderTodayKwhFromPac();
   } catch (e) {
     console.warn("seedTodayEnergyFromDb:", e?.message || e);
   }
 }
 
-async function syncTodayMwhFromServer() {
+async function syncTodayMwhFromServer(opts = {}) {
+  if (!Boolean(opts?.force) && hasTodayMwhWsAuthority()) {
+    return false;
+  }
   try {
     const rows = await fetchTodayEnergyTotalsRaw();
+    setTodayEnergyRowsClient(rows);
     const totalKwh = (rows || []).reduce(
       (sum, r) => sum + Number(r?.total_kwh || 0),
       0,
     );
-    applySyncedTodayKwh(totalKwh, Date.now());
-    renderTodayKwhFromPac();
+    const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+      source: "http",
+      allowRemoteFallback: Boolean(opts?.allowRemoteFallback),
+    });
+    if (applied) renderTodayKwhFromPac();
+    return applied;
   } catch (e) {
     // Non-fatal: next sync tick will refresh the metric.
     console.warn("syncTodayMwhFromServer:", e?.message || e);
+    return false;
+  }
+}
+
+function extractCurrentDaySummary(summaryRaw) {
+  const candidate =
+    summaryRaw && typeof summaryRaw === "object"
+      ? summaryRaw.current_day || summaryRaw.todaySummary || summaryRaw.daily || null
+      : null;
+  if (!candidate || typeof candidate !== "object") return null;
+
+  const day = sanitizeDateInputValue(candidate.day) || today();
+  const totalKwhRaw = Number(candidate.total_kwh);
+  const totalMwhRaw = Number(candidate.total_mwh);
+  const totalKwh = Number.isFinite(totalKwhRaw)
+    ? Number(totalKwhRaw.toFixed(6))
+    : Number.isFinite(totalMwhRaw)
+      ? Number((totalMwhRaw * 1000).toFixed(6))
+      : NaN;
+  const totalMwh = Number.isFinite(totalMwhRaw)
+    ? Number(totalMwhRaw.toFixed(6))
+    : Number.isFinite(totalKwh)
+      ? Number((totalKwh / 1000).toFixed(6))
+      : NaN;
+  if (!Number.isFinite(totalKwh) && !Number.isFinite(totalMwh)) return null;
+
+  return {
+    day,
+    asOfTs: Number(candidate.as_of_ts || candidate.asOfTs || 0),
+    totalKwh: Number.isFinite(totalKwh) ? totalKwh : Number((totalMwh * 1000).toFixed(6)),
+    totalMwh: Number.isFinite(totalMwh) ? totalMwh : Number((totalKwh / 1000).toFixed(6)),
+    inverterCount: Math.max(0, Math.trunc(Number(candidate.inverter_count || 0))),
+  };
+}
+
+function applyCurrentDaySummaryClient(summaryRaw, opts = {}) {
+  const summary = extractCurrentDaySummary(summaryRaw);
+  if (!summary) return false;
+
+  State.currentDaySummary = {
+    day: summary.day,
+    asOfTs: summary.asOfTs,
+    totalKwh: summary.totalKwh,
+    totalMwh: summary.totalMwh,
+    inverterCount: summary.inverterCount,
+  };
+
+  let analyticsChanged = false;
+  if (summary.day === today()) {
+    State.analyticsActualSummarySyncAt = Date.now();
+    State.analyticsActualSummarySyncDay = summary.day;
+    if (isTodayAnalyticsDate()) {
+      const nextMwh = Number(summary.totalMwh.toFixed(6));
+      if (State.analyticsDailyTotalMwh !== nextMwh) {
+        State.analyticsDailyTotalMwh = nextMwh;
+        analyticsChanged = true;
+      }
+    }
+  }
+
+  const reportDay = sanitizeDateInputValue($("reportDate")?.value) || today();
+  if (
+    summary.day === reportDay &&
+    State.reportView.summary &&
+    typeof State.reportView.summary === "object"
+  ) {
+    if (!State.reportView.summary.daily || typeof State.reportView.summary.daily !== "object") {
+      State.reportView.summary.daily = {};
+    }
+    State.reportView.summary.daily.total_kwh = summary.totalKwh;
+    State.reportView.summary.daily.total_mwh = summary.totalMwh;
+    State.reportView.summary.daily.inverter_count = summary.inverterCount;
+    if (summary.asOfTs > 0) {
+      State.reportView.summary.daily.as_of_ts = summary.asOfTs;
+    }
+    State.reportView.summary.current_day = {
+      day: summary.day,
+      as_of_ts: summary.asOfTs,
+      total_kwh: summary.totalKwh,
+      total_mwh: summary.totalMwh,
+      inverter_count: summary.inverterCount,
+    };
+    if (State.currentPage === "report") {
+      renderReportKpis();
+    }
+  }
+
+  if (
+    analyticsChanged &&
+    State.currentPage === "analytics" &&
+    isTodayAnalyticsDate() &&
+    !State.analyticsRealtimeTimer
+  ) {
+    renderAnalyticsFromState();
+  }
+
+  return analyticsChanged;
+}
+
+async function syncAnalyticsActualMwhFromServer(opts = {}) {
+  if (getActiveOperationModeClient() !== "gateway") return false;
+  if (State.currentPage !== "analytics") return false;
+  const day = sanitizeDateInputValue($("anaDate")?.value) || today();
+  if (day !== today()) return false;
+  if (State.analyticsFetchInFlight && !Boolean(opts?.force)) return false;
+  const now = Date.now();
+  if (
+    !Boolean(opts?.force) &&
+    State.analyticsActualSummarySyncDay === day &&
+    now - Number(State.analyticsActualSummarySyncAt || 0) <
+      ACTUAL_MWH_HTTP_SYNC_INTERVAL_MS
+  ) {
+    return false;
+  }
+  try {
+    const summary = await api(`/api/report/summary?date=${encodeURIComponent(day)}`);
+    State.analyticsActualSummarySyncAt = now;
+    State.analyticsActualSummarySyncDay = day;
+    const previous = Number(State.analyticsDailyTotalMwh);
+    const applied = applyCurrentDaySummaryClient(summary, {
+      source: opts?.force ? "http-force" : "http",
+    });
+    if (applied && Number(State.analyticsDailyTotalMwh) !== previous) {
+      renderAnalyticsFromState();
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn("syncAnalyticsActualMwhFromServer:", e?.message || e);
+    return false;
   }
 }
 
@@ -1561,9 +2855,14 @@ function stopTodayMwhSyncTimer() {
 
 function startTodayMwhSyncTimer() {
   stopTodayMwhSyncTimer();
+  // In remote mode, TODAY MWh is driven by WS todayEnergy updates to avoid
+  // racing the bridge feed with parallel HTTP/report refreshes.
+  if (getActiveOperationModeClient() === "remote") return;
   syncTodayMwhFromServer().catch(() => {});
+  syncAnalyticsActualMwhFromServer().catch(() => {});
   State.todayMwhSyncTimer = setInterval(() => {
     syncTodayMwhFromServer().catch(() => {});
+    syncAnalyticsActualMwhFromServer().catch(() => {});
   }, TODAY_MWH_SYNC_INTERVAL_MS);
 }
 
@@ -1591,6 +2890,19 @@ function getDetailedErrorMessage(status, errorMsg) {
   return errorMsg || "Request failed. Please try again.";
 }
 
+function shouldPreserveServerErrorMessage(url = "") {
+  const u = String(url || "");
+  return (
+    u.includes("/api/write") ||
+    u.includes("/api/runtime/network") ||
+    u.includes("/api/settings") ||
+    u.includes("/api/replication/") ||
+    u.includes("/api/export/") ||
+    u.includes("/api/forecast/solcast/") ||
+    u.includes("/api/export/solcast-preview")
+  );
+}
+
 function shouldShowProgress(url, method = "GET", options = {}) {
   if (Object.prototype.hasOwnProperty.call(options || {}, "progress")) {
     return Boolean(options.progress);
@@ -1604,9 +2916,12 @@ async function api(url, method = "GET", body, options = {}) {
   const showProgress = shouldShowProgress(url, method, options);
   if (showProgress) beginProgress(getProgressLabel(url, method));
   const opts = { method, headers: { "Content-Type": "application/json" } };
+  const abortMessage = String(options?.abortMessage || "").trim();
   if (body) opts.body = JSON.stringify(body);
+  if (options?.signal) opts.signal = options.signal;
   if (opts.body) netIOTrackTx(opts.body.length);
   let ok = false;
+  let progressDoneLabel = "Request failed";
   try {
     const r = await fetch(url, opts);
     const text = await r.text();
@@ -1625,6 +2940,9 @@ async function api(url, method = "GET", body, options = {}) {
         (text && text.trim()) ||
         `HTTP ${r.status}`;
       let detailedMsg = getDetailedErrorMessage(r.status, rawMsg);
+      if (shouldPreserveServerErrorMessage(url) && rawMsg) {
+        detailedMsg = String(rawMsg);
+      }
       if (
         url.includes("/api/forecast/generate") &&
         Number(r.status) >= 500
@@ -1648,21 +2966,233 @@ async function api(url, method = "GET", body, options = {}) {
         url.includes("/api/replication/reconcile-now")
       ) {
         detailedMsg = String(rawMsg || detailedMsg);
+        const e2 = new Error(detailedMsg);
+        e2.status = r.status;
+        e2.body = parsed;
+        throw e2;
+      }
+      if (url.includes("/api/chat/")) {
+        detailedMsg = String(rawMsg || detailedMsg);
       }
       throw new Error(String(detailedMsg));
     }
+    // Detect local-fallback when gateway is offline in remote mode
+    if (
+      r.headers.get("X-Data-Source") === "local-fallback" &&
+      !State._localFallbackNotified
+    ) {
+      State._localFallbackNotified = true;
+      showToast("Showing locally cached data \u2014 gateway is offline", "warn");
+    }
     ok = true;
+    progressDoneLabel = "Done";
     return parsed ?? {};
   } catch (err) {
     // Network error or parsing failure
+    if (err?.name === "AbortError") {
+      progressDoneLabel = "Cancelled";
+      throw new Error(abortMessage || "Request cancelled.");
+    }
     if (err instanceof TypeError) {
       console.warn("[app] Network error:", err.message);
       throw new Error("Network error. Please check your internet connection.");
     }
     throw err;
   } finally {
-    if (showProgress) endProgress(ok ? "Done" : "Request failed");
+    if (showProgress) endProgress(progressDoneLabel);
   }
+}
+
+async function apiWithTimeout(
+  url,
+  timeoutMs,
+  abortMessage,
+  method = "GET",
+  body,
+  options = {},
+) {
+  const controller = new AbortController();
+  const timeout = Math.max(1, Number(timeoutMs || 0));
+  const timer = setTimeout(() => controller.abort(), timeout);
+  const parentSignal = options?.signal || null;
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else {
+      parentSignal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
+  try {
+    return await api(url, method, body, {
+      ...options,
+      signal: controller.signal,
+      abortMessage,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function rejectModeTransitionLiveWaiters(reason = "Mode transition cancelled.") {
+  const waiters = Array.isArray(State.modeTransition?.liveWaiters)
+    ? State.modeTransition.liveWaiters.splice(0)
+    : [];
+  waiters.forEach((entry) => {
+    if (!entry) return;
+    try { clearTimeout(entry.timer); } catch (_) {}
+    try { entry.reject(new Error(reason)); } catch (_) {}
+  });
+}
+
+function resolveModeTransitionLiveWaiters(payload = null) {
+  const waiters = Array.isArray(State.modeTransition?.liveWaiters)
+    ? State.modeTransition.liveWaiters.splice(0)
+    : [];
+  waiters.forEach((entry) => {
+    if (!entry) return;
+    try { clearTimeout(entry.timer); } catch (_) {}
+    try { entry.resolve(payload); } catch (_) {}
+  });
+}
+
+function isGatewayModeRestartCapable() {
+  return Boolean(window.electronAPI?.restartApp);
+}
+
+function buildModeTransitionDetail(targetMode, detail = "") {
+  const custom = String(detail || "").trim();
+  if (custom) return custom;
+  return targetMode === "remote"
+    ? "Waiting for the first live snapshot from the gateway before re-enabling the dashboard."
+    : "Waiting for the local poller to complete its first cycle before re-enabling the dashboard.";
+}
+
+function syncModeTransitionUi() {
+  const active = Boolean(State.modeTransition?.active);
+  const targetMode = normalizeOperationModeValue(State.modeTransition?.targetMode);
+  const overlay = $("modeTransitionOverlay");
+  const titleEl = $("modeTransitionTitle");
+  const bodyEl = $("modeTransitionBody");
+  const saveBtn = $("btnSaveSettings");
+  const modeSelect = $("setOperationMode");
+  const testBtn = $("btnTestRemoteGateway");
+  const tailscaleBtn = $("btnCheckTailscale");
+  const standbyBtn = $("btnRunReplicationPull");
+  const refreshBtn = $("btnRefreshReplicationHealth");
+
+  if (overlay) {
+    overlay.classList.toggle("hidden", !active);
+    overlay.setAttribute("aria-hidden", active ? "false" : "true");
+  }
+  if (titleEl) {
+    titleEl.textContent = targetMode === "remote"
+      ? "Switching to Remote Mode"
+      : "Switching to Gateway Mode";
+  }
+  if (bodyEl) {
+    bodyEl.textContent = buildModeTransitionDetail(
+      targetMode,
+      State.modeTransition?.detail || "",
+    );
+  }
+  document.body.classList.toggle("mode-transition-active", active);
+  [saveBtn, modeSelect, testBtn, tailscaleBtn, standbyBtn, refreshBtn].forEach((ctrl) => {
+    if (!ctrl) return;
+    ctrl.disabled = active;
+  });
+}
+
+function setModeTransitionState(active, targetMode = "", detail = "") {
+  if (!active) {
+    rejectModeTransitionLiveWaiters();
+  }
+  State.modeTransition.active = Boolean(active);
+  State.modeTransition.targetMode = active
+    ? normalizeOperationModeValue(targetMode || State.settings.operationMode)
+    : "";
+  State.modeTransition.startedAt = active ? Date.now() : 0;
+  State.modeTransition.detail = active
+    ? buildModeTransitionDetail(targetMode, detail)
+    : "";
+  syncModeTransitionUi();
+}
+
+function updateModeTransitionDetail(detail = "") {
+  if (!State.modeTransition?.active) return;
+  State.modeTransition.detail = buildModeTransitionDetail(
+    State.modeTransition.targetMode,
+    detail,
+  );
+  syncModeTransitionUi();
+}
+
+function waitForModeTransitionLiveFrame(timeoutMs = 12000) {
+  if (
+    !State.modeTransition?.active ||
+    normalizeOperationModeValue(State.modeTransition.targetMode) !== "remote"
+  ) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = State.modeTransition.liveWaiters.indexOf(entry);
+      if (idx >= 0) State.modeTransition.liveWaiters.splice(idx, 1);
+      reject(new Error("Timed out waiting for a live gateway snapshot."));
+    }, Math.max(1000, Number(timeoutMs || 0)));
+    const entry = { resolve, reject, timer };
+    State.modeTransition.liveWaiters.push(entry);
+  });
+}
+
+async function waitForRemoteModeReady(readyStartedAt = Date.now(), timeoutMs = 12000) {
+  const startedAt = Math.max(0, Number(readyStartedAt || 0));
+  const liveFramePromise = waitForModeTransitionLiveFrame(timeoutMs).catch(() => null);
+  await refreshRemoteBridgeNow(true).catch(() => null);
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+  let lastReason = "";
+
+  while (Date.now() < deadline) {
+    const snap = await api("/api/runtime/network", "GET", null, { progress: false });
+    const health = normalizeRemoteHealthClient(snap?.remoteHealth || null);
+    lastReason = String(health.reasonText || snap?.remoteLastError || "").trim();
+    if (health.state === "auth-error" || health.state === "config-error") {
+      throw new Error(lastReason || "Remote gateway configuration is not ready.");
+    }
+    if (
+      Number(snap?.remoteLastSuccessTs || 0) >= startedAt &&
+      (health.state === "connected" || health.state === "degraded" || health.state === "stale")
+    ) {
+      await liveFramePromise;
+      return snap;
+    }
+    await waitMs(450);
+  }
+
+  throw new Error(lastReason || "Timed out waiting for gateway live data.");
+}
+
+async function waitForGatewayModeReady(readyStartedAt = Date.now(), timeoutMs = 12000) {
+  const startedAt = Math.max(0, Number(readyStartedAt || 0));
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+
+  while (Date.now() < deadline) {
+    const perf = await api("/api/runtime/perf", "GET", null, { progress: false });
+    const poll = perf?.poller && typeof perf.poller === "object" ? perf.poller : {};
+    if (
+      Boolean(poll?.running) &&
+      Number(poll?.lastPollStartedTs || 0) >= startedAt
+    ) {
+      return perf;
+    }
+    await waitMs(400);
+  }
+
+  throw new Error("Timed out waiting for local polling to restart.");
 }
 
 // ─── Window controls (Electron) ───────────────────────────────────────────────
@@ -1720,7 +3250,7 @@ async function openExportFolder() {
     return;
   }
 
-  alert(`Export folder: ${p}`);
+  showToast(`Export folder: ${p}`, "success", 5000);
 }
 
 function openLogsFolder() {
@@ -1758,9 +3288,96 @@ function applyRemoteGatewayInputNormalization() {
   return normalized;
 }
 
+function getSelectedOperationModeClient() {
+  return normalizeOperationModeValue(
+    $("setOperationMode")?.value || State.settings?.operationMode,
+  );
+}
+
+function getActiveOperationModeClient() {
+  return normalizeOperationModeValue(State.settings?.operationMode);
+}
+
 function isClientModeActive() {
-  const modeSetting = $("setOperationMode")?.value || State.settings?.operationMode;
-  return String(modeSetting || "gateway").trim().toLowerCase() === "remote";
+  return getActiveOperationModeClient() === "remote";
+}
+
+function normalizeRemoteHealthClient(raw = null) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const activeMode = getActiveOperationModeClient();
+  const fallbackState = activeMode === "remote" ? "disconnected" : "gateway-local";
+  const liveFreshMsRaw = src?.liveFreshMs;
+  return {
+    mode: normalizeOperationModeValue(src?.mode || activeMode),
+    state: String(src?.state || fallbackState).trim().toLowerCase() || fallbackState,
+    reasonCode: String(src?.reasonCode || "").trim(),
+    reasonText: String(src?.reasonText || "").trim(),
+    hasUsableSnapshot: Boolean(src?.hasUsableSnapshot),
+    snapshotRetainMs: Math.max(0, Number(src?.snapshotRetainMs || 0)),
+    liveFreshMs:
+      liveFreshMsRaw == null || liveFreshMsRaw === ""
+        ? null
+        : Math.max(0, Number(liveFreshMsRaw || 0)),
+    lastAttemptTs: Math.max(0, Number(src?.lastAttemptTs || 0)),
+    lastSuccessTs: Math.max(0, Number(src?.lastSuccessTs || 0)),
+    lastFailureTs: Math.max(0, Number(src?.lastFailureTs || 0)),
+    failureStreak: Math.max(0, Number(src?.failureStreak || 0)),
+    backoffMs: Math.max(0, Number(src?.backoffMs || 0)),
+    lastLatencyMs: Math.max(0, Number(src?.lastLatencyMs || 0)),
+    liveNodeCount: Math.max(0, Number(src?.liveNodeCount || 0)),
+    pausedForPriorityTransfer: Boolean(src?.pausedForPriorityTransfer),
+    pauseReason: String(src?.pauseReason || "").trim(),
+    pauseSince: Math.max(0, Number(src?.pauseSince || 0)),
+  };
+}
+
+function applyRemoteHealthClient(raw = null) {
+  State.remoteHealth = normalizeRemoteHealthClient(raw);
+  // Reset local-fallback toast when gateway reconnects
+  if (State.remoteHealth.state === "connected") {
+    State._localFallbackNotified = false;
+  }
+  return State.remoteHealth;
+}
+
+function getRemoteHealthDisplay(healthRaw = null, modeRaw = "") {
+  const mode = normalizeOperationModeValue(modeRaw || getActiveOperationModeClient());
+  const health = normalizeRemoteHealthClient(healthRaw || State.remoteHealth);
+  if (mode !== "remote") {
+    return { text: "Gateway local polling", cls: "" };
+  }
+  switch (String(health.state || "").trim().toLowerCase()) {
+    case "paused":
+      return { text: "Paused for standby refresh", cls: "warn" };
+    case "connecting":
+      return { text: "Connecting", cls: "warn" };
+    case "connected":
+      return { text: "Connected", cls: "ok" };
+    case "degraded":
+      return { text: "Degraded", cls: "warn" };
+    case "stale":
+      return { text: "Stale snapshot", cls: "warn" };
+    case "auth-error":
+      return {
+        text: health.hasUsableSnapshot ? "Auth error (stale data)" : "Auth error",
+        cls: "error",
+      };
+    case "config-error":
+      return {
+        text: health.hasUsableSnapshot ? "Config error (stale data)" : "Config error",
+        cls: "error",
+      };
+    default:
+      return {
+        text: health.hasUsableSnapshot ? "Disconnected (stale data)" : "Disconnected",
+        cls: health.hasUsableSnapshot ? "warn" : "error",
+      };
+  }
+}
+
+function isRemoteSnapshotRetainedClient(healthRaw = null) {
+  const health = normalizeRemoteHealthClient(healthRaw || State.remoteHealth);
+  return getActiveOperationModeClient() === "remote" && Boolean(health.hasUsableSnapshot);
 }
 
 function syncDayAheadGeneratorAvailability() {
@@ -1772,24 +3389,24 @@ function syncDayAheadGeneratorAvailability() {
     input.disabled = isClient;
     input.readOnly = isClient;
     input.title = isClient
-      ? "Day-ahead generation is available on Gateway mode only."
+      ? "Day-ahead generation is available only in Gateway mode."
       : "";
   }
   if (btn) {
     btn.disabled = isClient;
     btn.setAttribute("aria-disabled", isClient ? "true" : "false");
     btn.title = isClient
-      ? "Unavailable in Client mode. Use the Gateway server to generate day-ahead."
+      ? "Unavailable in Remote mode. Use the gateway workstation to generate the day-ahead forecast."
       : "";
   }
   if (res) {
     if (isClient) {
       res.className = "exp-result";
       res.textContent =
-        "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.";
+        "Day-ahead generation is unavailable in Remote mode. Run it from the gateway workstation.";
     } else if (
       res.textContent &&
-      /disabled in Client mode/i.test(String(res.textContent))
+      /unavailable in Remote mode/i.test(String(res.textContent))
     ) {
       res.textContent = "";
     }
@@ -1799,7 +3416,7 @@ function syncDayAheadGeneratorAvailability() {
 function notifyClientModeUnavailable(featureLabel) {
   const safeFeature = String(featureLabel || "This feature");
   showToast(
-    `${safeFeature} is unavailable in Client mode. Switch to Gateway mode in Settings.`,
+    `${safeFeature} is available only in Gateway mode. Change Operation Mode in Settings to continue.`,
     "warning",
     4200,
   );
@@ -1890,6 +3507,7 @@ function switchPage(page) {
   if (page === "audit") initAuditPage();
   if (page === "report") initReportPage();
   if (page === "export") initExportPage();
+  if (page === "forecast") initForecastPage();
   if (page === "settings") {
     initSettingsSectionNav();
     unlockSettingsInputs();
@@ -1935,20 +3553,12 @@ function normalizeSettingsSectionId(value) {
 function renderActiveSettingsMeta(sectionId) {
   const activeId = normalizeSettingsSectionId(sectionId);
   const meta = SETTINGS_SECTION_META[activeId] || SETTINGS_SECTION_META[DEFAULT_SETTINGS_SECTION_ID];
-  const titleNodes = [
-    $("settingsCurrentSectionTitle"),
-    $("settingsMainSectionTitle"),
-  ];
-  const copyNodes = [
-    $("settingsCurrentSectionCopy"),
-    $("settingsMainSectionCopy"),
-  ];
-  titleNodes.forEach((node) => {
-    if (node) node.textContent = meta.title;
-  });
-  copyNodes.forEach((node) => {
-    if (node) node.textContent = meta.copy;
-  });
+  const mainTitle = $("settingsMainSectionTitle");
+  const mainCopy = $("settingsMainSectionCopy");
+  const sidebarChip = $("settingsSidebarCurrentChip");
+  if (mainTitle) mainTitle.textContent = meta.title;
+  if (mainCopy) mainCopy.textContent = meta.copy;
+  if (sidebarChip) sidebarChip.textContent = meta.title;
 }
 
 function setActiveSettingsSection(sectionId, persist = true) {
@@ -2007,6 +3617,39 @@ function initSettingsSectionNav() {
   setActiveSettingsSection(saved || DEFAULT_SETTINGS_SECTION_ID, false);
 }
 
+function mountForecastSection() {
+  const host = $("forecastPageSections");
+  const section = $("forecastSection");
+  if (!host || !section || section.parentElement === host) return;
+  host.appendChild(section);
+}
+
+function updateForecastSidebarSummary() {
+  const chip = $("forecastSidebarCurrentChip");
+  if (!chip) return;
+  const provider = String(
+    $("setForecastProvider")?.value || State.settings.forecastProvider || "ml_local",
+  )
+    .trim()
+    .toLowerCase();
+  chip.textContent = provider === "solcast" ? "Active Source: Solcast" : "Active Source: Local ML";
+}
+
+function initForecastPage() {
+  mountForecastSection();
+  unlockSettingsInputs();
+  syncForecastProviderUi();
+  updateForecastSidebarSummary();
+  updateSolcastPreviewUnitUi();
+  const useToolkitPreview =
+    String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
+      .trim()
+      .toLowerCase() === "toolkit";
+  if (useToolkitPreview) {
+    loadSolcastPreview({ silent: true }).catch(() => {});
+  }
+}
+
 // ─── Clock ────────────────────────────────────────────────────────────────────
 function startClock() {
   function tick() {
@@ -2015,6 +3658,19 @@ function startClock() {
       `${pad2(n.getHours())}:${pad2(n.getMinutes())}:${pad2(n.getSeconds())}`;
     $("dateLbl").textContent =
       `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())} PHT`;
+    // Day-rollover: reset tab dates and invalidate caches when the calendar day changes.
+    if (State.lastDateInitDay && State.lastDateInitDay !== dateStr(n)) {
+      initAllTabDatesToToday();
+      State.tabFetchTs = {};
+      State.alarmView.rows  = [];
+      State.alarmView.queryKey = "";
+      State.energyView.rows = [];
+      State.energyView.queryKey = "";
+      State.energyView.summary = null;
+      State.auditView.rows  = [];
+      State.auditView.queryKey = "";
+      State.reportView.rows = [];
+    }
   }
   tick();
   State.clockTimer = setInterval(tick, 1000);
@@ -2030,7 +3686,7 @@ async function loadSettings() {
       s.exportUiState || {},
     );
     if ($("plantNameDisplay"))
-      $("plantNameDisplay").textContent = s.plantName || "Solar Plant";
+      $("plantNameDisplay").textContent = s.plantName || "ADSI Plant";
     $("setPlantName").value = s.plantName || "";
     $("setOperatorName").value = s.operatorName || "OPERATOR";
     $("setOperationMode").value = s.operationMode || "gateway";
@@ -2050,11 +3706,38 @@ async function loadSettings() {
     $("setCsvPath").value = s.csvSavePath || "";
     $("setRetainDays").value = s.retainDays || 90;
     $("setForecastProvider").value = s.forecastProvider || "ml_local";
-    $("setSolcastBaseUrl").value =
-      s.solcastBaseUrl || "https://api.solcast.com.au";
+    $("setSolcastBaseUrl").value = s.solcastBaseUrl || "https://api.solcast.com.au";
+    $("setSolcastAccessMode").value = s.solcastAccessMode || "toolkit";
     $("setSolcastApiKey").value = s.solcastApiKey || "";
     $("setSolcastResourceId").value = s.solcastResourceId || "";
+    $("setSolcastToolkitEmail").value = s.solcastToolkitEmail || "";
+    $("setSolcastToolkitPassword").value = s.solcastToolkitPassword || "";
+    $("setSolcastToolkitSiteRef").value = s.solcastToolkitSiteRef || "";
+    if ($("setSolcastToolkitDays")) $("setSolcastToolkitDays").value = s.solcastToolkitDays || "2";
+    if ($("setSolcastToolkitPeriod")) $("setSolcastToolkitPeriod").value = s.solcastToolkitPeriod || "PT5M";
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
+    if ($("setPlantLatitude"))  $("setPlantLatitude").value  = s.plantLatitude  ?? "";
+    if ($("setPlantLongitude")) $("setPlantLongitude").value = s.plantLongitude ?? "";
+    if ($("setPlantCapUpperMw")) {
+      $("setPlantCapUpperMw").value =
+        s.plantCapUpperMw == null ? "" : String(s.plantCapUpperMw);
+    }
+    if ($("setPlantCapLowerMw")) {
+      $("setPlantCapLowerMw").value =
+        s.plantCapLowerMw == null ? "" : String(s.plantCapLowerMw);
+    }
+    if ($("setPlantCapSequenceMode")) {
+      $("setPlantCapSequenceMode").value =
+        s.plantCapSequenceMode || "ascending";
+    }
+    if ($("setPlantCapSequenceCustom")) {
+      $("setPlantCapSequenceCustom").value = formatPlantCapSequenceInputClient(
+        s.plantCapSequenceCustom || [],
+      );
+    }
+    if ($("setPlantCapCooldownSec")) {
+      $("setPlantCapCooldownSec").value = String(s.plantCapCooldownSec ?? 30);
+    }
     $("setDataDir").textContent = s.dataDir || "—";
     const pc = s.inverterPollConfig || {};
     if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
@@ -2067,10 +3750,20 @@ async function loadSettings() {
       providerSel.dataset.bound = "1";
       providerSel.addEventListener("change", syncForecastProviderUi);
     }
+    const accessSel = $("setSolcastAccessMode");
+    if (accessSel && accessSel.dataset.bound !== "1") {
+      accessSel.dataset.bound = "1";
+      accessSel.addEventListener("change", syncForecastProviderUi);
+    }
     applyExportUiStateToInputs(State.settings.exportUiState);
+    mountForecastSection();
     unlockSettingsInputs();
     syncOperationModeUi();
+    syncModeTransitionUi();
     syncForecastProviderUi();
+    updateForecastSidebarSummary();
+    syncPlantCapFormsFromSettingsState();
+    refreshPlantCapStatus(true).catch(() => {});
     refreshLicenseSection().catch(() => {});
   } catch (e) {
     console.warn("[Settings] load failed:", e.message);
@@ -2078,13 +3771,15 @@ async function loadSettings() {
 }
 
 function unlockSettingsInputs() {
-  const root = $("page-settings");
-  if (!root) return;
-  root.querySelectorAll("input, select, textarea").forEach((ctrl) => {
-    ctrl.disabled = false;
-    ctrl.readOnly = false;
-    ctrl.removeAttribute("disabled");
-    ctrl.removeAttribute("readonly");
+  ["page-settings", "page-forecast"].forEach((pageId) => {
+    const root = $(pageId);
+    if (!root) return;
+    root.querySelectorAll("input, select, textarea").forEach((ctrl) => {
+      ctrl.disabled = false;
+      ctrl.readOnly = false;
+      ctrl.removeAttribute("disabled");
+      ctrl.removeAttribute("readonly");
+    });
   });
 }
 
@@ -2092,24 +3787,533 @@ function syncForecastProviderUi() {
   const provider = String($("setForecastProvider")?.value || "ml_local")
     .trim()
     .toLowerCase();
-  const useSolcast = provider === "solcast";
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
+    .trim()
+    .toLowerCase() === "api"
+    ? "api"
+    : "toolkit";
+  const apiMode = accessMode === "api";
+  const apiPanel = $("forecastSection")?.querySelector(".forecast-api-panel");
+  const toolkitPanel = $("forecastSection")?.querySelector(".forecast-toolkit-panel");
+  if (apiPanel) apiPanel.hidden = !apiMode;
+  if (toolkitPanel) toolkitPanel.hidden = apiMode;
+  ["setSolcastBaseUrl", "setSolcastAccessMode", "setSolcastTimezone"].forEach((id) => {
+    const ctrl = $(id);
+    if (!ctrl) return;
+    ctrl.disabled = false;
+  });
+  ["setSolcastApiKey", "setSolcastResourceId"].forEach((id) => {
+    const ctrl = $(id);
+    if (!ctrl) return;
+    ctrl.disabled = !apiMode;
+  });
   [
-    "setSolcastBaseUrl",
-    "setSolcastApiKey",
-    "setSolcastResourceId",
-    "setSolcastTimezone",
+    "setSolcastToolkitSiteRef",
+    "setSolcastToolkitDays",
+    "setSolcastToolkitPeriod",
+    "setSolcastToolkitEmail",
+    "setSolcastToolkitPassword",
   ].forEach((id) => {
     const ctrl = $(id);
     if (!ctrl) return;
-    ctrl.disabled = !useSolcast;
+    ctrl.disabled = apiMode;
+  });
+  const previewPanel = $("solcastPreviewPanel");
+  if (previewPanel) {
+    previewPanel.hidden = apiMode;
+  }
+  const previewDay = $("solcastPreviewDay");
+  const previewDayCount = $("solcastPreviewDayCount");
+  const previewResolution = $("solcastPreviewResolution");
+  const previewUnit = $("solcastPreviewUnit");
+  const previewExportFormat = $("solcastPreviewExportFormat");
+  const previewBtn = $("btnSolcastPreviewRefresh");
+  const previewExportBtn = $("btnSolcastPreviewExport");
+  if (previewDay) previewDay.disabled = apiMode;
+  if (previewDayCount) previewDayCount.disabled = apiMode;
+  if (previewResolution) previewResolution.disabled = apiMode;
+  if (previewUnit) previewUnit.disabled = apiMode;
+  if (previewExportFormat) previewExportFormat.disabled = apiMode;
+  if (previewBtn) previewBtn.disabled = apiMode;
+  if (previewExportBtn) previewExportBtn.disabled = apiMode;
+  if (apiMode) clearSolcastPreview(false);
+  updateForecastSidebarSummary();
+}
+
+function getSettingsMessageTargetId() {
+  return State.currentPage === "forecast" ? "forecastPageMsg" : "settingsMsg";
+}
+
+function readSolcastSettingsForm() {
+  return {
+    solcastBaseUrl: $("setSolcastBaseUrl")?.value || "https://api.solcast.com.au",
+    solcastAccessMode: $("setSolcastAccessMode")?.value || "toolkit",
+    solcastApiKey: $("setSolcastApiKey")?.value || "",
+    solcastResourceId: $("setSolcastResourceId")?.value || "",
+    solcastToolkitEmail: $("setSolcastToolkitEmail")?.value || "",
+    solcastToolkitPassword: $("setSolcastToolkitPassword")?.value || "",
+    solcastToolkitSiteRef: $("setSolcastToolkitSiteRef")?.value || "",
+    solcastToolkitDays: $("setSolcastToolkitDays")?.value || "2",
+    solcastToolkitPeriod: $("setSolcastToolkitPeriod")?.value || "PT5M",
+    solcastTimezone: $("setSolcastTimezone")?.value || "",
+  };
+}
+
+function destroyChartByKey(key) {
+  const chart = State.charts[key];
+  if (!chart) return;
+  try {
+    chart.destroy();
+  } catch (_) {}
+  delete State.charts[key];
+}
+
+function fillSolcastPreviewDayOptions(days, selectedDay) {
+  const sel = $("solcastPreviewDay");
+  if (!sel) return;
+  const safeDays = Array.isArray(days) ? days.filter(Boolean) : [];
+  sel.innerHTML = "";
+  if (!safeDays.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No preview days";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  safeDays.forEach((day) => {
+    const opt = document.createElement("option");
+    opt.value = day;
+    opt.textContent = day;
+    if (day === selectedDay) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.disabled = false;
+}
+
+function normalizeSolcastPreviewDayCountClient(value) {
+  const n = Math.trunc(Number(value || 1));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(7, Math.max(1, n));
+}
+
+function syncSolcastPreviewDayCountOptions(days, selectedDay, selectedCount) {
+  const sel = $("solcastPreviewDayCount");
+  if (!sel) return;
+  const safeDays = Array.isArray(days) ? days.filter(Boolean) : [];
+  const idx = Math.max(0, safeDays.indexOf(String(selectedDay || "").trim()));
+  const maxAllowed = safeDays.length
+    ? Math.min(7, Math.max(1, safeDays.length - idx))
+    : 1;
+  Array.from(sel.options).forEach((opt) => {
+    const count = normalizeSolcastPreviewDayCountClient(opt.value);
+    opt.disabled = count > maxAllowed;
+  });
+  sel.value = String(Math.min(normalizeSolcastPreviewDayCountClient(selectedCount), maxAllowed));
+  sel.disabled = safeDays.length === 0;
+}
+
+function setSolcastPreviewTotals(
+  forecastText = "—",
+  actualText = "—",
+  rangeText = "—",
+  windowText = "05:00-18:00",
+) {
+  if ($("solcastPreviewForecastTotal")) {
+    $("solcastPreviewForecastTotal").textContent = forecastText;
+  }
+  if ($("solcastPreviewActualTotal")) {
+    $("solcastPreviewActualTotal").textContent = actualText;
+  }
+  if ($("solcastPreviewRange")) {
+    $("solcastPreviewRange").textContent = rangeText;
+  }
+  if ($("solcastPreviewWindow")) {
+    $("solcastPreviewWindow").textContent = windowText;
+  }
+}
+
+function clearSolcastPreview(resetDays = false) {
+  State.solcastPreview.loaded = false;
+  State.solcastPreview.payload = null;
+  if (resetDays) {
+    State.solcastPreview.days = [];
+    State.solcastPreview.day = "";
+    State.solcastPreview.dayCount = 1;
+    State.solcastPreview.selectedDays = [];
+    State.solcastPreview.rangeLabel = "";
+    State.solcastPreview.resolution = "PT5M";
+    State.solcastPreview.unit = "mwh";
+    fillSolcastPreviewDayOptions([], "");
+    syncSolcastPreviewDayCountOptions([], "", 1);
+  }
+  const resolutionSel = $("solcastPreviewResolution");
+  const unitSel = $("solcastPreviewUnit");
+  if (resolutionSel && resetDays) resolutionSel.value = "PT5M";
+  if (unitSel && resetDays) unitSel.value = "mwh";
+  updateSolcastPreviewUnitUi();
+  setSolcastPreviewTotals("—", "—", "—", "05:00-18:00");
+  destroyChartByKey("solcastPreview");
+}
+
+function getSelectedSolcastPreviewUnit() {
+  const raw = String($("solcastPreviewUnit")?.value || State.solcastPreview.unit || "mwh")
+    .trim()
+    .toLowerCase();
+  return raw === "mw" ? "mw" : "mwh";
+}
+
+function updateSolcastPreviewUnitUi() {
+  const unit = getSelectedSolcastPreviewUnit();
+  const title = $("solcastPreviewChartTitle");
+  const note = $("solcastPreviewChartNote");
+  const emphasis = $("solcastPreviewChartEmphasis");
+  if (title) {
+    title.textContent = "Solcast PT5M Outlook";
+  }
+  if (note) {
+    note.textContent =
+      unit === "mw"
+        ? "05:00-18:00 local window · displaying raw toolkit MW"
+        : "05:00-18:00 local window · displaying MWh per 5-minute slot";
+  }
+  if (emphasis) {
+    emphasis.textContent = unit === "mw" ? "Chart Unit: MW" : "Chart Unit: MWh";
+  }
+}
+
+function buildSolcastPreviewChart(payload) {
+  const canvas = $("solcastPreviewChart");
+  if (!canvas) return;
+  const pal = getChartPalette();
+  const uiFont = cssVar("--font-main", "Arial");
+  const chartType = getChartTypography();
+  const labels = Array.isArray(payload?.labels) ? payload.labels : [];
+  const unit = getSelectedSolcastPreviewUnit();
+  const useMw = unit === "mw";
+  const forecast = Array.isArray(useMw ? payload?.forecastMw : payload?.forecastMwh)
+    ? (useMw ? payload.forecastMw : payload.forecastMwh)
+    : [];
+  const forecastLo = Array.isArray(useMw ? payload?.forecastLoMw : payload?.forecastLoMwh)
+    ? (useMw ? payload.forecastLoMw : payload.forecastLoMwh)
+    : [];
+  const forecastHi = Array.isArray(useMw ? payload?.forecastHiMw : payload?.forecastHiMwh)
+    ? (useMw ? payload.forecastHiMw : payload.forecastHiMwh)
+    : [];
+  const actual = Array.isArray(useMw ? payload?.actualMw : payload?.actualMwh)
+    ? (useMw ? payload.actualMw : payload.actualMwh)
+    : [];
+  const forecastMw = Array.isArray(payload?.forecastMw) ? payload.forecastMw : [];
+  const forecastLoMw = Array.isArray(payload?.forecastLoMw) ? payload.forecastLoMw : [];
+  const forecastHiMw = Array.isArray(payload?.forecastHiMw) ? payload.forecastHiMw : [];
+  const actualMw = Array.isArray(payload?.actualMw) ? payload.actualMw : [];
+  const maxTickCount =
+    labels.length > 900 ? 10 : labels.length > 450 ? 12 : labels.length > 220 ? 14 : 18;
+  const unitLabel = useMw ? "MW" : "MWh";
+  const opts = chartOpts(unitLabel, true);
+  opts.maintainAspectRatio = false;
+  opts.normalized = true;
+  opts.layout.padding = { top: 0, right: 8, bottom: 0, left: 0 };
+  opts.interaction = {
+    mode: "index",
+    intersect: false,
+  };
+  opts.plugins.legend.position = "top";
+  opts.plugins.legend.align = "start";
+  opts.plugins.legend.labels = {
+    ...opts.plugins.legend.labels,
+    usePointStyle: true,
+    pointStyle: "line",
+    boxWidth: chartType.legendBoxWidth,
+    boxHeight: chartType.legendBoxHeight,
+    padding: chartType.legendPadding,
+    color: pal.legend,
+    font: { family: uiFont, size: chartType.legend, weight: "700" },
+  };
+  opts.plugins.tooltip = {
+    backgroundColor: pal.tooltipBg,
+    borderColor: pal.tooltipBorder,
+    borderWidth: 1,
+    titleColor: pal.tooltipText,
+    bodyColor: pal.tooltipText,
+    titleFont: { family: uiFont, size: chartType.tooltip, weight: "700" },
+    bodyFont: { family: uiFont, size: chartType.tooltip, weight: "600" },
+    padding: chartType.legendPadding,
+    cornerRadius: 10,
+    displayColors: true,
+    boxPadding: 4,
+    callbacks: {
+      title(items) {
+        const raw = String(items?.[0]?.label || "").trim();
+        return raw.replace(/^(\d{2}-\d{2})\s/, "$1 · ");
+      },
+      label(ctx) {
+        const label = String(ctx.dataset?.label || "")
+          .replace(/^_+/, "")
+          .trim();
+        const value = Number(ctx.parsed?.y);
+        if (!Number.isFinite(value)) return `${label}: —`;
+        const mwValue = Number(ctx.dataset?.rawMwData?.[ctx.dataIndex]);
+        if (useMw) {
+          return `${label}: ${value.toFixed(3)} MW`;
+        }
+        if (Number.isFinite(mwValue)) {
+          return `${label}: ${value.toFixed(3)} MWh | ${mwValue.toFixed(3)} MW`;
+        }
+        return `${label}: ${value.toFixed(3)} MWh`;
+      },
+    },
+  };
+  if (opts.scales?.x?.ticks) {
+    opts.scales.x.ticks.autoSkip = true;
+    opts.scales.x.ticks.maxRotation = 0;
+    opts.scales.x.ticks.minRotation = 0;
+    opts.scales.x.ticks.maxTicksLimit = maxTickCount;
+    opts.scales.x.ticks.padding = 8;
+    opts.scales.x.ticks.font = { family: uiFont, size: 10, weight: "600" };
+  }
+  if (opts.scales?.x?.grid) {
+    opts.scales.x.grid.color = pal.grid;
+    opts.scales.x.grid.drawTicks = false;
+  }
+  if (opts.scales?.x) {
+    opts.scales.x.border = { display: false };
+  }
+  if (opts.scales?.y?.ticks) {
+    opts.scales.y.ticks.padding = 6;
+    opts.scales.y.ticks.font = { family: uiFont, size: 11, weight: "600" };
+  }
+  if (opts.scales?.y?.grid) {
+    opts.scales.y.grid.color = pal.grid;
+    opts.scales.y.grid.drawTicks = false;
+  }
+  if (opts.scales?.y?.title) {
+    opts.scales.y.title.font = { family: uiFont, size: 10, weight: "700" };
+  }
+  if (opts.scales?.y) {
+    opts.scales.y.border = { display: false };
+  }
+  opts.plugins.legend.labels.filter = (item) =>
+    !String(item?.text || "").startsWith("_");
+
+  const datasets = [
+    {
+      label: "_Forecast Band Lower",
+      data: forecastLo,
+      borderColor: "rgba(0,0,0,0)",
+      backgroundColor: "rgba(0,0,0,0)",
+      borderWidth: 0,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      tension: 0.12,
+      fill: false,
+      spanGaps: true,
+      rawMwData: forecastLoMw,
+    },
+    {
+      label: "_Forecast Band Upper",
+      data: forecastHi,
+      borderColor: "rgba(0,0,0,0)",
+      backgroundColor: pal.bandFill,
+      borderWidth: 0,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      tension: 0.12,
+      fill: "-1",
+      spanGaps: true,
+      rawMwData: forecastHiMw,
+    },
+    {
+      label: "Estimated Actual",
+      data: actual,
+      borderColor: pal.actual,
+      backgroundColor: pal.actualFill,
+      borderWidth: 2.8,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointBorderWidth: 0,
+      pointBackgroundColor: pal.actual,
+      tension: 0.2,
+      cubicInterpolationMode: "monotone",
+      fill: false,
+      spanGaps: true,
+      rawMwData: actualMw,
+    },
+    {
+      label: "Forecast",
+      data: forecast,
+      borderColor: pal.ahead,
+      backgroundColor: pal.aheadFill,
+      borderWidth: 2.8,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointBorderWidth: 0,
+      pointBackgroundColor: pal.ahead,
+      tension: 0.2,
+      cubicInterpolationMode: "monotone",
+      borderDash: [10, 5],
+      fill: false,
+      spanGaps: true,
+      rawMwData: forecastMw,
+    },
+  ];
+
+  const chart = State.charts.solcastPreview;
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets = datasets;
+    chart.options = opts;
+    chart.update("none");
+    return;
+  }
+
+  State.charts.solcastPreview = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: opts,
   });
 }
 
-function syncOperationModeUi() {
-  const mode = String($("setOperationMode")?.value || "gateway")
+function applySolcastPreviewPayload(payload) {
+  const days = Array.isArray(payload?.daysCovered) ? payload.daysCovered : [];
+  const day = String(payload?.day || "").trim();
+  const dayCount = normalizeSolcastPreviewDayCountClient(payload?.dayCount || 1);
+  State.solcastPreview.payload = payload;
+  State.solcastPreview.days = days;
+  State.solcastPreview.day = day;
+  State.solcastPreview.dayCount = dayCount;
+  State.solcastPreview.selectedDays = Array.isArray(payload?.selectedDays)
+    ? payload.selectedDays.filter(Boolean)
+    : [];
+  State.solcastPreview.rangeLabel = String(payload?.rangeLabel || "").trim();
+  State.solcastPreview.loaded = true;
+  syncSharedForecastExportFormatControls(State.solcastPreview.exportFormat || "standard");
+  updateSolcastPreviewUnitUi();
+  fillSolcastPreviewDayOptions(days, day);
+  syncSolcastPreviewDayCountOptions(days, day, dayCount);
+  setSolcastPreviewTotals(
+    `${Number(payload?.forecastTotalMwh || 0).toFixed(3)} MWh`,
+    Number(payload?.actualTotalMwh || 0) > 0
+      ? `${Number(payload?.actualTotalMwh || 0).toFixed(3)} MWh`
+      : "No estimated actuals",
+    String(payload?.rangeLabel || payload?.day || "—").trim() || "—",
+    `${payload?.startTime || "05:00"}-${payload?.endTime || "18:00"}`,
+  );
+  buildSolcastPreviewChart(payload);
+}
+
+function rerenderSolcastPreviewChartFromState() {
+  if (!State.solcastPreview.loaded || !State.solcastPreview.payload) return;
+  State.solcastPreview.unit = getSelectedSolcastPreviewUnit();
+  updateSolcastPreviewUnitUi();
+  buildSolcastPreviewChart(State.solcastPreview.payload);
+}
+
+const rerenderResponsiveChartsDebounced = debounce(() => {
+  if (State.currentPage === "analytics" && State.analyticsBaseRows.length > 0) {
+    renderAnalyticsFromState();
+  }
+  if (
+    (State.currentPage === "forecast" || State.currentPage === "settings") &&
+    State.solcastPreview.loaded &&
+    State.solcastPreview.payload
+  ) {
+    rerenderSolcastPreviewChartFromState();
+  }
+}, 180);
+
+async function loadSolcastPreview(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
     .trim()
     .toLowerCase();
-  const remote = mode === "remote";
+  if (accessMode !== "toolkit") {
+    clearSolcastPreview(false);
+    return null;
+  }
+  const btn = $("btnSolcastPreviewRefresh");
+  const payload = {
+    ...readSolcastSettingsForm(),
+    day:
+      opts.day !== undefined
+        ? opts.day
+        : $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
+    dayCount:
+      opts.dayCount !== undefined
+        ? opts.dayCount
+        : $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+  };
+  if (btn) btn.disabled = true;
+  showMsg(
+    "solcastPreviewMsg",
+    opts.silent ? "Loading preview..." : "Loading Solcast toolkit preview...",
+    "",
+  );
+  try {
+    const preview = await api("/api/forecast/solcast/preview", "POST", payload);
+    applySolcastPreviewPayload(preview);
+    showMsg(
+      "solcastPreviewMsg",
+      `✔ Preview loaded for ${preview.rangeLabel || preview.day} (${preview.startTime}-${preview.endTime})`,
+      "",
+    );
+    showSnapshotWarningToast("Solcast snapshot", preview?.snapshotWarnings || []);
+    return preview;
+  } catch (err) {
+    clearSolcastPreview(false);
+    showMsg("solcastPreviewMsg", `✗ Preview failed: ${err.message}`, "error");
+    throw err;
+  } finally {
+    if (btn) btn.disabled = false;
+    syncForecastProviderUi();
+  }
+}
+
+async function exportSolcastPreviewXlsx() {
+  const accessMode = String(
+    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
+  )
+    .trim()
+    .toLowerCase();
+  if (accessMode !== "toolkit") {
+    showMsg("solcastPreviewMsg", "Toolkit preview export is available only in Toolkit Login mode.", "error");
+    return;
+  }
+  const btn = $("btnSolcastPreviewExport");
+  if (btn) btn.disabled = true;
+  State.solcastPreview.exportFormat = getSelectedSolcastPreviewExportFormat();
+  showMsg("solcastPreviewMsg", "Exporting Solcast preview to Excel...", "");
+  try {
+    const payload = {
+      ...readSolcastSettingsForm(),
+      day: $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
+      dayCount:
+        $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+      resolution: getSelectedSolcastPreviewResolution(),
+      exportFormat: getSelectedSolcastPreviewExportFormat(),
+    };
+    const result = await api("/api/export/solcast-preview", "POST", payload);
+    showMsg("solcastPreviewMsg", `✔ Saved: ${result.path}`, "");
+    await openExportPathFolder(result.path);
+    return result;
+  } catch (err) {
+    showMsg("solcastPreviewMsg", `✗ Export failed: ${err.message}`, "error");
+    throw err;
+  } finally {
+    if (btn) btn.disabled = false;
+    syncForecastProviderUi();
+  }
+}
+
+function syncOperationModeUi() {
+  const selectedMode = getSelectedOperationModeClient();
+  const activeMode = getActiveOperationModeClient();
+  const remote = activeMode === "remote";
+  const restartCapable = isGatewayModeRestartCapable();
   // Keep connectivity inputs editable in both modes so users can preconfigure
   // remote access while staying in Gateway mode.
   ["setRemoteGatewayUrl", "setRemoteApiToken", "setTailscaleDeviceHint"].forEach(
@@ -2122,9 +4326,13 @@ function syncOperationModeUi() {
   );
   showMsg(
     "networkMsg",
-    remote
-      ? `Remote mode selected. ${$("setRemoteAutoSync")?.checked ? "Startup Auto Sync is enabled." : "Startup Auto Sync is disabled; use manual Pull/Push."}`
-      : "Gateway mode selected. Local polling is active; remote/Tailscale fields are optional.",
+    selectedMode !== activeMode
+      ? selectedMode === "gateway" && activeMode === "remote"
+        ? `Selected mode is Gateway, but the active runtime mode is still Remote. Save Settings to apply the mode change.${restartCapable ? " The app will restart for a clean Gateway startup." : " Restart the app after saving for a clean Gateway startup."}`
+        : `Selected mode is ${selectedMode === "remote" ? "Remote" : "Gateway"}, but the active runtime mode is still ${activeMode === "remote" ? "Remote" : "Gateway"}. Save Settings to apply the mode change.`
+      : remote
+        ? "Remote mode active. Live data is streamed from the gateway. Use Refresh Standby DB when you need a fresh local database copy before switching to Gateway mode."
+        : "Gateway mode active. Local polling is active; remote/Tailscale fields are optional.",
     "",
   );
   syncDayAheadGeneratorAvailability();
@@ -2163,14 +4371,41 @@ function pickSettingsConfigFields(src) {
     out.forecastProvider = String(src.forecastProvider ?? "");
   if (hasOwn(src, "solcastBaseUrl"))
     out.solcastBaseUrl = String(src.solcastBaseUrl ?? "");
+  if (hasOwn(src, "solcastAccessMode"))
+    out.solcastAccessMode = String(src.solcastAccessMode ?? "");
   if (hasOwn(src, "solcastApiKey"))
     out.solcastApiKey = String(src.solcastApiKey ?? "");
   if (hasOwn(src, "solcastResourceId"))
     out.solcastResourceId = String(src.solcastResourceId ?? "");
+  if (hasOwn(src, "solcastToolkitEmail"))
+    out.solcastToolkitEmail = String(src.solcastToolkitEmail ?? "");
+  if (hasOwn(src, "solcastToolkitPassword"))
+    out.solcastToolkitPassword = String(src.solcastToolkitPassword ?? "");
+  if (hasOwn(src, "solcastToolkitSiteRef"))
+    out.solcastToolkitSiteRef = String(src.solcastToolkitSiteRef ?? "");
+  if (hasOwn(src, "solcastToolkitDays"))
+    out.solcastToolkitDays = String(src.solcastToolkitDays ?? "");
+  if (hasOwn(src, "solcastToolkitPeriod"))
+    out.solcastToolkitPeriod = String(src.solcastToolkitPeriod ?? "");
   if (hasOwn(src, "solcastTimezone"))
     out.solcastTimezone = String(src.solcastTimezone ?? "");
   if (hasOwn(src, "invGridLayout"))
     out.invGridLayout = String(src.invGridLayout ?? "");
+  if (hasOwn(src, "plantCapUpperMw"))
+    out.plantCapUpperMw =
+      src.plantCapUpperMw == null ? "" : String(src.plantCapUpperMw ?? "");
+  if (hasOwn(src, "plantCapLowerMw"))
+    out.plantCapLowerMw =
+      src.plantCapLowerMw == null ? "" : String(src.plantCapLowerMw ?? "");
+  if (hasOwn(src, "plantCapSequenceMode"))
+    out.plantCapSequenceMode = String(src.plantCapSequenceMode ?? "");
+  if (hasOwn(src, "plantCapSequenceCustom")) {
+    out.plantCapSequenceCustom = Array.isArray(src.plantCapSequenceCustom)
+      ? src.plantCapSequenceCustom.map((item) => Number(item))
+      : [];
+  }
+  if (hasOwn(src, "plantCapCooldownSec"))
+    out.plantCapCooldownSec = Number(src.plantCapCooldownSec);
   if (
     hasOwn(src, "inverterPollConfig") &&
     src.inverterPollConfig &&
@@ -2218,10 +4453,12 @@ function pickCloudBackupSettingsFields(src) {
     };
   }
   if (hasOwn(src, "gdrive")) {
-    out.gdrive = {
+    const nextGDrive = {
       clientId: String(src.gdrive?.clientId ?? ""),
-      clientSecret: String(src.gdrive?.clientSecret ?? ""),
     };
+    const nextSecret = String(src.gdrive?.clientSecret ?? "").trim();
+    if (nextSecret) nextGDrive.clientSecret = nextSecret;
+    out.gdrive = nextGDrive;
   }
 
   return Object.keys(out).length ? out : null;
@@ -2333,6 +4570,10 @@ function parseSettingsConfigPayload(rawContent) {
   return {
     settings: Object.keys(settings).length ? settings : null,
     cloudBackupSettings,
+    containsSecrets: Boolean(parsed.containsSecrets),
+    excludedSecrets: Array.isArray(parsed.excludedSecrets)
+      ? parsed.excludedSecrets.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
   };
 }
 
@@ -2346,11 +4587,17 @@ async function disconnectCloudProvidersForConfigChange() {
 async function refreshAfterSettingsConfigApply(prevMode, reason) {
   await loadSettings();
   await cbLoadSettings();
-  await handleOperationModeTransition(
-    prevMode,
-    State.settings.operationMode,
-    reason,
-  );
+  try {
+    await handleOperationModeTransition(
+      prevMode,
+      State.settings.operationMode,
+      reason,
+    );
+  } catch (err) {
+    const msg = String(err?.message || err || "unknown error");
+    console.warn("[app] settings-config mode transition wait failed:", msg);
+    showToast(`Mode applied, but runtime startup is still settling: ${msg}`, "warning", 6200);
+  }
   buildInverterGrid();
   scheduleInverterCardsUpdate(true);
   buildSelects();
@@ -2364,7 +4611,11 @@ async function refreshAfterSettingsConfigApply(prevMode, reason) {
 
 async function applySettingsConfigBundle(
   bundle,
-  { reason = "settingsConfigApply", disconnectCloud = false } = {},
+  {
+    reason = "settingsConfigApply",
+    disconnectCloud = false,
+    clearGDriveClientSecret = false,
+  } = {},
 ) {
   const prevMode = State.settings.operationMode;
   const applied = {
@@ -2379,7 +4630,13 @@ async function applySettingsConfigBundle(
       applied.settings = true;
     }
     if (bundle?.cloudBackupSettings) {
-      await api("/api/backup/settings", "POST", bundle.cloudBackupSettings);
+      const cloudPayload = {
+        ...bundle.cloudBackupSettings,
+      };
+      if (clearGDriveClientSecret) {
+        cloudPayload.clearGDriveClientSecret = true;
+      }
+      await api("/api/backup/settings", "POST", cloudPayload);
       applied.cloudBackupSettings = true;
       if (disconnectCloud) {
         await disconnectCloudProvidersForConfigChange();
@@ -2417,16 +4674,22 @@ async function exportSettingsConfig() {
       api("/api/settings"),
       api("/api/backup/settings"),
     ]);
+    const settings = pickSettingsConfigFields(settingsSnapshot);
+    const cloudBackupSettings = pickCloudBackupSettingsFields(
+      cloudData?.settings || {},
+    );
+    const containsSecrets = Boolean(
+      settings?.remoteApiToken || settings?.solcastApiKey,
+    );
     const payload = {
       kind: SETTINGS_CONFIG_KIND,
       schemaVersion: SETTINGS_CONFIG_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       appVersion: getAppVersionLabel(),
-      containsSecrets: true,
-      settings: pickSettingsConfigFields(settingsSnapshot),
-      cloudBackupSettings: pickCloudBackupSettingsFields(
-        cloudData?.settings || {},
-      ),
+      containsSecrets,
+      excludedSecrets: ["gdrive.clientSecret", "oauthSessions"],
+      settings,
+      cloudBackupSettings,
     };
     const filePath = await saveTextFileLocally(
       JSON.stringify(payload, null, 2),
@@ -2437,7 +4700,10 @@ async function exportSettingsConfig() {
       showMsg("settingsMsg", "Export cancelled.", "");
       return;
     }
-    showMsg("settingsMsg", "✔ Settings config exported", "");
+    const exportMsg = containsSecrets
+      ? "✔ Settings file exported. Treat it as restricted configuration data. Stored Google client secret and active cloud sessions were not included."
+      : "✔ Settings file exported. Stored Google client secret and active cloud sessions were not included.";
+    showMsg("settingsMsg", exportMsg, "");
   } catch (err) {
     showMsg("settingsMsg", `✗ Export failed: ${err.message}`, "error");
   }
@@ -2448,12 +4714,23 @@ async function importSettingsConfig() {
     const picked = await openTextFileLocally("Import Settings Configuration");
     if (!picked?.content) return;
     const bundle = parseSettingsConfigPayload(picked.content);
-    const ok = window.confirm(
-      "Import this settings config and overwrite the current settings?",
-    );
+    const confirmLines = [
+      "Import this settings file and replace the current configuration?",
+    ];
+    if (bundle.containsSecrets) {
+      confirmLines.push(
+        "This file may contain operational credentials. Handle it as restricted configuration data.",
+      );
+    }
+    if (bundle.cloudBackupSettings) {
+      confirmLines.push(
+        "Cloud providers will be disconnected after import. The stored Google client secret is never included in exported files and must be entered again if required.",
+      );
+    }
+    const ok = await appConfirm("Import Settings", confirmLines.join("\n\n"), { ok: "Import" });
     if (!ok) return;
 
-    showMsg("settingsMsg", "Importing settings config...", "");
+    showMsg("settingsMsg", "Importing settings file...", "");
     const applied = await applySettingsConfigBundle(bundle, {
       reason: "importSettingsConfig",
       disconnectCloud: Boolean(bundle.cloudBackupSettings),
@@ -2461,8 +4738,8 @@ async function importSettingsConfig() {
     showMsg(
       "settingsMsg",
       applied.cloudBackupSettings
-        ? "✔ Config imported. Cloud providers were disconnected; reconnect if needed."
-        : "✔ Config imported",
+        ? "✔ Settings imported. Cloud providers were disconnected; reconnect them when ready."
+        : "✔ Settings imported.",
       "",
     );
   } catch (err) {
@@ -2471,12 +4748,14 @@ async function importSettingsConfig() {
 }
 
 async function resetSettingsToDefaults() {
-  const ok = window.confirm(
-    "Reset all dashboard settings and cloud backup configuration to defaults?",
+  const ok = await appConfirm(
+    "Restore Defaults",
+    "Restore dashboard settings and cloud backup configuration to their default values?\n\nThis will disconnect cloud providers and remove the stored Google client secret.",
+    { ok: "Restore" },
   );
   if (!ok) return;
 
-  showMsg("settingsMsg", "Resetting settings to defaults...", "");
+  showMsg("settingsMsg", "Restoring default settings...", "");
   try {
     const defaults = await api("/api/settings/defaults");
     const bundle = {
@@ -2488,10 +4767,11 @@ async function resetSettingsToDefaults() {
     await applySettingsConfigBundle(bundle, {
       reason: "resetSettingsDefaults",
       disconnectCloud: true,
+      clearGDriveClientSecret: true,
     });
     showMsg(
       "settingsMsg",
-      "✔ Settings reset to defaults. Cloud providers were disconnected.",
+      "✔ Default settings restored. Cloud providers were disconnected and the stored Google client secret was removed.",
       "",
     );
   } catch (err) {
@@ -2513,51 +4793,199 @@ async function handleOperationModeTransition(
   const prevMode = normalizeOperationModeValue(prevModeRaw);
   const nextMode = normalizeOperationModeValue(nextModeRaw);
   if (prevMode === nextMode) return;
+  const preserveAnalyticsView = State.currentPage === "analytics";
+  const readinessStartedAt = Date.now();
 
-  // Clear mode-specific runtime views immediately to avoid stale carry-over.
-  State.liveData = {};
-  State.totals = {};
-  State.invLastFresh = {};
-  State.analyticsBaseRows = [];
-  State.analyticsDayAheadBaseRows = [];
-  State.analyticsDailyTotalMwh = null;
-  State.pacToday.lastTs = 0;
-  State.pacToday.lastTotalPacW = 0;
-  scheduleInverterCardsUpdate(true);
+  setModeTransitionState(true, nextMode);
+  try {
+    // Invalidate in-flight analytics reads so older mode responses cannot win.
+    State.analyticsReqId = (State.analyticsReqId || 0) + 1;
+    State.alarmReqId = (State.alarmReqId || 0) + 1;
+    State.energyReqId = (State.energyReqId || 0) + 1;
+    State.auditReqId = (State.auditReqId || 0) + 1;
+    State.reportReqId = (State.reportReqId || 0) + 1;
 
-  // Re-seed canonical today MWh for the new mode source.
-  await syncTodayMwhFromServer().catch((err) => {
-    console.warn(
-      `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
-      err?.message || err,
-    );
-  });
-  renderTodayKwhFromPac();
+    // Clear mode-specific runtime views immediately to avoid stale carry-over.
+    State.liveData = {};
+    State.totals = {};
+    State.invLastFresh = {};
+    State.alarmView.queryKey = "";
+    State.energyView.queryKey = "";
+    State.auditView.queryKey = "";
+    State.reportView.queryKey = "";
+    if (!preserveAnalyticsView) {
+      State.analyticsBaseRows = [];
+      State.analyticsDayAheadBaseRows = [];
+      State.analyticsDayAheadCache = null;
+      State.analyticsDailyTotalMwh = null;
+      State.analyticsActualSummarySyncAt = 0;
+      State.analyticsActualSummarySyncDay = "";
+    }
+    State.pacToday.lastTs = 0;
+    State.pacToday.lastTotalPacW = 0;
+    resetTodayMwhAuthority();
+    State.remoteHealth = normalizeRemoteHealthClient({
+      state: nextMode === "remote" ? "disconnected" : "gateway-local",
+    });
+    resetChatState();
+    scheduleInverterCardsUpdate(true);
 
-  // Refresh currently visible data views so numbers align with the new mode immediately.
-  if (State.currentPage === "analytics") {
-    await loadAnalytics({ force: true }).catch((err) => {
-      console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
+    if (nextMode === "remote") {
+      stopTodayMwhSyncTimer();
+      updateModeTransitionDetail("Waiting for the first live snapshot from the gateway...");
+      // Allow a one-time HTTP seed while waiting for the first WS todayEnergy
+      // payload after entering remote mode. Ongoing remote updates stay WS-only.
+      await syncTodayMwhFromServer({ allowRemoteFallback: true }).catch((err) => {
+        console.warn(
+          `[app] mode transition today-MWh sync failed (${reason || "unknown"}):`,
+          err?.message || err,
+        );
+      });
+      renderTodayKwhFromPac();
+      await waitForRemoteModeReady(readinessStartedAt);
+    } else {
+      startTodayMwhSyncTimer();
+      renderTodayKwhFromPac();
+      updateModeTransitionDetail("Waiting for the local poller to complete its first cycle...");
+      await waitForGatewayModeReady(readinessStartedAt);
+    }
+
+    // Refresh currently visible data views only after the target runtime is ready.
+    if (State.currentPage === "analytics") {
+      await loadAnalytics({ force: true }).catch((err) => {
+        console.warn("[app] mode transition analytics refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "alarms") {
+      await fetchAlarms({ force: true }).catch((err) => {
+        console.warn("[app] mode transition alarms refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "report") {
+      await fetchReport({ force: true }).catch((err) => {
+        console.warn("[app] mode transition report refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "energy") {
+      await fetchEnergy({ force: true }).catch((err) => {
+        console.warn("[app] mode transition energy refresh failed:", err?.message || err);
+      });
+    } else if (State.currentPage === "audit") {
+      await fetchAudit({ force: true }).catch((err) => {
+        console.warn("[app] mode transition audit refresh failed:", err?.message || err);
+      });
+    }
+
+    await loadChatHistory({ silent: true }).catch((err) => {
+      console.warn("[app] mode transition chat refresh failed:", err?.message || err);
     });
-  } else if (State.currentPage === "report") {
-    await fetchReport().catch((err) => {
-      console.warn("[app] mode transition report refresh failed:", err?.message || err);
-    });
-  } else if (State.currentPage === "energy") {
-    await fetchEnergy().catch((err) => {
-      console.warn("[app] mode transition energy refresh failed:", err?.message || err);
-    });
+  } finally {
+    setModeTransitionState(false);
   }
+}
+
+function hasUnsavedRemoteConnectivityChanges(normalizedGateway = "") {
+  const formGateway = String(
+    normalizedGateway || $("setRemoteGatewayUrl")?.value || "",
+  ).trim();
+  const savedGateway = String(State.settings.remoteGatewayUrl || "").trim();
+  const formToken = String($("setRemoteApiToken")?.value || "").trim();
+  const savedToken = String(State.settings.remoteApiToken || "").trim();
+  return formGateway !== savedGateway || formToken !== savedToken;
+}
+
+async function refreshRemoteBridgeNow(silent = false) {
+  const activeMode = getActiveOperationModeClient();
+  if (activeMode !== "remote") return null;
+  try {
+    const result = await api("/api/runtime/network/reconnect", "POST", {}, {
+      progress: false,
+    });
+    if (result?.remoteHealth) applyRemoteHealthClient(result.remoteHealth);
+    await refreshReplicationHealth(true).catch(() => {});
+    if (!silent) {
+      const nodes = Number(result?.liveNodeCount || 0);
+      const health = normalizeRemoteHealthClient(result?.remoteHealth || State.remoteHealth);
+      if (result?.ok) {
+        showMsg(
+          "networkMsg",
+          `✔ Live bridge refreshed (${nodes} node(s) visible).`,
+          "",
+        );
+      } else {
+        const reason = String(result?.error || health.reasonText || "Live bridge is using the last retained snapshot.").trim();
+        showMsg(
+          "networkMsg",
+          `✗ Live bridge not fully healthy: ${reason}`,
+          "error",
+        );
+      }
+    }
+    return result;
+  } catch (err) {
+    await refreshReplicationHealth(true).catch(() => {});
+    if (!silent) {
+      showMsg(
+        "networkMsg",
+        `✗ Live bridge refresh failed: ${err.message}`,
+        "error",
+      );
+    }
+    return null;
+  }
+}
+
+async function confirmGatewayModeSwitch(nextMode, prevMode) {
+  if (
+    normalizeOperationModeValue(prevMode) !== "remote" ||
+    normalizeOperationModeValue(nextMode) !== "gateway"
+  ) {
+    return true;
+  }
+
+  await refreshReplicationHealth(true).catch(() => {});
+  const job = State.replication.job && typeof State.replication.job === "object"
+    ? State.replication.job
+    : null;
+  const stagedStandbyReady =
+    Boolean(job?.needsRestart) &&
+    String(job?.status || "").trim().toLowerCase() === "completed";
+  const restartCapable = isGatewayModeRestartCapable();
+  const bodyText = stagedStandbyReady
+    ? "A refreshed standby database is already staged locally.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts from the staged local database.\n\nContinue with the Gateway mode switch?"
+    : "Remote mode does not keep the local database current.\n\nRun Refresh Standby DB first if you need current local history before switching to Gateway mode.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts cleanly.\n\nContinue with the Gateway mode switch?";
+
+  return appConfirm(
+    "Switch to Gateway Mode",
+    bodyText,
+    {
+      ok: restartCapable ? "Save & Restart" : "Save Mode",
+      cancel: "Cancel",
+    },
+  );
 }
 
 async function saveSettings() {
   const prevMode = State.settings.operationMode;
+  const prevRetainDays = Math.max(1, Number(State.settings.retainDays || 90));
   const normalizedGateway = applyRemoteGatewayInputNormalization();
+  const settingsMsgId = getSettingsMessageTargetId();
+  const remoteConnectivityChanged = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
+  const solcastConfig = readSolcastSettingsForm();
+  const plantCapRaw = readPlantCapFormRawValues("settings");
+  const plantCapSequence = parsePlantCapSequenceInputClient(
+    plantCapRaw.sequenceCustom,
+    Number($("setInverterCount")?.value || State.settings.inverterCount || 27),
+  );
+  if (
+    normalizePlantCapSequenceModeClient(plantCapRaw.sequenceMode) === "exemption" &&
+    !plantCapSequence.ok
+  ) {
+    showMsg(settingsMsgId, plantCapSequence.error, "error");
+    return false;
+  }
+  const remoteAutoSyncCtrl = $("setRemoteAutoSync");
   const body = {
     plantName: $("setPlantName").value,
     operatorName: $("setOperatorName").value,
     operationMode: $("setOperationMode").value,
-    remoteAutoSync: Boolean($("setRemoteAutoSync")?.checked),
     remoteGatewayUrl:
       normalizedGateway || String($("setRemoteGatewayUrl").value || "").trim(),
     remoteApiToken: $("setRemoteApiToken").value,
@@ -2569,31 +4997,116 @@ async function saveSettings() {
     csvSavePath: $("setCsvPath").value,
     retainDays: Number($("setRetainDays").value),
     forecastProvider: $("setForecastProvider").value,
-    solcastBaseUrl: $("setSolcastBaseUrl").value,
-    solcastApiKey: $("setSolcastApiKey").value,
-    solcastResourceId: $("setSolcastResourceId").value,
-    solcastTimezone: $("setSolcastTimezone").value,
+    ...solcastConfig,
+    plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
+    plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
+    plantCapUpperMw: String(plantCapRaw.upper || "").trim(),
+    plantCapLowerMw: String(plantCapRaw.lower || "").trim(),
+    plantCapSequenceMode: normalizePlantCapSequenceModeClient(
+      plantCapRaw.sequenceMode,
+    ),
+    plantCapSequenceCustom: plantCapSequence.values,
+    plantCapCooldownSec: Number(plantCapRaw.cooldown || 30),
     inverterPollConfig: {
       modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
       reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
       readSpacing:    Number($("setPollReadSpacing")?.value    ?? 0.005),
     },
   };
+  if (remoteAutoSyncCtrl) {
+    body.remoteAutoSync = Boolean(remoteAutoSyncCtrl.checked);
+  }
+  const nextMode = normalizeOperationModeValue(body.operationMode);
+  const gatewayRestartPreferred =
+    normalizeOperationModeValue(prevMode) === "remote" &&
+    nextMode === "gateway";
+  const proceed = await confirmGatewayModeSwitch(nextMode, prevMode);
+  if (!proceed) return false;
   try {
+    if (Number(body.retainDays || prevRetainDays) < prevRetainDays) {
+      showMsg(
+        settingsMsgId,
+        "Saving settings and applying telemetry retention. This can take a while on large databases...",
+        "",
+      );
+    }
     const saved = await api("/api/settings", "POST", body);
+    const savedSettings =
+      saved?.settings && typeof saved.settings === "object" ? saved.settings : null;
     const nextCsvPath =
-      String(saved?.csvSavePath || body.csvSavePath || "").trim() ||
+      String(saved?.csvSavePath || savedSettings?.csvSavePath || body.csvSavePath || "").trim() ||
       State.settings.csvSavePath;
     if ($("setCsvPath")) $("setCsvPath").value = nextCsvPath;
-    State.settings = { ...State.settings, ...body, csvSavePath: nextCsvPath };
-    await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
+    if ($("setRetainDays") && savedSettings?.retainDays !== undefined) {
+      $("setRetainDays").value = String(savedSettings.retainDays);
+    }
+    State.settings = {
+      ...State.settings,
+      ...body,
+      ...(savedSettings || {}),
+      csvSavePath: nextCsvPath,
+    };
+    syncPlantCapFormsFromSettingsState();
     if ($("plantNameDisplay"))
-      $("plantNameDisplay").textContent = body.plantName;
+      $("plantNameDisplay").textContent = State.settings.plantName || body.plantName;
+    let transitionWarning = "";
+    if (gatewayRestartPreferred && isGatewayModeRestartCapable()) {
+      showMsg(
+        settingsMsgId,
+        "Gateway mode saved. Restarting the desktop app for a clean local startup...",
+        "",
+      );
+      try {
+        const restartResult = await window.electronAPI.restartApp();
+        if (restartResult?.ok === false) {
+          transitionWarning =
+            ` Restart request failed: ${String(restartResult.error || "unknown error")}. Runtime switched without a full restart.`;
+          console.warn("[app] gateway mode restart request failed:", restartResult.error);
+        } else {
+          return true;
+        }
+      } catch (err) {
+        transitionWarning =
+          ` Restart request failed: ${String(err?.message || err || "unknown error")}. Runtime switched without a full restart.`;
+        console.warn("[app] gateway mode restart threw:", err?.message || err);
+      }
+    }
+    try {
+      await handleOperationModeTransition(prevMode, body.operationMode, "saveSettings");
+    } catch (err) {
+      transitionWarning =
+        ` Mode applied, but the runtime is still settling: ${String(err?.message || err || "unknown error")}.`;
+      console.warn("[app] mode transition wait failed:", err?.message || err);
+    }
+    let saveMsg = saved?.exportDirCreated
+      ? "✔ Settings saved. Export folder created."
+      : "✔ Settings saved";
+    const retentionApplied =
+      saved?.retentionApplied && typeof saved.retentionApplied === "object"
+        ? saved.retentionApplied
+        : null;
+    if (retentionApplied) {
+      if (retentionApplied.ok === false) {
+        saveMsg += ` Retention apply failed: ${retentionApplied.error || "unknown error"}.`;
+      } else {
+        const archivedReadings = Number(retentionApplied?.archived?.readings || 0);
+        const archivedEnergy = Number(retentionApplied?.archived?.energy5 || 0);
+        if (archivedReadings > 0 || archivedEnergy > 0) {
+          saveMsg += ` Retention applied: archived ${archivedReadings.toLocaleString()} readings and ${archivedEnergy.toLocaleString()} energy rows. Main DB ${fmtBytes(Number(retentionApplied.mainDbBytesBefore || 0))} -> ${fmtBytes(Number(retentionApplied.mainDbBytesAfter || 0))}.`;
+        } else {
+          saveMsg += ` Retention applied: no telemetry older than ${State.settings.retainDays} day(s) was found.`;
+        }
+      }
+    }
+    if (gatewayRestartPreferred && !isGatewayModeRestartCapable()) {
+      transitionWarning += " Restart the desktop app now to start Gateway mode cleanly.";
+    }
+    if (transitionWarning) {
+      saveMsg += transitionWarning;
+    }
     showMsg(
-      "settingsMsg",
-      saved?.exportDirCreated
-        ? "✔ Settings saved. Export folder created."
-        : "✔ Settings saved",
+      settingsMsgId,
+      saveMsg,
       "",
     );
     buildInverterGrid();
@@ -2601,13 +5114,33 @@ async function saveSettings() {
     buildSelects();
     syncDayAheadGeneratorAvailability();
     syncOperationModeUi();
+    updateForecastSidebarSummary();
+    if (State.currentPage === "forecast") {
+      const useToolkitPreview =
+        String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
+          .trim()
+          .toLowerCase() === "toolkit";
+      if (useToolkitPreview) {
+        loadSolcastPreview({ silent: true }).catch(() => {});
+      }
+    }
     if (State.currentPage === "settings") {
       startReplicationHealthPolling();
       refreshReplicationHealth(true).catch(() => {});
     }
+    refreshPlantCapStatus(true).catch(() => {});
+    if (transitionWarning) {
+      showToast(transitionWarning.trim(), "warning", 6200);
+    }
+    if (
+      normalizeOperationModeValue(body.operationMode) === "remote" &&
+      (normalizeOperationModeValue(prevMode) !== "remote" || remoteConnectivityChanged)
+    ) {
+      refreshRemoteBridgeNow(true).catch(() => {});
+    }
     return true;
   } catch (e) {
-    showMsg("settingsMsg", "✗ Save failed: " + e.message, "error");
+    showMsg(settingsMsgId, "✗ Save failed: " + e.message, "error");
     return false;
   }
 }
@@ -2631,8 +5164,20 @@ async function testRemoteGateway() {
       `✔ Remote gateway reachable (${nodes} node(s), ${latency} ms)`,
       "",
     );
+    const unsavedConnectivity = hasUnsavedRemoteConnectivityChanges(normalizedGateway);
+    if (unsavedConnectivity) {
+      showToast(
+        "Gateway test used unsaved URL/token values. Save Settings to apply them to the live bridge.",
+        "warning",
+        5200,
+      );
+    } else if (getActiveOperationModeClient() === "remote") {
+      await refreshRemoteBridgeNow(true);
+    }
+    await refreshReplicationHealth(true).catch(() => {});
   } catch (e) {
     showMsg("networkMsg", `✗ ${e.message}`, "error");
+    await refreshReplicationHealth(true).catch(() => {});
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -2704,21 +5249,253 @@ function formatSyncDirection(value) {
     .toLowerCase();
   const map = {
     idle: "Idle",
-    "startup-auto-sync": "Startup auto sync",
-    "startup-auto-sync-failed": "Startup auto sync failed",
-    "pull-only": "Pull only",
-    "pull-live": "Live pull",
-    "pull-live-failed": "Live pull failed",
-    "push-then-pull": "Push then pull",
-    "push-full": "Push full",
-    "push-full-failed": "Push full failed",
-    "push-failed": "Push failed",
-    "pull-full": "Full pull",
-    "pull-full-failed": "Full pull failed",
-    "pull-incremental": "Incremental pull",
-    "pull-incremental-failed": "Incremental pull failed",
+    "startup-auto-sync": "Standby DB refresh",
+    "startup-auto-sync-failed": "Standby DB refresh failed",
+    "pull-only": "Standby DB refresh",
+    "pull-live": "Live stream",
+    "pull-live-only": "Live stream",
+    "pull-live-failed": "Live stream failed",
+    "pull-priority-paused": "Priority standby refresh",
+    "pull-full": "Standby DB refresh",
+    "pull-full-failed": "Standby DB refresh failed",
+    "pull-main-db-staged": "Standby DB staged",
+    "pull-main-db-failed": "Standby DB refresh failed",
+    "pull-incremental": "Standby DB catch-up",
+    "pull-incremental-failed": "Standby DB catch-up failed",
+    "push-full": "Push disabled",
+    "push-full-failed": "Push disabled",
+    "push-failed": "Push disabled",
   };
   return map[v] || (v ? v.replace(/[-_]/g, " ") : "—");
+}
+
+function loadReplicationArchiveSelectionPreference() {
+  try {
+    return localStorage.getItem(REPLICATION_INCLUDE_ARCHIVE_PREF_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function persistReplicationArchiveSelectionPreference(value) {
+  try {
+    localStorage.setItem(
+      REPLICATION_INCLUDE_ARCHIVE_PREF_KEY,
+      value ? "1" : "0",
+    );
+  } catch (_) {
+    // Ignore local preference persistence failures.
+  }
+}
+
+function setManualArchiveSyncSelected(checked, { persist = true, syncDom = true } = {}) {
+  const next = Boolean(checked);
+  State.replication.includeArchiveNext = next;
+  if (syncDom) {
+    const toggle = $("setReplicationIncludeArchive");
+    if (toggle) toggle.checked = next;
+  }
+  if (persist) {
+    persistReplicationArchiveSelectionPreference(next);
+  }
+  return next;
+}
+
+function isManualArchiveSyncSelected() {
+  return Boolean(State.replication.includeArchiveNext);
+}
+
+function formatTailscaleStatus(ts) {
+  const snap = ts && typeof ts === "object" ? ts : {};
+  if (!snap.installed) return { text: "Not installed", cls: "error" };
+  if (!snap.running) return { text: "Installed, not running", cls: "warn" };
+  if (!snap.connected) return { text: "Running, not connected", cls: "warn" };
+  const ip = Array.isArray(snap.tailscaleIps) && snap.tailscaleIps[0] ? snap.tailscaleIps[0] : "";
+  return {
+    text: ip ? `Connected (${ip})` : "Connected",
+    cls: "ok",
+  };
+}
+
+function formatReplicationScopeText(scope) {
+  const hotTables = Array.isArray(scope?.hotTables) ? scope.hotTables : [];
+  if (!hotTables.length) return "Gateway standby database scope is not available.";
+  return `Standby DB source: ${hotTables.join(", ")}. Standby refresh replaces the local standby database with the latest gateway snapshot. During a manual refresh, the remote live stream pauses temporarily so the download gets priority.`;
+}
+
+function formatArchiveScopeText(scope) {
+  const archive = scope?.archive && typeof scope.archive === "object" ? scope.archive : {};
+  const count = Math.max(0, Number(archive?.fileCount || 0));
+  const totalBytes = Math.max(0, Number(archive?.totalBytes || 0));
+  const selected = isManualArchiveSyncSelected();
+  return `${selected ? "Archive download is enabled for the next standby DB refresh and will stage the gateway monthly archive DB files." : "Archive download is optional and currently off."} Current local archive inventory: ${count.toLocaleString()} file${count === 1 ? "" : "s"} / ${fmtBytes(totalBytes)}. Live bridge polling never transfers archive files, and a manual standby refresh temporarily pauses the live stream so the DB download gets priority. Local mode settings, gateway credentials, Tailscale hint, and export path remain local.`;
+}
+
+function formatReplicationJobStatus(job) {
+  const j = job && typeof job === "object" ? job : null;
+  if (!j) return { text: "Idle", cls: "" };
+  const status = String(j.status || "idle").trim().toLowerCase();
+  const actionKey = String(j.action || "sync").trim().toLowerCase();
+  const action = actionKey === "pull" ? "standby refresh" : actionKey;
+  if (status === "running" || status === "queued") {
+    const priorityLabel = j.priorityMode ? " · priority download" : "";
+    const livePauseLabel = j.livePaused ? " · live paused" : "";
+    return {
+      text: `${action} ${status === "queued" ? "queued" : "running"}${j.includeArchive ? " · db + archive" : " · db only"}${priorityLabel}${livePauseLabel}`,
+      cls: status === "queued" ? "warn" : "ok",
+    };
+  }
+  if (status === "cancelling") {
+    return {
+      text: `${action} cancelling${j.includeArchive ? " · db + archive" : " · db only"}`,
+      cls: "warn",
+    };
+  }
+  if (status === "completed") {
+    return {
+      text: `${action} complete${j.needsRestart ? " · restart recommended" : ""}`,
+      cls: "ok",
+    };
+  }
+  if (status === "cancelled") {
+    return { text: `${action} cancelled`, cls: "warn" };
+  }
+  if (status === "failed") {
+    return { text: `${action} failed`, cls: "error" };
+  }
+  return { text: "Idle", cls: "" };
+}
+
+function updateReplicationActionButtons(job, mode) {
+  const currentJob = job && typeof job === "object" ? job : null;
+  const activeMode = String(mode || getActiveOperationModeClient() || "gateway")
+    .trim()
+    .toLowerCase();
+  const pullBtn = $("btnRunReplicationPull");
+  const cancelBtn = $("btnCancelReplicationJob");
+  const archiveToggle = $("setReplicationIncludeArchive");
+  const running = Boolean(currentJob?.running);
+  const cancelling = String(currentJob?.status || "").trim().toLowerCase() === "cancelling";
+  const canStartPull = activeMode === "remote" && !running;
+  const canCancel = activeMode === "remote" && running && !cancelling;
+
+  if (pullBtn) {
+    pullBtn.disabled = !canStartPull;
+    pullBtn.title = canStartPull
+      ? "Download the gateway database for local standby use. Requires restart to apply."
+      : activeMode !== "remote"
+        ? "Available only in Remote mode."
+        : "A standby DB refresh is already running.";
+  }
+  if (cancelBtn) {
+    cancelBtn.disabled = !canCancel;
+    cancelBtn.textContent = cancelling ? "Cancelling..." : "Force Cancel";
+    cancelBtn.title = canCancel
+      ? "Force-cancel the current standby DB refresh and clean up staged partial transfer files."
+      : activeMode !== "remote"
+        ? "Available only in Remote mode."
+        : running
+          ? "Cancellation has already been requested."
+          : "No standby DB refresh is running.";
+  }
+  if (archiveToggle) {
+    archiveToggle.checked = isManualArchiveSyncSelected();
+    archiveToggle.disabled = activeMode !== "remote" || running;
+  }
+}
+
+async function promptReplicationRestart(job) {
+  const j = job && typeof job === "object" ? job : null;
+  if (!j?.needsRestart || !j?.id) return;
+  if (State.replication.restartPromptedJobId === j.id) return;
+  State.replication.restartPromptedJobId = j.id;
+  const summary = String(j.summary || "").trim();
+  const ok = await appConfirm(
+    "Standby DB Refresh Complete",
+    `Standby DB refresh finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
+    { ok: "Restart Now", cancel: "Later" },
+  );
+  if (!ok) return;
+  try {
+    if (window.electronAPI?.restartApp) {
+      const res = await window.electronAPI.restartApp();
+      if (res?.ok === false) {
+        throw new Error(String(res?.error || "Restart request failed."));
+      }
+      return;
+    }
+    showToast("Restart the desktop app manually to reload the refreshed standby data.", "info", 5000);
+  } catch (err) {
+    showToast(`Restart request failed: ${err.message}`, "warning", 5000);
+  }
+}
+
+function handleReplicationJobUpdate(jobRaw, opts = {}) {
+  const job = jobRaw && typeof jobRaw === "object" ? jobRaw : null;
+  State.replication.job = job;
+  const status = formatReplicationJobStatus(job);
+  setReplicationField("repJobStatusVal", status.text, status.cls);
+  updateReplicationActionButtons(job, getActiveOperationModeClient());
+
+  if (!job) return;
+  if (opts.showMessage !== false) {
+    if (job.status === "running" || job.status === "queued") {
+      const actionLabel =
+        String(job.action || "").trim().toLowerCase() === "pull"
+          ? "standby DB refresh"
+          : String(job.action || "job").trim();
+      const priorityNote =
+        job.priorityMode || job.livePaused
+          ? " Live stream is paused temporarily so the download gets priority."
+          : "";
+      showMsg("replicationMsg", `Background ${actionLabel} started.${priorityNote}`, "");
+    } else if (job.status === "completed") {
+      showMsg("replicationMsg", `✔ ${job.summary || "Standby DB refresh complete."}`, "");
+      showToast(job.summary || "Standby DB refresh complete.", "success", 5200);
+    } else if (job.status === "cancelling") {
+      showMsg(
+        "replicationMsg",
+        job.summary || "Force-cancelling standby DB refresh...",
+        "",
+      );
+    } else if (job.status === "cancelled") {
+      const msg = job.summary || "Standby DB refresh cancelled.";
+      showMsg("replicationMsg", msg, "");
+      showToast(msg, "info", 4200);
+    } else if (job.status === "failed") {
+      const msg = job.error || job.summary || "Download failed.";
+      showMsg("replicationMsg", `✗ ${msg}`, "error");
+      showToast(`Download failed: ${msg}`, "warning", 6000);
+    }
+  }
+  if (job.status === "completed") {
+    promptReplicationRestart(job).catch(() => {});
+  }
+}
+
+function updateReplicationArchiveSelectionUi(silent = false) {
+  const checked = isManualArchiveSyncSelected();
+  const hint = $("replicationArchiveHint");
+  if (hint) {
+    hint.textContent = checked
+      ? "Archive download is enabled for the next standby DB refresh. All gateway monthly archive DB files will be staged, so expect a longer transfer while the remote live stream is paused."
+      : "Optional. Leave this off for the fastest standby DB refresh. Enable it only when you need the gateway archive DB files staged too. The remote live stream still pauses during the transfer.";
+  }
+  if (State.replication.scope) {
+    setReplicationField(
+      "repArchiveScopeVal",
+      formatArchiveScopeText(State.replication.scope),
+    );
+  }
+  if (!silent) {
+    showMsg(
+      "replicationMsg",
+      checked
+        ? "Archive download enabled for the next standby DB refresh. All gateway archive DB files will be staged while the remote live stream is paused."
+        : "Archive download disabled. Only the gateway standby database will be refreshed, with the remote live stream paused during the transfer.",
+      checked ? "error" : "",
+    );
+  }
 }
 
 function stopReplicationHealthPolling() {
@@ -2742,32 +5519,33 @@ function startReplicationHealthPolling() {
 async function refreshReplicationHealth(silent = true) {
   try {
     const n = await api("/api/runtime/network");
+    const scope = n?.manualReplicationScope || null;
+    const job = n?.manualReplicationJob || null;
+    State.replication.scope = scope;
+    State.replication.job = job;
     const mode = String(n?.operationMode || State.settings.operationMode || "gateway")
       .trim()
       .toLowerCase();
     const pullOnly = Boolean(n?.remotePullOnly);
-    const connected = Boolean(n?.remoteConnected);
+    const health = applyRemoteHealthClient(n?.remoteHealth || null);
+    const bridgeMeta = getRemoteHealthDisplay(health, mode);
     setReplicationField("repModeVal", mode === "remote" ? "Remote" : "Gateway");
     setReplicationField(
       "repGatewayVal",
       String(n?.remoteGatewayUrl || "—").trim() || "—",
     );
-    setReplicationField(
-      "repConnectedVal",
-      mode === "remote"
-        ? connected
-          ? "Connected"
-          : "Disconnected"
-        : "Gateway local polling",
-      mode === "remote" ? (connected ? "ok" : "warn") : "",
-    );
+    setReplicationField("repConnectedVal", bridgeMeta.text, bridgeMeta.cls);
+    const tailscaleState = formatTailscaleStatus(n?.tailscale || {});
+    setReplicationField("repTailnetVal", tailscaleState.text, tailscaleState.cls);
     const directionRaw = pullOnly
       ? "pull-live-only"
       : String(n?.remoteLastSyncDirection || "idle");
     const directionClass =
       /failed/i.test(directionRaw)
         ? "error"
-        : /push|pull/i.test(directionRaw)
+        : /^push/i.test(directionRaw)
+          ? "warn"
+          : /pull|live/i.test(directionRaw)
           ? "ok"
           : "";
     setReplicationField(
@@ -2786,43 +5564,29 @@ async function refreshReplicationHealth(silent = true) {
     );
     setReplicationField(
       "repLastReconcileVal",
-      fmtTsWithAge(n?.remoteLastReconcileTs || 0),
+      fmtTsWithAge(n?.remoteLastReplicationTs || n?.remoteLastReconcileTs || 0),
     );
-    setReplicationField(
-      "repLastReconcileRowsVal",
-      Number(n?.remoteLastReconcileRows || 0).toLocaleString(),
-    );
-    const sig = String(n?.remoteLastReplicationSignature || "").trim();
-    setReplicationField("repSignatureVal", sig ? `${sig.slice(0, 16)}…` : "—");
-    const cursors = n?.remoteReplicationCursors || {};
-    const cNode = $("repCursorsVal");
-    if (cNode) cNode.textContent = pullOnly ? "N/A (pull-only)" : JSON.stringify(cursors);
     const bridgeErr = String(n?.remoteLastError || "").trim();
     const repErr = String(n?.remoteLastReplicationError || "").trim();
     const recErr = String(n?.remoteLastReconcileError || "").trim();
-    const allErr = [bridgeErr, repErr, recErr].filter(Boolean);
+    const allErr = Array.from(
+      new Set([health.reasonText, bridgeErr, repErr, recErr].filter(Boolean)),
+    );
     setReplicationField(
       "repErrorsVal",
       allErr.length ? allErr.join(" | ") : "None",
-      allErr.length ? "warn" : "ok",
+      allErr.length
+        ? health.state === "auth-error" || health.state === "config-error"
+          ? "error"
+          : "warn"
+        : "ok",
     );
-    const pullBtn = $("btnRunReplicationPull");
-    const pushBtn = $("btnRunReplicationPush");
-    const manualDisabled = mode !== "remote";
-    if (pullBtn) {
-      pullBtn.disabled = manualDisabled;
-      pullBtn.title = manualDisabled
-        ? "Available only in Remote mode."
-        : "Pull latest DB snapshot from server.";
-    }
-    if (pushBtn) {
-      pushBtn.disabled = manualDisabled;
-      pushBtn.title = manualDisabled
-        ? "Available only in Remote mode."
-        : "Push local DB snapshot to server, then pull back.";
-    }
+    setReplicationField("repScopeVal", formatReplicationScopeText(scope));
+    setReplicationField("repArchiveScopeVal", formatArchiveScopeText(scope));
+    handleReplicationJobUpdate(job, { showMessage: false });
+    updateReplicationActionButtons(job, mode);
     if (!silent) {
-      showMsg("replicationMsg", "✔ Replication health refreshed", "");
+      showMsg("replicationMsg", "✔ Gateway link status refreshed", "");
     }
   } catch (e) {
     if (!silent) showMsg("replicationMsg", `✗ ${e.message}`, "error");
@@ -2902,13 +5666,14 @@ async function refreshRuntimePerf(silent = true) {
 }
 
 function ensureRemoteModeForReplicationActions() {
-  const mode = String($("setOperationMode")?.value || State.settings.operationMode || "gateway")
-    .trim()
-    .toLowerCase();
-  if (mode !== "remote") {
+  const activeMode = getActiveOperationModeClient();
+  const selectedMode = getSelectedOperationModeClient();
+  if (activeMode !== "remote") {
     showMsg(
       "replicationMsg",
-      "Replication actions are available only in Remote mode.",
+      selectedMode === "remote"
+        ? "Standby DB refresh actions require active Remote mode. Save Settings first to apply the mode change."
+        : "Standby DB refresh is available only in Remote mode.",
       "error",
     );
     return false;
@@ -2918,85 +5683,135 @@ function ensureRemoteModeForReplicationActions() {
 
 async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
-  if (
-    !window.confirm(
-      "Pull latest data from server now?\n\nThis will reload local client data from the gateway snapshot.",
-    )
-  ) {
-    return;
-  }
+  const includeArchive = isManualArchiveSyncSelected();
+  const archiveLine = includeArchive
+    ? "\n\nGateway archive DB files will be included. Expect a longer transfer."
+    : "\n\nArchive files: Skipped for this run.";
+  const _pullOk = await appConfirm(
+    "Refresh Standby Database",
+    "Download the gateway database for local standby use.\n\n" +
+    "The gateway snapshot will replace your local database on restart.\n\n" +
+    "While the standby refresh is running, the remote live stream will pause temporarily so the download gets priority.\n\n" +
+    "Local-only settings (operation mode, gateway URL/token, tailnet hint, and export path) are preserved." +
+    archiveLine +
+    "\n\nYou will be prompted to restart after completion.",
+    { ok: "Start Download" },
+  );
+  if (!_pullOk) return;
 
   const btn = $("btnRunReplicationPull");
   if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Pulling latest data from server...", "");
-  try {
-    const result = await api("/api/replication/pull-now", "POST", {});
-    const importedRows = Number(
-      result?.incremental?.importedRows || result?.full?.importedRows || 0,
-    );
-    const mode = String(result?.mode || "incremental");
-    const hasMore =
-      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
-    const dir = formatSyncDirection(result?.direction || "idle");
+  showMsg(
+    "replicationMsg",
+    "Starting priority standby refresh. Remote live stream will pause during the download…",
+    "",
+  );
+  const startPull = async (forcePull = false) => {
+    const result = await api("/api/replication/pull-now", "POST", {
+      background: true,
+      includeArchive,
+      forcePull,
+    });
+    const job = result?.job || null;
+    if (job) handleReplicationJobUpdate(job, { showMessage: false });
+    setManualArchiveSyncSelected(false);
+    updateReplicationArchiveSelectionUi(true);
     showMsg(
       "replicationMsg",
-      `✔ Pull complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | imported=${importedRows.toLocaleString()}`,
+      forcePull
+        ? includeArchive
+          ? "Force Pull started. The gateway database will overwrite newer local standby data, then gateway archive DB files will be staged while live streaming is paused."
+          : "Force Pull started. The gateway database will overwrite newer local standby data while live streaming is paused."
+        : includeArchive
+          ? "Priority download started. Staging the gateway database first. Gateway archive DB files will follow while live streaming is paused."
+          : "Priority download started. Staging the gateway database while live streaming is paused.",
       "",
     );
     await refreshReplicationHealth(true);
     await refreshRuntimePerf(true);
+  };
+  try {
+    await startPull(false);
   } catch (e) {
+    if (
+      e?.body?.errorCode === "LOCAL_NEWER_PUSH_FAILED" &&
+      e?.body?.canForcePull
+    ) {
+      const conflictMsg = String(
+        e?.body?.error ||
+        e?.message ||
+        "Local standby data is newer than the gateway.",
+      ).trim();
+      const forceOk = await appConfirm(
+        "Force Pull Required",
+        `${conflictMsg}\n\nUse Force Pull only if the gateway is the source of truth and you intentionally want to discard the newer local standby data on this machine.\n\nProceed with Force Pull now?`,
+        { ok: "Force Pull", cancel: "Cancel" },
+      );
+      if (!forceOk) {
+        showMsg("replicationMsg", `✗ ${conflictMsg}`, "error");
+        return;
+      }
+      try {
+        await startPull(true);
+        return;
+      } catch (forceErr) {
+        showMsg("replicationMsg", `✗ ${forceErr.message}`, "error");
+        return;
+      }
+    }
     showMsg("replicationMsg", `✗ ${e.message}`, "error");
   } finally {
     if (btn) btn.disabled = false;
   }
 }
 
-async function runReplicationPushNow() {
-  if (!ensureRemoteModeForReplicationActions()) return;
-  if (
-    !window.confirm(
-      "Push local data to server now?\n\nThis sends local DB snapshot to gateway, then pulls back for consistency.",
-    )
-  ) {
+async function runReplicationCancelNow() {
+  const job = State.replication.job && typeof State.replication.job === "object"
+    ? State.replication.job
+    : null;
+  if (!job?.running) {
+    showMsg("replicationMsg", "No standby DB refresh is currently running.", "error");
     return;
   }
-
-  const btn = $("btnRunReplicationPush");
-  if (btn) btn.disabled = true;
-  showMsg("replicationMsg", "Pushing local data to server...", "");
-  try {
-    const result = await api("/api/replication/push-now", "POST", {});
-    const pushedRows = Number(result?.pushed?.importedRows || 0);
-    const pulledRows = Number(
-      result?.incremental?.importedRows || result?.full?.importedRows || 0,
-    );
-    const mode = String(result?.mode || "incremental");
-    const hasMore =
-      mode === "incremental-partial" && Boolean(result?.incremental?.hasMore);
-    const dir = formatSyncDirection(result?.direction || "idle");
-    showMsg(
-      "replicationMsg",
-      `✔ Push complete (${dir}) | mode=${mode}${hasMore ? " (partial)" : ""} | pushed=${pushedRows.toLocaleString()} pulled=${pulledRows.toLocaleString()}`,
-      "",
-    );
-    await refreshReplicationHealth(true);
-    await refreshRuntimePerf(true);
-  } catch (e) {
-    showMsg("replicationMsg", `✗ ${e.message}`, "error");
-  } finally {
-    if (btn) btn.disabled = false;
+  const status = String(job.status || "").trim().toLowerCase();
+  if (status === "cancelling") {
+    showMsg("replicationMsg", "Cancellation is already in progress.", "");
+    return;
   }
+  const ok = await appConfirm(
+    "Force Cancel Standby Refresh",
+    "Force-cancel the current standby DB refresh.\n\n" +
+    "Any partially downloaded main DB or archive files from this run will be cleaned up so they are not applied on restart.\n\n" +
+    "Continue with the cancellation?",
+    { ok: "Force Cancel", cancel: "Keep Running" },
+  );
+  if (!ok) return;
+
+  updateReplicationActionButtons(
+    { ...job, status: "cancelling", running: true, cancelRequested: true },
+    getActiveOperationModeClient(),
+  );
+  showMsg("replicationMsg", "Force-cancelling standby DB refresh...", "");
+  try {
+    const result = await api("/api/replication/cancel", "POST", {});
+    if (result?.job) {
+      handleReplicationJobUpdate(result.job, { showMessage: false });
+    }
+    showMsg("replicationMsg", "Force-cancelling standby DB refresh...", "");
+  } catch (err) {
+    updateReplicationActionButtons(job, getActiveOperationModeClient());
+    showMsg("replicationMsg", `✗ ${err.message}`, "error");
+  }
+}
+
+// Viewer model: push is disabled — remote mode is a gateway-backed viewer.
+async function runReplicationPushNow() {
+  showMsg("replicationMsg", "Push is disabled. Remote mode is a gateway-backed viewer.", "error");
 }
 
 async function testSolcastConnection() {
   const btn = $("btnSolcastTest");
-  const payload = {
-    solcastBaseUrl: $("setSolcastBaseUrl")?.value || "",
-    solcastApiKey: $("setSolcastApiKey")?.value || "",
-    solcastResourceId: $("setSolcastResourceId")?.value || "",
-    solcastTimezone: $("setSolcastTimezone")?.value || "",
-  };
+  const payload = readSolcastSettingsForm();
 
   if (btn) btn.disabled = true;
   showMsg("solcastTestMsg", "Testing Solcast connection...", "");
@@ -3005,11 +5820,19 @@ async function testSolcastConnection() {
     const covered = Array.isArray(r?.daysCovered) ? r.daysCovered.length : 0;
     const slots = Number(r?.dayAheadPreview?.slots || 0);
     const mwh = Number(r?.dayAheadPreview?.totalMwh || 0).toFixed(6);
+    const modeLabel =
+      String(r?.accessMode || payload.solcastAccessMode || "").trim().toLowerCase() === "api"
+        ? "API"
+        : "Toolkit";
     const msg =
-      `✔ Solcast connected | records=${Number(r?.records || 0)} | days=${covered} | next-day slots=${slots} | next-day MWh=${mwh}`;
+      `✔ Solcast ${modeLabel} connected | records=${Number(r?.records || 0)} | days=${covered} | next-day slots=${slots} | next-day MWh=${mwh}`;
     showMsg("solcastTestMsg", msg, "");
     if (r?.warning) {
       showToast(`Solcast warning: ${r.warning}`, "warning", 4200);
+    }
+    showSnapshotWarningToast("Solcast snapshot", r?.snapshotWarning || "");
+    if (String(r?.accessMode || payload.solcastAccessMode || "").trim().toLowerCase() === "toolkit") {
+      loadSolcastPreview({ silent: true }).catch(() => {});
     }
   } catch (e) {
     showMsg("solcastTestMsg", `✗ Solcast test failed: ${e.message}`, "error");
@@ -3040,7 +5863,379 @@ function showMsg(id, text, cls) {
   }, 4000);
 }
 
+function showSnapshotWarningToast(prefix, warningInput) {
+  const warnings = Array.isArray(warningInput)
+    ? warningInput
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    : [String(warningInput || "").trim()].filter(Boolean);
+  if (!warnings.length) return;
+  const extra = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : "";
+  showToast(`${prefix}: ${warnings[0]}${extra}`, "warning", 5200);
+}
+
 // ─── Inverter Grid ────────────────────────────────────────────────────────────
+function syncPlantCapFormsFromSettingsState() {
+  applyPlantCapFormRawValues(
+    {
+      upper:
+        State.settings.plantCapUpperMw == null
+          ? ""
+          : String(State.settings.plantCapUpperMw),
+      lower:
+        State.settings.plantCapLowerMw == null
+          ? ""
+          : String(State.settings.plantCapLowerMw),
+      sequenceMode: State.settings.plantCapSequenceMode || "ascending",
+      sequenceCustom: formatPlantCapSequenceInputClient(
+        State.settings.plantCapSequenceCustom || [],
+      ),
+      cooldown: String(State.settings.plantCapCooldownSec ?? 30),
+    },
+    ["live", "settings"],
+  );
+}
+
+function buildPlantCapPanel() {
+  const wrap = el("div", "plant-cap-panel");
+  wrap.id = "plantCapPanel";
+  wrap.title =
+    "Plant-wide MW capping controls. Use this panel to define the output band, review the next planner decision, and enable or release automatic whole-inverter control.";
+  wrap.innerHTML = `
+    <div class="plant-cap-head">
+      <div class="plant-cap-head-main" title="Plant-wide MW capping settings and live controller summary.">
+        <div class="bulk-control-title">Plant Output Cap <span id="plantCapRemoteBadge" class="plant-cap-remote-badge" hidden title="Controls are proxied to the gateway workstation.">via Gateway</span></div>
+        <div class="plant-cap-title-line">Gateway-directed whole-inverter MW capping</div>
+      </div>
+      <div class="plant-cap-head-actions">
+        <div class="plant-cap-metrics">
+          <div class="plant-cap-metric" title="Current total plant MW from fresh live PAC data. The cap controller uses this as the starting point for stop and restart decisions.">
+            <span>Plant</span>
+            <strong id="plantCapCurrentMw">—</strong>
+          </div>
+          <div class="plant-cap-metric" title="Configured lower and upper MW band for plant-wide capping. The controller tries to keep total plant output inside this range.">
+            <span>Band</span>
+            <strong id="plantCapBandValue">—</strong>
+          </div>
+          <div class="plant-cap-metric" title="Current controller mode. Idle means disabled, Paused means monitoring is blocked by data or safety conditions, and Enabled means the controller is active.">
+            <span>Mode</span>
+            <strong id="plantCapModeValue">Idle</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="plantCapPanelBody" class="plant-cap-panel-body">
+      <div class="plant-cap-form">
+        <label title="Upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">
+          Upper Limit (MW)
+          <input id="plantCapUpperMw" class="inp" type="number" min="0" step="0.001" inputmode="decimal" title="Upper MW threshold for automatic capping decisions." />
+        </label>
+        <label title="Lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">
+          Lower Limit (MW)
+          <input id="plantCapLowerMw" class="inp" type="number" min="0" step="0.001" inputmode="decimal" title="Lower MW threshold for safe controller restart decisions." />
+        </label>
+        <label title="Candidate selection mode. Ascending and Descending walk inverter numbers in order. Exemption skips the listed inverter numbers and uses ascending order for the rest.">
+          Sequence
+          <select id="plantCapSequenceMode" class="sel" title="Choose how the controller selects inverters for automatic stop decisions.">
+            <option value="ascending">Ascending</option>
+            <option value="descending">Descending</option>
+            <option value="exemption">Exemption</option>
+          </select>
+        </label>
+        <label id="plantCapSequenceCustomWrap" hidden title="Exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">
+          Exempted Inverter Numbers
+          <input id="plantCapSequenceCustom" class="inp" type="text" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." />
+        </label>
+        <label title="Cooldown or settling time in seconds after each stop or restart action. The controller waits this long before making another decision.">
+          Cooldown (s)
+          <input id="plantCapCooldownSec" class="inp" type="number" min="5" max="600" step="1" inputmode="numeric" title="Seconds to wait after each controller action before the next plant cap decision." />
+        </label>
+      </div>
+      <div id="plantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the current cap band, node mix, and exemption list."></div>
+      <div class="plant-cap-actions">
+        <button id="btnPlantCapPreview" class="btn btn-outline" type="button" title="Preview the next stop or restart decision using the current band, live PAC, and exemption list.">Preview Plan</button>
+        <button id="btnPlantCapEnable" class="btn btn-red" type="button" title="Enable gateway-side plant output capping with confirmation and authorization.">Enable Cap</button>
+        <button id="btnPlantCapDisable" class="btn btn-outline" type="button" title="Disable automatic plant cap monitoring for the current session without restarting controlled inverters.">Disable Monitoring</button>
+        <button id="btnPlantCapRelease" class="btn btn-green" type="button" title="Restart controller-owned inverters sequentially and release them from plant cap control.">Release Controlled Inverters</button>
+      </div>
+      <div class="plant-cap-status-grid">
+        <div class="plant-cap-status-item" title="Current plant cap controller state.">
+          <span>Status</span>
+          <strong id="plantCapStatusText">Idle</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Primary reason for the current controller state or next recommended action.">
+          <span>Reason</span>
+          <strong id="plantCapReasonText">Plant-wide capping is disabled.</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Inverters currently owned by the plant cap controller because it stopped them earlier in this session.">
+          <span>Controlled</span>
+          <strong id="plantCapOwnedText">None</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Most recent automatic stop or restart action, or the remaining settling time after a recent action.">
+          <span>Last Action</span>
+          <strong id="plantCapLastActionText">—</strong>
+        </div>
+      </div>
+      <div id="plantCapServerWarnings" class="plant-cap-server-warnings" title="Server-side planner warnings, safety blocks, or advisory messages."></div>
+      <div class="plant-cap-preview">
+        <div class="plant-cap-preview-head">
+          <div class="plant-cap-preview-title" title="Preview of the next whole-inverter controller decision based on the current band, live plant MW, and exemption list.">Cap Plan Preview</div>
+          <div id="plantCapPreviewMeta" class="plant-cap-preview-meta" title="Planner summary for the next recommended stop or restart decision.">Preview the next stop/start decision before enabling control.</div>
+        </div>
+        <div class="plant-cap-preview-table-wrap">
+          <table class="plant-cap-preview-table">
+            <thead>
+              <tr>
+                <th title="Inverter number being evaluated by the planner.">Inverter</th>
+                <th title="Configured enabled node count for this inverter.">Nodes</th>
+                <th title="Node-adjusted rated inverter capacity in kW.">Rated kW</th>
+                <th title="Node-adjusted dependable capacity in kW used for conservative planning.">Dependable kW</th>
+                <th id="plantCapPreviewStepHdr" title="Estimated plant MW change if this inverter is stopped, or restart estimate if it is started.">Step kW</th>
+                <th title="Projected total plant MW after applying this stop or restart step.">Projected Plant MW</th>
+                <th title="Why this inverter step is preferred, allowed, or rejected by the planner.">Decision Reason</th>
+              </tr>
+            </thead>
+            <tbody id="plantCapPreviewBody">
+              <tr class="table-empty"><td colspan="7">No plant cap preview yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+  if (State.plantCapPanelCollapsed) {
+    wrap.classList.add("is-collapsed");
+    wrap.classList.add("is-hidden");
+    wrap.hidden = true;
+    wrap.style.display = "none";
+    wrap.setAttribute("aria-hidden", "true");
+  }
+  return wrap;
+}
+
+function normalizePlantCapStatusClient(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    enabled: Boolean(src.enabled),
+    status: String(src.status || "idle"),
+    reasonCode: String(src.reasonCode || "disabled"),
+    reasonText: String(src.reasonText || "Plant-wide capping is disabled."),
+    upperMw: src.upperMw == null ? null : Number(src.upperMw),
+    lowerMw: src.lowerMw == null ? null : Number(src.lowerMw),
+    currentPlantMw: src.currentPlantMw == null ? null : Number(src.currentPlantMw),
+    warnings: Array.isArray(src.warnings) ? src.warnings : [],
+    stepMetrics: src.stepMetrics && typeof src.stepMetrics === "object" ? src.stepMetrics : {},
+    ownedStopped: Array.isArray(src.ownedStopped) ? src.ownedStopped : [],
+    lastDecision: src.lastDecision && typeof src.lastDecision === "object" ? src.lastDecision : null,
+    preview: src.preview && typeof src.preview === "object" ? src.preview : null,
+    cooldownRemainingSec: Number(src.cooldownRemainingSec || 0),
+  };
+}
+
+function formatPlantCapBandLabel(status) {
+  if (status.upperMw == null || status.lowerMw == null) return "—";
+  return `${Number(status.lowerMw).toFixed(3)} - ${Number(status.upperMw).toFixed(3)} MW`;
+}
+
+function renderPlantCapPreviewTable(previewRaw) {
+  const tbody = $("plantCapPreviewBody");
+  const meta = $("plantCapPreviewMeta");
+  const stepHdr = $("plantCapPreviewStepHdr");
+  if (!tbody || !meta || !stepHdr) return;
+  const preview = previewRaw && typeof previewRaw === "object" ? previewRaw : null;
+  if (!preview) {
+    stepHdr.textContent = "Step kW";
+    stepHdr.title =
+      "Estimated plant output change for each candidate step in kW.";
+    meta.textContent =
+      "Preview the next stop/start decision before enabling control.";
+    meta.title = meta.textContent;
+    tbody.innerHTML =
+      '<tr class="table-empty"><td colspan="7">No plant cap preview yet.</td></tr>';
+    return;
+  }
+  const useRestart =
+    preview.currentPlantKw < preview.lowerKw &&
+    Array.isArray(preview.restartPlan) &&
+    preview.restartPlan.length > 0;
+  const rows = useRestart
+    ? preview.restartPlan || []
+    : (preview.stopPlan && preview.stopPlan.length
+      ? preview.stopPlan
+      : preview.restartPlan || []);
+  const selectedInverter = useRestart
+    ? preview.selectedRestart?.inverter
+    : preview.selectedStop?.inverter;
+  stepHdr.textContent = useRestart ? "Restart Est. kW" : "Live Pac kW";
+  stepHdr.title = useRestart
+    ? "Estimated plant output increase in kW if the controller restarts this inverter."
+    : "Current live PAC contribution in kW that would be removed if the controller stops this inverter.";
+  const recommended = String(preview.recommendedAction || "hold").toUpperCase();
+  meta.textContent = `Recommended: ${recommended} · Current ${Number(
+    preview.currentPlantMw || 0,
+  ).toFixed(3)} MW · Band ${Number(preview.lowerMw || 0).toFixed(3)}-${Number(
+    preview.upperMw || 0,
+  ).toFixed(3)} MW`;
+  meta.title = meta.textContent;
+  if (!rows.length) {
+    tbody.innerHTML =
+      '<tr class="table-empty"><td colspan="7">No eligible inverter step is available for the current band.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((row) => {
+      const stepKw = useRestart ? row.restartEstimateKw : row.livePacKw;
+      const selectedClass =
+        Number(row.inverter || 0) === Number(selectedInverter || 0)
+          ? " plant-cap-preview-selected"
+          : "";
+      const reason = String(row.decisionReason || "—");
+      const rowTitle =
+        `INV-${String(row.inverter || 0).padStart(2, "0")} · ` +
+        `Nodes ${Number(row.enabledNodes || 0)} · ` +
+        `Rated ${Number(row.ratedKw || 0).toFixed(1)} kW · ` +
+        `Dependable ${Number(row.dependableKw || 0).toFixed(1)} kW · ` +
+        `${useRestart ? "Restart estimate" : "Live PAC"} ${Number(stepKw || 0).toFixed(1)} kW · ` +
+        `Projected plant ${Number(row.projectedPlantMw || 0).toFixed(3)} MW · ` +
+        reason;
+      return `
+        <tr class="${selectedClass.trim()}" title="${rowTitle}">
+          <td title="Inverter number under evaluation.">INV-${String(row.inverter || 0).padStart(2, "0")}</td>
+          <td title="Configured enabled node count for this inverter.">${Number(row.enabledNodes || 0)}</td>
+          <td title="Node-adjusted rated inverter capacity in kW.">${Number(row.ratedKw || 0).toFixed(1)}</td>
+          <td title="Node-adjusted dependable capacity in kW used for conservative planning.">${Number(row.dependableKw || 0).toFixed(1)}</td>
+          <td title="${useRestart ? "Estimated plant output increase if this inverter is restarted." : "Current live PAC contribution that would be removed if this inverter is stopped."}">${Number(stepKw || 0).toFixed(1)}</td>
+          <td title="Projected total plant output after applying this step.">${Number(row.projectedPlantMw || 0).toFixed(3)}</td>
+          <td title="${reason}">${reason}</td>
+        </tr>`;
+    })
+    .join("");
+}
+
+function renderPlantCapPanel() {
+  syncPlantCapPanelCollapsedUi();
+  const currentMwEl = $("plantCapCurrentMw");
+  const bandEl = $("plantCapBandValue");
+  const modeEl = $("plantCapModeValue");
+  const statusEl = $("plantCapStatusText");
+  const reasonEl = $("plantCapReasonText");
+  const ownedEl = $("plantCapOwnedText");
+  const lastActionEl = $("plantCapLastActionText");
+  const warningsEl = $("plantCapServerWarnings");
+  const releaseBtn = $("btnPlantCapRelease");
+  const previewMetaEl = $("plantCapPreviewMeta");
+  if (!currentMwEl || !bandEl || !modeEl || !statusEl || !reasonEl || !ownedEl || !lastActionEl || !warningsEl) {
+    return;
+  }
+  const remoteBadge = $("plantCapRemoteBadge");
+  if (remoteBadge) {
+    remoteBadge.hidden = !isClientModeActive();
+  }
+  const status = normalizePlantCapStatusClient(State.plantCap.status || {});
+  currentMwEl.textContent =
+    status.currentPlantMw == null ? "—" : `${Number(status.currentPlantMw).toFixed(3)} MW`;
+  bandEl.textContent = formatPlantCapBandLabel(status);
+  const modeText = status.enabled ? "Enabled" : status.status === "paused" ? "Paused" : "Idle";
+  modeEl.textContent = modeText;
+  statusEl.textContent = String(status.status || "idle").toUpperCase();
+  reasonEl.textContent = status.reasonText || "Plant-wide capping is disabled.";
+  if (status.ownedStopped.length) {
+    ownedEl.textContent = status.ownedStopped
+      .map((entry) => `INV-${String(entry.inverter || 0).padStart(2, "0")}`)
+      .join(", ");
+  } else {
+    ownedEl.textContent = "None";
+  }
+  if (releaseBtn) {
+    releaseBtn.disabled = !status.ownedStopped.length;
+  }
+  if (status.lastDecision) {
+    const stamp = status.lastDecision.at ? fmtDateTime(status.lastDecision.at) : "";
+    const label = String(status.lastDecision.action || "").toUpperCase();
+    lastActionEl.textContent = stamp
+      ? `${label} INV-${String(status.lastDecision.inverter || 0).padStart(2, "0")} @ ${stamp}`
+      : `${label} INV-${String(status.lastDecision.inverter || 0).padStart(2, "0")}`;
+  } else if (status.cooldownRemainingSec > 0) {
+    lastActionEl.textContent = `Settling (${status.cooldownRemainingSec}s remaining)`;
+  } else {
+    lastActionEl.textContent = "—";
+  }
+  currentMwEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    status.currentPlantMw == null
+      ? "Current total plant MW from fresh live PAC data used by the cap controller."
+      : `Current total plant MW from fresh live PAC data: ${Number(status.currentPlantMw).toFixed(3)} MW.`,
+  );
+  bandEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    status.upperMw == null || status.lowerMw == null
+      ? "Configured lower and upper MW cap band."
+      : `Configured plant cap band: ${Number(status.lowerMw).toFixed(3)} to ${Number(status.upperMw).toFixed(3)} MW.`,
+  );
+  modeEl.closest(".plant-cap-metric")?.setAttribute(
+    "title",
+    `Current controller mode: ${modeText}. Idle means disabled, Paused means blocked by safety or freshness checks, and Enabled means active.`,
+  );
+  statusEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    `Current plant cap controller state: ${statusEl.textContent}.`,
+  );
+  reasonEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    `Current controller reason: ${reasonEl.textContent}`,
+  );
+  ownedEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    status.ownedStopped.length
+      ? `Controller-owned stopped inverters: ${ownedEl.textContent}.`
+      : "No inverter is currently owned by the plant cap controller.",
+  );
+  lastActionEl.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    lastActionEl.textContent === "—"
+      ? "No automatic stop or restart action has been recorded for this session."
+      : `Most recent controller action or settling state: ${lastActionEl.textContent}.`,
+  );
+  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
+  if (!warnings.length) {
+    warningsEl.className = "plant-cap-server-warnings";
+    warningsEl.textContent =
+      "Server-side planner status is normal. Preview or enable the controller to apply the configured cap band.";
+  } else {
+    const critical = warnings.some((warning) => warning?.severity === "critical");
+    warningsEl.className = `plant-cap-server-warnings ${critical ? "critical" : "warning"}`;
+    const visibleMsgs = warnings
+      .slice(0, 2)
+      .map((warning) => String(warning?.message || "").trim())
+      .filter(Boolean);
+    const extra = warnings.length - visibleMsgs.length;
+    warningsEl.textContent =
+      visibleMsgs.join(" ") + (extra > 0 ? ` (+${extra} more)` : "");
+  }
+  warningsEl.title = warnings.length
+    ? warnings
+      .map((warning) => String(warning?.message || "").trim())
+      .filter(Boolean)
+      .join(" ")
+    : "Server-side planner warnings, safety blocks, or advisory messages.";
+  if (previewMetaEl) {
+    previewMetaEl.title = previewMetaEl.textContent || "Planner summary for the next cap decision.";
+  }
+  renderPlantCapPreviewTable(
+    State.plantCap.preview || status.preview || null,
+  );
+}
+
+function applyPlantCapStatusClient(statusRaw, options = {}) {
+  const normalized = normalizePlantCapStatusClient(statusRaw);
+  State.plantCap.status = normalized;
+  if (!options.preservePreview) {
+    State.plantCap.preview = normalized.preview || State.plantCap.preview;
+  } else if (normalized.preview && !State.plantCap.preview) {
+    State.plantCap.preview = normalized.preview;
+  }
+  renderPlantCapPanel();
+}
+
 function buildInverterGrid() {
   const grid = $("invGrid");
   if (!grid) return;
@@ -3049,12 +6244,15 @@ function buildInverterGrid() {
   const count = State.settings.inverterCount;
   const nodes = State.settings.nodeCount || 4;
   const frag = document.createDocumentFragment();
+  frag.appendChild(buildPlantCapPanel());
   for (let i = 1; i <= count; i++) {
     frag.appendChild(buildInverterCard(i, nodes));
   }
   frag.appendChild(buildBulkControlPanel());
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
+  syncPlantCapFormsFromSettingsState();
+  renderPlantCapPanel();
 }
 
 function currentOperator() {
@@ -3062,6 +6260,472 @@ function currentOperator() {
   if (inState) return inState;
   const fromInput = String($("setOperatorName")?.value || "").trim();
   return fromInput || "OPERATOR";
+}
+
+function currentChatMachine() {
+  return normalizeOperationModeValue(State.settings.operationMode);
+}
+
+function getChatModeLabel(machine = currentChatMachine()) {
+  return normalizeChatMachineClient(machine, "gateway") === "remote"
+    ? "Remote"
+    : "Server";
+}
+
+function buildChatSenderLabel(row) {
+  const machine = normalizeChatMachineClient(row?.from_machine, currentChatMachine());
+  const explicit = String(row?.from_name || "").trim();
+  if (explicit) return explicit;
+  return `${currentOperator()} - ${getChatModeLabel(machine)}`;
+}
+
+function normalizeChatMachineClient(value, def = "gateway") {
+  return String(value || def).trim().toLowerCase() === "remote"
+    ? "remote"
+    : "gateway";
+}
+
+function isChatInboundRow(row, machine = currentChatMachine()) {
+  const ownMachine = normalizeChatMachineClient(machine, currentChatMachine());
+  return (
+    !!row &&
+    normalizeChatMachineClient(row.to_machine, ownMachine) === ownMachine &&
+    normalizeChatMachineClient(row.from_machine, ownMachine) !== ownMachine
+  );
+}
+
+function sanitizeChatRowClient(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = Math.max(0, Math.trunc(Number(row.id || 0)));
+  if (!id) return null;
+  const fromMachine = normalizeChatMachineClient(row.from_machine, "gateway");
+  const toMachine = normalizeChatMachineClient(
+    row.to_machine,
+    fromMachine === "remote" ? "gateway" : "remote",
+  );
+  return {
+    id,
+    ts: Math.max(0, Math.trunc(Number(row.ts || 0))),
+    from_machine: fromMachine,
+    to_machine: toMachine,
+    from_name: String(row.from_name || "").trim().slice(0, 160),
+    message: String(row.message || ""),
+    read_ts:
+      row.read_ts == null || row.read_ts === ""
+        ? null
+        : Math.max(0, Math.trunc(Number(row.read_ts || 0))),
+  };
+}
+
+function syncChatRuntimeFromRows() {
+  const machine = currentChatMachine();
+  let lastInboundId = 0;
+  let lastReadId = 0;
+  let unread = 0;
+  for (const row of State.chatMessages) {
+    if (normalizeChatMachineClient(row.to_machine, machine) !== machine) continue;
+    lastInboundId = Math.max(lastInboundId, Number(row.id || 0));
+    if (row.read_ts) lastReadId = Math.max(lastReadId, Number(row.id || 0));
+    else unread += 1;
+  }
+  State.chatLastInboundId = lastInboundId;
+  State.chatLastReadId = Math.max(Number(State.chatLastReadId || 0), lastReadId);
+  State.chatUnread = State.chatOpen ? 0 : unread;
+}
+
+function mergeChatRows(rows) {
+  const merged = new Map();
+  for (const row of State.chatMessages || []) {
+    const normalized = sanitizeChatRowClient(row);
+    if (normalized) merged.set(normalized.id, normalized);
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const normalized = sanitizeChatRowClient(row);
+    if (!normalized) continue;
+    const prev = merged.get(normalized.id);
+    if (!prev) {
+      merged.set(normalized.id, normalized);
+      continue;
+    }
+    merged.set(normalized.id, {
+      ...prev,
+      ...normalized,
+      read_ts: normalized.read_ts || prev.read_ts || null,
+    });
+  }
+  State.chatMessages = Array.from(merged.values())
+    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+    .slice(-CHAT_THREAD_LIMIT);
+  syncChatRuntimeFromRows();
+  renderChatSendState();
+  return State.chatMessages;
+}
+
+function renderChatBadge() {
+  const badge = $("chatBadge");
+  if (!badge) return;
+  const count = Math.max(0, Math.trunc(Number(State.chatUnread || 0)));
+  if (count > 0) {
+    badge.hidden = false;
+    badge.textContent = count > 99 ? "99+" : String(count);
+  } else {
+    badge.hidden = true;
+    badge.textContent = "0";
+  }
+}
+
+function renderChatSendState() {
+  const btn = $("chatSend");
+  const clearBtn = $("chatClear");
+  const input = $("chatInput");
+  const busy = !!State.chatPendingSend || !!State.chatPendingClear;
+  if (btn) {
+    btn.disabled = busy;
+    btn.textContent = State.chatPendingSend ? "Sending..." : "Send";
+  }
+  if (clearBtn) {
+    clearBtn.disabled =
+      busy || !Array.isArray(State.chatMessages) || State.chatMessages.length === 0;
+    clearBtn.textContent = State.chatPendingClear ? "Clearing..." : "Clear";
+  }
+  if (input) input.disabled = busy;
+}
+
+function renderChatThread() {
+  const thread = $("chatThread");
+  if (!thread) return;
+  const rows = Array.isArray(State.chatMessages) ? State.chatMessages : [];
+  const frag = document.createDocumentFragment();
+  if (!rows.length) {
+    const empty = el("div", "chat-empty");
+    empty.textContent = "No recent operator messages.";
+    frag.appendChild(empty);
+  } else {
+    const machine = currentChatMachine();
+    for (const row of rows) {
+      const self = normalizeChatMachineClient(row.from_machine, machine) === machine;
+      const item = el("div", `chat-message${self ? " is-self" : ""}`);
+      const meta = el("div", "chat-message-meta");
+      meta.textContent = `${buildChatSenderLabel(row)} • ${fmtDateTime(row.ts)}`;
+      const body = el("div", "chat-message-body");
+      body.textContent = String(row.message || "");
+      item.appendChild(meta);
+      item.appendChild(body);
+      frag.appendChild(item);
+    }
+  }
+  thread.textContent = "";
+  thread.appendChild(frag);
+  if (State.chatOpen) {
+    requestAnimationFrame(() => {
+      thread.scrollTop = thread.scrollHeight;
+    });
+  }
+}
+
+function clearChatDismissTimer() {
+  if (State.chatDismissTimer) {
+    clearTimeout(State.chatDismissTimer);
+    State.chatDismissTimer = null;
+  }
+}
+
+function chatHasProtectedDraft() {
+  const input = $("chatInput");
+  if (!input) return false;
+  return document.activeElement === input && String(input.value || "").trim().length > 0;
+}
+
+function resetChatDismissTimer() {
+  clearChatDismissTimer();
+  if (!State.chatOpen) return;
+  if (State.chatPendingSend) return;
+  if (State.chatPendingClear) return;
+  if (chatHasProtectedDraft()) return;
+  State.chatDismissTimer = setTimeout(() => {
+    closeChatPanel();
+  }, CHAT_DISMISS_MS);
+}
+
+function openChatPanel() {
+  const panel = $("chatPanel");
+  const bubble = $("chatBubble");
+  if (!panel || !bubble) return;
+  State.chatOpen = true;
+  panel.classList.add("chat-panel--open");
+  panel.setAttribute("aria-hidden", "false");
+  bubble.setAttribute("aria-expanded", "true");
+  State.chatUnread = 0;
+  renderChatBadge();
+  renderChatThread();
+  markChatRead().catch((err) => {
+    console.warn("[chat] mark read failed:", err.message);
+  });
+  resetChatDismissTimer();
+}
+
+function closeChatPanel() {
+  const panel = $("chatPanel");
+  const bubble = $("chatBubble");
+  if (!panel || !bubble) return;
+  State.chatOpen = false;
+  panel.classList.remove("chat-panel--open");
+  panel.setAttribute("aria-hidden", "true");
+  bubble.setAttribute("aria-expanded", "false");
+  clearChatDismissTimer();
+}
+
+function applyChatClearedState({ preserveDraft = true } = {}) {
+  State.chatMessages = [];
+  State.chatUnread = 0;
+  State.chatLastReadId = 0;
+  State.chatLastInboundId = 0;
+  State.chatReadInFlight = false;
+  State.chatPendingReadUpToId = 0;
+  State.chatHistoryLoaded = true;
+  if (!preserveDraft && $("chatInput")) $("chatInput").value = "";
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
+  if (State.chatOpen) resetChatDismissTimer();
+}
+
+async function loadChatHistory(options = {}) {
+  try {
+    const payload = await api(
+      `/api/chat/messages?mode=thread&limit=${CHAT_THREAD_LIMIT}`,
+      "GET",
+      null,
+      { progress: false },
+    );
+    mergeChatRows(payload?.rows);
+    State.chatHistoryLoaded = true;
+    renderChatBadge();
+    if (State.chatOpen) {
+      renderChatThread();
+      await markChatRead();
+      resetChatDismissTimer();
+    }
+    return State.chatMessages;
+  } catch (err) {
+    State.chatHistoryLoaded = false;
+    if (!options?.silent) {
+      console.warn("[chat] history load failed:", err.message);
+    }
+    return [];
+  }
+}
+
+async function markChatRead(forcedUpToId = 0) {
+  const machine = currentChatMachine();
+  let upToId = Math.max(0, Math.trunc(Number(forcedUpToId || 0)));
+  for (const row of State.chatMessages || []) {
+    if (!isChatInboundRow(row, machine)) continue;
+    upToId = Math.max(upToId, Number(row.id || 0));
+  }
+  if (!upToId || upToId <= Number(State.chatLastReadId || 0)) {
+    State.chatUnread = 0;
+    renderChatBadge();
+    return 0;
+  }
+  if (State.chatReadInFlight) {
+    State.chatPendingReadUpToId = Math.max(
+      Number(State.chatPendingReadUpToId || 0),
+      upToId,
+    );
+    return 0;
+  }
+  State.chatReadInFlight = true;
+  try {
+    const payload = await api(
+      "/api/chat/read",
+      "POST",
+      { upToId },
+      { progress: false },
+    );
+    const readTs = Date.now();
+    State.chatLastReadId = Math.max(Number(State.chatLastReadId || 0), upToId);
+    State.chatMessages = (State.chatMessages || []).map((row) => {
+      if (!isChatInboundRow(row, machine)) return row;
+      if (Number(row.id || 0) > upToId) return row;
+      if (row.read_ts) return row;
+      return {
+        ...row,
+        read_ts: readTs,
+      };
+    });
+    State.chatUnread = 0;
+    renderChatBadge();
+    return Math.max(0, Math.trunc(Number(payload?.updated || 0)));
+  } catch (err) {
+    console.warn("[chat] read sync failed:", err.message);
+    return 0;
+  } finally {
+    State.chatReadInFlight = false;
+    const pending = Math.max(0, Math.trunc(Number(State.chatPendingReadUpToId || 0)));
+    State.chatPendingReadUpToId = 0;
+    if (pending > Number(State.chatLastReadId || 0)) {
+      markChatRead(pending).catch(() => {});
+    }
+  }
+}
+
+function playChatSound() {
+  try {
+    const ctx = getOrCreateAlarmAudioCtx();
+    if (!ctx || ctx.state !== "running") {
+      State.chatAudioReady = false;
+      return;
+    }
+    State.chatAudioReady = true;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.018;
+    gain.connect(ctx.destination);
+    const t0 = ctx.currentTime;
+    [660, 880].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      const startAt = t0 + idx * 0.105;
+      osc.start(startAt);
+      osc.stop(startAt + 0.085);
+    });
+  } catch (err) {
+    console.warn("[chat] sound failed:", err.message);
+  }
+}
+
+function handleIncomingChatMessage(row) {
+  const normalized = sanitizeChatRowClient(row);
+  if (!normalized) return;
+  const hadRow = (State.chatMessages || []).some(
+    (item) => Number(item?.id || 0) === normalized.id,
+  );
+  const inbound = isChatInboundRow(normalized);
+  mergeChatRows([normalized]);
+  renderChatBadge();
+  if (!hadRow && inbound) {
+    openChatPanel();
+    playChatSound();
+    return;
+  }
+  if (State.chatOpen) {
+    renderChatThread();
+    if (inbound) {
+      markChatRead(normalized.id).catch((err) => {
+        console.warn("[chat] mark read failed:", err.message);
+      });
+    }
+  }
+  resetChatDismissTimer();
+}
+
+function handleChatCleared() {
+  applyChatClearedState({ preserveDraft: true });
+}
+
+async function sendChatMessage() {
+  const input = $("chatInput");
+  if (!input || State.chatPendingSend || State.chatPendingClear) return;
+  const draft = String(input.value || "").replace(/\r\n?/g, "\n");
+  const message = draft.trim();
+  if (!message) {
+    input.value = message;
+    resetChatDismissTimer();
+    return;
+  }
+  if (message.length > 500) {
+    showToast("Message must be 500 characters or fewer.", "warning", 3200);
+    return;
+  }
+  State.chatPendingSend = true;
+  renderChatSendState();
+  try {
+    const payload = await api(
+      "/api/chat/send",
+      "POST",
+      { message },
+      { progress: false },
+    );
+    const row = sanitizeChatRowClient(payload?.row);
+    if (!row) throw new Error("Chat send completed without a message row.");
+    mergeChatRows([row]);
+    input.value = "";
+    if (State.chatOpen) renderChatThread();
+    renderChatBadge();
+    resetChatDismissTimer();
+  } catch (err) {
+    showToast(String(err?.message || "Gateway unavailable. Message not sent."), "warning", 3600);
+  } finally {
+    State.chatPendingSend = false;
+    renderChatSendState();
+    if (State.chatOpen) resetChatDismissTimer();
+  }
+}
+
+async function clearChatMessages() {
+  if (State.chatPendingSend || State.chatPendingClear) return;
+  if (!Array.isArray(State.chatMessages) || State.chatMessages.length === 0) {
+    renderChatSendState();
+    return;
+  }
+  const ok = await appConfirm(
+    "Clear Operator Messages",
+    "Clear the current operator message thread?\n\nThis removes the shared message history for both Server and Remote panels.",
+    { ok: "Clear Messages", cancel: "Keep Messages" },
+  );
+  if (!ok) {
+    resetChatDismissTimer();
+    return;
+  }
+  State.chatPendingClear = true;
+  renderChatSendState();
+  try {
+    await api("/api/chat/clear", "POST", {}, { progress: false });
+    applyChatClearedState({ preserveDraft: true });
+    showToast("Operator message history cleared.", "success", 2600);
+  } catch (err) {
+    showToast(
+      String(err?.message || "Unable to clear operator messages."),
+      "warning",
+      3600,
+    );
+  } finally {
+    State.chatPendingClear = false;
+    renderChatSendState();
+    if (State.chatOpen) resetChatDismissTimer();
+  }
+}
+
+function toggleChatPanel() {
+  if (State.chatOpen) {
+    closeChatPanel();
+    return;
+  }
+  openChatPanel();
+  if (!State.chatHistoryLoaded) {
+    loadChatHistory({ silent: true }).catch(() => {});
+  }
+}
+
+function resetChatState() {
+  clearChatDismissTimer();
+  State.chatOpen = false;
+  State.chatUnread = 0;
+  State.chatMessages = [];
+  State.chatLastReadId = 0;
+  State.chatLastInboundId = 0;
+  State.chatPendingSend = false;
+  State.chatPendingClear = false;
+  State.chatReadInFlight = false;
+  State.chatPendingReadUpToId = 0;
+  State.chatHistoryLoaded = false;
+  if ($("chatInput")) $("chatInput").value = "";
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
+  closeChatPanel();
 }
 
 function buildBulkControlPanel() {
@@ -3078,16 +6742,17 @@ function buildBulkControlPanel() {
           inputmode="text"
           autocomplete="off"
           placeholder="1-13, 16, 18, 23-27"
+          title="Specify inverter numbers or ranges to target for bulk commands (e.g. 1-13, 16, 23-27)."
         />
-        <div class="bulk-range-helper">Accepts single values, ranges, or both. Duplicate inverter numbers are blocked.</div>
+        <div class="bulk-range-helper">Enter individual inverter numbers, ranges, or a combination of both. Duplicate entries are not allowed.</div>
       </div>
       <div class="bulk-action-group">
-        <button class="btn btn-outline" onclick="fillAllCommandTargets()">All Inverters</button>
-        <button class="btn btn-outline" onclick="clearCommandTargets()">Clear</button>
+        <button id="btnFillAllTargets" class="btn btn-outline" title="Fill in all configured inverter numbers.">All Inverters</button>
+        <button id="btnClearTargets" class="btn btn-outline" title="Clear the selected inverter range.">Clear</button>
       </div>
       <div class="bulk-action-group bulk-action-primary">
-        <button class="btn btn-green" onclick="sendSelectedNodes(1)">START SELECTED</button>
-        <button class="btn btn-red" onclick="sendSelectedNodes(0)">STOP SELECTED</button>
+        <button id="btnStartSelected" class="btn btn-green" title="Send START command to all selected inverters. Requires bulk control authorization.">START SELECTED</button>
+        <button id="btnStopSelected" class="btn btn-red" title="Send STOP command to all selected inverters. Requires bulk control authorization.">STOP SELECTED</button>
       </div>
     </div>`;
   return wrap;
@@ -3105,28 +6770,30 @@ function buildInverterCard(inv, nodeCount) {
         </div>
       </div>
       <div class="card-badges">
-        <span class="badge badge-offline" id="badge-${inv}">OFFLINE</span>
+        <span class="badge badge-offline" id="badge-${inv}" title="Current inverter status.">OFFLINE</span>
       </div>
     </div>
     <div class="card-pac">
       <div class="pac-controls">
-        <button class="card-ctrl-btn start" onclick="sendAllNodesInv(${inv},1)">Start</button>
-        <button class="card-ctrl-btn stop" onclick="sendAllNodesInv(${inv},0)">Stop</button>
+        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start" title="Send START command to all nodes of this inverter."><span class="ctrl-label">Start</span><span class="ctrl-icon">▶</span></button>
+        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop" title="Send STOP command to all nodes of this inverter."><span class="ctrl-label">Stop</span><span class="ctrl-icon">◼</span></button>
       </div>
-      <div class="pac-cell">
-        <div class="pac-label">DC POWER</div>
-        <div class="pac-val zero" id="pdcsum-${inv}">0.00<span class="pac-unit">kW</span></div>
+      <div class="pac-cell" title="Combined DC power input from all nodes of this inverter.">
+        <span class="pac-label">Pdc:</span>
+        <span class="pac-val zero" id="pdcsum-${inv}">0.00</span>
+        <span class="pac-unit">kW</span>
       </div>
-      <div class="pac-cell">
-        <div class="pac-label">AC POWER</div>
-        <div class="pac-val zero" id="pac-${inv}">0.00<span class="pac-unit">kW</span></div>
+      <div class="pac-cell" title="Combined AC power output from all nodes of this inverter.">
+        <span class="pac-label">Pac:</span>
+        <span class="pac-val zero" id="pac-${inv}">0.00</span>
+        <span class="pac-unit">kW</span>
       </div>
     </div>
     <div class="card-main">
       <div class="card-table-wrap">
         <table class="card-table">
           <thead>
-            <tr><th>Node</th><th>Alarm</th><th>Pdc (W)</th><th>Pac (W)</th><th>Last Seen</th><th>Ctrl</th></tr>
+            <tr><th title="Node number within this inverter.">Node</th><th title="Active alarm state for this node.">Alarm</th><th title="DC power input in watts.">Pdc (W)</th><th title="AC power output in watts.">Pac (W)</th><th title="Time of the last successful data reading.">Last Seen</th><th title="Node-level start and stop control.">Ctrl</th></tr>
           </thead>
           <tbody id="tbody-${inv}">
             ${buildNodeRows(inv, nodeCount)}
@@ -3147,9 +6814,9 @@ function buildNodeRows(inv, nodeCount) {
     const btnClass = nodeConfigured
       ? `node-btn ${state ? "cmd-stop" : "cmd-start"}`
       : "node-btn node-disabled";
-    const btnText = nodeConfigured ? (state ? "STOP" : "START") : "ISOLATED";
-    const btnTitle = nodeConfigured ? btnText : "Isolated";
-    const btnAria = `Node ${n} ${nodeConfigured ? btnText : "Isolated"}`;
+    const btnText = nodeButtonText(state, !nodeConfigured);
+    const btnTitle = nodeConfigured ? nodeButtonActionLabel(state) : "Isolated";
+    const btnAria = `Node ${n} ${nodeConfigured ? nodeButtonActionLabel(state) : "Isolated"}`;
     html += `
       <tr id="row-${inv}-${n}" class="${nodeConfigured ? "" : "row-node-disabled"}">
         <td class="node-cell"><span class="node-cell-inner"><span class="node-power-indicator node-ind-off" id="nind-${inv}-${n}" aria-hidden="true"></span><span class="node-label">N${n}</span></span></td>
@@ -3159,10 +6826,11 @@ function buildNodeRows(inv, nodeCount) {
         <td class="mono text-muted" id="rts-${inv}-${n}">—</td>
         <td class="ctrl-cell">
           <button class="${btnClass}" id="nbtn-${inv}-${n}"
+            data-inv="${inv}"
             data-node="${n}"
             title="${btnTitle}"
             aria-label="${btnAria}"
-            onclick="toggleNode(${inv},${n},this)" ${nodeConfigured ? "" : "disabled"}>${btnText}</button>
+            ${nodeConfigured ? "" : "disabled"}>${btnText}</button>
         </td>
       </tr>`;
   }
@@ -3198,10 +6866,15 @@ function scheduleInverterCardsUpdate(force = false) {
 
 function updateInverterCards() {
   const data = State.liveData;
-  const totals = State.totals;
   const now = Date.now();
   const nodeCount = Number(State.settings.nodeCount || 4);
   const invCount = Number(State.settings.inverterCount || 27);
+  const remoteMode = getActiveOperationModeClient() === "remote";
+  const remoteHealth = normalizeRemoteHealthClient(State.remoteHealth);
+  const retainRemoteSnapshot = remoteMode && Boolean(remoteHealth.hasUsableSnapshot);
+  const remoteDisplayHoldMs = retainRemoteSnapshot
+    ? Math.max(CARD_OFFLINE_HOLD_MS, Number(remoteHealth.snapshotRetainMs || 0))
+    : CARD_OFFLINE_HOLD_MS;
 
   // Build lightweight lookup indexes once per render tick.
   const unitsByInv = Array.from({ length: invCount + 1 }, () => []);
@@ -3236,10 +6909,6 @@ function updateInverterCards() {
     const configuredUnits = getConfiguredUnits(inv, nodeCount);
     const configuredSet = new Set(configuredUnits);
     totalNodes += configuredUnits.length;
-    const t = totals[inv];
-    if (t) {
-      totalPac += t.pac || 0;
-    }
 
     // Aggregate units for this inverter
     const units = (unitsByInv[inv] || []).filter(
@@ -3247,7 +6916,10 @@ function updateInverterCards() {
     );
     const invUnitMap = unitMapByInv[inv] || Object.create(null);
     const freshUnits = units.filter(
-      (d) => d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS,
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
+    );
+    const visibleUnits = units.filter(
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS + remoteDisplayHoldMs,
     );
     const activeAlarmEntries = (activeAlarmsByInv[inv] || []).filter(
       (a) =>
@@ -3255,15 +6927,22 @@ function updateInverterCards() {
     );
     const hasFreshData = freshUnits.length > 0;
     if (hasFreshData) State.invLastFresh[inv] = now;
+    const staleSnapshot = retainRemoteSnapshot && !hasFreshData && visibleUnits.length > 0;
     const inHold =
       !hasFreshData &&
+      !staleSnapshot &&
       now - Number(State.invLastFresh[inv] || 0) <= CARD_OFFLINE_HOLD_MS;
-    const anyOnline = hasFreshData || inHold;
+    const anyOnline = hasFreshData || staleSnapshot || inHold;
+    const unitsForDisplay = staleSnapshot ? visibleUnits : freshUnits;
+    const displayTotals = summarizeLiveRows(unitsForDisplay);
+    const pac = Number(displayTotals.pac || 0);
+    const pdc = Number(displayTotals.pdc || 0);
+    totalPac += pac;
     const anyAlarm =
-      freshUnits.some((d) => d.alarm && d.alarm !== 0) ||
+      unitsForDisplay.some((d) => d.alarm && d.alarm !== 0) ||
       activeAlarmEntries.length > 0;
     const topSev = higherSeverity(
-      getTopSev(freshUnits),
+      getTopSev(unitsForDisplay),
       activeAlarmEntries.reduce(
         (best, a) => higherSeverity(best, a?.severity || "fault"),
         null,
@@ -3283,6 +6962,9 @@ function updateInverterCards() {
     if (!anyOnline) {
       card.classList.add("offline");
       offline++;
+    } else if (staleSnapshot) {
+      card.classList.add("stale");
+      online++;
     } else if (topSev === "critical") {
       card.classList.add("critical");
       alarmed++;
@@ -3297,6 +6979,7 @@ function updateInverterCards() {
     if (iconEl) {
       iconEl.className = "card-inv-icon";
       if (!anyOnline) iconEl.classList.add("offline");
+      else if (staleSnapshot) iconEl.classList.add("stale");
       else if (topSev === "critical" || anyAlarm) iconEl.classList.add("alarm");
     }
 
@@ -3304,6 +6987,9 @@ function updateInverterCards() {
     if (!anyOnline) {
       badge.className = "badge badge-offline";
       badge.textContent = "OFFLINE";
+    } else if (staleSnapshot) {
+      badge.className = "badge badge-stale";
+      badge.textContent = "STALE";
     } else if (topSev === "critical") {
       badge.className = "badge badge-critical";
       badge.textContent = "CRITICAL";
@@ -3316,13 +7002,11 @@ function updateInverterCards() {
     }
 
     // PAC
-    const pac = t ? t.pac : 0;
-    const pdc = t ? t.pdc : 0;
     const pacKw = (pac / 1000).toFixed(2);
-    pacEl.innerHTML = `${pacKw}<span class="pac-unit">kW</span>`;
+    pacEl.textContent = pacKw;
     pacEl.className = "pac-val" + (pac === 0 ? " zero" : " active");
     if (pdcSumEl) {
-      pdcSumEl.innerHTML = `${(pdc / 1000).toFixed(2)}<span class="pac-unit">kW</span>`;
+      pdcSumEl.textContent = (pdc / 1000).toFixed(2);
       pdcSumEl.className = "pac-val" + (pdc === 0 ? " zero" : " active");
     }
 
@@ -3371,16 +7055,20 @@ function updateInverterCards() {
       }
 
       const d = invUnitMap[n];
-      const rowFresh =
+      const rowVisible =
         d &&
         d.online &&
-        now - Number(d.ts || 0) <= DATA_FRESH_MS + CARD_OFFLINE_HOLD_MS;
+        now - getLiveFreshTsClient(d) <= DATA_FRESH_MS + remoteDisplayHoldMs;
       const nodeReachable =
-        d && d.online && now - Number(d.ts || 0) <= DATA_FRESH_MS;
+        d && d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
+      const rowStale = staleSnapshot && rowVisible && !nodeReachable;
       if (nodeReachable) activeNodes++;
-      const nodeOn = nodeReachable && Number(d.on_off) === 1 ? 1 : 0;
+      const nodeOn =
+        (staleSnapshot ? rowVisible : nodeReachable) && Number(d?.on_off) === 1
+          ? 1
+          : 0;
       const activeAlarm = State.activeAlarms[key] || null;
-      const liveAlarmValue = rowFresh ? Number(d?.alarm || 0) : 0;
+      const liveAlarmValue = rowVisible ? Number(d?.alarm || 0) : 0;
       const persistedAlarmValue = Number(activeAlarm?.alarm_value || 0);
       // Alarm cell source-of-truth: use live tracker first when available,
       // then fallback to persisted active-alarm row.
@@ -3414,21 +7102,21 @@ function updateInverterCards() {
           : "cell-alarm no-alarm";
       }
       if (pdcEl)
-        pdcEl.textContent = rowFresh && d.pdc != null ? fmtNum(d.pdc, 0) : "—";
+        pdcEl.textContent = rowVisible && d.pdc != null ? fmtNum(d.pdc, 0) : "—";
       if (rpacEl) {
-        const pacVal = rowFresh && d.pac != null ? Number(d.pac) : 0;
-        rpacEl.textContent = rowFresh && d.pac != null ? fmtNum(d.pac, 0) : "—";
+        const pacVal = rowVisible && d.pac != null ? Number(d.pac) : 0;
+        rpacEl.textContent = rowVisible && d.pac != null ? fmtNum(d.pac, 0) : "—";
         rpacEl.className = "mono";
         if (nindEl) {
           const pacIndicatorClass = getPacIndicatorClass(
             pacVal,
             hasActiveAlarm,
-            rowFresh,
+            rowVisible,
           );
           nindEl.className = `node-power-indicator ${pacIndicatorClass}`;
         }
       }
-      if (rtsEl) rtsEl.textContent = rowFresh && d.ts ? fmtTime(d.ts) : "—";
+      if (rtsEl) rtsEl.textContent = rowVisible && d.ts ? fmtTime(d.ts) : "—";
       State.nodeStates[key] = nodeOn;
       if (rowEl) {
         rowEl.classList.remove("row-node-disabled");
@@ -3445,6 +7133,7 @@ function updateInverterCards() {
           hasActiveAlarm && !alarmAcked,
         );
         rowEl.classList.toggle("row-alarm-acked", hasActiveAlarm && alarmAcked);
+        rowEl.classList.toggle("row-stale-snapshot", rowStale);
       }
       if (nbtnEl) {
         setNodeButtonVisual(nbtnEl, n, !!nodeOn, false);
@@ -3480,7 +7169,7 @@ function updateInverterCards() {
   const mncEl = $("metricNodeCount");
   if (mncEl) mncEl.textContent = activeNodes;
   const mntEl = $("metricNodeTotal");
-  if (mntEl) mntEl.textContent = `/ ${totalNodes}`;
+  if (mntEl) mntEl.textContent = `/ ${invCount * nodeCount}`; // designed total, not configured-only
   renderTodayKwhFromPac();
 }
 
@@ -3523,7 +7212,7 @@ function applyNodeRowOrdering(inv, rowStateMap) {
 
 async function updateTodayKwh() {
   // Backward-compatible hook: force immediate server sync + render.
-  await syncTodayMwhFromServer();
+  await syncTodayMwhFromServer({ allowRemoteFallback: true });
   renderTodayKwhFromPac();
 }
 
@@ -3550,10 +7239,10 @@ function getRowSev(alarmVal) {
 function getPacRowClass(pacW, hasAlarm) {
   if (hasAlarm) return "row-pac-alarm";
   const v = Number(pacW || 0);
-  if (v >= NODE_RATED_W * 0.80) return "row-pac-high"; // ≥80% rated (~199 kW); allows up to 103% over-production
-  if (v >  NODE_RATED_W * 0.50) return "row-pac-mid";  // >50% rated (~125 kW)
-  if (v >  0)                   return "row-pac-low";
-  return "row-pac-off";
+  if (v >= NODE_RATED_W * 0.90) return "row-pac-high"; // ≥90% — High     (~224 kW)
+  if (v >  NODE_RATED_W * 0.70) return "row-pac-mid";  // >70%  — Moderate (~175 kW)
+  if (v >  NODE_RATED_W * 0.40) return "row-pac-low";  // >40%  — Mild     (~100 kW)
+  return "row-pac-off";                                 // ≤40%  — Low
 }
 
 function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
@@ -3567,40 +7256,36 @@ function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
 }
 
 function nodeButtonText(isOn, isIsolated = false) {
-  if (isIsolated) return "ISOLATED";
+  if (isIsolated) return "N/A";
+  return isOn ? "◼" : "▶";
+}
+
+function nodeButtonActionLabel(isOn, isIsolated = false) {
+  if (isIsolated) return "N/A";
   return isOn ? "STOP" : "START";
 }
 
 function setNodeButtonVisual(btnEl, node, isOn, isIsolated = false) {
   if (!btnEl) return;
   const txt = nodeButtonText(isOn, isIsolated);
+  const actionLabel = nodeButtonActionLabel(isOn, isIsolated);
   btnEl.disabled = !!isIsolated;
   btnEl.className = isIsolated
     ? "node-btn node-disabled"
     : `node-btn ${isOn ? "cmd-stop" : "cmd-start"}`;
   btnEl.textContent = txt;
-  btnEl.title = isIsolated ? "Isolated" : txt;
+  btnEl.title = isIsolated ? "Isolated" : actionLabel;
   btnEl.setAttribute(
     "aria-label",
-    `Node ${node} ${isIsolated ? "Isolated" : txt}`,
+    `Node ${node} ${isIsolated ? "Isolated" : actionLabel}`,
   );
 }
 
 // Bulk command auth is intentionally separate from IP Config/Topology auth.
-const PLANT_WIDE_AUTH_PREFIX = "sacups";
 const BulkAuth = {
   resolver: null,
   open: false,
 };
-
-function getPlantWideAuthKeys() {
-  const now = new Date();
-  const prev = new Date(now.getTime() - 60000);
-  return [
-    `${PLANT_WIDE_AUTH_PREFIX}${pad2(now.getMinutes())}`,
-    `${PLANT_WIDE_AUTH_PREFIX}${pad2(prev.getMinutes())}`,
-  ];
-}
 
 function isBulkAuthOpen() {
   const modal = $("bulkAuthModal");
@@ -3622,10 +7307,6 @@ function validatePlantWideAuthKey(input) {
     .trim()
     .toLowerCase();
   if (!entered) return { ok: false, error: "Auth key is required." };
-  const validKeys = getPlantWideAuthKeys();
-  if (!validKeys.includes(entered)) {
-    return { ok: false, error: "Authorization failed. Invalid auth key." };
-  }
   return { ok: true, key: entered };
 }
 
@@ -3706,7 +7387,280 @@ function requestBulkAuthorization(action, scopeLabel, totalTargets) {
 
 async function authorizeBulkCommand(action, scopeLabel, totalTargets) {
   initBulkAuthModal();
-  return await requestBulkAuthorization(action, scopeLabel, totalTargets);
+  const authKey = await requestBulkAuthorization(action, scopeLabel, totalTargets);
+  if (!authKey) return null;
+  const session = await api(
+    "/api/write/auth/bulk",
+    "POST",
+    { authKey },
+    { progress: false },
+  );
+  const authToken = String(session?.token || "").trim();
+  if (!authToken) {
+    throw new Error("Bulk authorization token was not issued.");
+  }
+  return {
+    authKey,
+    authToken,
+    expiresAt: Number(session?.expiresAt || 0),
+  };
+}
+
+function buildPlantCapRequestBody(context = "live") {
+  const values = readPlantCapRequestValues(context);
+  if (values.upperMw == null) {
+    throw new Error("Upper limit is required.");
+  }
+  if (values.lowerMw == null) {
+    throw new Error("Lower limit is required.");
+  }
+  if (!(values.lowerMw < values.upperMw)) {
+    throw new Error("Lower limit must be less than the upper limit.");
+  }
+  if (values.sequenceMode === "exemption" && values.sequenceError) {
+    throw new Error(values.sequenceError);
+  }
+  return {
+    upperMw: values.upperMw,
+    lowerMw: values.lowerMw,
+    sequenceMode: values.sequenceMode,
+    sequenceCustom: values.sequenceCustom,
+    cooldownSec: values.cooldownSec,
+  };
+}
+
+function countPlantCapTargetsFromPreview(previewRaw) {
+  const preview = previewRaw && typeof previewRaw === "object" ? previewRaw : null;
+  const previewProfiles = Array.isArray(preview?.profiles) ? preview.profiles : [];
+  const controllableNodeCount = previewProfiles
+    .filter((profile) => profile.controllable)
+    .reduce((sum, profile) => sum + Number(profile.enabledNodes || 0), 0);
+  if (controllableNodeCount > 0) return controllableNodeCount;
+  const ownedStopped = Array.isArray(State.plantCap.status?.ownedStopped)
+    ? State.plantCap.status.ownedStopped
+    : [];
+  const ownedNodeCount = ownedStopped.reduce(
+    (sum, entry) => sum + Number(entry.enabledNodes || 0),
+    0,
+  );
+  return Math.max(1, ownedNodeCount || 1);
+}
+
+async function refreshPlantCapStatus(silent = true) {
+  try {
+    const data = await api("/api/plant-cap/status");
+    applyPlantCapStatusClient(data.status || null, { preservePreview: true });
+    return data.status || null;
+  } catch (err) {
+    if (!silent) {
+      showToast(`Plant cap status refresh failed: ${err.message}`, "fault", 5000);
+    }
+    throw err;
+  }
+}
+
+async function previewPlantCap(options = {}) {
+  const context = String(options.context || "live").trim().toLowerCase() || "live";
+  const body = buildPlantCapRequestBody(context);
+  const data = await api("/api/plant-cap/preview", "POST", body, {
+    progress: false,
+  });
+  State.plantCap.preview = data.preview || null;
+  applyPlantCapStatusClient(data.status || null, { preservePreview: true });
+  renderPlantCapPanel();
+  return data.preview || null;
+}
+
+function buildPlantCapEnableConfirmText(preview) {
+  const warnings = Array.isArray(preview?.warnings) ? preview.warnings : [];
+  const warningText = warnings
+    .slice(0, 2)
+    .map((warning) => String(warning?.message || "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const bandText =
+    preview && preview.upperMw != null && preview.lowerMw != null
+      ? `Band: ${Number(preview.lowerMw).toFixed(3)} - ${Number(preview.upperMw).toFixed(3)} MW.`
+      : "Band: not configured.";
+  const plantText =
+    preview && preview.currentPlantMw != null
+      ? `Current plant output: ${Number(preview.currentPlantMw).toFixed(3)} MW.`
+      : "Current plant output is unavailable.";
+  const actionText = String(preview?.recommendedAction || "hold").toUpperCase();
+  const recommendation =
+    actionText === "STOP" && preview?.selectedStop
+      ? `Next stop candidate: INV-${String(preview.selectedStop.inverter || 0).padStart(2, "0")}.`
+      : actionText === "START" && preview?.selectedRestart
+        ? `Next restart candidate: INV-${String(preview.selectedRestart.inverter || 0).padStart(2, "0")}.`
+        : "No immediate inverter action is currently planned.";
+  return [plantText, bandText, `Recommended action: ${actionText}.`, recommendation, warningText]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function enablePlantCapControl() {
+  let preview;
+  try {
+    preview = await previewPlantCap({ context: "live" });
+  } catch (err) {
+    showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  const ok = await appConfirm(
+    "Enable Plant Output Cap",
+    buildPlantCapEnableConfirmText(preview),
+    { ok: "Enable" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      "ENABLE",
+      "plant cap monitoring",
+      countPlantCapTargetsFromPreview(preview),
+    );
+  } catch (err) {
+    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap enable cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/enable",
+      "POST",
+      {
+        ...buildPlantCapRequestBody("live"),
+        authToken: authSession.authToken,
+      },
+      { progress: false },
+    );
+    State.plantCap.preview = response?.status?.preview || State.plantCap.preview;
+    applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
+    showToast("Plant cap monitoring enabled.", "success", 3200);
+  } catch (err) {
+    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function disablePlantCapControl() {
+  const ok = await appConfirm(
+    "Disable Plant Output Cap",
+    "Disable plant-wide capping monitoring?\n\nThis stops automatic control but does not restart any inverter that the controller previously stopped.",
+    { ok: "Disable" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand("DISABLE", "plant cap monitoring", 1);
+  } catch (err) {
+    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap disable cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/disable",
+      "POST",
+      { authToken: authSession.authToken },
+      { progress: false },
+    );
+    applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
+    showToast("Plant cap monitoring disabled.", "success", 3200);
+  } catch (err) {
+    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function releasePlantCapControl() {
+  const ok = await appConfirm(
+    "Release Controlled Inverters",
+    "Start all controller-owned inverters sequentially in reverse stop order?\n\nThis also disables plant-wide capping monitoring for the current session.",
+    { ok: "Release" },
+  );
+  if (!ok) return;
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      "RELEASE",
+      "controller-owned inverters",
+      countPlantCapTargetsFromPreview(State.plantCap.preview),
+    );
+  } catch (err) {
+    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
+    showToast("Plant cap release cancelled.", "info", 3200);
+    return;
+  }
+  try {
+    const response = await api(
+      "/api/plant-cap/release",
+      "POST",
+      { authToken: authSession.authToken },
+      { progress: false },
+    );
+    if (response?.status) {
+      State.plantCap.preview = response.status.preview || null;
+      applyPlantCapStatusClient(response.status, { preservePreview: true });
+    }
+    showToast("Controller-owned inverters released.", "success", 3600);
+  } catch (err) {
+    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
+  const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
+  if (!tasks.length) return [];
+  const safeLimit = Math.max(1, Math.min(tasks.length, Number(limit || 1) || 1));
+  const results = new Array(tasks.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= tasks.length) return;
+      const task = tasks[index];
+      try {
+        const value = await api(String(task?.path || "/api/write"), "POST", task?.body || {}, {
+          progress: false,
+        });
+        results[index] = { status: "fulfilled", value };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  return results;
+}
+
+function normalizeBatchWriteResultsClient(expectedUnitsRaw, response) {
+  const expectedUnits = Array.isArray(expectedUnitsRaw)
+    ? expectedUnitsRaw
+        .map((unit) => Number(unit))
+        .filter((unit) => Number.isFinite(unit) && unit > 0)
+    : [];
+  const rawResults = Array.isArray(response?.results) ? response.results : [];
+  return expectedUnits.map((unit) => {
+    const match = rawResults.find((entry) => Number(entry?.unit) === unit);
+    return {
+      unit,
+      ok:
+        match != null
+          ? Boolean(match?.ok)
+          : Boolean(response?.ok) && rawResults.length === 0,
+    };
+  });
 }
 
 // ─── Node Control ─────────────────────────────────────────────────────────────
@@ -3723,6 +7677,7 @@ async function toggleNode(inv, node, btnEl) {
       unit: node,
       value: newState,
       scope: "single",
+      priority: "high",
       operator: currentOperator(),
     });
     State.nodeStates[key] = newState;
@@ -3750,63 +7705,62 @@ async function sendAllNodesInv(inv, val) {
   }
   const action = val ? "START" : "STOP";
   const scopeLabel = `INV-${String(inv).padStart(2, "0")}`;
-
-  const tasks = [];
-  for (const n of targetNodes) {
-    tasks.push({
-      inverter: inv,
-      node: n,
-      req: api("/api/write", "POST", {
+  try {
+    const response = await api(
+      "/api/write/batch",
+      "POST",
+      {
         inverter: inv,
-        node: n,
-        unit: n,
+        units: targetNodes,
         value: val,
         scope: "inverter",
+        priority: "high",
         operator: currentOperator(),
-      }),
-    });
-  }
-
-  const results = await Promise.allSettled(tasks.map((t) => t.req));
-  let ok = 0;
-  let fail = 0;
-
-  results.forEach((r, i) => {
-    const t = tasks[i];
-    if (r.status === "fulfilled") {
-      ok++;
-      const key = `${t.inverter}_${t.node}`;
-      State.nodeStates[key] = val;
-      const btn = $(`nbtn-${t.inverter}-${t.node}`);
-      if (btn) {
-        setNodeButtonVisual(btn, t.node, !!val, false);
-      }
-    } else {
-      fail++;
-    }
-  });
-
-  if (fail === 0) {
-    showToast(
-      `${action} sent: ${scopeLabel} (${ok}/${targetNodes.length} nodes)`,
-      "success",
-      3200,
+      },
+      { progress: false },
     );
-  } else if (ok === 0) {
-    const firstErr = results.find((r) => r.status === "rejected");
-    const detail = firstErr?.reason?.message
-      ? `: ${firstErr.reason.message}`
-      : "";
+
+    const unitResults = normalizeBatchWriteResultsClient(targetNodes, response);
+    let ok = 0;
+    let fail = 0;
+
+    unitResults.forEach(({ unit, ok: unitOk }) => {
+      if (unitOk) {
+        ok++;
+        const key = `${inv}_${unit}`;
+        State.nodeStates[key] = val;
+        const btn = $(`nbtn-${inv}-${unit}`);
+        if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+      } else {
+        fail++;
+      }
+    });
+
+    if (fail === 0) {
+      showToast(
+        `${action} sent: ${scopeLabel} (${ok}/${targetNodes.length} nodes)`,
+        "success",
+        3200,
+      );
+    } else if (ok === 0) {
+      const detail = response?.error ? `: ${response.error}` : "";
+      showToast(
+        `${action} failed: ${scopeLabel} (0/${targetNodes.length})${detail}`,
+        "fault",
+        6000,
+      );
+    } else {
+      showToast(
+        `${action} partial: ${scopeLabel} (${ok}/${targetNodes.length})`,
+        "warning",
+        5000,
+      );
+    }
+  } catch (e) {
     showToast(
-      `${action} failed: ${scopeLabel} (0/${targetNodes.length})${detail}`,
+      `${action} failed: ${scopeLabel}: ${e.message}`,
       "fault",
       6000,
-    );
-  } else {
-    showToast(
-      `${action} partial: ${scopeLabel} (${ok}/${targetNodes.length})`,
-      "warning",
-      5000,
     );
   }
 }
@@ -3944,49 +7898,61 @@ async function sendSelectedNodes(val) {
     return;
   }
   const action = val ? "START" : "STOP";
-  const authKey = await authorizeBulkCommand(
-    action,
-    `selected inverters (${selected.length})`,
-    totalTargets,
-  );
-  if (!authKey) {
+  let authSession = null;
+  try {
+    authSession = await authorizeBulkCommand(
+      action,
+      `selected inverters (${selected.length})`,
+      totalTargets,
+    );
+  } catch (e) {
+    showToast(`${action} failed: ${e.message}`, "fault", 5000);
+    return;
+  }
+  if (!authSession) {
     showToast(`${action} cancelled: selected inverters`, "info", 3200);
     return;
   }
 
   const tasks = [];
   selected.forEach((inv) => {
-    for (const n of getConfiguredUnits(inv, nodeCount)) {
-      tasks.push({
+    const units = getConfiguredUnits(inv, nodeCount);
+    if (!units.length) return;
+    tasks.push({
+      path: "/api/write/batch",
+      inverter: inv,
+      units,
+      body: {
         inverter: inv,
-        node: n,
-        req: api("/api/write", "POST", {
-          inverter: inv,
-          node: n,
-          unit: n,
-          value: val,
-          scope: "selected",
-          authKey,
-          operator: currentOperator(),
-        }),
-      });
-    }
+        units,
+        value: val,
+        scope: "selected",
+        authToken: authSession.authToken,
+        priority: "high",
+        operator: currentOperator(),
+      },
+    });
   });
 
-  const results = await Promise.allSettled(tasks.map((t) => t.req));
+  const results = await runControlTasksWithConcurrency(tasks, 4);
   let ok = 0;
   let fail = 0;
   results.forEach((r, i) => {
     const t = tasks[i];
     if (r.status === "fulfilled") {
-      ok++;
-      State.nodeStates[`${t.inverter}_${t.node}`] = val;
-      const btn = $(`nbtn-${t.inverter}-${t.node}`);
-      if (btn) {
-        setNodeButtonVisual(btn, t.node, !!val, false);
-      }
+      const unitResults = normalizeBatchWriteResultsClient(t.units, r.value);
+      unitResults.forEach(({ unit, ok: unitOk }) => {
+        if (unitOk) {
+          ok++;
+          State.nodeStates[`${t.inverter}_${unit}`] = val;
+          const btn = $(`nbtn-${t.inverter}-${unit}`);
+          if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+        } else {
+          fail++;
+        }
+      });
     } else {
-      fail++;
+      fail += Array.isArray(t.units) ? t.units.length : 0;
     }
   });
 
@@ -4022,6 +7988,266 @@ function filterInverters() {
     c.style.display = v === "all" || c.id === `inv-card-${v}` ? "" : "none";
   });
   scheduleInverterCardsUpdate(true);
+  if (v === "all") {
+    clearInverterDetail();
+  } else {
+    loadInverterDetail(Number(v));
+  }
+}
+
+// ─── Inverter Detail Panel ────────────────────────────────────────────────────
+
+function clearInverterDetail() {
+  // Return the inv-card to the grid before hiding the panel
+  const inv = State.invDetailInv;
+  if (inv) {
+    const card = document.getElementById(`inv-card-${inv}`);
+    const grid = $("invGrid");
+    if (card && grid && !grid.contains(card)) {
+      // re-insert before the bulk control panel (last child)
+      const bulk = grid.querySelector(".bulk-control-bar");
+      grid.insertBefore(card, bulk || null);
+    }
+  }
+  const panel = $("invDetailPanel");
+  if (panel) panel.style.display = "none";
+  if (State.invDetailRefreshTimer) {
+    clearInterval(State.invDetailRefreshTimer);
+    State.invDetailRefreshTimer = null;
+  }
+  State.invDetailInv = 0;
+  State.invDetailLoading = false;
+  State.invDetailKwh = 0;
+  State.invDetailAlarmRows = [];
+  State.invDetailReportRows = [];
+}
+
+async function loadInverterDetail(inv) {
+  if (State.invDetailInv === inv && State.invDetailLoading) return;
+  // If switching inverters, return old card first
+  if (State.invDetailInv && State.invDetailInv !== inv) clearInverterDetail();
+  State.invDetailInv = inv;
+  State.invDetailLoading = true;
+
+  const panel = $("invDetailPanel");
+  if (!panel) return;
+  panel.style.display = "flex";
+
+  // Move the live inv-card into the slot (card continues to update in real-time)
+  const card = document.getElementById(`inv-card-${inv}`);
+  const slot = $("invDetailCardSlot");
+  if (card && slot) {
+    slot.innerHTML = "";
+    slot.appendChild(card);
+  }
+
+  const invLabel = `INV-${String(inv).padStart(2, "0")}`;
+  const statsEl = $("invDetailStats");
+  const alarmsEl = $("invDetailAlarms");
+  const historyEl = $("invDetailHistory");
+  if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label">Loading ${invLabel} details…</span></div>`;
+  if (alarmsEl) alarmsEl.innerHTML = `<div class="inv-detail-no-data">Loading current activity…</div>`;
+  if (historyEl) historyEl.innerHTML = `<div class="inv-detail-no-data">Loading recent history…</div>`;
+
+  const now = Date.now();
+  const todayStr = today();
+  const todayStartMs = localDateStartMs(todayStr);
+  const sevenDayStart = dateStr(new Date(now - 7 * 86400000));
+
+  try {
+    const reportReq = apiWithTimeout(
+      `/api/report/daily?start=${sevenDayStart}&end=${todayStr}`,
+      15000,
+      "Timed out while loading recent history.",
+    ).catch((err) => {
+      console.warn("loadInverterDetail report:", err?.message || err);
+      return [];
+    });
+
+    const [alarmsResp, todayEnergyResp] = await Promise.all([
+      api(`/api/alarms?inverter=${inv}&start=${Math.floor(todayStartMs)}&end=${now}`).catch((err) => {
+        console.warn("loadInverterDetail alarms:", err?.message || err);
+        return [];
+      }),
+      api(`/api/energy/today`).catch((err) => {
+        console.warn("loadInverterDetail energy:", err?.message || err);
+        return [];
+      }),
+    ]);
+
+    if (State.invDetailInv !== inv) return; // selection changed while fetching
+
+    const alarmRows  = Array.isArray(alarmsResp) ? alarmsResp : (Array.isArray(alarmsResp?.rows) ? alarmsResp.rows : []);
+    const todayRows  = Array.isArray(todayEnergyResp) ? todayEnergyResp : [];
+
+    // Store for live refresh
+    State.invDetailAlarmRows  = alarmRows;
+    State.invDetailKwh = Number(todayRows.find((r) => Number(r.inverter) === inv)?.total_kwh || 0);
+
+    renderInverterDetailStats(inv);
+    renderInverterDetailAlarms(alarmRows);
+
+    const reportResp = await reportReq;
+    if (State.invDetailInv !== inv) return;
+    const reportRows = Array.isArray(reportResp)
+      ? reportResp
+      : Array.isArray(reportResp?.rows)
+        ? reportResp.rows
+        : [];
+    State.invDetailReportRows = reportRows;
+    renderInverterDetailHistory(inv, reportRows);
+    renderInverterDetailStats(inv);
+
+    // Refresh kWh and availability every 60 s.
+    // /api/report/daily?date=today recomputes the partial-day window live so
+    // availability_pct stays accurate throughout the day.
+    if (State.invDetailRefreshTimer) clearInterval(State.invDetailRefreshTimer);
+    State.invDetailRefreshTimer = setInterval(async () => {
+      const curInv = State.invDetailInv;
+      if (!curInv) return;
+      try {
+        const [energyRows, reportRows] = await Promise.all([
+          api(`/api/energy/today`).catch(() => null),
+          apiWithTimeout(
+            `/api/report/daily?date=${today()}`,
+            10000,
+            "Timed out while refreshing today's summary.",
+          ).catch(() => null),
+        ]);
+        if (Array.isArray(energyRows)) {
+          State.invDetailKwh = Number(energyRows.find((r) => Number(r.inverter) === curInv)?.total_kwh || 0);
+        }
+        if (Array.isArray(reportRows) && reportRows.length) {
+          const todayKey = today();
+          const others = State.invDetailReportRows.filter((r) => String(r.date || "") !== todayKey);
+          State.invDetailReportRows = [...others, ...reportRows];
+        }
+        renderInverterDetailStats(curInv);
+      } catch (_) { /* silent — stale values stay */ }
+    }, 60000);
+  } catch (err) {
+    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Unable to load detail view: ${err.message}</span></div>`;
+  } finally {
+    State.invDetailLoading = false;
+  }
+}
+
+function renderInverterDetailStats(inv) {
+  const el = $("invDetailStats");
+  if (!el) return;
+
+  const todayStr = today();
+  const now = Date.now();
+  const liveTotalsByInv = buildFreshLiveTotalsByInverter(now);
+  const liveTotals = liveTotalsByInv[inv] || { pac: 0, pdc: 0, kwh: 0 };
+
+  // Today Energy — use server-authoritative per-inverter totals tracked from
+  // /api/energy/today or WS todayEnergy rows so restart-safe persisted totals
+  // are not replaced by the poller's volatile in-memory kWh counters.
+  const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);
+
+  // DC Power — live from WS (not shown elsewhere; replaces redundant AC Output chip)
+  const pdc = Number(liveTotals.pdc || 0);
+
+  // Today Availability — from daily_report via 60s API poll (same source as exports)
+  const todayReport = State.invDetailReportRows.find((r) => r.date === todayStr && r.inverter === inv);
+  let availPct = null;
+  if (todayReport) {
+    const hasSomeData = Number(todayReport.uptime_s || 0) > 0 || Number(todayReport.kwh_total || 0) > 0;
+    availPct = hasSomeData ? Number(todayReport.availability_pct ?? 0) : null;
+  }
+
+  // Active Nodes — live count of online nodes for this inverter
+  const allInvKeys = Object.entries(State.liveData || {}).filter(([, d]) => Number(d?.inverter) === inv);
+  const totalNodes =
+    getConfiguredUnits(inv, Number(State.settings.nodeCount || 4)).length ||
+    Number(State.settings.nodeCount || 4) ||
+    4;
+  const nodeCount = allInvKeys.filter(
+    ([, d]) => d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
+  ).length;
+
+  const chips = [
+    { label: "Today Energy", value: kwh.toFixed(2),                unit: "kWh" },
+    { label: "DC Power",     value: (pdc / 1000).toFixed(2),       unit: "kW"  },
+    { label: "Today Availability", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
+    { label: "Active Nodes", value: String(nodeCount),             unit: "/ " + totalNodes },
+  ];
+
+  el.innerHTML = chips.map((c) => `
+    <div class="inv-detail-stat">
+      <span class="inv-detail-stat-label">${c.label}</span>
+      <span class="inv-detail-stat-value">${c.value}</span>
+      <span class="inv-detail-stat-unit">${c.unit}</span>
+    </div>`).join("");
+}
+
+function renderInverterDetailAlarms(alarmRows) {
+  const el = $("invDetailAlarms");
+  if (!el) return;
+
+  const rows = alarmRows.slice().sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0)).slice(0, 15);
+  if (!rows.length) {
+    el.innerHTML = `<div class="inv-detail-no-data">No alarm activity recorded today.</div>`;
+    return;
+  }
+
+  const sevPill = (sev) => {
+    const cls = sev === "critical" ? "sev-critical" : sev === "fault" ? "sev-fault" : sev === "warning" ? "sev-warning" : "sev-info";
+    return `<span class="inv-detail-sev-pill ${cls}">${sev || "?"}</span>`;
+  };
+
+  const thead = `<tr><th>Time</th><th>Node</th><th>Code</th><th>Severity</th><th>Status</th></tr>`;
+  const tbody = rows.map((r) => {
+    const ts = fmtDateTime(Number(r.ts || r.occurred_ts || 0));
+    const node = r.unit ? `N${r.unit}` : "—";
+    const code = r.alarm_code ? String(r.alarm_code).toUpperCase() : "—";
+    const status = r.cleared_ts
+      ? `<span class="status-cleared">Closed</span>`
+      : `<span class="status-active">Active</span>`;
+    return `<tr><td title="${ts}">${ts.slice(11, 19)}</td><td>${node}</td><td class="mono">${code}</td><td>${sevPill(r.severity)}</td><td>${status}</td></tr>`;
+  }).join("");
+
+  el.innerHTML = `
+    <table class="inv-detail-alarm-table">
+      <thead>${thead}</thead>
+    </table>
+    <div class="inv-detail-alarm-scroll">
+      <table class="inv-detail-alarm-table">
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderInverterDetailHistory(inv, reportRows) {
+  const el = $("invDetailHistory");
+  if (!el) return;
+
+  const rows = reportRows
+    .filter((r) => r.inverter === inv)
+    .sort((a, b) => (b.date > a.date ? 1 : -1));
+
+  if (!rows.length) {
+    el.innerHTML = `<div class="inv-detail-no-data">No recent daily summary is available.</div>`;
+    return;
+  }
+
+  const fmtKw  = (w)   => (Number(w || 0) / 1000).toFixed(2);
+  const fmtPct = (pct) => pct != null ? `${Number(pct).toFixed(1)}%` : "—";
+
+  const thead = `<tr>
+    <th>Date</th><th>kWh</th><th>Peak (kW)</th><th>Avg (kW)</th><th>Avail</th><th>Alarms</th>
+  </tr>`;
+  const tbody = rows.map((r) => `<tr>
+    <td>${r.date}</td>
+    <td>${Number(r.kwh_total || 0).toFixed(2)}</td>
+    <td>${fmtKw(r.pac_peak)}</td>
+    <td>${fmtKw(r.pac_avg)}</td>
+    <td>${fmtPct(r.availability_pct)}</td>
+    <td>${r.alarm_count ?? 0}</td>
+  </tr>`).join("");
+
+  el.innerHTML = `<table><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
 }
 
 // ─── Build selects ────────────────────────────────────────────────────────────
@@ -4039,8 +8265,6 @@ function buildSelects() {
     "alarmInv",
     "energyInv",
     "auditInv",
-    "auditFilterInverter",
-    "reportFilterInverter",
     "expAlarmInv",
     "expEnergyInv",
     "expInvDataInv",
@@ -4052,24 +8276,6 @@ function buildSelects() {
     el.innerHTML = allOpt + opts;
     if (prev && el.querySelector(`option[value="${prev}"]`)) el.value = prev;
   });
-
-  const nodeSel = $("auditFilterNode");
-  if (nodeSel) {
-    const prev = nodeSel.value;
-    const nodeCount = Number(State.settings.nodeCount || 4);
-    const nodeOpts = [
-      '<option value="all">All</option>',
-      '<option value="ALL">ALL</option>',
-      ...Array.from(
-        { length: nodeCount },
-        (_, i) => `<option value="N${i + 1}">N${i + 1}</option>`,
-      ),
-    ];
-    nodeSel.innerHTML = nodeOpts.join("");
-    if (prev && nodeSel.querySelector(`option[value="${prev}"]`)) {
-      nodeSel.value = prev;
-    }
-  }
 
   const rangeInput = $("bulkInvRangeInput");
   if (rangeInput && !String(rangeInput.value || "").trim()) {
@@ -4099,9 +8305,25 @@ function showOfflineIndicator(show, message) {
   }
 }
 
+function _clearWsReconnectTimer() {
+  if (State.wsReconnectTimer) {
+    clearTimeout(State.wsReconnectTimer);
+    State.wsReconnectTimer = null;
+  }
+}
+
 function connectWS() {
   if (State.wsConnecting) return;
+  const current = State.ws;
+  if (
+    current &&
+    (current.readyState === WebSocket.OPEN ||
+      current.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
   State.wsConnecting = true;
+  _clearWsReconnectTimer();
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = `${wsProto}://${location.host}/ws`;
@@ -4110,6 +8332,7 @@ function connectWS() {
 
   ws.onopen = () => {
     State.wsConnecting = false;
+    resetTodayMwhAuthority();
     setWsState(true, "ONLINE");
     State.wsRetries = 0;
     showOfflineIndicator(false);  // Clear offline banner on reconnect
@@ -4127,36 +8350,101 @@ function connectWS() {
 
   ws.onclose = () => {
     State.wsConnecting = false;
+    if (State.ws === ws) State.ws = null;
+    resetTodayMwhAuthority();
     setWsState(false, "RECONNECT");
-    const delay = Math.min(5000, 500 * ++State.wsRetries);
+    const retries = ++State.wsRetries;
+    const delay = Math.min(30000, Math.floor(500 * Math.pow(1.5, retries) + Math.random() * 500 * retries));
     const delaySeconds = Math.ceil(delay / 1000);
     showOfflineIndicator(true, `Reconnecting in ${delaySeconds}s...`);
-    setTimeout(connectWS, delay);
+    _clearWsReconnectTimer();
+    State.wsReconnectTimer = setTimeout(() => {
+      State.wsReconnectTimer = null;
+      connectWS();
+    }, delay);
   };
 
   ws.onerror = () => {
     State.wsConnecting = false;
+    resetTodayMwhAuthority();
     showOfflineIndicator(true, "Connection lost. Retrying...");
-    ws.close();
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
   };
 }
 
 function handleWS(msg) {
   if (msg.type === "init" || msg.type === "live") {
+    noteTodayMwhWsFrame(Date.now());
+    if (
+      State.modeTransition?.active &&
+      normalizeOperationModeValue(State.modeTransition.targetMode) === "remote"
+    ) {
+      resolveModeTransitionLiveWaiters(msg);
+    }
+    if (msg.remoteHealth) applyRemoteHealthClient(msg.remoteHealth);
     if (msg.data) State.liveData = sanitizeLiveDataByConfig(msg.data);
     if (msg.totals) State.totals = msg.totals;
     integrateTodayFromPac();
+    // Apply server-authoritative today energy from WS so the header metric
+    // updates on every bridge tick without depending on the HTTP sync timer.
+    if (Array.isArray(msg.todayEnergy)) {
+      const now = Date.now();
+      setTodayEnergyRowsClient(msg.todayEnergy);
+      const totalKwh = msg.todayEnergy.reduce(
+        (sum, r) => sum + Number(r?.total_kwh || 0), 0
+      );
+      noteTodayMwhWsEnergy(totalKwh, now);
+      const applied = applySyncedTodayKwh(totalKwh, now, {
+        source: "ws",
+      });
+      if (applied) renderTodayKwhFromPac();
+      if (!msg.todaySummary || typeof msg.todaySummary !== "object") {
+        applyCurrentDaySummaryClient(
+          {
+            day: today(),
+            as_of_ts: now,
+            total_kwh: totalKwh,
+            total_mwh: totalKwh / 1000,
+            inverter_count: Object.keys(State.todayEnergyByInv || {}).length,
+          },
+          { source: "ws-energy" },
+        );
+      }
+    }
+    if (msg.todaySummary && typeof msg.todaySummary === "object") {
+      applyCurrentDaySummaryClient(msg.todaySummary, { source: "ws" });
+    }
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
-      State.settings.plantName = msg.settings.plantName || "Solar Plant";
+      State.settings.plantName = msg.settings.plantName || "ADSI Plant";
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
+    if (msg.plantCap) {
+      applyPlantCapStatusClient(msg.plantCap, { preservePreview: true });
+    }
     scheduleInverterCardsUpdate();
+    // Keep detail panel stat chips live on every WS tick
+    if (State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv);
+    syncAlarmStateFromLiveData().catch((err) => {
+      console.warn("[app] live alarm sync failed:", err.message);
+    });
+  }
+  if (msg.type === "remote_health") {
+    applyRemoteHealthClient(msg.health || msg.remoteHealth || null);
+    scheduleInverterCardsUpdate(true);
+    if (State.currentPage === "settings") {
+      refreshReplicationHealth(true).catch(() => {});
+    }
+  }
+  if (msg.type === "plant_cap_status") {
+    applyPlantCapStatusClient(msg.plantCap || null, { preservePreview: true });
   }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;
-    loadSettings()
+    Promise.all([loadSettings(), loadIpConfig()])
       .then(async () => {
         await handleOperationModeTransition(
           prevModeWs,
@@ -4177,7 +8465,7 @@ function handleWS(msg) {
     const d = State.liveData[msg.key];
     if (d) {
       // Short debounce only: ignore only very-late races, not true offline transitions.
-      if (Date.now() - Number(d.ts || 0) <= 2000) return;
+      if (Date.now() - getLiveFreshTsClient(d) <= 2000) return;
       d.online = 0;
       integrateTodayFromPac();
       scheduleInverterCardsUpdate();
@@ -4185,6 +8473,15 @@ function handleWS(msg) {
   }
   if (msg.type === "xfer_progress") {
     handleXferProgress(msg);
+  }
+  if (msg.type === "replication_job") {
+    handleReplicationJobUpdate(msg.job || null);
+  }
+  if (msg.type === "chat") {
+    handleIncomingChatMessage(msg.row);
+  }
+  if (msg.type === "chat_clear") {
+    handleChatCleared();
   }
 }
 
@@ -4203,7 +8500,7 @@ function handleAlarmPush(alarms) {
       alarm_value: Number(a.alarm_value || 0),
       severity: a.severity || "fault",
       acknowledged: false,
-      ts: Date.now(),
+      ts: Number(a.ts || Date.now()),
       alarm_hex: toAlarmHex(a.alarm_value),
     };
 
@@ -4217,7 +8514,7 @@ function handleAlarmPush(alarms) {
     );
   });
 
-  setAlarmSoundActive(true);
+  syncAlarmSoundPlayback();
   scheduleInverterCardsUpdate();
 
   // Badge
@@ -4251,7 +8548,7 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
   item.innerHTML = `
     <div class="toast-hdr">
       <span class="toast-title">${sevLabel}</span>
-      <button class="toast-close" onclick="this.parentElement.parentElement.remove()">✕</button>
+      <button class="toast-close" aria-label="Dismiss">✕</button>
     </div>
     <div class="toast-body">${html}</div>
     <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
@@ -4285,10 +8582,12 @@ async function refreshAlarmBadge() {
       if (bell) bell.classList.add("hidden");
       closeNotif();
     }
-    setAlarmSoundActive(unacked > 0);
+    syncAlarmSoundPlayback();
     scheduleInverterCardsUpdate();
+    return true;
   } catch (err) {
     console.warn("[app] refreshAlarmBadge failed:", err.message);
+    return false;
   }
 }
 
@@ -4324,20 +8623,47 @@ function closeNotif() {
   $("notifPanel")?.classList.add("hidden");
 }
 
+function buildModeAwareQueryKey(parts = []) {
+  const mode = getActiveOperationModeClient();
+  return [mode, ...parts.map((part) => String(part ?? "").trim())].join("|");
+}
+
+function buildAlarmViewQueryKey() {
+  const date = sanitizeDateInputValue($("alarmDate")?.value) || today();
+  const inv = String($("alarmInv")?.value || "all").trim() || "all";
+  return buildModeAwareQueryKey([date, inv]);
+}
+
+function buildEnergyViewQueryKey() {
+  const date = sanitizeDateInputValue($("energyDate")?.value) || today();
+  const inv = String($("energyInv")?.value || "all").trim() || "all";
+  const resolution = String($("energyRes")?.value || "5min").trim() || "5min";
+  return buildModeAwareQueryKey([date, inv, resolution]);
+}
+
+function buildAuditViewQueryKey() {
+  const date = sanitizeDateInputValue($("auditDate")?.value) || today();
+  const inv = String($("auditInv")?.value || "all").trim() || "all";
+  return buildModeAwareQueryKey([date, inv]);
+}
+
+function buildReportViewQueryKey(dateOverride = "") {
+  const date =
+    sanitizeDateInputValue(dateOverride || $("reportDate")?.value) || today();
+  return buildModeAwareQueryKey([date]);
+}
+
 // ─── Alarms Page ──────────────────────────────────────────────────────────────
 function initAlarmsPage() {
-  if (!$("alarmStart").value) {
-    const s = new Date(Date.now() - 7 * 86400000);
-    s.setHours(0, 0, 0, 0);
-    $("alarmStart").value = dateStr(s);
-    $("alarmEnd").value = today();
-  }
+  if (!$("alarmDate").value) $("alarmDate").value = today();
   if (!Number.isFinite(Number(State.alarmView.page)) || State.alarmView.page < 1) {
     State.alarmView.page = 1;
   }
+  const queryKey = buildAlarmViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.alarmView.rows.length > 0 &&
+    State.alarmView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.alarms || 0) < TAB_STALE_MS
   ) {
     applyAlarmTableView();
@@ -4346,15 +8672,21 @@ function initAlarmsPage() {
   fetchAlarms();
 }
 
-async function fetchAlarms() {
-  if (State.tabFetching.alarms) return;
+async function fetchAlarms(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.alarms && !force) return;
   State.tabFetching.alarms = true;
+  const reqId = (State.alarmReqId || 0) + 1;
+  State.alarmReqId = reqId;
   showTableLoading("alarmBody", 10);
   const inv = $("alarmInv").value;
-  const start = $("alarmStart").value;
-  const end = $("alarmEnd").value;
-  const startMs = start ? new Date(`${start}T00:00:00`).getTime() : "";
-  const endMs = end ? new Date(`${end}T23:59:59.999`).getTime() : "";
+  let date = sanitizeDateInputValue($("alarmDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("alarmDate")) $("alarmDate").value = date;
+  }
+  const startMs = localDateStartMs(date);
+  const endMs = localDateEndMs(date);
   const qs = new URLSearchParams({
     start: String(startMs),
     end: String(endMs),
@@ -4362,27 +8694,42 @@ async function fetchAlarms() {
   });
   try {
     const raw = await api(`/api/alarms?${qs}`);
+    if (reqId !== State.alarmReqId) return;
     const rows = Array.isArray(raw) ? raw : [];
     State.alarmView.rows = rows;
     State.alarmView.page = 1;
+    State.alarmView.queryKey = buildAlarmViewQueryKey();
     State.tabFetchTs.alarms = Date.now();
     applyAlarmTableView();
     refreshAlarmBadge();
   } catch (e) {
     console.error("fetchAlarms:", e);
   } finally {
-    State.tabFetching.alarms = false;
+    if (reqId === State.alarmReqId) {
+      State.tabFetching.alarms = false;
+    }
   }
 }
 
 function applyAlarmTableView() {
   const allRows = Array.isArray(State.alarmView.rows) ? State.alarmView.rows : [];
-  const pageData = paginateRows(allRows, State.alarmView.page, State.alarmView.pageSize);
+  const minDurSec = Number($("alarmMinDur")?.value) || 0;
+  const filtered = minDurSec > 0
+    ? allRows.filter((r) => {
+        const t1 = Number(r.occurred_ts || r.ts || 0);
+        const t2 = r.cleared_ts ? Number(r.cleared_ts) : Date.now();
+        return t1 > 0 && (t2 - t1) / 1000 >= minDurSec;
+      })
+    : allRows;
+  const pageData = paginateRows(filtered, State.alarmView.page, State.alarmView.pageSize);
   State.alarmView.page = pageData.page;
   renderAlarmTable(pageData.rows);
   const countEl = $("alarmCount");
   if (countEl) {
-    countEl.textContent = `${pageData.from}-${pageData.to} / ${allRows.length} records`;
+    const suffix = minDurSec > 0 && filtered.length !== allRows.length
+      ? ` (${allRows.length} total)`
+      : "";
+    countEl.textContent = `${pageData.from}-${pageData.to} / ${filtered.length} records${suffix}`;
   }
   renderTablePager({
     hostId: "alarmPager",
@@ -4403,7 +8750,7 @@ function renderAlarmTable(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
   if (!safeRows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 10, "No alarm records for the selected filter.");
+    renderEmptyRow(tbody, 10, "No alarm records for the selected date.");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -4422,7 +8769,7 @@ function renderAlarmTable(rows) {
         : '<span class="status-active">ACTIVE</span>';
     const ackBtn = r.acknowledged
       ? '<button class="ack-btn acked" disabled>✔ ACK</button>'
-      : `<button class="ack-btn" onclick="ackAlarm(${r.id},this)">ACK</button>`;
+      : `<button class="ack-btn" data-alarm-id="${r.id}">ACK</button>`;
     const tr = el("tr");
     tr.id = `alarm-row-${r.id}`;
     tr.innerHTML = `
@@ -4455,7 +8802,7 @@ async function ackAlarm(id, btn) {
       showToast("Alarm already acknowledged.", "info", 1800);
     }
   } catch (e) {
-    alert("ACK failed: " + e.message);
+    showToast("ACK failed: " + e.message, "fault", 5000);
   }
 }
 
@@ -4463,6 +8810,8 @@ async function loadIpConfig() {
   try {
     const cfg = await api("/api/ip-config");
     State.ipConfig = cfg && typeof cfg === "object" ? cfg : null;
+    renderPlantCapClientWarnings();
+    renderPlantCapPanel();
   } catch (e) {
     console.warn("[IPCONFIG] load failed:", e.message);
     State.ipConfig = null;
@@ -4475,10 +8824,18 @@ function getConfiguredUnits(inv, fallbackNodeCount) {
   if (!cfg || typeof cfg !== "object") {
     return Array.from({ length: nodeCount }, (_, i) => i + 1);
   }
-  const unitsRaw = cfg?.units?.[inv] ?? cfg?.units?.[String(inv)] ?? [];
+  const unitsObj =
+    cfg.units && typeof cfg.units === "object" ? cfg.units : null;
+  const hasEntry =
+    !!unitsObj &&
+    (Object.prototype.hasOwnProperty.call(unitsObj, inv) ||
+      Object.prototype.hasOwnProperty.call(unitsObj, String(inv)));
+  const unitsRaw = hasEntry
+    ? unitsObj?.[inv] ?? unitsObj?.[String(inv)] ?? []
+    : Array.from({ length: nodeCount }, (_, i) => i + 1);
   const units = Array.isArray(unitsRaw)
     ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
-    : [];
+    : Array.from({ length: nodeCount }, (_, i) => i + 1);
   return [...new Set(units)];
 }
 
@@ -4500,7 +8857,7 @@ function sanitizeLiveDataByConfig(rawMap) {
 }
 
 async function ackAll() {
-  if (!confirm("Acknowledge ALL unacknowledged alarms?")) return;
+  if (!await appConfirm("Acknowledge All Alarms", "Acknowledge all active alarms that have not yet been acknowledged?", { ok: "Acknowledge All" })) return;
   try {
     const res = await api("/api/alarms/ack-all", "POST");
     document
@@ -4522,36 +8879,48 @@ async function ackAll() {
       2200,
     );
   } catch (e) {
-    alert("ACK ALL failed: " + e.message);
+    showToast("ACK ALL failed: " + e.message, "fault", 5000);
   }
 }
 
 // ─── Energy Page ──────────────────────────────────────────────────────────────
 function initEnergyPage() {
-  if (!$("energyStart").value) {
-    $("energyStart").value = today();
-    $("energyEnd").value = today();
-  }
+  if (!$("energyDate").value) $("energyDate").value = today();
   if (!Number.isFinite(Number(State.energyView.page)) || State.energyView.page < 1) {
     State.energyView.page = 1;
   }
+  const queryKey = buildEnergyViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.energyView.rows.length > 0 &&
+    State.energyView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.energy || 0) < TAB_STALE_MS
   ) {
     renderEnergyTable(State.energyView.rows);
+    if (State.energyView.summary) {
+      renderEnergySummaryFromStats(State.energyView.summary);
+    } else {
+      renderEnergySummary(State.energyView.rows);
+    }
     return;
   }
   fetchEnergy({ page: State.energyView.page });
 }
 
 async function fetchEnergy(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.energy && !force) return;
+  State.tabFetching.energy = true;
+  const reqId = (State.energyReqId || 0) + 1;
+  State.energyReqId = reqId;
   const inv = $("energyInv").value;
-  const start = $("energyStart").value;
-  const end = $("energyEnd").value;
-  const sTs = localDateStartMs(start);
-  const eTs = localDateEndMs(end);
+  let date = sanitizeDateInputValue($("energyDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("energyDate")) $("energyDate").value = date;
+  }
+  const sTs = localDateStartMs(date);
+  const eTs = localDateEndMs(date);
   const requestedPage = Math.max(
     1,
     Math.trunc(Number(options?.page ?? State.energyView.page) || 1),
@@ -4571,6 +8940,7 @@ async function fetchEnergy(options = {}) {
   });
   try {
     const raw = await api(`/api/energy/5min?${qs}`);
+    if (reqId !== State.energyReqId) return;
     const serverPaged = !Array.isArray(raw) && Array.isArray(raw?.rows);
     const fullRows = Array.isArray(raw)
       ? raw
@@ -4598,6 +8968,7 @@ async function fetchEnergy(options = {}) {
     State.energyView.summary =
       raw?.summary && typeof raw.summary === "object" ? raw.summary : null;
     State.energyView.serverPaged = serverPaged;
+    State.energyView.queryKey = buildEnergyViewQueryKey();
     State.tabFetchTs.energy = Date.now();
     renderEnergyTable(rows);
     if (State.energyView.summary) {
@@ -4625,6 +8996,10 @@ async function fetchEnergy(options = {}) {
     });
   } catch (e) {
     console.error("fetchEnergy:", e);
+  } finally {
+    if (reqId === State.energyReqId) {
+      State.tabFetching.energy = false;
+    }
   }
 }
 
@@ -4636,7 +9011,7 @@ function renderEnergyTable(rows) {
     renderEmptyRow(
       tbody,
       4,
-      "No 5-minute energy records for the selected range.",
+      "No 5-minute energy records for the selected date.",
     );
     return;
   }
@@ -4746,14 +9121,12 @@ function renderEnergySummary(rows) {
 // ─── Audit Log Page ───────────────────────────────────────────────────────────
 function initAuditPage() {
   setupAuditTableControls();
-  if (!$("auditStart").value) {
-    const s = new Date(Date.now() - 7 * 86400000);
-    $("auditStart").value = dateStr(s);
-    $("auditEnd").value = today();
-  }
+  if (!$("auditDate").value) $("auditDate").value = today();
+  const queryKey = buildAuditViewQueryKey();
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.auditView.rows.length > 0 &&
+    State.auditView.queryKey === queryKey &&
     Date.now() - (State.tabFetchTs.audit || 0) < TAB_STALE_MS
   ) {
     applyAuditTableView();
@@ -4762,21 +9135,21 @@ function initAuditPage() {
   fetchAudit();
 }
 
-async function fetchAudit() {
-  if (State.tabFetching.audit) return;
+async function fetchAudit(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.audit && !force) return;
   State.tabFetching.audit = true;
+  const reqId = (State.auditReqId || 0) + 1;
+  State.auditReqId = reqId;
   showTableLoading("auditBody", 8);
   const inv = $("auditInv").value;
-  const start = $("auditStart").value;
-  const end = $("auditEnd").value;
-  const hasValidDates = Boolean(start && end);
-  if (hasValidDates && start > end) {
-    showToast("Audit date range is invalid (From is after To).", "warning", 2600);
-    State.tabFetching.audit = false;
-    return;
+  let date = sanitizeDateInputValue($("auditDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("auditDate")) $("auditDate").value = date;
   }
-  const startMs = start ? new Date(`${start}T00:00:00`).getTime() : "";
-  const endMs = end ? new Date(`${end}T23:59:59.999`).getTime() : "";
+  const startMs = localDateStartMs(date);
+  const endMs = localDateEndMs(date);
   const qs = new URLSearchParams({
     start: String(startMs),
     end: String(endMs),
@@ -4785,14 +9158,18 @@ async function fetchAudit() {
   });
   try {
     const rows = await api(`/api/audit?${qs}`);
+    if (reqId !== State.auditReqId) return;
     State.auditView.rows = Array.isArray(rows) ? rows : [];
     State.auditView.page = 1;
+    State.auditView.queryKey = buildAuditViewQueryKey();
     State.tabFetchTs.audit = Date.now();
     applyAuditTableView();
   } catch (e) {
     console.error("fetchAudit:", e);
   } finally {
-    State.tabFetching.audit = false;
+    if (reqId === State.auditReqId) {
+      State.tabFetching.audit = false;
+    }
   }
 }
 
@@ -4801,7 +9178,7 @@ function renderAuditTable(rows) {
   if (!tbody) return;
   if (!rows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 8, "No audit records for the selected filter.");
+    renderEmptyRow(tbody, 8, "No audit records for the selected date.");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -4850,28 +9227,6 @@ function setupAuditTableControls() {
     });
   });
 
-  [
-    "auditFilterTs",
-    "auditFilterOperator",
-    "auditFilterInverter",
-    "auditFilterNode",
-    "auditFilterAction",
-    "auditFilterScope",
-    "auditFilterResult",
-    "auditFilterIp",
-  ].forEach((id) => {
-    const f = $(id);
-    if (!f || f.dataset.bound === "1") return;
-    f.dataset.bound = "1";
-    f.addEventListener("input", () => {
-      State.auditView.page = 1;
-      applyAuditTableViewDebounced();
-    });
-    f.addEventListener("change", () => {
-      State.auditView.page = 1;
-      applyAuditTableView();
-    });
-  });
 }
 
 function auditNodeLabel(node) {
@@ -4879,19 +9234,6 @@ function auditNodeLabel(node) {
   return n === 0 ? "ALL" : `N${n}`;
 }
 
-function getAuditFilters() {
-  const getVal = (id) => String($(id)?.value || "").trim();
-  return {
-    ts: getVal("auditFilterTs").toLowerCase(),
-    operator: getVal("auditFilterOperator").toLowerCase(),
-    inverter: getVal("auditFilterInverter"),
-    node: getVal("auditFilterNode"),
-    action: getVal("auditFilterAction").toUpperCase(),
-    scope: getVal("auditFilterScope").toLowerCase(),
-    result: getVal("auditFilterResult").toLowerCase(),
-    ip: getVal("auditFilterIp").toLowerCase(),
-  };
-}
 
 function compareAuditRows(a, b, key) {
   if (key === "ts") return Number(a.ts || 0) - Number(b.ts || 0);
@@ -4927,68 +9269,14 @@ function applyAuditTableView() {
   const allRows = Array.isArray(State.auditView.rows)
     ? State.auditView.rows
     : [];
-  const f = getAuditFilters();
-  const filtered = allRows.filter((r) => {
-    const tsText = fmtDateTime(r.ts).toLowerCase();
-    if (f.ts && !tsText.includes(f.ts)) return false;
-    if (
-      f.operator &&
-      !String(r.operator || "OPERATOR")
-        .toLowerCase()
-        .includes(f.operator)
-    )
-      return false;
-    if (
-      f.inverter &&
-      f.inverter !== "all" &&
-      Number(r.inverter || 0) !== Number(f.inverter)
-    )
-      return false;
-
-    const nodeText = auditNodeLabel(r.node);
-    if (f.node && f.node !== "all" && nodeText !== f.node) return false;
-
-    if (
-      f.action &&
-      f.action !== "ALL" &&
-      String(r.action || "").toUpperCase() !== f.action
-    )
-      return false;
-    if (
-      f.scope === "scope-all" &&
-      String(r.scope || "").toLowerCase() !== "all"
-    )
-      return false;
-    if (
-      f.scope &&
-      f.scope !== "all" &&
-      f.scope !== "scope-all" &&
-      String(r.scope || "").toLowerCase() !== f.scope
-    )
-      return false;
-
-    if (f.result === "ok" && String(r.result || "").toLowerCase() !== "ok")
-      return false;
-    if (f.result === "error" && String(r.result || "").toLowerCase() === "ok")
-      return false;
-
-    if (
-      f.ip &&
-      !String(r.ip || "")
-        .toLowerCase()
-        .includes(f.ip)
-    )
-      return false;
-    return true;
-  });
 
   const dir = State.auditView.sortDir === "asc" ? 1 : -1;
-  filtered.sort(
+  allRows.sort(
     (a, b) => dir * compareAuditRows(a, b, State.auditView.sortKey),
   );
 
   const pageData = paginateRows(
-    filtered,
+    allRows,
     State.auditView.page,
     State.auditView.pageSize,
   );
@@ -4997,7 +9285,7 @@ function applyAuditTableView() {
   renderAuditSortIndicators();
   const auditCountEl = $("auditCount");
   if (auditCountEl) {
-    auditCountEl.textContent = `${pageData.from}-${pageData.to} / ${filtered.length} filtered (${allRows.length} total)`;
+    auditCountEl.textContent = `${pageData.from}-${pageData.to} / ${allRows.length} records`;
   }
   renderTablePager({
     hostId: "auditPager",
@@ -5012,26 +9300,7 @@ function applyAuditTableView() {
   });
 }
 
-function resetAuditFilters() {
-  ["auditFilterTs", "auditFilterOperator", "auditFilterIp"].forEach((id) => {
-    const el = $(id);
-    if (el) el.value = "";
-  });
-  [
-    ["auditFilterInverter", "all"],
-    ["auditFilterNode", "all"],
-    ["auditFilterAction", "all"],
-    ["auditFilterScope", "all"],
-    ["auditFilterResult", "all"],
-  ].forEach(([id, v]) => {
-    const el = $(id);
-    if (el) el.value = v;
-  });
-  State.auditView.sortKey = "ts";
-  State.auditView.sortDir = "desc";
-  State.auditView.page = 1;
-  applyAuditTableView();
-}
+
 
 // ─── Daily Report Page ────────────────────────────────────────────────────────
 function initReportPage() {
@@ -5043,6 +9312,7 @@ function initReportPage() {
   // Stale cache: skip fetch and re-render from State if data is fresh.
   if (
     State.reportView.rows.length > 0 &&
+    State.reportView.queryKey === buildReportViewQueryKey() &&
     Date.now() - (State.tabFetchTs.report || 0) < TAB_STALE_MS
   ) {
     applyReportTableView();
@@ -5051,67 +9321,121 @@ function initReportPage() {
   fetchReport();
 }
 
-async function fetchReport() {
-  if (State.tabFetching.report) return;
+async function fetchReport(options = {}) {
+  const force = options?.force === true;
+  if (State.tabFetching.report && !force) return;
   State.tabFetching.report = true;
+  const reqId = (State.reportReqId || 0) + 1;
+  State.reportReqId = reqId;
   showTableLoading("reportBody", 14);
-  const date = $("reportDate").value;
+  let date = sanitizeDateInputValue($("reportDate")?.value);
+  if (!date) {
+    date = today();
+    if ($("reportDate")) $("reportDate").value = date;
+  }
   queuePersistExportUiState();
   try {
-    let rows = await api(`/api/report/daily?date=${date}`);
-    if ((!Array.isArray(rows) || rows.length === 0) && date) {
-      try {
-        const latest = await api("/api/report/latest-date");
-        const latestDate = String(latest?.latestDate || "").trim();
-        if (latestDate && latestDate !== date) {
-          $("reportDate").value = latestDate;
-          rows = await api(`/api/report/daily?date=${latestDate}`);
-          showToast(
-            `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
-            "warning",
-            3800,
-          );
-        }
-      } catch (_) {
-        // Non-fatal fallback; keep original empty result.
+    let rows = [];
+    let summary = null;
+    try {
+      const payload = await api(`/api/report/payload?date=${encodeURIComponent(date)}`);
+      if (reqId !== State.reportReqId) return;
+      rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : null;
+      const finalDate = String(payload?.date || "").trim();
+      if (payload?.fallbackUsed && finalDate && finalDate !== date) {
+        $("reportDate").value = finalDate;
+        showToast(
+          `No report rows for ${date}. Showing latest available date: ${finalDate}.`,
+          "warning",
+          3800,
+        );
       }
+    } catch (payloadErr) {
+      console.warn("fetchReport payload:", payloadErr?.message || payloadErr);
+      rows = await api(`/api/report/daily?date=${date}`);
+      if (reqId !== State.reportReqId) return;
+      if ((!Array.isArray(rows) || rows.length === 0) && date) {
+        try {
+          const latest = await api("/api/report/latest-date");
+          if (reqId !== State.reportReqId) return;
+          const latestDate = String(latest?.latestDate || "").trim();
+          if (latestDate && latestDate !== date) {
+            $("reportDate").value = latestDate;
+            rows = await api(`/api/report/daily?date=${latestDate}`);
+            if (reqId !== State.reportReqId) return;
+            showToast(
+              `No report rows for ${date}. Showing latest available date: ${latestDate}.`,
+              "warning",
+              3800,
+            );
+          }
+        } catch (_) {
+          // Non-fatal fallback; keep original empty result.
+        }
+      }
+      summary = await fetchReportSummary($("reportDate").value || date, {
+        requestId: reqId,
+      });
     }
-    State.reportView.rows = Array.isArray(rows)
-      ? rows.map((r) => toReportViewRow(r))
-      : [];
+    if (reqId !== State.reportReqId) return;
+    State.reportView.rows = Array.isArray(rows) ? rows.map((r) => toReportViewRow(r)) : [];
+    State.reportView.summary = summary;
     State.reportView.page = 1;
+    State.reportView.queryKey = buildReportViewQueryKey();
     State.tabFetchTs.report = Date.now();
     applyReportTableView();
-    await fetchReportSummary($("reportDate").value || date);
+    renderReportKpis();
   } catch (e) {
+    if (reqId !== State.reportReqId) return;
     console.error("fetchReport:", e);
     State.reportView.rows = [];
     State.reportView.summary = null;
+    State.reportView.queryKey = buildReportViewQueryKey();
     applyReportTableView();
     renderReportKpis();
     showToast(`Report load failed: ${e.message}`, "error", 4200);
   } finally {
-    State.tabFetching.report = false;
+    if (reqId === State.reportReqId) {
+      State.tabFetching.report = false;
+    }
   }
 }
 
-async function fetchReportSummary(date) {
+async function fetchReportSummary(date, options = {}) {
+  const requestId = Number(options?.requestId || 0);
   try {
     const summary = await api(`/api/report/summary?date=${date}`);
+    if (requestId > 0 && requestId !== State.reportReqId) {
+      return null;
+    }
     State.reportView.summary =
       summary && typeof summary === "object" ? summary : null;
     if (sanitizeDateInputValue(date) === today()) {
+      const currentDaySummary = extractCurrentDaySummary(summary);
+      if (currentDaySummary) {
+        applyCurrentDaySummaryClient(summary, { source: "report-summary" });
+      }
       const totalKwh = Number(summary?.daily?.total_kwh);
       if (Number.isFinite(totalKwh)) {
-        applySyncedTodayKwh(totalKwh, Date.now());
-        renderTodayKwhFromPac();
+        const applied = applySyncedTodayKwh(totalKwh, Date.now(), {
+          source: "report",
+        });
+        if (applied) renderTodayKwhFromPac();
       }
     }
   } catch (e) {
+    if (requestId > 0 && requestId !== State.reportReqId) {
+      return null;
+    }
     console.warn("fetchReportSummary:", e?.message || e);
     State.reportView.summary = null;
   }
+  if (requestId > 0 && requestId !== State.reportReqId) {
+    return null;
+  }
   renderReportKpis();
+  return State.reportView.summary;
 }
 
 function clampPctClient(value) {
@@ -5215,43 +9539,8 @@ function setupReportTableControls() {
     });
   });
 
-  [
-    "reportFilterInverter",
-    "reportFilterEnergy",
-    "reportFilterPeak",
-    "reportFilterAvg",
-    "reportFilterUptime",
-    "reportFilterAlarms",
-    "reportFilterAvail",
-    "reportFilterPerf",
-  ].forEach((id) => {
-    const f = $(id);
-    if (!f || f.dataset.bound === "1") return;
-    f.dataset.bound = "1";
-    f.addEventListener("input", () => {
-      State.reportView.page = 1;
-      applyReportTableViewDebounced();
-    });
-    f.addEventListener("change", () => {
-      State.reportView.page = 1;
-      applyReportTableView();
-    });
-  });
 }
 
-function getReportFilters() {
-  const getVal = (id) => String($(id)?.value || "").trim();
-  return {
-    inverter: getVal("reportFilterInverter"),
-    energy: getVal("reportFilterEnergy").toLowerCase(),
-    peak: getVal("reportFilterPeak").toLowerCase(),
-    avg: getVal("reportFilterAvg").toLowerCase(),
-    uptime: getVal("reportFilterUptime").toLowerCase(),
-    alarms: getVal("reportFilterAlarms"),
-    avail: getVal("reportFilterAvail").toLowerCase(),
-    perf: getVal("reportFilterPerf").toLowerCase(),
-  };
-}
 
 function compareReportRows(a, b, key) {
   if (
@@ -5296,70 +9585,14 @@ function applyReportTableView() {
   const allRows = Array.isArray(State.reportView.rows)
     ? State.reportView.rows
     : [];
-  const f = getReportFilters();
-  const filtered = allRows.filter((r) => {
-    if (
-      f.inverter &&
-      f.inverter !== "all" &&
-      Number(r.inverter || 0) !== Number(f.inverter)
-    )
-      return false;
-
-    if (
-      f.energy &&
-      !String(Number(r.mwh || 0).toFixed(6))
-        .toLowerCase()
-        .includes(f.energy)
-    )
-      return false;
-    if (
-      f.peak &&
-      !String(Number(r.peak_kw || 0).toFixed(3))
-        .toLowerCase()
-        .includes(f.peak)
-    )
-      return false;
-    if (
-      f.avg &&
-      !String(Number(r.avg_kw || 0).toFixed(3))
-        .toLowerCase()
-        .includes(f.avg)
-    )
-      return false;
-    if (
-      f.uptime &&
-      !String(Number(r.uptime_h || 0).toFixed(2))
-        .toLowerCase()
-        .includes(f.uptime)
-    )
-      return false;
-    if (
-      f.avail &&
-      !String(Number(r.availability_pct || 0).toFixed(1))
-        .toLowerCase()
-        .includes(f.avail)
-    )
-      return false;
-    if (
-      f.perf &&
-      !String(Number(r.performance_pct || 0).toFixed(1))
-        .toLowerCase()
-        .includes(f.perf)
-    )
-      return false;
-
-    if (f.alarms === "with" && Number(r.alarm_count || 0) <= 0) return false;
-    if (f.alarms === "none" && Number(r.alarm_count || 0) > 0) return false;
-    return true;
-  });
 
   const dir = State.reportView.sortDir === "asc" ? 1 : -1;
-  filtered.sort(
+  allRows.sort(
     (a, b) => dir * compareReportRows(a, b, State.reportView.sortKey),
   );
 
   const pageData = paginateRows(
-    filtered,
+    allRows,
     State.reportView.page,
     State.reportView.pageSize,
   );
@@ -5412,13 +9645,13 @@ function renderReportTable(rows, totalRows = rows.length) {
       <td class="${r.alarm_count > 0 ? "text-red" : ""}">${r.alarm_count || 0}</td>
       <td>
         <div class="perf-bar">
-          <div class="perf-track"><div class="perf-fill" style="width:${avail}%;background:${avail > 80 ? "var(--green)" : avail > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
+          <div class="perf-track"><div class="perf-fill ${avail > 80 ? "perf-fill-good" : avail > 50 ? "perf-fill-warn" : "perf-fill-poor"}" style="width:${avail}%"></div></div>
           <span>${avail.toFixed(1)}%</span>
         </div>
       </td>
       <td>
         <div class="perf-bar">
-          <div class="perf-track"><div class="perf-fill" style="width:${perf}%;background:${perf > 80 ? "var(--green)" : perf > 50 ? "var(--orange)" : "var(--red)"}"></div></div>
+          <div class="perf-track"><div class="perf-fill ${perf > 80 ? "perf-fill-good" : perf > 50 ? "perf-fill-warn" : "perf-fill-poor"}" style="width:${perf}%"></div></div>
           <span>${perf.toFixed(1)}%</span>
         </div>
       </td>`;
@@ -5511,11 +9744,11 @@ async function exportDailyReport() {
       format,
     });
     if (!r?.path) throw new Error("Export did not return output path.");
-    alert(`Saved to:\n${r.path}`);
+    showToast("Saved to: " + r.path, "success", 5000);
     await openExportPathFolder(r.path);
     setExportButtonState("btnExportDailyReport", "ok");
   } catch (e) {
-    alert("Export error: " + e.message);
+    showToast("Export error: " + e.message, "fault", 5000);
     setExportButtonState("btnExportDailyReport", "fail");
   }
 }
@@ -5543,14 +9776,13 @@ async function loadAnalytics(options = {}) {
     if ($("anaDate")) $("anaDate").value = date;
   }
   const intervalMin = Number($("anaInterval")?.value || 5);
-  const sTs = localDateStartMs(date);
-  const eTs = localDateEndMs(date);
+  const { startTs: sTs, endTs: eTs } = getAnalyticsSolarWindowBounds(date);
   try {
     const qs = new URLSearchParams({
       date,
       start: sTs,
       end: eTs,
-      bucketMin: 5,
+      bucketMin: String(intervalMin),
     });
     let rows = [];
     let dayAheadRows = [];
@@ -5564,6 +9796,7 @@ async function loadAnalytics(options = {}) {
         ),
       ]);
     } catch (err) {
+      if (isClientModeActive()) throw err;
       // Backward fallback for older backend versions.
       console.warn("[app] analytics v2 endpoint failed, using legacy:", err.message);
       rows = await api(`/api/energy/5min?${qs}`);
@@ -5576,10 +9809,18 @@ async function loadAnalytics(options = {}) {
     State.analyticsBaseRows = bucketed;
     State.analyticsDayAheadBaseRows = dayAheadBucketed;
     State.analyticsIntervalMin = intervalMin;
-    const summaryMwh = Number(dailySummary?.daily?.total_mwh);
-    State.analyticsDailyTotalMwh = Number.isFinite(summaryMwh)
-      ? Number(summaryMwh.toFixed(6))
-      : null;
+    const currentDaySummary = extractCurrentDaySummary(dailySummary);
+    State.analyticsDailyTotalMwh =
+      currentDaySummary && currentDaySummary.day === date
+        ? Number(currentDaySummary.totalMwh.toFixed(6))
+        : Number.isFinite(Number(dailySummary?.daily?.total_mwh))
+          ? Number(Number(dailySummary?.daily?.total_mwh).toFixed(6))
+          : null;
+    if (currentDaySummary) {
+      applyCurrentDaySummaryClient(dailySummary, { source: "analytics-load" });
+    }
+    State.analyticsActualSummarySyncAt = Date.now();
+    State.analyticsActualSummarySyncDay = date;
     renderAnalyticsFromState();
     ensureAnalyticsRealtime();
     ensureAnalyticsAutoRefresh();
@@ -5716,7 +9957,7 @@ function mergeRealtimeOverlay(baseRows, intervalMin) {
   Object.values(State.liveData || {}).forEach((d) => {
     const inv = Number(d?.inverter || 0);
     if (!inv) return;
-    const fresh = d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS;
+    const fresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
     if (!fresh) return;
     livePacByInv[inv] = (livePacByInv[inv] || 0) + Number(d?.pac || 0); // W
   });
@@ -5818,11 +10059,12 @@ function ensureAnalyticsRealtime() {
     let s = 0;
     const now = Date.now();
     Object.values(State.liveData || {}).forEach((d) => {
-      if (d?.online && now - Number(d?.ts || 0) <= DATA_FRESH_MS) {
+      if (d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS) {
         s += Number(d.pac || 0) * Number(d.inverter || 0);
       }
     });
-    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}`;
+    const actualSig = Number(State.analyticsDailyTotalMwh || 0).toFixed(6);
+    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}|${actualSig}`;
     if (sig === State.analyticsLastPacSig) return;
     State.analyticsLastPacSig = sig;
     renderAnalyticsFromState();
@@ -5915,6 +10157,11 @@ function buildSeriesByInverter(rows, intervalMin = 5) {
 }
 
 function destroyAnalyticsCharts() {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
+  }
+  State.analyticsRenderToken = Number(State.analyticsRenderToken || 0) + 1;
   Object.values(State.charts || {}).forEach((chart) => {
     try {
       chart?.destroy?.();
@@ -5923,6 +10170,17 @@ function destroyAnalyticsCharts() {
     }
   });
   State.charts = {};
+}
+
+function scheduleAnalyticsChartRender(step) {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
+  }
+  State.analyticsRenderTimer = setTimeout(() => {
+    State.analyticsRenderTimer = null;
+    step();
+  }, 0);
 }
 
 function ensureAnalyticsCards() {
@@ -5934,8 +10192,9 @@ function ensureAnalyticsCards() {
     "canvas[id^='chart-']",
   ).length;
   const hasSideCard = !!host.querySelector("#analyticsTotalSideCard");
+  const sig = String(count);
   if (
-    host.dataset.count === String(count) &&
+    host.dataset.sig === sig &&
     existingCanvasCount === expectedCanvasCount &&
     hasSideCard
   ) {
@@ -5944,7 +10203,7 @@ function ensureAnalyticsCards() {
 
   destroyAnalyticsCharts();
   host.innerHTML = "";
-  host.dataset.count = String(count);
+  host.dataset.sig = sig;
 
   const totalCard = document.createElement("div");
   totalCard.className = "chart-card";
@@ -5959,19 +10218,19 @@ function ensureAnalyticsCards() {
   totalSideCard.innerHTML = `
     <div class="chart-title">📊 Selected Date Summary</div>
     <div class="analytics-side-grid">
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Total measured energy generated for the selected date.">
         <div class="analytics-side-label">Actual MWh</div>
         <div class="analytics-side-value" id="anaSideActual">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Forecasted day-ahead energy for the selected date.">
         <div class="analytics-side-label">Day-ahead MWh</div>
         <div class="analytics-side-value" id="anaSideDayAhead">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Difference between actual and forecasted energy (actual minus forecast).">
         <div class="analytics-side-label">Variance MWh</div>
         <div class="analytics-side-value" id="anaSideVariance">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Highest single interval energy reading and when it occurred.">
         <div class="analytics-side-label">Peak Interval</div>
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
       </div>
@@ -5979,19 +10238,44 @@ function ensureAnalyticsCards() {
     <div class="analytics-gen-wrap">
       <div class="analytics-side-label">Day-ahead Generator</div>
       <div class="analytics-gen-row">
-        <label for="genDayCount" class="analytics-gen-label">Days</label>
-        <input
-          type="number"
-          id="genDayCount"
-          class="inp analytics-gen-input"
-          min="1"
-          max="31"
-          step="1"
-          value="1"
-        />
-        <button class="btn btn-accent analytics-gen-btn" onclick="runDayAheadGeneration()">
-          Generate
-        </button>
+        <label for="genDayCount" class="analytics-gen-field">
+          <span class="analytics-gen-label">Days</span>
+          <input
+            type="number"
+            id="genDayCount"
+            class="inp analytics-gen-input"
+            min="1"
+            max="31"
+            step="1"
+            value="1"
+            title="Number of consecutive days to generate day-ahead forecasts for (1-31)."
+          />
+        </label>
+        <label for="anaDayAheadExportFormat" class="analytics-gen-field analytics-gen-field-format">
+          <span class="analytics-gen-label">Format</span>
+          <select id="anaDayAheadExportFormat" class="sel analytics-gen-select" title="Standard: one row per time slot. Average Table: grouped averages per resolution bucket.">
+            <option value="standard">Standard</option>
+            <option value="average-table">Average Table</option>
+          </select>
+        </label>
+        <div class="analytics-gen-actions">
+          <button
+            id="btnDayAheadGenerate"
+            class="btn btn-accent analytics-gen-btn"
+            type="button"
+            title="Generate day-ahead forecast from the selected date."
+          >
+            Generate
+          </button>
+          <button
+            id="btnDayAheadExport"
+            class="btn btn-outline analytics-gen-btn analytics-gen-export-btn"
+            type="button"
+            title="Export day-ahead vs actual for the selected date and chart interval."
+          >
+            Export
+          </button>
+        </div>
       </div>
       <div class="exp-result analytics-gen-result" id="genDayResult"></div>
     </div>
@@ -6011,6 +10295,10 @@ function ensureAnalyticsCards() {
       Math.min(31, Math.max(1, Math.trunc(savedDayCount))),
     );
   }
+  const analyticsFormatSel = totalSideCard.querySelector("#anaDayAheadExportFormat");
+  if (analyticsFormatSel) {
+    analyticsFormatSel.value = getSharedForecastExportFormat();
+  }
   bindExportUiStatePersistence();
   syncDayAheadGeneratorAvailability();
 
@@ -6022,6 +10310,61 @@ function ensureAnalyticsCards() {
   }
 }
 
+function renderAnalyticsInverterCharts(
+  count,
+  labels,
+  mergedTimeline,
+  byInv,
+  fillPastMissingAsZero,
+  pastCutoffTs,
+) {
+  if (State.analyticsRenderTimer) {
+    clearTimeout(State.analyticsRenderTimer);
+    State.analyticsRenderTimer = null;
+  }
+  State.analyticsRenderToken = Number(State.analyticsRenderToken || 0) + 1;
+  const token = State.analyticsRenderToken;
+  const jobs = [];
+
+  for (let inv = 1; inv <= count; inv++) {
+    jobs.push(() => {
+      const p = paletteByInv(inv);
+      upsertLineChart(
+        `inv_${inv}`,
+        `chart-inv-${inv}`,
+        `INVERTER ${pad2(inv)} Energy (MWh)`,
+        labels,
+        mergedTimeline.map((ts) => {
+          const m = byInv.get(inv);
+          if (!m || !m.has(ts)) {
+            if (fillPastMissingAsZero && ts <= pastCutoffTs) return 0;
+            return null;
+          }
+          return Number(m.get(ts) || 0);
+        }),
+        p.stroke,
+        p.fill,
+        1.6,
+      );
+    });
+  }
+
+  let index = 0;
+  const runBatch = () => {
+    if (token !== Number(State.analyticsRenderToken || 0)) return;
+    const limit = Math.min(jobs.length, index + ANALYTICS_CHART_RENDER_BATCH);
+    while (index < limit) {
+      jobs[index]();
+      index += 1;
+    }
+    if (index < jobs.length) {
+      scheduleAnalyticsChartRender(runBatch);
+    }
+  };
+
+  runBatch();
+}
+
 function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
   const host = $("analyticsCharts");
   if (typeof Chart === "undefined") {
@@ -6031,6 +10374,7 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     }
     return;
   }
+  const count = Number(State.settings.inverterCount || 27);
   ensureAnalyticsCards();
 
   const { timeline, byInv } = buildSeriesByInverter(rows, intervalMin);
@@ -6054,7 +10398,6 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     const d = new Date(ts);
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   });
-  const count = Number(State.settings.inverterCount || 27);
   const selectedDate = String($("anaDate")?.value || today()).trim();
   const todayDate = today();
   let fillPastMissingAsZero = false;
@@ -6097,26 +10440,14 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     dayAheadValues,
   );
 
-  for (let inv = 1; inv <= count; inv++) {
-    const p = paletteByInv(inv);
-    upsertLineChart(
-      `inv_${inv}`,
-      `chart-inv-${inv}`,
-      `INVERTER ${pad2(inv)} Energy (MWh)`,
-      labels,
-      mergedTimeline.map((ts) => {
-        const m = byInv.get(inv);
-        if (!m || !m.has(ts)) {
-          if (fillPastMissingAsZero && ts <= pastCutoffTs) return 0;
-          return null;
-        }
-        return Number(m.get(ts) || 0);
-      }),
-      p.stroke,
-      p.fill,
-      1.6,
-    );
-  }
+  renderAnalyticsInverterCharts(
+    count,
+    labels,
+    mergedTimeline,
+    byInv,
+    fillPastMissingAsZero,
+    pastCutoffTs,
+  );
   renderAnalyticsSummary(
     rows,
     intervalMin,
@@ -6124,21 +10455,6 @@ function renderAnalyticsCharts(rows, intervalMin = 5, dayAheadRows = []) {
     mergedTimeline,
     dayAheadValues,
   );
-
-  // Clean up stale charts if inverter count changes downward.
-  for (const [key, chart] of Object.entries(State.charts || {})) {
-    if (key === "totalPac") continue;
-    const m = /^inv_(\d+)$/.exec(key);
-    if (!m) continue;
-    if (Number(m[1]) > count) {
-      try {
-        chart?.destroy?.();
-      } catch (err) {
-        console.warn("[app] chart destroy failed:", err.message);
-      }
-      delete State.charts[key];
-    }
-  }
 }
 
 function upsertLineChart(
@@ -6285,19 +10601,11 @@ function renderAnalyticsSummary(
   const computedTotalMwh = Number(
     numericTotalValues.reduce((s, v) => s + Number(v || 0), 0).toFixed(6),
   );
-  let totalMwh = computedTotalMwh;
-  const selectedDate = String($("anaDate")?.value || today()).trim();
-  if (selectedDate === today()) {
-    // Keep today's analytics total aligned with header/report canonical total.
-    totalMwh = Number(
-      (Math.max(0, Number(State.pacToday.totalKwh || 0)) / 1000).toFixed(6),
-    );
-  } else {
-    const summaryMwh = Number(State.analyticsDailyTotalMwh);
-    if (Number.isFinite(summaryMwh) && summaryMwh >= 0) {
-      totalMwh = Number(summaryMwh.toFixed(6));
-    }
-  }
+  const summaryMwh = Number(State.analyticsDailyTotalMwh);
+  const totalMwh =
+    Number.isFinite(summaryMwh) && summaryMwh >= 0
+      ? Number(summaryMwh.toFixed(6))
+      : computedTotalMwh;
   const peakRaw = (totalValues || []).map((v) =>
     v !== null && v !== undefined && Number.isFinite(Number(v))
       ? Number(v)
@@ -6376,12 +10684,7 @@ function buildAnalyticsDisplayTimeline(intervalMin = 5) {
   const d = String($("anaDate")?.value || today()).trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return [];
   const stepMs = Math.max(1, Number(intervalMin) || 5) * 60000;
-  const startTs = new Date(
-    `${d}T${pad2(ANALYTICS_VIEW_START_HOUR)}:00:00`,
-  ).getTime();
-  const endTs = new Date(
-    `${d}T${pad2(ANALYTICS_VIEW_END_HOUR)}:${pad2(ANALYTICS_VIEW_END_MIN)}:00`,
-  ).getTime();
+  const { startTs, endTs } = getAnalyticsSolarWindowBounds(d);
   if (
     !Number.isFinite(startTs) ||
     !Number.isFinite(endTs) ||
@@ -6396,6 +10699,8 @@ function buildAnalyticsDisplayTimeline(intervalMin = 5) {
 
 function chartOpts(unit, showLegend) {
   const pal = getChartPalette();
+  const chartType = getChartTypography();
+  const uiFont = cssVar("--font-main", "Arial");
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -6405,7 +10710,13 @@ function chartOpts(unit, showLegend) {
     plugins: {
       legend: {
         display: !!showLegend,
-        labels: { color: pal.legend, font: { family: "'Share Tech Mono'" } },
+        labels: {
+          color: pal.legend,
+          font: { family: uiFont, size: chartType.legend, weight: "600" },
+          boxWidth: chartType.legendBoxWidth,
+          boxHeight: chartType.legendBoxHeight,
+          padding: chartType.legendPadding,
+        },
       },
       decimation: {
         enabled: true,
@@ -6417,7 +10728,7 @@ function chartOpts(unit, showLegend) {
       x: {
         ticks: {
           color: pal.tick,
-          font: { size: 8 },
+          font: { family: uiFont, size: chartType.tickX, weight: "500" },
           autoSkip: false,
           callback(value, index, ticks) {
             const total = Math.max(1, ticks?.length || 1);
@@ -6433,13 +10744,13 @@ function chartOpts(unit, showLegend) {
         grid: { color: pal.grid },
       },
       y: {
-        ticks: { color: pal.tick, font: { size: 9 } },
+        ticks: { color: pal.tick, font: { family: uiFont, size: chartType.tickY, weight: "500" } },
         grid: { color: pal.grid },
         title: {
           display: true,
           text: unit,
           color: pal.tick,
-          font: { size: 10 },
+          font: { family: uiFont, size: chartType.axis, weight: "600" },
         },
       },
     },
@@ -6453,27 +10764,20 @@ function chartOpts(unit, showLegend) {
 // ─── Export Page ──────────────────────────────────────────────────────────────
 function initExportPage() {
   applyExportUiStateToInputs(State.settings.exportUiState || {});
-  const t = today(),
-    s = dateStr(new Date(Date.now() - 7 * 86400000));
+  syncSharedForecastExportFormatControls(getSharedForecastExportFormat());
+  bindExportDateValidators();
+  bindExportNumberValidators();
+  normalizeAllExportDateInputs({ forceDefault: true, preferred: "start" });
+  normalizeExportNumberInput("genDayCount");
+  normalizeExportNumberInput("expInvDataInterval");
   [
-    ["expAlarmStart", "expAlarmEnd"],
-    ["expEnergyStart", "expEnergyEnd"],
-    ["expInvDataStart", "expInvDataEnd"],
-    ["expAuditStart", "expAuditEnd"],
-    ["expReportStart", "expReportEnd"],
-  ].forEach(([a, b]) => {
-    const ea = $(a),
-      eb = $(b);
-    if (ea && !ea.value) ea.value = s;
-    if (eb && !eb.value) eb.value = t;
-  });
-  const expForecastDate = $("expForecastDate");
-  if (expForecastDate && !expForecastDate.value) expForecastDate.value = t;
-  const genDayCount = $("genDayCount");
-  if (genDayCount) {
-    const n = Number(genDayCount.value);
-    if (!Number.isFinite(n) || n < 1) genDayCount.value = "1";
-  }
+    "btnCancelAlarmExport",
+    "btnCancelEnergyExport",
+    "btnCancelForecastExport",
+    "btnCancelInvDataExport",
+    "btnCancelAuditExport",
+    "btnCancelDailyReportExport",
+  ].forEach((id) => setExportCancelButtonState(id, !!State.exportAbortControllers[id]));
   queuePersistExportUiState();
 }
 
@@ -6535,6 +10839,42 @@ function setExportButtonState(btnId, mode = "idle") {
   btn.textContent = base;
 }
 
+function setExportCancelButtonState(btnId, active = false) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.disabled = !active;
+  btn.classList.toggle("btn-red", active);
+  btn.classList.toggle("btn-outline", !active);
+}
+
+function registerExportAbortController(btnId, controller) {
+  if (!btnId || !controller) return;
+  State.exportAbortControllers[btnId] = controller;
+  setExportCancelButtonState(btnId, true);
+}
+
+function releaseExportAbortController(btnId) {
+  if (!btnId) return;
+  delete State.exportAbortControllers[btnId];
+  setExportCancelButtonState(btnId, false);
+}
+
+function requestExportCancellation(btnId, resultId) {
+  const controller = State.exportAbortControllers[btnId];
+  if (!controller) return;
+  const res = $(resultId);
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Cancelling…";
+  }
+  setExportCancelButtonState(btnId, false);
+  controller.abort();
+}
+
+function isExportCancelledError(err) {
+  return String(err?.message || "").trim().toLowerCase() === "export cancelled.";
+}
+
 async function runExport(
   type,
   invId,
@@ -6543,7 +10883,12 @@ async function runExport(
   resultId,
   extraBody = {},
   btnId = "",
+  cancelBtnId = "",
 ) {
+  normalizeExportDatePair(startId, endId, {
+    forceDefault: true,
+    preferred: "start",
+  });
   await persistExportUiState().catch(() => {});
   const inv = $(invId)?.value;
   const start = $(startId)?.value;
@@ -6561,11 +10906,15 @@ async function runExport(
     res.textContent = "Exporting…";
   }
   setExportButtonState(btnId, "loading");
+  const controller = new AbortController();
+  registerExportAbortController(cancelBtnId, controller);
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   const body = { inverter: inv, startTs, endTs, format, ...extraBody };
   try {
-    const r = await api(`/api/export/${type}`, "POST", body);
+    const r = await api(`/api/export/${type}`, "POST", body, {
+      signal: controller.signal,
+    });
     if (res) {
       res.className = "exp-result";
       res.textContent = "✔ Saved: " + r.path;
@@ -6573,30 +10922,158 @@ async function runExport(
     await openExportPathFolder(r.path);
     setExportButtonState(btnId, "ok");
   } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState(btnId, "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState(btnId, "fail");
     }
-    setExportButtonState(btnId, "fail");
+  } finally {
+    releaseExportAbortController(cancelBtnId);
+  }
+}
+
+async function runSingleDateExport(
+  type,
+  invId,
+  dateId,
+  resultId,
+  extraBody = {},
+  btnId = "",
+  cancelBtnId = "",
+) {
+  normalizeExportSingleDateInput(dateId, { forceDefault: true });
+  await persistExportUiState().catch(() => {});
+  const dateInput = $(dateId);
+  const day = dateInput?.value || today();
+  if (dateInput && !dateInput.value) dateInput.value = day;
+  const inv = invId ? $(invId)?.value : undefined;
+  const formatIdMap = {
+    expAlarmInv: "expAlarmFormat",
+    expEnergyInv: "expEnergyFormat",
+    expInvDataInv: "expInvDataFormat",
+    expAuditInv: "expAuditFormat",
+  };
+  const format = $(formatIdMap[invId])?.value || "xlsx";
+  const res = $(resultId);
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+  setExportButtonState(btnId, "loading");
+  const controller = new AbortController();
+  registerExportAbortController(cancelBtnId, controller);
+  const startTs = localDateStartMs(day);
+  const endTs = localDateEndMs(day);
+  const body = {
+    ...(invId ? { inverter: inv } : {}),
+    startTs,
+    endTs,
+    format,
+    ...extraBody,
+  };
+  try {
+    const r = await api(`/api/export/${type}`, "POST", body, {
+      signal: controller.signal,
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = "✔ Saved: " + r.path;
+    }
+    await openExportPathFolder(r.path);
+    setExportButtonState(btnId, "ok");
+  } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState(btnId, "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState(btnId, "fail");
+    }
+  } finally {
+    releaseExportAbortController(cancelBtnId);
   }
 }
 
 async function runEnergyExport() {
-  await runExport(
-    "energy",
-    "expEnergyInv",
-    "expEnergyStart",
-    "expEnergyEnd",
-    "expEnergyResult",
-    {},
-    "btnRunEnergyExport",
-  );
+  normalizeExportSingleDateInput("expEnergyDate", { forceDefault: true });
+  await persistExportUiState().catch(() => {});
+  const day = $("expEnergyDate")?.value || today();
+  if (!$("expEnergyDate")?.value && $("expEnergyDate")) $("expEnergyDate").value = day;
+  const inv = $("expEnergyInv")?.value;
+  const format = $("expEnergyFormat")?.value || "xlsx";
+  const res = $("expEnergyResult");
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+  setExportButtonState("btnRunEnergyExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelEnergyExport", controller);
+  try {
+    const startTs = localDateStartMs(day);
+    const endTs = localDateEndMs(day);
+    const r = await api("/api/export/energy", "POST", {
+      inverter: inv,
+      startTs,
+      endTs,
+      format,
+    }, {
+      signal: controller.signal,
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = "✔ Saved: " + r.path;
+    }
+    await openExportPathFolder(r.path);
+    setExportButtonState("btnRunEnergyExport", "ok");
+  } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunEnergyExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunEnergyExport", "fail");
+    }
+  } finally {
+    releaseExportAbortController("btnCancelEnergyExport");
+  }
 }
 
 async function runForecastActualExport() {
+  const fcInput = $("expForecastDate");
+  if (fcInput) {
+    let v = sanitizeDateInputValue(fcInput.value);
+    if (!v) { v = today(); fcInput.value = v; }
+    // No max cap — day-ahead forecasts can be for future dates.
+    delete fcInput.max;
+  }
   await persistExportUiState().catch(() => {});
-  const day = $("expForecastDate")?.value;
-  const format = $("expForecastFormat")?.value || "xlsx";
+  const day = fcInput?.value;
+  const source = $("expForecastSource")?.value || "analytics";
+  const exportFormat = getSharedForecastExportFormat();
+  const format = exportFormat === "average-table"
+    ? "xlsx"
+    : ($("expForecastFormat")?.value || "xlsx");
   const resolution = $("expForecastResolution")?.value || "5min";
   const res = $("expForecastResult");
   if (res) {
@@ -6604,27 +11081,90 @@ async function runForecastActualExport() {
     res.textContent = "Exporting…";
   }
   setExportButtonState("btnRunForecastExport", "loading");
-  const startTs = day ? localDateStartMs(day) : undefined;
-  const endTs = day ? localDateEndMs(day) : undefined;
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelForecastExport", controller);
+  const bounds = day ? getAnalyticsSolarWindowBounds(day) : null;
+  const startTs = bounds?.startTs;
+  const endTs = bounds?.endTs;
   try {
     const r = await api("/api/export/forecast-actual", "POST", {
       startTs,
       endTs,
       resolution,
       format,
+      exportFormat,
+      source,
+    }, {
+      signal: controller.signal,
     });
+    const sourceLabel = source === "solcast" ? "Solcast Day-Ahead" : "Trained Day-Ahead";
     if (res) {
       res.className = "exp-result";
-      res.textContent = "✔ Saved: " + r.path;
+      res.textContent =
+        `✔ Saved: ${r.path} (${sourceLabel}${exportFormat === "average-table" ? ", average table" : ""})`;
     }
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunForecastExport", "ok");
   } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunForecastExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunForecastExport", "fail");
+    }
+  } finally {
+    releaseExportAbortController("btnCancelForecastExport");
+  }
+}
+
+function getAnalyticsForecastExportResolution() {
+  const intervalMin = Number($("anaInterval")?.value || State.analyticsIntervalMin || 5);
+  if (intervalMin === 15) return "15min";
+  if (intervalMin === 30) return "30min";
+  if (intervalMin === 60) return "1hr";
+  return "5min";
+}
+
+async function runAnalyticsDayAheadExport() {
+  const day = String($("anaDate")?.value || today()).trim();
+  const res = $("genDayResult");
+  const bounds = day ? getAnalyticsSolarWindowBounds(day) : null;
+  const startTs = bounds?.startTs;
+  const endTs = bounds?.endTs;
+  const resolution = getAnalyticsForecastExportResolution();
+  const exportFormat = getSharedForecastExportFormat();
+
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+
+  try {
+    const r = await api("/api/export/forecast-actual", "POST", {
+      startTs,
+      endTs,
+      resolution,
+      format: "xlsx",
+      exportFormat,
+      source: "analytics",
+    });
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = `✔ Exported ${day} (${resolution}${exportFormat === "average-table" ? ", average table" : ""})`;
+    }
+    await openExportPathFolder(r.path);
+  } catch (e) {
     if (res) {
       res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+      res.textContent = `✗ ${e.message}`;
     }
-    setExportButtonState("btnRunForecastExport", "fail");
   }
 }
 
@@ -6634,10 +11174,10 @@ async function runDayAheadGeneration() {
     if (resBlocked) {
       resBlocked.className = "exp-result error";
       resBlocked.textContent =
-        "✗ Unavailable in Client mode. Generate day-ahead on the Gateway server.";
+        "✗ Unavailable in Remote mode. Run day-ahead generation from the gateway workstation.";
     }
     showToast(
-      "Day-ahead generation is disabled in Client mode. Please generate from the Gateway server.",
+      "Day-ahead generation is unavailable in Remote mode. Please generate it from the gateway workstation.",
       "warning",
       4200,
     );
@@ -6666,10 +11206,15 @@ async function runDayAheadGeneration() {
         .replace("ml_local", "Local ML")
         .replace("solcast", "Solcast");
       const fb = r?.fallbackUsed ? " (fallback)" : "";
-      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${fb}`;
+      const solcastInfo = r?.solcastPull?.pulled ? " + Solcast" : "";
+      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${solcastInfo}${fb}`;
       if (r?.fallbackUsed && r?.fallbackReason) {
         showToast(`Forecast fallback: ${r.fallbackReason}`, "warning", 5000);
       }
+      if (r?.solcastPull?.pulled === false && r?.solcastPull?.reason && r.solcastPull.reason !== "not_configured") {
+        showToast(`Solcast auto-pull skipped: ${r.solcastPull.reason}`, "info", 4000);
+      }
+      showSnapshotWarningToast("Forecast snapshot", r?.snapshotWarnings || []);
     }
     if (State.currentPage === "analytics") {
       loadAnalytics({ force: true }).catch(() => {});
@@ -6683,18 +11228,23 @@ async function runDayAheadGeneration() {
 }
 
 async function runInverterDataExport() {
-  await runExport(
+  normalizeExportNumberInput("expInvDataInterval");
+  await runSingleDateExport(
     "inverter-data",
     "expInvDataInv",
-    "expInvDataStart",
-    "expInvDataEnd",
+    "expInvDataDate",
     "expInvDataResult",
-    {},
+    { intervalMin: normalizeExportNumberInput("expInvDataInterval") || 1 },
     "btnRunInvDataExport",
+    "btnCancelInvDataExport",
   );
 }
 
 async function runDailyReportExport() {
+  normalizeExportDatePair("expReportStart", "expReportEnd", {
+    forceDefault: true,
+    preferred: "start",
+  });
   await persistExportUiState().catch(() => {});
   let start = $("expReportStart").value;
   let end = $("expReportEnd").value;
@@ -6717,20 +11267,23 @@ async function runDailyReportExport() {
     res.textContent = "Exporting…";
   }
   setExportButtonState("btnRunDailyReportExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelDailyReportExport", controller);
   const startTs = start ? localDateStartMs(start) : undefined;
   const endTs = end ? localDateEndMs(end) : undefined;
   try {
-    if (start) {
-      await api(
-        `/api/report/daily?date=${encodeURIComponent(start)}&refresh=1`,
-        "GET",
-      );
-    }
-    const r = await api("/api/export/daily-report", "POST", {
-      startTs,
-      endTs,
-      format,
-    });
+    const body =
+      start && end && start === end
+        ? { date: start, format }
+        : { startTs, endTs, format };
+    const r = await api(
+      "/api/export/daily-report",
+      "POST",
+      body,
+      {
+        signal: controller.signal,
+      },
+    );
     if (!r?.path) throw new Error("Export did not return output path.");
     if (res) {
       res.className = "exp-result";
@@ -6739,11 +11292,21 @@ async function runDailyReportExport() {
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunDailyReportExport", "ok");
   } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = "✗ " + e.message;
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunDailyReportExport", "idle");
+    } else {
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + e.message;
+      }
+      setExportButtonState("btnRunDailyReportExport", "fail");
     }
-    setExportButtonState("btnRunDailyReportExport", "fail");
+  } finally {
+    releaseExportAbortController("btnCancelDailyReportExport");
   }
 }
 
@@ -6770,8 +11333,8 @@ async function openExportPathFolder(filePath) {
 
 /** Lookup table for email domain → suggested provider. */
 const CB_DOMAIN_MAP = [
-  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "💡 Looks like a Microsoft account — OneDrive recommended." },
-  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "💡 Looks like a Google account — Google Drive recommended." },
+  { domains: ["outlook.com","hotmail.com","live.com","msn.com","live.com.au","hotmail.co.uk","outlook.com.au"], provider: "onedrive", hint: "Microsoft account detected. OneDrive is the recommended backup provider." },
+  { domains: ["gmail.com","googlemail.com"], provider: "gdrive", hint: "Google account detected. Google Drive is the recommended backup provider." },
 ];
 
 function cbSuggestProvider(email) {
@@ -6782,7 +11345,7 @@ function cbSuggestProvider(email) {
   for (const { domains, hint: h } of CB_DOMAIN_MAP) {
     if (domains.includes(domain)) { hint.textContent = h; return; }
   }
-  hint.textContent = "ℹ️ Domain unrecognized — select a provider manually or use Auto.";
+  hint.textContent = "No provider recommendation is available for this domain. Select a provider manually or keep Auto.";
 }
 
 function cbSetProgress(data) {
@@ -6794,22 +11357,26 @@ function cbSetProgress(data) {
   if (!wrap) return;
 
   const icons = {
-    idle: "💤",
-    queued: "⏳",
-    creating: "⚙",
-    uploading: "⬆",
-    pulling: "⬇",
-    restoring: "🔄",
-    done: "✅",
-    error: "❌",
-    success: "✅",
-    failed: "❌",
+    idle: "mdi mdi-sleep",
+    queued: "mdi mdi-timer-sand",
+    creating: "mdi mdi-cog-outline",
+    uploading: "mdi mdi-cloud-upload-outline",
+    pulling: "mdi mdi-cloud-download-outline",
+    restoring: "mdi mdi-backup-restore",
+    done: "mdi mdi-check-circle-outline",
+    error: "mdi mdi-alert-circle-outline",
+    success: "mdi mdi-check-circle-outline",
+    failed: "mdi mdi-alert-circle-outline",
   };
   const { status = "idle", pct: p = 0, message = "", updatedAt = 0, finishedAt = 0, startedAt = 0 } = data;
 
   if (status === "idle") { wrap.hidden = true; return; }
   wrap.hidden = false;
-  if (icon) icon.textContent = icons[status] || "⏳";
+  if (icon) {
+    icon.className = `cb-progress-icon ${icons[status] || "mdi mdi-timer-sand"}`;
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "";
+  }
   const ts = Number(updatedAt || finishedAt || startedAt || 0);
   const tsText = ts > 0 ? new Date(ts).toLocaleString() : "";
   if (label) label.textContent = tsText ? `${message || status} · Last: ${tsText}` : (message || status);
@@ -6875,7 +11442,7 @@ async function cbRefreshHistory() {
       : history;
 
     if (!filtered.length) {
-      body.innerHTML = '<tr class="table-empty"><td colspan="7">No backup history yet.</td></tr>';
+      body.innerHTML = '<tr class="table-empty"><td colspan="7">No backup activity available.</td></tr>';
       return;
     }
 
@@ -6961,7 +11528,22 @@ async function cbLoadSettings() {
     if ($("cbScopeLogs")) $("cbScopeLogs").checked = s.scope?.includes("logs") || false;
     if ($("cbOneDriveClientId")) $("cbOneDriveClientId").value = s.onedrive?.clientId || "";
     if ($("cbGDriveClientId")) $("cbGDriveClientId").value = s.gdrive?.clientId || "";
-    if ($("cbGDriveClientSecret")) $("cbGDriveClientSecret").value = s.gdrive?.clientSecret || "";
+    if ($("cbGDriveClientSecret")) {
+      const input = $("cbGDriveClientSecret");
+      const secretSaved = Boolean(s.gdrive?.clientSecretSaved);
+      input.value = "";
+      input.placeholder = secretSaved
+        ? "Stored securely. Enter a new secret to replace it."
+        : "Desktop app client secret";
+      input.title = secretSaved
+        ? "A Google client secret is already stored securely. Leave this blank to keep it, or enter a new one to replace it."
+        : "Enter the Google OAuth desktop client secret used for Drive access.";
+    }
+    if ($("cbGDriveSecretNote")) {
+      $("cbGDriveSecretNote").textContent = s.gdrive?.clientSecretSaved
+        ? "Stored securely in the app. Leave blank to keep it, or enter a new secret to replace it."
+        : "The client secret is stored locally after save and is not shown again in this screen.";
+    }
 
     cbSuggestProvider(s.email || "");
     await cbUpdateConnectionStatus();
@@ -7091,7 +11673,7 @@ async function cbListCloudBackups() {
   showMsg("cbActionMsg", `Listing ${providers.join(" + ")} backups…`, "");
   listSection.hidden = false;
   if (listTitle) listTitle.textContent = `Cloud Backups (${providers.join(" + ")})`;
-  listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Loading…</td></tr>';
+  listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Loading available backup files…</td></tr>';
 
   try {
     const results = await Promise.all(
@@ -7129,8 +11711,8 @@ async function cbListCloudBackups() {
       return tb - ta;
     });
     if (!filtered.length) {
-      listBody.innerHTML = '<tr class="table-empty"><td colspan="3">No cloud backups found.</td></tr>';
-      showMsg("cbActionMsg", errors.length ? `⚠ ${errors.join(" | ")}` : "No cloud backups found.", errors.length ? "error" : "");
+      listBody.innerHTML = '<tr class="table-empty"><td colspan="3">No cloud backups available.</td></tr>';
+      showMsg("cbActionMsg", errors.length ? `⚠ ${errors.join(" | ")}` : "No cloud backups are currently available.", errors.length ? "error" : "");
       return;
     }
     const frag = document.createDocumentFragment();
@@ -7165,7 +11747,7 @@ async function cbListCloudBackups() {
       showMsg("cbActionMsg", `✔ Found ${filtered.length} cloud backup(s)`, "");
     }
   } catch (err) {
-    listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Error loading.</td></tr>';
+    listBody.innerHTML = '<tr class="table-empty"><td colspan="3">Unable to load backup files.</td></tr>';
     showMsg("cbActionMsg", `✗ ${err.message}`, "error");
   }
 }
@@ -7184,7 +11766,7 @@ async function cbPullFromCloud(provider, remoteId, remoteName) {
 }
 
 async function cbRestoreBackup(backupId) {
-  if (!confirm(`Restore backup "${backupId}"?\n\nThis will overwrite the current database and config. A safety backup will be created first.\n\nThe app will need to restart after restore.`)) return;
+  if (!await appConfirm("Restore Backup", `Restore backup "${backupId}"?\n\nThis will overwrite the current database and config. A safety backup will be created first.\n\nThe app will need to restart after restore.`, { ok: "Restore" })) return;
   showMsg("cbActionMsg", "Restore started…", "");
   cbSetProgress({ status: "queued", pct: 5, message: "Restore queued…" });
   $("cbProgressWrap").hidden = false;
@@ -7198,7 +11780,7 @@ async function cbRestoreBackup(backupId) {
 }
 
 async function cbDeleteBackup(backupId) {
-  if (!confirm(`Delete local backup "${backupId}"?\nThis only removes the local copy. Cloud copies are not affected.`)) return;
+  if (!await appConfirm("Delete Backup", `Delete local backup "${backupId}"?\n\nThis only removes the local copy. Cloud copies are not affected.`, { ok: "Delete" })) return;
   try {
     await api(`/api/backup/${encodeURIComponent(backupId)}`, "DELETE");
     showMsg("cbActionMsg", "✔ Backup deleted", "");
@@ -7237,6 +11819,10 @@ function bindEventHandlers() {
 
   // Alarms page
   $("btnFetchAlarms")?.addEventListener("click", fetchAlarms);
+  $("alarmMinDur")?.addEventListener("input", () => {
+    State.alarmView.page = 1;
+    applyAlarmTableView();
+  });
   $("btnAckAll")?.addEventListener("click", ackAll);
 
   // Energy page
@@ -7247,7 +11833,6 @@ function bindEventHandlers() {
 
   // Audit page
   $("btnFetchAudit")?.addEventListener("click", fetchAudit);
-  $("btnResetAuditFilters")?.addEventListener("click", resetAuditFilters);
 
   // Daily Report page
   $("btnFetchReport")?.addEventListener("click", fetchReport);
@@ -7255,39 +11840,103 @@ function bindEventHandlers() {
 
   // Export page
   $("btnExportAlarms")?.addEventListener("click", () =>
-    runExport(
+    runSingleDateExport(
       "alarms",
       "expAlarmInv",
-      "expAlarmStart",
-      "expAlarmEnd",
+      "expAlarmDate",
       "expAlarmResult",
-      {},
+      {
+        minAlarmDurationSec: normalizeExportNumberInput("expAlarmMinDurationSec"),
+      },
       "btnExportAlarms",
+      "btnCancelAlarmExport",
     ));
   $("btnRunEnergyExport")?.addEventListener("click", runEnergyExport);
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
   $("btnExportAudit")?.addEventListener("click", () =>
-    runExport(
+    runSingleDateExport(
       "audit",
       "expAuditInv",
-      "expAuditStart",
-      "expAuditEnd",
+      "expAuditDate",
       "expAuditResult",
       {},
       "btnExportAudit",
+      "btnCancelAuditExport",
     ));
   $("btnRunDailyReportExport")?.addEventListener("click", runDailyReportExport);
+  $("btnCancelAlarmExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelAlarmExport", "expAlarmResult"),
+  );
+  $("btnCancelEnergyExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelEnergyExport", "expEnergyResult"),
+  );
+  $("btnCancelForecastExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelForecastExport", "expForecastResult"),
+  );
+  $("btnCancelInvDataExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelInvDataExport", "expInvDataResult"),
+  );
+  $("btnCancelAuditExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelAuditExport", "expAuditResult"),
+  );
+  $("btnCancelDailyReportExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelDailyReportExport", "expReportResult"),
+  );
 
   // Settings page
   $("btnSolcastSaveTest")?.addEventListener("click", saveAndTestSolcast);
-  $("btnSolcastTest")?.addEventListener("click", testSolcastConnection);
+  $("btnSolcastPreviewRefresh")?.addEventListener("click", () =>
+    loadSolcastPreview({ silent: false }).catch(() => {}),
+  );
+  $("btnSolcastPreviewExport")?.addEventListener("click", () =>
+    exportSolcastPreviewXlsx().catch(() => {}),
+  );
+  $("solcastPreviewDay")?.addEventListener("change", (event) => {
+    const nextDay = String(event?.target?.value || "").trim();
+    if (!nextDay) return;
+    syncSolcastPreviewDayCountOptions(
+      State.solcastPreview.days,
+      nextDay,
+      $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
+    );
+    loadSolcastPreview({ day: nextDay, silent: true }).catch(() => {});
+  });
+  $("solcastPreviewDayCount")?.addEventListener("change", (event) => {
+    const nextCount = normalizeSolcastPreviewDayCountClient(event?.target?.value || 1);
+    loadSolcastPreview({ dayCount: nextCount, silent: true }).catch(() => {});
+  });
+  $("solcastPreviewResolution")?.addEventListener("change", (event) => {
+    State.solcastPreview.resolution = normalizeSolcastPreviewResolutionClient(
+      event?.target?.value || "PT5M",
+    );
+  });
+  $("solcastPreviewUnit")?.addEventListener("change", () => {
+    rerenderSolcastPreviewChartFromState();
+  });
+  $("solcastPreviewExportFormat")?.addEventListener("change", (event) => {
+    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
+  });
+  $("expForecastExportFormat")?.addEventListener("change", (event) => {
+    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
+  });
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
   $("btnSaveSettings")?.addEventListener("click", saveSettings);
   $("btnExportSettingsConfig")?.addEventListener("click", exportSettingsConfig);
   $("btnImportSettingsConfig")?.addEventListener("click", importSettingsConfig);
   $("btnResetSettingsDefaults")?.addEventListener("click", resetSettingsToDefaults);
+  [
+    "setPlantCapUpperMw",
+    "setPlantCapLowerMw",
+    "setPlantCapSequenceCustom",
+    "setPlantCapCooldownSec",
+  ].forEach((id) => {
+    $(id)?.addEventListener("input", () => syncPlantCapFormContext("settings"));
+  });
+  $("setPlantCapSequenceMode")?.addEventListener("change", () =>
+    syncPlantCapFormContext("settings"),
+  );
   $("setOperationMode")?.addEventListener("change", () => {
     syncOperationModeUi();
     syncDayAheadGeneratorAvailability();
@@ -7303,7 +11952,34 @@ function bindEventHandlers() {
     refreshRuntimePerf(false),
   );
   $("btnRunReplicationPull")?.addEventListener("click", runReplicationPullNow);
-  $("btnRunReplicationPush")?.addEventListener("click", runReplicationPushNow);
+  $("btnCancelReplicationJob")?.addEventListener("click", runReplicationCancelNow);
+  // Push button removed — viewer model has no outbound data flows.
+  $("setReplicationIncludeArchive")?.addEventListener("change", async (event) => {
+    const target = event?.target;
+    if (!target) return;
+    if (target.checked) {
+      const ok = await appConfirm(
+        "Include Archive DB Files",
+        "Include gateway archive DB files in the next standby DB refresh?\n\nThis stages the gateway monthly archive DB files after the main database and can take significantly longer.",
+        { ok: "Include" },
+      );
+      if (!ok) {
+        setManualArchiveSyncSelected(false);
+        updateReplicationArchiveSelectionUi(true);
+        return;
+      }
+      setManualArchiveSyncSelected(true, { syncDom: false });
+      showToast(
+        "Archive download enabled. The next standby DB refresh will also stage the gateway monthly archive DB files.",
+        "warning",
+        5200,
+      );
+    } else {
+      setManualArchiveSyncSelected(false, { syncDom: false });
+    }
+    updateReplicationArchiveSelectionUi();
+    refreshReplicationHealth(true).catch(() => {});
+  });
   $("btnPickExportFolder")?.addEventListener("click", pickExportFolder);
   $("btnOpenExportFolder")?.addEventListener("click", openExportFolder);
   $("btnOpenIpConfig")?.addEventListener("click", openIpConfigSettings);
@@ -7328,12 +12004,125 @@ function bindEventHandlers() {
   $("cbOneDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade") || window.open("https://portal.azure.com"); });
   $("cbGDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://console.cloud.google.com/apis/credentials") || window.open("https://console.cloud.google.com"); });
 
+  // Bulk command form (static-param buttons built in buildBulkCommandTpl)
+  document.addEventListener("click", (e) => {
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t) return;
+    if (t.closest("#btnPlantCapToolbarToggle")) { togglePlantCapPanelCollapsed(); return; }
+    if (t.closest("#btnFillAllTargets")) { fillAllCommandTargets(); return; }
+    if (t.closest("#btnClearTargets"))   { clearCommandTargets();   return; }
+    if (t.closest("#btnStartSelected"))  { sendSelectedNodes(1);    return; }
+    if (t.closest("#btnStopSelected"))   { sendSelectedNodes(0);    return; }
+    if (t.closest("#btnPlantCapPreview")) {
+      previewPlantCap().catch((err) => {
+        showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+      });
+      return;
+    }
+    if (t.closest("#btnPlantCapEnable"))  { enablePlantCapControl().catch(() => {}); return; }
+    if (t.closest("#btnPlantCapDisable")) { disablePlantCapControl().catch(() => {}); return; }
+    if (t.closest("#btnPlantCapRelease")) { releasePlantCapControl().catch(() => {}); return; }
+  });
+
+  document.addEventListener("input", (e) => {
+    const id = String(e.target?.id || "");
+    if (
+      id === "plantCapUpperMw" ||
+      id === "plantCapLowerMw" ||
+      id === "plantCapSequenceCustom" ||
+      id === "plantCapCooldownSec"
+    ) {
+      syncPlantCapFormContext("live");
+      return;
+    }
+  });
+  document.addEventListener("change", (e) => {
+    const id = String(e.target?.id || "");
+    if (id === "plantCapSequenceMode") {
+      syncPlantCapFormContext("live");
+      return;
+    }
+  });
+
+  // Inverter grid — card start/stop and node toggle buttons (event delegation)
+  $("invGrid")?.addEventListener("click", (e) => {
+    const ctrlBtn = e.target.closest(".card-ctrl-btn[data-inv]");
+    if (ctrlBtn) {
+      sendAllNodesInv(Number(ctrlBtn.dataset.inv), ctrlBtn.dataset.action === "start" ? 1 : 0);
+      return;
+    }
+    const nodeBtn = e.target.closest("button[data-inv][data-node]");
+    if (nodeBtn && !nodeBtn.disabled) {
+      toggleNode(Number(nodeBtn.dataset.inv), Number(nodeBtn.dataset.node), nodeBtn);
+    }
+  });
+
+  // Alarm table — ACK button (event delegation)
+  $("alarmBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ack-btn:not([disabled])");
+    if (btn) ackAlarm(Number(btn.dataset.alarmId), btn);
+  });
+
+  // Toast close (event delegation on toast container)
+  $("alarmToast")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".toast-close");
+    if (btn) btn.closest(".toast-item")?.remove();
+  });
+
+  // Analytics day-ahead buttons (delegated on page container; rendered lazily by ensureAnalyticsCards)
+  $("page-analytics")?.addEventListener("click", (e) => {
+    if (e.target.closest("#btnDayAheadGenerate")) {
+      runDayAheadGeneration();
+      return;
+    }
+    if (e.target.closest("#btnDayAheadExport")) {
+      runAnalyticsDayAheadExport();
+    }
+  });
+  $("page-analytics")?.addEventListener("change", (e) => {
+    if (e.target?.id === "anaDayAheadExportFormat") {
+      syncSharedForecastExportFormatControls(e.target.value);
+    }
+  });
+
   // Alarm sound toggle
   $("btnAlarmSound")?.addEventListener("click", toggleAlarmSound);
 
   // Notification panel
   $("notifBell")?.addEventListener("click", toggleNotif);
   $("btnCloseNotif")?.addEventListener("click", closeNotif);
+
+  // Operator chat
+  $("chatBubble")?.addEventListener("click", toggleChatPanel);
+  $("chatClose")?.addEventListener("click", closeChatPanel);
+  $("chatSend")?.addEventListener("click", sendChatMessage);
+  $("chatClear")?.addEventListener("click", () => {
+    clearChatMessages().catch((err) => {
+      console.warn("[chat] clear failed:", err.message);
+    });
+  });
+  $("chatPanel")?.addEventListener("pointerdown", () => {
+    if (State.chatOpen) resetChatDismissTimer();
+  });
+  $("chatThread")?.addEventListener("scroll", () => {
+    if (State.chatOpen) resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("focus", () => {
+    if (!State.chatOpen) openChatPanel();
+    resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("blur", () => {
+    setTimeout(() => resetChatDismissTimer(), 0);
+  });
+  $("chatInput")?.addEventListener("input", () => {
+    resetChatDismissTimer();
+  });
+  $("chatInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
 
   // Guide modal
   $("btnCloseGuide")?.addEventListener("click", closeGuideModal);
@@ -7342,6 +12131,7 @@ function bindEventHandlers() {
   window.addEventListener("beforeunload", () => {
     clearInterval(State.clockTimer);
     clearInterval(State.alarmBadgeTimer);
+    clearChatDismissTimer();
     if (State.netIO.monitorTimer) { clearInterval(State.netIO.monitorTimer); State.netIO.monitorTimer = null; }
     const slots = State.xfer?.slots || {};
     for (const key of Object.keys(slots)) {
@@ -7356,33 +12146,126 @@ function bindEventHandlers() {
   });
 }
 
+// ─── Date defaults ────────────────────────────────────────────────────────────
+// Force all tab date inputs to today's values. Called at startup (to override
+// any stale exportUiState) and automatically by startClock on day rollover.
+function initAllTabDatesToToday() {
+  const d = today();
+  if ($("anaDate"))     $("anaDate").value = d;
+  if ($("reportDate"))  $("reportDate").value = d;
+  if ($("alarmDate"))   $("alarmDate").value = d;
+  if ($("energyDate"))  $("energyDate").value = d;
+  if ($("auditDate"))   $("auditDate").value = d;
+  State.lastDateInitDay = d;
+}
+
+// ─── Startup Tab Prefetch ─────────────────────────────────────────────────────
+// Fires ~2 s after startup (after WS connects and grid settles) so the first
+// visit to any data tab renders from State instead of waiting for a fetch.
+async function prefetchAllTabs() {
+  await new Promise((r) => setTimeout(r, 2000));
+  await Promise.allSettled([
+    fetchAlarms().catch(() => {}),
+    fetchReport().catch(() => {}),
+    fetchAudit().catch(() => {}),
+    fetchEnergy({ page: 1 }).catch(() => {}),
+  ]);
+}
+
+// ─── App Confirm Modal ────────────────────────────────────────────────────────
+const _appConfirmState = { resolver: null };
+
+function _resolveConfirm(result) {
+  const modal = $("appConfirmModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  const done = _appConfirmState.resolver;
+  _appConfirmState.resolver = null;
+  if (typeof done === "function") done(result);
+}
+
+function initConfirmModal() {
+  const modal = $("appConfirmModal");
+  if (!modal || modal.dataset.bound === "1") return;
+  modal.dataset.bound = "1";
+  $("confirmOk")?.addEventListener("click", () => _resolveConfirm(true));
+  $("confirmCancel")?.addEventListener("click", () => _resolveConfirm(false));
+  modal.addEventListener("click", (e) => { if (e.target === modal) _resolveConfirm(false); });
+  document.addEventListener("keydown", (e) => {
+    if (!modal.classList.contains("hidden")) {
+      if (e.key === "Escape") _resolveConfirm(false);
+      if (e.key === "Enter") _resolveConfirm(true);
+    }
+  });
+}
+
+function appConfirm(title, bodyText, { ok = "OK", cancel = "Cancel" } = {}) {
+  return new Promise((resolve) => {
+    _appConfirmState.resolver = resolve;
+    const modal = $("appConfirmModal");
+    const titleEl = $("confirmTitle");
+    const bodyEl = $("confirmBody");
+    if (titleEl) titleEl.textContent = title;
+    if (bodyEl) {
+      bodyEl.innerHTML = bodyText
+        .split("\n\n")
+        .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+        .join("");
+    }
+    const okBtn = $("confirmOk");
+    const cancelBtn = $("confirmCancel");
+    if (okBtn) okBtn.textContent = ok;
+    if (cancelBtn) cancelBtn.textContent = cancel;
+    if (modal) { modal.classList.remove("hidden"); modal.focus(); }
+    document.body.classList.add("modal-open");
+  });
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
   initThemeToggle();
+  State.plantCapPanelCollapsed = getStoredPlantCapPanelCollapsed();
   await initLicenseBridge();
   await initAppUpdateBridge();
   startClock();
   setupSideNav();
   initGuideModal();
+  initConfirmModal();
   setupNav();
   initSettingsSectionNav();
-  document.addEventListener(
-    "pointerdown",
-    () => {
-      try {
-        const ctx = getOrCreateAlarmAudioCtx();
-        if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
-      } catch (err) {
-        console.warn("[app] audio resume failed:", err.message);
+  const resumeAlarmAudio = () => {
+    try {
+      const ctx = getOrCreateAlarmAudioCtx();
+      if (!ctx) return;
+      if (ctx.state === "suspended") {
+        ctx.resume().then(() => {
+          State.chatAudioReady = ctx.state === "running";
+        }).catch(() => {});
+      } else {
+        State.chatAudioReady = ctx.state === "running";
       }
-    },
-    { passive: true },
-  );
+    } catch (err) {
+      console.warn("[app] audio resume failed:", err.message);
+    }
+  };
+  document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
+  document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
+  window.addEventListener("resize", rerenderResponsiveChartsDebounced, { passive: true });
   bindEventHandlers();
+  syncPlantCapPanelCollapsedUi();
+  renderChatSendState();
+  renderChatBadge();
+  renderChatThread();
+  setManualArchiveSyncSelected(loadReplicationArchiveSelectionPreference(), {
+    persist: false,
+  });
+  updateReplicationArchiveSelectionUi(true);
   // Restore alarm sound mute preference
   try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
   renderAlarmSoundBtn();
   await loadSettings();
+  initAllTabDatesToToday();    // override any stale exportUiState date with today
+  queuePersistExportUiState(); // persist today's reportDate immediately
   cbLoadSettings().catch(() => {});
   syncDayAheadGeneratorAvailability();
   bindExportUiStatePersistence();
@@ -7394,10 +12277,13 @@ async function init() {
   buildSelects();
   connectWS();
   startNetIOMonitor();
+  await loadChatHistory({ silent: true });
   refreshAlarmBadge();
 
   // Refresh alarm badge every 30s
   State.alarmBadgeTimer = setInterval(refreshAlarmBadge, 30000);
+  // Background prefetch so all data tabs are ready before the user visits them
+  prefetchAllTabs().catch(() => {});
 }
 
 document.addEventListener("DOMContentLoaded", init);

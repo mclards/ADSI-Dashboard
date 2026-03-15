@@ -4,7 +4,8 @@ node_modules/
 # Build outputs
 dist/
 release/
-build/
+build/*/
+!build/*.nsh
 __pycache__/
 *.pyc
 *.pyo
@@ -28,6 +29,9 @@ services/__pycache__/
 # Throwaway test / stale files
 test-electron.js
 d*ADSI-Dashboardtest-electron.js
+test-results/
+.tmp/
+release_pre_*/
 
 # Local-only licensing tools
 LICENSE-GENERATOR.md
@@ -52,6 +56,13 @@ cloud_backups/
 auth/
 userData/
 *.lic
+.claude/settings.local.json
+
+# Local machine IP config (do not commit)
+ipconfig.json
+server/ipconfig.json
+.vscode/settings.json
+.vscode/.tmp/
 
 # OS
 .DS_Store

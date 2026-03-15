@@ -92,8 +92,16 @@ def inverter_number_from_ip(ip):
 #   Configuration  —  paths & tunables
 # -------------------------------------------------
 
-PORTABLE_ROOT = str(os.getenv("IM_PORTABLE_DATA_DIR") or "").strip()
-EXPLICIT_DATA_DIR = str(os.getenv("IM_DATA_DIR") or "").strip()
+PORTABLE_ROOT = str(
+    os.getenv("IM_PORTABLE_DATA_DIR")
+    or os.getenv("ADSI_PORTABLE_DATA_DIR")
+    or ""
+).strip()
+EXPLICIT_DATA_DIR = str(
+    os.getenv("IM_DATA_DIR")
+    or os.getenv("ADSI_DATA_DIR")
+    or ""
+).strip()
 
 if PORTABLE_ROOT:
     PROGRAMDATA_DIR = Path(PORTABLE_ROOT) / "programdata"
@@ -131,6 +139,13 @@ LEGACY_IPCONFIG_PATHS = [
     Path.cwd() / "ipconfig.json",
 ]
 AUTORESET_PATH = PROGRAMDATA_DIR / "autoreset.json"
+SERVICE_STOP_FILE_RAW = str(
+    os.getenv("IM_SERVICE_STOP_FILE")
+    or os.getenv("ADSI_SERVICE_STOP_FILE")
+    or ""
+).strip()
+SERVICE_STOP_FILE = Path(SERVICE_STOP_FILE_RAW) if SERVICE_STOP_FILE_RAW else None
+SERVICE_STOP_POLL_SEC = 0.25
 
 DEFAULT_INTERVAL  = 0.05   # default poll interval per inverter
 MIN_POLL_INTERVAL = 0.05   # keep poll cadence close to configured interval
@@ -151,6 +166,7 @@ clients         = {}   # ip -> modbus client
 thread_locks    = {}   # ip -> threading.Lock
 write_queues    = {}   # ip -> Queue
 write_threads   = {}   # ip -> Thread
+write_pending   = {}   # ip -> threading.Event set while control write is queued/running
 intervals       = {}   # ip -> poll interval (float)
 static_units    = {}   # ip -> [unit list] or None
 
@@ -165,6 +181,40 @@ auto_reset_cfg = {
 }
 
 executor = ThreadPoolExecutor(max_workers=16)
+WRITE_WAIT_TIMEOUT_MIN_SEC = 8.0
+WRITE_WAIT_TIMEOUT_MAX_SEC = 20.0
+WRITE_QUEUE_SLOT_SEC = 1.5
+
+
+def service_stop_requested():
+    try:
+        return bool(SERVICE_STOP_FILE and SERVICE_STOP_FILE.exists())
+    except Exception:
+        return False
+
+
+def clear_service_stop_file():
+    if not SERVICE_STOP_FILE:
+        return
+    try:
+        SERVICE_STOP_FILE.unlink(missing_ok=True)
+    except TypeError:
+        try:
+            if SERVICE_STOP_FILE.exists():
+                SERVICE_STOP_FILE.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _resolve_future_threadsafe(loop, fut, value):
+    try:
+        if fut.done():
+            return
+        fut.set_result(value)
+    except Exception:
+        pass
 
 
 # -------------------------------------------------
@@ -370,31 +420,86 @@ def write_worker_loop(ip, lock, q):
     write_single() under the inverter's lock. Stops on a None sentinel.
     """
     while True:
+        pending_evt = write_pending.get(ip)
         job = q.get()
         if job is None:
+            if pending_evt:
+                pending_evt.clear()
             break
 
         client = clients.get(ip)
+        fut  = job["future"]
+        loop = job.get("loop")
         if not client:
+            try:
+                if loop and not fut.done():
+                    loop.call_soon_threadsafe(_resolve_future_threadsafe, loop, fut, False)
+            except Exception:
+                pass
+            if pending_evt and q.empty():
+                pending_evt.clear()
             continue
 
-        addr = job["address"]
-        val  = job["value"]
-        unit = job["unit"]
-        fut  = job["future"]
+        steps = job.get("steps")
+        if isinstance(steps, list) and steps:
+            normalized_steps = []
+            for step in steps:
+                try:
+                    normalized_steps.append({
+                        "address": int(step.get("address", 16)),
+                        "value":   int(step.get("value")),
+                        "unit":    int(step.get("unit")),
+                    })
+                except Exception:
+                    continue
+        else:
+            normalized_steps = [{
+                "address": int(job["address"]),
+                "value":   int(job["value"]),
+                "unit":    int(job["unit"]),
+            }]
 
-        ok = False
+        batch_mode = bool(job.get("batch")) or len(normalized_steps) > 1
+        result_payload = [] if batch_mode else False
         try:
             with lock:
-                ok = write_single(client, addr, val, unit)
+                if batch_mode:
+                    result_payload = []
+                    for step in normalized_steps:
+                        step_ok = write_single(
+                            client,
+                            step["address"],
+                            step["value"],
+                            step["unit"],
+                        )
+                        result_payload.append({
+                            "unit": step["unit"],
+                            "ok": bool(step_ok),
+                        })
+                else:
+                    step = normalized_steps[0]
+                    result_payload = write_single(
+                        client,
+                        step["address"],
+                        step["value"],
+                        step["unit"],
+                    )
         except Exception:
-            ok = False
+            result_payload = [] if batch_mode else False
 
         try:
-            if not fut.done():
-                fut.set_result(ok)
+            if loop and not fut.done():
+                loop.call_soon_threadsafe(
+                    _resolve_future_threadsafe,
+                    loop,
+                    fut,
+                    result_payload,
+                )
         except Exception:
             pass
+        finally:
+            if pending_evt and q.empty():
+                pending_evt.clear()
 
 
 # -------------------------------------------------
@@ -460,6 +565,39 @@ async def safe_read(func, client, addr, count, unit, ip):
         return None
 
 
+def is_write_pending(ip):
+    evt = write_pending.get(ip)
+    return bool(evt and evt.is_set())
+
+
+def compute_write_wait_timeout(ip, step_count=1):
+    q = write_queues.get(ip)
+    lock = thread_locks.get(ip)
+    pending = 0
+    try:
+        pending = int(q.qsize()) if q is not None else 0
+    except Exception:
+        pending = 0
+    try:
+        extra_steps = max(0, int(step_count) - 1)
+    except Exception:
+        extra_steps = 0
+    base = max(WRITE_WAIT_TIMEOUT_MIN_SEC, (_modbus_timeout * 4.0) + 2.0)
+    timeout = base + ((pending + extra_steps) * WRITE_QUEUE_SLOT_SEC)
+    if lock and lock.locked():
+        timeout += max(WRITE_QUEUE_SLOT_SEC, _modbus_timeout * 2.0)
+    return max(WRITE_WAIT_TIMEOUT_MIN_SEC, min(WRITE_WAIT_TIMEOUT_MAX_SEC, timeout))
+
+
+def mark_write_pending(ip):
+    evt = write_pending.get(ip)
+    if evt is None:
+        evt = threading.Event()
+        write_pending[ip] = evt
+    evt.set()
+    return evt
+
+
 # -------------------------------------------------
 #   Auto-reset alarm handler
 # -------------------------------------------------
@@ -505,16 +643,21 @@ async def handle_auto_reset(ip, unit, alarm_val):
         if state == "armed" and alarm_val in alarm_dec_list:
             loop = asyncio.get_running_loop()
             fut  = loop.create_future()
+            mark_write_pending(ip)
 
             write_queues[ip].put({
                 "address": 16,
                 "value":   0,       # OFF
                 "unit":    unit,
                 "future":  fut,
+                "loop":    loop,
             })
 
             try:
-                ok = await asyncio.wait_for(fut, timeout=2)
+                ok = await asyncio.wait_for(
+                    asyncio.shield(fut),
+                    timeout=max(2.0, compute_write_wait_timeout(ip)),
+                )
             except asyncio.TimeoutError:
                 ok = False
 
@@ -533,12 +676,14 @@ async def handle_auto_reset(ip, unit, alarm_val):
             if alarm_val == clear_dec:
                 loop = asyncio.get_running_loop()
                 fut  = loop.create_future()
+                mark_write_pending(ip)
 
                 write_queues[ip].put({
                     "address": 16,
                     "value":   1,   # ON
                     "unit":    unit,
                     "future":  fut,
+                    "loop":    loop,
                 })
 
                 auto_reset_state[key] = {"state": "armed", "since": 0}
@@ -579,6 +724,9 @@ async def detect_units_async(ip):
 
     units = []
     for u in [1, 2, 3, 4]:
+        if is_write_pending(ip):
+            await asyncio.sleep(0.05)
+            break
         r = await safe_read(_threaded_read_input, client, 1, 1, u, ip)
         if r:
             units.append(u)
@@ -600,21 +748,24 @@ async def read_fast_async(client, unit, ip):
     Returns a dict keyed to the field names expected by Node-RED,
     or None on failure.
     """
+    if is_write_pending(ip):
+        await asyncio.sleep(min(READ_SPACING, 0.01))
+        return None
+
     regs = await safe_read(_threaded_read_input, client, 0, 26, unit, ip)
     if not regs:
         return None
 
-    await asyncio.sleep(READ_SPACING)
-
-    onoff = await safe_read(_threaded_read_holding, client, 16, 1, unit, ip)
+    onoff = None
+    if not is_write_pending(ip):
+        await asyncio.sleep(READ_SPACING)
+        onoff = await safe_read(_threaded_read_holding, client, 16, 1, unit, ip)
 
     def reg(i):
         return regs[i] if len(regs) > i else 0
 
     return {
         "ts":       int(time.time() * 1000),
-        "kwh_high": reg(0),
-        "kwh_low":  reg(1),
         "alarm":    reg(7),
         "vdc":      reg(8),
         "idc":      reg(9),
@@ -672,6 +823,9 @@ async def poll_inverter(ip):
                 break  # wait for ip_map to be rebuilt
 
             for u in units:
+                if is_write_pending(ip):
+                    await asyncio.sleep(min(interval, 0.05))
+                    break
                 data = await read_fast_async(client, u, ip)
                 if not data:
                     continue
@@ -746,6 +900,7 @@ async def rebuild_global_maps(cfg=None):
             clients[ip] = c
 
         thread_locks.setdefault(ip, threading.Lock())
+        write_pending.setdefault(ip, threading.Event())
         write_queues.setdefault(ip, Queue())
 
         if ip not in write_threads or not write_threads[ip].is_alive():
@@ -771,6 +926,9 @@ async def rebuild_global_maps(cfg=None):
             except Exception: pass
 
             thread_locks.pop(ip, None)
+            evt = write_pending.pop(ip, None)
+            if evt:
+                evt.clear()
             intervals.pop(ip, None)
             shared.pop(ip, None)   # remove stale live-data so dropped inverters don't linger in /data
 
@@ -852,7 +1010,6 @@ async def ipconfig_watcher():
 
 metrics_state = {
     "pacEnergy":        {},   # nk -> {lastPacRaw, lastPacChangeTime, lastTime, totalWh, date}
-    "energyData":       {},   # nk -> {prevkWh, actualkWh, date}
     "pdcData":          {},   # nk -> {lastPdcRaw}
     "uiAlarm":          {},   # nk -> {AlarmValue, AlarmText}
     "lastUpdate":       {},   # nk -> timestamp ms
@@ -889,31 +1046,10 @@ def _update_metrics_from_frame(frame: dict):
     pac_cand = pac_reg * 10 if pac_reg * 10 <= 260_000 else 0
     pac_raw  = 0.0 if (vdc == 0 or idc == 0) else pac_cand
 
-    # Register kWh
-    hi = int(frame.get("kwh_high") or 0) & 0xFFFF
-    lo = int(frame.get("kwh_low")  or 0) & 0xFFFF
-    current_kwh = ((hi << 16) & 0xFFFFFFFF) + lo
-
     y  = frame.get("year")   or 0
     mo = frame.get("month")  or 0
     dy = frame.get("day")    or 0
     formatted_date = f"{y}-{_pad2(mo)}-{_pad2(dy)}" if y else time.strftime("%Y-%m-%d")
-
-    ed = ms["energyData"].get(nk)
-    if not ed:
-        ms["energyData"][nk] = {
-            "prevkWh": current_kwh, "firstkWh": current_kwh,
-            "actualkWh": 0.0, "date": formatted_date,
-        }
-    else:
-        if ed["date"] != formatted_date or current_kwh < ed["prevkWh"]:
-            ed.update({"prevkWh": current_kwh, "firstkWh": current_kwh,
-                        "actualkWh": 0.0, "date": formatted_date})
-        else:
-            diff = current_kwh - ed["prevkWh"]
-            if diff >= 0:
-                ed["actualkWh"] = round(ed["actualkWh"] + diff, 6)
-            ed["prevkWh"] = current_kwh
 
     pe = ms["pacEnergy"].get(nk)
     if not pe:
@@ -950,7 +1086,7 @@ def _update_metrics_from_frame(frame: dict):
 def _build_metrics() -> list:
     """
     Replicates the Node-RED ENGINE NODE output exactly.
-    Returns list of dicts: Inverter, Module, Pac, Pdc, kWh, kWh_Pac,
+    Returns list of dicts: Inverter, Module, Pac, Pdc,
                            ONLINE, AlarmValue, Alarm, on_off, Date, Time
     """
     ms  = metrics_state
@@ -992,9 +1128,6 @@ def _build_metrics() -> list:
         display_pac = 0.0 if (not online or pac_frozen) else pac_raw
         display_pdc = 0.0 if (not online or pac_frozen) else pdc_raw
 
-        reg_kwh = ms["energyData"].get(nk, {}).get("actualkWh", 0.0)
-        kwh_pac = pe.get("totalWh", 0.0) / 1000.0
-
         alarm_info = ms["uiAlarm"].get(nk, {"AlarmValue": 0, "AlarmText": "00000H"})
 
         lt  = pe.get("lastTime", now)
@@ -1009,8 +1142,6 @@ def _build_metrics() -> list:
             "Time":       time_str,
             "Pac":        round(display_pac, 2),
             "Pdc":        round(display_pdc, 2),
-            "kWh":        round(reg_kwh, 3),
-            "kWh_Pac":    round(kwh_pac, 3),
             "ONLINE":     online,
             "lastUpdate": last_seen,
             "AlarmValue": alarm_info.get("AlarmValue", 0),
@@ -1041,7 +1172,7 @@ def get_metrics():
     """
     Return processed inverter metrics — mirrors Node-RED engine output.
     Fields per node: Inverter, Module, Date, Time, Pac(W), Pdc(W),
-                     kWh, kWh_Pac, ONLINE, AlarmValue, Alarm, on_off
+                     ONLINE, AlarmValue, Alarm, on_off
     """
     return _build_metrics()
 
@@ -1050,6 +1181,24 @@ class WriteCommand(BaseModel):
     inverter: int
     unit:     int
     value:    int
+
+
+class WriteBatchCommand(BaseModel):
+    inverter: int
+    units:    list[int]
+    value:    int
+
+
+def _sanitize_write_units(units_raw):
+    units = []
+    for unit_raw in units_raw if isinstance(units_raw, list) else []:
+        try:
+            unit = int(unit_raw)
+        except Exception:
+            continue
+        if 1 <= unit <= 4 and unit not in units:
+            units.append(unit)
+    return units
 
 
 @app.post("/write")
@@ -1069,23 +1218,108 @@ async def write_command(cmd: WriteCommand):
 
     loop = asyncio.get_running_loop()
     fut  = loop.create_future()
+    mark_write_pending(ip)
 
     write_queues[ip].put({
         "address": 16,
         "value":   cmd.value,
         "unit":    cmd.unit,
         "future":  fut,
+        "loop":    loop,
     })
 
+    wait_timeout = compute_write_wait_timeout(ip)
     try:
-        ok = await asyncio.wait_for(fut, timeout=5)
+        ok = await asyncio.wait_for(asyncio.shield(fut), timeout=wait_timeout)
     except asyncio.TimeoutError:
-        return JSONResponse({"status": "error", "msg": "write timeout"}, 500)
+        return JSONResponse({"status": "error", "msg": f"write timeout after {wait_timeout:.1f}s"}, 500)
 
     if not ok:
         return JSONResponse({"status": "error", "msg": "write failed"}, 500)
 
     return {"status": "ok"}
+
+
+@app.post("/write/batch")
+async def write_batch_command(cmd: WriteBatchCommand):
+    """Queue a write batch (address 16) for one inverter across multiple units."""
+
+    units = _sanitize_write_units(cmd.units)
+    if not units:
+        return JSONResponse({"status": "error", "msg": "no valid units"}, 400)
+
+    if cmd.value == 2:
+        return {
+            "status":  "skipped",
+            "results": [{"unit": unit, "ok": True} for unit in units],
+        }
+
+    ip = ip_map.get(str(cmd.inverter))
+    if not ip:
+        return JSONResponse({"status": "error", "msg": "invalid inverter"}, 400)
+
+    client = clients.get(ip)
+    if not client:
+        return JSONResponse({"status": "error", "msg": "client not available"}, 400)
+
+    loop = asyncio.get_running_loop()
+    fut  = loop.create_future()
+    mark_write_pending(ip)
+
+    write_queues[ip].put({
+        "steps": [
+            {"address": 16, "value": cmd.value, "unit": unit}
+            for unit in units
+        ],
+        "future": fut,
+        "loop":   loop,
+        "batch":  True,
+    })
+
+    wait_timeout = compute_write_wait_timeout(ip, len(units))
+    try:
+        results = await asyncio.wait_for(asyncio.shield(fut), timeout=wait_timeout)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            {"status": "error", "msg": f"write timeout after {wait_timeout:.1f}s"},
+            500,
+        )
+
+    safe_results = []
+    for unit in units:
+        match = None
+        if isinstance(results, list):
+            match = next(
+                (entry for entry in results if int(entry.get("unit", -1)) == unit),
+                None,
+            )
+        safe_results.append({
+            "unit": unit,
+            "ok": bool(match and match.get("ok")),
+        })
+
+    ok_count = sum(1 for entry in safe_results if entry["ok"])
+    fail_count = len(safe_results) - ok_count
+
+    if ok_count == len(safe_results):
+        return {"status": "ok", "results": safe_results}
+    if ok_count > 0:
+        return {
+            "status":    "partial",
+            "results":   safe_results,
+            "okCount":   ok_count,
+            "failCount": fail_count,
+        }
+    return JSONResponse(
+        {
+            "status":    "error",
+            "msg":       "write failed",
+            "results":   safe_results,
+            "okCount":   0,
+            "failCount": fail_count,
+        },
+        500,
+    )
 
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -1113,6 +1347,7 @@ async def main():
     if os.name == "nt":
         free_engine_port()
 
+    clear_service_stop_file()
     load_autoreset_config()
     auto_reset_state.clear()
 
@@ -1130,7 +1365,27 @@ async def main():
         access_log=False,
     )
     server = uvicorn.Server(config)
-    await server.serve()
+    stop_task = None
+    try:
+        if SERVICE_STOP_FILE is not None:
+            async def watch_service_stop():
+                while not server.should_exit:
+                    if service_stop_requested():
+                        print("[ENGINE] Soft stop requested - shutting down...")
+                        server.should_exit = True
+                        return
+                    await asyncio.sleep(SERVICE_STOP_POLL_SEC)
+
+            stop_task = asyncio.create_task(watch_service_stop())
+        await server.serve()
+    finally:
+        if stop_task is not None:
+            stop_task.cancel()
+            try:
+                await stop_task
+            except asyncio.CancelledError:
+                pass
+        clear_service_stop_file()
 
 
 if __name__ == "__main__":

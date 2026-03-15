@@ -1,15 +1,22 @@
-"use strict";
+﻿"use strict";
 const express = require("express");
 const expressWs = require("express-ws");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const os = require("os");
 const crypto = require("crypto");
+const vm = require("vm");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
 const { spawnSync } = require("child_process");
+const { pipeline } = require("stream/promises");
+const WebSocket = require("ws");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
+const { getPortableDataRoot } = require("./runtimeEnvPaths");
 
 const {
   getSetting,
@@ -18,21 +25,69 @@ const {
   stmts,
   db,
   DATA_DIR,
+  ARCHIVE_DIR,
+  bulkInsert,
   bulkUpsertForecastDayAhead,
+  bulkUpsertForecastIntradayAdjusted,
+  bulkUpsertSolcastSnapshot,
   closeDb,
+  getTelemetryHotCutoffTs,
+  queryReadingsRangeAll,
+  queryReadingsRange,
+  queryEnergy5minRangeAll,
+  queryEnergy5minRange,
+  sumEnergy5minByInverterRange,
+  archiveReadingsRows,
+  archiveEnergyRows,
+  getDailyReadingsSummaryRows,
+  ingestDailyReadingsSummary,
+  rebuildDailyReadingsSummaryForDate,
+  closeArchiveDbForMonth,
+  prepareArchiveDbForTransfer,
+  createSqliteTransferSnapshot,
+  disposeSqliteTransferSnapshot,
+  stagePendingMainDbReplacement,
+  discardPendingMainDbReplacement,
+  beginArchiveDbReplacement,
+  validateSqliteFileSync,
+  endArchiveDbReplacement,
+  upsertDailyReportRowsToSnapshot,
+  insertChatMessage,
+  getChatThread,
+  getChatInboxAfterId,
+  markChatReadUpToId,
+  clearAllChatMessages,
 } = require("./db");
-const { registerClient, broadcastUpdate, getStats: getWsStats } = require("./ws");
+const {
+  registerClient,
+  broadcastUpdate,
+  setBroadcastPayloadEnricher,
+  startKeepAlive,
+  getStats: getWsStats,
+} = require("./ws");
 const poller = require("./poller");
 const exporter = require("./exporter");
 const {
   getActiveAlarms,
   decodeAlarm,
+  getTopSeverity,
   formatAlarmHex,
+  checkAlarms,
   logControlAction,
   getAuditLog,
 } = require("./alarms");
+const {
+  isValidPlantWideAuthKey,
+  issuePlantWideAuthSession,
+  isValidPlantWideAuthSession,
+} = require("./bulkControlAuth");
+const {
+  normalizeSequenceMode: normalizePlantCapSequenceMode,
+  normalizeSequenceCustom: normalizePlantCapSequenceCustom,
+  PlantCapController,
+} = require("./plantCapController");
 
-// ─── Cloud Backup ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Cloud Backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TokenStore = require("./tokenStore");
 const OneDriveProvider = require("./cloudProviders/onedrive");
 const GDriveProvider = require("./cloudProviders/gdrive");
@@ -46,8 +101,14 @@ const {
   applyGatewayCarryRows,
   evaluateHandoffProgress,
 } = require("./mwhHandoffCore");
+const {
+  summarizeCurrentDayEnergyRows,
+  mergeCurrentDaySummaryIntoReportSummary,
+  buildCurrentDayActualSupplementRows,
+} = require("./currentDayEnergyCore");
 
 const app = express();
+let plantCapController = null;
 expressWs(app);
 const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
 app.use(
@@ -68,12 +129,22 @@ app.use((err, req, res, next) => {
   }
   return next(err);
 });
-app.use("/assets", express.static(path.join(__dirname, "../assets")));
-app.use(express.static(path.join(__dirname, "../public")));
+const staticNoCache = {
+  etag: false,
+  lastModified: false,
+  setHeaders(res) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  },
+};
+app.use("/assets", express.static(path.join(__dirname, "../assets"), staticNoCache));
+app.use(express.static(path.join(__dirname, "../public"), staticNoCache));
 app.use("/api", remoteApiTokenGate);
-const PORT = 3500;
+const PORT = Math.max(1, Math.min(65535, Number(process.env.ADSI_SERVER_PORT || 3500) || 3500));
 const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
-const PORTABLE_ROOT = String(process.env.IM_PORTABLE_DATA_DIR || "").trim();
+const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
   : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "InverterDashboard");
@@ -85,6 +156,10 @@ const FORECAST_CTX_PATH = path.join(
   "global.json",
 );
 const FORECAST_CTX_MTIME_KEY = "forecastCtxMtimeMs";
+const ARCHIVE_PENDING_REPLACEMENTS_PATH = path.join(
+  ARCHIVE_DIR,
+  ".pending-archive-replacements.json",
+);
 const ROOT_DIR = path.join(__dirname, "..");
 const INVERTER_ENGINE_BASE_URL = "http://127.0.0.1:9100";
 const FORECAST_EXE_NAMES = ["ForecastCoreService.exe"];
@@ -108,21 +183,46 @@ const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
 const SOLCAST_SOLAR_END_H = 18;
 const SOLCAST_UNIT_KW_MAX = 997.0;
+const SOLCAST_ACCESS_MODE_API = "api";
+const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
+const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
+const SOLCAST_TOOLKIT_PERIOD = "PT5M";
+const SOLCAST_PREVIEW_RESOLUTIONS = new Set(["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"]);
+const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 7;
+const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 192;
+const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
+  "utility_scale_sites",
+  "rooftop_sites",
+  "sites",
+]);
 const REPORT_SOLAR_START_H = SOLCAST_SOLAR_START_H;
 const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
-const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6× OFFLINE_MS=20s)
+const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
 const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
-const REMOTE_BRIDGE_INTERVAL_MS = 1200;
+const REMOTE_BRIDGE_INTERVAL_MS = 800;
+const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
+const REMOTE_BRIDGE_WARMUP_MS = 8000; // allow the live bridge to establish before local fallback kicks in
+const REMOTE_ENERGY_POLL_INTERVAL_MS = 30000; // today-energy endpoint is rate-limited to 30 s
+const REMOTE_DB_MIN_PERSIST_MS = 1000;
+const REMOTE_DB_PAC_DELTA_PERSIST_W = 250;
 const REMOTE_FETCH_TIMEOUT_MS = 5000;
+const REMOTE_CHAT_POLL_INTERVAL_MS = 5000;
+const REMOTE_CHAT_POLL_LIMIT = 50;
+const REMOTE_LIVE_FETCH_RETRIES = 2;
+const REMOTE_LIVE_FETCH_RETRY_BASE_MS = 350;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE = 6;
+const REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC = 10;
+const REMOTE_LIVE_DEGRADED_GRACE_MS = 60000;
+const REMOTE_LIVE_STALE_RETENTION_MS = 180000;
 const REMOTE_REPLICATION_TIMEOUT_MS = 300000;
 const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
-const REMOTE_INCREMENTAL_APPEND_LIMIT = 10000;
+const REMOTE_INCREMENTAL_APPEND_LIMIT = 25000;
 const REMOTE_PUSH_DELTA_LIMIT = 50000;
-const REMOTE_PUSH_CHUNK_MAX_ROWS = 3000;
-const REMOTE_PUSH_CHUNK_TARGET_BYTES = 2 * 1024 * 1024;
+const REMOTE_PUSH_CHUNK_MAX_ROWS = 6000;
+const REMOTE_PUSH_CHUNK_TARGET_BYTES = 4 * 1024 * 1024;
 const REMOTE_PUSH_FETCH_RETRIES = 3;
 const REMOTE_PUSH_FETCH_RETRY_BASE_MS = 1200;
 const REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES = 200;
@@ -131,14 +231,41 @@ const REMOTE_INCREMENTAL_CATCHUP_PASSES = 8;
 const REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS = 90000;
 const REMOTE_INCREMENTAL_FETCH_RETRIES = 3;
 const REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS = 1200;
-const LIVE_FRESH_MS = 20000;
+const CHAT_THREAD_LIMIT = 20;
+const CHAT_RETENTION_COUNT = 500;
+const CHAT_MESSAGE_MAX_LEN = 500;
+const CHAT_PROXY_TIMEOUT_MS = 8000;
+const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 1; // default low-impact archive transfer lane
+// Keep priority standby pulls low-impact on the gateway. The viewer-side live
+// bridge is already paused, so preserving gateway responsiveness matters more
+// than maximum archive throughput.
+const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 1;
+const REPLICATION_TRANSFER_STREAM_HWM = 1024 * 1024;
+const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
+const GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
+const GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS = 10 * 60 * 1000;
+const REPLICATION_HASH_CACHE_LIMIT = 256;
+const REMOTE_FETCH_KEEPALIVE_MSECS = 15000;
+const REMOTE_FETCH_MAX_SOCKETS = 8;
+const REMOTE_FETCH_MAX_SOCKETS_REPLICATION = 16;
+const REMOTE_FETCH_MAX_SOCKETS_CONTROL = 8;
+const REMOTE_CONTROL_PROXY_TIMEOUT_MS = 60000;
+const CHAT_RATE_LIMIT_WINDOW_MS = 60000;
+const CHAT_RATE_LIMIT_MAX = 10;
+const LIVE_FRESH_MS = 15000; // keep live metric freshness aligned with renderer semantics
 const REMOTE_CLIENT_PULL_ONLY = false;
+const WRITE_ENGINE_TIMEOUT_MS = 25000;
+const WRITE_QUEUE_MAX_PENDING = 512;
 const REMOTE_TODAY_SHADOW_SETTING_KEY = "remoteTodayEnergyShadow";
+const MANUAL_REPLICATION_CANCEL_CODE = "MANUAL_REPLICATION_CANCELLED";
+const MANUAL_PULL_LOCAL_NEWER_CODE = "LOCAL_NEWER_PUSH_FAILED";
+const MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE = "GATEWAY_STATE_CHECK_FAILED";
 const REMOTE_GATEWAY_HANDOFF_SETTING_KEY = "remoteGatewayHandoffMeta";
 const MAX_SHADOW_AGE_MS = CORE_MAX_SHADOW_AGE_MS; // 4h stale same-day shadow protection
 const MAX_HANDOFF_ACTIVE_MS = 4 * 60 * 60 * 1000; // 4h hard cap for active handoff
 const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "operationMode",
+  "remoteAutoSync",
   "remoteGatewayUrl",
   "remoteApiToken",
   "tailscaleDeviceHint",
@@ -150,6 +277,19 @@ const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   REMOTE_TODAY_SHADOW_SETTING_KEY,
   REMOTE_GATEWAY_HANDOFF_SETTING_KEY,
 ]);
+const REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS = new Set([
+  "operationMode",
+  "remoteAutoSync",
+  "remoteGatewayUrl",
+  "remoteApiToken",
+  "tailscaleDeviceHint",
+  "wireguardInterface",
+  "csvSavePath",
+  // Preserve the latest same-day gateway today-energy baseline so a staged
+  // standby DB replacement can bridge current-day totals immediately after
+  // restart, before the local poller catches up.
+  REMOTE_TODAY_SHADOW_SETTING_KEY,
+]);
 const REPLICATION_TABLE_DEFS = [
   {
     name: "readings",
@@ -159,14 +299,6 @@ const REPLICATION_TABLE_DEFS = [
       "ts",
       "inverter",
       "unit",
-      "vdc",
-      "idc",
-      "vac1",
-      "vac2",
-      "vac3",
-      "iac1",
-      "iac2",
-      "iac3",
       "pac",
       "kwh",
       "alarm",
@@ -212,6 +344,33 @@ const REPLICATION_TABLE_DEFS = [
       "uptime_s",
       "alarm_count",
       "control_count",
+      "availability_pct",
+      "performance_pct",
+      "node_uptime_s",
+      "expected_node_uptime_s",
+      "expected_nodes",
+      "rated_kw",
+      "updated_ts",
+    ],
+  },
+  {
+    name: "daily_readings_summary",
+    orderBy: "date ASC, inverter ASC, unit ASC",
+    columns: [
+      "date",
+      "inverter",
+      "unit",
+      "sample_count",
+      "online_samples",
+      "pac_online_sum",
+      "pac_online_count",
+      "pac_peak",
+      "first_ts",
+      "last_ts",
+      "first_kwh",
+      "last_kwh",
+      "last_online",
+      "intervals_json",
       "updated_ts",
     ],
   },
@@ -221,11 +380,22 @@ const REPLICATION_TABLE_DEFS = [
     columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts"],
   },
   {
+    name: "forecast_intraday_adjusted",
+    orderBy: "date ASC, slot ASC",
+    columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts"],
+  },
+  {
     name: "settings",
     orderBy: "key ASC",
     columns: ["key", "value", "updated_ts"],
   },
 ];
+const REPLICATION_LOCAL_NEWER_IGNORE_TABLES = new Set([
+  // Manual pull should protect newer replicated data, not standby-client config
+  // drift. Settings differ by design in remote mode and should not block a
+  // source-of-truth gateway refresh.
+  "settings",
+]);
 const REPLICATION_DEF_MAP = Object.fromEntries(
   REPLICATION_TABLE_DEFS.map((x) => [x.name, x]),
 );
@@ -235,7 +405,19 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
   audit_log: { mode: "append", cursorColumn: "id", orderBy: "id ASC", limit: REMOTE_INCREMENTAL_APPEND_LIMIT },
   alarms: { mode: "updated", cursorColumn: "updated_ts", orderBy: "updated_ts ASC, id ASC", limit: 0 },
   daily_report: { mode: "updated", cursorColumn: "updated_ts", orderBy: "updated_ts ASC, id ASC", limit: 0 },
+  daily_readings_summary: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, date ASC, inverter ASC, unit ASC",
+    limit: 0,
+  },
   forecast_dayahead: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, date ASC, slot ASC",
+    limit: 0,
+  },
+  forecast_intraday_adjusted: {
     mode: "updated",
     cursorColumn: "updated_ts",
     orderBy: "updated_ts ASC, date ASC, slot ASC",
@@ -245,15 +427,33 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
 };
 
 let remoteBridgeTimer = null;
+let remoteBridgeSocket = null;
+let remoteChatPollTimer = null;
+let remoteLiveFetchController = null;
+let remoteTodayEnergyFetchController = null;
+let remoteChatFetchController = null;
 const remoteBridgeState = {
   running: false,
   connected: false,
+  startedAtTs: 0,
   lastAttemptTs: 0,
   lastSuccessTs: 0,
+  liveFailureCount: 0,
+  lastFailureTs: 0,
   lastError: "",
+  lastReasonCode: "",
+  lastReasonClass: "",
+  lastLatencyMs: 0,
+  lastLiveNodeCount: 0,
+  currentBase: "",
   liveData: {},
   totals: {},
   todayEnergyRows: [],   // gateway /api/energy/today rows, piggybacked from bridge tick
+  lastTodayEnergyFetchTs: 0, // ts of last successful today-energy fetch (rate-limited)
+  lastTodayEnergyShadowPersistTs: 0,
+  todayEnergyFetchInFlight: false,
+  todayEnergyFetchRequestId: 0,
+  bridgeSessionId: 0,
   replicationRunning: false,
   lastReplicationAttemptTs: 0,
   lastReplicationTs: 0,
@@ -267,17 +467,38 @@ const remoteBridgeState = {
   lastReconcileError: "",
   lastSyncDirection: "idle",
   autoSyncAttempted: false,
+  lastHealthBroadcastKey: "",
+  livePauseActive: false,
+  livePauseReason: "",
+  livePauseSince: 0,
+  livePauseResumeWanted: false,
+  livePauseGeneration: 0,
+};
+const remoteBridgePersistState = Object.create(null); // per-node persisted hot-data cadence
+const remoteBridgeEnergyMirrorState = Object.create(null); // per-inverter 5-min bucket mirror
+const remoteChatBridgeState = {
+  running: false,
+  lastInboundId: 0,
+  primed: false,
+  lastError: "",
+  lastWarnTs: 0,
 };
 const remoteTodayEnergyShadow = {
   day: "",
   rows: [],
   syncedAt: 0,
+  sourceKey: "",
+};
+const remoteBridgeAlarmState = Object.create(null);
+const remoteTodayCarryState = {
+  day: "",
+  byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
 };
 const gatewayTodayCarryState = {
   day: "",
   byInv: Object.create(null), // inverter -> { shadowBaseKwh, anchorPollerKwh }
 };
-// Handoff lifecycle: tracks an active Remote→Gateway transition so the stale-shadow
+// Handoff lifecycle: tracks an active Remoteâ†’Gateway transition so the stale-shadow
 // guard does not discard a freshly-captured shadow and carry-completion can be logged.
 const gatewayHandoffMeta = {
   active: false,
@@ -290,10 +511,32 @@ const inboundPushRxProgress = {
   key: "",
   recvBytes: 0,
 };
+function createManualReplicationJobState() {
+  return {
+    id: "",
+    action: "idle",
+    status: "idle",
+    running: false,
+    includeArchive: true,
+    startedAt: 0,
+    updatedAt: 0,
+    finishedAt: 0,
+    error: "",
+    errorCode: "",
+    summary: "",
+    needsRestart: false,
+    priorityMode: false,
+    livePaused: false,
+    cancelRequested: false,
+    result: null,
+  };
+}
+const manualReplicationJobState = createManualReplicationJobState();
+let manualReplicationRunControl = null;
 let cpuSampleTs = Date.now();
 let cpuSampleUsage = process.cpuUsage();
 
-// ─── Cloud Backup — Service Initialization ────────────────────────────────────
+// â”€â”€â”€ Cloud Backup â€” Service Initialization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const _tokenStore  = new TokenStore(DATA_DIR);
 const _onedrive    = new OneDriveProvider(_tokenStore);
 const _gdrive      = new GDriveProvider(_tokenStore);
@@ -372,6 +615,220 @@ function enqueueCloudOp(label, fn) {
   };
 }
 
+const GATEWAY_EXPORT_QUEUE_LIMIT = 3;
+let _gatewayExportRunnerBusy = false;
+const _gatewayExportQueue = [];
+let _gatewayMainDbSnapshot = null;
+let _gatewayMainDbSnapshotBuildPromise = null;
+let _gatewayMainDbSnapshotLastCheckpointTs = 0;
+const _replicationFileHashCache = new Map();
+
+function _scheduleGatewayExportRun() {
+  setImmediate(_runNextGatewayExportJob);
+}
+
+async function _runNextGatewayExportJob() {
+  if (_gatewayExportRunnerBusy) return;
+  const job = _gatewayExportQueue.shift();
+  if (!job) return;
+  _gatewayExportRunnerBusy = true;
+  try {
+    const startedAt = Date.now();
+    const result = await job.fn();
+    job.resolve(result);
+    console.log(
+      `[ExportQueue] completed "${job.label}" in ${Date.now() - startedAt} ms`,
+    );
+  } catch (err) {
+    job.reject(err);
+    console.warn(
+      `[ExportQueue] "${job.label}" failed:`,
+      String(err?.message || err || "unknown error"),
+    );
+  } finally {
+    _gatewayExportRunnerBusy = false;
+    if (_gatewayExportQueue.length > 0) {
+      _scheduleGatewayExportRun();
+    }
+  }
+}
+
+function enqueueGatewayExportJob(label, fn) {
+  const pending = _gatewayExportQueue.length + (_gatewayExportRunnerBusy ? 1 : 0);
+  if (pending >= GATEWAY_EXPORT_QUEUE_LIMIT) {
+    const err = new Error(
+      "Gateway export queue is busy. Wait for the current export to finish and try again.",
+    );
+    err.code = "EXPORT_QUEUE_BUSY";
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    _gatewayExportQueue.push({
+      label: String(label || "export"),
+      fn,
+      resolve,
+      reject,
+    });
+    _scheduleGatewayExportRun();
+  });
+}
+
+function isExportQueueBusyError(err) {
+  return String(err?.code || "").toUpperCase() === "EXPORT_QUEUE_BUSY";
+}
+
+async function runGatewayExportJob(label, fn) {
+  return enqueueGatewayExportJob(label, async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return fn();
+  });
+}
+
+const _writeQueueStates = new Map();
+
+function normalizeWriteScope(scopeRaw = "single") {
+  const scope = String(scopeRaw || "single").trim().toLowerCase();
+  if (
+    scope === "all" ||
+    scope === "selected" ||
+    scope === "inverter" ||
+    scope === "plant-cap"
+  ) {
+    return scope;
+  }
+  return "single";
+}
+
+function resolveWritePriority(scopeRaw = "single", priorityRaw = "") {
+  const explicit = String(priorityRaw || "").trim().toLowerCase();
+  if (explicit === "critical" || explicit === "highest" || explicit === "high") {
+    return 0;
+  }
+  switch (normalizeWriteScope(scopeRaw)) {
+    case "single":
+      return 0;
+    case "plant-cap":
+      return 0;
+    case "inverter":
+      return 1;
+    case "selected":
+      return 2;
+    case "all":
+      return 3;
+    default:
+      return 1;
+  }
+}
+
+function normalizeWriteQueueKey(queueKeyRaw = "global") {
+  const queueKey = String(queueKeyRaw || "global").trim().toLowerCase();
+  return queueKey || "global";
+}
+
+function getWriteQueueState(queueKeyRaw = "global") {
+  const queueKey = normalizeWriteQueueKey(queueKeyRaw);
+  let state = _writeQueueStates.get(queueKey);
+  if (!state) {
+    state = {
+      busy: false,
+      seq: 0,
+      queue: [],
+    };
+    _writeQueueStates.set(queueKey, state);
+  }
+  return { queueKey, state };
+}
+
+function getPendingWriteQueueCount() {
+  let total = 0;
+  for (const state of _writeQueueStates.values()) {
+    total += state.queue.length + (state.busy ? 1 : 0);
+  }
+  return total;
+}
+
+function cleanupWriteQueueState(queueKey, state) {
+  if (!queueKey || !state) return;
+  if (!state.busy && state.queue.length === 0) {
+    _writeQueueStates.delete(queueKey);
+  }
+}
+
+function scheduleWriteQueueRun(queueKeyRaw = "global", delayMs = 0) {
+  const queueKey = normalizeWriteQueueKey(queueKeyRaw);
+  const ms = Math.max(0, Number(delayMs) || 0);
+  if (ms <= 0) {
+    setImmediate(() => runNextWriteCommand(queueKey));
+    return;
+  }
+  const t = setTimeout(() => runNextWriteCommand(queueKey), ms);
+  if (t.unref) t.unref();
+}
+
+async function runNextWriteCommand(queueKeyRaw = "global") {
+  const { queueKey, state } = getWriteQueueState(queueKeyRaw);
+  if (state.busy) return;
+  const job = state.queue.shift();
+  if (!job) {
+    cleanupWriteQueueState(queueKey, state);
+    return;
+  }
+  state.busy = true;
+  try {
+    const result = await job.fn();
+    job.resolve(result);
+  } catch (err) {
+    job.reject(err);
+  } finally {
+    state.busy = false;
+    if (state.queue.length > 0) {
+      scheduleWriteQueueRun(queueKey, 0);
+    } else {
+      cleanupWriteQueueState(queueKey, state);
+    }
+  }
+}
+
+function insertWriteQueueJob(state, job) {
+  const next = job && typeof job === "object" ? job : null;
+  if (!state || !next) return;
+  let idx = state.queue.findIndex((queued) => {
+    const queuedPriority = Number(queued?.priority ?? Number.POSITIVE_INFINITY);
+    const nextPriority = Number(next.priority ?? Number.POSITIVE_INFINITY);
+    if (nextPriority < queuedPriority) return true;
+    if (nextPriority > queuedPriority) return false;
+    return Number(next.seq || 0) < Number(queued?.seq || 0);
+  });
+  if (idx < 0) idx = state.queue.length;
+  state.queue.splice(idx, 0, next);
+}
+
+function enqueueWriteCommand(scopeRaw, fn, options = {}) {
+  if (typeof fn !== "function") {
+    return Promise.reject(new Error("Invalid control command task."));
+  }
+  if (getPendingWriteQueueCount() >= WRITE_QUEUE_MAX_PENDING) {
+    return Promise.reject(
+      new Error("Control queue is busy. Please retry in a moment."),
+    );
+  }
+  const scope = normalizeWriteScope(scopeRaw);
+  const priority = resolveWritePriority(scope, options?.priority);
+  const { queueKey, state } = getWriteQueueState(options?.queueKey || "global");
+  return new Promise((resolve, reject) => {
+    insertWriteQueueJob(state, {
+      seq: (state.seq += 1),
+      scope,
+      priority,
+      queuedAt: Date.now(),
+      fn,
+      resolve,
+      reject,
+    });
+    scheduleWriteQueueRun(queueKey, 0);
+  });
+}
+
 // OAuth pending state: stateKey -> { provider, codeVerifier, expiresAt }
 const _oauthPending = new Map();
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -383,7 +840,7 @@ function _cleanOauthPending() {
   }
 }
 
-const OAUTH_REDIRECT_BASE = `http://localhost:${3500}/oauth/callback`;
+const OAUTH_REDIRECT_BASE = `http://localhost:${PORT}/oauth/callback`;
 
 function sanitizeOperationMode(value, def = "gateway") {
   const v = String(value || def)
@@ -476,9 +933,360 @@ function resolveRequestToken(req) {
   );
 }
 
+function broadcastRemoteOfflineLiveState() {
+  remoteBridgeState.liveData = {};
+  remoteBridgeState.totals = { pac: 0, kwh: 0 };
+  remoteBridgeState.lastLiveNodeCount = 0;
+  broadcastUpdate({
+    type: "live",
+    data: remoteBridgeState.liveData,
+    totals: remoteBridgeState.totals,
+    todayEnergy: getTodayEnergyRowsForWs(),
+    remoteHealth: buildRemoteHealthSnapshot(),
+  });
+}
+
+function countRemoteLiveNodes(data = remoteBridgeState.liveData) {
+  if (!data || typeof data !== "object") return 0;
+  return Object.values(data).filter((row) => row && typeof row === "object").length;
+}
+
+function getRemoteSnapshotAgeMs(nowTs = Date.now()) {
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  if (!lastSuccessTs) return Number.POSITIVE_INFINITY;
+  return Math.max(0, nowTs - lastSuccessTs);
+}
+
+function hasUsableRemoteLiveSnapshot(nowTs = Date.now()) {
+  return (
+    countRemoteLiveNodes(remoteBridgeState.liveData) > 0 &&
+    getRemoteSnapshotAgeMs(nowTs) <= REMOTE_LIVE_STALE_RETENTION_MS
+  );
+}
+
+function classifyRemoteBridgeFailure(err) {
+  const status = Number(err?.httpStatus || 0);
+  if (status === 401) {
+    return {
+      reasonCode: "HTTP_401",
+      reasonClass: "auth-error",
+      reasonText: "Gateway rejected the remote API token (401 Unauthorized).",
+    };
+  }
+  if (status === 403) {
+    return {
+      reasonCode: "HTTP_403",
+      reasonClass: "auth-error",
+      reasonText: "Gateway rejected the remote API token (403 Forbidden).",
+    };
+  }
+  if (status === 400) {
+    return {
+      reasonCode: "HTTP_400",
+      reasonClass: "config-error",
+      reasonText: "Gateway rejected the live request due to invalid remote settings.",
+    };
+  }
+  if (status === 404) {
+    return {
+      reasonCode: "HTTP_404",
+      reasonClass: "disconnected",
+      reasonText: "Gateway live endpoint was not found (404).",
+    };
+  }
+  if (status > 0) {
+    return {
+      reasonCode: `HTTP_${status}`,
+      reasonClass: "disconnected",
+      reasonText: `Gateway live request failed with HTTP ${status}.`,
+    };
+  }
+
+  const code = String(err?.code || err?.type || "")
+    .trim()
+    .toUpperCase();
+  const msg = String(err?.message || err || "")
+    .trim()
+    .toLowerCase();
+
+  if (msg.includes("remote gateway url is not configured")) {
+    return {
+      reasonCode: "MISSING_URL",
+      reasonClass: "config-error",
+      reasonText: "Remote gateway URL is not configured.",
+    };
+  }
+  if (msg.includes("cannot be localhost in remote mode")) {
+    return {
+      reasonCode: "LOOPBACK_URL",
+      reasonClass: "config-error",
+      reasonText: "Remote gateway URL cannot be localhost in Remote mode.",
+    };
+  }
+  if (
+    code === "ETIMEDOUT" ||
+    code === "ESOCKETTIMEDOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    msg.includes("network timeout") ||
+    msg.includes("timed out")
+  ) {
+    return {
+      reasonCode: "TIMEOUT",
+      reasonClass: "disconnected",
+      reasonText: "Gateway live request timed out.",
+    };
+  }
+  if (code === "ECONNREFUSED" || msg.includes("econnrefused")) {
+    return {
+      reasonCode: "ECONNREFUSED",
+      reasonClass: "disconnected",
+      reasonText: "Gateway connection was refused.",
+    };
+  }
+  if (
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    msg.includes("enotfound") ||
+    msg.includes("getaddrinfo")
+  ) {
+    return {
+      reasonCode: "DNS_FAILURE",
+      reasonClass: "disconnected",
+      reasonText: "Gateway host could not be resolved.",
+    };
+  }
+  if (
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    msg.includes("host unreachable") ||
+    msg.includes("network unreachable")
+  ) {
+    return {
+      reasonCode: "NETWORK_UNREACHABLE",
+      reasonClass: "disconnected",
+      reasonText: "Gateway route is unreachable.",
+    };
+  }
+  if (
+    code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
+    code === "UND_ERR_SOCKET" ||
+    msg.includes("socket hang up") ||
+    msg.includes("read econnreset") ||
+    msg.includes("econnaborted")
+  ) {
+    return {
+      reasonCode: "SOCKET_RESET",
+      reasonClass: "disconnected",
+      reasonText: "Gateway connection was reset during the live request.",
+    };
+  }
+  if (
+    code === "BAD_JSON" ||
+    msg.includes("invalid live json") ||
+    msg.includes("unexpected token")
+  ) {
+    return {
+      reasonCode: "BAD_PAYLOAD",
+      reasonClass: "disconnected",
+      reasonText: "Gateway returned an invalid live payload.",
+    };
+  }
+  return {
+    reasonCode: code || "LIVE_FETCH_FAILED",
+    reasonClass: "disconnected",
+    reasonText: String(err?.message || err || "Gateway live request failed."),
+  };
+}
+
+function getRemoteBridgeNextDelayMs(nowTs = Date.now(), pollElapsedMs = 0) {
+  const elapsedMs = Math.max(0, Number(pollElapsedMs || 0));
+  return Math.max(0, getRemoteBridgeTargetIntervalMs(nowTs) - elapsedMs);
+}
+
+function getRemoteBridgeTargetIntervalMs(nowTs = Date.now()) {
+  const failures = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+  const fastRetry = Boolean(remoteBridgeState.connected) || hasRecentRemoteBridgeSuccess(nowTs);
+  if (fastRetry || failures <= 1) {
+    // Adapt polling interval to gateway latency — if the gateway is slow,
+    // give it breathing room instead of hammering at the base bridge cadence.
+    const latency = Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0));
+    if (latency > 400) {
+      return Math.min(
+        REMOTE_BRIDGE_MAX_BACKOFF_MS,
+        Math.max(REMOTE_BRIDGE_INTERVAL_MS, latency * 2),
+      );
+    }
+    return REMOTE_BRIDGE_INTERVAL_MS;
+  }
+  return Math.min(
+    REMOTE_BRIDGE_MAX_BACKOFF_MS,
+    REMOTE_BRIDGE_INTERVAL_MS * Math.pow(2, failures - 1),
+  );
+}
+
+function isRemoteLiveBridgePausedForTransfer() {
+  return Boolean(remoteBridgeState.livePauseActive);
+}
+
+function pauseRemoteLiveBridgeForPriorityTransfer(reason = "standby-refresh") {
+  const wasRunning = Boolean(remoteBridgeState.running);
+  remoteBridgeState.livePauseActive = true;
+  remoteBridgeState.livePauseReason = String(reason || "standby-refresh");
+  remoteBridgeState.livePauseSince = Date.now();
+  remoteBridgeState.livePauseResumeWanted = wasRunning;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  closeRemoteBridgeSocket();
+  remoteBridgeState.running = false;
+  remoteBridgeState.connected = false;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.todayEnergyFetchRequestId =
+    Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
+  remoteBridgeState.lastSyncDirection = "pull-priority-paused";
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  broadcastRemoteHealthUpdate(true);
+  return {
+    bridgeWasRunning: wasRunning,
+    reason: remoteBridgeState.livePauseReason,
+    pausedAt: remoteBridgeState.livePauseSince,
+  };
+}
+
+function resumeRemoteLiveBridgeAfterPriorityTransfer(token = null) {
+  const shouldResume = Boolean(
+    token?.bridgeWasRunning ?? remoteBridgeState.livePauseResumeWanted,
+  );
+  remoteBridgeState.livePauseActive = false;
+  remoteBridgeState.livePauseReason = "";
+  remoteBridgeState.livePauseSince = 0;
+  remoteBridgeState.livePauseResumeWanted = false;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  if (shouldResume && isRemoteMode()) {
+    startRemoteBridge();
+    return;
+  }
+  broadcastRemoteHealthUpdate(true);
+}
+
+function buildPriorityTransferNote(includeArchive = false) {
+  return includeArchive
+    ? "Remote live stream paused to prioritize standby DB and archive download."
+    : "Remote live stream paused to prioritize standby DB download.";
+}
+
+function buildReplicationTransferFetchOptions(targetUrl, options = {}) {
+  const next = options && typeof options === "object" ? { ...options } : {};
+  next.compress = false;
+  next.headers =
+    next.headers && typeof next.headers === "object" ? { ...next.headers } : {};
+  if (next.headers["Accept-Encoding"] == null && next.headers["accept-encoding"] == null) {
+    next.headers["Accept-Encoding"] = "identity";
+  }
+  return buildRemoteFetchOptions(targetUrl, next);
+}
+
+function buildRemoteHealthSnapshot(nowTs = Date.now()) {
+  const mode = readOperationMode();
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  const lastFailureTs = Number(remoteBridgeState.lastFailureTs || 0);
+  const liveFreshMs = lastSuccessTs
+    ? Math.max(0, nowTs - lastSuccessTs)
+    : Number.POSITIVE_INFINITY;
+  const hasSnapshot = hasUsableRemoteLiveSnapshot(nowTs);
+  const reasonCode = String(remoteBridgeState.lastReasonCode || "").trim();
+  const reasonClass = String(remoteBridgeState.lastReasonClass || "").trim();
+  let reasonText = String(remoteBridgeState.lastError || "").trim();
+  let state = "disconnected";
+  let effectiveReasonCode = reasonCode;
+
+  if (mode !== "remote") {
+    state = "gateway-local";
+    effectiveReasonCode = "";
+    reasonText = "";
+  } else if (isRemoteLiveBridgePausedForTransfer()) {
+    state = "paused";
+    effectiveReasonCode = "PRIORITY_PULL";
+    reasonText =
+      String(remoteBridgeState.livePauseReason || "").trim() === "standby-refresh"
+        ? "Live bridge paused during standby refresh."
+        : String(remoteBridgeState.livePauseReason || "Live bridge paused during transfer.");
+  } else if (reasonClass === "config-error") {
+    state = "config-error";
+  } else if (reasonClass === "auth-error") {
+    state = "auth-error";
+  } else if (isRemoteBridgeWarmupActive(nowTs)) {
+    state = "connecting";
+  } else if (
+    Boolean(remoteBridgeState.connected) &&
+    Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)) <= 0
+  ) {
+    state = "connected";
+  } else if (hasSnapshot && liveFreshMs <= REMOTE_LIVE_DEGRADED_GRACE_MS) {
+    state = "degraded";
+  } else if (hasSnapshot) {
+    state = "stale";
+  } else {
+    state = "disconnected";
+  }
+
+  return {
+    mode,
+    state,
+    reasonCode: effectiveReasonCode,
+    reasonText,
+    hasUsableSnapshot: hasSnapshot,
+    snapshotRetainMs: REMOTE_LIVE_STALE_RETENTION_MS,
+    liveFreshMs: Number.isFinite(liveFreshMs) ? liveFreshMs : null,
+    lastAttemptTs: Number(remoteBridgeState.lastAttemptTs || 0),
+    lastSuccessTs,
+    lastFailureTs,
+    failureStreak: Math.max(0, Number(remoteBridgeState.liveFailureCount || 0)),
+    backoffMs:
+      mode === "remote" && remoteBridgeState.running && !isRemoteLiveBridgePausedForTransfer()
+        ? getRemoteBridgeNextDelayMs(nowTs)
+        : 0,
+    lastLatencyMs: Math.max(0, Number(remoteBridgeState.lastLatencyMs || 0)),
+    liveNodeCount:
+      hasSnapshot || Boolean(remoteBridgeState.connected)
+        ? Math.max(
+            0,
+            Number(remoteBridgeState.lastLiveNodeCount || countRemoteLiveNodes()),
+          )
+        : 0,
+    pausedForPriorityTransfer: isRemoteLiveBridgePausedForTransfer(),
+    pauseReason: String(remoteBridgeState.livePauseReason || ""),
+    pauseSince: Math.max(0, Number(remoteBridgeState.livePauseSince || 0)),
+  };
+}
+
+function broadcastRemoteHealthUpdate(force = false) {
+  const health = buildRemoteHealthSnapshot();
+  const key = JSON.stringify([
+    health.state,
+    health.reasonCode,
+    health.hasUsableSnapshot,
+    health.failureStreak,
+    health.lastSuccessTs,
+    health.lastFailureTs,
+    health.liveNodeCount,
+  ]);
+  if (!force && remoteBridgeState.lastHealthBroadcastKey === key) return;
+  remoteBridgeState.lastHealthBroadcastKey = key;
+  broadcastUpdate({ type: "remote_health", health });
+}
+
 function shouldProxyApiPath(pathname) {
   const p = String(pathname || "");
   if (p === "/backup" || p.startsWith("/backup/")) return false;
+  if (p === "/chat" || p.startsWith("/chat/")) return false;
+  if (p === "/forecast/solcast" || p.startsWith("/forecast/solcast/")) return false;
   if (p === "/settings" || p.startsWith("/settings/")) return false;
   if (p === "/runtime/network" || p.startsWith("/runtime/network/")) return false;
   if (p === "/runtime/perf" || p.startsWith("/runtime/perf/")) return false;
@@ -490,13 +1298,261 @@ function shouldProxyApiPath(pathname) {
     return false;
   if (p === "/live" || p.startsWith("/live/")) return false;
   if (p === "/write" || p.startsWith("/write/")) return false;
-  if (p.startsWith("/export/")) return false;
+  if (p === "/export" || p.startsWith("/export/")) return false;
   return true;
+}
+
+/**
+ * Read-only API paths that can fall back to local DB when gateway is offline.
+ * These all have local route handlers defined below the catch-all proxy middleware.
+ */
+function canFallbackToLocal(pathname) {
+  const p = String(pathname || "");
+  if (p === "/report" || p.startsWith("/report/")) return true;
+  if (p === "/energy" || p.startsWith("/energy/")) return true;
+  if (p === "/analytics" || p.startsWith("/analytics/")) return true;
+  if (p === "/alarms" || p.startsWith("/alarms/")) return true;
+  if (p === "/audit" || p.startsWith("/audit/")) return true;
+  return false;
+}
+
+function shouldServeLocalFallback(pathname, nowTs = Date.now()) {
+  // Viewer model: remote mode never falls back to local DB for historical reads.
+  // Gateway unavailability is surfaced honestly instead of serving stale local data.
+  return false;
+}
+
+function normalizeChatMachine(value, def = "gateway") {
+  const v = String(value || def)
+    .trim()
+    .toLowerCase();
+  return v === "remote" ? "remote" : "gateway";
+}
+
+function getOppositeChatMachine(machine) {
+  return normalizeChatMachine(machine, "gateway") === "remote"
+    ? "gateway"
+    : "remote";
+}
+
+function getChatModeLabel(machine) {
+  return normalizeChatMachine(machine, "gateway") === "remote"
+    ? "Remote"
+    : "Server";
+}
+
+function buildChatDisplayName(machine, operatorName) {
+  const operator = String(operatorName || "").trim() || "OPERATOR";
+  return `${operator} - ${getChatModeLabel(machine)}`.slice(0, 160);
+}
+
+function buildLocalChatIdentity(machineOverride = "") {
+  const fromMachine = normalizeChatMachine(machineOverride || readOperationMode(), "gateway");
+  return {
+    from_machine: fromMachine,
+    to_machine: getOppositeChatMachine(fromMachine),
+    from_name: buildChatDisplayName(
+      fromMachine,
+      getSetting("operatorName", "OPERATOR"),
+    ),
+  };
+}
+
+function sanitizeChatMessageText(raw) {
+  const normalized = String(raw || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .trim();
+  if (!normalized) {
+    const err = new Error("Message cannot be empty.");
+    err.httpStatus = 400;
+    throw err;
+  }
+  if (normalized.length > CHAT_MESSAGE_MAX_LEN) {
+    const err = new Error(`Message must be ${CHAT_MESSAGE_MAX_LEN} characters or fewer.`);
+    err.httpStatus = 400;
+    throw err;
+  }
+  return normalized;
+}
+
+const _chatRateBuckets = new Map(); // key: machine → { timestamps[] }
+
+function checkChatRateLimit(machine) {
+  const key = String(machine || "local");
+  const now = Date.now();
+  let bucket = _chatRateBuckets.get(key);
+  if (!bucket) {
+    bucket = { timestamps: [] };
+    _chatRateBuckets.set(key, bucket);
+  }
+  // Prune entries outside the window.
+  bucket.timestamps = bucket.timestamps.filter((ts) => now - ts < CHAT_RATE_LIMIT_WINDOW_MS);
+  if (bucket.timestamps.length >= CHAT_RATE_LIMIT_MAX) {
+    const err = new Error(`Rate limit exceeded. Maximum ${CHAT_RATE_LIMIT_MAX} messages per minute.`);
+    err.httpStatus = 429;
+    throw err;
+  }
+  bucket.timestamps.push(now);
+}
+
+function normalizeChatRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = Math.max(0, Math.trunc(Number(row.id || 0)));
+  if (!id) return null;
+  const fromMachine = normalizeChatMachine(row.from_machine, "gateway");
+  const toMachine = normalizeChatMachine(
+    row.to_machine,
+    getOppositeChatMachine(fromMachine),
+  );
+  return {
+    id,
+    ts: Math.max(0, Math.trunc(Number(row.ts || 0))),
+    from_machine: fromMachine,
+    to_machine: toMachine,
+    from_name: String(row.from_name || "").trim().slice(0, 160),
+    message: String(row.message || ""),
+    read_ts:
+      row.read_ts == null || row.read_ts === ""
+        ? null
+        : Math.max(0, Math.trunc(Number(row.read_ts || 0))),
+  };
+}
+
+function normalizeChatRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map(normalizeChatRow)
+    .filter(Boolean);
+}
+
+function getNewestChatIdForMachine(rows, machine) {
+  const targetMachine = normalizeChatMachine(machine, "gateway");
+  let maxId = 0;
+  for (const row of normalizeChatRows(rows)) {
+    if (row.to_machine !== targetMachine) continue;
+    if (row.id > maxId) maxId = row.id;
+  }
+  return maxId;
+}
+
+function updateRemoteChatCursorFromRows(rows, machine = "remote") {
+  const maxId = getNewestChatIdForMachine(rows, machine);
+  if (maxId > Number(remoteChatBridgeState.lastInboundId || 0)) {
+    remoteChatBridgeState.lastInboundId = maxId;
+  }
+  return remoteChatBridgeState.lastInboundId;
 }
 
 function getRuntimeLiveData() {
   return isRemoteMode() ? remoteBridgeState.liveData || {} : poller.getLiveData();
 }
+
+function resetRemoteBridgeAlarmState() {
+  for (const key of Object.keys(remoteBridgeAlarmState)) {
+    delete remoteBridgeAlarmState[key];
+  }
+}
+
+function syncRemoteBridgeAlarmTransitions(nextLiveData) {
+  const rows = nextLiveData && typeof nextLiveData === "object" ? nextLiveData : {};
+  const nextState = Object.create(null);
+  const raised = [];
+
+  for (const [key, row] of Object.entries(rows)) {
+    const inverter = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!inverter || !unit) continue;
+
+    const alarmValue = Number(row?.alarm || 0);
+    nextState[key] = alarmValue;
+
+    const prevAlarmValue = Number(remoteBridgeAlarmState[key] || 0);
+    if (!alarmValue || alarmValue === prevAlarmValue) continue;
+
+    raised.push({
+      inverter,
+      unit,
+      alarm_value: alarmValue,
+      severity: getTopSeverity(alarmValue) || "fault",
+      decoded: decodeAlarm(alarmValue),
+      alarm_hex: formatAlarmHex(alarmValue),
+    });
+  }
+
+  resetRemoteBridgeAlarmState();
+  for (const [key, value] of Object.entries(nextState)) {
+    remoteBridgeAlarmState[key] = value;
+  }
+
+  if (raised.length) {
+    broadcastUpdate({ type: "alarm", alarms: raised });
+  }
+}
+
+function clearRemoteBridgePersistState() {
+  for (const key of Object.keys(remoteBridgePersistState)) {
+    delete remoteBridgePersistState[key];
+  }
+  for (const key of Object.keys(remoteBridgeEnergyMirrorState)) {
+    delete remoteBridgeEnergyMirrorState[key];
+  }
+}
+
+function floorToFiveMinute(ts) {
+  const fiveMinMs = 5 * 60 * 1000;
+  return Math.floor(Number(ts || 0) / fiveMinMs) * fiveMinMs;
+}
+
+function isSolarWindowNow(ts = Date.now()) {
+  const d = new Date(Number(ts || Date.now()));
+  const hour = d.getHours();
+  return hour >= SOLCAST_SOLAR_START_H && hour < SOLCAST_SOLAR_END_H;
+}
+
+function normalizeRemoteLiveReading(row, fallbackTs = Date.now()) {
+  const inverter = Math.trunc(Number(row?.inverter || 0));
+  const unit = Math.trunc(Number(row?.unit || 0));
+  if (!(inverter > 0) || !(unit > 0)) return null;
+  const ts = Math.max(0, Number(row?.ts || fallbackTs) || fallbackTs);
+  return {
+    ts,
+    inverter,
+    unit,
+    pac: Math.max(0, Number(row?.pac || 0)),
+    kwh: Math.max(0, Number(row?.kwh || 0)),
+    alarm: Math.max(0, Number(row?.alarm || 0)),
+    on_off: Number(row?.on_off ?? row?.onOff ?? 0) === 1 ? 1 : 0,
+    online: Number(row?.online ?? 1) === 1 ? 1 : 0,
+  };
+}
+
+function buildRemoteLiveSnapshot(rowsRaw, syncedAt = Date.now()) {
+  const rows = rowsRaw && typeof rowsRaw === "object" ? rowsRaw : {};
+  const out = {};
+  for (const [key, rawRow] of Object.entries(rows)) {
+    const parsed = normalizeRemoteLiveReading(rawRow, syncedAt);
+    if (!parsed) continue;
+    out[String(key || `${parsed.inverter}_${parsed.unit}`)] = {
+      ...(rawRow && typeof rawRow === "object" ? rawRow : {}),
+      ...parsed,
+      // Preserve the gateway sample ts for persistence/history while using a
+      // bridge-local freshness ts for runtime liveness on remote clients.
+      sourceTs: Number(parsed.ts || 0),
+      bridgeTs: Math.max(0, Number(syncedAt || Date.now())),
+    };
+  }
+  return out;
+}
+
+function getRuntimeFreshTs(row) {
+  return Math.max(0, Number(row?.bridgeTs || row?.ts || 0));
+}
+
+// Viewer model: live DB persistence disabled — remote mode keeps data in-memory only.
+function persistRemoteLiveRows() { /* no-op */ }
+
+// Viewer model: energy mirroring to local DB disabled — remote mode keeps data in-memory only.
+function mirrorRemoteTodayEnergyRowsToLocal() { /* no-op */ }
 
 function sampleProcessCpuPercent() {
   const now = Date.now();
@@ -542,6 +1598,7 @@ function getRuntimePerfSnapshot() {
     remote: {
       connected: Boolean(remoteBridgeState.connected),
       running: Boolean(remoteBridgeState.running),
+      health: buildRemoteHealthSnapshot(),
       replicationRunning: Boolean(remoteBridgeState.replicationRunning),
       lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
       lastError: String(remoteBridgeState.lastError || ""),
@@ -561,7 +1618,7 @@ function computeTotalsFromLiveData(data) {
   for (const row of rows) {
     const inv = Number(row?.inverter || 0);
     if (!inv) continue;
-    const ts = Number(row?.ts || 0);
+    const ts = getRuntimeFreshTs(row);
     const online = Number(row?.online || 0) === 1;
     if (!online || !ts || now - ts > LIVE_FRESH_MS) continue;
     if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
@@ -570,6 +1627,16 @@ function computeTotalsFromLiveData(data) {
     out[inv].kwh += Number(row?.kwh || 0);
   }
   return out;
+}
+
+function computeTodayEnergyRowsFromLiveData(data) {
+  return Object.entries(computeTotalsFromLiveData(data))
+    .map(([inverter, totals]) => ({
+      inverter: Number(inverter || 0),
+      total_kwh: Number(Number(totals?.kwh || 0).toFixed(6)),
+    }))
+    .filter((row) => row.inverter > 0 && row.total_kwh > 0)
+    .sort((a, b) => a.inverter - b.inverter);
 }
 
 function normalizeReplicationCursors(raw) {
@@ -625,6 +1692,479 @@ function getReplicationWatermarkColumn(tableName, strategy) {
     return String(s.cursorColumn || "id");
   }
   return String(s.cursorColumn || "updated_ts");
+}
+
+function sanitizeArchiveFileName(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  const fileName = raw.toLowerCase().endsWith(".db") ? raw : `${raw}.db`;
+  return /^\d{4}-\d{2}\.db$/i.test(fileName) ? fileName : "";
+}
+
+function monthKeyFromArchiveFileName(fileName) {
+  const safe = sanitizeArchiveFileName(fileName);
+  return safe ? safe.slice(0, 7) : "";
+}
+
+function readPendingArchiveReplacements() {
+  try {
+    if (!fs.existsSync(ARCHIVE_PENDING_REPLACEMENTS_PATH)) return [];
+    const parsed = JSON.parse(
+      fs.readFileSync(ARCHIVE_PENDING_REPLACEMENTS_PATH, "utf8"),
+    );
+    if (!Array.isArray(parsed)) return [];
+    const deduped = new Map();
+    for (const entry of parsed) {
+      const name = sanitizeArchiveFileName(entry?.name || "");
+      const monthKey = monthKeyFromArchiveFileName(name);
+      const tempName = path.basename(String(entry?.tempName || "").trim());
+      if (!name || !monthKey || !tempName) continue;
+      deduped.set(name, {
+        name,
+        monthKey,
+        tempName,
+        size: Math.max(0, Number(entry?.size || 0)),
+        mtimeMs: Math.max(0, Number(entry?.mtimeMs || 0)),
+        stagedAt: Math.max(0, Number(entry?.stagedAt || 0)),
+      });
+    }
+    return Array.from(deduped.values()).sort((a, b) =>
+      String(a?.name || "").localeCompare(String(b?.name || "")),
+    );
+  } catch (_) {
+    return [];
+  }
+}
+
+function writePendingArchiveReplacements(entriesRaw) {
+  const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+  if (!entries.length) {
+    try {
+      fs.unlinkSync(ARCHIVE_PENDING_REPLACEMENTS_PATH);
+    } catch (_) {
+      // Ignore missing manifest cleanup failures.
+    }
+    return;
+  }
+  fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  const tempPath = `${ARCHIVE_PENDING_REPLACEMENTS_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(entries, null, 2));
+  fs.renameSync(tempPath, ARCHIVE_PENDING_REPLACEMENTS_PATH);
+}
+
+function stagePendingArchiveReplacement({
+  name,
+  monthKey,
+  tempName,
+  size = 0,
+  mtimeMs = 0,
+}) {
+  const safeName = sanitizeArchiveFileName(name || "");
+  const safeMonthKey = monthKeyFromArchiveFileName(
+    safeName || `${String(monthKey || "").trim()}.db`,
+  );
+  const safeTempName = path.basename(String(tempName || "").trim());
+  if (!safeName || !safeMonthKey || !safeTempName) {
+    throw new Error("Invalid staged archive replacement payload.");
+  }
+  const nextEntries = [];
+  for (const entry of readPendingArchiveReplacements()) {
+    if (String(entry?.name || "") !== safeName) {
+      nextEntries.push(entry);
+      continue;
+    }
+    const oldTempName = path.basename(String(entry?.tempName || "").trim());
+    if (oldTempName && oldTempName !== safeTempName && /\.tmp$/i.test(oldTempName)) {
+      try {
+        fs.unlinkSync(path.join(ARCHIVE_DIR, oldTempName));
+      } catch (_) {
+        // Ignore stale temp cleanup failures.
+      }
+    }
+  }
+  const staged = {
+    name: safeName,
+    monthKey: safeMonthKey,
+    tempName: safeTempName,
+    size: Math.max(0, Number(size || 0)),
+    mtimeMs: Math.max(0, Number(mtimeMs || 0)),
+    stagedAt: Date.now(),
+  };
+  nextEntries.push(staged);
+  writePendingArchiveReplacements(nextEntries);
+  return staged;
+}
+
+function getPendingArchiveReplacement(name) {
+  const safeName = sanitizeArchiveFileName(name || "");
+  if (!safeName) return null;
+  return (
+    readPendingArchiveReplacements().find(
+      (entry) => String(entry?.name || "") === safeName,
+    ) || null
+  );
+}
+
+function resolveArchiveFileForTransfer(fileName) {
+  const safeName = sanitizeArchiveFileName(fileName || "");
+  if (!safeName) return null;
+  const pending = getPendingArchiveReplacement(safeName);
+  if (pending?.tempName) {
+    const tempPath = path.join(ARCHIVE_DIR, pending.tempName);
+    if (fs.existsSync(tempPath)) {
+      const stat = fs.statSync(tempPath);
+      return {
+        path: tempPath,
+        size: Math.max(0, Number(stat.size || pending?.size || 0)),
+        mtimeMs: Math.max(0, Number(pending?.mtimeMs || stat.mtimeMs || 0)),
+        pendingApply: true,
+      };
+    }
+  }
+  const finalPath = path.join(ARCHIVE_DIR, safeName);
+  const stat = fs.statSync(finalPath);
+  return {
+    path: finalPath,
+    size: Math.max(0, Number(stat.size || 0)),
+    mtimeMs: Math.max(0, Number(stat.mtimeMs || 0)),
+    pendingApply: false,
+  };
+}
+
+function applyPendingArchiveReplacementsSync() {
+  const pendingEntries = readPendingArchiveReplacements();
+  if (!pendingEntries.length) return { applied: 0, failed: 0, pending: 0 };
+  let applied = 0;
+  let failed = 0;
+  const remaining = [];
+  for (const entry of pendingEntries) {
+    const name = sanitizeArchiveFileName(entry?.name || "");
+    const monthKey = monthKeyFromArchiveFileName(name);
+    const tempName = path.basename(String(entry?.tempName || "").trim());
+    const tempPath = path.join(ARCHIVE_DIR, tempName);
+    const finalPath = path.join(ARCHIVE_DIR, name);
+    if (!name || !monthKey || !tempName) continue;
+    if (!fs.existsSync(tempPath)) continue;
+    beginArchiveDbReplacement(monthKey);
+    try {
+      validateSqliteFileSync(tempPath);
+      try {
+        fs.unlinkSync(finalPath);
+      } catch (_) {
+        // Ignore missing prior archive file.
+      }
+      fs.renameSync(tempPath, finalPath);
+      const targetMtimeMs = Math.max(0, Number(entry?.mtimeMs || 0));
+      if (targetMtimeMs > 0) {
+        const mtime = new Date(targetMtimeMs);
+        fs.utimesSync(finalPath, mtime, mtime);
+      }
+      applied += 1;
+    } catch (err) {
+      failed += 1;
+      remaining.push(entry);
+      console.warn(
+        `[archive] pending replacement apply failed for ${name}:`,
+        err?.message || err,
+      );
+    } finally {
+      endArchiveDbReplacement(monthKey);
+    }
+  }
+  writePendingArchiveReplacements(remaining);
+  return { applied, failed, pending: remaining.length };
+}
+
+function listLocalArchiveManifest() {
+  const manifestMap = new Map();
+  try {
+    const names = fs
+      .readdirSync(ARCHIVE_DIR, { withFileTypes: true })
+      .filter((entry) => entry?.isFile?.())
+      .map((entry) => String(entry.name || ""))
+      .filter((name) => Boolean(sanitizeArchiveFileName(name)))
+      .sort((a, b) => a.localeCompare(b));
+    for (const name of names) {
+      const filePath = path.join(ARCHIVE_DIR, name);
+      let size = 0;
+      let mtimeMs = 0;
+      try {
+        const stat = fs.statSync(filePath);
+        size = Math.max(0, Number(stat.size || 0));
+        mtimeMs = Math.max(0, Number(stat.mtimeMs || 0));
+      } catch (_) {
+        size = 0;
+        mtimeMs = 0;
+      }
+      manifestMap.set(name, {
+        name,
+        monthKey: monthKeyFromArchiveFileName(name),
+        size,
+        mtimeMs,
+      });
+    }
+  } catch (_) {
+    // Ignore manifest read failures and fall back to any staged replacements.
+  }
+  for (const pending of readPendingArchiveReplacements()) {
+    const name = sanitizeArchiveFileName(pending?.name || "");
+    if (!name) continue;
+    manifestMap.set(name, {
+      name,
+      monthKey: monthKeyFromArchiveFileName(name),
+      size: Math.max(0, Number(pending?.size || 0)),
+      mtimeMs: Math.max(0, Number(pending?.mtimeMs || 0)),
+      pendingApply: true,
+    });
+  }
+  return Array.from(manifestMap.values()).sort((a, b) =>
+    String(a?.name || "").localeCompare(String(b?.name || "")),
+  );
+}
+
+function summarizeArchiveManifest(manifestRaw) {
+  const manifest = Array.isArray(manifestRaw) ? manifestRaw : [];
+  const fileCount = manifest.length;
+  const totalBytes = manifest.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  const newestMtimeMs = manifest.reduce(
+    (max, entry) => Math.max(max, Math.max(0, Number(entry?.mtimeMs || 0))),
+    0,
+  );
+  return {
+    fileCount,
+    totalBytes,
+    newestMtimeMs,
+    files: manifest,
+  };
+}
+
+function buildManualReplicationScope() {
+  const archiveSummary = summarizeArchiveManifest(listLocalArchiveManifest());
+  return {
+    background: true,
+    includeArchiveOptional: true,
+    defaultIncludeArchive: false,
+    hotTables: ["main database snapshot"],
+    preservedSettings: Array.from(REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS),
+    archive: {
+      ...archiveSummary,
+      optional: true,
+    },
+    notes: {
+      transport: "Standby DB refresh uses the configured remote gateway URL over the approved reachable network path.",
+      push:
+        "Push is disabled in the viewer model. Gateway remains the only authoritative source for shared data.",
+      pull:
+        "Pull downloads a fresh gateway main DB snapshot and stages it for restart-safe local replacement. Optional monthly archive DB files can follow. During manual standby refresh, the remote live bridge pauses temporarily so the transfer gets priority.",
+      liveBridge:
+        "Live bridge polling stays lightweight. Manual standby refresh temporarily pauses the viewer-side live bridge, then resumes it automatically when the transfer finishes.",
+      hotPriority:
+        "The gateway main DB snapshot is always staged first. Archive DB files are optional and intended for historical catch-up only.",
+    },
+  };
+}
+
+function snapshotManualReplicationJob() {
+  return {
+    id: String(manualReplicationJobState.id || ""),
+    action: String(manualReplicationJobState.action || "idle"),
+    status: String(manualReplicationJobState.status || "idle"),
+    running: Boolean(manualReplicationJobState.running),
+    includeArchive: Boolean(manualReplicationJobState.includeArchive),
+    startedAt: Number(manualReplicationJobState.startedAt || 0),
+    updatedAt: Number(manualReplicationJobState.updatedAt || 0),
+    finishedAt: Number(manualReplicationJobState.finishedAt || 0),
+    error: String(manualReplicationJobState.error || ""),
+    errorCode: String(manualReplicationJobState.errorCode || ""),
+    summary: String(manualReplicationJobState.summary || ""),
+    needsRestart: Boolean(manualReplicationJobState.needsRestart),
+    priorityMode: Boolean(manualReplicationJobState.priorityMode),
+    livePaused: Boolean(manualReplicationJobState.livePaused),
+    cancelRequested: Boolean(manualReplicationJobState.cancelRequested),
+    result:
+      manualReplicationJobState.result &&
+      typeof manualReplicationJobState.result === "object"
+        ? { ...manualReplicationJobState.result }
+        : null,
+  };
+}
+
+function createManualReplicationAbortError(message = "Standby DB refresh cancelled.") {
+  const err = new Error(String(message || "Standby DB refresh cancelled."));
+  err.name = "AbortError";
+  err.code = MANUAL_REPLICATION_CANCEL_CODE;
+  return err;
+}
+
+function createManualPullLocalNewerError(
+  message = "Manual pull blocked: local standby data is newer than the gateway.",
+) {
+  const err = new Error(
+    String(message || "Manual pull blocked: local standby data is newer than the gateway."),
+  );
+  err.code = MANUAL_PULL_LOCAL_NEWER_CODE;
+  err.canForcePull = true;
+  return err;
+}
+
+function createManualPullGatewayCheckError(
+  message = "Gateway state check failed.",
+) {
+  const err = new Error(String(message || "Gateway state check failed."));
+  err.code = MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE;
+  return err;
+}
+
+function isManualReplicationAbortError(err) {
+  return (
+    isAbortError(err) ||
+    String(err?.code || "").trim().toUpperCase() === MANUAL_REPLICATION_CANCEL_CODE
+  );
+}
+
+function throwIfManualReplicationAborted(signal, message = "Standby DB refresh cancelled.") {
+  if (signal?.aborted) {
+    throw createManualReplicationAbortError(message);
+  }
+}
+
+function isTransferStreamAbortError(err) {
+  if (isManualReplicationAbortError(err)) return true;
+  const code = String(err?.code || "").trim().toUpperCase();
+  if (
+    code === "ERR_STREAM_PREMATURE_CLOSE" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE"
+  ) {
+    return true;
+  }
+  const msg = String(err?.message || err || "").trim().toLowerCase();
+  return msg.includes("premature close") || msg.includes("request aborted");
+}
+
+function updateManualReplicationJob(patch = {}, options = {}) {
+  Object.assign(manualReplicationJobState, patch || {});
+  manualReplicationJobState.updatedAt = Date.now();
+  if (options.broadcast === false) return snapshotManualReplicationJob();
+  broadcastUpdate({
+    type: "replication_job",
+    job: snapshotManualReplicationJob(),
+  });
+  return snapshotManualReplicationJob();
+}
+
+function resetManualReplicationJob() {
+  Object.assign(manualReplicationJobState, createManualReplicationJobState(), {
+    updatedAt: Date.now(),
+  });
+  return snapshotManualReplicationJob();
+}
+
+function isManualReplicationJobRunning() {
+  return Boolean(manualReplicationJobState.running);
+}
+
+function createManualReplicationRunControl(jobId = "", action = "sync") {
+  return {
+    jobId: String(jobId || "").trim(),
+    action: String(action || "sync").trim(),
+    controller: new AbortController(),
+    cancelRequested: false,
+    stagedMainTempName: "",
+    stagedArchiveEntries: new Map(),
+  };
+}
+
+function trackManualReplicationStagedMainDb(runControl, tempName = "") {
+  if (!runControl || typeof runControl !== "object") return;
+  runControl.stagedMainTempName = path.basename(String(tempName || "").trim());
+}
+
+function trackManualReplicationStagedArchive(runControl, name = "", tempName = "") {
+  if (!runControl || !(runControl.stagedArchiveEntries instanceof Map)) return;
+  const safeName = sanitizeArchiveFileName(name || "");
+  const safeTempName = path.basename(String(tempName || "").trim());
+  if (!safeName || !safeTempName) return;
+  runControl.stagedArchiveEntries.set(safeName, safeTempName);
+}
+
+function discardPendingArchiveReplacement(name = "", tempName = "") {
+  const safeName = sanitizeArchiveFileName(name || "");
+  if (!safeName) return { cleared: false, tempRemoved: false };
+  const expectedTempName = path.basename(String(tempName || "").trim());
+  const remaining = [];
+  let cleared = false;
+  let tempRemoved = false;
+  for (const entry of readPendingArchiveReplacements()) {
+    if (String(entry?.name || "") !== safeName) {
+      remaining.push(entry);
+      continue;
+    }
+    const pendingTempName = path.basename(String(entry?.tempName || "").trim());
+    if (expectedTempName && pendingTempName && pendingTempName !== expectedTempName) {
+      remaining.push(entry);
+      continue;
+    }
+    cleared = true;
+    if (pendingTempName) {
+      try {
+        fs.unlinkSync(path.join(ARCHIVE_DIR, pendingTempName));
+        tempRemoved = true;
+      } catch (_) {
+        tempRemoved = false;
+      }
+    }
+  }
+  if (cleared) writePendingArchiveReplacements(remaining);
+  return { cleared, tempRemoved };
+}
+
+function discardTrackedManualReplicationArtifacts(runControl) {
+  if (!runControl || typeof runControl !== "object") return;
+  if (runControl.stagedMainTempName) {
+    try {
+      discardPendingMainDbReplacement(runControl.stagedMainTempName);
+    } catch (_) {}
+    runControl.stagedMainTempName = "";
+  }
+  if (runControl.stagedArchiveEntries instanceof Map) {
+    for (const [name, tempName] of runControl.stagedArchiveEntries.entries()) {
+      try {
+        discardPendingArchiveReplacement(name, tempName);
+      } catch (_) {}
+    }
+    runControl.stagedArchiveEntries.clear();
+  }
+}
+
+function requestManualReplicationCancel(
+  message = "Force-cancelling standby DB refresh...",
+) {
+  const runControl = manualReplicationRunControl;
+  if (!runControl || !isManualReplicationJobRunning()) {
+    return {
+      ok: false,
+      error: "No standby DB refresh is currently running.",
+      job: snapshotManualReplicationJob(),
+    };
+  }
+  runControl.cancelRequested = true;
+  updateManualReplicationJob({
+    status: "cancelling",
+    cancelRequested: true,
+    summary: String(message || "Force-cancelling standby DB refresh..."),
+    error: "",
+    errorCode: "",
+  });
+  try {
+    runControl.controller.abort(
+      createManualReplicationAbortError("Standby DB refresh cancelled by operator."),
+    );
+  } catch (_) {}
+  return { ok: true, job: snapshotManualReplicationJob() };
 }
 
 function buildReplicationSummary() {
@@ -712,6 +2252,7 @@ function hasLocalNewerReplicationData(localSummaryRaw, gatewaySummaryRaw) {
   const local = normalizeReplicationSummary(localSummaryRaw);
   const remote = normalizeReplicationSummary(gatewaySummaryRaw);
   for (const def of REPLICATION_TABLE_DEFS) {
+    if (REPLICATION_LOCAL_NEWER_IGNORE_TABLES.has(def.name)) continue;
     const a = Number(local.tables?.[def.name]?.watermark || 0);
     const b = Number(remote.tables?.[def.name]?.watermark || 0);
     if (a > b) return true;
@@ -843,6 +2384,10 @@ function buildPushDeltaChunks(deltaPayload) {
   const chunkCount = rawChunks.length;
   const totalRowsFromMeta = Number(sourceMeta?.totalRows || 0);
   const totalRows = totalRowsFromMeta > 0 ? totalRowsFromMeta : countReplicationRowsByTables(inTables);
+  const totalBytes = rawChunks.reduce(
+    (sum, chunk) => sum + Math.max(0, Number(chunk?.bytes || 0)),
+    0,
+  );
   const baseMode = String(sourceMeta?.mode || "push").trim() || "push";
   const baseSignature = String(sourceMeta?.signature || "").trim();
 
@@ -858,6 +2403,7 @@ function buildPushDeltaChunks(deltaPayload) {
         mode: `${baseMode}-chunk`,
         signature: baseSignature,
         totalRows,
+        totalBytes,
         chunkCount,
         chunkIndex: idx + 1,
         chunkRows: Number(chunk.rows || 0),
@@ -886,66 +2432,94 @@ function stmtCached(key, sql) {
   return REPLICATION_STMT_CACHE[key];
 }
 
-function mergeAppendReplicationRow(tableName, payload, cols) {
+function mergeAppendReplicationRow(tableName, payload, cols, authoritative = false) {
   if (tableName === "readings") {
-    const exists = stmtCached(
-      "exists:readings:ts_inv_unit",
-      `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
-    ).get(payload.ts, payload.inverter, payload.unit);
-    if (exists?.id) return false;
-    const sql = `INSERT INTO readings (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        unit=excluded.unit,
-        vdc=excluded.vdc,
-        idc=excluded.idc,
-        vac1=excluded.vac1,
-        vac2=excluded.vac2,
-        vac3=excluded.vac3,
-        iac1=excluded.iac1,
-        iac2=excluded.iac2,
-        iac3=excluded.iac3,
-        pac=excluded.pac,
-        kwh=excluded.kwh,
-        alarm=excluded.alarm,
-        online=excluded.online
-      WHERE COALESCE(excluded.ts,0) >= COALESCE(readings.ts,0)`;
-    stmtCached("merge:readings", sql).run(payload);
+    if (Number(payload?.ts || 0) < getTelemetryHotCutoffTs()) {
+      archiveReadingsRows([payload]);
+      return true;
+    }
+    if (authoritative) {
+      // Authoritative: overwrite existing row, insert if absent.
+      const upd = stmtCached(
+        "update:readings:auth",
+        `UPDATE readings SET pac=@pac, kwh=@kwh, alarm=@alarm, online=@online WHERE ts=@ts AND inverter=@inverter AND unit=@unit`,
+      ).run(payload);
+      if (upd.changes > 0) return true;
+      // No existing row — fall through to INSERT.
+    } else {
+      const exists = stmtCached(
+        "exists:readings:ts_inv_unit",
+        `SELECT id FROM readings WHERE ts=? AND inverter=? AND unit=? LIMIT 1`,
+      ).get(payload.ts, payload.inverter, payload.unit);
+      if (exists?.id) return false;
+    }
+    const colList = cols.join(", ");
+    const valList = cols.map((c) => "@" + c).join(", ");
+    if (authoritative) {
+      stmtCached("merge:readings:auth",
+        "INSERT INTO readings (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET" +
+        " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+        " pac=excluded.pac, kwh=excluded.kwh, alarm=excluded.alarm, online=excluded.online",
+      ).run(payload);
+    } else {
+      stmtCached("merge:readings",
+        "INSERT INTO readings (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET" +
+        " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+        " pac=excluded.pac, kwh=excluded.kwh, alarm=excluded.alarm, online=excluded.online" +
+        " WHERE COALESCE(excluded.ts,0) >= COALESCE(readings.ts,0)",
+      ).run(payload);
+    }
     return true;
   }
 
   if (tableName === "energy_5min") {
-    const existingRow = stmtCached(
-      "exists:energy_5min:ts_inv",
-      `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
-    ).get(payload.ts, payload.inverter);
-    if (existingRow?.id) {
-      // Row exists for this (ts, inverter). Update kwh_inc if the incoming value differs —
-      // this corrects stale local rows that were written with a lower value (e.g., from a
-      // previous partial bucket or a prior diverged local-gateway state).
-      const incomingKwh = Number(payload.kwh_inc || 0);
-      const existingKwh = Number(existingRow.kwh_inc || 0);
-      if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
-        stmtCached(
-          "update:energy_5min:kwh_inc_by_id",
-          `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
-        ).run(incomingKwh, existingRow.id);
-        return true;
-      }
-      return false; // identical — no change needed
+    if (Number(payload?.ts || 0) < getTelemetryHotCutoffTs()) {
+      archiveEnergyRows([payload]);
+      return true;
     }
-    const sql = `INSERT INTO energy_5min (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        kwh_inc=excluded.kwh_inc
-      WHERE COALESCE(excluded.ts,0) >= COALESCE(energy_5min.ts,0)`;
-    stmtCached("merge:energy_5min", sql).run(payload);
+    if (authoritative) {
+      // Authoritative: overwrite existing row, insert if absent.
+      const upd = stmtCached(
+        "update:energy_5min:auth",
+        `UPDATE energy_5min SET kwh_inc=@kwh_inc WHERE ts=@ts AND inverter=@inverter`,
+      ).run(payload);
+      if (upd.changes > 0) return true;
+      // No existing row — fall through to INSERT.
+    } else {
+      const existingRow = stmtCached(
+        "exists:energy_5min:ts_inv",
+        `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
+      ).get(payload.ts, payload.inverter);
+      if (existingRow?.id) {
+        // Row exists. Update kwh_inc if the incoming value differs — corrects stale local rows.
+        const incomingKwh = Number(payload.kwh_inc || 0);
+        const existingKwh = Number(existingRow.kwh_inc || 0);
+        if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
+          stmtCached(
+            "update:energy_5min:kwh_inc_by_id",
+            `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
+          ).run(incomingKwh, existingRow.id);
+          return true;
+        }
+        return false; // identical — no change needed
+      }
+    }
+    const colList = cols.join(", ");
+    const valList = cols.map((c) => "@" + c).join(", ");
+    if (authoritative) {
+      stmtCached("merge:energy_5min:auth",
+        "INSERT INTO energy_5min (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, inverter=excluded.inverter, kwh_inc=excluded.kwh_inc",
+      ).run(payload);
+    } else {
+      stmtCached("merge:energy_5min",
+        "INSERT INTO energy_5min (" + colList + ") VALUES (" + valList + ")" +
+        " ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, inverter=excluded.inverter, kwh_inc=excluded.kwh_inc" +
+        " WHERE COALESCE(excluded.ts,0) >= COALESCE(energy_5min.ts,0)",
+      ).run(payload);
+    }
     return true;
   }
 
@@ -991,37 +2565,45 @@ function mergeAppendReplicationRow(tableName, payload, cols) {
   return true;
 }
 
-function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings = true) {
+function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings = true, authoritative = false) {
   if (tableName === "settings") {
     const k = String(payload?.key || "").trim();
     if (preserveSettings && REMOTE_REPLICATION_PRESERVE_SETTING_KEYS.has(k)) {
       return false;
     }
-    const sql = `INSERT INTO settings (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(key) DO UPDATE SET
-        value=excluded.value,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(settings.updated_ts,0)`;
-    stmtCached("merge:settings:lww", sql).run(payload);
+    // In authoritative mode the gateway value always wins; no timestamp guard.
+    const sColList = cols.join(", ");
+    const sValList = cols.map((c) => "@" + c).join(", ");
+    const sBase = "INSERT INTO settings (" + sColList + ") VALUES (" + sValList + ")" +
+      " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts";
+    const sSql = authoritative ? sBase : sBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(settings.updated_ts,0)";
+    stmtCached(authoritative ? "merge:settings:auth" : "merge:settings:lww", sSql).run(payload);
     return true;
   }
 
   if (tableName === "forecast_dayahead") {
-    const sql = `INSERT INTO forecast_dayahead (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, slot) DO UPDATE SET
-        ts=excluded.ts,
-        time_hms=excluded.time_hms,
-        kwh_inc=excluded.kwh_inc,
-        kwh_lo=excluded.kwh_lo,
-        kwh_hi=excluded.kwh_hi,
-        source=excluded.source,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)`;
-    stmtCached("merge:forecast_dayahead:lww", sql).run(payload);
+    const fdColList = cols.join(", ");
+    const fdValList = cols.map((c) => "@" + c).join(", ");
+    const fdBase = "INSERT INTO forecast_dayahead (" + fdColList + ") VALUES (" + fdValList + ")" +
+      " ON CONFLICT(date, slot) DO UPDATE SET" +
+      " ts=excluded.ts, time_hms=excluded.time_hms," +
+      " kwh_inc=excluded.kwh_inc, kwh_lo=excluded.kwh_lo, kwh_hi=excluded.kwh_hi," +
+      " source=excluded.source, updated_ts=excluded.updated_ts";
+    const fdSql = authoritative ? fdBase : fdBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_dayahead.updated_ts,0)";
+    stmtCached(authoritative ? "merge:forecast_dayahead:auth" : "merge:forecast_dayahead:lww", fdSql).run(payload);
+    return true;
+  }
+
+  if (tableName === "forecast_intraday_adjusted") {
+    const fiColList = cols.join(", ");
+    const fiValList = cols.map((c) => "@" + c).join(", ");
+    const fiBase = "INSERT INTO forecast_intraday_adjusted (" + fiColList + ") VALUES (" + fiValList + ")" +
+      " ON CONFLICT(date, slot) DO UPDATE SET" +
+      " ts=excluded.ts, time_hms=excluded.time_hms," +
+      " kwh_inc=excluded.kwh_inc, kwh_lo=excluded.kwh_lo, kwh_hi=excluded.kwh_hi," +
+      " source=excluded.source, updated_ts=excluded.updated_ts";
+    const fiSql = authoritative ? fiBase : fiBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_intraday_adjusted.updated_ts,0)";
+    stmtCached(authoritative ? "merge:forecast_intraday_adjusted:auth" : "merge:forecast_intraday_adjusted:lww", fiSql).run(payload);
     return true;
   }
 
@@ -1033,38 +2615,45 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
     const drPayload = Object.fromEntries(
       Object.entries(payload).filter(([k]) => k !== "id"),
     );
-    const sql = `INSERT INTO daily_report (${drCols.join(", ")}) VALUES (${drCols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(date, inverter) DO UPDATE SET
-        kwh_total=excluded.kwh_total,
-        pac_peak=excluded.pac_peak,
-        pac_avg=excluded.pac_avg,
-        uptime_s=excluded.uptime_s,
-        alarm_count=excluded.alarm_count,
-        control_count=excluded.control_count,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)`;
-    stmtCached("merge:daily_report:lww", sql).run(drPayload);
+    const drColList = drCols.join(", ");
+    const drValList = drCols.map((c) => "@" + c).join(", ");
+    const drBase = "INSERT INTO daily_report (" + drColList + ") VALUES (" + drValList + ")" +
+      " ON CONFLICT(date, inverter) DO UPDATE SET" +
+      " kwh_total=excluded.kwh_total, pac_peak=excluded.pac_peak, pac_avg=excluded.pac_avg," +
+      " uptime_s=excluded.uptime_s, alarm_count=excluded.alarm_count, control_count=excluded.control_count," +
+      " availability_pct=excluded.availability_pct, performance_pct=excluded.performance_pct," +
+      " node_uptime_s=excluded.node_uptime_s, expected_node_uptime_s=excluded.expected_node_uptime_s," +
+      " expected_nodes=excluded.expected_nodes, rated_kw=excluded.rated_kw, updated_ts=excluded.updated_ts";
+    const drSql = authoritative ? drBase : drBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)";
+    stmtCached(authoritative ? "merge:daily_report:auth" : "merge:daily_report:lww", drSql).run(drPayload);
+    return true;
+  }
+
+  if (tableName === "daily_readings_summary") {
+    const drsColList = cols.join(", ");
+    const drsValList = cols.map((c) => "@" + c).join(", ");
+    const drsBase = "INSERT INTO daily_readings_summary (" + drsColList + ") VALUES (" + drsValList + ")" +
+      " ON CONFLICT(date, inverter, unit) DO UPDATE SET" +
+      " sample_count=excluded.sample_count, online_samples=excluded.online_samples," +
+      " pac_online_sum=excluded.pac_online_sum, pac_online_count=excluded.pac_online_count," +
+      " pac_peak=excluded.pac_peak, first_ts=excluded.first_ts, last_ts=excluded.last_ts," +
+      " first_kwh=excluded.first_kwh, last_kwh=excluded.last_kwh, last_online=excluded.last_online," +
+      " intervals_json=excluded.intervals_json, updated_ts=excluded.updated_ts";
+    const drsSql = authoritative ? drsBase : drsBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_readings_summary.updated_ts,0)";
+    stmtCached(authoritative ? "merge:daily_readings_summary:auth" : "merge:daily_readings_summary:lww", drsSql).run(payload);
     return true;
   }
 
   if (tableName === "alarms") {
-    const sql = `INSERT INTO alarms (${cols.join(", ")}) VALUES (${cols
-      .map((c) => `@${c}`)
-      .join(", ")})
-      ON CONFLICT(id) DO UPDATE SET
-        ts=excluded.ts,
-        inverter=excluded.inverter,
-        unit=excluded.unit,
-        alarm_code=excluded.alarm_code,
-        alarm_value=excluded.alarm_value,
-        severity=excluded.severity,
-        cleared_ts=excluded.cleared_ts,
-        acknowledged=excluded.acknowledged,
-        updated_ts=excluded.updated_ts
-      WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)`;
-    stmtCached("merge:alarms:lww", sql).run(payload);
+    const alColList = cols.join(", ");
+    const alValList = cols.map((c) => "@" + c).join(", ");
+    const alBase = "INSERT INTO alarms (" + alColList + ") VALUES (" + alValList + ")" +
+      " ON CONFLICT(id) DO UPDATE SET" +
+      " ts=excluded.ts, inverter=excluded.inverter, unit=excluded.unit," +
+      " alarm_code=excluded.alarm_code, alarm_value=excluded.alarm_value, severity=excluded.severity," +
+      " cleared_ts=excluded.cleared_ts, acknowledged=excluded.acknowledged, updated_ts=excluded.updated_ts";
+    const alSql = authoritative ? alBase : alBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)";
+    stmtCached(authoritative ? "merge:alarms:auth" : "merge:alarms:lww", alSql).run(payload);
     return true;
   }
 
@@ -1079,6 +2668,7 @@ function applyReplicationTableMerge(tablesPayload, options = {}) {
   const tables =
     tablesPayload && typeof tablesPayload === "object" ? tablesPayload : {};
   const preserveSettings = options?.preserveSettings !== false;
+  const authoritative = Boolean(options?.authoritative);
   const runMerge = () => {
     let importedRows = 0;
     let skippedRows = 0;
@@ -1091,12 +2681,13 @@ function applyReplicationTableMerge(tablesPayload, options = {}) {
         const payload = makeReplicationRowPayload(row, def.columns);
         const applied =
           strategy.mode === "append"
-            ? mergeAppendReplicationRow(def.name, payload, def.columns)
+            ? mergeAppendReplicationRow(def.name, payload, def.columns, authoritative)
             : mergeUpdatedReplicationRow(
                 def.name,
                 payload,
                 def.columns,
                 preserveSettings,
+                authoritative,
               );
         if (applied) importedRows += 1;
         else skippedRows += 1;
@@ -1171,17 +2762,52 @@ function capturePreservedLocalSettings() {
   }));
 }
 
-function applyFullDbSnapshot(snapshot) {
+function capturePreservedMainDbSettings() {
+  const keys = Array.from(REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS);
+  if (!keys.length) return [];
+  const placeholders = keys.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
+    .all(...keys);
+  return rows.map((r) => ({
+    key: String(r?.key || "").trim(),
+    value: String(r?.value ?? ""),
+  }));
+}
+
+function clearReplicatedTablesForFullReplace(preserveSettings = true) {
+  for (const def of REPLICATION_TABLE_DEFS) {
+    if (def.name === "settings" && preserveSettings) {
+      const keys = Array.from(REMOTE_REPLICATION_PRESERVE_SETTING_KEYS);
+      if (!keys.length) {
+        db.prepare("DELETE FROM settings").run();
+        continue;
+      }
+      const placeholders = keys.map(() => "?").join(", ");
+      db.prepare(`DELETE FROM settings WHERE key NOT IN (${placeholders})`).run(...keys);
+      continue;
+    }
+    db.prepare(`DELETE FROM ${def.name}`).run();
+  }
+}
+
+function applyFullDbSnapshot(snapshot, opts = {}) {
   const snap = snapshot && typeof snapshot === "object" ? snapshot : null;
   if (!snap || typeof snap !== "object") throw new Error("Invalid replication snapshot payload.");
   const tables = snap.tables && typeof snap.tables === "object" ? snap.tables : null;
   if (!tables) throw new Error("Invalid replication snapshot tables.");
 
   const preserveRows = capturePreservedLocalSettings();
+  const replace = Boolean(opts?.replace);
+  const authoritative = Boolean(opts?.authoritative);
   const importTx = db.transaction(() => {
+    if (replace) {
+      clearReplicatedTablesForFullReplace(true);
+    }
     const merged = applyReplicationTableMerge(tables, {
       preserveSettings: true,
       inTransaction: true,
+      authoritative,
     });
 
     for (const kv of preserveRows) {
@@ -1302,7 +2928,7 @@ function buildIncrementalReplicationDelta(clientCursorsRaw) {
   };
 }
 
-function applyIncrementalDbDelta(deltaPayload) {
+function applyIncrementalDbDelta(deltaPayload, opts = {}) {
   const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
   if (!delta || typeof delta !== "object") {
     throw new Error("Invalid incremental replication payload.");
@@ -1315,6 +2941,7 @@ function applyIncrementalDbDelta(deltaPayload) {
     const merged = applyReplicationTableMerge(tables, {
       preserveSettings: true,
       inTransaction: true,
+      authoritative: Boolean(opts?.authoritative),
     });
     const safe = saveReplicationCursorsSetting(nextCursors);
     setSetting("remoteReplicationLastTs", String(Date.now()));
@@ -1349,16 +2976,22 @@ function applyReplicationPushDelta(deltaPayload) {
   };
 }
 
-async function reconcileRemoteBeforePull(baseUrl) {
+async function checkLocalNewerBeforePull(baseUrl) {
   remoteBridgeState.lastReconcileError = "";
   remoteBridgeState.lastReconcileRows = 0;
-  let localNewerDetected = false;
   try {
-    const summaryRes = await fetch(`${baseUrl}/api/replication/summary`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-    });
+    const summaryRes = await fetchWithRetry(
+      `${baseUrl}/api/replication/summary`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
     if (!summaryRes.ok) {
       throw new Error(`Summary HTTP ${summaryRes.status} ${summaryRes.statusText}`);
     }
@@ -1366,57 +2999,98 @@ async function reconcileRemoteBeforePull(baseUrl) {
     if (!summaryData?.ok || !summaryData?.summary) {
       throw new Error(String(summaryData?.error || "Invalid replication summary payload."));
     }
-
     const gatewaySummary = normalizeReplicationSummary(summaryData.summary);
     const localSummary = buildReplicationSummary();
     const localNewer = hasLocalNewerReplicationData(localSummary, gatewaySummary);
-    localNewerDetected = localNewer;
-    if (!localNewer) {
-      remoteBridgeState.lastReconcileTs = Date.now();
-      remoteBridgeState.lastSyncDirection = "pull-only";
-      return { ok: true, pushed: false, rows: 0, localNewer: false };
-    }
-
-    const delta = buildPushDeltaAgainstSummary(gatewaySummary);
-    const expectedRows = Number(delta?.meta?.totalRows || 0);
-    if (expectedRows <= 0) {
-      remoteBridgeState.lastReconcileTs = Date.now();
-      remoteBridgeState.lastSyncDirection = "pull-only";
-      return { ok: true, pushed: false, rows: 0, localNewer: true };
-    }
-
-    const pushed = await pushDeltaInChunks(baseUrl, delta);
     remoteBridgeState.lastReconcileTs = Date.now();
-    remoteBridgeState.lastReconcileRows = Number(pushed?.importedRows || 0);
-    remoteBridgeState.lastSyncDirection = "push-then-pull";
-    return {
-      ok: true,
-      pushed: true,
-      rows: Number(pushed?.importedRows || 0),
-      skipped: Number(pushed?.skippedRows || 0),
-      chunks: Number(pushed?.chunkCount || 0),
-      localNewer: true,
-    };
+    remoteBridgeState.lastReconcileError = "";
+    if (localNewer) {
+      remoteBridgeState.lastSyncDirection = "pull-check-local-newer";
+    }
+    return { ok: true, localNewer };
   } catch (err) {
     remoteBridgeState.lastReconcileError = String(err?.message || err);
-    if (localNewerDetected) {
-      remoteBridgeState.lastSyncDirection = "push-failed";
-    }
-    return {
-      ok: false,
-      error: remoteBridgeState.lastReconcileError,
-      localNewer: localNewerDetected,
-    };
+    return { ok: false, error: remoteBridgeState.lastReconcileError };
   }
 }
 
-async function runRemoteFullReplication(baseUrl) {
+async function evaluateManualPullPreflight(baseUrl, forcePull = false) {
+  const check = await checkLocalNewerBeforePull(baseUrl);
+  if (!check?.ok) {
+    const message = `Gateway state check failed: ${String(check?.error || "unknown error")}`;
+    remoteBridgeState.lastReplicationError = message;
+    remoteBridgeState.lastSyncDirection = "pull-check-failed";
+    return {
+      ok: false,
+      localNewer: false,
+      check,
+      error: createManualPullGatewayCheckError(message),
+    };
+  }
+  if (check.localNewer && !forcePull) {
+    const message =
+      "Manual pull blocked: local standby data is newer than the gateway. Use Force Pull only if you intentionally want to overwrite the newer local data.";
+    remoteBridgeState.lastReplicationError = message;
+    remoteBridgeState.lastSyncDirection = "pull-check-blocked-local-newer";
+    return {
+      ok: false,
+      localNewer: true,
+      check,
+      error: createManualPullLocalNewerError(message),
+    };
+  }
+  remoteBridgeState.lastReplicationError = "";
+  if (check.localNewer && forcePull) {
+    remoteBridgeState.lastSyncDirection = "pull-check-force-local-newer";
+  }
+  return {
+    ok: true,
+    localNewer: Boolean(check.localNewer),
+    check,
+  };
+}
+
+async function assertManualPullPreflight(baseUrl, forcePull = false) {
+  const preflight = await evaluateManualPullPreflight(baseUrl, forcePull);
+  if (!preflight?.ok) {
+    throw preflight?.error || new Error("Standby DB refresh preflight failed.");
+  }
+  return preflight;
+}
+
+function buildManualPullErrorPayload(err) {
+  const code = String(err?.code || "").trim().toUpperCase();
+  const payload = {
+    ok: false,
+    error: String(err?.message || err || "Standby DB refresh failed."),
+  };
+  if (code) payload.errorCode = code;
+  if (code === MANUAL_PULL_LOCAL_NEWER_CODE) {
+    payload.canForcePull = true;
+  }
+  return payload;
+}
+
+function sendManualPullErrorResponse(res, err) {
+  const code = String(err?.code || "").trim().toUpperCase();
+  if (code === MANUAL_PULL_LOCAL_NEWER_CODE) {
+    return res.status(409).json(buildManualPullErrorPayload(err));
+  }
+  if (code === MANUAL_PULL_GATEWAY_CHECK_FAILED_CODE) {
+    return res.status(502).json(buildManualPullErrorPayload(err));
+  }
+  return res.status(500).json(buildManualPullErrorPayload(err));
+}
+
+async function runRemoteFullReplication(baseUrl, opts = {}) {
   if (remoteBridgeState.replicationRunning) return { skipped: true, reason: "in_progress" };
   remoteBridgeState.replicationRunning = true;
   remoteBridgeState.lastReplicationAttemptTs = Date.now();
   remoteBridgeState.lastReplicationError = "";
+  const xferLabel = String(opts?.label || "");
 
   try {
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0, label: xferLabel });
     const r = await fetch(`${baseUrl}/api/replication/full`, {
       method: "GET",
       headers: buildRemoteProxyHeaders(),
@@ -1430,7 +3104,7 @@ async function runRemoteFullReplication(baseUrl) {
       throw new Error(String(data?.error || "Gateway returned invalid replication payload."));
     }
 
-    const stats = applyFullDbSnapshot(data.snapshot);
+    const stats = applyFullDbSnapshot(data.snapshot, opts);
     ensurePersistedSettings();
     try {
       const cfg = loadIpConfigFromDb();
@@ -1448,12 +3122,12 @@ async function runRemoteFullReplication(baseUrl) {
     );
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastIncrementalTs = Date.now();
-    if (remoteBridgeState.lastSyncDirection !== "push-then-pull") {
-      remoteBridgeState.lastSyncDirection = "pull-full";
-    }
+    remoteBridgeState.lastSyncDirection = "pull-full";
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: 0, importedRows: Number(stats.importedRows || 0), label: xferLabel });
 
-    return { ok: true, ...stats };
+    return { ok: true, mode: "full", ...stats };
   } catch (err) {
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: 0, label: xferLabel });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
     if (remoteBridgeState.lastSyncDirection !== "push-failed") {
       remoteBridgeState.lastSyncDirection = "pull-full-failed";
@@ -1464,11 +3138,12 @@ async function runRemoteFullReplication(baseUrl) {
   }
 }
 
-async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
+async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5, opts = {}) {
   if (remoteBridgeState.replicationRunning) return { skipped: true, reason: "in_progress" };
   remoteBridgeState.replicationRunning = true;
   remoteBridgeState.lastReplicationAttemptTs = Date.now();
   remoteBridgeState.lastReplicationError = "";
+  const xferLabel = String(opts?.label || "");
 
   try {
     let batches = 0;
@@ -1480,15 +3155,15 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
       remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     );
 
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0 });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0, label: xferLabel });
 
     do {
       const data = await requestIncrementalDeltaWithRetry(baseUrl, cursors, (bytes) => {
         totalRecvBytes += bytes;
-        broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1 });
+        broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1, label: xferLabel });
       });
 
-      const applied = applyIncrementalDbDelta(data.delta);
+      const applied = applyIncrementalDbDelta(data.delta, opts);
       importedRows += Number(applied.importedRows || 0);
       signature = String(applied.signature || signature || "");
       cursors = normalizeReplicationCursors(applied.nextCursors || cursors);
@@ -1512,10 +3187,10 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
     remoteBridgeState.replicationCursors = cursors;
     remoteBridgeState.lastReplicationError = "";
     remoteBridgeState.lastSyncDirection = "pull-incremental";
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: totalRecvBytes, importedRows });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "done", recvBytes: totalRecvBytes, importedRows, label: xferLabel });
     return { ok: true, importedRows, hasMore, batches, signature, nextCursors: cursors };
   } catch (err) {
-    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: totalRecvBytes || 0 });
+    broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "error", recvBytes: totalRecvBytes || 0, label: xferLabel });
     remoteBridgeState.lastReplicationError = String(err?.message || err);
     remoteBridgeState.lastSyncDirection = "pull-incremental-failed";
     return { ok: false, error: remoteBridgeState.lastReplicationError };
@@ -1524,7 +3199,7 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5) {
   }
 }
 
-async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses = 8) {
+async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses = 8, opts = {}) {
   const safeBatches = Math.max(1, Number(maxBatches || 1));
   const safePasses = Math.max(1, Number(maxPasses || 1));
   let pass = 0;
@@ -1541,7 +3216,7 @@ async function runRemoteCatchUpReplication(baseUrl, maxBatches = 200, maxPasses 
 
   while (pass < safePasses) {
     pass += 1;
-    const res = await runRemoteIncrementalReplication(baseUrl, safeBatches);
+    const res = await runRemoteIncrementalReplication(baseUrl, safeBatches, opts);
     if (res?.skipped) return { skipped: true, reason: String(res.reason || "in_progress") };
     if (!res?.ok) return { ok: false, pass, error: String(res?.error || "Incremental replication failed.") };
     totalImported += Number(res.importedRows || 0);
@@ -1598,7 +3273,7 @@ async function runRemotePushFull(baseUrl) {
       tables,
     };
 
-    const pushed = await pushDeltaInChunks(baseUrl, delta);
+    const pushed = await pushDeltaInChunks(baseUrl, delta, { label: "Pushing local data" });
     const importedRows = Number(pushed?.importedRows || 0);
     remoteBridgeState.lastReconcileTs = Date.now();
     remoteBridgeState.lastReconcileRows = importedRows;
@@ -1622,6 +3297,157 @@ async function runRemotePushFull(baseUrl) {
   }
 }
 
+async function runManualPullSync(baseUrl, includeArchive = true, forcePull = false, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  const preflight = options?.preflight && typeof options.preflight === "object"
+    ? options.preflight
+    : null;
+  throwIfManualReplicationAborted(signal);
+  if (preflight?.ok) {
+    remoteBridgeState.lastReplicationError = "";
+    if (preflight.localNewer && forcePull) {
+      remoteBridgeState.lastSyncDirection = "pull-check-force-local-newer";
+    }
+  } else if (forcePull) {
+    remoteBridgeState.lastReplicationError = "";
+  } else {
+    await assertManualPullPreflight(baseUrl, forcePull);
+  }
+  throwIfManualReplicationAborted(signal);
+  boostSocketPoolForReplication();
+  const priorityPause = pauseRemoteLiveBridgeForPriorityTransfer("standby-refresh");
+  const priorityNote = buildPriorityTransferNote(includeArchive);
+  try {
+    // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
+    updateManualReplicationJob({
+      summary: `Downloading fresh gateway main database. ${priorityNote}`,
+      priorityMode: true,
+      livePaused: true,
+    });
+    const mainDb = await pullMainDbFromRemote(baseUrl, {
+      label: "Downloading main database",
+      syncDirection: "pull-main-db-staged",
+      failureDirection: "pull-main-db-failed",
+      priorityMode: true,
+      livePaused: true,
+      note: priorityNote,
+      signal,
+      runControl,
+    });
+    if (mainDb?.skipped) {
+      throw new Error("Replication already in progress.");
+    }
+    if (!mainDb?.ok) {
+      throw new Error(
+        `Main DB pull failed: ${String(
+          mainDb?.error || "unknown error",
+        )}. Ensure gateway and client are on the same build.`,
+      );
+    }
+
+    let archive = {
+      ok: true,
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      unsupported: false,
+    };
+    if (includeArchive) {
+      throwIfManualReplicationAborted(signal);
+      updateManualReplicationJob({
+        summary: `Main DB staged. Downloading archive DB files from gateway. ${priorityNote}`,
+        priorityMode: true,
+        livePaused: true,
+      });
+      archive = await pullArchiveFilesFromRemote(baseUrl, {
+        forceAll: true,
+        concurrency: PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY,
+        priorityMode: true,
+        livePaused: true,
+        note: priorityNote,
+        signal,
+        runControl,
+      });
+    }
+    const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
+    const archiveSummary = includeArchive
+      ? archive.unsupported
+        ? "archive skipped (remote build has no archive sync)"
+        : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
+      : "archive skipped";
+    return {
+      needsRestart: true,
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      mode: "main-db",
+      mainDb,
+      archive,
+      priorityMode: true,
+      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}. Remote live stream resumes automatically. Restart the app to apply the new gateway database.`,
+    };
+  } finally {
+    // Force immediate energy refresh after pull so the TODAY MWh metric
+    // recovers without waiting for the next 30 s piggyback cycle.
+    todayEnergyCache.ts = 0;
+    remoteBridgeState.lastTodayEnergyFetchTs = 0;
+    resumeRemoteLiveBridgeAfterPriorityTransfer(priorityPause);
+    restoreSocketPoolAfterReplication();
+  }
+}
+
+async function runManualPushSync(baseUrl, includeArchive = true) {
+  boostSocketPoolForReplication();
+  try {
+    updateManualReplicationJob({
+      summary: "Pushing local replicated hot data to gateway.",
+    });
+    const pushed = await runRemotePushFull(baseUrl);
+    if (pushed?.skipped) {
+      throw new Error("Replication already in progress.");
+    }
+    if (!pushed?.ok) {
+      throw new Error(String(pushed?.error || "Full push failed."));
+    }
+
+    let archivePush = {
+      ok: true,
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      unsupported: false,
+    };
+    if (includeArchive) {
+      updateManualReplicationJob({
+        summary: "Hot push finished. Uploading local archive DB files to gateway.",
+      });
+      archivePush = await pushArchiveFilesToRemote(baseUrl);
+    }
+
+    const archivePushSummary = includeArchive
+      ? archivePush.unsupported
+        ? "archive upload skipped"
+        : `archive sent to gateway=${Number(archivePush.transferredFiles || 0).toLocaleString()}`
+      : "archive skipped";
+    return {
+      needsRestart: false,
+      mode: "push",
+      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+      pushedRows: Number(pushed.importedRows || 0),
+      pushChunks: Number(pushed.chunkCount || 0),
+      archivePush,
+      summary: `Push complete | pushed=${Number(pushed.importedRows || 0).toLocaleString()} rows in ${Number(pushed.chunkCount || 0)} chunk(s) | ${archivePushSummary}. Local database was not changed.`,
+    };
+  } finally {
+    restoreSocketPoolAfterReplication();
+  }
+}
+
 function isUnsafeRemoteLoop(baseUrl) {
   return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/i.test(
     String(baseUrl || ""),
@@ -1632,10 +3458,15 @@ function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
 }
 
+function isAbortError(err) {
+  return String(err?.name || "").trim() === "AbortError";
+}
+
 function isRetryableNetworkError(err) {
   const code = String(err?.code || "").trim().toUpperCase();
   if (
     code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
     code === "ETIMEDOUT" ||
     code === "ESOCKETTIMEDOUT" ||
     code === "ECONNREFUSED" ||
@@ -1663,18 +3494,429 @@ function isRetryableHttpStatus(status) {
   return n === 408 || n === 425 || n === 429 || n === 500 || n === 502 || n === 503 || n === 504;
 }
 
+function shouldForceRemoteOffline(err) {
+  const status = Number(err?.httpStatus || 0);
+  if (status === 400 || status === 401 || status === 403 || status === 404) return true;
+  const msg = String(err?.message || err || "")
+    .trim()
+    .toLowerCase();
+  return (
+    msg.includes("remote gateway url is not configured") ||
+    msg.includes("cannot be localhost in remote mode") ||
+    msg.includes("unauthorized api request")
+  );
+}
+
+function getRemoteOfflineFailureThreshold() {
+  return remoteBridgeState.replicationRunning
+    ? REMOTE_LIVE_FAILURES_BEFORE_OFFLINE_DURING_SYNC
+    : REMOTE_LIVE_FAILURES_BEFORE_OFFLINE;
+}
+
+function hasRecentRemoteBridgeSuccess(nowTs = Date.now()) {
+  const lastSuccessTs = Number(remoteBridgeState.lastSuccessTs || 0);
+  if (!lastSuccessTs) return false;
+  return nowTs - lastSuccessTs < REMOTE_LIVE_DEGRADED_GRACE_MS;
+}
+
+function isRemoteBridgeWarmupActive(nowTs = Date.now()) {
+  if (!isRemoteMode()) return false;
+  if (remoteBridgeState.connected) return false;
+  if (Number(remoteBridgeState.lastSuccessTs || 0) > 0) return false;
+  if (!remoteBridgeState.running) return false;
+  const startedAtTs = Math.max(0, Number(remoteBridgeState.startedAtTs || 0));
+  if (!startedAtTs) return false;
+  const warmupAgeMs = Math.max(0, nowTs - startedAtTs);
+  const failureStreak = Math.max(0, Number(remoteBridgeState.liveFailureCount || 0));
+  return warmupAgeMs < REMOTE_BRIDGE_WARMUP_MS && failureStreak <= 1;
+}
+
+const REMOTE_HTTP_AGENT = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS / 2)),
+});
+
+const REMOTE_HTTPS_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS / 2)),
+});
+
+const REMOTE_CONTROL_HTTP_AGENT = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS_CONTROL,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS_CONTROL / 2)),
+});
+
+const REMOTE_CONTROL_HTTPS_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: REMOTE_FETCH_KEEPALIVE_MSECS,
+  maxSockets: REMOTE_FETCH_MAX_SOCKETS_CONTROL,
+  maxFreeSockets: Math.max(2, Math.floor(REMOTE_FETCH_MAX_SOCKETS_CONTROL / 2)),
+});
+
+function setRemoteAgentMaxSockets(maxSockets) {
+  const ms = Math.max(4, Math.min(32, Number(maxSockets) || REMOTE_FETCH_MAX_SOCKETS));
+  const free = Math.max(2, Math.floor(ms / 2));
+  REMOTE_HTTP_AGENT.maxSockets = ms;
+  REMOTE_HTTP_AGENT.maxFreeSockets = free;
+  REMOTE_HTTPS_AGENT.maxSockets = ms;
+  REMOTE_HTTPS_AGENT.maxFreeSockets = free;
+}
+
+function boostSocketPoolForReplication() {
+  setRemoteAgentMaxSockets(REMOTE_FETCH_MAX_SOCKETS_REPLICATION);
+}
+
+function restoreSocketPoolAfterReplication() {
+  setRemoteAgentMaxSockets(REMOTE_FETCH_MAX_SOCKETS);
+}
+
+function getFetchAgentForUrl(targetUrl, trafficClass = "default") {
+  try {
+    const protocol = String(new URL(String(targetUrl || "")).protocol || "").toLowerCase();
+    if (String(trafficClass || "").trim().toLowerCase() === "control") {
+      return protocol === "https:" ? REMOTE_CONTROL_HTTPS_AGENT : REMOTE_CONTROL_HTTP_AGENT;
+    }
+    return protocol === "https:" ? REMOTE_HTTPS_AGENT : REMOTE_HTTP_AGENT;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function buildRemoteFetchOptions(targetUrl, options = {}, trafficClass = "default") {
+  const next = options && typeof options === "object" ? { ...options } : {};
+  if (next.agent == null) next.agent = getFetchAgentForUrl(targetUrl, trafficClass);
+  if (next.compress == null) next.compress = true;
+  return next;
+}
+
+function createTransferReadStream(filePath) {
+  return fs.createReadStream(filePath, { highWaterMark: REPLICATION_TRANSFER_STREAM_HWM });
+}
+
+function createTransferWriteStream(filePath) {
+  return fs.createWriteStream(filePath, { highWaterMark: REPLICATION_TRANSFER_STREAM_HWM });
+}
+
+async function hashFileSha256(filePath) {
+  return await new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = createTransferReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function buildReplicationHashCacheKey(filePath, size = 0, mtimeMs = 0) {
+  return [
+    path.resolve(String(filePath || "")).toLowerCase(),
+    Math.max(0, Number(size || 0)),
+    Math.max(0, Number(mtimeMs || 0)),
+  ].join("|");
+}
+
+function pruneReplicationHashCache() {
+  while (_replicationFileHashCache.size > REPLICATION_HASH_CACHE_LIMIT) {
+    const oldest = _replicationFileHashCache.keys().next();
+    if (oldest.done) break;
+    _replicationFileHashCache.delete(oldest.value);
+  }
+}
+
+async function getCachedFileSha256(filePath, statHint = null) {
+  const stat = statHint || await fs.promises.stat(filePath);
+  const size = Math.max(0, Number(stat?.size || 0));
+  const mtimeMs = Math.max(0, Number(stat?.mtimeMs || 0));
+  const cacheKey = buildReplicationHashCacheKey(filePath, size, mtimeMs);
+  const cached = _replicationFileHashCache.get(cacheKey);
+  if (cached?.sha256) {
+    _replicationFileHashCache.delete(cacheKey);
+    _replicationFileHashCache.set(cacheKey, cached);
+    return String(cached.sha256);
+  }
+  const sha256 = await hashFileSha256(filePath);
+  _replicationFileHashCache.set(cacheKey, { sha256 });
+  pruneReplicationHashCache();
+  return sha256;
+}
+
+function isGatewayMainDbSnapshotUsable(snapshot, nowTs = Date.now()) {
+  return Boolean(
+    snapshot?.tempPath &&
+    Number(snapshot?.expiresAt || 0) > nowTs &&
+    fs.existsSync(snapshot.tempPath),
+  );
+}
+
+async function disposeGatewayMainDbSnapshot(snapshot) {
+  if (!snapshot) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  if (Number(snapshot.refCount || 0) > 0) {
+    scheduleGatewayMainDbSnapshotCleanup(snapshot, GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS);
+    return;
+  }
+  if (_gatewayMainDbSnapshot === snapshot) {
+    const remainingMs = Math.max(0, Number(snapshot.expiresAt || 0) - Date.now());
+    if (remainingMs > 0) {
+      scheduleGatewayMainDbSnapshotCleanup(snapshot, remainingMs);
+      return;
+    }
+    _gatewayMainDbSnapshot = null;
+  }
+  try {
+    await fs.promises.unlink(snapshot.tempPath);
+  } catch (err) {
+    const code = String(err?.code || "").trim().toUpperCase();
+    if (code !== "ENOENT") {
+      console.warn(
+        "[replication] failed to clean up cached main DB snapshot:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
+  }
+}
+
+function scheduleGatewayMainDbSnapshotCleanup(snapshot, delayMs = 0) {
+  if (!snapshot) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  const delay = Math.max(1000, Number(delayMs || 0));
+  const timer = setTimeout(() => {
+    disposeGatewayMainDbSnapshot(snapshot).catch((err) => {
+      console.warn(
+        "[replication] cached main DB snapshot cleanup failed:",
+        String(err?.message || err || "unknown error"),
+      );
+    });
+  }, delay);
+  if (timer.unref) timer.unref();
+  snapshot.cleanupTimer = timer;
+}
+
+function retainGatewayMainDbSnapshot(snapshot) {
+  if (!snapshot) return null;
+  snapshot.refCount = Math.max(0, Number(snapshot.refCount || 0)) + 1;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  return snapshot;
+}
+
+function releaseGatewayMainDbSnapshotForTransfer(snapshot) {
+  if (!snapshot) return;
+  snapshot.refCount = Math.max(0, Number(snapshot.refCount || 0) - 1);
+  if (Number(snapshot.refCount || 0) > 0) return;
+  disposeGatewayMainDbSnapshot(snapshot).catch((err) => {
+    console.warn(
+      "[replication] main DB snapshot release cleanup failed:",
+      String(err?.message || err || "unknown error"),
+    );
+  });
+}
+
+function cleanupGatewayMainDbSnapshotSync() {
+  const snapshot = _gatewayMainDbSnapshot;
+  _gatewayMainDbSnapshot = null;
+  if (!snapshot?.tempPath) return;
+  if (snapshot.cleanupTimer) {
+    clearTimeout(snapshot.cleanupTimer);
+    snapshot.cleanupTimer = null;
+  }
+  try {
+    fs.unlinkSync(snapshot.tempPath);
+  } catch (err) {
+    const code = String(err?.code || "").trim().toUpperCase();
+    if (code !== "ENOENT") {
+      console.warn(
+        "[replication] failed to remove cached main DB snapshot during shutdown:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
+  }
+}
+
+async function maybeCheckpointGatewayMainDbBeforeSnapshot() {
+  const nowTs = Date.now();
+  if (
+    nowTs - Number(_gatewayMainDbSnapshotLastCheckpointTs || 0) <
+    GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS
+  ) {
+    return;
+  }
+  _gatewayMainDbSnapshotLastCheckpointTs = nowTs;
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch (_) {
+    _gatewayMainDbSnapshotLastCheckpointTs = 0;
+  }
+}
+
+async function buildGatewayMainDbSnapshotForTransfer() {
+  await fs.promises.mkdir(DATA_DIR, { recursive: true });
+  const tempPath = path.join(
+    DATA_DIR,
+    `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
+  );
+  let todayReportRows = [];
+  try {
+    try {
+      poller.flushPending();
+    } catch (_) {
+      // Best effort only; backup still produces a consistent snapshot.
+    }
+    try {
+      // Refresh standby DB should stay read-only against the gateway's live DB.
+      // Compute current-day report rows in memory, then apply them only to the
+      // temporary snapshot so the downloaded file stays aligned with the UI.
+      todayReportRows = buildDailyReportRowsForDate(localDateStr(), {
+        persist: false,
+        includeTodayPartial: true,
+        refresh: false,
+      });
+    } catch (err) {
+      console.warn(
+        "[replication] standby snapshot today-report compute failed:",
+        String(err?.message || err || "unknown error"),
+      );
+    }
+    await maybeCheckpointGatewayMainDbBeforeSnapshot();
+    await db.backup(tempPath);
+    if (Array.isArray(todayReportRows) && todayReportRows.length > 0) {
+      try {
+        upsertDailyReportRowsToSnapshot(tempPath, todayReportRows);
+      } catch (err) {
+        console.warn(
+          "[replication] standby snapshot today-report apply failed:",
+          String(err?.message || err || "unknown error"),
+        );
+      }
+    }
+    const stat = await fs.promises.stat(tempPath);
+    const sha256 = await getCachedFileSha256(tempPath, stat);
+    return {
+      tempPath,
+      size: Math.max(0, Number(stat?.size || 0)),
+      mtimeMs: Math.max(0, Number(stat?.mtimeMs || Date.now())),
+      sha256,
+      expiresAt: Date.now() + GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS,
+      refCount: 0,
+      cleanupTimer: null,
+    };
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures after snapshot build errors.
+    }
+    throw err;
+  }
+}
+
+function createReplicationGzipStream() {
+  return zlib.createGzip({
+    level: zlib.constants.Z_BEST_SPEED,
+    chunkSize: REPLICATION_TRANSFER_STREAM_HWM,
+  });
+}
+
+function requestAcceptsGzip(req) {
+  const acceptEncoding = String(req?.headers?.["accept-encoding"] || "").toLowerCase();
+  return acceptEncoding.includes("gzip");
+}
+
+function shouldGzipReplicationStream(req, rawBytes) {
+  return requestAcceptsGzip(req) && Number(rawBytes || 0) >= REPLICATION_STREAM_GZIP_MIN_BYTES;
+}
+
+function sendJsonMaybeGzip(req, res, payload) {
+  const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  // Keep replication JSON uncompressed so all gateway<->remote transfer lanes
+  // follow the same low-CPU identity behavior.
+  res.setHeader("Content-Length", String(raw.length));
+  res.end(raw);
+}
+
+function encodeJsonRequestBody(payload) {
+  const raw = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
+  return {
+    headers: {
+    "Content-Type": "application/json",
+      "Content-Length": String(raw.length),
+    },
+    body: raw,
+  };
+}
+
+async function verifyTransferredFile(filePath, { expectedSize = 0, expectedSha256 = "" } = {}) {
+  const stat = await fs.promises.stat(filePath);
+  const actualSize = Math.max(0, Number(stat?.size || 0));
+  const sizeTarget = Math.max(0, Number(expectedSize || 0));
+  if (sizeTarget > 0 && actualSize !== sizeTarget) {
+    throw new Error(`Transfer size mismatch. Expected ${sizeTarget} bytes, received ${actualSize}.`);
+  }
+  const hashTarget = String(expectedSha256 || "").trim().toLowerCase();
+  if (hashTarget) {
+    const actualSha256 = String(await hashFileSha256(filePath) || "").trim().toLowerCase();
+    if (!actualSha256 || actualSha256 !== hashTarget) {
+      throw new Error("Transfer integrity check failed (SHA-256 mismatch).");
+    }
+  }
+  return { size: actualSize };
+}
+
+async function runTasksWithConcurrency(items, limit, handler) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length <= 0) return [];
+  const safeLimit = Math.max(1, Math.min(list.length, Number(limit || 1) || 1));
+  const results = new Array(list.length);
+  let cursor = 0;
+  let firstErr = null;
+
+  async function worker() {
+    while (true) {
+      if (firstErr) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= list.length) return;
+      try {
+        results[index] = await handler(list[index], index);
+      } catch (err) {
+        firstErr = firstErr || err;
+        return;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  if (firstErr) throw firstErr;
+  return results;
+}
+
 async function fetchWithRetry(url, options = {}, retryOptions = {}) {
   const attempts = Math.max(1, Number(retryOptions?.attempts || 1));
   const baseDelay = Math.max(0, Number(retryOptions?.baseDelayMs || 0));
   let lastErr = null;
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      return await fetch(url, options);
+      return await fetch(url, buildRemoteFetchOptions(url, options));
     } catch (err) {
       lastErr = err;
       const shouldRetry = i < attempts && isRetryableNetworkError(err);
       if (!shouldRetry) throw err;
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = baseDelay * i + jitter;
       await waitMs(delay);
     }
@@ -1685,18 +3927,20 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
 async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
   const attempts = Math.max(1, Number(REMOTE_INCREMENTAL_FETCH_RETRIES || 1));
   let lastErr = null;
+  const targetUrl = `${baseUrl}/api/replication/incremental`;
+  const encodedBody = encodeJsonRequestBody({ cursors });
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(`${baseUrl}/api/replication/incremental`, {
+      const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           ...buildRemoteProxyHeaders(),
+          ...encodedBody.headers,
         },
-        body: JSON.stringify({ cursors }),
+        body: encodedBody.body,
         timeout: REMOTE_INCREMENTAL_REQUEST_TIMEOUT_MS,
-      });
+      }));
       if (!r.ok) {
         const err = new Error(`Incremental replication HTTP ${r.status} ${r.statusText}`);
         err.httpStatus = Number(r.status || 0);
@@ -1718,7 +3962,7 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
       if (!retryable || i >= attempts) {
         throw err;
       }
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = REMOTE_INCREMENTAL_FETCH_RETRY_BASE_MS * i + jitter;
       await waitMs(delay);
     }
@@ -1730,18 +3974,20 @@ async function requestIncrementalDeltaWithRetry(baseUrl, cursors, onBytes) {
 async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
   const attempts = Math.max(1, Number(REMOTE_PUSH_FETCH_RETRIES || 1));
   let lastErr = null;
+  const targetUrl = `${baseUrl}/api/replication/push`;
+  const encodedBody = encodeJsonRequestBody({ delta: deltaPayload });
 
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const r = await fetch(`${baseUrl}/api/replication/push`, {
+      const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           ...buildRemoteProxyHeaders(),
+          ...encodedBody.headers,
         },
-        body: JSON.stringify({ delta: deltaPayload }),
+        body: encodedBody.body,
         timeout: REMOTE_REPLICATION_TIMEOUT_MS,
-      });
+      }));
       if (!r.ok) {
         let detail = "";
         try {
@@ -1775,7 +4021,7 @@ async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
       if (!retryable || i >= attempts) {
         throw err;
       }
-      const jitter = Math.floor(Math.random() * 250);
+      const jitter = Math.floor(Math.random() * 250 * i);
       const delay = REMOTE_PUSH_FETCH_RETRY_BASE_MS * i + jitter;
       await waitMs(delay);
     }
@@ -1784,13 +4030,14 @@ async function requestPushDeltaWithRetry(baseUrl, deltaPayload) {
   throw lastErr || new Error("Push delta request failed.");
 }
 
-async function pushDeltaInChunks(baseUrl, deltaPayload) {
+async function pushDeltaInChunks(baseUrl, deltaPayload, opts = {}) {
   const delta = deltaPayload && typeof deltaPayload === "object" ? deltaPayload : null;
   if (!delta || typeof delta !== "object") {
     throw new Error("Invalid push replication payload.");
   }
   const sourceTables = delta.tables && typeof delta.tables === "object" ? delta.tables : {};
   const totalRows = countReplicationRowsByTables(sourceTables);
+  const xferLabel = String(opts?.label || "Pushing local data");
   if (totalRows <= 0) {
     return {
       importedRows: 0,
@@ -1812,7 +4059,7 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
   let skippedRows = 0;
   let signature = String(delta?.meta?.signature || "");
 
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", totalBytes, sentBytes: 0, chunkCount: chunks.length, totalRows });
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "start", totalBytes, sentBytes: 0, chunkCount: chunks.length, totalRows, label: xferLabel });
 
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i];
@@ -1825,9 +4072,9 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
       skippedRows += Number(stats?.skippedRows || 0);
       signature = String(stats?.signature || signature || "");
       sentBytes += chunkBytes;
-      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "chunk", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, totalRows });
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "chunk", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, totalRows, label: xferLabel });
     } catch (err) {
-      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length });
+      broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "error", totalBytes, sentBytes, chunk: i + 1, chunkCount: chunks.length, label: xferLabel });
       const status = Number(err?.httpStatus || 0);
       const baseMsg =
         status === 413
@@ -1840,7 +4087,7 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
     }
   }
 
-  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", totalBytes, sentBytes, chunkCount: chunks.length, importedRows, totalRows });
+  broadcastUpdate({ type: "xfer_progress", dir: "tx", phase: "done", totalBytes, sentBytes, chunkCount: chunks.length, importedRows, totalRows, label: xferLabel });
 
   return {
     importedRows,
@@ -1848,6 +4095,982 @@ async function pushDeltaInChunks(baseUrl, deltaPayload) {
     chunkCount: chunks.length,
     totalRows,
     signature,
+  };
+}
+
+async function createGatewayMainDbSnapshotForTransfer() {
+  const nowTs = Date.now();
+  if (isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs)) {
+    return retainGatewayMainDbSnapshot(_gatewayMainDbSnapshot);
+  }
+  if (_gatewayMainDbSnapshot && !isGatewayMainDbSnapshotUsable(_gatewayMainDbSnapshot, nowTs)) {
+    disposeGatewayMainDbSnapshot(_gatewayMainDbSnapshot).catch(() => {});
+  }
+  if (_gatewayMainDbSnapshotBuildPromise) {
+    return retainGatewayMainDbSnapshot(await _gatewayMainDbSnapshotBuildPromise);
+  }
+  _gatewayMainDbSnapshotBuildPromise = (async () => {
+    const previousSnapshot = _gatewayMainDbSnapshot;
+    const nextSnapshot = await buildGatewayMainDbSnapshotForTransfer();
+    _gatewayMainDbSnapshot = nextSnapshot;
+    if (previousSnapshot && previousSnapshot !== nextSnapshot) {
+      previousSnapshot.expiresAt = 0;
+      disposeGatewayMainDbSnapshot(previousSnapshot).catch(() => {});
+    }
+    return nextSnapshot;
+  })();
+  try {
+    return retainGatewayMainDbSnapshot(await _gatewayMainDbSnapshotBuildPromise);
+  } finally {
+    _gatewayMainDbSnapshotBuildPromise = null;
+  }
+}
+
+async function refreshStandbyTodayShadowFromGateway(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  throwIfManualReplicationAborted(signal);
+  const base = getRemoteTodayEnergySourceKey(baseUrl);
+  if (!base) {
+    return { ok: false, rows: [], error: "Remote gateway URL is not configured." };
+  }
+  const targetUrl = `${base}/api/energy/today`;
+  try {
+    const r = await fetchWithRetry(
+      targetUrl,
+      buildReplicationTransferFetchOptions(targetUrl, {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: Math.min(REMOTE_REPLICATION_TIMEOUT_MS, 15000),
+        signal,
+      }),
+      {
+        attempts: Math.max(1, Number(REMOTE_LIVE_FETCH_RETRIES || 1)),
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
+    if (!r.ok) {
+      const err = new Error(`Standby today-energy HTTP ${r.status} ${r.statusText}`);
+      err.httpStatus = Number(r.status || 0);
+      throw err;
+    }
+    const rows = normalizeTodayEnergyRows(await r.json());
+    if (!rows.length) {
+      return { ok: false, rows: [], error: "Gateway returned no today-energy rows." };
+    }
+    const syncedAt = Date.now();
+    remoteBridgeState.todayEnergyRows = rows;
+    remoteBridgeState.lastTodayEnergyFetchTs = syncedAt;
+    remoteBridgeState.lastTodayEnergyShadowPersistTs = syncedAt;
+    updateRemoteTodayEnergyShadow(rows, syncedAt, { sourceKey: base });
+    return { ok: true, rows, syncedAt, fallbackUsed: false };
+  } catch (err) {
+    if (isManualReplicationAbortError(err)) {
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
+    }
+    let fallbackRows = normalizeTodayEnergyRows(remoteBridgeState.todayEnergyRows);
+    if (!fallbackRows.length) {
+      fallbackRows = getRemoteTodayEnergyShadowRows(localDateStr(), {
+        requireSourceMatch: true,
+        sourceKey: base,
+      });
+    }
+    if (fallbackRows.length) {
+      const syncedAt = Date.now();
+      updateRemoteTodayEnergyShadow(fallbackRows, syncedAt, { sourceKey: base });
+      return {
+        ok: false,
+        rows: fallbackRows,
+        syncedAt,
+        error: String(err?.message || err || "Standby today-energy refresh failed."),
+        fallbackUsed: true,
+      };
+    }
+    return {
+      ok: false,
+      rows: [],
+      error: String(err?.message || err || "Standby today-energy refresh failed."),
+      fallbackUsed: false,
+    };
+  }
+}
+
+async function pullMainDbFromRemote(baseUrl, opts = {}) {
+  const signal = opts?.signal || null;
+  const runControl = opts?.runControl || null;
+  throwIfManualReplicationAborted(signal);
+  if (remoteBridgeState.replicationRunning) {
+    return { skipped: true, reason: "in_progress" };
+  }
+  remoteBridgeState.replicationRunning = true;
+  remoteBridgeState.lastReplicationAttemptTs = Date.now();
+  remoteBridgeState.lastReplicationError = "";
+
+  const xferLabel = String(opts?.label || "Downloading main database");
+  const nextSyncDirection = String(opts?.syncDirection || "pull-main-db-staged");
+  const failureDirection = String(opts?.failureDirection || "pull-main-db-failed");
+  const tempPath = path.join(DATA_DIR, `adsi.db.download-${Date.now()}.tmp`);
+  let recvBytes = 0;
+  let totalBytes = 0;
+  let expectedSha256 = "";
+  let preserveRows = [];
+  let standbyTodayShadow = null;
+  let stagedTempName = "";
+  const transferMeta = {
+    priorityMode: Boolean(opts?.priorityMode),
+    livePaused: Boolean(opts?.livePaused),
+    stage: "main-db",
+    note: String(opts?.note || "").trim(),
+  };
+
+  try {
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    standbyTodayShadow = await refreshStandbyTodayShadowFromGateway(baseUrl, { signal });
+    if (!standbyTodayShadow?.ok && !standbyTodayShadow?.fallbackUsed) {
+      console.warn(
+        "[replication] standby today-energy baseline refresh failed:",
+        String(standbyTodayShadow?.error || "unknown error"),
+      );
+    }
+    preserveRows = capturePreservedMainDbSettings();
+    const targetUrl = `${baseUrl}/api/replication/main-db`;
+    const r = await fetch(targetUrl, buildReplicationTransferFetchOptions(targetUrl, {
+      method: "GET",
+      headers: buildRemoteProxyHeaders(),
+      timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+      signal,
+    }));
+    if (!r.ok) {
+      if (Number(r.status || 0) === 404) {
+        throw new Error("Gateway build does not expose main DB pull.");
+      }
+      throw new Error(`Main DB pull HTTP ${r.status} ${r.statusText}`);
+    }
+    totalBytes = Math.max(
+      0,
+      Number(
+        r.headers.get("x-main-db-size") ||
+          r.headers.get("content-length") ||
+          0,
+      ),
+    );
+    const targetMtimeMs = Math.max(
+      0,
+      Number(r.headers.get("x-main-db-mtime") || Date.now()),
+    );
+    expectedSha256 = String(r.headers.get("x-main-db-sha256") || "").trim().toLowerCase();
+
+    // Read gateway cursors so we can converge sync state after pull.
+    let gatewayCursors = null;
+    try {
+      const cursorsRaw = String(r.headers.get("x-main-db-cursors") || "").trim();
+      if (cursorsRaw && cursorsRaw !== "{}") {
+        gatewayCursors = normalizeReplicationCursors(JSON.parse(cursorsRaw));
+      }
+    } catch (_) { /* ignore malformed cursor header */ }
+
+    const body = r.body;
+    if (!body) {
+      throw new Error("Main DB pull returned an empty body.");
+    }
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes,
+      chunkCount: 1,
+      label: xferLabel,
+      ...transferMeta,
+    });
+
+    body.on("data", (chunk) => {
+      const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      if (bytes <= 0) return;
+      recvBytes += bytes;
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes,
+        totalBytes,
+        chunk: 1,
+        chunkCount: 1,
+        label: xferLabel,
+        ...transferMeta,
+      });
+    });
+
+    await pipeline(body, createTransferWriteStream(tempPath));
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: totalBytes > 0 ? totalBytes : recvBytes,
+      expectedSha256,
+    });
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      await fs.promises.utimes(tempPath, mtime, mtime);
+    }
+    const staged = stagePendingMainDbReplacement({
+      tempName: path.basename(tempPath),
+      size: Math.max(0, Number(verified?.size || totalBytes || recvBytes || 0)),
+      mtimeMs: targetMtimeMs,
+      preservedSettings: preserveRows,
+    });
+    stagedTempName = String(staged?.tempName || path.basename(tempPath)).trim();
+    trackManualReplicationStagedMainDb(runControl, stagedTempName);
+    throwIfManualReplicationAborted(signal);
+
+    remoteBridgeState.lastReplicationTs = Date.now();
+    remoteBridgeState.lastReplicationRows = 0;
+    remoteBridgeState.lastReplicationSignature = "";
+    remoteBridgeState.lastReplicationError = "";
+    remoteBridgeState.lastSyncDirection = nextSyncDirection;
+
+    // Converge replication cursors with gateway so incremental sync starts fresh.
+    if (gatewayCursors) {
+      remoteBridgeState.replicationCursors = gatewayCursors;
+      try { saveReplicationCursorsSetting(gatewayCursors); } catch (_) { /* non-fatal */ }
+    }
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes,
+      totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: xferLabel,
+      ...transferMeta,
+    });
+
+    return {
+      ok: true,
+      staged: true,
+      size: Math.max(0, Number(staged?.size || recvBytes || 0)),
+      mtimeMs: Math.max(0, Number(staged?.mtimeMs || targetMtimeMs || 0)),
+      standbyTodayShadow:
+        standbyTodayShadow && typeof standbyTodayShadow === "object"
+          ? {
+              ok: Boolean(standbyTodayShadow.ok),
+              rows: Array.isArray(standbyTodayShadow.rows)
+                ? Number(standbyTodayShadow.rows.length || 0)
+                : 0,
+              fallbackUsed: Boolean(standbyTodayShadow.fallbackUsed),
+              error: String(standbyTodayShadow.error || ""),
+            }
+          : null,
+      preservedSettings: preserveRows
+        .map((row) => String(row?.key || ""))
+        .filter(Boolean),
+    };
+  } catch (err) {
+    if (stagedTempName) {
+      try {
+        discardPendingMainDbReplacement(stagedTempName);
+      } catch (_) {
+        // Ignore staged manifest cleanup failures.
+      }
+      if (
+        runControl &&
+        typeof runControl === "object" &&
+        String(runControl.stagedMainTempName || "").trim() === stagedTempName
+      ) {
+        runControl.stagedMainTempName = "";
+      }
+    }
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    if (isManualReplicationAbortError(err)) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "cancelled",
+        recvBytes,
+        totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+        chunkCount: 1,
+        label: xferLabel,
+        ...transferMeta,
+      });
+      remoteBridgeState.lastReplicationError = "Standby DB refresh cancelled by operator.";
+      if (remoteBridgeState.lastSyncDirection !== "push-failed") {
+        remoteBridgeState.lastSyncDirection = "pull-main-db-cancelled";
+      }
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
+    }
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "error",
+      recvBytes,
+      totalBytes: totalBytes > 0 ? totalBytes : recvBytes,
+      chunkCount: 1,
+      label: xferLabel,
+      ...transferMeta,
+    });
+    remoteBridgeState.lastReplicationError = String(err?.message || err);
+    if (remoteBridgeState.lastSyncDirection !== "push-failed") {
+      remoteBridgeState.lastSyncDirection = failureDirection;
+    }
+    return { ok: false, error: remoteBridgeState.lastReplicationError };
+  } finally {
+    remoteBridgeState.replicationRunning = false;
+  }
+}
+
+function shouldPullArchiveFile(remoteMeta, localMeta) {
+  if (!localMeta) return true;
+  const remoteSize = Math.max(0, Number(remoteMeta?.size || 0));
+  const localSize = Math.max(0, Number(localMeta?.size || 0));
+  const remoteMtime = Math.max(0, Number(remoteMeta?.mtimeMs || 0));
+  const localMtime = Math.max(0, Number(localMeta?.mtimeMs || 0));
+  if (remoteSize !== localSize) return true;
+  return remoteMtime > localMtime + 2000;
+}
+
+function shouldPushArchiveFile(localMeta, remoteMeta) {
+  if (!remoteMeta) return true;
+  const localSize = Math.max(0, Number(localMeta?.size || 0));
+  const remoteSize = Math.max(0, Number(remoteMeta?.size || 0));
+  const localMtime = Math.max(0, Number(localMeta?.mtimeMs || 0));
+  const remoteMtime = Math.max(0, Number(remoteMeta?.mtimeMs || 0));
+  if (localSize > remoteSize) return true;
+  if (localSize < remoteSize) return false;
+  return localMtime > remoteMtime + 2000;
+}
+
+async function fetchRemoteArchiveManifest(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  throwIfManualReplicationAborted(signal);
+  const targetUrl = `${baseUrl}/api/replication/archive-manifest`;
+  const r = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
+    method: "GET",
+    headers: buildRemoteProxyHeaders(),
+    timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    signal,
+  }));
+  if (!r.ok) {
+    if (Number(r.status || 0) === 404) {
+      return { ok: false, unsupported: true, error: "Remote build does not expose archive sync." };
+    }
+    throw new Error(`Archive manifest HTTP ${r.status} ${r.statusText}`);
+  }
+  const data = await r.json();
+  if (!data?.ok) {
+    throw new Error(String(data?.error || "Invalid archive manifest payload."));
+  }
+  const files = Array.isArray(data?.manifest) ? data.manifest : [];
+  return {
+    ok: true,
+    manifest: files
+      .map((entry) => {
+        const name = sanitizeArchiveFileName(entry?.name || "");
+        if (!name) return null;
+        return {
+          name,
+          monthKey: monthKeyFromArchiveFileName(name),
+          size: Math.max(0, Number(entry?.size || 0)),
+          mtimeMs: Math.max(0, Number(entry?.mtimeMs || 0)),
+        };
+      })
+      .filter(Boolean),
+  };
+}
+
+async function downloadArchiveFileFromRemote(baseUrl, fileMeta, onBytes, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  throwIfManualReplicationAborted(signal);
+  const name = sanitizeArchiveFileName(fileMeta?.name || "");
+  if (!name) throw new Error("Invalid archive file name.");
+  const monthKey = monthKeyFromArchiveFileName(name);
+  const tempPath = path.join(ARCHIVE_DIR, `${name}.download-${Date.now()}.tmp`);
+  await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
+  closeArchiveDbForMonth(monthKey);
+
+  const RESUME_MAX_ATTEMPTS = 3;
+  let expectedSha256 = "";
+  let resumeOffset = 0;
+  let stagedTempName = "";
+
+  try {
+    for (let attempt = 1; attempt <= RESUME_MAX_ATTEMPTS; attempt += 1) {
+      const targetUrl = `${baseUrl}/api/replication/archive-download?file=${encodeURIComponent(name)}`;
+      const reqHeaders = { ...buildRemoteProxyHeaders() };
+
+      // On retry, try to resume from where we left off.
+      if (resumeOffset > 0) {
+        reqHeaders["Range"] = `bytes=${resumeOffset}-`;
+      }
+
+      let r;
+      try {
+        r = await fetch(
+          targetUrl,
+          buildReplicationTransferFetchOptions(targetUrl, {
+            method: "GET",
+            headers: reqHeaders,
+            timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+            signal,
+          }),
+        );
+      } catch (fetchErr) {
+        // On network error, check partial file size for resume.
+        if (attempt < RESUME_MAX_ATTEMPTS && isRetryableNetworkError(fetchErr)) {
+          try {
+            const partialStat = await fs.promises.stat(tempPath);
+            resumeOffset = Math.max(0, Number(partialStat.size || 0));
+          } catch (_) {
+            resumeOffset = 0;
+          }
+          const jitter = Math.floor(Math.random() * 500 * attempt);
+          await waitMs(1000 * attempt + jitter);
+          continue;
+        }
+        throw fetchErr;
+      }
+
+      // If server doesn't support range (416 or 200 on range request), restart from scratch.
+      if (resumeOffset > 0 && r.status === 416) {
+        resumeOffset = 0;
+        try { await fs.promises.unlink(tempPath); } catch (_) { /* ignore */ }
+        continue;
+      }
+      if (resumeOffset > 0 && r.status === 200) {
+        // Server ignored Range header — restart from scratch.
+        resumeOffset = 0;
+        try { await fs.promises.unlink(tempPath); } catch (_) { /* ignore */ }
+      }
+
+      throwIfManualReplicationAborted(signal);
+      if (!r.ok && r.status !== 206) {
+        throw new Error(`Archive download HTTP ${r.status} ${r.statusText}`);
+      }
+      expectedSha256 = String(r.headers.get("x-archive-sha256") || "").trim().toLowerCase();
+      const body = r.body;
+      if (!body) {
+        throw new Error("Archive download returned an empty body.");
+      }
+      body.on("data", (chunk) => {
+        const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+        if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
+      });
+
+      // On 206 Partial Content, append to existing temp file; otherwise overwrite.
+      const writeFlags = r.status === 206 ? "a" : "w";
+      const writeStream = fs.createWriteStream(tempPath, {
+        flags: writeFlags,
+        highWaterMark: REPLICATION_TRANSFER_STREAM_HWM,
+      });
+
+      try {
+        await pipeline(body, writeStream);
+      } catch (streamErr) {
+        if (attempt < RESUME_MAX_ATTEMPTS && isRetryableNetworkError(streamErr)) {
+          try {
+            const partialStat = await fs.promises.stat(tempPath);
+            resumeOffset = Math.max(0, Number(partialStat.size || 0));
+          } catch (_) {
+            resumeOffset = 0;
+          }
+          const jitter = Math.floor(Math.random() * 500 * attempt);
+          await waitMs(1000 * attempt + jitter);
+          continue;
+        }
+        throw streamErr;
+      }
+
+      // Download completed — break out of retry loop.
+      break;
+    }
+
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: Math.max(0, Number(fileMeta?.size || 0)),
+      expectedSha256,
+    });
+    const targetMtimeMs = Math.max(0, Number(fileMeta?.mtimeMs || 0));
+    if (targetMtimeMs > 0) {
+      const mtime = new Date(targetMtimeMs);
+      await fs.promises.utimes(tempPath, mtime, mtime);
+    }
+    const staged = stagePendingArchiveReplacement({
+      name,
+      monthKey,
+      tempName: path.basename(tempPath),
+      size: Math.max(0, Number(verified?.size || fileMeta?.size || 0)),
+      mtimeMs: targetMtimeMs,
+    });
+    stagedTempName = String(staged?.tempName || path.basename(tempPath)).trim();
+    trackManualReplicationStagedArchive(
+      runControl,
+      name,
+      stagedTempName,
+    );
+    throwIfManualReplicationAborted(signal);
+  } catch (err) {
+    if (stagedTempName) {
+      try {
+        discardPendingArchiveReplacement(name, stagedTempName);
+      } catch (_) {
+        // Ignore staged archive cleanup failures.
+      }
+      if (runControl?.stagedArchiveEntries instanceof Map) {
+        runControl.stagedArchiveEntries.delete(name);
+      }
+    }
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    throw err;
+  }
+  return {
+    name,
+    monthKey,
+    size: Math.max(0, Number(fileMeta?.size || 0)),
+    mtimeMs: Math.max(0, Number(fileMeta?.mtimeMs || 0)),
+  };
+}
+
+async function uploadArchiveFileToRemote(baseUrl, fileMeta, onBytes) {
+  const name = sanitizeArchiveFileName(fileMeta?.name || "");
+  if (!name) throw new Error("Invalid archive file name.");
+  const monthKey = monthKeyFromArchiveFileName(name);
+  const resolved = resolveArchiveFileForTransfer(name);
+  if (!resolved?.path) {
+    throw new Error("Archive file not found.");
+  }
+  const filePath = resolved.path;
+  prepareArchiveDbForTransfer(monthKey);
+  const stat = await fs.promises.stat(filePath);
+  const sha256 = await getCachedFileSha256(filePath, stat);
+  const targetUrl = `${baseUrl}/api/replication/archive-upload?file=${encodeURIComponent(name)}`;
+  const stream = createTransferReadStream(filePath);
+  stream.on("data", (chunk) => {
+    const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+    if (bytes > 0 && typeof onBytes === "function") onBytes(bytes);
+  });
+
+  const r = await fetch(
+    targetUrl,
+    buildRemoteFetchOptions(targetUrl, {
+      method: "POST",
+      headers: {
+        ...buildRemoteProxyHeaders(),
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(Math.max(0, Number(stat.size || 0))),
+        "x-archive-size": String(Math.max(0, Number(stat.size || 0))),
+        "x-archive-mtime": String(
+          Math.max(0, Number(fileMeta?.mtimeMs || stat.mtimeMs || Date.now())),
+        ),
+        "x-archive-sha256": sha256,
+      },
+      body: stream,
+      timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    }),
+  );
+  if (!r.ok) {
+    let detail = "";
+    try {
+      detail = String(await r.text()).trim();
+    } catch (_) {
+      detail = "";
+    }
+    throw new Error(
+      detail
+        ? `Archive upload HTTP ${r.status} ${r.statusText}: ${detail}`
+        : `Archive upload HTTP ${r.status} ${r.statusText}`,
+    );
+  }
+  const data = await r.json();
+  if (!data?.ok) {
+    throw new Error(String(data?.error || "Archive upload failed."));
+  }
+  return {
+    name,
+    monthKey,
+    size: Math.max(0, Number(stat.size || 0)),
+    mtimeMs: Math.max(0, Number(fileMeta?.mtimeMs || stat.mtimeMs || 0)),
+  };
+}
+
+async function pullArchiveFilesFromRemote(baseUrl, options = {}) {
+  const signal = options?.signal || null;
+  const runControl = options?.runControl || null;
+  throwIfManualReplicationAborted(signal);
+  const forceAll = Boolean(options?.forceAll);
+  const concurrency = Math.max(
+    1,
+    Math.min(4, Number(options?.concurrency || REMOTE_ARCHIVE_TRANSFER_CONCURRENCY) || 1),
+  );
+  const transferMeta = {
+    priorityMode: Boolean(options?.priorityMode),
+    livePaused: Boolean(options?.livePaused),
+    stage: "archive",
+    note: String(options?.note || "").trim(),
+  };
+  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl, { signal });
+  if (!remoteManifestRes.ok) {
+    return {
+      ok: false,
+      unsupported: Boolean(remoteManifestRes.unsupported),
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      error: String(remoteManifestRes.error || "Archive manifest unavailable."),
+    };
+  }
+
+  const remoteManifest = Array.isArray(remoteManifestRes.manifest)
+    ? remoteManifestRes.manifest
+    : [];
+  const localMap = new Map(
+    listLocalArchiveManifest().map((entry) => [String(entry.name || ""), entry]),
+  );
+  const toPull = forceAll
+    ? remoteManifest.slice()
+    : remoteManifest.filter((entry) =>
+        shouldPullArchiveFile(entry, localMap.get(String(entry.name || ""))),
+      );
+  const totalBytes = toPull.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  let transferredBytes = 0;
+  let transferredFiles = 0;
+  const transferredNames = [];
+  if (toPull.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes,
+      chunkCount: toPull.length,
+      label: "Downloading archive",
+      ...transferMeta,
+    });
+  }
+
+  try {
+    await runTasksWithConcurrency(
+      toPull,
+      concurrency,
+      async (fileMeta) => {
+        throwIfManualReplicationAborted(signal);
+        await downloadArchiveFileFromRemote(baseUrl, fileMeta, (bytes) => {
+          transferredBytes += Math.max(0, Number(bytes || 0));
+          const activeStep = Math.min(toPull.length, Math.max(1, transferredFiles + 1));
+          broadcastUpdate({
+            type: "xfer_progress",
+            dir: "rx",
+            phase: "chunk",
+            recvBytes: transferredBytes,
+            totalBytes,
+            chunk: activeStep,
+            chunkCount: toPull.length,
+            label: "Downloading archive",
+            ...transferMeta,
+          });
+        }, {
+          ...options,
+          signal,
+          runControl,
+        });
+        transferredFiles += 1;
+        transferredNames.push(fileMeta.name);
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "chunk",
+          recvBytes: transferredBytes,
+          totalBytes,
+          chunk: transferredFiles,
+          chunkCount: toPull.length,
+          label: "Downloading archive",
+          ...transferMeta,
+        });
+      },
+    );
+  } catch (err) {
+    if (isManualReplicationAbortError(err)) {
+      if (toPull.length > 0) {
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "rx",
+          phase: "cancelled",
+          recvBytes: transferredBytes,
+          totalBytes,
+          chunkCount: toPull.length,
+          label: "Downloading archive",
+          ...transferMeta,
+        });
+      }
+      throw createManualReplicationAbortError(
+        "Standby DB refresh cancelled by operator.",
+      );
+    }
+    if (toPull.length > 0) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "error",
+        recvBytes: transferredBytes,
+        totalBytes,
+        chunkCount: toPull.length,
+        label: "Downloading archive",
+        ...transferMeta,
+      });
+    }
+    throw err;
+  }
+
+  if (toPull.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes: transferredBytes,
+      totalBytes,
+      chunkCount: toPull.length,
+      label: "Downloading archive",
+      ...transferMeta,
+    });
+  }
+
+  return {
+    ok: true,
+    availableFiles: remoteManifest.length,
+    transferredFiles,
+    skippedFiles: Math.max(0, remoteManifest.length - transferredFiles),
+    totalBytes,
+    transferredBytes,
+    files: transferredNames,
+  };
+}
+
+async function pushArchiveFilesToRemote(baseUrl) {
+  const remoteManifestRes = await fetchRemoteArchiveManifest(baseUrl);
+  if (!remoteManifestRes.ok) {
+    return {
+      ok: false,
+      unsupported: Boolean(remoteManifestRes.unsupported),
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      error: String(remoteManifestRes.error || "Archive manifest unavailable."),
+    };
+  }
+
+  const remoteMap = new Map(
+    (Array.isArray(remoteManifestRes.manifest) ? remoteManifestRes.manifest : []).map(
+      (entry) => [String(entry.name || ""), entry],
+    ),
+  );
+  const localManifest = listLocalArchiveManifest();
+  const toPush = localManifest.filter((entry) =>
+    shouldPushArchiveFile(entry, remoteMap.get(String(entry.name || ""))),
+  );
+  const totalBytes = toPush.reduce(
+    (sum, entry) => sum + Math.max(0, Number(entry?.size || 0)),
+    0,
+  );
+  let transferredBytes = 0;
+  let transferredFiles = 0;
+  const transferredNames = [];
+  if (toPush.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "start",
+      sentBytes: 0,
+      totalBytes,
+      chunkCount: toPush.length,
+      label: "Pushing archive",
+    });
+  }
+
+  try {
+    await runTasksWithConcurrency(
+      toPush,
+      REMOTE_ARCHIVE_TRANSFER_CONCURRENCY,
+      async (fileMeta) => {
+        await uploadArchiveFileToRemote(baseUrl, fileMeta, (bytes) => {
+          transferredBytes += Math.max(0, Number(bytes || 0));
+          const activeStep = Math.min(toPush.length, Math.max(1, transferredFiles + 1));
+          broadcastUpdate({
+            type: "xfer_progress",
+            dir: "tx",
+            phase: "chunk",
+            sentBytes: transferredBytes,
+            totalBytes,
+            chunk: activeStep,
+            chunkCount: toPush.length,
+            label: "Pushing archive",
+          });
+        });
+        transferredFiles += 1;
+        transferredNames.push(fileMeta.name);
+        broadcastUpdate({
+          type: "xfer_progress",
+          dir: "tx",
+          phase: "chunk",
+          sentBytes: transferredBytes,
+          totalBytes,
+          chunk: transferredFiles,
+          chunkCount: toPush.length,
+          label: "Pushing archive",
+        });
+      },
+    );
+  } catch (err) {
+    if (toPush.length > 0) {
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "tx",
+        phase: "error",
+        sentBytes: transferredBytes,
+        totalBytes,
+        chunkCount: toPush.length,
+        label: "Pushing archive",
+      });
+    }
+    throw err;
+  }
+
+  if (toPush.length > 0) {
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "done",
+      sentBytes: transferredBytes,
+      totalBytes,
+      chunkCount: toPush.length,
+      label: "Pushing archive",
+    });
+  }
+
+  return {
+    ok: true,
+    availableFiles: localManifest.length,
+    transferredFiles,
+    skippedFiles: Math.max(0, localManifest.length - transferredFiles),
+    totalBytes,
+    transferredBytes,
+    files: transferredNames,
+  };
+}
+
+function startManualReplicationJob(action, options, runner) {
+  if (isManualReplicationJobRunning() || remoteBridgeState.replicationRunning) {
+    return {
+      started: false,
+      reason: "in_progress",
+      job: snapshotManualReplicationJob(),
+    };
+  }
+  const jobId = `${String(action || "sync")}-${Date.now()}`;
+  const runControl = createManualReplicationRunControl(jobId, action);
+  manualReplicationRunControl = runControl;
+  updateManualReplicationJob({
+    id: jobId,
+    action: String(action || "sync"),
+    status: "queued",
+    running: true,
+    includeArchive: options?.includeArchive !== false,
+    startedAt: Date.now(),
+    finishedAt: 0,
+    error: "",
+    summary: String(options?.summary || "Queued"),
+    needsRestart: false,
+    cancelRequested: false,
+    result: null,
+  });
+
+  setTimeout(async () => {
+    try {
+      throwIfManualReplicationAborted(
+        runControl?.controller?.signal || null,
+        "Standby DB refresh cancelled by operator.",
+      );
+      updateManualReplicationJob({
+        status: "running",
+        cancelRequested: false,
+        summary: String(options?.runningSummary || "Running"),
+      });
+      const result = await runner(runControl);
+      updateManualReplicationJob({
+        status: "completed",
+        running: false,
+        finishedAt: Date.now(),
+        summary: String(
+          result?.summary ||
+            `${String(action || "sync")} complete. Restart the app to refresh in-memory state.`,
+        ),
+        error: "",
+        errorCode: "",
+        needsRestart: Boolean(result?.needsRestart),
+        livePaused: false,
+        cancelRequested: false,
+        result:
+          result && typeof result === "object"
+            ? { ...result }
+            : null,
+      });
+    } catch (err) {
+      if (isManualReplicationAbortError(err)) {
+        discardTrackedManualReplicationArtifacts(runControl);
+        updateManualReplicationJob({
+          status: "cancelled",
+          running: false,
+          finishedAt: Date.now(),
+          summary: String(err?.message || "Standby DB refresh cancelled."),
+          error: "",
+          errorCode: MANUAL_REPLICATION_CANCEL_CODE,
+          needsRestart: false,
+          livePaused: false,
+          cancelRequested: false,
+          result: null,
+        });
+        return;
+      }
+      discardTrackedManualReplicationArtifacts(runControl);
+      updateManualReplicationJob({
+        status: "failed",
+        running: false,
+        finishedAt: Date.now(),
+        summary: `${String(action || "sync")} failed`,
+        error: String(err?.message || err),
+        errorCode: String(err?.code || ""),
+        needsRestart: false,
+        livePaused: false,
+        cancelRequested: false,
+        result: null,
+      });
+    } finally {
+      if (manualReplicationRunControl === runControl) {
+        manualReplicationRunControl = null;
+      }
+    }
+  }, 25);
+
+  return {
+    started: true,
+    job: snapshotManualReplicationJob(),
   };
 }
 
@@ -1859,6 +5082,34 @@ function buildRemoteProxyHeaders(tokenOverride = "") {
     headers.Authorization = `Bearer ${token}`;
   }
   return headers;
+}
+
+// Centralized proxy timeout rules: [pathPrefix, timeoutMs]
+// Ordered from most specific to least specific; first match wins.
+const PROXY_TIMEOUT_RULES = [
+  ["/api/export/",       600000],  // 10 min — large CSV/Excel exports
+  ["/api/report/",        45000],  // 45 s  — daily report generation
+  ["/api/replication/",    45000],  // 45 s  — replication sync
+  ["/api/write",          60000],  // 60 s  — control writes, including batched inverter actions
+  ["/api/plant-cap/",      60000],  // 60 s  — sequential plant cap release/control actions
+  ["/api/analytics/",      20000],  // 20 s  — analytics queries
+  ["/api/energy/5min",     20000],  // 20 s  — energy range queries
+  ["/api/alarms",          20000],  // 20 s  — alarm queries
+  ["/api/audit",           20000],  // 20 s  — audit queries
+  ["/api/chat/",           10000],  // 10 s  — chat messaging
+  ["/api/backup/",         60000],  // 60 s  — cloud backup operations
+];
+
+function resolveProxyTimeout(targetUrl) {
+  try {
+    const p = String(new URL(String(targetUrl || "")).pathname || "").toLowerCase();
+    for (const [prefix, ms] of PROXY_TIMEOUT_RULES) {
+      if (p.startsWith(prefix)) return Math.max(REMOTE_FETCH_TIMEOUT_MS, ms);
+    }
+  } catch (_) {
+    // Malformed URL — fall through to default.
+  }
+  return REMOTE_FETCH_TIMEOUT_MS;
 }
 
 async function proxyToRemote(req, res, tokenOverride = "") {
@@ -1876,35 +5127,19 @@ async function proxyToRemote(req, res, tokenOverride = "") {
 
   const target = `${base}${req.originalUrl}`;
   const method = String(req.method || "GET").toUpperCase();
-  let timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
-  try {
-    const u = new URL(target);
-    const p = String(u.pathname || "").toLowerCase();
-    if (p.startsWith("/api/export/")) timeoutMs = Math.max(timeoutMs, 180000);
-    else if (p.startsWith("/api/report/")) timeoutMs = Math.max(timeoutMs, 45000);
-    else if (
-      p.startsWith("/api/analytics/") ||
-      p.startsWith("/api/energy/5min") ||
-      p.startsWith("/api/alarms") ||
-      p.startsWith("/api/audit")
-    ) {
-      timeoutMs = Math.max(timeoutMs, 20000);
-    }
-  } catch (_) {
-    timeoutMs = REMOTE_FETCH_TIMEOUT_MS;
-  }
+  const timeoutMs = resolveProxyTimeout(target);
   const headers = {
     ...buildRemoteProxyHeaders(tokenOverride),
   };
   const hasBody = !["GET", "HEAD"].includes(method);
   if (hasBody) headers["Content-Type"] = "application/json";
   try {
-    const upstream = await fetch(target, {
+    const upstream = await fetch(target, buildRemoteFetchOptions(target, {
       method,
       headers,
       body: hasBody ? JSON.stringify(req.body || {}) : undefined,
       timeout: timeoutMs,
-    });
+    }));
     const contentType = String(upstream.headers.get("content-type") || "");
     const bodyText = await upstream.text();
     res.status(upstream.status);
@@ -1923,23 +5158,616 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   }
 }
 
-async function runRemoteStartupAutoSync(baseUrl) {
-  const reconcile = await reconcileRemoteBeforePull(baseUrl);
-  if (!reconcile?.ok) {
-    const reason = String(reconcile?.error || "Reconciliation failed.");
-    if (reconcile?.localNewer) {
-      remoteBridgeState.lastReplicationError =
-        `Startup auto sync blocked: local data is newer but push reconciliation failed (${reason}).`;
+async function proxyWriteToRemote(req, res, targetPath = "/api/write") {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res
+      .status(503)
+      .json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
+  }
+
+  const path =
+    String(targetPath || "/api/write").trim() || "/api/write";
+  const target = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  const payload =
+    req?.body && typeof req.body === "object"
+      ? { ...req.body }
+      : {};
+  try {
+    const upstream = await fetch(
+      target,
+      buildRemoteFetchOptions(
+        target,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-control-priority": "high",
+            ...buildRemoteProxyHeaders(),
+          },
+          body: JSON.stringify(payload),
+          timeout: REMOTE_CONTROL_PROXY_TIMEOUT_MS,
+        },
+        "control",
+      ),
+    );
+    const text = await upstream.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch (_) {
+      parsed = null;
+    }
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        ok: false,
+        error: String(parsed?.error || text || `Remote control failed (${upstream.status} ${upstream.statusText})`),
+      });
+    }
+    return res.json(parsed && typeof parsed === "object" ? parsed : { ok: true });
+  } catch (err) {
+    const msg = String(err?.message || err || "").trim();
+    const friendly = /timed out|timeout/i.test(msg)
+      ? `Gateway control path timeout after ${REMOTE_CONTROL_PROXY_TIMEOUT_MS} ms.`
+      : msg;
+    return res.status(502).json({
+      ok: false,
+      error: `Remote control request failed: ${friendly}`,
+    });
+  }
+}
+
+async function performLocalWriteRequest(url, upstreamPayload) {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(upstreamPayload),
+      timeout: WRITE_ENGINE_TIMEOUT_MS,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(
+        data.error ||
+          data.msg ||
+          `Upstream write failed (${r.status} ${r.statusText})`,
+      );
+    }
+    return data;
+  } catch (err) {
+    const msg = String(err?.message || err || "").trim();
+    if (/timed out|timeout/i.test(msg)) {
+      throw new Error(
+        `Control engine timeout after ${WRITE_ENGINE_TIMEOUT_MS} ms.`,
+      );
+    }
+    if (/econnrefused|socket hang up|fetch failed/i.test(msg.toLowerCase())) {
+      throw new Error("Control engine is temporarily unavailable.");
+    }
+    throw err;
+  }
+}
+
+function resolveBatchWriteUrl(urlRaw) {
+  const fallback = `${INVERTER_ENGINE_BASE_URL}/write/batch`;
+  const raw = String(urlRaw || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw);
+    const pathname = String(parsed.pathname || "");
+    if (/\/write\/?$/i.test(pathname)) {
+      parsed.pathname = pathname.replace(/\/write\/?$/i, "/write/batch");
     } else {
-      remoteBridgeState.lastReplicationError = `Startup reconciliation failed: ${reason}`;
-      remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
+      parsed.pathname = `${pathname.replace(/\/+$/, "")}/batch`;
+    }
+    return parsed.toString();
+  } catch (_) {
+    if (/\/write\/?$/i.test(raw)) return raw.replace(/\/write\/?$/i, "/write/batch");
+    return `${raw.replace(/\/+$/, "")}/batch`;
+  }
+}
+
+async function performLocalWriteBatchRequest(url, upstreamPayload) {
+  const batchUrl = resolveBatchWriteUrl(url);
+  try {
+    const r = await fetch(batchUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(upstreamPayload),
+      timeout: WRITE_ENGINE_TIMEOUT_MS,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(
+        data.error ||
+          data.msg ||
+          `Upstream batch write failed (${r.status} ${r.statusText})`,
+      );
+    }
+    return data;
+  } catch (err) {
+    const msg = String(err?.message || err || "").trim();
+    if (/timed out|timeout/i.test(msg)) {
+      throw new Error(
+        `Control engine timeout after ${WRITE_ENGINE_TIMEOUT_MS} ms.`,
+      );
+    }
+    if (/econnrefused|socket hang up|fetch failed/i.test(msg.toLowerCase())) {
+      throw new Error("Control engine is temporarily unavailable.");
+    }
+    throw err;
+  }
+}
+
+function isAuthorizedPlantWideControl({ authKey, authToken } = {}) {
+  return (
+    isValidPlantWideAuthSession(authToken) || isValidPlantWideAuthKey(authKey)
+  );
+}
+
+function getWriteActionLabel(value) {
+  const numeric = Number(value);
+  if (numeric === 1) return "START";
+  if (numeric === 0) return "STOP";
+  if (numeric === 2) return "RESET";
+  return "WRITE";
+}
+
+function sanitizeWriteUnits(unitsRaw, nodeMax) {
+  const source = Array.isArray(unitsRaw) ? unitsRaw : [];
+  const out = [];
+  for (const unitRaw of source) {
+    const unitNum = Number(unitRaw);
+    if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) continue;
+    const normalized = Math.trunc(unitNum);
+    if (!out.includes(normalized)) out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeBatchWriteResults(units, data) {
+  const safeUnits = Array.isArray(units) ? units : [];
+  const rawResults = Array.isArray(data?.results) ? data.results : [];
+  return safeUnits.map((unit) => {
+    const match = rawResults.find((entry) => Number(entry?.unit) === Number(unit));
+    return {
+      unit: Number(unit),
+      ok: Boolean(match?.ok),
+    };
+  });
+}
+
+async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
+  const {
+    inverter,
+    node,
+    unit,
+    value,
+    scope,
+    operator,
+    authKey,
+    authToken,
+    priority,
+  } = bodyRaw || {};
+  const skipBulkAuth = Boolean(options?.skipBulkAuth);
+  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
+  const invNum = Number(inverter);
+  const unitNum = Number(unit ?? node);
+  const valueNum = Number(value);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+
+  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
+    const err = new Error("Invalid inverter");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) {
+    const err = new Error("Invalid unit/node");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
+    const err = new Error("Invalid value");
+    err.status = 400;
+    throw err;
+  }
+
+  const scopeNorm = normalizeWriteScope(scope || "single");
+  const isBulkScope =
+    scopeNorm === "all" || scopeNorm === "selected" || scopeNorm === "plant-cap";
+  if (
+    !skipBulkAuth &&
+    isBulkScope &&
+    !isAuthorizedPlantWideControl({ authKey, authToken })
+  ) {
+    const err = new Error("Unauthorized bulk command");
+    err.status = 403;
+    throw err;
+  }
+
+  const operatorName =
+    String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
+  const cfg = loadIpConfigFromDb();
+  const targetIp = String(
+    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
+  ).trim();
+  const ip = targetIp || "";
+  const upstreamPayload = { inverter: invNum, unit: unitNum, value: valueNum };
+  const action = getWriteActionLabel(valueNum);
+  try {
+    const data = await enqueueWriteCommand(
+      scopeNorm,
+      () => performLocalWriteRequest(url, upstreamPayload),
+      { priority, queueKey: ip || `inv-${invNum}` },
+    );
+    logControlAction({
+      operator: operatorName,
+      inverter: invNum,
+      node: unitNum || 0,
+      action,
+      scope: scopeNorm,
+      result: "ok",
+      ip,
+    });
+    if (
+      plantCapController &&
+      scopeNorm !== "plant-cap" &&
+      typeof plantCapController.handleManualWrite === "function"
+    ) {
+      plantCapController.handleManualWrite({
+        scope: scopeNorm,
+        inverter: invNum,
+        unit: unitNum,
+        value: valueNum,
+        operator: operatorName,
+      });
     }
     return {
+      ok: true,
+      data,
+      inverter: invNum,
+      unit: unitNum,
+      scope: scopeNorm,
+      action,
+      operator: operatorName,
+      ip,
+    };
+  } catch (e) {
+    logControlAction({
+      operator: operatorName,
+      inverter: invNum,
+      node: unitNum || 0,
+      action,
+      scope: scopeNorm,
+      result: `error:${e.message}`,
+      ip,
+    });
+    if (!Number(e?.status || 0)) e.status = 502;
+    throw e;
+  }
+}
+
+async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) {
+  const {
+    inverter,
+    units,
+    value,
+    scope,
+    operator,
+    authKey,
+    authToken,
+    priority,
+  } = bodyRaw || {};
+  const skipBulkAuth = Boolean(options?.skipBulkAuth);
+  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
+  const invNum = Number(inverter);
+  const valueNum = Number(value);
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+  const unitList = sanitizeWriteUnits(units, nodeMax);
+
+  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
+    const err = new Error("Invalid inverter");
+    err.status = 400;
+    throw err;
+  }
+  if (!unitList.length) {
+    const err = new Error("No valid units provided");
+    err.status = 400;
+    throw err;
+  }
+  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
+    const err = new Error("Invalid value");
+    err.status = 400;
+    throw err;
+  }
+
+  const scopeNorm = normalizeWriteScope(scope || "inverter");
+  const isBulkScope =
+    scopeNorm === "all" || scopeNorm === "selected" || scopeNorm === "plant-cap";
+  if (
+    !skipBulkAuth &&
+    isBulkScope &&
+    !isAuthorizedPlantWideControl({ authKey, authToken })
+  ) {
+    const err = new Error("Unauthorized bulk command");
+    err.status = 403;
+    throw err;
+  }
+
+  const operatorName =
+    String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
+  const cfg = loadIpConfigFromDb();
+  const targetIp = String(
+    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
+  ).trim();
+  const ip = targetIp || "";
+  const upstreamPayload = { inverter: invNum, units: unitList, value: valueNum };
+  const action = getWriteActionLabel(valueNum);
+
+  try {
+    const data = await enqueueWriteCommand(
+      scopeNorm,
+      () => performLocalWriteBatchRequest(url, upstreamPayload),
+      { priority, queueKey: ip || `inv-${invNum}` },
+    );
+    const results = normalizeBatchWriteResults(unitList, data);
+    let okCount = 0;
+    let failCount = 0;
+    results.forEach(({ unit, ok }) => {
+      if (ok) okCount += 1;
+      else failCount += 1;
+      logControlAction({
+        operator: operatorName,
+        inverter: invNum,
+        node: unit || 0,
+        action,
+        scope: scopeNorm,
+        result: ok ? "ok" : "error",
+        ip,
+      });
+      if (
+        ok &&
+        plantCapController &&
+        scopeNorm !== "plant-cap" &&
+        typeof plantCapController.handleManualWrite === "function"
+      ) {
+        plantCapController.handleManualWrite({
+          scope: scopeNorm,
+          inverter: invNum,
+          unit,
+          value: valueNum,
+          operator: operatorName,
+        });
+      }
+    });
+
+    return {
+      ok: failCount === 0 && okCount > 0,
+      partial: okCount > 0 && failCount > 0,
+      data,
+      inverter: invNum,
+      units: unitList,
+      scope: scopeNorm,
+      action,
+      operator: operatorName,
+      ip,
+      results,
+      successCount: okCount,
+      failureCount: failCount,
+    };
+  } catch (e) {
+    unitList.forEach((unit) => {
+      logControlAction({
+        operator: operatorName,
+        inverter: invNum,
+        node: unit || 0,
+        action,
+        scope: scopeNorm,
+        result: "error",
+        ip,
+        details: String(e?.message || e || ""),
+      });
+    });
+    throw e;
+  }
+}
+
+async function requestRemoteChat(pathname, {
+  method = "GET",
+  body = null,
+  timeout = CHAT_PROXY_TIMEOUT_MS,
+  retry = null,
+  signal = null,
+} = {}) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    const err = new Error("Remote gateway URL is not configured.");
+    err.httpStatus = 503;
+    throw err;
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    const err = new Error("Remote gateway URL cannot be localhost in remote mode.");
+    err.httpStatus = 400;
+    throw err;
+  }
+  const target = `${base}${pathname}`;
+  const hasBody = !["GET", "HEAD"].includes(String(method || "GET").toUpperCase());
+  const headers = {
+    ...buildRemoteProxyHeaders(),
+  };
+  if (hasBody) headers["Content-Type"] = "application/json";
+
+  const fetchOptions = {
+    method,
+    headers,
+    body: hasBody ? JSON.stringify(body || {}) : undefined,
+    timeout: Math.max(1000, Number(timeout || CHAT_PROXY_TIMEOUT_MS)),
+    signal: signal || undefined,
+  };
+  const response = retry
+    ? await fetchWithRetry(target, fetchOptions, retry)
+    : await fetch(target, fetchOptions);
+  const text = await response.text();
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch (_) {
+    parsed = null;
+  }
+  if (!response.ok) {
+    const err = new Error(
+      String(parsed?.error || parsed?.message || text || `HTTP ${response.status}`),
+    );
+    err.httpStatus = Number(response.status || 0);
+    throw err;
+  }
+  return parsed && typeof parsed === "object" ? parsed : {};
+}
+
+function warnRemoteChatPoll(message) {
+  const now = Date.now();
+  if (now - Number(remoteChatBridgeState.lastWarnTs || 0) < 30000) return;
+  remoteChatBridgeState.lastWarnTs = now;
+  console.warn("[chat] remote poll failed:", String(message || "unknown error"));
+}
+
+async function primeRemoteChatCursor(signal = null) {
+  if (!isRemoteMode()) return 0;
+  const payload = await requestRemoteChat(
+    `/api/chat/messages?mode=thread&limit=${CHAT_THREAD_LIMIT}`,
+    {
+      method: "GET",
+      timeout: CHAT_PROXY_TIMEOUT_MS,
+      signal,
+      retry: {
+        attempts: 2,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    },
+  );
+  const rows = normalizeChatRows(payload?.rows);
+  remoteChatBridgeState.lastInboundId = getNewestChatIdForMachine(rows, "remote");
+  remoteChatBridgeState.primed = true;
+  remoteChatBridgeState.lastError = "";
+  return remoteChatBridgeState.lastInboundId;
+}
+
+async function pollRemoteChatOnce() {
+  if (!isRemoteMode()) return;
+  const controller = new AbortController();
+  remoteChatFetchController = controller;
+  try {
+    if (!remoteChatBridgeState.primed) {
+      await primeRemoteChatCursor(controller.signal);
+    }
+    const afterId = Math.max(0, Number(remoteChatBridgeState.lastInboundId || 0));
+    const qs = new URLSearchParams({
+      mode: "inbox",
+      machine: "remote",
+      afterId: String(afterId),
+      limit: String(REMOTE_CHAT_POLL_LIMIT),
+    });
+    const payload = await requestRemoteChat(`/api/chat/messages?${qs.toString()}`, {
+      method: "GET",
+      timeout: CHAT_PROXY_TIMEOUT_MS,
+      signal: controller.signal,
+      retry: {
+        attempts: 2,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    });
+    const rows = normalizeChatRows(payload?.rows);
+    if (!rows.length) {
+      remoteChatBridgeState.lastError = "";
+      return;
+    }
+    for (const row of rows) {
+      if (row.id > Number(remoteChatBridgeState.lastInboundId || 0)) {
+        remoteChatBridgeState.lastInboundId = row.id;
+      }
+      broadcastUpdate({ type: "chat", row });
+    }
+    remoteChatBridgeState.lastError = "";
+  } finally {
+    if (remoteChatFetchController === controller) {
+      remoteChatFetchController = null;
+    }
+  }
+}
+
+function stopRemoteChatBridge() {
+  if (remoteChatPollTimer) {
+    clearTimeout(remoteChatPollTimer);
+    remoteChatPollTimer = null;
+  }
+  if (remoteChatFetchController) {
+    try { remoteChatFetchController.abort(); } catch (_) {}
+    remoteChatFetchController = null;
+  }
+  remoteChatBridgeState.running = false;
+  remoteChatBridgeState.primed = false;
+  remoteChatBridgeState.lastInboundId = 0;
+  remoteChatBridgeState.lastError = "";
+}
+
+function startRemoteChatBridge() {
+  if (remoteChatBridgeState.running) return;
+  remoteChatBridgeState.running = true;
+  remoteChatBridgeState.primed = false;
+  remoteChatBridgeState.lastInboundId = 0;
+  remoteChatBridgeState.lastError = "";
+  const tick = async () => {
+    if (!remoteChatBridgeState.running) return;
+    if (!isRemoteMode()) {
+      stopRemoteChatBridge();
+      return;
+    }
+    try {
+      await pollRemoteChatOnce();
+    } catch (err) {
+      if (!remoteChatBridgeState.running || !isRemoteMode() || isAbortError(err)) {
+        return;
+      }
+      remoteChatBridgeState.lastError = String(err?.message || err);
+      warnRemoteChatPoll(remoteChatBridgeState.lastError);
+    }
+    remoteChatPollTimer = setTimeout(tick, REMOTE_CHAT_POLL_INTERVAL_MS);
+    if (remoteChatPollTimer?.unref) remoteChatPollTimer.unref();
+  };
+  tick();
+}
+
+async function runRemoteStartupAutoSync(baseUrl) {
+  const check = await checkLocalNewerBeforePull(baseUrl);
+  if (!check?.ok) {
+    remoteBridgeState.lastReplicationError =
+      `Startup gateway state check failed: ${String(check?.error || "unknown error")}`;
+    remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
+    return {
       ok: false,
-      stage: "reconcile",
-      localNewer: Boolean(reconcile?.localNewer),
+      stage: "check",
+      localNewer: false,
       error: remoteBridgeState.lastReplicationError,
-      reconcile,
+      check,
+    };
+  }
+  if (check.localNewer) {
+    remoteBridgeState.lastReplicationError =
+      "Startup auto sync blocked: local data is newer than the gateway. Run Push first or use manual Force Pull if you want to overwrite local state.";
+    remoteBridgeState.lastSyncDirection = "startup-auto-sync-blocked-local-newer";
+    return {
+      ok: false,
+      stage: "check",
+      localNewer: true,
+      error: remoteBridgeState.lastReplicationError,
+      check,
     };
   }
 
@@ -1954,7 +5782,7 @@ async function runRemoteStartupAutoSync(baseUrl) {
       stage: "incremental",
       skipped: true,
       error: String(inc?.reason || "Replication already in progress."),
-      reconcile,
+      check,
       incremental: inc,
     };
   }
@@ -1967,93 +5795,589 @@ async function runRemoteStartupAutoSync(baseUrl) {
       ok: false,
       stage: "incremental",
       error: remoteBridgeState.lastReplicationError,
-      reconcile,
+      check,
       incremental: inc,
     };
   }
 
   remoteBridgeState.lastReplicationError = "";
-  return { ok: true, stage: "complete", reconcile, incremental: inc };
+  return { ok: true, stage: "complete", check, incremental: inc };
 }
 
-async function pollRemoteLiveOnce() {
+function closeRemoteBridgeSocket({ preserveHandlers = false } = {}) {
+  const ws = remoteBridgeSocket;
+  remoteBridgeSocket = null;
+  if (!ws) return;
+  try {
+    if (!preserveHandlers && typeof ws.removeAllListeners === "function") {
+      ws.removeAllListeners();
+    }
+    if (typeof ws.terminate === "function") {
+      ws.terminate();
+      return;
+    }
+    if (typeof ws.close === "function") {
+      ws.close();
+    }
+  } catch (_) {}
+}
+
+function buildRemoteBridgeWsUrl(baseUrl, pathname = "/ws") {
+  const u = new URL(String(baseUrl || "").trim());
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = pathname;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+function shouldPersistRemoteTodayEnergyShadow(nowTs = Date.now()) {
+  return (
+    nowTs - Number(remoteBridgeState.lastTodayEnergyShadowPersistTs || 0) >=
+    REMOTE_ENERGY_POLL_INTERVAL_MS
+  );
+}
+
+function isCurrentRemoteBridgeContext({
+  bridgeSessionId,
+  livePauseGeneration,
+  base,
+} = {}) {
+  const isCurrentBridgeSession =
+    bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+  const isCurrentPauseGeneration =
+    livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+  return Boolean(
+    isCurrentBridgeSession &&
+      isCurrentPauseGeneration &&
+      !isRemoteLiveBridgePausedForTransfer() &&
+      remoteBridgeState.running &&
+      isRemoteMode() &&
+      getRemoteGatewayBaseUrl() === base
+  );
+}
+
+function applyRemoteBridgeLiveFrame(payload, context = {}) {
+  const msg = payload && typeof payload === "object" ? payload : {};
+  const data = msg.data && typeof msg.data === "object" ? msg.data : null;
+  if (!data) return false;
+  if (!isCurrentRemoteBridgeContext(context)) return false;
+
+  const successTs = Date.now();
+  remoteBridgeState.liveData = buildRemoteLiveSnapshot(data, successTs);
+  remoteBridgeState.lastLatencyMs = Math.max(
+    0,
+    Number(context?.startedAt ? successTs - Number(context.startedAt || 0) : 0),
+  );
+  remoteBridgeState.lastLiveNodeCount = countRemoteLiveNodes(remoteBridgeState.liveData);
+  remoteBridgeState.totals =
+    msg.totals && typeof msg.totals === "object"
+      ? {
+          pac: Math.max(0, Number(msg.totals.pac || 0)),
+          kwh: Math.max(0, Number(msg.totals.kwh || 0)),
+        }
+      : computeTotalsFromLiveData(remoteBridgeState.liveData);
+  remoteBridgeState.connected = true;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastSuccessTs = successTs;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastError = "";
+  if (Array.isArray(msg.todayEnergy)) {
+    const normalizedRows = normalizeTodayEnergyRows(msg.todayEnergy);
+    remoteBridgeState.todayEnergyRows = normalizedRows;
+    remoteBridgeState.lastTodayEnergyFetchTs = successTs;
+    if (shouldPersistRemoteTodayEnergyShadow(successTs)) {
+      updateRemoteTodayEnergyShadow(normalizedRows, successTs);
+      remoteBridgeState.lastTodayEnergyShadowPersistTs = successTs;
+    }
+    todayEnergyCache.ts = 0;
+  }
+  broadcastUpdate({
+    type: "live",
+    data: remoteBridgeState.liveData,
+    totals: remoteBridgeState.totals,
+    todayEnergy: getTodayEnergyRowsForWs(),
+    remoteHealth: buildRemoteHealthSnapshot(successTs),
+  });
+  remoteBridgeState.lastHealthBroadcastKey = "";
+  remoteBridgeState.lastSyncDirection = "stream-live";
+  return true;
+}
+
+function handleRemoteBridgeStreamFailure(err, context = {}) {
   const wasConnected = Boolean(remoteBridgeState.connected);
-  remoteBridgeState.lastAttemptTs = Date.now();
+  const hadLiveData = Boolean(
+    remoteBridgeState.liveData &&
+      typeof remoteBridgeState.liveData === "object" &&
+      Object.keys(remoteBridgeState.liveData).length,
+  );
+  if (!isCurrentRemoteBridgeContext(context)) return;
+  const failure = classifyRemoteBridgeFailure(err);
+  const nowTs = Date.now();
+  remoteBridgeState.connected = false;
+  remoteBridgeState.liveFailureCount += 1;
+  remoteBridgeState.lastFailureTs = nowTs;
+  remoteBridgeState.lastReasonCode = failure.reasonCode;
+  remoteBridgeState.lastReasonClass = failure.reasonClass;
+  remoteBridgeState.lastError = failure.reasonText;
+  if (!hasUsableRemoteLiveSnapshot(nowTs) && (wasConnected || hadLiveData)) {
+    broadcastRemoteOfflineLiveState();
+  }
+  if (wasConnected) {
+    remoteBridgeState.lastSyncDirection = "stream-live-failed";
+  }
+  broadcastRemoteHealthUpdate(true);
+}
+
+function scheduleRemoteBridgeReconnect() {
+  if (!remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer() || !isRemoteMode()) {
+    return;
+  }
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  const nextDelay = getRemoteBridgeNextDelayMs(Date.now(), 0);
+  remoteBridgeTimer = setTimeout(() => {
+    remoteBridgeTimer = null;
+    connectRemoteBridgeSocket();
+  }, Math.round(nextDelay));
+}
+
+function connectRemoteBridgeSocket() {
+  if (!remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer() || !isRemoteMode()) {
+    return;
+  }
+  const startedAt = Date.now();
+  remoteBridgeState.lastAttemptTs = startedAt;
+  const bridgeSessionId = Number(remoteBridgeState.bridgeSessionId || 0);
+  const livePauseGeneration = Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
     remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
+    scheduleRemoteBridgeReconnect();
     return;
   }
   if (isUnsafeRemoteLoop(base)) {
     remoteBridgeState.connected = false;
-    remoteBridgeState.lastError =
-      "Remote gateway URL cannot be localhost in remote mode.";
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError = "Remote gateway URL cannot be localhost in remote mode.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
     return;
   }
+  if (String(remoteBridgeState.currentBase || "").trim() !== base) {
+    resetRemoteBridgeLiveSessionState(base);
+    broadcastRemoteOfflineLiveState();
+  }
+
+  let wsUrl = "";
   try {
-    const r = await fetch(`${base}/api/live`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
+    wsUrl = buildRemoteBridgeWsUrl(base, "/ws");
+  } catch (err) {
+    handleRemoteBridgeStreamFailure(err, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
     });
-    if (!r.ok) {
-      throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    scheduleRemoteBridgeReconnect();
+    return;
+  }
+
+  closeRemoteBridgeSocket();
+  const ws = new WebSocket(wsUrl, {
+    headers: buildRemoteProxyHeaders(),
+    handshakeTimeout: REMOTE_FETCH_TIMEOUT_MS,
+  });
+  remoteBridgeSocket = ws;
+
+  const failOnce = (err) => {
+    if (ws._bridgeFailureHandled) return;
+    ws._bridgeFailureHandled = true;
+    if (remoteBridgeSocket === ws) remoteBridgeSocket = null;
+    handleRemoteBridgeStreamFailure(err, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
+    });
+    scheduleRemoteBridgeReconnect();
+  };
+
+  ws.on("open", () => {
+    if (!isCurrentRemoteBridgeContext({ bridgeSessionId, livePauseGeneration, base })) {
+      closeRemoteBridgeSocket();
+      return;
     }
-    const data = await r.json();
-    remoteBridgeState.liveData =
-      data && typeof data === "object" ? data : {};
+    remoteBridgeState.lastLatencyMs = Math.max(0, Date.now() - startedAt);
+    remoteBridgeState.lastSyncDirection = "stream-live-connect";
+    broadcastRemoteHealthUpdate(true);
+  });
+
+  ws.on("message", (raw) => {
+    if (!isCurrentRemoteBridgeContext({ bridgeSessionId, livePauseGeneration, base })) {
+      return;
+    }
+    let msg = null;
+    try {
+      msg = JSON.parse(String(raw || ""));
+    } catch (err) {
+      failOnce(new Error("Gateway live stream returned invalid JSON."));
+      return;
+    }
+    const type = String(msg?.type || "").trim().toLowerCase();
+    if (type !== "init" && type !== "live") return;
+    applyRemoteBridgeLiveFrame(msg, {
+      bridgeSessionId,
+      livePauseGeneration,
+      base,
+      startedAt,
+    });
+  });
+
+  ws.on("error", (err) => {
+    failOnce(err instanceof Error ? err : new Error(String(err || "Live stream error.")));
+  });
+
+  ws.on("close", (code) => {
+    const suffix = code ? ` (${code})` : "";
+    failOnce(new Error(`Gateway live stream closed${suffix}.`));
+  });
+}
+
+async function pollRemoteLiveOnce() {
+  const wasConnected = Boolean(remoteBridgeState.connected);
+  const hadLiveData = Boolean(
+    remoteBridgeState.liveData &&
+      typeof remoteBridgeState.liveData === "object" &&
+      Object.keys(remoteBridgeState.liveData).length,
+  );
+  const startedAt = Date.now();
+  remoteBridgeState.lastAttemptTs = startedAt;
+  const bridgeSessionId = Number(remoteBridgeState.bridgeSessionId || 0);
+  const livePauseGeneration = Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt) && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
+    return;
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = startedAt;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError =
+      "Remote gateway URL cannot be localhost in remote mode.";
+    if (!hasUsableRemoteLiveSnapshot(startedAt) && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    broadcastRemoteHealthUpdate(true);
+    return;
+  }
+  if (String(remoteBridgeState.currentBase || "").trim() !== base) {
+    resetRemoteBridgeLiveSessionState(base);
+    if (wasConnected || hadLiveData) {
+      broadcastRemoteOfflineLiveState();
+    }
+  }
+  const liveController = new AbortController();
+  remoteLiveFetchController = liveController;
+  try {
+    const r = await fetchWithRetry(
+      `${base}/api/live`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(),
+        timeout: REMOTE_FETCH_TIMEOUT_MS,
+        signal: liveController.signal,
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
+    if (!r.ok) {
+      const err = new Error(`HTTP ${r.status} ${r.statusText}`);
+      err.httpStatus = Number(r.status || 0);
+      throw err;
+    }
+    let data;
+    try {
+      data = await r.json();
+    } catch (parseErr) {
+      const err = new Error("Gateway returned invalid live JSON.");
+      err.code = "BAD_JSON";
+      throw err;
+    }
+    const isCurrentBridgeSession =
+      bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+    const isCurrentPauseGeneration =
+      livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+    if (
+      !isCurrentBridgeSession ||
+      !isCurrentPauseGeneration ||
+      isRemoteLiveBridgePausedForTransfer() ||
+      !remoteBridgeState.running ||
+      !isRemoteMode() ||
+      getRemoteGatewayBaseUrl() !== base
+    ) {
+      return;
+    }
+    const successTs = Date.now();
+    remoteBridgeState.liveData = buildRemoteLiveSnapshot(data, successTs);
+    remoteBridgeState.lastLatencyMs = Math.max(0, successTs - startedAt);
+    remoteBridgeState.lastLiveNodeCount = countRemoteLiveNodes(remoteBridgeState.liveData);
+    // Viewer model: live data stays in-memory only — no local DB persistence.
+    // persistRemoteLiveRows(remoteBridgeState.liveData, successTs);
     remoteBridgeState.totals = computeTotalsFromLiveData(
       remoteBridgeState.liveData,
     );
     remoteBridgeState.connected = true;
-    remoteBridgeState.lastSuccessTs = Date.now();
+    remoteBridgeState.liveFailureCount = 0;
+    remoteBridgeState.lastFailureTs = 0;
+    remoteBridgeState.lastSuccessTs = successTs;
+    remoteBridgeState.lastReasonCode = "";
+    remoteBridgeState.lastReasonClass = "";
     remoteBridgeState.lastError = "";
     broadcastUpdate({
       type: "live",
       data: remoteBridgeState.liveData,
       totals: remoteBridgeState.totals,
+      todayEnergy: getTodayEnergyRowsForWs(),
+      remoteHealth: buildRemoteHealthSnapshot(successTs),
     });
+    remoteBridgeState.lastHealthBroadcastKey = "";
     remoteBridgeState.lastSyncDirection = "pull-live";
 
     // Piggyback today's energy totals so /api/energy/today matches gateway exactly.
-    try {
-      const et = await fetch(`${base}/api/energy/today`, {
-        method: "GET",
-        headers: buildRemoteProxyHeaders(),
-        timeout: REMOTE_FETCH_TIMEOUT_MS,
-      });
-      if (et.ok) {
-        const rows = await et.json();
-        if (Array.isArray(rows)) {
+    // Rate-limited: only fetch when stale (>30 s) to avoid hammering the gateway
+    // on every 1.2 s bridge tick.
+    // Fire-and-forget: don't block the bridge tick, but only record success after
+    // rows were actually received so transient failures retry immediately.
+    const energyAgeMs = successTs - (remoteBridgeState.lastTodayEnergyFetchTs || 0);
+    if (
+      energyAgeMs >= REMOTE_ENERGY_POLL_INTERVAL_MS &&
+      !remoteBridgeState.todayEnergyFetchInFlight
+    ) {
+      remoteBridgeState.todayEnergyFetchInFlight = true;
+      const requestId =
+        Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
+      remoteBridgeState.todayEnergyFetchRequestId = requestId;
+      const todayController = new AbortController();
+      remoteTodayEnergyFetchController = todayController;
+      fetchWithRetry(
+        `${base}/api/energy/today`,
+        {
+          method: "GET",
+          headers: buildRemoteProxyHeaders(),
+          timeout: REMOTE_FETCH_TIMEOUT_MS,
+          signal: todayController.signal,
+        },
+        {
+          attempts: 1, // single attempt — next bridge tick will retry if needed
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      )
+        .then(async (et) => {
+          if (!et.ok) return;
+          const rows = await et.json();
+          const isCurrentRequest =
+            requestId === Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0));
+          const isCurrentSession =
+            bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+          if (
+            !isCurrentRequest ||
+            !isCurrentSession ||
+            !remoteBridgeState.running ||
+            !isRemoteMode() ||
+            getRemoteGatewayBaseUrl() !== base ||
+            !Array.isArray(rows)
+          ) {
+            return;
+          }
           const normalizedRows = normalizeTodayEnergyRows(rows);
           remoteBridgeState.todayEnergyRows = normalizedRows;
-          updateRemoteTodayEnergyShadow(normalizedRows, Date.now());
+          const ts = Date.now();
+          remoteBridgeState.lastTodayEnergyFetchTs = ts;
+          updateRemoteTodayEnergyShadow(normalizedRows, ts);
+          // Viewer model: energy stays in-memory only — no local DB mirroring.
+          // mirrorRemoteTodayEnergyRowsToLocal(normalizedRows, ts);
           todayEnergyCache.ts = 0; // force next request to re-read with new data
-        }
-      }
-    } catch (_) {
-      // Non-fatal; stale todayEnergyRows will be used until next tick.
+        })
+        .catch((err) => {
+          if (isAbortError(err)) return;
+          // Non-fatal; stale todayEnergyRows will be used until next tick.
+          console.warn("[remote-energy] piggyback fetch failed:", err?.message || err);
+        })
+        .finally(() => {
+          if (remoteTodayEnergyFetchController === todayController) {
+            remoteTodayEnergyFetchController = null;
+          }
+          if (
+            requestId === Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0))
+          ) {
+            remoteBridgeState.todayEnergyFetchInFlight = false;
+          }
+        });
     }
-    if (isRemotePullOnlyMode()) {
-      remoteBridgeState.replicationRunning = false;
-      remoteBridgeState.lastReplicationError =
-        "Disabled in Client pull-only mode.";
-    } else if (readRemoteAutoSyncEnabled() && !remoteBridgeState.autoSyncAttempted) {
-      remoteBridgeState.autoSyncAttempted = true;
-      remoteBridgeState.lastSyncDirection = "startup-auto-sync";
-      runRemoteStartupAutoSync(base).catch((err) => {
-        remoteBridgeState.lastReplicationError = String(err?.message || err);
-        remoteBridgeState.lastSyncDirection = "startup-auto-sync-failed";
-      });
-    }
+    // Viewer model: no startup auto-sync, no incremental replication.
+    // Remote mode is a gateway-backed viewer — manual Pull is the only DB refresh path.
   } catch (err) {
-    remoteBridgeState.connected = false;
-    remoteBridgeState.lastError = String(err.message || err);
-    if (wasConnected) {
+    if (isAbortError(err)) {
+      return;
+    }
+    const isCurrentBridgeSession =
+      bridgeSessionId === Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0));
+    const isCurrentPauseGeneration =
+      livePauseGeneration === Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0));
+    if (
+      !isCurrentBridgeSession ||
+      !isCurrentPauseGeneration ||
+      isRemoteLiveBridgePausedForTransfer() ||
+      !isRemoteMode() ||
+      getRemoteGatewayBaseUrl() !== base
+    ) {
+      return;
+    }
+    const failure = classifyRemoteBridgeFailure(err);
+    const nowTs = Date.now();
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = nowTs;
+    remoteBridgeState.lastReasonCode = failure.reasonCode;
+    remoteBridgeState.lastReasonClass = failure.reasonClass;
+    remoteBridgeState.lastError = failure.reasonText;
+    const lastSuccessAgeMs = remoteBridgeState.lastSuccessTs
+      ? nowTs - Number(remoteBridgeState.lastSuccessTs || 0)
+      : Number.POSITIVE_INFINITY;
+    const failureThreshold = getRemoteOfflineFailureThreshold();
+    const forceOffline = shouldForceRemoteOffline(err);
+    const recentSuccess = hasRecentRemoteBridgeSuccess(nowTs);
+    const shouldMarkOffline =
+      forceOffline ||
+      (!wasConnected && !recentSuccess) ||
+      remoteBridgeState.liveFailureCount >= failureThreshold ||
+      lastSuccessAgeMs >= REMOTE_LIVE_DEGRADED_GRACE_MS;
+    remoteBridgeState.connected = !shouldMarkOffline && wasConnected;
+    const keepSnapshot = hasUsableRemoteLiveSnapshot(nowTs);
+    if (shouldMarkOffline && !keepSnapshot && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
+    if (shouldMarkOffline && wasConnected) {
       remoteBridgeState.lastSyncDirection = "pull-live-failed";
     }
+    broadcastRemoteHealthUpdate(true);
+  } finally {
+    if (remoteLiveFetchController === liveController) {
+      remoteLiveFetchController = null;
+    }
   }
+}
+
+async function kickRemoteBridgeNow(reason = "manual-reconnect") {
+  if (!isRemoteMode()) {
+    return {
+      ok: false,
+      error: "Live bridge refresh is available only in Remote mode.",
+      connected: false,
+      liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
+    };
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.lastReasonCode = "MISSING_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError = "Remote gateway URL is not configured.";
+    broadcastRemoteHealthUpdate(true);
+    return {
+      ok: false,
+      error: remoteBridgeState.lastError,
+      connected: false,
+      liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
+    };
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.lastReasonCode = "LOOPBACK_URL";
+    remoteBridgeState.lastReasonClass = "config-error";
+    remoteBridgeState.lastError =
+      "Remote gateway URL cannot be localhost in remote mode.";
+    broadcastRemoteHealthUpdate(true);
+    return {
+      ok: false,
+      error: remoteBridgeState.lastError,
+      connected: false,
+      liveNodeCount: 0,
+      remoteHealth: buildRemoteHealthSnapshot(),
+    };
+  }
+  if (!remoteBridgeState.running) {
+    startRemoteBridge();
+  } else {
+    if (remoteBridgeTimer) {
+      clearTimeout(remoteBridgeTimer);
+      remoteBridgeTimer = null;
+    }
+    connectRemoteBridgeSocket();
+  }
+  const reconnectStartedAt = Date.now();
+  remoteBridgeState.lastSyncDirection = String(reason || "manual-reconnect");
+  remoteBridgeState.lastAttemptTs = reconnectStartedAt;
+  remoteBridgeState.liveFailureCount = 0;
+  const deadline = reconnectStartedAt + Math.max(3000, REMOTE_FETCH_TIMEOUT_MS + 2000);
+  while (Date.now() < deadline) {
+    if (Number(remoteBridgeState.lastSuccessTs || 0) >= reconnectStartedAt) break;
+    if (Number(remoteBridgeState.lastFailureTs || 0) >= reconnectStartedAt) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const remoteHealth = buildRemoteHealthSnapshot();
+  const liveNodeCount = Math.max(
+    0,
+    Object.values(remoteBridgeState.liveData || {}).filter(
+      (row) => row && typeof row === "object",
+    ).length,
+  );
+  return {
+    ok: remoteHealth.state === "connected",
+    degraded:
+      remoteHealth.state === "degraded" || remoteHealth.state === "stale",
+    connected: remoteHealth.state === "connected",
+    liveNodeCount,
+    lastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
+    lastError: String(remoteBridgeState.lastError || ""),
+    error:
+      remoteHealth.state === "connected"
+        ? ""
+        : String(remoteHealth.reasonText || "Live bridge is not fully healthy."),
+    remoteHealth,
+  };
 }
 
 function stopRemoteBridge() {
@@ -2061,31 +6385,75 @@ function stopRemoteBridge() {
     clearTimeout(remoteBridgeTimer);
     remoteBridgeTimer = null;
   }
+  if (remoteLiveFetchController) {
+    try { remoteLiveFetchController.abort(); } catch (_) {}
+    remoteLiveFetchController = null;
+  }
+  if (remoteTodayEnergyFetchController) {
+    try { remoteTodayEnergyFetchController.abort(); } catch (_) {}
+    remoteTodayEnergyFetchController = null;
+  }
+  closeRemoteBridgeSocket();
+  resetRemoteBridgeAlarmState();
+  clearRemoteBridgePersistState();
   remoteBridgeState.running = false;
   remoteBridgeState.connected = false;
+  remoteBridgeState.startedAtTs = 0;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.currentBase = "";
+  remoteBridgeState.lastTodayEnergyFetchTs = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteTodayCarryState.day = "";
+  remoteTodayCarryState.byInv = Object.create(null);
+  remoteBridgeState.todayEnergyFetchRequestId =
+    Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
+  remoteBridgeState.lastHealthBroadcastKey = "";
   remoteBridgeState.replicationRunning = false;
-  if (!isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
+  remoteBridgeState.livePauseActive = false;
+  remoteBridgeState.livePauseReason = "";
+  remoteBridgeState.livePauseSince = 0;
+  remoteBridgeState.livePauseResumeWanted = false;
+  remoteBridgeState.livePauseGeneration =
+    Math.max(0, Number(remoteBridgeState.livePauseGeneration || 0)) + 1;
+  if (_shutdownCalled || !isRemoteMode()) remoteBridgeState.lastSyncDirection = "idle";
 }
 
 function startRemoteBridge() {
-  if (remoteBridgeState.running) return;
+  if (remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer()) return;
+  if (remoteBridgeTimer) {
+    clearTimeout(remoteBridgeTimer);
+    remoteBridgeTimer = null;
+  }
+  closeRemoteBridgeSocket();
+  clearRemoteBridgePersistState();
+  remoteTodayCarryState.day = "";
+  remoteTodayCarryState.byInv = Object.create(null);
+  resetRemoteBridgeLiveSessionState(getRemoteGatewayBaseUrl());
   remoteBridgeState.running = true;
+  remoteBridgeState.startedAtTs = Date.now();
+  remoteBridgeState.bridgeSessionId =
+    Math.max(0, Number(remoteBridgeState.bridgeSessionId || 0)) + 1;
   remoteBridgeState.autoSyncAttempted = false;
+  remoteBridgeState.liveFailureCount = 0;
+  remoteBridgeState.lastFailureTs = 0;
+  remoteBridgeState.lastReasonCode = "";
+  remoteBridgeState.lastReasonClass = "";
+  remoteBridgeState.lastLatencyMs = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.lastHealthBroadcastKey = "";
   if (isRemotePullOnlyMode()) {
     remoteBridgeState.replicationCursors = normalizeReplicationCursors({});
   } else {
     remoteBridgeState.replicationCursors = readReplicationCursorsSetting();
   }
-  const tick = async () => {
-    if (!remoteBridgeState.running) return;
-    if (!isRemoteMode()) {
-      stopRemoteBridge();
-      return;
-    }
-    await pollRemoteLiveOnce().catch(() => {});
-    remoteBridgeTimer = setTimeout(tick, REMOTE_BRIDGE_INTERVAL_MS);
-  };
-  tick();
+  connectRemoteBridgeSocket();
 }
 
 function applyRuntimeMode() {
@@ -2103,46 +6471,65 @@ function applyRuntimeMode() {
     poller.markAllOffline();
     // Broadcast the all-offline state immediately so clients don't keep showing
     // stale gateway live data while waiting for the first remote-bridge push.
-    broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: { pac: 0, kwh: 0 } });
+    broadcastUpdate({
+      type: "live",
+      data: poller.getLiveData(),
+      totals: { pac: 0, kwh: 0 },
+      remoteHealth: buildRemoteHealthSnapshot(),
+    });
     startRemoteBridge();
+    startRemoteChatBridge();
   } else {
     const wasRemoteActive =
       Boolean(remoteBridgeState.running) || Boolean(remoteBridgeState.connected);
-    if (wasRemoteActive && Array.isArray(remoteBridgeState.todayEnergyRows)) {
-      updateRemoteTodayEnergyShadow(remoteBridgeState.todayEnergyRows, Date.now());
-    }
-    // ── Handoff lifecycle: capture per-inverter baselines ──────────────────────
+    // â"€â"€ Handoff lifecycle: capture per-inverter baselines â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if (wasRemoteActive) {
       const handoffNow = Date.now();
       const handoffDay = localDateStr(handoffNow);
+      const capturedRows = normalizeTodayEnergyRows(
+        getTodayEnergySupplementRows(handoffDay),
+      );
+      if (capturedRows.length) {
+        updateRemoteTodayEnergyShadow(capturedRows, handoffNow, {
+          sourceKey: getRemoteTodayEnergySourceKey(),
+        });
+      }
       gatewayHandoffMeta.active = true;
       gatewayHandoffMeta.startedAt = handoffNow;
       gatewayHandoffMeta.day = handoffDay;
       gatewayHandoffMeta.baselines = Object.create(null);
-      const capturedRows = normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
-      for (const row of capturedRows) {
+      const baselineRows = capturedRows.length
+        ? capturedRows
+        : getRemoteTodayEnergyShadowRows(handoffDay);
+      for (const row of baselineRows) {
         const inv = Number(row?.inverter || 0);
         if (inv > 0) gatewayHandoffMeta.baselines[inv] = Number(row?.total_kwh || 0);
       }
-      const baselineList = capturedRows
+      const baselineList = baselineRows
         .slice(0, 8)
         .map((r) => `${r.inverter}:${Number(r.total_kwh || 0).toFixed(2)}kWh`)
         .join(", ");
       console.log(
-        `[handoff] Remote→Gateway started day=${handoffDay}` +
-        ` inverters=${capturedRows.length}` +
-        ` baselines=[${baselineList}${capturedRows.length > 8 ? " ..." : ""}]`,
+        `[handoff] Remoteâ†'Gateway started day=${handoffDay}` +
+        ` inverters=${baselineRows.length}` +
+        ` baselines=[${baselineList}${baselineRows.length > 8 ? " ..." : ""}]`,
       );
       persistGatewayHandoffMeta();
     }
     stopRemoteBridge();
+    stopRemoteChatBridge();
     remoteBridgeState.liveData = {}; // discard stale remote snapshot
     remoteBridgeState.totals = {};
     remoteBridgeState.todayEnergyRows = []; // discard bridge cache; gateway mode uses DB + shadow supplement
     if (wasRemoteActive) {
       // Clear stale remote values on clients before local poller publishes fresh rows.
       poller.markAllOffline();
-      broadcastUpdate({ type: "live", data: poller.getLiveData(), totals: {} });
+      broadcastUpdate({
+        type: "live",
+        data: poller.getLiveData(),
+        totals: {},
+        remoteHealth: buildRemoteHealthSnapshot(),
+      });
     }
     poller.start();
   }
@@ -2256,44 +6643,70 @@ function mergeTodayEnergyRowsMax(...lists) {
   return mergeTodayEnergyRowsMaxCore(...lists);
 }
 
-function updateRemoteTodayEnergyShadow(rowsRaw, syncedAt = Date.now()) {
+function getRemoteTodayEnergySourceKey(base = null) {
+  const normalizedBase =
+    base === null || base === undefined
+      ? getRemoteGatewayBaseUrl()
+      : normalizeGatewayUrl(base);
+  return String(normalizedBase || "").trim();
+}
+
+function resetRemoteTodayEnergyShadow(persist = false) {
+  remoteTodayEnergyShadow.day = "";
+  remoteTodayEnergyShadow.rows = [];
+  remoteTodayEnergyShadow.syncedAt = 0;
+  remoteTodayEnergyShadow.sourceKey = "";
+  if (persist) persistRemoteTodayEnergyShadow();
+}
+
+function updateRemoteTodayEnergyShadow(rowsRaw, syncedAt = Date.now(), options = {}) {
   const day = localDateStr(syncedAt);
   const incoming = normalizeTodayEnergyRows(rowsRaw);
-  let changed = false;
-  if (remoteTodayEnergyShadow.day !== day) {
-    remoteTodayEnergyShadow.day = day;
-    remoteTodayEnergyShadow.rows = incoming;
-    remoteTodayEnergyShadow.syncedAt = Number(syncedAt || Date.now());
-    changed = true;
-    persistRemoteTodayEnergyShadow();
-    return remoteTodayEnergyShadow.rows;
+  if (!incoming.length) {
+    return normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
   }
-  const merged = mergeTodayEnergyRowsMax(
-    remoteTodayEnergyShadow.rows,
-    incoming,
+  const nextSourceKey = getRemoteTodayEnergySourceKey(
+    options?.sourceKey ?? null,
   );
-  changed = !todayEnergyRowsEqual(remoteTodayEnergyShadow.rows, merged);
-  remoteTodayEnergyShadow.rows = merged;
-  remoteTodayEnergyShadow.syncedAt = Math.max(
-    Number(remoteTodayEnergyShadow.syncedAt || 0),
-    Number(syncedAt || Date.now()),
-  );
+  const nextSyncedAt = Math.max(0, Number(syncedAt || Date.now()));
+  const changed =
+    remoteTodayEnergyShadow.day !== day ||
+    remoteTodayEnergyShadow.sourceKey !== nextSourceKey ||
+    Number(remoteTodayEnergyShadow.syncedAt || 0) !== nextSyncedAt ||
+    !todayEnergyRowsEqual(remoteTodayEnergyShadow.rows, incoming);
+  remoteTodayEnergyShadow.day = day;
+  remoteTodayEnergyShadow.rows = incoming;
+  remoteTodayEnergyShadow.syncedAt = nextSyncedAt;
+  remoteTodayEnergyShadow.sourceKey = nextSourceKey;
   if (changed) persistRemoteTodayEnergyShadow();
   return remoteTodayEnergyShadow.rows;
 }
 
-function getRemoteTodayEnergyShadowRows(day = localDateStr()) {
+function getRemoteTodayEnergyShadowRows(day = localDateStr(), options = {}) {
+  const requireSourceMatch = options?.requireSourceMatch === true;
+  const requiredSourceKey = requireSourceMatch
+    ? getRemoteTodayEnergySourceKey(options?.sourceKey ?? null)
+    : "";
   if (gatewayHandoffMeta.day && gatewayHandoffMeta.day !== day) {
     resetGatewayHandoffMeta(true);
   }
   if (remoteTodayEnergyShadow.day !== day) {
     if (remoteTodayEnergyShadow.day) {
-      remoteTodayEnergyShadow.day = "";
-      remoteTodayEnergyShadow.rows = [];
-      remoteTodayEnergyShadow.syncedAt = 0;
-      persistRemoteTodayEnergyShadow();
+      resetRemoteTodayEnergyShadow(true);
     }
     return [];
+  }
+  if (requireSourceMatch) {
+    const shadowSourceKey = String(remoteTodayEnergyShadow.sourceKey || "").trim();
+    if (!requiredSourceKey || !shadowSourceKey || shadowSourceKey !== requiredSourceKey) {
+      if (shadowSourceKey && requiredSourceKey && shadowSourceKey !== requiredSourceKey) {
+        console.warn(
+          `[shadow] source mismatch discarded: stored=${shadowSourceKey} current=${requiredSourceKey}`,
+        );
+      }
+      resetRemoteTodayEnergyShadow(true);
+      return [];
+    }
   }
   // Stale-shadow protection: if the handoff is not currently active and the
   // shadow is older than MAX_SHADOW_AGE_MS, discard it to prevent stale data
@@ -2305,13 +6718,24 @@ function getRemoteTodayEnergyShadowRows(day = localDateStr()) {
       `[shadow] stale shadow discarded: age=${Math.round(shadowAgeMs / 60000)}min` +
       ` day=${day} syncedAt=${new Date(remoteTodayEnergyShadow.syncedAt).toISOString()}`,
     );
-    remoteTodayEnergyShadow.day = "";
-    remoteTodayEnergyShadow.rows = [];
-    remoteTodayEnergyShadow.syncedAt = 0;
-    persistRemoteTodayEnergyShadow();
+    resetRemoteTodayEnergyShadow(true);
     return [];
   }
   return normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows);
+}
+
+function resetRemoteBridgeLiveSessionState(nextBase = "") {
+  remoteBridgeState.connected = false;
+  remoteBridgeState.liveData = {};
+  remoteBridgeState.totals = {};
+  remoteBridgeState.todayEnergyRows = [];
+  remoteBridgeState.lastSuccessTs = 0;
+  remoteBridgeState.lastLiveNodeCount = 0;
+  remoteBridgeState.lastTodayEnergyFetchTs = 0;
+  remoteBridgeState.lastTodayEnergyShadowPersistTs = 0;
+  remoteBridgeState.todayEnergyFetchInFlight = false;
+  remoteBridgeState.currentBase = String(nextBase || "").trim();
+  todayEnergyCache.ts = 0;
 }
 
 // Checks whether per-inverter baselines have been surpassed by local data and
@@ -2349,10 +6773,30 @@ function _checkHandoffCompletion(pollerMap, day) {
 
 function getTodayEnergySupplementRows(day = localDateStr()) {
   if (isRemoteMode()) {
-    return mergeTodayEnergyRowsMax(
-      remoteBridgeState.todayEnergyRows || [],
-      getRemoteTodayEnergyShadowRows(day),
-    );
+    // Keep remote today-energy metrics near real time between the 30 s
+    // gateway /api/energy/today syncs. Fresh gateway rows stay authoritative;
+    // the local shadow is only a same-source fallback when the current remote
+    // session has not fetched today-energy yet.
+    const liveRows = computeTodayEnergyRowsFromLiveData(remoteBridgeState.liveData);
+    const gatewayRows = normalizeTodayEnergyRows(remoteBridgeState.todayEnergyRows);
+    const shadowRows = gatewayRows.length
+      ? gatewayRows
+      : getRemoteTodayEnergyShadowRows(day, { requireSourceMatch: true });
+    if (!shadowRows.length) {
+      remoteTodayCarryState.day = day;
+      remoteTodayCarryState.byInv = Object.create(null);
+      return liveRows;
+    }
+    if (remoteTodayCarryState.day !== day) {
+      remoteTodayCarryState.day = day;
+      remoteTodayCarryState.byInv = Object.create(null);
+    }
+    const { rows: out } = applyGatewayCarryRows({
+      pollerRows: liveRows,
+      shadowRows,
+      carryByInv: remoteTodayCarryState.byInv,
+    });
+    return out;
   }
 
   const pollerRows = normalizeTodayEnergyRows(
@@ -2400,6 +6844,52 @@ function getTodayEnergySupplementRows(day = localDateStr()) {
 
   return out;
 }
+
+function getTodayEnergyRowsForWs(day = localDateStr()) {
+  // Remote-mode header updates should follow the live bridge tick, not the
+  // DB-oriented /api/energy/today cache path. Gateway mode keeps the existing
+  // DB-backed behavior for init payloads.
+  if (isRemoteMode()) {
+    return getTodayEnergySupplementRows(day);
+  }
+  return getTodayPacTotalsFromDbCached();
+}
+
+function getTodayEnergyRowsForLivePayload(day = localDateStr()) {
+  const liveRows = getTodayEnergySupplementRows(day);
+  if (isRemoteMode()) return liveRows;
+  const cachedRows =
+    todayEnergyCache.day === day && Array.isArray(todayEnergyCache.rows)
+      ? todayEnergyCache.rows
+      : [];
+  if (!cachedRows.length) return liveRows;
+  return mergeTodayEnergyRowsMax(cachedRows, liveRows);
+}
+
+setBroadcastPayloadEnricher((payload) => {
+  if (!payload || typeof payload !== "object") return payload;
+  if (String(payload.type || "").trim().toLowerCase() !== "live") return payload;
+  const todayEnergy = Object.prototype.hasOwnProperty.call(payload, "todayEnergy")
+    ? normalizeTodayEnergyRows(payload.todayEnergy)
+    : getTodayEnergyRowsForLivePayload();
+  const enriched = { ...payload, todayEnergy };
+  if (!Object.prototype.hasOwnProperty.call(enriched, "todaySummary")) {
+    enriched.todaySummary = buildCurrentDayEnergySnapshot({
+      asOfTs: Date.now(),
+      todayEnergyRows: todayEnergy,
+    }).todaySummary;
+  }
+  if (
+    plantCapController &&
+    !Object.prototype.hasOwnProperty.call(enriched, "plantCap")
+  ) {
+    enriched.plantCap = plantCapController.getStatus({
+      refresh: true,
+      includePreview: false,
+    });
+  }
+  return enriched;
+});
 
 function todayEnergyRowsEqual(aRaw, bRaw) {
   return todayEnergyRowsEqualCore(aRaw, bRaw);
@@ -2494,6 +6984,7 @@ function persistRemoteTodayEnergyShadow() {
         day: String(remoteTodayEnergyShadow.day || ""),
         rows: normalizeTodayEnergyRows(remoteTodayEnergyShadow.rows),
         syncedAt: Number(remoteTodayEnergyShadow.syncedAt || 0),
+        sourceKey: String(remoteTodayEnergyShadow.sourceKey || ""),
       }),
     );
   } catch (err) {
@@ -2509,6 +7000,10 @@ function loadRemoteTodayEnergyShadowFromSettings() {
     const day = String(parsed?.day || "").trim();
     const syncedAt = Number(parsed?.syncedAt || 0);
     const rows = normalizeTodayEnergyRows(parsed?.rows);
+    const rawSourceKey = String(parsed?.sourceKey || "").trim();
+    const sourceKey = rawSourceKey
+      ? getRemoteTodayEnergySourceKey(rawSourceKey)
+      : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !rows.length) return;
     if (day !== localDateStr()) {
       // Keep shadow strictly scoped to the current day.
@@ -2518,6 +7013,7 @@ function loadRemoteTodayEnergyShadowFromSettings() {
     remoteTodayEnergyShadow.day = day;
     remoteTodayEnergyShadow.rows = rows;
     remoteTodayEnergyShadow.syncedAt = Number.isFinite(syncedAt) ? syncedAt : 0;
+    remoteTodayEnergyShadow.sourceKey = sourceKey;
   } catch (err) {
     console.warn("[shadow] load remote today-energy failed:", err?.message || err);
   }
@@ -2548,16 +7044,40 @@ function parseHmsOnDay(day, timeText) {
   return new Date(y, mo, d, hh, mm, ss, 0).getTime();
 }
 
+function getForecastSolarWindowBounds(day) {
+  const raw = String(day || localDateStr()).trim();
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : localDateStr();
+  const hh = (n) => String(Math.trunc(Number(n) || 0)).padStart(2, "0");
+  return {
+    startTs: new Date(
+      `${d}T${hh(SOLCAST_SOLAR_START_H)}:00:00.000`,
+    ).getTime(),
+    endTs: new Date(
+      `${d}T${hh(SOLCAST_SOLAR_END_H)}:00:00.000`,
+    ).getTime(),
+  };
+}
+
+function countStoredForecastRows(tableName) {
+  const target =
+    tableName === "forecast_intraday_adjusted"
+      ? "forecast_intraday_adjusted"
+      : "forecast_dayahead";
+  try {
+    const row = stmtCached(
+      `count:${target}`,
+      `SELECT COUNT(*) AS cnt FROM ${target}`,
+    ).get();
+    return Math.max(0, Number(row?.cnt || 0));
+  } catch (err) {
+    console.warn(`[forecast] count failed for ${target}:`, err.message);
+    return 0;
+  }
+}
+
 function getDayAheadRowsForDate(day) {
   const dayKey = String(day || "").trim();
   if (!dayKey) return [];
-  try {
-    if (readForecastProvider() !== "solcast") {
-      syncDayAheadFromContextIfNewer(false);
-    }
-  } catch (err) {
-    console.warn("[forecast] context sync failed:", err.message);
-  }
   let dbRows = [];
   try {
     dbRows = stmts.getForecastDayAheadDate.all(dayKey);
@@ -2565,19 +7085,26 @@ function getDayAheadRowsForDate(day) {
     console.error("[forecast] DB read failed:", err.message);
     dbRows = [];
   }
-  if (!dbRows.length) {
-    const ctx = readForecastContext();
-    const root = ctx && typeof ctx === "object" ? ctx.PacEnergy_DayAhead : null;
-    const series =
-      root && typeof root === "object" ? root[dayKey] : null;
-    if (Array.isArray(series) && series.length) {
-      try {
-        upsertDayAheadSeriesToDb(dayKey, series, "legacy-fallback");
-        dbRows = stmts.getForecastDayAheadDate.all(dayKey);
-      } catch (err) {
-        console.warn("[forecast] legacy fallback upsert failed:", err.message);
-      }
-    }
+  if (!dbRows.length) return [];
+  return dbRows.map((r) => {
+    const kwhInc = Number(r?.kwh_inc || 0);
+    return {
+      ts: Number(r?.ts || 0),
+      kwh_inc: Number(kwhInc.toFixed(6)),
+      mwh_inc: Number((kwhInc / 1000).toFixed(6)),
+    };
+  });
+}
+
+function getIntradayAdjustedRowsForDate(day) {
+  const dayKey = String(day || "").trim();
+  if (!dayKey) return [];
+  let dbRows = [];
+  try {
+    dbRows = stmts.getForecastIntradayAdjustedDate.all(dayKey);
+  } catch (err) {
+    console.error("[forecast] intraday DB read failed:", err.message);
+    dbRows = [];
   }
   if (!dbRows.length) return [];
   return dbRows.map((r) => {
@@ -2620,6 +7147,12 @@ function upsertDayAheadSeriesToDb(day, series, source = "context-sync") {
   return rows.length;
 }
 
+function upsertIntradayAdjustedSeriesToDb(day, series, source = "context-sync") {
+  const rows = normalizeDayAheadSeries(day, series);
+  bulkUpsertForecastIntradayAdjusted(day, rows, source);
+  return rows.length;
+}
+
 function syncDayAheadFromContextIfNewer(force = false) {
   if (!fs.existsSync(FORECAST_CTX_PATH)) return { changed: false, days: 0, rows: 0 };
   const stat = fs.statSync(FORECAST_CTX_PATH);
@@ -2652,12 +7185,17 @@ function normalizeForecastDbWindow() {
   try {
     // Forecast window is 05:00..18:00 (5-minute window, typically ending at 17:55 slot).
     // Keep slots 60..216 inclusive so 18:00 boundary rows (if any) are preserved.
-    const info = db
+    const infoDayAhead = db
       .prepare(
         "DELETE FROM forecast_dayahead WHERE slot < 60 OR slot > 216",
       )
       .run();
-    return Number(info?.changes || 0);
+    const infoIntraday = db
+      .prepare(
+        "DELETE FROM forecast_intraday_adjusted WHERE slot < 60 OR slot > 216",
+      )
+      .run();
+    return Number(infoDayAhead?.changes || 0) + Number(infoIntraday?.changes || 0);
   } catch (e) {
     console.warn("[Forecast] DB window normalization failed:", e.message);
     return 0;
@@ -2695,8 +7233,7 @@ const EXPORT_UI_DATE_KEYS = [
   "reportDate",
   "expAlarmStart",
   "expAlarmEnd",
-  "expEnergyStart",
-  "expEnergyEnd",
+  "expEnergyDate",
   "expForecastDate",
   "expInvDataStart",
   "expInvDataEnd",
@@ -2713,12 +7250,17 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function sanitizeExportUiState(input) {
   const out = {};
   if (!input || typeof input !== "object") return out;
+  const energyDate =
+    String(input.expEnergyDate || "").trim() ||
+    String(input.expEnergyEnd || "").trim() ||
+    String(input.expEnergyStart || "").trim();
   for (const key of EXPORT_UI_DATE_KEYS) {
     const raw = input[key];
     if (raw === undefined || raw === null || raw === "") continue;
     const v = String(raw).trim();
     if (ISO_DATE_RE.test(v)) out[key] = v;
   }
+  if (ISO_DATE_RE.test(energyDate)) out.expEnergyDate = energyDate;
   Object.entries(EXPORT_UI_NUMERIC_KEYS).forEach(([key, cfg]) => {
     const raw = input[key];
     if (raw === undefined || raw === null || raw === "") return;
@@ -2767,8 +7309,7 @@ function buildDefaultExportUiState() {
     reportDate: end,
     expAlarmStart: start,
     expAlarmEnd: end,
-    expEnergyStart: start,
-    expEnergyEnd: end,
+    expEnergyDate: end,
     expForecastDate: end,
     genDayCount: 1,
     expInvDataStart: start,
@@ -2794,14 +7335,27 @@ function ensurePersistedSettings() {
     inverterCount: "27",
     nodeCount: "4",
     invGridLayout: "4",
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     retainDays: "90",
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
     solcastTimezone: "Asia/Manila",
+    plantLatitude: String(WEATHER_LAT),
+    plantLongitude: String(WEATHER_LON),
+    plantCapUpperMw: "",
+    plantCapLowerMw: "",
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustomJson: "[]",
+    plantCapCooldownSec: String(30),
     remoteReplicationCursors: JSON.stringify(normalizeReplicationCursors({})),
     inverterPollConfig: JSON.stringify(DEFAULT_POLL_CFG),
   };
@@ -2848,14 +7402,27 @@ function buildDefaultSettingsSnapshot() {
     inverterCount: 27,
     nodeCount: 4,
     invGridLayout: "4",
-    plantName: "Solar Plant",
+    plantName: "ADSI Plant",
     operatorName: "OPERATOR",
     retainDays: 90,
     forecastProvider: "ml_local",
     solcastBaseUrl: "https://api.solcast.com.au",
+    solcastAccessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
     solcastApiKey: "",
     solcastResourceId: "",
+    solcastToolkitEmail: "",
+    solcastToolkitPassword: "",
+    solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
     solcastTimezone: "Asia/Manila",
+    plantLatitude: WEATHER_LAT,
+    plantLongitude: WEATHER_LON,
+    plantCapUpperMw: null,
+    plantCapLowerMw: null,
+    plantCapSequenceMode: "ascending",
+    plantCapSequenceCustom: [],
+    plantCapCooldownSec: 30,
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     dataDir: DATA_DIR,
@@ -2896,14 +7463,64 @@ function buildSettingsSnapshot() {
         ? "solcast"
         : "ml_local",
     solcastBaseUrl: getSetting("solcastBaseUrl", defaults.solcastBaseUrl),
+    solcastAccessMode: normalizeSolcastAccessMode(
+      getSetting("solcastAccessMode", defaults.solcastAccessMode),
+    ),
     solcastApiKey: getSetting("solcastApiKey", defaults.solcastApiKey),
     solcastResourceId: getSetting(
       "solcastResourceId",
       defaults.solcastResourceId,
     ),
+    solcastToolkitEmail: getSetting(
+      "solcastToolkitEmail",
+      defaults.solcastToolkitEmail,
+    ),
+    solcastToolkitPassword: getSetting(
+      "solcastToolkitPassword",
+      defaults.solcastToolkitPassword,
+    ),
+    solcastToolkitSiteRef: getSetting(
+      "solcastToolkitSiteRef",
+      defaults.solcastToolkitSiteRef,
+    ),
+    solcastToolkitDays: getSetting(
+      "solcastToolkitDays",
+      defaults.solcastToolkitDays,
+    ),
+    solcastToolkitPeriod: getSetting(
+      "solcastToolkitPeriod",
+      defaults.solcastToolkitPeriod,
+    ),
     solcastTimezone: getSetting(
       "solcastTimezone",
       defaults.solcastTimezone,
+    ),
+    plantLatitude: Number(getSetting("plantLatitude", WEATHER_LAT)),
+    plantLongitude: Number(getSetting("plantLongitude", WEATHER_LON)),
+    plantCapUpperMw: (() => {
+      const raw = String(getSetting("plantCapUpperMw", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    })(),
+    plantCapLowerMw: (() => {
+      const raw = String(getSetting("plantCapLowerMw", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    })(),
+    plantCapSequenceMode: normalizePlantCapSequenceMode(
+      getSetting("plantCapSequenceMode", defaults.plantCapSequenceMode),
+    ),
+    plantCapSequenceCustom: normalizePlantCapSequenceCustom(
+      readJsonSetting("plantCapSequenceCustomJson", defaults.plantCapSequenceCustom),
+      Number(getSetting("inverterCount", defaults.inverterCount)),
+    ),
+    plantCapCooldownSec: clampInt(
+      getSetting("plantCapCooldownSec", defaults.plantCapCooldownSec),
+      5,
+      600,
+      defaults.plantCapCooldownSec,
     ),
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", defaults.exportUiState),
@@ -3042,39 +7659,113 @@ function readForecastProvider() {
     : "ml_local";
 }
 
+function normalizeSolcastAccessMode(value) {
+  return String(value || SOLCAST_ACCESS_MODE_TOOLKIT)
+    .trim()
+    .toLowerCase() === SOLCAST_ACCESS_MODE_TOOLKIT
+    ? SOLCAST_ACCESS_MODE_TOOLKIT
+    : SOLCAST_ACCESS_MODE_API;
+}
+
+function resolveSolcastAccessMode(rawMode, candidate = null) {
+  const src = candidate && typeof candidate === "object" ? candidate : {};
+  const hasToolkit = !!(
+    String(src.toolkitEmail || "").trim() &&
+    String(src.toolkitPassword || "").trim() &&
+    String(src.toolkitSiteRef || "").trim()
+  );
+  const hasApi = !!(
+    String(src.apiKey || "").trim() &&
+    String(src.resourceId || "").trim()
+  );
+  const explicit = String(rawMode ?? "").trim();
+  if (!explicit) {
+    return hasToolkit ? SOLCAST_ACCESS_MODE_TOOLKIT : SOLCAST_ACCESS_MODE_API;
+  }
+  const normalized = normalizeSolcastAccessMode(explicit);
+  if (normalized === SOLCAST_ACCESS_MODE_API && hasToolkit && !hasApi) {
+    return SOLCAST_ACCESS_MODE_TOOLKIT;
+  }
+  return normalized;
+}
+
 function getSolcastConfig() {
-  return {
+  const cfg = {
     baseUrl: String(
       getSetting("solcastBaseUrl", "https://api.solcast.com.au") || "",
     ).trim() || "https://api.solcast.com.au",
+    accessMode: String(
+      getSetting("solcastAccessMode", SOLCAST_ACCESS_MODE_TOOLKIT) || "",
+    ).trim(),
     apiKey: String(getSetting("solcastApiKey", "") || "").trim(),
     resourceId: String(getSetting("solcastResourceId", "") || "").trim(),
+    toolkitEmail: String(getSetting("solcastToolkitEmail", "") || "").trim(),
+    toolkitPassword: String(
+      getSetting("solcastToolkitPassword", "") || "",
+    ).trim(),
+    toolkitSiteRef: String(
+      getSetting("solcastToolkitSiteRef", "") || "",
+    ).trim(),
+    toolkitDays: Math.max(1, Math.min(7, Math.trunc(Number(getSetting("solcastToolkitDays", "2")) || 2))),
+    toolkitPeriod: String(getSetting("solcastToolkitPeriod", SOLCAST_TOOLKIT_PERIOD) || SOLCAST_TOOLKIT_PERIOD).trim(),
     timeZone:
       String(getSetting("solcastTimezone", WEATHER_TZ) || "").trim() ||
       WEATHER_TZ,
   };
+  cfg.accessMode = resolveSolcastAccessMode(cfg.accessMode, cfg);
+  return cfg;
 }
 
 function buildSolcastConfigFromInput(input = null) {
   const base = getSolcastConfig();
   const src = input && typeof input === "object" ? input : {};
-  return {
+  const cfg = {
     baseUrl: String(
       src.solcastBaseUrl ?? src.baseUrl ?? base.baseUrl ?? "",
     ).trim() || "https://api.solcast.com.au",
+    accessMode: String(
+      src.solcastAccessMode ?? src.accessMode ?? base.accessMode ?? "",
+    ).trim(),
     apiKey: String(src.solcastApiKey ?? src.apiKey ?? base.apiKey ?? "").trim(),
     resourceId: String(
       src.solcastResourceId ?? src.resourceId ?? base.resourceId ?? "",
     ).trim(),
+    toolkitEmail: String(
+      src.solcastToolkitEmail ?? src.toolkitEmail ?? base.toolkitEmail ?? "",
+    ).trim(),
+    toolkitPassword: String(
+      src.solcastToolkitPassword ??
+        src.toolkitPassword ??
+        base.toolkitPassword ??
+        "",
+    ).trim(),
+    toolkitSiteRef: String(
+      src.solcastToolkitSiteRef ??
+        src.toolkitSiteRef ??
+        base.toolkitSiteRef ??
+        "",
+    ).trim(),
+    toolkitDays: Math.max(1, Math.min(7, Math.trunc(
+      Number(src.solcastToolkitDays ?? src.toolkitDays ?? base.toolkitDays ?? 2) || 2,
+    ))),
+    toolkitPeriod: String(
+      src.solcastToolkitPeriod ?? src.toolkitPeriod ?? base.toolkitPeriod ?? SOLCAST_TOOLKIT_PERIOD,
+    ).trim() || SOLCAST_TOOLKIT_PERIOD,
     timeZone: String(
       src.solcastTimezone ?? src.timeZone ?? base.timeZone ?? "",
     ).trim() || WEATHER_TZ,
   };
+  cfg.accessMode = resolveSolcastAccessMode(cfg.accessMode, cfg);
+  return cfg;
 }
 
 function hasUsableSolcastConfig(cfg = null) {
   const c = cfg || getSolcastConfig();
-  return !!(c.apiKey && c.resourceId && isHttpUrl(c.baseUrl));
+  if (!isHttpUrl(c.baseUrl)) return false;
+  if (normalizeSolcastAccessMode(c.accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return !!(c.toolkitEmail && c.toolkitPassword && c.toolkitSiteRef);
+  }
+  return !!(c.apiKey && c.resourceId);
 }
 
 function computePlantMaxKwFromConfig() {
@@ -3092,7 +7783,7 @@ function computeSlotCapKwh() {
   return (computePlantMaxKwFromConfig() * SOLCAST_SLOT_MIN) / 60;
 }
 
-async function fetchSolcastForecastRecords(cfg) {
+async function fetchSolcastApiForecastRecords(cfg) {
   const base = String(cfg.baseUrl || "").replace(/\/+$/, "");
   const rid = encodeURIComponent(String(cfg.resourceId || "").trim());
   const candidates = [
@@ -3135,6 +7826,823 @@ async function fetchSolcastForecastRecords(cfg) {
   );
 }
 
+function normalizeSolcastToolkitRecentHours(value, fallback = SOLCAST_TOOLKIT_RECENT_HOURS) {
+  const n = Math.max(1, Math.trunc(Number(value || fallback)));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, n);
+}
+
+function buildSolcastToolkitRecentUrl(
+  origin,
+  siteType,
+  siteId,
+  hours = SOLCAST_TOOLKIT_RECENT_HOURS,
+  period = SOLCAST_TOOLKIT_PERIOD,
+) {
+  const safeType = String(siteType || "").trim().toLowerCase();
+  const safeId = encodeURIComponent(String(siteId || "").trim());
+  const safeHours = normalizeSolcastToolkitRecentHours(hours, SOLCAST_TOOLKIT_RECENT_HOURS);
+  const safePeriod = String(period || SOLCAST_TOOLKIT_PERIOD).trim() || SOLCAST_TOOLKIT_PERIOD;
+  return new URL(
+    `/${safeType}/${safeId}/recent?view=Toolkit&theme=light&hours=${safeHours}&period=${encodeURIComponent(safePeriod)}`,
+    origin,
+  ).toString();
+}
+
+function parseSolcastToolkitSiteRef(value, baseUrl, options = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    throw new Error("Plant Resource ID is required for Toolkit mode.");
+  }
+  const recentHours = normalizeSolcastToolkitRecentHours(
+    options?.recentHours,
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+  );
+  const period = String(options?.period || SOLCAST_TOOLKIT_PERIOD).trim() || SOLCAST_TOOLKIT_PERIOD;
+  let origin = "";
+  try {
+    origin = new URL(String(baseUrl || "https://api.solcast.com.au")).origin;
+  } catch {
+    throw new Error("Invalid Solcast Base URL.");
+  }
+
+  const parseSitePath = (input) => {
+    const cleaned = String(input || "").replace(/^\/+|\/+$/g, "");
+    const m = /^(utility_scale_sites|rooftop_sites|sites)\/([^/?#]+)/i.exec(
+      cleaned,
+    );
+    if (!m) return null;
+    const siteType = String(m[1] || "").trim().toLowerCase();
+    if (!SOLCAST_TOOLKIT_SITE_TYPES.has(siteType)) return null;
+    return {
+      siteType,
+      siteId: decodeURIComponent(String(m[2] || "").trim()),
+    };
+  };
+
+  if (/^https?:\/\//i.test(raw)) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(raw);
+    } catch {
+      throw new Error("Invalid Solcast toolkit site URL.");
+    }
+    const parsed = parseSitePath(parsedUrl.pathname);
+    if (!parsed) {
+      throw new Error(
+        "Solcast toolkit URL must include /utility_scale_sites/<id>, /rooftop_sites/<id>, or /sites/<id>.",
+      );
+    }
+    return {
+      ...parsed,
+      origin: parsedUrl.origin,
+      pageUrl: buildSolcastToolkitRecentUrl(
+        parsedUrl.origin,
+        parsed.siteType,
+        parsed.siteId,
+        recentHours,
+        period,
+      ),
+    };
+  }
+
+  const parsed = parseSitePath(raw);
+  if (parsed) {
+    return {
+      ...parsed,
+      origin,
+      pageUrl: buildSolcastToolkitRecentUrl(
+        origin,
+        parsed.siteType,
+        parsed.siteId,
+        recentHours,
+        period,
+      ),
+    };
+  }
+
+  if (!/^[A-Za-z0-9._-]+$/.test(raw)) {
+    throw new Error(
+      "Plant Resource ID must contain only alphanumeric characters, dots, hyphens, or underscores.",
+    );
+  }
+  return {
+    siteType: "utility_scale_sites",
+    siteId: raw,
+    origin,
+    pageUrl: buildSolcastToolkitRecentUrl(
+      origin,
+      "utility_scale_sites",
+      raw,
+      recentHours,
+      period,
+    ),
+  };
+}
+
+function mergeCookiesIntoJar(jar, response) {
+  if (!jar || !response?.headers || typeof response.headers.raw !== "function") {
+    return;
+  }
+  const setCookies = response.headers.raw()["set-cookie"] || [];
+  for (const entry of setCookies) {
+    const first = String(entry || "").split(";")[0] || "";
+    const eq = first.indexOf("=");
+    if (eq <= 0) continue;
+    const name = first.slice(0, eq).trim();
+    const value = first.slice(eq + 1).trim();
+    if (!name) continue;
+    if (!value) {
+      jar.delete(name);
+    } else {
+      jar.set(name, value);
+    }
+  }
+}
+
+function buildCookieHeader(jar) {
+  if (!(jar instanceof Map) || !jar.size) return "";
+  return Array.from(jar.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function escapeRegex(source) {
+  return String(source || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractJsArrayLiteralByName(html, name) {
+  const src = String(html || "");
+  const re = new RegExp(`\\b${escapeRegex(name)}\\b\\s*=\\s*\\[`, "i");
+  const match = re.exec(src);
+  if (!match) return "";
+  const start = src.indexOf("[", match.index);
+  if (start < 0) return "";
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (ch === "'" || ch === "\"" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return src.slice(start, i + 1);
+      }
+    }
+  }
+  return "";
+}
+
+function extractJsonParseArrayByName(html, name) {
+  const src = String(html || "");
+  const re = new RegExp(
+    `\\b${escapeRegex(name)}\\b\\s*=\\s*JSON\\.parse\\((['"])([\\s\\S]*?)\\1\\)`,
+    "i",
+  );
+  const match = re.exec(src);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[2]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    throw new Error(
+      `Unable to parse Solcast toolkit ${name} JSON payload: ${err.message}`,
+    );
+  }
+}
+
+function evaluateJsArrayLiteral(literal, label) {
+  if (!literal) return [];
+  try {
+    const result = vm.runInNewContext(`(${literal})`, Object.create(null), {
+      timeout: 1000,
+    });
+    return Array.isArray(result) ? result : [];
+  } catch (err) {
+    throw new Error(`Unable to parse Solcast toolkit ${label} payload: ${err.message}`);
+  }
+}
+
+function parseSolcastToolkitHtml(html) {
+  const forecastsLiteral = extractJsArrayLiteralByName(html, "forecasts");
+  const estActualsLiteral = extractJsArrayLiteralByName(html, "estActuals");
+  const forecasts = forecastsLiteral
+    ? evaluateJsArrayLiteral(forecastsLiteral, "forecasts")
+    : extractJsonParseArrayByName(html, "forecasts");
+  const estActuals = estActualsLiteral
+    ? evaluateJsArrayLiteral(estActualsLiteral, "estimated actuals")
+    : extractJsonParseArrayByName(html, "estActuals");
+  if (!forecasts.length) {
+    if (/auth\/credentials|name=\"userName\"|type=\"password\"/i.test(String(html || ""))) {
+      throw new Error("Solcast toolkit login failed. Check the email and password.");
+    }
+    throw new Error("Solcast toolkit page did not expose forecast data.");
+  }
+  return {
+    forecasts,
+    estActuals,
+    yLabelMw: /Power Output\s*\(MW\)/i.test(String(html || "")),
+  };
+}
+
+function normalizeToolkitPowerValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Number(n.toFixed(6));
+}
+
+function normalizeSolcastToolkitForecastRecords(records) {
+  const out = [];
+  for (const rec of records || []) {
+    if (!rec || typeof rec !== "object") continue;
+    const pvEstimate = normalizeToolkitPowerValue(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean,
+    );
+    const pvEstimate10 = normalizeToolkitPowerValue(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+    );
+    const pvEstimate90 = normalizeToolkitPowerValue(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+    );
+    out.push({
+      ...rec,
+      period_end:
+        rec?.period_end ??
+        rec?.periodEnd ??
+        rec?.period_end_utc ??
+        rec?.periodEndUtc,
+      period: rec?.period || SOLCAST_TOOLKIT_PERIOD,
+      pv_estimate: pvEstimate,
+      pv_estimate10:
+        pvEstimate10 ?? (pvEstimate != null ? pvEstimate : null),
+      pv_estimate90:
+        pvEstimate90 ?? (pvEstimate != null ? pvEstimate : null),
+    });
+  }
+  return out;
+}
+
+async function fetchSolcastToolkitForecastRecords(cfg, options = {}) {
+  const cfgHours = cfg.toolkitDays ? cfg.toolkitDays * 24 : undefined;
+  const site = parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl, {
+    recentHours: options?.toolkitHours ?? cfgHours,
+    period: options?.toolkitPeriod ?? cfg.toolkitPeriod,
+  });
+  const cookieJar = new Map();
+  const buildHeaders = (extra = {}) => {
+    const headers = { ...extra };
+    const cookie = buildCookieHeader(cookieJar);
+    if (cookie) headers.Cookie = cookie;
+    return headers;
+  };
+
+  const landing = await fetch(site.pageUrl, {
+    timeout: SOLCAST_TIMEOUT_MS,
+    headers: buildHeaders({
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }),
+  });
+  mergeCookiesIntoJar(cookieJar, landing);
+
+  const authUrl = new URL("/auth/credentials", site.origin).toString();
+  const authBody = new URLSearchParams({
+    userName: cfg.toolkitEmail,
+    password: cfg.toolkitPassword,
+    rememberMe: "false",
+    continue: site.pageUrl,
+  }).toString();
+  const authResp = await fetch(authUrl, {
+    method: "POST",
+    timeout: SOLCAST_TIMEOUT_MS,
+    redirect: "manual",
+    headers: buildHeaders({
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: site.pageUrl,
+    }),
+    body: authBody,
+  });
+  mergeCookiesIntoJar(cookieJar, authResp);
+  if (authResp.status >= 400) {
+    const detail = String(await authResp.text().catch(() => "") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+    throw new Error(
+      `Solcast toolkit login failed (HTTP ${authResp.status}${detail ? ` - ${detail}` : ""}).`,
+    );
+  }
+
+  const pageResp = await fetch(site.pageUrl, {
+    timeout: SOLCAST_TIMEOUT_MS,
+    headers: buildHeaders({
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: site.pageUrl,
+    }),
+  });
+  mergeCookiesIntoJar(cookieJar, pageResp);
+  if (!pageResp.ok) {
+    const detail = String(await pageResp.text().catch(() => "") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+    throw new Error(
+      `Solcast toolkit page fetch failed (HTTP ${pageResp.status}${detail ? ` - ${detail}` : ""}).`,
+    );
+  }
+  const html = await pageResp.text();
+  const parsed = parseSolcastToolkitHtml(html);
+  const records = normalizeSolcastToolkitForecastRecords(parsed.forecasts);
+  if (!records.length) {
+    throw new Error("Solcast toolkit page returned no forecast records.");
+  }
+  return {
+    endpoint: site.pageUrl,
+    records,
+    estActuals: parsed.estActuals,
+    accessMode: SOLCAST_ACCESS_MODE_TOOLKIT,
+    siteType: site.siteType,
+    siteId: site.siteId,
+    units: parsed.yLabelMw
+      ? "MW-average (converted to interval MWh / stored slot kWh)"
+      : "toolkit chart power",
+  };
+}
+
+async function fetchSolcastForecastRecords(cfg, options = {}) {
+  return normalizeSolcastAccessMode(cfg.accessMode) ===
+    SOLCAST_ACCESS_MODE_TOOLKIT
+    ? fetchSolcastToolkitForecastRecords(cfg, options)
+    : fetchSolcastApiForecastRecords(cfg);
+}
+
+function convertSolcastPowerToMwh(powerValue, durMin, accessMode) {
+  const power = Number(powerValue);
+  const minutes = Number(durMin);
+  if (!Number.isFinite(power) || !Number.isFinite(minutes) || power <= 0 || minutes <= 0) {
+    return null;
+  }
+  if (normalizeSolcastAccessMode(accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return Number((power * (minutes / 60)).toFixed(6));
+  }
+  return Number(((power * (minutes / 60)) / 1000).toFixed(6));
+}
+
+function convertSolcastPowerToMw(powerValue, accessMode) {
+  const power = Number(powerValue);
+  if (!Number.isFinite(power) || power <= 0) return null;
+  if (normalizeSolcastAccessMode(accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+    return Number(power.toFixed(6));
+  }
+  return Number((power / 1000).toFixed(6));
+}
+
+function normalizeSolcastPreviewDayCount(value) {
+  const n = Math.trunc(Number(value || 1));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.max(1, n));
+}
+
+function normalizeSolcastPreviewResolution(value) {
+  const raw = String(value || SOLCAST_TOOLKIT_PERIOD)
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  return SOLCAST_PREVIEW_RESOLUTIONS.has(raw) ? raw : SOLCAST_TOOLKIT_PERIOD;
+}
+
+function getSolcastPreviewBucketMinutes(resolution) {
+  const normalized = normalizeSolcastPreviewResolution(resolution);
+  const minutes = Number.parseInt(
+    normalized.replace(/^PT/i, "").replace(/M$/i, ""),
+    10,
+  );
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : SOLCAST_SLOT_MIN;
+}
+
+function parseSolcastPreviewMinuteOfDay(timeText) {
+  const raw = String(timeText || "").trim();
+  const match = /^(\d{2}):(\d{2})$/.exec(raw);
+  if (!match) return -1;
+  const hh = Number(match[1] || 0);
+  const mm = Number(match[2] || 0);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return -1;
+  return hh * 60 + mm;
+}
+
+function formatSolcastPreviewBucketTime(minuteOfDay) {
+  const minute = Math.max(0, Math.trunc(Number(minuteOfDay || 0)));
+  const hh = Math.floor(minute / 60);
+  const mm = minute % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+function sumSolcastPreviewNumbers(values) {
+  let total = 0;
+  let seen = false;
+  for (const raw of values || []) {
+    const num = Number(raw);
+    if (!Number.isFinite(num)) continue;
+    total += num;
+    seen = true;
+  }
+  return seen ? Number(total.toFixed(6)) : null;
+}
+
+function averageSolcastPreviewNumbers(values) {
+  let total = 0;
+  let count = 0;
+  for (const raw of values || []) {
+    const num = Number(raw);
+    if (!Number.isFinite(num)) continue;
+    total += num;
+    count += 1;
+  }
+  return count > 0 ? Number((total / count).toFixed(6)) : null;
+}
+
+function aggregateSolcastPreviewRows(rows, resolution) {
+  const displayPeriod = normalizeSolcastPreviewResolution(resolution);
+  const bucketMinutes = getSolcastPreviewBucketMinutes(displayPeriod);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (bucketMinutes <= SOLCAST_SLOT_MIN) {
+    return {
+      rows: safeRows.map((row) => ({
+        ...row,
+        period: displayPeriod,
+      })),
+      displayPeriod,
+      bucketMinutes,
+    };
+  }
+
+  const grouped = new Map();
+  for (const row of safeRows) {
+    const date = String(row?.date || "").trim();
+    const minuteOfDay = parseSolcastPreviewMinuteOfDay(row?.time);
+    if (!date || minuteOfDay < 0) continue;
+    const bucketStart = Math.floor(minuteOfDay / bucketMinutes) * bucketMinutes;
+    const key = `${date}|${bucketStart}`;
+    let entry = grouped.get(key);
+    if (!entry) {
+      const bucketTime = formatSolcastPreviewBucketTime(bucketStart);
+      entry = {
+        date,
+        time: bucketTime,
+        period: displayPeriod,
+        chartLabel: `${date.slice(5)} ${bucketTime}`,
+        forecastMwh: [],
+        forecastLoMwh: [],
+        forecastHiMwh: [],
+        actualMwh: [],
+        forecastMw: [],
+        forecastLoMw: [],
+        forecastHiMw: [],
+        actualMw: [],
+      };
+      grouped.set(key, entry);
+    }
+    entry.forecastMwh.push(row?.forecastMwh);
+    entry.forecastLoMwh.push(row?.forecastLoMwh);
+    entry.forecastHiMwh.push(row?.forecastHiMwh);
+    entry.actualMwh.push(row?.actualMwh);
+    entry.forecastMw.push(row?.forecastMw);
+    entry.forecastLoMw.push(row?.forecastLoMw);
+    entry.forecastHiMw.push(row?.forecastHiMw);
+    entry.actualMw.push(row?.actualMw);
+  }
+
+  return {
+    rows: Array.from(grouped.values())
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        return a.time.localeCompare(b.time);
+      })
+      .map((entry) => ({
+        date: entry.date,
+        time: entry.time,
+        period: displayPeriod,
+        chartLabel: entry.chartLabel,
+        forecastMwh: sumSolcastPreviewNumbers(entry.forecastMwh),
+        forecastLoMwh: sumSolcastPreviewNumbers(entry.forecastLoMwh),
+        forecastHiMwh: sumSolcastPreviewNumbers(entry.forecastHiMwh),
+        actualMwh: sumSolcastPreviewNumbers(entry.actualMwh),
+        forecastMw: averageSolcastPreviewNumbers(entry.forecastMw),
+        forecastLoMw: averageSolcastPreviewNumbers(entry.forecastLoMw),
+        forecastHiMw: averageSolcastPreviewNumbers(entry.forecastHiMw),
+        actualMw: averageSolcastPreviewNumbers(entry.actualMw),
+      })),
+    displayPeriod,
+    bucketMinutes,
+  };
+}
+
+function computeSolcastPreviewHours(dayCount) {
+  const count = normalizeSolcastPreviewDayCount(dayCount);
+  return Math.max(
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+    Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, (count + 1) * 24),
+  );
+}
+
+function parseIsoDateParts(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { year, month, day };
+}
+
+function diffIsoDays(aDateStr, bDateStr) {
+  const a = parseIsoDateParts(aDateStr);
+  const b = parseIsoDateParts(bDateStr);
+  if (!a || !b) return 0;
+  const aUtc = Date.UTC(a.year, a.month - 1, a.day);
+  const bUtc = Date.UTC(b.year, b.month - 1, b.day);
+  return Math.round((aUtc - bUtc) / 86400000);
+}
+
+function computeSolcastPreviewHoursForRequest(
+  startDay,
+  dayCount,
+  cfg,
+  availableSpanDayCount = dayCount,
+) {
+  const count = normalizeSolcastPreviewDayCount(dayCount);
+  const availableSpan = normalizeSolcastPreviewDayCount(availableSpanDayCount);
+  const todayTz = localDateStrInTz(Date.now(), cfg?.timeZone || WEATHER_TZ);
+  const requestedStartDay = String(startDay || "").trim();
+  const startOffsetDays = Math.max(0, diffIsoDays(requestedStartDay, todayTz));
+  const neededHours = (startOffsetDays + Math.max(count, availableSpan) + 1) * 24;
+  return Math.max(
+    SOLCAST_TOOLKIT_RECENT_HOURS,
+    Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS, neededHours),
+  );
+}
+
+function listSolcastPreviewDays(forecastRecords, actualRecords, cfg) {
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const daySet = new Set();
+  const pushDay = (rec) => {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) return;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.minuteOfDay < startMin || p.minuteOfDay > endMin) return;
+    daySet.add(p.date);
+  };
+
+  for (const rec of forecastRecords || []) pushDay(rec);
+  for (const rec of actualRecords || []) pushDay(rec);
+  return Array.from(daySet).sort();
+}
+
+function buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg) {
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const actualMwhMap = new Map();
+  const actualMwMap = new Map();
+  const forecastMwhMap = new Map();
+  const forecastMwMap = new Map();
+  const forecastLoMwhMap = new Map();
+  const forecastLoMwMap = new Map();
+  const forecastHiMwhMap = new Map();
+  const forecastHiMwMap = new Map();
+  const pushRow = (rec, kind) => {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) return;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.date !== day || p.minuteOfDay < startMin || p.minuteOfDay > endMin) return;
+    const label = p.time.slice(0, 5);
+    const durMin = parseIsoDurationToMinutes(
+      rec?.period ?? rec?.period_duration ?? rec?.duration,
+      SOLCAST_SLOT_MIN,
+    );
+    const mid = convertSolcastPowerToMwh(
+      rec?.pv_estimate ??
+        rec?.pvEstimate ??
+        rec?.pv_estimate_mean ??
+        rec?.pv_estimate_median,
+      durMin,
+      accessMode,
+    );
+    const midMw = convertSolcastPowerToMw(
+      rec?.pv_estimate ??
+        rec?.pvEstimate ??
+        rec?.pv_estimate_mean ??
+        rec?.pv_estimate_median,
+      accessMode,
+    );
+    if (kind !== "forecast") {
+      if (mid != null) actualMwhMap.set(label, mid);
+      if (midMw != null) actualMwMap.set(label, midMw);
+      return;
+    }
+    if (mid != null) forecastMwhMap.set(label, mid);
+    if (midMw != null) forecastMwMap.set(label, midMw);
+    const lo = convertSolcastPowerToMwh(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      durMin,
+      accessMode,
+    );
+    const loMw = convertSolcastPowerToMw(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      accessMode,
+    );
+    const hi = convertSolcastPowerToMwh(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      durMin,
+      accessMode,
+    );
+    const hiMw = convertSolcastPowerToMw(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      accessMode,
+    );
+    if (lo != null) forecastLoMwhMap.set(label, lo);
+    if (loMw != null) forecastLoMwMap.set(label, loMw);
+    if (hi != null) forecastHiMwhMap.set(label, hi);
+    if (hiMw != null) forecastHiMwMap.set(label, hiMw);
+  };
+
+  for (const rec of forecastRecords || []) pushRow(rec, "forecast");
+  for (const rec of actualRecords || []) pushRow(rec, "actual");
+
+  const rows = [];
+  let forecastTotalMwh = 0;
+  let actualTotalMwh = 0;
+  for (let minute = startMin; minute <= endMin; minute += SOLCAST_SLOT_MIN) {
+    const hh = Math.floor(minute / 60);
+    const mm = minute % 60;
+    const label = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    const forecastVal = forecastMwhMap.has(label)
+      ? Number(forecastMwhMap.get(label))
+      : null;
+    const loVal = forecastLoMwhMap.has(label)
+      ? Number(forecastLoMwhMap.get(label))
+      : null;
+    const hiVal = forecastHiMwhMap.has(label)
+      ? Number(forecastHiMwhMap.get(label))
+      : null;
+    const actualVal = actualMwhMap.has(label) ? Number(actualMwhMap.get(label)) : null;
+    const forecastMw = forecastMwMap.has(label)
+      ? Number(forecastMwMap.get(label))
+      : null;
+    const forecastLoMw = forecastLoMwMap.has(label)
+      ? Number(forecastLoMwMap.get(label))
+      : null;
+    const forecastHiMw = forecastHiMwMap.has(label)
+      ? Number(forecastHiMwMap.get(label))
+      : null;
+    const actualMw = actualMwMap.has(label)
+      ? Number(actualMwMap.get(label))
+      : null;
+    rows.push({
+      date: day,
+      time: label,
+      period: SOLCAST_TOOLKIT_PERIOD,
+      chartLabel: `${day.slice(5)} ${label}`,
+      forecastMwh: forecastVal,
+      forecastLoMwh: loVal,
+      forecastHiMwh: hiVal,
+      actualMwh: actualVal,
+      forecastMw,
+      forecastLoMw,
+      forecastHiMw,
+      actualMw,
+    });
+    if (forecastVal != null) forecastTotalMwh += forecastVal;
+    if (actualVal != null) actualTotalMwh += actualVal;
+  }
+
+  return {
+    day,
+    rows,
+    forecastTotalMwh: Number(forecastTotalMwh.toFixed(6)),
+    actualTotalMwh: Number(actualTotalMwh.toFixed(6)),
+    startTime: "05:00",
+    endTime: "18:00",
+  };
+}
+
+function buildSolcastPreviewSeries(
+  startDay,
+  dayCount,
+  forecastRecords,
+  actualRecords,
+  cfg,
+  resolution,
+) {
+  const availableDays = listSolcastPreviewDays(forecastRecords, actualRecords, cfg);
+  const todayTz = localDateStrInTz(Date.now(), cfg.timeZone);
+  const requestedStartDay = String(startDay || "").trim();
+  const normalizedCount = normalizeSolcastPreviewDayCount(dayCount);
+  const displayPeriod = normalizeSolcastPreviewResolution(resolution);
+  const effectiveStartDay =
+    requestedStartDay && availableDays.includes(requestedStartDay)
+      ? requestedStartDay
+      : availableDays.includes(todayTz)
+        ? todayTz
+        : availableDays[0] || requestedStartDay || todayTz;
+  const startIdx = Math.max(0, availableDays.indexOf(effectiveStartDay));
+  const selectedDays = availableDays.slice(startIdx, startIdx + normalizedCount);
+  if (!selectedDays.length) {
+    throw new Error("No Solcast samples are available inside the 05:00-18:00 window.");
+  }
+
+  const daySeries = selectedDays.map((day) =>
+    buildSolcastPreviewDaySeries(day, forecastRecords, actualRecords, cfg),
+  );
+  const rawRows = daySeries.flatMap((entry) => entry.rows || []);
+  if (!rawRows.length) {
+    throw new Error(
+      `No Solcast samples matched ${selectedDays[0]} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
+    );
+  }
+  const aggregated = aggregateSolcastPreviewRows(rawRows, displayPeriod);
+  const rows = aggregated.rows;
+
+  const labels = rows.map((row) => row.chartLabel);
+  const forecastMwh = rows.map((row) => row.forecastMwh);
+  const forecastLoMwh = rows.map((row) => row.forecastLoMwh);
+  const forecastHiMwh = rows.map((row) => row.forecastHiMwh);
+  const actualMwh = rows.map((row) => row.actualMwh);
+  const forecastMw = rows.map((row) => row.forecastMw);
+  const forecastLoMw = rows.map((row) => row.forecastLoMw);
+  const forecastHiMw = rows.map((row) => row.forecastHiMw);
+  const actualMw = rows.map((row) => row.actualMw);
+  const forecastTotalMwh = daySeries.reduce(
+    (sum, entry) => sum + Number(entry?.forecastTotalMwh || 0),
+    0,
+  );
+  const actualTotalMwh = daySeries.reduce(
+    (sum, entry) => sum + Number(entry?.actualTotalMwh || 0),
+    0,
+  );
+  const rangeStartDay = selectedDays[0];
+  const rangeEndDay = selectedDays[selectedDays.length - 1];
+
+  return {
+    day: rangeStartDay,
+    dayCount: selectedDays.length,
+    selectedDays,
+    daysCovered: availableDays,
+    rangeStartDay,
+    rangeEndDay,
+    sourcePeriod: SOLCAST_TOOLKIT_PERIOD,
+    displayPeriod: aggregated.displayPeriod,
+    bucketMinutes: aggregated.bucketMinutes,
+    rangeLabel:
+      rangeStartDay === rangeEndDay
+        ? rangeStartDay
+        : `${rangeStartDay} to ${rangeEndDay}`,
+    labels,
+    forecastMwh,
+    forecastLoMwh,
+    forecastHiMwh,
+    actualMwh,
+    forecastMw,
+    forecastLoMw,
+    forecastHiMw,
+    actualMw,
+    rawRows,
+    rows,
+    forecastTotalMwh: Number(forecastTotalMwh.toFixed(6)),
+    actualTotalMwh: Number(actualTotalMwh.toFixed(6)),
+    startTime: "05:00",
+    endTime: "18:00",
+  };
+}
+
 function buildDayAheadRowsFromSolcast(day, records, cfg) {
   const slotKwh = new Array(288).fill(0);
   const slotLo = new Array(288).fill(0);
@@ -3143,6 +8651,15 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
   const slotMs = SOLCAST_SLOT_MIN * 60000;
   const startMin = SOLCAST_SOLAR_START_H * 60;
   const endMin = SOLCAST_SOLAR_END_H * 60;
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const powerToKwh = (value, hours) => {
+    const power = Number(value);
+    if (!Number.isFinite(power) || power <= 0 || !(hours > 0)) return 0;
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      return power * hours * 1000;
+    }
+    return power * hours;
+  };
 
   for (const rec of records || []) {
     const periodEndRaw =
@@ -3187,9 +8704,9 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
       if (p.date === day && p.minuteOfDay >= startMin && p.minuteOfDay < endMin) {
         const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
         const overlapH = (segEnd - segStart) / 3600000;
-        slotKwh[slot] += Math.max(0, Number.isFinite(kw) ? kw : 0) * overlapH;
-        slotLo[slot] += Math.max(0, Number.isFinite(kwLo) ? kwLo : 0) * overlapH;
-        slotHi[slot] += Math.max(0, Number.isFinite(kwHi) ? kwHi : 0) * overlapH;
+        slotKwh[slot] += powerToKwh(kw, overlapH);
+        slotLo[slot] += powerToKwh(kwLo, overlapH);
+        slotHi[slot] += powerToKwh(kwHi, overlapH);
         matched += 1;
       }
       segStart = segEnd;
@@ -3224,6 +8741,164 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
   return rows;
 }
 
+function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const slotMs = SOLCAST_SLOT_MIN * 60000;
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin = SOLCAST_SOLAR_END_H * 60;
+  const KWH_PER_MW = 1000 * (SOLCAST_SLOT_MIN / 60);
+
+  // Per-slot accumulators for forecast (MW weighted by overlap hours)
+  const slotData = new Array(288).fill(null).map(() => ({
+    sumMwH: 0, sumLoH: 0, sumHiH: 0, overlapH: 0,
+    period_end_utc: null, period: null,
+  }));
+
+  // Build estActual MW map keyed by slot index
+  const estActualMwBySlot = new Map();
+  for (const rec of estActuals || []) {
+    const endRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) continue;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.date !== day || p.minuteOfDay < startMin || p.minuteOfDay >= endMin) continue;
+    const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+    const mw = convertSolcastPowerToMw(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
+      accessMode,
+    );
+    if (mw != null) estActualMwBySlot.set(slot, mw);
+  }
+
+  // Accumulate forecast records into per-slot MW*h buckets
+  let matched = 0;
+  for (const rec of records || []) {
+    const periodEndRaw =
+      rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs = Date.parse(String(periodEndRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) continue;
+    const durMin = parseIsoDurationToMinutes(
+      rec?.period ?? rec?.period_duration ?? rec?.duration,
+      30,
+    );
+    if (!Number.isFinite(durMin) || durMin <= 0) continue;
+    const startTs = endTs - durMin * 60000;
+    const mw = convertSolcastPowerToMw(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
+      accessMode,
+    );
+    const loMw = convertSolcastPowerToMw(
+      rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
+      accessMode,
+    ) ?? mw;
+    const hiMw = convertSolcastPowerToMw(
+      rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
+      accessMode,
+    ) ?? mw;
+    if (mw == null && loMw == null && hiMw == null) continue;
+
+    let segStart = startTs;
+    while (segStart < endTs) {
+      const boundary = Math.min(endTs, (Math.floor(segStart / slotMs) + 1) * slotMs);
+      const segEnd = boundary > segStart ? boundary : Math.min(endTs, segStart + slotMs);
+      const midTs = segStart + Math.floor((segEnd - segStart) / 2);
+      const p = getTzParts(midTs, cfg.timeZone);
+      if (p.date === day && p.minuteOfDay >= startMin && p.minuteOfDay < endMin) {
+        const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+        const overlapH = (segEnd - segStart) / 3600000;
+        const d = slotData[slot];
+        if (mw   != null) d.sumMwH += mw   * overlapH;
+        if (loMw != null) d.sumLoH += loMw * overlapH;
+        if (hiMw != null) d.sumHiH += hiMw * overlapH;
+        d.overlapH += overlapH;
+        d.period_end_utc = String(periodEndRaw);
+        d.period = rec?.period ?? rec?.period_duration ?? rec?.duration ?? null;
+        matched += 1;
+      }
+      segStart = segEnd;
+    }
+  }
+
+  if (!matched) {
+    throw new Error(
+      `No Solcast samples matched ${day} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
+    );
+  }
+
+  const rows = [];
+  for (let slot = startMin / SOLCAST_SLOT_MIN; slot < endMin / SOLCAST_SLOT_MIN; slot++) {
+    const hh = Math.floor((slot * SOLCAST_SLOT_MIN) / 60);
+    const mm = (slot * SOLCAST_SLOT_MIN) % 60;
+    const ts_local = zonedDateTimeToUtcMs(day, hh, mm, 0, cfg.timeZone);
+    const d = slotData[slot];
+    const oh = d.overlapH > 0 ? d.overlapH : 0;
+    const forecast_mw    = oh > 0 ? Number((d.sumMwH / oh).toFixed(6)) : null;
+    const forecast_lo_mw = oh > 0 ? Number((d.sumLoH / oh).toFixed(6)) : null;
+    const forecast_hi_mw = oh > 0 ? Number((d.sumHiH / oh).toFixed(6)) : null;
+    const est_actual_mw  = estActualMwBySlot.has(slot)
+      ? Number(estActualMwBySlot.get(slot).toFixed(6)) : null;
+    rows.push({
+      slot,
+      ts_local: Number.isFinite(ts_local) ? Number(ts_local) : 0,
+      period_end_utc: d.period_end_utc,
+      period: d.period,
+      forecast_mw,
+      forecast_lo_mw,
+      forecast_hi_mw,
+      est_actual_mw,
+      forecast_kwh:    forecast_mw    != null ? Number((forecast_mw    * KWH_PER_MW).toFixed(6)) : null,
+      forecast_lo_kwh: forecast_lo_mw != null ? Number((forecast_lo_mw * KWH_PER_MW).toFixed(6)) : null,
+      forecast_hi_kwh: forecast_hi_mw != null ? Number((forecast_hi_mw * KWH_PER_MW).toFixed(6)) : null,
+      est_actual_kwh:  est_actual_mw  != null ? Number((est_actual_mw  * KWH_PER_MW).toFixed(6)) : null,
+    });
+  }
+  return rows;
+}
+
+function persistSolcastSnapshot(day, rows, source, pulledTs) {
+  if (!Array.isArray(rows) || !rows.length) return 0;
+  try {
+    bulkUpsertSolcastSnapshot(String(day || ""), rows, source, pulledTs);
+    return rows.length;
+  } catch (err) {
+    console.warn(`[solcast-snapshot] persist failed for ${day}:`, err.message);
+    return 0;
+  }
+}
+
+function buildAndPersistSolcastSnapshot(day, records, estActuals, cfg, source, pulledTs) {
+  try {
+    const snapshotRows = buildSolcastSnapshotRows(day, records, estActuals || [], cfg);
+    const persistedRows = persistSolcastSnapshot(day, snapshotRows, source, pulledTs);
+    if (snapshotRows.length && persistedRows !== snapshotRows.length) {
+      return {
+        ok: false,
+        builtRows: Number(snapshotRows.length || 0),
+        persistedRows: Number(persistedRows || 0),
+        warning:
+          `Solcast snapshot persist failed for ${day} ` +
+          `(${Number(persistedRows || 0)}/${Number(snapshotRows.length || 0)} rows saved).`,
+      };
+    }
+    return {
+      ok: true,
+      builtRows: Number(snapshotRows.length || 0),
+      persistedRows: Number(persistedRows || 0),
+      warning: "",
+    };
+  } catch (err) {
+    const msg = String(err?.message || err || "unknown snapshot error").trim();
+    console.warn(`[solcast-snapshot] ${day}:`, msg);
+    return {
+      ok: false,
+      builtRows: 0,
+      persistedRows: 0,
+      warning: `Solcast snapshot skipped for ${day}: ${msg}`,
+    };
+  }
+}
+
 function classifyDailySky(row) {
   const cloud = Number(row?.cloud_pct || 0);
   const rain = Number(row?.precip_mm || 0);
@@ -3247,58 +8922,69 @@ async function fetchDailyWeatherRange(startDay, endDay, useArchive = false) {
   const base = useArchive
     ? "https://archive-api.open-meteo.com/v1/archive"
     : "https://api.open-meteo.com/v1/forecast";
+  const _lat = Number(getSetting("plantLatitude", WEATHER_LAT));
+  const _lon = Number(getSetting("plantLongitude", WEATHER_LON));
   const url =
-    `${base}?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}` +
+    `${base}?latitude=${_lat}&longitude=${_lon}` +
     `&daily=${encodeURIComponent(WEATHER_DAILY_FIELDS)}` +
     `&start_date=${encodeURIComponent(startDay)}` +
     `&end_date=${encodeURIComponent(endDay)}` +
     `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
 
-  const r = await fetch(url, { timeout: 20000 });
-  if (!r.ok) {
-    throw new Error(`Weather API HTTP ${r.status}`);
-  }
-  const payload = await r.json();
-  const d = payload?.daily || {};
-  const time = Array.isArray(d.time) ? d.time : [];
-  const tempMax = Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max : [];
-  const tempMin = Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min : [];
-  const precip = Array.isArray(d.precipitation_sum) ? d.precipitation_sum : [];
-  const precipProb = Array.isArray(d.precipitation_probability_max)
-    ? d.precipitation_probability_max
-    : [];
-  const cloud = Array.isArray(d.cloudcover_mean)
-    ? d.cloudcover_mean
-    : Array.isArray(d.cloud_cover_mean)
-      ? d.cloud_cover_mean
+  try {
+    const r = await fetch(url, { timeout: 20000 });
+    if (!r.ok) {
+      throw new Error(`Weather API HTTP ${r.status}`);
+    }
+    const payload = await r.json();
+    const d = payload?.daily || {};
+    const time = Array.isArray(d.time) ? d.time : [];
+    const tempMax = Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max : [];
+    const tempMin = Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min : [];
+    const precip = Array.isArray(d.precipitation_sum) ? d.precipitation_sum : [];
+    const precipProb = Array.isArray(d.precipitation_probability_max)
+      ? d.precipitation_probability_max
       : [];
-  const wind = Array.isArray(d.windspeed_10m_max)
-    ? d.windspeed_10m_max
-    : Array.isArray(d.wind_speed_10m_max)
-      ? d.wind_speed_10m_max
-      : [];
-  const rad = Array.isArray(d.shortwave_radiation_sum) ? d.shortwave_radiation_sum : [];
+    const cloud = Array.isArray(d.cloudcover_mean)
+      ? d.cloudcover_mean
+      : Array.isArray(d.cloud_cover_mean)
+        ? d.cloud_cover_mean
+        : [];
+    const wind = Array.isArray(d.windspeed_10m_max)
+      ? d.windspeed_10m_max
+      : Array.isArray(d.wind_speed_10m_max)
+        ? d.wind_speed_10m_max
+        : [];
+    const rad = Array.isArray(d.shortwave_radiation_sum) ? d.shortwave_radiation_sum : [];
 
-  const n = time.length;
-  const rows = [];
-  for (let i = 0; i < n; i++) {
-    const solarMJ = Number(rad[i] || 0);
-    const row = {
-      date: String(time[i] || ""),
-      temp_max_c: Number.isFinite(Number(tempMax[i])) ? Number(Number(tempMax[i]).toFixed(1)) : null,
-      temp_min_c: Number.isFinite(Number(tempMin[i])) ? Number(Number(tempMin[i]).toFixed(1)) : null,
-      precip_mm: Number.isFinite(Number(precip[i])) ? Number(Number(precip[i]).toFixed(1)) : 0,
-      precip_prob_pct: Number.isFinite(Number(precipProb[i])) ? Number(Math.round(Number(precipProb[i]))) : 0,
-      cloud_pct: Number.isFinite(Number(cloud[i])) ? Number(Math.round(Number(cloud[i]))) : 0,
-      wind_kph: Number.isFinite(Number(wind[i])) ? Number(Number(wind[i]).toFixed(1)) : 0,
-      solar_kwh_m2: Number.isFinite(solarMJ) ? Number((solarMJ / 3.6).toFixed(2)) : 0,
-    };
-    row.sky = classifyDailySky(row);
-    rows.push(row);
+    const n = time.length;
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const solarMJ = Number(rad[i] || 0);
+      const row = {
+        date: String(time[i] || ""),
+        temp_max_c: Number.isFinite(Number(tempMax[i])) ? Number(Number(tempMax[i]).toFixed(1)) : null,
+        temp_min_c: Number.isFinite(Number(tempMin[i])) ? Number(Number(tempMin[i]).toFixed(1)) : null,
+        precip_mm: Number.isFinite(Number(precip[i])) ? Number(Number(precip[i]).toFixed(1)) : 0,
+        precip_prob_pct: Number.isFinite(Number(precipProb[i])) ? Number(Math.round(Number(precipProb[i]))) : 0,
+        cloud_pct: Number.isFinite(Number(cloud[i])) ? Number(Math.round(Number(cloud[i]))) : 0,
+        wind_kph: Number.isFinite(Number(wind[i])) ? Number(Number(wind[i]).toFixed(1)) : 0,
+        solar_kwh_m2: Number.isFinite(solarMJ) ? Number((solarMJ / 3.6).toFixed(2)) : 0,
+      };
+      row.sky = classifyDailySky(row);
+      rows.push(row);
+    }
+
+    weatherWeeklyCache.set(key, { ts: now, rows });
+    return rows;
+  } catch (err) {
+    // Network error or API failure — serve stale cache if available, even past TTL.
+    if (cached && Array.isArray(cached.rows) && cached.rows.length) {
+      console.warn(`[weather] API unavailable (${err.message}); serving stale cache for ${key}`);
+      return cached.rows;
+    }
+    throw err; // No stale data available — propagate so route returns 500
   }
-
-  weatherWeeklyCache.set(key, { ts: now, rows });
-  return rows;
 }
 
 async function getWeeklyWeather(startDay) {
@@ -3453,14 +9139,59 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
   });
 }
 
+/**
+ * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
+ * Silently returns { pulled: false } if Solcast is not configured or fetch fails.
+ */
+async function autoFetchSolcastSnapshots(dates) {
+  try {
+    const cfg = getSolcastConfig();
+    if (!hasUsableSolcastConfig(cfg)) {
+      return { pulled: false, reason: "not_configured" };
+    }
+    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
+    const pulledTs = Date.now();
+    const warnings = [];
+    let persisted = 0;
+    for (const day of dates) {
+      const snap = buildAndPersistSolcastSnapshot(
+        day,
+        records,
+        estActuals || [],
+        cfg,
+        accessMode,
+        pulledTs,
+      );
+      persisted += Number(snap?.persistedRows || 0);
+      if (!snap?.ok && snap?.warning) {
+        warnings.push(String(snap.warning));
+      }
+    }
+    console.log(
+      `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted`,
+    );
+    return { pulled: true, persisted, warnings };
+  } catch (err) {
+    console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
+    return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300) };
+  }
+}
+
 async function generateDayAheadWithMl(dayCount) {
+  // Auto-pull fresh Solcast snapshots before spawning Python ML generator
+  const tomorrow = addDaysIso(localDateStr(), 1);
+  const lastDay = addDaysIso(tomorrow, dayCount - 1);
+  const dates = daysInclusive(tomorrow, lastDay);
+  const solcastPull = await autoFetchSolcastSnapshots(dates);
+
   const args = ["--generate-days", String(dayCount)];
   const result = await runForecastGenerator(args);
-  if (Number(result?.code || -1) !== 0) {
+  const exitCode = Number(result?.code ?? -1);
+  if (exitCode !== 0) {
     const details = String(result?.stderr || result?.stdout || "")
       .trim()
       .slice(-2000);
-    throw new Error(`ML forecast generator failed (code ${Number(result?.code || -1)}). ${details || ""}`.trim());
+    throw new Error(`ML forecast generator failed (code ${exitCode}). ${details || ""}`.trim());
   }
   try {
     syncDayAheadFromContextIfNewer(true);
@@ -3472,26 +9203,52 @@ async function generateDayAheadWithMl(dayCount) {
     providerUsed: "ml_local",
     durationMs: Number(result.durationMs || 0),
     normalizedRows,
+    solcastPull,
   };
 }
 
 async function generateDayAheadWithSolcast(dates) {
   const cfg = getSolcastConfig();
   if (!hasUsableSolcastConfig(cfg)) {
-    throw new Error("Solcast is selected but API key/resource/base URL are incomplete.");
+    if (normalizeSolcastAccessMode(cfg.accessMode) === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      throw new Error(
+        "Solcast toolkit mode is selected but the site reference, email, or password is incomplete.",
+      );
+    }
+    throw new Error(
+      "Solcast API mode is selected but the API key, resource ID, or base URL is incomplete. Switch Access Mode to Toolkit Login if you want to use only the toolkit URL, email, and password.",
+    );
   }
-  const { endpoint, records } = await fetchSolcastForecastRecords(cfg);
+  const { endpoint, records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
+  const pulledTs = Date.now();
   let writtenRows = 0;
+  let snapshotRowsPersisted = 0;
+  const snapshotWarnings = [];
   for (const day of dates) {
     const rows = buildDayAheadRowsFromSolcast(day, records, cfg);
     bulkUpsertForecastDayAhead(day, rows, "solcast");
     writtenRows += Number(rows.length || 0);
+    const snapshotResult = buildAndPersistSolcastSnapshot(
+      day,
+      records,
+      estActuals || [],
+      cfg,
+      accessMode,
+      pulledTs,
+    );
+    snapshotRowsPersisted += Number(snapshotResult?.persistedRows || 0);
+    if (!snapshotResult?.ok && snapshotResult?.warning) {
+      snapshotWarnings.push(String(snapshotResult.warning));
+    }
   }
   const normalizedRows = normalizeForecastDbWindow();
   return {
     providerUsed: "solcast",
+    accessMode,
     endpoint,
     writtenRows,
+    snapshotRowsPersisted,
+    snapshotWarnings,
     normalizedRows,
   };
 }
@@ -3529,25 +9286,6 @@ function enrichAlarmRow(row, nowTs = Date.now()) {
   };
 }
 
-const PLANT_WIDE_AUTH_PREFIX = "sacups";
-function getPlantWideAuthKeys() {
-  const now = new Date();
-  const prev = new Date(now.getTime() - 60000);
-  const nowMM = String(now.getMinutes()).padStart(2, "0");
-  const prevMM = String(prev.getMinutes()).padStart(2, "0");
-  return new Set([
-    `${PLANT_WIDE_AUTH_PREFIX}${nowMM}`,
-    `${PLANT_WIDE_AUTH_PREFIX}${prevMM}`,
-  ]);
-}
-function isValidPlantWideAuthKey(v) {
-  const key = String(v || "")
-    .trim()
-    .toLowerCase();
-  if (!key) return false;
-  return getPlantWideAuthKeys().has(key);
-}
-
 function startOfLocalDayMs(ts = Date.now()) {
   const d = new Date(ts);
   d.setHours(0, 0, 0, 0);
@@ -3564,17 +9302,21 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 
   let rows = [];
   if (!inverter || inverter === "all") {
-    rows = db
-      .prepare(
-        "SELECT inverter, unit, ts, pac, online FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter, unit, ts ASC",
-      )
-      .all(s, e);
+    rows = queryReadingsRangeAll(s, e).map((r) => ({
+      inverter: r.inverter,
+      unit: r.unit,
+      ts: r.ts,
+      pac: r.pac,
+      online: r.online,
+    }));
   } else {
-    rows = db
-      .prepare(
-        "SELECT inverter, unit, ts, pac, online FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY inverter, unit, ts ASC",
-      )
-      .all(Number(inverter), s, e);
+    rows = queryReadingsRange(Number(inverter), s, e).map((r) => ({
+      inverter: r.inverter,
+      unit: r.unit,
+      ts: r.ts,
+      pac: r.pac,
+      online: r.online,
+    }));
   }
 
   const nodeState = new Map(); // `${inv}_${unit}` -> { ts, pac }
@@ -3622,22 +9364,17 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 }
 
 function buildTodayPacTotalsFromDb() {
+  const day = localDateStr();
+  if (isRemoteMode()) {
+    return normalizeTodayEnergyRows(getTodayEnergySupplementRows(day));
+  }
   // Use energy_5min (completed 5-min buckets) as primary source, supplemented by
   // the poller's live PAC accumulator for the current partial bucket.
   // This is reliable, fast, and resets automatically at midnight via timestamp boundary.
-  const day = localDateStr();
   const startTs = new Date(`${day}T00:00:00.000`).getTime();
   const endTs = Date.now();
 
-  const e5Rows = db.prepare(
-    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter ORDER BY inverter ASC",
-  ).all(startTs, endTs);
-
-  const resultMap = new Map();
-  for (const r of e5Rows) {
-    const inv = Number(r?.inverter || 0);
-    if (inv > 0) resultMap.set(inv, Number(r?.total_kwh || 0));
-  }
+  const resultMap = sumEnergy5minByInverterRange(startTs, endTs);
 
   // Supplement with current partial-bucket totals plus the latest remote shadow
   // captured while this client was in Remote mode. This keeps totals stable when
@@ -3666,6 +9403,8 @@ const todayEnergyCache = {
 };
 const PAST_DAILY_REPORT_CACHE_TTL_MS = 5 * 60 * 1000; // 5-minute cache for immutable past days
 const pastDailyReportCache = new Map(); // day -> { ts, rows }
+const PAST_REPORT_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
+const pastReportSummaryCache = new Map(); // day -> { ts, summary }
 
 function getTodayPacTotalsFromDbCached() {
   const now = Date.now();
@@ -3681,6 +9420,121 @@ function getTodayPacTotalsFromDbCached() {
   todayEnergyCache.ts = now;
   todayEnergyCache.rows = Array.isArray(rows) ? rows : [];
   return todayEnergyCache.rows;
+}
+
+function buildCurrentDayEnergySnapshot(options = {}) {
+  const asOfTs = Number(options?.asOfTs || Date.now());
+  const day = localDateStr(asOfTs);
+  const rows = normalizeTodayEnergyRows(
+    Array.isArray(options?.todayEnergyRows)
+      ? options.todayEnergyRows
+      : getTodayPacTotalsFromDbCached(),
+  );
+  const todaySummary = {
+    day,
+    as_of_ts: asOfTs,
+    ...summarizeCurrentDayEnergyRows(rows),
+  };
+  const snapshot = {
+    day,
+    asOfTs,
+    rows,
+    todaySummary,
+  };
+
+  if (options?.includeDailyReportRows === true) {
+    snapshot.dailyReportRows = buildDailyReportRowsForDate(day, {
+      persist: false,
+      refresh: false,
+      includeTodayPartial: true,
+      todayEnergyRows: rows,
+    });
+  }
+
+  return snapshot;
+}
+
+function buildReportSummaryWithCurrentDaySnapshot(day, baseSummary, currentDaySnapshot, todayRows) {
+  const today = localDateStr();
+  if (!currentDaySnapshot || currentDaySnapshot.day !== today) {
+    return baseSummary;
+  }
+
+  const selectedDay = String(day || "").trim();
+  const summary = mergeCurrentDaySummaryIntoReportSummary(
+    baseSummary,
+    currentDaySnapshot.todaySummary,
+    {
+      replaceDaily: selectedDay === today,
+      replaceWeekly:
+        String(baseSummary?.week_start || "") <= today &&
+        String(baseSummary?.week_end || "") >= today,
+      baseTodayDailyTotalKwh: summarizeDailyReportRows(todayRows).total_kwh,
+    },
+  );
+
+  if (
+    selectedDay === today &&
+    Array.isArray(currentDaySnapshot.dailyReportRows) &&
+    currentDaySnapshot.dailyReportRows.length > 0
+  ) {
+    summary.current_day.daily_report_rows = cloneDailyReportRows(
+      currentDaySnapshot.dailyReportRows,
+    );
+  }
+
+  return summary;
+}
+
+function sumEnergyRowsKwh(rows) {
+  return (Array.isArray(rows) ? rows : []).reduce(
+    (sum, row) => sum + Math.max(0, Number(row?.kwh_inc || 0)),
+    0,
+  );
+}
+
+function buildForecastActualSupplementRowsForRange(
+  startTs,
+  endTs,
+  currentDaySnapshot = null,
+) {
+  const snapshot =
+    currentDaySnapshot &&
+    currentDaySnapshot.day === localDateStr() &&
+    currentDaySnapshot.todaySummary
+      ? currentDaySnapshot
+      : buildCurrentDayEnergySnapshot();
+  const s = Number(startTs || 0) || Date.now() - 86400000;
+  const e = Number(endTs || 0) || Date.now();
+  const day = String(snapshot.day || localDateStr());
+  const dayStartTs = new Date(`${day}T00:00:00.000`).getTime();
+  const dayEndTs = new Date(`${day}T23:59:59.999`).getTime();
+  const overlapStartTs = Math.max(s, dayStartTs);
+  const overlapEndTs = Math.min(e, dayEndTs, Number(snapshot.asOfTs || Date.now()));
+  if (!(overlapEndTs >= overlapStartTs)) return [];
+
+  const persistedBeforeRangeKwh =
+    overlapStartTs > dayStartTs
+      ? sumEnergyRowsKwh(
+          queryEnergy5minRangeAll(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
+        )
+      : 0;
+  const persistedRangeKwh = sumEnergyRowsKwh(
+    queryEnergy5minRangeAll(overlapStartTs, overlapEndTs),
+  );
+
+  return buildCurrentDayActualSupplementRows({
+    startTs: s,
+    endTs: e,
+    rangeStartTs: overlapStartTs,
+    rangeEndTs: overlapEndTs,
+    dayStartTs,
+    dayEndTs,
+    asOfTs: Number(snapshot.asOfTs || Date.now()),
+    authoritativeTotalKwh: Number(snapshot.todaySummary?.total_kwh || 0),
+    persistedBeforeRangeKwh,
+    persistedRangeKwh,
+  });
 }
 
 function cloneDailyReportRows(rowsRaw) {
@@ -3709,6 +9563,108 @@ function setPastDailyReportRowsCache(day, rowsRaw, now = Date.now()) {
   });
 }
 
+function cloneReportSummary(summary) {
+  if (!summary || typeof summary !== "object") return null;
+  return JSON.parse(JSON.stringify(summary));
+}
+
+function getPastReportSummaryCached(day, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key) return null;
+  const entry = pastReportSummaryCache.get(key);
+  if (!entry) return null;
+  if (Number(now || Date.now()) - Number(entry.ts || 0) > PAST_REPORT_SUMMARY_CACHE_TTL_MS) {
+    pastReportSummaryCache.delete(key);
+    return null;
+  }
+  return cloneReportSummary(entry.summary);
+}
+
+function setPastReportSummaryCache(day, summary, now = Date.now()) {
+  const key = String(day || "").trim();
+  if (!key || !summary || typeof summary !== "object") return;
+  pastReportSummaryCache.set(key, {
+    ts: Number(now || Date.now()),
+    summary: cloneReportSummary(summary),
+  });
+}
+
+function getSummaryIntervalsForRow(summaryRow) {
+  let intervals = [];
+  try {
+    const parsed = JSON.parse(String(summaryRow?.intervals_json || "[]"));
+    if (Array.isArray(parsed)) {
+      intervals = parsed
+        .map((pair) => {
+          if (!Array.isArray(pair) || pair.length < 2) return null;
+          const start = Number(pair[0] || 0);
+          const end = Number(pair[1] || 0);
+          return end > start && start > 0 ? [start, end] : null;
+        })
+        .filter(Boolean);
+    }
+  } catch (_) {
+    intervals = [];
+  }
+  const lastTs = Number(summaryRow?.last_ts || 0);
+  if (Number(summaryRow?.last_online || 0) === 1 && lastTs > 0) {
+    intervals.push([lastTs, lastTs + 1000]);
+  }
+  return intervals;
+}
+
+function computeOnlineSecondsFromIntervals(intervals, window = null) {
+  let clipped = Array.isArray(intervals) ? intervals.slice() : [];
+  if (window?.startTs > 0 && window?.endTs > window.startTs) {
+    clipped = clipIntervalsToWindowMs(clipped, window.startTs, window.endTs);
+  }
+  return sumMergedIntervalsMs(clipped) / 1000;
+}
+
+function normalizePersistedDailyReportRow(row, day, ipCfg = null) {
+  const safeRow = row && typeof row === "object" ? { ...row } : {};
+  const reportDay = parseIsoDateStrict(String(day || safeRow?.date || localDateStr()), "date");
+  const inv = Number(safeRow?.inverter || 0);
+  const configuredUnits = inv > 0 ? getConfiguredUnitsForReportInverter(ipCfg || loadIpConfigFromDb(), inv) : [];
+  const expectedNodesRaw = Number(safeRow?.expected_nodes || 0);
+  const expectedNodes = expectedNodesRaw > 0
+    ? Math.max(1, Math.min(REPORT_MAX_NODES_PER_INVERTER, Math.trunc(expectedNodesRaw)))
+    : getReportActiveNodeCount(configuredUnits, new Map());
+  const ratedKw = Number(safeRow?.rated_kw || 0) > 0
+    ? Number(safeRow?.rated_kw || 0)
+    : getReportRatedKwForNodeCount(expectedNodes);
+  const uptimeS = Math.max(0, Number(safeRow?.uptime_s || 0));
+  const windowS = getReportSolarWindowSeconds(reportDay, reportDay === localDateStr());
+  const availabilityPct = Number(safeRow?.availability_pct);
+  const performancePct = Number(safeRow?.performance_pct);
+  const kwhTotal = Math.max(0, Number(safeRow?.kwh_total || 0));
+  const perfDenom = ratedKw > 0 ? ratedKw * (uptimeS / 3600) : 0;
+
+  safeRow.date = reportDay;
+  safeRow.expected_nodes = expectedNodes;
+  safeRow.rated_kw = Number(ratedKw.toFixed(3));
+  safeRow.availability_pct = Number(
+    clampPct(Number.isFinite(availabilityPct) ? availabilityPct : (windowS > 0 ? (uptimeS / windowS) * 100 : 0)).toFixed(3),
+  );
+  safeRow.performance_pct = Number(
+    clampPct(Number.isFinite(performancePct) ? performancePct : (perfDenom > 0 ? (kwhTotal / perfDenom) * 100 : 0)).toFixed(3),
+  );
+  safeRow.node_uptime_s = Math.max(0, Math.round(Number(safeRow?.node_uptime_s || 0)));
+  safeRow.expected_node_uptime_s = Math.max(
+    0,
+    Math.round(Number(safeRow?.expected_node_uptime_s || windowS * expectedNodes)),
+  );
+  safeRow.control_count = Math.max(0, Math.trunc(Number(safeRow?.control_count || 0)));
+  return safeRow;
+}
+
+function normalizePersistedDailyReportRows(rows, day) {
+  const ipCfg = loadIpConfigFromDb();
+  return (Array.isArray(rows) ? rows : []).map((row) =>
+    normalizePersistedDailyReportRow(row, day || row?.date || localDateStr(), ipCfg),
+  );
+}
+
 function getDailyReportRowsForDay(dayInput, options = {}) {
   const day = parseIsoDateStrict(dayInput || localDateStr(), "date");
   const today = localDateStr();
@@ -3724,10 +9680,18 @@ function getDailyReportRowsForDay(dayInput, options = {}) {
     if (!refresh) {
       const cached = getPastDailyReportRowsCached(day);
       if (cached) return cached;
+
+      const persisted = stmts.getDailyReport.all(day);
+      if (persisted.length) {
+        const normalized = normalizePersistedDailyReportRows(persisted, day);
+        setPastDailyReportRowsCache(day, normalized);
+        return cloneDailyReportRows(normalized);
+      }
     }
 
     const rebuilt = buildDailyReportRowsForDate(day, {
       persist,
+      refresh,
       includeTodayPartial: false,
     });
     setPastDailyReportRowsCache(day, rebuilt);
@@ -3736,6 +9700,7 @@ function getDailyReportRowsForDay(dayInput, options = {}) {
 
   return buildDailyReportRowsForDate(day, {
     persist,
+    refresh,
     includeTodayPartial,
   });
 }
@@ -3768,7 +9733,7 @@ function computeSpanSeconds(rows) {
 // For each consecutive pair, the interval is credited only when the starting
 // row is online=1.  Each interval is capped at AVAIL_MAX_GAP_S so that long
 // silent gaps (outages / comms loss that produced no readings) are not
-// mistakenly counted as uptime — the old lastTs-firstTs span formula would
+// mistakenly counted as uptime â€" the old lastTs-firstTs span formula would
 // credit the entire gap regardless of what happened inside it.
 function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
@@ -3906,6 +9871,7 @@ function getReportRatedKwForNodeCount(nodeCount) {
 
 function buildDailyReportRowsForDate(dateText, options = {}) {
   const persist = options.persist !== false;
+  const refresh = options.refresh === true;
   const includeTodayPartial = options.includeTodayPartial !== false;
   const day = parseIsoDateStrict(
     dateText || localDateStr(),
@@ -3918,47 +9884,46 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
     includeTodayPartial && day === localDateStr()
       ? Math.min(dayEndTs, Date.now())
       : dayEndTs;
+  const currentDayEnergyRows =
+    day === localDateStr() && includeTodayPartial && Array.isArray(options?.todayEnergyRows)
+      ? normalizeTodayEnergyRows(options.todayEnergyRows)
+      : null;
 
   const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const pacKwhByInv = sumEnergy5minByInverterRange(startTs, endTs);
 
-  // Use energy_5min as the single source of truth for kWh, matching the TODAY MWh
-  // header. buildPacEnergyBuckets re-integrates the subsampled readings table and
-  // systematically undercounts vs. the continuous live integrator that writes energy_5min.
-  const pacKwhByInv = new Map();
-  const e5Rows = db.prepare(
-    "SELECT inverter, SUM(kwh_inc) AS total_kwh FROM energy_5min WHERE ts >= ? AND ts <= ? GROUP BY inverter",
-  ).all(startTs, endTs);
-  for (const r of e5Rows) {
-    const inv = Number(r?.inverter || 0);
-    if (inv > 0) pacKwhByInv.set(inv, Number(r?.total_kwh || 0));
-  }
-
-  // For today's partial day, fold in the live supplement source used by
-  // /api/energy/today (poller in gateway mode, remote shadow on mode transition).
   if (day === localDateStr() && includeTodayPartial) {
-    const supplementalRows = getTodayEnergySupplementRows(day);
+    const supplementalRows =
+      currentDayEnergyRows && currentDayEnergyRows.length
+        ? currentDayEnergyRows
+        : getTodayEnergySupplementRows(day);
     for (const { inverter, total_kwh } of supplementalRows) {
       const inv = Number(inverter || 0);
       if (inv <= 0 || !(total_kwh > 0)) continue;
       pacKwhByInv.set(inv, Math.max(pacKwhByInv.get(inv) || 0, total_kwh));
     }
   }
+
   const reportWindow = getReportSolarWindowBounds(day, includeTodayPartial);
   const expectedSolarWindowS = Number(reportWindow.seconds || 0);
   const ipCfg = loadIpConfigFromDb();
+  const persistedRows = normalizePersistedDailyReportRows(stmts.getDailyReport.all(day), day);
+  const persistedByInv = new Map(
+    persistedRows.map((row) => [Number(row?.inverter || 0), row]),
+  );
 
-  // ── Batch queries: replace per-inverter N+1 pattern (was 27×3 = 81 queries) ──
-  // All readings for the day in a single scan, grouped in-process by inverter.
-  const allReadingsBatch = db.prepare(
-    "SELECT inverter, unit, ts, pac, kwh, online FROM readings WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, unit ASC, ts ASC",
-  ).all(startTs, endTs);
-  const readingsByInv = new Map();
-  for (const r of allReadingsBatch) {
-    const inv = Number(r.inverter);
-    if (!readingsByInv.has(inv)) readingsByInv.set(inv, []);
-    readingsByInv.get(inv).push(r);
+  let summaryRows = refresh ? rebuildDailyReadingsSummaryForDate(day) : getDailyReadingsSummaryRows(day);
+  if ((!summaryRows || !summaryRows.length) && day <= localDateStr()) {
+    summaryRows = rebuildDailyReadingsSummaryForDate(day);
   }
-  // Alarm and audit counts per inverter in 2 queries instead of 54.
+  const summaryByInv = new Map();
+  for (const row of summaryRows || []) {
+    const inv = Number(row?.inverter || 0);
+    if (!(inv > 0)) continue;
+    if (!summaryByInv.has(inv)) summaryByInv.set(inv, []);
+    summaryByInv.get(inv).push(row);
+  }
+
   const alarmCountBatch = db.prepare(
     "SELECT inverter, COUNT(*) AS cnt FROM alarms WHERE ts BETWEEN ? AND ? GROUP BY inverter",
   ).all(startTs, endTs);
@@ -3974,58 +9939,70 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 
   const out = [];
   for (let inv = 1; inv <= invCount; inv++) {
-    const allRows = readingsByInv.get(inv) || [];
-    const alarmCount = alarmCountByInv.get(inv) || 0;
-    const controlCount = auditCountByInv.get(inv) || 0;
+    const persistedRow = persistedByInv.get(inv) || null;
+    const alarmCountRaw = alarmCountByInv.get(inv) || 0;
+    const controlCountRaw = auditCountByInv.get(inv) || 0;
+    const alarmCount = day < localDateStr()
+      ? Math.max(alarmCountRaw, Number(persistedRow?.alarm_count || 0))
+      : alarmCountRaw;
+    const controlCount = day < localDateStr()
+      ? Math.max(controlCountRaw, Number(persistedRow?.control_count || 0))
+      : controlCountRaw;
     const pacKwh = Number(pacKwhByInv.get(inv) || 0);
     const configuredUnits = getConfiguredUnitsForReportInverter(ipCfg, inv);
     const configuredUnitSet = new Set(configuredUnits);
+    const allRows = summaryByInv.get(inv) || [];
     const rows = configuredUnits.length
       ? allRows.filter((r) => configuredUnitSet.has(Number(r?.unit || 0)))
       : allRows;
     const hasLiveData =
-      rows.length > 0 || pacKwh > 0 || alarmCount > 0 || controlCount > 0;
+      rows.length > 0 ||
+      pacKwh > 0 ||
+      alarmCount > 0 ||
+      controlCount > 0 ||
+      Boolean(persistedRow);
     if (!hasLiveData) continue;
+    if (!rows.length && persistedRow) {
+      const fallbackRow = normalizePersistedDailyReportRow(
+        {
+          ...persistedRow,
+          date: day,
+          inverter: inv,
+          alarm_count: Math.max(alarmCount, Number(persistedRow?.alarm_count || 0)),
+          control_count: Math.max(controlCount, Number(persistedRow?.control_count || 0)),
+        },
+        day,
+        ipCfg,
+      );
+      out.push(fallbackRow);
+      continue;
+    }
 
-    const onlineRows = rows.filter(
-      (r) => Number(r?.online || 0) === 1 && Number(r?.pac || 0) > 0,
-    );
-    // Group ALL rows by unit (online and offline) so computeNodeOnlineSeconds
-    // can see every state transition.  Using only online=1 rows (the old
-    // onlineRowsByUnit approach) caused computeSpanSeconds to credit the full
-    // first→last span even when the node was offline for hours in between.
     const rowsByUnit = new Map();
+    const perUnitUptime = [];
+    let allIntervals = [];
+    let pacPeak = 0;
+    let pacOnlineSum = 0;
+    let pacOnlineCount = 0;
     for (const r of rows) {
       const unit = Number(r?.unit || 0);
       if (unit < 1) continue;
-      if (!rowsByUnit.has(unit)) rowsByUnit.set(unit, []);
-      rowsByUnit.get(unit).push(r);
-    }
-    const pacValues = rows
-      .map((r) => Number(r?.pac || 0))
-      .filter((v) => Number.isFinite(v) && v >= 0);
-
-    const pacPeak = pacValues.length ? Math.max(...pacValues) : 0;
-    const pacAvg = onlineRows.length
-      ? onlineRows.reduce((s, r) => s + Number(r?.pac || 0), 0) /
-        onlineRows.length
-      : 0;
-    // Inverter uptime is the union of online intervals across all observed units.
-    // If any unit is online, inverter uptime advances.
-    const activeNodeCount = getReportActiveNodeCount(configuredUnits, rowsByUnit);
-    const ratedKw = getReportRatedKwForNodeCount(activeNodeCount);
-    const uptimeS = computeInverterOnlineSeconds(
-      rowsByUnit,
-      AVAIL_MAX_GAP_S,
-      reportWindow,
-    );
-    const perUnitUptime = [];
-    for (const [unit, unitRows] of rowsByUnit.entries()) {
+      rowsByUnit.set(unit, r);
+      pacPeak = Math.max(pacPeak, Number(r?.pac_peak || 0));
+      pacOnlineSum += Number(r?.pac_online_sum || 0);
+      pacOnlineCount += Number(r?.pac_online_count || 0);
+      const intervals = getSummaryIntervalsForRow(r);
+      allIntervals.push(...intervals);
       perUnitUptime.push({
         unit,
-        uptimeS: computeNodeOnlineSeconds(unitRows, AVAIL_MAX_GAP_S, reportWindow),
+        uptimeS: computeOnlineSecondsFromIntervals(intervals, reportWindow),
       });
     }
+
+    const pacAvg = pacOnlineCount > 0 ? pacOnlineSum / pacOnlineCount : 0;
+    const activeNodeCount = getReportActiveNodeCount(configuredUnits, rowsByUnit);
+    const ratedKw = getReportRatedKwForNodeCount(activeNodeCount);
+    const uptimeS = computeOnlineSecondsFromIntervals(allIntervals, reportWindow);
     perUnitUptime.sort(
       (a, b) =>
         Number(b.uptimeS || 0) - Number(a.uptimeS || 0) ||
@@ -4036,25 +10013,17 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       .reduce((s, r) => s + Math.max(0, Number(r?.uptimeS || 0)), 0);
 
     let kwhTotal = Math.max(0, pacKwh);
-    if (kwhTotal <= 0 && rows.length >= 2) {
-      // Per-unit register difference (rows are mixed-unit, sorted by ts).
-      const unitFirst = new Map();
-      const unitLast = new Map();
-      for (const r of rows) {
-        const unit = Number(r?.unit || 0);
-        const kwh = Number(r?.kwh || 0);
-        if (!unit || !Number.isFinite(kwh)) continue;
-        if (!unitFirst.has(unit)) unitFirst.set(unit, kwh);
-        unitLast.set(unit, kwh);
-      }
+    if (kwhTotal <= 0 && rows.length >= 1) {
       let regTotal = 0;
-      for (const [unit, firstKwh] of unitFirst.entries()) {
-        const lastKwh = unitLast.get(unit) || firstKwh;
+      for (const r of rows) {
+        const firstKwh = Number(r?.first_kwh || 0);
+        const lastKwh = Number(r?.last_kwh || firstKwh);
         const diff = lastKwh - firstKwh;
         if (Number.isFinite(diff) && diff > 0) regTotal += diff;
       }
       if (regTotal > 0) kwhTotal = regTotal;
     }
+
     const expectedNodeUptimeS = expectedSolarWindowS * activeNodeCount;
     const availabilityPct =
       expectedSolarWindowS > 0 ? (uptimeS / expectedSolarWindowS) * 100 : 0;
@@ -4090,6 +10059,12 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
         row.uptime_s,
         row.alarm_count,
         row.control_count,
+        row.availability_pct,
+        row.performance_pct,
+        row.node_uptime_s,
+        row.expected_node_uptime_s,
+        row.expected_nodes,
+        row.rated_kw,
       );
     }
 
@@ -4102,7 +10077,6 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
   }
   return out;
 }
-
 function calcAvailabilityPctFromRow(row) {
   const explicit = Number(row?.availability_pct);
   if (Number.isFinite(explicit)) return clampPct(explicit);
@@ -4188,6 +10162,11 @@ function summarizeDailyReportRows(rows) {
 function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const day = parseIsoDateStrict(targetDateText || localDateStr(), "date");
   const refreshDay = options.refreshDay === true;
+  const currentDaySnapshot =
+    options.currentDaySnapshot && typeof options.currentDaySnapshot === "object"
+      ? options.currentDaySnapshot
+      : null;
+  const today = localDateStr();
   const selectedDate = new Date(`${day}T00:00:00.000`);
   const dow = selectedDate.getDay(); // 0=Sunday ... 6=Saturday
   const weekStartDate = new Date(selectedDate.getTime());
@@ -4195,7 +10174,11 @@ function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   const weekStart = localDateStr(weekStartDate.getTime());
   const weekEnd = addDaysIso(weekStart, 6);
   const dates = daysInclusive(weekStart, weekEnd);
-  const today = localDateStr();
+  const canCacheSummary = day < today && weekEnd < today;
+  if (canCacheSummary && !refreshDay) {
+    const cached = getPastReportSummaryCached(day);
+    if (cached) return cached;
+  }
 
   const byDateRows = new Map();
   const isToday = day === today;
@@ -4217,13 +10200,21 @@ function buildDailyWeeklyReportSummary(targetDateText, options = {}) {
   }
 
   const weeklyRows = dates.flatMap((d) => byDateRows.get(d) || []);
-  return {
+  const baseSummary = {
     date: day,
     week_start: weekStart,
     week_end: weekEnd,
     daily: summarizeDailyReportRows(dailyRows),
     weekly: summarizeDailyReportRows(weeklyRows),
   };
+  const summary = buildReportSummaryWithCurrentDaySnapshot(
+    day,
+    baseSummary,
+    currentDaySnapshot,
+    byDateRows.get(today) || [],
+  );
+  if (canCacheSummary) setPastReportSummaryCache(day, summary);
+  return summary;
 }
 
 function getLatestReportDate() {
@@ -4364,6 +10355,17 @@ function getConfiguredNodeSet(cfg = null) {
   return set;
 }
 
+plantCapController = new PlantCapController({
+  getLiveData: () => getRuntimeLiveData(),
+  getIpConfig: () => loadIpConfigFromDb(),
+  getSettings: () => buildSettingsSnapshot(),
+  isRemoteMode: () => isRemoteMode(),
+  executeWrite: (body) => executeLocalControlWriteRequest(body, { skipBulkAuth: true }),
+  broadcast: (payload) => broadcastUpdate(payload),
+  liveFreshMs: LIVE_FRESH_MS,
+  operatorName: "PLANT CAP",
+});
+
 function isHttpUrl(v) {
   try {
     const u = new URL(String(v));
@@ -4425,28 +10427,562 @@ ensurePersistedSettings();
 
 app.ws("/ws", (ws) => {
   registerClient(ws);
+  const todayEnergy = getTodayEnergyRowsForWs();
+  const plantCap =
+    plantCapController &&
+    plantCapController.getStatus({ refresh: true, includePreview: false });
   ws.send(
     JSON.stringify({
       type: "init",
       data: getRuntimeLiveData(),
+      todayEnergy,
+      todaySummary: buildCurrentDayEnergySnapshot({
+        asOfTs: Date.now(),
+        todayEnergyRows: todayEnergy,
+      }).todaySummary,
+      remoteHealth: buildRemoteHealthSnapshot(),
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
-        plantName: getSetting("plantName", "Solar Plant"),
+        plantName: getSetting("plantName", "ADSI Plant"),
       },
+      plantCap: plantCap || null,
     }),
   );
 });
 
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
+  // Supports ETag for direct consumers that can tolerate cached heartbeat data.
+  // The remote bridge still uses full polls so downstream clients keep fresh
+  // timestamps/totals for accuracy and stale-card avoidance.
+  // Uses res.writeHead()+res.end() to bypass Express's own ETag generation
+  // which would overwrite our timestamp-based ETag.
   if (!isRemoteMode() && typeof poller.getLiveSnapshotJson === "function") {
     const snap = poller.getLiveSnapshotJson();
     if (snap && typeof snap.json === "string") {
-      res.set("Content-Type", "application/json; charset=utf-8");
-      return res.send(snap.json);
+      const etag = `"live-${snap.ts}"`;
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { "ETag": etag });
+        return res.end();
+      }
+      const buf = Buffer.from(snap.json, "utf8");
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": String(buf.length),
+        "ETag": etag,
+        "Cache-Control": "no-cache",
+      });
+      return res.end(buf);
     }
   }
   return res.json(getRuntimeLiveData());
+});
+
+function resolveGatewayChatIdentity(req) {
+  if (isLoopbackRequest(req)) {
+    return buildLocalChatIdentity();
+  }
+  const fromMachine = normalizeChatMachine(req?.body?.from_machine, "remote");
+  const toMachine = normalizeChatMachine(
+    req?.body?.to_machine,
+    getOppositeChatMachine(fromMachine),
+  );
+  if (toMachine !== getOppositeChatMachine(fromMachine)) {
+    const err = new Error("Invalid chat route.");
+    err.httpStatus = 400;
+    throw err;
+  }
+  const fromName = String(req?.body?.from_name || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  return {
+    from_machine: fromMachine,
+    to_machine: toMachine,
+    from_name:
+      fromName ||
+      buildChatDisplayName(
+        fromMachine,
+        getSetting("operatorName", "OPERATOR"),
+      ),
+  };
+}
+
+app.post("/api/chat/send", async (req, res) => {
+  let message = "";
+  try {
+    message = sanitizeChatMessageText(req?.body?.message);
+    const rateMachine = isRemoteMode() ? "remote" : (readOperationMode() || "gateway");
+    checkChatRateLimit(rateMachine);
+    if (isRemoteMode()) {
+      const identity = buildLocalChatIdentity("remote");
+      const payload = await requestRemoteChat("/api/chat/send", {
+        method: "POST",
+        body: {
+          message,
+          ...identity,
+        },
+        timeout: CHAT_PROXY_TIMEOUT_MS,
+      });
+      const row = normalizeChatRow(payload?.row);
+      if (!row) throw new Error("Gateway returned an invalid chat row.");
+      broadcastUpdate({ type: "chat", row });
+      return res.json({ ok: true, row });
+    }
+
+    const identity = resolveGatewayChatIdentity(req);
+    const row = insertChatMessage(
+      {
+        ts: Date.now(),
+        ...identity,
+        message,
+        read_ts: null,
+      },
+      CHAT_RETENTION_COUNT,
+    );
+    broadcastUpdate({ type: "chat", row });
+    return res.json({ ok: true, row });
+  } catch (err) {
+    const status = Math.max(400, Math.min(599, Number(err?.httpStatus || 502)));
+    const rawMessage = String(err?.message || err || "Message send failed.");
+    const error =
+      isRemoteMode() && /remote gateway|fetch failed|timed out|econnrefused|connect/i.test(rawMessage)
+        ? "Gateway unavailable. Message not sent."
+        : rawMessage;
+    return res.status(status).json({ ok: false, error });
+  }
+});
+
+app.get("/api/chat/messages", async (req, res) => {
+  try {
+    const mode = String(req?.query?.mode || "thread")
+      .trim()
+      .toLowerCase();
+    const limit = Math.max(
+      1,
+      Math.min(
+        mode === "thread" ? CHAT_THREAD_LIMIT : REMOTE_CHAT_POLL_LIMIT,
+        Math.trunc(Number(req?.query?.limit || (mode === "thread" ? CHAT_THREAD_LIMIT : REMOTE_CHAT_POLL_LIMIT))),
+      ),
+    );
+    const afterId = Math.max(0, Math.trunc(Number(req?.query?.afterId || 0)));
+    const machine = normalizeChatMachine(
+      req?.query?.machine,
+      isRemoteMode() ? "remote" : readOperationMode(),
+    );
+
+    if (isRemoteMode()) {
+      const qs = new URLSearchParams({
+        mode: mode === "inbox" ? "inbox" : "thread",
+        limit: String(limit),
+      });
+      if (mode === "inbox") {
+        qs.set("machine", machine);
+        qs.set("afterId", String(afterId));
+      }
+      const payload = await requestRemoteChat(`/api/chat/messages?${qs.toString()}`, {
+        method: "GET",
+        timeout: CHAT_PROXY_TIMEOUT_MS,
+        retry: {
+          attempts: 2,
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      });
+      const rows = normalizeChatRows(payload?.rows);
+      if (mode === "thread") {
+        updateRemoteChatCursorFromRows(rows, "remote");
+        remoteChatBridgeState.primed = true;
+      } else if (mode === "inbox") {
+        updateRemoteChatCursorFromRows(rows, machine);
+        remoteChatBridgeState.primed = true;
+      }
+      return res.json({ ok: true, rows });
+    }
+
+    if (mode === "inbox") {
+      const rows = getChatInboxAfterId(machine, afterId, limit).map(normalizeChatRow).filter(Boolean);
+      return res.json({ ok: true, rows });
+    }
+    const rows = getChatThread(limit).map(normalizeChatRow).filter(Boolean);
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    const status = Math.max(400, Math.min(599, Number(err?.httpStatus || 502)));
+    return res.status(status).json({
+      ok: false,
+      error: String(err?.message || err || "Chat history request failed."),
+    });
+  }
+});
+
+app.post("/api/chat/read", async (req, res) => {
+  try {
+    const upToId = Math.max(0, Math.trunc(Number(req?.body?.upToId || 0)));
+    if (isRemoteMode()) {
+      const payload = await requestRemoteChat("/api/chat/read", {
+        method: "POST",
+        body: {
+          upToId,
+          machine: "remote",
+        },
+        timeout: CHAT_PROXY_TIMEOUT_MS,
+        retry: {
+          attempts: 2,
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      });
+      return res.json({
+        ok: true,
+        updated: Math.max(0, Math.trunc(Number(payload?.updated || 0))),
+      });
+    }
+
+    const machine = isLoopbackRequest(req)
+      ? readOperationMode()
+      : normalizeChatMachine(req?.body?.machine, readOperationMode());
+    const updated = markChatReadUpToId(machine, upToId, Date.now());
+    return res.json({ ok: true, updated });
+  } catch (err) {
+    const status = Math.max(400, Math.min(599, Number(err?.httpStatus || 502)));
+    return res.status(status).json({
+      ok: false,
+      error: String(err?.message || err || "Chat read update failed."),
+    });
+  }
+});
+
+app.post("/api/chat/clear", async (req, res) => {
+  try {
+    if (isRemoteMode()) {
+      const payload = await requestRemoteChat("/api/chat/clear", {
+        method: "POST",
+        body: {},
+        timeout: CHAT_PROXY_TIMEOUT_MS,
+        retry: {
+          attempts: 2,
+          baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+        },
+      });
+      broadcastUpdate({ type: "chat_clear" });
+      return res.json({
+        ok: true,
+        cleared: Math.max(0, Math.trunc(Number(payload?.cleared || 0))),
+      });
+    }
+
+    const cleared = clearAllChatMessages();
+    broadcastUpdate({ type: "chat_clear" });
+    return res.json({ ok: true, cleared });
+  } catch (err) {
+    const status = Math.max(400, Math.min(599, Number(err?.httpStatus || 502)));
+    return res.status(status).json({
+      ok: false,
+      error: String(err?.message || err || "Chat clear failed."),
+    });
+  }
+});
+
+app.get("/api/replication/manual-scope", (req, res) => {
+  res.json({ ok: true, scope: buildManualReplicationScope() });
+});
+
+app.get("/api/replication/job-status", (req, res) => {
+  res.json({ ok: true, job: snapshotManualReplicationJob() });
+});
+
+app.post("/api/replication/cancel", (req, res) => {
+  const result = requestManualReplicationCancel();
+  if (!result.ok) {
+    return res.status(409).json(result);
+  }
+  return res.json(result);
+});
+
+app.get("/api/replication/archive-manifest", (req, res) => {
+  try {
+    const manifest = listLocalArchiveManifest();
+    sendJsonMaybeGzip(req, res, {
+      ok: true,
+      manifest,
+      summary: summarizeArchiveManifest(manifest),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/replication/archive-download", async (req, res) => {
+  const fileName = sanitizeArchiveFileName(req.query?.file || "");
+  if (!fileName) {
+    return res.status(400).json({ ok: false, error: "Invalid archive file." });
+  }
+  const monthKey = monthKeyFromArchiveFileName(fileName);
+  prepareArchiveDbForTransfer(monthKey);
+  let snapshot = null;
+  try {
+    const resolved = resolveArchiveFileForTransfer(fileName);
+    if (!resolved?.path) {
+      throw new Error("Archive file not found.");
+    }
+    snapshot = await createSqliteTransferSnapshot(resolved.path, {
+      targetDir: ARCHIVE_DIR,
+      prefix: `${fileName}.transfer-snapshot`,
+      mtimeMs: Math.max(0, Number(resolved.mtimeMs || 0)),
+    });
+    const totalBytes = Math.max(0, Number(snapshot?.size || resolved.size || 0));
+    const sha256 = await getCachedFileSha256(snapshot.tempPath, {
+      size: totalBytes,
+      mtimeMs: Math.max(0, Number(snapshot?.mtimeMs || resolved.mtimeMs || 0)),
+    });
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("x-archive-size", String(totalBytes));
+    res.setHeader("x-archive-sha256", sha256);
+    res.setHeader(
+      "x-archive-mtime",
+      String(Math.max(0, Number(snapshot?.mtimeMs || resolved.mtimeMs || 0))),
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Accept-Ranges", "bytes");
+
+    // Support HTTP Range requests for resumable downloads.
+    const rangeHeader = String(req.headers.range || "").trim();
+    if (rangeHeader && totalBytes > 0) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
+      if (match) {
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? Math.min(parseInt(match[2], 10), totalBytes - 1) : totalBytes - 1;
+        if (start >= totalBytes || start > end) {
+          res.setHeader("Content-Range", `bytes */${totalBytes}`);
+          return res.status(416).end();
+        }
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${totalBytes}`);
+        res.setHeader("Content-Length", String(end - start + 1));
+        res.status(206);
+        await pipeline(
+          fs.createReadStream(snapshot.tempPath, {
+            start,
+            end,
+            highWaterMark: REPLICATION_TRANSFER_STREAM_HWM,
+          }),
+          res,
+        );
+        return;
+      }
+    }
+
+    const useGzip = shouldGzipReplicationStream(req, totalBytes);
+    if (!useGzip) {
+      res.setHeader("Content-Length", String(totalBytes));
+      await pipeline(createTransferReadStream(snapshot.tempPath), res);
+      return;
+    }
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    await pipeline(
+      createTransferReadStream(snapshot.tempPath),
+      createReplicationGzipStream(),
+      res,
+    );
+    return;
+  } catch (err) {
+    return res.status(404).json({ ok: false, error: "Archive file not found." });
+  } finally {
+    if (snapshot?.tempPath) {
+      try {
+        await disposeSqliteTransferSnapshot(snapshot);
+      } catch (err) {
+        console.warn(
+          "[replication] failed to clean up archive transfer snapshot:",
+          String(err?.message || err || "unknown error"),
+        );
+      }
+    }
+  }
+});
+
+app.post("/api/replication/archive-upload", async (req, res) => {
+  const fileName = sanitizeArchiveFileName(req.query?.file || "");
+  if (!fileName) {
+    return res.status(400).json({ ok: false, error: "Invalid archive file." });
+  }
+  const monthKey = monthKeyFromArchiveFileName(fileName);
+  const tempPath = path.join(ARCHIVE_DIR, `${fileName}.upload-${Date.now()}.tmp`);
+  const expectedSize = Math.max(0, Number(req.headers["x-archive-size"] || 0));
+  const expectedMtimeMs = Math.max(0, Number(req.headers["x-archive-mtime"] || Date.now()));
+  const expectedSha256 = String(req.headers["x-archive-sha256"] || "").trim().toLowerCase();
+  let recvBytes = 0;
+  try {
+    await fs.promises.mkdir(ARCHIVE_DIR, { recursive: true });
+    closeArchiveDbForMonth(monthKey);
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "start",
+      recvBytes: 0,
+      totalBytes: expectedSize,
+      chunkCount: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    req.on("data", (chunk) => {
+      recvBytes += Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "rx",
+        phase: "chunk",
+        recvBytes,
+        totalBytes: expectedSize,
+        chunk: 1,
+        chunkCount: 1,
+        label: `Receiving archive ${fileName}`,
+      });
+    });
+    await pipeline(req, createTransferWriteStream(tempPath));
+    const verified = await verifyTransferredFile(tempPath, {
+      expectedSize: expectedSize > 0 ? expectedSize : recvBytes,
+      expectedSha256,
+    });
+    const mtime = new Date(expectedMtimeMs);
+    await fs.promises.utimes(tempPath, mtime, mtime);
+    stagePendingArchiveReplacement({
+      name: fileName,
+      monthKey,
+      tempName: path.basename(tempPath),
+      size: Math.max(0, Number(verified?.size || expectedSize || recvBytes || 0)),
+      mtimeMs: expectedMtimeMs,
+    });
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "done",
+      recvBytes,
+      totalBytes: expectedSize > 0 ? expectedSize : recvBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    return res.json({
+      ok: true,
+      file: {
+        name: fileName,
+        monthKey,
+        size: expectedSize > 0 ? expectedSize : recvBytes,
+        mtimeMs: expectedMtimeMs,
+        staged: true,
+      },
+    });
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore temp cleanup failures.
+    }
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "rx",
+      phase: "error",
+      recvBytes,
+      totalBytes: expectedSize > 0 ? expectedSize : recvBytes,
+      chunkCount: 1,
+      label: `Receiving archive ${fileName}`,
+    });
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/replication/main-db", async (req, res) => {
+  if (isRemotePullOnlyMode()) {
+    return res.status(409).json({
+      ok: false,
+      error: "Replication is disabled in Client pull-only mode.",
+    });
+  }
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+
+  let snapshot = null;
+  let sentBytes = 0;
+  try {
+    snapshot = await createGatewayMainDbSnapshotForTransfer();
+    const fileName = "adsi.db";
+    const totalBytes = Math.max(0, Number(snapshot?.size || 0));
+    const targetMtimeMs = Math.max(0, Number(snapshot?.mtimeMs || Date.now()));
+    const stream = createTransferReadStream(snapshot.tempPath);
+    const useGzip = shouldGzipReplicationStream(req, totalBytes);
+
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "start",
+      sentBytes: 0,
+      totalBytes,
+      chunkCount: 1,
+      label: "Sending main database",
+    });
+
+    stream.on("data", (chunk) => {
+      sentBytes += Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      broadcastUpdate({
+        type: "xfer_progress",
+        dir: "tx",
+        phase: "chunk",
+        sentBytes,
+        totalBytes,
+        chunk: 1,
+        chunkCount: 1,
+        label: "Sending main database",
+      });
+    });
+
+    // Include gateway cursors so the remote side can converge after pull.
+    let gatewayCursorsJson = "{}";
+    try {
+      gatewayCursorsJson = JSON.stringify(buildCurrentReplicationCursors());
+    } catch (_) { /* non-fatal */ }
+
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("x-main-db-size", String(totalBytes));
+    res.setHeader("x-main-db-mtime", String(targetMtimeMs));
+    res.setHeader("x-main-db-sha256", String(snapshot?.sha256 || ""));
+    res.setHeader("x-main-db-cursors", gatewayCursorsJson);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    if (!useGzip) {
+      res.setHeader("Content-Length", String(totalBytes));
+      await pipeline(stream, res);
+    } else {
+      res.setHeader("Content-Encoding", "gzip");
+      res.setHeader("Vary", "Accept-Encoding");
+      await pipeline(stream, createReplicationGzipStream(), res);
+    }
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: "done",
+      sentBytes,
+      totalBytes,
+      chunkCount: 1,
+      importedRows: 1,
+      label: "Sending main database",
+    });
+  } catch (err) {
+    const cancelled = isTransferStreamAbortError(err);
+    broadcastUpdate({
+      type: "xfer_progress",
+      dir: "tx",
+      phase: cancelled ? "cancelled" : "error",
+      sentBytes,
+      totalBytes: Math.max(0, Number(snapshot?.size || sentBytes || 0)),
+      chunkCount: 1,
+      label: "Sending main database",
+    });
+    if (cancelled) {
+      return;
+    }
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  } finally {
+    releaseGatewayMainDbSnapshotForTransfer(snapshot);
+  }
 });
 
 app.get("/api/replication/summary", async (req, res) => {
@@ -4461,7 +10997,7 @@ app.get("/api/replication/summary", async (req, res) => {
   }
   try {
     const summary = buildReplicationSummary();
-    res.json({ ok: true, summary });
+    sendJsonMaybeGzip(req, res, { ok: true, summary });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -4479,7 +11015,7 @@ app.get("/api/replication/full", async (req, res) => {
   }
   try {
     const snapshot = buildFullDbSnapshot();
-    res.json({ ok: true, snapshot });
+    sendJsonMaybeGzip(req, res, { ok: true, snapshot });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -4498,7 +11034,7 @@ app.post("/api/replication/incremental", async (req, res) => {
   try {
     const cursors = normalizeReplicationCursors(req?.body?.cursors || {});
     const delta = buildIncrementalReplicationDelta(cursors);
-    res.json({ ok: true, delta });
+    sendJsonMaybeGzip(req, res, { ok: true, delta });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -4522,6 +11058,7 @@ app.post("/api/replication/push", async (req, res) => {
     const chunkIndex = Math.max(0, Number(meta?.chunkIndex || 0));
     const chunkCount = Math.max(0, Number(meta?.chunkCount || 0));
     const totalRows = Math.max(0, Number(meta?.totalRows || 0));
+    const totalBytes = Math.max(0, Number(meta?.totalBytes || 0));
     const signature = String(meta?.signature || "");
     const chunkBytesFromMeta = Math.max(0, Number(meta?.chunkBytes || 0));
     const reqBytes = Buffer.byteLength(JSON.stringify(req?.body || {}), "utf8");
@@ -4538,6 +11075,7 @@ app.post("/api/replication/push", async (req, res) => {
           dir: "rx",
           phase: "start",
           recvBytes: 0,
+          totalBytes,
           chunkCount,
           totalRows,
           label: "Receiving push",
@@ -4549,6 +11087,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "chunk",
         recvBytes: inboundPushRxProgress.recvBytes,
+        totalBytes,
         batch: chunkIndex > 0 ? chunkIndex : 1,
         chunkCount,
         totalRows,
@@ -4560,6 +11099,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "start",
         recvBytes: 0,
+        totalBytes,
         label: "Receiving push",
       });
       broadcastUpdate({
@@ -4567,6 +11107,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "chunk",
         recvBytes: Math.max(0, recvBytes),
+        totalBytes,
         batch: 1,
         chunkCount: 1,
         totalRows,
@@ -4591,6 +11132,7 @@ app.post("/api/replication/push", async (req, res) => {
           dir: "rx",
           phase: "done",
           recvBytes: Math.max(0, Number(inboundPushRxProgress.recvBytes || 0)),
+          totalBytes,
           chunkCount,
           totalRows,
           importedRows: Number(stats?.importedRows || 0),
@@ -4606,6 +11148,7 @@ app.post("/api/replication/push", async (req, res) => {
         dir: "rx",
         phase: "done",
         recvBytes: Math.max(0, recvBytes),
+        totalBytes,
         importedRows: Number(stats?.importedRows || 0),
         label: "Receiving push",
       });
@@ -4619,6 +11162,7 @@ app.post("/api/replication/push", async (req, res) => {
       dir: "rx",
       phase: "error",
       recvBytes,
+      totalBytes,
       label: "Receiving push",
     });
     inboundPushRxProgress.active = false;
@@ -4647,263 +11191,210 @@ app.post("/api/replication/pull-now", async (req, res) => {
       error: "Remote gateway URL cannot be localhost in remote mode.",
     });
   }
+  const includeArchive = req?.body?.includeArchive !== false;
+  const background = req?.body?.background !== false;
+  const forcePull = Boolean(req?.body?.forcePull);
   try {
-    const inc = await runRemoteCatchUpReplication(
-      base,
-      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-      REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    );
-    if (inc?.skipped) {
-      return res.status(202).json({
-        ok: false,
-        error: "Replication already in progress.",
-        incremental: inc,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
+    let preflight = null;
+    if (background && !forcePull) {
+      preflight = await evaluateManualPullPreflight(base, forcePull);
+      if (!preflight?.ok) {
+        return sendManualPullErrorResponse(res, preflight?.error);
+      }
     }
-    if (inc?.ok) {
-      return res.json({
+    if (background) {
+      const started = startManualReplicationJob(
+        "pull",
+        {
+          includeArchive,
+          summary: "Queued standby DB refresh from gateway.",
+          runningSummary: "Downloading and staging the gateway main database for standby use.",
+        },
+        (runControl) =>
+          runManualPullSync(base, includeArchive, forcePull, {
+            signal: runControl?.controller?.signal || null,
+            runControl,
+            preflight,
+          }),
+      );
+      if (!started?.started) {
+        return res.status(202).json({
+          ok: false,
+          error: "Replication already in progress.",
+          background: true,
+          job: started?.job || snapshotManualReplicationJob(),
+        });
+      }
+      return res.status(202).json({
         ok: true,
-        mode: String(inc.mode || "incremental"),
-        incremental: inc,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
+        background: true,
+        includeArchive,
+        forcePull,
+        job: started.job,
+        message:
+          "Background standby DB refresh started. The gateway main database will be staged for restart-safe local replacement.",
       });
     }
 
-    return res.status(502).json({
-      ok: false,
-      error: `Incremental pull failed: ${String(
-        inc?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-      incremental: inc,
+    const result = await runManualPullSync(base, includeArchive, forcePull);
+    return res.json({
+      ok: true,
+      background: false,
+      includeArchive,
+      forcePull,
+      result,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
     });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    return sendManualPullErrorResponse(res, err);
   }
 });
 
 app.post("/api/replication/push-now", async (req, res) => {
-  if (!isRemoteMode()) {
-    return res.status(400).json({
-      ok: false,
-      error: "Manual push is available only in Remote mode.",
-    });
-  }
-  const base = getRemoteGatewayBaseUrl();
-  if (!base) {
-    return res
-      .status(503)
-      .json({ ok: false, error: "Remote gateway URL is not configured." });
-  }
-  if (isUnsafeRemoteLoop(base)) {
-    return res.status(400).json({
-      ok: false,
-      error: "Remote gateway URL cannot be localhost in remote mode.",
-    });
-  }
-  try {
-    const pushed = await runRemotePushFull(base);
-    if (pushed?.skipped) {
-      return res.status(202).json({
-        ok: false,
-        error: "Replication already in progress.",
-        pushed,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (!pushed?.ok) {
-      return res.status(502).json({
-        ok: false,
-        error: String(pushed?.error || "Full push failed."),
-        pushed,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    const incremental = await runRemoteCatchUpReplication(
-      base,
-      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-      REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    );
-    if (incremental?.ok) {
-      return res.json({
-        ok: true,
-        pushed,
-        mode: String(incremental.mode || "incremental"),
-        incremental,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    return res.status(502).json({
-      ok: false,
-      error: `Post-push incremental pull failed: ${String(
-        incremental?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-      pushed,
-      incremental,
-      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-    });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
-  }
+  // Viewer model: push is disabled. Remote mode is a gateway-backed viewer.
+  return res.status(410).json({
+    ok: false,
+    error: "Push is disabled. Remote mode is a gateway-backed viewer.",
+  });
 });
 
 app.post("/api/replication/reconcile-now", async (req, res) => {
-  if (isRemotePullOnlyMode()) {
-    return res.status(409).json({
-      ok: false,
-      error:
-        "Manual replication is disabled in Client pull-only mode. Use the gateway server as source of truth.",
-    });
-  }
-  if (!isRemoteMode()) {
-    return res.status(400).json({
-      ok: false,
-      error: "Manual replication is only available in Remote mode.",
-    });
-  }
-  const base = getRemoteGatewayBaseUrl();
-  if (!base) {
-    return res
-      .status(503)
-      .json({ ok: false, error: "Remote gateway URL is not configured." });
-  }
-  if (isUnsafeRemoteLoop(base)) {
-    return res.status(400).json({
-      ok: false,
-      error: "Remote gateway URL cannot be localhost in remote mode.",
-    });
-  }
-
-  const forcePull = Boolean(req?.body?.forcePull);
-  try {
-    const reconcile = await reconcileRemoteBeforePull(base);
-    if (!reconcile?.ok && reconcile?.localNewer && !forcePull) {
-      return res.status(409).json({
-        ok: false,
-        code: "LOCAL_NEWER_PUSH_FAILED",
-        canForcePull: true,
-        error:
-          "Local data appears newer, but push reconciliation failed. Retry with forcePull to pull from gateway anyway.",
-        reconcile,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (!reconcile?.ok && !forcePull) {
-      return res.status(502).json({
-        ok: false,
-        error: String(reconcile?.error || "Reconciliation failed."),
-        reconcile,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-    if (!reconcile?.ok && forcePull) {
-      remoteBridgeState.lastSyncDirection = "pull-only";
-    }
-
-    const incremental = await runRemoteCatchUpReplication(
-      base,
-      REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES,
-      REMOTE_INCREMENTAL_CATCHUP_PASSES,
-    );
-    if (incremental?.ok) {
-      return res.json({
-        ok: true,
-        reconcile,
-        mode: String(incremental.mode || "incremental"),
-        incremental,
-        direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-      });
-    }
-
-    return res.status(502).json({
-      ok: false,
-      error: `Reconcile pull failed: ${String(
-        incremental?.error || "unknown error",
-      )}. Ensure gateway and client are on the same build.`,
-      reconcile,
-      incremental,
-      direction: String(remoteBridgeState.lastSyncDirection || "idle"),
-    });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
-  }
+  // Viewer model: reconciliation is disabled. Remote mode is a gateway-backed viewer.
+  return res.status(410).json({
+    ok: false,
+    error: "Reconciliation is disabled. Remote mode is a gateway-backed viewer.",
+  });
 });
 
 app.post("/api/write", async (req, res) => {
   if (isRemoteMode()) {
+    return proxyWriteToRemote(req, res);
+  }
+  try {
+    const result = await executeLocalControlWriteRequest(req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/write/batch", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyWriteToRemote(req, res, "/api/write/batch");
+  }
+  try {
+    const result = await executeLocalBatchControlWriteRequest(req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/write/auth/bulk", async (req, res) => {
+  if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
-  const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
-  const { inverter, node, unit, value, scope, operator, authKey } = req.body || {};
-  const invNum = Number(inverter);
-  const unitNum = Number(unit ?? node);
-  const valueNum = Number(value);
-  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
-  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+  const { authKey } = req.body || {};
+  if (!isValidPlantWideAuthKey(authKey)) {
+    return res.status(403).json({ ok: false, error: "Authorization failed. Invalid auth key." });
+  }
+  const session = issuePlantWideAuthSession();
+  return res.json({
+    ok: true,
+    token: session.token,
+    issuedAt: session.issuedAt,
+    expiresAt: session.expiresAt,
+    ttlMs: session.ttlMs,
+  });
+});
 
-  if (!Number.isFinite(invNum) || invNum < 1 || invNum > invMax) {
-    return res.status(400).json({ ok: false, error: "Invalid inverter" });
+app.get("/api/plant-cap/status", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
   }
-  if (!Number.isFinite(unitNum) || unitNum < 1 || unitNum > nodeMax) {
-    return res.status(400).json({ ok: false, error: "Invalid unit/node" });
-  }
-  if (!Number.isFinite(valueNum) || (valueNum !== 0 && valueNum !== 1 && valueNum !== 2)) {
-    return res.status(400).json({ ok: false, error: "Invalid value" });
-  }
-  const scopeNorm = String(scope || "single").toLowerCase();
-  const isBulkScope = scopeNorm === "all" || scopeNorm === "selected";
-  if (isBulkScope && !isValidPlantWideAuthKey(authKey)) {
-    return res.status(403).json({ ok: false, error: "Unauthorized bulk command" });
-  }
+  return res.json({
+    ok: true,
+    status:
+      plantCapController &&
+      plantCapController.getStatus({ refresh: true, includePreview: true }),
+  });
+});
 
-  const upstreamPayload = { inverter: invNum, unit: unitNum, value: valueNum };
-  const operatorName = String(operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
-  const cfg = loadIpConfigFromDb();
-  const targetIp = String(
-    cfg?.inverters?.[invNum] ?? cfg?.inverters?.[String(invNum)] ?? "",
-  ).trim();
-  const ip = targetIp || "";
+app.post("/api/plant-cap/preview", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(upstreamPayload),
-      timeout: 3000,
+    const preview =
+      plantCapController && plantCapController.buildPreview(req.body || {});
+    return res.json({
+      ok: true,
+      preview,
+      status:
+        plantCapController &&
+        plantCapController.getStatus({ refresh: true, includePreview: false }),
     });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      throw new Error(
-        data.error || `Upstream write failed (${r.status} ${r.statusText})`,
-      );
-    }
-    logControlAction({
-      operator: operatorName,
-      inverter: invNum,
-      node: unitNum || 0,
-      action: valueNum === 1 ? "START" : "STOP",
-      scope: scope || "single",
-      result: "ok",
-      ip,
-    });
-    res.json({ ok: true, data });
-  } catch (e) {
-    logControlAction({
-      operator: operatorName,
-      inverter: invNum,
-      node: unitNum || 0,
-      action: valueNum === 1 ? "START" : "STOP",
-      scope: scope || "single",
-      result: `error:${e.message}`,
-      ip,
-    });
-    res.status(502).json({ ok: false, error: e.message });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/enable", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  try {
+    const status =
+      plantCapController &&
+      (await plantCapController.enable(req.body || {}));
+    return res.json({ ok: true, status });
+  } catch (err) {
+    return res
+      .status(Number(err?.status || 400))
+      .json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/disable", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  const status =
+    plantCapController &&
+    plantCapController.disable(
+      "disabled",
+      "Plant-wide capping monitoring was disabled by an authorized operator.",
+    );
+  return res.json({ ok: true, status });
+});
+
+app.post("/api/plant-cap/release", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "Unauthorized plant cap command" });
+  }
+  try {
+    const result =
+      plantCapController && (await plantCapController.releaseControlled());
+    return res.json(result || { ok: false, error: "Plant cap controller unavailable." });
+  } catch (err) {
+    return res
+      .status(Number(err?.status || 500))
+      .json({ ok: false, error: err.message });
   }
 });
 
@@ -4951,6 +11442,7 @@ app.post("/api/ip-config", (req, res) => {
     mirrorIpConfigToLegacyFiles(cfg);
     backfillAuditIpsFromConfig();
     pastDailyReportCache.clear();
+    pastReportSummaryCache.clear();
     // Push new config to poller immediately (skip 5 s cache lag).
     if (!isRemoteMode()) poller.setIpConfigSnapshot(cfg);
     // Notify the dashboard so it rebuilds inverter cards without a restart.
@@ -4966,6 +11458,7 @@ app.post("/api/settings", (req, res) => {
   let exportDirCreated = false;
   let exportDirResolved = "";
   const modeBefore = readOperationMode();
+  const retainDaysBefore = Math.max(1, Number(getSetting("retainDays", 90)));
   const remoteGatewayBefore = getRemoteGatewayBaseUrl();
   const remoteTokenBefore = getRemoteApiToken();
   const {
@@ -4986,11 +11479,24 @@ app.post("/api/settings", (req, res) => {
     retainDays,
     forecastProvider,
     solcastBaseUrl,
+    solcastAccessMode,
     solcastApiKey,
     solcastResourceId,
+    solcastToolkitEmail,
+    solcastToolkitPassword,
+    solcastToolkitSiteRef,
+    solcastToolkitDays,
+    solcastToolkitPeriod,
     solcastTimezone,
     exportUiState,
     inverterPollConfig,
+    plantLatitude,
+    plantLongitude,
+    plantCapUpperMw,
+    plantCapLowerMw,
+    plantCapSequenceMode,
+    plantCapSequenceCustom,
+    plantCapCooldownSec,
   } =
     req.body || {};
 
@@ -5057,7 +11563,7 @@ app.post("/api/settings", (req, res) => {
   if (invGridLayout !== undefined)
     updates.invGridLayout = sanitizeInvGridLayout(invGridLayout);
   if (retainDays !== undefined)
-    updates.retainDays = clampInt(retainDays, 7, 1095, 90);
+    updates.retainDays = clampInt(retainDays, 1, 1095, 90);
   if (plantName !== undefined) {
     const name = String(plantName).trim();
     if (!name)
@@ -5088,6 +11594,16 @@ app.post("/api/settings", (req, res) => {
     }
     updates.solcastBaseUrl = base || "https://api.solcast.com.au";
   }
+  if (solcastAccessMode !== undefined) {
+    const mode = normalizeSolcastAccessMode(solcastAccessMode);
+    if (
+      mode !== SOLCAST_ACCESS_MODE_API &&
+      mode !== SOLCAST_ACCESS_MODE_TOOLKIT
+    ) {
+      return res.status(400).json({ ok: false, error: "Invalid solcastAccessMode" });
+    }
+    updates.solcastAccessMode = mode;
+  }
   if (solcastApiKey !== undefined) {
     const key = String(solcastApiKey || "").trim();
     updates.solcastApiKey = key.slice(0, 256);
@@ -5096,6 +11612,45 @@ app.post("/api/settings", (req, res) => {
     const rid = String(solcastResourceId || "").trim();
     updates.solcastResourceId = rid.slice(0, 120);
   }
+  const effectiveSolcastBaseUrl =
+    String(
+      updates.solcastBaseUrl ??
+        getSetting("solcastBaseUrl", "https://api.solcast.com.au") ??
+        "https://api.solcast.com.au",
+    ).trim() || "https://api.solcast.com.au";
+  if (solcastToolkitEmail !== undefined) {
+    const email = String(solcastToolkitEmail || "").trim();
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return res.status(400).json({ ok: false, error: "Invalid solcastToolkitEmail" });
+    }
+    updates.solcastToolkitEmail = email.slice(0, 200);
+  }
+  if (solcastToolkitPassword !== undefined) {
+    const pwd = String(solcastToolkitPassword || "").trim();
+    updates.solcastToolkitPassword = pwd.slice(0, 256);
+  }
+  if (solcastToolkitSiteRef !== undefined) {
+    const ref = String(solcastToolkitSiteRef || "").trim();
+    if (ref) {
+      try {
+        parseSolcastToolkitSiteRef(ref, effectiveSolcastBaseUrl);
+      } catch (err) {
+        return res.status(400).json({
+          ok: false,
+          error: `Invalid Plant Resource ID: ${err.message}`,
+        });
+      }
+    }
+    updates.solcastToolkitSiteRef = ref.slice(0, 500);
+  }
+  if (solcastToolkitDays !== undefined) {
+    const d = Math.max(1, Math.min(7, Math.trunc(Number(solcastToolkitDays) || 2)));
+    updates.solcastToolkitDays = String(d);
+  }
+  if (solcastToolkitPeriod !== undefined) {
+    const p = String(solcastToolkitPeriod || "PT5M").trim();
+    updates.solcastToolkitPeriod = SOLCAST_PREVIEW_RESOLUTIONS.has(p) ? p : SOLCAST_TOOLKIT_PERIOD;
+  }
   if (solcastTimezone !== undefined) {
     const tz = String(solcastTimezone || "").trim();
     if (tz && !/^[A-Za-z0-9_.+\-]+(?:\/[A-Za-z0-9_.+\-]+)*$/.test(tz)) {
@@ -5103,11 +11658,129 @@ app.post("/api/settings", (req, res) => {
     }
     updates.solcastTimezone = (tz || "Asia/Manila").slice(0, 80);
   }
+  if (plantLatitude !== undefined) {
+    const lat = Number(plantLatitude);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90)
+      return res.status(400).json({ ok: false, error: "plantLatitude must be between -90 and 90" });
+    updates.plantLatitude = String(lat);
+  }
+  if (plantLongitude !== undefined) {
+    const lon = Number(plantLongitude);
+    if (!Number.isFinite(lon) || lon < -180 || lon > 180)
+      return res.status(400).json({ ok: false, error: "plantLongitude must be between -180 and 180" });
+    updates.plantLongitude = String(lon);
+  }
+  if (plantCapUpperMw !== undefined) {
+    const rawUpper = String(plantCapUpperMw ?? "").trim();
+    if (!rawUpper) {
+      updates.plantCapUpperMw = "";
+    } else {
+      const upper = Number(rawUpper);
+      if (!Number.isFinite(upper) || upper <= 0) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapUpperMw must be greater than 0",
+        });
+      }
+      updates.plantCapUpperMw = String(upper);
+    }
+  }
+  if (plantCapLowerMw !== undefined) {
+    const rawLower = String(plantCapLowerMw ?? "").trim();
+    if (!rawLower) {
+      updates.plantCapLowerMw = "";
+    } else {
+      const lower = Number(rawLower);
+      if (!Number.isFinite(lower) || lower < 0) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapLowerMw must be 0 or higher",
+        });
+      }
+      updates.plantCapLowerMw = String(lower);
+    }
+  }
+  if (plantCapSequenceMode !== undefined) {
+    updates.plantCapSequenceMode = normalizePlantCapSequenceMode(
+      plantCapSequenceMode,
+    );
+  }
+  if (plantCapSequenceCustom !== undefined) {
+    updates.plantCapSequenceCustomJson = JSON.stringify(
+      normalizePlantCapSequenceCustom(
+        plantCapSequenceCustom,
+        clampInt(
+          inverterCount !== undefined
+            ? inverterCount
+            : getSetting("inverterCount", 27),
+          1,
+          200,
+          27,
+        ),
+      ),
+    );
+  }
+  if (plantCapCooldownSec !== undefined) {
+    updates.plantCapCooldownSec = String(
+      clampInt(plantCapCooldownSec, 5, 600, 30),
+    );
+  }
+  if (
+    updates.plantCapUpperMw !== undefined ||
+    updates.plantCapLowerMw !== undefined
+  ) {
+    const upperValue = String(
+      updates.plantCapUpperMw !== undefined
+        ? updates.plantCapUpperMw
+        : getSetting("plantCapUpperMw", ""),
+    ).trim();
+    const lowerValue = String(
+      updates.plantCapLowerMw !== undefined
+        ? updates.plantCapLowerMw
+        : getSetting("plantCapLowerMw", ""),
+    ).trim();
+    if (upperValue && lowerValue) {
+      const upper = Number(upperValue);
+      const lower = Number(lowerValue);
+      if (Number.isFinite(upper) && Number.isFinite(lower) && !(lower < upper)) {
+        return res.status(400).json({
+          ok: false,
+          error: "plantCapLowerMw must be less than plantCapUpperMw",
+        });
+      }
+    }
+  }
   if (exportUiState !== undefined) {
     updates.exportUiState = JSON.stringify(sanitizeExportUiState(exportUiState));
   }
   if (inverterPollConfig !== undefined) {
     updates.inverterPollConfig = JSON.stringify(sanitizePollConfig(inverterPollConfig));
+  }
+
+  const effectiveMode = sanitizeOperationMode(
+    updates.operationMode !== undefined ? updates.operationMode : modeBefore,
+    modeBefore,
+  );
+  const effectiveRemoteGatewayUrl = String(
+    updates.remoteGatewayUrl !== undefined
+      ? updates.remoteGatewayUrl
+      : remoteGatewayBefore,
+  ).trim();
+  if (effectiveMode === "remote") {
+    if (!effectiveRemoteGatewayUrl) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Remote mode requires a configured Remote Gateway URL. Enter the gateway address first, then save again.",
+      });
+    }
+    if (isUnsafeRemoteLoop(effectiveRemoteGatewayUrl)) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Remote mode cannot use localhost or 127.0.0.1 as the gateway URL. Use the gateway workstation IP, hostname, or Tailscale address.",
+      });
+    }
   }
 
   db.transaction(() => {
@@ -5124,20 +11797,41 @@ app.post("/api/settings", (req, res) => {
     applyRuntimeMode();
     todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
     broadcastUpdate({ type: "configChanged" }); // tell clients to reload settings + rebuild UI
+    if (modeAfter === "remote") {
+      setTimeout(() => {
+        kickRemoteBridgeNow("settings-refresh").catch(() => {});
+      }, 25);
+    }
   }
   if (
     updates.inverterCount !== undefined ||
     updates.nodeCount !== undefined
   ) {
     pastDailyReportCache.clear();
+    pastReportSummaryCache.clear();
   }
   if (updates.remoteAutoSync === "0") {
     remoteBridgeState.autoSyncAttempted = false;
   }
+  let retentionScheduled = false;
+  if (updates.retainDays !== undefined) {
+    const retainDaysAfter = Math.max(1, Number(updates.retainDays || retainDaysBefore));
+    if (retainDaysAfter !== retainDaysBefore) {
+      retentionScheduled = true;
+      // Fire-and-forget: pruneOldData is async and yields between batches to avoid
+      // blocking the event loop. Don't await it — respond to the client immediately.
+      pruneOldData({ vacuum: retainDaysAfter < retainDaysBefore }).catch((err) => {
+        console.error("[settings] background pruneOldData failed:", err.message);
+      });
+    }
+  }
+  const snapshot = buildSettingsSnapshot();
   res.json({
     ok: true,
     csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     exportDirCreated,
+    settings: snapshot,
+    retentionApplied: retentionScheduled ? { ok: true, scheduled: true } : null,
   });
 });
 
@@ -5157,6 +11851,8 @@ app.get("/api/runtime/network", (req, res) => {
     remotePullOnly: Boolean(isRemotePullOnlyMode()),
     remoteGatewayUrl: getRemoteGatewayBaseUrl(),
     remoteConnected: Boolean(remoteBridgeState.connected),
+    remoteLiveFailureCount: Number(remoteBridgeState.liveFailureCount || 0),
+    remoteLastFailureTs: Number(remoteBridgeState.lastFailureTs || 0),
     remoteLastAttemptTs: Number(remoteBridgeState.lastAttemptTs || 0),
     remoteLastSuccessTs: Number(remoteBridgeState.lastSuccessTs || 0),
     remoteLastError: String(remoteBridgeState.lastError || ""),
@@ -5171,17 +11867,48 @@ app.get("/api/runtime/network", (req, res) => {
     remoteLastReconcileRows: Number(remoteBridgeState.lastReconcileRows || 0),
     remoteLastReconcileError: String(remoteBridgeState.lastReconcileError || ""),
     remoteLastSyncDirection: String(remoteBridgeState.lastSyncDirection || "idle"),
+    remoteLivePausedForTransfer: Boolean(remoteBridgeState.livePauseActive),
+    remoteLivePauseReason: String(remoteBridgeState.livePauseReason || ""),
+    remoteLivePauseSince: Number(remoteBridgeState.livePauseSince || 0),
+    remoteHealth: buildRemoteHealthSnapshot(),
     remoteReplicationCursors: normalizeReplicationCursors(
       isRemotePullOnlyMode()
         ? {}
         : remoteBridgeState.replicationCursors || readReplicationCursorsSetting(),
     ),
+    manualReplicationJob: snapshotManualReplicationJob(),
+    manualReplicationScope: buildManualReplicationScope(),
     tailscale: getTailscaleStatusSnapshot(),
   });
 });
 
 app.get("/api/runtime/perf", (req, res) => {
   res.json(getRuntimePerfSnapshot());
+});
+
+app.get("/api/runtime/data-health", (req, res) => {
+  const todayEnergy =
+    typeof poller.getTodayEnergyHealth === "function"
+      ? poller.getTodayEnergyHealth()
+      : {};
+  const pollerStats =
+    typeof poller.getPerfStats === "function"
+      ? poller.getPerfStats()
+      : {};
+  res.json({
+    ok: true,
+    operationMode: isRemoteMode() ? "remote" : "gateway",
+    todayEnergy,
+    poller: {
+      running: Boolean(pollerStats?.running),
+      lastPollStartedTs: Number(pollerStats?.lastPollStartedTs || 0),
+      lastPollEndedTs: Number(pollerStats?.lastPollEndedTs || 0),
+      lastDbPersistOkTs: Number(pollerStats?.lastDbPersistOkTs || 0),
+      fetchOkCount: Number(pollerStats?.fetchOkCount || 0),
+      fetchErrorCount: Number(pollerStats?.fetchErrorCount || 0),
+      lastFetchError: String(pollerStats?.lastFetchError || ""),
+    },
+  });
 });
 
 app.get("/api/tailscale/status", (req, res) => {
@@ -5219,11 +11946,18 @@ app.post("/api/runtime/network/test", async (req, res) => {
   }
   const started = Date.now();
   try {
-    const r = await fetch(`${base}/api/live`, {
-      method: "GET",
-      headers: buildRemoteProxyHeaders(token),
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-    });
+    const r = await fetchWithRetry(
+      `${base}/api/live`,
+      {
+        method: "GET",
+        headers: buildRemoteProxyHeaders(token),
+        timeout: Math.max(REMOTE_FETCH_TIMEOUT_MS, 15000),
+      },
+      {
+        attempts: REMOTE_LIVE_FETCH_RETRIES,
+        baseDelayMs: REMOTE_LIVE_FETCH_RETRY_BASE_MS,
+      },
+    );
     if (!r.ok) {
       return res.status(502).json({
         ok: false,
@@ -5246,9 +11980,35 @@ app.post("/api/runtime/network/test", async (req, res) => {
   }
 });
 
+app.post("/api/runtime/network/reconnect", async (req, res) => {
+  const result = await kickRemoteBridgeNow("manual-reconnect");
+  if (/available only in Remote mode/i.test(String(result?.error || ""))) {
+    return res.status(400).json({
+      ok: false,
+      error: String(result?.error || "Remote bridge refresh failed."),
+      connected: false,
+      liveNodeCount: Number(result?.liveNodeCount || 0),
+      lastSuccessTs: Number(result?.lastSuccessTs || 0),
+      lastError: String(result?.lastError || result?.error || ""),
+      remoteHealth: result?.remoteHealth || buildRemoteHealthSnapshot(),
+    });
+  }
+  return res.json({
+    ok: Boolean(result?.ok),
+    degraded: Boolean(result?.degraded),
+    error: String(result?.error || ""),
+    connected: Boolean(result?.connected),
+    liveNodeCount: Number(result?.liveNodeCount || 0),
+    lastSuccessTs: Number(result?.lastSuccessTs || 0),
+    lastError: String(result?.lastError || ""),
+    remoteHealth: result?.remoteHealth || buildRemoteHealthSnapshot(),
+  });
+});
+
 app.use("/api", async (req, res, next) => {
   if (!isRemoteMode()) return next();
   if (!shouldProxyApiPath(req.path)) return next();
+  // Viewer model: all proxied reads go through gateway — no local fallback.
   return proxyToRemote(req, res);
 });
 
@@ -5317,6 +12077,9 @@ app.get("/api/audit", (req, res) => {
 });
 
 app.get("/api/energy/5min", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const _t0 = Date.now();
   const { inverter, start, end, paged, limit, offset } = req.query;
   const s = start ? Number(start) : Date.now() - 86400000;
@@ -5333,154 +12096,82 @@ app.get("/api/energy/5min", (req, res) => {
       ? invParsed
       : null;
 
-  if (pagedMode) {
-    const safeLimit = clampInt(limit, 100, 5000, 500);
-    const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
-    try {
-      let rows = [];
-      let total = 0;
-      let summaryRow = {};
-      let peakRow = {};
+  try {
+    const baseRows = scopedInv
+      ? queryEnergy5minRange(scopedInv, s, e)
+      : queryEnergy5minRangeAll(s, e);
 
-      if (Number.isFinite(scopedInv) && scopedInv > 0) {
-        rows = db
-          .prepare(
-            `SELECT id, ts, inverter, kwh_inc
-             FROM energy_5min
-             WHERE inverter=? AND ts BETWEEN ? AND ?
-             ORDER BY ts DESC, inverter ASC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(scopedInv, s, e, safeLimit, safeOffset);
-        total = Number(
-          db
-            .prepare(
-              `SELECT COUNT(1) AS c
-               FROM energy_5min
-               WHERE inverter=? AND ts BETWEEN ? AND ?`,
-            )
-            .get(scopedInv, s, e)?.c || 0,
-        );
-        summaryRow =
-          db
-            .prepare(
-              `SELECT COUNT(1) AS row_count,
-                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
-                      COALESCE(MAX(ts), 0) AS latest_ts,
-                      COUNT(DISTINCT inverter) AS inverter_count
-                 FROM energy_5min
-                WHERE inverter=? AND ts BETWEEN ? AND ?`,
-            )
-            .get(scopedInv, s, e) || {};
-        peakRow =
-          db
-            .prepare(
-              `SELECT inverter, ts, kwh_inc
-                 FROM energy_5min
-                WHERE inverter=? AND ts BETWEEN ? AND ?
-                ORDER BY kwh_inc DESC, ts DESC
-                LIMIT 1`,
-            )
-            .get(scopedInv, s, e) || {};
-      } else {
-        rows = db
-          .prepare(
-            `SELECT id, ts, inverter, kwh_inc
-             FROM energy_5min
-             WHERE ts BETWEEN ? AND ?
-             ORDER BY ts DESC, inverter ASC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(s, e, safeLimit, safeOffset);
-        total = Number(
-          db
-            .prepare(
-              `SELECT COUNT(1) AS c
-               FROM energy_5min
-               WHERE ts BETWEEN ? AND ?`,
-            )
-            .get(s, e)?.c || 0,
-        );
-        summaryRow =
-          db
-            .prepare(
-              `SELECT COUNT(1) AS row_count,
-                      COALESCE(SUM(kwh_inc), 0) AS total_kwh,
-                      COALESCE(MAX(ts), 0) AS latest_ts,
-                      COUNT(DISTINCT inverter) AS inverter_count
-                 FROM energy_5min
-                WHERE ts BETWEEN ? AND ?`,
-            )
-            .get(s, e) || {};
-        peakRow =
-          db
-            .prepare(
-              `SELECT inverter, ts, kwh_inc
-                 FROM energy_5min
-                WHERE ts BETWEEN ? AND ?
-                ORDER BY kwh_inc DESC, ts DESC
-                LIMIT 1`,
-            )
-            .get(s, e) || {};
+    if (pagedMode) {
+      const safeLimit = clampInt(limit, 100, 5000, 500);
+      const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+      const rows = baseRows
+        .slice()
+        .sort((a, b) => Number(b?.ts || 0) - Number(a?.ts || 0) || Number(a?.inverter || 0) - Number(b?.inverter || 0))
+        .slice(safeOffset, safeOffset + safeLimit);
+
+      let totalKwh = 0;
+      let latestTs = 0;
+      let peak = { inverter: 0, ts: 0, kwhInc: 0 };
+      const inverterSet = new Set();
+      for (const row of baseRows) {
+        const inv = Number(row?.inverter || 0);
+        const ts = Number(row?.ts || 0);
+        const kwhInc = Number(row?.kwh_inc || 0);
+        if (inv > 0) inverterSet.add(inv);
+        totalKwh += kwhInc;
+        if (ts > latestTs) latestTs = ts;
+        if (
+          kwhInc > Number(peak.kwhInc || 0) ||
+          (kwhInc === Number(peak.kwhInc || 0) && ts > Number(peak.ts || 0))
+        ) {
+          peak = { inverter: inv, ts, kwhInc };
+        }
       }
-
-      const rowCount = Number(summaryRow?.row_count || 0);
-      const totalKwh = Number(summaryRow?.total_kwh || 0);
-      const summary = {
-        rowCount,
-        totalKwh: Number(totalKwh.toFixed(6)),
-        avgKwh: rowCount > 0 ? Number((totalKwh / rowCount).toFixed(6)) : 0,
-        latestTs: Number(summaryRow?.latest_ts || 0),
-        inverterCount: Number(summaryRow?.inverter_count || 0),
-        peak: {
-          inverter: Number(peakRow?.inverter || 0),
-          ts: Number(peakRow?.ts || 0),
-          kwhInc: Number(Number(peakRow?.kwh_inc || 0).toFixed(6)),
-        },
-      };
 
       res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
       return res.json({
         ok: true,
         rows,
-        total,
+        total: baseRows.length,
         limit: safeLimit,
         offset: safeOffset,
-        hasMore: safeOffset + rows.length < total,
-        summary,
+        hasMore: safeOffset + rows.length < baseRows.length,
+        summary: {
+          rowCount: baseRows.length,
+          totalKwh: Number(totalKwh.toFixed(6)),
+          avgKwh: baseRows.length > 0 ? Number((totalKwh / baseRows.length).toFixed(6)) : 0,
+          latestTs,
+          inverterCount: inverterSet.size,
+          peak: {
+            inverter: Number(peak.inverter || 0),
+            ts: Number(peak.ts || 0),
+            kwhInc: Number(Number(peak.kwhInc || 0).toFixed(6)),
+          },
+        },
       });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message || "Energy pagination failed." });
     }
-  }
 
-  // Non-paged fallback: apply a hard row cap so a wide date range cannot
-  // serialize millions of rows and hang the process. Use paged=1 for large ranges.
-  try {
     const capLimit = ENERGY_5MIN_UNPAGED_ROW_CAP;
-    const rows = !scopedInv
-      ? db.prepare(
-          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
-        ).all(s, e, capLimit + 1)
-      : db.prepare(
-          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
-        ).all(Number(scopedInv), s, e, capLimit + 1);
-    if (rows.length > capLimit) {
+    if (baseRows.length > capLimit) {
       return res.status(400).json({
         ok: false,
         error: `Date range too large: use paged=1 with limit/offset or narrow the range. Exceeded ${capLimit} row cap.`,
         rowCap: capLimit,
       });
     }
-    return res.json(rows);
+    res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+    return res.json(baseRows);
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message || "Energy read failed." });
   }
 });
 
 // Analytics-specific energy source:
 // Always PAC-integrated kWh buckets (never register kWh deltas).
 app.get("/api/analytics/energy", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const { inverter, start, end, bucketMin } = req.query;
   const s = start ? Number(start) : Date.now() - 86400000;
   const e = end ? Number(end) : Date.now();
@@ -5489,12 +12180,8 @@ app.get("/api/analytics/energy", (req, res) => {
   // Apply row cap to prevent wide date ranges from hanging the analytics chart.
   const baseRows =
     !inverter || inverter === "all"
-      ? db.prepare(
-          "SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC LIMIT ?",
-        ).all(s, e, ENERGY_5MIN_UNPAGED_ROW_CAP)
-      : db.prepare(
-          "SELECT * FROM energy_5min WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT ?",
-        ).all(Number(inverter), s, e, ENERGY_5MIN_UNPAGED_ROW_CAP);
+      ? queryEnergy5minRangeAll(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
+      : queryEnergy5minRange(Number(inverter), s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP);
 
   if (baseRows.length) {
     if (bm <= 5) return res.json(baseRows);
@@ -5533,20 +12220,30 @@ app.get("/api/analytics/energy", (req, res) => {
 });
 
 app.get("/api/analytics/dayahead", (req, res) => {
-  const { date, start, end, bucketMin } = req.query;
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const { date, start, end, bucketMin, product } = req.query;
   const parsedStart = parseDateMs(start, NaN, false);
   const parsedEnd = parseDateMs(end, NaN, true);
   const targetDate = String(
     date || (Number.isFinite(parsedStart) ? localDateStr(parsedStart) : localDateStr()),
   ).trim();
-
-  let rows = getDayAheadRowsForDate(targetDate);
+  const solarWindow = getForecastSolarWindowBounds(targetDate);
+  const productKey = String(product || "dayahead").trim().toLowerCase();
+  let rows =
+    productKey === "intraday" || productKey === "intraday-adjusted"
+      ? getIntradayAdjustedRowsForDate(targetDate)
+      : getDayAheadRowsForDate(targetDate);
   const s = Number.isFinite(parsedStart)
-    ? parsedStart
-    : new Date(`${targetDate}T00:00:00.000`).getTime();
+    ? Math.max(parsedStart, solarWindow.startTs)
+    : solarWindow.startTs;
   const e = Number.isFinite(parsedEnd)
-    ? parsedEnd
-    : new Date(`${targetDate}T23:59:59.999`).getTime();
+    ? Math.min(parsedEnd, solarWindow.endTs)
+    : solarWindow.endTs;
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e < s) {
+    return res.json([]);
+  }
   rows = rows.filter((r) => {
     const ts = Number(r?.ts || 0);
     return ts >= s && ts <= e;
@@ -5576,6 +12273,9 @@ app.get("/api/analytics/dayahead", (req, res) => {
 });
 
 app.get("/api/weather/weekly", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
     const rows = await getWeeklyWeather(day);
@@ -5591,18 +12291,53 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     if (!isHttpUrl(cfg.baseUrl)) {
       return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
     }
-    if (!cfg.apiKey) {
-      return res.status(400).json({ ok: false, error: "Solcast API key is required." });
-    }
-    if (!cfg.resourceId) {
-      return res.status(400).json({ ok: false, error: "Solcast resource ID is required." });
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit email is required.",
+        });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit password is required.",
+        });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({
+          ok: false,
+          error: "Plant Resource ID is required for Toolkit mode.",
+        });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
     }
     if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
       return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
     }
 
     const started = Date.now();
-    const { endpoint, records } = await fetchSolcastForecastRecords(cfg);
+    const { endpoint, records, estActuals, units } = await fetchSolcastForecastRecords(cfg);
     const validTs = [];
     const daySet = new Set();
     for (const rec of records || []) {
@@ -5630,24 +12365,251 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     } catch (err) {
       warning = String(err?.message || err || "").slice(0, 240);
     }
+    const snapshotResult = buildAndPersistSolcastSnapshot(
+      tomorrowTz,
+      records,
+      estActuals || [],
+      cfg,
+      accessMode,
+      started,
+    );
 
     return res.json({
       ok: true,
       provider: "solcast",
+      accessMode,
       endpoint,
       durationMs: Date.now() - started,
       records: Number(records.length || 0),
+      estimatedActuals: Number(estActuals?.length || 0),
+      units: String(units || "").trim() || "provider payload",
       timezone: cfg.timeZone,
       firstPeriodEndIso: validTs.length ? new Date(validTs[0]).toISOString() : "",
       lastPeriodEndIso: validTs.length
         ? new Date(validTs[validTs.length - 1]).toISOString()
         : "",
       daysCovered: Array.from(daySet).sort(),
+      snapshotOk: !!snapshotResult?.ok,
+      snapshotRowsPersisted: Number(snapshotResult?.persistedRows || 0),
+      snapshotWarning: String(snapshotResult?.warning || ""),
       dayAheadPreview: preview,
       warning,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/forecast/solcast/preview", async (req, res) => {
+  try {
+    const cfg = buildSolcastConfigFromInput(req.body || {});
+    if (!isHttpUrl(cfg.baseUrl)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
+    }
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit email is required.",
+        });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({
+          ok: false,
+          error: "Solcast toolkit password is required.",
+        });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({
+          ok: false,
+          error: "Plant Resource ID is required for Toolkit mode.",
+        });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
+    }
+    if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
+    }
+
+    const requestedDay = String(req.body?.day || "").trim();
+    const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
+    const started = Date.now();
+    const { endpoint, records, estActuals, units } = await fetchSolcastForecastRecords(cfg, {
+      toolkitHours: computeSolcastPreviewHoursForRequest(
+        requestedDay,
+        requestedDayCount,
+        cfg,
+        SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+      ),
+    });
+    const preview = buildSolcastPreviewSeries(
+      requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
+      requestedDayCount,
+      records,
+      estActuals || [],
+      cfg,
+      SOLCAST_TOOLKIT_PERIOD,
+    );
+    let snapshotRowsPersisted = 0;
+    const snapshotWarnings = [];
+    for (const day of (preview.selectedDays?.length ? preview.selectedDays : [preview.day])) {
+      const snapshotResult = buildAndPersistSolcastSnapshot(
+        day,
+        records,
+        estActuals || [],
+        cfg,
+        accessMode,
+        started,
+      );
+      snapshotRowsPersisted += Number(snapshotResult?.persistedRows || 0);
+      if (!snapshotResult?.ok && snapshotResult?.warning) {
+        snapshotWarnings.push(String(snapshotResult.warning));
+      }
+    }
+    return res.json({
+      ok: true,
+      provider: "solcast",
+      accessMode,
+      endpoint,
+      durationMs: Date.now() - started,
+      units: String(units || "").trim() || "provider payload",
+      timezone: cfg.timeZone,
+      day: preview.day,
+      dayCount: preview.dayCount,
+      selectedDays: preview.selectedDays,
+      rangeStartDay: preview.rangeStartDay,
+      rangeEndDay: preview.rangeEndDay,
+      sourcePeriod: preview.sourcePeriod,
+      displayPeriod: preview.displayPeriod,
+      bucketMinutes: preview.bucketMinutes,
+      rangeLabel: preview.rangeLabel,
+      daysCovered: preview.daysCovered,
+      startTime: preview.startTime,
+      endTime: preview.endTime,
+      labels: preview.labels,
+      forecastMwh: preview.forecastMwh,
+      forecastLoMwh: preview.forecastLoMwh,
+      forecastHiMwh: preview.forecastHiMwh,
+      actualMwh: preview.actualMwh,
+      forecastMw: preview.forecastMw,
+      forecastLoMw: preview.forecastLoMw,
+      forecastHiMw: preview.forecastHiMw,
+      actualMw: preview.actualMw,
+      rows: preview.rows,
+      forecastTotalMwh: preview.forecastTotalMwh,
+      actualTotalMwh: preview.actualTotalMwh,
+      snapshotOk: snapshotWarnings.length === 0,
+      snapshotRowsPersisted,
+      snapshotWarnings,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/export/solcast-preview", async (req, res) => {
+  try {
+    const cfg = buildSolcastConfigFromInput(req.body || {});
+    if (!isHttpUrl(cfg.baseUrl)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast Base URL." });
+    }
+    const accessMode = normalizeSolcastAccessMode(cfg.accessMode);
+    if (accessMode === SOLCAST_ACCESS_MODE_TOOLKIT) {
+      if (!cfg.toolkitEmail) {
+        return res.status(400).json({ ok: false, error: "Solcast toolkit email is required." });
+      }
+      if (!cfg.toolkitPassword) {
+        return res.status(400).json({ ok: false, error: "Solcast toolkit password is required." });
+      }
+      if (!cfg.toolkitSiteRef) {
+        return res.status(400).json({ ok: false, error: "Plant Resource ID is required for Toolkit mode." });
+      }
+      try {
+        parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    } else {
+      if (!cfg.apiKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast API key is required. Switch Access Mode to Toolkit Login if you want to use email and password only.",
+        });
+      }
+      if (!cfg.resourceId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Solcast resource ID is required. Switch Access Mode to Toolkit Login if you want to use the toolkit chart URL instead.",
+        });
+      }
+    }
+    if (!/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(cfg.timeZone)) {
+      return res.status(400).json({ ok: false, error: "Invalid Solcast timezone format." });
+    }
+
+    const requestedDay = String(req.body?.day || "").trim();
+    const requestedDayCount = normalizeSolcastPreviewDayCount(req.body?.dayCount || 1);
+    const requestedResolution = normalizeSolcastPreviewResolution(
+      req.body?.resolution || SOLCAST_TOOLKIT_PERIOD,
+    );
+    const { records, estActuals } = await fetchSolcastForecastRecords(cfg, {
+      toolkitHours: computeSolcastPreviewHoursForRequest(
+        requestedDay,
+        requestedDayCount,
+        cfg,
+        SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+      ),
+    });
+    const preview = buildSolcastPreviewSeries(
+      requestedDay || localDateStrInTz(Date.now(), cfg.timeZone),
+      requestedDayCount,
+      records,
+      estActuals || [],
+      cfg,
+      requestedResolution,
+    );
+    const rawOutPath = await runGatewayExportJob("solcast-preview", () =>
+      exporter.exportSolcastPreview({
+        rawRows: preview.rawRows,
+        rows: preview.rows,
+        startDay: preview.rangeStartDay,
+        endDay: preview.rangeEndDay,
+        resolution: preview.displayPeriod,
+        exportFormat: req.body?.exportFormat,
+        format: "xlsx",
+      }),
+    );
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast");
+    return res.json(buildExportResult(outPath, {
+      day: preview.day,
+      dayCount: preview.dayCount,
+      rangeStartDay: preview.rangeStartDay,
+      rangeEndDay: preview.rangeEndDay,
+    }));
+  } catch (e) {
+    return sendExportRouteError(res, e);
   }
 });
 
@@ -5755,7 +12717,12 @@ app.post("/api/forecast/generate", async (req, res) => {
       durationMs: Number(generation.durationMs || 0),
       normalizedRows: Number(generation.normalizedRows || 0),
       writtenRows: Number(generation.writtenRows || 0),
+      snapshotRowsPersisted: Number(generation.snapshotRowsPersisted || 0),
+      snapshotWarnings: Array.isArray(generation.snapshotWarnings)
+        ? generation.snapshotWarnings
+        : [],
       endpoint: generation.endpoint || "",
+      solcastPull: generation.solcastPull || null,
       attempts,
     });
   } catch (e) {
@@ -5767,7 +12734,7 @@ app.post("/api/forecast/generate", async (req, res) => {
 
 app.get("/api/energy/today", (req, res) => {
   try {
-    const rows = getTodayPacTotalsFromDbCached();
+    const rows = buildCurrentDayEnergySnapshot().rows;
     // Keep this endpoint strictly aligned with logged daily report rows.
     return res.json(rows);
   } catch (e) {
@@ -5782,6 +12749,7 @@ app.get("/api/report/daily", (req, res) => {
   }
   const _t0 = Date.now();
   try {
+    const currentDaySnapshot = buildCurrentDayEnergySnapshot();
     const { date, start, end, refresh } = req.query;
     const refreshRequested = ["1", "true", "yes", "on"].includes(
       String(refresh || "")
@@ -5802,8 +12770,82 @@ app.get("/api/report/daily", (req, res) => {
 
     const s = start || localDateStr(Date.now() - 7 * 86400000);
     const e = end || localDateStr();
+    const today = localDateStr();
+    // For ranges that include today, compute today live (partial-day window) and
+    // merge with persisted past rows. The raw DB range query returns stale
+    // persisted availability_pct for today and must not be used for it.
+    if (e >= today && s <= today) {
+      const dayBeforeToday = localDateStr(new Date(`${today}T00:00:00.000`).getTime() - 1);
+      const pastRows = normalizePersistedDailyReportRows(
+        s < today ? stmts.getDailyReportRange.all(s, dayBeforeToday) : [],
+      );
+      const todayRows = getDailyReportRowsForDay(today, {
+        persist: true,
+        includeTodayPartial: true,
+        refresh: refreshRequested,
+      });
+      const merged = [...pastRows, ...todayRows].sort(
+        (a, b) =>
+          String(a.date || "").localeCompare(String(b.date || "")) ||
+          Number(a.inverter || 0) - Number(b.inverter || 0),
+      );
+      res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+      return res.json(merged);
+    }
     res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
-    return res.json(stmts.getDailyReportRange.all(s, e));
+    return res.json(
+      normalizePersistedDailyReportRows(stmts.getDailyReportRange.all(s, e)),
+    );
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/report/payload", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const _t0 = Date.now();
+  try {
+    const requestedDate = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
+    const refreshRequested = ["1", "true", "yes", "on"].includes(
+      String(req.query?.refresh || "")
+        .trim()
+        .toLowerCase(),
+    );
+    const latestDate = getLatestReportDate();
+    let date = requestedDate;
+    let rows = getDailyReportRowsForDay(date, {
+      persist: true,
+      includeTodayPartial: date === localDateStr(),
+      refresh: refreshRequested,
+    });
+    let fallbackUsed = false;
+
+    if ((!Array.isArray(rows) || rows.length === 0) && latestDate && latestDate !== date) {
+      date = latestDate;
+      rows = getDailyReportRowsForDay(date, {
+        persist: true,
+        includeTodayPartial: date === localDateStr(),
+        refresh: false,
+      });
+      fallbackUsed = true;
+    }
+
+    const summary = buildDailyWeeklyReportSummary(date, {
+      refreshDay: refreshRequested && date === requestedDate,
+      currentDaySnapshot,
+    });
+    res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
+    return res.json({
+      ok: true,
+      requestedDate,
+      date,
+      latestDate: latestDate || "",
+      fallbackUsed,
+      rows: Array.isArray(rows) ? rows : [],
+      summary,
+    });
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
@@ -5815,13 +12857,17 @@ app.get("/api/report/summary", (req, res) => {
   }
   try {
     const day = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
+    const currentDaySnapshot = buildCurrentDayEnergySnapshot();
     const refreshRequested = ["1", "true", "yes", "on"].includes(
       String(req.query?.refresh || "")
         .trim()
         .toLowerCase(),
     );
     return res.json(
-      buildDailyWeeklyReportSummary(day, { refreshDay: refreshRequested }),
+      buildDailyWeeklyReportSummary(day, {
+        refreshDay: refreshRequested,
+        currentDaySnapshot,
+      }),
     );
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
@@ -5844,88 +12890,480 @@ app.get("/api/report/latest-date", (req, res) => {
   }
 });
 
+function getEnergySummarySupplementRowsForRange(
+  startTs,
+  endTs,
+  currentDaySnapshot = null,
+) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const today = localDateStr();
+  const todayStart = new Date(`${today}T00:00:00.000`).getTime();
+  const todayEnd = new Date(`${today}T23:59:59.999`).getTime();
+  if (e < todayStart || s > todayEnd) return [];
+  if (currentDaySnapshot && currentDaySnapshot.day === today) {
+    return normalizeTodayEnergyRows(currentDaySnapshot.rows);
+  }
+  return buildCurrentDayEnergySnapshot().rows;
+}
+
+function buildEnergySummarySourceRows(payload = {}) {
+  const s = Number(payload?.startTs || 0) || Date.now() - 86400000;
+  const e = Number(payload?.endTs || 0) || Date.now();
+  const currentDaySnapshot = buildCurrentDayEnergySnapshot();
+  return exporter.buildEnergySummaryExportRows(s, e, payload?.inverter, {
+    supplementalTodayRows: getEnergySummarySupplementRowsForRange(
+      s,
+      e,
+      currentDaySnapshot,
+    ),
+  });
+}
+
+function exportTouchesCurrentDay(payload = {}) {
+  const today = localDateStr();
+  const dateText = String(payload?.date || "").trim();
+  if (dateText) return dateText === today;
+
+  const s = Number(payload?.startTs || 0);
+  const e = Number(payload?.endTs || 0);
+  if (Number.isFinite(s) && s > 0 && Number.isFinite(e) && e >= s) {
+    const todayStart = new Date(`${today}T00:00:00.000`).getTime();
+    const todayEnd = new Date(`${today}T23:59:59.999`).getTime();
+    return e >= todayStart && s <= todayEnd;
+  }
+
+  return true;
+}
+
+function getConfiguredExportRoot() {
+  const configured = String(
+    getSetting("csvSavePath", "C:\\Logs\\InverterDashboard") || "",
+  ).trim();
+  return path.resolve(configured || "C:\\Logs\\InverterDashboard");
+}
+
+function isPathInsideBase(baseDir, targetPath) {
+  const base = path.resolve(String(baseDir || ""));
+  const target = path.resolve(String(targetPath || ""));
+  const rel = path.relative(base, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function normalizeExportRelativePath(relativePath, fallbackPath = "") {
+  const raw = String(relativePath || "").trim();
+  const parts = raw
+    ? raw.split(/[\\/]+/).filter(Boolean)
+    : [];
+  if (!parts.length && fallbackPath) {
+    const base = getConfiguredExportRoot();
+    const absFallback = path.resolve(String(fallbackPath || ""));
+    if (isPathInsideBase(base, absFallback)) {
+      return normalizeExportRelativePath(path.relative(base, absFallback));
+    }
+  }
+  if (!parts.length) {
+    throw new Error("Export relative path is missing.");
+  }
+  if (parts.some((part) => part === "." || part === "..")) {
+    throw new Error("Invalid export relative path.");
+  }
+  const normalized = path.normalize(parts.join(path.sep));
+  if (!normalized || normalized === "." || path.isAbsolute(normalized)) {
+    throw new Error("Invalid export relative path.");
+  }
+  return normalized;
+}
+
+function normalizeForecastExportRelativePathForRoute(routePath, relativePath, payload) {
+  const route = String(routePath || "").trim();
+  if (route === "/api/export/forecast-actual") {
+    const source = String(payload?.source || "analytics").trim().toLowerCase();
+    const subFolder = source === "solcast" ? "Solcast" : "Analytics";
+    return exporter.rewriteForecastExportRelativePath(relativePath, subFolder);
+  }
+  if (route === "/api/export/solcast-preview") {
+    return exporter.rewriteForecastExportRelativePath(relativePath, "Solcast");
+  }
+  return relativePath;
+}
+
+function resolveLocalExportPath(relativePath, fallbackPath = "") {
+  const base = getConfiguredExportRoot();
+  const rel = normalizeExportRelativePath(relativePath, fallbackPath);
+  const absolute = path.resolve(base, rel);
+  if (!isPathInsideBase(base, absolute)) {
+    throw new Error("Resolved export path is outside the configured export directory.");
+  }
+  return absolute;
+}
+
+function buildExportResult(outPath, extra = {}) {
+  const absolute = path.resolve(String(outPath || ""));
+  const base = getConfiguredExportRoot();
+  const relativePath = normalizeExportRelativePath("", absolute).replace(/\\/g, "/");
+  return {
+    ok: true,
+    path: absolute,
+    relativePath,
+    basePath: base,
+    ...(extra && typeof extra === "object" ? extra : {}),
+  };
+}
+
+function normalizeAlarmExportMinDurationSecServer(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(86400, Math.max(0, Math.trunc(raw)));
+}
+
+function sendExportRouteError(res, err) {
+  const status = isExportQueueBusyError(err) ? 429 : 500;
+  if (status === 429) {
+    res.setHeader("Retry-After", "5");
+  }
+  return res.status(status).json({
+    ok: false,
+    error: String(err?.message || err || "Export failed."),
+  });
+}
+
+async function fetchRemoteExportJson(routePath, payload = {}) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    throw new Error("Remote gateway URL is not configured.");
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    throw new Error("Remote gateway URL cannot be localhost in remote mode.");
+  }
+  const targetUrl = `${base}${routePath}`;
+  const response = await fetch(targetUrl, buildRemoteFetchOptions(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildRemoteProxyHeaders(),
+    },
+    body: JSON.stringify(payload || {}),
+    timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+  }));
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (_) {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error(
+      String(data?.error || text || `Remote export failed with HTTP ${response.status}`),
+    );
+  }
+  if (!data?.ok) {
+    throw new Error(String(data?.error || "Remote export failed."));
+  }
+  return data;
+}
+
+async function downloadRemoteExportToLocal(routePath, payload = {}) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    throw new Error("Remote gateway URL is not configured.");
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    throw new Error("Remote gateway URL cannot be localhost in remote mode.");
+  }
+
+  const exportResult = await fetchRemoteExportJson(routePath, payload);
+  if (String(routePath || "").trim() === "/api/export/alarms") {
+    const requestedMinDurationSec = normalizeAlarmExportMinDurationSecServer(
+      payload?.minAlarmDurationSec,
+    );
+    const appliedMinDurationSec = normalizeAlarmExportMinDurationSecServer(
+      exportResult?.appliedFilters?.minAlarmDurationSec,
+    );
+    if (requestedMinDurationSec > 0 && appliedMinDurationSec !== requestedMinDurationSec) {
+      throw new Error(
+        "Gateway alarm export did not confirm the requested minimum duration filter. Update and restart the gateway app, then export again.",
+      );
+    }
+  }
+  const remoteRelativePath = normalizeExportRelativePath(
+    exportResult?.relativePath,
+    exportResult?.path,
+  );
+  const localRelativePath = normalizeForecastExportRelativePathForRoute(
+    routePath,
+    remoteRelativePath,
+    payload,
+  );
+  const localPath = resolveLocalExportPath(localRelativePath, exportResult?.path);
+  await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
+
+  const artifactUrl = `${base}/api/export/artifact`;
+  const tempPath = `${localPath}.download-${process.pid}-${Date.now()}.part`;
+  try {
+    const response = await fetch(artifactUrl, buildRemoteFetchOptions(artifactUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...buildRemoteProxyHeaders(),
+      },
+      body: JSON.stringify({ relativePath: remoteRelativePath }),
+      timeout: REMOTE_REPLICATION_TIMEOUT_MS,
+    }));
+    if (!response.ok || !response.body) {
+      let detail = "";
+      try {
+        detail = String(await response.text() || "").trim();
+      } catch (_) {
+        detail = "";
+      }
+      throw new Error(
+        detail || `Remote export download failed with HTTP ${response.status}`,
+      );
+    }
+    await pipeline(response.body, createTransferWriteStream(tempPath));
+    try {
+      await fs.promises.unlink(localPath);
+    } catch (_) {
+      // Ignore when the destination does not exist yet.
+    }
+    await fs.promises.rename(tempPath, localPath);
+    return buildExportResult(localPath);
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (_) {
+      // Ignore cleanup failures.
+    }
+    throw err;
+  }
+}
+
+app.post("/api/energy/summary-source", async (req, res) => {
+  try {
+    const rows = buildEnergySummarySourceRows(req.body || {});
+    return res.json({ ok: true, rows });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/export/artifact", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const relativePath = normalizeExportRelativePath(
+      req?.body?.relativePath,
+      req?.body?.path,
+    );
+    const filePath = resolveLocalExportPath(relativePath, req?.body?.path);
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      return res.status(404).json({ ok: false, error: "Export file not found." });
+    }
+    const fileName = path.basename(filePath).replace(/"/g, "");
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(Math.max(0, Number(stat.size || 0))));
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("x-export-relative-path", relativePath.replace(/\\/g, "/"));
+    const stream = createTransferReadStream(filePath);
+    stream.on("error", (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ ok: false, error: String(err?.message || err) });
+        return;
+      }
+      res.destroy(err);
+    });
+    stream.pipe(res);
+  } catch (e) {
+    const msg = String(e?.message || "");
+    const code =
+      String(e?.code || "").toUpperCase() === "ENOENT" ||
+      /not found|no such file/i.test(msg)
+        ? 404
+        : 400;
+    return res.status(code).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/export/alarms", async (req, res) => {
   try {
-    const outPath = await exporter.exportAlarms(req.body || {});
-    res.json({ ok: true, path: outPath });
+    const payload = req.body || {};
+    const minAlarmDurationSec = normalizeAlarmExportMinDurationSecServer(
+      payload?.minAlarmDurationSec,
+    );
+    if (isRemoteMode()) {
+      return res.json(await downloadRemoteExportToLocal("/api/export/alarms", payload));
+    }
+    const outPath = await runGatewayExportJob("alarms", () =>
+      exporter.exportAlarms(payload),
+    );
+    return res.json(
+      buildExportResult(outPath, {
+        appliedFilters: {
+          minAlarmDurationSec,
+        },
+      }),
+    );
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/energy", async (req, res) => {
   try {
-    const outPath = await exporter.exportEnergy(req.body || {});
-    res.json({ ok: true, path: outPath });
+    if (isRemoteMode()) {
+      return res.json(await downloadRemoteExportToLocal("/api/export/energy", req.body || {}));
+    }
+    const payload = req.body || {};
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot()
+      : null;
+    const outPath = await runGatewayExportJob("energy", () =>
+      exporter.exportEnergy({
+        ...payload,
+        supplementalTodayRows: getEnergySummarySupplementRowsForRange(
+          payload?.startTs,
+          payload?.endTs,
+          currentDaySnapshot,
+        ),
+      }),
+    );
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/inverter-data", async (req, res) => {
   try {
-    const outPath = await exporter.exportInverterData(req.body || {});
-    res.json({ ok: true, path: outPath });
+    if (isRemoteMode()) {
+      return res.json(
+        await downloadRemoteExportToLocal("/api/export/inverter-data", req.body || {}),
+      );
+    }
+    const outPath = await runGatewayExportJob("inverter-data", () =>
+      exporter.exportInverterData(req.body || {}),
+    );
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/5min", async (req, res) => {
   try {
-    const outPath = await exporter.export5min(req.body || {});
-    res.json({ ok: true, path: outPath });
+    if (isRemoteMode()) {
+      return res.json(await downloadRemoteExportToLocal("/api/export/5min", req.body || {}));
+    }
+    const outPath = await runGatewayExportJob("energy-5min", () =>
+      exporter.export5min(req.body || {}),
+    );
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/audit", async (req, res) => {
   try {
-    const outPath = await exporter.exportAudit(req.body || {});
-    res.json({ ok: true, path: outPath });
+    if (isRemoteMode()) {
+      return res.json(await downloadRemoteExportToLocal("/api/export/audit", req.body || {}));
+    }
+    const outPath = await runGatewayExportJob("audit", () =>
+      exporter.exportAudit(req.body || {}),
+    );
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/daily-report", async (req, res) => {
   try {
+    if (isRemoteMode()) {
+      return res.json(
+        await downloadRemoteExportToLocal("/api/export/daily-report", req.body || {}),
+      );
+    }
     const payload = req.body || {};
-    const dateText = String(payload?.date || "").trim();
-    if (dateText) {
-      try {
-        const day = parseIsoDateStrict(dateText, "date");
-        buildDailyReportRowsForDate(day, {
-          persist: true,
-          includeTodayPartial: day === localDateStr(),
-        });
-      } catch (_) {
-        // Exporter handles fallback/defaults.
-      }
-    } else {
-      const s = Number(payload?.startTs || 0);
-      const e = Number(payload?.endTs || 0);
-      if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
-        const startDay = fmtDate(s);
-        const endDay = fmtDate(e);
-        const today = localDateStr();
-        for (const day of daysInclusive(startDay, endDay)) {
-          if (day > today) continue;
-          buildDailyReportRowsForDate(day, {
-            persist: true,
-            includeTodayPartial: day === today,
-          });
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot({ includeDailyReportRows: true })
+      : null;
+    const outPath = await runGatewayExportJob("daily-report", async () => {
+      const dateText = String(payload?.date || "").trim();
+      if (dateText) {
+        try {
+          const day = parseIsoDateStrict(dateText, "date");
+          if (day !== localDateStr()) {
+            buildDailyReportRowsForDate(day, {
+              persist: true,
+              includeTodayPartial: false,
+            });
+          }
+        } catch (_) {
+          // Exporter handles fallback/defaults.
+        }
+      } else {
+        const s = Number(payload?.startTs || 0);
+        const e = Number(payload?.endTs || 0);
+        if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
+          const startDay = fmtDate(s);
+          const endDay = fmtDate(e);
+          const today = localDateStr();
+          for (const day of daysInclusive(startDay, endDay)) {
+            if (day > today || day === today) continue;
+            buildDailyReportRowsForDate(day, {
+              persist: true,
+              includeTodayPartial: false,
+            });
+            await new Promise((resolve) => setImmediate(resolve));
+          }
         }
       }
-    }
-    const outPath = await exporter.exportDailyReport(req.body || {});
-    res.json({ ok: true, path: outPath });
+      const rowsByDate =
+        currentDaySnapshot &&
+        Array.isArray(currentDaySnapshot.dailyReportRows) &&
+        currentDaySnapshot.dailyReportRows.length
+          ? { [currentDaySnapshot.day]: currentDaySnapshot.dailyReportRows }
+          : null;
+      return exporter.exportDailyReport({
+        ...payload,
+        rowsByDate,
+      });
+    });
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 app.post("/api/export/forecast-actual", async (req, res) => {
   try {
-    const outPath = await exporter.exportForecastActual(req.body || {});
-    res.json({ ok: true, path: outPath });
+    if (isRemoteMode()) {
+      return res.json(
+        await downloadRemoteExportToLocal("/api/export/forecast-actual", req.body || {}),
+      );
+    }
+    const payload = req.body || {};
+    const source = String(payload.source || "analytics").trim().toLowerCase();
+    const isSolcast = source === "solcast";
+    const currentDaySnapshot = exportTouchesCurrentDay(payload)
+      ? buildCurrentDayEnergySnapshot()
+      : null;
+    const rawOutPath = await runGatewayExportJob("forecast-actual", () =>
+      exporter.exportForecastActual({
+        ...payload,
+        source,
+        supplementalActualRows: buildForecastActualSupplementRowsForRange(
+          payload?.startTs,
+          payload?.endTs,
+          currentDaySnapshot,
+        ),
+      }),
+    );
+    const subFolder = isSolcast ? "Solcast" : "Analytics";
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, subFolder);
+    return res.json(buildExportResult(outPath));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return sendExportRouteError(res, e);
   }
 });
 
@@ -5945,7 +13383,24 @@ cron.schedule("5 18 * * *", () => {
   }
 });
 
+const pendingArchiveApplyResult = applyPendingArchiveReplacementsSync();
+if (Number(pendingArchiveApplyResult?.applied || 0) > 0) {
+  console.log(
+    `[archive] Applied ${Number(pendingArchiveApplyResult.applied || 0)} staged archive replacement(s) on startup.`,
+  );
+}
+if (Number(pendingArchiveApplyResult?.failed || 0) > 0) {
+  console.warn(
+    `[archive] ${Number(pendingArchiveApplyResult.failed || 0)} staged archive replacement(s) still pending after startup.`,
+  );
+}
+
 const httpServer = app.listen(PORT, () => {
+  // Keep gateway sockets alive longer so remote bridge keep-alive connections
+  // don't hit a server-side close between polls. Node defaults to 5 s which is
+  // shorter than the client's keepAliveMsecs (15 s), causing spurious ECONNRESET.
+  httpServer.keepAliveTimeout = 30000;   // 30 s — well above client keepAlive
+  httpServer.headersTimeout = 35000;     // must be > keepAliveTimeout per Node docs
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
   loadRemoteTodayEnergyShadowFromSettings();
   loadGatewayHandoffMetaFromSettings();
@@ -5957,51 +13412,70 @@ const httpServer = app.listen(PORT, () => {
     console.warn("[IPCONFIG] startup migration failed:", e.message);
   }
   try {
-    if (readForecastProvider() !== "solcast") {
-      const r = syncDayAheadFromContextIfNewer(true);
-      if (r?.changed) {
-        console.log(
-          `[Forecast] Day-ahead sync -> DB: days=${Number(r.days || 0)} rows=${Number(r.rows || 0)}`,
-        );
-      }
+    if (readOperationMode() === "remote") {
+      console.log("[Forecast] Remote mode active; skipped startup forecast DB sync.");
     } else {
-      console.log("[Forecast] Solcast provider selected; skipped legacy context sync.");
-    }
-    const trimmed = normalizeForecastDbWindow();
-    if (trimmed > 0) {
-      console.log(`[Forecast] Normalized DB forecast window (removed ${trimmed} row(s) outside 05:00-18:00).`);
+      if (readForecastProvider() !== "solcast") {
+        const storedRows = countStoredForecastRows("forecast_dayahead");
+        if (storedRows <= 0) {
+          const r = syncDayAheadFromContextIfNewer(true);
+          if (r?.changed) {
+            console.log(
+              `[Forecast] Day-ahead sync -> DB: days=${Number(r.days || 0)} rows=${Number(r.rows || 0)}`,
+            );
+          }
+        } else {
+          console.log(
+            `[Forecast] Startup legacy context import skipped; forecast_dayahead already has ${storedRows} stored row(s).`,
+          );
+        }
+      } else {
+        console.log("[Forecast] Solcast provider selected; skipped legacy context sync.");
+      }
+      const trimmed = normalizeForecastDbWindow();
+      if (trimmed > 0) {
+        console.log(`[Forecast] Normalized DB forecast window (removed ${trimmed} row(s) outside 05:00-18:00).`);
+      }
     }
   } catch (e) {
     console.warn("[Forecast] startup sync failed:", e.message);
+  }
+  startKeepAlive();
+  if (plantCapController) {
+    plantCapController.start();
   }
   applyRuntimeMode();
   if (process.send) process.send("ready");
 });
 
-// ─── Cloud Backup API Routes ──────────────────────────────────────────────────
+// â"€â"€â"€ Cloud Backup API Routes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/** GET /api/backup/settings  — return cloud backup settings */
+/** GET /api/backup/settings  â€" return cloud backup settings */
 app.get("/api/backup/settings", (req, res) => {
   try {
-    const s = _cloudBackup.getCloudSettings();
+    const s = _cloudBackup.getCloudSettingsForClient();
     res.json({ ok: true, settings: s, connected: _tokenStore.listConnected() });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-/** POST /api/backup/settings  — save cloud backup settings */
+/** POST /api/backup/settings  â€" save cloud backup settings */
 app.post("/api/backup/settings", (req, res) => {
   try {
-    const body = req.body || {};
-    const saved = _cloudBackup.saveCloudSettings(body);
-    res.json({ ok: true, settings: saved });
+    const body = req.body && typeof req.body === "object" ? { ...req.body } : {};
+    const clearGDriveClientSecret = Boolean(body.clearGDriveClientSecret);
+    delete body.clearGDriveClientSecret;
+    const saved = _cloudBackup.saveCloudSettings(body, {
+      clearGDriveClientSecret,
+    });
+    res.json({ ok: true, settings: _cloudBackup.getCloudSettingsForClient(saved) });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
   }
 });
 
-/** POST /api/backup/auth/:provider/start  — begin OAuth flow */
+/** POST /api/backup/auth/:provider/start  â€" begin OAuth flow */
 app.post("/api/backup/auth/:provider/start", (req, res) => {
   const provider = req.params.provider;
   if (provider !== "onedrive" && provider !== "gdrive") {
@@ -6041,7 +13515,7 @@ app.post("/api/backup/auth/:provider/start", (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/callback  — complete OAuth token exchange */
+/** POST /api/backup/auth/:provider/callback  â€" complete OAuth token exchange */
 app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   const provider = req.params.provider;
   const { code, state } = req.body || {};
@@ -6070,7 +13544,7 @@ app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   }
 });
 
-/** POST /api/backup/auth/:provider/disconnect  — revoke stored tokens */
+/** POST /api/backup/auth/:provider/disconnect  â€" revoke stored tokens */
 app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   const provider = req.params.provider;
   try {
@@ -6082,7 +13556,7 @@ app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   }
 });
 
-/** GET /api/backup/status  — connection status + progress */
+/** GET /api/backup/status  â€" connection status + progress */
 app.get("/api/backup/status", (req, res) => {
   res.json({
     ok: true,
@@ -6091,12 +13565,12 @@ app.get("/api/backup/status", (req, res) => {
   });
 });
 
-/** GET /api/backup/progress  — current operation progress */
+/** GET /api/backup/progress  â€" current operation progress */
 app.get("/api/backup/progress", (req, res) => {
   res.json({ ok: true, progress: _cloudBackup.getProgress() });
 });
 
-/** GET /api/backup/history  — local backup history */
+/** GET /api/backup/history  â€" local backup history */
 app.get("/api/backup/history", (req, res) => {
   try {
     const history = _cloudBackup.getHistory().map((h) => ({
@@ -6115,7 +13589,7 @@ app.get("/api/backup/history", (req, res) => {
   }
 });
 
-/** POST /api/backup/now  — run backup immediately */
+/** POST /api/backup/now  â€" run backup immediately */
 app.post("/api/backup/now", async (req, res) => {
   const { scope, provider, tag } = req.body || {};
   try {
@@ -6133,7 +13607,7 @@ app.post("/api/backup/now", async (req, res) => {
   }
 });
 
-/** GET /api/backup/cloud/:provider  — list cloud backups */
+/** GET /api/backup/cloud/:provider  â€" list cloud backups */
 app.get("/api/backup/cloud/:provider", async (req, res) => {
   const provider = req.params.provider;
   try {
@@ -6144,7 +13618,7 @@ app.get("/api/backup/cloud/:provider", async (req, res) => {
   }
 });
 
-/** POST /api/backup/pull  — pull backup from cloud */
+/** POST /api/backup/pull  â€" pull backup from cloud */
 app.post("/api/backup/pull", async (req, res) => {
   const { provider, remoteId, remoteName } = req.body || {};
   if (!provider || !remoteId || !remoteName) {
@@ -6165,7 +13639,7 @@ app.post("/api/backup/pull", async (req, res) => {
   }
 });
 
-/** POST /api/backup/restore/:id  — restore a local backup */
+/** POST /api/backup/restore/:id  â€" restore a local backup */
 app.post("/api/backup/restore/:id", async (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   const { skipSafetyBackup } = req.body || {};
@@ -6186,7 +13660,7 @@ app.post("/api/backup/restore/:id", async (req, res) => {
   }
 });
 
-/** DELETE /api/backup/:id  — delete a local backup package */
+/** DELETE /api/backup/:id  â€" delete a local backup package */
 app.delete("/api/backup/:id", (req, res) => {
   const backupId = decodeURIComponent(req.params.id);
   try {
@@ -6197,33 +13671,72 @@ app.delete("/api/backup/:id", (req, res) => {
   }
 });
 
-// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+// â"€â"€â"€ Graceful Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 let _shutdownCalled = false;
+let _shutdownPromise = null;
+let _flushClosed = false;
 
 function _flushAndClose() {
+  if (_flushClosed) return;
+  _flushClosed = true;
   try { poller.flushPending(); } catch (_) {}   // recover last ~1 s of readings
+  cleanupGatewayMainDbSnapshotSync();
   closeDb();                                      // WAL checkpoint + db.close
+}
+
+function _beginShutdown(mode, reason) {
+  if (_shutdownPromise) return _shutdownPromise;
+  _shutdownCalled = true;
+  if (mode === "embedded") {
+    console.log("[Server] Embedded shutdown: flushing DB...");
+  } else {
+    console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
+  }
+  stopRemoteBridge();
+  stopRemoteChatBridge();
+  if (plantCapController) {
+    try {
+      plantCapController.stop();
+    } catch (_) {}
+  }
+  try { poller.stop(); } catch (_) {}
+
+  _shutdownPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      _flushAndClose();
+      resolve();
+    };
+    let deadline = null;
+    try {
+      deadline = setTimeout(finish, 2000);
+      if (deadline && typeof deadline.unref === "function") deadline.unref();
+      httpServer.close(() => {
+        if (deadline) clearTimeout(deadline);
+        finish();
+      });
+    } catch (_) {
+      if (deadline) clearTimeout(deadline);
+      finish();
+    }
+  });
+  return _shutdownPromise;
 }
 
 // Called when running as a spawned child process (dev mode or future use).
 function gracefulShutdown(reason) {
-  if (_shutdownCalled) return;
-  _shutdownCalled = true;
-  console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
-  try { poller.stop(); } catch (_) {}
-  httpServer.close(() => { _flushAndClose(); process.exit(0); });
+  const shutdownPromise = _beginShutdown("child", reason);
+  shutdownPromise.finally(() => process.exit(0));
   // Safety: if httpServer doesn't drain within 2 s, force-close and exit.
-  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2000).unref();
+  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2500).unref();
 }
 
 // Called when running embedded in the Electron main process (packaged mode).
-// Must NOT call process.exit — Electron controls the lifecycle.
+// Must NOT call process.exit â€" Electron controls the lifecycle.
 function shutdownEmbedded() {
-  if (_shutdownCalled) return;
-  _shutdownCalled = true;
-  console.log("[Server] Embedded shutdown: flushing DB...");
-  try { poller.stop(); } catch (_) {}
-  _flushAndClose();
+  return _beginShutdown("embedded");
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
@@ -6232,13 +13745,29 @@ process.on("message", (msg) => {
   if (msg && msg.type === "shutdown") gracefulShutdown("ipc");
 });
 
-// ─── Periodic WAL Checkpoint ──────────────────────────────────────────────────
+// Safety net: ensure DB flush/close on any exit path, including unexpected crashes.
+process.on("exit", () => {
+  try { _flushAndClose(); } catch (_) {}
+});
+
+process.on("uncaughtException", (err) => {
+  const code = String(err?.code || "");
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") return;
+  console.error("[Server] Uncaught exception — flushing DB:", err);
+  try { _flushAndClose(); } catch (_) {}
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[Server] Unhandled rejection:", reason);
+});
+
+// â"€â"€â"€ Periodic WAL Checkpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.
 setInterval(() => {
   try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
 }, 15 * 60 * 1000).unref();
 
-// ─── Periodic DB Backup ───────────────────────────────────────────────────────
+// â"€â"€â"€ Periodic DB Backup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Rotates between 2 backup files every 2 hours. Uses SQLite's online backup API
 // so it never blocks reads/writes and is always consistent.
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
@@ -6258,5 +13787,3 @@ setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
 
 module.exports = { shutdownEmbedded };
-
-

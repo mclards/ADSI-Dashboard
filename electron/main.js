@@ -1,6 +1,6 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for ADSI Inverter Dashboard v2.0
+ * main.js - Electron entry point for ADSI Inverter Dashboard
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
  */
 
@@ -13,6 +13,9 @@ const fs = require("fs");
 const net = require("net");
 const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
+
+// Allow dashboard alarm audio to start immediately on packaged clients.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 // Prevent packaged app crashes when stdout/stderr pipe is unavailable (EPIPE).
 function makeSafeConsoleWriter(method) {
@@ -76,11 +79,14 @@ const SERVER_PORT = Number(SERVER_HTTP.port || 80);
 const TOPOLOGY_URL = `${SERVER_URL}/topology.html`;
 const IP_CONFIG_URL = `${SERVER_URL}/ip-config.html`;
 const POLL_INTERVAL = 600;
-const POLL_TIMEOUT = 60000;
+const POLL_TIMEOUT = 120000;
 const INITIAL_LOAD_RETRY_DELAY = 1200;
 const INITIAL_LOAD_RETRY_MAX = 8;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
+const FORECAST_MODE_SYNC_MS = 10000;
+const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
+const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
 const IS_DEV = process.env.NODE_ENV === "development";
 const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
@@ -98,8 +104,9 @@ const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
 const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
+const DAY_MS = 24 * 60 * 60 * 1000;
 const TRIAL_DAYS = 7;
-const LICENSE_WARN_MS = 24 * 60 * 60 * 1000; // 1 day
+const LICENSE_WARN_MS = DAY_MS; // 1 day
 const LICENSE_CHECK_INTERVAL_MS = 5 * 1000;
 const LICENSE_PUBLIC_KEY_PATH = String(process.env.ADSI_LICENSE_PUBLIC_KEY_PATH || "").trim();
 const LICENSE_PUBLIC_KEY_PEM = String(process.env.ADSI_LICENSE_PUBLIC_KEY || "").trim();
@@ -113,6 +120,12 @@ const UPDATE_FEED_URL = String(
 ).trim();
 const UPDATE_GITHUB_TOKEN = String(process.env.ADSI_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim();
 const UPDATE_CHECK_TIMEOUT_MS = 10000;
+const LEGACY_USERDATA_DIR_NAMES = [
+  "adsi-dashboard",
+  "adsi-inverter-dashboard",
+  "inverter dashboard",
+  "dashboard v2",
+];
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let mainWin = null;
@@ -133,6 +146,9 @@ let initialLoadRetryTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
 let forecastRestartAttempts = 0;
+let forecastModeSyncTimer = null;
+let forecastModeSyncInFlight = false;
+let forecastStopExpected = false;
 let lastForecastLaunch = null;
 let hasAuthenticated = false;
 let bootStarted = false;
@@ -142,6 +158,10 @@ let licenseCheckerTimer = null;
 let licenseShutdownTriggered = false;
 let lastBroadcastLicenseSignature = "";
 let allowMainWindowClose = false;
+let appShutdownPromise = null;
+let appShutdownBypassQuit = false;
+let appShutdownFinalAction = { type: "quit", exitCode: 0 };
+let backendStopExpected = false;
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
 let appUpdateBridgeBound = false;
@@ -161,6 +181,13 @@ let appUpdateState = {
   error: "",
 };
 
+const SERVICE_SOFT_STOP_FILE_NAMES = Object.freeze({
+  backend: "backend.stop",
+  forecast: "forecast.stop",
+});
+const BACKEND_SOFT_STOP_WAIT_MS = 8000;
+const FORECAST_SOFT_STOP_WAIT_MS = 25000;
+
 function configurePortableDataPaths() {
   if (!PORTABLE_DATA_DIR) return;
   try {
@@ -172,6 +199,8 @@ function configurePortableDataPaths() {
     fs.mkdirSync(dbDir, { recursive: true });
     fs.mkdirSync(cfgDir, { recursive: true });
     app.setPath("userData", userDataDir);
+    process.env.IM_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
+    process.env.IM_DATA_DIR = dbDir;
     process.env.ADSI_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
     process.env.ADSI_DATA_DIR = dbDir;
     console.log("[main] Portable data root:", PORTABLE_DATA_DIR);
@@ -181,6 +210,99 @@ function configurePortableDataPaths() {
 }
 
 configurePortableDataPaths();
+
+function copyFileIfMissing(src, dest) {
+  try {
+    if (!fs.existsSync(src) || fs.existsSync(dest)) return false;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    return true;
+  } catch (err) {
+    console.warn("[migrate] file copy failed:", src, "->", dest, err.message);
+    return false;
+  }
+}
+
+function copyDirIfMissing(srcDir, destDir) {
+  try {
+    if (!fs.existsSync(srcDir)) return 0;
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] dir init failed:", srcDir, "->", destDir, err.message);
+    return 0;
+  }
+  let copied = 0;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  } catch (err) {
+    console.warn("[migrate] dir read failed:", srcDir, err.message);
+    return 0;
+  }
+  for (const entry of entries) {
+    const src = path.join(srcDir, entry.name);
+    const dest = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copied += copyDirIfMissing(src, dest);
+    } else if (entry.isFile()) {
+      copied += copyFileIfMissing(src, dest) ? 1 : 0;
+    }
+  }
+  return copied;
+}
+
+function migrateLegacyUserDataIfNeeded() {
+  if (isPortableRuntime()) return { migrated: false, source: "", files: 0 };
+  let appDataDir = "";
+  let currentUserData = "";
+  try {
+    appDataDir = app.getPath("appData");
+    currentUserData = app.getPath("userData");
+  } catch (err) {
+    console.warn("[migrate] userData path resolve failed:", err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+  if (!appDataDir || !currentUserData) return { migrated: false, source: "", files: 0 };
+  try {
+    fs.mkdirSync(currentUserData, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] current userData init failed:", currentUserData, err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+
+  const currentNorm = path.resolve(currentUserData).toLowerCase();
+  const candidateDirs = [];
+  for (const name of LEGACY_USERDATA_DIR_NAMES) {
+    const abs = path.join(appDataDir, name);
+    const norm = path.resolve(abs).toLowerCase();
+    if (norm === currentNorm) continue;
+    candidateDirs.push(abs);
+  }
+
+  for (const legacyDir of candidateDirs) {
+    if (!fs.existsSync(legacyDir)) continue;
+    const authCopied = copyDirIfMissing(
+      path.join(legacyDir, "auth"),
+      path.join(currentUserData, "auth"),
+    );
+    const configCopied = copyDirIfMissing(
+      path.join(legacyDir, "config"),
+      path.join(currentUserData, "config"),
+    );
+    const rootConfigCopied = copyFileIfMissing(
+      path.join(legacyDir, "ipconfig.json"),
+      path.join(currentUserData, "config", "ipconfig.json"),
+    ) ? 1 : 0;
+    const totalCopied = authCopied + configCopied + rootConfigCopied;
+    if (totalCopied > 0) {
+      console.log(
+        `[migrate] userData migrated from ${legacyDir} -> ${currentUserData} (${totalCopied} file(s))`,
+      );
+      return { migrated: true, source: legacyDir, files: totalCopied };
+    }
+  }
+  return { migrated: false, source: "", files: 0 };
+}
 
 function parseVersionParts(input) {
   const normalized = String(input || "")
@@ -492,7 +614,7 @@ function initAppUpdater() {
       canDownload: false,
       canInstall: false,
       downloadUrl: "",
-      message: `Installer update channel ready (${UPDATE_FEED_URL}).`,
+      message: "Installer update channel ready.",
       error: "",
     }, false);
     return;
@@ -663,19 +785,17 @@ async function installAppUpdateNow() {
     message: "Restarting app to install update...",
     checking: false,
   });
-  setTimeout(() => {
-    try {
-      allowMainWindowClose = true;
-      autoUpdater.quitAndInstall(false, true);
-    } catch (err) {
-      setAppUpdateState({
-        mode: "installer",
-        status: "error",
-        message: `Install failed: ${err.message}`,
-        error: String(err.message || "Install failed"),
-      });
-    }
-  }, 150);
+  requestAppShutdown({
+    reason: "install downloaded update",
+    action: { type: "install" },
+  }).catch((err) => {
+    setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      message: `Install failed: ${err.message}`,
+      error: String(err.message || "Install failed"),
+    });
+  });
   return { ok: true, state: buildPublicAppUpdateState() };
 }
 
@@ -712,12 +832,282 @@ function getUpdateErrorMessage(err) {
   return raw;
 }
 
+function normalizeAppShutdownAction(action) {
+  const type = String(action?.type || "quit").trim().toLowerCase();
+  if (type === "install") return { type: "install", exitCode: 0 };
+  if (type === "relaunch") return { type: "relaunch", exitCode: 0 };
+  if (type === "exit") {
+    const exitCode = Number.isInteger(action?.exitCode) ? action.exitCode : 0;
+    return { type: "exit", exitCode };
+  }
+  return { type: "quit", exitCode: 0 };
+}
+
+function getAppShutdownActionRank(action) {
+  const type = String(action?.type || "quit");
+  if (type === "install") return 4;
+  if (type === "relaunch") return 3;
+  if (type === "exit") return 2;
+  return 1;
+}
+
+function mergeAppShutdownAction(nextAction) {
+  const next = normalizeAppShutdownAction(nextAction);
+  if (getAppShutdownActionRank(next) >= getAppShutdownActionRank(appShutdownFinalAction)) {
+    appShutdownFinalAction = next;
+  }
+  return appShutdownFinalAction;
+}
+
+function normalizeSoftStopServiceName(serviceName) {
+  return String(serviceName || "").trim().toLowerCase() === "forecast"
+    ? "forecast"
+    : "backend";
+}
+
+function getRuntimeControlDir() {
+  let baseDir = "";
+  try {
+    baseDir = app.getPath("userData");
+  } catch (_) {
+    baseDir = "";
+  }
+  if (!baseDir) {
+    baseDir = PORTABLE_DATA_DIR || process.cwd();
+  }
+  return path.join(baseDir, "runtime-control");
+}
+
+function getServiceSoftStopFile(serviceName) {
+  const normalized = normalizeSoftStopServiceName(serviceName);
+  return path.join(
+    getRuntimeControlDir(),
+    SERVICE_SOFT_STOP_FILE_NAMES[normalized],
+  );
+}
+
+function clearServiceSoftStopFile(stopFilePath) {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return;
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch (err) {
+    console.warn("[main] Failed to clear service stop file:", filePath, err.message);
+  }
+}
+
+function writeServiceSoftStopFile(stopFilePath, label, reason = "shutdown requested") {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return false;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          label: String(label || "service"),
+          reason: String(reason || "shutdown requested"),
+          requestedAt: Date.now(),
+          pid: process.pid,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    return true;
+  } catch (err) {
+    console.warn("[main] Failed to write service stop file:", filePath, err.message);
+    return false;
+  }
+}
+
+function attachServiceSoftStopMeta(proc, serviceName, waitMs) {
+  if (!proc) return proc;
+  proc._softStopFile = getServiceSoftStopFile(serviceName);
+  proc._softStopWaitMs = Math.max(0, Number(waitMs || 0));
+  clearServiceSoftStopFile(proc._softStopFile);
+  return proc;
+}
+
+function waitForChildExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    if (
+      !proc ||
+      proc.killed ||
+      proc.exitCode !== null ||
+      proc.signalCode !== null
+    ) {
+      resolve(true);
+      return;
+    }
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      try {
+        proc.removeListener("exit", onExit);
+      } catch (_) {}
+      clearTimeout(timer);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    proc.once("exit", onExit);
+  });
+}
+
+async function stopTrackedProcess(proc, label) {
+  if (!proc || proc.killed) return;
+  const softStopFile = String(proc._softStopFile || "").trim();
+  const softStopWaitMs = Math.max(0, Number(proc._softStopWaitMs || 0));
+  if (softStopFile && writeServiceSoftStopFile(softStopFile, label, "app shutdown")) {
+    const exitedSoft = await waitForChildExit(proc, softStopWaitMs);
+    clearServiceSoftStopFile(softStopFile);
+    if (exitedSoft) return;
+    console.warn(
+      `[main] ${label} did not exit within ${softStopWaitMs}ms after soft-stop; forcing exit`,
+    );
+  }
+  forceKillProc(proc, label);
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+  clearServiceSoftStopFile(softStopFile);
+  if (!exited) {
+    console.warn(`[main] ${label} did not exit within ${APP_SHUTDOWN_FORCE_KILL_WAIT_MS}ms`);
+  }
+}
+
+async function shutdownEmbeddedServerGracefully(serverModule) {
+  if (!serverModule || typeof serverModule.shutdownEmbedded !== "function") return;
+  let shutdownPromise;
+  try {
+    shutdownPromise = Promise.resolve(serverModule.shutdownEmbedded());
+  } catch (err) {
+    console.warn("[main] embedded web server shutdown failed:", err.message);
+    return;
+  }
+  let timeoutId = null;
+  const outcome = await Promise.race([
+    shutdownPromise
+      .then(() => "done")
+      .catch((err) => {
+        console.warn("[main] embedded web server shutdown failed:", err.message);
+        return "done";
+      }),
+    new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve("timeout"), APP_SHUTDOWN_WEB_TIMEOUT_MS);
+      if (timeoutId && typeof timeoutId.unref === "function") timeoutId.unref();
+    }),
+  ]);
+  if (timeoutId) clearTimeout(timeoutId);
+  if (outcome === "timeout") {
+    console.warn(`[main] embedded web server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms`);
+  }
+}
+
+async function shutdownChildWebServerGracefully(proc) {
+  if (!proc || proc.killed) return;
+  try {
+    proc.send({ type: "shutdown" });
+  } catch (_) {}
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_WEB_TIMEOUT_MS);
+  if (exited) return;
+  console.warn(`[main] web-server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms; forcing exit`);
+  forceKillProc(proc, "web-server");
+  await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+}
+
+async function stopRuntimeServices(reason = "application shutdown") {
+  isAppShuttingDown = true;
+  allowMainWindowClose = true;
+  stopForecastModeSync();
+  clearForecastRestartTimer();
+  if (appUpdateAutoCheckTimer) {
+    clearTimeout(appUpdateAutoCheckTimer);
+    appUpdateAutoCheckTimer = null;
+  }
+  if (licenseCheckerTimer) {
+    clearInterval(licenseCheckerTimer);
+    licenseCheckerTimer = null;
+  }
+
+  const embeddedModule = embeddedServerStarted ? embeddedServerModule : null;
+  const childWebProc = webProc;
+  const backend = backendProc;
+  const forecast = forecastProc;
+
+  embeddedServerStarted = false;
+  embeddedServerModule = null;
+  webProc = null;
+  backendProc = null;
+  forecastProc = null;
+  backendStopExpected = true;
+  forecastStopExpected = true;
+
+  const tasks = [];
+  if (backend && !backend.killed) tasks.push(stopTrackedProcess(backend, "backend"));
+  if (forecast && !forecast.killed) tasks.push(stopTrackedProcess(forecast, "forecast"));
+  if (embeddedModule && typeof embeddedModule.shutdownEmbedded === "function") {
+    tasks.push(shutdownEmbeddedServerGracefully(embeddedModule));
+  }
+  if (childWebProc && !childWebProc.killed) {
+    tasks.push(shutdownChildWebServerGracefully(childWebProc));
+  }
+
+  if (!tasks.length) return;
+  console.log(`[main] Stopping runtime services (${reason})...`);
+  await Promise.allSettled(tasks);
+}
+
+function finalizeAppShutdown() {
+  appShutdownBypassQuit = true;
+  allowMainWindowClose = true;
+  const action = normalizeAppShutdownAction(appShutdownFinalAction);
+  if (action.type === "install") {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+      return;
+    } catch (err) {
+      console.error("[main] quitAndInstall failed:", err.message);
+      app.exit(1);
+      return;
+    }
+  }
+  if (action.type === "relaunch") {
+    app.relaunch();
+    app.quit();
+    return;
+  }
+  if (action.type === "exit") {
+    app.exit(action.exitCode || 0);
+    return;
+  }
+  app.quit();
+}
+
+function requestAppShutdown(options = {}) {
+  const reason = String(options?.reason || "application shutdown").trim() || "application shutdown";
+  mergeAppShutdownAction(options?.action);
+  if (appShutdownPromise) return appShutdownPromise;
+  console.log(`[main] Shutdown requested (${reason})`);
+  appShutdownPromise = stopRuntimeServices(reason)
+    .catch((err) => {
+      console.error("[main] Shutdown sequence failed:", err?.message || err);
+    })
+    .finally(() => {
+      finalizeAppShutdown();
+    });
+  return appShutdownPromise;
+}
+
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
-  app.setName("Inverter Dashboard");
+  app.setName("ADSI Inverter Dashboard");
+  migrateLegacyUserDataIfNeeded();
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
   Menu.setApplicationMenu(null);
@@ -753,22 +1143,17 @@ app.on("activate", async () => {
   else if (bootStarted) showLoadingWindow();
 });
 
-app.on("before-quit", () => {
-  allowMainWindowClose = true;
-  isAppShuttingDown = true;
-  if (appUpdateAutoCheckTimer) {
-    clearTimeout(appUpdateAutoCheckTimer);
-    appUpdateAutoCheckTimer = null;
-  }
-  if (licenseCheckerTimer) {
-    clearInterval(licenseCheckerTimer);
-    licenseCheckerTimer = null;
-  }
-  // Embedded mode (packaged): server runs in-process — call its shutdown directly.
-  if (embeddedServerModule && typeof embeddedServerModule.shutdownEmbedded === "function") {
-    try { embeddedServerModule.shutdownEmbedded(); } catch (_) {}
-  }
-  killServer();
+app.on("before-quit", (event) => {
+  if (appShutdownBypassQuit) return;
+  event.preventDefault();
+  requestAppShutdown({
+    reason: "before-quit",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] before-quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 });
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
@@ -781,18 +1166,20 @@ function showLoadingWindow() {
     return;
   }
   loadingWin = new BrowserWindow({
-    width: 500,
-    height: 420,
-    minWidth: 500,
-    minHeight: 420,
+    width: 600,
+    height: 720,
+    minWidth: 600,
+    minHeight: 500,
     useContentSize: true,
+    title: "ADSI Inverter Dashboard",
     icon: APP_ICON,
     frame: false,
     resizable: false,
+    autoHideMenuBar: true,
     // No alwaysOnTop: loading should be visible during startup but must not trap
     // clicks on other OS windows (e.g. the user's taskbar or other apps).
     center: true,
-    backgroundColor: "#0f1117",
+    backgroundColor: "#07111e",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
   });
   loadingWin.loadFile(path.join(PUBLIC_DIR, "loading.html"));
@@ -857,17 +1244,17 @@ function showLoginWindow() {
     return;
   }
   loginWin = new BrowserWindow({
-    width: 500,
+    width: 480,
     height: 540,
-    minWidth: 500,
-    minHeight: 540,
+    minWidth: 480,
+    minHeight: 490,
     icon: APP_ICON,
     frame: true,
     autoHideMenuBar: true,
     resizable: false,
     maximizable: false,
     minimizable: false,
-    backgroundColor: "#102029",
+    backgroundColor: "#050c17",
     center: true,
     alwaysOnTop: true,
     show: false,
@@ -1033,6 +1420,20 @@ function parseDateMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
+function parseLicenseExpiryMs(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+  const raw = String(v || "").trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const t = new Date(`${raw}T23:59:59.999`).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  const t = new Date(raw).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
 function readWindowsMachineGuid() {
   try {
     const out = execFileSync(
@@ -1084,6 +1485,19 @@ function writeRegistryValue(regPath, valueName, value) {
   }
 }
 
+function deleteRegistryValue(regPath, valueName) {
+  try {
+    execFileSync(
+      "reg",
+      ["delete", regPath, "/v", valueName, "/f"],
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function pickEarliestTimestamp(...values) {
   const items = values
     .map((v) => parseDateMs(v))
@@ -1098,6 +1512,11 @@ function loadLicenseRegistryMarker() {
     firstInstallAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "FirstInstallAt")),
     trialAcceptedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialAcceptedAt")),
     trialExpiresAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt")),
+    licenseFingerprint: String(readRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint") || "").trim(),
+    licenseActivatedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt")),
+    licenseExpiresAt: parseLicenseExpiryMs(readRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt")),
+    licenseType: String(readRegistryValue(LICENSE_REG_PATH, "LicenseType") || "").trim().toLowerCase(),
+    licenseLifetime: String(readRegistryValue(LICENSE_REG_PATH, "LicenseLifetime") || "").trim() === "1",
   };
 }
 
@@ -1119,6 +1538,35 @@ function saveLicenseRegistryMarker(state) {
   if (Number.isFinite(trialExpiresAt) && trialExpiresAt > 0) {
     writeRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt", String(trialExpiresAt));
   }
+
+  const lic = normalizeStoredLicense(state?.license);
+  if (lic?.fingerprint) {
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint", lic.fingerprint);
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseLifetime", lic.lifetime ? "1" : "0");
+    if (lic.type) writeRegistryValue(LICENSE_REG_PATH, "LicenseType", lic.type);
+    else deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+
+    const activatedAt = parseDateMs(lic.activatedAt);
+    if (Number.isFinite(activatedAt) && activatedAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt", String(activatedAt));
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+    }
+
+    const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+    if (!lic.lifetime && Number.isFinite(expiresAt) && expiresAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt", String(expiresAt));
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+    }
+    return;
+  }
+
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseLifetime");
 }
 
 // ─── Credential Encryption ─────────────────────────────────────────────────
@@ -1191,6 +1639,11 @@ function stripLicenseSignature(payload) {
   delete clone._signature;
   delete clone.sig;
   return clone;
+}
+
+function buildLicensePayloadFingerprint(payload) {
+  const canonical = stableStringify(stripLicenseSignature(payload));
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 function extractLicenseSignature(payload) {
@@ -1305,6 +1758,99 @@ function verifyLicenseSignature(payload) {
   return { ok: false, error: "License signature verification failed." };
 }
 
+function normalizeStoredLicense(value) {
+  if (!value || typeof value !== "object") return null;
+  const fingerprint = String(value.fingerprint || value.identity || "").trim();
+  const activatedAt = parseDateMs(value.activatedAt);
+  const expiresAt = parseLicenseExpiryMs(value.expiresAt);
+  const rawType = String(value.type || "").trim().toLowerCase();
+  const lifetime = !!value.lifetime || rawType === "lifetime";
+  return {
+    ...value,
+    fingerprint,
+    activatedAt: Number.isFinite(activatedAt) && activatedAt > 0 ? Math.trunc(activatedAt) : null,
+    expiresAt: !lifetime && Number.isFinite(expiresAt) && expiresAt > 0 ? Math.trunc(expiresAt) : null,
+    type: lifetime ? "lifetime" : rawType,
+    lifetime,
+    metadata: value.metadata && typeof value.metadata === "object" ? { ...value.metadata } : {},
+  };
+}
+
+function buildRegistryLicenseSnapshot(regState) {
+  const fingerprint = String(regState?.licenseFingerprint || "").trim();
+  if (!fingerprint) return null;
+  return normalizeStoredLicense({
+    fingerprint,
+    activatedAt: regState?.licenseActivatedAt,
+    expiresAt: regState?.licenseExpiresAt,
+    type: regState?.licenseType || "",
+    lifetime: !!regState?.licenseLifetime,
+    metadata: {},
+  });
+}
+
+function mergeLicenseRecords(primary, secondary) {
+  const a = normalizeStoredLicense(primary);
+  const b = normalizeStoredLicense(secondary);
+  if (!a) return b;
+  if (!b) return a;
+  if (a.fingerprint && b.fingerprint && a.fingerprint !== b.fingerprint) return a;
+  return normalizeStoredLicense({
+    ...b,
+    ...a,
+    fingerprint: a.fingerprint || b.fingerprint || "",
+    activatedAt: pickEarliestTimestamp(a.activatedAt, b.activatedAt) || a.activatedAt || b.activatedAt || null,
+    expiresAt:
+      a.lifetime || b.lifetime
+        ? null
+        : pickEarliestTimestamp(a.expiresAt, b.expiresAt) || a.expiresAt || b.expiresAt || null,
+    type: a.type || b.type || "",
+    lifetime: !!(a.lifetime || b.lifetime),
+    metadata: {
+      ...(b.metadata && typeof b.metadata === "object" ? b.metadata : {}),
+      ...(a.metadata && typeof a.metadata === "object" ? a.metadata : {}),
+    },
+  });
+}
+
+function resolveLicenseActivationAnchor(priorLicense, nextFingerprint, durationMs) {
+  const prior = normalizeStoredLicense(priorLicense);
+  if (!prior || !Number.isFinite(durationMs) || durationMs <= 0) return null;
+  if (prior.fingerprint && nextFingerprint && prior.fingerprint !== nextFingerprint) return null;
+  const activatedAt = parseDateMs(prior.activatedAt);
+  if (Number.isFinite(activatedAt) && activatedAt > 0) return Math.trunc(activatedAt);
+  const expiresAt = parseLicenseExpiryMs(prior.expiresAt);
+  if (Number.isFinite(expiresAt) && expiresAt > 0) {
+    return Math.trunc(expiresAt - durationMs);
+  }
+  return null;
+}
+
+function tryRestoreMirroredLicense(priorLicense) {
+  try {
+    if (!fs.existsSync(LICENSE_FILE_MIRROR)) return null;
+    const raw = fs.readFileSync(LICENSE_FILE_MIRROR, "utf8").replace(/^\uFEFF/, "");
+    const payload = JSON.parse(raw);
+    const normalized = normalizeLicensePayload(payload, LICENSE_FILE_MIRROR, priorLicense);
+    return normalized.ok ? normalized.license : null;
+  } catch (err) {
+    console.warn("[license] mirror restore failed:", err.message);
+    return null;
+  }
+}
+
+function resolvePersistedLicense(rawLicense, regState) {
+  const regLicense = buildRegistryLicenseSnapshot(regState);
+  const merged = mergeLicenseRecords(rawLicense, regLicense);
+  if (merged?.fingerprint) return { license: merged, restoredFromMirror: false };
+  const restored = tryRestoreMirroredLicense(merged || regLicense);
+  if (!restored) return { license: merged, restoredFromMirror: false };
+  return {
+    license: mergeLicenseRecords(restored, merged),
+    restoredFromMirror: true,
+  };
+}
+
 function defaultLicenseState() {
   return {
     schema: 1,
@@ -1341,6 +1887,7 @@ function loadLicenseState() {
   const regState = loadLicenseRegistryMarker();
   try {
     if (!fs.existsSync(LICENSE_STATE_PATH)) {
+      const resolved = resolvePersistedLicense(null, regState);
       const def = defaultLicenseState();
       const state = {
         ...def,
@@ -1348,6 +1895,7 @@ function loadLicenseState() {
         firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
         trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
         trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+        license: resolved.license,
       };
       state.audit = normalizeLicenseAudit([
         {
@@ -1356,6 +1904,16 @@ function loadLicenseState() {
           level: "info",
           details: "License state created on this device.",
         },
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
       ]);
       fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
@@ -1363,6 +1921,7 @@ function loadLicenseState() {
       return state;
     }
     const raw = JSON.parse(fs.readFileSync(LICENSE_STATE_PATH, "utf8"));
+    const resolved = resolvePersistedLicense(raw?.license, regState);
     const def = defaultLicenseState();
     const state = {
       schema: Number(raw?.schema || 1),
@@ -1370,8 +1929,20 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(raw?.firstInstallAt, regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(raw?.trialAcceptedAt, regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(raw?.trialExpiresAt, regState.trialExpiresAt),
-      license: raw?.license && typeof raw.license === "object" ? raw.license : null,
-      audit: normalizeLicenseAudit(raw?.audit),
+      license: resolved.license,
+      audit: normalizeLicenseAudit([
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
+        ...(Array.isArray(raw?.audit) ? raw.audit : []),
+      ]),
     };
     fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
     saveLicenseRegistryMarker(state);
@@ -1379,6 +1950,7 @@ function loadLicenseState() {
     return state;
   } catch (err) {
     console.error("[license] state load failed:", err.message);
+    const resolved = resolvePersistedLicense(null, regState);
     const def = defaultLicenseState();
     const state = {
       ...def,
@@ -1386,6 +1958,27 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+      license: resolved.license,
+      audit: normalizeLicenseAudit(
+        [
+          {
+            ts: Date.now(),
+            action: "state_reinitialized",
+            level: "warning",
+            details: `License state was reinitialized after a read error: ${err.message}`,
+          },
+          ...(resolved.restoredFromMirror
+            ? [
+                {
+                  ts: Date.now(),
+                  action: "license_restored",
+                  level: "success",
+                  details: "Recovered current license from the mirrored license file.",
+                },
+              ]
+            : []),
+        ],
+      ),
     };
     try {
       fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
@@ -1431,7 +2024,7 @@ function getLicenseAuditRows() {
   return normalizeLicenseAudit(state.audit);
 }
 
-function normalizeLicensePayload(payload, sourcePath) {
+function normalizeLicensePayload(payload, sourcePath, priorLicense = null) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "License file must contain a JSON object." };
   }
@@ -1442,6 +2035,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   }
 
   const now = Date.now();
+  const prior = normalizeStoredLicense(priorLicense);
   const fp = getDeviceFingerprint();
   const boundDevice = String(
     payload.deviceFingerprint ||
@@ -1466,6 +2060,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   );
   const durationHours = Number(payload.duration_hours ?? payload.durationHours ?? NaN);
   const durationMsField = Number(payload.duration_ms ?? payload.durationMs ?? NaN);
+  const fingerprint = buildLicensePayloadFingerprint(payload);
   let durationMs = null;
   if (Number.isFinite(durationMsField) && durationMsField > 0) {
     durationMs = Math.trunc(durationMsField);
@@ -1475,7 +2070,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     durationMs = Math.trunc(durationDays * 24 * 60 * 60 * 1000);
   }
 
-  const explicitExpiry = parseDateMs(
+  const explicitExpiry = parseLicenseExpiryMs(
     payload.expiresAt ||
       payload.expires_at ||
       payload.validUntil ||
@@ -1485,7 +2080,8 @@ function normalizeLicensePayload(payload, sourcePath) {
       payload.endAt ||
       payload.end_at,
   );
-  const activatedAt = now;
+  const activatedAt =
+    resolveLicenseActivationAnchor(prior, fingerprint, durationMs) || now;
   const expiresAt = lifetime
     ? null
     : Number.isFinite(explicitExpiry)
@@ -1505,6 +2101,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     sourcePath: String(sourcePath || ""),
     importedAt: now,
     activatedAt,
+    fingerprint,
     type: lifetime ? "lifetime" : Number.isFinite(durationMs) && !Number.isFinite(explicitExpiry) ? "duration" : "datetime",
     lifetime: !!lifetime,
     expiresAt: Number.isFinite(expiresAt) ? Math.trunc(expiresAt) : null,
@@ -1528,13 +2125,13 @@ function installLicenseFromFile(filePath) {
     if (!fullPath) return { ok: false, error: "No license file selected." };
     const raw = fs.readFileSync(fullPath, "utf8").replace(/^\uFEFF/, "");
     const payload = JSON.parse(raw);
-    const normalized = normalizeLicensePayload(payload, fullPath);
+    const state = loadLicenseState();
+    const normalized = normalizeLicensePayload(payload, fullPath, state.license);
     if (!normalized.ok) {
       appendLicenseAudit("license_import_failed", normalized.error || "Invalid license payload.", "error");
       return normalized;
     }
 
-    const state = loadLicenseState();
     state.deviceFingerprint = getDeviceFingerprint();
     state.license = normalized.license;
     if (!state.firstInstallAt) state.firstInstallAt = Date.now();
@@ -1576,7 +2173,7 @@ function activateTrialNow() {
   state.deviceFingerprint = getDeviceFingerprint();
   state.firstInstallAt = state.firstInstallAt || now;
   state.trialAcceptedAt = now;
-  state.trialExpiresAt = now + TRIAL_DAYS * 24 * 60 * 60 * 1000;
+  state.trialExpiresAt = now + TRIAL_DAYS * DAY_MS;
   saveLicenseState(state);
   appendLicenseAudit(
     "trial_started",
@@ -1597,62 +2194,53 @@ function humanRemaining(msLeft) {
   return `${Math.max(1, mins)}m`;
 }
 
-function evaluateLicense(now = Date.now()) {
-  const state = licenseStateCache || loadLicenseState();
-  const fp = getDeviceFingerprint();
-  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
-  if (mismatch) {
-    return {
-      valid: false,
-      source: "device",
-      code: "device_mismatch",
-      expiresAt: null,
-      msLeft: 0,
-      nearExpiry: false,
-      message: "License storage belongs to another device fingerprint.",
-    };
-  }
+function calcRemainingDays(msLeft) {
+  if (!Number.isFinite(msLeft) || msLeft <= 0) return 0;
+  return Math.max(1, Math.ceil(msLeft / DAY_MS));
+}
 
-  const lic = state.license && typeof state.license === "object" ? state.license : null;
-  if (lic) {
-    const expiresAt = parseDateMs(lic.expiresAt);
-    if (lic.lifetime || lic.type === "lifetime") {
-      return {
-        valid: true,
-        source: "license",
-        code: "lifetime",
-        lifetime: true,
-        expiresAt: null,
-        msLeft: Number.POSITIVE_INFINITY,
-        nearExpiry: false,
-        message: "Lifetime license active.",
-      };
-    }
-    if (Number.isFinite(expiresAt) && expiresAt > now) {
-      const msLeft = expiresAt - now;
-      return {
-        valid: true,
-        source: "license",
-        code: "licensed",
-        lifetime: false,
-        expiresAt,
-        msLeft,
-        nearExpiry: msLeft <= LICENSE_WARN_MS,
-        message: `License expires in ${humanRemaining(msLeft)}.`,
-      };
-    }
+function evaluateStoredLicenseEntitlement(license, now) {
+  const lic = normalizeStoredLicense(license);
+  if (!lic) return null;
+  const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+  if (lic.lifetime || lic.type === "lifetime") {
     return {
-      valid: false,
+      valid: true,
       source: "license",
-      code: "license_expired",
-      lifetime: false,
-      expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
-      msLeft: 0,
+      code: "lifetime",
+      lifetime: true,
+      expiresAt: null,
+      msLeft: Number.POSITIVE_INFINITY,
       nearExpiry: false,
-      message: "License expired.",
+      message: "Lifetime license active.",
     };
   }
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    const msLeft = expiresAt - now;
+    return {
+      valid: true,
+      source: "license",
+      code: "licensed",
+      lifetime: false,
+      expiresAt,
+      msLeft,
+      nearExpiry: msLeft <= LICENSE_WARN_MS,
+      message: `License expires in ${humanRemaining(msLeft)}.`,
+    };
+  }
+  return {
+    valid: false,
+    source: "license",
+    code: "license_expired",
+    lifetime: false,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
+    msLeft: 0,
+    nearExpiry: false,
+    message: "License expired.",
+  };
+}
 
+function evaluateTrialEntitlement(state, now) {
   const trialAcceptedAt = parseDateMs(state.trialAcceptedAt);
   const trialExpiresAt = parseDateMs(state.trialExpiresAt);
   if (trialAcceptedAt && trialExpiresAt && trialExpiresAt > now) {
@@ -1692,16 +2280,44 @@ function evaluateLicense(now = Date.now()) {
   };
 }
 
+function evaluateLicense(now = Date.now()) {
+  const state = licenseStateCache || loadLicenseState();
+  const fp = getDeviceFingerprint();
+  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
+  if (mismatch) {
+    return {
+      valid: false,
+      source: "device",
+      code: "device_mismatch",
+      expiresAt: null,
+      msLeft: 0,
+      nearExpiry: false,
+      message: "License storage belongs to another device fingerprint.",
+    };
+  }
+
+  const licenseStatus = evaluateStoredLicenseEntitlement(state.license, now);
+  if (licenseStatus?.valid) return licenseStatus;
+  const trialStatus = evaluateTrialEntitlement(state, now);
+  if (trialStatus?.valid) return trialStatus;
+  return licenseStatus || trialStatus;
+}
+
 function buildLicensePublicStatus() {
   const v = evaluateLicense();
+  const expiresAt = Number.isFinite(v.expiresAt) ? v.expiresAt : null;
+  const msLeft = Number.isFinite(v.msLeft) ? v.msLeft : null;
+  const daysLeft = expiresAt == null ? null : calcRemainingDays(msLeft || 0);
   return {
     valid: !!v.valid,
     source: v.source || "trial",
     code: v.code || "",
     lifetime: !!v.lifetime,
-    expiresAt: Number.isFinite(v.expiresAt) ? v.expiresAt : null,
-    expiresAtIso: Number.isFinite(v.expiresAt) ? new Date(v.expiresAt).toISOString() : null,
-    msLeft: Number.isFinite(v.msLeft) ? v.msLeft : null,
+    expiresAt,
+    expiresAtIso: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+    msLeft,
+    daysLeft,
+    remainingText: v.lifetime ? "lifetime" : msLeft && msLeft > 0 ? humanRemaining(msLeft) : "",
     nearExpiry: !!v.nearExpiry,
     message: String(v.message || ""),
   };
@@ -1724,6 +2340,8 @@ function broadcastLicenseStatus(force = false) {
     status.code,
     status.lifetime,
     status.expiresAtIso,
+    status.daysLeft,
+    status.remainingText,
     status.nearExpiry,
   ]);
   if (!force && signature === lastBroadcastLicenseSignature) return status;
@@ -1760,7 +2378,7 @@ async function ensureLicenseAtStartup() {
         defaultId: 0,
         cancelId: 2,
         title: "License Required",
-        message: "Welcome to Inverter Dashboard",
+        message: "Welcome to ADSI Inverter Dashboard",
         detail:
           "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
       });
@@ -1822,8 +2440,14 @@ function enforceLicenseShutdown(status) {
       ? "Trial/license expired while dashboard is running. Services will stop now."
       : "License expired while dashboard is running. Services will stop now.";
   dialog.showErrorBox("License Expired", `${detail}\n\nPlease upload a valid license and restart the dashboard.`);
-  killServer();
-  app.exit(0);
+  requestAppShutdown({
+    reason: "runtime license expired",
+    action: { type: "exit", exitCode: 0 },
+  }).catch((err) => {
+    console.error("[main] license shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }
 
 function handleLicenseRuntimeTick() {
@@ -1867,7 +2491,12 @@ function startEmbeddedServer(serverEntry) {
     serverBootError = "";
     return true;
   } catch (err) {
-    serverBootError = String(err?.message || err || "unknown error");
+    const code = String(err?.code || "").trim().toUpperCase();
+    const baseMsg = String(err?.message || err || "unknown error");
+    serverBootError =
+      code === "EADDRINUSE"
+        ? `Port ${SERVER_PORT} is already in use. Close any previous dashboard or local server process that is still bound to localhost:${SERVER_PORT}, then retry.`
+        : baseMsg;
     console.error("[main] Embedded web server start failed:", serverBootError);
     return false;
   }
@@ -1875,13 +2504,19 @@ function startEmbeddedServer(serverEntry) {
 
 function showLoadingErrorMessage(message) {
   if (!loadingWin || loadingWin.isDestroyed()) return;
-  const safe = String(message || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/\r?\n/g, "<br/>");
+  const safeMessage = String(message || "").replace(/<br\s*\/?>/gi, "\n");
+  const fallbackHtml = `<div style="font-family:Segoe UI,sans-serif;color:#ffd8df;padding:20px;text-align:center;line-height:1.6;background:#09121f">${safeMessage
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\r?\n/g, "<br/>")}</div>`;
   loadingWin.webContents
     .executeJavaScript(
-      `document.body.innerHTML='<div style="font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45">${safe}</div>';`,
+      `if (typeof window.showStartupError === "function") {
+         window.showStartupError(${JSON.stringify(safeMessage)});
+       } else {
+         document.body.innerHTML = ${JSON.stringify(fallbackHtml)};
+       }`,
     )
     .catch(() => {});
 }
@@ -1907,7 +2542,6 @@ function startServer() {
   killImageNames(FORECAST_EXE_NAMES);
 
   startBackendProcess();
-  startForecastProcess();
 
   const serverEntry = resolveServerEntry();
   if (!serverEntry) {
@@ -1916,39 +2550,15 @@ function startServer() {
     return;
   }
 
-  // Packaged app: run the Express server in-process for startup reliability.
-  if (app.isPackaged) {
-    const ok = startEmbeddedServer(serverEntry);
-    if (!ok) {
-      showLoadingErrorMessage(
-        `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
-      );
-      return;
-    }
-    pollUntilReady();
+  // Run the Express server in-process for both packaged and workspace runs.
+  // This avoids stale detached dev server processes serving old backend code.
+  const ok = startEmbeddedServer(serverEntry);
+  if (!ok) {
+    showLoadingErrorMessage(
+      `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
+    );
     return;
   }
-
-  const runtimeBin = process.execPath;
-  console.log("[main] Spawning web server:", runtimeBin, serverEntry);
-  webProc = spawn(runtimeBin, [serverEntry], {
-    cwd: path.dirname(serverEntry),
-    stdio: ["inherit", "inherit", "inherit", "ipc"],
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      ELECTRON_RUN_AS_NODE: "1",
-    },
-    shell: false,
-  });
-  webProc.on("error", (err) => {
-    console.error("[main] Web server spawn error:", err.message);
-  });
-  webProc.on("exit", (code, signal) => {
-    console.warn("[main] Web server exited - code=" + code + " signal=" + signal);
-  });
-
-  // Poll HTTP until server is ready
   pollUntilReady();
 }
 
@@ -2032,6 +2642,8 @@ function buildLaunch(targetPath) {
 }
 
 function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend:") {
+  const stopFile = getServiceSoftStopFile("backend");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, backendLaunch.cmd, ...backendLaunch.args);
   backendProc = spawn(backendLaunch.cmd, backendLaunch.args, {
     cwd: backendLaunch.cwd,
@@ -2039,13 +2651,23 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
   });
+  attachServiceSoftStopMeta(backendProc, "backend", BACKEND_SOFT_STOP_WAIT_MS);
   backendProc.on("error", (err) => {
     console.error("[main] Backend spawn error:", err.message);
   });
   backendProc.on("exit", (code, signal) => {
+    const expectedStop = backendStopExpected;
+    backendStopExpected = false;
+    backendProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Backend stopped - code=" + code + " signal=" + signal);
+      return;
+    }
     console.warn("[main] Backend exited - code=" + code + " signal=" + signal);
   });
 }
@@ -2057,6 +2679,9 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     cwd: forecastLaunch.cwd,
   };
   clearForecastRestartTimer();
+  forecastStopExpected = false;
+  const stopFile = getServiceSoftStopFile("forecast");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, forecastLaunch.cmd, ...forecastLaunch.args);
   forecastProc = spawn(forecastLaunch.cmd, forecastLaunch.args, {
     cwd: forecastLaunch.cwd,
@@ -2064,9 +2689,12 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
   });
+  attachServiceSoftStopMeta(forecastProc, "forecast", FORECAST_SOFT_STOP_WAIT_MS);
   forecastProc.on("error", (err) => {
     console.error("[main] Forecast spawn error:", err.message);
     scheduleForecastRestart("spawn error");
@@ -2075,7 +2703,13 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     forecastRestartAttempts = 0;
   });
   forecastProc.on("exit", (code, signal) => {
+    const expectedStop = forecastStopExpected;
+    forecastStopExpected = false;
     forecastProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Forecast stopped - code=" + code + " signal=" + signal);
+      return;
+    }
     console.warn("[main] Forecast exited - code=" + code + " signal=" + signal);
     scheduleForecastRestart(`exit code=${code} signal=${signal}`);
   });
@@ -2092,6 +2726,7 @@ function startBackendProcess() {
 }
 
 function startForecastProcess() {
+  if (forecastProc && !forecastProc.killed) return true;
   const launch = resolveForecastLaunch();
   if (!launch) {
     console.warn("[main] Forecast service not found. Skipping day-ahead background process.");
@@ -2099,6 +2734,21 @@ function startForecastProcess() {
   }
   spawnForecastProcess(launch);
   return true;
+}
+
+function stopForecastProcess(reason = "") {
+  clearForecastRestartTimer();
+  forecastRestartAttempts = 0;
+  if (!forecastProc || forecastProc.killed) {
+    forecastProc = null;
+    return;
+  }
+  forecastStopExpected = true;
+  if (reason) {
+    console.log(`[main] Stopping forecast service (${reason})`);
+  }
+  forceKillProc(forecastProc, "forecast");
+  forecastProc = null;
 }
 
 function clearForecastRestartTimer() {
@@ -2122,12 +2772,9 @@ function scheduleForecastRestart(reason) {
   forecastRestartTimer = setTimeout(() => {
     forecastRestartTimer = null;
     if (isAppShuttingDown) return;
-    const launch = resolveForecastLaunch() || lastForecastLaunch;
-    if (!launch) {
-      console.error("[main] Forecast restart failed: launch target not found.");
-      return;
-    }
-    spawnForecastProcess(launch, "[main] Restarting forecast:");
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast restart sync failed:", err?.message || err);
+    });
   }, delay);
 }
 
@@ -2169,13 +2816,9 @@ function pollUntilReady() {
       if (Date.now() < deadline) setTimeout(attempt, POLL_INTERVAL);
       else {
         console.error("[main] Poll timed out - backend did not become ready.");
-        if (loadingWin && !loadingWin.isDestroyed()) {
-          loadingWin.webContents
-            .executeJavaScript(
-              "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Backend startup timed out.<br/>Please close the app and retry.</div>';",
-            )
-            .catch(() => {});
-        }
+        showLoadingErrorMessage(
+          "Backend startup timed out. If this is the first run after an update, database maintenance may still be finishing. Please retry.",
+        );
       }
     });
 
@@ -2193,6 +2836,7 @@ function onServerReady() {
   if (serverReadyFired) return;
   serverReadyFired = true;
   registerShortcutsOnce();
+  startForecastModeSync();
   console.log("[main] Server ready - opening main window");
   createMainWindow();
 }
@@ -2246,6 +2890,7 @@ function createMainWindow() {
     // Bring the dashboard to front BEFORE closing the loading window so there
     // is no focus vacuum that lets it slip behind other OS windows.
     mainWin.show();
+    mainWin.maximize();
     mainWin.focus();
     if (loadingWin && !loadingWin.isDestroyed()) {
       loadingWin.close();
@@ -2262,13 +2907,9 @@ function createMainWindow() {
     if (mainPageLoadedOnce) return;
     if (initialLoadRetries >= INITIAL_LOAD_RETRY_MAX) {
       console.error("[main] Initial load retries exhausted.");
-      if (loadingWin && !loadingWin.isDestroyed()) {
-        loadingWin.webContents
-          .executeJavaScript(
-            "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Unable to connect to backend on localhost:3500.<br/>Please check InverterCoreService.exe and retry.</div>';",
-          )
-          .catch(() => {});
-      }
+      showLoadingErrorMessage(
+        "Unable to connect to the local dashboard backend on localhost:3500.\nPlease verify InverterCoreService.exe and retry.",
+      );
       return;
     }
     initialLoadRetries += 1;
@@ -2296,7 +2937,7 @@ function createMainWindow() {
       defaultId: 0,
       cancelId: 0,
       title: "Confirm Exit",
-      message: "Exit Inverter Dashboard?",
+      message: "Exit ADSI Inverter Dashboard?",
       detail: "This will stop local services and close the dashboard.",
     });
     if (choice !== 1) {
@@ -2314,9 +2955,29 @@ function createMainWindow() {
 
 function loadMainUrlWithRetry() {
   if (!mainWin || mainWin.isDestroyed()) return;
-  mainWin.loadURL(SERVER_URL).catch((err) => {
-    console.error("[main] loadURL error:", err.message);
-  });
+  const doLoad = () => {
+    if (!mainWin || mainWin.isDestroyed()) return;
+    mainWin.loadURL(SERVER_URL).catch((err) => {
+      console.error("[main] loadURL error:", err.message);
+    });
+  };
+  if (mainWin.__cacheClearedOnce) {
+    doLoad();
+    return;
+  }
+  mainWin.__cacheClearedOnce = true;
+  const ses = mainWin.webContents?.session || null;
+  if (!ses) {
+    doLoad();
+    return;
+  }
+  Promise.resolve()
+    .then(() => ses.clearCache())
+    .then(() => ses.clearStorageData({ storages: ["cache"] }))
+    .catch((err) => {
+      console.warn("[main] cache clear before load failed:", err.message);
+    })
+    .finally(doLoad);
 }
 
 function focusWindow(win) {
@@ -2449,7 +3110,7 @@ function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
   });
 }
 
-async function getCurrentOperationMode(timeoutMs = 1500) {
+async function tryGetCurrentOperationMode(timeoutMs = 1500) {
   try {
     const settings = await requestServerJson(
       "GET",
@@ -2462,8 +3123,49 @@ async function getCurrentOperationMode(timeoutMs = 1500) {
       .toLowerCase();
     return mode === "remote" ? "remote" : "gateway";
   } catch {
-    return "gateway";
+    return null;
   }
+}
+
+async function getCurrentOperationMode(timeoutMs = 1500) {
+  return (await tryGetCurrentOperationMode(timeoutMs)) || "gateway";
+}
+
+async function syncForecastProcessForCurrentMode(timeoutMs = 1500) {
+  if (isAppShuttingDown || !serverReadyFired || forecastModeSyncInFlight) {
+    return false;
+  }
+  forecastModeSyncInFlight = true;
+  try {
+    const mode = await tryGetCurrentOperationMode(timeoutMs);
+    if (!mode) return false;
+    if (mode === "remote") {
+      stopForecastProcess("remote mode active");
+      return false;
+    }
+    return startForecastProcess();
+  } finally {
+    forecastModeSyncInFlight = false;
+  }
+}
+
+function startForecastModeSync() {
+  if (forecastModeSyncTimer) return;
+  syncForecastProcessForCurrentMode().catch((err) => {
+    console.warn("[main] Initial forecast mode sync failed:", err?.message || err);
+  });
+  forecastModeSyncTimer = setInterval(() => {
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast mode sync failed:", err?.message || err);
+    });
+  }, FORECAST_MODE_SYNC_MS);
+}
+
+function stopForecastModeSync() {
+  if (!forecastModeSyncTimer) return;
+  clearInterval(forecastModeSyncTimer);
+  forecastModeSyncTimer = null;
+  forecastModeSyncInFlight = false;
 }
 
 async function ensureGatewayModeForWindow(featureLabel, ownerWin) {
@@ -2679,6 +3381,8 @@ ipcMain.handle("license-get-status", async () => {
       expiresAt: null,
       expiresAtIso: null,
       msLeft: null,
+      daysLeft: null,
+      remainingText: "",
       nearExpiry: false,
       message: "Unable to read license status.",
     };
@@ -2740,6 +3444,22 @@ ipcMain.handle("app-update-download", async () => {
 
 ipcMain.handle("app-update-install", async () => {
   return installAppUpdateNow();
+});
+
+ipcMain.handle("app-restart", async () => {
+  try {
+    requestAppShutdown({
+      reason: "manual app restart",
+      action: { type: "relaunch" },
+    }).catch((err) => {
+      console.error("[main] restart shutdown failed:", err?.message || err);
+      appShutdownBypassQuit = true;
+      app.exit(1);
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 });
 
 ipcMain.on("login-success", async () => {
@@ -2995,29 +3715,17 @@ function forceKillProc(proc, label) {
   });
 }
 
-function killServer() {
-  isAppShuttingDown = true;
-  clearForecastRestartTimer();
-
-  // Always force-kill Python processes (no graceful shutdown path)
-  forceKillProc(backendProc, "backend");
-  forceKillProc(forecastProc, "forecast");
-  backendProc = null;
-  forecastProc = null;
-
-  // Ask the web server (Node.js child) to flush the DB and exit cleanly,
-  // then force-kill it if it hasn't gone away within 1.5 s.
-  const wp = webProc;
-  webProc = null;
-  if (!wp || wp.killed) return;
-  try { wp.send({ type: "shutdown" }); } catch (_) {}
-  const deadline = setTimeout(() => forceKillProc(wp, "web-server"), 1500);
-  if (deadline.unref) deadline.unref();
-  wp.once("exit", () => clearTimeout(deadline));
+function killServer(reason = "application shutdown") {
+  return stopRuntimeServices(reason);
 }
 
 function quit() {
-  allowMainWindowClose = true;
-  killServer();
-  app.quit();
+  requestAppShutdown({
+    reason: "quit requested",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }

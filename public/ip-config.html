@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Inverter IP Configuration</title>
+    <title>ADSI Inverter Dashboard Network Configuration</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -611,39 +611,39 @@
               <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
             </svg>
           </div>
-          <div id="auth-title">IP Config Authorization</div>
+          <div id="auth-title">Network Configuration Access</div>
         </div>
         <div id="auth-sub">Enter the authorization key to continue.</div>
-        <input id="auth-input" type="password" autocomplete="off" placeholder="adsi••" />
-        <button id="auth-submit">Unlock</button>
+        <input id="auth-input" type="password" autocomplete="off" placeholder="Authorization key" />
+        <button id="auth-submit">Continue</button>
         <div id="auth-error" role="alert"></div>
       </div>
     </div>
     <div class="page">
       <div class="header">
         <div class="header-left">
-          <img id="header-logo" src="/assets/adsi_logo.png" alt="Inverter Dashboard" />
+          <img id="header-logo" src="/assets/adsi_logo.png" alt="ADSI Inverter Dashboard" />
         </div>
         <div class="header-center">
           <div class="metric-pill">
-            <div class="metric-label">Configuration</div>
-            <div class="metric-value">INVERTER IP CONFIGURATION</div>
+            <div class="metric-label">Network Configuration</div>
+            <div class="metric-value">INVERTER DEVICE ADDRESSING</div>
           </div>
         </div>
         <div class="header-right">
           <div class="clock-wrap">
             <span class="ws-dot"></span>
-            <span class="ws-label">Live</span>
+            <span class="ws-label">Active</span>
             <div id="clock">--:--:--</div>
           </div>
           <div id="scanIndicator" class="scan-indicator">
             <div class="scan-ring"></div>
-            <span>Scanning</span>
+            <span>Checking</span>
           </div>
-          <div class="reach-badge" id="ipCounter">Reachable: — / 27</div>
+          <div class="reach-badge" id="ipCounter">Online: — / 27</div>
           <button class="btn btn-ghost" id="themeToggle">Light</button>
-          <button class="btn btn-ghost" onclick="scanAll()">Scan</button>
-          <button class="btn btn-ghost" id="toTopologyBtn">Topology</button>
+          <button class="btn btn-ghost" onclick="scanAll()">Check Status</button>
+          <button class="btn btn-ghost" id="toTopologyBtn">Open Topology</button>
         </div>
       </div>
 
@@ -653,9 +653,9 @@
             <tr>
               <th>Inverter</th>
               <th>IP Address</th>
-              <th>Poll Interval (s)</th>
-              <th>Units</th>
-              <th>Action</th>
+              <th>Polling Interval (s)</th>
+              <th>Enabled Units</th>
+              <th>Save</th>
             </tr>
           </thead>
           <tbody id="inverterTable">
@@ -664,7 +664,7 @@
                 colspan="5"
                 style="padding: 28px; text-align: center; color: var(--text2)"
               >
-                Loading configuration...
+                Loading device configuration…
               </td>
             </tr>
           </tbody>
@@ -673,14 +673,14 @@
 
       <div class="footer">
         <div class="status-bar" id="statusBar">
-          <span id="statusText">Ready</span>
+          <span id="statusText">Ready for review</span>
         </div>
         <button class="btn btn-primary" onclick="saveAll()">
           Save All Changes
         </button>
       </div>
       <div style="text-align:center;padding:6px 16px;font-size:11px;color:#7a9ac0;border-top:1px solid #1a2e4a;">
-        Inverter Dashboard v2.2 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
+        ADSI Inverter Dashboard v2.3.3 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
       </div>
     </div>
 
@@ -745,7 +745,7 @@
       }
       function updateCounter() {
         document.getElementById("ipCounter").textContent =
-          `Reachable: ${reachableCount} / 27`;
+          `Online: ${reachableCount} / 27`;
       }
       function showScanIndicator(on) {
         document
@@ -777,7 +777,7 @@
         const checked = (n) => (units.includes(n) ? "checked" : "");
         const allChecked = units.length === 4 ? "checked" : "";
         return `<tr>
-    <td><div class="inv-cell"><div class="inv-num">${String(num).padStart(2, "0")}</div><span>INV-${String(num).padStart(2, "0")}</span><div class="cfg-icon ip-empty" id="cfg-${num}" onclick="openInverter(${num})" title="Open inverter web interface">⚙</div></div></td>
+    <td><div class="inv-cell"><div class="inv-num">${String(num).padStart(2, "0")}</div><span>INV-${String(num).padStart(2, "0")}</span><div class="cfg-icon ip-empty" id="cfg-${num}" onclick="openInverter(${num})" title="Open device web page">⚙</div></div></td>
     <td><input id="ip-${num}" type="text" value="${ip}" oninput="markDirty(${num})"></td>
     <td><input id="poll-${num}" type="number" step="0.01" min="0.01" value="${interval}" oninput="markDirty(${num})"></td>
     <td><div class="units-wrap"><label class="unit-chip"><input type="checkbox" id="u-${num}-all" ${allChecked} onclick="toggleAll(${num})">All</label><div class="sep-line"></div><label class="unit-chip"><input type="checkbox" id="u-${num}-1" ${checked(1)} onclick="unitChanged(${num})">1</label><label class="unit-chip"><input type="checkbox" id="u-${num}-2" ${checked(2)} onclick="unitChanged(${num})">2</label><label class="unit-chip"><input type="checkbox" id="u-${num}-3" ${checked(3)} onclick="unitChanged(${num})">3</label><label class="unit-chip"><input type="checkbox" id="u-${num}-4" ${checked(4)} onclick="unitChanged(${num})">4</label></div></td>
@@ -788,7 +788,7 @@
       function openInverter(num) {
         const ip = document.getElementById(`ip-${num}`).value.trim();
         if (!ip) {
-          setStatus("No IP configured for this inverter", "error");
+          setStatus("No IP address is configured for this inverter.", "error");
           return;
         }
         window.electronAPI.openIP(ip);
@@ -814,7 +814,7 @@
             rowHtml(n, ip, interval, units),
           );
         }
-        setStatus("Loaded inverter configuration", "success");
+        setStatus("Device configuration loaded.", "success");
         scanAll();
       }
 
@@ -825,9 +825,9 @@
         );
         const units = getUnits(num);
         if (!ip || !isValidIP(ip))
-          throw new Error(`Invalid IP at inverter ${num}`);
+          throw new Error(`Enter a valid IPv4 address for inverter ${num}.`);
         if (!Number.isFinite(poll) || poll < 0.01)
-          throw new Error(`Invalid poll interval at inverter ${num}`);
+          throw new Error(`Enter a valid polling interval for inverter ${num}.`);
         return { ip, poll, units };
       }
 
@@ -839,9 +839,9 @@
           config.units[num] = row.units;
           const ret = await window.electronAPI.saveConfig(config);
           if (ret && ret.success === false)
-            throw new Error(ret.error || "Save failed");
+            throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.delete(num);
-          setStatus(`Saved inverter ${num} (${row.ip})`, "success");
+          setStatus(`Inverter ${num} settings saved.`, "success");
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }
@@ -857,9 +857,9 @@
           }
           const ret = await window.electronAPI.saveConfig(config);
           if (ret && ret.success === false)
-            throw new Error(ret.error || "Save failed");
+            throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.clear();
-          setStatus("All changes saved successfully", "success");
+          setStatus("All inverter network settings were saved.", "success");
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }
@@ -940,7 +940,7 @@
         }
         const unlock = async () => {
           if (!verifyKey(input.value)) {
-            err.textContent = "Invalid key. Use adsi<current minute>.";
+            err.textContent = "Invalid authorization key. Please try again.";
             input.select();
             return;
           }
@@ -973,7 +973,7 @@
       }
       function alertClientModeUnavailable(feature) {
         alert(
-          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+          `${feature} view is available only in Gateway mode.\nChange Operation Mode in Settings to continue.`,
         );
       }
       document.getElementById("toTopologyBtn").addEventListener("click", async () => {
@@ -983,7 +983,7 @@
         }
         if (
           dirtyRows.size > 0 &&
-          !confirm("Unsaved changes will be lost. Continue to topology?")
+          !confirm("Unsaved changes will be discarded. Continue to the topology view?")
         )
           return;
         if (window.electronAPI?.openTopologyWindow) {

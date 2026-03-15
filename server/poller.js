@@ -1,12 +1,19 @@
 const fetch = require('node-fetch');
-const { bulkInsert, stmts, getSetting } = require('./db');
+const {
+  bulkInsertPollerBatch,
+  getSetting,
+  sumEnergy5minByInverterRange,
+} = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
+const {
+  normalizeTodayEnergyRows,
+  evaluateTodayEnergyHealth,
+} = require("./todayEnergyHealthCore");
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const liveData = {};       // key: `${inv}_${unit}` → latest parsed row
-const prevKwh  = {};       // for 5-min energy increment tracking
 const unreachableState = {}; // per-key miss/suppression tracking
 const lastPersistState = {}; // per-key DB persist cadence state
 
@@ -22,11 +29,15 @@ const API_FETCH_TIMEOUT_MS = 5000;
 const IPCONFIG_CACHE_MS = 5000;
 const DB_MIN_PERSIST_MS = 1000;
 const DB_PAC_DELTA_PERSIST_W = 250;
+const DB_READING_BACKLOG_MAX_ROWS = 120000;
+const DB_ENERGY_BACKLOG_MAX_ROWS = 12000;
 
 let pollTimer = null;
 let running   = false;
 let liveJsonCache = "{}";
 let liveJsonCacheTs = Date.now();
+const pendingReadingQueue = new Map();
+const pendingEnergyQueue = new Map();
 const pollStats = {
   startedAt: Date.now(),
   tickCount: 0,
@@ -47,6 +58,15 @@ const pollStats = {
   rowsPersistSkippedCadence: 0,
   dbBulkInsertCount: 0,
   dbInsertErrorCount: 0,
+  dbPersistRetryCount: 0,
+  dbPersistDroppedReadingCount: 0,
+  dbPersistDroppedEnergyCount: 0,
+  pendingReadingQueueSize: 0,
+  pendingEnergyQueueSize: 0,
+  pendingReadingQueueHighWater: 0,
+  pendingEnergyQueueHighWater: 0,
+  lastDbPersistError: "",
+  lastDbPersistOkTs: 0,
   offlineMarkCount: 0,
   lastCacheUpdateTs: Date.now(),
 };
@@ -54,6 +74,24 @@ const pollStats = {
 // Pac-based daily energy integrator (independent from kWh register).
 const pacTodayByInverter = {}; // key: inverter -> kWh
 const pacIntegratorState = {}; // key: `${inv}_${unit}` -> { ts, pac }
+let todayEnergyHealthState = {
+  byInv: Object.create(null),
+  summary: {
+    state: "idle",
+    reasonCode: "inactive",
+    reasonText: "Today-energy health has not been evaluated yet.",
+    checkedAt: 0,
+    activeInverterCount: 0,
+    fallbackActiveCount: 0,
+    staleCount: 0,
+    mismatchCount: 0,
+    selectedSource: "pac",
+  },
+};
+let todayEnergySelectedRows = [];
+let todayEnergyBaselineDay = "";
+let todayEnergyBaselineByInv = new Map();
+let todayEnergyBaselineSeededAt = 0;
 let pacDayKey = '';
 let ipConfigCache = null;
 let ipConfigCacheTs = 0;
@@ -62,9 +100,14 @@ let apiOfflineBroadcasted = false;
 
 function updateLiveSnapshotCache() {
   try {
-    liveJsonCache = JSON.stringify(liveData);
-    liveJsonCacheTs = Date.now();
-    pollStats.lastCacheUpdateTs = liveJsonCacheTs;
+    const next = JSON.stringify(liveData);
+    // Only bump the cache timestamp when the serialized payload actually changed.
+    // This keeps /api/live ETag responses meaningful for direct conditional GETs.
+    if (next !== liveJsonCache) {
+      liveJsonCache = next;
+      liveJsonCacheTs = Date.now();
+      pollStats.lastCacheUpdateTs = liveJsonCacheTs;
+    }
   } catch (err) {
     // Keep last good snapshot; avoid throwing in hot path.
     console.warn("[poller] live snapshot cache failed:", err.message);
@@ -75,6 +118,12 @@ function updateLiveSnapshotCache() {
 
 function isSolarWindow() {
   const h = new Date().getHours();
+  return h >= SOLAR_HOUR_START && h < SOLAR_HOUR_END;
+}
+
+function isSolarWindowAt(ts = Date.now()) {
+  const d = new Date(ts);
+  const h = d.getHours();
   return h >= SOLAR_HOUR_START && h < SOLAR_HOUR_END;
 }
 
@@ -92,6 +141,61 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   pacDayKey = k;
   for (const key of Object.keys(pacTodayByInverter)) delete pacTodayByInverter[key];
   for (const key of Object.keys(pacIntegratorState)) delete pacIntegratorState[key];
+  todayEnergySelectedRows = [];
+  todayEnergyBaselineDay = "";
+  todayEnergyBaselineByInv = new Map();
+  todayEnergyBaselineSeededAt = 0;
+  todayEnergyHealthState = {
+    byInv: Object.create(null),
+    summary: {
+      state: "idle",
+      reasonCode: "day_reset",
+      reasonText: "Today-energy health was reset for the new local day.",
+      checkedAt: Math.max(0, Number(ts || Date.now())),
+      activeInverterCount: 0,
+      fallbackActiveCount: 0,
+      staleCount: 0,
+      mismatchCount: 0,
+      selectedSource: "pac",
+    },
+  };
+}
+
+function roundKwh(value) {
+  return Number((Math.max(0, Number(value) || 0)).toFixed(6));
+}
+
+function resolveFrameDay(row, ts = Date.now()) {
+  const year = Math.floor(Number(row?.year || 0));
+  const month = Math.floor(Number(row?.month || 0));
+  const day = Math.floor(Number(row?.day || 0));
+  if (year >= 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  return dayKey(ts);
+}
+
+function localDayStartTs(dayText) {
+  return new Date(`${String(dayText || dayKey()).trim()}T00:00:00.000`).getTime();
+}
+
+function ensureTodayEnergyBaseline(ts = Date.now()) {
+  const day = dayKey(ts);
+  if (
+    todayEnergyBaselineDay === day &&
+    todayEnergyBaselineSeededAt > 0 &&
+    todayEnergyBaselineByInv instanceof Map
+  ) {
+    return todayEnergyBaselineByInv;
+  }
+  const seeded = sumEnergy5minByInverterRange(
+    localDayStartTs(day),
+    Math.max(localDayStartTs(day), Number(ts || Date.now())),
+  );
+  todayEnergyBaselineDay = day;
+  todayEnergyBaselineByInv = seeded instanceof Map ? seeded : new Map();
+  todayEnergyBaselineSeededAt = Date.now();
+  return todayEnergyBaselineByInv;
 }
 
 function integratePacToday(parsed) {
@@ -102,20 +206,24 @@ function integratePacToday(parsed) {
   const prev = pacIntegratorState[key];
 
   if (!prev) {
-    pacIntegratorState[key] = { ts: now, pac };
+    pacIntegratorState[key] = { ts: now, pac, totalKwh: 0 };
+    parsed.kwh = 0;
     return;
   }
 
+  let totalKwh = Number(prev.totalKwh || 0);
   const dtSec = Math.max(0, (now - prev.ts) / 1000);
   if (dtSec > 0) {
     const safeDt = Math.min(dtSec, MAX_PAC_DT_S);
     const avgPac = (prev.pac + pac) / 2;
     const kwhInc = (avgPac * safeDt) / 3600000; // W*s -> kWh
+    totalKwh += kwhInc;
     pacTodayByInverter[parsed.inverter] =
       (pacTodayByInverter[parsed.inverter] || 0) + kwhInc;
   }
 
-  pacIntegratorState[key] = { ts: now, pac };
+  parsed.kwh = roundKwh(totalKwh);
+  pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh };
 }
 
 function parseRow(row) {
@@ -133,8 +241,6 @@ function parseRow(row) {
   const iac2 = Number(row.iac2 || 0);
   const iac3 = Number(row.iac3 || 0);
   const pac  = Number(row.pac  || 0);
-  // Use multiplication instead of left-shift to avoid signed 32-bit overflow in JS.
-  const kwh  = (((Number(row.kwh_high || 0) & 0xFFFF) * 65536) + (Number(row.kwh_low || 0) & 0xFFFF)) / 10;
   const alarm = Number(row.alarm || 0);
   const onOffRaw = Number(row.on_off ?? row.onOff ?? 0);
   const on_off = onOffRaw === 1 ? 1 : 0;
@@ -145,19 +251,33 @@ function parseRow(row) {
 
   const sourceTs = Number(row.ts || row.timestamp || Date.now());
   const ts = Number.isFinite(sourceTs) && sourceTs > 0 ? sourceTs : Date.now();
+  const day = resolveFrameDay(row, ts);
 
   return {
     ts,
+    day,
     inverter, unit,
     vdc, idc,
     vac1, vac2, vac3,
     iac1, iac2, iac3,
     pac: safePac,
     pdc: safePdc,
-    kwh,
+    kwh: 0,
     alarm,
     on_off,
     online: 1
+  };
+}
+
+function toPersistedReadingRow(row) {
+  return {
+    ts: Number(row?.ts || 0),
+    inverter: Number(row?.inverter || 0),
+    unit: Number(row?.unit || 0),
+    pac: Number(row?.pac || 0),
+    kwh: roundKwh(row?.kwh),
+    alarm: Number(row?.alarm || 0),
+    online: Number(row?.online ?? 1) === 1 ? 1 : 0,
   };
 }
 
@@ -280,7 +400,7 @@ function floorToFiveMinute(ts) {
   return Math.floor(ts / FIVE) * FIVE;
 }
 
-function update5minBucket(parsed) {
+function update5minBucket(parsed, energyRows) {
   const key = String(parsed.inverter);
   const now = parsed.ts || Date.now();
   const bucketStart = floorToFiveMinute(now);
@@ -298,8 +418,109 @@ function update5minBucket(parsed) {
   // Persist exactly on wall-clock 5-minute boundaries (:00/:05/:10/...),
   // derived from PAC integration only (not register kWh).
   const inc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
-  stmts.insertEnergy5.run(bucketStart, parsed.inverter, inc);
+  energyRows.push({
+    ts: bucketStart,
+    inverter: parsed.inverter,
+    kwh_inc: Number(inc.toFixed(6)),
+  });
   energyBuckets[key] = { bucketStart, kwhStart: kwhNow, day: dKey };
+}
+
+function readingQueueKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`;
+}
+
+function energyQueueKey(row) {
+  return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}`;
+}
+
+function syncPendingQueueStats() {
+  pollStats.pendingReadingQueueSize = pendingReadingQueue.size;
+  pollStats.pendingEnergyQueueSize = pendingEnergyQueue.size;
+  if (pendingReadingQueue.size > pollStats.pendingReadingQueueHighWater) {
+    pollStats.pendingReadingQueueHighWater = pendingReadingQueue.size;
+  }
+  if (pendingEnergyQueue.size > pollStats.pendingEnergyQueueHighWater) {
+    pollStats.pendingEnergyQueueHighWater = pendingEnergyQueue.size;
+  }
+}
+
+function enqueueBounded(map, key, row, maxRows, dropCounterField, label) {
+  if (map.has(key)) {
+    map.set(key, row);
+    return;
+  }
+  map.set(key, row);
+  while (map.size > maxRows) {
+    const oldestKey = map.keys().next();
+    if (oldestKey.done) break;
+    map.delete(oldestKey.value);
+    pollStats[dropCounterField] += 1;
+    const dropped = Number(pollStats[dropCounterField] || 0);
+    if (dropped === 1 || dropped % 500 === 0) {
+      console.warn(
+        `[poller] ${label} backlog cap reached; dropped ${dropped} oldest queued row(s).`,
+      );
+    }
+  }
+}
+
+function enqueuePendingPersist(readingRows = [], energyRows = []) {
+  for (const row of readingRows) {
+    enqueueBounded(
+      pendingReadingQueue,
+      readingQueueKey(row),
+      row,
+      DB_READING_BACKLOG_MAX_ROWS,
+      "dbPersistDroppedReadingCount",
+      "reading",
+    );
+  }
+  for (const row of energyRows) {
+    enqueueBounded(
+      pendingEnergyQueue,
+      energyQueueKey(row),
+      row,
+      DB_ENERGY_BACKLOG_MAX_ROWS,
+      "dbPersistDroppedEnergyCount",
+      "energy_5min",
+    );
+  }
+  syncPendingQueueStats();
+}
+
+function flushPersistBacklog(reason = "tick") {
+  if (!pendingReadingQueue.size && !pendingEnergyQueue.size) {
+    pollStats.lastDbPersistError = "";
+    syncPendingQueueStats();
+    return true;
+  }
+  const readingRows = Array.from(pendingReadingQueue.values()).sort((a, b) =>
+    Number(a.ts || 0) - Number(b.ts || 0) ||
+    Number(a.inverter || 0) - Number(b.inverter || 0) ||
+    Number(a.unit || 0) - Number(b.unit || 0),
+  );
+  const energyRows = Array.from(pendingEnergyQueue.values()).sort((a, b) =>
+    Number(a.ts || 0) - Number(b.ts || 0) ||
+    Number(a.inverter || 0) - Number(b.inverter || 0),
+  );
+  try {
+    bulkInsertPollerBatch(readingRows, energyRows);
+    pendingReadingQueue.clear();
+    pendingEnergyQueue.clear();
+    pollStats.dbBulkInsertCount += 1;
+    pollStats.lastDbPersistError = "";
+    pollStats.lastDbPersistOkTs = Date.now();
+    syncPendingQueueStats();
+    return true;
+  } catch (err) {
+    pollStats.dbInsertErrorCount += 1;
+    pollStats.dbPersistRetryCount += 1;
+    pollStats.lastDbPersistError = String(err?.message || err || "");
+    syncPendingQueueStats();
+    console.error(`[poller] DB persist failed (${reason}):`, pollStats.lastDbPersistError);
+    return false;
+  }
 }
 
 function buildTotals(now) {
@@ -314,6 +535,62 @@ function buildTotals(now) {
     totals[inv].kwh += d.kwh || 0;
   }
   return totals;
+}
+
+function getTodayPacRowsRaw() {
+  resetPacTodayIfNeeded(Date.now());
+  const baseline = ensureTodayEnergyBaseline(Date.now());
+  const invSet = new Set([
+    ...Array.from(baseline.keys()),
+    ...Object.keys(pacTodayByInverter).map((inv) => Number(inv || 0)),
+  ]);
+  return Array.from(invSet)
+    .filter((inv) => Number(inv || 0) > 0)
+    .map((inv) => ({
+      inverter: Number(inv),
+      total_kwh: Number(
+        (
+          Number(baseline.get(Number(inv)) || 0) +
+          Number(pacTodayByInverter[inv] || 0)
+        ).toFixed(6),
+      ),
+    }))
+    .filter((row) => row.total_kwh > 0)
+    .sort((a, b) => a.inverter - b.inverter);
+}
+
+function updateTodayEnergyHealthFromTotals(totals, now = Date.now()) {
+  const result = evaluateTodayEnergyHealth({
+    pacRows: getTodayPacRowsRaw(),
+    liveTotalsByInv: totals,
+    prevState: todayEnergyHealthState,
+    now,
+    solarActive: isSolarWindow(),
+  });
+  todayEnergyHealthState = result.nextState;
+  todayEnergySelectedRows = normalizeTodayEnergyRows(result.rows);
+  for (const evt of result.events || []) {
+    if (!evt || typeof evt !== "object") continue;
+    if (evt.type === "source_change") {
+      console.log(
+        `[today-energy] inv=${evt.inverter} source=${evt.source}` +
+        ` reason=${evt.reasonCode}` +
+        ` pac=${Number(evt.pacKwh || 0).toFixed(3)}kWh` +
+        ` livePac=${Number(evt.livePacW || 0).toFixed(0)}W`,
+      );
+      continue;
+    }
+    if (evt.type === "summary_change") {
+      const health = evt.health || {};
+      console.log(
+        `[today-energy] state=${String(health.state || "unknown")}` +
+        ` reason=${String(health.reasonCode || "")}` +
+        ` fallback=${Number(health.fallbackActiveCount || 0)}` +
+        ` stale=${Number(health.staleCount || 0)}` +
+        ` mismatch=${Number(health.mismatchCount || 0)}`,
+      );
+    }
+  }
 }
 
 function markAllOffline() {
@@ -341,6 +618,7 @@ async function poll() {
   let noChangeThisTick = 0;
   let persistedThisTick = 0;
   let skippedCadenceThisTick = 0;
+  const energyBatch = [];
 
   const apiUrl = getSetting('apiUrl', 'http://127.0.0.1:9100/data');
   const ipConfig = loadIpConfigSnapshot();
@@ -351,11 +629,15 @@ async function poll() {
   let fetchOk = false;
   try {
     const res = await fetch(apiUrl, { timeout: API_FETCH_TIMEOUT_MS });
+    if (!res.ok) {
+      throw new Error(`Gateway poll HTTP ${res.status}`);
+    }
     rows = await res.json();
     if (!Array.isArray(rows)) rows = [];
     fetchOk = true;
     pollStats.fetchOkCount += 1;
     pollStats.rowsFetched += rows.length;
+    pollStats.lastFetchError = "";
     apiFailMs = 0;
     apiOfflineBroadcasted = false;
   } catch (e) {
@@ -367,12 +649,14 @@ async function poll() {
 
   // Avoid flapping all cards on short API hiccups.
   if (!fetchOk) {
+    flushPersistBacklog("fetch-error-retry");
     if (apiFailMs >= OFFLINE_MS && !apiOfflineBroadcasted) {
       markAllOffline();
       apiOfflineBroadcasted = true;
     }
     updateLiveSnapshotCache();
     const totals = buildTotals(now);
+    updateTodayEnergyHealthFromTotals(totals, now);
     broadcastUpdate({ type: 'live', data: liveData, totals });
     const pollEndedAt = Date.now();
     const dur = Math.max(0, pollEndedAt - pollStartedAt);
@@ -386,6 +670,7 @@ async function poll() {
   }
 
   const batch = [];
+  const alarmBatch = [];
   const seen  = new Set();
 
   for (const row of rows) {
@@ -407,17 +692,20 @@ async function poll() {
     const prev = liveData[key];
     if (prev &&
         prev.pac === parsed.pac &&
-        prev.kwh === parsed.kwh &&
-        prev.alarm === parsed.alarm) {
+        prev.alarm === parsed.alarm &&
+        prev.on_off === parsed.on_off) {
       // Heartbeat refresh: keep timestamp/online fresh even when values are stable.
       prev.ts = parsed.ts;
       prev.online = 1;
+      prev.kwh = parsed.kwh;
+      prev.day = parsed.day;
       noChangeThisTick += 1;
       continue;
     }
 
     liveData[key] = parsed;
     acceptedThisTick += 1;
+    alarmBatch.push(parsed);
 
     // Persist with cadence guard to reduce synchronous DB pressure.
     const persistPrev = lastPersistState[key];
@@ -432,12 +720,12 @@ async function poll() {
       ? Number.MAX_SAFE_INTEGER
       : Math.abs(Number(parsed.pac || 0) - Number(persistPrev.pac || 0));
     const shouldPersist =
-      isSolarWindow() &&
+      isSolarWindowAt(parsed.ts) &&
       (forcePersist || elapsedMs >= DB_MIN_PERSIST_MS || pacDelta >= DB_PAC_DELTA_PERSIST_W);
 
     if (shouldPersist) {
-      batch.push(parsed);
-      update5minBucket(parsed);
+      batch.push(toPersistedReadingRow(parsed));
+      update5minBucket(parsed, energyBatch);
       lastPersistState[key] = {
         ts: Number(parsed.ts || 0),
         pac: Number(parsed.pac || 0),
@@ -451,14 +739,14 @@ async function poll() {
 
   }
 
-  if (batch.length) {
+  enqueuePendingPersist(batch, energyBatch);
+  flushPersistBacklog("tick");
+
+  if (alarmBatch.length) {
     try {
-      bulkInsert(batch);
-      checkAlarms(batch);
-      pollStats.dbBulkInsertCount += 1;
+      checkAlarms(alarmBatch);
     } catch (e) {
-      console.error('[DB]', e.message);
-      pollStats.dbInsertErrorCount += 1;
+      console.error("[alarms]", e.message);
     }
   }
 
@@ -484,6 +772,7 @@ async function poll() {
   }
 
   const totals = buildTotals(now);
+  updateTodayEnergyHealthFromTotals(totals, now);
   updateLiveSnapshotCache();
   broadcastUpdate({ type: 'live', data: liveData, totals });
 
@@ -508,10 +797,12 @@ function start() {
   running = true;
   (function tick() {
     if (!running) return;
+    const tickStartedAt = Date.now();
     poll()
       .catch((err) => console.error("[poller] unhandled poll error:", err.message))
       .finally(() => {
-        pollTimer = setTimeout(tick, POLL_MS);
+        const delay = Math.max(0, POLL_MS - (Date.now() - tickStartedAt));
+        pollTimer = setTimeout(tick, delay);
       });
   })();
 }
@@ -527,25 +818,18 @@ function flushPending() {
   const batch = [];
   for (const d of Object.values(liveData)) {
     if (!d || !d.ts) continue;
+    if (!isSolarWindowAt(d.ts)) continue;
     const key = `${d.inverter}_${d.unit}`;
     const prev = lastPersistState[key];
     if (prev && Number(d.ts) <= Number(prev.ts)) continue;
-    batch.push({
-      ts: Number(d.ts), inverter: Number(d.inverter), unit: Number(d.unit),
-      vdc: Number(d.vdc || 0), idc: Number(d.idc || 0),
-      vac1: Number(d.vac1 || 0), vac2: Number(d.vac2 || 0), vac3: Number(d.vac3 || 0),
-      iac1: Number(d.iac1 || 0), iac2: Number(d.iac2 || 0), iac3: Number(d.iac3 || 0),
-      pac: Number(d.pac || 0), kwh: Number(d.kwh || 0),
-      alarm: Number(d.alarm || 0), online: Number(d.online ?? 1),
-    });
+    batch.push(toPersistedReadingRow(d));
     lastPersistState[key] = {
       ts: Number(d.ts), pac: Number(d.pac || 0),
       alarm: Number(d.alarm || 0), on_off: Number(d.on_off || 0),
     };
   }
-  if (batch.length) {
-    try { bulkInsert(batch); } catch (err) { console.error('[poller] flushPending failed:', err.message); }
-  }
+  enqueuePendingPersist(batch, []);
+  flushPersistBacklog("shutdown");
 }
 
 function getLiveData() { return liveData; }
@@ -558,13 +842,24 @@ function getLiveSnapshotJson() {
 }
 
 function getTodayPacKwh() {
-  resetPacTodayIfNeeded(Date.now());
-  return Object.keys(pacTodayByInverter)
-    .map((inv) => ({
-      inverter: Number(inv),
-      total_kwh: Number((pacTodayByInverter[inv] || 0).toFixed(6)),
-    }))
-    .sort((a, b) => a.inverter - b.inverter);
+  if (Array.isArray(todayEnergySelectedRows) && todayEnergySelectedRows.length) {
+    return normalizeTodayEnergyRows(todayEnergySelectedRows);
+  }
+  return getTodayPacRowsRaw();
+}
+
+function getTodayPacRawKwh() {
+  return getTodayPacRowsRaw();
+}
+
+function getTodayEnergyHealth() {
+  return {
+    ...(todayEnergyHealthState?.summary || {}),
+    sourceRows: {
+      pac: getTodayPacRowsRaw(),
+      selected: normalizeTodayEnergyRows(todayEnergySelectedRows),
+    },
+  };
 }
 
 function getPerfStats() {
@@ -576,6 +871,11 @@ function getPerfStats() {
     expectedSuppressedKeyCount: Object.keys(unreachableState).length,
     ...pollStats,
     avgPollDurationMs: Number(Number(pollStats.avgPollDurationMs || 0).toFixed(3)),
+    todayEnergyHealth: todayEnergyHealthState?.summary || {
+      state: "idle",
+      reasonCode: "inactive",
+      reasonText: "Today-energy health has not been evaluated yet.",
+    },
   };
 }
 
@@ -587,6 +887,8 @@ module.exports = {
   getLiveData,
   getLiveSnapshotJson,
   getTodayPacKwh,
+  getTodayPacRawKwh,
+  getTodayEnergyHealth,
   setIpConfigSnapshot,
   getPerfStats,
 };

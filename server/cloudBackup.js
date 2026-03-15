@@ -21,7 +21,7 @@ const crypto = require("crypto");
 const cron = require("node-cron");
 const fetch = require("node-fetch");
 
-const APP_VERSION = "2.2.1";
+const APP_VERSION = require("../package.json").version;
 const DB_SCHEMA_VERSION = "2";
 
 // Limit how many local backup packages to keep.
@@ -163,21 +163,55 @@ class CloudBackupService {
     }
   }
 
-  saveCloudSettings(s) {
+  getCloudSettingsForClient(settings = null) {
+    const source = settings && typeof settings === "object"
+      ? settings
+      : this.getCloudSettings();
+    const secret = String(source?.gdrive?.clientSecret || "").trim();
+    return {
+      ...source,
+      onedrive: {
+        ...(source?.onedrive || {}),
+      },
+      gdrive: {
+        ...(source?.gdrive || {}),
+        clientSecret: "",
+        clientSecretSaved: secret.length > 0,
+      },
+    };
+  }
+
+  saveCloudSettings(s, options = {}) {
     const current = this.getCloudSettings();
     const body = s && typeof s === "object" ? s : {};
+    const clearGDriveClientSecret = Boolean(options?.clearGDriveClientSecret);
+    const incomingOneDrive = {
+      clientId: String(body?.onedrive?.clientId ?? ""),
+    };
+    const incomingGDrive = {
+      clientId: String(body?.gdrive?.clientId ?? ""),
+      clientSecret: String(body?.gdrive?.clientSecret ?? ""),
+    };
     const merged = {
       ...current,
       ...body,
       onedrive: {
         ...(current.onedrive || {}),
-        ...((body.onedrive && typeof body.onedrive === "object") ? body.onedrive : {}),
+        ...incomingOneDrive,
       },
       gdrive: {
         ...(current.gdrive || {}),
-        ...((body.gdrive && typeof body.gdrive === "object") ? body.gdrive : {}),
+        ...incomingGDrive,
       },
     };
+    const nextSecret = String(incomingGDrive.clientSecret ?? "").trim();
+    if (clearGDriveClientSecret) {
+      merged.gdrive.clientSecret = "";
+    } else if (nextSecret) {
+      merged.gdrive.clientSecret = nextSecret;
+    } else {
+      merged.gdrive.clientSecret = String(current.gdrive?.clientSecret || "");
+    }
     // Validate provider
     if (!["auto", "onedrive", "gdrive", "both"].includes(merged.provider)) {
       merged.provider = "auto";
