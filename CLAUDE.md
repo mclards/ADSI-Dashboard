@@ -299,6 +299,21 @@ Preserve these unless a deliberate migration is implemented:
 - Only controller-owned stopped inverters may be auto-started again. Manual operator stops remain manual.
 - The plant-cap panel defaults collapsed behind the inverter-toolbar `Show Cap` button.
 - Plant-cap UI must use shared theme tokens in `dark`, `light`, and `classic`, and plant-cap controls, metrics, warnings, and preview headers should expose hover descriptions.
+- Plant-cap controller STOP/START commands are recorded in `audit_log` with `scope = "plant-cap"`. The forecast engine uses this scope to distinguish cap-dispatch curtailment from manual operator stops and faults; see Forecast Training Rules.
+
+## Forecast Training Rules
+
+- The ML forecast engine (`services/forecast_engine.py`) reads `audit_log.scope` to distinguish plant-cap-dispatched STOPs (`scope = "plant-cap"`) from manual / fault-caused STOPs.
+- `load_operational_constraint_profile()` tracks two separate per-slot node counts: `commanded_off_nodes` (all stops) and `cap_dispatched_off_nodes` (cap controller only).
+- `build_operational_constraint_mask()` exposes `cap_dispatch_mask` (boolean array) and `cap_dispatch_slot_count` in its meta dict alongside the full `operational_mask`.
+- For training data collection (`collect_training_data`, `collect_training_data_hardened`):
+  - Slots that are cap-dispatch-only (no concurrent manual stop or fault) get their actual output replaced with the physics/hybrid baseline. This preserves high-irradiance training samples that would otherwise be lost.
+  - Only manually constrained slots are excluded from the training mask. Cap-reconstructed slots contribute with residual ≈ 0 (baseline − baseline).
+- `collect_history_days()` stores `cap_dispatch_mask` per sample so downstream hardened training can reuse it without re-querying.
+- `build_intraday_adjusted_forecast()` excludes cap-dispatched observed slots from the actual-vs-dayahead ratio computation so that cap-depressed output does not propagate as under-forecast into remaining slots. Falls back to all observed if too few uncapped observations remain.
+- `compute_error_memory()` already excludes all operationally constrained slots (superset of cap-dispatch) from error correction — cap-depressed actuals do not create false negative bias.
+- Export-cap curtailment detection (`curtailed_mask`, 24 MW export ceiling) remains a separate mechanism. It catches output clipping at the export limit; plant-cap dispatch curtails below that ceiling via whole-inverter STOP commands.
+- Do not remove the `scope` column from `audit_log` or change the plant-cap controller's `scope: "plant-cap"` tag — forecast training depends on it.
 
 ## Operator Messaging
 

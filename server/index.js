@@ -13707,6 +13707,22 @@ process.on("message", (msg) => {
   if (msg && msg.type === "shutdown") gracefulShutdown("ipc");
 });
 
+// Safety net: ensure DB flush/close on any exit path, including unexpected crashes.
+process.on("exit", () => {
+  try { _flushAndClose(); } catch (_) {}
+});
+
+process.on("uncaughtException", (err) => {
+  const code = String(err?.code || "");
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") return;
+  console.error("[Server] Uncaught exception — flushing DB:", err);
+  try { _flushAndClose(); } catch (_) {}
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[Server] Unhandled rejection:", reason);
+});
+
 // â"€â"€â"€ Periodic WAL Checkpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.
 setInterval(() => {

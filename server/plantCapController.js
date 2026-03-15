@@ -674,7 +674,7 @@ class PlantCapController {
       reasonCode: "disabled",
       reasonText: "Plant-wide capping is disabled.",
       activeConfig: null,
-      ownedStopped: {},
+      ownedStopped: new Map(),
       stopOrder: [],
       pendingAction: null,
       cooldownUntilTs: 0,
@@ -903,7 +903,7 @@ class PlantCapController {
     if (scope === "plant-cap") return;
     const inverter = Math.trunc(Number(event.inverter));
     if (!Number.isFinite(inverter) || inverter < 1) return;
-    if (!this.state.ownedStopped?.[String(inverter)]) return;
+    if (!this.state.ownedStopped?.has?.(inverter)) return;
     this.state.enabled = false;
     this.state.pendingAction = null;
     this.state.status = "paused";
@@ -1002,20 +1002,20 @@ class PlantCapController {
       }
       const actionAt = this.now();
       if (Number(value) === 0) {
-        this.state.ownedStopped[String(profile.inverter)] = {
+        this.state.ownedStopped.set(profile.inverter, {
           inverter: profile.inverter,
           stoppedAt: actionAt,
           pacBeforeStopKw: roundValue(Number(profile.livePacKw || 0), 3),
           enabledNodes: Number(profile.enabledNodes || 0),
           ratedKw: roundValue(Number(profile.ratedKw || 0), 3),
           dependableKw: roundValue(Number(profile.dependableKw || 0), 3),
-        };
+        });
         this.state.stopOrder = this.state.stopOrder.filter(
           (entry) => entry !== profile.inverter,
         );
         this.state.stopOrder.push(profile.inverter);
       } else {
-        delete this.state.ownedStopped[String(profile.inverter)];
+        this.state.ownedStopped.delete(profile.inverter);
         this.state.stopOrder = this.state.stopOrder.filter(
           (entry) => entry !== profile.inverter,
         );

@@ -1244,17 +1244,17 @@ function showLoginWindow() {
     return;
   }
   loginWin = new BrowserWindow({
-    width: 500,
+    width: 480,
     height: 540,
-    minWidth: 500,
-    minHeight: 540,
+    minWidth: 480,
+    minHeight: 490,
     icon: APP_ICON,
     frame: true,
     autoHideMenuBar: true,
     resizable: false,
     maximizable: false,
     minimizable: false,
-    backgroundColor: "#102029",
+    backgroundColor: "#050c17",
     center: true,
     alwaysOnTop: true,
     show: false,

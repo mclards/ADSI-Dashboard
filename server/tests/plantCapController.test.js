@@ -216,16 +216,16 @@ async function run() {
     },
   });
   controller.state.enabled = true;
-  controller.state.ownedStopped = {
-      2: {
-        inverter: 2,
-        stoppedAt: nowTs,
-        pacBeforeStopKw: 600,
+  controller.state.ownedStopped = new Map([
+    [2, {
+      inverter: 2,
+      stoppedAt: nowTs,
+      pacBeforeStopKw: 600,
       enabledNodes: 4,
       ratedKw: 997,
       dependableKw: 917,
-    },
-  };
+    }],
+  ]);
   controller.handleManualWrite({
     scope: "single",
     inverter: 2,

@@ -5893,7 +5893,7 @@ function buildPlantCapPanel() {
   wrap.innerHTML = `
     <div class="plant-cap-head">
       <div class="plant-cap-head-main" title="Plant-wide MW capping settings and live controller summary.">
-        <div class="bulk-control-title">Plant Output Cap</div>
+        <div class="bulk-control-title">Plant Output Cap <span id="plantCapRemoteBadge" class="plant-cap-remote-badge" hidden title="Controls are proxied to the gateway workstation.">via Gateway</span></div>
         <div class="plant-cap-title-line">Gateway-directed whole-inverter MW capping</div>
       </div>
       <div class="plant-cap-head-actions">
@@ -6115,6 +6115,10 @@ function renderPlantCapPanel() {
   if (!currentMwEl || !bandEl || !modeEl || !statusEl || !reasonEl || !ownedEl || !lastActionEl || !warningsEl) {
     return;
   }
+  const remoteBadge = $("plantCapRemoteBadge");
+  if (remoteBadge) {
+    remoteBadge.hidden = !isClientModeActive();
+  }
   const status = normalizePlantCapStatusClient(State.plantCap.status || {});
   currentMwEl.textContent =
     status.currentPlantMw == null ? "—" : `${Number(status.currentPlantMw).toFixed(3)} MW`;
@@ -6188,11 +6192,13 @@ function renderPlantCapPanel() {
   } else {
     const critical = warnings.some((warning) => warning?.severity === "critical");
     warningsEl.className = `plant-cap-server-warnings ${critical ? "critical" : "warning"}`;
-    warningsEl.textContent = warnings
+    const visibleMsgs = warnings
       .slice(0, 2)
       .map((warning) => String(warning?.message || "").trim())
-      .filter(Boolean)
-      .join(" ");
+      .filter(Boolean);
+    const extra = warnings.length - visibleMsgs.length;
+    warningsEl.textContent =
+      visibleMsgs.join(" ") + (extra > 0 ? ` (+${extra} more)` : "");
   }
   warningsEl.title = warnings.length
     ? warnings
@@ -6796,9 +6802,9 @@ function buildNodeRows(inv, nodeCount) {
     const btnClass = nodeConfigured
       ? `node-btn ${state ? "cmd-stop" : "cmd-start"}`
       : "node-btn node-disabled";
-    const btnText = nodeConfigured ? (state ? "STOP" : "START") : "N/A";
-    const btnTitle = nodeConfigured ? btnText : "Isolated";
-    const btnAria = `Node ${n} ${nodeConfigured ? btnText : "Isolated"}`;
+    const btnText = nodeButtonText(state, !nodeConfigured);
+    const btnTitle = nodeConfigured ? nodeButtonActionLabel(state) : "Isolated";
+    const btnAria = `Node ${n} ${nodeConfigured ? nodeButtonActionLabel(state) : "Isolated"}`;
     html += `
       <tr id="row-${inv}-${n}" class="${nodeConfigured ? "" : "row-node-disabled"}">
         <td class="node-cell"><span class="node-cell-inner"><span class="node-power-indicator node-ind-off" id="nind-${inv}-${n}" aria-hidden="true"></span><span class="node-label">N${n}</span></span></td>
@@ -7239,21 +7245,27 @@ function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
 
 function nodeButtonText(isOn, isIsolated = false) {
   if (isIsolated) return "N/A";
+  return isOn ? "◼" : "▶";
+}
+
+function nodeButtonActionLabel(isOn, isIsolated = false) {
+  if (isIsolated) return "N/A";
   return isOn ? "STOP" : "START";
 }
 
 function setNodeButtonVisual(btnEl, node, isOn, isIsolated = false) {
   if (!btnEl) return;
   const txt = nodeButtonText(isOn, isIsolated);
+  const actionLabel = nodeButtonActionLabel(isOn, isIsolated);
   btnEl.disabled = !!isIsolated;
   btnEl.className = isIsolated
     ? "node-btn node-disabled"
     : `node-btn ${isOn ? "cmd-stop" : "cmd-start"}`;
   btnEl.textContent = txt;
-  btnEl.title = isIsolated ? "Isolated" : txt;
+  btnEl.title = isIsolated ? "Isolated" : actionLabel;
   btnEl.setAttribute(
     "aria-label",
-    `Node ${node} ${isIsolated ? "Isolated" : txt}`,
+    `Node ${node} ${isIsolated ? "Isolated" : actionLabel}`,
   );
 }
 

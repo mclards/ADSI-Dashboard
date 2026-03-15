@@ -324,6 +324,18 @@ db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
 
+// Startup integrity check — detect corruption from a prior bad exit early.
+try {
+  const qc = String(db.prepare("PRAGMA quick_check(1)").pluck().get() || "").trim().toLowerCase();
+  if (qc !== "ok") {
+    console.error(`[DB] Startup quick_check FAILED: ${qc}`);
+  } else {
+    console.log("[DB] Startup quick_check: ok");
+  }
+} catch (qcErr) {
+  console.error("[DB] Startup quick_check error:", qcErr.message);
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS readings (
     ${READING_TABLE_DDL}
