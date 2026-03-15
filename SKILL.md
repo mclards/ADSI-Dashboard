@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.4` in `package.json`
+- Current repo version baseline: `2.4.5` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -244,6 +244,7 @@ The UI should reduce operator confusion without making screens noisy.
 ## Security and Privacy Rules
 
 - Do not expose secrets, private keys, OAuth internals, signing details, or sensitive debugging information in the renderer unless explicitly required.
+- Do not expose internal GitHub repo URLs, feed URLs, or API endpoints in user-facing status messages or UI text.
 - Keep client secrets, API keys, tokens, and license material out of normal UI displays by default.
 - Do not add logs that print tokens, OAuth responses, license payload internals, filesystem secrets, or personally sensitive data.
 - If a UI flow can be simplified without exposing security internals, prefer the simpler user-facing flow.

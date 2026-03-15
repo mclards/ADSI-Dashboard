@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.4` in `package.json`
+- Current repo version baseline: `2.4.5` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -360,6 +360,7 @@ Availability:
 ## Security and Privacy
 
 - Do not expose tokens, client secrets, license signing details, or private material in normal UI.
+- Do not expose internal GitHub repo URLs, feed URLs, or API endpoints in user-facing status messages or UI text.
 - Do not log credentials or sensitive payloads.
 - Prefer simpler UX if it removes exposed security internals without harming operations.
 - Treat imported or exported config files and archive telemetry as sensitive.

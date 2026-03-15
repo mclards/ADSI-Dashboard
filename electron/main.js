@@ -614,7 +614,7 @@ function initAppUpdater() {
       canDownload: false,
       canInstall: false,
       downloadUrl: "",
-      message: `Installer update channel ready (${UPDATE_FEED_URL}).`,
+      message: "Installer update channel ready.",
       error: "",
     }, false);
     return;
@@ -2890,6 +2890,7 @@ function createMainWindow() {
     // Bring the dashboard to front BEFORE closing the loading window so there
     // is no focus vacuum that lets it slip behind other OS windows.
     mainWin.show();
+    mainWin.maximize();
     mainWin.focus();
     if (loadingWin && !loadingWin.isDestroyed()) {
       loadingWin.close();
