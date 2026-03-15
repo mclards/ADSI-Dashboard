@@ -985,6 +985,27 @@ function collectDayAheadRowsForRange(startTs, endTs) {
   return out;
 }
 
+function collectSolcastRowsForRange(startTs, endTs) {
+  try {
+    const dbRows = db
+      .prepare(
+        'SELECT ts_local, forecast_kwh FROM solcast_snapshots WHERE ts_local BETWEEN ? AND ? ORDER BY ts_local ASC',
+      )
+      .all(startTs, endTs);
+    if (Array.isArray(dbRows) && dbRows.length) {
+      return dbRows
+        .map((r) => ({
+          ts: Number(r?.ts_local || 0),
+          kwh_inc: Number(Number(r?.forecast_kwh || 0).toFixed(6)),
+        }))
+        .filter((r) => Number(r.ts) > 0);
+    }
+  } catch (err) {
+    console.warn('[exporter] collectSolcastRowsForRange DB query failed:', err.message);
+  }
+  return [];
+}
+
 function resolveExportDir(inverter, categoryFolder) {
   const validFolders = new Set(Object.values(EXPORT_FOLDERS));
   if (!validFolders.has(categoryFolder)) {
@@ -1659,8 +1680,12 @@ async function exportForecastActual({
   resolution,
   exportFormat,
   supplementalActualRows,
+  source,
 }) {
-  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.analytics);
+  const isSolcast = String(source || '').trim().toLowerCase() === 'solcast';
+  const dir = resolveForecastExportDir(
+    isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics,
+  );
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
   const spec = normalizeEnergyResolution(resolution);
@@ -1680,9 +1705,8 @@ async function exportForecastActual({
       })),
     )
     .filter((r) => isWithinSolarWindowTs(r.ts));
-  const dayAheadRaw = collectDayAheadRowsForRange(s, e).filter((r) =>
-    isWithinSolarWindowTs(r.ts),
-  );
+  const dayAheadRaw = (isSolcast ? collectSolcastRowsForRange(s, e) : collectDayAheadRowsForRange(s, e))
+    .filter((r) => isWithinSolarWindowTs(r.ts));
 
   const actualAgg = aggregateKwhByResolution(actualRaw, spec);
   const dayAheadAgg = aggregateKwhByResolution(dayAheadRaw, spec);
@@ -1735,14 +1759,16 @@ async function exportForecastActual({
   ];
   const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
   const useAverageTable = normalizedExportFormat === 'average-table' && spec.mode !== 'day';
+  const forecastSourceLabel = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
   const summaryRows = [
     { Metric: 'Plant', Value: plantName },
+    { Metric: 'Source', Value: forecastSourceLabel },
     { Metric: 'Range Start', Value: fmtDateTime(s) },
     { Metric: 'Range End', Value: fmtDateTime(e) },
     { Metric: 'Resolution', Value: spec.mode === 'day' ? 'Daily' : spec.label },
     { Metric: 'Export Format', Value: useAverageTable ? 'Average Table' : 'Standard' },
     { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(6) },
-    { Metric: 'Day-Ahead Total (MWh)', Value: (dayAheadTotalKwh / 1000).toFixed(6) },
+    { Metric: `${forecastSourceLabel} Total (MWh)`, Value: (dayAheadTotalKwh / 1000).toFixed(6) },
     { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(6) },
     { Metric: 'Absolute Error Total (MWh)', Value: (absErrorTotalKwh / 1000).toFixed(6) },
     {
@@ -1764,7 +1790,7 @@ async function exportForecastActual({
     { key: 'Resolution',  label: 'Resolution' },
     { key: 'Plant',       label: 'Plant' },
     { key: 'ActualMWh',   label: 'Actual (MWh)' },
-    { key: 'DayAheadMWh', label: 'Day-Ahead (MWh)' },
+    { key: 'DayAheadMWh', label: `${forecastSourceLabel} (MWh)` },
     { key: 'DeltaMWh',    label: 'Delta (MWh)' },
     { key: 'AbsDeltaMWh', label: 'Absolute Delta (MWh)' },
     { key: 'ErrorPct',    label: 'Absolute Error (%)' },
@@ -1782,13 +1808,14 @@ async function exportForecastActual({
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
   const averageResolutionCode = `PT${Math.max(5, Number(spec.minutes || 5))}M`;
+  const sourceTag = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
   const fileBase = exportDateAwareFileBase(
     s,
     e,
     'all',
     useAverageTable
-      ? `Day-Ahead ${averageResolutionCode} AvgTable 05-18`
-      : `Day-Ahead vs Actual ${resLabel}`,
+      ? `${sourceTag} ${averageResolutionCode} AvgTable 05-18`
+      : `${sourceTag} vs Actual ${resLabel}`,
   );
   if (useAverageTable) {
     return writeDayAheadAverageTableXlsx({
@@ -1797,6 +1824,7 @@ async function exportForecastActual({
       resolution: averageResolutionCode,
       fileBase,
       dayAheadRawRows: dayAheadRaw,
+      isSolcast,
     });
   }
   return await writeExport(headers, finalRows, dir, fileBase, format, {
@@ -2184,6 +2212,7 @@ async function writeDayAheadAverageTableXlsx({
   resolution,
   fileBase,
   dayAheadRawRows,
+  isSolcast,
 }) {
   const startDay = fmtDate(startTs || Date.now());
   const endDay = fmtDate(endTs || startTs || Date.now());
@@ -2202,10 +2231,12 @@ async function writeDayAheadAverageTableXlsx({
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
 
-  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.analytics);
+  const subFolder = isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics;
+  const dir = resolveForecastExportDir(subFolder);
   const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const metaLabel = isSolcast ? 'Solcast Day-Ahead Average Table Export' : 'Trained Day-Ahead Average Table Export';
   const wb = new ExcelJS.Workbook();
-  setWorkbookMetadata(wb, 'Day-Ahead Average Table Export');
+  setWorkbookMetadata(wb, metaLabel);
 
   for (const day of allDays.length ? allDays : [startDay || endDay || fmtDate(Date.now())]) {
     const dayAheadEntry = dayAheadDayMap.get(day) || createAverageTableDayEntry(day);

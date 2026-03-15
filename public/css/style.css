@@ -1957,24 +1957,26 @@ label[data-required]::after {
     font-size: calc(9px * var(--inv-card-scale));
   }
 
-  /* ── 7-col: hide Last Seen column to reclaim space ───────────────────── */
-  .inv-grid.layout-7 .card-table thead th:nth-child(5),
-  .inv-grid.layout-7 .card-table td:nth-child(5) {
+  /* ── 6-7 col: hide Pdc column to reclaim space ────────────────────────── */
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(3),
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table td:nth-child(3) {
     display: none;
   }
 
-  .inv-grid.layout-7 .card-table thead th:nth-child(2) {
-    width: 20%;
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:first-child {
+    width: 14%;
   }
-  .inv-grid.layout-7 .card-table thead th:nth-child(3),
-  .inv-grid.layout-7 .card-table thead th:nth-child(4) {
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(2) {
+    width: 18%;
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(4) {
+    width: 22%;
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(5) {
     width: 24%;
   }
-  .inv-grid.layout-7 .card-table thead th:first-child {
-    width: 12%;
-  }
-  .inv-grid.layout-7 .card-table thead th:nth-child(6) {
-    width: 12%;
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(6) {
+    width: 10%;
   }
 
   .inv-grid.layout-7 .card-table td.ctrl-cell .node-btn {
@@ -3327,19 +3329,19 @@ label[data-required]::after {
 
 .analytics-grid .chart-total-card {
   grid-column: 1 / span 2;
-  min-height: 280px;
+  min-height: 560px;
 }
 
 .analytics-grid .chart-total-side-card {
   grid-column: 3 / span 1;
-  min-height: 280px;
+  min-height: 560px;
   padding: 10px;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
 .chart-card {
-  min-height: 220px;
+  min-height: 330px;
   display: flex;
   flex-direction: column;
   padding: 14px;
@@ -3361,11 +3363,11 @@ label[data-required]::after {
 .chart-card canvas {
   display: block;
   width: 100% !important;
-  height: 170px !important;
+  height: 255px !important;
 }
 
 .analytics-grid .chart-total-card canvas {
-  height: 240px !important;
+  height: 480px !important;
 }
 
 .analytics-side-grid {
@@ -3968,6 +3970,15 @@ label[data-required]::after {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
+}
+
+.srow-toolkit-5col {
+  grid-template-columns: 3fr 2fr 2fr 3fr 2fr !important;
+}
+
+.srow-toolkit-5col > label {
+  grid-column: span 1 !important;
+  min-width: 0;
 }
 
 .srow label {
@@ -4767,21 +4778,6 @@ label[data-required]::after {
   text-shadow: 0 0 10px rgba(201, 88, 120, 0.36);
 }
 
-#page-audit .data-table thead tr.audit-filter-row th {
-  padding: 6px 8px;
-  background: linear-gradient(180deg, rgba(56, 20, 33, 0.98) 0%, rgba(40, 14, 24, 0.98) 100%);
-  border-bottom: 1px solid rgba(95, 47, 61, 0.66);
-}
-
-#page-audit .audit-filter-inp,
-#page-audit .audit-filter-sel {
-  width: 100%;
-  min-width: 60px;
-  height: 45px;
-  padding: 4px 8px;
-  font-size: 10px;
-  border-radius: 6px;
-}
 
 #page-report .data-table th.report-sort {
   cursor: pointer;
@@ -4797,21 +4793,6 @@ label[data-required]::after {
   text-shadow: 0 0 10px rgba(201, 88, 120, 0.36);
 }
 
-#page-report .data-table thead tr.report-filter-row th {
-  padding: 6px 8px;
-  background: linear-gradient(180deg, rgba(56, 20, 33, 0.98) 0%, rgba(40, 14, 24, 0.98) 100%);
-  border-bottom: 1px solid rgba(95, 47, 61, 0.66);
-}
-
-#page-report .report-filter-inp,
-#page-report .report-filter-sel {
-  width: 100%;
-  min-width: 78px;
-  height: 26px;
-  padding: 4px 8px;
-  font-size: 10px;
-  border-radius: 6px;
-}
 
 #page-alarms .data-table,
 #page-energy .data-table,
@@ -7157,7 +7138,6 @@ body.mode-transition-active {
   overflow: visible;
 }
 
-#page-forecast .forecast-main-header,
 #page-forecast .forecast-page-sections > .sgroup.settings-card {
   border: 1px solid var(--border2);
   border-radius: 16px;
@@ -7169,8 +7149,7 @@ body.mode-transition-active {
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-#page-forecast .forecast-page-kicker,
-#page-forecast .forecast-main-eyebrow {
+#page-forecast .forecast-page-kicker {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.85px;
@@ -7179,8 +7158,7 @@ body.mode-transition-active {
   opacity: 0.88;
 }
 
-#page-forecast .forecast-page-current-title,
-#page-forecast .forecast-main-title {
+#page-forecast .forecast-page-current-title {
   margin-top: 2px;
   font-size: 17px;
   font-weight: 800;
@@ -7188,8 +7166,7 @@ body.mode-transition-active {
   color: var(--text);
 }
 
-#page-forecast .forecast-page-current-copy,
-#page-forecast .forecast-main-copy {
+#page-forecast .forecast-page-current-copy {
   margin-top: 6px;
   font-size: 12px;
   line-height: 1.55;
@@ -7217,38 +7194,18 @@ body.mode-transition-active {
   padding-right: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}
-
-#page-forecast .forecast-main-header {
-  padding: 10px 16px;
-}
-
-#page-forecast .forecast-main-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-
-#page-forecast .forecast-main-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-#page-forecast .forecast-page-current-chip {
-  margin-top: 0;
+  gap: 0;
 }
 
 #page-forecast #forecastPageMsg {
-  margin-top: 6px;
-  min-height: 16px;
+  min-height: 0;
   display: flex;
   align-items: center;
+}
+
+#page-forecast #forecastPageMsg:not(:empty) {
+  margin-top: 6px;
+  min-height: 16px;
 }
 
 #page-forecast .forecast-page-sections > .sgroup.settings-card {
@@ -8264,18 +8221,8 @@ body.mode-transition-active {
     padding: 14px;
   }
 
-  #page-forecast .forecast-page-sections > .sgroup.settings-card,
-  #page-forecast .forecast-main-header {
+  #page-forecast .forecast-page-sections > .sgroup.settings-card {
     padding: 14px;
-  }
-
-  #page-forecast .forecast-main-topbar {
-    flex-direction: column;
-  }
-
-  #page-forecast .forecast-main-actions {
-    width: 100%;
-    justify-content: flex-start;
   }
 
   #page-settings .settings-sections .srow {

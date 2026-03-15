@@ -58,6 +58,8 @@ const State = {
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
     solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: "PT5M",
     solcastTimezone: "Asia/Manila",
     plantCapUpperMw: null,
     plantCapLowerMw: null,
@@ -1572,7 +1574,6 @@ const EXPORT_DATE_RANGE_IDS = [
 const EXPORT_SINGLE_DATE_IDS = [
   "expAlarmDate",
   "expEnergyDate",
-  "expForecastDate",
   "expInvDataDate",
   "expAuditDate",
 ];
@@ -2285,8 +2286,8 @@ function renderTablePager({
   });
 }
 
-const applyAuditTableViewDebounced = debounce(() => applyAuditTableView());
-const applyReportTableViewDebounced = debounce(() => applyReportTableView());
+
+
 
 const duration_min = (ts1, ts2) => {
   if (!ts1 || !ts2) return "—";
@@ -3712,6 +3713,8 @@ async function loadSettings() {
     $("setSolcastToolkitEmail").value = s.solcastToolkitEmail || "";
     $("setSolcastToolkitPassword").value = s.solcastToolkitPassword || "";
     $("setSolcastToolkitSiteRef").value = s.solcastToolkitSiteRef || "";
+    if ($("setSolcastToolkitDays")) $("setSolcastToolkitDays").value = s.solcastToolkitDays || "2";
+    if ($("setSolcastToolkitPeriod")) $("setSolcastToolkitPeriod").value = s.solcastToolkitPeriod || "PT5M";
     $("setSolcastTimezone").value = s.solcastTimezone || "Asia/Manila";
     if ($("setPlantLatitude"))  $("setPlantLatitude").value  = s.plantLatitude  ?? "";
     if ($("setPlantLongitude")) $("setPlantLongitude").value = s.plantLongitude ?? "";
@@ -3808,6 +3811,8 @@ function syncForecastProviderUi() {
   });
   [
     "setSolcastToolkitSiteRef",
+    "setSolcastToolkitDays",
+    "setSolcastToolkitPeriod",
     "setSolcastToolkitEmail",
     "setSolcastToolkitPassword",
   ].forEach((id) => {
@@ -3850,6 +3855,8 @@ function readSolcastSettingsForm() {
     solcastToolkitEmail: $("setSolcastToolkitEmail")?.value || "",
     solcastToolkitPassword: $("setSolcastToolkitPassword")?.value || "",
     solcastToolkitSiteRef: $("setSolcastToolkitSiteRef")?.value || "",
+    solcastToolkitDays: $("setSolcastToolkitDays")?.value || "2",
+    solcastToolkitPeriod: $("setSolcastToolkitPeriod")?.value || "PT5M",
     solcastTimezone: $("setSolcastTimezone")?.value || "",
   };
 }
@@ -4376,6 +4383,10 @@ function pickSettingsConfigFields(src) {
     out.solcastToolkitPassword = String(src.solcastToolkitPassword ?? "");
   if (hasOwn(src, "solcastToolkitSiteRef"))
     out.solcastToolkitSiteRef = String(src.solcastToolkitSiteRef ?? "");
+  if (hasOwn(src, "solcastToolkitDays"))
+    out.solcastToolkitDays = String(src.solcastToolkitDays ?? "");
+  if (hasOwn(src, "solcastToolkitPeriod"))
+    out.solcastToolkitPeriod = String(src.solcastToolkitPeriod ?? "");
   if (hasOwn(src, "solcastTimezone"))
     out.solcastTimezone = String(src.solcastTimezone ?? "");
   if (hasOwn(src, "invGridLayout"))
@@ -6731,16 +6742,17 @@ function buildBulkControlPanel() {
           inputmode="text"
           autocomplete="off"
           placeholder="1-13, 16, 18, 23-27"
+          title="Specify inverter numbers or ranges to target for bulk commands (e.g. 1-13, 16, 23-27)."
         />
         <div class="bulk-range-helper">Enter individual inverter numbers, ranges, or a combination of both. Duplicate entries are not allowed.</div>
       </div>
       <div class="bulk-action-group">
-        <button id="btnFillAllTargets" class="btn btn-outline">All Inverters</button>
-        <button id="btnClearTargets" class="btn btn-outline">Clear</button>
+        <button id="btnFillAllTargets" class="btn btn-outline" title="Fill in all configured inverter numbers.">All Inverters</button>
+        <button id="btnClearTargets" class="btn btn-outline" title="Clear the selected inverter range.">Clear</button>
       </div>
       <div class="bulk-action-group bulk-action-primary">
-        <button id="btnStartSelected" class="btn btn-green">START SELECTED</button>
-        <button id="btnStopSelected" class="btn btn-red">STOP SELECTED</button>
+        <button id="btnStartSelected" class="btn btn-green" title="Send START command to all selected inverters. Requires bulk control authorization.">START SELECTED</button>
+        <button id="btnStopSelected" class="btn btn-red" title="Send STOP command to all selected inverters. Requires bulk control authorization.">STOP SELECTED</button>
       </div>
     </div>`;
   return wrap;
@@ -6758,20 +6770,20 @@ function buildInverterCard(inv, nodeCount) {
         </div>
       </div>
       <div class="card-badges">
-        <span class="badge badge-offline" id="badge-${inv}">OFFLINE</span>
+        <span class="badge badge-offline" id="badge-${inv}" title="Current inverter status.">OFFLINE</span>
       </div>
     </div>
     <div class="card-pac">
       <div class="pac-controls">
-        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start">Start</button>
-        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop">Stop</button>
+        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start" title="Send START command to all nodes of this inverter.">Start</button>
+        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop" title="Send STOP command to all nodes of this inverter.">Stop</button>
       </div>
-      <div class="pac-cell">
+      <div class="pac-cell" title="Combined DC power input from all nodes of this inverter.">
         <span class="pac-label">Pdc:</span>
         <span class="pac-val zero" id="pdcsum-${inv}">0.00</span>
         <span class="pac-unit">kW</span>
       </div>
-      <div class="pac-cell">
+      <div class="pac-cell" title="Combined AC power output from all nodes of this inverter.">
         <span class="pac-label">Pac:</span>
         <span class="pac-val zero" id="pac-${inv}">0.00</span>
         <span class="pac-unit">kW</span>
@@ -6781,7 +6793,7 @@ function buildInverterCard(inv, nodeCount) {
       <div class="card-table-wrap">
         <table class="card-table">
           <thead>
-            <tr><th>Node</th><th>Alarm</th><th>Pdc (W)</th><th>Pac (W)</th><th>Last Seen</th><th>Ctrl</th></tr>
+            <tr><th title="Node number within this inverter.">Node</th><th title="Active alarm state for this node.">Alarm</th><th title="DC power input in watts.">Pdc (W)</th><th title="AC power output in watts.">Pac (W)</th><th title="Time of the last successful data reading.">Last Seen</th><th title="Node-level start and stop control.">Ctrl</th></tr>
           </thead>
           <tbody id="tbody-${inv}">
             ${buildNodeRows(inv, nodeCount)}
@@ -8253,8 +8265,6 @@ function buildSelects() {
     "alarmInv",
     "energyInv",
     "auditInv",
-    "auditFilterInverter",
-    "reportFilterInverter",
     "expAlarmInv",
     "expEnergyInv",
     "expInvDataInv",
@@ -8266,24 +8276,6 @@ function buildSelects() {
     el.innerHTML = allOpt + opts;
     if (prev && el.querySelector(`option[value="${prev}"]`)) el.value = prev;
   });
-
-  const nodeSel = $("auditFilterNode");
-  if (nodeSel) {
-    const prev = nodeSel.value;
-    const nodeCount = Number(State.settings.nodeCount || 4);
-    const nodeOpts = [
-      '<option value="all">All</option>',
-      '<option value="ALL">ALL</option>',
-      ...Array.from(
-        { length: nodeCount },
-        (_, i) => `<option value="N${i + 1}">N${i + 1}</option>`,
-      ),
-    ];
-    nodeSel.innerHTML = nodeOpts.join("");
-    if (prev && nodeSel.querySelector(`option[value="${prev}"]`)) {
-      nodeSel.value = prev;
-    }
-  }
 
   const rangeInput = $("bulkInvRangeInput");
   if (rangeInput && !String(rangeInput.value || "").trim()) {
@@ -8721,12 +8713,23 @@ async function fetchAlarms(options = {}) {
 
 function applyAlarmTableView() {
   const allRows = Array.isArray(State.alarmView.rows) ? State.alarmView.rows : [];
-  const pageData = paginateRows(allRows, State.alarmView.page, State.alarmView.pageSize);
+  const minDurSec = Number($("alarmMinDur")?.value) || 0;
+  const filtered = minDurSec > 0
+    ? allRows.filter((r) => {
+        const t1 = Number(r.occurred_ts || r.ts || 0);
+        const t2 = r.cleared_ts ? Number(r.cleared_ts) : Date.now();
+        return t1 > 0 && (t2 - t1) / 1000 >= minDurSec;
+      })
+    : allRows;
+  const pageData = paginateRows(filtered, State.alarmView.page, State.alarmView.pageSize);
   State.alarmView.page = pageData.page;
   renderAlarmTable(pageData.rows);
   const countEl = $("alarmCount");
   if (countEl) {
-    countEl.textContent = `${pageData.from}-${pageData.to} / ${allRows.length} records`;
+    const suffix = minDurSec > 0 && filtered.length !== allRows.length
+      ? ` (${allRows.length} total)`
+      : "";
+    countEl.textContent = `${pageData.from}-${pageData.to} / ${filtered.length} records${suffix}`;
   }
   renderTablePager({
     hostId: "alarmPager",
@@ -9224,28 +9227,6 @@ function setupAuditTableControls() {
     });
   });
 
-  [
-    "auditFilterTs",
-    "auditFilterOperator",
-    "auditFilterInverter",
-    "auditFilterNode",
-    "auditFilterAction",
-    "auditFilterScope",
-    "auditFilterResult",
-    "auditFilterIp",
-  ].forEach((id) => {
-    const f = $(id);
-    if (!f || f.dataset.bound === "1") return;
-    f.dataset.bound = "1";
-    f.addEventListener("input", () => {
-      State.auditView.page = 1;
-      applyAuditTableViewDebounced();
-    });
-    f.addEventListener("change", () => {
-      State.auditView.page = 1;
-      applyAuditTableView();
-    });
-  });
 }
 
 function auditNodeLabel(node) {
@@ -9253,19 +9234,6 @@ function auditNodeLabel(node) {
   return n === 0 ? "ALL" : `N${n}`;
 }
 
-function getAuditFilters() {
-  const getVal = (id) => String($(id)?.value || "").trim();
-  return {
-    ts: getVal("auditFilterTs").toLowerCase(),
-    operator: getVal("auditFilterOperator").toLowerCase(),
-    inverter: getVal("auditFilterInverter"),
-    node: getVal("auditFilterNode"),
-    action: getVal("auditFilterAction").toUpperCase(),
-    scope: getVal("auditFilterScope").toLowerCase(),
-    result: getVal("auditFilterResult").toLowerCase(),
-    ip: getVal("auditFilterIp").toLowerCase(),
-  };
-}
 
 function compareAuditRows(a, b, key) {
   if (key === "ts") return Number(a.ts || 0) - Number(b.ts || 0);
@@ -9301,68 +9269,14 @@ function applyAuditTableView() {
   const allRows = Array.isArray(State.auditView.rows)
     ? State.auditView.rows
     : [];
-  const f = getAuditFilters();
-  const filtered = allRows.filter((r) => {
-    const tsText = fmtDateTime(r.ts).toLowerCase();
-    if (f.ts && !tsText.includes(f.ts)) return false;
-    if (
-      f.operator &&
-      !String(r.operator || "OPERATOR")
-        .toLowerCase()
-        .includes(f.operator)
-    )
-      return false;
-    if (
-      f.inverter &&
-      f.inverter !== "all" &&
-      Number(r.inverter || 0) !== Number(f.inverter)
-    )
-      return false;
-
-    const nodeText = auditNodeLabel(r.node);
-    if (f.node && f.node !== "all" && nodeText !== f.node) return false;
-
-    if (
-      f.action &&
-      f.action !== "ALL" &&
-      String(r.action || "").toUpperCase() !== f.action
-    )
-      return false;
-    if (
-      f.scope === "scope-all" &&
-      String(r.scope || "").toLowerCase() !== "all"
-    )
-      return false;
-    if (
-      f.scope &&
-      f.scope !== "all" &&
-      f.scope !== "scope-all" &&
-      String(r.scope || "").toLowerCase() !== f.scope
-    )
-      return false;
-
-    if (f.result === "ok" && String(r.result || "").toLowerCase() !== "ok")
-      return false;
-    if (f.result === "error" && String(r.result || "").toLowerCase() === "ok")
-      return false;
-
-    if (
-      f.ip &&
-      !String(r.ip || "")
-        .toLowerCase()
-        .includes(f.ip)
-    )
-      return false;
-    return true;
-  });
 
   const dir = State.auditView.sortDir === "asc" ? 1 : -1;
-  filtered.sort(
+  allRows.sort(
     (a, b) => dir * compareAuditRows(a, b, State.auditView.sortKey),
   );
 
   const pageData = paginateRows(
-    filtered,
+    allRows,
     State.auditView.page,
     State.auditView.pageSize,
   );
@@ -9371,7 +9285,7 @@ function applyAuditTableView() {
   renderAuditSortIndicators();
   const auditCountEl = $("auditCount");
   if (auditCountEl) {
-    auditCountEl.textContent = `${pageData.from}-${pageData.to} / ${filtered.length} filtered (${allRows.length} total)`;
+    auditCountEl.textContent = `${pageData.from}-${pageData.to} / ${allRows.length} records`;
   }
   renderTablePager({
     hostId: "auditPager",
@@ -9386,26 +9300,7 @@ function applyAuditTableView() {
   });
 }
 
-function resetAuditFilters() {
-  ["auditFilterTs", "auditFilterOperator", "auditFilterIp"].forEach((id) => {
-    const el = $(id);
-    if (el) el.value = "";
-  });
-  [
-    ["auditFilterInverter", "all"],
-    ["auditFilterNode", "all"],
-    ["auditFilterAction", "all"],
-    ["auditFilterScope", "all"],
-    ["auditFilterResult", "all"],
-  ].forEach(([id, v]) => {
-    const el = $(id);
-    if (el) el.value = v;
-  });
-  State.auditView.sortKey = "ts";
-  State.auditView.sortDir = "desc";
-  State.auditView.page = 1;
-  applyAuditTableView();
-}
+
 
 // ─── Daily Report Page ────────────────────────────────────────────────────────
 function initReportPage() {
@@ -9644,43 +9539,8 @@ function setupReportTableControls() {
     });
   });
 
-  [
-    "reportFilterInverter",
-    "reportFilterEnergy",
-    "reportFilterPeak",
-    "reportFilterAvg",
-    "reportFilterUptime",
-    "reportFilterAlarms",
-    "reportFilterAvail",
-    "reportFilterPerf",
-  ].forEach((id) => {
-    const f = $(id);
-    if (!f || f.dataset.bound === "1") return;
-    f.dataset.bound = "1";
-    f.addEventListener("input", () => {
-      State.reportView.page = 1;
-      applyReportTableViewDebounced();
-    });
-    f.addEventListener("change", () => {
-      State.reportView.page = 1;
-      applyReportTableView();
-    });
-  });
 }
 
-function getReportFilters() {
-  const getVal = (id) => String($(id)?.value || "").trim();
-  return {
-    inverter: getVal("reportFilterInverter"),
-    energy: getVal("reportFilterEnergy").toLowerCase(),
-    peak: getVal("reportFilterPeak").toLowerCase(),
-    avg: getVal("reportFilterAvg").toLowerCase(),
-    uptime: getVal("reportFilterUptime").toLowerCase(),
-    alarms: getVal("reportFilterAlarms"),
-    avail: getVal("reportFilterAvail").toLowerCase(),
-    perf: getVal("reportFilterPerf").toLowerCase(),
-  };
-}
 
 function compareReportRows(a, b, key) {
   if (
@@ -9725,70 +9585,14 @@ function applyReportTableView() {
   const allRows = Array.isArray(State.reportView.rows)
     ? State.reportView.rows
     : [];
-  const f = getReportFilters();
-  const filtered = allRows.filter((r) => {
-    if (
-      f.inverter &&
-      f.inverter !== "all" &&
-      Number(r.inverter || 0) !== Number(f.inverter)
-    )
-      return false;
-
-    if (
-      f.energy &&
-      !String(Number(r.mwh || 0).toFixed(6))
-        .toLowerCase()
-        .includes(f.energy)
-    )
-      return false;
-    if (
-      f.peak &&
-      !String(Number(r.peak_kw || 0).toFixed(3))
-        .toLowerCase()
-        .includes(f.peak)
-    )
-      return false;
-    if (
-      f.avg &&
-      !String(Number(r.avg_kw || 0).toFixed(3))
-        .toLowerCase()
-        .includes(f.avg)
-    )
-      return false;
-    if (
-      f.uptime &&
-      !String(Number(r.uptime_h || 0).toFixed(2))
-        .toLowerCase()
-        .includes(f.uptime)
-    )
-      return false;
-    if (
-      f.avail &&
-      !String(Number(r.availability_pct || 0).toFixed(1))
-        .toLowerCase()
-        .includes(f.avail)
-    )
-      return false;
-    if (
-      f.perf &&
-      !String(Number(r.performance_pct || 0).toFixed(1))
-        .toLowerCase()
-        .includes(f.perf)
-    )
-      return false;
-
-    if (f.alarms === "with" && Number(r.alarm_count || 0) <= 0) return false;
-    if (f.alarms === "none" && Number(r.alarm_count || 0) > 0) return false;
-    return true;
-  });
 
   const dir = State.reportView.sortDir === "asc" ? 1 : -1;
-  filtered.sort(
+  allRows.sort(
     (a, b) => dir * compareReportRows(a, b, State.reportView.sortKey),
   );
 
   const pageData = paginateRows(
-    filtered,
+    allRows,
     State.reportView.page,
     State.reportView.pageSize,
   );
@@ -10414,19 +10218,19 @@ function ensureAnalyticsCards() {
   totalSideCard.innerHTML = `
     <div class="chart-title">📊 Selected Date Summary</div>
     <div class="analytics-side-grid">
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Total measured energy generated for the selected date.">
         <div class="analytics-side-label">Actual MWh</div>
         <div class="analytics-side-value" id="anaSideActual">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Forecasted day-ahead energy for the selected date.">
         <div class="analytics-side-label">Day-ahead MWh</div>
         <div class="analytics-side-value" id="anaSideDayAhead">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Difference between actual and forecasted energy (actual minus forecast).">
         <div class="analytics-side-label">Variance MWh</div>
         <div class="analytics-side-value" id="anaSideVariance">—</div>
       </div>
-      <div class="analytics-side-item">
+      <div class="analytics-side-item" title="Highest single interval energy reading and when it occurred.">
         <div class="analytics-side-label">Peak Interval</div>
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
       </div>
@@ -10444,11 +10248,12 @@ function ensureAnalyticsCards() {
             max="31"
             step="1"
             value="1"
+            title="Number of consecutive days to generate day-ahead forecasts for (1-31)."
           />
         </label>
         <label for="anaDayAheadExportFormat" class="analytics-gen-field analytics-gen-field-format">
           <span class="analytics-gen-label">Format</span>
-          <select id="anaDayAheadExportFormat" class="sel analytics-gen-select">
+          <select id="anaDayAheadExportFormat" class="sel analytics-gen-select" title="Standard: one row per time slot. Average Table: grouped averages per resolution bucket.">
             <option value="standard">Standard</option>
             <option value="average-table">Average Table</option>
           </select>
@@ -11255,9 +11060,16 @@ async function runEnergyExport() {
 }
 
 async function runForecastActualExport() {
-  normalizeExportSingleDateInput("expForecastDate", { forceDefault: true });
+  const fcInput = $("expForecastDate");
+  if (fcInput) {
+    let v = sanitizeDateInputValue(fcInput.value);
+    if (!v) { v = today(); fcInput.value = v; }
+    // No max cap — day-ahead forecasts can be for future dates.
+    delete fcInput.max;
+  }
   await persistExportUiState().catch(() => {});
-  const day = $("expForecastDate")?.value;
+  const day = fcInput?.value;
+  const source = $("expForecastSource")?.value || "analytics";
   const exportFormat = getSharedForecastExportFormat();
   const format = exportFormat === "average-table"
     ? "xlsx"
@@ -11281,13 +11093,15 @@ async function runForecastActualExport() {
       resolution,
       format,
       exportFormat,
+      source,
     }, {
       signal: controller.signal,
     });
+    const sourceLabel = source === "solcast" ? "Solcast Day-Ahead" : "Trained Day-Ahead";
     if (res) {
       res.className = "exp-result";
       res.textContent =
-        `✔ Saved: ${r.path}${exportFormat === "average-table" ? " (average table)" : " (standard)"}`;
+        `✔ Saved: ${r.path} (${sourceLabel}${exportFormat === "average-table" ? ", average table" : ""})`;
     }
     await openExportPathFolder(r.path);
     setExportButtonState("btnRunForecastExport", "ok");
@@ -11339,6 +11153,7 @@ async function runAnalyticsDayAheadExport() {
       resolution,
       format: "xlsx",
       exportFormat,
+      source: "analytics",
     });
     if (res) {
       res.className = "exp-result";
@@ -12004,6 +11819,10 @@ function bindEventHandlers() {
 
   // Alarms page
   $("btnFetchAlarms")?.addEventListener("click", fetchAlarms);
+  $("alarmMinDur")?.addEventListener("input", () => {
+    State.alarmView.page = 1;
+    applyAlarmTableView();
+  });
   $("btnAckAll")?.addEventListener("click", ackAll);
 
   // Energy page
@@ -12014,7 +11833,6 @@ function bindEventHandlers() {
 
   // Audit page
   $("btnFetchAudit")?.addEventListener("click", fetchAudit);
-  $("btnResetAuditFilters")?.addEventListener("click", resetAuditFilters);
 
   // Daily Report page
   $("btnFetchReport")?.addEventListener("click", fetchReport);
@@ -12068,7 +11886,6 @@ function bindEventHandlers() {
 
   // Settings page
   $("btnSolcastSaveTest")?.addEventListener("click", saveAndTestSolcast);
-  $("btnSolcastTest")?.addEventListener("click", testSolcastConnection);
   $("btnSolcastPreviewRefresh")?.addEventListener("click", () =>
     loadSolcastPreview({ silent: false }).catch(() => {}),
   );
@@ -12106,7 +11923,6 @@ function bindEventHandlers() {
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
   $("btnSaveSettings")?.addEventListener("click", saveSettings);
-  $("btnSaveForecastSettings")?.addEventListener("click", saveSettings);
   $("btnExportSettingsConfig")?.addEventListener("click", exportSettingsConfig);
   $("btnImportSettingsConfig")?.addEventListener("click", importSettingsConfig);
   $("btnResetSettingsDefaults")?.addEventListener("click", resetSettingsToDefaults);

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.2` in `package.json`
+- Current repo version baseline: `2.4.4` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -252,7 +252,16 @@ Preserve these unless a deliberate migration is implemented:
 - Default export path: `C:\Logs\InverterDashboard`
 - Forecast analytics export subfolder: `C:\Logs\InverterDashboard\All Inverters\Forecast\Analytics`
 - Forecast Solcast export subfolder: `C:\Logs\InverterDashboard\All Inverters\Forecast\Solcast`
-- Forecast export policy: both `Standard` and `Average Table` analytics day-ahead exports belong under `...\Forecast\Analytics`; legacy flat `...\Forecast\<file>` results should be relocated into the matching forecast subfolder automatically.
+- Forecast export policy: legacy flat `...\Forecast\<file>` results should be relocated into the matching forecast subfolder automatically.
+- Forecast export source selector: the Day-Ahead Forecast Export dialog exposes a `Source` dropdown (`Analytics` or `Solcast`). Both share the same `/api/export/forecast-actual` route via a `source` body parameter.
+- Forecast export file naming convention — three distinct sources, uniform pattern:
+  - **Trained Day-Ahead** (ML-trained model output from `forecast_dayahead`): `Trained Day-Ahead vs Actual <res>` / `Trained Day-Ahead <PTxM> AvgTable 05-18` → saved under `...\Forecast\Analytics`
+  - **Solcast Day-Ahead** (stored Solcast API snapshots from `solcast_snapshots`): `Solcast Day-Ahead vs Actual <res>` / `Solcast Day-Ahead <PTxM> AvgTable 05-18` → saved under `...\Forecast\Solcast`
+  - **Solcast Toolkit** (live Solcast API preview from Settings page): `Solcast Toolkit <PTxM> 05-18` / `Solcast Toolkit <PTxM> AvgTable 05-18` → saved under `...\Forecast\Solcast`
+- Do not merge or confuse the three naming prefixes. Each identifies a different data origin.
+- Solcast Toolkit URL construction: the full toolkit chart URL is built server-side from structured settings — operators enter only the Plant Resource ID, Forecast Days (1-7, default 2), and Resolution (PT5M/PT10M/PT15M/PT30M/PT60M, default PT5M). Do not reintroduce a raw URL input field.
+- The constructed URL pattern is: `https://api.solcast.com.au/utility_scale_sites/{resourceId}/recent?view=Toolkit&theme=light&hours={days*24}&period={period}`
+- Settings keys: `solcastToolkitSiteRef` (resource ID only), `solcastToolkitDays`, `solcastToolkitPeriod`.
 - Legacy portable data root for older deployments only: `<portable exe dir>\InverterDashboardData`
 - Cloud provider folder: `InverterDashboardBackups`
 

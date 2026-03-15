@@ -7346,6 +7346,8 @@ function ensurePersistedSettings() {
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
     solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
     solcastTimezone: "Asia/Manila",
     plantLatitude: String(WEATHER_LAT),
     plantLongitude: String(WEATHER_LON),
@@ -7411,6 +7413,8 @@ function buildDefaultSettingsSnapshot() {
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
     solcastToolkitSiteRef: "",
+    solcastToolkitDays: "2",
+    solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
     solcastTimezone: "Asia/Manila",
     plantLatitude: WEATHER_LAT,
     plantLongitude: WEATHER_LON,
@@ -7478,6 +7482,14 @@ function buildSettingsSnapshot() {
     solcastToolkitSiteRef: getSetting(
       "solcastToolkitSiteRef",
       defaults.solcastToolkitSiteRef,
+    ),
+    solcastToolkitDays: getSetting(
+      "solcastToolkitDays",
+      defaults.solcastToolkitDays,
+    ),
+    solcastToolkitPeriod: getSetting(
+      "solcastToolkitPeriod",
+      defaults.solcastToolkitPeriod,
     ),
     solcastTimezone: getSetting(
       "solcastTimezone",
@@ -7694,6 +7706,8 @@ function getSolcastConfig() {
     toolkitSiteRef: String(
       getSetting("solcastToolkitSiteRef", "") || "",
     ).trim(),
+    toolkitDays: Math.max(1, Math.min(7, Math.trunc(Number(getSetting("solcastToolkitDays", "2")) || 2))),
+    toolkitPeriod: String(getSetting("solcastToolkitPeriod", SOLCAST_TOOLKIT_PERIOD) || SOLCAST_TOOLKIT_PERIOD).trim(),
     timeZone:
       String(getSetting("solcastTimezone", WEATHER_TZ) || "").trim() ||
       WEATHER_TZ,
@@ -7731,6 +7745,12 @@ function buildSolcastConfigFromInput(input = null) {
         base.toolkitSiteRef ??
         "",
     ).trim(),
+    toolkitDays: Math.max(1, Math.min(7, Math.trunc(
+      Number(src.solcastToolkitDays ?? src.toolkitDays ?? base.toolkitDays ?? 2) || 2,
+    ))),
+    toolkitPeriod: String(
+      src.solcastToolkitPeriod ?? src.toolkitPeriod ?? base.toolkitPeriod ?? SOLCAST_TOOLKIT_PERIOD,
+    ).trim() || SOLCAST_TOOLKIT_PERIOD,
     timeZone: String(
       src.solcastTimezone ?? src.timeZone ?? base.timeZone ?? "",
     ).trim() || WEATHER_TZ,
@@ -7832,7 +7852,7 @@ function buildSolcastToolkitRecentUrl(
 function parseSolcastToolkitSiteRef(value, baseUrl, options = {}) {
   const raw = String(value || "").trim();
   if (!raw) {
-    throw new Error("Solcast toolkit site URL or site ID is required.");
+    throw new Error("Plant Resource ID is required for Toolkit mode.");
   }
   const recentHours = normalizeSolcastToolkitRecentHours(
     options?.recentHours,
@@ -7903,7 +7923,7 @@ function parseSolcastToolkitSiteRef(value, baseUrl, options = {}) {
 
   if (!/^[A-Za-z0-9._-]+$/.test(raw)) {
     throw new Error(
-      "Solcast toolkit site reference must be a site URL, site path, or site ID.",
+      "Plant Resource ID must contain only alphanumeric characters, dots, hyphens, or underscores.",
     );
   }
   return {
@@ -8083,9 +8103,10 @@ function normalizeSolcastToolkitForecastRecords(records) {
 }
 
 async function fetchSolcastToolkitForecastRecords(cfg, options = {}) {
+  const cfgHours = cfg.toolkitDays ? cfg.toolkitDays * 24 : undefined;
   const site = parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl, {
-    recentHours: options?.toolkitHours,
-    period: options?.toolkitPeriod,
+    recentHours: options?.toolkitHours ?? cfgHours,
+    period: options?.toolkitPeriod ?? cfg.toolkitPeriod,
   });
   const cookieJar = new Map();
   const buildHeaders = (extra = {}) => {
@@ -11464,6 +11485,8 @@ app.post("/api/settings", (req, res) => {
     solcastToolkitEmail,
     solcastToolkitPassword,
     solcastToolkitSiteRef,
+    solcastToolkitDays,
+    solcastToolkitPeriod,
     solcastTimezone,
     exportUiState,
     inverterPollConfig,
@@ -11614,11 +11637,19 @@ app.post("/api/settings", (req, res) => {
       } catch (err) {
         return res.status(400).json({
           ok: false,
-          error: `Invalid solcastToolkitSiteRef: ${err.message}`,
+          error: `Invalid Plant Resource ID: ${err.message}`,
         });
       }
     }
     updates.solcastToolkitSiteRef = ref.slice(0, 500);
+  }
+  if (solcastToolkitDays !== undefined) {
+    const d = Math.max(1, Math.min(7, Math.trunc(Number(solcastToolkitDays) || 2)));
+    updates.solcastToolkitDays = String(d);
+  }
+  if (solcastToolkitPeriod !== undefined) {
+    const p = String(solcastToolkitPeriod || "PT5M").trim();
+    updates.solcastToolkitPeriod = SOLCAST_PREVIEW_RESOLUTIONS.has(p) ? p : SOLCAST_TOOLKIT_PERIOD;
   }
   if (solcastTimezone !== undefined) {
     const tz = String(solcastTimezone || "").trim();
@@ -12277,7 +12308,7 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
       if (!cfg.toolkitSiteRef) {
         return res.status(400).json({
           ok: false,
-          error: "Solcast toolkit site URL or site ID is required.",
+          error: "Plant Resource ID is required for Toolkit mode.",
         });
       }
       try {
@@ -12392,7 +12423,7 @@ app.post("/api/forecast/solcast/preview", async (req, res) => {
       if (!cfg.toolkitSiteRef) {
         return res.status(400).json({
           ok: false,
-          error: "Solcast toolkit site URL or site ID is required.",
+          error: "Plant Resource ID is required for Toolkit mode.",
         });
       }
       try {
@@ -12511,7 +12542,7 @@ app.post("/api/export/solcast-preview", async (req, res) => {
         return res.status(400).json({ ok: false, error: "Solcast toolkit password is required." });
       }
       if (!cfg.toolkitSiteRef) {
-        return res.status(400).json({ ok: false, error: "Solcast toolkit site URL or site ID is required." });
+        return res.status(400).json({ ok: false, error: "Plant Resource ID is required for Toolkit mode." });
       }
       try {
         parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl);
@@ -12945,10 +12976,12 @@ function normalizeExportRelativePath(relativePath, fallbackPath = "") {
   return normalized;
 }
 
-function normalizeForecastExportRelativePathForRoute(routePath, relativePath) {
+function normalizeForecastExportRelativePathForRoute(routePath, relativePath, payload) {
   const route = String(routePath || "").trim();
   if (route === "/api/export/forecast-actual") {
-    return exporter.rewriteForecastExportRelativePath(relativePath, "Analytics");
+    const source = String(payload?.source || "analytics").trim().toLowerCase();
+    const subFolder = source === "solcast" ? "Solcast" : "Analytics";
+    return exporter.rewriteForecastExportRelativePath(relativePath, subFolder);
   }
   if (route === "/api/export/solcast-preview") {
     return exporter.rewriteForecastExportRelativePath(relativePath, "Solcast");
@@ -13062,6 +13095,7 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
   const localRelativePath = normalizeForecastExportRelativePathForRoute(
     routePath,
     remoteRelativePath,
+    payload,
   );
   const localPath = resolveLocalExportPath(localRelativePath, exportResult?.path);
   await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
@@ -13309,12 +13343,15 @@ app.post("/api/export/forecast-actual", async (req, res) => {
       );
     }
     const payload = req.body || {};
+    const source = String(payload.source || "analytics").trim().toLowerCase();
+    const isSolcast = source === "solcast";
     const currentDaySnapshot = exportTouchesCurrentDay(payload)
       ? buildCurrentDayEnergySnapshot()
       : null;
     const rawOutPath = await runGatewayExportJob("forecast-actual", () =>
       exporter.exportForecastActual({
         ...payload,
+        source,
         supplementalActualRows: buildForecastActualSupplementRowsForRange(
           payload?.startTs,
           payload?.endTs,
@@ -13322,7 +13359,8 @@ app.post("/api/export/forecast-actual", async (req, res) => {
         ),
       }),
     );
-    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Analytics");
+    const subFolder = isSolcast ? "Solcast" : "Analytics";
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, subFolder);
     return res.json(buildExportResult(outPath));
   } catch (e) {
     return sendExportRouteError(res, e);
