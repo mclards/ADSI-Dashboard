@@ -2044,6 +2044,14 @@ label[data-required]::after {
     font-size: calc(6px * var(--inv-card-scale));
     border-radius: calc(3px * var(--inv-card-scale));
   }
+
+  /* ── 7 col: icon-only Start/Stop, narrower controls column ──────────── */
+  .inv-grid.layout-7 .card-pac {
+    grid-template-columns: calc(48px * var(--inv-card-scale)) minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .inv-grid.layout-7 .ctrl-label { display: none; }
+  .inv-grid.layout-7 .ctrl-icon { display: inline; }
 }
 
 .inv-card {
@@ -2253,6 +2261,8 @@ label[data-required]::after {
   padding: calc(2px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
   background: rgba(0, 0, 0, 0.42);
 }
+
+.ctrl-icon { display: none; }
 
 .pac-controls .card-ctrl-btn {
   width: auto;

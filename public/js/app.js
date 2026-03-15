@@ -6775,8 +6775,8 @@ function buildInverterCard(inv, nodeCount) {
     </div>
     <div class="card-pac">
       <div class="pac-controls">
-        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start" title="Send START command to all nodes of this inverter.">Start</button>
-        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop" title="Send STOP command to all nodes of this inverter.">Stop</button>
+        <button class="card-ctrl-btn start" data-inv="${inv}" data-action="start" title="Send START command to all nodes of this inverter."><span class="ctrl-label">Start</span><span class="ctrl-icon">▶</span></button>
+        <button class="card-ctrl-btn stop" data-inv="${inv}" data-action="stop" title="Send STOP command to all nodes of this inverter."><span class="ctrl-label">Stop</span><span class="ctrl-icon">◼</span></button>
       </div>
       <div class="pac-cell" title="Combined DC power input from all nodes of this inverter.">
         <span class="pac-label">Pdc:</span>
