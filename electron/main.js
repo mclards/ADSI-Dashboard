@@ -442,7 +442,7 @@ async function checkPortableUpdates() {
     mode: "portable",
     status: "checking",
     checking: true,
-    message: "Checking latest release from GitHub...",
+    message: "Checking for updates...",
     error: "",
   });
 
@@ -482,8 +482,8 @@ async function checkPortableUpdates() {
       canInstall: false,
       downloadPercent: 0,
       downloadUrl: "",
-      message: `Update check failed: ${err.message}`,
-      error: String(err.message || "Update check failed"),
+      message: "Update check failed. Please check your internet connection.",
+      error: "Update check failed",
     });
   }
 }
@@ -820,16 +820,13 @@ function getUpdateErrorMessage(err) {
   const has404 = lower.includes(" 404") || lower.includes("http 404") || lower.includes("status code 404");
   const feedBlocked = lower.includes("releases.atom") || lower.includes("latest.yml") || lower.includes("/releases/latest/download");
   if (has404 && feedBlocked) {
-    return [
-      "Update feed returned 404 (not publicly reachable).",
-      "Ensure this repo release feed is public and has latest.yml + setup artifacts.",
-      "If private, set ADSI_UPDATE_FEED_URL to a public generic feed URL.",
-    ].join(" ");
+    return "Update feed returned 404. Ensure the release channel is reachable and has published assets.";
   }
   if (has404) {
-    return "Update feed returned 404. Verify publish URL and release assets.";
+    return "Update feed returned 404. Verify release assets are published.";
   }
-  return raw;
+  /* Strip URLs / repo identifiers from raw error to avoid leaking internal paths */
+  return raw.replace(/https?:\/\/[^\s)]+/gi, "").replace(/\s{2,}/g, " ").trim() || "Update check failed";
 }
 
 function normalizeAppShutdownAction(action) {
