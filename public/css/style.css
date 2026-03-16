@@ -2470,51 +2470,45 @@ label[data-required]::after {
 }
 
 .node-power-indicator {
-  width: calc(6px * var(--inv-card-scale));
-  min-width: calc(6px * var(--inv-card-scale));
-  max-width: calc(6px * var(--inv-card-scale));
+  width: calc(7px * var(--inv-card-scale));
+  min-width: calc(7px * var(--inv-card-scale));
+  max-width: calc(7px * var(--inv-card-scale));
   height: calc(14px * var(--inv-card-scale));
   min-height: calc(14px * var(--inv-card-scale));
   max-height: calc(14px * var(--inv-card-scale));
   border-radius: calc(2px * var(--inv-card-scale));
-  border: 1px solid rgba(135, 164, 204, 0.45);
+  border: none;
   background: #2a3f5f;
-  transition: background 0.2s, border-color 0.2s;
-  box-shadow: 0 0 0 1px rgba(8, 16, 30, 0.45);
-  flex: 0 0 calc(6px * var(--inv-card-scale));
+  transition: background 0.2s;
+  box-shadow: none;
+  flex: 0 0 calc(7px * var(--inv-card-scale));
   box-sizing: border-box;
   align-self: center;
 }
 
 .node-power-indicator.node-ind-high {
-  background: var(--status-high);
-  border-color: var(--status-high);
+  background: #00e800;
 }
 
 .node-power-indicator.node-ind-mid {
-  background: var(--status-moderate);
-  border-color: var(--status-moderate);
+  background: #f0e000;
 }
 
 .node-power-indicator.node-ind-low {
-  background: var(--status-mild);
-  border-color: var(--status-mild);
+  background: #ff8c00;
 }
 
 .node-power-indicator.node-ind-off {
-  background: var(--status-critical);
-  border-color: var(--status-critical);
+  background: #ff1a1a;
 }
 
 .node-power-indicator.node-ind-alarm {
-  background: var(--status-critical);
-  border-color: var(--status-critical);
+  background: #ff1a1a;
   animation: alarmBlink 1s ease-in-out infinite;
 }
 
 .node-power-indicator.node-ind-isolated {
   background: var(--status-isolated);
-  border-color: var(--status-isolated);
 }
 
 /* ── PAC Legend (inverter toolbar) ─────────────────────────────────────────── */
@@ -2572,36 +2566,31 @@ label[data-required]::after {
   white-space: nowrap;
 }
 .pac-leg-ind {
-  width: calc(8px * var(--inv-toolbar-scale));
-  min-width: calc(8px * var(--inv-toolbar-scale));
+  width: calc(9px * var(--inv-toolbar-scale));
+  min-width: calc(9px * var(--inv-toolbar-scale));
   height: calc(16px * var(--inv-toolbar-scale));
   border-radius: calc(3px * var(--inv-toolbar-scale));
-  box-shadow: 0 0 0 1px rgba(5, 11, 21, 0.42);
+  box-shadow: none;
   flex-shrink: 0;
 }
 .pac-leg-high {
-  background: var(--legend-high);
-  border-color: var(--legend-high);
+  background: #00e800;
 }
 
 .pac-leg-moderate {
-  background: var(--legend-moderate);
-  border-color: var(--legend-moderate);
+  background: #f0e000;
 }
 
 .pac-leg-mild {
-  background: var(--legend-mild);
-  border-color: var(--legend-mild);
+  background: #ff8c00;
 }
 
 .pac-leg-low {
-  background: var(--legend-low);
-  border-color: var(--legend-low);
+  background: #ff1a1a;
 }
 
 .pac-leg-alarm {
-  background: var(--legend-alarm);
-  border-color: var(--legend-alarm);
+  background: #ff1a1a;
 }
 .pac-leg-blink {
   animation: alarmBlink 1s ease-in-out infinite;
