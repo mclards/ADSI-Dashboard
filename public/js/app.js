@@ -2510,8 +2510,9 @@ function summarizeLiveRows(rowsRaw = []) {
   const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
   const out = { pac: 0, pdc: 0, kwh: 0 };
   rows.forEach((d) => {
-    out.pac += Number(d?.pac || 0);
-    out.pdc += Number(d?.pdc || 0);
+    const pac = Number(d?.pac || 0);
+    out.pac += pac;
+    out.pdc += pac > 0 ? Number(d?.pdc || 0) : 0;
     out.kwh += Number(d?.kwh || 0);
   });
   return out;
@@ -2524,8 +2525,9 @@ function buildFreshLiveTotalsByInverter(now = Date.now()) {
     const isFresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
     if (!inv || !isFresh) return;
     if (!out[inv]) out[inv] = { pac: 0, pdc: 0, kwh: 0 };
-    out[inv].pac += Number(d?.pac || 0);
-    out[inv].pdc += Number(d?.pdc || 0);
+    const pac = Number(d?.pac || 0);
+    out[inv].pac += pac;
+    out[inv].pdc += pac > 0 ? Number(d?.pdc || 0) : 0;
     out[inv].kwh += Number(d?.kwh || 0);
   });
   return out;
@@ -6823,7 +6825,7 @@ function buildInverterCard(inv, nodeCount) {
       <div class="card-table-wrap">
         <table class="card-table">
           <thead>
-            <tr><th title="Node number within this inverter.">Node</th><th title="Active alarm state for this node.">Alarm</th><th title="DC power input in watts.">Pdc (W)</th><th title="AC power output in watts.">Pac (W)</th><th title="Time of the last successful data reading.">Last Seen</th><th title="Node-level start and stop control.">Ctrl</th></tr>
+            <tr><th title="Node number within this inverter.">Node</th><th title="Active alarm state for this node.">Alarm</th><th title="DC power input in watts.">Pdc (W)</th><th title="AC power output in watts.">Pac (W)</th><th title="Time of the last successful data reading.">Last Seen</th><th title="Node running status indicator.">Status</th></tr>
           </thead>
           <tbody id="tbody-${inv}">
             ${buildNodeRows(inv, nodeCount)}
@@ -6844,23 +6846,23 @@ function buildNodeRows(inv, nodeCount) {
     const btnClass = nodeConfigured
       ? `node-btn ${state ? "cmd-stop" : "cmd-start"}`
       : "node-btn node-disabled";
-    const btnText = nodeButtonText(state, !nodeConfigured);
     const btnTitle = nodeConfigured ? nodeButtonActionLabel(state) : "Isolated";
     const btnAria = `Node ${n} ${nodeConfigured ? nodeButtonActionLabel(state) : "Isolated"}`;
+    const statusClass = nodeConfigured
+      ? (state ? "node-status-on" : "node-status-off")
+      : "node-status-isolated";
     html += `
       <tr id="row-${inv}-${n}" class="${nodeConfigured ? "" : "row-node-disabled"}">
-        <td class="node-cell"><span class="node-cell-inner"><span class="node-power-indicator node-ind-off" id="nind-${inv}-${n}" aria-hidden="true"></span><span class="node-label">N${n}</span></span></td>
+        <td class="node-cell"><span class="node-cell-inner"><button class="node-power-indicator node-ind-off ${btnClass}" id="nbtn-${inv}-${n}"
+            data-inv="${inv}" data-node="${n}"
+            title="${btnTitle}" aria-label="${btnAria}"
+            ${nodeConfigured ? "" : "disabled"}>N${n}</button></span></td>
         <td><span class="cell-alarm no-alarm" id="alarm-${inv}-${n}">0000H</span></td>
         <td class="mono" id="pdc-${inv}-${n}">—</td>
         <td class="mono" id="rpac-${inv}-${n}">—</td>
         <td class="mono text-muted" id="rts-${inv}-${n}">—</td>
         <td class="ctrl-cell">
-          <button class="${btnClass}" id="nbtn-${inv}-${n}"
-            data-inv="${inv}"
-            data-node="${n}"
-            title="${btnTitle}"
-            aria-label="${btnAria}"
-            ${nodeConfigured ? "" : "disabled"}>${btnText}</button>
+          <span class="node-status-dot ${statusClass}" id="nind-${inv}-${n}"></span>
         </td>
       </tr>`;
   }
@@ -7051,7 +7053,6 @@ function updateInverterCards() {
       const rtsEl = $(`rts-${inv}-${n}`);
       const rowEl = $(`row-${inv}-${n}`);
       const nbtnEl = $(`nbtn-${inv}-${n}`);
-      const nindEl = $(`nind-${inv}-${n}`);
 
       if (!nodeConfigured) {
         if (alarmEl) {
@@ -7078,7 +7079,6 @@ function updateInverterCards() {
             "row-pac-alarm",
           );
         }
-        if (nindEl) nindEl.className = "node-power-indicator node-ind-isolated";
         if (nbtnEl) setNodeButtonVisual(nbtnEl, n, false, true);
         rowStateMap.set(n, "isolated");
         continue;
@@ -7131,19 +7131,22 @@ function updateInverterCards() {
           ? `cell-alarm sev-${alarmSev} alarm-live ${alarmAcked ? "acknowledged" : "unacked"}`
           : "cell-alarm no-alarm";
       }
-      if (pdcEl)
-        pdcEl.textContent = rowVisible && d.pdc != null ? fmtNum(d.pdc, 0) : "—";
+      if (pdcEl) {
+        const pacActive = rowVisible && Number(d?.pac || 0) > 0;
+        pdcEl.textContent = rowVisible ? (pacActive && d.pdc != null ? fmtNum(d.pdc, 0) : "0") : "—";
+      }
       if (rpacEl) {
         const pacVal = rowVisible && d.pac != null ? Number(d.pac) : 0;
         rpacEl.textContent = rowVisible && d.pac != null ? fmtNum(d.pac, 0) : "—";
         rpacEl.className = "mono";
-        if (nindEl) {
+        if (nbtnEl) {
           const pacIndicatorClass = getPacIndicatorClass(
             pacVal,
             hasActiveAlarm,
             rowVisible,
           );
-          nindEl.className = `node-power-indicator ${pacIndicatorClass}`;
+          const ctrlClass = nbtnEl.className.match(/cmd-\S+|node-disabled/)?.[0] || "";
+          nbtnEl.className = `node-power-indicator ${pacIndicatorClass} node-btn ${ctrlClass}`;
         }
       }
       if (rtsEl) rtsEl.textContent = rowVisible && d.ts ? fmtTime(d.ts) : "—";
@@ -7286,8 +7289,8 @@ function getPacIndicatorClass(pacW, hasAlarm, isFresh = true) {
 }
 
 function nodeButtonText(isOn, isIsolated = false) {
-  if (isIsolated) return "N/A";
-  return isOn ? "◼" : "▶";
+  if (isIsolated) return "—";
+  return isOn ? "■" : "▶";
 }
 
 function nodeButtonActionLabel(isOn, isIsolated = false) {
@@ -7297,18 +7300,24 @@ function nodeButtonActionLabel(isOn, isIsolated = false) {
 
 function setNodeButtonVisual(btnEl, node, isOn, isIsolated = false) {
   if (!btnEl) return;
-  const txt = nodeButtonText(isOn, isIsolated);
   const actionLabel = nodeButtonActionLabel(isOn, isIsolated);
+  const inv = btnEl.dataset.inv;
   btnEl.disabled = !!isIsolated;
+  // Keep node-power-indicator + PAC indicator class, add node-btn control class
+  const pacClass = btnEl.className.match(/node-ind-\S+/)?.[0] || "node-ind-off";
   btnEl.className = isIsolated
-    ? "node-btn node-disabled"
-    : `node-btn ${isOn ? "cmd-stop" : "cmd-start"}`;
-  btnEl.textContent = txt;
+    ? `node-power-indicator ${pacClass} node-btn node-disabled`
+    : `node-power-indicator ${pacClass} node-btn ${isOn ? "cmd-stop" : "cmd-start"}`;
   btnEl.title = isIsolated ? "Isolated" : actionLabel;
   btnEl.setAttribute(
     "aria-label",
     `Node ${node} ${isIsolated ? "Isolated" : actionLabel}`,
   );
+  // Update status dot in Ctrl column
+  const dotEl = $(`nind-${inv}-${node}`);
+  if (dotEl) {
+    dotEl.className = `node-status-dot ${isIsolated ? "node-status-isolated" : (isOn ? "node-status-on" : "node-status-off")}`;
+  }
 }
 
 // Bulk command auth is intentionally separate from IP Config/Topology auth.
