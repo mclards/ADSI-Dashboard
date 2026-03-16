@@ -271,6 +271,7 @@ const REMOTE_REPLICATION_PRESERVE_SETTING_KEYS = new Set([
   "tailscaleDeviceHint",
   "wireguardInterface",
   "csvSavePath",
+  "operatorName",
   "remoteReplicationCursors",
   "remoteReplicationLastTs",
   "remoteReplicationLastSignature",
@@ -285,6 +286,7 @@ const REMOTE_MAIN_DB_PRESERVE_SETTING_KEYS = new Set([
   "tailscaleDeviceHint",
   "wireguardInterface",
   "csvSavePath",
+  "operatorName",
   // Preserve the latest same-day gateway today-energy baseline so a staged
   // standby DB replacement can bridge current-day totals immediately after
   // restart, before the local poller catches up.

@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.6` in `package.json`
+- Current repo version baseline: `2.4.7` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -161,7 +161,7 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
 - Manual-pull preflight must finish before pausing the live stream or starting any main-DB or archive transfer. A blocked pull should fail fast and stay low-impact on the gateway.
 - If the operator explicitly chooses `Force Pull`, reuse the successful preflight when available and skip redundant gateway-summary round trips so standby refresh adds the minimum extra load to the gateway.
 - Use chunked push uploads to avoid HTTP `413`.
-- When replacing the main DB from the gateway, preserve only the explicit local-only remote settings on the client machine: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
+- When replacing the main DB from the gateway, preserve only the explicit local-only remote settings on the client machine: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, `csvSavePath`, and `operatorName`.
 - Never copy the live gateway `adsi.db` file directly. Flush pending in-memory telemetry first, then export a consistent SQLite snapshot from the running gateway DB and transfer that snapshot file instead.
 - Keep replication transport optimized by default:
   - reuse HTTP connections for gateway transfer requests

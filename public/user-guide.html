@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ADSI Inverter Dashboard — User Guide</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --card: #1c2128;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #d2a8ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --orange: #db6d28;
+    --red: #f85149;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --text3: #6e7681;
+    --link: #58a6ff;
+    --tbl-head: #21262d;
+    --tbl-alt: rgba(56,62,71,.35);
+    --section-bg: linear-gradient(135deg, #161b22 0%, #0e1117 100%);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Cover ── */
+  .cover {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: linear-gradient(160deg, #0d1117 0%, #161b22 40%, #1a1e2e 70%, #0d1117 100%);
+    padding: 60px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle at 30% 40%, rgba(88,166,255,.06) 0%, transparent 50%),
+                radial-gradient(circle at 70% 60%, rgba(210,168,255,.04) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .cover-badge {
+    display: inline-block;
+    padding: 6px 18px;
+    border-radius: 20px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 28px;
+    position: relative;
+  }
+  .cover h1 {
+    font-size: clamp(32px, 5vw, 56px);
+    font-weight: 800;
+    letter-spacing: -1px;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, #e6edf3, #58a6ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    position: relative;
+  }
+  .cover-sub {
+    font-size: 18px;
+    color: var(--text2);
+    max-width: 640px;
+    margin-bottom: 40px;
+    position: relative;
+  }
+  .cover-meta {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    justify-content: center;
+    color: var(--text3);
+    font-size: 13px;
+    position: relative;
+  }
+  .cover-meta span { display: flex; align-items: center; gap: 6px; }
+  .cover-meta b { color: var(--text2); }
+
+  /* ── Table of Contents ── */
+  .toc {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 60px 24px 40px;
+  }
+  .toc h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--accent);
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .toc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 8px;
+  }
+  .toc-grid a {
+    display: block;
+    padding: 10px 14px;
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+    transition: background .15s;
+  }
+  .toc-grid a:hover { background: var(--card); text-decoration: none; }
+  .toc-grid a .toc-num {
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 8px;
+    font-size: 13px;
+  }
+
+  /* ── Sections ── */
+  .content {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+  section {
+    margin-bottom: 56px;
+    scroll-margin-top: 24px;
+  }
+  .section-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: rgba(88,166,255,.12);
+    color: var(--accent);
+    font-weight: 800;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .section-head h2 {
+    font-size: 22px;
+    font-weight: 700;
+  }
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent2);
+    margin: 28px 0 12px;
+  }
+  h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 20px 0 8px;
+  }
+  p, ul, ol { margin-bottom: 14px; }
+  ul, ol { padding-left: 24px; }
+  li { margin-bottom: 6px; }
+  li::marker { color: var(--accent); }
+
+  /* ── Info cards ── */
+  .info-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 16px 0;
+  }
+  .info-card.warn {
+    border-color: var(--yellow);
+    background: rgba(210,153,34,.08);
+  }
+  .info-card.tip {
+    border-color: var(--green);
+    background: rgba(63,185,80,.06);
+  }
+  .info-card-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .info-card.warn .info-card-label { color: var(--yellow); }
+  .info-card.tip .info-card-label { color: var(--green); }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0 20px;
+    font-size: 13.5px;
+  }
+  thead th {
+    background: var(--tbl-head);
+    color: var(--text2);
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid rgba(48,54,61,.5);
+    vertical-align: top;
+  }
+  tbody tr:nth-child(even) { background: var(--tbl-alt); }
+  tbody tr:hover { background: rgba(88,166,255,.04); }
+  td code, th code {
+    background: rgba(88,166,255,.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+
+  /* ── Feature grid ── */
+  .feat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+    margin: 20px 0;
+  }
+  .feat-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .feat-item-icon {
+    font-size: 22px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .feat-item h4 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .feat-item p {
+    font-size: 13px;
+    color: var(--text2);
+    margin: 0;
+  }
+
+  /* ── Legend colors ── */
+  .legend-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 16px; }
+  .legend-chip {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 500;
+  }
+  .legend-dot {
+    width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
+  }
+
+  /* ── Shortcut keys ── */
+  kbd {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    box-shadow: inset 0 -1px 0 var(--border);
+    color: var(--text);
+  }
+
+  /* ── Step list ── */
+  .steps { counter-reset: step; list-style: none; padding-left: 0; }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 44px;
+    margin-bottom: 14px;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(88,166,255,.12);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ── ML highlight card ── */
+  .ml-highlight {
+    border-color: var(--accent);
+    background: rgba(88,166,255,.06);
+    border-left: 4px solid var(--accent);
+  }
+  .ml-highlight h4 {
+    color: var(--accent);
+    margin-top: 16px;
+  }
+  .ml-highlight p, .ml-highlight li {
+    font-size: 14px;
+    line-height: 1.65;
+  }
+
+  /* ── Workflow cards ── */
+  .wf-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin: 16px 0;
+  }
+  .wf-card h4 {
+    margin: 0 0 12px;
+    color: var(--accent);
+    font-size: 15px;
+  }
+
+  /* ── Back to top ── */
+  .back-top {
+    display: inline-block;
+    margin-top: 20px;
+    font-size: 12px;
+    color: var(--text3);
+  }
+
+  /* ── Footer ── */
+  .guide-footer {
+    text-align: center;
+    padding: 40px 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text3);
+    font-size: 13px;
+  }
+
+  /* ── Print ── */
+  @media print {
+    :root {
+      --bg: #ffffff; --surface: #f8f9fa; --card: #f4f5f6;
+      --border: #d0d5dd; --accent: #1a6ad4; --accent2: #6f42c1;
+      --text: #1a1a1a; --text2: #4a4a4a; --text3: #777;
+      --tbl-head: #eaecef; --tbl-alt: #f6f8fa;
+    }
+    body { background: #fff !important; color: #1a1a1a !important; font-size: 10.5pt; -webkit-print-color-adjust: exact; }
+
+    /* Cover */
+    .cover { min-height: auto; padding: 48px 24px; background: #fff !important; }
+    .cover::before { display: none; }
+    .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; color: #1a1a1a !important; font-size: 32pt; }
+    .cover-badge { border-color: #1a6ad4; color: #1a6ad4; background: #f0f7ff !important; }
+    .cover-sub { color: #444 !important; }
+    .cover-meta { color: #555 !important; }
+    .cover-meta b { color: #222 !important; }
+
+    /* Section heads */
+    .section-head { border-bottom-color: #d0d5dd !important; }
+    .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; }
+    .section-head h2 { color: #1a1a1a !important; }
+    h3 { color: #6f42c1 !important; }
+    h4 { color: #1a1a1a !important; }
+    p, li, ul, ol { color: #2a2a2a !important; }
+
+    /* Tables */
+    table { border: 1px solid #ccc !important; }
+    thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; }
+    tbody td { border: 1px solid #ddd !important; color: #2a2a2a !important; }
+    tbody tr:nth-child(even) { background: #f6f8fa !important; }
+    tbody tr:hover { background: transparent !important; }
+    td code, th code { background: #e8f0fe !important; color: #1a6ad4 !important; }
+
+    /* Cards */
+    .info-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+    .info-card.warn { background: #fef9e7 !important; border-color: #d29922 !important; }
+    .info-card.tip { background: #eafbf0 !important; border-color: #3fb950 !important; }
+    .info-card.warn .info-card-label { color: #8a6914 !important; }
+    .info-card.tip .info-card-label { color: #1a7f37 !important; }
+
+    .feat-item { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+    .feat-item h4 { color: #1a1a1a !important; }
+    .feat-item p { color: #4a4a4a !important; }
+
+    .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+    .wf-card h4 { color: #1a6ad4 !important; }
+
+    /* Legend */
+    .legend-chip { color: #2a2a2a !important; }
+
+    /* Steps */
+    .steps li::before { background: #e8f0fe !important; color: #1a6ad4 !important; }
+    .steps li { color: #2a2a2a !important; }
+
+    /* Keyboard */
+    kbd { background: #eee !important; border-color: #bbb !important; color: #1a1a1a !important; box-shadow: inset 0 -1px 0 #bbb !important; }
+
+    /* Links & misc */
+    a { color: #1a6ad4 !important; }
+    .back-top { display: none !important; }
+    .guide-footer { background: #fff !important; border-top: 1px solid #d0d5dd !important; color: #666 !important; }
+    .guide-footer b { color: #333 !important; }
+
+    /* ML highlight card */
+    .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; }
+    .ml-highlight h3 { color: #1a6ad4 !important; }
+
+    /* Page breaks */
+    section { page-break-inside: avoid; }
+    .cover { page-break-after: always; }
+    table { page-break-inside: auto; }
+    tr { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════ COVER ═══════ -->
+<div class="cover">
+  <div class="cover-badge">Official User Guide</div>
+  <h1>ADSI Inverter Dashboard</h1>
+  <p class="cover-sub">
+    Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
+  </p>
+  <div class="cover-meta">
+    <span><b>Version:</b> 2.4.6</span>
+    <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
+    <span><b>Date:</b> March 2026</span>
+  </div>
+</div>
+
+<!-- ═══════ TABLE OF CONTENTS ═══════ -->
+<nav class="toc" id="toc">
+  <h2>Table of Contents</h2>
+  <div class="toc-grid">
+    <a href="#s1"><span class="toc-num">1</span> Overview &amp; Purpose</a>
+    <a href="#s2"><span class="toc-num">2</span> System Requirements</a>
+    <a href="#s3"><span class="toc-num">3</span> Getting Started</a>
+    <a href="#s4"><span class="toc-num">4</span> Interface Layout</a>
+    <a href="#s5"><span class="toc-num">5</span> Inverters Page</a>
+    <a href="#s6"><span class="toc-num">6</span> Plant Output Capping</a>
+    <a href="#s7"><span class="toc-num">7</span> Analytics Page</a>
+    <a href="#s8"><span class="toc-num">8</span> Forecast Page</a>
+    <a href="#s9"><span class="toc-num">9</span> Alarms Page</a>
+    <a href="#s10"><span class="toc-num">10</span> Energy Page</a>
+    <a href="#s11"><span class="toc-num">11</span> Audit Page</a>
+    <a href="#s12"><span class="toc-num">12</span> Report Page</a>
+    <a href="#s13"><span class="toc-num">13</span> Export Page</a>
+    <a href="#s14"><span class="toc-num">14</span> Settings</a>
+    <a href="#s15"><span class="toc-num">15</span> Operating Modes</a>
+    <a href="#s16"><span class="toc-num">16</span> Operator Messaging</a>
+    <a href="#s17"><span class="toc-num">17</span> Cloud Backup &amp; Restore</a>
+    <a href="#s18"><span class="toc-num">18</span> Workflows</a>
+    <a href="#s19"><span class="toc-num">19</span> Keyboard Shortcuts</a>
+    <a href="#s20"><span class="toc-num">20</span> Troubleshooting</a>
+    <a href="#s21"><span class="toc-num">21</span> Quick Reference</a>
+  </div>
+</nav>
+
+<!-- ═══════ CONTENT ═══════ -->
+<div class="content">
+
+<!-- ──── 1. Overview ──── -->
+<section id="s1">
+  <div class="section-head">
+    <span class="section-num">1</span>
+    <h2>Overview &amp; Purpose</h2>
+  </div>
+  <p>ADSI Inverter Dashboard provides centralized operational visibility for a utility-scale solar inverter fleet. The application consolidates live status, interval energy, alarms, audit activity, and formal reporting in one workstation interface.</p>
+
+  <div class="feat-grid">
+    <div class="feat-item">
+      <span class="feat-item-icon">&#9889;</span>
+      <h4>Live Monitoring</h4>
+      <p>Real-time inverter and node-level status with supervised control actions.</p>
+    </div>
+    <div class="feat-item">
+      <span class="feat-item-icon">&#128200;</span>
+      <h4>Analytics &amp; Forecasting</h4>
+      <p>Daily analytics with interval charts and day-ahead forecast comparison.</p>
+    </div>
+    <div class="feat-item">
+      <span class="feat-item-icon">&#128276;</span>
+      <h4>Alarm Management</h4>
+      <p>Episode tracking with severity, duration, and acknowledgement state.</p>
+    </div>
+    <div class="feat-item">
+      <span class="feat-item-icon">&#128196;</span>
+      <h4>Reporting &amp; Export</h4>
+      <p>Daily performance reports and structured exports in Excel or CSV.</p>
+    </div>
+    <div class="feat-item">
+      <span class="feat-item-icon">&#127760;</span>
+      <h4>Remote Operations</h4>
+      <p>Gateway-linked remote viewing and write control from authorized workstations.</p>
+    </div>
+    <div class="feat-item">
+      <span class="feat-item-icon">&#9729;&#65039;</span>
+      <h4>Cloud Backup</h4>
+      <p>Scheduled cloud backup with OneDrive or Google Drive integration.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ──── 2. System Requirements ──── -->
+<section id="s2">
+  <div class="section-head">
+    <span class="section-num">2</span>
+    <h2>System Requirements</h2>
+  </div>
+  <table>
+    <thead><tr><th>Requirement</th><th>Details</th></tr></thead>
+    <tbody>
+      <tr><td>Operating System</td><td>Windows 10 / 11 (64-bit)</td></tr>
+      <tr><td>Display</td><td>1920 &times; 1080 minimum; scales up at 2200px+ and 3000px+</td></tr>
+      <tr><td>Administrator Rights</td><td>Required &mdash; the installed app requests elevation automatically</td></tr>
+      <tr><td>Network</td><td>LAN access to inverter fleet (Gateway mode) or secure network path to gateway (Remote mode)</td></tr>
+      <tr><td>Disk Space</td><td>Sufficient for database, archive, and export storage</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ──── 3. Getting Started ──── -->
+<section id="s3">
+  <div class="section-head">
+    <span class="section-num">3</span>
+    <h2>Getting Started</h2>
+  </div>
+
+  <h3>Installation</h3>
+  <ol class="steps">
+    <li>Run the installer (<code>Inverter-Dashboard-Setup-x.x.x.exe</code>).</li>
+    <li>Accept the Windows User Account Control prompt to allow administrator elevation.</li>
+    <li>Choose the installation directory (default is recommended).</li>
+    <li>Complete the wizard and launch the application.</li>
+  </ol>
+
+  <h3>First Sign-In</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Default Value</th></tr></thead>
+    <tbody>
+      <tr><td>Username</td><td><code>admin</code></td></tr>
+      <tr><td>Password</td><td><code>1234</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-card tip">
+    <div class="info-card-label">Tip</div>
+    Change your credentials after first login using the <b>Update Username and Password</b> link on the sign-in screen. You will need the Authorization Key.
+  </div>
+
+  <h3>Credential Management</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Update Username and Password</td><td>Change credentials using the Authorization Key</td></tr>
+      <tr><td>Recover with Authorization Key</td><td>Restore default credentials (<code>admin</code> / <code>1234</code>)</td></tr>
+      <tr><td>Remember credentials</td><td>Persists login on the workstation</td></tr>
+    </tbody>
+  </table>
+
+  <p>After successful sign-in, the application maximizes to full screen and begins service initialization.</p>
+</section>
+
+<!-- ──── 4. Interface Layout ──── -->
+<section id="s4">
+  <div class="section-head">
+    <span class="section-num">4</span>
+    <h2>Interface Layout</h2>
+  </div>
+
+  <h3>Header Bar</h3>
+  <p>The fixed header is the primary global status strip, always visible at the top.</p>
+  <table>
+    <thead><tr><th>Element</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Plant Logo / Title</td><td>Identifies the plant and dashboard instance</td></tr>
+      <tr><td><code>TOTAL POWER OUTPUT (Pac)</code></td><td>Combined AC power from all online inverters in real time (kW)</td></tr>
+      <tr><td><code>TOTAL ENERGY GENERATED</code></td><td>Today&rsquo;s cumulative plant energy (MWh)</td></tr>
+      <tr><td>Clock &amp; Date</td><td>Local workstation time, updates every second</td></tr>
+      <tr><td>Theme Toggle</td><td>Switch between <b>Dark</b>, <b>Light</b>, and <b>Classic</b> themes</td></tr>
+      <tr><td>Alarm Sound</td><td>Mute or unmute alarm audio notifications</td></tr>
+      <tr><td>Connection Indicator</td><td>Green dot when live data is streaming; red when disconnected</td></tr>
+      <tr><td>Menu Button</td><td>Toggle the side navigation panel</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Side Navigation</h3>
+  <p>The navigation panel provides access to all main pages:</p>
+  <table>
+    <thead><tr><th>Page</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><b>Inverters</b></td><td>Live inverter status, node-level control, and real-time output monitoring</td></tr>
+      <tr><td><b>Analytics</b></td><td>Daily energy analytics with interval charts and day-ahead forecast comparison</td></tr>
+      <tr><td><b>Forecast</b></td><td>Dedicated forecast workspace for day-ahead generation and Solcast provider management</td></tr>
+      <tr><td><b>Alarms</b></td><td>Alarm episode history with severity, duration, and acknowledgement tracking</td></tr>
+      <tr><td><b>Energy</b></td><td>5-minute interval energy records by inverter for the selected date</td></tr>
+      <tr><td><b>Audit</b></td><td>Operator command history with timestamps, scope, and results</td></tr>
+      <tr><td><b>Report</b></td><td>Daily performance report with energy, output, availability, and alarm counts per inverter</td></tr>
+      <tr><td><b>Export</b></td><td>Export operational data, alarms, reports, and forecasts to Excel or CSV</td></tr>
+      <tr><td><b>Settings</b></td><td>Plant configuration, connectivity, license, updates, and cloud backup management</td></tr>
+    </tbody>
+  </table>
+
+  <h3>About Section</h3>
+  <p>The bottom of the sidebar shows application and license information including installed version, license state, update state, and data directory. The <b>Open User Guide</b> button launches this guide.</p>
+
+  <h3>Visual Themes</h3>
+  <p>Three themes are available. Theme selection persists between restarts.</p>
+  <table>
+    <thead><tr><th>Theme</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><b>Dark</b></td><td>Default theme with dark backgrounds and high-contrast text</td></tr>
+      <tr><td><b>Light</b></td><td>Light backgrounds for well-lit environments</td></tr>
+      <tr><td><b>Classic</b></td><td>Alternative dark palette with warmer tones</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ──── 5. Inverters Page ──── -->
+<section id="s5">
+  <div class="section-head">
+    <span class="section-num">5</span>
+    <h2>Inverters Page</h2>
+  </div>
+  <p>The Inverters page is the primary live operations page for monitoring the full inverter fleet, reviewing node-level status, and sending control commands.</p>
+
+  <h3>Toolbar Controls</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter Filter</td><td>Show all inverters, or filter by Online, Offline, or Alarmed status</td></tr>
+      <tr><td>Layout</td><td>Change the grid column layout (Auto, 2–7 columns)</td></tr>
+      <tr><td>Show Cap / Hide Cap</td><td>Toggle the plant output cap panel</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Fleet Status Chips</h3>
+  <p>Quick counts displayed on the toolbar:</p>
+  <table>
+    <thead><tr><th>Chip</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><b>Inverters</b></td><td>Active / Total inverter count</td></tr>
+      <tr><td><b>Nodes</b></td><td>Active / Total node count</td></tr>
+      <tr><td><b>Online</b></td><td>Inverters currently producing power</td></tr>
+      <tr><td><b>Alarmed</b></td><td>Inverters with active unacknowledged alarms</td></tr>
+      <tr><td><b>Offline</b></td><td>Inverters not responding</td></tr>
+    </tbody>
+  </table>
+
+  <h3>PAC Output Band Legend</h3>
+  <p>Node output level indicators based on percentage of rated node capacity:</p>
+  <div class="legend-row">
+    <span class="legend-chip"><span class="legend-dot" style="background:#00cf00"></span> &ge;90% High</span>
+    <span class="legend-chip"><span class="legend-dot" style="background:#e8e800"></span> &gt;70% Moderate</span>
+    <span class="legend-chip"><span class="legend-dot" style="background:#ffa500"></span> &gt;40% Mild</span>
+    <span class="legend-chip"><span class="legend-dot" style="background:#ff0000"></span> &le;40% Low</span>
+    <span class="legend-chip"><span class="legend-dot" style="background:#ff0000; animation: blink 1s infinite"></span> Alarm</span>
+  </div>
+  <style>@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }</style>
+
+  <h3>Inverter Card Contents</h3>
+  <p>Each inverter card displays:</p>
+  <ul>
+    <li><b>INVERTER XX</b> &mdash; title with current state badge</li>
+    <li><b>Start / Stop buttons</b> &mdash; inverter-wide control (icon-only in 7-column layout)</li>
+    <li><b>Pdc / Pac summary</b> &mdash; combined DC and AC power</li>
+    <li><b>Node table</b> &mdash; per-node Alarm, Pdc, Pac, Last Seen, and Control columns</li>
+  </ul>
+
+  <h3>Inverter Detail Panel</h3>
+  <p>Clicking any inverter card opens a detail panel showing:</p>
+  <ul>
+    <li>Live inverter statistics (Today Energy, Peak Pac, Avg Pac, Uptime)</li>
+    <li>Today&rsquo;s alarm activity</li>
+    <li>Last 7 days performance summary</li>
+  </ul>
+
+  <h3>Node Controls</h3>
+  <table>
+    <thead><tr><th>Action Type</th><th>Scope</th><th>Authorization</th></tr></thead>
+    <tbody>
+      <tr><td>Node button</td><td>Single node</td><td>None (confirmation only)</td></tr>
+      <tr><td>Card Start / Stop</td><td>Entire inverter (all nodes)</td><td>None (confirmation only)</td></tr>
+      <tr><td>Bulk START / STOP SELECTED</td><td>Selected inverter set</td><td>Authorization key required</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Bulk Inverter Commands</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter Numbers / Ranges</td><td>Enter values like <code>1-13, 16, 18, 23-27</code></td></tr>
+      <tr><td>All Inverters</td><td>Auto-fills the full valid inverter range</td></tr>
+      <tr><td>Clear</td><td>Clears the current selection</td></tr>
+      <tr><td>START SELECTED</td><td>Starts configured nodes in selected inverters</td></tr>
+      <tr><td>STOP SELECTED</td><td>Stops configured nodes in selected inverters</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-card warn">
+    <div class="info-card-label">Important</div>
+    Bulk control actions (<b>START SELECTED</b> / <b>STOP SELECTED</b>) require a separate authorization key from authorized personnel. Isolated inverters are skipped automatically.
+  </div>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 6. Plant Output Capping ──── -->
+<section id="s6">
+  <div class="section-head">
+    <span class="section-num">6</span>
+    <h2>Plant Output Auto Capping</h2>
+  </div>
+  <p>Automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters. Operators set upper and lower limits, exempt specific units, and preview the control plan before activation.</p>
+
+  <h3>Cap Configuration</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Upper Limit (MW)</td><td>Upper plant MW threshold that triggers automatic stop decisions</td></tr>
+      <tr><td>Lower Limit (MW)</td><td>Lower threshold for restarting controller-owned inverters</td></tr>
+      <tr><td>Sequence</td><td>Inverter selection mode: Ascending, Descending, or Exemption</td></tr>
+      <tr><td>Exempted Inverter Numbers</td><td>Comma-separated inverter numbers excluded from automatic stop selection</td></tr>
+      <tr><td>Cooldown (s)</td><td>Settling time between each automatic action (default: 30)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Cap Actions</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Preview Plan</td><td>Simulates next stop or restart decision using live plant state</td></tr>
+      <tr><td>Enable Cap</td><td>Enables gateway-side plant output capping (requires authorization)</td></tr>
+      <tr><td>Disable Monitoring</td><td>Stops automation without restarting controller-owned inverters</td></tr>
+      <tr><td>Release Controlled Inverters</td><td>Restarts controller-owned inverters sequentially and ends the session</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Cap Status Panel</h3>
+  <p>The panel reports current plant MW, configured MW band, controller mode and status, reason text, controlled inverter count, last automatic action, planner warnings, and the next-step preview table.</p>
+
+  <div class="info-card warn">
+    <div class="info-card-label">Important</div>
+    <ul style="margin:0">
+      <li>Current builds use whole-inverter sequential control only</li>
+      <li>Very narrow MW bands may not settle cleanly with whole-inverter steps</li>
+      <li>The controller only restarts inverters it previously stopped &mdash; manually stopped inverters are not affected</li>
+      <li>In Remote mode, cap actions are proxied to the gateway workstation</li>
+    </ul>
+  </div>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 7. Analytics Page ──── -->
+<section id="s7">
+  <div class="section-head">
+    <span class="section-num">7</span>
+    <h2>Analytics Page</h2>
+  </div>
+  <p>Interval-based review of production with day-ahead forecast comparison.</p>
+
+  <h3>Controls</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Date</td><td>Select the day to analyze</td></tr>
+      <tr><td>Interval</td><td>Chart grouping: 5 min, 15 min, 30 min, or 1 hour</td></tr>
+      <tr><td>Load View</td><td>Loads analytics for the selected date and interval</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Summary Metrics</h3>
+  <table>
+    <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Interval</td><td>Selected time bucket size</td></tr>
+      <tr><td>Total Energy</td><td>Plant total for the day (MWh)</td></tr>
+      <tr><td>Peak Plant Output</td><td>Highest combined AC power (kW)</td></tr>
+      <tr><td>Reporting Inverters</td><td>Count of inverters with data</td></tr>
+      <tr><td>Latest Interval</td><td>Timestamp of last recorded interval</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Selected Date Summary</h3>
+  <table>
+    <thead><tr><th>Item</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Actual MWh</td><td>Authoritative total daily energy (live for today&rsquo;s date)</td></tr>
+      <tr><td>Day-ahead MWh</td><td>Forecasted total daily energy</td></tr>
+      <tr><td>Variance MWh</td><td>Difference between actual and forecast</td></tr>
+      <tr><td>Peak Interval</td><td>Highest interval energy with timestamp</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Day-Ahead Generator</h3>
+  <p>Available on the gateway workstation only. Includes Days input, Format selector (Standard or Average Table), Generate button, and Export button.</p>
+
+  <h3>7-Day Weather Outlook</h3>
+  <p>Daily weather context: sky condition, temperature range, rainfall, cloud percentage, wind speed, and solar irradiance. Serves stale cached data when the weather API is unavailable.</p>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 8. Forecast Page ──── -->
+<section id="s8">
+  <div class="section-head">
+    <span class="section-num">8</span>
+    <h2>Forecast Page</h2>
+  </div>
+  <p>Dedicated workspace for forecast configuration, Solcast validation, toolkit preview, and export.</p>
+
+  <h3>Forecast Source Options</h3>
+  <table>
+    <thead><tr><th>Source</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Local ML (Current)</td><td>Standard local ML-trained forecasting source</td></tr>
+      <tr><td>Solcast</td><td>External forecast source for validation or alternate use</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Solcast Access Modes</h3>
+  <table>
+    <thead><tr><th>Mode</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Toolkit Login</td><td>Reads the Solcast toolkit chart feed using account sign-in</td></tr>
+      <tr><td>API Key</td><td>Uses formal Solcast API credentials and resource ID</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Solcast Toolkit Settings</h3>
+  <p>Instead of entering a full URL, operators configure structured fields. The application constructs the Solcast toolkit URL internally.</p>
+  <table>
+    <thead><tr><th>Field</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Plant Resource ID</td><td>Your plant&rsquo;s unique Solcast site identifier</td></tr>
+      <tr><td>Forecast Days</td><td>Number of days to forecast (1&ndash;7, default: 2)</td></tr>
+      <tr><td>Resolution</td><td>Forecast interval: PT5M, PT10M, PT15M, PT30M, PT60M (default: PT5M)</td></tr>
+      <tr><td>Toolkit Email</td><td>Solcast toolkit account email</td></tr>
+      <tr><td>Toolkit Password</td><td>Solcast toolkit account password</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Toolkit Preview</h3>
+  <table>
+    <thead><tr><th>Control / Metric</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Start Day</td><td>First day shown in preview</td></tr>
+      <tr><td>Days to Display</td><td>Number of days included</td></tr>
+      <tr><td>Chart Unit</td><td>View values as MWh or MW</td></tr>
+      <tr><td>Export Resolution</td><td>Preview export interval</td></tr>
+      <tr><td>Export Format</td><td>Standard or Average Table</td></tr>
+      <tr><td>Forecast Total</td><td>Total forecasted energy in selected window</td></tr>
+      <tr><td>Estimated Actual</td><td>Estimated actual value for comparison</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Forecast Actions</h3>
+  <table>
+    <thead><tr><th>Button</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Save and Test Solcast</td><td>Saves active values, then tests the chosen Solcast mode</td></tr>
+      <tr><td>Refresh Preview</td><td>Reloads toolkit preview using current form values</td></tr>
+      <tr><td>Export XLSX</td><td>Exports the current preview</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-card tip">
+    <div class="info-card-label">Note</div>
+    Day-ahead forecast generation is only available on the Gateway workstation. In Remote mode, run generation from the gateway.
+  </div>
+
+  <div class="info-card ml-highlight">
+    <div class="info-card-label" style="color:var(--accent)">Day-Ahead Generator &mdash; ML Training Engine</div>
+    <p>The day-ahead forecast is produced by a <b>trained machine-learning model</b> that learns your plant&rsquo;s unique generation profile from historical operating data. The engine runs on the gateway workstation and builds a production forecast for the next day based on weather inputs and observed performance patterns.</p>
+
+    <h4>How Training Works</h4>
+    <ul>
+      <li>The engine collects historical irradiance, weather, and production data to build a training dataset.</li>
+      <li>Training samples are filtered by an <b>operational constraint mask</b> to exclude periods where the plant was not operating normally (manual stops, faults, or partial shutdowns).</li>
+      <li>A hardened data collector rejects outliers, flat-line artifacts, and low-confidence samples to improve model quality.</li>
+      <li>The trained model produces a full-day energy forecast at configurable intervals (5 min to 1 hour).</li>
+    </ul>
+
+    <h4>Plant Cap Awareness</h4>
+    <p>When the <b>Plant Output Cap</b> controller stops inverters to limit plant output, the ML engine treats these periods differently from manual stops or faults:</p>
+    <ul>
+      <li><b>Cap-dispatched stops</b> (logged with scope <code>plant-cap</code> in the audit log) are identified separately from manual operator stops.</li>
+      <li>During cap-only periods (no concurrent manual stop or fault), the engine <b>reconstructs</b> what the plant would have produced at full capacity using a physics/hybrid baseline.</li>
+      <li>This preserves high-irradiance training samples that would otherwise be lost &mdash; the model sees the reconstructed output instead of the artificially capped value.</li>
+      <li>Only manually constrained slots are excluded from training. Cap-reconstructed slots contribute normally with near-zero residual.</li>
+    </ul>
+
+    <h4>Intraday Adjustment</h4>
+    <ul>
+      <li>Throughout the day, the engine compares observed actual output against the day-ahead forecast to compute an adjustment ratio.</li>
+      <li><b>Cap-depressed observations are excluded</b> from this ratio so that curtailed output does not propagate as an under-forecast bias into remaining slots.</li>
+      <li>If too few uncapped observations are available, the engine falls back to the full observation set.</li>
+    </ul>
+
+    <h4>Error Memory</h4>
+    <ul>
+      <li>A rolling error correction system tracks forecast accuracy over recent days.</li>
+      <li>All operationally constrained slots (including cap dispatch) are excluded from error correction to prevent false negative bias from curtailed actuals.</li>
+    </ul>
+
+    <h4>Operational Impact</h4>
+    <table>
+      <thead><tr><th>Scenario</th><th>Effect on Forecast Training</th></tr></thead>
+      <tbody>
+        <tr><td>Normal operation (all inverters running)</td><td>All data used directly for training</td></tr>
+        <tr><td>Manual inverter stop or fault</td><td>Affected slots excluded from training</td></tr>
+        <tr><td>Plant cap controller stops inverters</td><td>Output reconstructed to full-capacity baseline; training preserved</td></tr>
+        <tr><td>Mixed (cap + manual stop together)</td><td>Slot excluded from training (treated as manually constrained)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="info-card warn" style="margin-top:12px">
+      <div class="info-card-label">Important</div>
+      The forecast engine depends on the <code>plant-cap</code> scope tag in the audit log to distinguish automated cap stops from manual stops. Do not modify or clear audit log records without understanding this dependency.
+    </div>
+  </div>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 9. Alarms Page ──── -->
+<section id="s9">
+  <div class="section-head">
+    <span class="section-num">9</span>
+    <h2>Alarms Page</h2>
+  </div>
+  <p>Formal alarm review and acknowledgement workspace.</p>
+
+  <h3>Controls</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter</td><td>Filter by specific inverter or all</td></tr>
+      <tr><td>Date</td><td>Select review date</td></tr>
+      <tr><td>Load Records</td><td>Query alarms for the selected scope</td></tr>
+      <tr><td>Min Duration</td><td>Filter out alarms shorter than N seconds</td></tr>
+      <tr><td>Acknowledge All</td><td>Acknowledge all active alarms in scope</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Alarm Table Columns</h3>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Alarm Time</td><td>Timestamp when alarm was first raised</td></tr>
+      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
+      <tr><td>Node</td><td>Node number within inverter</td></tr>
+      <tr><td>Alarm Code</td><td>Hexadecimal alarm code from inverter register</td></tr>
+      <tr><td>Severity</td><td>Classification: Critical, Warning, Info</td></tr>
+      <tr><td>Description</td><td>Human-readable alarm description</td></tr>
+      <tr><td>Cleared</td><td>Time the alarm resolved (or &mdash; if still active)</td></tr>
+      <tr><td>Duration</td><td>Active or total duration</td></tr>
+      <tr><td>Status</td><td>Active or Cleared</td></tr>
+      <tr><td>Ack.</td><td>Acknowledged or unacknowledged</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Alarm Sound Behavior</h3>
+  <ul>
+    <li>Sound triggers only for unacknowledged active alarms lasting at least <b>5 seconds</b></li>
+    <li>Very short alarm blips are ignored to prevent false noise</li>
+    <li>If a node already has an active alarm and the alarm value changes, the same episode continues &mdash; no new sound is triggered</li>
+    <li>Use the header mute button to silence alarms without disabling detection</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 10. Energy Page ──── -->
+<section id="s10">
+  <div class="section-head">
+    <span class="section-num">10</span>
+    <h2>Energy Page</h2>
+  </div>
+  <p>5-minute interval energy records by inverter for detailed production verification.</p>
+
+  <h3>KPI Summary Tiles</h3>
+  <table>
+    <thead><tr><th>Tile</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Date Total</td><td>Total MWh for selected date across all inverters</td></tr>
+      <tr><td>Average per Interval</td><td>Mean MWh per 5-minute bucket</td></tr>
+      <tr><td>Peak Interval</td><td>Highest single interval value with timestamp</td></tr>
+      <tr><td>Reporting Inverters</td><td>Count of unique inverters with data</td></tr>
+      <tr><td>Latest Interval End</td><td>End time of the most recent recorded interval</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Energy Table Columns</h3>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Date</td><td>Calendar date of interval</td></tr>
+      <tr><td>Interval End</td><td>Timestamp when 5-min bucket closed</td></tr>
+      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
+      <tr><td>Interval Energy (MWh)</td><td>Energy produced during that interval</td></tr>
+    </tbody>
+  </table>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 11. Audit Page ──── -->
+<section id="s11">
+  <div class="section-head">
+    <span class="section-num">11</span>
+    <h2>Audit Page</h2>
+  </div>
+  <p>Operator command accountability and traceability records.</p>
+
+  <h3>Audit Table Columns</h3>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Date/Time</td><td>Command timestamp</td></tr>
+      <tr><td>Operator</td><td>Operator name recorded at execution</td></tr>
+      <tr><td>Inverter</td><td>Affected inverter</td></tr>
+      <tr><td>Node</td><td>Affected node or aggregated scope</td></tr>
+      <tr><td>Action</td><td>START, STOP, etc.</td></tr>
+      <tr><td>Scope</td><td>single, inverter, selected, or plant-cap</td></tr>
+      <tr><td>Result</td><td>OK or ERROR</td></tr>
+      <tr><td>IP</td><td>Source workstation address</td></tr>
+    </tbody>
+  </table>
+  <p>All columns support sorting. An inline filter row enables targeted review by operator, action, scope, result, or IP address.</p>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 12. Report Page ──── -->
+<section id="s12">
+  <div class="section-head">
+    <span class="section-num">12</span>
+    <h2>Report Page</h2>
+  </div>
+  <p>Daily inverter-by-inverter performance summary for formal reporting and management handoff.</p>
+
+  <h3>Report Table Columns</h3>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
+      <tr><td>Energy (MWh)</td><td>Daily energy total</td></tr>
+      <tr><td>Peak Pac (kW)</td><td>Highest AC output for the day</td></tr>
+      <tr><td>Avg Pac (kW)</td><td>Average AC output during the window</td></tr>
+      <tr><td>Uptime (h)</td><td>Operating hours</td></tr>
+      <tr><td>Alarms</td><td>Alarm episode count</td></tr>
+      <tr><td>Availability (%)</td><td>Uptime as percentage of operating window (5:00 AM &ndash; 6:00 PM)</td></tr>
+      <tr><td>Performance (%)</td><td>Ratio of actual to expected output</td></tr>
+    </tbody>
+  </table>
+  <p>A <b>TOTAL</b> row summarizes plant-wide totals. Reports can be exported in Excel or CSV format.</p>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 13. Export Page ──── -->
+<section id="s13">
+  <div class="section-head">
+    <span class="section-num">13</span>
+    <h2>Export Page</h2>
+  </div>
+  <p>Dedicated export workspace with six structured export packages.</p>
+
+  <div class="feat-grid">
+    <div class="feat-item">
+      <h4>Alarm History Export</h4>
+      <p>Alarm records for selected date including code, severity, duration, and acknowledgement state.</p>
+    </div>
+    <div class="feat-item">
+      <h4>Energy Summary Export</h4>
+      <p>Daily operational energy summaries by inverter and reporting node with calculated totals.</p>
+    </div>
+    <div class="feat-item">
+      <h4>Day-Ahead Forecast Export</h4>
+      <p>Forecast-versus-actual comparison. Source: Analytics (ML) or Solcast. Format: Standard or Average Table.</p>
+    </div>
+    <div class="feat-item">
+      <h4>Operational Data Export</h4>
+      <p>Interval-sampled inverter operating data for analysis and troubleshooting.</p>
+    </div>
+    <div class="feat-item">
+      <h4>Operator Audit Export</h4>
+      <p>Operator command history with timestamp, scope, result, and affected equipment.</p>
+    </div>
+    <div class="feat-item">
+      <h4>Daily Performance Report</h4>
+      <p>Multi-day inverter performance summary with energy, availability, and alarm counts.</p>
+    </div>
+  </div>
+
+  <h3>Common Export Behavior</h3>
+  <ul>
+    <li>Exports are written to the configured export folder</li>
+    <li>Format options: Excel (.xlsx) and CSV</li>
+    <li>XLSX exports include fitted column widths, colored headers, bordered cells, and highlighted total rows</li>
+    <li>Cancel button is available during active exports</li>
+    <li>Result text shows filename, file size, and completion timestamp</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 14. Settings ──── -->
+<section id="s14">
+  <div class="section-head">
+    <span class="section-num">14</span>
+    <h2>Settings</h2>
+  </div>
+  <p>The administrative center organized as section-based configuration.</p>
+
+  <h3>Global Actions</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Save Settings</td><td>Saves the active configuration</td></tr>
+      <tr><td>Export Settings</td><td>Downloads a configuration file (JSON)</td></tr>
+      <tr><td>Import Settings</td><td>Loads a saved configuration file</td></tr>
+      <tr><td>Export Folder&hellip;</td><td>Select the export destination path</td></tr>
+      <tr><td>Open Folder</td><td>Opens the current export path in Explorer</td></tr>
+      <tr><td>IP Configuration</td><td>Opens the network configuration window</td></tr>
+      <tr><td>Restore Defaults</td><td>Resets settings with confirmation</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Plant Configuration</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Default</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Plant Name</td><td>ADSI Plant</td><td>Display and document naming</td></tr>
+      <tr><td>Operator Name</td><td>OPERATOR</td><td>Recorded operator identity in audit entries</td></tr>
+      <tr><td>Inverter Count</td><td>27</td><td>Total inverters configured</td></tr>
+      <tr><td>Nodes/Inverter</td><td>4</td><td>Reporting nodes per inverter</td></tr>
+      <tr><td>Plant Latitude</td><td>&mdash;</td><td>Geographic latitude for weather context</td></tr>
+      <tr><td>Plant Longitude</td><td>&mdash;</td><td>Geographic longitude for weather context</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Data &amp; Polling</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Data API URL</td><td>Read-side service endpoint</td></tr>
+      <tr><td>Write API URL</td><td>Command/write service endpoint</td></tr>
+      <tr><td>Export Folder</td><td>Destination for generated files</td></tr>
+      <tr><td>Retention Window (days)</td><td>Days kept in main database before archival</td></tr>
+      <tr><td>Modbus Timeout (s)</td><td>Max wait time for read response</td></tr>
+      <tr><td>Reconnect Delay (s)</td><td>Delay before read retry after reconnect</td></tr>
+      <tr><td>Read Spacing (s)</td><td>Pause between register groups</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Plant Output Cap Defaults</h3>
+  <p>These settings define the default values loaded into the live Plant Output Cap panel.</p>
+  <table>
+    <thead><tr><th>Field</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Upper Limit (MW)</td><td>Default upper plant MW cap threshold</td></tr>
+      <tr><td>Lower Limit (MW)</td><td>Default lower plant MW threshold</td></tr>
+      <tr><td>Sequence</td><td>Default inverter selection mode</td></tr>
+      <tr><td>Exempted Inverter Numbers</td><td>Default comma-separated exclusion list</td></tr>
+      <tr><td>Cooldown (s)</td><td>Default settling delay after each controller action</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Connectivity &amp; Sync</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>Operation Mode</td><td>Gateway or Remote</td></tr>
+      <tr><td>Remote Gateway URL</td><td>URL of the gateway workstation</td></tr>
+      <tr><td>Remote API Token</td><td>Shared API token for remote access</td></tr>
+      <tr><td>Tailscale Device Hint</td><td>Optional identifier for secure-network status</td></tr>
+    </tbody>
+  </table>
+  <p>Connectivity actions include: Test Remote Gateway, Check Tailscale, Refresh, and Refresh Standby DB.</p>
+
+  <h3>Runtime Health</h3>
+  <p>Displays real-time application health: CPU, memory, uptime, polling cycles, fetch errors, rows persisted, and connected clients.</p>
+
+  <h3>License</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Status</td><td>Current license state</td></tr>
+      <tr><td>Source</td><td>Where the license was loaded from</td></tr>
+      <tr><td>Expiry</td><td>License expiry date</td></tr>
+      <tr><td>Remaining Days</td><td>Days remaining on current term</td></tr>
+      <tr><td>Upload Replacement</td><td>Apply a new license file</td></tr>
+      <tr><td>Refresh License</td><td>Reload license state</td></tr>
+    </tbody>
+  </table>
+
+  <h3>App Updates</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Check for Updates</td><td>Query the update channel for newer builds</td></tr>
+      <tr><td>Download Update</td><td>Download the update package when available</td></tr>
+      <tr><td>Restart &amp; Install</td><td>Orderly shutdown then installer handoff</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-card warn">
+    <div class="info-card-label">Important</div>
+    Do not power off the workstation or relaunch the app manually while the restart/install handoff is in progress. After restart, wait for the first local poll cycle before relying on fresh data.
+  </div>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 15. Operating Modes ──── -->
+<section id="s15">
+  <div class="section-head">
+    <span class="section-num">15</span>
+    <h2>Operating Modes</h2>
+  </div>
+
+  <table>
+    <thead><tr><th>Mode</th><th>Purpose</th><th>Main Behavior</th></tr></thead>
+    <tbody>
+      <tr><td><b>Gateway</b></td><td>Local plant-connected workstation</td><td>Polls and persists plant data locally; authoritative source of truth</td></tr>
+      <tr><td><b>Remote</b></td><td>Gateway-linked viewer workstation</td><td>Streams live data from gateway; proxies historical access; no local persistence</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Gateway Mode</h3>
+  <ul>
+    <li>Polls the plant directly and persists data locally</li>
+    <li>Is the authoritative source of truth for live data, reports, forecasts, and replication</li>
+    <li>Is the only mode that can generate day-ahead and intraday-adjusted forecasts</li>
+  </ul>
+
+  <h3>Remote Mode</h3>
+  <ul>
+    <li>Displays live gateway data in-memory only &mdash; no local DB persistence from the live stream</li>
+    <li>Historical views, reports, analytics, and exports are served from the gateway via proxy</li>
+    <li>Inverter on/off write control stays enabled via gateway proxy</li>
+    <li>Forecast generation is disabled</li>
+    <li>When gateway is unavailable, historical pages show &ldquo;Gateway unavailable&rdquo;</li>
+  </ul>
+
+  <h3>Standby Database Refresh</h3>
+  <p>The <b>Refresh Standby DB</b> action downloads the gateway main database for local standby use. The staged database is not activated until a restart.</p>
+
+  <div class="info-card tip">
+    <div class="info-card-label">Best Practice</div>
+    Use <b>Refresh Standby DB</b> before switching a remote workstation back to Gateway mode to ensure fresh local history is available.
+  </div>
+
+  <h3>Gateway Link Health States</h3>
+  <table>
+    <thead><tr><th>State</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Connected</td><td>Live data streaming normally</td></tr>
+      <tr><td>Degraded</td><td>Data arriving with elevated latency</td></tr>
+      <tr><td>Stale</td><td>Last snapshot shown while fresh data is temporarily unavailable</td></tr>
+      <tr><td>Disconnected</td><td>No active connection to the gateway</td></tr>
+      <tr><td>Auth Error</td><td>API token mismatch or expired</td></tr>
+      <tr><td>Config Error</td><td>Gateway URL or configuration is invalid</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Connectivity Options</h3>
+  <p>Remote-to-gateway connectivity can use any of these methods:</p>
+  <ul>
+    <li><b>Tailscale</b> &mdash; Zero-config mesh VPN; recommended for simplicity and security</li>
+    <li><b>Traditional VPN</b> &mdash; Site-to-site or client VPN (OpenVPN, WireGuard, IPsec)</li>
+    <li><b>Port Forwarding</b> &mdash; Direct port exposure through the router/firewall (requires HTTPS and strong tokens)</li>
+    <li><b>Cloud Relay / Tunnel</b> &mdash; Services like Cloudflare Tunnel or ngrok for NAT traversal</li>
+    <li><b>LAN / Same-Network</b> &mdash; Direct IP access when both machines share a network</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 16. Operator Messaging ──── -->
+<section id="s16">
+  <div class="section-head">
+    <span class="section-num">16</span>
+    <h2>Operator Messaging</h2>
+  </div>
+  <p>A compact gateway-to-remote note channel for operational communication between workstations.</p>
+  <ul>
+    <li>Access via the floating message bubble in the bottom corner</li>
+    <li>Messages are stored on the gateway and synced to remote workstations</li>
+    <li>Audio notification for new inbound messages (silent for self-sent echoes)</li>
+    <li>Clear thread action with confirmation and gateway sync</li>
+    <li>Rate limited: 10 messages per 60 seconds per machine</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 17. Cloud Backup ──── -->
+<section id="s17">
+  <div class="section-head">
+    <span class="section-num">17</span>
+    <h2>Cloud Backup &amp; Restore</h2>
+  </div>
+
+  <h3>Supported Providers</h3>
+  <table>
+    <thead><tr><th>Provider</th><th>Authorization</th></tr></thead>
+    <tbody>
+      <tr><td>OneDrive</td><td>Microsoft OAuth via Azure Client ID</td></tr>
+      <tr><td>Google Drive</td><td>Google OAuth via Client ID and Client Secret</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Backup Policy</h3>
+  <table>
+    <thead><tr><th>Setting</th><th>Options</th></tr></thead>
+    <tbody>
+      <tr><td>Schedule</td><td>Manual only, Daily at 3:00 AM, Every 6 hours</td></tr>
+      <tr><td>Scope</td><td>Application data, Configuration files, Logs (optional)</td></tr>
+      <tr><td>Backup date tag</td><td>Date tag used for package labeling</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Backup Actions</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Backup Now</td><td>Create and upload a backup package immediately</td></tr>
+      <tr><td>Refresh Cloud List</td><td>List available cloud backups</td></tr>
+      <tr><td>Refresh backup history</td><td>Refresh local backup activity and restore list</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Restore Behavior</h3>
+  <ul>
+    <li>Restore creates a safety backup first</li>
+    <li>Restore overwrites the active database and configuration</li>
+    <li>Application restart is required to complete the restore</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 18. Workflows ──── -->
+<section id="s18">
+  <div class="section-head">
+    <span class="section-num">18</span>
+    <h2>Standard Operating Workflows</h2>
+  </div>
+
+  <div class="wf-card">
+    <h4>Daily Startup Check</h4>
+    <ol class="steps">
+      <li>Launch the application and complete sign-in.</li>
+      <li>Confirm the license notice area is clear.</li>
+      <li>Check the header connection dot and clock.</li>
+      <li>Review <b>TOTAL PAC</b> and <b>TODAY MWh</b>.</li>
+      <li>Open the <b>Inverters</b> page and confirm fleet status chips.</li>
+      <li>If operating remotely, confirm Connectivity &amp; Sync status in Settings.</li>
+    </ol>
+  </div>
+
+  <div class="wf-card">
+    <h4>Live Control Workflow</h4>
+    <ol class="steps">
+      <li>Open the <b>Inverters</b> page.</li>
+      <li>Select the target inverter or node.</li>
+      <li>Review current alarm state and freshness.</li>
+      <li>Send the required START or STOP action.</li>
+      <li>Confirm the result via status updates and audit history.</li>
+    </ol>
+  </div>
+
+  <div class="wf-card">
+    <h4>Plant Output Cap Workflow</h4>
+    <ol class="steps">
+      <li>Open the <b>Inverters</b> page and click <b>Show Cap</b>.</li>
+      <li>Set <b>Upper Limit</b> and <b>Lower Limit</b> in MW.</li>
+      <li>Choose the inverter <b>Sequence</b> and add exemptions if needed.</li>
+      <li>Click <b>Preview Plan</b> to review proposed actions.</li>
+      <li>Click <b>Enable Cap</b> and complete authorization.</li>
+      <li>Monitor status, reason, controlled count, and planner warnings.</li>
+      <li>Use <b>Release Controlled Inverters</b> to end the session.</li>
+    </ol>
+  </div>
+
+  <div class="wf-card">
+    <h4>Daily Performance Review</h4>
+    <ol class="steps">
+      <li>Open <b>Analytics</b> for interval review and day-ahead comparison.</li>
+      <li>Open <b>Energy</b> for interval production detail.</li>
+      <li>Open <b>Report</b> for the formal daily inverter summary.</li>
+      <li>Export the required package from <b>Report</b> or <b>Export</b>.</li>
+    </ol>
+  </div>
+
+  <div class="wf-card">
+    <h4>Remote Standby Refresh Workflow</h4>
+    <ol class="steps">
+      <li>Confirm the workstation is in <b>Remote</b> mode.</li>
+      <li>Open <b>Settings &rarr; Connectivity &amp; Sync</b>.</li>
+      <li>Review gateway link and transfer monitor status.</li>
+      <li>Run <b>Refresh Standby DB</b>.</li>
+      <li>If newer local data is detected, decide whether to cancel or <b>Force Pull</b>.</li>
+      <li>Wait for completion and confirm success.</li>
+      <li>Restart the application when the refreshed DB is needed.</li>
+    </ol>
+  </div>
+
+  <div class="wf-card">
+    <h4>Cloud Backup Workflow</h4>
+    <ol class="steps">
+      <li>Configure provider access and authorize.</li>
+      <li>Save backup settings and select scope.</li>
+      <li>Run <b>Backup Now</b> or rely on the configured schedule.</li>
+      <li>Review history and cloud file listings.</li>
+    </ol>
+  </div>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 19. Keyboard Shortcuts ──── -->
+<section id="s19">
+  <div class="section-head">
+    <span class="section-num">19</span>
+    <h2>Keyboard Shortcuts</h2>
+  </div>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>T</kbd></td><td>Open the Topology window</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>I</kbd></td><td>Open the IP Configuration window</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>=</kbd></td><td>Zoom in</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>-</kbd></td><td>Zoom out</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>0</kbd></td><td>Reset zoom</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>Theme toggle in auxiliary windows</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Interface Tips</h3>
+  <ul>
+    <li>Use the alarm bell for active alarm review without changing pages</li>
+    <li>Use the operator message bubble for shift notes and remote coordination</li>
+    <li>Use <b>Open Folder</b> in Settings to verify export output quickly</li>
+    <li>Hover over controls and metrics for tooltip descriptions</li>
+    <li>Use <b>Check for Updates</b> and <b>Refresh License</b> during planned maintenance windows</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 20. Troubleshooting ──── -->
+<section id="s20">
+  <div class="section-head">
+    <span class="section-num">20</span>
+    <h2>Troubleshooting</h2>
+  </div>
+  <table>
+    <thead><tr><th>Symptom</th><th>Likely Cause</th><th>Recommended Action</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Connection dot shows disconnected</td>
+        <td>Live link is unavailable</td>
+        <td>Check mode, gateway URL, token, and Tailscale status</td>
+      </tr>
+      <tr>
+        <td>Stale status appears</td>
+        <td>Last retained snapshot is being shown</td>
+        <td>Check live link health and recent gateway contact</td>
+      </tr>
+      <tr>
+        <td>Refresh Standby DB completes but data unchanged</td>
+        <td>Standby DB is staged, not yet active</td>
+        <td>Restart the application</td>
+      </tr>
+      <tr>
+        <td>Refresh Standby DB blocked with newer-local warning</td>
+        <td>Local standby copy has newer data than gateway</td>
+        <td>Cancel to preserve local data, or use Force Pull if overwrite is intentional</td>
+      </tr>
+      <tr>
+        <td>TODAY MWh looks old after switching to Gateway</td>
+        <td>Local polling has not caught up yet</td>
+        <td>Run Refresh Standby DB, restart, and wait for first poll cycle</td>
+      </tr>
+      <tr>
+        <td>Day-ahead generation unavailable</td>
+        <td>Workstation is in Remote mode</td>
+        <td>Run generation from the gateway workstation</td>
+      </tr>
+      <tr>
+        <td>Plant-cap fails with &ldquo;Cannot POST&rdquo;</td>
+        <td>Older gateway build or wrong remote gateway target</td>
+        <td>Update gateway app and verify Remote Gateway URL</td>
+      </tr>
+      <tr>
+        <td>Cap band warning: limits too close</td>
+        <td>Whole-inverter step size exceeds configured deadband</td>
+        <td>Increase gap between Lower and Upper limits</td>
+      </tr>
+      <tr>
+        <td>Cloud restore unavailable</td>
+        <td>Provider or backup state not ready</td>
+        <td>Refresh cloud list and verify provider authorization</td>
+      </tr>
+      <tr>
+        <td>IP Configuration cannot be opened</td>
+        <td>Current mode is Remote or access restricted</td>
+        <td>Use the gateway workstation</td>
+      </tr>
+      <tr>
+        <td>Alarm sound is silent</td>
+        <td>Sound muted or system audio unavailable</td>
+        <td>Re-enable alarm sound and check workstation audio</td>
+      </tr>
+      <tr>
+        <td>Export fails</td>
+        <td>Path, date, format, or dataset issue</td>
+        <td>Verify export folder, input filters, and current mode</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 21. Quick Reference ──── -->
+<section id="s21">
+  <div class="section-head">
+    <span class="section-num">21</span>
+    <h2>Quick Reference</h2>
+  </div>
+
+  <h3>Defaults &amp; Constants</h3>
+  <table>
+    <thead><tr><th>Item</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Default Username</td><td><code>admin</code></td></tr>
+      <tr><td>Default Password</td><td><code>1234</code></td></tr>
+      <tr><td>Default Plant Name</td><td>ADSI Plant</td></tr>
+      <tr><td>Default Operator Name</td><td>OPERATOR</td></tr>
+      <tr><td>Inverter Rated Capacity</td><td>997.0 kW</td></tr>
+      <tr><td>Inverter Dependable Capacity</td><td>917.0 kW</td></tr>
+      <tr><td>Nodes per Inverter</td><td>4</td></tr>
+      <tr><td>Node Rated Capacity</td><td>249.25 kW</td></tr>
+      <tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr>
+      <tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Page Quick Finder</h3>
+  <table>
+    <thead><tr><th>Need</th><th>Best Page</th></tr></thead>
+    <tbody>
+      <tr><td>Live plant status</td><td>Inverters</td></tr>
+      <tr><td>Interval production analysis</td><td>Analytics and Energy</td></tr>
+      <tr><td>Day-ahead comparison</td><td>Analytics and Export</td></tr>
+      <tr><td>Forecast source setup</td><td>Forecast</td></tr>
+      <tr><td>Alarm review and acknowledgement</td><td>Alarms</td></tr>
+      <tr><td>Operator action traceability</td><td>Audit</td></tr>
+      <tr><td>Formal daily summary</td><td>Report</td></tr>
+      <tr><td>File generation</td><td>Export</td></tr>
+      <tr><td>Mode, link, standby DB</td><td>Settings &rarr; Connectivity &amp; Sync</td></tr>
+      <tr><td>License and updates</td><td>Settings &rarr; License / App Updates</td></tr>
+      <tr><td>Backup and restore</td><td>Settings &rarr; Cloud Backup &amp; Restore</td></tr>
+      <tr><td>Network configuration</td><td>IP Configuration</td></tr>
+      <tr><td>Visual plant map</td><td>Topology</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Data Units</h3>
+  <table>
+    <thead><tr><th>Item</th><th>Unit</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>PAC</td><td>W or kW</td><td>Active AC output power</td></tr>
+      <tr><td>PDC</td><td>W or kW</td><td>DC-side input power</td></tr>
+      <tr><td>Energy</td><td>MWh</td><td>Produced electrical energy</td></tr>
+      <tr><td>Duration</td><td>sec / min / hrs</td><td>Event age, uptime, or interval</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Status Terms</h3>
+  <table>
+    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Online</td><td>Fresh data available, unit communicating normally</td></tr>
+      <tr><td>Offline</td><td>No current live data available</td></tr>
+      <tr><td>Stale</td><td>Last snapshot shown while fresh data is temporarily unavailable</td></tr>
+      <tr><td>Alarm</td><td>Alarm condition is active</td></tr>
+      <tr><td>Acknowledged</td><td>Alarm has been operator-acknowledged</td></tr>
+    </tbody>
+  </table>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+</div>
+
+<!-- ═══════ FOOTER ═══════ -->
+<div class="guide-footer">
+  <p><b>ADSI Inverter Dashboard</b> v2.4.6</p>
+  <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
+  <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
+</div>
+
+</body>
+</html>

@@ -4276,8 +4276,8 @@ label[data-required]::after {
 }
 
 .guide-modal-card {
-  width: min(1000px, 96vw);
-  max-height: min(88vh, 940px);
+  width: min(1400px, 96vw);
+  height: 94vh;
   border-radius: 12px;
   border: 1px solid var(--border2);
   background: linear-gradient(160deg, #2a121a 0%, #1b0c12 100%);
@@ -4305,6 +4305,12 @@ label[data-required]::after {
   letter-spacing: 0.35px;
 }
 
+.guide-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .guide-modal-close {
   width: 28px;
   height: 28px;
@@ -4322,144 +4328,12 @@ label[data-required]::after {
 }
 
 .guide-modal-body {
-  padding: 14px;
-  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.guide-visual-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.guide-visual-item {
-  border: 1px solid rgba(98, 49, 63, 0.55);
-  border-radius: 10px;
-  background: rgba(35, 14, 22, 0.5);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.guide-visual-icon {
-  font-size: 17px;
-  color: var(--accent);
-}
-
-.guide-visual-text {
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--text2);
-}
-
-.guide-accordion {
-  display: grid;
-  gap: 8px;
-}
-
-.guide-accordion details {
-  border: 1px solid rgba(98, 49, 63, 0.55);
-  border-radius: 9px;
-  background: rgba(35, 14, 22, 0.48);
-  padding: 8px 10px;
-}
-
-.guide-accordion summary {
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: 0.25px;
-  list-style: none;
-}
-
-.guide-accordion summary::-webkit-details-marker {
-  display: none;
-}
-
-.guide-accordion summary::after {
-  content: "\25BE";
-  float: right;
-  color: var(--text3);
-}
-
-.guide-accordion details[open] summary::after {
-  content: "\25B4";
-}
-
-.guide-accordion ul {
-  margin: 8px 0 0;
-  padding-left: 18px;
-  display: grid;
-  gap: 4px;
-  color: var(--text2);
-}
-
-.guide-accordion li {
-  font-size: 10.5px;
-  line-height: 1.45;
-}
-
-.guide-accordion code {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--accent);
-}
-
-/* Guide author banner */
-.guide-author-banner {
-  text-align: center;
-  padding: 14px 16px 10px;
-  margin-bottom: 14px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(52,211,153,0.08) 0%, rgba(96,165,250,0.06) 100%);
-  border: 1px solid rgba(52,211,153,0.2);
-}
-.guide-author-app {
-  font-size: 15px;
-  font-weight: 800;
-  color: var(--text);
-  letter-spacing: 0.3px;
-}
-.guide-author-ver {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent);
-  margin-left: 4px;
-}
-.guide-author-desc {
-  font-size: 10.5px;
-  color: var(--text2);
-  margin-top: 4px;
-  line-height: 1.45;
-}
-.guide-author-credit {
-  font-size: 11px;
-  color: var(--text);
-  margin-top: 8px;
-  font-weight: 600;
-}
-.guide-author-credit strong {
-  color: var(--accent);
-}
-.guide-author-credit em {
-  color: var(--cyan);
-}
-.guide-author-copy {
-  font-size: 9.5px;
-  color: var(--text3);
-  margin-top: 4px;
-}
-.guide-footer-credit {
-  text-align: center;
-  margin-top: 18px;
-  padding: 10px 16px;
-  font-size: 10px;
-  color: var(--text3);
-  border-top: 1px solid var(--border2);
-}
+/* Old guide accordion/banner CSS removed — guide now uses iframe */
 
 /* About sidebar expanded styles */
 .side-about-appname {
@@ -6163,29 +6037,6 @@ body.mode-transition-active {
   color: #2f2418;
 }
 
-:root[data-theme="light"] .guide-visual-item,
-:root[data-theme="light"] .guide-accordion details {
-  border-color: #b39f80;
-  background: linear-gradient(180deg, rgba(245, 237, 223, 0.96) 0%, rgba(236, 225, 205, 0.96) 100%);
-}
-
-:root[data-theme="light"] .guide-visual-text,
-:root[data-theme="light"] .guide-accordion ul {
-  color: #4b3d2c;
-}
-
-:root[data-theme="light"] .guide-accordion summary {
-  color: #2f2418;
-}
-
-:root[data-theme="light"] .guide-accordion summary::after {
-  color: #7a6650;
-}
-
-:root[data-theme="light"] .guide-accordion code {
-  color: #2b67ad;
-}
-
 :root[data-theme="light"] .license-item {
   border-color: #b49f81;
   background: linear-gradient(180deg, rgba(246, 238, 224, 0.96) 0%, rgba(236, 226, 206, 0.96) 100%);
@@ -6705,12 +6556,6 @@ body.mode-transition-active {
   color: #dce8fa;
 }
 
-:root[data-theme="classic"] .guide-visual-item,
-:root[data-theme="classic"] .guide-accordion details {
-  border-color: rgba(58, 88, 128, 0.68);
-  background: rgba(12, 22, 38, 0.82);
-}
-
 :root[data-theme="classic"] .license-item {
   border-color: rgba(58, 88, 128, 0.68);
   background: rgba(12, 22, 38, 0.82);
@@ -6949,7 +6794,7 @@ body.mode-transition-active {
   }
 
   .guide-modal-card {
-    max-height: 92vh;
+    height: 92vh;
   }
 }
 

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.6` in `package.json`
+- Current repo version baseline: `2.4.7` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -155,7 +155,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - Protect local-only settings during merge/import.
 - Startup and live remote sync should stay incremental/LWW.
 - Never stream the live gateway `adsi.db` file directly. Flush pending in-memory telemetry, create a transactionally consistent SQLite snapshot from the running gateway DB, and transfer that snapshot file instead.
-- During a staged gateway main-DB replacement, preserve only the client-local remote settings: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, and `csvSavePath`.
+- During a staged gateway main-DB replacement, preserve only the client-local remote settings: operation mode, remote auto-sync flag, gateway URL/token, tailnet hint/interface, `csvSavePath`, and `operatorName`.
 - Keep replication transport optimized by default:
   - reuse HTTP connections for gateway transfer requests
   - gzip large replication JSON payloads and large main-DB / archive downloads when the peer accepts it

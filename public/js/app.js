@@ -3520,6 +3520,10 @@ function switchPage(page) {
 function openGuideModal() {
   const m = $("guideModal");
   if (!m) return;
+  const iframe = $("guideIframe");
+  if (iframe && (!iframe.src || iframe.src === "about:blank")) {
+    iframe.src = "/user-guide.html";
+  }
   m.classList.remove("hidden");
   document.body.classList.add("modal-open");
 }
@@ -3531,6 +3535,31 @@ function closeGuideModal() {
   document.body.classList.remove("modal-open");
 }
 
+async function downloadGuidePdf() {
+  const btn = $("btnDownloadGuidePdf");
+  if (!btn) return;
+  if (typeof window.electronAPI?.downloadUserGuidePdf !== "function") {
+    showToast("PDF download is only available in the desktop app.", "warn");
+    return;
+  }
+  const origText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="mdi mdi-loading mdi-spin"></span> Generating PDF…';
+  try {
+    const res = await window.electronAPI.downloadUserGuidePdf();
+    if (res?.ok) {
+      showToast("User Guide saved as PDF.", "ok");
+    } else if (res?.error) {
+      showToast("PDF generation failed: " + res.error, "err");
+    }
+  } catch (err) {
+    showToast("PDF download error.", "err");
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origText;
+  }
+}
+
 function initGuideModal() {
   const m = $("guideModal");
   if (!m || m.dataset.bound === "1") return;
@@ -3538,6 +3567,7 @@ function initGuideModal() {
   m.addEventListener("click", (e) => {
     if (e.target === m) closeGuideModal();
   });
+  $("btnDownloadGuidePdf")?.addEventListener("click", downloadGuidePdf);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && m && !m.classList.contains("hidden")) {
       closeGuideModal();

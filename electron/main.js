@@ -3558,6 +3558,114 @@ ipcMain.handle("open-text-file", async (_, options = {}) => {
     return null;
   }
 });
+ipcMain.handle("download-user-guide-pdf", async (event) => {
+  try {
+    const ownerWin = BrowserWindow.fromWebContents(event.sender) || mainWin || undefined;
+    const result = await dialog.showSaveDialog(ownerWin, {
+      title: "Save User Guide as PDF",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        "ADSI-Inverter-Dashboard-User-Guide.pdf"
+      ),
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false };
+    const hidden = new BrowserWindow({
+      width: 1200,
+      height: 900,
+      show: false,
+      webPreferences: { offscreen: true },
+    });
+    await hidden.loadURL(`${SERVER_URL}/user-guide.html`);
+    // inject light-mode overrides so PDF renders with readable contrast
+    await hidden.webContents.insertCSS(`
+      :root {
+        --bg: #ffffff !important; --surface: #f8f9fa !important; --card: #f4f5f6 !important;
+        --border: #d0d5dd !important; --accent: #1a6ad4 !important; --accent2: #6f42c1 !important;
+        --green: #1a7f37 !important; --yellow: #8a6914 !important; --orange: #9a4e00 !important;
+        --red: #cf222e !important; --text: #1a1a1a !important; --text2: #4a4a4a !important;
+        --text3: #666 !important; --link: #1a6ad4 !important;
+        --tbl-head: #eaecef !important; --tbl-alt: #f6f8fa !important;
+      }
+      body { background: #fff !important; color: #1a1a1a !important; }
+      .cover { background: linear-gradient(160deg, #f0f4ff 0%, #fff 100%) !important; min-height: auto !important; padding: 60px 24px !important; }
+      .cover::before { display: none !important; }
+      .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; }
+      .cover-badge { background: #e8f0fe !important; border-color: #1a6ad4 !important; color: #1a6ad4 !important; }
+      .cover-sub { color: #444 !important; }
+      .cover-meta { color: #555 !important; }
+      .cover-meta b { color: #222 !important; }
+      .section-head { border-bottom-color: #d0d5dd !important; }
+      .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .section-head h2 { color: #1a1a1a !important; }
+      h3 { color: #6f42c1 !important; }
+      h4 { color: #1a1a1a !important; }
+      p, li { color: #2a2a2a !important; }
+      table { border: 1px solid #ccc !important; }
+      thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; }
+      tbody td { border: 1px solid #ddd !important; color: #2a2a2a !important; }
+      tbody tr:nth-child(even) { background: #f6f8fa !important; }
+      tbody tr:hover { background: transparent !important; }
+      td code, th code { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .info-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; color: #2a2a2a !important; }
+      .info-card.warn { background: #fef9e7 !important; border-color: #d29922 !important; }
+      .info-card.tip { background: #eafbf0 !important; border-color: #1a7f37 !important; }
+      .info-card.warn .info-card-label { color: #8a6914 !important; }
+      .info-card.tip .info-card-label { color: #1a7f37 !important; }
+      .info-card-label { color: #333 !important; }
+      .feat-item { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+      .feat-item h4 { color: #1a1a1a !important; }
+      .feat-item p { color: #4a4a4a !important; }
+      .feat-item-icon { filter: grayscale(0) !important; }
+      .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+      .wf-card h4 { color: #1a6ad4 !important; }
+      .legend-chip { color: #2a2a2a !important; }
+      .steps li::before { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .steps li { color: #2a2a2a !important; }
+      kbd { background: #eee !important; border-color: #bbb !important; color: #1a1a1a !important; }
+      a { color: #1a6ad4 !important; }
+      .back-top { display: none !important; }
+      .guide-footer { background: #fff !important; border-top-color: #d0d5dd !important; color: #666 !important; }
+      .guide-footer b { color: #333 !important; }
+      .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; }
+      .ml-highlight h4 { color: #1a6ad4 !important; }
+      .toc h2 { color: #1a6ad4 !important; border-bottom-color: #d0d5dd !important; }
+      .toc-grid a { color: #1a1a1a !important; }
+      .toc-grid a .toc-num { color: #1a6ad4 !important; }
+      .toc-grid a:hover { background: transparent !important; }
+      h3 { font-weight: 800 !important; }
+      h4 { font-weight: 700 !important; }
+      .info-card-label { font-weight: 800 !important; }
+      .wf-card h4 { font-weight: 800 !important; }
+      table { page-break-inside: avoid !important; }
+      thead { display: table-header-group !important; }
+      tr { page-break-inside: avoid !important; }
+      .info-card { page-break-inside: avoid !important; }
+      .ml-highlight { page-break-inside: avoid !important; }
+      .feat-grid { page-break-inside: avoid !important; }
+      .wf-card { page-break-inside: avoid !important; }
+      section { page-break-inside: avoid !important; }
+      .section-head { page-break-after: avoid !important; }
+      h3, h4 { page-break-after: avoid !important; }
+    `);
+    // allow styles and layout to settle
+    await new Promise((r) => setTimeout(r, 1200));
+    const pdfBuf = await hidden.webContents.printToPDF({
+      printBackground: true,
+      landscape: false,
+      margins: { top: 0.25, bottom: 0.25, left: 0.3, right: 0.3 },
+      pageSize: { width: 8.5, height: 13 },
+      preferCSSPageSize: false,
+    });
+    hidden.close();
+    fs.writeFileSync(result.filePath, pdfBuf);
+    shell.showItemInFolder(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    console.error("[main] download-user-guide-pdf failed:", err.message);
+    return { ok: false, error: err.message };
+  }
+});
 ipcMain.handle("open-folder", async (_, folder) => {
   try {
     const target = String(folder || "").trim();

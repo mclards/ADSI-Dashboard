@@ -1941,156 +1941,16 @@
     <div id="guideModal" class="guide-modal hidden" role="dialog" aria-modal="true">
       <div class="guide-modal-card">
         <div class="guide-modal-head">
-          <div class="guide-modal-title">ADSI Inverter Dashboard — Operator Guide</div>
-          <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">&times;</button>
+          <div class="guide-modal-title">ADSI Inverter Dashboard — User Guide</div>
+          <div class="guide-modal-actions">
+            <button id="btnDownloadGuidePdf" class="btn btn-accent btn-sm" type="button" title="Save this guide as a PDF document.">
+              <span class="mdi mdi-file-pdf-box"></span> Download PDF
+            </button>
+            <button id="btnCloseGuide" class="guide-modal-close" type="button" aria-label="Close guide">&times;</button>
+          </div>
         </div>
-        <div class="guide-modal-body">
-
-          <div class="guide-author-banner">
-            <div class="guide-author-app">ADSI Inverter Dashboard <span class="guide-author-ver">v2.3.3</span></div>
-            <div class="guide-author-desc">Professional plant monitoring, reporting, forecast review, and controlled remote coordination.</div>
-            <div class="guide-author-credit">
-              Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> &nbsp;·&nbsp; Alias: <em>Engr. M.</em>
-            </div>
-            <div class="guide-author-copy">© 2026 Engr. Clariden Montaño REE. All rights reserved.</div>
-          </div>
-
-          <div class="guide-visual-grid">
-            <div class="guide-visual-item">
-              <span class="mdi mdi-flash guide-visual-icon"></span>
-              <div class="guide-visual-text">Live inverter monitoring and supervised control actions</div>
-            </div>
-            <div class="guide-visual-item">
-              <span class="mdi mdi-chart-line guide-visual-icon"></span>
-              <div class="guide-visual-text">Daily analytics with measured and day-ahead comparison</div>
-            </div>
-            <div class="guide-visual-item">
-              <span class="mdi mdi-bell-alert guide-visual-icon"></span>
-              <div class="guide-visual-text">Alarm tracking, acknowledgement, and event continuity</div>
-            </div>
-            <div class="guide-visual-item">
-              <span class="mdi mdi-file-export guide-visual-icon"></span>
-              <div class="guide-visual-text">Structured operational exports in Excel or CSV</div>
-            </div>
-            <div class="guide-visual-item">
-              <span class="mdi mdi-brain guide-visual-icon"></span>
-              <div class="guide-visual-text">Forecast review with controlled provider selection</div>
-            </div>
-            <div class="guide-visual-item">
-              <span class="mdi mdi-server-network guide-visual-icon"></span>
-              <div class="guide-visual-text">Controlled remote viewing and control through the gateway</div>
-            </div>
-          </div>
-
-          <div class="guide-accordion">
-            <details open>
-              <summary>1. Overview &amp; Purpose</summary>
-              <ul>
-                <li>ADSI Inverter Dashboard provides centralized operational visibility for the configured inverter fleet.</li>
-                <li>The application consolidates live status, interval energy, alarms, audit activity, and formal reporting in one workstation interface.</li>
-                <li>Forecast and comparison tools support day-ahead review and daily performance assessment.</li>
-                <li>Gateway and remote operating modes allow controlled access from more than one machine while preserving a single operational source of truth.</li>
-                <li>Core monitoring and reporting functions remain available on the local installation without relying on continuous internet access.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>2. Startup and Access</summary>
-              <ul>
-                <li>Start the application and complete the sign-in check before the dashboard opens.</li>
-                <li>License validation is performed automatically during startup.</li>
-                <li>If the license is nearing expiry, a notice appears with the action needed to replace it.</li>
-                <li>Application services initialize in the background after successful access validation.</li>
-                <li>Use the credential management actions on the sign-in screen only when an authorized change is required.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>3. Inverters Page &amp; Node Controls</summary>
-              <ul>
-                <li>Each inverter card summarizes current output, DC values, active alarm indication, status, and last update time.</li>
-                <li>Selecting an inverter opens a focused detail view with daily generation, live power, alarm activity, and recent history.</li>
-                <li>Node controls require confirmation before any command is sent.</li>
-                <li>Bulk actions support structured inverter range selection and require separate authorization.</li>
-                <li>Filter and layout controls help operators review the full fleet or a narrower operating subset.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>4. Analytics &amp; Day-Ahead Forecast</summary>
-              <ul>
-                <li>Analytics charts present interval energy trends for the selected day and reporting interval.</li>
-                <li>Per-inverter views highlight contribution patterns and relative performance across the fleet.</li>
-                <li>Day-ahead comparison overlays forecasted and measured values for structured operational review.</li>
-                <li>Supporting weather context helps explain changes in daily production behavior.</li>
-                <li>Forecast generation is available on the gateway workstation only.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>5. Alarms, Audit Log &amp; Reports</summary>
-              <ul>
-                <li>Alarm records show occurrence time, severity, status, and acknowledgement state.</li>
-                <li>Operators can acknowledge individual active alarms or clear the active list intentionally.</li>
-                <li>Audit history records operator actions, affected scope, and execution result.</li>
-                <li>Daily reporting summarizes energy, output, availability, performance, and alarm counts by inverter.</li>
-                <li>Filtered tables and export options support both quick review and formal handoff.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>6. Data Export</summary>
-              <ul>
-                <li>Exports are available in Excel by default, with CSV where applicable.</li>
-                <li>Available packages cover alarms, energy, forecasts, operational data, audit history, and daily reporting.</li>
-                <li>Files are written to the configured export directory using standardized naming.</li>
-                <li>Select the required date range, inverter scope, and format before starting the export.</li>
-                <li>Treat exported files as operational records and share them only through approved channels.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>7. Settings &amp; Configuration</summary>
-              <ul>
-                <li><b>Plant Name:</b> Controls visible naming across reports, exports, and on-screen headers.</li>
-                <li><b>Operator Name:</b> Identifies the operator in audit entries and generated records.</li>
-                <li><b>Retention and Polling:</b> These values should be adjusted only by authorized personnel.</li>
-                <li><b>Connectivity:</b> Determines whether the workstation acts as the gateway or a supervised remote station.</li>
-                <li><b>Forecast Provider:</b> Allows external provider validation without exposing stored credentials on-screen.</li>
-                <li><b>Administrative Sections:</b> License, update, and backup tasks are grouped together for controlled maintenance.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>8. Remote Viewer Mode</summary>
-              <ul>
-                <li>Remote mode displays live gateway data without storing it in the local database.</li>
-                <li>Historical views, reports, and exports are served from the gateway in real time.</li>
-                <li>Inverter on/off control remains available in Remote mode through the gateway command path.</li>
-                <li>Standby refresh downloads the gateway database for local standby use (requires restart to apply).</li>
-                <li>Archive files can be included in standby refresh when historical records are needed for later gateway-mode use.</li>
-                <li>If connectivity is interrupted, live viewing resumes when the secure network path returns and standby refresh can be retried afterward.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>9. IP Configuration &amp; Topology</summary>
-              <ul>
-                <li>The IP Configuration window is used to maintain inverter addresses, polling intervals, and enabled reporting units.</li>
-                <li>The topology view provides a plant-wide status map for quick visual review.</li>
-                <li>Each auxiliary window opens separately so it can be used without leaving the main dashboard.</li>
-                <li>Topology filters help isolate online, offline, or unknown devices.</li>
-                <li>Only authorized users should change device network settings.</li>
-              </ul>
-            </details>
-            <details>
-              <summary>10. Keyboard Shortcuts &amp; Interface Tips</summary>
-              <ul>
-                <li><code>Ctrl+T</code>: Open the topology window.</li>
-                <li><code>Ctrl+I</code>: Open the IP configuration window.</li>
-                <li><code>Ctrl + =</code> / <code>Ctrl + -</code> / <code>Ctrl+0</code>: Adjust or reset zoom where supported.</li>
-                <li>The alarm bell opens the active alarm list without changing pages.</li>
-                <li>Transfer and diagnostics indicators in Settings help confirm background activity.</li>
-                <li>Theme selection persists between restarts.</li>
-              </ul>
-            </details>
-          </div>
-
-          <div class="guide-footer-credit">
-            ADSI Inverter Dashboard v2.3.3 &nbsp;·&nbsp; Engr. Clariden Montaño REE &nbsp;·&nbsp; © 2026 All rights reserved.
-          </div>
+        <div class="guide-modal-body" style="padding:0">
+          <iframe id="guideIframe" src="about:blank" style="width:100%;height:100%;border:none;border-radius:0 0 12px 12px"></iframe>
         </div>
       </div>
     </div>
