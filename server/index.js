@@ -10026,9 +10026,27 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       if (regTotal > 0) kwhTotal = regTotal;
     }
 
-    const expectedNodeUptimeS = expectedSolarWindowS * activeNodeCount;
+    /* ── Per-inverter dynamic availability window ───────────────────────
+       Window start = first non-zero PAC interval start (>= solar 5 AM)
+       Window end   = last interval end (last zero-PAC transition, <= solar 6 PM / now)
+       Falls back to the fixed solar window if no intervals exist.          */
+    const clippedIntervals = reportWindow.startTs > 0 && reportWindow.endTs > reportWindow.startTs
+      ? clipIntervalsToWindowMs(allIntervals, reportWindow.startTs, reportWindow.endTs)
+      : allIntervals.slice();
+    let dynWindowStartMs = Infinity;
+    let dynWindowEndMs = 0;
+    for (const [s, e] of clippedIntervals) {
+      if (s < dynWindowStartMs) dynWindowStartMs = s;
+      if (e > dynWindowEndMs) dynWindowEndMs = e;
+    }
+    const dynWindowS = dynWindowEndMs > dynWindowStartMs
+      ? (dynWindowEndMs - dynWindowStartMs) / 1000
+      : 0;
+    const availWindowS = dynWindowS > 0 ? dynWindowS : expectedSolarWindowS;
+
+    const expectedNodeUptimeS = availWindowS * activeNodeCount;
     const availabilityPct =
-      expectedSolarWindowS > 0 ? (uptimeS / expectedSolarWindowS) * 100 : 0;
+      availWindowS > 0 ? (uptimeS / availWindowS) * 100 : 0;
     const uptimeH = uptimeS / 3600;
     const perfDenomKwh = ratedKw * uptimeH;
     const performancePct =
@@ -10145,7 +10163,8 @@ function summarizeDailyReportRows(rows) {
     denomKwh += rowDenom;
   }
 
-  const availabilityAvgPct = list.length ? availSum / list.length : 0;
+  const totalInvCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const availabilityAvgPct = totalInvCount > 0 ? availSum / totalInvCount : 0;
   const perfPct = denomKwh > 0 ? (totalKwh / denomKwh) * 100 : 0;
 
   return {

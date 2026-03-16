@@ -9721,7 +9721,8 @@ function computeReportSummaryFromRows(rows) {
     availSum += clampPctClient(avail);
     denomMwh += Math.max(0, denom);
   });
-  const avgAvail = list.length ? availSum / list.length : 0;
+  const totalInvCount = Math.max(1, Number(State.settings.inverterCount || 27));
+  const avgAvail = totalInvCount > 0 ? availSum / totalInvCount : 0;
   const perf = denomMwh > 0 ? (totalMwh / denomMwh) * 100 : 0;
   return {
     inverter_count: new Set(

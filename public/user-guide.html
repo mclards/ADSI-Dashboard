@@ -56,9 +56,15 @@
     left: -50%;
     width: 200%;
     height: 200%;
-    background: radial-gradient(circle at 30% 40%, rgba(88,166,255,.06) 0%, transparent 50%),
-                radial-gradient(circle at 70% 60%, rgba(210,168,255,.04) 0%, transparent 50%);
+    background: radial-gradient(circle at 30% 40%, rgba(88,166,255,.08) 0%, transparent 50%),
+                radial-gradient(circle at 70% 60%, rgba(210,168,255,.06) 0%, transparent 50%),
+                radial-gradient(circle at 50% 80%, rgba(63,185,80,.04) 0%, transparent 40%);
     pointer-events: none;
+    animation: coverGlow 12s ease-in-out infinite alternate;
+  }
+  @keyframes coverGlow {
+    0% { opacity: .7; transform: scale(1) rotate(0deg); }
+    100% { opacity: 1; transform: scale(1.05) rotate(2deg); }
   }
   .cover-badge {
     display: inline-block;
@@ -72,17 +78,24 @@
     text-transform: uppercase;
     margin-bottom: 28px;
     position: relative;
+    box-shadow: 0 0 20px rgba(88,166,255,.15), inset 0 0 12px rgba(88,166,255,.06);
   }
   .cover h1 {
     font-size: clamp(32px, 5vw, 56px);
     font-weight: 800;
     letter-spacing: -1px;
     margin-bottom: 16px;
-    background: linear-gradient(135deg, #e6edf3, #58a6ff);
+    background: linear-gradient(135deg, #e6edf3 0%, #58a6ff 50%, #d2a8ff 100%);
+    background-size: 200% 200%;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
     position: relative;
+    animation: titleShimmer 6s ease-in-out infinite alternate;
+  }
+  @keyframes titleShimmer {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 100% 50%; }
   }
   .cover-sub {
     font-size: 18px;
@@ -129,9 +142,15 @@
     border-radius: 8px;
     color: var(--text);
     font-size: 14px;
-    transition: background .15s;
+    border: 1px solid transparent;
+    transition: background .2s, border-color .2s, transform .2s;
   }
-  .toc-grid a:hover { background: var(--card); text-decoration: none; }
+  .toc-grid a:hover {
+    background: var(--card);
+    border-color: rgba(88,166,255,.2);
+    text-decoration: none;
+    transform: translateX(4px);
+  }
   .toc-grid a .toc-num {
     color: var(--accent);
     font-weight: 700;
@@ -153,22 +172,27 @@
     display: flex;
     align-items: center;
     gap: 14px;
-    margin-bottom: 20px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+    padding-bottom: 14px;
+    border-bottom: none;
+    background-image: linear-gradient(to right, var(--accent), var(--accent2), transparent);
+    background-size: 100% 2px;
+    background-repeat: no-repeat;
+    background-position: bottom;
   }
   .section-num {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 38px;
+    height: 38px;
     border-radius: 10px;
-    background: rgba(88,166,255,.12);
+    background: linear-gradient(135deg, rgba(88,166,255,.18), rgba(210,168,255,.12));
     color: var(--accent);
     font-weight: 800;
     font-size: 15px;
     flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(88,166,255,.10);
   }
   .section-head h2 {
     font-size: 22px;
@@ -197,6 +221,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 16px 20px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.15);
     margin: 16px 0;
   }
   .info-card.warn {
@@ -223,25 +248,28 @@
     border-collapse: collapse;
     margin: 14px 0 20px;
     font-size: 13.5px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,.12);
   }
   thead th {
-    background: var(--tbl-head);
+    background: linear-gradient(180deg, var(--tbl-head), rgba(22,27,34,.95));
     color: var(--text2);
     text-align: left;
-    padding: 10px 14px;
-    font-weight: 600;
-    font-size: 12px;
+    padding: 11px 14px;
+    font-weight: 700;
+    font-size: 11.5px;
     text-transform: uppercase;
-    letter-spacing: .5px;
-    border-bottom: 1px solid var(--border);
+    letter-spacing: .7px;
+    border-bottom: 2px solid var(--accent);
   }
   tbody td {
     padding: 9px 14px;
-    border-bottom: 1px solid rgba(48,54,61,.5);
+    border-bottom: 1px solid rgba(48,54,61,.4);
     vertical-align: top;
   }
   tbody tr:nth-child(even) { background: var(--tbl-alt); }
-  tbody tr:hover { background: rgba(88,166,255,.04); }
+  tbody tr:hover { background: rgba(88,166,255,.06); }
   td code, th code {
     background: rgba(88,166,255,.1);
     padding: 2px 6px;
@@ -262,6 +290,12 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 18px;
+    transition: transform .2s, box-shadow .2s, border-color .2s;
+  }
+  .feat-item:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 24px rgba(88,166,255,.08);
+    border-color: rgba(88,166,255,.3);
   }
   .feat-item-icon {
     font-size: 22px;
@@ -330,8 +364,18 @@
   /* ── ML highlight card ── */
   .ml-highlight {
     border-color: var(--accent);
-    background: rgba(88,166,255,.06);
+    background: linear-gradient(135deg, rgba(88,166,255,.08) 0%, rgba(210,168,255,.04) 100%);
     border-left: 4px solid var(--accent);
+    box-shadow: 0 4px 20px rgba(88,166,255,.10), inset 0 0 40px rgba(88,166,255,.03);
+    position: relative;
+  }
+  .ml-highlight::before {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    width: 80px; height: 80px;
+    background: radial-gradient(circle, rgba(88,166,255,.08) 0%, transparent 70%);
+    pointer-events: none;
   }
   .ml-highlight h4 {
     color: var(--accent);
@@ -349,6 +393,8 @@
     border-radius: 10px;
     padding: 20px;
     margin: 16px 0;
+    box-shadow: 0 2px 12px rgba(0,0,0,.12);
+    border-left: 3px solid var(--accent);
   }
   .wf-card h4 {
     margin: 0 0 12px;
@@ -367,8 +413,12 @@
   /* ── Footer ── */
   .guide-footer {
     text-align: center;
-    padding: 40px 24px;
-    border-top: 1px solid var(--border);
+    padding: 48px 24px;
+    border-top: none;
+    background-image: linear-gradient(to right, transparent, var(--accent), var(--accent2), transparent);
+    background-size: 100% 2px;
+    background-repeat: no-repeat;
+    background-position: top;
     color: var(--text3);
     font-size: 13px;
   }
@@ -383,26 +433,28 @@
     }
     body { background: #fff !important; color: #1a1a1a !important; font-size: 10.5pt; -webkit-print-color-adjust: exact; }
 
+    * { animation: none !important; }
+
     /* Cover */
     .cover { min-height: auto; padding: 48px 24px; background: #fff !important; }
     .cover::before { display: none; }
-    .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; color: #1a1a1a !important; font-size: 32pt; }
+    .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; color: #1a1a1a !important; font-size: 32pt; animation: none !important; }
     .cover-badge { border-color: #1a6ad4; color: #1a6ad4; background: #f0f7ff !important; }
     .cover-sub { color: #444 !important; }
     .cover-meta { color: #555 !important; }
     .cover-meta b { color: #222 !important; }
 
     /* Section heads */
-    .section-head { border-bottom-color: #d0d5dd !important; }
-    .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; }
+    .section-head { background-image: linear-gradient(to right, #1a6ad4, #6f42c1, transparent) !important; }
+    .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; box-shadow: none !important; }
     .section-head h2 { color: #1a1a1a !important; }
     h3 { color: #6f42c1 !important; }
     h4 { color: #1a1a1a !important; }
     p, li, ul, ol { color: #2a2a2a !important; }
 
     /* Tables */
-    table { border: 1px solid #ccc !important; }
-    thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; }
+    table { border: 1px solid #ccc !important; box-shadow: none !important; }
+    thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; border-bottom: 2px solid #1a6ad4 !important; }
     tbody td { border: 1px solid #ddd !important; color: #2a2a2a !important; }
     tbody tr:nth-child(even) { background: #f6f8fa !important; }
     tbody tr:hover { background: transparent !important; }
@@ -419,8 +471,11 @@
     .feat-item h4 { color: #1a1a1a !important; }
     .feat-item p { color: #4a4a4a !important; }
 
-    .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+    .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; border-left: 3px solid #1a6ad4 !important; box-shadow: none !important; }
     .wf-card h4 { color: #1a6ad4 !important; }
+
+    .info-card { box-shadow: none !important; }
+    .feat-item { box-shadow: none !important; }
 
     /* Legend */
     .legend-chip { color: #2a2a2a !important; }
@@ -435,12 +490,13 @@
     /* Links & misc */
     a { color: #1a6ad4 !important; }
     .back-top { display: none !important; }
-    .guide-footer { background: #fff !important; border-top: 1px solid #d0d5dd !important; color: #666 !important; }
+    .guide-footer { background: #fff !important; background-image: linear-gradient(to right, transparent, #1a6ad4, #6f42c1, transparent) !important; color: #666 !important; }
     .guide-footer b { color: #333 !important; }
 
     /* ML highlight card */
-    .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; }
-    .ml-highlight h3 { color: #1a6ad4 !important; }
+    .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; box-shadow: none !important; }
+    .ml-highlight::before { display: none !important; }
+    .ml-highlight h3, .ml-highlight h4 { color: #1a6ad4 !important; }
 
     /* Page breaks */
     section { page-break-inside: avoid; }
@@ -1089,11 +1145,27 @@
       <tr><td>Avg Pac (kW)</td><td>Average AC output during the window</td></tr>
       <tr><td>Uptime (h)</td><td>Operating hours</td></tr>
       <tr><td>Alarms</td><td>Alarm episode count</td></tr>
-      <tr><td>Availability (%)</td><td>Uptime as percentage of operating window (5:00 AM &ndash; 6:00 PM)</td></tr>
+      <tr><td>Availability (%)</td><td>Uptime as percentage of the inverter&rsquo;s dynamic production window (see below)</td></tr>
       <tr><td>Performance (%)</td><td>Ratio of actual to expected output</td></tr>
     </tbody>
   </table>
-  <p>A <b>TOTAL</b> row summarizes plant-wide totals. Reports can be exported in Excel or CSV format.</p>
+
+  <h3>Availability Calculation</h3>
+  <div class="info-card tip">
+    <div class="info-card-label">How It Works</div>
+    <p>Availability is calculated <b>per inverter</b> using a <b>dynamic production window</b> rather than a fixed solar window:</p>
+    <ul>
+      <li><b>Window Start</b> &mdash; the timestamp of the first non-zero PAC reading for that inverter, at or after 5:00 AM.</li>
+      <li><b>Window End</b> &mdash; the timestamp of the last interval end (zero-PAC transition) for that inverter, at or before 6:00 PM (or current time if today).</li>
+      <li><b>Formula</b> &mdash; <code>Availability = (Online Uptime / Dynamic Window) &times; 100%</code></li>
+    </ul>
+    <p>This ensures inverters are not penalized for the gap between the fixed 5 AM boundary and their actual generation start, or between their last generation and 6 PM.</p>
+  </div>
+  <div class="info-card warn">
+    <div class="info-card-label">Plant Availability</div>
+    The <b>TOTAL</b> row averages availability across <b>all configured inverters</b>, including inactive ones. Inverters that did not produce any energy contribute 0% to the plant average, reflecting true fleet-level availability.
+  </div>
+  <p>Reports can be exported in Excel or CSV format.</p>
 
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
@@ -1585,7 +1657,7 @@
       <tr><td>Inverter Dependable Capacity</td><td>917.0 kW</td></tr>
       <tr><td>Nodes per Inverter</td><td>4</td></tr>
       <tr><td>Node Rated Capacity</td><td>249.25 kW</td></tr>
-      <tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr>
+      <tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM (availability uses per-inverter dynamic window within these bounds)</td></tr>
       <tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr>
     </tbody>
   </table>
@@ -1640,7 +1712,7 @@
 
 <!-- ═══════ FOOTER ═══════ -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.6</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.4.7</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>
