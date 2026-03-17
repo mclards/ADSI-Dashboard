@@ -281,6 +281,19 @@ def _save_json(path: Path, data: dict) -> bool:
         return False
 
 
+def _has_forecast_dayahead_in_db(day: str) -> bool:
+    """Check if forecast_dayahead has rows for the given day in the DB."""
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM forecast_dayahead WHERE date = ? LIMIT 1",
+                (str(day),),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
 def _is_retryable_sqlite_error(exc: Exception) -> bool:
     if not isinstance(exc, sqlite3.OperationalError):
         return False
@@ -4755,24 +4768,26 @@ def main() -> None:
             now_h      = now.hour
 
             ctx_fc     = _load_json(FORECAST_CTX)
-            da_target  = ctx_fc.get("PacEnergy_DayAhead", {}).get(target_s)
             da_today   = ctx_fc.get("PacEnergy_DayAhead", {}).get(today_s)
+
+            # Authoritative DB check for tomorrow's day-ahead
+            da_target_in_db = _has_forecast_dayahead_in_db(target_s)
 
             # â”€â”€â”€ Decide whether to run a forecast this loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             #
             # Run conditions (any one sufficient):
             #   A) Scheduled hour (DA_RUN_HOURS) and we haven't run this hour yet
-            #   B) Target-day forecast is missing entirely
+            #   B) Target-day forecast missing from DB (authoritative check)
             #   C) Today's forecast is missing and we are inside solar hours
             #      (morning recovery)
 
             run_scheduled = (now_h in DA_RUN_HOURS) and (last_run_hour != now_h)
-            run_missing   = (da_target is None)
+            run_missing   = not da_target_in_db
             run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (da_today is None)
 
             if run_scheduled or run_missing:
                 log.info(
-                    "Run trigger: scheduled=%s  missing_target=%s",
+                    "Run trigger: scheduled=%s  missing_target_db=%s",
                     run_scheduled, run_missing,
                 )
                 clear_forecast_data_cache()
