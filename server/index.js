@@ -9737,6 +9737,16 @@ function computeSpanSeconds(rows) {
 // silent gaps (outages / comms loss that produced no readings) are not
 // mistakenly counted as uptime â€" the old lastTs-firstTs span formula would
 // credit the entire gap regardless of what happened inside it.
+/* Availability-aware online interval builder.
+   A node is "available" when online=1, UNLESS it was manually stopped
+   (alarm=0x1000).  Non-manual-stop fault alarms are disregarded — the node
+   still counts as available even if PAC dropped to 0 due to a fault. */
+function isNodeAvailableForRow(row) {
+  if (Number(row?.online || 0) !== 1) return false;
+  const alarm = Number(row?.alarm || 0);
+  return (alarm & 0x1000) === 0;
+}
+
 function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   const sorted = [...rows].sort((a, b) => Number(a.ts) - Number(b.ts));
   if (sorted.length === 0) return [];
@@ -9745,7 +9755,7 @@ function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
   for (let i = 0; i < sorted.length - 1; i += 1) {
     const cur = sorted[i];
     const next = sorted[i + 1];
-    if (Number(cur?.online || 0) !== 1) continue;
+    if (!isNodeAvailableForRow(cur)) continue;
     const start = Number(cur?.ts || 0);
     const endRaw = Number(next?.ts || 0);
     if (!(start > 0) || !(endRaw > start)) continue;
@@ -9756,7 +9766,7 @@ function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
 
   // Keep parity with computeNodeOnlineSeconds(): tail credit for a final online row.
   const last = sorted[sorted.length - 1];
-  if (Number(last?.online || 0) === 1) {
+  if (isNodeAvailableForRow(last)) {
     const start = Number(last?.ts || 0);
     if (start > 0) intervals.push([start, start + 1000]);
   }

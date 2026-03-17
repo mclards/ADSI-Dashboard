@@ -1592,7 +1592,14 @@ function applyReadingToSummaryState(state, row) {
   if (!(ts > 0)) return;
   const pac = Math.max(0, Number(row?.pac || 0));
   const kwh = Number(row?.kwh || 0);
-  const isOnline = Number(row?.online || 0) === 1 && pac > 0;
+  /* Availability rule: only manual-stop alarm (0x1000 = 4096) counts as
+     unavailable.  Other fault/warning alarms are disregarded — the node is
+     still considered "available" if it is communicating (online=1).
+     A non-manual-stop alarm with pac=0 still counts as available. */
+  const alarmVal = Number(row?.alarm || 0);
+  const isManualStop = (alarmVal & 0x1000) !== 0;
+  const hasFaultAlarm = alarmVal > 0 && !isManualStop;
+  const isOnline = Number(row?.online || 0) === 1 && (pac > 0 || hasFaultAlarm);
 
   state.sample_count += 1;
   if (isOnline) {
