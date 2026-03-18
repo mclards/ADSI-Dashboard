@@ -3025,10 +3025,11 @@ label[data-required]::after {
 
 /* ── Bulk command card ─────────────────────────────────────────────── */
 .bulk-control-bar {
+  --card-fixed-h: calc(228px * var(--inv-card-scale));
   min-width: 0;
-  height: var(--card-fixed-h, calc(228px * var(--inv-card-scale)));
-  min-height: var(--card-fixed-h, calc(228px * var(--inv-card-scale)));
-  max-height: var(--card-fixed-h, calc(228px * var(--inv-card-scale)));
+  height: var(--card-fixed-h);
+  min-height: var(--card-fixed-h);
+  max-height: var(--card-fixed-h);
   display: flex;
   flex-direction: column;
   overflow: hidden;
