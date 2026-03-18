@@ -1832,13 +1832,17 @@ label[data-required]::after {
   }
 
   /* ── 5+ col: compact card and table ─────────────────────────────────────── */
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .inv-card,
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-control-bar {
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .inv-card {
     --card-table-head-h: calc(17px * var(--inv-card-scale));
     --card-row-h: calc(18px * var(--inv-card-scale));
     --card-row-gap: calc(2px * var(--inv-card-scale));
     --card-content-pad-x: calc(5px * var(--inv-card-scale));
     --card-content-gap-x: calc(5px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-control-bar {
     height: auto;
     min-height: 0;
     max-height: none;
@@ -1908,11 +1912,13 @@ label[data-required]::after {
   }
 
   /* ── 6+ col: further compaction ──────────────────────────────────────── */
-  :is(.inv-grid.layout-6, .inv-grid.layout-7) .inv-card,
-  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-control-bar {
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .inv-card {
     --card-table-head-h: calc(15px * var(--inv-card-scale));
     --card-row-gap: calc(1px * var(--inv-card-scale));
     --card-content-pad-x: calc(4px * var(--inv-card-scale));
+    border-radius: calc(8px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-control-bar {
     border-radius: calc(8px * var(--inv-card-scale));
   }
 
@@ -2065,6 +2071,120 @@ label[data-required]::after {
 
   .inv-grid.layout-7 .ctrl-label { display: none; }
   .inv-grid.layout-7 .ctrl-icon { display: inline; }
+
+  /* ── 5+ col: compact bulk command card ─────────────────────────────── */
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-hdr {
+    padding: calc(5px * var(--inv-card-scale)) calc(6px * var(--inv-card-scale));
+    gap: calc(5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-icon {
+    font-size: calc(11px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-title {
+    font-size: calc(9.5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-body {
+    gap: calc(4px * var(--inv-card-scale));
+    padding: calc(5px * var(--inv-card-scale)) calc(6px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-label {
+    font-size: calc(7.5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-field {
+    gap: calc(2px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-input {
+    font-size: calc(9px * var(--inv-card-scale));
+    padding: calc(3px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-helper {
+    font-size: calc(6.5px * var(--inv-card-scale));
+    line-height: 1.1;
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-quick-row {
+    gap: calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-quick-btn {
+    height: calc(20px * var(--inv-card-scale));
+    font-size: calc(8px * var(--inv-card-scale)) !important;
+    border-radius: calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-sep {
+    margin: calc(1px * var(--inv-card-scale)) 0;
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-label {
+    font-size: calc(7px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-row {
+    gap: calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-btn {
+    height: calc(24px * var(--inv-card-scale));
+    font-size: calc(9.5px * var(--inv-card-scale)) !important;
+    border-radius: calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-footer {
+    font-size: calc(6px * var(--inv-card-scale));
+  }
+
+  /* ── 6+ col: further bulk card compaction ──────────────────────────── */
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-hdr {
+    padding: calc(3px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
+    gap: calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-icon {
+    font-size: calc(10px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-title {
+    font-size: calc(8.5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-body {
+    gap: calc(3px * var(--inv-card-scale));
+    padding: calc(4px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-label {
+    font-size: calc(7px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-input {
+    font-size: calc(8px * var(--inv-card-scale));
+    padding: calc(2px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-helper {
+    display: none;
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-quick-btn {
+    height: calc(17px * var(--inv-card-scale));
+    font-size: calc(7px * var(--inv-card-scale)) !important;
+    border-radius: calc(3px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-btn {
+    height: calc(20px * var(--inv-card-scale));
+    font-size: calc(8px * var(--inv-card-scale)) !important;
+    border-radius: calc(3px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-label {
+    font-size: calc(6.5px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-footer {
+    font-size: calc(5.5px * var(--inv-card-scale));
+  }
+
+  /* ── 7 col: maximum bulk card compaction ───────────────────────────── */
+  .inv-grid.layout-7 .bulk-card-body {
+    gap: calc(2px * var(--inv-card-scale));
+    padding: calc(3px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
+  }
+  .inv-grid.layout-7 .bulk-quick-btn {
+    height: calc(15px * var(--inv-card-scale));
+    font-size: calc(6.5px * var(--inv-card-scale)) !important;
+  }
+  .inv-grid.layout-7 .bulk-cmd-btn {
+    height: calc(18px * var(--inv-card-scale));
+    font-size: calc(7.5px * var(--inv-card-scale)) !important;
+  }
+  .inv-grid.layout-7 .bulk-footer {
+    display: none;
+  }
 }
 
 .inv-card {
