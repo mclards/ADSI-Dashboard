@@ -21,6 +21,7 @@ import asyncio
 import json
 import time
 import sqlite3
+import math
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -221,13 +222,17 @@ def _resolve_future_threadsafe(loop, fut, value):
 #   ipconfig.json  —  load
 # -------------------------------------------------
 
+DEFAULT_LOSS_PCT = 2.5
+
+
 def _default_ipconfig():
-    cfg = {"inverters": {}, "poll_interval": {}, "units": {}}
+    cfg = {"inverters": {}, "poll_interval": {}, "units": {}, "losses": {}}
     for i in range(1, 28):
         key = str(i)
         cfg["inverters"][key] = f"192.168.1.{100 + i}"
         cfg["poll_interval"][key] = float(DEFAULT_INTERVAL)
         cfg["units"][key] = [1, 2, 3, 4]
+        cfg["losses"][key] = float(DEFAULT_LOSS_PCT)
     return cfg
 
 
@@ -237,6 +242,7 @@ def _sanitize_ipconfig(data):
     src_inv = src.get("inverters", {}) if isinstance(src.get("inverters"), dict) else {}
     src_poll = src.get("poll_interval", {}) if isinstance(src.get("poll_interval"), dict) else {}
     src_units = src.get("units", {}) if isinstance(src.get("units"), dict) else {}
+    src_losses = src.get("losses", {}) if isinstance(src.get("losses"), dict) else {}
 
     for i in range(1, 28):
         key = str(i)
@@ -263,9 +269,18 @@ def _sanitize_ipconfig(data):
         else:
             units = [1, 2, 3, 4]
 
+        loss_raw = src_losses.get(key, src_losses.get(i, out["losses"][key]))
+        try:
+            loss = float(loss_raw)
+        except Exception:
+            loss = float(out["losses"][key])
+        if not math.isfinite(loss) or loss < 0 or loss > 100:
+            loss = float(out["losses"][key])
+
         out["inverters"][key] = ip
         out["poll_interval"][key] = poll if poll >= 0.01 else float(DEFAULT_INTERVAL)
         out["units"][key] = units if units else [1]
+        out["losses"][key] = loss
 
     return out
 

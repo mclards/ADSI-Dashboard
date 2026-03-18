@@ -681,7 +681,7 @@
         </button>
       </div>
       <div style="text-align:center;padding:6px 16px;font-size:11px;color:#7a9ac0;border-top:1px solid #1a2e4a;">
-        ADSI Inverter Dashboard v2.3.3 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
+        ADSI Inverter Dashboard v2.4.21 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
       </div>
     </div>
 
@@ -706,6 +706,7 @@
       const themeToggle = document.getElementById("themeToggle");
       const THEME_KEY = "topology_theme";
       const DEFAULT_INTERVAL = 0.05;
+      const DEFAULT_LOSS_PCT = 2.5;
       const dirtyRows = new Set();
       let config = {};
       let ipState = {};
@@ -813,7 +814,11 @@
           const units = Array.isArray(config.units[n])
             ? config.units[n]
             : [1, 2, 3, 4];
-          const loss = Number(config.losses[n]) || 0;
+          const rawLoss = Number(config.losses[n]);
+          const loss =
+            Number.isFinite(rawLoss) && rawLoss >= 0 && rawLoss <= 100
+              ? rawLoss
+              : DEFAULT_LOSS_PCT;
           tbody.insertAdjacentHTML(
             "beforeend",
             rowHtml(n, ip, interval, units, loss),

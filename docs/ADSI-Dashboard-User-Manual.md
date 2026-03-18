@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.20`
+**Applies to:** ADSI Inverter Dashboard `v2.4.21`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1050,12 +1050,12 @@ Each of the 27 inverters has one row with the following columns:
 | **IP Address** | IPv4 address of the inverter on the local network. |
 | **Polling Interval (s)** | How often the gateway polls this inverter, in seconds (min 0.01, default 0.05). |
 | **Enabled Units** | Which nodes (1--4) are active. Use **All** to toggle all four. Empty selection disables the inverter. |
-| **Loss %** | Estimated MW transmission loss from this inverter to the substation (0--100%). Accounts for cable degradation or distance. Used exclusively by the forecast engine for substation-level accuracy; does *not* affect live dashboard readings, energy totals, or exports. |
+| **Loss %** | Estimated MW transmission loss from this inverter to the substation (0--100%). Default is `2.5%` per inverter unless overridden. Used exclusively by the forecast engine for substation-level accuracy; does *not* affect live dashboard readings, energy totals, or exports. |
 | **Save** | Saves the individual row. Use **Save All Changes** at the bottom to save every row at once. |
 
 ### Loss % and Forecasting
 
-When a non-zero Loss % is configured, the day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training. The ML model learns substation-level output patterns rather than raw inverter output, producing more accurate day-ahead and intraday-adjusted forecasts.
+Loss % is forecast-only. The dashboard, logged telemetry, daily reports, and exports continue using raw measured values. The day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training so the ML model learns substation-level output patterns rather than raw inverter output.
 
 Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far from substation), the forecast engine reduces their historical energy contributions by those percentages when building training data, computing error corrections, and scoring forecast quality.
 

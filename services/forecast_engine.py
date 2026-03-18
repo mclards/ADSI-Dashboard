@@ -72,7 +72,6 @@ WEATHER_BIAS_FILE = BASE / "forecast/pv_weather_bias.joblib"
 SOLCAST_RELIABILITY_FILE = BASE / "forecast/pv_solcast_reliability.joblib"
 FORECAST_SNAPSHOT_DIR = BASE / "forecast/snapshots"
 WEATHER_DIR   = BASE / "weather"
-IPCONFIG_FILE = (PORTABLE_ROOT / "config" / "ipconfig.json") if PORTABLE_ROOT is not None else (BASE / "ipconfig.json")
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
 SERVICE_STOP_FILE_RAW = str(
     os.getenv("IM_SERVICE_STOP_FILE")
@@ -89,6 +88,16 @@ elif PORTABLE_ROOT is not None:
 else:
     APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".inverter-dashboard")))
     APP_DB_FILE = APPDATA_ROOT / "Inverter-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
+
+if PORTABLE_ROOT is not None:
+    IPCONFIG_FILE = PORTABLE_ROOT / "config" / "ipconfig.json"
+    LEGACY_IPCONFIG_FILES: list[Path] = []
+else:
+    IPCONFIG_FILE = APP_DB_FILE.parent / "ipconfig.json"
+    LEGACY_IPCONFIG_FILES = []
+    for candidate in [BASE / "ipconfig.json", Path(__file__).resolve().parent / "ipconfig.json", Path.cwd() / "ipconfig.json"]:
+        if candidate != IPCONFIG_FILE and candidate not in LEGACY_IPCONFIG_FILES:
+            LEGACY_IPCONFIG_FILES.append(candidate)
 
 ARCHIVE_DIR = APP_DB_FILE.parent / "archive"
 SQLITE_READ_TIMEOUT_SEC = 8.0
@@ -165,6 +174,8 @@ SOLAR_END_SLOT   = SOLAR_END_H   * 60 // SLOT_MIN
 # Plant
 EXPORT_MW          = 24.0   # fallback export ceiling when no explicit setting exists
 FORECAST_EXPORT_LIMIT_SETTING_KEY = "forecastExportLimitMw"
+IPCONFIG_SETTING_KEY = "ipConfigJson"
+DEFAULT_INVERTER_LOSS_PCT = 2.5
 UNIT_KW_MAX        = 997.0   # kW peak per inverter (4-node complete)
 UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
 PLANT_MW_FALLBACK  = 40.0    # used when ipconfig absent
@@ -284,14 +295,20 @@ def _save_json(path: Path, data: dict) -> bool:
 
 
 def _has_forecast_dayahead_in_db(day: str) -> bool:
-    """Check if forecast_dayahead has rows for the given day in the DB."""
+    """Check if forecast_dayahead has a complete solar-window rowset for the day."""
     try:
         with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             row = conn.execute(
-                "SELECT 1 FROM forecast_dayahead WHERE date = ? LIMIT 1",
-                (str(day),),
+                """
+                SELECT COUNT(DISTINCT slot)
+                  FROM forecast_dayahead
+                 WHERE date = ?
+                   AND slot >= ?
+                   AND slot < ?
+                """,
+                (str(day), int(SOLAR_START_SLOT), int(SOLAR_END_SLOT)),
             ).fetchone()
-            return row is not None
+            return int(row[0] or 0) >= int(SOLAR_SLOTS)
     except Exception:
         return False
 
@@ -474,6 +491,7 @@ def clear_forecast_data_cache() -> None:
     _cached_loss_factors = None
     _read_setting_value.cache_clear()
     load_forecast_export_limit_mw.cache_clear()
+    load_ipconfig_authoritative.cache_clear()
     load_actual.cache_clear()
     load_actual_with_presence.cache_clear()
     load_actual_loss_adjusted.cache_clear()
@@ -544,6 +562,101 @@ def validate_weather_5min(day: str, w5: pd.DataFrame) -> tuple[bool, str]:
 
 
 # ============================================================================
+# IPCONFIG RESOLUTION
+# ============================================================================
+
+def _default_ipconfig() -> dict:
+    cfg = {"inverters": {}, "poll_interval": {}, "units": {}, "losses": {}}
+    for i in range(1, 28):
+        key = str(i)
+        cfg["inverters"][key] = ""
+        cfg["poll_interval"][key] = 0.05
+        cfg["units"][key] = [1, 2, 3, 4]
+        cfg["losses"][key] = float(DEFAULT_INVERTER_LOSS_PCT)
+    return cfg
+
+
+def _sanitize_ipconfig(data) -> dict:
+    out = _default_ipconfig()
+    src = data if isinstance(data, dict) else {}
+    src_inv = src.get("inverters", {}) if isinstance(src.get("inverters"), dict) else {}
+    src_poll = src.get("poll_interval", {}) if isinstance(src.get("poll_interval"), dict) else {}
+    src_units = src.get("units", {}) if isinstance(src.get("units"), dict) else {}
+    src_losses = src.get("losses", {}) if isinstance(src.get("losses"), dict) else {}
+
+    for i in range(1, 28):
+        key = str(i)
+        ip_raw = src_inv.get(key, src_inv.get(i, out["inverters"][key]))
+        poll_raw = src_poll.get(key, src_poll.get(i, out["poll_interval"][key]))
+        units_raw = src_units.get(key, src_units.get(i, out["units"][key]))
+        loss_raw = src_losses.get(key, src_losses.get(i, out["losses"][key]))
+
+        ip = str(ip_raw or "").strip()
+
+        try:
+            poll = float(poll_raw)
+        except Exception:
+            poll = float(out["poll_interval"][key])
+        if not math.isfinite(poll) or poll < 0.01:
+            poll = float(out["poll_interval"][key])
+
+        if isinstance(units_raw, list):
+            units = []
+            for unit in units_raw:
+                try:
+                    unit_i = int(unit)
+                except Exception:
+                    continue
+                if 1 <= unit_i <= 4 and unit_i not in units:
+                    units.append(unit_i)
+        else:
+            units = list(out["units"][key])
+
+        try:
+            loss_pct = float(loss_raw)
+        except Exception:
+            loss_pct = float(out["losses"][key])
+        if not math.isfinite(loss_pct) or loss_pct < 0.0 or loss_pct > 100.0:
+            loss_pct = float(out["losses"][key])
+
+        out["inverters"][key] = ip
+        out["poll_interval"][key] = poll
+        out["units"][key] = units
+        out["losses"][key] = loss_pct
+
+    return out
+
+
+@lru_cache(maxsize=1)
+def load_ipconfig_authoritative() -> dict:
+    raw = _read_setting_value(IPCONFIG_SETTING_KEY)
+    if raw:
+        try:
+            return {
+                "config": _sanitize_ipconfig(json.loads(raw)),
+                "source": f"settings:{IPCONFIG_SETTING_KEY}",
+                "path": str(APP_DB_FILE),
+            }
+        except Exception as e:
+            log.warning("Invalid %s setting - falling back to file ipconfig: %s", IPCONFIG_SETTING_KEY, e)
+
+    for path in [IPCONFIG_FILE, *LEGACY_IPCONFIG_FILES]:
+        cfg = _load_json(path)
+        if isinstance(cfg, dict) and cfg:
+            return {
+                "config": _sanitize_ipconfig(cfg),
+                "source": "file",
+                "path": str(path),
+            }
+
+    return {
+        "config": _default_ipconfig(),
+        "source": "default",
+        "path": str(IPCONFIG_FILE),
+    }
+
+
+# ============================================================================
 # PLANT CAPACITY
 # ============================================================================
 
@@ -572,7 +685,8 @@ def plant_capacity_profile() -> dict:
       - if units entry is missing for a configured inverter, assume 4 nodes
       - if units entry is [], inverter contributes 0 nodes
     """
-    cfg = _load_json(IPCONFIG_FILE)
+    ipconfig_meta = load_ipconfig_authoritative()
+    cfg = ipconfig_meta.get("config", {}) if isinstance(ipconfig_meta, dict) else {}
     inv_map = cfg.get("inverters", {}) or {}
     unit_map = cfg.get("units", {}) or {}
 
@@ -589,6 +703,8 @@ def plant_capacity_profile() -> dict:
             "dependable_kw": fb_kw,
             "max_kw": fb_kw,
             "source": "fallback",
+            "ipconfig_source": str(ipconfig_meta.get("source", "missing")),
+            "ipconfig_path": str(ipconfig_meta.get("path", IPCONFIG_FILE)),
         }
 
     def _sort_key(k: str):
@@ -639,6 +755,8 @@ def plant_capacity_profile() -> dict:
             "dependable_kw": fb_kw,
             "max_kw": fb_kw,
             "source": "fallback",
+            "ipconfig_source": str(ipconfig_meta.get("source", "missing")),
+            "ipconfig_path": str(ipconfig_meta.get("path", IPCONFIG_FILE)),
         }
 
     equiv_inverters = enabled_nodes / 4.0
@@ -653,6 +771,8 @@ def plant_capacity_profile() -> dict:
         "dependable_kw": dependable_kw,
         "max_kw": max_kw,
         "source": "ipconfig",
+        "ipconfig_source": str(ipconfig_meta.get("source", "file")),
+        "ipconfig_path": str(ipconfig_meta.get("path", IPCONFIG_FILE)),
     }
 
 
@@ -908,7 +1028,9 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
         if col in rest_interp.columns:
             rest_interp[col] = rest_interp[col].clip(lower=0)
 
-    out = pd.concat([rad_interp, rest_interp], axis=1).reset_index(drop=True)
+    out = pd.concat([rad_interp, rest_interp], axis=1).reset_index()
+    if "index" in out.columns and "time" not in out.columns:
+        out = out.rename(columns={"index": "time"})
 
     # Gentle smoothing for cloud (meteorological, not sub-minute noise)
     for col in ["cloud", "cloud_low", "cloud_mid", "cloud_high"]:
@@ -1859,11 +1981,12 @@ def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[
 def _load_inverter_loss_factors() -> dict[str, float]:
     """Load per-inverter transmission loss factors (0.0-1.0) from ipconfig.
 
-    Used exclusively by the forecast training and day-ahead generation paths.
-    General actual-data queries (inverter health, Solcast, QA) must not apply
-    these factors -- they track true inverter output.
+    Used exclusively by forecast-engine paths that compare or learn against
+    substation-delivered energy. Dashboard telemetry, exports, and Solcast
+    reliability stay on raw actual inverter output.
     """
-    cfg = _load_json(IPCONFIG_FILE)
+    ipconfig_meta = load_ipconfig_authoritative()
+    cfg = ipconfig_meta.get("config", {}) if isinstance(ipconfig_meta, dict) else {}
     raw = cfg.get("losses", {}) or {}
     factors: dict[str, float] = {}
     for k, v in raw.items():
@@ -2122,7 +2245,7 @@ def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None
 def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
     """Loss-adjusted 5-min actual for forecast training / day-ahead / QA.
 
-    Falls back to raw load_actual() when no losses are configured.
+    Falls back to raw load_actual() when configured losses are all zero.
     """
     values, _ = load_actual_loss_adjusted_with_presence(day)
     return values
@@ -3344,6 +3467,18 @@ def apply_weather_bias_adjustment(
         except Exception:
             return 0.0
         return num if math.isfinite(num) else 0.0
+
+    if "time" not in adjusted.columns:
+        log.warning(
+            "Weather-bias 5-minute frame missing time column [%s]; rebuilding synthetic 5-minute timestamps.",
+            day,
+        )
+        adjusted = adjusted.copy()
+        adjusted.insert(
+            0,
+            "time",
+            pd.date_range(f"{day} 00:00:00", periods=len(adjusted), freq="5min"),
+        )
 
     adjusted["time"] = pd.to_datetime(adjusted["time"], errors="coerce")
     rad_factors = []
@@ -4601,7 +4736,7 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
         log.warning("Legacy forecast JSON write failed for %s; DB write succeeded and remains authoritative.", day)
     elif ok_file and not ok_db:
         log.warning("Forecast DB write failed for %s; legacy JSON fallback succeeded.", day)
-    return bool(ok_db or ok_file)
+    return bool(ok_db) if _forecast_table_name_for_key(key) is not None else bool(ok_file)
 
 
 def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
@@ -5401,6 +5536,19 @@ def _read_operation_mode() -> str:
         return "gateway"
 
 
+def _register_forecast_failure(
+    consecutive_failures: int,
+    monotonic_now: float,
+    base_backoff_sec: int,
+) -> tuple[int, float, int]:
+    next_failures = max(0, int(consecutive_failures)) + 1
+    backoff = min(
+        int(base_backoff_sec) * (2 ** min(next_failures - 1, 3)),
+        1800,
+    )
+    return next_failures, float(monotonic_now) + float(backoff), int(backoff)
+
+
 def main() -> None:
     _clear_service_stop_file()
     profile = plant_capacity_profile()
@@ -5416,6 +5564,11 @@ def main() -> None:
         profile["configured_inverters"],
         profile["enabled_nodes"],
         profile["equiv_inverters"],
+    )
+    log.info(
+        "IPConfig      : source=%s  path=%s",
+        profile.get("ipconfig_source", profile.get("source", "unknown")),
+        profile.get("ipconfig_path", IPCONFIG_FILE),
     )
     log.info("Plant Capacity: %.3f MW dep  /  %.3f MW max", cap_dep / 1000.0, cap_max / 1000.0)
     log.info("Slot Cap      : dep=%.4f MWh  max=%.4f MWh per 5-min", slot_cap_kwh(True) / 1000.0, slot_cap_kwh(False) / 1000.0)
@@ -5452,9 +5605,7 @@ def main() -> None:
             now_h      = now.hour
             mono_now   = time.monotonic()
 
-            ctx_fc     = _load_json(FORECAST_CTX)
-            da_today   = ctx_fc.get("PacEnergy_DayAhead", {}).get(today_s)
-
+            da_today_in_db = _has_forecast_dayahead_in_db(today_s)
             # Authoritative DB check for tomorrow's day-ahead
             da_target_in_db = _has_forecast_dayahead_in_db(target_s)
 
@@ -5474,7 +5625,7 @@ def main() -> None:
             # Generate if missing; skip if present. Re-generate if it disappears.
             outside_solar = (now_h >= SOLAR_END_H) or (now_h < SOLAR_START_H)
             run_postsolar = outside_solar and (not da_target_in_db)
-            run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (da_today is None)
+            run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (not da_today_in_db)
 
             # Respect failure cooldown for post-solar retries.
             # Primary scheduled runs always bypass the cooldown.
@@ -5494,36 +5645,48 @@ def main() -> None:
                 if _service_stop_requested():
                     raise KeyboardInterrupt
 
-                # (Re)train model before forecast
-                trained = train_model(today)
-                if _service_stop_requested():
-                    raise KeyboardInterrupt
-                if not trained:
-                    log.warning("Model training skipped â€“ will use existing model or physics")
+                try:
+                    # (Re)train model before forecast
+                    trained = train_model(today)
+                    if _service_stop_requested():
+                        raise KeyboardInterrupt
+                    if not trained:
+                        log.warning("Model training skipped â€“ will use existing model or physics")
 
-                # Forecast quality audit of yesterday
-                forecast_qa(today)
-                if _service_stop_requested():
-                    raise KeyboardInterrupt
+                    # Forecast quality audit of yesterday
+                    forecast_qa(today)
+                    if _service_stop_requested():
+                        raise KeyboardInterrupt
 
-                # Generate tomorrow's day-ahead
-                ok = run_dayahead(target, today)
-                if ok:
-                    last_run_hour = now_h
-                    _consecutive_failures = 0
-                    _fail_cooldown_until = 0.0
-                    log.info("Day-ahead for %s completed successfully", target_s)
-                else:
-                    _consecutive_failures += 1
-                    backoff = min(
-                        _FAIL_COOLDOWN_BASE * (2 ** min(_consecutive_failures - 1, 3)),
-                        1800,
+                    # Generate tomorrow's day-ahead
+                    ok = run_dayahead(target, today)
+                except Exception:
+                    _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
+                        _consecutive_failures,
+                        time.monotonic(),
+                        _FAIL_COOLDOWN_BASE,
                     )
-                    _fail_cooldown_until = time.monotonic() + backoff
                     log.error(
-                        "Day-ahead for %s FAILED (attempt %d, cooldown %ds)",
+                        "Day-ahead for %s crashed (attempt %d, cooldown %ds)",
                         target_s, _consecutive_failures, backoff,
+                        exc_info=True,
                     )
+                else:
+                    if ok:
+                        last_run_hour = now_h
+                        _consecutive_failures = 0
+                        _fail_cooldown_until = 0.0
+                        log.info("Day-ahead for %s completed successfully", target_s)
+                    else:
+                        _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
+                            _consecutive_failures,
+                            time.monotonic(),
+                            _FAIL_COOLDOWN_BASE,
+                        )
+                        log.error(
+                            "Day-ahead for %s FAILED (attempt %d, cooldown %ds)",
+                            target_s, _consecutive_failures, backoff,
+                        )
 
             elif run_recovery:
                 log.warning("Recovery: today %s missing day-ahead â€“ generating now", today_s)
@@ -5544,6 +5707,7 @@ def main() -> None:
                 if intraday_slot_key != last_intraday_slot_key:
                     if _service_stop_requested():
                         raise KeyboardInterrupt
+                    clear_forecast_data_cache()
                     run_intraday_adjusted(today)
                     last_intraday_slot_key = intraday_slot_key
 

@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.20
+- **Repo/package version baseline:** 2.4.21
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.21 Changes - Forecast Resiliency and Default Loss Baseline (2026-03-19)
+- **Day-ahead persistence and retry logic were hardened:** DB-backed day-ahead success now requires a real SQLite write, partial DB rowsets no longer suppress regeneration, and crashed post-solar attempts now enter the same cooldown path as clean failures.
+- **Forecast completeness checks now match the solar window end-to-end:** Python overnight generation, the Node fallback cron, and startup legacy-context repair all require a complete solar-window day-ahead rowset instead of any stray row.
+- **Per-inverter forecast loss defaults now start at `2.5%`:** missing or partial `losses` config values now default to `2.5` in forecast-engine config sanitization, server-side `ipConfigJson` defaults, inverter-engine file mirroring, and the IP Config UI.
+- **Loss handling remains forecast-only:** the manual/rulebook wording was updated to state explicitly that `Loss %` does not alter dashboard telemetry, logged plant data, reports, or exports.
 
 ## v2.4.20 Changes - Forecast Release Alignment and Constraint-Hardened QA (2026-03-19)
 - **Forecast export ceiling is now configurable:** the forecast engine reads `forecastExportLimitMw` from the settings table, with `24 MW` retained only as the fallback export ceiling instead of a silent hardcoded assumption.

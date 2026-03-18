@@ -182,6 +182,8 @@ const SOLCAST_TIMEOUT_MS = 20000;
 const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
 const SOLCAST_SOLAR_END_H = 18;
+const FORECAST_SOLAR_SLOT_COUNT =
+  ((SOLCAST_SOLAR_END_H - SOLCAST_SOLAR_START_H) * 60) / SOLCAST_SLOT_MIN;
 const SOLCAST_UNIT_KW_MAX = 997.0;
 const SOLCAST_ACCESS_MODE_API = "api";
 const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
@@ -7102,6 +7104,28 @@ function getDayAheadRowsForDate(day) {
   });
 }
 
+function countDayAheadSolarWindowRows(day) {
+  const { startTs, endTs } = getForecastSolarWindowBounds(day);
+  return getDayAheadRowsForDate(day).reduce((count, row) => {
+    const ts = Number(row?.ts || 0);
+    return count + (ts >= startTs && ts < endTs ? 1 : 0);
+  }, 0);
+}
+
+function hasCompleteDayAheadRowsForDate(day) {
+  return countDayAheadSolarWindowRows(day) >= FORECAST_SOLAR_SLOT_COUNT;
+}
+
+function getIncompleteDayAheadContextDays() {
+  const ctx = readForecastContext();
+  const root = ctx && typeof ctx === "object" ? ctx.PacEnergy_DayAhead : null;
+  if (!root || typeof root !== "object") return [];
+  return Object.keys(root).filter((day) => {
+    const series = root[day];
+    return Array.isArray(series) && !hasCompleteDayAheadRowsForDate(day);
+  });
+}
+
 function getIntradayAdjustedRowsForDate(day) {
   const dayKey = String(day || "").trim();
   if (!dayKey) return [];
@@ -10282,13 +10306,15 @@ function getLatestReportDate() {
   }
 }
 
+const DEFAULT_INVERTER_LOSS_PCT = 2.5;
+
 function defaultIpConfig() {
   const cfg = { inverters: {}, poll_interval: {}, units: {}, losses: {} };
   for (let i = 1; i <= 27; i++) {
     cfg.inverters[i] = `192.168.1.${100 + i}`;
     cfg.poll_interval[i] = 0.05;
     cfg.units[i] = [1, 2, 3, 4];
-    cfg.losses[i] = 0;
+    cfg.losses[i] = DEFAULT_INVERTER_LOSS_PCT;
   }
   return cfg;
 }
@@ -10310,12 +10336,15 @@ function sanitizeIpConfig(input) {
       ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
       : [1, 2, 3, 4];
     const lossRaw = Number(
-      src?.losses?.[i] ?? src?.losses?.[String(i)] ?? 0,
+      src?.losses?.[i] ?? src?.losses?.[String(i)] ?? out.losses[i],
     );
     out.inverters[i] = ip;
     out.poll_interval[i] = Number.isFinite(poll) && poll >= 0.01 ? poll : 0.05;
     out.units[i] = units.length ? [...new Set(units)] : [];
-    out.losses[i] = Number.isFinite(lossRaw) && lossRaw >= 0 && lossRaw <= 100 ? lossRaw : 0;
+    out.losses[i] =
+      Number.isFinite(lossRaw) && lossRaw >= 0 && lossRaw <= 100
+        ? lossRaw
+        : out.losses[i];
   }
   return out;
 }
@@ -13434,18 +13463,19 @@ cron.schedule("0 2 * * *", pruneOldData);
 // crashes, misses its window, or is not running, this Node cron
 // ensures tomorrow's forecast still gets generated.
 // Runs at 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
-// already exists and only generates if missing.  Gateway mode only.
+// has a complete solar-window rowset and only generates if missing/incomplete.
+// Gateway mode only.
 for (const cronExpr of ["30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
     if (isRemoteMode()) return;
     const tomorrow = addDaysIso(localDateStr(), 1);
     try {
-      const existing = getDayAheadRowsForDate(tomorrow);
-      if (existing.length > 0) {
-        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing.length} slots) - skip`);
+      const existing = countDayAheadSolarWindowRows(tomorrow);
+      if (hasCompleteDayAheadRowsForDate(tomorrow)) {
+        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing} solar slots) - skip`);
         return;
       }
-      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} missing - triggering ML generation`);
+      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} incomplete (${existing}/${FORECAST_SOLAR_SLOT_COUNT} solar slots) - triggering ML generation`);
       const result = await generateDayAheadWithMl(1);
       console.log(
         `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.providerUsed}, ${result?.durationMs || 0}ms)`,
@@ -13505,7 +13535,8 @@ const httpServer = app.listen(PORT, () => {
     } else {
       if (readForecastProvider() !== "solcast") {
         const storedRows = countStoredForecastRows("forecast_dayahead");
-        if (storedRows <= 0) {
+        const incompleteDays = getIncompleteDayAheadContextDays();
+        if (storedRows <= 0 || incompleteDays.length > 0) {
           const r = syncDayAheadFromContextIfNewer(true);
           if (r?.changed) {
             console.log(
@@ -13514,7 +13545,7 @@ const httpServer = app.listen(PORT, () => {
           }
         } else {
           console.log(
-            `[Forecast] Startup legacy context import skipped; forecast_dayahead already has ${storedRows} stored row(s).`,
+            `[Forecast] Startup legacy context import skipped; forecast_dayahead already has ${storedRows} stored row(s) and no incomplete context day(s).`,
           );
         }
       } else {

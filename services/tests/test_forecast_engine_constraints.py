@@ -233,6 +233,114 @@ class ForecastEngineConstraintTests(unittest.TestCase):
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
 
+    def test_has_forecast_dayahead_in_db_requires_full_solar_window(self):
+        tmp_root = WORK_TMP / "dayahead_presence"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "dayahead_presence")
+            conn = sqlite3.connect(mod.APP_DB_FILE)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE forecast_dayahead (
+                        date TEXT NOT NULL,
+                        ts INTEGER NOT NULL,
+                        slot INTEGER NOT NULL,
+                        time_hms TEXT,
+                        kwh_inc REAL,
+                        kwh_lo REAL,
+                        kwh_hi REAL,
+                        source TEXT,
+                        updated_ts INTEGER,
+                        PRIMARY KEY (date, slot)
+                    )
+                    """
+                )
+                day = "2026-03-20"
+                conn.execute(
+                    "INSERT INTO forecast_dayahead (date, ts, slot, time_hms, kwh_inc) VALUES (?, ?, ?, ?, ?)",
+                    (day, 0, int(mod.SOLAR_START_SLOT), "05:00:00", 1.0),
+                )
+                conn.commit()
+                self.assertFalse(mod._has_forecast_dayahead_in_db(day))
+
+                rows = []
+                for slot in range(int(mod.SOLAR_START_SLOT), int(mod.SOLAR_END_SLOT)):
+                    hh = (slot * mod.SLOT_MIN) // 60
+                    mm = (slot * mod.SLOT_MIN) % 60
+                    rows.append(
+                        (
+                            day,
+                            slot * mod.SLOT_MIN * 60 * 1000,
+                            slot,
+                            f"{hh:02d}:{mm:02d}:00",
+                            1.0,
+                        )
+                    )
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO forecast_dayahead (date, ts, slot, time_hms, kwh_inc)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.assertTrue(mod._has_forecast_dayahead_in_db(day))
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_write_forecast_returns_false_when_db_write_fails_even_if_json_succeeds(self):
+        tmp_root = WORK_TMP / "write_forecast"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "write_forecast")
+            orig_save = mod._save_json
+            orig_write_db = mod._write_forecast_db
+            try:
+                mod._save_json = lambda path, data: True
+                mod._write_forecast_db = lambda key, day, series: False
+                ok = mod.write_forecast(
+                    "PacEnergy_DayAhead",
+                    "2026-03-20",
+                    [{"ts": 0, "kwh": 1.0}],
+                )
+            finally:
+                mod._save_json = orig_save
+                mod._write_forecast_db = orig_write_db
+
+            self.assertFalse(ok)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_register_forecast_failure_backoff_caps_and_grows(self):
+        tmp_root = WORK_TMP / "failure_backoff"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "failure_backoff")
+            failures = 0
+            mono_now = 1000.0
+            observed = []
+            for _ in range(5):
+                failures, cooldown_until, backoff = mod._register_forecast_failure(
+                    failures,
+                    mono_now,
+                    300,
+                )
+                observed.append(backoff)
+                self.assertAlmostEqual(cooldown_until, mono_now + backoff, places=6)
+            self.assertEqual(observed, [300, 600, 1200, 1800, 1800])
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

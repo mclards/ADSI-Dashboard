@@ -281,12 +281,15 @@ function toPersistedReadingRow(row) {
   };
 }
 
+const DEFAULT_INVERTER_LOSS_PCT = 2.5;
+
 function defaultIpConfig() {
-  const cfg = { inverters: {}, poll_interval: {}, units: {} };
+  const cfg = { inverters: {}, poll_interval: {}, units: {}, losses: {} };
   for (let i = 1; i <= 27; i++) {
     cfg.inverters[i] = `192.168.1.${100 + i}`;
     cfg.poll_interval[i] = 0.05;
     cfg.units[i] = [1, 2, 3, 4];
+    cfg.losses[i] = DEFAULT_INVERTER_LOSS_PCT;
   }
   return cfg;
 }
@@ -307,12 +310,19 @@ function sanitizeIpConfig(input) {
     const units = Array.isArray(unitsRaw)
       ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
       : [1, 2, 3, 4];
+    const lossRaw = Number(
+      src?.losses?.[i] ?? src?.losses?.[String(i)] ?? out.losses[i],
+    );
     // Validate IP format; fall back to default on invalid entries.
     const ipValid = /^(\d{1,3}\.){3}\d{1,3}$/.test(ip);
     if (!ipValid) console.warn(`[poller] Ignoring invalid IP for inverter ${i}: "${ip}"`);
     out.inverters[i] = ipValid ? ip : `192.168.1.${100 + i}`;
     out.poll_interval[i] = Number.isFinite(poll) && poll >= 0.01 && poll <= 60 ? poll : 0.05;
     out.units[i] = units.length ? [...new Set(units)] : [];
+    out.losses[i] =
+      Number.isFinite(lossRaw) && lossRaw >= 0 && lossRaw <= 100
+        ? lossRaw
+        : out.losses[i];
   }
   return out;
 }
