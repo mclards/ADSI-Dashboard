@@ -13408,6 +13408,34 @@ app.post("/api/export/forecast-actual", async (req, res) => {
 });
 
 cron.schedule("0 2 * * *", pruneOldData);
+
+// ── Day-ahead forecast auto-generation fallback ──────────────────────────
+// The Python forecast service has its own scheduler (DA_RUN_HOURS 6,18,19-22)
+// but if it crashes, misses its window, or is not running, this Node cron
+// ensures tomorrow's forecast still gets generated.
+// Runs at 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
+// already exists and only generates if missing.  Gateway mode only.
+for (const cronExpr of ["30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
+  cron.schedule(cronExpr, async () => {
+    if (isRemoteMode()) return;
+    const tomorrow = addDaysIso(localDateStr(), 1);
+    try {
+      const existing = getDayAheadRowsForDate(tomorrow);
+      if (existing.length > 0) {
+        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing.length} slots) - skip`);
+        return;
+      }
+      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} missing - triggering ML generation`);
+      const result = await generateDayAheadWithMl(1);
+      console.log(
+        `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.providerUsed}, ${result?.durationMs || 0}ms)`,
+      );
+    } catch (err) {
+      console.warn(`[Cron:forecast] Fallback generation for ${tomorrow} failed:`, err.message);
+    }
+  });
+}
+
 cron.schedule("5 18 * * *", () => {
   const today = localDateStr();
   try {

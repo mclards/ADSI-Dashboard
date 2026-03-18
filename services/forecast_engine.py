@@ -251,7 +251,7 @@ CONF_CLOUD_ADD  = 0.20   # additional Â±20% on overcast / volatile days
 CLOUD_VOLATILE  = 60.0   # cloud cover % threshold for "volatile"
 
 # Forecast re-run schedule (hours UTC+8 when a new day-ahead is computed)
-DA_RUN_HOURS = {6, 18}   # 06:00 and 18:00 local
+DA_RUN_HOURS = {6, 18, 19, 20, 21, 22}  # 06:00, 18:00 primary; 19-22 fallback
 MIN_HOURLY_POINTS = 20
 MIN_5MIN_POINTS = 240
 
@@ -4932,6 +4932,9 @@ def main() -> None:
 
     last_run_hour = -1   # track which hour we last ran in
     last_intraday_slot_key = ""
+    _fail_cooldown_until = 0.0       # monotonic time until retry is allowed
+    _FAIL_COOLDOWN_BASE = 300        # 5 min base backoff after a failed attempt
+    _consecutive_failures = 0
 
     while True:
         try:
@@ -4949,6 +4952,7 @@ def main() -> None:
             target     = today + timedelta(days=1)
             target_s   = target.isoformat()
             now_h      = now.hour
+            mono_now   = time.monotonic()
 
             ctx_fc     = _load_json(FORECAST_CTX)
             da_today   = ctx_fc.get("PacEnergy_DayAhead", {}).get(today_s)
@@ -4968,10 +4972,19 @@ def main() -> None:
             run_missing   = not da_target_in_db
             run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (da_today is None)
 
+            # Respect failure cooldown for missing-target retries.
+            # Scheduled runs always bypass the cooldown (new hour = fresh window).
+            if not run_scheduled and run_missing and mono_now < _fail_cooldown_until:
+                log.debug(
+                    "Target missing but in failure cooldown (%.0fs remaining)",
+                    _fail_cooldown_until - mono_now,
+                )
+                run_missing = False
+
             if run_scheduled or run_missing:
                 log.info(
-                    "Run trigger: scheduled=%s  missing_target_db=%s",
-                    run_scheduled, run_missing,
+                    "Run trigger: scheduled=%s  missing_target_db=%s  failures=%d",
+                    run_scheduled, run_missing, _consecutive_failures,
                 )
                 clear_forecast_data_cache()
                 if _service_stop_requested():
@@ -4993,9 +5006,20 @@ def main() -> None:
                 ok = run_dayahead(target, today)
                 if ok:
                     last_run_hour = now_h
+                    _consecutive_failures = 0
+                    _fail_cooldown_until = 0.0
                     log.info("Day-ahead for %s completed successfully", target_s)
                 else:
-                    log.error("Day-ahead for %s FAILED", target_s)
+                    _consecutive_failures += 1
+                    backoff = min(
+                        _FAIL_COOLDOWN_BASE * (2 ** min(_consecutive_failures - 1, 3)),
+                        1800,
+                    )
+                    _fail_cooldown_until = time.monotonic() + backoff
+                    log.error(
+                        "Day-ahead for %s FAILED (attempt %d, cooldown %ds)",
+                        target_s, _consecutive_failures, backoff,
+                    )
 
             elif run_recovery:
                 log.warning("Recovery: today %s missing day-ahead â€“ generating now", today_s)
