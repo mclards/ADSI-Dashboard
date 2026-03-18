@@ -2123,7 +2123,7 @@ label[data-required]::after {
     font-size: calc(9.5px * var(--inv-card-scale)) !important;
     border-radius: calc(4px * var(--inv-card-scale));
   }
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-footer {
+  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-info {
     font-size: calc(6px * var(--inv-card-scale));
   }
 
@@ -2139,11 +2139,15 @@ label[data-required]::after {
     font-size: calc(8.5px * var(--inv-card-scale));
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-body {
-    gap: calc(3px * var(--inv-card-scale));
-    padding: calc(4px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
+    gap: 0;
+    padding: calc(3px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
+    justify-content: space-between;
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-label {
     font-size: calc(7px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-field {
+    gap: calc(1px * var(--inv-card-scale));
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-input {
     font-size: calc(8px * var(--inv-card-scale));
@@ -2152,38 +2156,68 @@ label[data-required]::after {
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-helper {
     display: none;
   }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-quick-row {
+    gap: calc(4px * var(--inv-card-scale));
+  }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-quick-btn {
     height: calc(17px * var(--inv-card-scale));
     font-size: calc(7px * var(--inv-card-scale)) !important;
     border-radius: calc(3px * var(--inv-card-scale));
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-sep {
+    margin: 0;
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-label {
+    font-size: calc(6.5px * var(--inv-card-scale));
+    line-height: 1;
+  }
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-row {
+    gap: calc(4px * var(--inv-card-scale));
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-btn {
     height: calc(20px * var(--inv-card-scale));
     font-size: calc(8px * var(--inv-card-scale)) !important;
     border-radius: calc(3px * var(--inv-card-scale));
   }
-  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-cmd-label {
-    font-size: calc(6.5px * var(--inv-card-scale));
-  }
-  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-footer {
+  :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-info {
     font-size: calc(5.5px * var(--inv-card-scale));
+    margin-top: 0;
   }
 
-  /* ── 7 col: maximum bulk card compaction ───────────────────────────── */
+  /* ── 7 col: tighter bulk card ──────────────────────────────────────── */
+  .inv-grid.layout-7 .bulk-card-hdr {
+    padding: calc(2px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
+    gap: calc(3px * var(--inv-card-scale));
+  }
+  .inv-grid.layout-7 .bulk-card-icon {
+    font-size: calc(9px * var(--inv-card-scale));
+  }
+  .inv-grid.layout-7 .bulk-card-title {
+    font-size: calc(8px * var(--inv-card-scale));
+  }
   .inv-grid.layout-7 .bulk-card-body {
-    gap: calc(2px * var(--inv-card-scale));
-    padding: calc(3px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
+    padding: calc(2px * var(--inv-card-scale)) calc(3px * var(--inv-card-scale));
+  }
+  .inv-grid.layout-7 .bulk-range-label {
+    font-size: calc(6.5px * var(--inv-card-scale));
+  }
+  .inv-grid.layout-7 .bulk-range-input {
+    font-size: calc(7.5px * var(--inv-card-scale));
+    padding: calc(1px * var(--inv-card-scale)) calc(3px * var(--inv-card-scale));
   }
   .inv-grid.layout-7 .bulk-quick-btn {
     height: calc(15px * var(--inv-card-scale));
     font-size: calc(6.5px * var(--inv-card-scale)) !important;
   }
+  .inv-grid.layout-7 .bulk-cmd-label {
+    display: none;
+  }
   .inv-grid.layout-7 .bulk-cmd-btn {
     height: calc(18px * var(--inv-card-scale));
     font-size: calc(7.5px * var(--inv-card-scale)) !important;
   }
-  .inv-grid.layout-7 .bulk-footer {
-    display: none;
+  .inv-grid.layout-7 .bulk-info {
+    font-size: calc(5px * var(--inv-card-scale));
   }
 }
 
@@ -3283,13 +3317,15 @@ label[data-required]::after {
   gap: 6px;
 }
 
-.bulk-footer {
+.bulk-info {
   font-size: calc(7.5px * var(--inv-card-scale));
   color: var(--text3);
   text-align: center;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
+  line-height: 1.35;
   margin-top: auto;
   opacity: 0.7;
+  padding: 0 calc(2px * var(--inv-card-scale));
 }
 
 .bulk-cmd-btn {

@@ -6935,7 +6935,7 @@ function buildBulkControlPanel() {
         <button id="btnStartSelected" class="btn btn-green bulk-cmd-btn" title="Send START command to all nodes of each selected inverter. Requires authorization.">START</button>
         <button id="btnStopSelected" class="btn btn-red bulk-cmd-btn" title="Send STOP command to all nodes of each selected inverter. Requires authorization.">STOP</button>
       </div>
-      <div class="bulk-footer">Authorization required before execution</div>
+      <div class="bulk-info">Enter inverter numbers or ranges, then press START or STOP. An authorization key is required before execution.</div>
     </div>`;
   return wrap;
 }
