@@ -7357,6 +7357,7 @@ function ensurePersistedSettings() {
     solcastTimezone: "Asia/Manila",
     plantLatitude: String(WEATHER_LAT),
     plantLongitude: String(WEATHER_LON),
+    forecastExportLimitMw: "24",
     plantCapUpperMw: "",
     plantCapLowerMw: "",
     plantCapSequenceMode: "ascending",
@@ -7424,6 +7425,7 @@ function buildDefaultSettingsSnapshot() {
     solcastTimezone: "Asia/Manila",
     plantLatitude: WEATHER_LAT,
     plantLongitude: WEATHER_LON,
+    forecastExportLimitMw: 24,
     plantCapUpperMw: null,
     plantCapLowerMw: null,
     plantCapSequenceMode: "ascending",
@@ -7503,6 +7505,12 @@ function buildSettingsSnapshot() {
     ),
     plantLatitude: Number(getSetting("plantLatitude", WEATHER_LAT)),
     plantLongitude: Number(getSetting("plantLongitude", WEATHER_LON)),
+    forecastExportLimitMw: (() => {
+      const raw = String(getSetting("forecastExportLimitMw", defaults.forecastExportLimitMw) || "").trim();
+      if (!raw) return defaults.forecastExportLimitMw;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : defaults.forecastExportLimitMw;
+    })(),
     plantCapUpperMw: (() => {
       const raw = String(getSetting("plantCapUpperMw", "") || "").trim();
       if (!raw) return null;
@@ -11532,6 +11540,7 @@ app.post("/api/settings", (req, res) => {
     inverterPollConfig,
     plantLatitude,
     plantLongitude,
+    forecastExportLimitMw,
     plantCapUpperMw,
     plantCapLowerMw,
     plantCapSequenceMode,
@@ -11709,6 +11718,16 @@ app.post("/api/settings", (req, res) => {
     if (!Number.isFinite(lon) || lon < -180 || lon > 180)
       return res.status(400).json({ ok: false, error: "plantLongitude must be between -180 and 180" });
     updates.plantLongitude = String(lon);
+  }
+  if (forecastExportLimitMw !== undefined) {
+    const limit = Number(forecastExportLimitMw);
+    if (!Number.isFinite(limit) || limit <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "forecastExportLimitMw must be greater than 0",
+      });
+    }
+    updates.forecastExportLimitMw = String(limit);
   }
   if (plantCapUpperMw !== undefined) {
     const rawUpper = String(plantCapUpperMw ?? "").trim();
@@ -13410,8 +13429,9 @@ app.post("/api/export/forecast-actual", async (req, res) => {
 cron.schedule("0 2 * * *", pruneOldData);
 
 // ── Day-ahead forecast auto-generation fallback ──────────────────────────
-// The Python forecast service has its own scheduler (DA_RUN_HOURS 6,18,19-22)
-// but if it crashes, misses its window, or is not running, this Node cron
+// The Python forecast service runs primary day-ahead passes at 06:00 and 18:00
+// plus a constant post-solar checker outside the solar window, but if it
+// crashes, misses its window, or is not running, this Node cron
 // ensures tomorrow's forecast still gets generated.
 // Runs at 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
 // already exists and only generates if missing.  Gateway mode only.

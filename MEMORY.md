@@ -2,12 +2,19 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.10
+- **Repo/package version baseline:** 2.4.20
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.20 Changes - Forecast Release Alignment and Constraint-Hardened QA (2026-03-19)
+- **Forecast export ceiling is now configurable:** the forecast engine reads `forecastExportLimitMw` from the settings table, with `24 MW` retained only as the fallback export ceiling instead of a silent hardcoded assumption.
+- **Day-ahead QA and backtest scoring now match forecast-data hygiene:** slot metrics exclude missing actual/forecast slots and operationally constrained periods, so reported WAPE/MAPE/RMSE no longer penalize plant-cap or manual-stop intervals that training and error-memory already ignore.
+- **Release docs and comments were realigned:** rulebook notes now describe the configurable forecast export ceiling and the constant post-solar day-ahead checker, and the bundled/public user-guide version markers are aligned to `2.4.20`.
+- **Validation and release build completed locally:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_constraints.py`, `python -m unittest discover -s services\\tests -p "test_*.py"`, `npm run rebuild:native:node`, `node server/tests/smokeGatewayLink.js`, `npm run rebuild:native:electron`, `pyinstaller --noconfirm services\\ForecastCoreService.spec`, and `npm run build:installer` all succeeded.
+- **Final local release output is clean:** `release/` contains only `Inverter-Dashboard-Setup-2.4.20.exe`, `Inverter-Dashboard-Setup-2.4.20.exe.blockmap`, and `latest.yml`.
 
 ## v2.4.2 Changes - Faster Gateway Inverter Control Batching (2026-03-15)
 - **Whole-inverter and selected multi-inverter commands now batch per inverter:** the renderer groups configured node writes into one `/api/write/batch` request per inverter instead of firing one `/api/write` call per node.

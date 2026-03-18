@@ -163,7 +163,8 @@ SOLAR_START_SLOT = SOLAR_START_H * 60 // SLOT_MIN
 SOLAR_END_SLOT   = SOLAR_END_H   * 60 // SLOT_MIN
 
 # Plant
-EXPORT_MW          = 24.0
+EXPORT_MW          = 24.0   # fallback export ceiling when no explicit setting exists
+FORECAST_EXPORT_LIMIT_SETTING_KEY = "forecastExportLimitMw"
 UNIT_KW_MAX        = 997.0   # kW peak per inverter (4-node complete)
 UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
 PLANT_MW_FALLBACK  = 40.0    # used when ipconfig absent
@@ -251,9 +252,10 @@ CONF_CLOUD_ADD  = 0.20   # additional Â±20% on overcast / volatile days
 CLOUD_VOLATILE  = 60.0   # cloud cover % threshold for "volatile"
 
 # Forecast re-run schedule (hours UTC+8 when a new day-ahead is computed)
-DA_RUN_HOURS = {6, 18, 19, 20, 21, 22}  # 06:00, 18:00 primary; 19-22 fallback
+DA_RUN_HOURS_PRIMARY = {6, 18}   # always run (retrain + generate)
 MIN_HOURLY_POINTS = 20
 MIN_5MIN_POINTS = 240
+OPERATIONAL_CONSTRAINT_LOOKBACK_DAYS = 90
 
 # ============================================================================
 # I/O HELPERS
@@ -470,6 +472,8 @@ def _merge_slot_series_with_presence(
 def clear_forecast_data_cache() -> None:
     global _cached_loss_factors
     _cached_loss_factors = None
+    _read_setting_value.cache_clear()
+    load_forecast_export_limit_mw.cache_clear()
     load_actual.cache_clear()
     load_actual_with_presence.cache_clear()
     load_actual_loss_adjusted.cache_clear()
@@ -478,6 +482,7 @@ def clear_forecast_data_cache() -> None:
     load_dayahead_with_presence.cache_clear()
     load_intraday_adjusted.cache_clear()
     load_intraday_adjusted_with_presence.cache_clear()
+    load_operational_constraint_profile.cache_clear()
 
 
 def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
@@ -669,7 +674,7 @@ def plant_capacity_kw(dependable: bool = True) -> float:
 def slot_cap_kwh(dependable: bool = True) -> float:
     """Maximum kWh in a single 5-min slot based on plant capacity only.
 
-    NOTE: The export cap (EXPORT_MW) is intentionally NOT applied here.
+    NOTE: The configured forecast export cap is intentionally NOT applied here.
     Applying it to the forecast curve creates an artificial flat plateau
     that hides the true shape â€” cloud dips, afternoon shoulders, etc.
     Export limiting is a dispatch/curtailment action, not a forecast property.
@@ -1569,8 +1574,255 @@ def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = 0.97) 
     These slots must be excluded from ML training or the model
     learns a falsely-depressed response at high irradiance.
     """
-    cap_slot = EXPORT_MW * 1000.0 * SLOT_MIN / 60.0
+    cap_slot = load_forecast_export_limit_mw() * 1000.0 * SLOT_MIN / 60.0
     return (actual >= tol * cap_slot) & (baseline > cap_slot * 1.05)
+
+
+# ============================================================================
+# OPERATIONAL CONSTRAINTS (manual stops vs plant-cap curtailment)
+# ============================================================================
+
+def _iter_history_db_paths(start_ms: int, end_ms_exclusive: int) -> list[Path]:
+    paths: list[Path] = []
+    archive_paths = [ARCHIVE_DIR / f"{month_key}.db" for month_key in _archive_month_keys_for_range(start_ms, end_ms_exclusive)]
+    for path in [APP_DB_FILE, *archive_paths]:
+        if path.exists() and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _normalize_audit_scope(value) -> str:
+    return str(value or "single").strip().lower() or "single"
+
+
+def _audit_result_ok(value) -> bool:
+    result = str(value or "ok").strip().lower()
+    return bool(result) and not result.startswith("error")
+
+
+def _query_audit_log_latest_before(db_path: Path, before_ms: int) -> list[dict]:
+    if not db_path.exists():
+        return []
+    sql = """
+        SELECT a.ts,
+               a.inverter,
+               a.node,
+               UPPER(COALESCE(a.action, '')) AS action,
+               LOWER(COALESCE(a.scope, 'single')) AS scope,
+               LOWER(COALESCE(a.result, 'ok')) AS result
+          FROM audit_log a
+          JOIN (
+                SELECT inverter, node, MAX(ts) AS max_ts
+                  FROM audit_log
+                 WHERE ts < ?
+                   AND inverter > 0
+                   AND node > 0
+                   AND UPPER(COALESCE(action, '')) IN ('STOP', 'START')
+                   AND LOWER(COALESCE(result, 'ok')) NOT LIKE 'error%'
+                 GROUP BY inverter, node
+          ) last
+            ON last.inverter = a.inverter
+           AND last.node = a.node
+           AND last.max_ts = a.ts
+         WHERE a.inverter > 0
+           AND a.node > 0
+           AND UPPER(COALESCE(a.action, '')) IN ('STOP', 'START')
+         ORDER BY a.ts ASC
+    """
+    try:
+        with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(sql, (int(before_ms),)).fetchall()
+        return [
+            {
+                "ts": int(row[0] or 0),
+                "inverter": int(row[1] or 0),
+                "node": int(row[2] or 0),
+                "action": str(row[3] or "").upper(),
+                "scope": _normalize_audit_scope(row[4]),
+                "result": str(row[5] or "").lower(),
+            }
+            for row in rows
+            if int(row[0] or 0) > 0 and int(row[1] or 0) > 0 and int(row[2] or 0) > 0
+        ]
+    except Exception as e:
+        if "no such table" in str(e).lower():
+            return []
+        log.warning("Audit-log latest-before query failed [%s]: %s", db_path, e)
+        return []
+
+
+def _query_audit_log_events(db_path: Path, start_ms: int, end_ms_exclusive: int) -> list[dict]:
+    if not db_path.exists():
+        return []
+    sql = """
+        SELECT ts,
+               inverter,
+               node,
+               UPPER(COALESCE(action, '')) AS action,
+               LOWER(COALESCE(scope, 'single')) AS scope,
+               LOWER(COALESCE(result, 'ok')) AS result,
+               id
+          FROM audit_log
+         WHERE ts >= ?
+           AND ts < ?
+           AND inverter > 0
+           AND node > 0
+           AND UPPER(COALESCE(action, '')) IN ('STOP', 'START')
+           AND LOWER(COALESCE(result, 'ok')) NOT LIKE 'error%'
+         ORDER BY ts ASC, id ASC
+    """
+    try:
+        with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(sql, (int(start_ms), int(end_ms_exclusive))).fetchall()
+        return [
+            {
+                "ts": int(row[0] or 0),
+                "inverter": int(row[1] or 0),
+                "node": int(row[2] or 0),
+                "action": str(row[3] or "").upper(),
+                "scope": _normalize_audit_scope(row[4]),
+                "result": str(row[5] or "").lower(),
+                "order": int(row[6] or 0),
+            }
+            for row in rows
+            if int(row[0] or 0) > 0 and int(row[1] or 0) > 0 and int(row[2] or 0) > 0
+        ]
+    except Exception as e:
+        if "no such table" in str(e).lower():
+            return []
+        log.warning("Audit-log range query failed [%s]: %s", db_path, e)
+        return []
+
+
+@lru_cache(maxsize=256)
+def load_operational_constraint_profile(day: str) -> dict:
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    zero_counts = np.zeros(SLOTS_DAY, dtype=np.int16)
+    empty = {
+        "day": str(day),
+        "commanded_off_nodes": zero_counts.copy(),
+        "cap_dispatched_off_nodes": zero_counts.copy(),
+        "manual_off_nodes": zero_counts.copy(),
+        "event_count": 0,
+    }
+    if day_start_ms is None or day_end_ms is None:
+        return empty
+
+    lookback_start_ms = max(
+        0,
+        int(day_start_ms) - int(OPERATIONAL_CONSTRAINT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
+    )
+    db_paths = _iter_history_db_paths(lookback_start_ms, day_end_ms)
+    if not db_paths:
+        return empty
+
+    latest_by_node: dict[tuple[int, int], dict] = {}
+    events: list[dict] = []
+    for db_path in db_paths:
+        for rec in _query_audit_log_latest_before(db_path, day_start_ms):
+            key = (int(rec["inverter"]), int(rec["node"]))
+            prev = latest_by_node.get(key)
+            if prev is None or int(rec["ts"]) >= int(prev.get("ts", 0)):
+                latest_by_node[key] = rec
+        events.extend(_query_audit_log_events(db_path, day_start_ms, day_end_ms))
+
+    active_stops: dict[tuple[int, int], str] = {}
+    for rec in latest_by_node.values():
+        if not _audit_result_ok(rec.get("result")):
+            continue
+        key = (int(rec["inverter"]), int(rec["node"]))
+        if str(rec.get("action")) == "STOP":
+            active_stops[key] = _normalize_audit_scope(rec.get("scope"))
+        elif str(rec.get("action")) == "START":
+            active_stops.pop(key, None)
+
+    events.sort(
+        key=lambda rec: (
+            int(rec.get("ts", 0)),
+            int(rec.get("order", 0)),
+            int(rec.get("inverter", 0)),
+            int(rec.get("node", 0)),
+            0 if str(rec.get("action")) == "STOP" else 1,
+        )
+    )
+
+    slot_ms = SLOT_MIN * 60 * 1000
+    commanded_off_nodes = np.zeros(SLOTS_DAY, dtype=np.int16)
+    cap_dispatched_off_nodes = np.zeros(SLOTS_DAY, dtype=np.int16)
+    cursor_slot = 0
+
+    def fill_until(slot_exclusive: int) -> None:
+        nonlocal cursor_slot
+        slot_exclusive = int(np.clip(slot_exclusive, 0, SLOTS_DAY))
+        if slot_exclusive <= cursor_slot:
+            return
+        commanded_count = len(active_stops)
+        cap_count = sum(1 for scope in active_stops.values() if scope == "plant-cap")
+        commanded_off_nodes[cursor_slot:slot_exclusive] = np.int16(commanded_count)
+        cap_dispatched_off_nodes[cursor_slot:slot_exclusive] = np.int16(cap_count)
+        cursor_slot = slot_exclusive
+
+    for rec in events:
+        slot = int((int(rec["ts"]) - int(day_start_ms)) // slot_ms)
+        slot = int(np.clip(slot, 0, SLOTS_DAY - 1))
+        fill_until(slot)
+        key = (int(rec["inverter"]), int(rec["node"]))
+        action = str(rec.get("action") or "").upper()
+        if action == "STOP":
+            active_stops[key] = _normalize_audit_scope(rec.get("scope"))
+        elif action == "START":
+            active_stops.pop(key, None)
+
+    fill_until(SLOTS_DAY)
+    manual_off_nodes = np.clip(
+        commanded_off_nodes.astype(int) - cap_dispatched_off_nodes.astype(int),
+        0,
+        None,
+    ).astype(np.int16)
+    return {
+        "day": str(day),
+        "commanded_off_nodes": commanded_off_nodes,
+        "cap_dispatched_off_nodes": cap_dispatched_off_nodes,
+        "manual_off_nodes": manual_off_nodes,
+        "event_count": int(len(events)),
+    }
+
+
+def build_operational_constraint_mask(day: str) -> tuple[np.ndarray, dict]:
+    profile = load_operational_constraint_profile(day)
+    commanded_off_nodes = np.asarray(
+        profile.get("commanded_off_nodes", np.zeros(SLOTS_DAY, dtype=np.int16)),
+        dtype=int,
+    ).copy()
+    cap_dispatched_off_nodes = np.asarray(
+        profile.get("cap_dispatched_off_nodes", np.zeros(SLOTS_DAY, dtype=np.int16)),
+        dtype=int,
+    ).copy()
+    manual_off_nodes = np.asarray(
+        profile.get("manual_off_nodes", np.zeros(SLOTS_DAY, dtype=np.int16)),
+        dtype=int,
+    ).copy()
+    cap_dispatched_off_nodes = np.clip(cap_dispatched_off_nodes, 0, commanded_off_nodes)
+    manual_off_nodes = np.clip(manual_off_nodes, 0, commanded_off_nodes)
+
+    operational_mask = commanded_off_nodes > 0
+    cap_dispatch_mask = (cap_dispatched_off_nodes > 0) & (manual_off_nodes <= 0)
+    manual_constraint_mask = manual_off_nodes > 0
+    return operational_mask, {
+        "day": str(day),
+        "operational_mask": operational_mask,
+        "cap_dispatch_mask": cap_dispatch_mask,
+        "manual_constraint_mask": manual_constraint_mask,
+        "commanded_off_nodes": commanded_off_nodes,
+        "cap_dispatched_off_nodes": cap_dispatched_off_nodes,
+        "manual_off_nodes": manual_off_nodes,
+        "operational_slot_count": int(np.count_nonzero(operational_mask)),
+        "cap_dispatch_slot_count": int(np.count_nonzero(cap_dispatch_mask)),
+        "manual_constraint_slot_count": int(np.count_nonzero(manual_constraint_mask)),
+        "event_count": int(profile.get("event_count", 0)),
+    }
 
 
 # ============================================================================
@@ -2449,51 +2701,61 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     Only applies where both forecast and actual existed.
     Returns a SLOTS_DAY array of kWh bias corrections.
     """
-    weights  = []
-    errors   = []
-    geo_today = solar_geometry(today.isoformat())
+    weight_vectors = []
+    errors = []
 
     for d in range(1, ERR_MEMORY_DAYS + 1):
-        day   = (today - timedelta(days=d)).isoformat()
-        actual = load_actual_loss_adjusted(day)
-        fc     = load_dayahead(day)
-        if actual is None or fc is None:
+        day = (today - timedelta(days=d)).isoformat()
+        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
+        fc, fc_present = load_dayahead_with_presence(day)
+        if actual is None or fc is None or actual_present is None or fc_present is None:
             continue
 
-        err = actual - fc
-
-        # Only count solar hours with meaningful activity
+        err = np.asarray(actual, dtype=float) - np.asarray(fc, dtype=float)
+        geo_day = solar_geometry(day)
         solar_mask = (
-            (geo_today["cos_z"] > 0.05) &
-            (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
-            (np.arange(SLOTS_DAY) <  SOLAR_END_SLOT)
+            (geo_day["cos_z"] > 0.05)
+            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
         )
-        err[~solar_mask] = 0.0
+        _, constraint_meta = build_operational_constraint_mask(day)
+        usable_mask = (
+            solar_mask
+            & np.asarray(actual_present, dtype=bool)
+            & np.asarray(fc_present, dtype=bool)
+            & (~np.asarray(constraint_meta.get("operational_mask"), dtype=bool))
+        )
+        if int(np.count_nonzero(usable_mask)) <= 0:
+            continue
 
-        # Clip extreme single-slot errors (sensor spikes)
+        err[~usable_mask] = 0.0
         err = np.clip(err, -200, 200)
-
         weight = ERR_MEMORY_DECAY ** (d - 1)
+        weight_vec = np.zeros(SLOTS_DAY, dtype=float)
+        weight_vec[usable_mask] = weight
         errors.append(err)
-        weights.append(weight)
+        weight_vectors.append(weight_vec)
 
     if not errors:
         return np.zeros(SLOTS_DAY)
 
-    weights   = np.array(weights)
-    weight_sum = weights.sum()
-    mem_err   = sum(w * e for w, e in zip(weights, errors)) / weight_sum
+    weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
+    weight_sum = np.sum(np.stack(weight_vectors), axis=0)
+    mem_err = np.divide(weighted_sum, np.maximum(weight_sum, 1e-9), out=np.zeros(SLOTS_DAY, dtype=float), where=weight_sum > 0)
 
     # Smooth the error correction (avoid slot-level noise amplification)
     mem_err = pd.Series(mem_err).rolling(7, min_periods=1, center=True).mean().values
-
+    mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
-    mem_err[SOLAR_END_SLOT:]   = 0.0
-
+    mem_err[SOLAR_END_SLOT:] = 0.0
     return mem_err
 
 
-def collect_history_days(today: date, lookback_days: int) -> list[dict]:
+def collect_history_days(
+    today: date,
+    lookback_days: int,
+    solcast_reliability: dict | None = None,
+) -> list[dict]:
     """
     Build the historical basis for training and intra-hour hardening.
 
@@ -2502,6 +2764,10 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
     forecast-provider bias.
     """
     history = []
+    solar_slot_mask = (
+        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+        & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+    )
     log.info(
         "Collecting history basis from last %d days using actual archived weather + actual generation",
         lookback_days,
@@ -2509,10 +2775,10 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
 
     for days_ago in range(1, lookback_days + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
-        actual = load_actual_loss_adjusted(day)
+        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
         wdata = fetch_weather(day, source="archive")
         snapshot = load_solcast_snapshot(day)
-        if actual is None or wdata is None:
+        if actual is None or actual_present is None or wdata is None:
             log.debug("  Skip %s - missing history basis", day)
             continue
 
@@ -2523,25 +2789,77 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
             continue
 
         baseline = physics_baseline(day, w5)
-        stats = analyse_weather_day(day, w5, actual)
-        bad, reason = training_day_rejection(stats, actual, baseline)
+        solcast_prior = solcast_prior_from_snapshot(day, w5, snapshot, solcast_reliability)
+        history_baseline, hybrid_meta = blend_physics_with_solcast(baseline, solcast_prior)
+        _, constraint_meta = build_operational_constraint_mask(day)
+        actual_present_arr = np.asarray(actual_present, dtype=bool).copy()
+        operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool).copy()
+        cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool).copy()
+        manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy()
+        rad_arr = pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values
+
+        actual_effective = np.asarray(actual, dtype=float).copy()
+        actual_effective[cap_dispatch_mask] = history_baseline[cap_dispatch_mask]
+        actual_eval = actual_effective.copy()
+        fill_mask = (~actual_present_arr) | operational_mask
+        actual_eval[fill_mask] = history_baseline[fill_mask]
+
+        stats = analyse_weather_day(day, w5, actual_eval)
+        bad, reason = training_day_rejection(stats, actual_eval, history_baseline)
         if bad:
             log.warning("  Reject %s - %s", day, reason)
+            continue
+
+        usable_mask = (
+            solar_slot_mask
+            & actual_present_arr
+            & (~manual_constraint_mask)
+            & (history_baseline > 0.0)
+            & (rad_arr >= RAD_MIN_WM2)
+        )
+        usable_slots = int(np.count_nonzero(usable_mask))
+        if usable_slots < MIN_SAMPLES:
+            log.warning("  Reject %s - too few usable unconstrained slots (%d)", day, usable_slots)
             continue
 
         history.append({
             "day": day,
             "days_ago": days_ago,
             "actual": np.asarray(actual, dtype=float),
+            "actual_present": actual_present_arr,
+            "actual_effective": actual_effective,
             "weather": w5,
             "baseline": np.asarray(baseline, dtype=float),
+            "hybrid_baseline": np.asarray(history_baseline, dtype=float),
             "stats": stats,
             "season": _season_bucket_from_day(day),
             "day_regime": classify_day_regime(stats),
-            "first_active_slot": _find_first_active_slot(actual),
-            "last_active_slot": _find_last_active_slot(actual),
+            "first_active_slot": _find_first_active_slot(actual_effective),
+            "last_active_slot": _find_last_active_slot(actual_effective),
             "solcast_snapshot": snapshot,
+            "solcast_prior": solcast_prior,
+            "used_solcast": bool(hybrid_meta.get("used_solcast")),
+            "operational_mask": operational_mask,
+            "cap_dispatch_mask": cap_dispatch_mask,
+            "manual_constraint_mask": manual_constraint_mask,
+            "commanded_off_nodes": np.asarray(constraint_meta.get("commanded_off_nodes"), dtype=int).copy(),
+            "cap_dispatched_off_nodes": np.asarray(constraint_meta.get("cap_dispatched_off_nodes"), dtype=int).copy(),
+            "manual_off_nodes": np.asarray(constraint_meta.get("manual_off_nodes"), dtype=int).copy(),
+            "operational_slot_count": int(constraint_meta.get("operational_slot_count", 0)),
+            "cap_dispatch_slot_count": int(constraint_meta.get("cap_dispatch_slot_count", 0)),
+            "manual_constraint_slot_count": int(constraint_meta.get("manual_constraint_slot_count", 0)),
+            "event_count": int(constraint_meta.get("event_count", 0)),
+            "usable_slots": usable_slots,
         })
+        log.info(
+            "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  solcast=%s",
+            day,
+            stats["sky_class"],
+            usable_slots,
+            int(constraint_meta.get("manual_constraint_slot_count", 0)),
+            int(constraint_meta.get("cap_dispatch_slot_count", 0)),
+            "yes" if hybrid_meta.get("used_solcast") else "no",
+        )
 
     log.info("History basis accepted: %d day(s)", len(history))
     return history
@@ -2555,14 +2873,20 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
 
     for sample in history_days:
         day = str(sample["day"])
-        actual = np.asarray(sample["actual"], dtype=float)
+        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float)
+        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
         w5 = sample["weather"]
         stats = sample["stats"]
         first_slot = sample.get("first_active_slot")
         last_slot = sample.get("last_active_slot")
         csi_arr = clear_sky_radiation(day, pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values)
 
-        if first_slot is not None and last_slot is not None:
+        if (
+            first_slot is not None
+            and last_slot is not None
+            and not np.any(manual_constraint_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])
+        ):
             activity_records.append({
                 "day": day,
                 "days_ago": int(sample["days_ago"]),
@@ -2578,6 +2902,9 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
 
         for hour in range(SOLAR_START_H, SOLAR_END_H):
             start, end = _solar_hour_bounds(hour)
+            usable_hour_mask = actual_present[start:end] & (~manual_constraint_mask[start:end])
+            if int(np.count_nonzero(usable_hour_mask)) < max(4, (60 // SLOT_MIN) // 2):
+                continue
             hour_total = float(actual[start:end].sum())
             if hour_total < threshold * 1.5:
                 continue
@@ -2598,7 +2925,7 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
 
     return {
         "created_ts": int(time.time()),
-        "training_basis": "actual archived weather + actual generation",
+        "training_basis": "actual archived weather + cleaned actual generation",
         "lookback_days": int(SHAPE_LOOKBACK_DAYS),
         "history_days": int(len(history_days)),
         "shape_records": shape_records,
@@ -2626,7 +2953,12 @@ def load_forecast_artifacts(today: date | None = None, allow_build: bool = False
             log.warning("Artifact load failed %s: %s", ARTIFACT_FILE, e)
 
     if allow_build and today is not None:
-        history_days = collect_history_days(today, SHAPE_LOOKBACK_DAYS)
+        solcast_reliability = build_solcast_reliability_artifact(today)
+        history_days = collect_history_days(
+            today,
+            SHAPE_LOOKBACK_DAYS,
+            solcast_reliability=solcast_reliability,
+        )
         if not history_days:
             return None
         artifact = build_forecast_artifacts(history_days)
@@ -3397,59 +3729,70 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
     y_parts = []
     valid_days = 0
 
-    log.info("Collecting training data from last %d daysâ€¦", N_TRAIN_DAYS)
+    log.info("Collecting training data from last %d days...", N_TRAIN_DAYS)
 
     for d in range(1, N_TRAIN_DAYS + 1):
-        day    = (today - timedelta(days=d)).isoformat()
-        actual = load_actual_loss_adjusted(day)
-        wdata  = fetch_weather(day, source="archive")
+        day = (today - timedelta(days=d)).isoformat()
+        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
+        wdata = fetch_weather(day, source="archive")
 
-        if actual is None or wdata is None:
-            log.debug("  Skip %s â€“ missing data", day)
+        if actual is None or actual_present is None or wdata is None:
+            log.debug("  Skip %s - missing data", day)
             continue
 
-        w5      = interpolate_5min(wdata, day)
+        w5 = interpolate_5min(wdata, day)
         ok_w5, reason_w5 = validate_weather_5min(day, w5)
         if not ok_w5:
-            log.warning("  Reject %s â€“ weather quality failed: %s", day, reason_w5)
+            log.warning("  Reject %s - weather quality failed: %s", day, reason_w5)
             continue
-        base    = physics_baseline(day, w5)
-        stats   = analyse_weather_day(day, w5, actual)
-        bad, reason = is_anomalous_day(stats)
+        base = physics_baseline(day, w5)
+        _, constraint_meta = build_operational_constraint_mask(day)
+        actual_present_arr = np.asarray(actual_present, dtype=bool)
+        operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+        cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+        manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool)
+        actual_train = np.asarray(actual, dtype=float).copy()
+        actual_train[cap_dispatch_mask] = base[cap_dispatch_mask]
+        actual_eval = actual_train.copy()
+        actual_eval[(~actual_present_arr) | operational_mask] = base[(~actual_present_arr) | operational_mask]
+        stats = analyse_weather_day(day, w5, actual_eval)
+        bad, reason = training_day_rejection(stats, actual_eval, base)
 
         if bad:
-            log.warning("  Reject %s â€“ %s", day, reason)
+            log.warning("  Reject %s - %s", day, reason)
             continue
 
         log.info(
-            "  Accept %s  sky=%-14s  CF=%.3f  corr=%.2f  vol=%.2f",
-            day, stats["sky_class"], stats["capacity_factor"],
-            stats.get("rad_gen_corr", 0), stats["vol_index"]
+            "  Accept %s  sky=%-14s  CF=%.3f  corr=%.2f  vol=%.2f  manual_slots=%d  cap_slots=%d",
+            day,
+            stats["sky_class"],
+            stats["capacity_factor"],
+            stats.get("rad_gen_corr", 0),
+            stats["vol_index"],
+            int(constraint_meta.get("manual_constraint_slot_count", 0)),
+            int(constraint_meta.get("cap_dispatch_slot_count", 0)),
         )
 
-        feat    = build_features(w5, day)
-        curtailed = curtailed_mask(actual, base)
-        mask    = (
-            (base > 0) &
-            (actual >= 0) &
-            (~curtailed) &
-            (feat["rad"].values >= RAD_MIN_WM2) &
-            (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
-            (np.arange(SLOTS_DAY) <  SOLAR_END_SLOT)
+        feat = build_features(w5, day)
+        curtailed = curtailed_mask(actual_train, base)
+        mask = (
+            (base > 0)
+            & actual_present_arr
+            & (~manual_constraint_mask)
+            & (~curtailed)
+            & (feat["rad"].values >= RAD_MIN_WM2)
+            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
         )
 
         if mask.sum() < MIN_SAMPLES:
-            log.warning("  Reject %s â€“ too few usable slots (%d)", day, mask.sum())
+            log.warning("  Reject %s - too few usable slots (%d)", day, int(mask.sum()))
             continue
 
-        # Residual target: actual âˆ’ physics (what ML needs to learn)
-        residual = actual - base
-        residual = np.clip(residual, -500, 500)
+        residual = np.clip(actual_train - base, -500.0, 500.0)
+        X = feat.loc[mask, FEATURE_COLS]
+        y = residual[mask]
 
-        X  = feat.loc[mask, FEATURE_COLS]
-        y  = residual[mask]
-
-        # Recency weighting (repeat rows proportionally)
         recency_w = max(1, round(RECENCY_BASE ** (N_TRAIN_DAYS - d)))
         X = pd.concat([X] * recency_w, ignore_index=True)
         y = np.tile(y, recency_w)
@@ -3459,7 +3802,7 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
         valid_days += 1
 
     if valid_days < MIN_TRAIN_DAYS:
-        log.warning("Only %d valid training days â€“ minimum is %d", valid_days, MIN_TRAIN_DAYS)
+        log.warning("Only %d valid training days - minimum is %d", valid_days, MIN_TRAIN_DAYS)
         return None, None
 
     X_train = pd.concat(X_parts, ignore_index=True)
@@ -3480,7 +3823,7 @@ def collect_training_data_hardened(
     The model learns residual plant response from actual archived weather and
     actual generation. Forecast weather is used only at inference time.
     """
-    samples = list(history_days or collect_history_days(today, N_TRAIN_DAYS))
+    samples = list(history_days or collect_history_days(today, N_TRAIN_DAYS, solcast_reliability=solcast_reliability))
     samples = [sample for sample in samples if int(sample.get("days_ago", N_TRAIN_DAYS + 1)) <= N_TRAIN_DAYS]
     if day_regime:
         samples = [sample for sample in samples if str(sample.get("day_regime") or "") == str(day_regime)]
@@ -3501,26 +3844,40 @@ def collect_training_data_hardened(
 
     for sample in samples:
         day = str(sample["day"])
-        actual = np.asarray(sample["actual"], dtype=float)
+        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
+        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+        cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
         w5 = sample["weather"]
-        base = np.asarray(sample["baseline"], dtype=float)
         stats = sample["stats"]
-        solcast_prior = solcast_prior_from_snapshot(
+        base = np.asarray(sample["baseline"], dtype=float)
+        solcast_prior = sample.get("solcast_prior") if isinstance(sample.get("solcast_prior"), dict) else solcast_prior_from_snapshot(
             day,
             w5,
             sample.get("solcast_snapshot"),
             solcast_reliability,
         )
-        hybrid_base, hybrid_meta = blend_physics_with_solcast(base, solcast_prior)
+        stored_hybrid = sample.get("hybrid_baseline")
+        if stored_hybrid is not None:
+            hybrid_base = np.asarray(stored_hybrid, dtype=float).copy()
+            hybrid_meta = {
+                "used_solcast": bool(sample.get("used_solcast")),
+                "coverage_ratio": float((solcast_prior or {}).get("coverage_ratio", 0.0)),
+                "mean_blend": float(np.mean(np.asarray((solcast_prior or {}).get("blend", np.zeros(SLOTS_DAY)), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if solcast_prior else 0.0,
+            }
+        else:
+            hybrid_base, hybrid_meta = blend_physics_with_solcast(base, solcast_prior)
         feat = build_features(w5, day, solcast_prior)
-        curtailed = curtailed_mask(actual, base)
+        actual[cap_dispatch_mask] = hybrid_base[cap_dispatch_mask]
+        curtailed = curtailed_mask(actual, hybrid_base)
         mask = (
-            (hybrid_base > 0) &
-            (actual >= 0) &
-            (~curtailed) &
-            (feat["rad"].values >= RAD_MIN_WM2) &
-            (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
-            (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+            (hybrid_base > 0)
+            & actual_present
+            & (~manual_constraint_mask)
+            & (~curtailed)
+            & (feat["rad"].values >= RAD_MIN_WM2)
+            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
         )
 
         usable = int(np.count_nonzero(mask))
@@ -3544,13 +3901,15 @@ def collect_training_data_hardened(
             solcast_days += 1
 
         log.info(
-            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  solcast=%s blend=%.2f cov=%.2f",
+            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  manual_slots=%d  cap_slots=%d  solcast=%s blend=%.2f cov=%.2f",
             day,
             stats["sky_class"],
             stats["capacity_factor"],
             corr,
             float(sample_weight[0]) if len(sample_weight) else 0.0,
             usable,
+            int(np.count_nonzero(manual_constraint_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+            int(np.count_nonzero(cap_dispatch_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
             "yes" if hybrid_meta.get("used_solcast") else "no",
             float(hybrid_meta.get("mean_blend", 0.0)),
             float(hybrid_meta.get("coverage_ratio", 0.0)),
@@ -3613,8 +3972,12 @@ def fit_residual_model(
 
 def build_training_state(today: date) -> dict | None:
     """Build the in-memory model/artifact state for a given training cut-off date."""
-    history_days = collect_history_days(today, max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS))
     solcast_reliability = build_solcast_reliability_artifact(today)
+    history_days = collect_history_days(
+        today,
+        max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS),
+        solcast_reliability=solcast_reliability,
+    )
     X, y, sample_weight = collect_training_data_hardened(
         today,
         history_days,
@@ -3626,7 +3989,7 @@ def build_training_state(today: date) -> dict | None:
     global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
     bundle = {
         "created_ts": int(time.time()),
-        "training_basis": "actual archived weather + actual generation (+ Solcast prior when available)",
+        "training_basis": "actual archived weather + cleaned actual generation (+ Solcast prior when available)",
         "history_days": int(len(history_days)),
         "feature_cols": list(X.columns),
         "global": {
@@ -3672,7 +4035,6 @@ def build_training_state(today: date) -> dict | None:
         "forecast_artifacts": build_forecast_artifacts(history_days),
         "weather_bias": build_weather_bias_artifact(today),
         "solcast_reliability": solcast_reliability,
-        "global_meta": dict(global_meta),
     }
 
 
@@ -3934,8 +4296,14 @@ def confidence_bands(
 # FORECAST QUALITY METRICS  (logged after each run)
 # ============================================================================
 
-def compute_forecast_metrics(actual: np.ndarray | None, forecast: np.ndarray | None) -> dict | None:
-    """Compute solar-window forecast accuracy metrics for slot-level generation."""
+def compute_forecast_metrics(
+    actual: np.ndarray | None,
+    forecast: np.ndarray | None,
+    actual_present: np.ndarray | None = None,
+    forecast_present: np.ndarray | None = None,
+    exclude_mask: np.ndarray | None = None,
+) -> dict | None:
+    """Compute solar-window forecast metrics on usable 5-minute slots only."""
     if actual is None or forecast is None:
         return None
 
@@ -3943,28 +4311,56 @@ def compute_forecast_metrics(actual: np.ndarray | None, forecast: np.ndarray | N
     forecast_arr = np.nan_to_num(np.asarray(forecast, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     if actual_arr.size < SLOTS_DAY or forecast_arr.size < SLOTS_DAY:
         return None
+    if actual_present is None:
+        actual_present_arr = np.ones(SLOTS_DAY, dtype=bool)
+    else:
+        actual_present_arr = np.asarray(actual_present, dtype=bool)
+        if actual_present_arr.size < SLOTS_DAY:
+            return None
+    if forecast_present is None:
+        forecast_present_arr = np.ones(SLOTS_DAY, dtype=bool)
+    else:
+        forecast_present_arr = np.asarray(forecast_present, dtype=bool)
+        if forecast_present_arr.size < SLOTS_DAY:
+            return None
+    if exclude_mask is None:
+        exclude_arr = np.zeros(SLOTS_DAY, dtype=bool)
+    else:
+        exclude_arr = np.asarray(exclude_mask, dtype=bool)
+        if exclude_arr.size < SLOTS_DAY:
+            return None
 
     solar_mask = (
         (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) &
         (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
     )
-    if not np.any(solar_mask):
+    usable_mask = solar_mask & actual_present_arr & forecast_present_arr & (~exclude_arr)
+    if not np.any(usable_mask):
         return None
 
-    act_s = np.clip(actual_arr[solar_mask], 0.0, None)
-    fc_s = np.clip(forecast_arr[solar_mask], 0.0, None)
+    act_s = np.clip(actual_arr[usable_mask], 0.0, None)
+    fc_s = np.clip(forecast_arr[usable_mask], 0.0, None)
     err = fc_s - act_s
     abs_err = np.abs(err)
     actual_total = float(act_s.sum())
     forecast_total = float(fc_s.sum())
 
-    first_actual = _find_first_active_slot(actual_arr)
-    first_forecast = _find_first_active_slot(forecast_arr)
-    last_actual = _find_last_active_slot(actual_arr)
-    last_forecast = _find_last_active_slot(forecast_arr)
+    actual_eval = actual_arr.copy()
+    forecast_eval = forecast_arr.copy()
+    actual_eval[~usable_mask] = 0.0
+    forecast_eval[~usable_mask] = 0.0
+    first_actual = _find_first_active_slot(actual_eval)
+    first_forecast = _find_first_active_slot(forecast_eval)
+    last_actual = _find_last_active_slot(actual_eval)
+    last_forecast = _find_last_active_slot(forecast_eval)
 
     return {
         "slot_count": int(np.count_nonzero(solar_mask)),
+        "usable_slot_count": int(np.count_nonzero(usable_mask)),
+        "masked_slot_count": int(np.count_nonzero(solar_mask & (~usable_mask))),
+        "operational_masked_slot_count": int(np.count_nonzero(solar_mask & exclude_arr)),
+        "missing_actual_slot_count": int(np.count_nonzero(solar_mask & (~actual_present_arr))),
+        "missing_forecast_slot_count": int(np.count_nonzero(solar_mask & (~forecast_present_arr))),
         "actual_total_kwh": actual_total,
         "forecast_total_kwh": forecast_total,
         "abs_error_sum_kwh": float(abs_err.sum()),
@@ -3997,27 +4393,52 @@ def forecast_qa(today: date) -> None:
     yesterday = (today - timedelta(days=1)).isoformat()
     day2ago   = (today - timedelta(days=2)).isoformat()
 
-    actual = load_actual_loss_adjusted(yesterday)
-    fc     = load_dayahead(yesterday)
-    pers   = load_actual_loss_adjusted(day2ago)   # persistence proxy
+    actual, actual_present = load_actual_loss_adjusted_with_presence(yesterday)
+    fc, fc_present = load_dayahead_with_presence(yesterday)
+    pers, pers_present = load_actual_loss_adjusted_with_presence(day2ago)   # persistence proxy
 
-    if actual is None or fc is None:
+    if (
+        actual is None
+        or fc is None
+        or actual_present is None
+        or fc_present is None
+    ):
         log.info("QA: no data for %s", yesterday)
         return
 
-    metrics = compute_forecast_metrics(actual, fc)
+    _, constraint_meta = build_operational_constraint_mask(yesterday)
+    exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+    metrics = compute_forecast_metrics(
+        actual,
+        fc,
+        actual_present=actual_present,
+        forecast_present=fc_present,
+        exclude_mask=exclude_mask,
+    )
     if metrics is None:
         return
 
-    pers_metrics = compute_forecast_metrics(actual, pers) if pers is not None else None
+    pers_metrics = (
+        compute_forecast_metrics(
+            actual,
+            pers,
+            actual_present=actual_present,
+            forecast_present=pers_present,
+            exclude_mask=exclude_mask,
+        )
+        if pers is not None and pers_present is not None
+        else None
+    )
     if pers_metrics is not None and pers_metrics["rmse_kwh"] > 0:
         skill = 1.0 - metrics["rmse_kwh"] / max(pers_metrics["rmse_kwh"], 1.0)
     else:
         skill = float("nan")
 
     log.info(
-        "QA [%s] WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
+        "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
         yesterday,
+        metrics["usable_slot_count"],
+        metrics["masked_slot_count"],
         metrics["wape_pct"],
         metrics["mape_pct"],
         metrics["total_ape_pct"],
@@ -4200,6 +4621,9 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     day_s = day.isoformat()
     dayahead, _ = load_dayahead_with_presence(day_s)
     actual, actual_present = load_actual_loss_adjusted_with_presence(day_s)
+    _, constraint_meta = build_operational_constraint_mask(day_s)
+    operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+    cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
     meta = {
         "day": day_s,
         "observed_slots": 0,
@@ -4207,13 +4631,30 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
         "global_ratio": 1.0,
         "recent_ratio": 1.0,
         "strength": 0.0,
+        "constraint_mode": "none",
     }
     if dayahead is None or actual is None or actual_present is None:
         return None, meta
 
-    solar_obs = np.where(np.asarray(actual_present, dtype=bool)[SOLAR_START_SLOT:SOLAR_END_SLOT])[0] + SOLAR_START_SLOT
+    actual_present_arr = np.asarray(actual_present, dtype=bool)
+    unconstrained_mask = actual_present_arr & (~operational_mask)
+    cap_free_mask = actual_present_arr & (~cap_dispatch_mask)
+    fallback_mask = actual_present_arr.copy()
+
+    def solar_slots(mask: np.ndarray) -> np.ndarray:
+        return np.where(np.asarray(mask, dtype=bool)[SOLAR_START_SLOT:SOLAR_END_SLOT])[0] + SOLAR_START_SLOT
+
+    solar_obs = solar_slots(unconstrained_mask)
+    constraint_mode = "unconstrained"
+    if solar_obs.size < INTRADAY_MIN_OBS_SLOTS:
+        solar_obs = solar_slots(cap_free_mask)
+        constraint_mode = "cap-free"
+    if solar_obs.size < INTRADAY_MIN_OBS_SLOTS:
+        solar_obs = solar_slots(fallback_mask)
+        constraint_mode = "all-observed"
     if solar_obs.size < INTRADAY_MIN_OBS_SLOTS:
         meta["observed_slots"] = int(solar_obs.size)
+        meta["constraint_mode"] = constraint_mode
         return None, meta
 
     observed_slots = solar_obs[-min(int(solar_obs.size), INTRADAY_MAX_OBS_SLOTS):]
@@ -4221,7 +4662,7 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     obs_mask = np.zeros(SLOTS_DAY, dtype=bool)
     obs_mask[observed_slots] = True
     adjusted = np.asarray(dayahead, dtype=float).copy()
-    adjusted[np.asarray(actual_present, dtype=bool)] = np.asarray(actual, dtype=float)[np.asarray(actual_present, dtype=bool)]
+    adjusted[actual_present_arr] = np.asarray(actual, dtype=float)[actual_present_arr]
 
     dayahead_obs_total = float(np.asarray(dayahead, dtype=float)[obs_mask].sum())
     actual_obs_total = float(np.asarray(actual, dtype=float)[obs_mask].sum())
@@ -4274,6 +4715,9 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
         "global_ratio": global_ratio,
         "recent_ratio": recent_ratio,
         "strength": strength,
+        "constraint_mode": constraint_mode,
+        "cap_dispatch_slots": int(np.count_nonzero(cap_dispatch_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+        "operational_slots": int(np.count_nonzero(operational_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
     })
     return to_ui_series(adjusted, lo, hi, day_s), meta
 
@@ -4702,8 +5146,8 @@ def run_backtest(dates: list[date]) -> bool:
 
     for target_date in dates:
         target_s = target_date.isoformat()
-        actual = load_actual_loss_adjusted(target_s)
-        if actual is None:
+        actual, actual_present = load_actual_loss_adjusted_with_presence(target_s)
+        if actual is None or actual_present is None:
             skipped_actual += 1
             log.warning("Backtest skip [%s] - actual 5-minute history unavailable", target_s)
             continue
@@ -4732,7 +5176,13 @@ def run_backtest(dates: list[date]) -> bool:
             log.warning("Backtest skip [%s] - forecast replay failed", target_s)
             continue
 
-        metrics = compute_forecast_metrics(actual, np.asarray(result["forecast"], dtype=float))
+        _, constraint_meta = build_operational_constraint_mask(target_s)
+        metrics = compute_forecast_metrics(
+            actual,
+            np.asarray(result["forecast"], dtype=float),
+            actual_present=actual_present,
+            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+        )
         if metrics is None:
             skipped_forecast += 1
             log.warning("Backtest skip [%s] - forecast metrics unavailable", target_s)
@@ -4748,8 +5198,10 @@ def run_backtest(dates: list[date]) -> bool:
             **metrics,
         })
         log.info(
-            "Backtest [%s] WAPE=%.1f%% TotalAPE=%.1f%% MAPE=%.1f%% RMSE=%.1f kWh/slot First=%s Last=%s regime=%s solcast=%s blend=%.2f",
+            "Backtest [%s] usable=%d masked=%d WAPE=%.1f%% TotalAPE=%.1f%% MAPE=%.1f%% RMSE=%.1f kWh/slot First=%s Last=%s regime=%s solcast=%s blend=%.2f",
             target_s,
+            metrics["usable_slot_count"],
+            metrics["masked_slot_count"],
             metrics["wape_pct"],
             metrics["total_ape_pct"],
             metrics["mape_pct"],
@@ -4892,17 +5344,59 @@ def run_cli_generation(args) -> int:
 # MAIN SERVICE LOOP
 # ============================================================================
 
-def _read_operation_mode() -> str:
-    """Read operationMode from the settings table. Returns 'gateway' or 'remote'."""
+@lru_cache(maxsize=64)
+def _read_setting_value(key: str) -> str | None:
+    """Read a setting value from the settings table, returning None if absent."""
+    if not APP_DB_FILE.exists():
+        return None
     try:
         conn = _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True)
         try:
             row = conn.execute(
-                "SELECT value FROM settings WHERE key = 'operationMode' LIMIT 1"
+                "SELECT value FROM settings WHERE key = ? LIMIT 1",
+                (str(key),),
             ).fetchone()
-            return str(row[0]).strip().lower() if row else "gateway"
         finally:
             conn.close()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    value = str(row[0]).strip()
+    return value or None
+
+
+@lru_cache(maxsize=1)
+def load_forecast_export_limit_mw() -> float:
+    raw = _read_setting_value(FORECAST_EXPORT_LIMIT_SETTING_KEY)
+    if raw is None:
+        return float(EXPORT_MW)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid %s setting %r - using fallback %.1f MW",
+            FORECAST_EXPORT_LIMIT_SETTING_KEY,
+            raw,
+            EXPORT_MW,
+        )
+        return float(EXPORT_MW)
+    if not np.isfinite(value) or value <= 0.0:
+        log.warning(
+            "Non-positive %s setting %r - using fallback %.1f MW",
+            FORECAST_EXPORT_LIMIT_SETTING_KEY,
+            raw,
+            EXPORT_MW,
+        )
+        return float(EXPORT_MW)
+    return float(value)
+
+
+def _read_operation_mode() -> str:
+    """Read operationMode from the settings table. Returns 'gateway' or 'remote'."""
+    try:
+        value = str(_read_setting_value("operationMode") or "gateway").strip().lower()
+        return "remote" if value == "remote" else "gateway"
     except Exception:
         return "gateway"
 
@@ -4925,7 +5419,11 @@ def main() -> None:
     )
     log.info("Plant Capacity: %.3f MW dep  /  %.3f MW max", cap_dep / 1000.0, cap_max / 1000.0)
     log.info("Slot Cap      : dep=%.4f MWh  max=%.4f MWh per 5-min", slot_cap_kwh(True) / 1000.0, slot_cap_kwh(False) / 1000.0)
-    log.info("Export Limit  : %.0f MW  (dispatch only - not applied to forecast curve)", EXPORT_MW)
+    log.info(
+        "Export Limit  : %.2f MW  (%s, dispatch only - not applied to forecast curve)",
+        load_forecast_export_limit_mw(),
+        FORECAST_EXPORT_LIMIT_SETTING_KEY,
+    )
     log.info("Train Window  : %d days  (min %d)", N_TRAIN_DAYS, MIN_TRAIN_DAYS)
     log.info("Actual Source : AppData energy_5min (hot + archive), legacy JSON fallback only")
     log.info("=" * 70)
@@ -4963,28 +5461,34 @@ def main() -> None:
             # â”€â”€â”€ Decide whether to run a forecast this loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             #
             # Run conditions (any one sufficient):
-            #   A) Scheduled hour (DA_RUN_HOURS) and we haven't run this hour yet
-            #   B) Target-day forecast missing from DB (authoritative check)
+            #   A) Primary scheduled hour (DA_RUN_HOURS_PRIMARY) and we have not
+            #      run this hour yet
+            #   B) Target-day forecast missing from DB while outside solar hours
+            #      (post-solar constant checker)
             #   C) Today's forecast is missing and we are inside solar hours
             #      (morning recovery)
 
-            run_scheduled = (now_h in DA_RUN_HOURS) and (last_run_hour != now_h)
-            run_missing   = not da_target_in_db
+            run_scheduled = (now_h in DA_RUN_HOURS_PRIMARY) and (last_run_hour != now_h)
+            # Post-solar constant checker: outside solar window (18:00-04:59),
+            # verify every loop that tomorrow's day-ahead still exists in DB.
+            # Generate if missing; skip if present. Re-generate if it disappears.
+            outside_solar = (now_h >= SOLAR_END_H) or (now_h < SOLAR_START_H)
+            run_postsolar = outside_solar and (not da_target_in_db)
             run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (da_today is None)
 
-            # Respect failure cooldown for missing-target retries.
-            # Scheduled runs always bypass the cooldown (new hour = fresh window).
-            if not run_scheduled and run_missing and mono_now < _fail_cooldown_until:
+            # Respect failure cooldown for post-solar retries.
+            # Primary scheduled runs always bypass the cooldown.
+            if not run_scheduled and run_postsolar and mono_now < _fail_cooldown_until:
                 log.debug(
                     "Target missing but in failure cooldown (%.0fs remaining)",
                     _fail_cooldown_until - mono_now,
                 )
-                run_missing = False
+                run_postsolar = False
 
-            if run_scheduled or run_missing:
+            if run_scheduled or run_postsolar:
                 log.info(
-                    "Run trigger: scheduled=%s  missing_target_db=%s  failures=%d",
-                    run_scheduled, run_missing, _consecutive_failures,
+                    "Run trigger: scheduled=%s  postsolar_check=%s  failures=%d",
+                    run_scheduled, run_postsolar, _consecutive_failures,
                 )
                 clear_forecast_data_cache()
                 if _service_stop_requested():
@@ -5029,7 +5533,10 @@ def main() -> None:
                 run_dayahead(today, today)
 
             else:
-                log.debug("No forecast action needed (hour=%02d)", now_h)
+                if outside_solar and da_target_in_db:
+                    log.debug("Post-solar check: day-ahead for %s exists - OK", target_s)
+                else:
+                    log.debug("No forecast action needed (hour=%02d)", now_h)
 
             if SOLAR_START_H <= now_h < SOLAR_END_H:
                 slot_idx = int((now_h * 60 + now.minute) // SLOT_MIN)

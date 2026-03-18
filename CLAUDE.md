@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.19` in `package.json`
+- Current repo version baseline: `2.4.20` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -335,7 +335,7 @@ Preserve these unless a deliberate migration is implemented:
 - `collect_history_days()` stores `cap_dispatch_mask` per sample so downstream hardened training can reuse it without re-querying.
 - `build_intraday_adjusted_forecast()` excludes cap-dispatched observed slots from the actual-vs-dayahead ratio computation so that cap-depressed output does not propagate as under-forecast into remaining slots. Falls back to all observed if too few uncapped observations remain.
 - `compute_error_memory()` already excludes all operationally constrained slots (superset of cap-dispatch) from error correction — cap-depressed actuals do not create false negative bias.
-- Export-cap curtailment detection (`curtailed_mask`, 24 MW export ceiling) remains a separate mechanism. It catches output clipping at the export limit; plant-cap dispatch curtails below that ceiling via whole-inverter STOP commands.
+- Export-cap curtailment detection (`curtailed_mask`) remains a separate mechanism. It catches output clipping at the configured forecast export ceiling (`forecastExportLimitMw`, default `24 MW`); plant-cap dispatch curtails below that ceiling via whole-inverter STOP commands.
 - Do not remove the `scope` column from `audit_log` or change the plant-cap controller's `scope: "plant-cap"` tag — forecast training depends on it.
 
 ### Per-Inverter Transmission Loss Rules
@@ -355,6 +355,17 @@ Preserve these unless a deliberate migration is implemented:
 - When all losses are 0 (default), loss-adjusted loaders short-circuit to the cached raw `load_actual()` with zero overhead.
 - `_cached_loss_factors` is a module-level snapshot refreshed each cycle via `clear_forecast_data_cache()`. Both `load_actual_loss_adjusted` and `load_actual_loss_adjusted_with_presence` are LRU-cached alongside the raw loaders.
 - `_query_energy_5min_loss_adjusted()` queries per-inverter `energy_5min` rows and applies `kwh * (1 - loss_fraction)` before summing into plant-level 5-min totals. The original `_query_energy_5min_totals()` remains raw.
+
+### Day-Ahead Auto-Generation Rules
+
+- The Python forecast service (`services/forecast_engine.py`) runs a continuous main loop checking every 60 seconds.
+- **Primary scheduled runs** at hours 6 and 18 (`DA_RUN_HOURS_PRIMARY = {6, 18}`): always retrain + generate, regardless of whether the day-ahead already exists.
+- **Post-solar constant checker**: outside the solar window (18:00-04:59), every 60-second loop verifies that tomorrow's day-ahead exists in DB. If missing, it generates. If it disappears after being generated, it regenerates. During the solar window (05:00-17:59) the checker is inactive.
+- **Recovery**: if today's forecast is missing during solar hours, the service generates it immediately.
+- **Failure backoff**: after a failed generation attempt, the post-solar checker enters exponential cooldown (5 min, 10 min, 20 min, capped at 30 min). Primary scheduled runs bypass the cooldown. Cooldown resets on success.
+- **Node.js cron fallback**: `server/index.js` schedules cron jobs at 18:30, 20:00, and 22:00 that check if tomorrow's day-ahead exists in DB and trigger a one-shot ML forecast CLI generation if missing. This provides a safety net when the Python forecast service is not running.
+- Do not remove the dual-layer safety net (Python service + Node.js cron). Both layers are needed because the Python service can crash and the Node.js server may outlive it.
+- Forecast generation in `remote` mode is always skipped (viewer model).
 
 ## Operator Messaging
 
