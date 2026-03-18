@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.16</span>
+    <span><b>Version:</b> 2.4.17</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -544,9 +544,10 @@
     <a href="#s16"><span class="toc-num">16</span> Operator Messaging</a>
     <a href="#s17"><span class="toc-num">17</span> Cloud Backup &amp; Restore</a>
     <a href="#s18"><span class="toc-num">18</span> Workflows</a>
-    <a href="#s19"><span class="toc-num">19</span> Keyboard Shortcuts</a>
-    <a href="#s20"><span class="toc-num">20</span> Troubleshooting</a>
-    <a href="#s21"><span class="toc-num">21</span> Quick Reference</a>
+    <a href="#s19"><span class="toc-num">19</span> IP Configuration</a>
+    <a href="#s20"><span class="toc-num">20</span> Keyboard Shortcuts</a>
+    <a href="#s21"><span class="toc-num">21</span> Troubleshooting</a>
+    <a href="#s22"><span class="toc-num">22</span> Quick Reference</a>
   </div>
 </nav>
 
@@ -1583,10 +1584,46 @@
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 19. Keyboard Shortcuts ──── -->
+<!-- ──── 19. IP Configuration ──── -->
 <section id="s19">
   <div class="section-head">
     <span class="section-num">19</span>
+    <h2>IP Configuration</h2>
+  </div>
+  <p>The <b>IP Configuration</b> window manages per-inverter network and operational settings. Open it from <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Access requires an auth gate key (<code>adsiM</code> or <code>adsiMM</code>, where M is the current minute). The session lasts 1 hour.</p>
+
+  <h3>Configuration Table</h3>
+  <p>Each of the 27 inverters has one row with the following fields:</p>
+  <table>
+    <thead><tr><th>Column</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><b>Inverter</b></td><td>Inverter number and device label (INV-01 &ndash; INV-27). Click the gear icon to open the inverter web page.</td></tr>
+      <tr><td><b>IP Address</b></td><td>IPv4 address of the inverter on the local network.</td></tr>
+      <tr><td><b>Polling Interval (s)</b></td><td>How often the gateway polls this inverter, in seconds (min 0.01, default 0.05).</td></tr>
+      <tr><td><b>Enabled Units</b></td><td>Which nodes (1&ndash;4) are active. Use <b>All</b> to toggle all four. An empty selection disables the inverter.</td></tr>
+      <tr><td><b>Loss %</b></td><td>Estimated MW transmission loss from this inverter to the substation (0&ndash;100%). Accounts for cable degradation or distance. Used exclusively by the forecast engine for substation-level accuracy; it does <em>not</em> affect live dashboard readings, energy totals, or exports.</td></tr>
+      <tr><td><b>Save</b></td><td>Saves the individual row. Use <b>Save All Changes</b> at the bottom to save every row at once.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Loss % and Forecasting</h3>
+  <p>When a non-zero Loss % is configured, the day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training. This means the ML model learns substation-level output patterns rather than raw inverter output, producing more accurate day-ahead and intraday-adjusted forecasts.</p>
+  <p>Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far from substation), the forecast engine reduces their historical energy contributions by those percentages when building training data, computing error corrections, and scoring forecast quality.</p>
+
+  <h3>Additional Controls</h3>
+  <ul>
+    <li><b>Check Status</b> &ndash; scans all configured IPs for reachability and shows an online count.</li>
+    <li><b>Open Topology</b> &ndash; opens the visual plant topology map.</li>
+    <li><b>Theme toggle</b> &ndash; switches between light and dark mode for this window.</li>
+  </ul>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 20. Keyboard Shortcuts ──── -->
+<section id="s20">
+  <div class="section-head">
+    <span class="section-num">20</span>
     <h2>Keyboard Shortcuts</h2>
   </div>
   <table>
@@ -1613,10 +1650,10 @@
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 20. Troubleshooting ──── -->
-<section id="s20">
+<!-- ──── 21. Troubleshooting ──── -->
+<section id="s21">
   <div class="section-head">
-    <span class="section-num">20</span>
+    <span class="section-num">21</span>
     <h2>Troubleshooting</h2>
   </div>
   <table>
@@ -1688,10 +1725,10 @@
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 21. Quick Reference ──── -->
-<section id="s21">
+<!-- ──── 22. Quick Reference ──── -->
+<section id="s22">
   <div class="section-head">
-    <span class="section-num">21</span>
+    <span class="section-num">22</span>
     <h2>Quick Reference</h2>
   </div>
 

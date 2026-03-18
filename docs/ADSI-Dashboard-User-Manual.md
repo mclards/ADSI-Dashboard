@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.16`
+**Applies to:** ADSI Inverter Dashboard `v2.4.17`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1038,19 +1038,37 @@ Restore behavior:
 
 ## 7.1 IP Configuration
 
-The `IP Configuration` window is intended for network and polling configuration of inverter devices.
+The `IP Configuration` window manages per-inverter network and operational settings. Open it from **Settings > IP Configuration** or `Ctrl+I`. Access requires an auth gate key (`adsiM` or `adsiMM`, where M is the current minute). The session lasts 1 hour.
 
-Use it to:
+### Configuration Table
 
-- maintain device addresses
-- review device reachability
-- control enabled reporting units
-- open the `Topology` view
+Each of the 27 inverters has one row with the following columns:
 
-Operational note:
+| Column | Description |
+|--------|-------------|
+| **Inverter** | Inverter number and device label (INV-01 -- INV-27). Click the gear icon to open the inverter web page. |
+| **IP Address** | IPv4 address of the inverter on the local network. |
+| **Polling Interval (s)** | How often the gateway polls this inverter, in seconds (min 0.01, default 0.05). |
+| **Enabled Units** | Which nodes (1--4) are active. Use **All** to toggle all four. Empty selection disables the inverter. |
+| **Loss %** | Estimated MW transmission loss from this inverter to the substation (0--100%). Accounts for cable degradation or distance. Used exclusively by the forecast engine for substation-level accuracy; does *not* affect live dashboard readings, energy totals, or exports. |
+| **Save** | Saves the individual row. Use **Save All Changes** at the bottom to save every row at once. |
 
-- this function is intended for authorized personnel only
-- in `Remote` mode, the dashboard blocks access to gateway-only configuration actions
+### Loss % and Forecasting
+
+When a non-zero Loss % is configured, the day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training. The ML model learns substation-level output patterns rather than raw inverter output, producing more accurate day-ahead and intraday-adjusted forecasts.
+
+Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far from substation), the forecast engine reduces their historical energy contributions by those percentages when building training data, computing error corrections, and scoring forecast quality.
+
+### Additional Controls
+
+- **Check Status** -- scans all configured IPs for reachability and shows an online count.
+- **Open Topology** -- opens the visual plant topology map.
+- **Theme toggle** -- switches between light and dark mode for this window.
+
+### Operational Notes
+
+- This function is intended for authorized personnel only.
+- In `Remote` mode, the dashboard blocks access to gateway-only configuration actions.
 
 ## 7.2 Topology
 

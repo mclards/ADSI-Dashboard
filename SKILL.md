@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.16` in `package.json`
+- Current repo version baseline: `2.4.17` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -427,6 +427,24 @@ If a visible product rename affects install directory behavior, assess updater i
 - `compute_error_memory()` already excludes all operationally constrained slots (superset of cap-dispatch) from error correction — cap-depressed actuals do not create false negative bias.
 - Export-cap curtailment detection (`curtailed_mask`, 24 MW export ceiling) remains a separate mechanism. It catches output clipping at the export limit; plant-cap dispatch curtails below that ceiling via whole-inverter STOP commands.
 - Do not remove the `scope` column from `audit_log` or change the plant-cap controller's `scope: "plant-cap"` tag — forecast training depends on it.
+
+### Per-Inverter Transmission Loss Rules
+
+- The IP Config page exposes a per-inverter `Loss %` field (0-100) representing MW transmission loss from inverter to substation (cable degradation, distance).
+- Loss factors are stored in `ipconfig.json` as `losses: { "1": 2.5, "2": 0, ... }` and persisted via the `ipConfigJson` settings key.
+- Loss factors are used exclusively by the forecast engine for substation-level accuracy. They must never alter raw inverter telemetry, dashboard display, health metrics, or energy exports.
+- Forecast-engine consumers that use loss-adjusted actuals (`load_actual_loss_adjusted`, `load_actual_loss_adjusted_with_presence`):
+  - `collect_training_data()` and `collect_history_days()` (feeds `collect_training_data_hardened`)
+  - `compute_error_memory()` (bias correction)
+  - `build_intraday_adjusted_forecast()` (intraday ratio)
+  - `forecast_qa()` (QA scoring)
+  - `run_backtest()` (backtest comparison)
+  - `plant_capacity_profile()` returns `loss_adjusted_equiv`, `dependable_kw`, and `max_kw` reflecting losses so the physics baseline ceiling is consistent.
+- Forecast-engine consumers that must stay on raw actuals (`load_actual`):
+  - Solcast reliability scoring — compares Solcast predictions against true inverter output.
+- When all losses are 0 (default), loss-adjusted loaders short-circuit to the cached raw `load_actual()` with zero overhead.
+- `_cached_loss_factors` is a module-level snapshot refreshed each cycle via `clear_forecast_data_cache()`. Both `load_actual_loss_adjusted` and `load_actual_loss_adjusted_with_presence` are LRU-cached alongside the raw loaders.
+- `_query_energy_5min_loss_adjusted()` queries per-inverter `energy_5min` rows and applies `kwh * (1 - loss_fraction)` before summing into plant-level 5-min totals. The original `_query_energy_5min_totals()` remains raw.
 
 ## Operator Messaging Rules
 

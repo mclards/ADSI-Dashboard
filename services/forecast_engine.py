@@ -468,8 +468,12 @@ def _merge_slot_series_with_presence(
 
 
 def clear_forecast_data_cache() -> None:
+    global _cached_loss_factors
+    _cached_loss_factors = None
     load_actual.cache_clear()
     load_actual_with_presence.cache_clear()
+    load_actual_loss_adjusted.cache_clear()
+    load_actual_loss_adjusted_with_presence.cache_clear()
     load_dayahead.cache_clear()
     load_dayahead_with_presence.cache_clear()
     load_intraday_adjusted.cache_clear()
@@ -588,8 +592,12 @@ def plant_capacity_profile() -> dict:
         except Exception:
             return (1, k)
 
+    loss_map = cfg.get("losses", {}) or {}
+    loss_map = {str(k): v for k, v in loss_map.items()}
+
     configured = 0
     enabled_nodes = 0
+    loss_adjusted_equiv = 0.0
     for inv_id in sorted(all_ids, key=_sort_key):
         ip = str(inv_map.get(inv_id, "") or "").strip()
 
@@ -606,6 +614,17 @@ def plant_capacity_profile() -> dict:
             n_nodes = len(_sanitize_units(raw_units))
         enabled_nodes += n_nodes
 
+        # Per-inverter transmission loss (cable degradation / distance)
+        loss_pct = 0.0
+        try:
+            loss_pct = float(loss_map.get(inv_id, 0))
+        except (TypeError, ValueError):
+            pass
+        if loss_pct < 0 or loss_pct > 100:
+            loss_pct = 0.0
+        inv_equiv = n_nodes / 4.0
+        loss_adjusted_equiv += inv_equiv * (1.0 - loss_pct / 100.0)
+
     if configured == 0:
         fb_kw = PLANT_MW_FALLBACK * 1000.0
         return {
@@ -618,13 +637,14 @@ def plant_capacity_profile() -> dict:
         }
 
     equiv_inverters = enabled_nodes / 4.0
-    dependable_kw = equiv_inverters * UNIT_KW_DEPENDABLE
-    max_kw = equiv_inverters * UNIT_KW_MAX
+    dependable_kw = loss_adjusted_equiv * UNIT_KW_DEPENDABLE
+    max_kw = loss_adjusted_equiv * UNIT_KW_MAX
 
     return {
         "configured_inverters": configured,
         "enabled_nodes": enabled_nodes,
         "equiv_inverters": equiv_inverters,
+        "loss_adjusted_equiv": loss_adjusted_equiv,
         "dependable_kw": dependable_kw,
         "max_kw": max_kw,
         "source": "ipconfig",
@@ -1584,7 +1604,80 @@ def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[
     return keys
 
 
+def _load_inverter_loss_factors() -> dict[str, float]:
+    """Load per-inverter transmission loss factors (0.0-1.0) from ipconfig.
+
+    Used exclusively by the forecast training and day-ahead generation paths.
+    General actual-data queries (inverter health, Solcast, QA) must not apply
+    these factors -- they track true inverter output.
+    """
+    cfg = _load_json(IPCONFIG_FILE)
+    raw = cfg.get("losses", {}) or {}
+    factors: dict[str, float] = {}
+    for k, v in raw.items():
+        pct = 0.0
+        try:
+            pct = float(v)
+        except (TypeError, ValueError):
+            pass
+        if pct < 0 or pct > 100:
+            pct = 0.0
+        factors[str(k)] = pct / 100.0
+    return factors
+
+
+def _query_energy_5min_loss_adjusted(
+    db_path: Path,
+    day_start_ms: int,
+    day_end_ms: int,
+    loss_factors: dict[str, float],
+) -> dict[int, float]:
+    """Per-inverter loss-adjusted 5-min energy totals for forecast training.
+
+    Each inverter kWh contribution is reduced by its configured transmission
+    loss percentage so the forecast trains on substation-level output.
+    """
+    if not db_path.exists():
+        return {}
+    sql = """
+        SELECT ts, inverter, COALESCE(kwh_inc, 0) AS kwh_inc
+          FROM energy_5min
+         WHERE ts >= ? AND ts < ?
+         ORDER BY ts ASC
+    """
+    out: dict[int, float] = {}
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cur = conn.execute(sql, (int(day_start_ms), int(day_end_ms)))
+                for ts, inverter, kwh_inc in cur.fetchall():
+                    ts_i = int(ts or 0)
+                    if ts_i <= 0:
+                        continue
+                    inv_key = str(inverter)
+                    loss_frac = loss_factors.get(inv_key, 0.0)
+                    adjusted = _coerce_non_negative_float(kwh_inc) * (1.0 - loss_frac)
+                    out[ts_i] = out.get(ts_i, 0.0) + adjusted
+            return out
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB loss-adjusted load retry %d/%d [%s]: %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    db_path.name,
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB loss-adjusted load failed [%s]: %s", db_path, e)
+            break
+    return out
+
+
 def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, float]:
+    """Raw plant-level 5-min energy totals -- no loss adjustment."""
     if not db_path.exists():
         return {}
     sql = """
@@ -1690,6 +1783,96 @@ def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray |
 @lru_cache(maxsize=256)
 def load_actual(day: str) -> np.ndarray | None:
     values, _ = load_actual_with_presence(day)
+    return values
+
+
+# ---------------------------------------------------------------------------
+# Loss-adjusted actual loaders (forecast engine only)
+# ---------------------------------------------------------------------------
+# These apply per-inverter transmission loss factors so the ML model, error
+# memory, intraday adjustment, QA, and backtest all operate on consistent
+# substation-level actuals.  Non-forecast consumers (inverter health display,
+# Solcast reliability) use the raw load_actual() above.
+# ---------------------------------------------------------------------------
+
+# Module-level loss-factor snapshot refreshed each forecast cycle via
+# clear_forecast_data_cache().  Avoids re-reading ipconfig.json on every
+# per-day call inside training / error-memory loops.
+_cached_loss_factors: dict[str, float] | None = None
+
+
+def _get_loss_factors() -> dict[str, float]:
+    """Return cached loss factors, loading from ipconfig on first call."""
+    global _cached_loss_factors
+    if _cached_loss_factors is None:
+        _cached_loss_factors = _load_inverter_loss_factors()
+    return _cached_loss_factors
+
+
+def _has_nonzero_losses() -> bool:
+    return any(v > 0 for v in _get_loss_factors().values())
+
+
+def _load_actual_loss_adjusted_from_appdata(
+    day: str,
+    loss_factors: dict[str, float],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return None, None
+
+    merged = _query_energy_5min_loss_adjusted(APP_DB_FILE, day_start_ms, day_end_ms, loss_factors)
+    for month_key in _archive_month_keys_for_range(day_start_ms, day_end_ms):
+        archive_path = ARCHIVE_DIR / f"{month_key}.db"
+        archive_rows = _query_energy_5min_loss_adjusted(archive_path, day_start_ms, day_end_ms, loss_factors)
+        for ts, kwh_inc in archive_rows.items():
+            prev = merged.get(ts, None)
+            if prev is None:
+                merged[ts] = kwh_inc
+            elif prev <= 0 < kwh_inc:
+                merged[ts] = kwh_inc
+
+    if not merged:
+        return None, None
+
+    out = _empty_slot_values()
+    present = _empty_slot_presence()
+    slot_ms = SLOT_MIN * 60 * 1000
+    for ts in sorted(merged.keys()):
+        slot = int((int(ts) - day_start_ms) // slot_ms)
+        if 0 <= slot < SLOTS_DAY:
+            out[slot] += _coerce_non_negative_float(merged[ts])
+            present[slot] = True
+    return out, present
+
+
+@lru_cache(maxsize=256)
+def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Loss-adjusted (values, presence) pair for forecast-engine consumers."""
+    if not _has_nonzero_losses():
+        return load_actual_with_presence(day)
+
+    loss_factors = _get_loss_factors()
+    db_actual, db_present = _load_actual_loss_adjusted_from_appdata(day, loss_factors)
+    legacy_actual, legacy_present = _load_actual_from_legacy_context(day)
+    return _merge_slot_series_with_presence(
+        "Actual history (loss-adjusted)",
+        day,
+        db_actual,
+        db_present,
+        legacy_actual,
+        legacy_present,
+        MIN_HISTORY_SOLAR_SLOTS,
+    )
+
+
+@lru_cache(maxsize=256)
+def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
+    """Loss-adjusted 5-min actual for forecast training / day-ahead / QA.
+
+    Falls back to raw load_actual() when no losses are configured.
+    """
+    values, _ = load_actual_loss_adjusted_with_presence(day)
     return values
 
 
@@ -2272,7 +2455,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
 
     for d in range(1, ERR_MEMORY_DAYS + 1):
         day   = (today - timedelta(days=d)).isoformat()
-        actual = load_actual(day)
+        actual = load_actual_loss_adjusted(day)
         fc     = load_dayahead(day)
         if actual is None or fc is None:
             continue
@@ -2326,7 +2509,7 @@ def collect_history_days(today: date, lookback_days: int) -> list[dict]:
 
     for days_ago in range(1, lookback_days + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
-        actual = load_actual(day)
+        actual = load_actual_loss_adjusted(day)
         wdata = fetch_weather(day, source="archive")
         snapshot = load_solcast_snapshot(day)
         if actual is None or wdata is None:
@@ -3218,7 +3401,7 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
 
     for d in range(1, N_TRAIN_DAYS + 1):
         day    = (today - timedelta(days=d)).isoformat()
-        actual = load_actual(day)
+        actual = load_actual_loss_adjusted(day)
         wdata  = fetch_weather(day, source="archive")
 
         if actual is None or wdata is None:
@@ -3814,9 +3997,9 @@ def forecast_qa(today: date) -> None:
     yesterday = (today - timedelta(days=1)).isoformat()
     day2ago   = (today - timedelta(days=2)).isoformat()
 
-    actual = load_actual(yesterday)
+    actual = load_actual_loss_adjusted(yesterday)
     fc     = load_dayahead(yesterday)
-    pers   = load_actual(day2ago)   # persistence proxy
+    pers   = load_actual_loss_adjusted(day2ago)   # persistence proxy
 
     if actual is None or fc is None:
         log.info("QA: no data for %s", yesterday)
@@ -4016,7 +4199,7 @@ def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
 def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict]:
     day_s = day.isoformat()
     dayahead, _ = load_dayahead_with_presence(day_s)
-    actual, actual_present = load_actual_with_presence(day_s)
+    actual, actual_present = load_actual_loss_adjusted_with_presence(day_s)
     meta = {
         "day": day_s,
         "observed_slots": 0,
@@ -4519,7 +4702,7 @@ def run_backtest(dates: list[date]) -> bool:
 
     for target_date in dates:
         target_s = target_date.isoformat()
-        actual = load_actual(target_s)
+        actual = load_actual_loss_adjusted(target_s)
         if actual is None:
             skipped_actual += 1
             log.warning("Backtest skip [%s] - actual 5-minute history unavailable", target_s)

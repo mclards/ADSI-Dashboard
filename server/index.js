@@ -10275,11 +10275,12 @@ function getLatestReportDate() {
 }
 
 function defaultIpConfig() {
-  const cfg = { inverters: {}, poll_interval: {}, units: {} };
+  const cfg = { inverters: {}, poll_interval: {}, units: {}, losses: {} };
   for (let i = 1; i <= 27; i++) {
     cfg.inverters[i] = `192.168.1.${100 + i}`;
     cfg.poll_interval[i] = 0.05;
     cfg.units[i] = [1, 2, 3, 4];
+    cfg.losses[i] = 0;
   }
   return cfg;
 }
@@ -10300,9 +10301,13 @@ function sanitizeIpConfig(input) {
     const units = Array.isArray(unitsRaw)
       ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
       : [1, 2, 3, 4];
+    const lossRaw = Number(
+      src?.losses?.[i] ?? src?.losses?.[String(i)] ?? 0,
+    );
     out.inverters[i] = ip;
     out.poll_interval[i] = Number.isFinite(poll) && poll >= 0.01 ? poll : 0.05;
     out.units[i] = units.length ? [...new Set(units)] : [];
+    out.losses[i] = Number.isFinite(lossRaw) && lossRaw >= 0 && lossRaw <= 100 ? lossRaw : 0;
   }
   return out;
 }
