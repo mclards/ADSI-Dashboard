@@ -1539,12 +1539,14 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
     Node: r.node === 0 ? 'ALL' : `Node-${r.node}`,
     Action: r.action, Scope: (r.scope||'single').toUpperCase(),
     Result: r.result || 'ok', IP: resolveAuditIp(ipMap, r.inverter, r.ip),
+    Reason: r.reason || '',
   }));
 
   const headers = [
     {key:'Date',label:'Date'},{key:'Time',label:'Time'},{key:'Plant',label:'Plant'},
     {key:'Operator',label:'Operator'},{key:'Inverter',label:'Inverter'},{key:'Node',label:'Node'},
     {key:'Action',label:'Action'},{key:'Scope',label:'Scope'},{key:'Result',label:'Result'},{key:'IP',label:'IP Address'},
+    {key:'Reason',label:'Reason'},
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(mapped, {

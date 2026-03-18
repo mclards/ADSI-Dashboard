@@ -5985,10 +5985,10 @@ function buildPlantCapPanel() {
       </div>
       <div id="plantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the current cap band, node mix, and exemption list."></div>
       <div class="plant-cap-actions">
-        <button id="btnPlantCapPreview" class="btn btn-outline" type="button" title="Preview the next stop or restart decision using the current band, live PAC, and exemption list.">Preview Plan</button>
-        <button id="btnPlantCapEnable" class="btn btn-red" type="button" title="Enable gateway-side plant output capping with confirmation and authorization.">Enable Cap</button>
-        <button id="btnPlantCapDisable" class="btn btn-outline" type="button" title="Disable automatic plant cap monitoring for the current session without restarting controlled inverters.">Disable Monitoring</button>
-        <button id="btnPlantCapRelease" class="btn btn-green" type="button" title="Restart controller-owned inverters sequentially and release them from plant cap control.">Release Controlled Inverters</button>
+        <button id="btnPlantCapPreview" class="btn btn-outline plant-cap-cmd-btn" type="button" title="Preview the next stop or restart decision using the current band, live PAC, and exemption list.">Preview Plan</button>
+        <button id="btnPlantCapEnable" class="btn btn-red plant-cap-cmd-btn" type="button" title="Enable gateway-side plant output capping with confirmation and authorization.">Enable Cap</button>
+        <button id="btnPlantCapDisable" class="btn btn-outline plant-cap-cmd-btn" type="button" title="Disable automatic plant cap monitoring for the current session without restarting controlled inverters.">Disable Monitoring</button>
+        <button id="btnPlantCapRelease" class="btn btn-green plant-cap-cmd-btn" type="button" title="Restart controller-owned inverters sequentially and release them from plant cap control.">Release Controlled Inverters</button>
       </div>
       <div class="plant-cap-status-grid">
         <div class="plant-cap-status-item" title="Current plant cap controller state.">
@@ -5999,13 +5999,48 @@ function buildPlantCapPanel() {
           <span>Reason</span>
           <strong id="plantCapReasonText">Plant-wide capping is disabled.</strong>
         </div>
-        <div class="plant-cap-status-item" title="Inverters currently owned by the plant cap controller because it stopped them earlier in this session.">
-          <span>Controlled</span>
-          <strong id="plantCapOwnedText">None</strong>
-        </div>
         <div class="plant-cap-status-item" title="Most recent automatic stop or restart action, or the remaining settling time after a recent action.">
           <span>Last Action</span>
           <strong id="plantCapLastActionText">—</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Cooldown or settling time after the most recent controller action.">
+          <span>Cooldown</span>
+          <strong id="plantCapCooldownText">—</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Total MW curtailed by the controller based on PAC at time of each stop.">
+          <span>Curtailed</span>
+          <strong id="plantCapCurtailedText">0.000 MW</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Number of inverters available for the controller to stop.">
+          <span>Controllable</span>
+          <strong id="plantCapControllableText">—</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Current in-flight controller action, if any.">
+          <span>Pending</span>
+          <strong id="plantCapPendingText">None</strong>
+        </div>
+        <div class="plant-cap-status-item" title="Inverters exempted from automatic stop selection.">
+          <span>Exempted</span>
+          <strong id="plantCapExemptedText">None</strong>
+        </div>
+      </div>
+      <div id="plantCapControlledWrap" class="plant-cap-controlled-wrap" hidden>
+        <span class="plant-cap-controlled-label">Controlled Inverters</span>
+        <div class="plant-cap-controlled-table-wrap">
+          <table class="plant-cap-controlled-table">
+            <thead>
+              <tr>
+                <th title="Inverter number stopped by the controller.">Inverter</th>
+                <th title="Time the controller stopped this inverter.">Stopped At</th>
+                <th title="Elapsed time since the controller stopped this inverter.">Duration</th>
+                <th title="AC power output at the moment the inverter was stopped.">Pac Removed (kW)</th>
+                <th title="Enabled node count at the time of stop.">Nodes</th>
+                <th title="Node-adjusted rated inverter capacity in kW.">Rated kW</th>
+                <th title="Node-adjusted dependable capacity in kW used for conservative planning.">Depend. kW</th>
+              </tr>
+            </thead>
+            <tbody id="plantCapControlledBody"></tbody>
+          </table>
         </div>
       </div>
       <div id="plantCapServerWarnings" class="plant-cap-server-warnings" title="Server-side planner warnings, safety blocks, or advisory messages."></div>
@@ -6058,8 +6093,12 @@ function normalizePlantCapStatusClient(raw) {
     stepMetrics: src.stepMetrics && typeof src.stepMetrics === "object" ? src.stepMetrics : {},
     ownedStopped: Array.isArray(src.ownedStopped) ? src.ownedStopped : [],
     lastDecision: src.lastDecision && typeof src.lastDecision === "object" ? src.lastDecision : null,
+    pendingAction: src.pendingAction && typeof src.pendingAction === "object" ? src.pendingAction : null,
     preview: src.preview && typeof src.preview === "object" ? src.preview : null,
     cooldownRemainingSec: Number(src.cooldownRemainingSec || 0),
+    cooldownSec: Number(src.cooldownSec || 0),
+    sequenceCustom: Array.isArray(src.sequenceCustom) ? src.sequenceCustom : [],
+    gapMw: src.gapMw == null ? null : Number(src.gapMw),
   };
 }
 
@@ -6150,12 +6189,18 @@ function renderPlantCapPanel() {
   const modeEl = $("plantCapModeValue");
   const statusEl = $("plantCapStatusText");
   const reasonEl = $("plantCapReasonText");
-  const ownedEl = $("plantCapOwnedText");
   const lastActionEl = $("plantCapLastActionText");
+  const cooldownEl = $("plantCapCooldownText");
+  const curtailedEl = $("plantCapCurtailedText");
+  const controllableEl = $("plantCapControllableText");
+  const pendingEl = $("plantCapPendingText");
+  const exemptedEl = $("plantCapExemptedText");
+  const controlledWrap = $("plantCapControlledWrap");
+  const controlledBody = $("plantCapControlledBody");
   const warningsEl = $("plantCapServerWarnings");
   const releaseBtn = $("btnPlantCapRelease");
   const previewMetaEl = $("plantCapPreviewMeta");
-  if (!currentMwEl || !bandEl || !modeEl || !statusEl || !reasonEl || !ownedEl || !lastActionEl || !warningsEl) {
+  if (!currentMwEl || !bandEl || !modeEl || !statusEl || !reasonEl || !lastActionEl || !warningsEl) {
     return;
   }
   const remoteBadge = $("plantCapRemoteBadge");
@@ -6170,16 +6215,10 @@ function renderPlantCapPanel() {
   modeEl.textContent = modeText;
   statusEl.textContent = String(status.status || "idle").toUpperCase();
   reasonEl.textContent = status.reasonText || "Plant-wide capping is disabled.";
-  if (status.ownedStopped.length) {
-    ownedEl.textContent = status.ownedStopped
-      .map((entry) => `INV-${String(entry.inverter || 0).padStart(2, "0")}`)
-      .join(", ");
-  } else {
-    ownedEl.textContent = "None";
-  }
   if (releaseBtn) {
     releaseBtn.disabled = !status.ownedStopped.length;
   }
+  /* Last Action */
   if (status.lastDecision) {
     const stamp = status.lastDecision.at ? fmtDateTime(status.lastDecision.at) : "";
     const label = String(status.lastDecision.action || "").toUpperCase();
@@ -6190,6 +6229,85 @@ function renderPlantCapPanel() {
     lastActionEl.textContent = `Settling (${status.cooldownRemainingSec}s remaining)`;
   } else {
     lastActionEl.textContent = "—";
+  }
+  /* Cooldown */
+  if (cooldownEl) {
+    if (status.cooldownRemainingSec > 0) {
+      cooldownEl.textContent = `Settling (${status.cooldownRemainingSec}s)`;
+    } else if (status.cooldownSec > 0) {
+      cooldownEl.textContent = `${status.cooldownSec}s configured`;
+    } else {
+      cooldownEl.textContent = "—";
+    }
+  }
+  /* Curtailed */
+  if (curtailedEl) {
+    const totalKw = status.ownedStopped.reduce((sum, e) => sum + Number(e.pacBeforeStopKw || 0), 0);
+    const totalMw = totalKw / 1000;
+    const invCount = status.ownedStopped.length;
+    curtailedEl.textContent = invCount
+      ? `${totalMw.toFixed(3)} MW (${invCount} inv)`
+      : "0.000 MW";
+  }
+  /* Controllable */
+  if (controllableEl) {
+    const cnt = Number(status.stepMetrics.controllableInverterCount || 0);
+    controllableEl.textContent = cnt ? `${cnt} inverters` : "0 inverters";
+  }
+  /* Pending */
+  if (pendingEl) {
+    if (status.pendingAction) {
+      const pType = String(status.pendingAction.type || status.pendingAction.action || "ACTION").toUpperCase();
+      const pInv = status.pendingAction.inverter;
+      pendingEl.textContent = pInv != null
+        ? `${pType} INV-${String(pInv).padStart(2, "0")} in progress`
+        : `${pType} in progress`;
+    } else {
+      pendingEl.textContent = "None";
+    }
+  }
+  /* Exempted */
+  if (exemptedEl) {
+    if (status.sequenceCustom.length) {
+      exemptedEl.textContent = status.sequenceCustom
+        .map((n) => `INV-${String(n).padStart(2, "0")}`)
+        .join(", ");
+    } else {
+      exemptedEl.textContent = "None";
+    }
+  }
+  /* Controlled inverters mini-table */
+  if (controlledWrap && controlledBody) {
+    if (status.ownedStopped.length) {
+      controlledWrap.hidden = false;
+      const sorted = [...status.ownedStopped].sort((a, b) => {
+        return Number(b.stoppedAt || 0) - Number(a.stoppedAt || 0);
+      });
+      const nowMs = Date.now();
+      controlledBody.innerHTML = sorted.map((entry) => {
+        const inv = `INV-${String(entry.inverter || 0).padStart(2, "0")}`;
+        const stoppedTs = Number(entry.stoppedAt || 0);
+        const stoppedAt = stoppedTs ? fmtTime(stoppedTs) : "—";
+        const elapsedMs = stoppedTs ? Math.max(0, nowMs - stoppedTs) : 0;
+        const elapsedSec = Math.floor(elapsedMs / 1000);
+        const durH = Math.floor(elapsedSec / 3600);
+        const durM = Math.floor((elapsedSec % 3600) / 60);
+        const durS = elapsedSec % 60;
+        const duration = elapsedMs
+          ? (durH > 0 ? `${durH}h ${String(durM).padStart(2, "0")}m` : `${durM}m ${String(durS).padStart(2, "0")}s`)
+          : "—";
+        const pac = Number(entry.pacBeforeStopKw || 0).toFixed(1);
+        const nodes = Number(entry.enabledNodes || 0);
+        const rated = Number(entry.ratedKw || 0).toFixed(1);
+        const dependable = Number(entry.dependableKw || 0).toFixed(1);
+        return `<tr title="${inv} stopped at ${stoppedAt} (${duration} ago), ${pac} kW removed, ${nodes} nodes, rated ${rated} kW, dependable ${dependable} kW.">
+          <td>${inv}</td><td>${stoppedAt}</td><td>${duration}</td><td>${pac}</td><td>${nodes}</td><td>${rated}</td><td>${dependable}</td>
+        </tr>`;
+      }).join("");
+    } else {
+      controlledWrap.hidden = true;
+      controlledBody.innerHTML = "";
+    }
   }
   currentMwEl.closest(".plant-cap-metric")?.setAttribute(
     "title",
@@ -6215,11 +6333,35 @@ function renderPlantCapPanel() {
     "title",
     `Current controller reason: ${reasonEl.textContent}`,
   );
-  ownedEl.closest(".plant-cap-status-item")?.setAttribute(
+  cooldownEl?.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    status.cooldownRemainingSec > 0
+      ? `Settling after last action: ${status.cooldownRemainingSec}s remaining of ${status.cooldownSec}s configured.`
+      : status.cooldownSec > 0
+        ? `Configured settle time between controller actions: ${status.cooldownSec}s.`
+        : "Cooldown or settling time between controller actions.",
+  );
+  curtailedEl?.closest(".plant-cap-status-item")?.setAttribute(
     "title",
     status.ownedStopped.length
-      ? `Controller-owned stopped inverters: ${ownedEl.textContent}.`
-      : "No inverter is currently owned by the plant cap controller.",
+      ? `Total MW curtailed by ${status.ownedStopped.length} controller-stopped inverter(s) based on PAC at stop time.`
+      : "No inverter is currently curtailed by the plant cap controller.",
+  );
+  controllableEl?.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    `Number of inverters eligible for automatic stop selection: ${Number(status.stepMetrics.controllableInverterCount || 0)}.`,
+  );
+  pendingEl?.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    status.pendingAction
+      ? `An in-flight controller command is executing: ${pendingEl.textContent}.`
+      : "No controller action is currently in progress.",
+  );
+  exemptedEl?.closest(".plant-cap-status-item")?.setAttribute(
+    "title",
+    status.sequenceCustom.length
+      ? `Inverters exempt from automatic stop: ${exemptedEl.textContent}.`
+      : "No inverters are exempted from automatic stop selection.",
   );
   lastActionEl.closest(".plant-cap-status-item")?.setAttribute(
     "title",
@@ -6277,10 +6419,10 @@ function buildInverterGrid() {
   const nodes = State.settings.nodeCount || 4;
   const frag = document.createDocumentFragment();
   frag.appendChild(buildPlantCapPanel());
+  frag.appendChild(buildBulkControlPanel());
   for (let i = 1; i <= count; i++) {
     frag.appendChild(buildInverterCard(i, nodes));
   }
-  frag.appendChild(buildBulkControlPanel());
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
   syncPlantCapFormsFromSettingsState();
@@ -6763,29 +6905,37 @@ function resetChatState() {
 function buildBulkControlPanel() {
   const wrap = el("div", "bulk-control-bar");
   wrap.innerHTML = `
-    <div class="bulk-control-title">Bulk Inverter Command</div>
-    <div class="bulk-control-main">
-      <div class="bulk-range-wrap">
-        <label class="bulk-range-label" for="bulkInvRangeInput">Inverter Numbers / Ranges</label>
-        <input
-          id="bulkInvRangeInput"
-          class="inp bulk-range-input"
-          type="text"
-          inputmode="text"
-          autocomplete="off"
-          placeholder="1-13, 16, 18, 23-27"
-          title="Specify inverter numbers or ranges to target for bulk commands (e.g. 1-13, 16, 23-27)."
-        />
-        <div class="bulk-range-helper">Enter individual inverter numbers, ranges, or a combination of both. Duplicate entries are not allowed.</div>
+    <div class="bulk-card-hdr">
+      <span class="bulk-card-icon">⚡</span>
+      <span class="bulk-card-title">Bulk Command</span>
+    </div>
+    <div class="bulk-card-body">
+      <div class="bulk-field">
+        <label class="bulk-range-label" for="bulkInvRangeInput">Inverter Targets</label>
+        <div class="bulk-input-row">
+          <input
+            id="bulkInvRangeInput"
+            class="inp bulk-range-input"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            placeholder="1-13, 16, 23-27"
+            title="Specify inverter numbers or ranges to target for bulk commands (e.g. 1-13, 16, 23-27)."
+          />
+        </div>
+        <div class="bulk-helper">Numbers, ranges, or both. Duplicates ignored.</div>
       </div>
-      <div class="bulk-action-group">
-        <button id="btnFillAllTargets" class="btn btn-outline" title="Fill in all configured inverter numbers.">All Inverters</button>
-        <button id="btnClearTargets" class="btn btn-outline" title="Clear the selected inverter range.">Clear</button>
+      <div class="bulk-quick-row">
+        <button id="btnFillAllTargets" class="btn btn-outline bulk-quick-btn" title="Fill in all configured inverter numbers.">All Inverters</button>
+        <button id="btnClearTargets" class="btn btn-outline bulk-quick-btn" title="Clear the selected inverter range.">Clear</button>
       </div>
-      <div class="bulk-action-group bulk-action-primary">
-        <button id="btnStartSelected" class="btn btn-green" title="Send START command to all selected inverters. Requires bulk control authorization.">START SELECTED</button>
-        <button id="btnStopSelected" class="btn btn-red" title="Send STOP command to all selected inverters. Requires bulk control authorization.">STOP SELECTED</button>
+      <div class="bulk-sep"></div>
+      <div class="bulk-cmd-label">Send command to all nodes per target</div>
+      <div class="bulk-cmd-row">
+        <button id="btnStartSelected" class="btn btn-green bulk-cmd-btn" title="Send START command to all nodes of each selected inverter. Requires authorization.">START</button>
+        <button id="btnStopSelected" class="btn btn-red bulk-cmd-btn" title="Send STOP command to all nodes of each selected inverter. Requires authorization.">STOP</button>
       </div>
+      <div class="bulk-footer">Authorization required before execution</div>
     </div>`;
   return wrap;
 }
@@ -6803,6 +6953,7 @@ function buildInverterCard(inv, nodeCount) {
       </div>
       <div class="card-badges">
         <span class="badge badge-offline" id="badge-${inv}" title="Current inverter status.">OFFLINE</span>
+        <span class="cap-stopped-ts" id="cap-ts-${inv}" hidden></span>
       </div>
     </div>
     <div class="card-pac">
@@ -6930,6 +7081,16 @@ function updateInverterCards() {
     activeAlarmsByInv[inv].push(alarm);
   }
 
+  // Cap-stopped lookup from plant cap controller state
+  const capOwnedMap = new Map();
+  const capOwnedArr = Array.isArray(State.plantCap?.status?.ownedStopped)
+    ? State.plantCap.status.ownedStopped
+    : [];
+  for (const entry of capOwnedArr) {
+    const inv = Number(entry?.inverter || 0);
+    if (inv > 0) capOwnedMap.set(inv, entry);
+  }
+
   let totalPac = 0,
     online = 0,
     alarmed = 0,
@@ -7031,6 +7192,35 @@ function updateInverterCards() {
     } else {
       badge.className = "badge badge-online";
       badge.textContent = "ONLINE";
+    }
+
+    // Cap-stopped overlay — must run after badge + icon logic so it can override OFFLINE
+    const capEntry = capOwnedMap.get(inv);
+    const capTsEl = $(`cap-ts-${inv}`);
+    if (capEntry) {
+      const capTs = Number(capEntry.stoppedAt || 0);
+      card.classList.add("cap-stopped");
+      badge.className = "badge badge-cap-stopped";
+      badge.textContent = "CAP STOPPED";
+      badge.title = capTs
+        ? `Stopped by plant cap controller at ${fmtTime(capTs)}, ${Number(capEntry.pacBeforeStopKw || 0).toFixed(1)} kW removed.`
+        : "Stopped by plant cap controller.";
+      if (iconEl) {
+        iconEl.classList.remove("offline");
+        iconEl.classList.add("cap-stopped");
+      }
+      if (capTsEl) {
+        capTsEl.textContent = capTs ? `Stopped ${fmtTime(capTs)}` : "Stopped";
+        capTsEl.title = capTs
+          ? `Controller stopped this inverter at ${fmtDateTime(capTs)}.`
+          : "Controller stopped this inverter.";
+        capTsEl.hidden = false;
+      }
+    } else {
+      if (capTsEl) {
+        capTsEl.hidden = true;
+        capTsEl.textContent = "";
+      }
     }
 
     // PAC
@@ -8043,9 +8233,11 @@ function clearInverterDetail() {
     const card = document.getElementById(`inv-card-${inv}`);
     const grid = $("invGrid");
     if (card && grid && !grid.contains(card)) {
-      // re-insert before the bulk control panel (last child)
-      const bulk = grid.querySelector(".bulk-control-bar");
-      grid.insertBefore(card, bulk || null);
+      // re-insert among sibling inv-cards in numeric order
+      const allCards = [...grid.querySelectorAll(".inv-card")];
+      const invNum = Number(card.id.replace("inv-card-", ""));
+      const after = allCards.find((c) => Number(c.id.replace("inv-card-", "")) > invNum);
+      grid.insertBefore(card, after || null);
     }
   }
   const panel = $("invDetailPanel");
@@ -9217,7 +9409,7 @@ function renderAuditTable(rows) {
   if (!tbody) return;
   if (!rows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 8, "No audit records for the selected date.");
+    renderEmptyRow(tbody, 9, "No audit records for the selected date.");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -9230,16 +9422,23 @@ function renderAuditTable(rows) {
       r.result === "ok"
         ? '<span class="result-ok">✔ OK</span>'
         : `<span class="result-err">✗ ${r.result}</span>`;
+    const scopeRaw = (r.scope || "single").toUpperCase();
+    const isCapScope = scopeRaw === "PLANT-CAP";
+    const scopeHtml = isCapScope
+      ? '<span class="scope-cap" title="Automatic action by the plant output cap controller.">PLANT-CAP</span>'
+      : scopeRaw;
     const tr = el("tr");
+    if (isCapScope) tr.classList.add("audit-row-cap");
     tr.innerHTML = `
       <td>${fmtDateTime(r.ts)}</td>
       <td>${r.operator || "OPERATOR"}</td>
       <td>INV-${String(r.inverter).padStart(2, "0")}</td>
       <td>${r.node === 0 ? "ALL" : "N" + r.node}</td>
       <td>${action}</td>
-      <td>${(r.scope || "single").toUpperCase()}</td>
+      <td>${scopeHtml}</td>
       <td>${result}</td>
-      <td>${r.ip || "—"}</td>`;
+      <td>${r.ip || "—"}</td>
+      <td title="${r.reason || ""}">${r.reason || "—"}</td>`;
     frag.appendChild(tr);
   });
   tbody.textContent = "";

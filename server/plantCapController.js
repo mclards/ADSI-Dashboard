@@ -998,6 +998,7 @@ class PlantCapController {
           scope: "plant-cap",
           operator: this.operatorName,
           priority: "high",
+          reason: String(step?.decisionReason || "").trim(),
         });
       }
       const actionAt = this.now();

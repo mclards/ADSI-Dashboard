@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.12` in `package.json`
+- Current repo version baseline: `2.4.13` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -202,6 +202,7 @@ When adding, removing, or restructuring UI:
 - The compact PAC strip should stay short and operational: left side keeps horizontal card `Start` / `Stop`, right side uses separate inline `Pdc:` and `Pac:` cells without a `|` separator.
 - Do not let node-table font sizing overpower the PAC summary totals.
 - PAC legend indicators are fixed signal colors across all themes: green, yellow, orange, red, and blinking red for alarm.
+- The Bulk Command panel is a card in the inverter grid, placed as the first card before all inverter cards. It participates in grid layout columns and auto-height overrides just like `.inv-card`. Do not revert it to a full-width bar spanning the grid.
 - After inverter-card CSS/HTML changes, run the live Electron Playwright smoke before handing off the change.
 
 ### Scrollable Page Body Pattern
@@ -240,6 +241,19 @@ The UI should reduce operator confusion without making screens noisy.
 - Use hover info for controls with operational consequences, technical abbreviations, or hidden assumptions.
 - Keep hover text concise and operational. Prefer "what this does" and "why it matters".
 - Do not rely on hover only for critical safety information. Pair it with visible labels when the action is destructive or high impact.
+
+## User Guide Sync Rule
+
+The User Guide must always match the dashboard's latest version. Any UI change must be accompanied by corresponding documentation updates.
+
+- When any UI element is added, removed, or restructured, update all three User Guide artifacts:
+  - HTML guide: `docs/ADSI-Dashboard-User-Guide.html`
+  - Markdown manual: `docs/ADSI-Dashboard-User-Manual.md`
+  - PDF: `docs/ADSI-Dashboard-User-Guide.pdf` (regenerated from the HTML)
+- The User Guide version header must match the `package.json` version baseline.
+- PDF regeneration uses Chrome headless: `chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf="<pdf>" --print-to-pdf-no-header "<html>"`
+- Do not ship or hand off UI changes when the User Guide still describes older behavior or is missing the new feature.
+- When multiple UI changes land in a single session, batch the guide updates but ensure all changes are reflected before handoff.
 
 ## Security and Privacy Rules
 

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.12` in `package.json`
+- Current repo version baseline: `2.4.13` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -193,6 +193,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - The PAC strip should remain short: left side keeps horizontal card `Start` / `Stop`, right side uses separate inline `Pdc:` and `Pac:` cells without a `|` separator.
 - Do not let node-table typography visually outrank the PAC summary totals.
 - PAC legend indicators are fixed signal colors across `dark`, `light`, and `classic`: green, yellow, orange, red, and blinking red for alarm.
+- The Bulk Command panel is a card in the inverter grid, placed as the first card before all inverter cards. It participates in grid layout columns and auto-height overrides just like `.inv-card`. Do not revert it to a full-width bar spanning the grid.
 - After inverter-card CSS/HTML changes, run the live Electron Playwright smoke before handoff.
 
 ### Scrollable Page Body Pattern
@@ -211,6 +212,19 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - **Proxy timeouts**: Centralized in `PROXY_TIMEOUT_RULES` array + `resolveProxyTimeout()`. Add new proxy route timeouts there, not inline.
 - **Gateway link stability**: Adaptive polling (`max(1200, latency×2)` when >400 ms), gateway `/api/live` ETag support for direct consumers, guarded fire-and-forget energy piggyback, gateway `keepAliveTimeout=30s` (must stay > client keepAlive 15s), failure thresholds 6/10/60s/180s. Do not lower thresholds or revert to fixed polling.
 - **Availability today**: `/api/report/daily` range handler splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range. Detail panel 60 s refresh also fetches today's report rows to keep availability chip current.
+
+## User Guide Sync Rule
+
+The User Guide must always match the dashboard's latest version. Any UI change must be accompanied by corresponding documentation updates.
+
+- When any UI element is added, removed, or restructured, update all three User Guide artifacts:
+  - HTML guide: `docs/ADSI-Dashboard-User-Guide.html`
+  - Markdown manual: `docs/ADSI-Dashboard-User-Manual.md`
+  - PDF: `docs/ADSI-Dashboard-User-Guide.pdf` (regenerated from the HTML)
+- The User Guide version header must match the `package.json` version baseline.
+- PDF regeneration uses Chrome headless: `chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf="<pdf>" --print-to-pdf-no-header "<html>"`
+- Do not ship or hand off UI changes when the User Guide still describes older behavior or is missing the new feature.
+- When multiple UI changes land in a single session, batch the guide updates but ensure all changes are reflected before handoff.
 
 ## Version, Branding, and Release Compatibility
 

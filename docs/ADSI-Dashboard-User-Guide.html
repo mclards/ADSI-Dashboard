@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.6</span>
+    <span><b>Version:</b> 2.4.13</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -831,7 +831,48 @@
   </table>
 
   <h3>Cap Status Panel</h3>
-  <p>The panel reports current plant MW, configured MW band, controller mode and status, reason text, controlled inverter count, last automatic action, planner warnings, and the next-step preview table.</p>
+  <p>The status panel reports live controller state through a set of labeled metrics:</p>
+  <table>
+    <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Status</td><td>Controller state: Idle, Monitoring, Stopping, Starting, Paused, or Fault</td></tr>
+      <tr><td>Reason</td><td>Human-readable explanation of the current state or pending action</td></tr>
+      <tr><td>Last Action</td><td>Most recent automatic stop or restart, with inverter number and timestamp</td></tr>
+      <tr><td>Cooldown</td><td>Remaining settling time after the most recent controller action</td></tr>
+      <tr><td>Curtailed</td><td>Total MW removed by controller-owned stops (sum of Pac at each stop time)</td></tr>
+      <tr><td>Controllable</td><td>Number of inverters eligible for stop selection</td></tr>
+      <tr><td>Pending</td><td>In-flight controller action, if any</td></tr>
+      <tr><td>Exempted</td><td>Inverter numbers excluded from automatic stop selection</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Controlled Inverters Table</h3>
+  <p>When the controller owns one or more stopped inverters, a detailed table appears inside the cap panel:</p>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter</td><td>Inverter number stopped by the controller</td></tr>
+      <tr><td>Stopped At</td><td>Time the controller issued the stop command</td></tr>
+      <tr><td>Duration</td><td>Elapsed time since the stop (e.g. 12m 35s or 2h 05m)</td></tr>
+      <tr><td>Pac Removed (kW)</td><td>AC power output at the moment of stop</td></tr>
+      <tr><td>Nodes</td><td>Enabled node count at the time of stop</td></tr>
+      <tr><td>Rated kW</td><td>Node-adjusted rated inverter capacity</td></tr>
+      <tr><td>Depend. kW</td><td>Node-adjusted dependable inverter capacity</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Cap-Stopped Inverter Card Indicators</h3>
+  <p>Inverters stopped by the plant cap controller are visually distinct in the inverter grid:</p>
+  <ul>
+    <li>The card badge changes from <b>OFFLINE</b> to <b>CAP STOPPED</b> (blue)</li>
+    <li>A stoppage timestamp appears below the badge showing when the controller stopped the inverter</li>
+    <li>The card border and icon shift to a blue accent instead of the dimmed gray used for regular offline inverters</li>
+    <li>The card stays at full opacity, unlike ordinary offline cards which are dimmed</li>
+  </ul>
+  <p>These indicators appear on all three themes (dark, light, classic) and clear automatically when the inverter is released or the cap session ends.</p>
+
+  <h3>Cap Plan Preview</h3>
+  <p>The preview table shows each candidate inverter in sequence order with its node count, rated and dependable capacity, estimated step kW, projected plant MW after the step, and the planner&rsquo;s decision reason. The selected candidate (next action) is highlighted.</p>
 
   <div class="info-card warn">
     <div class="info-card-label">Important</div>
@@ -839,7 +880,9 @@
       <li>Current builds use whole-inverter sequential control only</li>
       <li>Very narrow MW bands may not settle cleanly with whole-inverter steps</li>
       <li>The controller only restarts inverters it previously stopped &mdash; manually stopped inverters are not affected</li>
+      <li>If an operator manually controls a controller-owned inverter, the cap controller pauses and requires re-enable after review</li>
       <li>In Remote mode, cap actions are proxied to the gateway workstation</li>
+      <li>All cap controller stop and start actions are recorded in the <a href="#s11">Audit</a> page with scope <b>PLANT-CAP</b></li>
     </ul>
   </div>
 
@@ -1115,14 +1158,18 @@
       <tr><td>Date/Time</td><td>Command timestamp</td></tr>
       <tr><td>Operator</td><td>Operator name recorded at execution</td></tr>
       <tr><td>Inverter</td><td>Affected inverter</td></tr>
-      <tr><td>Node</td><td>Affected node or aggregated scope</td></tr>
-      <tr><td>Action</td><td>START, STOP, etc.</td></tr>
-      <tr><td>Scope</td><td>single, inverter, selected, or plant-cap</td></tr>
+      <tr><td>Node</td><td>Affected node or aggregated scope (ALL if the command targeted all nodes)</td></tr>
+      <tr><td>Action</td><td>START or STOP</td></tr>
+      <tr><td>Scope</td><td>SINGLE, INVERTER, SELECTED, ALL, or PLANT-CAP</td></tr>
       <tr><td>Result</td><td>OK or ERROR</td></tr>
-      <tr><td>IP</td><td>Source workstation address</td></tr>
+      <tr><td>IP</td><td>Source workstation or inverter IP address</td></tr>
+      <tr><td>Reason</td><td>Controller decision reason for automatic actions (plant-cap scope); blank for manual commands</td></tr>
     </tbody>
   </table>
   <p>All columns support sorting. An inline filter row enables targeted review by operator, action, scope, result, or IP address.</p>
+
+  <h3>Plant-Cap Scope Indicator</h3>
+  <p>Audit entries generated by the <a href="#s6">Plant Output Cap</a> controller display a <b>PLANT-CAP</b> badge in the Scope column with a blue highlight on the row. The <b>Reason</b> column shows the controller&rsquo;s decision reason (e.g. &ldquo;Keeps projected plant output above the lower limit.&rdquo;), making it straightforward to distinguish automatic cap actions from manual operator commands.</p>
 
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
@@ -1493,7 +1540,10 @@
       <li>Click <b>Preview Plan</b> to review proposed actions.</li>
       <li>Click <b>Enable Cap</b> and complete authorization.</li>
       <li>Monitor status, reason, controlled count, and planner warnings.</li>
-      <li>Use <b>Release Controlled Inverters</b> to end the session.</li>
+      <li>Cap-stopped inverter cards show a blue <b>CAP STOPPED</b> badge with the stoppage time for at-a-glance identification.</li>
+      <li>Review the <b>Controlled Inverters</b> table inside the cap panel for duration, removed Pac, rated kW, and dependable kW per inverter.</li>
+      <li>Use <b>Release Controlled Inverters</b> to end the session, or <b>Disable Monitoring</b> to pause automation without restarting.</li>
+      <li>Check the <b>Audit</b> page for a full record of cap controller actions (scope: <b>PLANT-CAP</b>) with decision reasons.</li>
     </ol>
   </div>
 

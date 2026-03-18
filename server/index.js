@@ -331,7 +331,7 @@ const REPLICATION_TABLE_DEFS = [
   {
     name: "audit_log",
     orderBy: "id ASC",
-    columns: ["id", "ts", "operator", "inverter", "node", "action", "scope", "result", "ip"],
+    columns: ["id", "ts", "operator", "inverter", "node", "action", "scope", "result", "ip", "reason"],
   },
   {
     name: "daily_report",
@@ -2554,7 +2554,8 @@ function mergeAppendReplicationRow(tableName, payload, cols, authoritative = fal
         action=excluded.action,
         scope=excluded.scope,
         result=excluded.result,
-        ip=excluded.ip
+        ip=excluded.ip,
+        reason=excluded.reason
       WHERE COALESCE(excluded.ts,0) >= COALESCE(audit_log.ts,0)`;
     stmtCached("merge:audit_log", sql).run(payload);
     return true;
@@ -5355,6 +5356,7 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
     authKey,
     authToken,
     priority,
+    reason,
   } = bodyRaw || {};
   const skipBulkAuth = Boolean(options?.skipBulkAuth);
   const url = getSetting("writeUrl", `${INVERTER_ENGINE_BASE_URL}/write`);
@@ -5416,6 +5418,7 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
       scope: scopeNorm,
       result: "ok",
       ip,
+      reason: reason || "",
     });
     if (
       plantCapController &&
@@ -5449,6 +5452,7 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
       scope: scopeNorm,
       result: `error:${e.message}`,
       ip,
+      reason: reason || "",
     });
     if (!Number(e?.status || 0)) e.status = 502;
     throw e;

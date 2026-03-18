@@ -184,8 +184,8 @@ let configuredNodeCache = { ts: 0, set: null };
 
 // Module-level prepared statement — avoids re-preparing on every logControlAction call.
 const stmtInsertAudit = db.prepare(`
-  INSERT INTO audit_log (ts, operator, inverter, node, action, scope, result, ip)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO audit_log (ts, operator, inverter, node, action, scope, result, ip, reason)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 function hydrateActiveAlarmStateFromDb() {
@@ -380,6 +380,7 @@ function logControlAction({
   scope,
   result,
   ip,
+  reason,
 }) {
   const inv = Number(inverter || 0);
   const nd  = Number(node || 0);
@@ -406,6 +407,7 @@ function logControlAction({
     scope || "single",
     result || "ok",
     ip || "",
+    reason || "",
   );
 }
 

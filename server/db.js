@@ -376,7 +376,8 @@ db.exec(`
     action    TEXT NOT NULL,
     scope     TEXT DEFAULT 'single',
     result    TEXT DEFAULT 'ok',
-    ip        TEXT DEFAULT ''
+    ip        TEXT DEFAULT '',
+    reason    TEXT DEFAULT ''
   );
   CREATE INDEX IF NOT EXISTS idx_audit_ts     ON audit_log(ts);
   CREATE INDEX IF NOT EXISTS idx_audit_inv_ts ON audit_log(inverter, ts);
@@ -655,6 +656,8 @@ ensureColumn(
   "intervals_json",
   "intervals_json TEXT DEFAULT '[]'",
 );
+// Migration: store plant-cap decision reason in audit_log (added 2026-03).
+ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
