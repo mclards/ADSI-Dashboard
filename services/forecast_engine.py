@@ -908,9 +908,10 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
     cache = _weather_cache_path(day, source_kind)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    use_cache = not (source_kind == "forecast" and day == today)
-    if use_cache and cache.exists():
+    def _load_cached_weather() -> pd.DataFrame | None:
         try:
+            if not cache.exists():
+                return None
             df = pd.read_csv(cache, parse_dates=["time"])
             day_df = _slice_weather_day(df, day)
             ok, reason = validate_weather_hourly(day, day_df)
@@ -919,7 +920,28 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
                 return day_df
             log.warning("Weather cache invalid [%s] for %s: %s", source_kind, day, reason)
         except Exception:
-            pass
+            return None
+        return None
+
+    def _fallback_cached_weather(reason: str) -> pd.DataFrame | None:
+        if source_kind != "forecast":
+            return None
+        cached = _load_cached_weather()
+        if cached is not None:
+            log.warning(
+                "Weather fetch fallback [%s] for %s: %s; using cached forecast weather.",
+                source_kind,
+                day,
+                reason,
+            )
+            return cached
+        return None
+
+    use_cache = not (source_kind == "forecast" and day == today)
+    if use_cache:
+        cached = _load_cached_weather()
+        if cached is not None:
+            return cached
 
     hourly_fields = (
         "shortwave_radiation,direct_radiation,diffuse_radiation,"
@@ -950,6 +972,9 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
         j = r.json().get("hourly", {})
         if not j or "time" not in j:
             log.error("Weather API payload missing hourly data for %s", day)
+            cached = _fallback_cached_weather("provider payload missing hourly data")
+            if cached is not None:
+                return cached
             return None
         full_df = pd.DataFrame({
             "time":       pd.to_datetime(j["time"]),
@@ -970,12 +995,18 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
         ok, reason = validate_weather_hourly(day, day_df)
         if not ok:
             log.error("Weather fetched but invalid [%s] for %s: %s", source_kind, day, reason)
+            cached = _fallback_cached_weather(f"provider payload invalid ({reason})")
+            if cached is not None:
+                return cached
             return None
         day_df.to_csv(cache, index=False)
         log.info("Weather fetched & cached [%s]: %s (%d rows)", source_kind, day, len(day_df))
         return day_df
     except Exception as e:
         log.error("Weather fetch failed [%s] for %s: %s", source_kind, day, e)
+        cached = _fallback_cached_weather(f"provider fetch failed ({e})")
+        if cached is not None:
+            return cached
         return None
 
 
@@ -4909,6 +4940,20 @@ def run_dayahead(
     target_s = target_date.isoformat()
     log.info("â”€â”€ Day-Ahead Forecast  target=%s â”€â”€", target_s)
 
+    def _load_saved_snapshot_hourly(snapshot_day: str) -> pd.DataFrame:
+        snap = load_forecast_weather_snapshot(snapshot_day)
+        if not snap:
+            return pd.DataFrame()
+        raw_hourly_records = list(snap.get("raw_hourly") or [])
+        if raw_hourly_records:
+            frame = _weather_records_to_frame(raw_hourly_records, snapshot_day)
+            if not frame.empty:
+                return frame
+        applied_hourly_records = list(snap.get("applied_hourly") or [])
+        if applied_hourly_records:
+            return _weather_records_to_frame(applied_hourly_records, snapshot_day)
+        return pd.DataFrame()
+
     # 1. Weather
     weather_source = "forecast"
     raw_hourly = pd.DataFrame()
@@ -4931,6 +4976,15 @@ def run_dayahead(
     else:
         fetched = fetch_weather(target_s, source="forecast")
         raw_hourly = fetched if fetched is not None else pd.DataFrame()
+        if raw_hourly.empty:
+            snap_hourly = _load_saved_snapshot_hourly(target_s)
+            if not snap_hourly.empty:
+                raw_hourly = snap_hourly
+                weather_source = "snapshot-fallback"
+                log.warning(
+                    "Forecast weather unavailable for %s - using saved weather snapshot fallback.",
+                    target_s,
+                )
 
     if raw_hourly.empty and not persist:
         log.error("Cannot run forecast - weather unavailable for %s", target_s)
@@ -5549,6 +5603,22 @@ def _register_forecast_failure(
     return next_failures, float(monotonic_now) + float(backoff), int(backoff)
 
 
+def _resolve_service_target_date(today: date, now_h: int, da_today_in_db: bool) -> date:
+    """
+    Resolve the day-ahead target for the main service loop.
+
+    Before sunrise, the upcoming solar window is today. During daylight hours,
+    a missing day-ahead for today takes priority over generating tomorrow.
+    Otherwise, target tomorrow.
+    """
+    hour = int(now_h)
+    if hour < SOLAR_START_H:
+        return today
+    if (SOLAR_START_H <= hour < SOLAR_END_H) and (not da_today_in_db):
+        return today
+    return today + timedelta(days=1)
+
+
 def main() -> None:
     _clear_service_stop_file()
     profile = plant_capacity_profile()
@@ -5600,13 +5670,12 @@ def main() -> None:
             now        = datetime.now()
             today      = now.date()
             today_s    = today.isoformat()
-            target     = today + timedelta(days=1)
-            target_s   = target.isoformat()
             now_h      = now.hour
             mono_now   = time.monotonic()
 
             da_today_in_db = _has_forecast_dayahead_in_db(today_s)
-            # Authoritative DB check for tomorrow's day-ahead
+            target     = _resolve_service_target_date(today, now_h, da_today_in_db)
+            target_s   = target.isoformat()
             da_target_in_db = _has_forecast_dayahead_in_db(target_s)
 
             # â”€â”€â”€ Decide whether to run a forecast this loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5614,15 +5683,15 @@ def main() -> None:
             # Run conditions (any one sufficient):
             #   A) Primary scheduled hour (DA_RUN_HOURS_PRIMARY) and we have not
             #      run this hour yet
-            #   B) Target-day forecast missing from DB while outside solar hours
-            #      (post-solar constant checker)
+            #   B) Outside-solar target missing from DB:
+            #      today before sunrise, tomorrow after sunset
             #   C) Today's forecast is missing and we are inside solar hours
             #      (morning recovery)
 
             run_scheduled = (now_h in DA_RUN_HOURS_PRIMARY) and (last_run_hour != now_h)
-            # Post-solar constant checker: outside solar window (18:00-04:59),
-            # verify every loop that tomorrow's day-ahead still exists in DB.
-            # Generate if missing; skip if present. Re-generate if it disappears.
+            # Outside-solar constant checker:
+            #   00:00-04:59 -> ensure today's solar-window forecast exists
+            #   18:00-23:59 -> ensure tomorrow's solar-window forecast exists
             outside_solar = (now_h >= SOLAR_END_H) or (now_h < SOLAR_START_H)
             run_postsolar = outside_solar and (not da_target_in_db)
             run_recovery  = (SOLAR_START_H <= now_h < SOLAR_END_H) and (not da_today_in_db)
@@ -5638,8 +5707,11 @@ def main() -> None:
 
             if run_scheduled or run_postsolar:
                 log.info(
-                    "Run trigger: scheduled=%s  postsolar_check=%s  failures=%d",
-                    run_scheduled, run_postsolar, _consecutive_failures,
+                    "Run trigger: target=%s scheduled=%s postsolar_check=%s failures=%d",
+                    target_s,
+                    run_scheduled,
+                    run_postsolar,
+                    _consecutive_failures,
                 )
                 clear_forecast_data_cache()
                 if _service_stop_requested():
@@ -5658,7 +5730,7 @@ def main() -> None:
                     if _service_stop_requested():
                         raise KeyboardInterrupt
 
-                    # Generate tomorrow's day-ahead
+                    # Generate the resolved target day-ahead
                     ok = run_dayahead(target, today)
                 except Exception:
                     _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
@@ -5693,11 +5765,21 @@ def main() -> None:
                 clear_forecast_data_cache()
                 if _service_stop_requested():
                     raise KeyboardInterrupt
-                run_dayahead(today, today)
+                try:
+                    ok = run_dayahead(today, today)
+                except Exception:
+                    log.error("Recovery day-ahead for %s crashed", today_s, exc_info=True)
+                else:
+                    if ok:
+                        log.info("Recovery day-ahead for %s completed successfully", today_s)
+                        clear_forecast_data_cache()
+                        run_intraday_adjusted(today)
+                    else:
+                        log.error("Recovery day-ahead for %s FAILED", today_s)
 
             else:
                 if outside_solar and da_target_in_db:
-                    log.debug("Post-solar check: day-ahead for %s exists - OK", target_s)
+                    log.debug("Outside-solar check: day-ahead for %s exists - OK", target_s)
                 else:
                     log.debug("No forecast action needed (hour=%02d)", now_h)
 

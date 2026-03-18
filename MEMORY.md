@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.21
+- **Repo/package version baseline:** 2.4.22
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.22 Changes - Day-Ahead Target Resolution and Weather Fallback Recovery (2026-03-19)
+- **Pre-sunrise day-ahead targeting is fixed:** the forecast service now treats the upcoming solar window as `today` before sunrise instead of incorrectly targeting `today + 1`, so missing day-ahead generation at `00:00-04:59` now repairs the correct date.
+- **Current-day forecast weather recovery is more resilient:** if the live forecast provider fails or returns an invalid payload, the engine now falls back to cached forecast weather first, and then to the saved weather snapshot path already used by `run_dayahead()`.
+- **Recovery execution now self-reports cleanly:** successful daytime recovery logs completion and refreshes the intraday-adjusted forecast immediately after writing the repaired day-ahead.
+- **Validation passed locally:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_constraints.py services\\tests\\test_forecast_engine_weather.py` and `python -m unittest discover -s services\\tests -p "test_*.py"` both succeeded.
 
 ## v2.4.21 Changes - Forecast Resiliency and Default Loss Baseline (2026-03-19)
 - **Day-ahead persistence and retry logic were hardened:** DB-backed day-ahead success now requires a real SQLite write, partial DB rowsets no longer suppress regeneration, and crashed post-solar attempts now enter the same cooldown path as clean failures.

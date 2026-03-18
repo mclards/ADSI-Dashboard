@@ -341,6 +341,34 @@ class ForecastEngineConstraintTests(unittest.TestCase):
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
 
+    def test_resolve_service_target_date_prioritizes_today_before_sunrise_and_when_missing(self):
+        tmp_root = WORK_TMP / "target_resolution"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "target_resolution")
+            today = date(2026, 3, 19)
+
+            self.assertEqual(
+                mod._resolve_service_target_date(today, 2, da_today_in_db=False),
+                today,
+            )
+            self.assertEqual(
+                mod._resolve_service_target_date(today, 6, da_today_in_db=False),
+                today,
+            )
+            self.assertEqual(
+                mod._resolve_service_target_date(today, 6, da_today_in_db=True),
+                date(2026, 3, 20),
+            )
+            self.assertEqual(
+                mod._resolve_service_target_date(today, 20, da_today_in_db=True),
+                date(2026, 3, 20),
+            )
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
