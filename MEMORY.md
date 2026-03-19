@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.26
+- **Repo/package version baseline:** 2.4.27
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.27 Changes - IP-Config Identity Authority and Today-Energy Repair (2026-03-19)
+- **Current-day inverter energy totals are restart-safe again:** the gateway poller now seeds from persisted `energy_5min` totals plus a live PAC anchor and only adds post-seed live growth, instead of re-adding the full live day counter on top of the persisted baseline.
+- **Telemetry ownership now follows IP Config directly:** the inverter service stamps each live frame with `source_ip` and `node_number`, and the Node poller resolves inverter identity from configured inverter IP plus configured node list before accepting the row. Unknown IPs and unconfigured nodes are rejected, and IP Config wins if a raw frame reports a conflicting inverter number.
+- **Operator-facing inverter labels now expose the configured binding:** inverter cards, selectors, detail loading text, node-control toasts, and alarm notifications now show `INV-xx` together with the configured inverter IP so non-patterned IP allocations remain auditable from the UI.
+- **Validation covered both identity and energy handoff paths:** `node --check public/js/app.js`, `node --check server/poller.js`, `python -m py_compile services\\inverter_engine.py`, `node server/tests/pollerIpConfigMapping.test.js`, `node server/tests/pollerTodayEnergyTotal.test.js`, `node server/tests/todayEnergyHealth.test.js`, `node server/tests/mwhHandoff.test.js`, `node server/tests/smokeGatewayLink.js`, `node server/tests/modeIsolation.test.js`, and `node server/tests/serviceSoftStopSource.test.js` all succeeded. `npm run rebuild:native:node` was attempted first but hit a transient Windows file-lock on `better_sqlite3.node`; the subsequent Node smoke/tests still passed on the already-working Node ABI.
 
 ## v2.4.26 Changes - Solcast Unit Normalization and Release Refresh (2026-03-19)
 - **Raw Solcast MW is now normalized defensively inside the forecast engine:** `load_solcast_snapshot()` now derives per-slot `kWh` from raw `MW` when older or partial snapshot rows are missing the stored energy fields, so reliability scoring and hybrid blending stay on the correct 5-minute energy basis.
@@ -184,8 +190,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.26`
-- Current repo/package baseline: `v2.4.26`
+- Current latest published GitHub release: `v2.4.27`
+- Current repo/package baseline: `v2.4.27`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

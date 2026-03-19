@@ -91,6 +91,7 @@ let todayEnergyHealthState = {
 let todayEnergySelectedRows = [];
 let todayEnergyBaselineDay = "";
 let todayEnergyBaselineByInv = new Map();
+let todayEnergyBaselineLiveByInv = new Map();
 let todayEnergyBaselineSeededAt = 0;
 let pacDayKey = '';
 let ipConfigCache = null;
@@ -144,6 +145,7 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   todayEnergySelectedRows = [];
   todayEnergyBaselineDay = "";
   todayEnergyBaselineByInv = new Map();
+  todayEnergyBaselineLiveByInv = new Map();
   todayEnergyBaselineSeededAt = 0;
   todayEnergyHealthState = {
     byInv: Object.create(null),
@@ -165,6 +167,109 @@ function roundKwh(value) {
   return Number((Math.max(0, Number(value) || 0)).toFixed(6));
 }
 
+function normalizeSourceIp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(\d{1,3}\.){3}\d{1,3}:\d+$/.test(raw)) {
+    return raw.replace(/:\d+$/, "");
+  }
+  try {
+    if (raw.includes("://")) {
+      return String(new URL(raw).hostname || "").trim();
+    }
+  } catch {
+    // Fall through to raw token.
+  }
+  return raw;
+}
+
+function getRowUnitNumber(row) {
+  return Math.trunc(
+    Number(
+      row?.unit ??
+        row?.node_number ??
+        row?.nodeNumber ??
+        row?.node ??
+        row?.Module ??
+        row?.module,
+    ),
+  );
+}
+
+function getRowReportedInverter(row) {
+  return Math.trunc(
+    Number(
+      row?.inverter ??
+        row?.inverter_number ??
+        row?.inverterNumber ??
+        row?.Inverter,
+    ),
+  );
+}
+
+function buildIpConfigLookup(cfg) {
+  const safeCfg = sanitizeIpConfig(cfg);
+  const byIp = new Map();
+  const unitsByInverter = new Map();
+  for (let inv = 1; inv <= 27; inv++) {
+    const ip = normalizeSourceIp(
+      safeCfg?.inverters?.[inv] ?? safeCfg?.inverters?.[String(inv)] ?? "",
+    );
+    if (ip) byIp.set(ip, inv);
+    const unitsRaw =
+      safeCfg?.units?.[inv] ?? safeCfg?.units?.[String(inv)] ?? [1, 2, 3, 4];
+    const units = Array.isArray(unitsRaw)
+      ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
+      : [1, 2, 3, 4];
+    unitsByInverter.set(inv, new Set(units));
+  }
+  return {
+    byIp,
+    unitsByInverter,
+  };
+}
+
+function resolveConfiguredTelemetryIdentity(row, lookup) {
+  const sourceIp = normalizeSourceIp(
+    row?.source_ip ??
+      row?.sourceIp ??
+      row?.ip ??
+      row?.ip_address ??
+      row?.ipAddress ??
+      row?.host,
+  );
+  const unit = getRowUnitNumber(row);
+  const rawInverter = getRowReportedInverter(row);
+  let inverter = rawInverter;
+
+  if (sourceIp && lookup?.byIp instanceof Map) {
+    inverter = Number(lookup.byIp.get(sourceIp) || 0);
+    if (!(inverter > 0)) {
+      return { ok: false, reasonCode: "ip_unconfigured", sourceIp, unit, rawInverter };
+    }
+  }
+
+  if (!(unit >= 1 && unit <= 4)) {
+    return { ok: false, reasonCode: "unit_invalid", sourceIp, unit, rawInverter, inverter };
+  }
+  if (!(inverter >= 1 && inverter <= 27)) {
+    return { ok: false, reasonCode: "inverter_invalid", sourceIp, unit, rawInverter, inverter };
+  }
+
+  const configuredUnits = lookup?.unitsByInverter?.get(inverter);
+  if (configuredUnits instanceof Set && !configuredUnits.has(unit)) {
+    return { ok: false, reasonCode: "unit_unconfigured", sourceIp, unit, rawInverter, inverter };
+  }
+
+  return {
+    ok: true,
+    inverter,
+    unit,
+    sourceIp,
+    rawInverter,
+  };
+}
+
 function resolveFrameDay(row, ts = Date.now()) {
   const year = Math.floor(Number(row?.year || 0));
   const month = Math.floor(Number(row?.month || 0));
@@ -179,21 +284,83 @@ function localDayStartTs(dayText) {
   return new Date(`${String(dayText || dayKey()).trim()}T00:00:00.000`).getTime();
 }
 
+function buildPacTodayByInverterMap() {
+  const out = new Map();
+  for (const [invRaw, totalRaw] of Object.entries(pacTodayByInverter)) {
+    const inverter = Math.floor(Number(invRaw || 0));
+    const totalKwh = roundKwh(totalRaw);
+    if (!(inverter > 0) || !(totalKwh > 0)) continue;
+    out.set(inverter, totalKwh);
+  }
+  return out;
+}
+
+function buildTodayEnergyRowsFromSeed({
+  seededTotalByInv,
+  seededLiveByInv,
+  currentLiveByInv,
+}) {
+  const seededTotals =
+    seededTotalByInv instanceof Map ? seededTotalByInv : new Map();
+  const seededLive =
+    seededLiveByInv instanceof Map ? seededLiveByInv : new Map();
+  const currentLive =
+    currentLiveByInv instanceof Map ? currentLiveByInv : new Map();
+  const invSet = new Set([
+    ...Array.from(seededTotals.keys()),
+    ...Array.from(seededLive.keys()),
+    ...Array.from(currentLive.keys()),
+  ]);
+
+  return Array.from(invSet)
+    .map((inv) => {
+      const inverter = Math.floor(Number(inv || 0));
+      if (!(inverter > 0)) return null;
+      const seededTotal = roundKwh(seededTotals.get(inverter));
+      const anchorLive = roundKwh(seededLive.get(inverter));
+      const liveNow = roundKwh(currentLive.get(inverter));
+      const totalKwh = roundKwh(seededTotal + Math.max(0, liveNow - anchorLive));
+      if (!(totalKwh > 0)) return null;
+      return {
+        inverter,
+        total_kwh: totalKwh,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.inverter - b.inverter);
+}
+
 function ensureTodayEnergyBaseline(ts = Date.now()) {
   const day = dayKey(ts);
   if (
     todayEnergyBaselineDay === day &&
     todayEnergyBaselineSeededAt > 0 &&
-    todayEnergyBaselineByInv instanceof Map
+    todayEnergyBaselineByInv instanceof Map &&
+    todayEnergyBaselineLiveByInv instanceof Map
   ) {
     return todayEnergyBaselineByInv;
   }
-  const seeded = sumEnergy5minByInverterRange(
+  const seededDb = sumEnergy5minByInverterRange(
     localDayStartTs(day),
     Math.max(localDayStartTs(day), Number(ts || Date.now())),
   );
+  const seededLive = buildPacTodayByInverterMap();
+  const seededTotals = new Map();
+  const invSet = new Set([
+    ...Array.from(seededDb.keys()),
+    ...Array.from(seededLive.keys()),
+  ]);
+  for (const inv of invSet) {
+    const inverter = Math.floor(Number(inv || 0));
+    if (!(inverter > 0)) continue;
+    const dbKwh = roundKwh(seededDb.get(inverter));
+    const liveKwh = roundKwh(seededLive.get(inverter));
+    const totalKwh = roundKwh(Math.max(dbKwh, liveKwh));
+    if (totalKwh > 0) seededTotals.set(inverter, totalKwh);
+  }
   todayEnergyBaselineDay = day;
-  todayEnergyBaselineByInv = seeded instanceof Map ? seeded : new Map();
+  todayEnergyBaselineByInv = seededTotals;
+  todayEnergyBaselineLiveByInv = seededLive;
   todayEnergyBaselineSeededAt = Date.now();
   return todayEnergyBaselineByInv;
 }
@@ -226,11 +393,12 @@ function integratePacToday(parsed) {
   pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh };
 }
 
-function parseRow(row) {
-  const inverter = Math.trunc(Number(row.inverter));
-  const unit     = Math.trunc(Number(row.unit));
-  // Reject rows with inverter/unit outside valid hardware ranges.
-  if (inverter < 1 || inverter > 27 || unit < 1 || unit > 4) return null;
+function parseRow(row, identity = null) {
+  const resolved =
+    identity && typeof identity === "object" ? identity : resolveConfiguredTelemetryIdentity(row, null);
+  if (!resolved?.ok) return null;
+  const inverter = Math.trunc(Number(resolved.inverter));
+  const unit = Math.trunc(Number(resolved.unit));
 
   const vdc  = Number(row.vdc  || 0);
   const idc  = Number(row.idc  || 0);
@@ -265,7 +433,8 @@ function parseRow(row) {
     kwh: 0,
     alarm,
     on_off,
-    online: 1
+    online: 1,
+    source_ip: String(resolved.sourceIp || ""),
   };
 }
 
@@ -549,24 +718,12 @@ function buildTotals(now) {
 
 function getTodayPacRowsRaw() {
   resetPacTodayIfNeeded(Date.now());
-  const baseline = ensureTodayEnergyBaseline(Date.now());
-  const invSet = new Set([
-    ...Array.from(baseline.keys()),
-    ...Object.keys(pacTodayByInverter).map((inv) => Number(inv || 0)),
-  ]);
-  return Array.from(invSet)
-    .filter((inv) => Number(inv || 0) > 0)
-    .map((inv) => ({
-      inverter: Number(inv),
-      total_kwh: Number(
-        (
-          Number(baseline.get(Number(inv)) || 0) +
-          Number(pacTodayByInverter[inv] || 0)
-        ).toFixed(6),
-      ),
-    }))
-    .filter((row) => row.total_kwh > 0)
-    .sort((a, b) => a.inverter - b.inverter);
+  ensureTodayEnergyBaseline(Date.now());
+  return buildTodayEnergyRowsFromSeed({
+    seededTotalByInv: todayEnergyBaselineByInv,
+    seededLiveByInv: todayEnergyBaselineLiveByInv,
+    currentLiveByInv: buildPacTodayByInverterMap(),
+  });
 }
 
 function updateTodayEnergyHealthFromTotals(totals, now = Date.now()) {
@@ -632,8 +789,7 @@ async function poll() {
 
   const apiUrl = getSetting('apiUrl', 'http://127.0.0.1:9100/data');
   const ipConfig = loadIpConfigSnapshot();
-  const expectedKeys = getExpectedKeysFromIpConfig(ipConfig);
-  const expectedSet = new Set(expectedKeys);
+  const ipConfigLookup = buildIpConfigLookup(ipConfig);
 
   let rows = [];
   let fetchOk = false;
@@ -684,14 +840,21 @@ async function poll() {
   const seen  = new Set();
 
   for (const row of rows) {
-    const parsed = parseRow(row);
+    const identity = resolveConfiguredTelemetryIdentity(row, ipConfigLookup);
+    if (!identity?.ok) {
+      if (
+        identity?.reasonCode === "ip_unconfigured" ||
+        identity?.reasonCode === "unit_unconfigured"
+      ) {
+        skippedConfigThisTick += 1;
+      }
+      continue;
+    }
+
+    const parsed = parseRow(row, identity);
     if (!parsed) continue;
     parsedThisTick += 1;
     const key = `${parsed.inverter}_${parsed.unit}`;
-    if (!expectedSet.has(key)) {
-      skippedConfigThisTick += 1;
-      continue;
-    }
 
     integratePacToday(parsed);
 
@@ -901,4 +1064,7 @@ module.exports = {
   getTodayEnergyHealth,
   setIpConfigSnapshot,
   getPerfStats,
+  buildTodayEnergyRowsFromSeed,
+  buildIpConfigLookup,
+  resolveConfiguredTelemetryIdentity,
 };

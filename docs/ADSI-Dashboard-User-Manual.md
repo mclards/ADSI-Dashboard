@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.26`
+**Applies to:** ADSI Inverter Dashboard `v2.4.27`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1052,6 +1052,8 @@ Each of the 27 inverters has one row with the following columns:
 | **Enabled Units** | Which nodes (1--4) are active. Use **All** to toggle all four. Empty selection disables the inverter. |
 | **Loss %** | Estimated MW transmission loss from this inverter to the substation (0--100%). Default is `2.5%` per inverter unless overridden. Used exclusively by the forecast engine for substation-level accuracy; does *not* affect live dashboard readings, energy totals, or exports. |
 | **Save** | Saves the individual row. Use **Save All Changes** at the bottom to save every row at once. |
+
+IP Config is also the authority for live inverter identity. The dashboard binds telemetry to an inverter by the configured IP address and enabled node list, not by any assumed IP numbering pattern. Cards, selectors, and alarm labels may show the configured IP alongside `INV-xx` so operators can verify the assignment directly.
 
 ### Loss % and Forecasting
 

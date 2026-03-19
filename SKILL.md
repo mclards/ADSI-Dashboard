@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.26` in `package.json`
+- Current repo version baseline: `2.4.27` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -432,6 +432,8 @@ If a visible product rename affects install directory behavior, assess updater i
 ### Per-Inverter Transmission Loss Rules
 
 - The IP Config page exposes a per-inverter `Loss %` field (0-100) representing MW transmission loss from inverter to substation (cable degradation, distance).
+- Telemetry ownership is also anchored by IP Config: live frames are matched by configured inverter IP address plus configured node number, not by any assumed IP-numbering pattern.
+- Dashboard labels may show `INV-xx` plus the configured inverter IP so operators can verify the binding visually.
 - Loss factors are stored in `ipconfig.json` as `losses: { "1": 2.5, "2": 2.5, ... }` and persisted via the `ipConfigJson` settings key.
 - Default loss is `2.5%` per inverter when the config omits a `losses` value; operators can still explicitly set any inverter to `0`.
 - Loss factors are used exclusively by the forecast engine for substation-level accuracy. They must never alter raw inverter telemetry, dashboard display, health metrics, or energy exports.

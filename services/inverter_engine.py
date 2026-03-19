@@ -845,8 +845,10 @@ async def poll_inverter(ip):
                 if not data:
                     continue
 
+                data["source_ip"] = ip
                 data["inverter"] = inv_num if inv_num is not None else -1
                 data["unit"]     = u
+                data["node_number"] = u
                 out.append(data)
 
                 # Trigger auto-reset check (non-blocking)

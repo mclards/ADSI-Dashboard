@@ -7026,12 +7026,15 @@ function buildBulkControlPanel() {
 function buildInverterCard(inv, nodeCount) {
   const card = el("div", "inv-card");
   card.id = `inv-card-${inv}`;
+  const invLabel = getInverterBaseLabel(inv);
+  const invIp = getConfiguredInverterIp(inv);
   card.innerHTML = `
     <div class="card-hdr">
       <div class="card-hdr-left">
         <div class="card-inv-icon" id="icon-${inv}">⚡</div>
         <div>
-          <div class="card-title">INVERTER ${String(inv).padStart(2, "0")}</div>
+          <div class="card-title" id="card-title-${inv}">${invLabel}</div>
+          <div class="card-subtitle" id="card-subtitle-${inv}" title="${invIp ? `Configured IP address: ${invIp}` : "No configured IP address."}">${invIp || "IP not configured"}</div>
         </div>
       </div>
       <div class="card-badges">
@@ -7994,14 +7997,16 @@ async function toggleNode(inv, node, btnEl) {
     });
     State.nodeStates[key] = newState;
     setNodeButtonVisual(btnEl, node, !!newState, false);
+    const nodeLabel = getInverterNodeDisplayLabel(inv, node, { includeIp: true });
     showToast(
-      `${action} sent: INV-${String(inv).padStart(2, "0")} N${node}`,
+      `${action} sent: ${nodeLabel}`,
       "success",
       2600,
     );
   } catch (e) {
+    const nodeLabel = getInverterNodeDisplayLabel(inv, node, { includeIp: true });
     showToast(
-      `${action} failed: INV-${String(inv).padStart(2, "0")} N${node}: ${e.message}`,
+      `${action} failed: ${nodeLabel}: ${e.message}`,
       "fault",
       5000,
     );
@@ -8012,11 +8017,11 @@ async function sendAllNodesInv(inv, val) {
   const nodeCount = State.settings.nodeCount || 4;
   const targetNodes = getConfiguredUnits(inv, nodeCount);
   if (!targetNodes.length) {
-    showToast(`INV-${String(inv).padStart(2, "0")} is fully isolated`, "info");
+    showToast(`${getInverterDisplayLabel(inv, { includeIp: true })} is fully isolated`, "info");
     return;
   }
   const action = val ? "START" : "STOP";
-  const scopeLabel = `INV-${String(inv).padStart(2, "0")}`;
+  const scopeLabel = getInverterDisplayLabel(inv, { includeIp: true });
   try {
     const response = await api(
       "/api/write/batch",
@@ -8355,7 +8360,7 @@ async function loadInverterDetail(inv) {
     slot.appendChild(card);
   }
 
-  const invLabel = `INV-${String(inv).padStart(2, "0")}`;
+  const invLabel = getInverterDisplayLabel(inv, { includeIp: true });
   const statsEl = $("invDetailStats");
   const alarmsEl = $("invDetailAlarms");
   const historyEl = $("invDetailHistory");
@@ -8570,7 +8575,7 @@ function buildSelects() {
   const opts = Array.from(
     { length: count },
     (_, i) =>
-      `<option value="${i + 1}">INV-${String(i + 1).padStart(2, "0")}</option>`,
+      `<option value="${i + 1}">${getInverterDisplayLabel(i + 1, { includeIp: true })}</option>`,
   ).join("");
   const allOpt = '<option value="all">All Inverters</option>';
 
@@ -8818,7 +8823,9 @@ function handleAlarmPush(alarms) {
       alarm_hex: toAlarmHex(a.alarm_value),
     };
 
-    const invLabel = `INV-${String(a.inverter).padStart(2, "0")} N${a.unit}`;
+    const invLabel = getInverterNodeDisplayLabel(a.inverter, a.unit, {
+      includeIp: true,
+    });
     const hex = toAlarmHex(a.alarm_value);
     const desc =
       (a.decoded || []).map((b) => b.label).join(", ") || "Alarm triggered";
@@ -8918,7 +8925,7 @@ async function refreshNotifPanel() {
       const desc = (r.decoded || []).map((b) => b.label).join(", ") || "Alarm";
       const item = el("div", "notif-item");
       item.innerHTML = `
-        <div class="notif-inv">INV-${String(r.inverter).padStart(2, "0")} / N${r.unit}</div>
+        <div class="notif-inv">${getInverterNodeDisplayLabel(r.inverter, r.unit, { includeIp: true })}</div>
         <div class="notif-code">${r.alarm_hex || "—"} <span class="sev-pill sev-${r.severity || "fault"}">${(r.severity || "fault").toUpperCase()}</span></div>
         <div class="notif-desc">${desc}</div>
         <div class="notif-ts">${fmtDateTime(r.ts)}</div>`;
@@ -9124,6 +9131,9 @@ async function loadIpConfig() {
   try {
     const cfg = await api("/api/ip-config");
     State.ipConfig = cfg && typeof cfg === "object" ? cfg : null;
+    refreshInverterLabelViews();
+    buildSelects();
+    scheduleInverterCardsUpdate(true);
     renderPlantCapClientWarnings();
     renderPlantCapPanel();
   } catch (e) {
@@ -9151,6 +9161,47 @@ function getConfiguredUnits(inv, fallbackNodeCount) {
     ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
     : Array.from({ length: nodeCount }, (_, i) => i + 1);
   return [...new Set(units)];
+}
+
+function getConfiguredInverterIp(inv) {
+  const cfg = State.ipConfig;
+  if (!cfg || typeof cfg !== "object") return "";
+  return String(
+    cfg?.inverters?.[inv] ?? cfg?.inverters?.[String(inv)] ?? "",
+  ).trim();
+}
+
+function getInverterBaseLabel(inv) {
+  return `INV-${String(Number(inv || 0)).padStart(2, "0")}`;
+}
+
+function getInverterDisplayLabel(inv, options = {}) {
+  const base = getInverterBaseLabel(inv);
+  const ip = getConfiguredInverterIp(inv);
+  if (!Boolean(options?.includeIp) || !ip) return base;
+  return `${base} · ${ip}`;
+}
+
+function getInverterNodeDisplayLabel(inv, node, options = {}) {
+  const base = getInverterDisplayLabel(inv, options);
+  const unit = Number(node || 0);
+  return unit > 0 ? `${base} / N${unit}` : base;
+}
+
+function refreshInverterLabelViews(invCount = Number(State.settings.inverterCount || 27)) {
+  for (let inv = 1; inv <= invCount; inv += 1) {
+    const titleEl = $(`card-title-${inv}`);
+    const subtitleEl = $(`card-subtitle-${inv}`);
+    const base = getInverterBaseLabel(inv);
+    const ip = getConfiguredInverterIp(inv);
+    if (titleEl) titleEl.textContent = base;
+    if (subtitleEl) {
+      subtitleEl.textContent = ip || "IP not configured";
+      subtitleEl.title = ip
+        ? `Configured IP address: ${ip}`
+        : "No configured IP address.";
+    }
+  }
 }
 
 function isConfiguredNodeClient(inv, node) {
