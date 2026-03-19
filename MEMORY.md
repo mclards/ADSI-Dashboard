@@ -2,15 +2,24 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.25
+- **Repo/package version baseline:** 2.4.26
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
 
+## v2.4.26 Changes - Solcast Unit Normalization and Release Refresh (2026-03-19)
+- **Raw Solcast MW is now normalized defensively inside the forecast engine:** `load_solcast_snapshot()` now derives per-slot `kWh` from raw `MW` when older or partial snapshot rows are missing the stored energy fields, so reliability scoring and hybrid blending stay on the correct 5-minute energy basis.
+- **Unit metadata is now explicit in the forecast artifacts:** Solcast snapshot payloads and daily resolution-history records now tag raw provider power as `mw` and comparison energy as `kwh_per_slot`, which makes the basis of the learned weather-class source selection auditable.
+- **Solcast export behavior was rechecked before release:** the forecast-engine changes do not alter the Solcast preview/export path in `server/exporter.js`, and a direct `exportSolcastPreview()` smoke run still produced an `.xlsx` under `Forecast\\Solcast`.
+- **Final validation and build completed on the release tree:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_constraints.py services\\tests\\test_forecast_engine_ipconfig.py services\\tests\\test_forecast_engine_weather.py services\\tests\\test_forecast_engine_error_classifier.py`, `python -m unittest services.tests.test_forecast_engine_constraints services.tests.test_forecast_engine_ipconfig services.tests.test_forecast_engine_weather services.tests.test_forecast_engine_error_classifier`, `node --check electron/main.js`, `node --check server/index.js`, `pyinstaller --noconfirm services\\ForecastCoreService.spec`, `npm run rebuild:native:electron`, and `npm run build:installer` all succeeded.
+- **Release version surfaces were advanced together:** `package.json`, `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `MEMORY.md`, `docs/ADSI-Dashboard-User-Manual.md`, `docs/ADSI-Dashboard-User-Guide.html`, `public/user-guide.html`, and the forecast-ML plan now match `v2.4.26`.
+
 ## v2.4.25 Changes - Forecast Error-Classifier Optimization and Release Alignment (2026-03-19)
 - **Forecast error classification is now fully hardened:** the day-ahead pipeline now uses blocked day-holdout probability calibration, slot-opportunity label normalization, cached historical feature/mask/residual artifacts, conservative centroid shrinkage, sparse-class damping, weather-profile reliability scaling, blocked estimator-stage selection, and raw-feature tree inference without the old `RobustScaler` coupling.
+- **Solcast trust calibration now uses the same substation basis as the rest of forecasting:** `build_solcast_reliability_artifact()` compares Solcast snapshots against `load_actual_loss_adjusted()` so already-loss-subtracted Solcast data is not implicitly judged against raw inverter totals.
+- **Weather-class source selection is now learned on a unit-consistent basis:** raw Solcast arrives in `MW`, is normalized to `kWh per 5-minute slot` for apples-to-apples scoring, and the artifact stores that daily resolution history for both `Solcast vs loss-adjusted actual` and `generated day-ahead vs loss-adjusted actual`, then feeds it back into Solcast authority and the ML feature set via `solcast_resolution_weight` / `solcast_resolution_support`.
 - **Runtime hot paths are lighter without changing forecast rules:** slot weather-bucket classification is now vectorized, repeated pandas rolling calls were replaced with NumPy rolling helpers, and the optimized bucket path is covered by a direct reference-rule equivalence test.
 - **Verification was broadened before release:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_constraints.py services\\tests\\test_forecast_engine_ipconfig.py services\\tests\\test_forecast_engine_weather.py services\\tests\\test_forecast_engine_error_classifier.py`, `python -m unittest services.tests.test_forecast_engine_constraints services.tests.test_forecast_engine_ipconfig services.tests.test_forecast_engine_weather services.tests.test_forecast_engine_error_classifier`, `node --check electron/main.js`, `node --check server/index.js`, `pyinstaller --noconfirm services\\ForecastCoreService.spec`, `npm run rebuild:native:electron`, and `npm run build:installer` all succeeded.
 - **Live replay path was exercised too:** `run_backtest()` was attempted for `2026-03-14` and `2026-03-15`, and it exited through the expected training-unavailable branch because the local environment currently has `0` accepted history days for reference dates `2026-03-13` and `2026-03-14`.
@@ -175,8 +184,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.25`
-- Current repo/package baseline: `v2.4.25`
+- Current latest published GitHub release: `v2.4.26`
+- Current repo/package baseline: `v2.4.26`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

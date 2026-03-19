@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.25`
+**Applies to:** ADSI Inverter Dashboard `v2.4.26`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1055,7 +1055,7 @@ Each of the 27 inverters has one row with the following columns:
 
 ### Loss % and Forecasting
 
-Loss % is forecast-only. The dashboard, logged telemetry, daily reports, and exports continue using raw measured values. The day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training so the ML model learns substation-level output patterns rather than raw inverter output.
+Loss % is forecast-only. The dashboard, logged telemetry, daily reports, and exports continue using raw measured values. The day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training so the ML model and Solcast reliability calibration learn substation-level output patterns rather than raw inverter output. Solcast forecasts themselves are treated as already substation-based and are not reduced again by `Loss %`. Raw Solcast power arrives in `MW` and is normalized to `kWh` per 5-minute slot for forecast scoring, and the forecast artifact keeps daily weather-bucket resolution history on that same loss-adjusted actual basis.
 
 Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far from substation), the forecast engine reduces their historical energy contributions by those percentages when building training data, computing error corrections, and scoring forecast quality.
 

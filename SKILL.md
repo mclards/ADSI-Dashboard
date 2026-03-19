@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.25` in `package.json`
+- Current repo version baseline: `2.4.26` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -441,9 +441,11 @@ If a visible product rename affects install directory behavior, assess updater i
   - `build_intraday_adjusted_forecast()` (intraday ratio)
   - `forecast_qa()` (QA scoring)
   - `run_backtest()` (backtest comparison)
+  - `build_solcast_reliability_artifact()` / Solcast reliability scoring, because Solcast snapshots are already substation-level
   - `plant_capacity_profile()` returns `loss_adjusted_equiv`, `dependable_kw`, and `max_kw` reflecting losses so the physics baseline ceiling is consistent.
-- Forecast-engine consumers that must stay on raw actuals (`load_actual`):
-  - Solcast reliability scoring — compares Solcast predictions against true inverter output.
+- Solcast reliability artifacts now also carry unit-tagged weather-bucket resolution history comparing `Solcast vs loss-adjusted actual` and `day-ahead vs loss-adjusted actual`; raw Solcast arrives in `MW` and is normalized onto the common `kWh per 5-minute slot` basis for those comparisons.
+- Those resolution profiles feed both runtime Solcast blend/damping and ML features (`solcast_resolution_weight`, `solcast_resolution_support`), so weather-class source preference is learned rather than hardcoded.
+- Raw `load_actual()` remains for non-forecast consumers and for the zero-loss fast path.
 - When all losses are explicitly `0`, loss-adjusted loaders short-circuit to the cached raw `load_actual()` with zero overhead.
 - `_cached_loss_factors` is a module-level snapshot refreshed each cycle via `clear_forecast_data_cache()`. Both `load_actual_loss_adjusted` and `load_actual_loss_adjusted_with_presence` are LRU-cached alongside the raw loaders.
 - `_query_energy_5min_loss_adjusted()` queries per-inverter `energy_5min` rows and applies `kwh * (1 - loss_fraction)` before summing into plant-level 5-min totals. The original `_query_energy_5min_totals()` remains raw.

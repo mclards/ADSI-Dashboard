@@ -4,7 +4,7 @@
 Add an auxiliary ML error-classification path on top of the existing residual regressor in [forecast_engine.py](d:/ADSI-Dashboard/services/forecast_engine.py). Keep the current physics + Solcast + residual-regression pipeline as the primary forecast path, then add a weather-conditioned classifier that learns whether each 5-minute slot is likely to be `strong_over`, `mild_over`, `neutral`, `mild_under`, or `strong_under` relative to the hybrid baseline. Use it in two places: a conservative capped bias term during day-ahead inference, and explicit QA/backtest breakdowns by weather bucket.
 
 ## Release Status
-- Included in release baseline `v2.4.25` with forecast-engine verification and installer rebuild completed on `2026-03-19`.
+- Included in release baseline `v2.4.26` with forecast-engine verification and installer rebuild completed on `2026-03-19`.
 
 ## Progress
 - [x] Core weather-conditioned error classifier path implemented in `forecast_engine.py`
@@ -48,6 +48,9 @@ Add an auxiliary ML error-classification path on top of the existing residual re
   - per-class residual centroids and per-day-regime + slot-bucket error summaries for calibration and QA
 - Use `GradientBoostingClassifier` with the same sample weights as the residual regressor; tree models consume aligned raw features directly.
 - Use blocked day-level holdout selection to choose tree stage counts and classifier calibration temperature without slot-level leakage.
+- Keep Solcast reliability calibration on the same substation-delivered basis as the rest of the forecast stack by comparing snapshots against `load_actual_loss_adjusted()` when per-inverter losses are configured.
+- Learn per-weather-class resolution preference between `Solcast vs loss-adjusted actual` and `generated day-ahead vs loss-adjusted actual`, and feed that history back into both Solcast authority and ML features.
+- Store daily unit-tagged resolution/error history (`MW` Solcast normalized to `kWh per 5-minute slot` against loss-adjusted actuals) so training has more basis than one-off live comparisons.
 - In inference:
   - predict class probabilities for each slot from the weather/features of the target day
   - convert probabilities into an expected class residual bias using the trained class centroids

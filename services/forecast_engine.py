@@ -176,6 +176,8 @@ SLOTS_DAY     = 288         # 24 Ã— 60 / 5
 SOLAR_START_H = 5           # 05:00 - first forecast slot
 SOLAR_END_H   = 18          # end boundary (exclusive), last slot = 17:55
 SOLAR_SLOTS   = (SOLAR_END_H - SOLAR_START_H) * 60 // SLOT_MIN   # 156 slots
+SLOT_HOURS    = SLOT_MIN / 60.0
+SOLCAST_KWH_PER_MW_SLOT = 1000.0 * SLOT_HOURS
 
 SOLAR_START_SLOT = SOLAR_START_H * 60 // SLOT_MIN
 SOLAR_END_SLOT   = SOLAR_END_H   * 60 // SLOT_MIN
@@ -270,6 +272,13 @@ SOLCAST_BIAS_RATIO_CLIP = (0.82, 1.18)
 SOLCAST_RESIDUAL_DAMP_MIN = 0.18
 SOLCAST_RESIDUAL_DAMP_MAX = 0.72
 SOLCAST_RESIDUAL_PRIMARY_CAP = 0.40
+SOLCAST_RESOLUTION_WEIGHT_FALLBACK = 0.50
+SOLCAST_RESOLUTION_BLEND_SCALE_MIN = 0.88
+SOLCAST_RESOLUTION_BLEND_SCALE_MAX = 1.12
+SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN = 0.94
+SOLCAST_RESOLUTION_PRIMARY_SCALE_MAX = 1.06
+SOLCAST_RESOLUTION_AUTHORITY_MIN = 0.72
+SOLCAST_RESOLUTION_AUTHORITY_MAX = 1.00
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -410,6 +419,32 @@ def _coerce_non_negative_float(value, default: float = 0.0) -> float:
     if not math.isfinite(f):
         return float(default)
     return max(0.0, f)
+
+
+def _coerce_optional_non_negative_float(value) -> float | None:
+    try:
+        f = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(f):
+        return None
+    return max(0.0, f)
+
+
+def _normalize_solcast_slot_pair(
+    energy_kwh_value,
+    power_mw_value,
+) -> tuple[float | None, float | None]:
+    energy_kwh = _coerce_optional_non_negative_float(energy_kwh_value)
+    power_mw = _coerce_optional_non_negative_float(power_mw_value)
+    # Solcast arrives as MW. Forecast scoring inside the engine is done on a
+    # per-slot energy basis, so derive the missing side when only one form is
+    # stored in the snapshot row.
+    if energy_kwh is None and power_mw is not None:
+        energy_kwh = power_mw * SOLCAST_KWH_PER_MW_SLOT
+    if power_mw is None and energy_kwh is not None:
+        power_mw = energy_kwh / max(SOLCAST_KWH_PER_MW_SLOT, 1e-9)
+    return energy_kwh, power_mw
 
 
 def _empty_slot_values() -> np.ndarray:
@@ -2018,6 +2053,25 @@ def build_features(
         solcast_cov = float(np.clip(solcast_prior.get("coverage_ratio", 0.0), 0.0, 1.0))
         solcast_rel = float(np.clip(solcast_prior.get("reliability", 0.0), 0.0, 1.0))
         solcast_bias_ratio = float(np.clip(solcast_prior.get("bias_ratio", 1.0), *SOLCAST_BIAS_RATIO_CLIP))
+        solcast_resolution_weight = np.clip(
+            np.asarray(
+                solcast_prior.get(
+                    "resolution_weight",
+                    np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float),
+                ),
+                dtype=float,
+            ),
+            0.0,
+            1.0,
+        )[:SLOTS_DAY]
+        solcast_resolution_support = np.clip(
+            np.asarray(
+                solcast_prior.get("resolution_support", np.zeros(SLOTS_DAY, dtype=float)),
+                dtype=float,
+            ),
+            0.0,
+            1.0,
+        )[:SLOTS_DAY]
     else:
         solcast_kwh = np.zeros(SLOTS_DAY, dtype=float)
         solcast_mw = np.zeros(SLOTS_DAY, dtype=float)
@@ -2027,6 +2081,8 @@ def build_features(
         solcast_cov = 0.0
         solcast_rel = 0.0
         solcast_bias_ratio = 1.0
+        solcast_resolution_weight = np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float)
+        solcast_resolution_support = np.zeros(SLOTS_DAY, dtype=float)
     slot_cap_arr = np.full(SLOTS_DAY, max(cap_kw * SLOT_MIN / 60.0, 0.05), dtype=float)
     solcast_vs_physics = np.clip(solcast_kwh / slot_cap_arr, 0.0, 1.5)
     irr_proxy = np.maximum((np.clip(rad, 0.0, None) / 1000.0) * slot_cap_arr, 0.05)
@@ -2099,6 +2155,8 @@ def build_features(
         "solcast_day_coverage": np.full(SLOTS_DAY, solcast_cov),
         "solcast_day_reliability": np.full(SLOTS_DAY, solcast_rel),
         "solcast_bias_ratio": np.full(SLOTS_DAY, solcast_bias_ratio),
+        "solcast_resolution_weight": solcast_resolution_weight,
+        "solcast_resolution_support": solcast_resolution_support,
         # Plant
         "expected_nodes": expected_nodes,
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
@@ -2122,6 +2180,7 @@ FEATURE_COLS = [
     "solcast_prior_kwh", "solcast_prior_mw", "solcast_prior_spread", "solcast_prior_available",
     "solcast_prior_blend", "solcast_prior_vs_physics", "solcast_prior_vs_irradiance",
     "solcast_day_coverage", "solcast_day_reliability", "solcast_bias_ratio",
+    "solcast_resolution_weight", "solcast_resolution_support",
     "expected_nodes", "cap_kw",
 ]
 
@@ -2422,8 +2481,8 @@ def _load_inverter_loss_factors() -> dict[str, float]:
     """Load per-inverter transmission loss factors (0.0-1.0) from ipconfig.
 
     Used exclusively by forecast-engine paths that compare or learn against
-    substation-delivered energy. Dashboard telemetry, exports, and Solcast
-    reliability stay on raw actual inverter output.
+    substation-delivered energy. Dashboard telemetry and exports stay on raw
+    actual inverter output.
     """
     ipconfig_meta = load_ipconfig_authoritative()
     cfg = ipconfig_meta.get("config", {}) if isinstance(ipconfig_meta, dict) else {}
@@ -2606,8 +2665,9 @@ def load_actual(day: str) -> np.ndarray | None:
 # ---------------------------------------------------------------------------
 # These apply per-inverter transmission loss factors so the ML model, error
 # memory, intraday adjustment, QA, and backtest all operate on consistent
-# substation-level actuals.  Non-forecast consumers (inverter health display,
-# Solcast reliability) use the raw load_actual() above.
+# substation-level actuals.  Solcast reliability uses the same basis because
+# Solcast snapshots are already substation-level.  Non-forecast consumers
+# (inverter health display, exports, reports) use the raw load_actual() above.
 # ---------------------------------------------------------------------------
 
 # Module-level loss-factor snapshot refreshed each forecast cycle via
@@ -2819,14 +2879,26 @@ def load_solcast_snapshot(day: str) -> dict | None:
                 if not (0 <= slot_i < SLOTS_DAY):
                     continue
                 has_prior = any(value is not None for value in (row[1], row[5], row[2], row[3]))
-                forecast_kwh[slot_i] = _coerce_non_negative_float(row[1])
-                forecast_lo_kwh[slot_i] = _coerce_non_negative_float(row[2], forecast_kwh[slot_i])
-                forecast_hi_kwh[slot_i] = _coerce_non_negative_float(row[3], forecast_kwh[slot_i])
-                est_actual_kwh[slot_i] = _coerce_non_negative_float(row[4])
-                forecast_mw[slot_i] = _coerce_non_negative_float(row[5])
-                forecast_lo_mw[slot_i] = _coerce_non_negative_float(row[6], forecast_mw[slot_i])
-                forecast_hi_mw[slot_i] = _coerce_non_negative_float(row[7], forecast_mw[slot_i])
-                est_actual_mw[slot_i] = _coerce_non_negative_float(row[8])
+                row_forecast_kwh, row_forecast_mw = _normalize_solcast_slot_pair(row[1], row[5])
+                row_forecast_lo_kwh, row_forecast_lo_mw = _normalize_solcast_slot_pair(row[2], row[6])
+                row_forecast_hi_kwh, row_forecast_hi_mw = _normalize_solcast_slot_pair(row[3], row[7])
+                row_est_actual_kwh, row_est_actual_mw = _normalize_solcast_slot_pair(row[4], row[8])
+                forecast_kwh[slot_i] = float(row_forecast_kwh or 0.0)
+                forecast_mw[slot_i] = float(row_forecast_mw or 0.0)
+                forecast_lo_kwh[slot_i] = float(
+                    forecast_kwh[slot_i] if row_forecast_lo_kwh is None else row_forecast_lo_kwh
+                )
+                forecast_hi_kwh[slot_i] = float(
+                    forecast_kwh[slot_i] if row_forecast_hi_kwh is None else row_forecast_hi_kwh
+                )
+                est_actual_kwh[slot_i] = float(row_est_actual_kwh or 0.0)
+                forecast_lo_mw[slot_i] = float(
+                    forecast_mw[slot_i] if row_forecast_lo_mw is None else row_forecast_lo_mw
+                )
+                forecast_hi_mw[slot_i] = float(
+                    forecast_mw[slot_i] if row_forecast_hi_mw is None else row_forecast_hi_mw
+                )
+                est_actual_mw[slot_i] = float(row_est_actual_mw or 0.0)
                 present[slot_i] = bool(has_prior)
                 if row[9] is not None:
                     pulled_ts = max(pulled_ts, int(float(row[9] or 0)))
@@ -2864,6 +2936,8 @@ def load_solcast_snapshot(day: str) -> dict | None:
                 "spread_frac": spread_frac,
                 "coverage_slots": coverage_slots,
                 "coverage_ratio": float(coverage_slots / max(SOLAR_SLOTS, 1)),
+                "power_unit": "mw",
+                "energy_unit": "kwh_per_slot",
                 "pulled_ts": int(pulled_ts),
                 "source": source or "solcast",
             }
@@ -2885,43 +2959,126 @@ def load_solcast_snapshot(day: str) -> dict | None:
 
 def build_solcast_reliability_artifact(today: date) -> dict | None:
     records = []
+    resolution_days: list[dict] = []
+    resolution_overall_solcast: list[dict] = []
+    resolution_overall_dayahead: list[dict] = []
+    resolution_regime_solcast: dict[str, list[dict]] = {}
+    resolution_regime_dayahead: dict[str, list[dict]] = {}
+    resolution_bucket_solcast: dict[str, list[dict]] = {}
+    resolution_bucket_dayahead: dict[str, list[dict]] = {}
+    resolution_pair_solcast: dict[tuple[str, str], list[dict]] = {}
+    resolution_pair_dayahead: dict[tuple[str, str], list[dict]] = {}
     lookback = max(SOLCAST_RELIABILITY_LOOKBACK_DAYS, N_TRAIN_DAYS)
     for days_ago in range(1, lookback + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
-        actual = load_actual(day)
+        # Solcast's raw provider unit is MW, normalized to per-slot kWh for
+        # forecast scoring, and already substation-level. Calibrate it against
+        # the same loss-adjusted actual basis used by training, QA, and backtest.
+        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
         snapshot = load_solcast_snapshot(day)
-        if actual is None or not snapshot:
+        dayahead, dayahead_present = load_dayahead_with_presence(day)
+        if actual is None or actual_present is None:
             continue
         wdata = fetch_weather(day, source="archive")
         if wdata is None:
             continue
         w5 = interpolate_5min(wdata, day)
         stats = analyse_weather_day(day, w5, actual)
-        present = np.asarray(snapshot["present"], dtype=bool)
-        mask = (
-            present
-            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
-            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
-            & (np.asarray(snapshot["forecast_kwh"], dtype=float) > 0.0)
+        regime = classify_day_regime(stats)
+        bucket_labels = classify_slot_weather_buckets(w5, day)
+        _, constraint_meta = build_operational_constraint_mask(day)
+        exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+        solcast_metrics = None
+        solcast_bucket_metrics: dict[str, dict] = {}
+        if snapshot:
+            present = np.asarray(snapshot["present"], dtype=bool)
+            mask = (
+                present
+                & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+                & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+                & (np.asarray(snapshot["forecast_kwh"], dtype=float) > 0.0)
+            )
+            usable = int(np.count_nonzero(mask))
+            if usable >= SOLCAST_MIN_USABLE_SLOTS:
+                prior = np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float)[mask], 0.0, None)
+                actual_slots = np.clip(np.asarray(actual, dtype=float)[mask], 0.0, None)
+                spread = np.asarray(snapshot["spread_frac"], dtype=float)[mask]
+                if np.any(prior > 0):
+                    ratio = float(np.clip(actual_slots.sum() / max(prior.sum(), 1.0), *SOLCAST_BIAS_RATIO_CLIP))
+                    mape = float(np.mean(np.abs(actual_slots - prior) / np.maximum(actual_slots, 1.0)))
+                    records.append({
+                        "day": day,
+                        "regime": regime,
+                        "coverage_ratio": float(snapshot.get("coverage_ratio", 0.0)),
+                        "bias_ratio": ratio,
+                        "mape": mape,
+                        "spread_mean": float(np.mean(spread)) if spread.size else 0.0,
+                    })
+                    solcast_forecast = np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None)
+                    solcast_metrics = compute_forecast_metrics(
+                        actual,
+                        solcast_forecast,
+                        actual_present=actual_present,
+                        forecast_present=present,
+                        exclude_mask=exclude_mask,
+                    )
+                    solcast_bucket_metrics = compute_bucketed_forecast_metrics(
+                        actual,
+                        solcast_forecast,
+                        bucket_labels,
+                        actual_present=actual_present,
+                        forecast_present=present,
+                        exclude_mask=exclude_mask,
+                    )
+        dayahead_metrics = (
+            compute_forecast_metrics(
+                actual,
+                dayahead,
+                actual_present=actual_present,
+                forecast_present=dayahead_present,
+                exclude_mask=exclude_mask,
+            )
+            if dayahead is not None and dayahead_present is not None
+            else None
         )
-        usable = int(np.count_nonzero(mask))
-        if usable < SOLCAST_MIN_USABLE_SLOTS:
-            continue
-        prior = np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float)[mask], 0.0, None)
-        actual_slots = np.clip(np.asarray(actual, dtype=float)[mask], 0.0, None)
-        spread = np.asarray(snapshot["spread_frac"], dtype=float)[mask]
-        if not np.any(prior > 0):
-            continue
-        ratio = float(np.clip(actual_slots.sum() / max(prior.sum(), 1.0), *SOLCAST_BIAS_RATIO_CLIP))
-        mape = float(np.mean(np.abs(actual_slots - prior) / np.maximum(actual_slots, 1.0)))
-        records.append({
-            "day": day,
-            "regime": classify_day_regime(stats),
-            "coverage_ratio": float(snapshot.get("coverage_ratio", 0.0)),
-            "bias_ratio": ratio,
-            "mape": mape,
-            "spread_mean": float(np.mean(spread)) if spread.size else 0.0,
-        })
+        dayahead_bucket_metrics = (
+            compute_bucketed_forecast_metrics(
+                actual,
+                dayahead,
+                bucket_labels,
+                actual_present=actual_present,
+                forecast_present=dayahead_present,
+                exclude_mask=exclude_mask,
+            )
+            if dayahead is not None and dayahead_present is not None
+            else {}
+        )
+        daily_record = _build_resolution_daily_record(
+            day,
+            regime,
+            solcast_metrics,
+            dayahead_metrics,
+            solcast_bucket_metrics,
+            dayahead_bucket_metrics,
+        )
+        overall_profile = daily_record.get("overall") if isinstance(daily_record.get("overall"), dict) else {}
+        if overall_profile.get("solcast") or overall_profile.get("dayahead"):
+            resolution_days.append(daily_record)
+        if overall_profile.get("solcast"):
+            resolution_overall_solcast.append(dict(overall_profile["solcast"]))
+            resolution_regime_solcast.setdefault(regime, []).append(dict(overall_profile["solcast"]))
+        if overall_profile.get("dayahead"):
+            resolution_overall_dayahead.append(dict(overall_profile["dayahead"]))
+            resolution_regime_dayahead.setdefault(regime, []).append(dict(overall_profile["dayahead"]))
+        for bucket, profile in (daily_record.get("buckets") or {}).items():
+            if not isinstance(profile, dict):
+                continue
+            if profile.get("solcast"):
+                resolution_bucket_solcast.setdefault(bucket, []).append(dict(profile["solcast"]))
+                resolution_pair_solcast.setdefault((regime, bucket), []).append(dict(profile["solcast"]))
+            if profile.get("dayahead"):
+                resolution_bucket_dayahead.setdefault(bucket, []).append(dict(profile["dayahead"]))
+                resolution_pair_dayahead.setdefault((regime, bucket), []).append(dict(profile["dayahead"]))
 
     if len(records) < SOLCAST_RELIABILITY_MIN_DAYS:
         return None
@@ -2953,6 +3110,40 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
             regime: aggregate(rows)
             for regime, rows in sorted(by_regime.items())
             if rows
+        },
+        "resolution_profiles": {
+            "created_ts": int(time.time()),
+            "day_count": int(len(resolution_days)),
+            "resolution_minutes": int(SLOT_MIN),
+            "source_power_unit": "mw",
+            "energy_unit": "kwh_per_slot",
+            "actual_basis": "loss_adjusted_actual",
+            "days": resolution_days,
+            "overall": _build_resolution_profile(
+                resolution_overall_solcast,
+                resolution_overall_dayahead,
+            ),
+            "regimes": {
+                regime: _build_resolution_profile(
+                    resolution_regime_solcast.get(regime),
+                    resolution_regime_dayahead.get(regime),
+                )
+                for regime in sorted(set(resolution_regime_solcast.keys()) | set(resolution_regime_dayahead.keys()))
+            },
+            "buckets": {
+                bucket: _build_resolution_profile(
+                    resolution_bucket_solcast.get(bucket),
+                    resolution_bucket_dayahead.get(bucket),
+                )
+                for bucket in sorted(set(resolution_bucket_solcast.keys()) | set(resolution_bucket_dayahead.keys()))
+            },
+            "pairs": {
+                f"{regime}:{bucket}": _build_resolution_profile(
+                    resolution_pair_solcast.get((regime, bucket)),
+                    resolution_pair_dayahead.get((regime, bucket)),
+                )
+                for regime, bucket in sorted(set(resolution_pair_solcast.keys()) | set(resolution_pair_dayahead.keys()))
+            },
         },
     }
 
@@ -2990,6 +3181,239 @@ def load_solcast_reliability_artifact(today: date | None = None, allow_build: bo
     return None
 
 
+def _metric_reliability_from_mape_pct(mape_pct: float) -> float:
+    mape_frac = max(float(mape_pct or 0.0), 0.0) / 100.0
+    return float(np.clip(1.0 - min(0.55, mape_frac) / 0.55, 0.25, 1.0))
+
+
+def _forecast_metric_summary(metrics: dict | None) -> dict | None:
+    if not metrics or int(metrics.get("usable_slot_count", 0)) <= 0:
+        return None
+    usable = int(metrics.get("usable_slot_count", 0))
+    rmse = float(metrics.get("rmse_kwh", 0.0))
+    return {
+        "usable_slot_count": usable,
+        "actual_total_kwh": float(metrics.get("actual_total_kwh", 0.0)),
+        "forecast_total_kwh": float(metrics.get("forecast_total_kwh", 0.0)),
+        "abs_error_sum_kwh": float(metrics.get("abs_error_sum_kwh", 0.0)),
+        "mae_kwh": float(metrics.get("mae_kwh", 0.0)),
+        "mbe_kwh": float(metrics.get("mbe_kwh", 0.0)),
+        "rmse_kwh": rmse,
+        "mape_pct": float(metrics.get("mape_pct", 0.0)),
+        "wape_pct": float(metrics.get("wape_pct", 0.0)),
+        "total_ape_pct": float(metrics.get("total_ape_pct", 0.0)),
+        "sse_kwh2": float((rmse ** 2) * usable),
+        "reliability": _metric_reliability_from_mape_pct(float(metrics.get("mape_pct", 0.0))),
+    }
+
+
+def _aggregate_forecast_metric_rows(rows: list[dict] | None) -> dict | None:
+    valid = [
+        dict(row)
+        for row in (rows or [])
+        if isinstance(row, dict) and int(row.get("usable_slot_count", 0)) > 0
+    ]
+    if not valid:
+        return None
+    usable_total = int(sum(int(row.get("usable_slot_count", 0)) for row in valid))
+    actual_total = float(sum(float(row.get("actual_total_kwh", 0.0)) for row in valid))
+    forecast_total = float(sum(float(row.get("forecast_total_kwh", 0.0)) for row in valid))
+    abs_error_sum = float(sum(float(row.get("abs_error_sum_kwh", 0.0)) for row in valid))
+    sse = float(sum(float(row.get("sse_kwh2", 0.0)) for row in valid))
+    mae = float(
+        np.average(
+            [float(row.get("mae_kwh", 0.0)) for row in valid],
+            weights=[max(int(row.get("usable_slot_count", 0)), 1) for row in valid],
+        )
+    )
+    mbe = float(
+        np.average(
+            [float(row.get("mbe_kwh", 0.0)) for row in valid],
+            weights=[max(int(row.get("usable_slot_count", 0)), 1) for row in valid],
+        )
+    )
+    mape = float(
+        np.average(
+            [float(row.get("mape_pct", 0.0)) for row in valid],
+            weights=[max(int(row.get("usable_slot_count", 0)), 1) for row in valid],
+        )
+    )
+    total_ape = float(
+        np.average(
+            [float(row.get("total_ape_pct", 0.0)) for row in valid],
+            weights=[max(float(row.get("actual_total_kwh", 0.0)), 1.0) for row in valid],
+        )
+    )
+    return {
+        "day_count": int(len(valid)),
+        "usable_slot_count": usable_total,
+        "actual_total_kwh": actual_total,
+        "forecast_total_kwh": forecast_total,
+        "abs_error_sum_kwh": abs_error_sum,
+        "mae_kwh": mae,
+        "mbe_kwh": mbe,
+        "rmse_kwh": float(np.sqrt(sse / max(usable_total, 1))),
+        "mape_pct": mape,
+        "wape_pct": float((abs_error_sum / max(actual_total, 1.0)) * 100.0),
+        "total_ape_pct": total_ape,
+        "reliability": _metric_reliability_from_mape_pct(mape),
+    }
+
+
+def _build_resolution_profile(solcast_rows: list[dict] | None, dayahead_rows: list[dict] | None) -> dict:
+    solcast_stats = _aggregate_forecast_metric_rows(solcast_rows)
+    dayahead_stats = _aggregate_forecast_metric_rows(dayahead_rows)
+    common_days = int(
+        min(
+            int((solcast_stats or {}).get("day_count", 0)),
+            int((dayahead_stats or {}).get("day_count", 0)),
+        )
+    ) if solcast_stats and dayahead_stats else 0
+    solcast_weight = SOLCAST_RESOLUTION_WEIGHT_FALLBACK
+    preferred_source = "blend"
+    wape_gap = None
+    if solcast_stats and dayahead_stats:
+        solcast_wape = max(float(solcast_stats.get("wape_pct", 0.0)), 0.0)
+        dayahead_wape = max(float(dayahead_stats.get("wape_pct", 0.0)), 0.0)
+        if solcast_wape > 0.0 or dayahead_wape > 0.0:
+            solcast_weight = float(
+                np.clip(
+                    dayahead_wape / max(solcast_wape + dayahead_wape, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+        wape_gap = float(dayahead_wape - solcast_wape)
+        if solcast_weight >= 0.55:
+            preferred_source = "solcast"
+        elif solcast_weight <= 0.45:
+            preferred_source = "dayahead"
+    return {
+        "solcast": solcast_stats,
+        "dayahead": dayahead_stats,
+        "solcast_weight": float(solcast_weight),
+        "preferred_source": preferred_source,
+        "support_days": common_days,
+        "wape_gap_pct": wape_gap,
+    }
+
+
+def _build_resolution_daily_record(
+    day: str,
+    regime: str,
+    solcast_metrics: dict | None,
+    dayahead_metrics: dict | None,
+    solcast_bucket_metrics: dict[str, dict] | None,
+    dayahead_bucket_metrics: dict[str, dict] | None,
+) -> dict:
+    solcast_summary = _forecast_metric_summary(solcast_metrics)
+    dayahead_summary = _forecast_metric_summary(dayahead_metrics)
+    bucket_profiles: dict[str, dict] = {}
+    bucket_names = sorted(
+        set((solcast_bucket_metrics or {}).keys()) | set((dayahead_bucket_metrics or {}).keys())
+    )
+    for bucket in bucket_names:
+        profile = _build_resolution_profile(
+            [_forecast_metric_summary((solcast_bucket_metrics or {}).get(bucket))]
+            if (solcast_bucket_metrics or {}).get(bucket)
+            else [],
+            [_forecast_metric_summary((dayahead_bucket_metrics or {}).get(bucket))]
+            if (dayahead_bucket_metrics or {}).get(bucket)
+            else [],
+        )
+        if profile.get("solcast") or profile.get("dayahead"):
+            bucket_profiles[str(bucket)] = profile
+    return {
+        "day": str(day),
+        "day_regime": str(regime or ""),
+        "resolution_minutes": int(SLOT_MIN),
+        "source_power_unit": "mw",
+        "energy_unit": "kwh_per_slot",
+        "actual_basis": "loss_adjusted_actual",
+        "overall": _build_resolution_profile(
+            [solcast_summary] if solcast_summary else [],
+            [dayahead_summary] if dayahead_summary else [],
+        ),
+        "buckets": bucket_profiles,
+    }
+
+
+def lookup_solcast_resolution_profile(
+    artifact: dict | None,
+    regime: str,
+    bucket: str | None = None,
+) -> dict:
+    fallback = {
+        "solcast_weight": SOLCAST_RESOLUTION_WEIGHT_FALLBACK,
+        "preferred_source": "blend",
+        "support_days": 0,
+        "wape_gap_pct": None,
+        "profile_key": "fallback",
+    }
+    if not artifact or not isinstance(artifact, dict):
+        return fallback
+    profiles = artifact.get("resolution_profiles")
+    if not isinstance(profiles, dict):
+        return fallback
+    pair_key = f"{str(regime or '')}:{str(bucket or '')}"
+    pairs = profiles.get("pairs") if isinstance(profiles.get("pairs"), dict) else {}
+    if bucket and pair_key in pairs and isinstance(pairs[pair_key], dict):
+        out = dict(fallback)
+        out.update(pairs[pair_key])
+        out["profile_key"] = pair_key
+        return out
+    buckets = profiles.get("buckets") if isinstance(profiles.get("buckets"), dict) else {}
+    if bucket and str(bucket) in buckets and isinstance(buckets[str(bucket)], dict):
+        out = dict(fallback)
+        out.update(buckets[str(bucket)])
+        out["profile_key"] = str(bucket)
+        return out
+    regimes = profiles.get("regimes") if isinstance(profiles.get("regimes"), dict) else {}
+    if regime in regimes and isinstance(regimes[regime], dict):
+        out = dict(fallback)
+        out.update(regimes[regime])
+        out["profile_key"] = str(regime)
+        return out
+    overall = profiles.get("overall") if isinstance(profiles.get("overall"), dict) else {}
+    out = dict(fallback)
+    out.update(overall)
+    out["profile_key"] = "overall"
+    return out
+
+
+def lookup_solcast_resolution_weight_vector(
+    artifact: dict | None,
+    regime: str,
+    bucket_labels: np.ndarray | list[str] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    weights = np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float)
+    support = np.zeros(SLOTS_DAY, dtype=float)
+    if bucket_labels is None:
+        return weights, support
+    labels = np.asarray(bucket_labels, dtype=object).reshape(-1)
+    if labels.size < SLOTS_DAY:
+        return weights, support
+    support_norm = float(max(max(SOLCAST_RELIABILITY_LOOKBACK_DAYS, N_TRAIN_DAYS), 1))
+    for bucket in sorted({
+        str(label)
+        for label in labels[:SLOTS_DAY]
+        if str(label) and str(label) != "offsolar"
+    }):
+        profile = lookup_solcast_resolution_profile(artifact, regime, bucket)
+        mask = labels[:SLOTS_DAY] == bucket
+        weights[mask] = float(
+            np.clip(
+                profile.get("solcast_weight", SOLCAST_RESOLUTION_WEIGHT_FALLBACK),
+                0.0,
+                1.0,
+            )
+        )
+        support[mask] = float(
+            np.clip(float(profile.get("support_days", 0)) / support_norm, 0.0, 1.0)
+        )
+    return weights, support
+
+
 def lookup_solcast_reliability(artifact: dict | None, regime: str) -> dict:
     fallback = {
         "day_count": 0,
@@ -3024,6 +3448,12 @@ def solcast_prior_from_snapshot(
     stats = analyse_weather_day(day, w5)
     regime = classify_day_regime(stats)
     reliability = lookup_solcast_reliability(reliability_artifact, regime)
+    bucket_labels = classify_slot_weather_buckets(w5, day)
+    resolution_weight, resolution_support = lookup_solcast_resolution_weight_vector(
+        reliability_artifact,
+        regime,
+        bucket_labels,
+    )
 
     prior_kwh = np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None).copy()
     prior_lo = np.clip(np.asarray(snapshot["forecast_lo_kwh"], dtype=float), 0.0, None).copy()
@@ -3072,6 +3502,11 @@ def solcast_prior_from_snapshot(
         )
     spread_weight = 1.0 - 0.42 * np.clip(spread_frac / max(SOLCAST_PRIOR_SPREAD_FRAC_CLIP, 0.1), 0.0, 1.0)
     blend = base_by_regime * reliability_score * (0.55 + 0.45 * coverage_ratio) * spread_weight * solar_weight
+    resolution_scale = (
+        SOLCAST_RESOLUTION_BLEND_SCALE_MIN
+        + (SOLCAST_RESOLUTION_BLEND_SCALE_MAX - SOLCAST_RESOLUTION_BLEND_SCALE_MIN) * resolution_weight
+    )
+    blend = blend * resolution_scale
     if primary_mode:
         rel_norm = np.clip(
             (reliability_score - SOLCAST_PRIMARY_RELIABILITY_MIN)
@@ -3095,6 +3530,10 @@ def solcast_prior_from_snapshot(
             SOLCAST_PRIMARY_BLEND_FLOOR_MIN,
             SOLCAST_PRIMARY_BLEND_FLOOR_MAX,
         )
+        primary_floor = primary_floor * (
+            SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN
+            + (SOLCAST_RESOLUTION_PRIMARY_SCALE_MAX - SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN) * resolution_weight
+        )
         blend = np.maximum(blend, primary_floor)
     blend = np.clip(blend, SOLCAST_PRIOR_BLEND_MIN, SOLCAST_PRIOR_BLEND_MAX)
     blend[~present] = 0.0
@@ -3113,6 +3552,8 @@ def solcast_prior_from_snapshot(
         "coverage_ratio": coverage_ratio,
         "bias_ratio": bias_ratio,
         "reliability": reliability_score,
+        "resolution_weight": resolution_weight,
+        "resolution_support": resolution_support,
         "primary_mode": primary_mode,
         "regime": regime,
         "source": str(snapshot.get("source") or "solcast"),
@@ -3138,6 +3579,22 @@ def blend_physics_with_solcast(
     prior = np.clip(np.asarray(solcast_prior["prior_kwh"], dtype=float), 0.0, None)
     blend = np.clip(np.asarray(solcast_prior["blend"], dtype=float), 0.0, 1.0)
     present = np.asarray(solcast_prior["present"], dtype=bool)
+    resolution_weight = np.clip(
+        np.asarray(
+            solcast_prior.get(
+                "resolution_weight",
+                np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float),
+            ),
+            dtype=float,
+        ),
+        0.0,
+        1.0,
+    )
+    resolution_support = np.clip(
+        np.asarray(solcast_prior.get("resolution_support", np.zeros(SLOTS_DAY, dtype=float)), dtype=float),
+        0.0,
+        1.0,
+    )
     adjusted_prior = prior.copy()
     solar_present = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
     base_solar = base[SOLAR_START_SLOT:SOLAR_END_SLOT]
@@ -3165,6 +3622,16 @@ def blend_physics_with_solcast(
         "mean_blend": float(np.mean(blend[SOLAR_START_SLOT:SOLAR_END_SLOT][present[SOLAR_START_SLOT:SOLAR_END_SLOT]])) if np.any(present[SOLAR_START_SLOT:SOLAR_END_SLOT]) else 0.0,
         "bias_ratio": float(solcast_prior.get("bias_ratio", 1.0)),
         "reliability": float(solcast_prior.get("reliability", 0.0)),
+        "resolution_weight_mean": float(
+            np.mean(
+                resolution_weight[SOLAR_START_SLOT:SOLAR_END_SLOT][present[SOLAR_START_SLOT:SOLAR_END_SLOT]]
+            )
+        ) if np.any(present[SOLAR_START_SLOT:SOLAR_END_SLOT]) else SOLCAST_RESOLUTION_WEIGHT_FALLBACK,
+        "resolution_support_mean": float(
+            np.mean(
+                resolution_support[SOLAR_START_SLOT:SOLAR_END_SLOT][present[SOLAR_START_SLOT:SOLAR_END_SLOT]]
+            )
+        ) if np.any(present[SOLAR_START_SLOT:SOLAR_END_SLOT]) else 0.0,
         "primary_mode": bool(solcast_prior.get("primary_mode", False)),
         "raw_prior_total_kwh": prior_total,
         "applied_prior_total_kwh": float(adjusted_prior[SOLAR_START_SLOT:SOLAR_END_SLOT].sum()),
@@ -3666,6 +4133,18 @@ def save_forecast_weather_snapshot(
 def load_forecast_weather_snapshot(day: str) -> dict | None:
     payload = _load_json(forecast_snapshot_path(day))
     return payload if isinstance(payload, dict) and payload else None
+
+
+def update_forecast_weather_snapshot_meta(day: str, updates: dict | None) -> bool:
+    if not updates:
+        return False
+    payload = load_forecast_weather_snapshot(day)
+    if not payload or not isinstance(payload, dict):
+        return False
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    meta.update(dict(updates))
+    payload["meta"] = meta
+    return _save_json(forecast_snapshot_path(day), payload)
 
 
 def _weather_bias_frame_5min(df: pd.DataFrame, day: str) -> pd.DataFrame:
@@ -5439,7 +5918,18 @@ def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
     mean_blend = float(np.clip(solcast_meta.get("mean_blend", 0.0), 0.0, 1.0))
     reliability = float(np.clip(solcast_meta.get("reliability", 0.0), 0.0, 1.0))
     coverage = float(np.clip(solcast_meta.get("coverage_ratio", 0.0), 0.0, 1.0))
-    damp = 1.0 - 0.70 * mean_blend * (0.35 + 0.65 * reliability) * (0.55 + 0.45 * coverage)
+    resolution_weight = float(
+        np.clip(
+            solcast_meta.get("resolution_weight_mean", SOLCAST_RESOLUTION_WEIGHT_FALLBACK),
+            0.0,
+            1.0,
+        )
+    )
+    resolution_authority = (
+        SOLCAST_RESOLUTION_AUTHORITY_MIN
+        + (SOLCAST_RESOLUTION_AUTHORITY_MAX - SOLCAST_RESOLUTION_AUTHORITY_MIN) * resolution_weight
+    )
+    damp = 1.0 - 0.70 * mean_blend * (0.35 + 0.65 * reliability) * (0.55 + 0.45 * coverage) * resolution_authority
     damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
     if bool(solcast_meta.get("primary_mode")):
         damp = min(damp, SOLCAST_RESIDUAL_PRIMARY_CAP)
@@ -5836,6 +6326,44 @@ def forecast_qa(today: date) -> None:
         forecast_present=fc_present,
         exclude_mask=exclude_mask,
     ) if bucket_labels is not None else {}
+    solcast_metrics = None
+    solcast_bucket_metrics = {}
+    solcast_snapshot = load_solcast_snapshot(yesterday)
+    if solcast_snapshot:
+        solcast_forecast = np.clip(np.asarray(solcast_snapshot.get("forecast_kwh"), dtype=float), 0.0, None)
+        solcast_present = np.asarray(solcast_snapshot.get("present"), dtype=bool)
+        solcast_metrics = compute_forecast_metrics(
+            actual,
+            solcast_forecast,
+            actual_present=actual_present,
+            forecast_present=solcast_present,
+            exclude_mask=exclude_mask,
+        )
+        solcast_bucket_metrics = compute_bucketed_forecast_metrics(
+            actual,
+            solcast_forecast,
+            bucket_labels,
+            actual_present=actual_present,
+            forecast_present=solcast_present,
+            exclude_mask=exclude_mask,
+        ) if bucket_labels is not None else {}
+    day_regime = str(
+        snapshot_meta.get("target_regime")
+        or ((snapshot.get("applied_signature") or {}).get("day_regime") if isinstance(snapshot, dict) else "")
+        or ((snapshot.get("signature") or {}).get("day_regime") if isinstance(snapshot, dict) else "")
+        or ""
+    )
+    resolution_debug = _build_resolution_daily_record(
+        yesterday,
+        day_regime,
+        solcast_metrics,
+        metrics,
+        solcast_bucket_metrics,
+        bucket_metrics,
+    )
+    overall_resolution = resolution_debug.get("overall") if isinstance(resolution_debug.get("overall"), dict) else {}
+    if overall_resolution.get("solcast") or overall_resolution.get("dayahead"):
+        update_forecast_weather_snapshot_meta(yesterday, {"resolution_debug": resolution_debug})
 
     log.info(
         "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
@@ -5852,6 +6380,14 @@ def forecast_qa(today: date) -> None:
         skill,
     )
     log.info("QA weather buckets [%s] %s", yesterday, _format_bucket_metric_summary(bucket_metrics))
+    if overall_resolution:
+        log.info(
+            "QA resolution [%s] winner=%s solcast_weight=%.2f support_days=%d",
+            yesterday,
+            overall_resolution.get("preferred_source"),
+            float(overall_resolution.get("solcast_weight", SOLCAST_RESOLUTION_WEIGHT_FALLBACK)),
+            int(overall_resolution.get("support_days", 0)),
+        )
     if classifier_metrics is not None:
         log.info(
             "QA classifier [%s] sign_hit=%.3f exact_hit=%.3f severe_hit=%s mean_conf=%.2f",
@@ -6293,13 +6829,14 @@ def run_dayahead(
         )
     )
     log.info(
-        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f bias_ratio=%.3f ratio=%.2f->%.2f source=%s",
+        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f res=%.2f bias_ratio=%.3f ratio=%.2f->%.2f source=%s",
         bool(solcast_meta.get("used_solcast")),
         solcast_primary,
         solcast_meta.get("regime"),
         float(solcast_meta.get("coverage_ratio", 0.0)),
         float(solcast_meta.get("mean_blend", 0.0)),
         float(solcast_meta.get("reliability", 0.0)),
+        float(solcast_meta.get("resolution_weight_mean", SOLCAST_RESOLUTION_WEIGHT_FALLBACK)),
         float(solcast_meta.get("bias_ratio", 1.0)),
         float(solcast_meta.get("raw_prior_ratio", 1.0)),
         float(solcast_meta.get("applied_prior_ratio", 1.0)),

@@ -2,6 +2,7 @@ import importlib.util
 import logging
 import os
 import shutil
+import sqlite3
 import unittest
 from datetime import date
 from pathlib import Path
@@ -532,6 +533,276 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
 
+    def test_solcast_reliability_uses_loss_adjusted_actuals(self):
+        tmp_root = WORK_TMP / "solcast-loss-adjusted-reliability"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "solcast-loss-adjusted-reliability")
+            day_values = {
+                "2026-03-19": 8.0,
+                "2026-03-18": 10.0,
+            }
+            expected_days = sorted(day_values.keys())
+            solar_mask = np.zeros(mod.SLOTS_DAY, dtype=bool)
+            solar_mask[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT] = True
+
+            def make_actual(slot_value: float) -> np.ndarray:
+                arr = np.zeros(mod.SLOTS_DAY, dtype=float)
+                arr[solar_mask] = slot_value
+                return arr
+
+            snapshot = {
+                "forecast_kwh": np.where(solar_mask, 10.0, 0.0).astype(float),
+                "spread_frac": np.where(solar_mask, 0.10, 0.0).astype(float),
+                "present": solar_mask.copy(),
+                "coverage_slots": int(np.count_nonzero(solar_mask)),
+                "coverage_ratio": 1.0,
+            }
+            w5 = pd.DataFrame({
+                "rad": np.full(mod.SLOTS_DAY, 700.0),
+                "cloud": np.full(mod.SLOTS_DAY, 20.0),
+                "rh": np.full(mod.SLOTS_DAY, 60.0),
+                "precip": np.zeros(mod.SLOTS_DAY),
+                "cape": np.zeros(mod.SLOTS_DAY),
+            })
+            loss_adjusted_calls: list[str] = []
+            dayahead = np.zeros(mod.SLOTS_DAY, dtype=float)
+            dayahead[solar_mask] = 9.0
+
+            def fail_raw_actual(day: str):
+                raise AssertionError(f"raw actual loader should not be used for {day}")
+
+            def fake_loss_adjusted(day: str):
+                loss_adjusted_calls.append(day)
+                slot_value = day_values.get(day)
+                if slot_value is None:
+                    return None, None
+                return make_actual(slot_value), solar_mask.copy()
+
+            orig_load_actual = mod.load_actual
+            orig_load_actual_loss_adjusted = mod.load_actual_loss_adjusted_with_presence
+            orig_load_solcast_snapshot = mod.load_solcast_snapshot
+            orig_load_dayahead = mod.load_dayahead_with_presence
+            orig_fetch_weather = mod.fetch_weather
+            orig_interpolate_5min = mod.interpolate_5min
+            orig_analyse = mod.analyse_weather_day
+            orig_classify = mod.classify_day_regime
+            orig_constraints = mod.build_operational_constraint_mask
+            orig_lookback = mod.SOLCAST_RELIABILITY_LOOKBACK_DAYS
+            orig_train_days = mod.N_TRAIN_DAYS
+            orig_min_days = mod.SOLCAST_RELIABILITY_MIN_DAYS
+            try:
+                mod.load_actual = fail_raw_actual
+                mod.load_actual_loss_adjusted_with_presence = fake_loss_adjusted
+                mod.load_solcast_snapshot = lambda day: snapshot.copy() if day in day_values else None
+                mod.load_dayahead_with_presence = lambda day: (dayahead.copy(), solar_mask.copy()) if day in day_values else (None, None)
+                mod.fetch_weather = lambda day, source="archive": pd.DataFrame({"time": pd.date_range(f"{day} 00:00:00", periods=24, freq="1h")})
+                mod.interpolate_5min = lambda df, day: w5.copy()
+                mod.analyse_weather_day = lambda day, w5, actual=None: {
+                    "cloud_mean": 20.0,
+                    "rad_peak": 700.0,
+                    "rh_mean": 60.0,
+                    "vol_index": 0.05,
+                    "rainy": False,
+                    "convective": False,
+                    "sky_class": "clear",
+                }
+                mod.classify_day_regime = lambda stats: "clear"
+                mod.build_operational_constraint_mask = lambda day: (
+                    np.zeros(mod.SLOTS_DAY, dtype=bool),
+                    {"operational_mask": np.zeros(mod.SLOTS_DAY, dtype=bool)},
+                )
+                mod.SOLCAST_RELIABILITY_LOOKBACK_DAYS = 2
+                mod.N_TRAIN_DAYS = 2
+                mod.SOLCAST_RELIABILITY_MIN_DAYS = 2
+
+                artifact = mod.build_solcast_reliability_artifact(date(2026, 3, 20))
+            finally:
+                mod.load_actual = orig_load_actual
+                mod.load_actual_loss_adjusted_with_presence = orig_load_actual_loss_adjusted
+                mod.load_solcast_snapshot = orig_load_solcast_snapshot
+                mod.load_dayahead_with_presence = orig_load_dayahead
+                mod.fetch_weather = orig_fetch_weather
+                mod.interpolate_5min = orig_interpolate_5min
+                mod.analyse_weather_day = orig_analyse
+                mod.classify_day_regime = orig_classify
+                mod.build_operational_constraint_mask = orig_constraints
+                mod.SOLCAST_RELIABILITY_LOOKBACK_DAYS = orig_lookback
+                mod.N_TRAIN_DAYS = orig_train_days
+                mod.SOLCAST_RELIABILITY_MIN_DAYS = orig_min_days
+
+            self.assertIsNotNone(artifact)
+            self.assertEqual(sorted(loss_adjusted_calls), expected_days)
+            self.assertAlmostEqual(float(artifact["regimes"]["clear"]["bias_ratio"]), 0.91, places=6)
+            self.assertEqual(int(artifact["resolution_profiles"]["resolution_minutes"]), mod.SLOT_MIN)
+            self.assertEqual(str(artifact["resolution_profiles"]["source_power_unit"]), "mw")
+            self.assertEqual(str(artifact["resolution_profiles"]["energy_unit"]), "kwh_per_slot")
+            self.assertEqual(str(artifact["resolution_profiles"]["actual_basis"]), "loss_adjusted_actual")
+            self.assertEqual(int(artifact["resolution_profiles"]["day_count"]), 2)
+            self.assertIn("clear_stable", artifact["resolution_profiles"]["buckets"])
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_load_solcast_snapshot_derives_kwh_from_raw_mw(self):
+        tmp_root = WORK_TMP / "solcast-mw-normalization"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "solcast-mw-normalization")
+            conn = sqlite3.connect(mod.APP_DB_FILE)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE solcast_snapshots (
+                        forecast_day    TEXT NOT NULL,
+                        slot            INTEGER NOT NULL,
+                        forecast_kwh    REAL,
+                        forecast_lo_kwh REAL,
+                        forecast_hi_kwh REAL,
+                        est_actual_kwh  REAL,
+                        forecast_mw     REAL,
+                        forecast_lo_mw  REAL,
+                        forecast_hi_mw  REAL,
+                        est_actual_mw   REAL,
+                        pulled_ts       INTEGER,
+                        source          TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO solcast_snapshots (
+                        forecast_day, slot,
+                        forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, est_actual_kwh,
+                        forecast_mw, forecast_lo_mw, forecast_hi_mw, est_actual_mw,
+                        pulled_ts, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "2026-03-20",
+                        mod.SOLAR_START_SLOT,
+                        None, None, None, None,
+                        1.2, 1.0, 1.4, 0.9,
+                        1710800000000,
+                        "solcast",
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            snapshot = mod.load_solcast_snapshot("2026-03-20")
+            self.assertIsNotNone(snapshot)
+            slot = mod.SOLAR_START_SLOT
+            self.assertAlmostEqual(float(snapshot["forecast_mw"][slot]), 1.2, places=6)
+            self.assertAlmostEqual(float(snapshot["forecast_lo_mw"][slot]), 1.0, places=6)
+            self.assertAlmostEqual(float(snapshot["forecast_hi_mw"][slot]), 1.4, places=6)
+            self.assertAlmostEqual(float(snapshot["est_actual_mw"][slot]), 0.9, places=6)
+            self.assertAlmostEqual(float(snapshot["forecast_kwh"][slot]), 1.2 * mod.SOLCAST_KWH_PER_MW_SLOT, places=6)
+            self.assertAlmostEqual(float(snapshot["forecast_lo_kwh"][slot]), 1.0 * mod.SOLCAST_KWH_PER_MW_SLOT, places=6)
+            self.assertAlmostEqual(float(snapshot["forecast_hi_kwh"][slot]), 1.4 * mod.SOLCAST_KWH_PER_MW_SLOT, places=6)
+            self.assertAlmostEqual(float(snapshot["est_actual_kwh"][slot]), 0.9 * mod.SOLCAST_KWH_PER_MW_SLOT, places=6)
+            self.assertEqual(str(snapshot["power_unit"]), "mw")
+            self.assertEqual(str(snapshot["energy_unit"]), "kwh_per_slot")
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_solcast_prior_scales_blend_by_resolution_profile(self):
+        tmp_root = WORK_TMP / "solcast-resolution-profile"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "solcast-resolution-profile")
+            day = "2026-03-20"
+            w5 = pd.DataFrame({
+                "rad": np.full(mod.SLOTS_DAY, 780.0),
+                "cloud": np.full(mod.SLOTS_DAY, 14.0),
+                "rh": np.full(mod.SLOTS_DAY, 60.0),
+                "precip": np.zeros(mod.SLOTS_DAY),
+                "cape": np.zeros(mod.SLOTS_DAY),
+                "cloud_low": np.full(mod.SLOTS_DAY, 10.0),
+                "cloud_mid": np.full(mod.SLOTS_DAY, 8.0),
+                "cloud_high": np.full(mod.SLOTS_DAY, 6.0),
+                "temp": np.full(mod.SLOTS_DAY, 28.0),
+                "wind": np.full(mod.SLOTS_DAY, 3.0),
+                "rad_direct": np.full(mod.SLOTS_DAY, 500.0),
+                "rad_diffuse": np.full(mod.SLOTS_DAY, 140.0),
+            })
+            snapshot = {
+                "forecast_kwh": np.where(
+                    (np.arange(mod.SLOTS_DAY) >= mod.SOLAR_START_SLOT)
+                    & (np.arange(mod.SLOTS_DAY) < mod.SOLAR_END_SLOT),
+                    16.0,
+                    0.0,
+                ).astype(float),
+                "forecast_lo_kwh": np.full(mod.SLOTS_DAY, 14.0, dtype=float),
+                "forecast_hi_kwh": np.full(mod.SLOTS_DAY, 18.0, dtype=float),
+                "forecast_mw": np.full(mod.SLOTS_DAY, 0.192, dtype=float),
+                "spread_frac": np.full(mod.SLOTS_DAY, 0.08, dtype=float),
+                "present": np.ones(mod.SLOTS_DAY, dtype=bool),
+                "coverage_slots": int(mod.SOLAR_SLOTS),
+                "coverage_ratio": 0.86,
+                "source": "solcast",
+            }
+            base_artifact = {
+                "regimes": {
+                    "clear": {"bias_ratio": 1.0, "reliability": 0.90, "coverage_ratio": 0.85},
+                },
+                "resolution_profiles": {
+                    "overall": {"solcast_weight": 0.5},
+                    "pairs": {
+                        "clear:clear_stable": {"solcast_weight": 1.0, "preferred_source": "solcast", "support_days": 8},
+                    },
+                },
+            }
+            weak_artifact = {
+                "regimes": {
+                    "clear": {"bias_ratio": 1.0, "reliability": 0.90, "coverage_ratio": 0.85},
+                },
+                "resolution_profiles": {
+                    "overall": {"solcast_weight": 0.5},
+                    "pairs": {
+                        "clear:clear_stable": {"solcast_weight": 0.0, "preferred_source": "dayahead", "support_days": 8},
+                    },
+                },
+            }
+
+            orig_analyse = mod.analyse_weather_day
+            orig_classify = mod.classify_day_regime
+            orig_clear_sky = mod.clear_sky_radiation
+            try:
+                mod.analyse_weather_day = lambda day, w5, actual=None: {
+                    "cloud_mean": 14.0,
+                    "rad_peak": 780.0,
+                    "rh_mean": 60.0,
+                    "vol_index": 0.04,
+                    "rainy": False,
+                    "convective": False,
+                    "sky_class": "clear",
+                }
+                mod.classify_day_regime = lambda stats: "clear"
+                mod.clear_sky_radiation = lambda day, rh: np.full(mod.SLOTS_DAY, 900.0, dtype=float)
+                strong_prior = mod.solcast_prior_from_snapshot(day, w5, snapshot, base_artifact)
+                weak_prior = mod.solcast_prior_from_snapshot(day, w5, snapshot, weak_artifact)
+            finally:
+                mod.analyse_weather_day = orig_analyse
+                mod.classify_day_regime = orig_classify
+                mod.clear_sky_radiation = orig_clear_sky
+
+            self.assertIsNotNone(strong_prior)
+            self.assertIsNotNone(weak_prior)
+            strong_blend = float(np.mean(np.asarray(strong_prior["blend"], dtype=float)[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT]))
+            weak_blend = float(np.mean(np.asarray(weak_prior["blend"], dtype=float)[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT]))
+            self.assertGreater(strong_blend, weak_blend)
+            self.assertGreater(float(np.mean(np.asarray(strong_prior["resolution_weight"], dtype=float)[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT])), 0.9)
+            self.assertLess(float(np.mean(np.asarray(weak_prior["resolution_weight"], dtype=float)[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT])), 0.1)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
     def test_run_dayahead_returns_error_class_meta_and_bias(self):
         tmp_root = WORK_TMP / "run-dayahead-error-class"
         shutil.rmtree(tmp_root, ignore_errors=True)
@@ -723,6 +994,78 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             self.assertIn("QA weather buckets [2026-03-20]", joined)
             self.assertIn("clear_stable:WAPE=", joined)
             self.assertIn("QA classifier [2026-03-20]", joined)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_forecast_qa_stores_resolution_history(self):
+        tmp_root = WORK_TMP / "qa-resolution-history"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "qa-resolution-history")
+            actual = np.zeros(mod.SLOTS_DAY, dtype=float)
+            actual[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT] = 100.0
+            forecast = actual.copy()
+            forecast[mod.SOLAR_START_SLOT + 12:mod.SOLAR_START_SLOT + 24] += 15.0
+            solcast = actual.copy()
+            solcast[mod.SOLAR_START_SLOT + 24:mod.SOLAR_START_SLOT + 36] += 8.0
+            present = np.zeros(mod.SLOTS_DAY, dtype=bool)
+            present[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT] = True
+            slot_buckets = np.array(["offsolar"] * mod.SLOTS_DAY, dtype=object)
+            slot_buckets[mod.SOLAR_START_SLOT:mod.SOLAR_START_SLOT + 30] = "clear_stable"
+            slot_buckets[mod.SOLAR_START_SLOT + 30:mod.SOLAR_END_SLOT] = "mixed_volatile"
+            stored = {}
+
+            orig_actual = mod.load_actual_loss_adjusted_with_presence
+            orig_dayahead = mod.load_dayahead_with_presence
+            orig_constraints = mod.build_operational_constraint_mask
+            orig_snapshot = mod.load_forecast_weather_snapshot
+            orig_solcast_snapshot = mod.load_solcast_snapshot
+            orig_update_meta = mod.update_forecast_weather_snapshot_meta
+            try:
+                mod.load_actual_loss_adjusted_with_presence = lambda day: (actual.copy(), present.copy())
+                mod.load_dayahead_with_presence = lambda day: (forecast.copy(), present.copy())
+                mod.build_operational_constraint_mask = lambda day: (
+                    np.zeros(mod.SLOTS_DAY, dtype=bool),
+                    {"operational_mask": np.zeros(mod.SLOTS_DAY, dtype=bool)},
+                )
+                mod.load_forecast_weather_snapshot = lambda day: {
+                    "meta": {
+                        "target_regime": "clear",
+                        "error_class_debug": {
+                            "slot_weather_buckets": [str(v) for v in slot_buckets],
+                        },
+                    },
+                    "signature": {"day_regime": "clear"},
+                    "applied_signature": {"day_regime": "clear"},
+                }
+                mod.load_solcast_snapshot = lambda day: {
+                    "forecast_kwh": solcast.copy(),
+                    "present": present.copy(),
+                }
+                mod.update_forecast_weather_snapshot_meta = lambda day, updates: stored.setdefault("payload", (day, updates)) is None or True
+
+                mod.forecast_qa(date(2026, 3, 21))
+            finally:
+                mod.load_actual_loss_adjusted_with_presence = orig_actual
+                mod.load_dayahead_with_presence = orig_dayahead
+                mod.build_operational_constraint_mask = orig_constraints
+                mod.load_forecast_weather_snapshot = orig_snapshot
+                mod.load_solcast_snapshot = orig_solcast_snapshot
+                mod.update_forecast_weather_snapshot_meta = orig_update_meta
+
+            self.assertIn("payload", stored)
+            saved_day, updates = stored["payload"]
+            self.assertEqual(saved_day, "2026-03-20")
+            self.assertIn("resolution_debug", updates)
+            debug = updates["resolution_debug"]
+            self.assertEqual(int(debug["resolution_minutes"]), mod.SLOT_MIN)
+            self.assertEqual(str(debug["source_power_unit"]), "mw")
+            self.assertEqual(str(debug["energy_unit"]), "kwh_per_slot")
+            self.assertEqual(str(debug["actual_basis"]), "loss_adjusted_actual")
+            self.assertIn("overall", debug)
+            self.assertIn("buckets", debug)
         finally:
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
