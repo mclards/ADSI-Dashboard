@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.23</span>
+    <span><b>Version:</b> 2.4.24</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -812,7 +812,7 @@
     <thead><tr><th>Field</th><th>Function</th></tr></thead>
     <tbody>
       <tr><td>Upper Limit (MW)</td><td>Upper plant MW threshold that triggers automatic stop decisions</td></tr>
-      <tr><td>Lower Limit (MW)</td><td>Lower threshold for restarting controller-owned inverters</td></tr>
+      <tr><td>Lower Limit (MW)</td><td>Lower threshold for restarting eligible stopped non-exempt inverters</td></tr>
       <tr><td>Sequence</td><td>Inverter selection mode: Ascending, Descending, or Exemption</td></tr>
       <tr><td>Exempted Inverter Numbers</td><td>Comma-separated inverter numbers excluded from automatic stop selection</td></tr>
       <tr><td>Cooldown (s)</td><td>Settling time between each automatic action (default: 30)</td></tr>
@@ -838,7 +838,8 @@
     <ul style="margin:0">
       <li>Current builds use whole-inverter sequential control only</li>
       <li>Very narrow MW bands may not settle cleanly with whole-inverter steps</li>
-      <li>The controller only restarts inverters it previously stopped &mdash; manually stopped inverters are not affected</li>
+      <li>While plant cap is enabled, all non-exempted inverters stay under controller authority</li>
+      <li>Manual start/stop for non-exempted inverters is blocked until plant cap is disabled or the inverter is exempted</li>
       <li>In Remote mode, cap actions are proxied to the gateway workstation</li>
     </ul>
   </div>

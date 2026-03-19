@@ -22,6 +22,14 @@ function roundValue(value, digits = 3) {
   return Number(n.toFixed(digits));
 }
 
+function getWriteActionLabel(value) {
+  const numeric = Number(value);
+  if (numeric === 1) return "START";
+  if (numeric === 0) return "STOP";
+  if (numeric === 2) return "RESET";
+  return "WRITE";
+}
+
 function parseMaybeNumber(value) {
   if (value === null || value === undefined) return null;
   const raw = String(value).trim();
@@ -280,10 +288,13 @@ function buildInverterProfiles({
       allUnitsFresh,
       controllable: Boolean(ip) && enabledNodes > 0,
       liveRunning: anyUnitOn,
-      running: owned ? false : anyUnitOn,
+      running: anyUnitOn,
       ownedStopped: owned,
       canStop: Boolean(ip) && enabledNodes > 0 && allUnitsFresh && anyUnitOn && !owned,
-      canStart: Boolean(ip) && enabledNodes > 0 && Boolean(owned),
+      canStart:
+        Boolean(ip) &&
+        enabledNodes > 0 &&
+        (Boolean(owned) || (allUnitsFresh && !anyUnitOn)),
     });
   }
   return out;
@@ -360,6 +371,7 @@ function buildPlantCapPreview({
       exempted,
       controllable: profile.controllable && !exempted,
       canStop: profile.canStop && !exempted,
+      canStart: profile.canStart && !exempted,
     };
   });
   const sequence = buildSequenceOrder({
@@ -489,13 +501,29 @@ function buildPlantCapPreview({
   }
 
   const ownedMap = buildOwnedStoppedMap(ownedStopped);
-  const restartCandidates = [...ownedMap.values()]
+  const ownedRestartCandidates = [...ownedMap.values()]
     .sort((a, b) => Number(b.stoppedAt || 0) - Number(a.stoppedAt || 0))
     .map((entry) => {
       const profile = profileByInv.get(entry.inverter);
-      return profile ? { ...entry, profile } : null;
+      return profile && profile.canStart
+        ? { ...entry, profile, owned: true }
+        : null;
     })
     .filter(Boolean);
+  const nonOwnedRestartCandidates = orderedProfiles
+    .filter((profile) => profile.canStart && !ownedMap.has(profile.inverter))
+    .map((profile) => ({
+      inverter: profile.inverter,
+      stoppedAt: 0,
+      pacBeforeStopKw: 0,
+      dependableKw: profile.dependableKw,
+      profile,
+      owned: false,
+    }));
+  const restartCandidates = [
+    ...ownedRestartCandidates,
+    ...nonOwnedRestartCandidates,
+  ];
   const restartPlan = restartCandidates.map((entry) => {
     const profile = entry.profile;
     const restartEstimateKw = roundValue(
@@ -520,7 +548,9 @@ function buildPlantCapPreview({
       fitsUpper,
       stoppedAt: Number(entry.stoppedAt || 0),
       decisionReason: fitsUpper
-        ? "Restores one controller-owned inverter without exceeding the upper limit."
+        ? entry.owned
+          ? "Restores one controller-owned inverter without exceeding the upper limit."
+          : "Starts one eligible stopped non-exempt inverter without exceeding the upper limit."
         : "Would exceed the upper limit after restart.",
     };
   });
@@ -532,15 +562,15 @@ function buildPlantCapPreview({
         warnings,
         "cannot_restore_without_exceeding_upper",
         "warning",
-        "Plant output is below the lower limit, but restarting any controller-owned inverter would exceed the upper limit.",
+        "Plant output is below the lower limit, but restarting any eligible stopped non-exempt inverter would exceed the upper limit.",
       );
     }
     if (!selectedRestart && !restartPlan.length) {
       addWarning(
         warnings,
-        "no_owned_inverters",
+        "no_restart_candidates",
         "info",
-        "Plant output is below the lower limit, but there are no controller-owned stopped inverters available to restart.",
+        "Plant output is below the lower limit, but there are no eligible stopped non-exempt inverters available to restart.",
       );
     }
   }
@@ -581,7 +611,7 @@ function buildPlantCapPreview({
       recommendedAction = "hold";
       reasonCode = "no_restart_candidate";
       reasonText =
-        "Plant output is below the lower limit, but no eligible controller-owned inverter can be restarted safely.";
+        "Plant output is below the lower limit, but no eligible stopped non-exempt inverter can be restarted safely.";
     }
   }
 
@@ -898,6 +928,32 @@ class PlantCapController {
     return this.getStatus({ refresh: true, includePreview: true });
   }
 
+  getManualWriteGuard(event = {}) {
+    const scope = String(event.scope || "").trim().toLowerCase();
+    if (scope === "plant-cap") {
+      return { allowed: true };
+    }
+    const inverter = Math.trunc(Number(event.inverter));
+    if (!this.state.enabled || !Number.isFinite(inverter) || inverter < 1) {
+      return { allowed: true };
+    }
+    const activeSettings = this.getActiveSettings();
+    const exempted =
+      activeSettings.sequenceMode === "exemption" &&
+      Array.isArray(activeSettings.sequenceCustom) &&
+      activeSettings.sequenceCustom.includes(inverter);
+    if (exempted) {
+      return { allowed: true, exempted: true };
+    }
+    const action = getWriteActionLabel(event.value);
+    return {
+      allowed: false,
+      status: 409,
+      reasonCode: "plant_cap_manual_control_blocked",
+      message: `Plant Output Cap is active and INV-${String(inverter).padStart(2, "0")} is not exempted. Manual ${action} cannot override the current plant cap session. Disable plant capping or exempt this inverter before changing it manually.`,
+    };
+  }
+
   handleManualWrite(event = {}) {
     const scope = String(event.scope || "").trim().toLowerCase();
     if (scope === "plant-cap") return;
@@ -906,6 +962,7 @@ class PlantCapController {
     if (!this.state.ownedStopped?.has?.(inverter)) return;
     this.state.enabled = false;
     this.state.pendingAction = null;
+    this.state.ownedStopped.delete(inverter);
     this.state.status = "paused";
     this.state.reasonCode = "manual_override_detected";
     this.state.reasonText = `Manual control was applied to controller-owned inverter ${String(inverter).padStart(2, "0")}. Re-enable plant-wide capping after operator review.`;
@@ -1174,7 +1231,7 @@ class PlantCapController {
       this.state.status = "monitoring";
       this.state.reasonCode = "no_restart_candidate";
       this.state.reasonText =
-        "Plant output is below the lower limit, but no controller-owned inverter can be restarted without exceeding the upper limit.";
+        "Plant output is below the lower limit, but no eligible stopped non-exempt inverter can be restarted without exceeding the upper limit.";
       this.broadcastStatus();
       return this.getStatus({ refresh: false, includePreview: false });
     }

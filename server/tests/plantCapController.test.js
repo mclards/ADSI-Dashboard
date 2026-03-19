@@ -145,6 +145,29 @@ async function run() {
     "Restarts should use LIFO order for controller-owned inverters.",
   );
 
+  const stoppedRestartPreview = buildPlantCapPreview({
+    settings: {
+      upperMw: 2.0,
+      lowerMw: 1.0,
+      sequenceMode: "ascending",
+      cooldownSec: 30,
+    },
+    liveData: {
+      ...makeLiveRows(nowTs, 1, 700),
+      ...makeLiveRows(nowTs, 2, 0, { onOff: 0 }),
+      ...makeLiveRows(nowTs, 3, 0, { onOff: 0 }),
+    },
+    ipConfig: makeIpConfig(),
+    inverterCount: 3,
+    nodeCount: 4,
+    nowTs,
+  });
+  assert.strictEqual(
+    stoppedRestartPreview.selectedRestart?.inverter,
+    2,
+    "Stopped non-exempt inverters should be restart candidates even when they were not previously stopped by the controller.",
+  );
+
   const exemptionPreview = buildPlantCapPreview({
     settings: {
       upperMw: 1.1,
@@ -197,6 +220,68 @@ async function run() {
     "A narrow cap band should emit a dynamic deadband warning.",
   );
 
+  const authorityController = new PlantCapController({
+    getLiveData: () => ({}),
+    getIpConfig: () => makeIpConfig(),
+    getSettings: () => ({
+      inverterCount: 3,
+      nodeCount: 4,
+      plantCapUpperMw: 1.5,
+      plantCapLowerMw: 1.0,
+      plantCapSequenceMode: "exemption",
+      plantCapSequenceCustom: [3],
+      plantCapCooldownSec: 30,
+    }),
+    executeWrite: async () => ({ ok: true }),
+    broadcast: () => {},
+  });
+  authorityController.state.enabled = true;
+  authorityController.state.activeConfig = {
+    upperMw: 1.5,
+    lowerMw: 1.0,
+    sequenceMode: "exemption",
+    sequenceCustom: [3],
+    cooldownSec: 30,
+    inverterCount: 3,
+  };
+  const blockedGuard = authorityController.getManualWriteGuard({
+    scope: "single",
+    inverter: 2,
+    value: 0,
+    operator: "OPERATOR",
+  });
+  assert.strictEqual(
+    blockedGuard.allowed,
+    false,
+    "Manual control should be blocked for non-exempted inverters while plant cap is enabled.",
+  );
+  assert(
+    /cannot override|not exempted/i.test(String(blockedGuard.message || "")),
+    "Blocked manual control should explain that plant cap is active and the inverter is not exempted.",
+  );
+  const exemptGuard = authorityController.getManualWriteGuard({
+    scope: "single",
+    inverter: 3,
+    value: 0,
+    operator: "OPERATOR",
+  });
+  assert.strictEqual(
+    exemptGuard.allowed,
+    true,
+    "Exempted inverters should remain manually controllable during plant cap monitoring.",
+  );
+  const plantCapGuard = authorityController.getManualWriteGuard({
+    scope: "plant-cap",
+    inverter: 2,
+    value: 0,
+    operator: "PLANT CAP",
+  });
+  assert.strictEqual(
+    plantCapGuard.allowed,
+    true,
+    "Controller-owned plant-cap commands must bypass the manual-control guard.",
+  );
+
   let manualWritePaused = false;
   const controller = new PlantCapController({
     getLiveData: () => ({}),
@@ -244,6 +329,11 @@ async function run() {
   assert(
     manualWritePaused,
     "Manual overrides should broadcast an updated controller state.",
+  );
+  assert.strictEqual(
+    controller.state.ownedStopped.has(2),
+    false,
+    "Manual override should clear the stale ownedStopped entry for the overridden inverter.",
   );
 }
 

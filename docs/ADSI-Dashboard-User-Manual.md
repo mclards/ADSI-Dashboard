@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.23`
+**Applies to:** ADSI Inverter Dashboard `v2.4.24`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -390,7 +390,7 @@ The `Plant Output Cap` panel is located on the `Inverters` page and is hidden by
 | Field | Function |
 | --- | --- |
 | `Upper Limit (MW)` | Upper plant MW threshold that triggers automatic capping decisions |
-| `Lower Limit (MW)` | Lower plant MW threshold used to decide whether controller-owned inverters may be restarted |
+| `Lower Limit (MW)` | Lower plant MW threshold used to decide whether eligible stopped non-exempt inverters may be restarted |
 | `Sequence` | Inverter selection mode: `Ascending`, `Descending`, or `Exemption` |
 | `Exempted Inverter Numbers` | Comma-separated inverter numbers skipped during automatic stop selection |
 | `Cooldown (s)` | Settling time after each automatic stop or restart before the next controller decision |
@@ -453,9 +453,9 @@ The preview table shows each candidate inverter in sequence order with its node 
 - planning is node-aware and capacity-aware; enabled node count affects each inverter step size
 - live inverter `Pac` is the primary estimate for the next shedding step
 - dependable inverter capacity is used as the fallback and as the stability guard when the cap band is very narrow
-- the controller may restart only inverters that it previously stopped itself
-- manually stopped inverters are not treated as controller-owned
-- if an operator manually controls a controller-owned inverter, the cap controller pauses and requires re-enable after review
+- while plant-cap monitoring is enabled, all non-exempted inverters are treated as controller-controlled assets
+- the controller may restart any eligible fresh stopped non-exempt inverter; controller-owned stops are still tracked separately for release order and history
+- manual control for non-exempted inverters is blocked while plant cap is active; the operator is warned that the cap session is still ongoing and must disable or exempt first
 - a very small gap between `Upper Limit` and `Lower Limit` produces warnings because the controller may overshoot or fail to settle cleanly
 - hover descriptions are available on plant-cap controls, metrics, warnings, and preview fields
 - in `Remote` mode, the panel remains viewable and the requests are proxied to the gateway workstation

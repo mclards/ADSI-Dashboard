@@ -5406,6 +5406,40 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
   const ip = targetIp || "";
   const upstreamPayload = { inverter: invNum, unit: unitNum, value: valueNum };
   const action = getWriteActionLabel(valueNum);
+  if (
+    plantCapController &&
+    scopeNorm !== "plant-cap" &&
+    typeof plantCapController.getManualWriteGuard === "function"
+  ) {
+    const guard = plantCapController.getManualWriteGuard({
+      scope: scopeNorm,
+      inverter: invNum,
+      unit: unitNum,
+      value: valueNum,
+      operator: operatorName,
+    });
+    if (guard && guard.allowed === false) {
+      logControlAction({
+        operator: operatorName,
+        inverter: invNum,
+        node: unitNum || 0,
+        action,
+        scope: scopeNorm,
+        result: `blocked:${String(guard.reasonCode || "plant_cap_active")}`,
+        ip,
+        reason: reason || "",
+        details: String(guard.message || ""),
+      });
+      const err = new Error(
+        String(
+          guard.message ||
+            "Plant Output Cap is active; manual control is blocked for this inverter.",
+        ),
+      );
+      err.status = Number(guard.status || 409);
+      throw err;
+    }
+  }
   try {
     const data = await enqueueWriteCommand(
       scopeNorm,
@@ -5518,6 +5552,41 @@ async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) 
   const ip = targetIp || "";
   const upstreamPayload = { inverter: invNum, units: unitList, value: valueNum };
   const action = getWriteActionLabel(valueNum);
+  if (
+    plantCapController &&
+    scopeNorm !== "plant-cap" &&
+    typeof plantCapController.getManualWriteGuard === "function"
+  ) {
+    const guard = plantCapController.getManualWriteGuard({
+      scope: scopeNorm,
+      inverter: invNum,
+      units: unitList,
+      value: valueNum,
+      operator: operatorName,
+    });
+    if (guard && guard.allowed === false) {
+      unitList.forEach((unit) => {
+        logControlAction({
+          operator: operatorName,
+          inverter: invNum,
+          node: unit || 0,
+          action,
+          scope: scopeNorm,
+          result: `blocked:${String(guard.reasonCode || "plant_cap_active")}`,
+          ip,
+          details: String(guard.message || ""),
+        });
+      });
+      const err = new Error(
+        String(
+          guard.message ||
+            "Plant Output Cap is active; manual control is blocked for this inverter.",
+        ),
+      );
+      err.status = Number(guard.status || 409);
+      throw err;
+    }
+  }
 
   try {
     const data = await enqueueWriteCommand(

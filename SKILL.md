@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.23` in `package.json`
+- Current repo version baseline: `2.4.24` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -409,7 +409,8 @@ If a visible product rename affects install directory behavior, assess updater i
 - The current planner is whole-inverter sequential control only.
 - Use live inverter `Pac` as the primary shed estimate, and scale the `997.0 kW` rated plus `917.0 kW` dependable baselines by enabled node count for plant-cap planning and stability warnings.
 - Exempted inverter numbers must be excluded from automatic stop selection and controllable-step math.
-- Only controller-owned stopped inverters may be auto-started again. Manual operator stops remain manual.
+- While plant-cap monitoring is enabled, all non-exempted inverters are under controller authority. Manual control for non-exempted inverters must be blocked at the API layer with an operator-facing warning instead of pausing the controller after the fact.
+- Restart planning may use any fresh stopped non-exempt inverter; controller-owned stops are still tracked separately for release order and forecast history.
 - The plant-cap panel defaults collapsed behind the inverter-toolbar `Show Cap` button.
 - Plant-cap UI must use shared theme tokens in `dark`, `light`, and `classic`, and plant-cap controls, metrics, warnings, and preview headers should expose hover descriptions.
 - Plant-cap controller STOP/START commands are recorded in `audit_log` with `scope = "plant-cap"`. The forecast engine uses this scope to distinguish cap-dispatch curtailment from manual operator stops and faults; see Forecast Training Rules.
