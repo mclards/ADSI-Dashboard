@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 import requests
 from joblib import dump, load
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.preprocessing import RobustScaler
 
 # ============================================================================
@@ -213,6 +213,26 @@ REGIME_MODEL_MIN_DAYS = 6
 REGIME_MODEL_MIN_SAMPLES = 320
 REGIME_BLEND_BASE = 0.52
 REGIME_BLEND_MAX = 0.82
+WEATHER_BUCKET_RAIN_MM = 0.05
+WEATHER_BUCKET_RAIN_CLOUD = 82.0
+WEATHER_BUCKET_RAIN_CAPE = 650.0
+WEATHER_BUCKET_CLEAR_CLOUD = 25.0
+WEATHER_BUCKET_CLEAR_EDGE_CLOUD = 40.0
+WEATHER_BUCKET_CLEAR_KT = 0.70
+WEATHER_BUCKET_CLEAR_EDGE_KT = 0.55
+WEATHER_BUCKET_MIXED_KT = 0.40
+WEATHER_BUCKET_MIXED_CLOUD = 70.0
+WEATHER_BUCKET_MIXED_VOL_CLOUD = 80.0
+WEATHER_BUCKET_CLEAR_DRAD = 90.0
+WEATHER_BUCKET_MIXED_VOL_DRAD = 120.0
+WEATHER_BUCKETS = (
+    "clear_stable",
+    "clear_edge",
+    "mixed_stable",
+    "mixed_volatile",
+    "overcast",
+    "rainy",
+)
 WEATHER_BIAS_LOOKBACK_DAYS = 21
 WEATHER_BIAS_MIN_MATCHES = 4
 WEATHER_BIAS_TOP_K = 6
@@ -251,6 +271,22 @@ ML_BLEND_ALPHA = 0.45
 ERR_MEMORY_DAYS   = 7      # days used for bias correction
 ERR_MEMORY_DECAY  = 0.72   # older day weight decay (geometric series)
 ERROR_ALPHA       = 0.28   # fraction of error correction to apply
+ERROR_CLASS_NAMES = (
+    "strong_over",
+    "mild_over",
+    "neutral",
+    "mild_under",
+    "strong_under",
+)
+ERROR_CLASS_NEUTRAL_IDX = 2
+ERROR_CLASS_MILD_THRESHOLD = 0.04
+ERROR_CLASS_STRONG_THRESHOLD = 0.14
+ERROR_CLASS_BLEND_MIN = 0.10
+ERROR_CLASS_BLEND_MAX = 0.35
+ERROR_CLASS_BLEND_CONFIDENCE_FLOOR = 0.40
+ERROR_CLASS_BIAS_CAP_FRAC = 0.18
+ERROR_CLASS_CONF_BAND_ADD_MAX = 0.14
+ERROR_CLASS_SEVERE_BAND_ADD_MAX = 0.08
 
 # Anomaly rejection thresholds
 ANOM_MIN_CF    = 0.02   # capacity factor â€“ days below this are bad
@@ -1392,6 +1428,90 @@ def classify_hour_regime(
     if kt_mean >= 0.42 and cloud_mean < 72.0:
         return "mixed"
     return "overcast"
+
+
+def classify_slot_weather_buckets(w5: pd.DataFrame, day: str) -> np.ndarray:
+    """Classify each 5-minute slot into a weather bucket for error analysis."""
+    def col(name: str, default: float = 0.0) -> np.ndarray:
+        if name not in w5.columns:
+            return np.full(SLOTS_DAY, default, dtype=float)
+        arr = pd.to_numeric(w5[name], errors="coerce").fillna(default).values
+        if len(arr) < SLOTS_DAY:
+            arr = np.concatenate([arr, np.full(SLOTS_DAY - len(arr), default, dtype=float)])
+        return arr[:SLOTS_DAY].astype(float)
+
+    rad = np.clip(col("rad", 0.0), 0.0, None)
+    cloud = np.clip(col("cloud", 0.0), 0.0, 100.0)
+    precip = np.clip(col("precip", 0.0), 0.0, None)
+    cape = np.clip(col("cape", 0.0), 0.0, None)
+    rh = np.clip(col("rh", 0.0), 0.0, 100.0)
+    csi = clear_sky_radiation(day, rh)
+    kt = np.where(csi > 10.0, rad / np.maximum(csi, 1.0), 0.0)
+    kt = np.clip(kt, 0.0, 1.2)
+    drad = np.abs(np.diff(rad, prepend=rad[0]))
+
+    out = np.full(SLOTS_DAY, "offsolar", dtype=object)
+    for idx in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+        if precip[idx] > WEATHER_BUCKET_RAIN_MM or (cape[idx] >= WEATHER_BUCKET_RAIN_CAPE and cloud[idx] >= WEATHER_BUCKET_RAIN_CLOUD):
+            out[idx] = "rainy"
+        elif cloud[idx] < WEATHER_BUCKET_CLEAR_CLOUD and kt[idx] >= WEATHER_BUCKET_CLEAR_KT and drad[idx] < WEATHER_BUCKET_CLEAR_DRAD:
+            out[idx] = "clear_stable"
+        elif cloud[idx] < WEATHER_BUCKET_CLEAR_EDGE_CLOUD and kt[idx] >= WEATHER_BUCKET_CLEAR_EDGE_KT and drad[idx] >= WEATHER_BUCKET_CLEAR_DRAD:
+            out[idx] = "clear_edge"
+        elif (
+            cloud[idx] >= WEATHER_BUCKET_CLEAR_CLOUD
+            and cloud[idx] < WEATHER_BUCKET_MIXED_CLOUD
+            and kt[idx] >= WEATHER_BUCKET_MIXED_KT
+            and drad[idx] < WEATHER_BUCKET_MIXED_VOL_DRAD
+            and precip[idx] <= WEATHER_BUCKET_RAIN_MM
+        ):
+            out[idx] = "mixed_stable"
+        elif (
+            cloud[idx] >= WEATHER_BUCKET_CLEAR_CLOUD
+            and cloud[idx] < WEATHER_BUCKET_MIXED_VOL_CLOUD
+            and drad[idx] >= WEATHER_BUCKET_MIXED_VOL_DRAD
+            and precip[idx] <= WEATHER_BUCKET_RAIN_MM
+        ):
+            out[idx] = "mixed_volatile"
+        else:
+            out[idx] = "overcast"
+    return out
+
+
+def classify_residual_error_classes(residual: np.ndarray, cap_slot: float | None = None) -> np.ndarray:
+    cap = max(float(cap_slot if cap_slot is not None else slot_cap_kwh(False)), 1.0)
+    rn = np.asarray(residual, dtype=float) / cap
+    out = np.full(rn.shape, ERROR_CLASS_NEUTRAL_IDX, dtype=int)
+    out[rn <= -ERROR_CLASS_STRONG_THRESHOLD] = 0
+    out[(rn > -ERROR_CLASS_STRONG_THRESHOLD) & (rn <= -ERROR_CLASS_MILD_THRESHOLD)] = 1
+    out[(rn >= ERROR_CLASS_MILD_THRESHOLD) & (rn < ERROR_CLASS_STRONG_THRESHOLD)] = 3
+    out[rn >= ERROR_CLASS_STRONG_THRESHOLD] = 4
+    return out
+
+
+def _error_class_name(label: int) -> str:
+    idx = int(np.clip(int(label), 0, len(ERROR_CLASS_NAMES) - 1))
+    return ERROR_CLASS_NAMES[idx]
+
+
+def _error_class_sign(label: np.ndarray | int) -> np.ndarray:
+    arr = np.asarray(label, dtype=int)
+    out = np.zeros(arr.shape, dtype=int)
+    out[arr < ERROR_CLASS_NEUTRAL_IDX] = -1
+    out[arr > ERROR_CLASS_NEUTRAL_IDX] = 1
+    return out
+
+
+def _aggregate_scalar_series(values: list[float]) -> dict:
+    if not values:
+        return {"count": 0, "mean": 0.0, "std": 0.0, "mae": 0.0}
+    arr = np.asarray(values, dtype=float)
+    return {
+        "count": int(arr.size),
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "mae": float(np.mean(np.abs(arr))),
+    }
 
 
 def hour_weather_signature(day: str, w5: pd.DataFrame, hour: int, csi_arr: np.ndarray | None = None) -> dict:
@@ -2640,11 +2760,15 @@ def solcast_prior_from_snapshot(
     solar_weight = 0.58 + 0.42 * np.sin(np.pi * solar_rel)
     solar_weight = np.clip(solar_weight, 0.45, 1.0)
     base_by_regime = {
-        "clear": 0.34,
-        "mixed": 0.52,
-        "overcast": 0.58,
-        "rainy": 0.46,
-    }.get(regime, 0.44)
+        "clear": 0.54,
+        "mixed": 0.50,
+        "overcast": 0.56,
+        "rainy": 0.44,
+    }.get(regime, 0.46)
+    if regime == "clear":
+        clear_rel = np.clip((reliability_score - 0.60) / 0.30, 0.0, 1.0)
+        clear_cov = np.clip((coverage_ratio - 0.72) / 0.28, 0.0, 1.0)
+        base_by_regime = max(base_by_regime, 0.58 + 0.16 * clear_rel + 0.08 * clear_cov)
     primary_mode = bool(
         coverage_ratio >= SOLCAST_PRIMARY_COVERAGE_MIN
         and reliability_score >= SOLCAST_PRIMARY_RELIABILITY_MIN
@@ -4117,6 +4241,22 @@ def _make_residual_regressor() -> GradientBoostingRegressor:
     )
 
 
+def _make_error_classifier() -> GradientBoostingClassifier:
+    return GradientBoostingClassifier(
+        n_estimators=320,
+        learning_rate=0.04,
+        max_depth=3,
+        min_samples_split=18,
+        min_samples_leaf=10,
+        subsample=0.8,
+        max_features=0.75,
+        random_state=42,
+        validation_fraction=0.1,
+        n_iter_no_change=25,
+        tol=1e-4,
+    )
+
+
 def fit_residual_model(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -4136,6 +4276,106 @@ def fit_residual_model(
     return model, scaler, meta
 
 
+def fit_error_classifier(
+    X: pd.DataFrame,
+    residual: np.ndarray,
+    sample_weight: np.ndarray,
+) -> tuple[GradientBoostingClassifier, RobustScaler, dict] | tuple[None, None, None]:
+    labels = classify_residual_error_classes(residual)
+    present = sorted({int(v) for v in np.asarray(labels, dtype=int)})
+    if len(present) < 2:
+        return None, None, None
+
+    scaler = RobustScaler()
+    X_sc = scaler.fit_transform(X)
+    model = _make_error_classifier()
+    model.fit(X_sc, labels, sample_weight=sample_weight)
+    centroids = {}
+    label_arr = np.asarray(labels, dtype=int)
+    residual_arr = np.asarray(residual, dtype=float)
+    weight_arr = np.asarray(sample_weight, dtype=float)
+    class_counts = {}
+    for label in present:
+        mask = label_arr == label
+        class_counts[_error_class_name(label)] = int(np.count_nonzero(mask))
+        if not np.any(mask):
+            continue
+        centroids[str(label)] = float(np.average(residual_arr[mask], weights=weight_arr[mask]))
+    meta = {
+        "sample_count": int(len(residual_arr)),
+        "feature_count": int(X.shape[1]),
+        "feature_names": list(X.columns),
+        "estimators_used": int(getattr(model, "n_estimators_", model.n_estimators)),
+        "classes": list(map(int, getattr(model, "classes_", []))),
+        "class_counts": class_counts,
+        "centroids_kwh": centroids,
+        "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
+    }
+    return model, scaler, meta
+
+
+def build_weather_error_profiles(history_days: list[dict]) -> dict:
+    """Aggregate residual behavior by day regime and slot weather bucket."""
+    pair_values: dict[tuple[str, str], list[float]] = {}
+    regime_values: dict[str, list[float]] = {}
+    bucket_values: dict[str, list[float]] = {}
+    cap_slot = max(slot_cap_kwh(False), 1.0)
+    solar_mask = (
+        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+        & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+    )
+
+    for sample in history_days:
+        day = str(sample["day"])
+        w5 = sample["weather"]
+        feat = build_features(w5, day, sample.get("solcast_prior"))
+        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
+        hybrid = np.asarray(sample.get("hybrid_baseline", sample["baseline"]), dtype=float).copy()
+        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+        cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+        actual[cap_dispatch_mask] = hybrid[cap_dispatch_mask]
+        usable_mask = (
+            solar_mask
+            & actual_present
+            & (~manual_constraint_mask)
+            & (~curtailed_mask(actual, hybrid))
+            & (feat["rad"].values >= RAD_MIN_WM2)
+            & (hybrid > 0.0)
+        )
+        if not np.any(usable_mask):
+            continue
+        residual = np.clip(actual - hybrid, -500.0, 500.0)
+        bucket_labels = classify_slot_weather_buckets(w5, day)
+        regime = str(sample.get("day_regime") or classify_day_regime(sample.get("stats") or analyse_weather_day(day, w5)))
+        for slot in np.flatnonzero(usable_mask):
+            bucket = str(bucket_labels[slot] or "")
+            if not bucket or bucket == "offsolar":
+                continue
+            value = float(residual[slot])
+            pair_values.setdefault((regime, bucket), []).append(value)
+            regime_values.setdefault(regime, []).append(value)
+            bucket_values.setdefault(bucket, []).append(value)
+
+    return {
+        "created_ts": int(time.time()),
+        "class_names": list(ERROR_CLASS_NAMES),
+        "cap_slot_kwh": float(cap_slot),
+        "pairs": {
+            f"{regime}:{bucket}": _aggregate_scalar_series(values)
+            for (regime, bucket), values in sorted(pair_values.items())
+        },
+        "regimes": {
+            regime: _aggregate_scalar_series(values)
+            for regime, values in sorted(regime_values.items())
+        },
+        "buckets": {
+            bucket: _aggregate_scalar_series(values)
+            for bucket, values in sorted(bucket_values.items())
+        },
+    }
+
+
 def build_training_state(today: date) -> dict | None:
     """Build the in-memory model/artifact state for a given training cut-off date."""
     solcast_reliability = build_solcast_reliability_artifact(today)
@@ -4153,6 +4393,7 @@ def build_training_state(today: date) -> dict | None:
         return None
 
     global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
+    error_classifier_model, error_classifier_scaler, error_classifier_meta = fit_error_classifier(X, y, sample_weight)
     bundle = {
         "created_ts": int(time.time()),
         "training_basis": "actual archived weather + cleaned actual generation (+ Solcast prior when available)",
@@ -4164,7 +4405,19 @@ def build_training_state(today: date) -> dict | None:
             "meta": dict(global_meta),
         },
         "regimes": {},
+        "error_classifier": {
+            "class_names": list(ERROR_CLASS_NAMES),
+            "global": {},
+            "regimes": {},
+            "weather_profiles": build_weather_error_profiles(history_days),
+        },
     }
+    if error_classifier_model is not None and error_classifier_scaler is not None and error_classifier_meta is not None:
+        bundle["error_classifier"]["global"] = {
+            "model": error_classifier_model,
+            "scaler": error_classifier_scaler,
+            "meta": dict(error_classifier_meta),
+        }
 
     for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
         regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
@@ -4192,6 +4445,14 @@ def build_training_state(today: date) -> dict | None:
             int(regime_meta.get("sample_count", 0)),
             f"{float(regime_meta['train_score']):.4f}" if regime_meta.get("train_score") is not None else "n/a",
         )
+        cls_model, cls_scaler, cls_meta = fit_error_classifier(X_reg, y_reg, w_reg)
+        if cls_model is not None and cls_scaler is not None and cls_meta is not None:
+            cls_meta["day_count"] = int(regime_days)
+            bundle["error_classifier"]["regimes"][regime] = {
+                "model": cls_model,
+                "scaler": cls_scaler,
+                "meta": cls_meta,
+            }
 
     return {
         "created_ts": int(time.time()),
@@ -4241,10 +4502,38 @@ def load_model_bundle() -> dict | None:
                     },
                 },
                 "regimes": {},
+                "error_classifier": {
+                    "class_names": list(ERROR_CLASS_NAMES),
+                    "global": {},
+                    "regimes": {},
+                    "weather_profiles": {},
+                },
             }
         except Exception as e:
             log.warning("Legacy model load failed: %s", e)
     return None
+
+
+def _align_bundle_features(
+    block: dict,
+    bundle_feature_cols: list[str] | None,
+    X_pred: pd.DataFrame,
+) -> pd.DataFrame:
+    expected_cols = list((block.get("meta") or {}).get("feature_names") or bundle_feature_cols or [])
+    if expected_cols:
+        X_aligned = pd.DataFrame(index=X_pred.index)
+        for col in expected_cols:
+            if col in X_pred.columns:
+                X_aligned[col] = pd.to_numeric(X_pred[col], errors="coerce").fillna(0.0)
+            else:
+                X_aligned[col] = 0.0
+        return X_aligned
+    scaler = block.get("scaler")
+    if hasattr(scaler, "n_features_in_") and int(scaler.n_features_in_) != int(X_pred.shape[1]):
+        raise ValueError(
+            f"Feature count mismatch for model bundle (expected {int(scaler.n_features_in_)}, got {int(X_pred.shape[1])})"
+        )
+    return X_pred
 
 
 def predict_residual_with_bundle(
@@ -4262,19 +4551,7 @@ def predict_residual_with_bundle(
     if global_model is None or global_scaler is None:
         return np.zeros(len(X_pred), dtype=float), {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
 
-    expected_cols = list((global_block.get("meta") or {}).get("feature_names") or bundle.get("feature_cols") or [])
-    if expected_cols:
-        X_aligned = pd.DataFrame(index=X_pred.index)
-        for col in expected_cols:
-            if col in X_pred.columns:
-                X_aligned[col] = pd.to_numeric(X_pred[col], errors="coerce").fillna(0.0)
-            else:
-                X_aligned[col] = 0.0
-        X_pred = X_aligned
-    elif hasattr(global_scaler, "n_features_in_") and int(global_scaler.n_features_in_) != int(X_pred.shape[1]):
-        raise ValueError(
-            f"Feature count mismatch for model bundle (expected {int(global_scaler.n_features_in_)}, got {int(X_pred.shape[1])})"
-        )
+    X_pred = _align_bundle_features(global_block, list(bundle.get("feature_cols") or []), X_pred)
 
     X_global = global_scaler.transform(X_pred)
     global_pred = np.asarray(global_model.predict(X_global), dtype=float)
@@ -4300,6 +4577,111 @@ def predict_residual_with_bundle(
     }
 
 
+def _classifier_probabilities_to_full_vector(probs: np.ndarray, classes: list[int]) -> np.ndarray:
+    out = np.zeros((len(probs), len(ERROR_CLASS_NAMES)), dtype=float)
+    for idx, class_id in enumerate(classes):
+        class_idx = int(class_id)
+        if 0 <= class_idx < len(ERROR_CLASS_NAMES):
+            out[:, class_idx] = np.asarray(probs[:, idx], dtype=float)
+    row_sum = out.sum(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.divide(out, np.maximum(row_sum, 1e-9), out=np.zeros_like(out), where=row_sum > 0)
+    return out
+
+
+def _expected_bias_from_classifier_probs(prob_matrix: np.ndarray, centroids: dict) -> np.ndarray:
+    expected = np.zeros(prob_matrix.shape[0], dtype=float)
+    for class_idx, class_name in enumerate(ERROR_CLASS_NAMES):
+        centroid = float(centroids.get(str(class_idx), 0.0))
+        if centroid == 0.0:
+            continue
+        expected += np.asarray(prob_matrix[:, class_idx], dtype=float) * centroid
+    return expected
+
+
+def predict_error_classifier_with_bundle(
+    bundle: dict | None,
+    X_pred: pd.DataFrame,
+    target_regime: str,
+    regime_confidence: float = 1.0,
+) -> tuple[np.ndarray, dict]:
+    default_meta = {
+        "available": False,
+        "target_regime": target_regime,
+        "used_regime_model": False,
+        "blend": 0.0,
+        "probabilities": np.zeros((len(X_pred), len(ERROR_CLASS_NAMES)), dtype=float),
+        "predicted_labels": np.full(len(X_pred), ERROR_CLASS_NEUTRAL_IDX, dtype=int),
+        "confidence": np.zeros(len(X_pred), dtype=float),
+        "severe_probability": np.zeros(len(X_pred), dtype=float),
+        "weather_profiles": {},
+    }
+    if not bundle or not isinstance(bundle, dict):
+        return np.zeros(len(X_pred), dtype=float), default_meta
+
+    classifier_block = bundle.get("error_classifier") or {}
+    global_block = classifier_block.get("global") or {}
+    global_model = global_block.get("model")
+    global_scaler = global_block.get("scaler")
+    if global_model is None or global_scaler is None:
+        return np.zeros(len(X_pred), dtype=float), default_meta
+
+    X_pred = _align_bundle_features(global_block, list(bundle.get("feature_cols") or []), X_pred)
+    X_global = global_scaler.transform(X_pred)
+    global_probs = _classifier_probabilities_to_full_vector(
+        np.asarray(global_model.predict_proba(X_global), dtype=float),
+        list(map(int, getattr(global_model, "classes_", []))),
+    )
+    global_centroids = dict((global_block.get("meta") or {}).get("centroids_kwh") or {})
+    global_bias = _expected_bias_from_classifier_probs(global_probs, global_centroids)
+
+    regime_block = ((classifier_block.get("regimes") or {}).get(target_regime) or {})
+    regime_model = regime_block.get("model")
+    regime_scaler = regime_block.get("scaler")
+    if regime_model is None or regime_scaler is None:
+        probs = global_probs
+        expected_bias = global_bias
+        used_regime_model = False
+        blend = 0.0
+        regime_days = 0
+        regime_samples = 0
+    else:
+        X_regime = regime_scaler.transform(X_pred)
+        regime_probs = _classifier_probabilities_to_full_vector(
+            np.asarray(regime_model.predict_proba(X_regime), dtype=float),
+            list(map(int, getattr(regime_model, "classes_", []))),
+        )
+        regime_centroids = dict((regime_block.get("meta") or {}).get("centroids_kwh") or {})
+        regime_bias = _expected_bias_from_classifier_probs(regime_probs, regime_centroids)
+        regime_meta = regime_block.get("meta") or {}
+        regime_days = int(regime_meta.get("day_count", 0))
+        regime_samples = int(regime_meta.get("sample_count", 0))
+        blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
+        blend = min(blend, REGIME_BLEND_MAX)
+        blend *= float(np.clip(regime_confidence, 0.60, 1.0))
+        probs = ((1.0 - blend) * global_probs) + (blend * regime_probs)
+        expected_bias = ((1.0 - blend) * global_bias) + (blend * regime_bias)
+        used_regime_model = True
+
+    predicted_labels = np.argmax(probs, axis=1).astype(int)
+    confidence = np.max(probs, axis=1).astype(float)
+    severe_probability = (probs[:, 0] + probs[:, -1]).astype(float)
+    meta = {
+        "available": True,
+        "target_regime": target_regime,
+        "used_regime_model": used_regime_model,
+        "blend": float(blend),
+        "regime_days": int(regime_days),
+        "regime_samples": int(regime_samples),
+        "probabilities": probs,
+        "predicted_labels": predicted_labels,
+        "confidence": confidence,
+        "severe_probability": severe_probability,
+        "weather_profiles": classifier_block.get("weather_profiles") or {},
+    }
+    return expected_bias, meta
+
+
 def train_model(today: date) -> bool:
     """Train (or retrain) the residual correction model."""
     state = build_training_state(today)
@@ -4317,11 +4699,14 @@ def train_model(today: date) -> bool:
     save_forecast_artifacts(state.get("forecast_artifacts") or {})
     save_weather_bias_artifact(state.get("weather_bias") or {})
     save_solcast_reliability_artifact(state.get("solcast_reliability"))
+    classifier_block = bundle.get("error_classifier") or {}
     log.info(
-        "Model trained - global_estimators=%d global_train_score=%s regime_models=%d solcast_reliability_days=%d",
+        "Model trained - global_estimators=%d global_train_score=%s regime_models=%d classifier_regime_models=%d classifier_global=%s solcast_reliability_days=%d",
         int(global_meta.get("estimators_used", 0)),
         f"{float(global_meta['train_score']):.4f}" if global_meta.get("train_score") is not None else "n/a",
         int(len(bundle["regimes"])),
+        int(len(classifier_block.get("regimes") or {})),
+        bool((classifier_block.get("global") or {}).get("model")),
         int(((state.get("solcast_reliability") or {}).get("day_count", 0))),
     )
     return True
@@ -4421,6 +4806,7 @@ def confidence_bands(
     w5: pd.DataFrame,
     day: str,
     regime_confidence: float = 1.0,
+    error_class_meta: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Per-slot confidence bands based on:
@@ -4433,6 +4819,18 @@ def confidence_bands(
     lo    = np.zeros(SLOTS_DAY)
     hi    = np.zeros(SLOTS_DAY)
     confidence_penalty = float(np.clip(1.0 - float(regime_confidence), 0.0, 0.4))
+    if error_class_meta:
+        class_confidence = np.asarray(error_class_meta.get("confidence"), dtype=float).reshape(-1)
+        severe_probability = np.asarray(error_class_meta.get("severe_probability"), dtype=float).reshape(-1)
+    else:
+        class_confidence = np.ones(SLOTS_DAY, dtype=float)
+        severe_probability = np.zeros(SLOTS_DAY, dtype=float)
+    if class_confidence.size < SLOTS_DAY:
+        class_confidence = np.pad(class_confidence, (0, SLOTS_DAY - class_confidence.size), constant_values=1.0)
+    class_confidence = class_confidence[:SLOTS_DAY]
+    if severe_probability.size < SLOTS_DAY:
+        severe_probability = np.pad(severe_probability, (0, SLOTS_DAY - severe_probability.size), constant_values=0.0)
+    severe_probability = severe_probability[:SLOTS_DAY]
 
     geo   = solar_geometry(day)
     solar_prog = np.clip(
@@ -4449,7 +4847,9 @@ def confidence_bands(
         cloud_i  = w5["cloud"].values[i]
         # Additional uncertainty from cloud layer presence
         cloud_unc = CONF_CLOUD_ADD * np.clip((cloud_i - 30) / 70.0, 0, 1)
-        conf      = (CONF_CLEAR_BASE + cloud_unc + confidence_penalty * 0.12) * tod_factor[i]
+        classifier_unc = ERROR_CLASS_CONF_BAND_ADD_MAX * np.clip(1.0 - class_confidence[i], 0.0, 1.0)
+        severe_unc = ERROR_CLASS_SEVERE_BAND_ADD_MAX * np.clip(severe_probability[i], 0.0, 1.0)
+        conf      = (CONF_CLEAR_BASE + cloud_unc + confidence_penalty * 0.12 + classifier_unc + severe_unc) * tod_factor[i]
         conf      = min(conf, 0.40)   # cap at Â±40%
 
         lo[i] = v * (1.0 - conf)
@@ -4545,6 +4945,152 @@ def compute_forecast_metrics(
     }
 
 
+def compute_bucketed_forecast_metrics(
+    actual: np.ndarray | None,
+    forecast: np.ndarray | None,
+    bucket_labels: np.ndarray | list[str] | None,
+    actual_present: np.ndarray | None = None,
+    forecast_present: np.ndarray | None = None,
+    exclude_mask: np.ndarray | None = None,
+) -> dict[str, dict]:
+    if bucket_labels is None:
+        return {}
+    labels = np.asarray(bucket_labels, dtype=object).reshape(-1)
+    if labels.size < SLOTS_DAY:
+        return {}
+    if exclude_mask is None:
+        base_exclude = np.zeros(SLOTS_DAY, dtype=bool)
+    else:
+        base_exclude = np.asarray(exclude_mask, dtype=bool)
+        if base_exclude.size < SLOTS_DAY:
+            return {}
+    out = {}
+    bucket_names = sorted({
+        str(label)
+        for label in labels[SOLAR_START_SLOT:SOLAR_END_SLOT]
+        if str(label) and str(label) != "offsolar"
+    })
+    for bucket in bucket_names:
+        bucket_exclude = np.asarray(base_exclude, dtype=bool).copy()
+        bucket_exclude |= labels[:SLOTS_DAY] != bucket
+        metrics = compute_forecast_metrics(
+            actual,
+            forecast,
+            actual_present=actual_present,
+            forecast_present=forecast_present,
+            exclude_mask=bucket_exclude,
+        )
+        if metrics and int(metrics.get("usable_slot_count", 0)) > 0:
+            out[bucket] = metrics
+    return out
+
+
+def compute_error_class_metrics(
+    actual: np.ndarray | None,
+    hybrid_baseline: np.ndarray | None,
+    predicted_labels: np.ndarray | list[int] | None,
+    class_confidence: np.ndarray | list[float] | None = None,
+    actual_present: np.ndarray | None = None,
+    exclude_mask: np.ndarray | None = None,
+) -> dict | None:
+    if actual is None or hybrid_baseline is None or predicted_labels is None:
+        return None
+    actual_arr = np.asarray(actual, dtype=float).reshape(-1)
+    hybrid_arr = np.asarray(hybrid_baseline, dtype=float).reshape(-1)
+    pred_arr = np.asarray(predicted_labels, dtype=int).reshape(-1)
+    if actual_arr.size < SLOTS_DAY or hybrid_arr.size < SLOTS_DAY or pred_arr.size < SLOTS_DAY:
+        return None
+    if actual_present is None:
+        actual_present_arr = np.ones(SLOTS_DAY, dtype=bool)
+    else:
+        actual_present_arr = np.asarray(actual_present, dtype=bool)
+        if actual_present_arr.size < SLOTS_DAY:
+            return None
+    if exclude_mask is None:
+        exclude_arr = np.zeros(SLOTS_DAY, dtype=bool)
+    else:
+        exclude_arr = np.asarray(exclude_mask, dtype=bool)
+        if exclude_arr.size < SLOTS_DAY:
+            return None
+    if class_confidence is None:
+        conf_arr = np.zeros(SLOTS_DAY, dtype=float)
+    else:
+        conf_arr = np.asarray(class_confidence, dtype=float).reshape(-1)
+        if conf_arr.size < SLOTS_DAY:
+            return None
+
+    usable_mask = (
+        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+        & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+        & actual_present_arr
+        & (~exclude_arr)
+    )
+    if not np.any(usable_mask):
+        return None
+
+    actual_labels = classify_residual_error_classes(actual_arr[:SLOTS_DAY] - hybrid_arr[:SLOTS_DAY])
+    pred_sign = _error_class_sign(pred_arr[:SLOTS_DAY])
+    actual_sign = _error_class_sign(actual_labels)
+    sign_hit = float(np.mean(pred_sign[usable_mask] == actual_sign[usable_mask]))
+    exact_hit = float(np.mean(pred_arr[:SLOTS_DAY][usable_mask] == actual_labels[usable_mask]))
+    severe_actual_mask = usable_mask & ((actual_labels == 0) | (actual_labels == 4))
+    severe_hit = None
+    if np.any(severe_actual_mask):
+        severe_hit = float(
+            np.mean(
+                (pred_arr[:SLOTS_DAY][severe_actual_mask] == actual_labels[severe_actual_mask])
+                | (
+                    (_error_class_sign(pred_arr[:SLOTS_DAY][severe_actual_mask]) == _error_class_sign(actual_labels[severe_actual_mask]))
+                    & ((pred_arr[:SLOTS_DAY][severe_actual_mask] == 0) | (pred_arr[:SLOTS_DAY][severe_actual_mask] == 4))
+                )
+            )
+        )
+    return {
+        "usable_slot_count": int(np.count_nonzero(usable_mask)),
+        "sign_hit_rate": sign_hit,
+        "exact_hit_rate": exact_hit,
+        "severe_hit_rate": severe_hit,
+        "mean_confidence": float(np.mean(conf_arr[:SLOTS_DAY][usable_mask])) if np.any(usable_mask) else 0.0,
+    }
+
+
+def summarize_value_by_bucket(values: np.ndarray | None, bucket_labels: np.ndarray | list[str] | None) -> dict[str, dict]:
+    if values is None or bucket_labels is None:
+        return {}
+    value_arr = np.asarray(values, dtype=float).reshape(-1)
+    labels = np.asarray(bucket_labels, dtype=object).reshape(-1)
+    if value_arr.size < SLOTS_DAY or labels.size < SLOTS_DAY:
+        return {}
+    out = {}
+    solar_mask = (
+        (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+        & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+    )
+    for bucket in sorted({
+        str(label)
+        for label in labels[SOLAR_START_SLOT:SOLAR_END_SLOT]
+        if str(label) and str(label) != "offsolar"
+    }):
+        slot_mask = solar_mask & (labels[:SLOTS_DAY] == bucket)
+        if not np.any(slot_mask):
+            continue
+        out[bucket] = {
+            "slot_count": int(np.count_nonzero(slot_mask)),
+            "total_kwh": float(np.sum(value_arr[slot_mask])),
+            "mean_kwh": float(np.mean(value_arr[slot_mask])),
+        }
+    return out
+
+
+def _format_bucket_metric_summary(bucket_metrics: dict[str, dict] | None) -> str:
+    if not bucket_metrics:
+        return "n/a"
+    parts = []
+    for bucket, metrics in sorted(bucket_metrics.items()):
+        parts.append(f"{bucket}:WAPE={float(metrics.get('wape_pct', 0.0)):.1f}%")
+    return ", ".join(parts) if parts else "n/a"
+
+
 def _format_minutes(value: int | None) -> str:
     if value is None:
         return "n/a"
@@ -4600,6 +5146,45 @@ def forecast_qa(today: date) -> None:
     else:
         skill = float("nan")
 
+    bucket_labels = None
+    classifier_metrics = None
+    snapshot = load_forecast_weather_snapshot(yesterday)
+    snapshot_meta = snapshot.get("meta") if isinstance(snapshot, dict) else {}
+    error_debug = snapshot_meta.get("error_class_debug") if isinstance(snapshot_meta, dict) else {}
+    if isinstance(error_debug, dict):
+        debug_buckets = error_debug.get("slot_weather_buckets")
+        if isinstance(debug_buckets, list) and len(debug_buckets) >= SLOTS_DAY:
+            bucket_labels = np.asarray(debug_buckets[:SLOTS_DAY], dtype=object)
+        hybrid_debug = error_debug.get("hybrid_baseline_kwh")
+        predicted_debug = error_debug.get("predicted_labels")
+        confidence_debug = error_debug.get("class_confidence")
+        if (
+            isinstance(hybrid_debug, list)
+            and len(hybrid_debug) >= SLOTS_DAY
+            and isinstance(predicted_debug, list)
+            and len(predicted_debug) >= SLOTS_DAY
+        ):
+            classifier_metrics = compute_error_class_metrics(
+                actual,
+                np.asarray(hybrid_debug[:SLOTS_DAY], dtype=float),
+                np.asarray(predicted_debug[:SLOTS_DAY], dtype=int),
+                class_confidence=np.asarray(confidence_debug[:SLOTS_DAY], dtype=float) if isinstance(confidence_debug, list) and len(confidence_debug) >= SLOTS_DAY else None,
+                actual_present=actual_present,
+                exclude_mask=exclude_mask,
+            )
+    if bucket_labels is None:
+        weather_hourly = load_forecast_weather_for_day(yesterday)
+        if weather_hourly is not None and not weather_hourly.empty:
+            bucket_labels = classify_slot_weather_buckets(interpolate_5min(weather_hourly, yesterday), yesterday)
+    bucket_metrics = compute_bucketed_forecast_metrics(
+        actual,
+        fc,
+        bucket_labels,
+        actual_present=actual_present,
+        forecast_present=fc_present,
+        exclude_mask=exclude_mask,
+    ) if bucket_labels is not None else {}
+
     log.info(
         "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
         yesterday,
@@ -4614,6 +5199,16 @@ def forecast_qa(today: date) -> None:
         _format_minutes(metrics["last_active_error_min"]),
         skill,
     )
+    log.info("QA weather buckets [%s] %s", yesterday, _format_bucket_metric_summary(bucket_metrics))
+    if classifier_metrics is not None:
+        log.info(
+            "QA classifier [%s] sign_hit=%.3f exact_hit=%.3f severe_hit=%s mean_conf=%.2f",
+            yesterday,
+            float(classifier_metrics.get("sign_hit_rate", 0.0)),
+            float(classifier_metrics.get("exact_hit_rate", 0.0)),
+            f"{float(classifier_metrics['severe_hit_rate']):.3f}" if classifier_metrics.get("severe_hit_rate") is not None else "n/a",
+            float(classifier_metrics.get("mean_confidence", 0.0)),
+        )
 
 
 # ============================================================================
@@ -5060,15 +5655,38 @@ def run_dayahead(
     )
 
     # 3. ML residual correction
+    feat = build_features(w5, target_s, solcast_prior)
+    X_pred = feat[FEATURE_COLS]
+    slot_weather_buckets = classify_slot_weather_buckets(w5, target_s)
+    blend = residual_blend_vector(w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
+    solcast_residual_scale = solcast_residual_damp_factor(solcast_meta)
+    clear_slot_mask = np.isin(slot_weather_buckets, np.asarray(["clear_stable", "clear_edge"], dtype=object))
+    clear_solcast_priority = 1.0
+    if bool(solcast_meta.get("used_solcast")) and target_regime == "clear":
+        clear_solcast_priority = float(np.clip(0.72 + 0.28 * float(solcast_meta.get("mean_blend", 0.0)), 0.72, 1.0))
+
     ml_residual = np.zeros(SLOTS_DAY)
+    error_class_term = np.zeros(SLOTS_DAY)
+    error_class_meta = {
+        "available": False,
+        "target_regime": target_regime,
+        "used_regime_model": False,
+        "blend": 0.0,
+        "confidence": np.ones(SLOTS_DAY, dtype=float),
+        "severe_probability": np.zeros(SLOTS_DAY, dtype=float),
+        "predicted_labels": np.full(SLOTS_DAY, ERROR_CLASS_NEUTRAL_IDX, dtype=int),
+        "probabilities": np.zeros((SLOTS_DAY, len(ERROR_CLASS_NAMES)), dtype=float),
+        "slot_weather_buckets": slot_weather_buckets.copy(),
+        "weather_profiles": {},
+        "class_blend": np.zeros(SLOTS_DAY, dtype=float),
+        "class_bias_kwh": np.zeros(SLOTS_DAY, dtype=float),
+    }
     if runtime_state is not None and "model_bundle" in runtime_state:
         model_bundle = runtime_state.get("model_bundle")
     else:
         model_bundle = load_model_bundle()
     if model_bundle:
         try:
-            feat   = build_features(w5, target_s, solcast_prior)
-            X_pred = feat[FEATURE_COLS]
             raw_residual, model_meta = predict_residual_with_bundle(
                 model_bundle,
                 X_pred,
@@ -5088,7 +5706,6 @@ def run_dayahead(
             ml_residual = np.clip(ml_residual, -cap_kwh * 0.5, cap_kwh * 0.5)
 
             # Weather-adaptive blending: trust ML less in volatile/rainy slots.
-            blend = residual_blend_vector(w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
             ml_residual = ml_residual * blend
             ml_residual = (
                 pd.Series(ml_residual)
@@ -5096,9 +5713,10 @@ def run_dayahead(
                 .mean()
                 .values
             )
-            solcast_residual_scale = solcast_residual_damp_factor(solcast_meta)
             if solcast_residual_scale < 0.999:
                 ml_residual = ml_residual * solcast_residual_scale
+            if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
+                ml_residual[clear_slot_mask] *= (1.0 - 0.28 * clear_solcast_priority)
 
             log.info(
                 "ML residual: mean=%.2f  std=%.2f  p95=%.2f kWh/slot  blend_mean=%.2f  solcast_scale=%.2f",
@@ -5116,9 +5734,58 @@ def run_dayahead(
                 int(model_meta.get("regime_days", 0)),
                 int(model_meta.get("regime_samples", 0)),
             )
+            raw_class_bias, classifier_meta = predict_error_classifier_with_bundle(
+                model_bundle,
+                X_pred,
+                target_regime,
+                regime_confidence=float(bias_meta.get("regime_confidence", 1.0)),
+            )
+            error_class_term = np.asarray(raw_class_bias, dtype=float)
+            error_class_term[:SOLAR_START_SLOT] = 0.0
+            error_class_term[SOLAR_END_SLOT:] = 0.0
+            error_class_term[w5["rad"].values < RAD_MIN_WM2] = 0.0
+            error_class_term = np.clip(error_class_term, -cap_kwh * ERROR_CLASS_BIAS_CAP_FRAC, cap_kwh * ERROR_CLASS_BIAS_CAP_FRAC)
+            class_confidence = np.asarray(classifier_meta.get("confidence"), dtype=float)
+            class_blend = ERROR_CLASS_BLEND_MIN + (
+                ERROR_CLASS_BLEND_MAX - ERROR_CLASS_BLEND_MIN
+            ) * np.clip(
+                (class_confidence - ERROR_CLASS_BLEND_CONFIDENCE_FLOOR)
+                / max(1.0 - ERROR_CLASS_BLEND_CONFIDENCE_FLOOR, 1e-6),
+                0.0,
+                1.0,
+            )
+            if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
+                class_blend = class_blend.copy()
+                class_blend[clear_slot_mask] *= (1.0 - 0.35 * clear_solcast_priority)
+            error_class_term = error_class_term * blend
+            error_class_term = (
+                pd.Series(error_class_term)
+                .rolling(3, min_periods=1, center=True)
+                .mean()
+                .values
+            )
+            if solcast_residual_scale < 0.999:
+                error_class_term = error_class_term * solcast_residual_scale
+            error_class_term = error_class_term * class_blend
+            error_class_meta = {
+                **classifier_meta,
+                "slot_weather_buckets": slot_weather_buckets.copy(),
+                "class_blend": class_blend,
+                "class_bias_kwh": error_class_term.copy(),
+            }
+            log.info(
+                "Error classifier: available=%s regime_model=%s blend=%.2f mean_conf=%.2f severe_prob=%.2f total_bias=%.0f kWh",
+                bool(error_class_meta.get("available")),
+                bool(error_class_meta.get("used_regime_model")),
+                float(error_class_meta.get("blend", 0.0)),
+                float(np.mean(np.asarray(error_class_meta.get("confidence"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+                float(np.mean(np.asarray(error_class_meta.get("severe_probability"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+                float(np.sum(error_class_term)),
+            )
         except Exception as e:
             log.error("ML prediction failed â€“ falling back to physics only: %s", e)
             ml_residual = np.zeros(SLOTS_DAY)
+            error_class_term = np.zeros(SLOTS_DAY)
     else:
         log.warning("No trained model found â€“ using physics baseline only")
 
@@ -5136,7 +5803,7 @@ def run_dayahead(
     )
 
     # 5. Combine
-    forecast = hybrid_baseline + ml_residual + bias_correction
+    forecast = hybrid_baseline + ml_residual + error_class_term + bias_correction
 
     # Hard capacity constraints:
     # - dependable cap is used in physics baseline shaping
@@ -5199,26 +5866,54 @@ def run_dayahead(
         )
         forecast *= max_kwh_day / forecast.sum()
     # 6. Confidence bands
-    lo, hi = confidence_bands(forecast, w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
+    lo, hi = confidence_bands(
+        forecast,
+        w5,
+        target_s,
+        float(bias_meta.get("regime_confidence", 1.0)),
+        error_class_meta=error_class_meta if bool(error_class_meta.get("available")) else None,
+    )
 
     # 7. Summary log
     log.info(
         "Forecast summary: total=%.0f kWh  peak=%.2f kWh/slot  "
-        "baseline_total=%.0f kWh  hybrid_total=%.0f kWh  ml_corr=%.0f kWh  bias_corr=%.0f kWh",
+        "baseline_total=%.0f kWh  hybrid_total=%.0f kWh  ml_corr=%.0f kWh  class_corr=%.0f kWh  bias_corr=%.0f kWh",
         forecast.sum(),
         forecast.max(),
         baseline.sum(),
         hybrid_baseline.sum(),
         ml_residual.sum(),
+        error_class_term.sum(),
         bias_correction.sum(),
     )
 
     series = to_ui_series(forecast, lo, hi, target_s)
+    error_class_summary = {
+        "available": bool(error_class_meta.get("available")),
+        "target_regime": target_regime,
+        "used_regime_model": bool(error_class_meta.get("used_regime_model")),
+        "blend": float(error_class_meta.get("blend", 0.0)),
+        "mean_confidence": float(np.mean(np.asarray(error_class_meta.get("confidence"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if bool(error_class_meta.get("available")) else 0.0,
+        "mean_probabilities": {
+            name: float(np.mean(np.asarray(error_class_meta.get("probabilities"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT, idx]))
+            for idx, name in enumerate(ERROR_CLASS_NAMES)
+        } if bool(error_class_meta.get("available")) else {name: 0.0 for name in ERROR_CLASS_NAMES},
+        "weather_bucket_forecast_summary": summarize_value_by_bucket(forecast, slot_weather_buckets),
+        "weather_profiles": error_class_meta.get("weather_profiles") or {},
+        "slot_weather_buckets": slot_weather_buckets.copy(),
+        "predicted_labels": np.asarray(error_class_meta.get("predicted_labels"), dtype=int).copy(),
+        "class_confidence": np.asarray(error_class_meta.get("confidence"), dtype=float).copy(),
+        "severe_probability": np.asarray(error_class_meta.get("severe_probability"), dtype=float).copy(),
+        "class_blend": np.asarray(error_class_meta.get("class_blend"), dtype=float).copy(),
+        "class_bias_kwh": np.asarray(error_class_meta.get("class_bias_kwh"), dtype=float).copy(),
+        "total_bias_kwh": float(np.sum(error_class_term)),
+    }
     if not persist:
         return {
             "day": target_s,
             "series": series,
             "forecast": forecast,
+            "hybrid_baseline": hybrid_baseline,
             "lo": lo,
             "hi": hi,
             "weather_source": weather_source,
@@ -5234,7 +5929,9 @@ def run_dayahead(
             "hybrid_total_kwh": float(hybrid_baseline.sum()),
             "forecast_total_kwh": float(forecast.sum()),
             "ml_total_kwh": float(ml_residual.sum()),
+            "error_class_total_kwh": float(error_class_term.sum()),
             "bias_total_kwh": float(bias_correction.sum()),
+            "error_class_meta": error_class_summary,
         }
 
     # 8. Write
@@ -5249,6 +5946,12 @@ def run_dayahead(
                 "weather_source": weather_source,
                 "bias_meta": bias_meta,
                 "target_regime": target_regime,
+                "error_class_debug": {
+                    "hybrid_baseline_kwh": [float(v) for v in np.asarray(hybrid_baseline, dtype=float)],
+                    "slot_weather_buckets": [str(v) for v in np.asarray(slot_weather_buckets, dtype=object)],
+                    "predicted_labels": [int(v) for v in np.asarray(error_class_meta.get("predicted_labels"), dtype=int)],
+                    "class_confidence": [float(v) for v in np.asarray(error_class_meta.get("confidence"), dtype=float)],
+                },
             },
         )
     return ok
@@ -5377,6 +6080,22 @@ def run_backtest(dates: list[date]) -> bool:
             log.warning("Backtest skip [%s] - forecast metrics unavailable", target_s)
             continue
 
+        bucket_metrics = compute_bucketed_forecast_metrics(
+            actual,
+            np.asarray(result["forecast"], dtype=float),
+            (result.get("error_class_meta") or {}).get("slot_weather_buckets"),
+            actual_present=actual_present,
+            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+        )
+        class_metrics = compute_error_class_metrics(
+            actual,
+            np.asarray(result.get("hybrid_baseline"), dtype=float) if result.get("hybrid_baseline") is not None else None,
+            (result.get("error_class_meta") or {}).get("predicted_labels"),
+            class_confidence=(result.get("error_class_meta") or {}).get("class_confidence"),
+            actual_present=actual_present,
+            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+        )
+
         rows.append({
             "day": target_s,
             "reference_day": reference_day.isoformat(),
@@ -5384,10 +6103,14 @@ def run_backtest(dates: list[date]) -> bool:
             "target_regime": str(result.get("target_regime") or ""),
             "solcast_used": bool((result.get("solcast_meta") or {}).get("used_solcast")),
             "solcast_blend": float((result.get("solcast_meta") or {}).get("mean_blend", 0.0)),
+            "bucket_metrics": bucket_metrics,
+            "classifier_sign_hit_rate": None if class_metrics is None else float(class_metrics.get("sign_hit_rate", 0.0)),
+            "classifier_severe_hit_rate": None if class_metrics is None or class_metrics.get("severe_hit_rate") is None else float(class_metrics.get("severe_hit_rate", 0.0)),
+            "classifier_mean_confidence": 0.0 if class_metrics is None else float(class_metrics.get("mean_confidence", 0.0)),
             **metrics,
         })
         log.info(
-            "Backtest [%s] usable=%d masked=%d WAPE=%.1f%% TotalAPE=%.1f%% MAPE=%.1f%% RMSE=%.1f kWh/slot First=%s Last=%s regime=%s solcast=%s blend=%.2f",
+            "Backtest [%s] usable=%d masked=%d WAPE=%.1f%% TotalAPE=%.1f%% MAPE=%.1f%% RMSE=%.1f kWh/slot First=%s Last=%s regime=%s solcast=%s blend=%.2f sign_hit=%s conf=%.2f",
             target_s,
             metrics["usable_slot_count"],
             metrics["masked_slot_count"],
@@ -5400,7 +6123,10 @@ def run_backtest(dates: list[date]) -> bool:
             result.get("target_regime"),
             bool((result.get("solcast_meta") or {}).get("used_solcast")),
             float((result.get("solcast_meta") or {}).get("mean_blend", 0.0)),
+            f"{float(class_metrics['sign_hit_rate']):.3f}" if class_metrics is not None else "n/a",
+            0.0 if class_metrics is None else float(class_metrics.get("mean_confidence", 0.0)),
         )
+        log.info("Backtest buckets [%s] %s", target_s, _format_bucket_metric_summary(bucket_metrics))
 
     if not rows:
         log.error(
@@ -5419,6 +6145,13 @@ def run_backtest(dates: list[date]) -> bool:
     median_daily_wape = float(np.median([row["wape_pct"] for row in rows]))
     mean_total_ape = float(np.mean([row["total_ape_pct"] for row in rows]))
     mean_mape = float(np.mean([row["mape_pct"] for row in rows]))
+    regime_summary_parts = []
+    for regime in sorted({str(row.get("target_regime") or "") for row in rows if row.get("target_regime")}):
+        regime_rows = [row for row in rows if str(row.get("target_regime") or "") == regime]
+        regime_actual_total = float(sum(row["actual_total_kwh"] for row in regime_rows))
+        regime_abs_total = float(sum(row["abs_error_sum_kwh"] for row in regime_rows))
+        regime_wape = float((regime_abs_total / max(regime_actual_total, 1.0)) * 100.0)
+        regime_summary_parts.append(f"{regime}:WAPE={regime_wape:.1f}% n={len(regime_rows)}")
 
     log.info(
         "Backtest summary: scored=%d/%d overall_WAPE=%.1f%% mean_daily_WAPE=%.1f%% median_daily_WAPE=%.1f%% mean_total_APE=%.1f%% mean_MAPE=%.1f%% skipped(actual=%d snapshot=%d training=%d forecast=%d)",
@@ -5434,6 +6167,8 @@ def run_backtest(dates: list[date]) -> bool:
         skipped_training,
         skipped_forecast,
     )
+    if regime_summary_parts:
+        log.info("Backtest regimes: %s", ", ".join(regime_summary_parts))
     return True
 
 

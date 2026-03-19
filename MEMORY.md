@@ -2,12 +2,19 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.22
+- **Repo/package version baseline:** 2.4.23
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.23 Changes - Forecast Classifier, Runtime Supervision, and Plant Cap Settings Polish (2026-03-19)
+- **Forecast inference is more weather-aware:** the day-ahead path now adds a conservative weather-conditioned error classifier on top of the physics/Solcast hybrid baseline and residual regressor, with stronger Solcast respect on clear-weather slots.
+- **Day-ahead generation and recovery are harder to break:** the current codebase includes the pre-sunrise target-date fix, forecast-weather fallback, complete day-ahead rowset checks, DB-backed write success requirements, crash backoff, authoritative `ipconfig` loading, configurable export-cap detection, and cleaner plant-cap constraint handling in training, QA, and intraday adjustment.
+- **Forecast process supervision is earlier and mode-aware:** Electron now starts forecast mode sync during server boot, can read `operationMode` from the local settings DB before HTTP is ready, keeps the forecast EXE alive in gateway mode, and still shuts it down intentionally in remote mode.
+- **Plant Output Cap defaults in Settings were reorganized:** the settings UI now groups band and selection controls into clearer cards, shows a planner summary strip for selection mode / band gap / controllable count / smallest step, and renders structured inline guidance instead of a single plain note.
+- **Validation and release build completed locally:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_weather.py services\\tests\\test_forecast_engine_error_classifier.py`, `python -m unittest discover -s services\\tests -p "test_*.py"`, `node --check electron/main.js`, `node --check server/index.js`, `node server/tests/forecastWatchdogSource.test.js`, `node server/tests/forecastCompletenessSource.test.js`, `node server/tests/ipConfigLossDefaultsSource.test.js`, `node server/tests/plantCapController.test.js`, `npm run rebuild:native:node`, `node server/tests/smokeGatewayLink.js`, `npm run rebuild:native:electron`, `pyinstaller --noconfirm services\\ForecastCoreService.spec`, and `npm run build:installer` all succeeded. The optional Electron Playwright smoke could not run because `playwright/test` is not installed in this repo.
 
 ## v2.4.22 Changes - Day-Ahead Target Resolution and Weather Fallback Recovery (2026-03-19)
 - **Pre-sunrise day-ahead targeting is fixed:** the forecast service now treats the upcoming solar window as `today` before sunrise instead of incorrectly targeting `today + 1`, so missing day-ahead generation at `00:00-04:59` now repairs the correct date.

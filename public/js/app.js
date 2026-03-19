@@ -791,14 +791,90 @@ function buildPlantCapClientWarningMessages(context = "live") {
   return warnings;
 }
 
+function formatPlantCapSequenceModeLabelClient(mode, exemptedCount = 0) {
+  const normalized = normalizePlantCapSequenceModeClient(mode);
+  if (normalized === "descending") return "Descending";
+  if (normalized === "exemption") {
+    return exemptedCount > 0 ? `Exemption (${exemptedCount})` : "Exemption";
+  }
+  return "Ascending";
+}
+
+function buildPlantCapClientWarningMarkup(title, copy, warnings = []) {
+  const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  const safeTitle = escapeHtml(title || "Planner Guidance");
+  const safeCopy = String(copy || "").trim();
+  const body = safeCopy
+    ? `<div class="plant-cap-warning-copy">${escapeHtml(safeCopy)}</div>`
+    : "";
+  const items = list.length
+    ? `<ul class="plant-cap-warning-list">${list
+        .map((message) => `<li>${escapeHtml(message)}</li>`)
+        .join("")}</ul>`
+    : "";
+  return `<div class="plant-cap-warning-title">${safeTitle}</div>${body}${items}`;
+}
+
+function renderPlantCapSettingsSummary() {
+  const values = readPlantCapRequestValues("settings");
+  const metrics = getClientPlantCapStepMetrics("settings", values);
+  const totalInverters = Math.max(1, Number(State.settings.inverterCount || 27));
+  const modeEl = $("setPlantCapSummaryMode");
+  const gapEl = $("setPlantCapSummaryGap");
+  const controllableEl = $("setPlantCapSummaryControllable");
+  const stepEl = $("setPlantCapSummaryStep");
+  if (modeEl) {
+    modeEl.textContent = formatPlantCapSequenceModeLabelClient(
+      values.sequenceMode,
+      values.sequenceCustom.length,
+    );
+  }
+  if (gapEl) {
+    if (values.upperMw == null || values.lowerMw == null) {
+      gapEl.textContent = "Not set";
+    } else if (!(values.lowerMw < values.upperMw)) {
+      gapEl.textContent = "Invalid";
+    } else {
+      gapEl.textContent = `${(values.upperMw - values.lowerMw).toFixed(3)} MW`;
+    }
+  }
+  if (controllableEl) {
+    controllableEl.textContent = `${metrics.controllableInverterCount}/${totalInverters}`;
+  }
+  if (stepEl) {
+    stepEl.textContent =
+      metrics.smallestConfiguredStepMw != null
+        ? `${metrics.smallestConfiguredStepMw.toFixed(3)} MW`
+        : "Unavailable";
+  }
+}
+
 function renderPlantCapClientWarningsForContext(context = "live") {
   const els = getPlantCapFormElements(context);
   if (!els.warnings) return;
+  const values = readPlantCapRequestValues(context);
+  const metrics = getClientPlantCapStepMetrics(context, values);
   const warnings = buildPlantCapClientWarningMessages(context);
   if (!warnings.length) {
     els.warnings.className = "plant-cap-inline-warnings";
-    els.warnings.textContent =
-      "Whole-inverter control uses live PAC plus node-aware dependable capacity to plan each stop/start step. Exemption mode skips the listed inverter numbers during automatic stop selection.";
+    const guidanceParts = [
+      "Whole-inverter control uses live PAC plus node-aware dependable capacity to plan each stop/start step.",
+      values.sequenceMode === "exemption" && values.sequenceCustom.length
+        ? `Automatic stop selection skips inverter numbers ${values.sequenceCustom.join(", ")}.`
+        : `Automatic stop selection currently follows ${formatPlantCapSequenceModeLabelClient(
+            values.sequenceMode,
+            values.sequenceCustom.length,
+          ).toLowerCase()} order.`,
+    ];
+    if (metrics.smallestConfiguredStepMw != null) {
+      guidanceParts.push(
+        `Smallest controllable step is about ${metrics.smallestConfiguredStepMw.toFixed(3)} MW.`,
+      );
+    }
+    els.warnings.innerHTML = buildPlantCapClientWarningMarkup(
+      "Planner Guidance",
+      guidanceParts.join(" "),
+    );
     els.warnings.title =
       "Planner guidance for the current plant cap settings. Exemption mode keeps the listed inverter numbers out of automatic stop selection.";
     return;
@@ -807,11 +883,18 @@ function renderPlantCapClientWarningsForContext(context = "live") {
     /extremely close|must be less/i.test(message),
   );
   els.warnings.className = `plant-cap-inline-warnings ${critical ? "critical" : "warning"}`;
-  els.warnings.textContent = warnings[0];
+  els.warnings.innerHTML = buildPlantCapClientWarningMarkup(
+    critical ? "Review This Band Before Saving" : "Planner Warning",
+    critical
+      ? "The current band or selection setup is likely to cause controller overshoot, repeated stop/start actions, or no valid automatic target."
+      : "The defaults are still readable by the controller, but the planner sees conditions that can make automatic plant-cap actions harder to predict.",
+    warnings,
+  );
   els.warnings.title = warnings.join(" ");
 }
 
 function renderPlantCapClientWarnings() {
+  renderPlantCapSettingsSummary();
   renderPlantCapClientWarningsForContext("live");
   renderPlantCapClientWarningsForContext("settings");
 }

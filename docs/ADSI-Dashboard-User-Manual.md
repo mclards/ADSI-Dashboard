@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.22`
+**Applies to:** ADSI Inverter Dashboard `v2.4.23`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -857,7 +857,7 @@ The `Settings` page is the administrative center. It is organized as a section-b
 
 #### Plant Output Cap Defaults
 
-These settings define the default values loaded into the live `Plant Output Cap` panel on the `Inverters` page.
+These settings define the default values loaded into the live `Plant Output Cap` panel on the `Inverters` page. The settings view now also shows a small planner summary for selection mode, band gap, controllable inverter count, and the smallest available controller step.
 
 | Field | Use |
 | --- | --- |

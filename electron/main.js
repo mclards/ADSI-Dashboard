@@ -12,7 +12,9 @@ const { spawn, execFile, execFileSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
 const crypto = require("crypto");
+const Database = require("better-sqlite3");
 const { autoUpdater } = require("electron-updater");
+const { getExplicitDataDir, getPortableDataRoot } = require("../server/runtimeEnvPaths");
 
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -2556,6 +2558,7 @@ function startServer() {
     );
     return;
   }
+  startForecastModeSync();
   pollUntilReady();
 }
 
@@ -2833,7 +2836,6 @@ function onServerReady() {
   if (serverReadyFired) return;
   serverReadyFired = true;
   registerShortcutsOnce();
-  startForecastModeSync();
   console.log("[main] Server ready - opening main window");
   createMainWindow();
 }
@@ -3108,6 +3110,8 @@ function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
 }
 
 async function tryGetCurrentOperationMode(timeoutMs = 1500) {
+  const localMode = readOperationModeFromLocalDb();
+  if (localMode) return localMode;
   try {
     const settings = await requestServerJson(
       "GET",
@@ -3115,10 +3119,7 @@ async function tryGetCurrentOperationMode(timeoutMs = 1500) {
       undefined,
       timeoutMs,
     );
-    const mode = String(settings?.operationMode || "gateway")
-      .trim()
-      .toLowerCase();
-    return mode === "remote" ? "remote" : "gateway";
+    return sanitizeOperationModeValue(settings?.operationMode, "gateway");
   } catch {
     return null;
   }
@@ -3129,13 +3130,12 @@ async function getCurrentOperationMode(timeoutMs = 1500) {
 }
 
 async function syncForecastProcessForCurrentMode(timeoutMs = 1500) {
-  if (isAppShuttingDown || !serverReadyFired || forecastModeSyncInFlight) {
+  if (isAppShuttingDown || forecastModeSyncInFlight) {
     return false;
   }
   forecastModeSyncInFlight = true;
   try {
-    const mode = await tryGetCurrentOperationMode(timeoutMs);
-    if (!mode) return false;
+    const mode = (await tryGetCurrentOperationMode(timeoutMs)) || "gateway";
     if (mode === "remote") {
       stopForecastProcess("remote mode active");
       return false;
@@ -3213,6 +3213,63 @@ function getConfigPath() {
     fs.mkdirSync(cfgDir, { recursive: true });
   } catch (_) {}
   return path.join(cfgDir, "ipconfig.json");
+}
+
+function getLocalSettingsDbPath() {
+  const explicitDataDir = String(getExplicitDataDir(process.env) || "").trim();
+  if (explicitDataDir) {
+    return path.join(explicitDataDir, "adsi.db");
+  }
+
+  const portableRoot = String(getPortableDataRoot(process.env) || "").trim();
+  if (portableRoot) {
+    return path.join(portableRoot, "db", "adsi.db");
+  }
+
+  if (process.env.APPDATA) {
+    const preferred = path.join(process.env.APPDATA, "Inverter-Dashboard", "adsi.db");
+    const legacy = path.join(process.env.APPDATA, "ADSI-Dashboard", "adsi.db");
+    if (fs.existsSync(preferred)) return preferred;
+    if (fs.existsSync(legacy)) return legacy;
+    return preferred;
+  }
+
+  try {
+    return path.join(app.getPath("userData"), "..", "adsi.db");
+  } catch (_) {
+    return path.join(process.cwd(), "adsi.db");
+  }
+}
+
+function sanitizeOperationModeValue(value, fallback = null) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "remote") return "remote";
+  if (mode === "gateway") return "gateway";
+  return fallback;
+}
+
+function readOperationModeFromLocalDb() {
+  const dbPath = getLocalSettingsDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+  let db = null;
+  try {
+    db = new Database(dbPath, {
+      readonly: true,
+      fileMustExist: true,
+      timeout: 500,
+    });
+    db.pragma("query_only = ON");
+    const row = db
+      .prepare("SELECT value FROM settings WHERE key = ? LIMIT 1")
+      .get("operationMode");
+    return sanitizeOperationModeValue(row?.value, null);
+  } catch (_) {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
 }
 
 function defaultConfig() {

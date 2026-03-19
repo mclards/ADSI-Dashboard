@@ -1045,21 +1045,82 @@
             </div>
             <div class="settings-subsection plant-cap-settings-subsection">
               <div class="settings-subtitle">Plant Output Cap Defaults</div>
-              <div class="srow">
-                <label title="Default upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">Upper Limit (MW)<input type="number" id="setPlantCapUpperMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default upper MW threshold for plant output capping." /></label>
-                <label title="Default lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">Lower Limit (MW)<input type="number" id="setPlantCapLowerMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default lower MW threshold for safe restart decisions." /></label>
-                <label title="Default candidate selection mode. Exemption skips the listed inverter numbers and uses ascending order for the remaining inverters.">Sequence
-                  <select id="setPlantCapSequenceMode" class="sel" title="Choose the default selection mode for automatic stop decisions.">
-                    <option value="ascending">Ascending</option>
-                    <option value="descending">Descending</option>
-                    <option value="exemption">Exemption</option>
-                  </select>
-                </label>
-                <label id="setPlantCapSequenceCustomWrap" hidden title="Default exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">Exempted Inverter Numbers<input type="text" id="setPlantCapSequenceCustom" class="inp inp-lg" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." /></label>
-                <label title="Default cooldown or settling time in seconds after each stop or restart action.">Cooldown (s)<input type="number" id="setPlantCapCooldownSec" class="inp inp-sm" min="5" max="600" step="1" inputmode="numeric" title="Default settling time in seconds after each controller action." /></label>
+              <div class="plant-cap-settings-intro">
+                <div class="plant-cap-settings-lead">
+                  <strong>Automatic whole-inverter control</strong>
+                  <p>
+                    Save the default band and selection behavior used by the live Plant Output Cap controller. These defaults are applied when operators preview, enable, and release controller-owned inverter steps.
+                  </p>
+                </div>
+                <div class="plant-cap-settings-metrics" id="setPlantCapSettingsSummary" aria-live="polite">
+                  <div class="plant-cap-settings-metric" title="Current default selection strategy for automatic stop decisions.">
+                    <span>Selection</span>
+                    <strong id="setPlantCapSummaryMode">Ascending</strong>
+                  </div>
+                  <div class="plant-cap-settings-metric" title="Gap between the saved upper and lower band edges.">
+                    <span>Band Gap</span>
+                    <strong id="setPlantCapSummaryGap">Not set</strong>
+                  </div>
+                  <div class="plant-cap-settings-metric" title="Configured inverters currently available for automatic plant-cap actions.">
+                    <span>Controllable</span>
+                    <strong id="setPlantCapSummaryControllable">-</strong>
+                  </div>
+                  <div class="plant-cap-settings-metric" title="Approximate smallest inverter step the controller can remove with the current configured fleet.">
+                    <span>Smallest Step</span>
+                    <strong id="setPlantCapSummaryStep">-</strong>
+                  </div>
+                </div>
               </div>
-              <small title="These settings are saved as the default plant cap band, selection mode, exemption list, and cooldown for the live controller.">Saved here as the default band and selection mode for the live Plant Output Cap controller. Tight bands can cause whole-inverter stop/start hunting.</small>
-              <div id="setPlantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the saved default cap band, node mix, and exemption list."></div>
+              <div class="plant-cap-settings-grid">
+                <div class="plant-cap-settings-card">
+                  <div class="plant-cap-settings-card-title">MW Band</div>
+                  <div class="srow plant-cap-settings-input-row">
+                    <label class="plant-cap-settings-field" title="Default upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">
+                      <span class="plant-cap-settings-label">Upper Limit (MW)</span>
+                      <input type="number" id="setPlantCapUpperMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default upper MW threshold for plant output capping." />
+                      <small class="plant-cap-settings-help">Stops are planned only after plant MW holds above this edge.</small>
+                    </label>
+                    <label class="plant-cap-settings-field" title="Default lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">
+                      <span class="plant-cap-settings-label">Lower Limit (MW)</span>
+                      <input type="number" id="setPlantCapLowerMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default lower MW threshold for safe restart decisions." />
+                      <small class="plant-cap-settings-help">Restarts are considered only after plant MW falls below this edge.</small>
+                    </label>
+                  </div>
+                  <div class="plant-cap-settings-card-copy">Keep enough separation between the two limits to avoid repeated stop/start hunting.</div>
+                </div>
+                <div class="plant-cap-settings-card">
+                  <div class="plant-cap-settings-card-title">Selection Behavior</div>
+                  <div class="srow plant-cap-settings-input-row">
+                    <label class="plant-cap-settings-field" title="Default candidate selection mode. Exemption skips the listed inverter numbers and uses ascending order for the remaining inverters.">
+                      <span class="plant-cap-settings-label">Sequence</span>
+                      <select id="setPlantCapSequenceMode" class="sel" title="Choose the default selection mode for automatic stop decisions.">
+                        <option value="ascending">Ascending</option>
+                        <option value="descending">Descending</option>
+                        <option value="exemption">Exemption</option>
+                      </select>
+                      <small class="plant-cap-settings-help">Choose whether the controller walks inverter numbers up, down, or skips a protected list.</small>
+                    </label>
+                    <label class="plant-cap-settings-field" title="Default cooldown or settling time in seconds after each stop or restart action.">
+                      <span class="plant-cap-settings-label">Cooldown (s)</span>
+                      <input type="number" id="setPlantCapCooldownSec" class="inp inp-sm" min="5" max="600" step="1" inputmode="numeric" title="Default settling time in seconds after each controller action." />
+                      <small class="plant-cap-settings-help">Wait time after each automatic action before the next controller decision.</small>
+                    </label>
+                  </div>
+                  <div class="plant-cap-settings-card-copy">These defaults shape how quickly the controller responds and which inverters it touches first.</div>
+                </div>
+                <div id="setPlantCapSequenceCustomWrap" class="plant-cap-settings-card plant-cap-settings-card-wide" hidden>
+                  <div class="plant-cap-settings-card-title">Exempted Inverters</div>
+                  <div class="srow plant-cap-settings-input-row plant-cap-settings-input-row-wide">
+                    <label class="plant-cap-settings-field" title="Default exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">
+                      <span class="plant-cap-settings-label">Exempted Inverter Numbers</span>
+                      <input type="text" id="setPlantCapSequenceCustom" class="inp inp-lg" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." />
+                      <small class="plant-cap-settings-help">Skipped only during automatic stop selection. Use a comma-separated list of inverter numbers.</small>
+                    </label>
+                  </div>
+                  <div class="plant-cap-settings-card-copy">Use exemptions when certain inverters must stay available or should never be chosen first by the automatic controller.</div>
+                </div>
+              </div>
+              <div id="setPlantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the saved default cap band, node mix, and exemption list." aria-live="polite"></div>
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">

@@ -3620,6 +3620,26 @@ label[data-required]::after {
   line-height: 1.5;
 }
 
+.plant-cap-warning-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+.plant-cap-warning-copy {
+  margin-top: 4px;
+}
+
+.plant-cap-warning-list {
+  margin: 8px 0 0;
+  padding-left: 17px;
+}
+
+.plant-cap-warning-list li + li {
+  margin-top: 4px;
+}
+
 .plant-cap-inline-warnings.warning,
 .plant-cap-server-warnings.warning {
   border-color: color-mix(in srgb, var(--orange) 32%, var(--border2));
@@ -8060,16 +8080,145 @@ body.mode-transition-active {
   grid-column: span 6;
 }
 
-#page-settings #opsCompactSection .plant-cap-settings-subsection .srow {
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+#page-settings #opsCompactSection .plant-cap-settings-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-#page-settings #opsCompactSection .plant-cap-settings-subsection .srow label {
-  grid-column: span 2;
+#page-settings #opsCompactSection .plant-cap-settings-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
+  gap: 12px;
+  align-items: stretch;
 }
 
-#page-settings #opsCompactSection .plant-cap-settings-subsection .srow label:nth-of-type(4) {
-  grid-column: span 4;
+#page-settings #opsCompactSection .plant-cap-settings-lead,
+#page-settings #opsCompactSection .plant-cap-settings-card {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.01) 100%);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-lead {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-lead strong {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-lead p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text2);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  padding: 12px 13px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border2) 76%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface) 82%, transparent) 0%,
+      color-mix(in srgb, var(--surface2) 90%, transparent) 100%
+    );
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-metric span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-metric strong {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-card-wide {
+  grid-column: 1 / -1;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-card-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-input-row {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+#page-settings .settings-sections #opsCompactSection .plant-cap-settings-input-row > label {
+  grid-column: span 3;
+}
+
+#page-settings .settings-sections #opsCompactSection .plant-cap-settings-input-row-wide > label {
+  grid-column: 1 / -1;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-help,
+#page-settings #opsCompactSection .plant-cap-settings-card-copy {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text3);
+}
+
+#page-settings #opsCompactSection .plant-cap-settings-card-copy {
+  margin-top: -2px;
 }
 
 /* Mode & Remote Access: full width so 4 form fields can sit 2-per-row */
@@ -8447,16 +8596,16 @@ body.mode-transition-active {
     grid-column: 1 / -1;
   }
 
-  #page-settings #opsCompactSection .plant-cap-settings-subsection .srow {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+  #page-settings #opsCompactSection .plant-cap-settings-intro {
+    grid-template-columns: 1fr;
   }
 
-  #page-settings #opsCompactSection .plant-cap-settings-subsection .srow label {
-    grid-column: span 3;
+  #page-settings #opsCompactSection .plant-cap-settings-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  #page-settings #opsCompactSection .plant-cap-settings-subsection .srow label:nth-of-type(4) {
-    grid-column: 1 / -1;
+  #page-settings #opsCompactSection .plant-cap-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   /* Connectivity: Mode & Remote stays full-width; health+diag stay 7/5 — no override needed */
@@ -8599,13 +8748,26 @@ body.mode-transition-active {
     grid-column: span 6;
   }
 
-  #page-settings #opsCompactSection .plant-cap-settings-subsection .srow label,
-  #page-settings #opsCompactSection .plant-cap-settings-subsection .srow label:nth-of-type(4) {
+  #page-settings #opsCompactSection .plant-cap-settings-grid,
+  #page-settings #opsCompactSection .plant-cap-settings-intro {
+    grid-template-columns: 1fr;
+  }
+
+  #page-settings #opsCompactSection .plant-cap-settings-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #page-settings .settings-sections #opsCompactSection .plant-cap-settings-input-row > label,
+  #page-settings .settings-sections #opsCompactSection .plant-cap-settings-input-row-wide > label {
     grid-column: 1 / -1;
   }
 }
 
 @media (max-width: 640px) {
+  #page-settings #opsCompactSection .plant-cap-settings-metrics {
+    grid-template-columns: 1fr;
+  }
+
   :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-wrap {
     padding: 14px;
     min-height: 320px;
