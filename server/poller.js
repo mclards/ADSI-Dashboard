@@ -790,6 +790,8 @@ async function poll() {
   const apiUrl = getSetting('apiUrl', 'http://127.0.0.1:9100/data');
   const ipConfig = loadIpConfigSnapshot();
   const ipConfigLookup = buildIpConfigLookup(ipConfig);
+  const expectedKeys = getExpectedKeysFromIpConfig(ipConfig);
+  const expectedSet = new Set(expectedKeys);
 
   let rows = [];
   let fetchOk = false;
