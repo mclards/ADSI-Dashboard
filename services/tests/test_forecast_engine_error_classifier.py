@@ -127,6 +127,311 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
                 cap_slot=1000.0,
             )
             self.assertEqual(labels.tolist(), [0, 1, 2, 3, 4])
+
+            cap_labels = mod.classify_residual_error_classes(
+                np.array([50.0, 50.0], dtype=float),
+                cap_slot=1000.0,
+            )
+            opp_labels = mod.classify_residual_error_classes(
+                np.array([50.0, 50.0], dtype=float),
+                baseline_kwh=np.array([100.0, 800.0], dtype=float),
+                cap_slot=1000.0,
+            )
+            self.assertEqual(cap_labels.tolist(), [3, 3])
+            self.assertEqual(opp_labels.tolist(), [4, 3])
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_vectorized_bucket_classification_matches_reference_rules(self):
+        tmp_root = WORK_TMP / "bucket-class-reference"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "bucket-class-reference")
+            rng = np.random.default_rng(42)
+            w5 = pd.DataFrame({
+                "rad": rng.uniform(0.0, 950.0, mod.SLOTS_DAY),
+                "cloud": rng.uniform(0.0, 100.0, mod.SLOTS_DAY),
+                "rh": rng.uniform(35.0, 95.0, mod.SLOTS_DAY),
+                "precip": rng.uniform(0.0, 0.25, mod.SLOTS_DAY),
+                "cape": rng.uniform(0.0, 1200.0, mod.SLOTS_DAY),
+            })
+
+            def reference_bucket_labels(day: str) -> np.ndarray:
+                rad = np.clip(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values[:mod.SLOTS_DAY], 0.0, None)
+                cloud = np.clip(pd.to_numeric(w5["cloud"], errors="coerce").fillna(0.0).values[:mod.SLOTS_DAY], 0.0, 100.0)
+                precip = np.clip(pd.to_numeric(w5["precip"], errors="coerce").fillna(0.0).values[:mod.SLOTS_DAY], 0.0, None)
+                cape = np.clip(pd.to_numeric(w5["cape"], errors="coerce").fillna(0.0).values[:mod.SLOTS_DAY], 0.0, None)
+                rh = np.clip(pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values[:mod.SLOTS_DAY], 0.0, 100.0)
+                csi = mod.clear_sky_radiation(day, rh)
+                kt = np.where(csi > 10.0, rad / np.maximum(csi, 1.0), 0.0)
+                kt = np.clip(kt, 0.0, 1.2)
+                drad = np.abs(np.diff(rad, prepend=rad[0]))
+
+                out = np.full(mod.SLOTS_DAY, "offsolar", dtype=object)
+                for idx in range(mod.SOLAR_START_SLOT, mod.SOLAR_END_SLOT):
+                    if precip[idx] > mod.WEATHER_BUCKET_RAIN_MM or (
+                        cape[idx] >= mod.WEATHER_BUCKET_RAIN_CAPE and cloud[idx] >= mod.WEATHER_BUCKET_RAIN_CLOUD
+                    ):
+                        out[idx] = "rainy"
+                    elif (
+                        cloud[idx] < mod.WEATHER_BUCKET_CLEAR_CLOUD
+                        and kt[idx] >= mod.WEATHER_BUCKET_CLEAR_KT
+                        and drad[idx] < mod.WEATHER_BUCKET_CLEAR_DRAD
+                    ):
+                        out[idx] = "clear_stable"
+                    elif (
+                        cloud[idx] < mod.WEATHER_BUCKET_CLEAR_EDGE_CLOUD
+                        and kt[idx] >= mod.WEATHER_BUCKET_CLEAR_EDGE_KT
+                        and drad[idx] >= mod.WEATHER_BUCKET_CLEAR_DRAD
+                    ):
+                        out[idx] = "clear_edge"
+                    elif (
+                        cloud[idx] >= mod.WEATHER_BUCKET_CLEAR_CLOUD
+                        and cloud[idx] < mod.WEATHER_BUCKET_MIXED_CLOUD
+                        and kt[idx] >= mod.WEATHER_BUCKET_MIXED_KT
+                        and drad[idx] < mod.WEATHER_BUCKET_MIXED_VOL_DRAD
+                        and precip[idx] <= mod.WEATHER_BUCKET_RAIN_MM
+                    ):
+                        out[idx] = "mixed_stable"
+                    elif (
+                        cloud[idx] >= mod.WEATHER_BUCKET_CLEAR_CLOUD
+                        and cloud[idx] < mod.WEATHER_BUCKET_MIXED_VOL_CLOUD
+                        and drad[idx] >= mod.WEATHER_BUCKET_MIXED_VOL_DRAD
+                        and precip[idx] <= mod.WEATHER_BUCKET_RAIN_MM
+                    ):
+                        out[idx] = "mixed_volatile"
+                    else:
+                        out[idx] = "overcast"
+                return out
+
+            orig_clear_sky = mod.clear_sky_radiation
+            try:
+                mod.clear_sky_radiation = lambda day, rh: np.full(mod.SLOTS_DAY, 900.0, dtype=float)
+                actual = mod.classify_slot_weather_buckets(w5, "2026-03-20")
+                expected = reference_bucket_labels("2026-03-20")
+            finally:
+                mod.clear_sky_radiation = orig_clear_sky
+
+            self.assertEqual(actual.tolist(), expected.tolist())
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_probability_temperature_and_blocked_holdout_helpers(self):
+        tmp_root = WORK_TMP / "temperature-holdout"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "temperature-holdout")
+            raw_probs = np.array([
+                [0.92, 0.05, 0.01, 0.01, 0.01],
+                [0.88, 0.07, 0.02, 0.02, 0.01],
+                [0.90, 0.04, 0.03, 0.02, 0.01],
+            ], dtype=float)
+            labels = np.array([1, 1, 2], dtype=int)
+            base_nll = mod._weighted_neg_log_loss(raw_probs, labels)
+            scaled = mod._apply_probability_temperature(raw_probs, 2.0)
+            scaled_nll = mod._weighted_neg_log_loss(scaled, labels)
+
+            self.assertLess(scaled_nll, base_nll)
+            self.assertGreater(float(scaled[0, 1]), float(raw_probs[0, 1]))
+            self.assertLess(float(scaled[0, 0]), float(raw_probs[0, 0]))
+
+            day_keys = []
+            for day in ("2026-03-19", "2026-03-18", "2026-03-17", "2026-03-16", "2026-03-15", "2026-03-14", "2026-03-13", "2026-03-12"):
+                day_keys.extend([day] * 3)
+            holdout = mod._blocked_classifier_holdout_mask(np.asarray(day_keys, dtype=object))
+            self.assertEqual(int(np.count_nonzero(holdout)), 6)
+            self.assertTrue(bool(np.all(holdout[:6])))
+            self.assertFalse(bool(np.any(holdout[6:])))
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_support_and_weather_profile_reliability_helpers(self):
+        tmp_root = WORK_TMP / "support-profile-helpers"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "support-profile-helpers")
+            weights = mod._error_class_support_weights({
+                "class_counts": {
+                    "strong_over": 2,
+                    "mild_over": 9,
+                    "neutral": 80,
+                    "mild_under": 12,
+                    "strong_under": 1,
+                },
+                "sample_count": 104,
+            })
+            self.assertLess(float(weights[0]), float(weights[1]))
+            self.assertEqual(float(weights[mod.ERROR_CLASS_NEUTRAL_IDX]), 1.0)
+            self.assertLess(float(weights[4]), float(weights[3]))
+
+            profile_rel = mod._weather_profile_reliability_vector(
+                {
+                    "cap_slot_kwh": 1000.0,
+                    "pairs": {
+                        "clear:clear_stable": {"count": 64, "mean": 20.0, "std": 12.0, "mae": 24.0},
+                        "clear:mixed_volatile": {"count": 4, "mean": 35.0, "std": 180.0, "mae": 160.0},
+                    },
+                    "buckets": {
+                        "clear_stable": {"count": 80, "mean": 18.0, "std": 15.0, "mae": 20.0},
+                        "mixed_volatile": {"count": 8, "mean": 30.0, "std": 200.0, "mae": 170.0},
+                    },
+                    "regimes": {
+                        "clear": {"count": 90, "mean": 22.0, "std": 18.0, "mae": 24.0},
+                    },
+                },
+                "clear",
+                np.array(["clear_stable", "mixed_volatile", "offsolar"], dtype=object),
+            )
+            self.assertGreater(float(profile_rel[0]), float(profile_rel[1]))
+            self.assertEqual(float(profile_rel[2]), 0.0)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_numpy_rolling_helpers_match_pandas(self):
+        tmp_root = WORK_TMP / "numpy-rolling-helpers"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "numpy-rolling-helpers")
+            arr = np.array([0.0, 2.0, np.nan, 6.0, 10.0, -4.0, 8.0], dtype=float)
+
+            mean_expected = pd.Series(arr).rolling(3, min_periods=1, center=True).mean().values
+            sum_expected = pd.Series(arr).rolling(4, min_periods=1).sum().values
+            std_expected = pd.Series(arr).rolling(4, min_periods=1).std().values
+
+            np.testing.assert_allclose(mod._rolling_mean(arr, 3, center=True), mean_expected, equal_nan=True)
+            np.testing.assert_allclose(mod._rolling_sum(arr, 4), sum_expected, equal_nan=True)
+            np.testing.assert_allclose(mod._rolling_std(arr, 4), std_expected, equal_nan=True)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_training_models_record_blocked_stage_validation(self):
+        tmp_root = WORK_TMP / "stage-validation-meta"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "stage-validation-meta")
+            samples_per_day = 60
+            day_keys = []
+            for day_idx in range(14):
+                day_keys.extend([f"2026-03-{day_idx + 1:02d}"] * samples_per_day)
+            n = len(day_keys)
+            x_axis = np.tile(np.linspace(-1.0, 1.0, samples_per_day), 14)
+            X = pd.DataFrame({
+                col: (x_axis * (idx + 1)) if idx < 3 else np.zeros(n, dtype=float)
+                for idx, col in enumerate(mod.FEATURE_COLS)
+            })
+            residual = np.where(x_axis > 0.45, 180.0, np.where(x_axis < -0.45, -160.0, x_axis * 60.0)).astype(float)
+            sample_weight = np.ones(n, dtype=float)
+            opportunity = np.full(n, 1000.0, dtype=float)
+
+            reg_model, reg_scaler, reg_meta = mod.fit_residual_model(X, residual, sample_weight, day_keys=np.asarray(day_keys, dtype=object))
+            cls_model, cls_scaler, cls_meta = mod.fit_error_classifier(
+                X,
+                residual,
+                sample_weight,
+                opportunity_kwh=opportunity,
+                day_keys=np.asarray(day_keys, dtype=object),
+            )
+
+            self.assertIsNotNone(reg_model)
+            self.assertIsNone(reg_scaler)
+            self.assertIsNotNone(cls_model)
+            self.assertIsNone(cls_scaler)
+            self.assertTrue(bool(reg_meta["stage_validation"]["used_blocked_validation"]))
+            self.assertGreaterEqual(int(reg_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
+            self.assertTrue(bool(cls_meta["stage_validation"]["used_blocked_validation"]))
+            self.assertGreaterEqual(int(cls_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
+
+            bundle = {
+                "feature_cols": list(mod.FEATURE_COLS),
+                "global": {"model": reg_model, "scaler": reg_scaler, "meta": reg_meta},
+                "regimes": {},
+                "error_classifier": {
+                    "class_names": list(mod.ERROR_CLASS_NAMES),
+                    "global": {"model": cls_model, "scaler": cls_scaler, "meta": cls_meta},
+                    "regimes": {},
+                    "weather_profiles": {},
+                },
+            }
+            reg_pred, reg_pred_meta = mod.predict_residual_with_bundle(bundle, X.iloc[:8].copy(), "clear")
+            cls_pred, cls_pred_meta = mod.predict_error_classifier_with_bundle(bundle, X.iloc[:8].copy(), "clear")
+            self.assertEqual(len(reg_pred), 8)
+            self.assertEqual(len(cls_pred), 8)
+            self.assertFalse(bool(reg_pred_meta["used_regime_model"]))
+            self.assertTrue(bool(cls_pred_meta["available"]))
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_predict_error_classifier_damps_sparse_extremes(self):
+        tmp_root = WORK_TMP / "predict-sparse-extremes"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "predict-sparse-extremes")
+            X_pred = pd.DataFrame({
+                col: np.zeros(2, dtype=float)
+                for col in mod.FEATURE_COLS
+            })
+            bundle = {
+                "feature_cols": list(mod.FEATURE_COLS),
+                "error_classifier": {
+                    "class_names": list(mod.ERROR_CLASS_NAMES),
+                    "global": {
+                        "model": FixedClassifier([0.01, 0.02, 0.05, 0.12, 0.80]),
+                        "scaler": IdentityScaler(len(mod.FEATURE_COLS)),
+                        "meta": {
+                            "feature_names": list(mod.FEATURE_COLS),
+                            "sample_count": 214,
+                            "class_counts": {
+                                "strong_over": 1,
+                                "mild_over": 3,
+                                "neutral": 198,
+                                "mild_under": 11,
+                                "strong_under": 1,
+                            },
+                            "centroids_kwh": {"0": -160.0, "1": -70.0, "2": 0.0, "3": 90.0, "4": 220.0},
+                        },
+                    },
+                    "regimes": {},
+                    "weather_profiles": {
+                        "cap_slot_kwh": 1000.0,
+                        "pairs": {
+                            "clear:clear_stable": {"count": 48, "mean": 15.0, "std": 10.0, "mae": 20.0},
+                            "clear:mixed_volatile": {"count": 5, "mean": 40.0, "std": 220.0, "mae": 180.0},
+                        },
+                        "buckets": {
+                            "clear_stable": {"count": 60, "mean": 15.0, "std": 12.0, "mae": 18.0},
+                            "mixed_volatile": {"count": 8, "mean": 45.0, "std": 200.0, "mae": 170.0},
+                        },
+                        "regimes": {
+                            "clear": {"count": 72, "mean": 18.0, "std": 14.0, "mae": 20.0},
+                        },
+                    },
+                },
+            }
+
+            bias, meta = mod.predict_error_classifier_with_bundle(
+                bundle,
+                X_pred,
+                "clear",
+                slot_weather_buckets=np.array(["clear_stable", "mixed_volatile"], dtype=object),
+            )
+
+            self.assertEqual(meta["predicted_labels"].tolist(), [mod.ERROR_CLASS_NEUTRAL_IDX, mod.ERROR_CLASS_NEUTRAL_IDX])
+            self.assertGreater(float(meta["profile_reliability"][0]), float(meta["profile_reliability"][1]))
+            self.assertGreater(float(meta["cap_frac"][0]), float(meta["cap_frac"][1]))
+            self.assertLess(float(meta["confidence"][0]), 0.90)
+            self.assertTrue(np.all(np.asarray(bias, dtype=float) >= 0.0))
         finally:
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -359,6 +664,8 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             self.assertGreater(float(result["error_class_total_kwh"]), 0.0)
             self.assertEqual(len(result["error_class_meta"]["slot_weather_buckets"]), mod.SLOTS_DAY)
             self.assertTrue(result["error_class_meta"]["weather_bucket_forecast_summary"])
+            self.assertIn("mean_profile_reliability", result["error_class_meta"])
+            self.assertIn("class_support_weights", result["error_class_meta"])
             self.assertGreater(float(result["forecast_total_kwh"]), float(result["hybrid_total_kwh"]))
         finally:
             logging.shutdown()

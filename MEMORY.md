@@ -2,12 +2,19 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.24
+- **Repo/package version baseline:** 2.4.25
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.25 Changes - Forecast Error-Classifier Optimization and Release Alignment (2026-03-19)
+- **Forecast error classification is now fully hardened:** the day-ahead pipeline now uses blocked day-holdout probability calibration, slot-opportunity label normalization, cached historical feature/mask/residual artifacts, conservative centroid shrinkage, sparse-class damping, weather-profile reliability scaling, blocked estimator-stage selection, and raw-feature tree inference without the old `RobustScaler` coupling.
+- **Runtime hot paths are lighter without changing forecast rules:** slot weather-bucket classification is now vectorized, repeated pandas rolling calls were replaced with NumPy rolling helpers, and the optimized bucket path is covered by a direct reference-rule equivalence test.
+- **Verification was broadened before release:** `python -m py_compile services\\forecast_engine.py services\\tests\\test_forecast_engine_constraints.py services\\tests\\test_forecast_engine_ipconfig.py services\\tests\\test_forecast_engine_weather.py services\\tests\\test_forecast_engine_error_classifier.py`, `python -m unittest services.tests.test_forecast_engine_constraints services.tests.test_forecast_engine_ipconfig services.tests.test_forecast_engine_weather services.tests.test_forecast_engine_error_classifier`, `node --check electron/main.js`, `node --check server/index.js`, `pyinstaller --noconfirm services\\ForecastCoreService.spec`, `npm run rebuild:native:electron`, and `npm run build:installer` all succeeded.
+- **Live replay path was exercised too:** `run_backtest()` was attempted for `2026-03-14` and `2026-03-15`, and it exited through the expected training-unavailable branch because the local environment currently has `0` accepted history days for reference dates `2026-03-13` and `2026-03-14`.
+- **Versioned docs were realigned to the new baseline:** `package.json`, `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `MEMORY.md`, `docs/ADSI-Dashboard-User-Manual.md`, `docs/ADSI-Dashboard-User-Guide.html`, `public/user-guide.html`, and `docs/ADSI-Dashboard-User-Guide.pdf` now match `v2.4.25`.
 
 ## v2.4.23 Changes - Forecast Classifier, Runtime Supervision, and Plant Cap Settings Polish (2026-03-19)
 - **Forecast inference is more weather-aware:** the day-ahead path now adds a conservative weather-conditioned error classifier on top of the physics/Solcast hybrid baseline and residual regressor, with stronger Solcast respect on clear-weather slots.
@@ -168,8 +175,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.24`
-- Current repo/package baseline: `v2.4.24`
+- Current latest published GitHub release: `v2.4.25`
+- Current repo/package baseline: `v2.4.25`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

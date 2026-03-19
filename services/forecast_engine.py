@@ -40,7 +40,16 @@ import pandas as pd
 import requests
 from joblib import dump, load
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
-from sklearn.preprocessing import RobustScaler
+
+
+class IdentityFeatureScaler:
+    """Legacy-compatible no-op transformer for standalone scaler artifacts."""
+
+    def __init__(self, n_features: int):
+        self.n_features_in_ = int(n_features)
+
+    def transform(self, X):
+        return np.asarray(X, dtype=float)
 
 # ============================================================================
 # PATHS
@@ -281,12 +290,30 @@ ERROR_CLASS_NAMES = (
 ERROR_CLASS_NEUTRAL_IDX = 2
 ERROR_CLASS_MILD_THRESHOLD = 0.04
 ERROR_CLASS_STRONG_THRESHOLD = 0.14
+ERROR_CLASS_OPPORTUNITY_FLOOR_FRAC = 0.12
 ERROR_CLASS_BLEND_MIN = 0.10
 ERROR_CLASS_BLEND_MAX = 0.35
 ERROR_CLASS_BLEND_CONFIDENCE_FLOOR = 0.40
 ERROR_CLASS_BIAS_CAP_FRAC = 0.18
 ERROR_CLASS_CONF_BAND_ADD_MAX = 0.14
 ERROR_CLASS_SEVERE_BAND_ADD_MAX = 0.08
+ERROR_CLASS_CENTROID_SHRINKAGE_SAMPLES = 36.0
+ERROR_CLASS_CALIBRATION_MIN_DAYS = 8
+ERROR_CLASS_CALIBRATION_HOLDOUT_MAX_DAYS = 6
+ERROR_CLASS_CALIBRATION_HOLDOUT_MIN_SAMPLES = 144
+ERROR_CLASS_CALIBRATION_TEMP_MIN = 0.70
+ERROR_CLASS_CALIBRATION_TEMP_MAX = 2.40
+ERROR_CLASS_CALIBRATION_TEMP_STEPS = 18
+ERROR_CLASS_SUPPORT_MILD_FULL_COUNT = 24.0
+ERROR_CLASS_SUPPORT_STRONG_FULL_COUNT = 36.0
+ERROR_CLASS_PROFILE_MIN_RELIABILITY = 0.55
+ERROR_CLASS_PROFILE_DEFAULT_RELIABILITY = 0.62
+ERROR_CLASS_PROFILE_PAIR_FULL_COUNT = 30.0
+ERROR_CLASS_PROFILE_BUCKET_FULL_COUNT = 42.0
+ERROR_CLASS_PROFILE_REGIME_FULL_COUNT = 60.0
+ERROR_CLASS_PROFILE_MAE_REF_FRAC = 0.18
+ERROR_CLASS_PROFILE_STD_REF_FRAC = 0.24
+MODEL_STAGE_HOLDOUT_MIN_SAMPLES = 144
 
 # Anomaly rejection thresholds
 ANOM_MIN_CF    = 0.02   # capacity factor â€“ days below this are bad
@@ -879,11 +906,74 @@ def _season_bucket_from_day(day: str) -> str:
     return "dry" if month in (12, 1, 2, 3, 4, 5) else "wet"
 
 
+def _rolling_window_bounds(length: int, window: int, center: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    size = max(int(length), 0)
+    win = max(int(window), 1)
+    idx = np.arange(size, dtype=int)
+    if center:
+        left = (win - 1) // 2
+        right = win // 2
+        start = np.clip(idx - left, 0, size)
+        end = np.clip(idx + right + 1, 0, size)
+    else:
+        start = np.clip(idx - win + 1, 0, size)
+        end = idx + 1
+    return start, end
+
+
+def _rolling_sum(values: np.ndarray, window: int, center: bool = False) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size <= 0:
+        return np.zeros(0, dtype=float)
+    start, end = _rolling_window_bounds(arr.size, window, center=center)
+    valid = np.isfinite(arr)
+    arr_valid = np.where(valid, arr, 0.0)
+    csum = np.concatenate(([0.0], np.cumsum(arr_valid, dtype=float)))
+    count = np.concatenate(([0], np.cumsum(valid.astype(np.int64), dtype=np.int64)))
+    out = csum[end] - csum[start]
+    out[(count[end] - count[start]) <= 0] = np.nan
+    return out
+
+
+def _rolling_mean(values: np.ndarray, window: int, center: bool = False) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size <= 0:
+        return np.zeros(0, dtype=float)
+    start, end = _rolling_window_bounds(arr.size, window, center=center)
+    valid = np.isfinite(arr)
+    arr_valid = np.where(valid, arr, 0.0)
+    csum = np.concatenate(([0.0], np.cumsum(arr_valid, dtype=float)))
+    count = np.concatenate(([0], np.cumsum(valid.astype(np.int64), dtype=np.int64)))
+    numer = csum[end] - csum[start]
+    denom = count[end] - count[start]
+    return np.divide(numer, denom, out=np.full(arr.size, np.nan, dtype=float), where=denom > 0)
+
+
+def _rolling_std(values: np.ndarray, window: int, center: bool = False, ddof: int = 1) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size <= 0:
+        return np.zeros(0, dtype=float)
+    start, end = _rolling_window_bounds(arr.size, window, center=center)
+    valid = np.isfinite(arr)
+    arr_valid = np.where(valid, arr, 0.0)
+    csum = np.concatenate(([0.0], np.cumsum(arr_valid, dtype=float)))
+    csum_sq = np.concatenate(([0.0], np.cumsum(arr_valid * arr_valid, dtype=float)))
+    count = np.concatenate(([0], np.cumsum(valid.astype(np.int64), dtype=np.int64)))
+    numer = csum[end] - csum[start]
+    numer_sq = csum_sq[end] - csum_sq[start]
+    denom_count = count[end] - count[start]
+    mean = np.divide(numer, denom_count, out=np.zeros(arr.size, dtype=float), where=denom_count > 0)
+    var_numer = np.clip(numer_sq - (numer * mean), 0.0, None)
+    denom = denom_count - max(int(ddof), 0)
+    var = np.divide(var_numer, denom, out=np.full(arr.size, np.nan, dtype=float), where=denom > 0)
+    return np.sqrt(np.clip(var, 0.0, None))
+
+
 def _normalize_profile(values: np.ndarray) -> np.ndarray:
     arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
     if arr.size == 0:
         return np.array([], dtype=float)
-    arr = pd.Series(arr).rolling(3, min_periods=1, center=True).mean().values
+    arr = _rolling_mean(arr, 3, center=True)
     total = float(arr.sum())
     if total <= 0:
         return np.full(arr.size, 1.0 / arr.size, dtype=float)
@@ -1102,7 +1192,7 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
     # Gentle smoothing for cloud (meteorological, not sub-minute noise)
     for col in ["cloud", "cloud_low", "cloud_mid", "cloud_high"]:
         if col in out.columns:
-            out[col] = out[col].rolling(5, min_periods=1, center=True).mean()
+            out[col] = _rolling_mean(pd.to_numeric(out[col], errors="coerce").values, 5, center=True)
 
     return out.iloc[:SLOTS_DAY].reset_index(drop=True)
 
@@ -1451,42 +1541,243 @@ def classify_slot_weather_buckets(w5: pd.DataFrame, day: str) -> np.ndarray:
     drad = np.abs(np.diff(rad, prepend=rad[0]))
 
     out = np.full(SLOTS_DAY, "offsolar", dtype=object)
-    for idx in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
-        if precip[idx] > WEATHER_BUCKET_RAIN_MM or (cape[idx] >= WEATHER_BUCKET_RAIN_CAPE and cloud[idx] >= WEATHER_BUCKET_RAIN_CLOUD):
-            out[idx] = "rainy"
-        elif cloud[idx] < WEATHER_BUCKET_CLEAR_CLOUD and kt[idx] >= WEATHER_BUCKET_CLEAR_KT and drad[idx] < WEATHER_BUCKET_CLEAR_DRAD:
-            out[idx] = "clear_stable"
-        elif cloud[idx] < WEATHER_BUCKET_CLEAR_EDGE_CLOUD and kt[idx] >= WEATHER_BUCKET_CLEAR_EDGE_KT and drad[idx] >= WEATHER_BUCKET_CLEAR_DRAD:
-            out[idx] = "clear_edge"
-        elif (
-            cloud[idx] >= WEATHER_BUCKET_CLEAR_CLOUD
-            and cloud[idx] < WEATHER_BUCKET_MIXED_CLOUD
-            and kt[idx] >= WEATHER_BUCKET_MIXED_KT
-            and drad[idx] < WEATHER_BUCKET_MIXED_VOL_DRAD
-            and precip[idx] <= WEATHER_BUCKET_RAIN_MM
-        ):
-            out[idx] = "mixed_stable"
-        elif (
-            cloud[idx] >= WEATHER_BUCKET_CLEAR_CLOUD
-            and cloud[idx] < WEATHER_BUCKET_MIXED_VOL_CLOUD
-            and drad[idx] >= WEATHER_BUCKET_MIXED_VOL_DRAD
-            and precip[idx] <= WEATHER_BUCKET_RAIN_MM
-        ):
-            out[idx] = "mixed_volatile"
-        else:
-            out[idx] = "overcast"
+    solar_mask = np.zeros(SLOTS_DAY, dtype=bool)
+    solar_mask[SOLAR_START_SLOT:SOLAR_END_SLOT] = True
+    active = solar_mask.copy()
+
+    rainy_mask = active & (
+        (precip > WEATHER_BUCKET_RAIN_MM)
+        | ((cape >= WEATHER_BUCKET_RAIN_CAPE) & (cloud >= WEATHER_BUCKET_RAIN_CLOUD))
+    )
+    out[rainy_mask] = "rainy"
+    active &= ~rainy_mask
+
+    clear_stable_mask = active & (
+        (cloud < WEATHER_BUCKET_CLEAR_CLOUD)
+        & (kt >= WEATHER_BUCKET_CLEAR_KT)
+        & (drad < WEATHER_BUCKET_CLEAR_DRAD)
+    )
+    out[clear_stable_mask] = "clear_stable"
+    active &= ~clear_stable_mask
+
+    clear_edge_mask = active & (
+        (cloud < WEATHER_BUCKET_CLEAR_EDGE_CLOUD)
+        & (kt >= WEATHER_BUCKET_CLEAR_EDGE_KT)
+        & (drad >= WEATHER_BUCKET_CLEAR_DRAD)
+    )
+    out[clear_edge_mask] = "clear_edge"
+    active &= ~clear_edge_mask
+
+    mixed_stable_mask = active & (
+        (cloud >= WEATHER_BUCKET_CLEAR_CLOUD)
+        & (cloud < WEATHER_BUCKET_MIXED_CLOUD)
+        & (kt >= WEATHER_BUCKET_MIXED_KT)
+        & (drad < WEATHER_BUCKET_MIXED_VOL_DRAD)
+        & (precip <= WEATHER_BUCKET_RAIN_MM)
+    )
+    out[mixed_stable_mask] = "mixed_stable"
+    active &= ~mixed_stable_mask
+
+    mixed_volatile_mask = active & (
+        (cloud >= WEATHER_BUCKET_CLEAR_CLOUD)
+        & (cloud < WEATHER_BUCKET_MIXED_VOL_CLOUD)
+        & (drad >= WEATHER_BUCKET_MIXED_VOL_DRAD)
+        & (precip <= WEATHER_BUCKET_RAIN_MM)
+    )
+    out[mixed_volatile_mask] = "mixed_volatile"
+    active &= ~mixed_volatile_mask
+
+    out[active] = "overcast"
     return out
 
 
-def classify_residual_error_classes(residual: np.ndarray, cap_slot: float | None = None) -> np.ndarray:
+def _error_class_normalizer(
+    residual: np.ndarray,
+    opportunity_kwh: np.ndarray | float | None = None,
+    baseline_kwh: np.ndarray | float | None = None,
+    cap_slot: float | None = None,
+) -> np.ndarray:
+    residual_arr = np.asarray(residual, dtype=float)
     cap = max(float(cap_slot if cap_slot is not None else slot_cap_kwh(False)), 1.0)
-    rn = np.asarray(residual, dtype=float) / cap
+    floor = cap * ERROR_CLASS_OPPORTUNITY_FLOOR_FRAC
+    if opportunity_kwh is not None:
+        scale = np.asarray(opportunity_kwh, dtype=float)
+    elif baseline_kwh is not None:
+        scale = np.maximum(np.clip(np.asarray(baseline_kwh, dtype=float), 0.0, None), floor)
+    else:
+        scale = np.full(residual_arr.shape, cap, dtype=float)
+    if scale.shape != residual_arr.shape:
+        if scale.size == 1:
+            scale = np.full(residual_arr.shape, float(scale.reshape(-1)[0]), dtype=float)
+        else:
+            raise ValueError("Residual normalization scale shape mismatch")
+    scale = np.where(np.isfinite(scale), scale, floor)
+    scale = np.maximum(scale, floor)
+    return scale
+
+
+def classify_residual_error_classes(
+    residual: np.ndarray,
+    cap_slot: float | None = None,
+    opportunity_kwh: np.ndarray | float | None = None,
+    baseline_kwh: np.ndarray | float | None = None,
+) -> np.ndarray:
+    rn = np.asarray(residual, dtype=float) / _error_class_normalizer(
+        residual,
+        opportunity_kwh=opportunity_kwh,
+        baseline_kwh=baseline_kwh,
+        cap_slot=cap_slot,
+    )
     out = np.full(rn.shape, ERROR_CLASS_NEUTRAL_IDX, dtype=int)
     out[rn <= -ERROR_CLASS_STRONG_THRESHOLD] = 0
     out[(rn > -ERROR_CLASS_STRONG_THRESHOLD) & (rn <= -ERROR_CLASS_MILD_THRESHOLD)] = 1
     out[(rn >= ERROR_CLASS_MILD_THRESHOLD) & (rn < ERROR_CLASS_STRONG_THRESHOLD)] = 3
     out[rn >= ERROR_CLASS_STRONG_THRESHOLD] = 4
     return out
+
+
+def _apply_probability_temperature(prob_matrix: np.ndarray, temperature: float | None) -> np.ndarray:
+    probs = np.asarray(prob_matrix, dtype=float)
+    if probs.ndim != 2 or probs.size <= 0:
+        return probs.copy()
+    temp = float(temperature if temperature is not None else 1.0)
+    if not math.isfinite(temp) or temp <= 0:
+        temp = 1.0
+    row_sum = probs.sum(axis=1, keepdims=True)
+    probs = np.divide(probs, np.maximum(row_sum, 1e-9), out=np.zeros_like(probs), where=row_sum > 0)
+    if abs(temp - 1.0) < 1e-6:
+        return probs
+    scaled = np.power(np.clip(probs, 1e-9, 1.0), 1.0 / temp)
+    scaled_sum = scaled.sum(axis=1, keepdims=True)
+    return np.divide(scaled, np.maximum(scaled_sum, 1e-9), out=np.zeros_like(scaled), where=scaled_sum > 0)
+
+
+def _weighted_neg_log_loss(
+    prob_matrix: np.ndarray,
+    labels: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> float:
+    probs = np.asarray(prob_matrix, dtype=float)
+    y = np.asarray(labels, dtype=int).reshape(-1)
+    if probs.ndim != 2 or probs.shape[0] != y.shape[0] or probs.shape[0] <= 0:
+        return float("inf")
+    y = np.clip(y, 0, probs.shape[1] - 1)
+    losses = -np.log(np.clip(probs[np.arange(probs.shape[0]), y], 1e-9, 1.0))
+    if sample_weight is None:
+        return float(np.mean(losses))
+    w = np.asarray(sample_weight, dtype=float).reshape(-1)
+    if w.shape[0] != losses.shape[0]:
+        return float(np.mean(losses))
+    return float(np.average(losses, weights=np.maximum(w, 1e-9)))
+
+
+def _weighted_mae_loss(
+    pred: np.ndarray,
+    actual: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> float:
+    err = np.abs(np.asarray(pred, dtype=float).reshape(-1) - np.asarray(actual, dtype=float).reshape(-1))
+    if sample_weight is None:
+        return float(np.mean(err)) if err.size else float("inf")
+    w = np.asarray(sample_weight, dtype=float).reshape(-1)
+    if w.shape[0] != err.shape[0]:
+        return float(np.mean(err)) if err.size else float("inf")
+    return float(np.average(err, weights=np.maximum(w, 1e-9))) if err.size else float("inf")
+
+
+def _blocked_day_holdout_mask(day_keys: np.ndarray | list[str] | None) -> np.ndarray:
+    if day_keys is None:
+        return np.zeros(0, dtype=bool)
+    days = [str(v) for v in np.asarray(day_keys, dtype=object).reshape(-1)]
+    if not days:
+        return np.zeros(0, dtype=bool)
+    ordered_unique = []
+    seen = set()
+    for day in days:
+        if day not in seen:
+            seen.add(day)
+            ordered_unique.append(day)
+    if len(ordered_unique) < ERROR_CLASS_CALIBRATION_MIN_DAYS:
+        return np.zeros(len(days), dtype=bool)
+    holdout_days = int(np.clip(round(len(ordered_unique) * 0.20), 2, ERROR_CLASS_CALIBRATION_HOLDOUT_MAX_DAYS))
+    min_train_days = max(MIN_TRAIN_DAYS, 4)
+    if (len(ordered_unique) - holdout_days) < min_train_days:
+        holdout_days = max(0, len(ordered_unique) - min_train_days)
+    if holdout_days < 2:
+        return np.zeros(len(days), dtype=bool)
+    holdout_set = set(ordered_unique[:holdout_days])
+    return np.asarray([day in holdout_set for day in days], dtype=bool)
+
+
+def _blocked_classifier_holdout_mask(day_keys: np.ndarray | list[str] | None) -> np.ndarray:
+    return _blocked_day_holdout_mask(day_keys)
+
+
+def _fit_error_classifier_temperature(
+    X: pd.DataFrame,
+    labels: np.ndarray,
+    sample_weight: np.ndarray,
+    day_keys: np.ndarray | list[str] | None,
+) -> dict:
+    meta = {
+        "calibrated": False,
+        "temperature": 1.0,
+        "holdout_days": 0,
+        "holdout_samples": 0,
+        "nll_before": None,
+        "nll_after": None,
+        "accuracy_before": None,
+        "accuracy_after": None,
+    }
+    holdout_mask = _blocked_day_holdout_mask(day_keys)
+    if holdout_mask.size != len(labels) or not np.any(holdout_mask):
+        return meta
+    train_mask = ~holdout_mask
+    if int(np.count_nonzero(holdout_mask)) < ERROR_CLASS_CALIBRATION_HOLDOUT_MIN_SAMPLES:
+        return meta
+    y_train = np.asarray(labels, dtype=int)[train_mask]
+    y_holdout = np.asarray(labels, dtype=int)[holdout_mask]
+    if len({int(v) for v in y_train}) < 2 or len({int(v) for v in y_holdout}) < 2:
+        return meta
+
+    X_train = X.iloc[train_mask].reset_index(drop=True)
+    X_holdout = X.iloc[holdout_mask].reset_index(drop=True)
+    w_train = np.asarray(sample_weight, dtype=float)[train_mask]
+    w_holdout = np.asarray(sample_weight, dtype=float)[holdout_mask]
+    model = _make_error_classifier()
+    model.fit(X_train, y_train, sample_weight=w_train)
+
+    raw_probs = _classifier_probabilities_to_full_vector(
+        np.asarray(model.predict_proba(X_holdout), dtype=float),
+        list(map(int, getattr(model, "classes_", []))),
+    )
+    base_nll = _weighted_neg_log_loss(raw_probs, y_holdout, w_holdout)
+    base_acc = float(np.average((np.argmax(raw_probs, axis=1) == y_holdout).astype(float), weights=np.maximum(w_holdout, 1e-9)))
+    best_temp = 1.0
+    best_nll = base_nll
+    best_probs = raw_probs
+    for temp in np.linspace(
+        ERROR_CLASS_CALIBRATION_TEMP_MIN,
+        ERROR_CLASS_CALIBRATION_TEMP_MAX,
+        ERROR_CLASS_CALIBRATION_TEMP_STEPS,
+    ):
+        cand_probs = _apply_probability_temperature(raw_probs, float(temp))
+        cand_nll = _weighted_neg_log_loss(cand_probs, y_holdout, w_holdout)
+        if cand_nll + 1e-6 < best_nll:
+            best_nll = cand_nll
+            best_temp = float(temp)
+            best_probs = cand_probs
+    meta.update({
+        "calibrated": bool(best_temp != 1.0),
+        "temperature": float(best_temp),
+        "holdout_days": int(len({str(v) for v in np.asarray(day_keys, dtype=object).reshape(-1)[holdout_mask]})),
+        "holdout_samples": int(np.count_nonzero(holdout_mask)),
+        "nll_before": float(base_nll),
+        "nll_after": float(best_nll),
+        "accuracy_before": base_acc,
+        "accuracy_after": float(np.average((np.argmax(best_probs, axis=1) == y_holdout).astype(float), weights=np.maximum(w_holdout, 1e-9))),
+    })
+    return meta
 
 
 def _error_class_name(label: int) -> str:
@@ -1696,10 +1987,8 @@ def build_features(
     rad_lag[:12] = rad[:12]
     rad_grad_15m = np.diff(rad, prepend=rad[0])
     cloud_grad_15m = np.diff(cloud, prepend=cloud[0])
-    precip_1h = pd.Series(precip).rolling(12, min_periods=1).sum().values
-    cloud_std_1h = (
-        pd.Series(cloud).rolling(12, min_periods=1).std().fillna(0.0).values
-    )
+    precip_1h = np.nan_to_num(_rolling_sum(precip, 12), nan=0.0)
+    cloud_std_1h = np.nan_to_num(_rolling_std(cloud, 12), nan=0.0)
 
     cap_kw = plant_capacity_kw(True)
     sunrise_slots = np.clip(idx - SOLAR_START_SLOT, 0, SOLAR_SLOTS)
@@ -3022,7 +3311,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     mem_err = np.divide(weighted_sum, np.maximum(weight_sum, 1e-9), out=np.zeros(SLOTS_DAY, dtype=float), where=weight_sum > 0)
 
     # Smooth the error correction (avoid slot-level noise amplification)
-    mem_err = pd.Series(mem_err).rolling(7, min_periods=1, center=True).mean().values
+    mem_err = _rolling_mean(mem_err, 7, center=True)
     mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
     mem_err[SOLAR_END_SLOT:] = 0.0
@@ -3069,18 +3358,22 @@ def collect_history_days(
         baseline = physics_baseline(day, w5)
         solcast_prior = solcast_prior_from_snapshot(day, w5, snapshot, solcast_reliability)
         history_baseline, hybrid_meta = blend_physics_with_solcast(baseline, solcast_prior)
+        feature_frame = build_features(w5, day, solcast_prior)
+        slot_weather_buckets = classify_slot_weather_buckets(w5, day)
         _, constraint_meta = build_operational_constraint_mask(day)
         actual_present_arr = np.asarray(actual_present, dtype=bool).copy()
         operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool).copy()
         cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool).copy()
         manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy()
-        rad_arr = pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values
+        rad_arr = pd.to_numeric(feature_frame["rad"], errors="coerce").fillna(0.0).values
 
         actual_effective = np.asarray(actual, dtype=float).copy()
         actual_effective[cap_dispatch_mask] = history_baseline[cap_dispatch_mask]
         actual_eval = actual_effective.copy()
         fill_mask = (~actual_present_arr) | operational_mask
         actual_eval[fill_mask] = history_baseline[fill_mask]
+        residual = np.clip(actual_effective - history_baseline, -500.0, 500.0)
+        curtailed = curtailed_mask(actual_effective, history_baseline)
 
         stats = analyse_weather_day(day, w5, actual_eval)
         bad, reason = training_day_rejection(stats, actual_eval, history_baseline)
@@ -3100,6 +3393,14 @@ def collect_history_days(
             log.warning("  Reject %s - too few usable unconstrained slots (%d)", day, usable_slots)
             continue
 
+        training_usable_mask = usable_mask & (~curtailed)
+        training_feature_frame = feature_frame.loc[training_usable_mask, FEATURE_COLS].reset_index(drop=True)
+        training_residual = residual[training_usable_mask]
+        training_class_scale = _error_class_normalizer(
+            training_residual,
+            baseline_kwh=np.asarray(history_baseline, dtype=float)[training_usable_mask],
+        )
+
         history.append({
             "day": day,
             "days_ago": days_ago,
@@ -3109,6 +3410,14 @@ def collect_history_days(
             "weather": w5,
             "baseline": np.asarray(baseline, dtype=float),
             "hybrid_baseline": np.asarray(history_baseline, dtype=float),
+            "residual": residual,
+            "feature_frame": feature_frame,
+            "slot_weather_buckets": slot_weather_buckets,
+            "training_usable_mask": training_usable_mask,
+            "training_feature_frame": training_feature_frame,
+            "training_residual": training_residual,
+            "training_class_scale": training_class_scale,
+            "training_slot_count": int(np.count_nonzero(training_usable_mask)),
             "stats": stats,
             "season": _season_bucket_from_day(day),
             "day_regime": classify_day_regime(stats),
@@ -3812,8 +4121,8 @@ def estimate_activity_window(
     records = list((artifacts or {}).get("activity_records") or [])
 
     forecast_arr = np.clip(np.asarray(forecast, dtype=float), 0.0, None)
-    forecast_smooth = pd.Series(forecast_arr).rolling(3, min_periods=1, center=True).mean().values
-    rad_smooth = pd.Series(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values).rolling(3, min_periods=1, center=True).mean().values
+    forecast_smooth = _rolling_mean(forecast_arr, 3, center=True)
+    rad_smooth = _rolling_mean(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values, 3, center=True)
     threshold = activity_threshold_kwh()
 
     weather_first = _find_first_active_slot(forecast_smooth, threshold * 0.80, sustain_slots=ACTIVITY_SUSTAIN_SLOTS)
@@ -3953,7 +4262,7 @@ def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndar
     if stage_limit <= 0:
         return out.copy(), {"node_step_kwh": node_step, "staged_slots": 0}
 
-    rad = pd.Series(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values).rolling(3, min_periods=1, center=True).mean().values
+    rad = _rolling_mean(pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values, 3, center=True)
     active_nodes = 0
     staged_slots = 0
 
@@ -4106,7 +4415,7 @@ def collect_training_data_hardened(
     history_days: list[dict] | None = None,
     day_regime: str | None = None,
     solcast_reliability: dict | None = None,
-) -> tuple[pd.DataFrame, np.ndarray, np.ndarray] | tuple[None, None, None]:
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[None, None, None, None, None]:
     """
     Build the residual-training set from the hardened historical basis.
 
@@ -4121,6 +4430,8 @@ def collect_training_data_hardened(
     X_parts = []
     y_parts = []
     weight_parts = []
+    class_scale_parts = []
+    day_parts = []
     solcast_days = 0
 
     if day_regime:
@@ -4134,59 +4445,78 @@ def collect_training_data_hardened(
 
     for sample in samples:
         day = str(sample["day"])
-        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
-        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+        stats = sample["stats"]
         manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
         cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
-        w5 = sample["weather"]
-        stats = sample["stats"]
-        base = np.asarray(sample["baseline"], dtype=float)
-        solcast_prior = sample.get("solcast_prior") if isinstance(sample.get("solcast_prior"), dict) else solcast_prior_from_snapshot(
-            day,
-            w5,
-            sample.get("solcast_snapshot"),
-            solcast_reliability,
-        )
-        stored_hybrid = sample.get("hybrid_baseline")
-        if stored_hybrid is not None:
-            hybrid_base = np.asarray(stored_hybrid, dtype=float).copy()
-            hybrid_meta = {
-                "used_solcast": bool(sample.get("used_solcast")),
-                "coverage_ratio": float((solcast_prior or {}).get("coverage_ratio", 0.0)),
-                "mean_blend": float(np.mean(np.asarray((solcast_prior or {}).get("blend", np.zeros(SLOTS_DAY)), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if solcast_prior else 0.0,
-            }
-        else:
-            hybrid_base, hybrid_meta = blend_physics_with_solcast(base, solcast_prior)
-        feat = build_features(w5, day, solcast_prior)
-        actual[cap_dispatch_mask] = hybrid_base[cap_dispatch_mask]
-        curtailed = curtailed_mask(actual, hybrid_base)
-        mask = (
-            (hybrid_base > 0)
-            & actual_present
-            & (~manual_constraint_mask)
-            & (~curtailed)
-            & (feat["rad"].values >= RAD_MIN_WM2)
-            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
-            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
-        )
-
-        usable = int(np.count_nonzero(mask))
+        X = sample.get("training_feature_frame")
+        y = np.asarray(sample.get("training_residual"), dtype=float) if sample.get("training_residual") is not None else np.asarray([], dtype=float)
+        class_scale = np.asarray(sample.get("training_class_scale"), dtype=float) if sample.get("training_class_scale") is not None else np.asarray([], dtype=float)
+        usable = int(sample.get("training_slot_count", len(y)))
+        hybrid_meta = {
+            "used_solcast": bool(sample.get("used_solcast")),
+            "coverage_ratio": float(((sample.get("solcast_prior") or {}).get("coverage_ratio", 0.0)) if isinstance(sample.get("solcast_prior"), dict) else 0.0),
+            "mean_blend": float(
+                np.mean(
+                    np.asarray(
+                        ((sample.get("solcast_prior") or {}).get("blend", np.zeros(SLOTS_DAY)))
+                        if isinstance(sample.get("solcast_prior"), dict)
+                        else np.zeros(SLOTS_DAY),
+                        dtype=float,
+                    )[SOLAR_START_SLOT:SOLAR_END_SLOT]
+                )
+            ),
+        }
+        if not isinstance(X, pd.DataFrame) or len(X) != len(y) or len(y) != len(class_scale):
+            actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
+            actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+            w5 = sample["weather"]
+            base = np.asarray(sample["baseline"], dtype=float)
+            solcast_prior = sample.get("solcast_prior") if isinstance(sample.get("solcast_prior"), dict) else solcast_prior_from_snapshot(
+                day,
+                w5,
+                sample.get("solcast_snapshot"),
+                solcast_reliability,
+            )
+            stored_hybrid = sample.get("hybrid_baseline")
+            if stored_hybrid is not None:
+                hybrid_base = np.asarray(stored_hybrid, dtype=float).copy()
+                hybrid_meta = {
+                    "used_solcast": bool(sample.get("used_solcast")),
+                    "coverage_ratio": float((solcast_prior or {}).get("coverage_ratio", 0.0)),
+                    "mean_blend": float(np.mean(np.asarray((solcast_prior or {}).get("blend", np.zeros(SLOTS_DAY)), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if solcast_prior else 0.0,
+                }
+            else:
+                hybrid_base, hybrid_meta = blend_physics_with_solcast(base, solcast_prior)
+            feat = build_features(w5, day, solcast_prior)
+            actual[cap_dispatch_mask] = hybrid_base[cap_dispatch_mask]
+            curtailed = curtailed_mask(actual, hybrid_base)
+            mask = (
+                (hybrid_base > 0)
+                & actual_present
+                & (~manual_constraint_mask)
+                & (~curtailed)
+                & (feat["rad"].values >= RAD_MIN_WM2)
+                & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
+                & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+            )
+            usable = int(np.count_nonzero(mask))
+            X = feat.loc[mask, FEATURE_COLS].reset_index(drop=True)
+            y = np.clip(actual - hybrid_base, -500.0, 500.0)[mask]
+            class_scale = _error_class_normalizer(y, baseline_kwh=hybrid_base[mask])
         if usable < MIN_SAMPLES:
             log.warning("  Reject %s - too few usable slots (%d)", day, usable)
             continue
-
-        residual = np.clip(actual - hybrid_base, -500.0, 500.0)
-        X = feat.loc[mask, FEATURE_COLS]
-        y = residual[mask]
 
         recency_weight = _sample_weight_for_days_ago(int(sample.get("days_ago", N_TRAIN_DAYS)))
         corr = float(stats.get("rad_gen_corr", 0.0))
         quality_weight = float(np.clip(0.70 + 0.30 * max(corr, 0.0), 0.55, 1.0))
         sample_weight = np.full(len(y), recency_weight * quality_weight, dtype=float)
 
-        X_parts.append(X)
+        X_parts.append(X.reset_index(drop=True))
         y_parts.append(y)
         weight_parts.append(sample_weight)
+        class_scale_parts.append(class_scale)
+        day_parts.append(np.full(len(y), day, dtype=object))
         if bool(hybrid_meta.get("used_solcast")):
             solcast_days += 1
 
@@ -4208,11 +4538,13 @@ def collect_training_data_hardened(
     valid_days = len(X_parts)
     if valid_days < MIN_TRAIN_DAYS:
         log.warning("Only %d valid training days - minimum is %d", valid_days, MIN_TRAIN_DAYS)
-        return None, None, None
+        return None, None, None, None, None
 
     X_train = pd.concat(X_parts, ignore_index=True)
     y_train = np.concatenate(y_parts)
     w_train = np.concatenate(weight_parts)
+    class_scale_train = np.concatenate(class_scale_parts)
+    day_train = np.concatenate(day_parts)
     log.info(
         "Training set: %d samples from %d days (mean sample weight=%.3f, solcast_days=%d)",
         len(y_train),
@@ -4220,12 +4552,12 @@ def collect_training_data_hardened(
         float(np.mean(w_train)),
         int(solcast_days),
     )
-    return X_train, y_train, w_train
+    return X_train, y_train, w_train, class_scale_train, day_train
 
 
-def _make_residual_regressor() -> GradientBoostingRegressor:
+def _make_residual_regressor(n_estimators: int | None = None) -> GradientBoostingRegressor:
     return GradientBoostingRegressor(
-        n_estimators=500,
+        n_estimators=int(n_estimators or 500),
         learning_rate=0.025,
         max_depth=4,
         min_samples_split=15,
@@ -4235,15 +4567,14 @@ def _make_residual_regressor() -> GradientBoostingRegressor:
         random_state=42,
         loss="huber",
         alpha=0.85,
-        validation_fraction=0.1,
-        n_iter_no_change=30,
+        n_iter_no_change=None,
         tol=1e-4,
     )
 
 
-def _make_error_classifier() -> GradientBoostingClassifier:
+def _make_error_classifier(n_estimators: int | None = None) -> GradientBoostingClassifier:
     return GradientBoostingClassifier(
-        n_estimators=320,
+        n_estimators=int(n_estimators or 320),
         learning_rate=0.04,
         max_depth=3,
         min_samples_split=18,
@@ -4251,56 +4582,170 @@ def _make_error_classifier() -> GradientBoostingClassifier:
         subsample=0.8,
         max_features=0.75,
         random_state=42,
-        validation_fraction=0.1,
-        n_iter_no_change=25,
+        n_iter_no_change=None,
         tol=1e-4,
     )
+
+
+def _select_residual_regressor_stage(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    sample_weight: np.ndarray,
+    day_keys: np.ndarray | list[str] | None,
+) -> dict:
+    meta = {
+        "used_blocked_validation": False,
+        "holdout_days": 0,
+        "holdout_samples": 0,
+        "best_n_estimators": int(_make_residual_regressor().n_estimators),
+        "mae_full": None,
+        "mae_best": None,
+    }
+    holdout_mask = _blocked_day_holdout_mask(day_keys)
+    if holdout_mask.size != len(y) or not np.any(holdout_mask):
+        return meta
+    if int(np.count_nonzero(holdout_mask)) < MODEL_STAGE_HOLDOUT_MIN_SAMPLES:
+        return meta
+    train_mask = ~holdout_mask
+    if len({str(v) for v in np.asarray(day_keys, dtype=object).reshape(-1)[train_mask]}) < max(MIN_TRAIN_DAYS, 4):
+        return meta
+    X_train = X.iloc[train_mask].reset_index(drop=True)
+    X_holdout = X.iloc[holdout_mask].reset_index(drop=True)
+    y_train = np.asarray(y, dtype=float)[train_mask]
+    y_holdout = np.asarray(y, dtype=float)[holdout_mask]
+    w_train = np.asarray(sample_weight, dtype=float)[train_mask]
+    w_holdout = np.asarray(sample_weight, dtype=float)[holdout_mask]
+    model = _make_residual_regressor()
+    model.fit(X_train, y_train, sample_weight=w_train)
+    best_n = int(getattr(model, "n_estimators_", model.n_estimators))
+    best_mae = float("inf")
+    full_mae = None
+    for idx, pred in enumerate(model.staged_predict(X_holdout), start=1):
+        mae = _weighted_mae_loss(pred, y_holdout, w_holdout)
+        if idx == int(getattr(model, "n_estimators_", model.n_estimators)):
+            full_mae = mae
+        if mae + 1e-6 < best_mae:
+            best_mae = mae
+            best_n = idx
+    meta.update({
+        "used_blocked_validation": True,
+        "holdout_days": int(len({str(v) for v in np.asarray(day_keys, dtype=object).reshape(-1)[holdout_mask]})),
+        "holdout_samples": int(np.count_nonzero(holdout_mask)),
+        "best_n_estimators": int(best_n),
+        "mae_full": None if full_mae is None else float(full_mae),
+        "mae_best": None if not math.isfinite(best_mae) else float(best_mae),
+    })
+    return meta
+
+
+def _select_error_classifier_stage(
+    X: pd.DataFrame,
+    labels: np.ndarray,
+    sample_weight: np.ndarray,
+    day_keys: np.ndarray | list[str] | None,
+) -> dict:
+    meta = {
+        "used_blocked_validation": False,
+        "holdout_days": 0,
+        "holdout_samples": 0,
+        "best_n_estimators": int(_make_error_classifier().n_estimators),
+        "nll_full": None,
+        "nll_best": None,
+    }
+    holdout_mask = _blocked_day_holdout_mask(day_keys)
+    if holdout_mask.size != len(labels) or not np.any(holdout_mask):
+        return meta
+    if int(np.count_nonzero(holdout_mask)) < MODEL_STAGE_HOLDOUT_MIN_SAMPLES:
+        return meta
+    train_mask = ~holdout_mask
+    y_train = np.asarray(labels, dtype=int)[train_mask]
+    y_holdout = np.asarray(labels, dtype=int)[holdout_mask]
+    if len({int(v) for v in y_train}) < 2 or len({int(v) for v in y_holdout}) < 2:
+        return meta
+    X_train = X.iloc[train_mask].reset_index(drop=True)
+    X_holdout = X.iloc[holdout_mask].reset_index(drop=True)
+    w_train = np.asarray(sample_weight, dtype=float)[train_mask]
+    w_holdout = np.asarray(sample_weight, dtype=float)[holdout_mask]
+    model = _make_error_classifier()
+    model.fit(X_train, y_train, sample_weight=w_train)
+    best_n = int(getattr(model, "n_estimators_", model.n_estimators))
+    best_nll = float("inf")
+    full_nll = None
+    for idx, probs in enumerate(model.staged_predict_proba(X_holdout), start=1):
+        full_probs = _classifier_probabilities_to_full_vector(
+            np.asarray(probs, dtype=float),
+            list(map(int, getattr(model, "classes_", []))),
+        )
+        nll = _weighted_neg_log_loss(full_probs, y_holdout, w_holdout)
+        if idx == int(getattr(model, "n_estimators_", model.n_estimators)):
+            full_nll = nll
+        if nll + 1e-6 < best_nll:
+            best_nll = nll
+            best_n = idx
+    meta.update({
+        "used_blocked_validation": True,
+        "holdout_days": int(len({str(v) for v in np.asarray(day_keys, dtype=object).reshape(-1)[holdout_mask]})),
+        "holdout_samples": int(np.count_nonzero(holdout_mask)),
+        "best_n_estimators": int(best_n),
+        "nll_full": None if full_nll is None else float(full_nll),
+        "nll_best": None if not math.isfinite(best_nll) else float(best_nll),
+    })
+    return meta
 
 
 def fit_residual_model(
     X: pd.DataFrame,
     y: np.ndarray,
     sample_weight: np.ndarray,
-) -> tuple[GradientBoostingRegressor, RobustScaler, dict]:
-    scaler = RobustScaler()
-    X_sc = scaler.fit_transform(X)
-    model = _make_residual_regressor()
-    model.fit(X_sc, y, sample_weight=sample_weight)
+    day_keys: np.ndarray | list[str] | None = None,
+) -> tuple[GradientBoostingRegressor, object | None, dict]:
+    stage_meta = _select_residual_regressor_stage(X, y, sample_weight, day_keys)
+    model = _make_residual_regressor(stage_meta.get("best_n_estimators"))
+    model.fit(X.reset_index(drop=True), y, sample_weight=sample_weight)
     meta = {
         "sample_count": int(len(y)),
         "feature_count": int(X.shape[1]),
         "feature_names": list(X.columns),
         "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
         "estimators_used": int(getattr(model, "n_estimators_", model.n_estimators)),
+        "stage_validation": stage_meta,
     }
-    return model, scaler, meta
+    return model, None, meta
 
 
 def fit_error_classifier(
     X: pd.DataFrame,
     residual: np.ndarray,
     sample_weight: np.ndarray,
-) -> tuple[GradientBoostingClassifier, RobustScaler, dict] | tuple[None, None, None]:
-    labels = classify_residual_error_classes(residual)
+    opportunity_kwh: np.ndarray | None = None,
+    day_keys: np.ndarray | list[str] | None = None,
+) -> tuple[GradientBoostingClassifier, object | None, dict] | tuple[None, None, None]:
+    labels = classify_residual_error_classes(residual, opportunity_kwh=opportunity_kwh)
     present = sorted({int(v) for v in np.asarray(labels, dtype=int)})
     if len(present) < 2:
         return None, None, None
 
-    scaler = RobustScaler()
-    X_sc = scaler.fit_transform(X)
-    model = _make_error_classifier()
-    model.fit(X_sc, labels, sample_weight=sample_weight)
+    stage_meta = _select_error_classifier_stage(X, labels, sample_weight, day_keys)
+    model = _make_error_classifier(stage_meta.get("best_n_estimators"))
+    model.fit(X.reset_index(drop=True), labels, sample_weight=sample_weight)
     centroids = {}
+    raw_centroids = {}
     label_arr = np.asarray(labels, dtype=int)
     residual_arr = np.asarray(residual, dtype=float)
     weight_arr = np.asarray(sample_weight, dtype=float)
     class_counts = {}
+    residual_prior = float(np.average(residual_arr, weights=np.maximum(weight_arr, 1e-9)))
     for label in present:
         mask = label_arr == label
-        class_counts[_error_class_name(label)] = int(np.count_nonzero(mask))
+        count = int(np.count_nonzero(mask))
+        class_counts[_error_class_name(label)] = count
         if not np.any(mask):
             continue
-        centroids[str(label)] = float(np.average(residual_arr[mask], weights=weight_arr[mask]))
+        raw_mean = float(np.average(residual_arr[mask], weights=np.maximum(weight_arr[mask], 1e-9)))
+        shrink = count / (count + ERROR_CLASS_CENTROID_SHRINKAGE_SAMPLES)
+        raw_centroids[str(label)] = raw_mean
+        centroids[str(label)] = float((shrink * raw_mean) + ((1.0 - shrink) * residual_prior))
+    calibration = _fit_error_classifier_temperature(X, label_arr, weight_arr, day_keys)
     meta = {
         "sample_count": int(len(residual_arr)),
         "feature_count": int(X.shape[1]),
@@ -4309,9 +4754,23 @@ def fit_error_classifier(
         "classes": list(map(int, getattr(model, "classes_", []))),
         "class_counts": class_counts,
         "centroids_kwh": centroids,
+        "raw_centroids_kwh": raw_centroids,
+        "centroid_prior_kwh": residual_prior,
+        "label_normalization": "slot_opportunity" if opportunity_kwh is not None else "slot_cap",
+        "opportunity_floor_frac": float(ERROR_CLASS_OPPORTUNITY_FLOOR_FRAC),
+        "prob_temperature": float(calibration.get("temperature", 1.0)),
+        "calibration": calibration,
+        "stage_validation": stage_meta,
+        "class_support_weights": {
+            ERROR_CLASS_NAMES[idx]: float(weight)
+            for idx, weight in enumerate(_error_class_support_weights({
+                "class_counts": class_counts,
+                "sample_count": int(len(residual_arr)),
+            }))
+        },
         "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
     }
-    return model, scaler, meta
+    return model, None, meta
 
 
 def build_weather_error_profiles(history_days: list[dict]) -> dict:
@@ -4328,25 +4787,32 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
     for sample in history_days:
         day = str(sample["day"])
         w5 = sample["weather"]
-        feat = build_features(w5, day, sample.get("solcast_prior"))
-        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
-        hybrid = np.asarray(sample.get("hybrid_baseline", sample["baseline"]), dtype=float).copy()
-        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
-        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
-        cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
-        actual[cap_dispatch_mask] = hybrid[cap_dispatch_mask]
-        usable_mask = (
-            solar_mask
-            & actual_present
-            & (~manual_constraint_mask)
-            & (~curtailed_mask(actual, hybrid))
-            & (feat["rad"].values >= RAD_MIN_WM2)
-            & (hybrid > 0.0)
-        )
+        residual = np.asarray(sample.get("residual"), dtype=float) if sample.get("residual") is not None else None
+        usable_mask = np.asarray(sample.get("training_usable_mask"), dtype=bool) if sample.get("training_usable_mask") is not None else None
+        bucket_labels = np.asarray(sample.get("slot_weather_buckets"), dtype=object) if sample.get("slot_weather_buckets") is not None else None
+        if residual is None or residual.size < SLOTS_DAY or usable_mask is None or usable_mask.size < SLOTS_DAY:
+            feat = sample.get("feature_frame")
+            if not isinstance(feat, pd.DataFrame):
+                feat = build_features(w5, day, sample.get("solcast_prior"))
+            actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
+            hybrid = np.asarray(sample.get("hybrid_baseline", sample["baseline"]), dtype=float).copy()
+            actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
+            manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+            cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+            actual[cap_dispatch_mask] = hybrid[cap_dispatch_mask]
+            usable_mask = (
+                solar_mask
+                & actual_present
+                & (~manual_constraint_mask)
+                & (~curtailed_mask(actual, hybrid))
+                & (feat["rad"].values >= RAD_MIN_WM2)
+                & (hybrid > 0.0)
+            )
+            residual = np.clip(actual - hybrid, -500.0, 500.0)
         if not np.any(usable_mask):
             continue
-        residual = np.clip(actual - hybrid, -500.0, 500.0)
-        bucket_labels = classify_slot_weather_buckets(w5, day)
+        if bucket_labels is None or bucket_labels.size < SLOTS_DAY:
+            bucket_labels = classify_slot_weather_buckets(w5, day)
         regime = str(sample.get("day_regime") or classify_day_regime(sample.get("stats") or analyse_weather_day(day, w5)))
         for slot in np.flatnonzero(usable_mask):
             bucket = str(bucket_labels[slot] or "")
@@ -4384,7 +4850,7 @@ def build_training_state(today: date) -> dict | None:
         max(N_TRAIN_DAYS, SHAPE_LOOKBACK_DAYS),
         solcast_reliability=solcast_reliability,
     )
-    X, y, sample_weight = collect_training_data_hardened(
+    X, y, sample_weight, class_scale, day_keys = collect_training_data_hardened(
         today,
         history_days,
         solcast_reliability=solcast_reliability,
@@ -4392,8 +4858,14 @@ def build_training_state(today: date) -> dict | None:
     if X is None:
         return None
 
-    global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight)
-    error_classifier_model, error_classifier_scaler, error_classifier_meta = fit_error_classifier(X, y, sample_weight)
+    global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight, day_keys=day_keys)
+    error_classifier_model, error_classifier_scaler, error_classifier_meta = fit_error_classifier(
+        X,
+        y,
+        sample_weight,
+        opportunity_kwh=class_scale,
+        day_keys=day_keys,
+    )
     bundle = {
         "created_ts": int(time.time()),
         "training_basis": "actual archived weather + cleaned actual generation (+ Solcast prior when available)",
@@ -4423,7 +4895,7 @@ def build_training_state(today: date) -> dict | None:
         regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
         if regime_days < REGIME_MODEL_MIN_DAYS:
             continue
-        X_reg, y_reg, w_reg = collect_training_data_hardened(
+        X_reg, y_reg, w_reg, reg_class_scale, reg_day_keys = collect_training_data_hardened(
             today,
             history_days,
             day_regime=regime,
@@ -4431,7 +4903,7 @@ def build_training_state(today: date) -> dict | None:
         )
         if X_reg is None or len(y_reg) < REGIME_MODEL_MIN_SAMPLES:
             continue
-        regime_model, regime_scaler, regime_meta = fit_residual_model(X_reg, y_reg, w_reg)
+        regime_model, regime_scaler, regime_meta = fit_residual_model(X_reg, y_reg, w_reg, day_keys=reg_day_keys)
         regime_meta["day_count"] = int(regime_days)
         bundle["regimes"][regime] = {
             "model": regime_model,
@@ -4445,7 +4917,13 @@ def build_training_state(today: date) -> dict | None:
             int(regime_meta.get("sample_count", 0)),
             f"{float(regime_meta['train_score']):.4f}" if regime_meta.get("train_score") is not None else "n/a",
         )
-        cls_model, cls_scaler, cls_meta = fit_error_classifier(X_reg, y_reg, w_reg)
+        cls_model, cls_scaler, cls_meta = fit_error_classifier(
+            X_reg,
+            y_reg,
+            w_reg,
+            opportunity_kwh=reg_class_scale,
+            day_keys=reg_day_keys,
+        )
         if cls_model is not None and cls_scaler is not None and cls_meta is not None:
             cls_meta["day_count"] = int(regime_days)
             bundle["error_classifier"]["regimes"][regime] = {
@@ -4484,10 +4962,10 @@ def load_model_bundle() -> dict | None:
         except Exception as e:
             log.warning("Model bundle load failed %s: %s", MODEL_BUNDLE_FILE, e)
 
-    if MODEL_FILE.exists() and SCALER_FILE.exists():
+    if MODEL_FILE.exists():
         try:
             model = load(MODEL_FILE)
-            scaler = load(SCALER_FILE)
+            scaler = load(SCALER_FILE) if SCALER_FILE.exists() else None
             return {
                 "created_ts": int(time.time()),
                 "training_basis": "legacy-single-model",
@@ -4497,6 +4975,7 @@ def load_model_bundle() -> dict | None:
                     "meta": {
                         "sample_count": 0,
                         "feature_count": len(FEATURE_COLS),
+                        "feature_names": list(FEATURE_COLS),
                         "train_score": None,
                         "estimators_used": int(getattr(model, "n_estimators_", getattr(model, "n_estimators", 0)) or 0),
                     },
@@ -4529,10 +5008,23 @@ def _align_bundle_features(
                 X_aligned[col] = 0.0
         return X_aligned
     scaler = block.get("scaler")
-    if hasattr(scaler, "n_features_in_") and int(scaler.n_features_in_) != int(X_pred.shape[1]):
+    model = block.get("model")
+    expected_count = None
+    if hasattr(scaler, "n_features_in_"):
+        expected_count = int(scaler.n_features_in_)
+    elif hasattr(model, "n_features_in_"):
+        expected_count = int(model.n_features_in_)
+    if expected_count is not None and expected_count != int(X_pred.shape[1]):
         raise ValueError(
-            f"Feature count mismatch for model bundle (expected {int(scaler.n_features_in_)}, got {int(X_pred.shape[1])})"
+            f"Feature count mismatch for model bundle (expected {expected_count}, got {int(X_pred.shape[1])})"
         )
+    return X_pred
+
+
+def _transform_bundle_features(block: dict, X_pred: pd.DataFrame):
+    scaler = block.get("scaler")
+    if scaler is not None and hasattr(scaler, "transform"):
+        return np.asarray(scaler.transform(X_pred), dtype=float)
     return X_pred
 
 
@@ -4547,21 +5039,19 @@ def predict_residual_with_bundle(
 
     global_block = bundle.get("global") or {}
     global_model = global_block.get("model")
-    global_scaler = global_block.get("scaler")
-    if global_model is None or global_scaler is None:
+    if global_model is None:
         return np.zeros(len(X_pred), dtype=float), {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
 
     X_pred = _align_bundle_features(global_block, list(bundle.get("feature_cols") or []), X_pred)
 
-    X_global = global_scaler.transform(X_pred)
+    X_global = _transform_bundle_features(global_block, X_pred)
     global_pred = np.asarray(global_model.predict(X_global), dtype=float)
     regime_block = ((bundle.get("regimes") or {}).get(target_regime) or {})
     regime_model = regime_block.get("model")
-    regime_scaler = regime_block.get("scaler")
-    if regime_model is None or regime_scaler is None:
+    if regime_model is None:
         return global_pred, {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
 
-    X_regime = regime_scaler.transform(X_pred)
+    X_regime = _transform_bundle_features(regime_block, X_pred)
     regime_pred = np.asarray(regime_model.predict(X_regime), dtype=float)
     regime_meta = regime_block.get("meta") or {}
     regime_days = int(regime_meta.get("day_count", 0))
@@ -4599,11 +5089,124 @@ def _expected_bias_from_classifier_probs(prob_matrix: np.ndarray, centroids: dic
     return expected
 
 
+def _error_class_support_weights(meta: dict | None) -> np.ndarray:
+    meta_dict = meta if isinstance(meta, dict) else {}
+    class_counts = dict(meta_dict.get("class_counts") or {})
+    if not class_counts:
+        return np.ones(len(ERROR_CLASS_NAMES), dtype=float)
+    weights = np.ones(len(ERROR_CLASS_NAMES), dtype=float)
+    for idx, name in enumerate(ERROR_CLASS_NAMES):
+        if idx == ERROR_CLASS_NEUTRAL_IDX:
+            weights[idx] = 1.0
+            continue
+        full_count = ERROR_CLASS_SUPPORT_STRONG_FULL_COUNT if idx in (0, len(ERROR_CLASS_NAMES) - 1) else ERROR_CLASS_SUPPORT_MILD_FULL_COUNT
+        count = max(float(class_counts.get(name, 0.0)), 0.0)
+        weights[idx] = float(np.sqrt(np.clip(count / max(full_count, 1.0), 0.0, 1.0)))
+    return weights
+
+
+def _stabilize_classifier_probabilities(
+    prob_matrix: np.ndarray,
+    meta: dict | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    probs = np.asarray(prob_matrix, dtype=float)
+    if probs.ndim != 2 or probs.size <= 0:
+        support_weights = np.ones(len(ERROR_CLASS_NAMES), dtype=float)
+        return probs.copy(), support_weights, np.ones(probs.shape[0] if probs.ndim == 2 else 0, dtype=float)
+    support_weights = _error_class_support_weights(meta)
+    adjusted = probs.copy()
+    for idx in range(adjusted.shape[1]):
+        if idx == ERROR_CLASS_NEUTRAL_IDX:
+            continue
+        adjusted[:, idx] *= float(support_weights[idx])
+    row_sum = adjusted.sum(axis=1, keepdims=True)
+    neutral_add = np.clip(1.0 - row_sum, 0.0, 1.0)
+    adjusted[:, ERROR_CLASS_NEUTRAL_IDX] += neutral_add[:, 0]
+    row_sum = adjusted.sum(axis=1, keepdims=True)
+    adjusted = np.divide(adjusted, np.maximum(row_sum, 1e-9), out=np.zeros_like(adjusted), where=row_sum > 0)
+    support_strength = np.clip(adjusted @ support_weights, 0.0, 1.0)
+    return adjusted, support_weights, support_strength
+
+
+def _weather_profile_stat_reliability(stat: dict | None, cap_slot_kwh: float, full_count: float) -> float | None:
+    if not isinstance(stat, dict):
+        return None
+    count = int(stat.get("count", 0) or 0)
+    if count <= 0:
+        return None
+    cap_slot = max(float(cap_slot_kwh), 1.0)
+    count_score = float(np.clip(count / max(full_count, 1.0), 0.0, 1.0))
+    mae_norm = float(np.clip(abs(float(stat.get("mae", 0.0))) / max(cap_slot * ERROR_CLASS_PROFILE_MAE_REF_FRAC, 1.0), 0.0, 1.0))
+    std_norm = float(np.clip(abs(float(stat.get("std", 0.0))) / max(cap_slot * ERROR_CLASS_PROFILE_STD_REF_FRAC, 1.0), 0.0, 1.0))
+    stability = float(np.clip(1.0 - 0.60 * mae_norm - 0.40 * std_norm, 0.0, 1.0))
+    return float(
+        np.clip(
+            ERROR_CLASS_PROFILE_MIN_RELIABILITY
+            + (1.0 - ERROR_CLASS_PROFILE_MIN_RELIABILITY) * count_score * stability,
+            ERROR_CLASS_PROFILE_MIN_RELIABILITY,
+            1.0,
+        )
+    )
+
+
+def _weather_profile_reliability_vector(
+    weather_profiles: dict | None,
+    target_regime: str,
+    slot_weather_buckets: np.ndarray | list[str] | None,
+) -> np.ndarray:
+    if slot_weather_buckets is None:
+        return np.ones(0, dtype=float)
+    labels = np.asarray(slot_weather_buckets, dtype=object).reshape(-1)
+    out = np.full(labels.shape, ERROR_CLASS_PROFILE_DEFAULT_RELIABILITY, dtype=float)
+    if labels.size <= 0:
+        return out
+    profiles = weather_profiles if isinstance(weather_profiles, dict) else {}
+    pair_stats = dict(profiles.get("pairs") or {})
+    bucket_stats = dict(profiles.get("buckets") or {})
+    regime_stats = dict(profiles.get("regimes") or {})
+    cap_slot = float(profiles.get("cap_slot_kwh", slot_cap_kwh(False)) or slot_cap_kwh(False))
+    for idx, raw_label in enumerate(labels):
+        bucket = str(raw_label or "")
+        if not bucket or bucket == "offsolar":
+            out[idx] = 0.0
+            continue
+        scored: list[tuple[float, float]] = []
+        pair_rel = _weather_profile_stat_reliability(
+            pair_stats.get(f"{target_regime}:{bucket}"),
+            cap_slot,
+            ERROR_CLASS_PROFILE_PAIR_FULL_COUNT,
+        )
+        if pair_rel is not None:
+            scored.append((0.60, pair_rel))
+        bucket_rel = _weather_profile_stat_reliability(
+            bucket_stats.get(bucket),
+            cap_slot,
+            ERROR_CLASS_PROFILE_BUCKET_FULL_COUNT,
+        )
+        if bucket_rel is not None:
+            scored.append((0.25, bucket_rel))
+        regime_rel = _weather_profile_stat_reliability(
+            regime_stats.get(target_regime),
+            cap_slot,
+            ERROR_CLASS_PROFILE_REGIME_FULL_COUNT,
+        )
+        if regime_rel is not None:
+            scored.append((0.15, regime_rel))
+        if scored:
+            weights = np.asarray([w for w, _ in scored], dtype=float)
+            values = np.asarray([v for _, v in scored], dtype=float)
+            out[idx] = float(np.average(values, weights=weights))
+        else:
+            out[idx] = ERROR_CLASS_PROFILE_DEFAULT_RELIABILITY
+    return np.clip(out, 0.0, 1.0)
+
+
 def predict_error_classifier_with_bundle(
     bundle: dict | None,
     X_pred: pd.DataFrame,
     target_regime: str,
     regime_confidence: float = 1.0,
+    slot_weather_buckets: np.ndarray | list[str] | None = None,
 ) -> tuple[np.ndarray, dict]:
     default_meta = {
         "available": False,
@@ -4615,6 +5218,11 @@ def predict_error_classifier_with_bundle(
         "confidence": np.zeros(len(X_pred), dtype=float),
         "severe_probability": np.zeros(len(X_pred), dtype=float),
         "weather_profiles": {},
+        "support_strength": np.zeros(len(X_pred), dtype=float),
+        "profile_reliability": np.ones(len(X_pred), dtype=float),
+        "trust_scale": np.zeros(len(X_pred), dtype=float),
+        "cap_frac": np.full(len(X_pred), ERROR_CLASS_BIAS_CAP_FRAC, dtype=float),
+        "class_support_weights": {name: 1.0 for name in ERROR_CLASS_NAMES},
     }
     if not bundle or not isinstance(bundle, dict):
         return np.zeros(len(X_pred), dtype=float), default_meta
@@ -4622,34 +5230,50 @@ def predict_error_classifier_with_bundle(
     classifier_block = bundle.get("error_classifier") or {}
     global_block = classifier_block.get("global") or {}
     global_model = global_block.get("model")
-    global_scaler = global_block.get("scaler")
-    if global_model is None or global_scaler is None:
+    if global_model is None:
         return np.zeros(len(X_pred), dtype=float), default_meta
 
     X_pred = _align_bundle_features(global_block, list(bundle.get("feature_cols") or []), X_pred)
-    X_global = global_scaler.transform(X_pred)
+    X_global = _transform_bundle_features(global_block, X_pred)
     global_probs = _classifier_probabilities_to_full_vector(
         np.asarray(global_model.predict_proba(X_global), dtype=float),
         list(map(int, getattr(global_model, "classes_", []))),
+    )
+    global_probs = _apply_probability_temperature(
+        global_probs,
+        float((global_block.get("meta") or {}).get("prob_temperature", 1.0)),
+    )
+    global_probs, global_support_weights, global_support_strength = _stabilize_classifier_probabilities(
+        global_probs,
+        global_block.get("meta"),
     )
     global_centroids = dict((global_block.get("meta") or {}).get("centroids_kwh") or {})
     global_bias = _expected_bias_from_classifier_probs(global_probs, global_centroids)
 
     regime_block = ((classifier_block.get("regimes") or {}).get(target_regime) or {})
     regime_model = regime_block.get("model")
-    regime_scaler = regime_block.get("scaler")
-    if regime_model is None or regime_scaler is None:
+    if regime_model is None:
         probs = global_probs
         expected_bias = global_bias
         used_regime_model = False
         blend = 0.0
         regime_days = 0
         regime_samples = 0
+        support_weights = global_support_weights
+        support_strength = global_support_strength
     else:
-        X_regime = regime_scaler.transform(X_pred)
+        X_regime = _transform_bundle_features(regime_block, X_pred)
         regime_probs = _classifier_probabilities_to_full_vector(
             np.asarray(regime_model.predict_proba(X_regime), dtype=float),
             list(map(int, getattr(regime_model, "classes_", []))),
+        )
+        regime_probs = _apply_probability_temperature(
+            regime_probs,
+            float((regime_block.get("meta") or {}).get("prob_temperature", 1.0)),
+        )
+        regime_probs, regime_support_weights, regime_support_strength = _stabilize_classifier_probabilities(
+            regime_probs,
+            regime_block.get("meta"),
         )
         regime_centroids = dict((regime_block.get("meta") or {}).get("centroids_kwh") or {})
         regime_bias = _expected_bias_from_classifier_probs(regime_probs, regime_centroids)
@@ -4662,10 +5286,26 @@ def predict_error_classifier_with_bundle(
         probs = ((1.0 - blend) * global_probs) + (blend * regime_probs)
         expected_bias = ((1.0 - blend) * global_bias) + (blend * regime_bias)
         used_regime_model = True
+        support_weights = ((1.0 - blend) * global_support_weights) + (blend * regime_support_weights)
+        support_strength = ((1.0 - blend) * global_support_strength) + (blend * regime_support_strength)
 
+    profile_reliability = _weather_profile_reliability_vector(
+        classifier_block.get("weather_profiles"),
+        target_regime,
+        slot_weather_buckets,
+    )
+    if profile_reliability.size != len(X_pred):
+        profile_reliability = np.ones(len(X_pred), dtype=float)
+    support_strength = np.clip(np.asarray(support_strength, dtype=float), 0.0, 1.0)
+    trust_scale = np.clip(profile_reliability * support_strength, 0.0, 1.0)
     predicted_labels = np.argmax(probs, axis=1).astype(int)
-    confidence = np.max(probs, axis=1).astype(float)
+    confidence = (np.max(probs, axis=1).astype(float) * np.sqrt(np.clip(trust_scale, 0.0, 1.0))).astype(float)
     severe_probability = (probs[:, 0] + probs[:, -1]).astype(float)
+    cap_frac = (
+        ERROR_CLASS_BIAS_CAP_FRAC
+        * (0.45 + 0.55 * np.clip(profile_reliability, 0.0, 1.0))
+        * (0.55 + 0.45 * np.clip(support_strength, 0.0, 1.0))
+    )
     meta = {
         "available": True,
         "target_regime": target_regime,
@@ -4678,6 +5318,14 @@ def predict_error_classifier_with_bundle(
         "confidence": confidence,
         "severe_probability": severe_probability,
         "weather_profiles": classifier_block.get("weather_profiles") or {},
+        "support_strength": support_strength,
+        "profile_reliability": profile_reliability,
+        "trust_scale": trust_scale,
+        "cap_frac": cap_frac.astype(float),
+        "class_support_weights": {
+            ERROR_CLASS_NAMES[idx]: float(support_weights[idx])
+            for idx in range(min(len(ERROR_CLASS_NAMES), len(support_weights)))
+        },
     }
     return expected_bias, meta
 
@@ -4694,7 +5342,10 @@ def train_model(today: date) -> bool:
     global_scaler = global_block.get("scaler")
     global_meta = dict(global_block.get("meta") or {})
     dump(global_model, MODEL_FILE)
-    dump(global_scaler, SCALER_FILE)
+    if global_scaler is not None:
+        dump(global_scaler, SCALER_FILE)
+    else:
+        dump(IdentityFeatureScaler(int(global_meta.get("feature_count", len(bundle.get("feature_cols") or FEATURE_COLS)))), SCALER_FILE)
     save_model_bundle(bundle)
     save_forecast_artifacts(state.get("forecast_artifacts") or {})
     save_weather_bias_artifact(state.get("weather_bias") or {})
@@ -4756,10 +5407,8 @@ def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float =
     solar_conf = 0.68 + 0.32 * np.sin(np.pi * solar_rel)
     solar_conf = np.clip(solar_conf, 0.55, 1.0)
 
-    cloud_std_1h = (
-        pd.Series(cloud).rolling(12, min_periods=1).std().fillna(0.0).values / 100.0
-    )
-    precip_1h = pd.Series(precip).rolling(12, min_periods=1).sum().values
+    cloud_std_1h = np.nan_to_num(_rolling_std(cloud, 12), nan=0.0) / 100.0
+    precip_1h = np.nan_to_num(_rolling_sum(precip, 12), nan=0.0)
 
     cloud_unc = np.clip((cloud - 45.0) / 55.0, 0.0, 1.0)
     rain_unc = np.clip(precip_1h / 3.0, 0.0, 1.0)
@@ -5028,7 +5677,10 @@ def compute_error_class_metrics(
     if not np.any(usable_mask):
         return None
 
-    actual_labels = classify_residual_error_classes(actual_arr[:SLOTS_DAY] - hybrid_arr[:SLOTS_DAY])
+    actual_labels = classify_residual_error_classes(
+        actual_arr[:SLOTS_DAY] - hybrid_arr[:SLOTS_DAY],
+        baseline_kwh=hybrid_arr[:SLOTS_DAY],
+    )
     pred_sign = _error_class_sign(pred_arr[:SLOTS_DAY])
     actual_sign = _error_class_sign(actual_labels)
     sign_hit = float(np.mean(pred_sign[usable_mask] == actual_sign[usable_mask]))
@@ -5680,6 +6332,11 @@ def run_dayahead(
         "weather_profiles": {},
         "class_blend": np.zeros(SLOTS_DAY, dtype=float),
         "class_bias_kwh": np.zeros(SLOTS_DAY, dtype=float),
+        "support_strength": np.zeros(SLOTS_DAY, dtype=float),
+        "profile_reliability": np.ones(SLOTS_DAY, dtype=float),
+        "trust_scale": np.zeros(SLOTS_DAY, dtype=float),
+        "cap_frac": np.full(SLOTS_DAY, ERROR_CLASS_BIAS_CAP_FRAC, dtype=float),
+        "class_support_weights": {name: 1.0 for name in ERROR_CLASS_NAMES},
     }
     if runtime_state is not None and "model_bundle" in runtime_state:
         model_bundle = runtime_state.get("model_bundle")
@@ -5707,12 +6364,7 @@ def run_dayahead(
 
             # Weather-adaptive blending: trust ML less in volatile/rainy slots.
             ml_residual = ml_residual * blend
-            ml_residual = (
-                pd.Series(ml_residual)
-                .rolling(3, min_periods=1, center=True)
-                .mean()
-                .values
-            )
+            ml_residual = _rolling_mean(ml_residual, 3, center=True)
             if solcast_residual_scale < 0.999:
                 ml_residual = ml_residual * solcast_residual_scale
             if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
@@ -5739,12 +6391,18 @@ def run_dayahead(
                 X_pred,
                 target_regime,
                 regime_confidence=float(bias_meta.get("regime_confidence", 1.0)),
+                slot_weather_buckets=slot_weather_buckets,
             )
             error_class_term = np.asarray(raw_class_bias, dtype=float)
             error_class_term[:SOLAR_START_SLOT] = 0.0
             error_class_term[SOLAR_END_SLOT:] = 0.0
             error_class_term[w5["rad"].values < RAD_MIN_WM2] = 0.0
-            error_class_term = np.clip(error_class_term, -cap_kwh * ERROR_CLASS_BIAS_CAP_FRAC, cap_kwh * ERROR_CLASS_BIAS_CAP_FRAC)
+            class_cap_frac = np.asarray(classifier_meta.get("cap_frac"), dtype=float).reshape(-1)
+            if class_cap_frac.size < SLOTS_DAY:
+                class_cap_frac = np.pad(class_cap_frac, (0, SLOTS_DAY - class_cap_frac.size), constant_values=ERROR_CLASS_BIAS_CAP_FRAC)
+            class_cap_frac = np.clip(class_cap_frac[:SLOTS_DAY], 0.0, ERROR_CLASS_BIAS_CAP_FRAC)
+            class_cap_kwh = cap_kwh * class_cap_frac
+            error_class_term = np.clip(error_class_term, -class_cap_kwh, class_cap_kwh)
             class_confidence = np.asarray(classifier_meta.get("confidence"), dtype=float)
             class_blend = ERROR_CLASS_BLEND_MIN + (
                 ERROR_CLASS_BLEND_MAX - ERROR_CLASS_BLEND_MIN
@@ -5754,19 +6412,20 @@ def run_dayahead(
                 0.0,
                 1.0,
             )
+            class_trust_scale = np.asarray(classifier_meta.get("trust_scale"), dtype=float).reshape(-1)
+            if class_trust_scale.size < SLOTS_DAY:
+                class_trust_scale = np.pad(class_trust_scale, (0, SLOTS_DAY - class_trust_scale.size), constant_values=1.0)
+            class_trust_scale = np.clip(class_trust_scale[:SLOTS_DAY], 0.0, 1.0)
+            class_blend = class_blend * class_trust_scale
             if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
                 class_blend = class_blend.copy()
                 class_blend[clear_slot_mask] *= (1.0 - 0.35 * clear_solcast_priority)
             error_class_term = error_class_term * blend
-            error_class_term = (
-                pd.Series(error_class_term)
-                .rolling(3, min_periods=1, center=True)
-                .mean()
-                .values
-            )
+            error_class_term = _rolling_mean(error_class_term, 3, center=True)
             if solcast_residual_scale < 0.999:
                 error_class_term = error_class_term * solcast_residual_scale
             error_class_term = error_class_term * class_blend
+            error_class_term = np.clip(error_class_term, -class_cap_kwh, class_cap_kwh)
             error_class_meta = {
                 **classifier_meta,
                 "slot_weather_buckets": slot_weather_buckets.copy(),
@@ -5774,12 +6433,14 @@ def run_dayahead(
                 "class_bias_kwh": error_class_term.copy(),
             }
             log.info(
-                "Error classifier: available=%s regime_model=%s blend=%.2f mean_conf=%.2f severe_prob=%.2f total_bias=%.0f kWh",
+                "Error classifier: available=%s regime_model=%s blend=%.2f mean_conf=%.2f severe_prob=%.2f support=%.2f profile_rel=%.2f total_bias=%.0f kWh",
                 bool(error_class_meta.get("available")),
                 bool(error_class_meta.get("used_regime_model")),
                 float(error_class_meta.get("blend", 0.0)),
                 float(np.mean(np.asarray(error_class_meta.get("confidence"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
                 float(np.mean(np.asarray(error_class_meta.get("severe_probability"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+                float(np.mean(np.asarray(error_class_meta.get("support_strength"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+                float(np.mean(np.asarray(error_class_meta.get("profile_reliability"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])),
                 float(np.sum(error_class_term)),
             )
         except Exception as e:
@@ -5894,16 +6555,23 @@ def run_dayahead(
         "used_regime_model": bool(error_class_meta.get("used_regime_model")),
         "blend": float(error_class_meta.get("blend", 0.0)),
         "mean_confidence": float(np.mean(np.asarray(error_class_meta.get("confidence"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if bool(error_class_meta.get("available")) else 0.0,
+        "mean_support_strength": float(np.mean(np.asarray(error_class_meta.get("support_strength"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if bool(error_class_meta.get("available")) else 0.0,
+        "mean_profile_reliability": float(np.mean(np.asarray(error_class_meta.get("profile_reliability"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT])) if bool(error_class_meta.get("available")) else 0.0,
         "mean_probabilities": {
             name: float(np.mean(np.asarray(error_class_meta.get("probabilities"), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT, idx]))
             for idx, name in enumerate(ERROR_CLASS_NAMES)
         } if bool(error_class_meta.get("available")) else {name: 0.0 for name in ERROR_CLASS_NAMES},
         "weather_bucket_forecast_summary": summarize_value_by_bucket(forecast, slot_weather_buckets),
         "weather_profiles": error_class_meta.get("weather_profiles") or {},
+        "class_support_weights": dict(error_class_meta.get("class_support_weights") or {}),
         "slot_weather_buckets": slot_weather_buckets.copy(),
         "predicted_labels": np.asarray(error_class_meta.get("predicted_labels"), dtype=int).copy(),
         "class_confidence": np.asarray(error_class_meta.get("confidence"), dtype=float).copy(),
         "severe_probability": np.asarray(error_class_meta.get("severe_probability"), dtype=float).copy(),
+        "support_strength": np.asarray(error_class_meta.get("support_strength"), dtype=float).copy(),
+        "profile_reliability": np.asarray(error_class_meta.get("profile_reliability"), dtype=float).copy(),
+        "trust_scale": np.asarray(error_class_meta.get("trust_scale"), dtype=float).copy(),
+        "cap_frac": np.asarray(error_class_meta.get("cap_frac"), dtype=float).copy(),
         "class_blend": np.asarray(error_class_meta.get("class_blend"), dtype=float).copy(),
         "class_bias_kwh": np.asarray(error_class_meta.get("class_bias_kwh"), dtype=float).copy(),
         "total_bias_kwh": float(np.sum(error_class_term)),
@@ -5951,6 +6619,8 @@ def run_dayahead(
                     "slot_weather_buckets": [str(v) for v in np.asarray(slot_weather_buckets, dtype=object)],
                     "predicted_labels": [int(v) for v in np.asarray(error_class_meta.get("predicted_labels"), dtype=int)],
                     "class_confidence": [float(v) for v in np.asarray(error_class_meta.get("confidence"), dtype=float)],
+                    "support_strength": [float(v) for v in np.asarray(error_class_meta.get("support_strength"), dtype=float)],
+                    "profile_reliability": [float(v) for v in np.asarray(error_class_meta.get("profile_reliability"), dtype=float)],
                 },
             },
         )
