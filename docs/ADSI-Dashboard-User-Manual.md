@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.29`
+**Applies to:** ADSI Inverter Dashboard `v2.4.30`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1127,11 +1127,12 @@ Operational note:
 ## 8.1 Daily Startup Check
 
 1. Launch the application and complete sign-in if required.
-2. Confirm the license notice area is clear.
-3. Check the header connection dot and clock.
-4. Review `TOTAL PAC` and `TODAY MWh`.
-5. Open the `Inverters` page and confirm online, alarmed, and offline counts.
-6. If operating remotely, confirm `Connectivity & Sync` status in Settings.
+2. Wait for the startup loading screen to finish before evaluating live values.
+3. Confirm the license notice area is clear.
+4. Check the header connection dot and clock.
+5. Review `TOTAL PAC` and `TODAY MWh`.
+6. Open the `Inverters` page and confirm online, alarmed, and offline counts.
+7. If operating remotely, confirm `Connectivity & Sync` status in Settings.
 
 ## 8.2 Live Control Workflow
 
@@ -1195,10 +1196,11 @@ Important:
 3. Review gateway link and transfer monitor status.
 4. Decide whether archive DB files are required.
 5. Run `Refresh Standby DB`.
-6. If the app reports that local standby data is newer than the gateway, decide whether to cancel or use explicit `Force Pull`.
-7. Wait for completion and confirm success.
-8. Restart the application when you need the refreshed standby DB to become the active local database.
-9. After restart, allow `Gateway` mode to finish its first local poll cycle before relying on live totals.
+6. Allow the preflight phase to finish before expecting the heavier snapshot transfer to begin.
+7. If the app reports that local standby data is newer than the gateway, decide whether to cancel or use explicit `Force Pull`.
+8. Wait for completion and confirm success.
+9. Restart the application when you need the refreshed standby DB to become the active local database.
+10. After restart, allow the startup loading screen and the first local poll cycle to finish before relying on live totals.
 
 Important:
 

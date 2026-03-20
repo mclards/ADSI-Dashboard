@@ -63,6 +63,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("app-update-status", handler);
   },
 
+  // Startup readiness
+  reportStartupProgress: (payload) => ipcRenderer.send("dashboard-startup-progress", payload),
+  reportStartupReady: (payload) => ipcRenderer.send("dashboard-startup-ready", payload),
+  reportStartupFailure: (message) => ipcRenderer.send("dashboard-startup-failed", message),
+
   // Cloud Backup OAuth
   // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }
   openOAuthWindow: (authUrl) => ipcRenderer.invoke("oauth-start", { authUrl }),

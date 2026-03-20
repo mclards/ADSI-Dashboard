@@ -9,7 +9,7 @@ This file is the canonical project rulebook. Keep `CLAUDE.md` aligned with it wh
 - User-facing product name: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.29` in `package.json`
+- Current repo version baseline: `2.4.30` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -535,7 +535,7 @@ Day rollover also clears `State.tabFetchTs` and all tab row caches so data re-fe
 
 ### Startup Tab Prefetch
 
-`prefetchAllTabs()` fires 2 s after startup and runs `fetchAlarms / fetchReport / fetchAudit / fetchEnergy` in parallel so the first tab switch renders instantly from cache. `TAB_STALE_MS` is set to `60000` (60 s). Called at the end of `init()`.
+`prefetchAllTabs()` still warms `Alarms / Report / Audit / Energy`, but startup now keeps the main window behind the loading screen until critical bootstrap data is ready. The startup warmup runs sequentially during that loading phase, together with settings/IP-config load, seeded today-energy, chat/alarm state, and the first live WebSocket sample. `TAB_STALE_MS` remains `60000` (60 s). Do not revert this to a delayed parallel fire-and-forget path, or the loading screen stops representing true readiness.
 
 ### PAC Indicator Thresholds
 

@@ -9,7 +9,7 @@ Claude should read `SKILL.md` first and treat it as the canonical rulebook. This
 - User-facing product: `ADSI Inverter Dashboard`
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.29` in `package.json`
+- Current repo version baseline: `2.4.30` in `package.json`
 - Operator-noted deployed server-side app version: `2.2.32`
 - GitHub release channel: `mclards/ADSI-Dashboard`
 - Stack:
@@ -205,7 +205,7 @@ The implemented backend now uses a hot/cold telemetry model. Keep future work al
 - **Inverter detail panel**: `filterInverters()` calls `loadInverterDetail(inv)` / `clearInverterDetail()`. Functions `renderInverterDetailStats/Chart/Alarms/History` live after `filterInverters()`. Panel is inside `.inv-page-body` alongside `#invGrid`.
 - **Tab date init**: `initAllTabDatesToToday()` called on startup and on day rollover in `startClock()`. Also clears `State.tabFetchTs` on rollover.
 - **Weather offline**: `fetchDailyWeatherRange()` (server/index.js) serves stale cache on any API/network failure.
-- **Startup tab prefetch**: `prefetchAllTabs()` fires 2 s after `init()` and pre-warms all 4 tabs in parallel. `TAB_STALE_MS = 60000`.
+- **Startup tab prefetch**: `prefetchAllTabs()` still warms Alarms, Report, Audit, and Energy, but startup now keeps the main window behind the loading screen until critical bootstrap data and the first live sample are ready. The warmup runs sequentially during that loading phase. `TAB_STALE_MS = 60000`. Do not revert to delayed parallel fire-and-forget prefetch or the loading screen stops representing true readiness.
 - **PAC indicator thresholds**: `getPacRowClass()` uses `NODE_RATED_W = 249,250 W`. ≥90% → High (green), >70% → Moderate (yellow), >40% → Mild (orange), ≤40% → Low (red). Static `.pac-legend-wrap` in inverter toolbar.
 - **App confirm modal**: `appConfirm(title, body, {ok, cancel})` → `Promise<boolean>`. Replaces all native `confirm()` and `alert()` calls. `#appConfirmModal` + `.confirm-dialog` CSS. `initConfirmModal()` called from `init()`.
 - **WebSocket reconnect**: Exponential backoff with jitter: `Math.min(30000, 500 * 1.5^retries + random * 500 * retries)`. Do not revert to linear — prevents thundering herd with multiple remote clients.

@@ -2,12 +2,19 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.29
+- **Repo/package version baseline:** 2.4.30
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.30 Changes - Startup Readiness Gating and Standby Refresh Smoothing (2026-03-20)
+- **Loading screen now gates actual readiness:** the Electron main window stays hidden until the renderer reports startup complete, instead of showing the shell before the dashboard has real data. The loading screen now reflects live startup progress pushed from Electron rather than polling `/` and redirecting itself early.
+- **Startup warmup now uses the loading phase intentionally:** bootstrap waits for settings, IP configuration, seeded current-day energy, first live WebSocket data, chat/alarm state, and sequential tab warmup before the dashboard is revealed. Cloud-backup settings loading was removed from the initial path so Settings-only work no longer slows first paint.
+- **First standby refresh hit is lighter on the gateway:** gateway main-DB snapshot generation now reuses the authoritative current-day snapshot rows when building the current-day report payload, avoiding a duplicate full-range `energy_5min` scan during `Refresh Standby DB`.
+- **Cloud-backup S3 surface exists in the tree:** `server/cloudProviders/s3.js` plus S3-focused tests are present for the backup provider path and should be considered part of the current release baseline.
+- **Validation before release handoff:** `node --check electron/main.js`, `node --check electron/preload.js`, `node --check public/js/app.js`, `node --check server/index.js`, `node server/tests/standbySnapshotReadOnly.test.js`, and `node server/tests/manualPullGuard.test.js` all passed. A live Electron Playwright smoke was attempted but the local environment was missing `playwright/test`.
 
 ## v2.4.28 Changes - Real-Time Metric Alignment and Alarm Quick-ACK (2026-03-20)
 - **All MWh metrics now update live when today is selected:** `extractCurrentDaySummary` in `public/js/app.js` was fixed to correctly parse the flat `todaySummary` object pushed over WebSocket instead of expecting a nested shape. The downstream `applyCurrentDaySummaryClient` now calls `renderAnalyticsFromState()` directly on every WS push when the Analytics or Energy page is active and the selected date is today, so Analytics summary cards, Energy KPI tiles, and related charts all update in real-time on the same cadence as `TODAY MWh` in the header.
@@ -198,8 +205,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.29`
-- Current repo/package baseline: `v2.4.29`
+- Current latest published GitHub release: `v2.4.30`
+- Current repo/package baseline: `v2.4.30`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

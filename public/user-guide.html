@@ -1469,6 +1469,7 @@
     <h4>Daily Startup Check</h4>
     <ol class="steps">
       <li>Launch the application and complete sign-in.</li>
+      <li>Wait for the startup loading screen to finish before evaluating live values.</li>
       <li>Confirm the license notice area is clear.</li>
       <li>Check the header connection dot and clock.</li>
       <li>Review <b>TOTAL PAC</b> and <b>TODAY MWh</b>.</li>
@@ -1518,9 +1519,11 @@
       <li>Open <b>Settings &rarr; Connectivity &amp; Sync</b>.</li>
       <li>Review gateway link and transfer monitor status.</li>
       <li>Run <b>Refresh Standby DB</b>.</li>
+      <li>Allow the preflight phase to finish before expecting the heavier snapshot transfer to begin.</li>
       <li>If newer local data is detected, decide whether to cancel or <b>Force Pull</b>.</li>
       <li>Wait for completion and confirm success.</li>
       <li>Restart the application when the refreshed DB is needed.</li>
+      <li>After restart, wait for the startup loading screen and first local poll cycle before relying on live totals.</li>
     </ol>
   </div>
 
@@ -1597,9 +1600,9 @@
         <td>Cancel to preserve local data, or use Force Pull if overwrite is intentional</td>
       </tr>
       <tr>
-        <td>TODAY MWh looks old after switching to Gateway</td>
+        <td>TODAY MWh looks old right after startup or after switching to Gateway</td>
         <td>Local polling has not caught up yet</td>
-        <td>Run Refresh Standby DB, restart, and wait for first poll cycle</td>
+        <td>Run Refresh Standby DB if needed, restart, and wait for the startup loading screen plus first poll cycle</td>
       </tr>
       <tr>
         <td>Day-ahead generation unavailable</td>
@@ -1716,7 +1719,7 @@
 
 <!-- ═══════ FOOTER ═══════ -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.7</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.4.30</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

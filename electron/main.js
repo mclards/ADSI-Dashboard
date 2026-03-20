@@ -84,6 +84,7 @@ const POLL_INTERVAL = 600;
 const POLL_TIMEOUT = 120000;
 const INITIAL_LOAD_RETRY_DELAY = 1200;
 const INITIAL_LOAD_RETRY_MAX = 8;
+const MAIN_RENDERER_READY_TIMEOUT_MS = 120000;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
 const FORECAST_MODE_SYNC_MS = 10000;
@@ -145,6 +146,8 @@ let serverReadyFired = false;
 let mainPageLoadedOnce = false;
 let initialLoadRetries = 0;
 let initialLoadRetryTimer = null;
+let mainRendererReady = false;
+let mainRendererReadyTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
 let forecastRestartAttempts = 0;
@@ -1282,6 +1285,11 @@ function startAfterLogin() {
   if (bootStarted) return;
   bootStarted = true;
   showLoadingWindow();
+  updateLoadingStartupState({
+    step: 1,
+    progress: 12,
+    text: "Starting local dashboard services...",
+  });
   startServer();
 }
 
@@ -2520,6 +2528,71 @@ function showLoadingErrorMessage(message) {
     .catch(() => {});
 }
 
+function updateLoadingStartupState(payload = {}) {
+  if (!loadingWin || loadingWin.isDestroyed()) return;
+  const progress = Number(payload?.progress);
+  const step = Number(payload?.step);
+  const safePayload = {
+    ...(Number.isFinite(progress)
+      ? { progress: Math.max(0, Math.min(100, Math.trunc(progress))) }
+      : {}),
+    ...(Number.isFinite(step)
+      ? { step: Math.max(1, Math.min(4, Math.trunc(step))) }
+      : {}),
+    ...(String(payload?.text || "").trim()
+      ? { text: String(payload.text).trim() }
+      : {}),
+  };
+  loadingWin.webContents
+    .executeJavaScript(
+      `if (typeof window.updateStartupState === "function") {
+         window.updateStartupState(${JSON.stringify(safePayload)});
+       }`,
+    )
+    .catch(() => {});
+}
+
+function clearMainRendererReadyTimer() {
+  if (!mainRendererReadyTimer) return;
+  clearTimeout(mainRendererReadyTimer);
+  mainRendererReadyTimer = null;
+}
+
+function armMainRendererReadyTimer() {
+  clearMainRendererReadyTimer();
+  mainRendererReadyTimer = setTimeout(() => {
+    if (mainRendererReady || !mainWin || mainWin.isDestroyed()) return;
+    console.error("[main] Renderer startup timed out.");
+    showLoadingErrorMessage(
+      "Dashboard startup timed out while loading the initial data set. Please retry.",
+    );
+  }, MAIN_RENDERER_READY_TIMEOUT_MS);
+  if (typeof mainRendererReadyTimer.unref === "function") {
+    mainRendererReadyTimer.unref();
+  }
+}
+
+function revealMainWindowIfReady() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (!mainPageLoadedOnce || !mainRendererReady) return;
+  clearMainRendererReadyTimer();
+  updateLoadingStartupState({
+    step: 4,
+    progress: 100,
+    text: "Dashboard ready.",
+  });
+  mainWin.show();
+  mainWin.maximize();
+  mainWin.focus();
+  if (loadingWin && !loadingWin.isDestroyed()) {
+    loadingWin.close();
+    loadingWin = null;
+  }
+  broadcastLicenseStatus(true);
+  broadcastAppUpdateState();
+  scheduleAutoUpdateCheck();
+}
+
 function killImageNames(imageNames = []) {
   const seen = new Set();
   for (const name of imageNames) {
@@ -2836,17 +2909,24 @@ function onServerReady() {
   if (serverReadyFired) return;
   serverReadyFired = true;
   registerShortcutsOnce();
-  console.log("[main] Server ready - opening main window");
+  console.log("[main] Server ready - opening hidden main window");
+  updateLoadingStartupState({
+    step: 3,
+    progress: 68,
+    text: "Server ready. Loading dashboard shell...",
+  });
   createMainWindow();
 }
 
 function createMainWindow() {
   mainPageLoadedOnce = false;
+  mainRendererReady = false;
   initialLoadRetries = 0;
   if (initialLoadRetryTimer) {
     clearTimeout(initialLoadRetryTimer);
     initialLoadRetryTimer = null;
   }
+  clearMainRendererReadyTimer();
 
   mainWin = new BrowserWindow({
     width: 1600,
@@ -2879,25 +2959,20 @@ function createMainWindow() {
       console.warn("[main] Ignoring non-app load:", loadedUrl || "(empty)");
       return;
     }
-    if (!mainPageLoadedOnce) console.log("[main] Page loaded OK");
+    if (!mainPageLoadedOnce) console.log("[main] Page loaded OK - waiting for renderer startup");
     mainPageLoadedOnce = true;
     initialLoadRetries = 0;
     if (initialLoadRetryTimer) {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
     }
-    // Bring the dashboard to front BEFORE closing the loading window so there
-    // is no focus vacuum that lets it slip behind other OS windows.
-    mainWin.show();
-    mainWin.maximize();
-    mainWin.focus();
-    if (loadingWin && !loadingWin.isDestroyed()) {
-      loadingWin.close();
-      loadingWin = null;
-    }
-    broadcastLicenseStatus(true);
-    broadcastAppUpdateState();
-    scheduleAutoUpdateCheck();
+    updateLoadingStartupState({
+      step: 4,
+      progress: 78,
+      text: "Loading dashboard data...",
+    });
+    armMainRendererReadyTimer();
+    revealMainWindowIfReady();
   });
 
   mainWin.webContents.on("did-fail-load", (e, code, desc) => {
@@ -2919,6 +2994,7 @@ function createMainWindow() {
   });
 
   mainWin.on("closed", () => {
+    clearMainRendererReadyTimer();
     if (initialLoadRetryTimer) {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
@@ -3870,6 +3946,30 @@ ipcMain.handle("oauth-start", async (_, { authUrl }) => {
       finish({ ok: false, error: err.message });
     });
   });
+});
+
+ipcMain.on("dashboard-startup-progress", (event, payload) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  updateLoadingStartupState(payload);
+});
+
+ipcMain.on("dashboard-startup-ready", (event, payload) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  mainRendererReady = true;
+  updateLoadingStartupState({
+    step: 4,
+    progress: 100,
+    text: String(payload?.text || "Dashboard ready."),
+  });
+  revealMainWindowIfReady();
+});
+
+ipcMain.on("dashboard-startup-failed", (event, message) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  clearMainRendererReadyTimer();
+  const safeMessage = String(message || "").trim() || "Dashboard startup failed.";
+  console.error("[main] Renderer startup failed:", safeMessage);
+  showLoadingErrorMessage(safeMessage);
 });
 
 // ─── Cleanup ──────────────────────────────────────────────────────────────────

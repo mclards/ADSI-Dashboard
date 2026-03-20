@@ -441,15 +441,7 @@
     </div>
 
     <script>
-      const STARTUP_TIMEOUT = 120000;
-      const STEP_TIMELINE = [
-        { at: 0, step: 1, progress: 14, text: "Initializing application services..." },
-        { at: 2200, step: 2, progress: 38, text: "Validating license and workstation state..." },
-        { at: 7000, step: 3, progress: 66, text: "Loading plant configuration and runtime settings..." },
-        { at: 14000, step: 4, progress: 90, text: "Bringing dashboard services online..." },
-      ];
-
-      let startTime = Date.now();
+      const STEP_COUNT = 4;
       let currentStep = 1;
 
       const progressFill = document.getElementById("progressFill");
@@ -478,28 +470,11 @@
         if (state) el.classList.add(state);
       }
 
-      function applyTimeline(elapsed) {
-        let active = STEP_TIMELINE[0];
-        for (const item of STEP_TIMELINE) {
-          if (elapsed >= item.at) active = item;
-        }
-
-        if (active.step !== currentStep) {
-          for (let i = 1; i < active.step; i += 1) markStep(i, "done");
-          markStep(active.step, "active");
-          for (let i = active.step + 1; i <= STEP_TIMELINE.length; i += 1) markStep(i, "");
-          currentStep = active.step;
-        }
-
-        statusText.textContent = active.text;
-        setProgress(active.progress);
-      }
-
       function showStartupError(message) {
         if (spinner) spinner.style.display = "none";
         if (statusText) statusText.textContent = "Startup requires attention";
         setProgress(100);
-        for (let i = 1; i <= STEP_TIMELINE.length; i += 1) {
+        for (let i = 1; i <= STEP_COUNT; i += 1) {
           markStep(i, i < currentStep ? "done" : "");
         }
         if (errorMsg) errorMsg.textContent = String(message || "The dashboard could not finish starting.");
@@ -508,33 +483,32 @@
 
       window.showStartupError = showStartupError;
 
-      function checkServerReady() {
-        const elapsed = Date.now() - startTime;
-        applyTimeline(elapsed);
+      function updateStartupState(state = {}) {
+        if (errorPanel) errorPanel.style.display = "none";
+        if (spinner) spinner.style.display = "inline-flex";
 
-        if (elapsed > STARTUP_TIMEOUT) {
-          showStartupError(
-            "Startup is taking longer than expected. If this is the first launch after an update, database maintenance may still be finishing. Verify the required services, then retry."
-          );
-          return;
+        const nextStep = Math.max(1, Math.min(STEP_COUNT, Math.trunc(Number(state.step) || currentStep)));
+        if (nextStep !== currentStep) {
+          for (let i = 1; i < nextStep; i += 1) markStep(i, "done");
+          markStep(nextStep, "active");
+          for (let i = nextStep + 1; i <= STEP_COUNT; i += 1) markStep(i, "");
+          currentStep = nextStep;
         }
 
-        fetch("/", { method: "HEAD" })
-          .then((r) => {
-            if (r.ok) {
-              setProgress(100);
-              window.location.href = "/";
-              return;
-            }
-            setTimeout(checkServerReady, 500);
-          })
-          .catch(() => {
-            setTimeout(checkServerReady, 500);
-          });
+        if (String(state.text || "").trim()) {
+          statusText.textContent = String(state.text).trim();
+        }
+        if (Number.isFinite(Number(state.progress))) {
+          setProgress(Number(state.progress));
+        }
       }
 
-      applyTimeline(0);
-      setTimeout(checkServerReady, 120);
+      window.updateStartupState = updateStartupState;
+      updateStartupState({
+        step: 1,
+        progress: 14,
+        text: "Initializing application services...",
+      });
     </script>
   </body>
 </html>

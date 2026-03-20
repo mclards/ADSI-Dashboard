@@ -3793,6 +3793,7 @@ async function buildGatewayMainDbSnapshotForTransfer() {
     `adsi.db.snapshot-${Date.now()}-${process.pid}.tmp`,
   );
   let todayReportRows = [];
+  let currentDaySnapshot = null;
   try {
     try {
       poller.flushPending();
@@ -3800,6 +3801,10 @@ async function buildGatewayMainDbSnapshotForTransfer() {
       // Best effort only; backup still produces a consistent snapshot.
     }
     try {
+      // Reuse the same authoritative today-energy rows for snapshot report
+      // injection so a standby refresh does not rescan the full current-day
+      // energy range again right after /api/energy/today has already warmed it.
+      currentDaySnapshot = buildCurrentDayEnergySnapshot();
       // Refresh standby DB should stay read-only against the gateway's live DB.
       // Compute current-day report rows in memory, then apply them only to the
       // temporary snapshot so the downloaded file stays aligned with the UI.
@@ -3807,6 +3812,7 @@ async function buildGatewayMainDbSnapshotForTransfer() {
         persist: false,
         includeTodayPartial: true,
         refresh: false,
+        todayEnergyRows: currentDaySnapshot?.rows || [],
       });
     } catch (err) {
       console.warn(
@@ -10027,7 +10033,17 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       : null;
 
   const invCount = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
-  const pacKwhByInv = sumEnergy5minByInverterRange(startTs, endTs);
+  const pacKwhByInv =
+    currentDayEnergyRows && currentDayEnergyRows.length
+      ? new Map(
+          currentDayEnergyRows
+            .map((row) => [
+              Number(row?.inverter || 0),
+              Number(row?.total_kwh || 0),
+            ])
+            .filter(([inv, totalKwh]) => inv > 0 && totalKwh > 0),
+        )
+      : sumEnergy5minByInverterRange(startTs, endTs);
 
   if (day === localDateStr() && includeTodayPartial) {
     const supplementalRows =

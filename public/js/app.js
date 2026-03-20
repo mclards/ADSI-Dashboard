@@ -82,6 +82,8 @@ const State = {
   charts: {},
   currentPage: "inverters",
   wsRetries: 0,
+  startupLiveReady: false,
+  startupLiveWaiters: [],
   invLastFresh: {}, // key: inverter -> last fresh timestamp
   analyticsReqId: 0,
   alarmReqId: 0,
@@ -8641,6 +8643,71 @@ function buildSelects() {
   }
 }
 
+function reportStartupProgress(payload = {}) {
+  try {
+    window.electronAPI?.reportStartupProgress?.(payload);
+  } catch (_) {}
+}
+
+function reportStartupReady(payload = {}) {
+  try {
+    window.electronAPI?.reportStartupReady?.(payload);
+  } catch (_) {}
+}
+
+function reportStartupFailure(message) {
+  try {
+    window.electronAPI?.reportStartupFailure?.(String(message || "Dashboard startup failed."));
+  } catch (_) {}
+}
+
+function resetStartupLiveWaiters() {
+  State.startupLiveReady = false;
+  const waiters = Array.isArray(State.startupLiveWaiters) ? State.startupLiveWaiters.splice(0) : [];
+  for (const waiter of waiters) {
+    try {
+      waiter.reject?.(new Error("Live startup reset."));
+    } catch (_) {}
+  }
+}
+
+function noteStartupLiveReady() {
+  if (State.startupLiveReady) return;
+  State.startupLiveReady = true;
+  const waiters = Array.isArray(State.startupLiveWaiters) ? State.startupLiveWaiters.splice(0) : [];
+  for (const waiter of waiters) {
+    try {
+      waiter.resolve?.(true);
+    } catch (_) {}
+  }
+}
+
+function waitForInitialLiveData(timeoutMs = 12000) {
+  if (State.startupLiveReady || Object.keys(State.liveData || {}).length > 0) {
+    State.startupLiveReady = true;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      resolve: () => {
+        if (timer) clearTimeout(timer);
+        resolve(true);
+      },
+      reject: (err) => {
+        if (timer) clearTimeout(timer);
+        reject(err);
+      },
+    };
+    State.startupLiveWaiters.push(waiter);
+    const timer = setTimeout(() => {
+      const list = Array.isArray(State.startupLiveWaiters) ? State.startupLiveWaiters : [];
+      const idx = list.indexOf(waiter);
+      if (idx >= 0) list.splice(idx, 1);
+      reject(new Error("Timed out waiting for live telemetry."));
+    }, Math.max(1000, Number(timeoutMs) || 12000));
+  });
+}
+
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function showOfflineIndicator(show, message) {
   const bannerId = "offlineBanner";
@@ -8681,6 +8748,7 @@ function connectWS() {
     return;
   }
   State.wsConnecting = true;
+  State.startupLiveReady = false;
   _clearWsReconnectTimer();
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
@@ -8734,6 +8802,7 @@ function connectWS() {
 
 function handleWS(msg) {
   if (msg.type === "init" || msg.type === "live") {
+    noteStartupLiveReady();
     noteTodayMwhWsFrame(Date.now());
     if (
       State.modeTransition?.active &&
@@ -9072,6 +9141,7 @@ function initAlarmsPage() {
 
 async function fetchAlarms(options = {}) {
   const force = options?.force === true;
+  const silent = options?.silent === true;
   if (State.tabFetching.alarms && !force) return;
   State.tabFetching.alarms = true;
   const reqId = (State.alarmReqId || 0) + 1;
@@ -9101,7 +9171,7 @@ async function fetchAlarms(options = {}) {
     applyAlarmTableView();
     refreshAlarmBadge();
   } catch (e) {
-    console.error("fetchAlarms:", e);
+    if (!silent) console.error("fetchAlarms:", e);
   } finally {
     if (reqId === State.alarmReqId) {
       State.tabFetching.alarms = false;
@@ -9351,6 +9421,7 @@ function initEnergyPage() {
 
 async function fetchEnergy(options = {}) {
   const force = options?.force === true;
+  const silent = options?.silent === true;
   if (State.tabFetching.energy && !force) return;
   State.tabFetching.energy = true;
   const reqId = (State.energyReqId || 0) + 1;
@@ -9437,7 +9508,7 @@ async function fetchEnergy(options = {}) {
       },
     });
   } catch (e) {
-    console.error("fetchEnergy:", e);
+    if (!silent) console.error("fetchEnergy:", e);
   } finally {
     if (reqId === State.energyReqId) {
       State.tabFetching.energy = false;
@@ -9579,6 +9650,7 @@ function initAuditPage() {
 
 async function fetchAudit(options = {}) {
   const force = options?.force === true;
+  const silent = options?.silent === true;
   if (State.tabFetching.audit && !force) return;
   State.tabFetching.audit = true;
   const reqId = (State.auditReqId || 0) + 1;
@@ -9607,7 +9679,7 @@ async function fetchAudit(options = {}) {
     State.tabFetchTs.audit = Date.now();
     applyAuditTableView();
   } catch (e) {
-    console.error("fetchAudit:", e);
+    if (!silent) console.error("fetchAudit:", e);
   } finally {
     if (reqId === State.auditReqId) {
       State.tabFetching.audit = false;
@@ -9772,6 +9844,7 @@ function initReportPage() {
 
 async function fetchReport(options = {}) {
   const force = options?.force === true;
+  const silent = options?.silent === true;
   if (State.tabFetching.report && !force) return;
   State.tabFetching.report = true;
   const reqId = (State.reportReqId || 0) + 1;
@@ -9837,13 +9910,13 @@ async function fetchReport(options = {}) {
     renderReportKpis();
   } catch (e) {
     if (reqId !== State.reportReqId) return;
-    console.error("fetchReport:", e);
+    if (!silent) console.error("fetchReport:", e);
     State.reportView.rows = [];
     State.reportView.summary = null;
     State.reportView.queryKey = buildReportViewQueryKey();
     applyReportTableView();
     renderReportKpis();
-    showToast(`Report load failed: ${e.message}`, "error", 4200);
+    if (!silent) showToast(`Report load failed: ${e.message}`, "error", 4200);
   } finally {
     if (reqId === State.reportReqId) {
       State.tabFetching.report = false;
@@ -12718,16 +12791,57 @@ function initAllTabDatesToToday() {
 }
 
 // ─── Startup Tab Prefetch ─────────────────────────────────────────────────────
-// Fires ~2 s after startup (after WS connects and grid settles) so the first
-// visit to any data tab renders from State instead of waiting for a fetch.
-async function prefetchAllTabs() {
-  await new Promise((r) => setTimeout(r, 2000));
-  await Promise.allSettled([
-    fetchAlarms().catch(() => {}),
-    fetchReport().catch(() => {}),
-    fetchAudit().catch(() => {}),
-    fetchEnergy({ page: 1 }).catch(() => {}),
-  ]);
+// Warm tab data ahead of first navigation. Startup mode runs sequentially to
+// avoid spiking the local server while the UI is still bootstrapping.
+async function prefetchAllTabs(options = {}) {
+  const delayMs = Math.max(0, Math.trunc(Number(options?.delayMs ?? 2000) || 0));
+  const sequential = options?.sequential !== false;
+  const silent = options?.silent === true;
+  const onStep = typeof options?.onStep === "function" ? options.onStep : null;
+  const tasks = [
+    {
+      step: 4,
+      progress: 82,
+      text: "Loading alarm history...",
+      run: () => fetchAlarms({ force: true, silent }),
+    },
+    {
+      step: 4,
+      progress: 88,
+      text: "Loading daily report...",
+      run: () => fetchReport({ force: true, silent }),
+    },
+    {
+      step: 4,
+      progress: 94,
+      text: "Loading audit trail...",
+      run: () => fetchAudit({ force: true, silent }),
+    },
+    {
+      step: 4,
+      progress: 98,
+      text: "Loading energy history...",
+      run: () => fetchEnergy({ page: 1, force: true, silent }),
+    },
+  ];
+
+  if (delayMs > 0) {
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  if (!sequential) {
+    await Promise.allSettled(tasks.map((task) => task.run()));
+    return;
+  }
+
+  for (const task of tasks) {
+    try {
+      onStep?.({ step: task.step, progress: task.progress, text: task.text });
+      await task.run();
+    } catch (_) {
+      // Prefetch is best-effort; the page can still fetch on demand later.
+    }
+  }
 }
 
 // ─── App Confirm Modal ────────────────────────────────────────────────────────
@@ -12781,67 +12895,118 @@ function appConfirm(title, bodyText, { ok = "OK", cancel = "Cancel" } = {}) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
-  initThemeToggle();
-  State.plantCapPanelCollapsed = getStoredPlantCapPanelCollapsed();
-  await initLicenseBridge();
-  await initAppUpdateBridge();
-  startClock();
-  setupSideNav();
-  initGuideModal();
-  initConfirmModal();
-  setupNav();
-  initSettingsSectionNav();
-  const resumeAlarmAudio = () => {
-    try {
-      const ctx = getOrCreateAlarmAudioCtx();
-      if (!ctx) return;
-      if (ctx.state === "suspended") {
-        ctx.resume().then(() => {
-          State.chatAudioReady = ctx.state === "running";
-        }).catch(() => {});
-      } else {
-        State.chatAudioReady = ctx.state === "running";
-      }
-    } catch (err) {
-      console.warn("[app] audio resume failed:", err.message);
-    }
-  };
-  document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
-  document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
-  window.addEventListener("resize", rerenderResponsiveChartsDebounced, { passive: true });
-  bindEventHandlers();
-  syncPlantCapPanelCollapsedUi();
-  renderChatSendState();
-  renderChatBadge();
-  renderChatThread();
-  setManualArchiveSyncSelected(loadReplicationArchiveSelectionPreference(), {
-    persist: false,
+  resetStartupLiveWaiters();
+  reportStartupProgress({
+    step: 1,
+    progress: 18,
+    text: "Initializing dashboard interface...",
   });
-  updateReplicationArchiveSelectionUi(true);
-  // Restore alarm sound mute preference
-  try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
-  renderAlarmSoundBtn();
-  await loadSettings();
-  initAllTabDatesToToday();    // override any stale exportUiState date with today
-  queuePersistExportUiState(); // persist today's reportDate immediately
-  cbLoadSettings().catch(() => {});
-  syncDayAheadGeneratorAvailability();
-  bindExportUiStatePersistence();
-  setupExportUiStateFlush();
-  await loadIpConfig();
-  await seedTodayEnergyFromDb();
-  startTodayMwhSyncTimer();
-  buildInverterGrid();
-  buildSelects();
-  connectWS();
-  startNetIOMonitor();
-  await loadChatHistory({ silent: true });
-  refreshAlarmBadge();
 
-  // Refresh alarm badge every 30s
-  State.alarmBadgeTimer = setInterval(refreshAlarmBadge, 30000);
-  // Background prefetch so all data tabs are ready before the user visits them
-  prefetchAllTabs().catch(() => {});
+  try {
+    initThemeToggle();
+    State.plantCapPanelCollapsed = getStoredPlantCapPanelCollapsed();
+    await initLicenseBridge();
+    await initAppUpdateBridge();
+    startClock();
+    setupSideNav();
+    initGuideModal();
+    initConfirmModal();
+    setupNav();
+    initSettingsSectionNav();
+    const resumeAlarmAudio = () => {
+      try {
+        const ctx = getOrCreateAlarmAudioCtx();
+        if (!ctx) return;
+        if (ctx.state === "suspended") {
+          ctx.resume().then(() => {
+            State.chatAudioReady = ctx.state === "running";
+          }).catch(() => {});
+        } else {
+          State.chatAudioReady = ctx.state === "running";
+        }
+      } catch (err) {
+        console.warn("[app] audio resume failed:", err.message);
+      }
+    };
+    document.addEventListener("pointerdown", resumeAlarmAudio, { passive: true });
+    document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
+    window.addEventListener("resize", rerenderResponsiveChartsDebounced, { passive: true });
+    bindEventHandlers();
+    syncPlantCapPanelCollapsedUi();
+    renderChatSendState();
+    renderChatBadge();
+    renderChatThread();
+    setManualArchiveSyncSelected(loadReplicationArchiveSelectionPreference(), {
+      persist: false,
+    });
+    updateReplicationArchiveSelectionUi(true);
+    // Restore alarm sound mute preference
+    try { State.alarmSoundMuted = localStorage.getItem("alarmSoundMuted") === "1"; } catch (_) {}
+    renderAlarmSoundBtn();
+
+    reportStartupProgress({
+      step: 2,
+      progress: 34,
+      text: "Loading runtime settings...",
+    });
+    await loadSettings();
+    initAllTabDatesToToday();    // override any stale exportUiState date with today
+    queuePersistExportUiState(); // persist today's reportDate immediately
+    syncDayAheadGeneratorAvailability();
+    bindExportUiStatePersistence();
+    setupExportUiStateFlush();
+
+    reportStartupProgress({
+      step: 3,
+      progress: 48,
+      text: "Loading plant configuration...",
+    });
+    await loadIpConfig();
+    await seedTodayEnergyFromDb();
+    startTodayMwhSyncTimer();
+    buildInverterGrid();
+    buildSelects();
+
+    reportStartupProgress({
+      step: 3,
+      progress: 62,
+      text: "Connecting live telemetry...",
+    });
+    connectWS();
+    startNetIOMonitor();
+    try {
+      await waitForInitialLiveData(12000);
+    } catch (err) {
+      console.warn("[startup] live telemetry warmup:", err.message);
+    }
+
+    reportStartupProgress({
+      step: 4,
+      progress: 74,
+      text: "Loading alarm and chat state...",
+    });
+    await Promise.allSettled([
+      loadChatHistory({ silent: true }),
+      refreshAlarmBadge(),
+    ]);
+
+    // Refresh alarm badge every 30s
+    State.alarmBadgeTimer = setInterval(refreshAlarmBadge, 30000);
+
+    await prefetchAllTabs({
+      delayMs: 0,
+      sequential: true,
+      silent: true,
+      onStep: reportStartupProgress,
+    });
+
+    reportStartupReady({
+      text: "Dashboard ready.",
+    });
+  } catch (err) {
+    console.error("[startup] init failed:", err);
+    reportStartupFailure(err?.message || err || "Dashboard startup failed.");
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -181,6 +181,11 @@ auto_reset_cfg = {
     "wait_clear_timeout_sec":  10,
 }
 
+# Per-unit last-known on_off state: holds the most recent successful holding-register
+# read. If the next read returns None (transient failure), we fall back to this value
+# so Node does not briefly see the inverter as OFF and skip a persistence cycle.
+_last_known_on_off = {}   # key: f"{ip}_{unit}" -> int (0 or 1)
+
 executor = ThreadPoolExecutor(max_workers=16)
 WRITE_WAIT_TIMEOUT_MIN_SEC = 8.0
 WRITE_WAIT_TIMEOUT_MAX_SEC = 20.0
@@ -779,6 +784,28 @@ async def read_fast_async(client, unit, ip):
     def reg(i):
         return regs[i] if len(regs) > i else 0
 
+    # ── on_off: hold last known value on transient holding-register failure (Fix #6) ──
+    on_off_key = f"{ip}_{unit}"
+    on_off_raw = onoff[0] if onoff else None
+    if on_off_raw is not None:
+        _last_known_on_off[on_off_key] = on_off_raw
+    on_off_val = on_off_raw if on_off_raw is not None else _last_known_on_off.get(on_off_key)
+
+    # ── Fix #3: warn when inverter RTC date diverges from server wall-clock ──
+    inv_num_for_log = inverter_number_from_ip(ip)
+    y_reg  = reg(20)
+    mo_reg = reg(21)
+    dy_reg = reg(22)
+    if y_reg and mo_reg and dy_reg:
+        inverter_date = f"{y_reg}-{_pad2(mo_reg)}-{_pad2(dy_reg)}"
+        server_date   = time.strftime("%Y-%m-%d")
+        if inverter_date != server_date:
+            print(
+                f"[CLOCK] Date mismatch inv={inv_num_for_log} unit={unit}"
+                f" inverter={inverter_date} server={server_date}"
+                f" — bucket ts will use server clock but 'day' field uses inverter date"
+            )
+
     return {
         "ts":       int(time.time() * 1000),
         "alarm":    reg(7),
@@ -797,7 +824,7 @@ async def read_fast_async(client, unit, ip):
         "hour":     reg(23),
         "minute":   reg(24),
         "second":   reg(25),
-        "on_off":   onoff[0] if onoff else None,
+        "on_off":   on_off_val,
     }
 
 
@@ -1081,7 +1108,10 @@ def _update_metrics_from_frame(frame: dict):
                         "lastTime": now, "lastPacRaw": pac_raw,
                         "lastPacChangeTime": now})
         else:
-            dt_sec = (now - pe["lastTime"]) / 1000.0
+            # Fix #2: cap dt at 30s to match Node's MAX_PAC_DT_S.
+            # Without this cap, /metrics energy grows unbounded during any dropout
+            # and always diverges from the Node energy_5min DB totals.
+            dt_sec = min((now - pe["lastTime"]) / 1000.0, 30.0)
             if pac_raw != pe["lastPacRaw"]:
                 pe["lastPacChangeTime"] = now
             if dt_sec > 0 and pac_raw >= 0:
@@ -1176,11 +1206,35 @@ def _build_metrics() -> list:
 
 @app.get("/data")
 def get_data():
-    """Return a flat list of all live inverter data frames (raw modbus)."""
+    """Return a flat list of all live inverter data frames (raw modbus).
+
+    Stale-frame guard: Python caches the last successful Modbus frame per IP.
+    Frames older than STALE_FRAME_MAX_AGE_MS are excluded so Node sees no frame
+    (and naturally marks the inverter offline) when Modbus is down.
+
+    Energy enrichment: each fresh frame is enriched with `kwh_today` — the
+    per-unit accumulated kWh from Python's high-frequency (50ms) integrator.
+    Node uses this value directly instead of re-integrating PAC at 200ms.
+    """
+    STALE_FRAME_MAX_AGE_MS = 3000  # must match STALE_FRAME_MAX_AGE_MS in Node poller.js
+    now_ms = int(time.time() * 1000)
     flat = []
     for arr in shared.values():
         if isinstance(arr, list):
-            flat.extend(arr)
+            for frame in arr:
+                frame_ts = int(frame.get("ts") or 0)
+                age_ms = now_ms - frame_ts
+                if 0 <= age_ms <= STALE_FRAME_MAX_AGE_MS:
+                    # Ensure metrics state is current for this frame, then read kwh_today
+                    _update_metrics_from_frame(frame)
+                    inv  = frame.get("inverter")
+                    unit = frame.get("unit")
+                    nk   = f"{inv}_{unit}" if inv and unit else None
+                    pe   = metrics_state["pacEnergy"].get(nk) if nk else None
+                    kwh_today = round(pe["totalWh"] / 1000.0, 6) if pe else 0.0
+                    enriched = dict(frame)
+                    enriched["kwh_today"] = kwh_today
+                    flat.append(enriched)
     return flat
 
 
