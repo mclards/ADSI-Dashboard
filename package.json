@@ -1,92 +1,92 @@
 {
-  "name": "inverter-dashboard",
-  "version": "2.4.28",
-  "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
-  "author": "Engr. Clariden D. Montano, REE",
-  "main": "electron/main.js",
-  "scripts": {
-    "start": "node start-electron.js",
-    "dev": "set NODE_ENV=development && node start-electron.js",
-    "server": "node server/index.js",
-    "rebuild:native:node": "npm rebuild better-sqlite3",
-    "rebuild:native:electron": "electron-builder install-app-deps",
-    "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-builder --win nsis --x64",
-    "build:installer": "electron-builder --win nsis --x64"
-  },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.1012.0",
-    "@aws-sdk/lib-storage": "^3.1012.0",
-    "better-sqlite3": "^9.6.0",
-    "chart.js": "^4.5.1",
-    "cors": "^2.8.6",
-    "electron-updater": "^6.3.9",
-    "exceljs": "^4.4.0",
-    "express": "^4.22.1",
-    "express-ws": "^5.0.2",
-    "node-cron": "^3.0.3",
-    "node-fetch": "^2.7.0",
-    "ws": "^7.5.10"
-  },
-  "devDependencies": {
-    "electron": "^29.0.0",
-    "electron-builder": "^24.13.3"
-  },
-  "build": {
-    "appId": "com.engr-m.inverter-dashboard",
-    "productName": "ADSI Inverter Dashboard",
-    "directories": {
-      "output": "release",
-      "buildResources": "assets"
+    "name": "inverter-dashboard",
+    "version": "2.4.29",
+    "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
+    "author": "Engr. Clariden D. Montano, REE",
+    "main": "electron/main.js",
+    "scripts": {
+        "start": "node start-electron.js",
+        "dev": "set NODE_ENV=development && node start-electron.js",
+        "server": "node server/index.js",
+        "rebuild:native:node": "npm rebuild better-sqlite3",
+        "rebuild:native:electron": "electron-builder install-app-deps",
+        "postinstall": "electron-builder install-app-deps",
+        "build:win": "electron-builder --win nsis --x64",
+        "build:installer": "electron-builder --win nsis --x64"
     },
-    "files": [
-      "electron/**/*",
-      "public/**/*",
-      "server/**/*",
-      "assets/**/*",
-      "drivers/**/*",
-      "services/**/*",
-      "package.json"
-    ],
-    "asarUnpack": [
-      "node_modules/better-sqlite3/**"
-    ],
-    "extraResources": [
-      {
-        "from": "dist/InverterCoreService.exe",
-        "to": "backend/InverterCoreService.exe"
-      },
-      {
-        "from": "dist/ForecastCoreService.exe",
-        "to": "backend/ForecastCoreService.exe"
-      }
-    ],
-    "win": {
-      "icon": "icon-256.png",
-      "requestedExecutionLevel": "requireAdministrator",
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
+    "dependencies": {
+        "@aws-sdk/client-s3": "^3.1012.0",
+        "@aws-sdk/lib-storage": "^3.1012.0",
+        "better-sqlite3": "^9.6.0",
+        "chart.js": "^4.5.1",
+        "cors": "^2.8.6",
+        "electron-updater": "^6.3.9",
+        "exceljs": "^4.4.0",
+        "express": "^4.22.1",
+        "express-ws": "^5.0.2",
+        "node-cron": "^3.0.3",
+        "node-fetch": "^2.7.0",
+        "ws": "^7.5.10"
     },
-    "nsis": {
-      "artifactName": "Inverter-Dashboard-Setup-${version}.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
-      "include": "build/uninstaller.nsh"
+    "devDependencies": {
+        "electron": "^29.0.0",
+        "electron-builder": "^24.13.3"
     },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "mclards",
-        "repo": "ADSI-Dashboard",
-        "releaseType": "release"
-      }
-    ]
-  }
+    "build": {
+        "appId": "com.engr-m.inverter-dashboard",
+        "productName": "ADSI Inverter Dashboard",
+        "directories": {
+            "output": "release",
+            "buildResources": "assets"
+        },
+        "files": [
+            "electron/**/*",
+            "public/**/*",
+            "server/**/*",
+            "assets/**/*",
+            "drivers/**/*",
+            "services/**/*",
+            "package.json"
+        ],
+        "asarUnpack": [
+            "node_modules/better-sqlite3/**"
+        ],
+        "extraResources": [
+            {
+                "from": "dist/InverterCoreService.exe",
+                "to": "backend/InverterCoreService.exe"
+            },
+            {
+                "from": "dist/ForecastCoreService.exe",
+                "to": "backend/ForecastCoreService.exe"
+            }
+        ],
+        "win": {
+            "icon": "icon-256.png",
+            "requestedExecutionLevel": "requireAdministrator",
+            "target": [
+                {
+                    "target": "nsis",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ]
+        },
+        "nsis": {
+            "artifactName": "Inverter-Dashboard-Setup-${version}.${ext}",
+            "oneClick": false,
+            "allowToChangeInstallationDirectory": true,
+            "deleteAppDataOnUninstall": false,
+            "include": "build/uninstaller.nsh"
+        },
+        "publish": [
+            {
+                "provider": "github",
+                "owner": "mclards",
+                "repo": "ADSI-Dashboard",
+                "releaseType": "release"
+            }
+        ]
+    }
 }

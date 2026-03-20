@@ -2,7 +2,7 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.28
+- **Repo/package version baseline:** 2.4.29
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
@@ -198,8 +198,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.28`
-- Current repo/package baseline: `v2.4.28`
+- Current latest published GitHub release: `v2.4.29`
+- Current repo/package baseline: `v2.4.29`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`
