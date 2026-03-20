@@ -925,12 +925,13 @@
   <table>
     <thead><tr><th>Item</th><th>Meaning</th></tr></thead>
     <tbody>
-      <tr><td>Actual MWh</td><td>Authoritative total daily energy (live for today&rsquo;s date)</td></tr>
+      <tr><td>Actual MWh</td><td>Authoritative total daily energy &mdash; updates automatically when today&rsquo;s date is selected</td></tr>
       <tr><td>Day-ahead MWh</td><td>Forecasted total daily energy</td></tr>
       <tr><td>Variance MWh</td><td>Difference between actual and forecast</td></tr>
       <tr><td>Peak Interval</td><td>Highest interval energy with timestamp</td></tr>
     </tbody>
   </table>
+  <p><strong>Live updates:</strong> When today&rsquo;s date is selected, the summary card and interval charts refresh automatically on each server push &mdash; no manual reload needed. For past dates, press <b>Load View</b>.</p>
 
   <h3>Day-Ahead Generator</h3>
   <p>Available on the gateway workstation only. Includes Days input, Format selector (Standard or Average Table), Generate button, and Export button.</p>
@@ -1130,6 +1131,7 @@
       <tr><td>Latest Interval End</td><td>End time of the most recent recorded interval</td></tr>
     </tbody>
   </table>
+  <p><strong>Live updates:</strong> When today&rsquo;s date is selected, all KPI tiles update automatically on each server push &mdash; no manual reload needed. For past dates, press <b>Load Records</b>.</p>
 
   <h3>Energy Table Columns</h3>
   <table>
@@ -1470,6 +1472,7 @@
     <tbody>
       <tr><td>OneDrive</td><td>Microsoft OAuth via Azure Client ID</td></tr>
       <tr><td>Google Drive</td><td>Google OAuth via Client ID and Client Secret</td></tr>
+      <tr><td>S3-compatible</td><td>Static access key pair validated against the configured endpoint, bucket, and prefix; unchanged backup data is reused across later backups</td></tr>
     </tbody>
   </table>
 
@@ -1482,6 +1485,8 @@
       <tr><td>Backup date tag</td><td>Date tag used for package labeling</td></tr>
     </tbody>
   </table>
+
+  <p><b>Application data</b> includes the active SQLite database plus forecast model bundles, forecast history context, Solcast reliability artifacts, weather cache, and forecast snapshots stored under ProgramData.</p>
 
   <h3>Backup Actions</h3>
   <table>
@@ -1641,7 +1646,7 @@
 
   <h3>Interface Tips</h3>
   <ul>
-    <li>Use the alarm bell for active alarm review without changing pages</li>
+    <li>Use the alarm bell panel to quickly review and <b>acknowledge alarms without changing pages</b> &mdash; each unacknowledged alarm has an inline <b>&#x2714; ACK</b> button; alarm toast pop-ups also include an <b>ACK</b> button</li>
     <li>Use the operator message bubble for shift notes and remote coordination</li>
     <li>Use <b>Open Folder</b> in Settings to verify export output quickly</li>
     <li>Hover over controls and metrics for tooltip descriptions</li>
@@ -1800,7 +1805,7 @@
 
 <!-- ═══════ FOOTER ═══════ -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.7</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.4.28</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

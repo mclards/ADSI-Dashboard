@@ -92,8 +92,8 @@ const State = {
   analyticsRealtimeTimer: null,
   analyticsFetchTimer: null,
   analyticsFetchInFlight: false,
-  analyticsBaseRows: [],
-  analyticsDayAheadBaseRows: [],
+  analyticsBaseRows: [], // raw 5-minute actual rows for the selected date
+  analyticsDayAheadBaseRows: [], // raw 5-minute day-ahead rows for the selected date
   analyticsIntervalMin: 5,
   analyticsDailyTotalMwh: null,
   analyticsActualSummarySyncAt: 0,
@@ -2803,10 +2803,14 @@ async function syncTodayMwhFromServer(opts = {}) {
 }
 
 function extractCurrentDaySummary(summaryRaw) {
+  if (!summaryRaw || typeof summaryRaw !== "object") return null;
+  // Accept both nested shapes (from /api/report/summary) and the flat shape
+  // {day, total_kwh, total_mwh, ...} sent directly in WS todaySummary frames.
   const candidate =
-    summaryRaw && typeof summaryRaw === "object"
-      ? summaryRaw.current_day || summaryRaw.todaySummary || summaryRaw.daily || null
-      : null;
+    summaryRaw.current_day ||
+    summaryRaw.todaySummary ||
+    summaryRaw.daily ||
+    (summaryRaw.day != null || summaryRaw.total_kwh != null ? summaryRaw : null);
   if (!candidate || typeof candidate !== "object") return null;
 
   const day = sanitizeDateInputValue(candidate.day) || today();
@@ -2859,11 +2863,12 @@ function applyCurrentDaySummaryClient(summaryRaw, opts = {}) {
   }
 
   const reportDay = sanitizeDateInputValue($("reportDate")?.value) || today();
-  if (
-    summary.day === reportDay &&
-    State.reportView.summary &&
-    typeof State.reportView.summary === "object"
-  ) {
+  if (summary.day === reportDay) {
+    // Seed a minimal summary object if no report has been loaded yet so the
+    // KPI bar can display live today-totals without requiring a Load Report click.
+    if (!State.reportView.summary || typeof State.reportView.summary !== "object") {
+      State.reportView.summary = { daily: {}, weekly: {} };
+    }
     if (!State.reportView.summary.daily || typeof State.reportView.summary.daily !== "object") {
       State.reportView.summary.daily = {};
     }
@@ -2880,22 +2885,41 @@ function applyCurrentDaySummaryClient(summaryRaw, opts = {}) {
       total_mwh: summary.totalMwh,
       inverter_count: summary.inverterCount,
     };
-    if (State.currentPage === "report") {
-      renderReportKpis();
+    // Always re-render KPI bar — cheap innerHTML swap, keeps Daily MWh live on
+    // every WS push regardless of which page the user is currently viewing.
+    renderReportKpis();
+  }
+
+  // ── Energy page: live-update total MWh when today's date is selected ──
+  // energy_5min DB rows only include completed 5-min buckets so the computed
+  // total lags up to 5 min. When energyDate === today we override energyTotalMwh
+  // directly from the WS authoritative value so it matches the main header.
+  if (summary.day === today()) {
+    const energyDate = sanitizeDateInputValue($("energyDate")?.value) || today();
+    if (energyDate === today()) {
+      const totalNode = $("energyTotalMwh");
+      if (totalNode) totalNode.textContent = `${summary.totalMwh.toFixed(6)} MWh`;
+      if (State.energyView.summary && typeof State.energyView.summary === "object") {
+        State.energyView.summary.totalKwh = summary.totalKwh;
+      }
     }
   }
 
+  // ── Analytics: full real-time update on every WS push ──
+  // Charts and summary numbers all update immediately when the value changes.
+  // The 2s realtime timer remains as a fallback for time-progression updates
+  // (live overlay ticks) even when the energy total hasn't changed.
   if (
     analyticsChanged &&
     State.currentPage === "analytics" &&
-    isTodayAnalyticsDate() &&
-    !State.analyticsRealtimeTimer
+    isTodayAnalyticsDate()
   ) {
     renderAnalyticsFromState();
   }
 
   return analyticsChanged;
 }
+
 
 async function syncAnalyticsActualMwhFromServer(opts = {}) {
   if (getActiveOperationModeClient() !== "gateway") return false;
@@ -4575,6 +4599,15 @@ function pickCloudBackupSettingsFields(src) {
     if (nextSecret) nextGDrive.clientSecret = nextSecret;
     out.gdrive = nextGDrive;
   }
+  if (hasOwn(src, "s3")) {
+    out.s3 = {
+      endpoint: String(src.s3?.endpoint ?? "").trim(),
+      region: String(src.s3?.region ?? "").trim(),
+      bucket: String(src.s3?.bucket ?? "").trim(),
+      prefix: String(src.s3?.prefix ?? "").trim(),
+      forcePathStyle: Boolean(src.s3?.forcePathStyle),
+    };
+  }
 
   return Object.keys(out).length ? out : null;
 }
@@ -4696,6 +4729,7 @@ async function disconnectCloudProvidersForConfigChange() {
   await Promise.allSettled([
     api("/api/backup/auth/onedrive/disconnect", "POST", {}),
     api("/api/backup/auth/gdrive/disconnect", "POST", {}),
+    api("/api/backup/auth/s3/disconnect", "POST", {}),
   ]);
 }
 
@@ -4802,7 +4836,12 @@ async function exportSettingsConfig() {
       exportedAt: new Date().toISOString(),
       appVersion: getAppVersionLabel(),
       containsSecrets,
-      excludedSecrets: ["gdrive.clientSecret", "oauthSessions"],
+      excludedSecrets: [
+        "gdrive.clientSecret",
+        "s3.accessKeyId",
+        "s3.secretAccessKey",
+        "oauthSessions",
+      ],
       settings,
       cloudBackupSettings,
     };
@@ -4839,7 +4878,7 @@ async function importSettingsConfig() {
     }
     if (bundle.cloudBackupSettings) {
       confirmLines.push(
-        "Cloud providers will be disconnected after import. The stored Google client secret is never included in exported files and must be entered again if required.",
+        "Cloud providers will be disconnected after import. Stored Google client secrets and S3 access credentials are never included in exported files and must be entered again if required.",
       );
     }
     const ok = await appConfirm("Import Settings", confirmLines.join("\n\n"), { ok: "Import" });
@@ -4865,7 +4904,7 @@ async function importSettingsConfig() {
 async function resetSettingsToDefaults() {
   const ok = await appConfirm(
     "Restore Defaults",
-    "Restore dashboard settings and cloud backup configuration to their default values?\n\nThis will disconnect cloud providers and remove the stored Google client secret.",
+    "Restore dashboard settings and cloud backup configuration to their default values?\n\nThis will disconnect cloud providers and remove stored cloud credentials.",
     { ok: "Restore" },
   );
   if (!ok) return;
@@ -4886,7 +4925,7 @@ async function resetSettingsToDefaults() {
     });
     showMsg(
       "settingsMsg",
-      "✔ Default settings restored. Cloud providers were disconnected and the stored Google client secret was removed.",
+      "✔ Default settings restored. Cloud providers were disconnected and stored cloud credentials were removed.",
       "",
     );
   } catch (err) {
@@ -8829,10 +8868,7 @@ function handleAlarmPush(alarms) {
     const hex = toAlarmHex(a.alarm_value);
     const desc =
       (a.decoded || []).map((b) => b.label).join(", ") || "Alarm triggered";
-    showToast(
-      `${invLabel} — <b>${hex}</b><br><small>${desc}</small>`,
-      a.severity,
-    );
+    showAlarmToast(a, invLabel, hex, desc);
   });
 
   syncAlarmSoundPlayback();
@@ -8881,6 +8917,43 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
     Math.max(800, Number(ttlMs) || 8000),
   );
 }
+// Alarm-specific toast — same layout as showToast but with an inline ACK button
+// so operators can acknowledge without navigating to the Alarms page.
+function showAlarmToast(alarm, invLabel, hex, desc) {
+  const toast = $("alarmToast");
+  if (!toast) return;
+
+  const maxStack = 5;
+  while (toast.children.length >= maxStack) {
+    toast.firstElementChild?.remove();
+  }
+
+  const sev = alarm.severity || "fault";
+  const alarmId = Number(alarm.id || 0);
+  const sevLabel = {
+    success: "🟢 SUCCESS",
+    critical: "🔴 CRITICAL",
+    fault: "🟠 FAULT",
+    warning: "🟡 WARNING",
+    info: "🔵 INFO",
+  }[sev] || "ALARM";
+
+  const item = el("div", `toast-item sev-${sev}`);
+  item.innerHTML = `
+    <div class="toast-hdr">
+      <span class="toast-title">${sevLabel}</span>
+      <div class="toast-hdr-actions">
+        ${alarmId ? `<button class="toast-ack-btn" data-alarm-id="${alarmId}" aria-label="Acknowledge alarm">ACK</button>` : ""}
+        <button class="toast-close" aria-label="Dismiss">✕</button>
+      </div>
+    </div>
+    <div class="toast-body">${invLabel} — <b>${hex}</b><br><small>${desc}</small></div>
+    <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
+
+  toast.appendChild(item);
+  // Slightly longer TTL so operator has time to ACK before it disappears.
+  setTimeout(() => { if (item.parentNode) item.remove(); }, 12000);
+}
 
 async function refreshAlarmBadge() {
   try {
@@ -8923,12 +8996,16 @@ async function refreshNotifPanel() {
     list.innerHTML = "";
     filteredRows.slice(0, 50).forEach((r) => {
       const desc = (r.decoded || []).map((b) => b.label).join(", ") || "Alarm";
-      const item = el("div", "notif-item");
+      const isUnacked = !r.acknowledged;
+      const item = el("div", `notif-item${isUnacked ? " notif-item--active" : ""}`);
       item.innerHTML = `
         <div class="notif-inv">${getInverterNodeDisplayLabel(r.inverter, r.unit, { includeIp: true })}</div>
         <div class="notif-code">${r.alarm_hex || "—"} <span class="sev-pill sev-${r.severity || "fault"}">${(r.severity || "fault").toUpperCase()}</span></div>
         <div class="notif-desc">${desc}</div>
-        <div class="notif-ts">${fmtDateTime(r.ts)}</div>`;
+        <div class="notif-footer">
+          <span class="notif-ts">${fmtDateTime(r.ts)}</span>
+          ${isUnacked && r.id ? `<button class="notif-ack-btn" data-alarm-id="${r.id}" aria-label="Acknowledge alarm">✔ ACK</button>` : `<span class="notif-acked">✔ Acked</span>`}
+        </div>`;
       list.appendChild(item);
     });
   } catch (err) {
@@ -10155,7 +10232,7 @@ async function loadAnalytics(options = {}) {
       date,
       start: sTs,
       end: eTs,
-      bucketMin: String(intervalMin),
+      bucketMin: "5",
     });
     let rows = [];
     let dayAheadRows = [];
@@ -10177,11 +10254,12 @@ async function loadAnalytics(options = {}) {
       dailySummary = null;
     }
     if (reqId !== State.analyticsReqId) return;
-    const bucketed = aggregateEnergyRows(rows, intervalMin);
-    const dayAheadBucketed = aggregateForecastRows(dayAheadRows, intervalMin);
-    State.analyticsBaseRows = bucketed;
-    State.analyticsDayAheadBaseRows = dayAheadBucketed;
+    State.analyticsBaseRows = Array.isArray(rows) ? rows.slice() : [];
+    State.analyticsDayAheadBaseRows = Array.isArray(dayAheadRows)
+      ? dayAheadRows.slice()
+      : [];
     State.analyticsIntervalMin = intervalMin;
+    State.analyticsDayAheadCache = null;
     const currentDaySummary = extractCurrentDaySummary(dailySummary);
     State.analyticsDailyTotalMwh =
       currentDaySummary && currentDaySummary.day === date
@@ -10364,9 +10442,27 @@ function mergeRealtimeOverlay(baseRows, intervalMin) {
   return out;
 }
 
+function getAnalyticsRealtimeRenderSig(intervalMin, now = Date.now()) {
+  const intMin = Math.max(1, Number(intervalMin) || 5);
+  const bucketTs = floorToInterval(now, intMin);
+  const elapsedHours = Math.max(0, (now - bucketTs) / 3600000);
+  let pacSig = 0;
+  let liveBucketMwh = 0;
+
+  Object.values(State.liveData || {}).forEach((d) => {
+    if (!(d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS)) return;
+    const pacW = Math.max(0, Number(d?.pac || 0));
+    pacSig += pacW * Number(d?.inverter || 0);
+    liveBucketMwh += (pacW / 1000000) * elapsedHours;
+  });
+
+  return `${bucketTs}|${pacSig.toFixed(0)}|${liveBucketMwh.toFixed(6)}`;
+}
+
 function renderAnalyticsFromState() {
   const intervalMin = Number(State.analyticsIntervalMin || 5);
-  const actualRows = mergeRealtimeOverlay(State.analyticsBaseRows, intervalMin);
+  const liveBaseRows = mergeRealtimeOverlay(State.analyticsBaseRows, 5);
+  const actualRows = aggregateEnergyRows(liveBaseRows, intervalMin);
 
   // Cache dayahead aggregation — the source rows only change on a full fetch
   // (every 60 s or on tab switch), so re-aggregating on every 2-s realtime tick
@@ -10426,18 +10522,12 @@ function ensureAnalyticsRealtime() {
       stopAnalyticsRealtime();
       return;
     }
-    // Build a cheap live-PAC signature. Skip re-render when no inverter data
-    // has changed since the last tick — avoids rebuilding 28 chart datasets
-    // every 2 s when power output is stable.
-    let s = 0;
+    // Build a cheap signature that also advances with the in-progress interval
+    // so the live summary cards keep moving even when PAC is steady.
     const now = Date.now();
-    Object.values(State.liveData || {}).forEach((d) => {
-      if (d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS) {
-        s += Number(d.pac || 0) * Number(d.inverter || 0);
-      }
-    });
+    const liveSig = getAnalyticsRealtimeRenderSig(State.analyticsIntervalMin, now);
     const actualSig = Number(State.analyticsDailyTotalMwh || 0).toFixed(6);
-    const sig = `${s.toFixed(0)}|${State.analyticsIntervalMin}|${actualSig}`;
+    const sig = `${liveSig}|${State.analyticsIntervalMin}|${actualSig}`;
     if (sig === State.analyticsLastPacSig) return;
     State.analyticsLastPacSig = sig;
     renderAnalyticsFromState();
@@ -10975,8 +11065,11 @@ function renderAnalyticsSummary(
     numericTotalValues.reduce((s, v) => s + Number(v || 0), 0).toFixed(6),
   );
   const summaryMwh = Number(State.analyticsDailyTotalMwh);
-  const totalMwh =
-    Number.isFinite(summaryMwh) && summaryMwh >= 0
+  const totalMwh = isTodayAnalyticsDate()
+    ? Number.isFinite(summaryMwh) && summaryMwh >= 0
+      ? Number(Math.max(summaryMwh, computedTotalMwh).toFixed(6))
+      : computedTotalMwh
+    : Number.isFinite(summaryMwh) && summaryMwh >= 0
       ? Number(summaryMwh.toFixed(6))
       : computedTotalMwh;
   const peakRaw = (totalValues || []).map((v) =>
@@ -11800,7 +11893,12 @@ function cbStatusBadge(status) {
 
 function cbCloudBadges(cloud) {
   if (!cloud || !Object.keys(cloud).length) return "—";
-  return Object.keys(cloud).map((p) => (p === "onedrive" ? "☁OD" : "🔵GD")).join(" ");
+  return Object.keys(cloud).map((p) => {
+    if (p === "onedrive") return "☁OD";
+    if (p === "gdrive") return "🔵GD";
+    if (p === "s3") return "🪣S3";
+    return p;
+  }).join(" ");
 }
 
 async function cbRefreshHistory() {
@@ -11859,13 +11957,17 @@ async function cbUpdateConnectionStatus() {
     const connected = data.connected || [];
     const odConn = connected.find((c) => c.provider === "onedrive");
     const gdConn = connected.find((c) => c.provider === "gdrive");
+    const s3Conn = connected.find((c) => c.provider === "s3");
 
     const odBadge = $("cbOneDriveStatus");
     const gdBadge = $("cbGDriveStatus");
+    const s3Badge = $("cbS3Status");
     const btnConnOD = $("btnConnectOneDrive");
     const btnDiscOD = $("btnDisconnectOneDrive");
     const btnConnGD = $("btnConnectGDrive");
     const btnDiscGD = $("btnDisconnectGDrive");
+    const btnConnS3 = $("btnConnectS3");
+    const btnDiscS3 = $("btnDisconnectS3");
 
     if (odBadge) {
       odBadge.textContent = odConn ? (odConn.expired ? "Expired — reconnect" : "Connected") : "Not connected";
@@ -11875,10 +11977,16 @@ async function cbUpdateConnectionStatus() {
       gdBadge.textContent = gdConn ? (gdConn.expired ? "Expired — reconnect" : "Connected") : "Not connected";
       gdBadge.className = "cb-conn-badge" + (gdConn && !gdConn.expired ? " connected" : "");
     }
+    if (s3Badge) {
+      s3Badge.textContent = s3Conn ? "Connected" : "Not connected";
+      s3Badge.className = "cb-conn-badge" + (s3Conn ? " connected" : "");
+    }
     if (btnConnOD) btnConnOD.hidden = !!(odConn && !odConn.expired);
     if (btnDiscOD) btnDiscOD.hidden = !(odConn && !odConn.expired);
     if (btnConnGD) btnConnGD.hidden = !!(gdConn && !gdConn.expired);
     if (btnDiscGD) btnDiscGD.hidden = !(gdConn && !gdConn.expired);
+    if (btnConnS3) btnConnS3.hidden = !!s3Conn;
+    if (btnDiscS3) btnDiscS3.hidden = !s3Conn;
 
     cbSetProgress(data.progress || {});
   } catch {
@@ -11917,6 +12025,18 @@ async function cbLoadSettings() {
         ? "Stored securely in the app. Leave blank to keep it, or enter a new secret to replace it."
         : "The client secret is stored locally after save and is not shown again in this screen.";
     }
+    if ($("cbS3Endpoint")) $("cbS3Endpoint").value = s.s3?.endpoint || "";
+    if ($("cbS3Region")) $("cbS3Region").value = s.s3?.region || "";
+    if ($("cbS3Bucket")) $("cbS3Bucket").value = s.s3?.bucket || "";
+    if ($("cbS3Prefix")) $("cbS3Prefix").value = s.s3?.prefix || "";
+    if ($("cbS3ForcePathStyle")) $("cbS3ForcePathStyle").checked = !!s.s3?.forcePathStyle;
+    if ($("cbS3AccessKeyId")) $("cbS3AccessKeyId").value = "";
+    if ($("cbS3SecretAccessKey")) $("cbS3SecretAccessKey").value = "";
+    if ($("cbS3SecretNote")) {
+      $("cbS3SecretNote").textContent = s.s3?.credentialsSaved
+        ? "Stored securely in the app. Leave both credential fields blank to keep them, or enter a new pair to replace them. Unchanged S3 backup data is reused across later backups."
+        : "Access credentials are stored locally after a successful validation and are not shown again on this screen. Unchanged S3 backup data is reused across later backups.";
+    }
 
     cbSuggestProvider(s.email || "");
     await cbUpdateConnectionStatus();
@@ -11943,6 +12063,13 @@ async function cbSaveSettings() {
       clientId: ($("cbGDriveClientId")?.value || "").trim(),
       clientSecret: ($("cbGDriveClientSecret")?.value || "").trim(),
     },
+    s3: {
+      endpoint: ($("cbS3Endpoint")?.value || "").trim(),
+      region: ($("cbS3Region")?.value || "").trim(),
+      bucket: ($("cbS3Bucket")?.value || "").trim(),
+      prefix: ($("cbS3Prefix")?.value || "").trim(),
+      forcePathStyle: !!$("cbS3ForcePathStyle")?.checked,
+    },
   };
   try {
     await api("/api/backup/settings", "POST", body);
@@ -11956,7 +12083,38 @@ async function cbConnectProvider(provider) {
   // Save credentials first.
   await cbSaveSettings();
 
-  const msgId = provider === "onedrive" ? "cbOneDriveMsg" : "cbGDriveMsg";
+  const msgId =
+    provider === "onedrive"
+      ? "cbOneDriveMsg"
+      : provider === "gdrive"
+        ? "cbGDriveMsg"
+        : "cbS3Msg";
+
+  if (provider === "s3") {
+    showMsg(msgId, "Validating bucket access…", "");
+    try {
+      const result = await api("/api/backup/auth/s3/connect", "POST", {
+        accessKeyId: ($("cbS3AccessKeyId")?.value || "").trim(),
+        secretAccessKey: ($("cbS3SecretAccessKey")?.value || "").trim(),
+      });
+      if (!result?.ok) throw new Error(result?.error || "S3 validation failed");
+      if ($("cbS3AccessKeyId")) $("cbS3AccessKeyId").value = "";
+      if ($("cbS3SecretAccessKey")) $("cbS3SecretAccessKey").value = "";
+      if ($("cbS3SecretNote")) {
+        $("cbS3SecretNote").textContent =
+          "Stored securely in the app. Leave both credential fields blank to keep them, or enter a new pair to replace them. Unchanged S3 backup data is reused across later backups.";
+      }
+      const summary = result?.info?.bucket
+        ? `✔ Connected to ${result.info.bucket}${result.info.prefix ? `/${result.info.prefix}` : ""}`
+        : "✔ Connected";
+      showMsg(msgId, summary, "");
+      await cbUpdateConnectionStatus();
+    } catch (err) {
+      showMsg(msgId, `✗ ${err.message}`, "error");
+    }
+    return;
+  }
+
   showMsg(msgId, "Opening browser for authentication…", "");
 
   try {
@@ -12000,7 +12158,12 @@ async function cbConnectProvider(provider) {
 }
 
 async function cbDisconnectProvider(provider) {
-  const msgId = provider === "onedrive" ? "cbOneDriveMsg" : "cbGDriveMsg";
+  const msgId =
+    provider === "onedrive"
+      ? "cbOneDriveMsg"
+      : provider === "gdrive"
+        ? "cbGDriveMsg"
+        : "cbS3Msg";
   try {
     await api(`/api/backup/auth/${provider}/disconnect`, "POST", {});
     showMsg(msgId, `✔ Disconnected from ${provider}`, "");
@@ -12035,7 +12198,7 @@ async function cbListCloudBackups() {
   const providerPref = $("cbProvider")?.value || "auto";
   const providers =
     providerPref === "both" || providerPref === "auto"
-      ? ["onedrive", "gdrive"]
+      ? ["onedrive", "gdrive", "s3"]
       : [providerPref];
   const restoreDateFilter = ($("cbRestoreDate")?.value || "").trim();
   const listSection = $("cbCloudListSection");
@@ -12094,7 +12257,7 @@ async function cbListCloudBackups() {
       const created = item.createdTime || item.createdDateTime || item.lastModifiedDateTime || "";
       const createdFmt = created ? new Date(created).toLocaleString() : "—";
       const p = String(item.__provider || "").toLowerCase();
-      const providerTag = p === "onedrive" ? "OD" : p === "gdrive" ? "GD" : p;
+      const providerTag = p === "onedrive" ? "OD" : p === "gdrive" ? "GD" : p === "s3" ? "S3" : p;
       tr.innerHTML = `
         <td>[${escapeHtml(providerTag)}] ${escapeHtml(item.name)}</td>
         <td>${createdFmt}</td>
@@ -12371,6 +12534,8 @@ function bindEventHandlers() {
   $("btnDisconnectOneDrive")?.addEventListener("click", () => cbDisconnectProvider("onedrive"));
   $("btnConnectGDrive")?.addEventListener("click", () => cbConnectProvider("gdrive"));
   $("btnDisconnectGDrive")?.addEventListener("click", () => cbDisconnectProvider("gdrive"));
+  $("btnConnectS3")?.addEventListener("click", () => cbConnectProvider("s3"));
+  $("btnDisconnectS3")?.addEventListener("click", () => cbDisconnectProvider("s3"));
   $("btnRefreshBackupHistory")?.addEventListener("click", cbRefreshHistory);
   $("cbRestoreDate")?.addEventListener("change", cbRefreshHistory);
   $("btnClearRestoreDate")?.addEventListener("click", () => { if ($("cbRestoreDate")) { $("cbRestoreDate").value = ""; cbRefreshHistory(); } });
@@ -12436,10 +12601,30 @@ function bindEventHandlers() {
     if (btn) ackAlarm(Number(btn.dataset.alarmId), btn);
   });
 
-  // Toast close (event delegation on toast container)
+  // Toast close + ACK (event delegation on toast container)
   $("alarmToast")?.addEventListener("click", (e) => {
-    const btn = e.target.closest(".toast-close");
-    if (btn) btn.closest(".toast-item")?.remove();
+    const closeBtn = e.target.closest(".toast-close");
+    if (closeBtn) { closeBtn.closest(".toast-item")?.remove(); return; }
+    const ackBtn = e.target.closest(".toast-ack-btn:not([disabled])");
+    if (ackBtn) {
+      const id = Number(ackBtn.dataset.alarmId);
+      ackBtn.disabled = true;
+      ackBtn.textContent = "…";
+      ackAlarm(id, ackBtn).then(() => {
+        // Auto-dismiss this toast shortly after ACK
+        setTimeout(() => ackBtn.closest(".toast-item")?.remove(), 1200);
+      });
+    }
+  });
+
+  // Notif panel ACK (event delegation)
+  $("notifList")?.addEventListener("click", (e) => {
+    const ackBtn = e.target.closest(".notif-ack-btn:not([disabled])");
+    if (!ackBtn) return;
+    const id = Number(ackBtn.dataset.alarmId);
+    ackBtn.disabled = true;
+    ackBtn.textContent = "…";
+    ackAlarm(id, ackBtn);
   });
 
   // Analytics day-ahead buttons (delegated on page container; rendered lazily by ensureAnalyticsCards)

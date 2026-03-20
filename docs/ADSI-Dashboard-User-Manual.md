@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.27`
+**Applies to:** ADSI Inverter Dashboard `v2.4.28`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -269,9 +269,25 @@ Current behavior:
 
 Use the theme toggle to switch the dashboard visual theme. Theme choice persists between restarts.
 
-### 5.3 Alarm Notification Bell
+### 5.3 Alarm Notification Bell and Quick-ACK
 
 The alarm bell appears when active unacknowledged alarms exist. It opens the alarm notification panel without forcing page navigation.
+
+The notification panel shows up to 50 recent active alarms. Each unacknowledged alarm entry includes:
+
+- inverter label and alarm code with severity
+- alarm description
+- timestamp
+- **`✔ ACK` button** — acknowledges the alarm directly from the panel without navigating to the Alarms page
+
+Already-acknowledged alarms show a muted **`✔ Acked`** label instead of the button.
+
+Alarm toasts (the pop-up notifications that appear in the corner when a new alarm is raised) also include an inline **`ACK`** button. Clicking ACK from a toast:
+
+- immediately registers the acknowledgement
+- auto-dismisses the toast after a short delay
+
+Use the Alarms page for formal review, bulk acknowledgement, and history. Use the bell panel and toast buttons for quick acknowledgement without leaving the current page.
 
 ### 5.4 Operator Messages
 
@@ -508,10 +524,15 @@ The page builds:
 
 | Item | Meaning |
 | --- | --- |
-| `Actual MWh` | Authoritative total daily energy. For today's date this stays live from the server current-day energy snapshot |
+| `Actual MWh` | Authoritative total daily energy. For today's date this stays live and updates automatically as new energy data arrives over the gateway connection |
 | `Day-ahead MWh` | Forecast total daily energy |
 | `Variance MWh` | Difference between actual and day-ahead values |
 | `Peak Interval` | Highest interval energy or output summary for the selected view |
+
+Operational note:
+
+- when **today's date** is selected, the summary card and interval charts update automatically on each server push, at the same cadence as `TODAY MWh` in the header — no manual reload is needed
+- for past dates, data is loaded on demand by pressing `Load View`
 
 ### Day-ahead Generator
 
@@ -673,6 +694,11 @@ The `Energy` page focuses on interval production records.
 | `Peak Interval` | Highest recorded interval value |
 | `Reporting Inverters` | Count of inverters with records |
 | `Latest Interval End` | End time of the latest interval shown |
+
+Operational note:
+
+- when **today's date** is selected, all KPI tiles update automatically on each server push alongside the header `TODAY MWh` — no manual reload is needed
+- for past dates, records are loaded on demand by pressing `Load Records`
 
 ### Energy Table Columns
 
@@ -986,20 +1012,23 @@ Operational note:
 | Field or Action | Use |
 | --- | --- |
 | `Email` | Provider suggestion or reference only |
-| `Backup Provider` | `Auto`, `OneDrive`, `Google Drive`, or `Both` |
+| `Backup Provider` | `Auto`, `OneDrive`, `Google Drive`, `S3-compatible`, or `Both` |
 | `Authorize OneDrive` | Starts Microsoft provider authorization |
 | `Authorize Google Drive` | Starts Google provider authorization |
+| `Validate & Connect` | Validates the configured S3-compatible bucket and stores the credential pair locally |
 | `Disconnect Provider` | Disconnects the current provider session |
 | `Azure Client ID` | OneDrive authorization client ID |
 | `Google Client ID` | Google authorization client ID |
 | `Google Client Secret` | Stored locally after save; not shown again |
+| `S3 Endpoint / Region / Bucket / Prefix` | Object-storage location and folder-style prefix |
+| `S3 Access Key ID / Secret Access Key` | Stored locally after validation; not shown again |
 
 #### Backup Policy
 
 | Field | Use |
 | --- | --- |
 | `Enable scheduled cloud backup` | Enables scheduled backup execution |
-| `Application data` | Include database and application data |
+| `Application data` | Include the main database plus forecast model bundles, forecast history context, weather cache, Solcast reliability artifacts, and forecast snapshots |
 | `Configuration files` | Include configuration settings |
 | `Logs (optional)` | Include log files when needed |
 | `Schedule` | `Manual only`, `Daily at 3:00 AM`, or `Every 6 hours` |
@@ -1024,6 +1053,10 @@ The backup activity table reports:
 - backup size
 - backup status
 - cloud provider
+
+Forecast data is packaged under the same backup when `Application data` is selected. This includes the active SQLite database and the forecast engine artifact directories stored under `ProgramData\\InverterDashboard`.
+
+For `S3-compatible` storage, unchanged backup content is chunk-deduplicated and reused across later backups instead of being uploaded again.
 - available actions
 
 Restore behavior:

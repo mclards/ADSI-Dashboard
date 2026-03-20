@@ -17,12 +17,17 @@ const liveData = {};       // key: `${inv}_${unit}` → latest parsed row
 const unreachableState = {}; // per-key miss/suppression tracking
 const lastPersistState = {}; // per-key DB persist cadence state
 
-const POLL_MS    = 500;    // poll interval
+const POLL_MS    = 200;    // poll interval — reduced from 500ms; Python updates at ~50ms/inverter
 const OFFLINE_MS = 20000;   // mark offline after 20s no data
 const MISSING_GRACE_MS = 12000; // ignore short per-poll gaps before counting misses
 const SOLAR_HOUR_START = 5;
 const SOLAR_HOUR_END   = 18;
-const MAX_PAC_DT_S = 30;   // cap integration gap — allows recovery from short network outages
+// Primary dropout protection is the stale frame guard in integratePacToday():
+// it detects when Python serves a cached Modbus frame (ts unchanged) and skips
+// PAC integration, preventing phantom kWh accumulation during Modbus dropouts.
+// This 30s cap is a hard ceiling for genuine long timestamp gaps (e.g. clock jumps).
+// A gap-clip warning is emitted whenever the cap fires so discards are visible in logs.
+const MAX_PAC_DT_S = 30;   // cap integration gap — hard ceiling (stale frame guard is primary)
 const SUPPRESS_AFTER_MISS_MS = 120000; // suppress after prolonged misses
 const SUPPRESS_BACKOFF_MS = 30000;    // retry after backoff window
 const API_FETCH_TIMEOUT_MS = 5000;
@@ -31,6 +36,12 @@ const DB_MIN_PERSIST_MS = 1000;
 const DB_PAC_DELTA_PERSIST_W = 250;
 const DB_READING_BACKLOG_MAX_ROWS = 120000;
 const DB_ENERGY_BACKLOG_MAX_ROWS = 12000;
+// When Python has no fresh Modbus frame (Modbus down), it serves the LAST cached
+// frame unchanged. If Node integrates PAC against that stale frame it accumulates
+// phantom kWh. Guard: if the frame timestamp hasn't advanced since the last
+// integration for this key, and system time has moved on, treat as stale and
+// skip the PAC increment. 3s matches Python's per-inverter reconnect window.
+const STALE_FRAME_MAX_AGE_MS = 3000; // frame ts must advance within this window
 
 let pollTimer = null;
 let running   = false;
@@ -69,6 +80,15 @@ const pollStats = {
   lastDbPersistOkTs: 0,
   offlineMarkCount: 0,
   lastCacheUpdateTs: Date.now(),
+  // ─── Energy integrity counters (new) ─────────────────────────────────────
+  pacGapClipCount: 0,         // times PAC dt was capped by MAX_PAC_DT_S → silent energy loss
+  pacGapClipTotalSec: 0,      // cumulative seconds clipped (indicates severity)
+  partialBucketFlushCount: 0, // 5-min partial buckets flushed on shutdown (recovered energy)
+  solarWindowSkipCount: 0,    // readings dropped because outside solar persist window
+  staleFrameSkipCount: 0,     // PAC integrations skipped because Python served a cached stale frame
+  // ─── Frame latency (Python sweep lag vs Node poll interval) ─────────────────
+  frameAgeAvgMs: 0,           // EMA of (Date.now() − frame.ts) across all parsed rows
+  frameAgeMaxMs: 0,           // peak frame age seen in this session (ms)
 };
 
 // Pac-based daily energy integrator (independent from kWh register).
@@ -365,6 +385,7 @@ function ensureTodayEnergyBaseline(ts = Date.now()) {
   return todayEnergyBaselineByInv;
 }
 
+
 function integratePacToday(parsed) {
   const now = parsed.ts || Date.now();
   resetPacTodayIfNeeded(now);
@@ -373,15 +394,54 @@ function integratePacToday(parsed) {
   const prev = pacIntegratorState[key];
 
   if (!prev) {
-    pacIntegratorState[key] = { ts: now, pac, totalKwh: 0 };
+    pacIntegratorState[key] = { ts: now, pac, totalKwh: 0, pythonKwh: parsed.kwh_python || 0 };
     parsed.kwh = 0;
     return;
   }
 
   let totalKwh = Number(prev.totalKwh || 0);
   const dtSec = Math.max(0, (now - prev.ts) / 1000);
+
+  // ── Stale frame guard: trust Python's timestamp ──
+  // Python's /data filters out frames older than STALE_FRAME_MAX_AGE_MS before sending.
+  // If dtSec === 0 the same ts was re-served — skip to avoid zero-increment noise.
+  if (dtSec === 0 && prev.ts > 0) {
+    pollStats.staleFrameSkipCount += 1;
+    parsed.kwh = roundKwh(totalKwh);
+    return;
+  }
+
+  // ── Primary path: use Python's accumulated kwh_today delta ──
+  // Python integrates at 50ms granularity (vs Node's 200ms refetch), so its kWh
+  // is more accurate. We take the delta from the last known Python value;
+  // if Python restarted (kwh_python < prev), delta = 0 (safe — DB baseline covers it).
+  const pythonKwh = Number(parsed.kwh_python || 0);
+  if (pythonKwh > 0) {
+    const prevPythonKwh = Number(prev.pythonKwh || 0);
+    const pythonDelta = Math.max(0, pythonKwh - prevPythonKwh);
+    totalKwh += pythonDelta;
+    pacTodayByInverter[parsed.inverter] =
+      (pacTodayByInverter[parsed.inverter] || 0) + pythonDelta;
+    parsed.kwh = roundKwh(totalKwh);
+    pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh, pythonKwh };
+    return;
+  }
+
+  // ── Fallback path: PAC trapezoid (when Python kwh_today unavailable) ──
   if (dtSec > 0) {
     const safeDt = Math.min(dtSec, MAX_PAC_DT_S);
+    // ── Gap-clip warning: any dt capped here is energy permanently lost ──
+    if (dtSec > MAX_PAC_DT_S) {
+      pollStats.pacGapClipCount += 1;
+      pollStats.pacGapClipTotalSec += Math.round(dtSec - MAX_PAC_DT_S);
+      const discardedKwh = ((prev.pac + pac) / 2 * (dtSec - MAX_PAC_DT_S)) / 3600000;
+      console.warn(
+        `[energy] PAC gap clipped: inv=${parsed.inverter}_${parsed.unit}` +
+        ` dt=${dtSec.toFixed(1)}s capped=${MAX_PAC_DT_S}s` +
+        ` discarded≈${discardedKwh.toFixed(4)}kWh` +
+        ` totalClips=${pollStats.pacGapClipCount}`,
+      );
+    }
     const avgPac = (prev.pac + pac) / 2;
     const kwhInc = (avgPac * safeDt) / 3600000; // W*s -> kWh
     totalKwh += kwhInc;
@@ -390,7 +450,7 @@ function integratePacToday(parsed) {
   }
 
   parsed.kwh = roundKwh(totalKwh);
-  pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh };
+  pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh, pythonKwh: 0 };
 }
 
 function parseRow(row, identity = null) {
@@ -417,6 +477,10 @@ function parseRow(row, identity = null) {
   const safePac = pac * 10 <= 260000 ? pac * 10 : 0;
   const safePdc = vdc * idc <= 265000 ? vdc * idc : 0;
 
+  // Python's pre-accumulated kWh for this node (50ms integrator, 30s cap applied).
+  // When > 0, Node uses the delta of this value instead of its own PAC trapezoid.
+  const kwh_python = Math.max(0, Number(row.kwh_today || 0));
+
   const sourceTs = Number(row.ts || row.timestamp || Date.now());
   const ts = Number.isFinite(sourceTs) && sourceTs > 0 ? sourceTs : Date.now();
   const day = resolveFrameDay(row, ts);
@@ -431,6 +495,7 @@ function parseRow(row, identity = null) {
     pac: safePac,
     pdc: safePdc,
     kwh: 0,
+    kwh_python,
     alarm,
     on_off,
     online: 1,
@@ -858,6 +923,13 @@ async function poll() {
     parsedThisTick += 1;
     const key = `${parsed.inverter}_${parsed.unit}`;
 
+    // Fix #5: track frame age (Python sweep lag vs Node poll interval)
+    const frameAge = Math.max(0, Date.now() - Number(parsed.ts || 0));
+    if (frameAge > pollStats.frameAgeMaxMs) pollStats.frameAgeMaxMs = frameAge;
+    pollStats.frameAgeAvgMs = pollStats.frameAgeAvgMs
+      ? pollStats.frameAgeAvgMs * 0.95 + frameAge * 0.05
+      : frameAge;
+
     integratePacToday(parsed);
 
     seen.add(key);
@@ -894,9 +966,15 @@ async function poll() {
     const pacDelta = !persistPrev
       ? Number.MAX_SAFE_INTEGER
       : Math.abs(Number(parsed.pac || 0) - Number(persistPrev.pac || 0));
+    const inSolarWindow = isSolarWindowAt(parsed.ts);
     const shouldPersist =
-      isSolarWindowAt(parsed.ts) &&
+      inSolarWindow &&
       (forcePersist || elapsedMs >= DB_MIN_PERSIST_MS || pacDelta >= DB_PAC_DELTA_PERSIST_W);
+
+    if (!inSolarWindow) {
+      // Track skips outside the solar window so clock-drift energy loss is visible
+      pollStats.solarWindowSkipCount += 1;
+    }
 
     if (shouldPersist) {
       batch.push(toPersistedReadingRow(parsed));
@@ -988,8 +1066,10 @@ function stop() {
 }
 
 // Flush any liveData readings not yet written due to cadence guards.
-// Called on graceful shutdown to recover up to ~1 s of readings.
+// Also flushes current partial 5-min buckets so a graceful restart does not
+// lose the energy accumulated in the current bucket window.
 function flushPending() {
+  const now = Date.now();
   const batch = [];
   for (const d of Object.values(liveData)) {
     if (!d || !d.ts) continue;
@@ -1003,7 +1083,34 @@ function flushPending() {
       alarm: Number(d.alarm || 0), on_off: Number(d.on_off || 0),
     };
   }
-  enqueuePendingPersist(batch, []);
+
+  // ── Partial 5-min bucket flush (FIX: server restart was losing active bucket) ──
+  // Write the energy accumulated in the current (incomplete) 5-min window so
+  // a restart does not permanently lose up to 5 min of solar generation.
+  const partialEnergyBatch = [];
+  const dKey = dayKey(now);
+  for (const [invKey, state] of Object.entries(energyBuckets)) {
+    if (!state || state.day !== dKey) continue;
+    const inv = Number(invKey);
+    if (!(inv > 0)) continue;
+    const kwhNow = Number(pacTodayByInverter[inv] || 0);
+    const inc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
+    if (!(inc > 0)) continue;
+    // Use the current wall-clock bucket start as the timestamp
+    const bucketTs = floorToFiveMinute(now);
+    partialEnergyBatch.push({
+      ts: bucketTs,
+      inverter: inv,
+      kwh_inc: Number(inc.toFixed(6)),
+    });
+    pollStats.partialBucketFlushCount += 1;
+    console.log(
+      `[energy] partial bucket flushed on shutdown: inv=${inv}` +
+      ` inc=${inc.toFixed(4)}kWh bucket=${new Date(bucketTs).toISOString()}`,
+    );
+  }
+
+  enqueuePendingPersist(batch, partialEnergyBatch);
   flushPersistBacklog("shutdown");
 }
 
@@ -1042,6 +1149,9 @@ function getPerfStats() {
     running: Boolean(running),
     pollMs: POLL_MS,
     offlineMs: OFFLINE_MS,
+    maxPacDtS: MAX_PAC_DT_S,
+    solarHourStart: SOLAR_HOUR_START,
+    solarHourEnd: SOLAR_HOUR_END,
     liveKeyCount: Object.keys(liveData).length,
     expectedSuppressedKeyCount: Object.keys(unreachableState).length,
     ...pollStats,

@@ -1,8 +1,9 @@
 "use strict";
 /**
- * tokenStore.js — AES-256-GCM encrypted cloud OAuth token storage.
- * Tokens are encrypted at rest using a machine-derived key so they cannot
- * be trivially extracted from the data directory.
+ * tokenStore.js — AES-256-GCM encrypted cloud credential storage.
+ * Provider tokens and static credentials are encrypted at rest using a
+ * machine-derived key so they cannot be trivially extracted from the data
+ * directory.
  */
 
 const crypto = require("crypto");
@@ -92,14 +93,20 @@ class TokenStore {
    */
   isExpired(provider) {
     const t = this._cache[provider];
-    if (!t || !t.access_token) return true;
+    if (!t) return true;
+    if (t.accessKeyId && t.secretAccessKey) return false;
+    if (!t.access_token) return true;
     if (!t.expires_at) return false; // no expiry info, assume valid
     return Date.now() >= Number(t.expires_at) - 90_000;
   }
 
   /** Returns true if a token is stored (connected), regardless of expiry. */
   isConnected(provider) {
-    return !!this._cache[provider]?.access_token;
+    const entry = this._cache[provider];
+    return !!(
+      entry?.access_token ||
+      (entry?.accessKeyId && entry?.secretAccessKey)
+    );
   }
 
   /** Summary of connected providers (no token values exposed). */

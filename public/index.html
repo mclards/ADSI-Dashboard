@@ -1709,7 +1709,8 @@
                     <option value="auto">Auto (any connected provider)</option>
                     <option value="onedrive">OneDrive only</option>
                     <option value="gdrive">Google Drive only</option>
-                    <option value="both">Both connected providers</option>
+                    <option value="s3">S3-compatible only</option>
+                    <option value="both">All connected providers</option>
                   </select>
                 </label>
                 <small id="cbEmailHint" class="cb-email-hint"></small>
@@ -1774,6 +1775,70 @@
                   <span class="smsg" id="cbGDriveMsg"></span>
                 </div>
               </div>
+
+              <!-- S3-compatible connect -->
+              <div class="cb-provider-block" id="cbS3Block">
+                <div class="cb-provider-header">
+                  <span class="cb-provider-icon mdi mdi-database-arrow-up-outline" aria-hidden="true"></span>
+                  <strong>S3-Compatible Object Storage</strong>
+                  <span class="cb-conn-badge" id="cbS3Status">Not connected</span>
+                </div>
+                <div class="srow cb-provider-fields">
+                  <label>Endpoint
+                    <input type="text" id="cbS3Endpoint" class="inp inp-lg"
+                      placeholder="https://s3.ap-southeast-1.amazonaws.com" autocomplete="off"
+                      title="S3 endpoint URL. Leave blank for standard AWS S3, or enter a custom endpoint for compatible providers such as Backblaze B2, Wasabi, R2, IDrive e2, or MinIO." />
+                  </label>
+                  <label>Region
+                    <input type="text" id="cbS3Region" class="inp inp-lg"
+                      placeholder="ap-southeast-1 or auto" autocomplete="off"
+                      title="Bucket region. Use the provider's actual region; some compatible endpoints accept auto." />
+                  </label>
+                </div>
+                <div class="srow cb-provider-fields">
+                  <label>Bucket
+                    <input type="text" id="cbS3Bucket" class="inp inp-lg"
+                      placeholder="inverter-dashboard-backups" autocomplete="off"
+                      title="Existing object-storage bucket name used for dashboard backup packages." />
+                  </label>
+                  <label>Path Prefix
+                    <input type="text" id="cbS3Prefix" class="inp inp-lg"
+                      placeholder="InverterDashboardBackups" autocomplete="off"
+                      title="Optional folder-style prefix inside the bucket. Backup packages are stored below this prefix." />
+                  </label>
+                </div>
+                <div class="srow cb-provider-fields">
+                  <label>Access Key ID
+                    <input type="text" id="cbS3AccessKeyId" class="inp inp-lg"
+                      placeholder="Enter a new access key ID" autocomplete="off"
+                      title="Static access key ID for the S3-compatible bucket. Leave blank to keep the stored key." />
+                  </label>
+                  <label>Secret Access Key
+                    <input type="password" id="cbS3SecretAccessKey" class="inp inp-lg"
+                      placeholder="Enter a new secret access key" autocomplete="off"
+                      title="Static secret access key for the S3-compatible bucket. Leave blank to keep the stored key." />
+                  </label>
+                </div>
+                <div class="field-note" id="cbS3SecretNote">Access credentials are stored locally after a successful validation and are not shown again on this screen. Unchanged S3 backup data is reused across later backups to reduce re-upload cost.</div>
+                <div class="srow">
+                  <label class="chk-inline" title="Enable path-style bucket addressing. Some S3-compatible providers require this.">
+                    <input type="checkbox" id="cbS3ForcePathStyle" />
+                    <span>Use path-style bucket access</span>
+                  </label>
+                </div>
+                <div class="cb-provider-help">
+                  <span class="field-note">Works with AWS S3 and compatible providers that expose an S3 API.</span>
+                </div>
+                <div class="sgroup-actions">
+                  <button id="btnConnectS3" class="btn btn-outline" type="button" title="Validate bucket access and store S3-compatible credentials securely for cloud backup." aria-label="Validate and connect S3-compatible storage">
+                    <span class="mdi mdi-link-variant" aria-hidden="true"></span><span>Validate &amp; Connect</span>
+                  </button>
+                  <button id="btnDisconnectS3" class="btn btn-outline" type="button" title="Disconnect the current S3-compatible object-storage credentials for cloud backup." aria-label="Disconnect S3-compatible storage" hidden>
+                    <span class="mdi mdi-link-variant-off" aria-hidden="true"></span><span>Disconnect Provider</span>
+                  </button>
+                  <span class="smsg" id="cbS3Msg"></span>
+                </div>
+              </div>
             </div>
 
             <!-- Backup Configuration -->
@@ -1786,7 +1851,7 @@
                 </label>
                 <label class="cb-scope-label" title="Choose which parts of the dashboard are included in each backup package.">Scope
                   <div class="cb-scope-checks">
-                    <label class="chk-inline" title="Include the main SQLite database (telemetry, reports, alarms, forecasts).">
+                    <label class="chk-inline" title="Include the main SQLite database plus forecast model bundles, training history context, Solcast reliability artifacts, weather cache, and forecast snapshots.">
                       <input type="checkbox" id="cbScopeDb" checked />
                       <span>Application data</span>
                     </label>
@@ -1990,7 +2055,7 @@
           placeholder="Write a short operator note..."
           title="Type a short operator note to send to connected workstations (max 500 characters)."
         />
-        <button id="chatSend" class="chat-send-btn btn-primary" type="button" title="Send this operator note to the gateway message thread.">
+        <button id="chatSend" class="btn btn-accent chat-send-btn" type="button" title="Send this operator note to the gateway message thread.">
           Send
         </button>
       </div>
@@ -2069,8 +2134,8 @@
         </div>
         <div id="confirmBody" class="confirm-dialog-body"></div>
         <div class="confirm-dialog-actions">
-          <button id="confirmCancel" class="btn-outline confirm-btn">Cancel</button>
-          <button id="confirmOk" class="btn-primary confirm-btn">Confirm</button>
+          <button id="confirmCancel" class="btn btn-outline confirm-btn">Cancel</button>
+          <button id="confirmOk" class="btn btn-accent confirm-btn">Confirm</button>
         </div>
       </div>
     </div>

@@ -26,10 +26,16 @@ const DB_SCHEMA_VERSION = "2";
 
 // Limit how many local backup packages to keep.
 const MAX_LOCAL_PACKAGES = 20;
+const S3_DEDUPE_LAYOUT = "chunked-v1";
+const S3_DEDUPE_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function sha256File(filePath) {
   const data = fs.readFileSync(filePath);
   return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+function sha256Buffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
 function safeReadJson(filePath) {
@@ -56,6 +62,22 @@ function listFilesRecursive(rootDir) {
   };
   walk(rootDir, "");
   return out;
+}
+
+function copyDirRecursive(srcDir, destDir) {
+  if (!srcDir || !fs.existsSync(srcDir)) return false;
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(src, dst);
+    } else if (entry.isFile()) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+    }
+  }
+  return true;
 }
 
 function semverCompare(a, b) {
@@ -86,8 +108,10 @@ class CloudBackupService {
    * @param {object} deps.tokenStore       TokenStore instance
    * @param {object} deps.onedrive         OneDriveProvider instance
    * @param {object} deps.gdrive           GDriveProvider instance
+   * @param {object} deps.s3               S3CompatibleProvider instance
    * @param {object} deps.poller           poller module (optional, for stop/start around restore)
    * @param {string} deps.ipConfigPath     Path to ipconfig.json (for config scope backup)
+   * @param {string} deps.programDataDir   ProgramData root for forecast artifacts
    */
   constructor(deps) {
     this.dataDir = deps.dataDir;
@@ -97,8 +121,10 @@ class CloudBackupService {
     this.tokenStore = deps.tokenStore;
     this.onedrive = deps.onedrive;
     this.gdrive = deps.gdrive;
+    this.s3 = deps.s3;
     this.poller = deps.poller || null;
     this.ipConfigPath = deps.ipConfigPath || null;
+    this.programDataDir = deps.programDataDir || null;
 
     this.backupDir = path.join(this.dataDir, "cloud_backups");
     this.historyFile = path.join(this.dataDir, "backup_history.json");
@@ -128,11 +154,18 @@ class CloudBackupService {
     return {
       enabled: false,
       email: "",
-      provider: "auto",              // auto | onedrive | gdrive | both
+      provider: "auto",              // auto | onedrive | gdrive | s3 | both
       scope: ["database", "config"], // database | config | logs
       schedule: "manual",            // manual | daily | every6h
       onedrive: { clientId: "" },
       gdrive: { clientId: "", clientSecret: "" },
+      s3: {
+        endpoint: "",
+        region: "",
+        bucket: "",
+        prefix: "InverterDashboardBackups",
+        forcePathStyle: false,
+      },
     };
   }
 
@@ -157,6 +190,12 @@ class CloudBackupService {
             ? parsed.gdrive
             : {}),
         },
+        s3: {
+          ...defaults.s3,
+          ...(parsed?.s3 && typeof parsed.s3 === "object"
+            ? parsed.s3
+            : {}),
+        },
       };
     } catch {
       return defaults;
@@ -178,6 +217,12 @@ class CloudBackupService {
         clientSecret: "",
         clientSecretSaved: secret.length > 0,
       },
+      s3: {
+        ...(source?.s3 || {}),
+        accessKeyId: "",
+        secretAccessKey: "",
+        credentialsSaved: this.tokenStore.isConnected("s3"),
+      },
     };
   }
 
@@ -192,6 +237,13 @@ class CloudBackupService {
       clientId: String(body?.gdrive?.clientId ?? ""),
       clientSecret: String(body?.gdrive?.clientSecret ?? ""),
     };
+    const incomingS3 = {
+      endpoint: String(body?.s3?.endpoint ?? "").trim(),
+      region: String(body?.s3?.region ?? "").trim(),
+      bucket: String(body?.s3?.bucket ?? "").trim(),
+      prefix: String(body?.s3?.prefix ?? "").trim(),
+      forcePathStyle: Boolean(body?.s3?.forcePathStyle),
+    };
     const merged = {
       ...current,
       ...body,
@@ -203,6 +255,10 @@ class CloudBackupService {
         ...(current.gdrive || {}),
         ...incomingGDrive,
       },
+      s3: {
+        ...(current.s3 || {}),
+        ...incomingS3,
+      },
     };
     const nextSecret = String(incomingGDrive.clientSecret ?? "").trim();
     if (clearGDriveClientSecret) {
@@ -213,7 +269,7 @@ class CloudBackupService {
       merged.gdrive.clientSecret = String(current.gdrive?.clientSecret || "");
     }
     // Validate provider
-    if (!["auto", "onedrive", "gdrive", "both"].includes(merged.provider)) {
+    if (!["auto", "onedrive", "gdrive", "s3", "both"].includes(merged.provider)) {
       merged.provider = "auto";
     }
     if (!["manual", "daily", "every6h"].includes(merged.schedule)) {
@@ -222,6 +278,13 @@ class CloudBackupService {
     this.setSetting("cloudBackupSettings", JSON.stringify(merged));
     this._applySchedule(merged.schedule, merged.enabled);
     return merged;
+  }
+
+  _getProviderAdapter(provider) {
+    if (provider === "onedrive") return this.onedrive;
+    if (provider === "gdrive") return this.gdrive;
+    if (provider === "s3") return this.s3;
+    return null;
   }
 
   // ─── Progress ─────────────────────────────────────────────────────────────
@@ -264,6 +327,151 @@ class CloudBackupService {
     return [...this.history];
   }
 
+  _recordFilesFromDir(dir, relPrefix, checksums, files) {
+    if (!dir || !fs.existsSync(dir)) return;
+    for (const rel of listFilesRecursive(dir)) {
+      const abs = path.join(dir, ...rel.split("/"));
+      const outRel = relPrefix ? `${relPrefix}/${rel}` : rel;
+      checksums[outRel] = sha256File(abs);
+      files.push({ name: outRel, size: fs.statSync(abs).size });
+    }
+  }
+
+  _getS3ChunkKey(chunkHash) {
+    return `objects/chunks/${String(chunkHash || "").slice(0, 2)}/${chunkHash}`;
+  }
+
+  async _uploadS3DeduplicatedBackup(dir, backupId, manifest, adapter) {
+    if (
+      typeof adapter?.objectExists !== "function" ||
+      typeof adapter?.uploadBuffer !== "function"
+    ) {
+      throw new Error("S3 adapter does not support deduplicated backup uploads");
+    }
+
+    const manifestPath = path.join(dir, "manifest.json");
+    const allFiles = listFilesRecursive(dir).filter((fname) => fname !== "manifest.json");
+    if (!allFiles.length) {
+      throw new Error("No files found in backup package");
+    }
+
+    const totalBytes = allFiles.reduce((sum, fname) => {
+      const localPath = path.join(dir, ...fname.split("/"));
+      return sum + Number(fs.statSync(localPath).size || 0);
+    }, 0);
+    const knownChunks = new Set();
+    const cloudFiles = {};
+    let processedBytes = 0;
+    let uploadedBytes = 0;
+    let reusedBytes = 0;
+
+    for (const fname of allFiles) {
+      const localPath = path.join(dir, ...fname.split("/"));
+      const fileSize = Number(fs.statSync(localPath).size || 0);
+      const fileChecksum = String(manifest?.checksums?.[fname] || sha256File(localPath));
+      const fileMeta = {
+        format: S3_DEDUPE_LAYOUT,
+        size: fileSize,
+        checksum: fileChecksum,
+        chunks: [],
+      };
+
+      if (fileSize > 0) {
+        const fd = fs.openSync(localPath, "r");
+        try {
+          let offset = 0;
+          while (offset < fileSize) {
+            const bytesToRead = Math.min(S3_DEDUPE_CHUNK_BYTES, fileSize - offset);
+            const buffer = Buffer.allocUnsafe(bytesToRead);
+            const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, offset);
+            if (!(bytesRead > 0)) break;
+            const chunk = bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead);
+            const chunkHash = sha256Buffer(chunk);
+            const chunkKey = this._getS3ChunkKey(chunkHash);
+            let chunkExists = knownChunks.has(chunkKey);
+            if (!chunkExists) {
+              chunkExists = await adapter.objectExists(chunkKey);
+              if (!chunkExists) {
+                await adapter.uploadBuffer(chunk, chunkKey);
+                uploadedBytes += chunk.length;
+              } else {
+                reusedBytes += chunk.length;
+              }
+              knownChunks.add(chunkKey);
+            } else {
+              reusedBytes += chunk.length;
+            }
+            fileMeta.chunks.push({
+              id: chunkKey,
+              sha256: chunkHash,
+              size: chunk.length,
+            });
+            processedBytes += chunk.length;
+            const ratio = totalBytes > 0 ? processedBytes / totalBytes : 1;
+            this._setProgress({
+              pct: Math.min(95, 75 + Math.round(ratio * 18)),
+            });
+            offset += chunk.length;
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+
+      cloudFiles[fname] = fileMeta;
+    }
+
+    manifest.cloud.s3 = {
+      uploadedAt: new Date().toISOString(),
+      layout: S3_DEDUPE_LAYOUT,
+      chunkBytes: S3_DEDUPE_CHUNK_BYTES,
+      uploadedBytes,
+      reusedBytes,
+      files: cloudFiles,
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    const manifestResult = await adapter.uploadFile(
+      manifestPath,
+      `${backupId}/manifest.json`,
+      (pct) => {
+        this._setProgress({
+          pct: Math.min(95, 93 + Math.round((Number(pct || 0) / 100) * 2)),
+        });
+      },
+    );
+    manifest.cloud.s3.manifest = manifestResult;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    await adapter.uploadFile(manifestPath, `${backupId}/manifest.json`);
+    return cloudFiles;
+  }
+
+  async _downloadS3ChunkedFile(adapter, localPath, meta, onChunk) {
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    const chunks = Array.isArray(meta?.chunks) ? meta.chunks : [];
+    if (!chunks.length) {
+      fs.writeFileSync(localPath, Buffer.alloc(0));
+      return;
+    }
+
+    const fd = fs.openSync(localPath, "w");
+    try {
+      for (const chunkMeta of chunks) {
+        const chunkId = String(chunkMeta?.id || "").trim();
+        if (!chunkId) continue;
+        const data = await adapter.downloadBuffer(chunkId);
+        const expectedHash = String(chunkMeta?.sha256 || "").trim();
+        if (expectedHash && sha256Buffer(data) !== expectedHash) {
+          throw new Error(`Checksum mismatch while restoring chunk for ${path.basename(localPath)}`);
+        }
+        fs.writeSync(fd, data, 0, data.length);
+        if (typeof onChunk === "function") onChunk(chunkMeta, data.length);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   // ─── Local Backup Creation ─────────────────────────────────────────────────
 
   /**
@@ -300,6 +508,27 @@ class CloudBackupService {
       await this.db.backup(dbDest);
       checksums["adsi.db"] = sha256File(dbDest);
       files.push({ name: "adsi.db", size: fs.statSync(dbDest).size });
+      const forecastDir = this.programDataDir
+        ? path.join(this.programDataDir, "forecast")
+        : null;
+      const historyDir = this.programDataDir
+        ? path.join(this.programDataDir, "history")
+        : null;
+      const weatherDir = this.programDataDir
+        ? path.join(this.programDataDir, "weather")
+        : null;
+      const forecastDest = path.join(dir, "forecast");
+      const historyDest = path.join(dir, "history");
+      const weatherDest = path.join(dir, "weather");
+      if (forecastDir && copyDirRecursive(forecastDir, forecastDest)) {
+        this._recordFilesFromDir(forecastDest, "forecast", checksums, files);
+      }
+      if (historyDir && copyDirRecursive(historyDir, historyDest)) {
+        this._recordFilesFromDir(historyDest, "history", checksums, files);
+      }
+      if (weatherDir && copyDirRecursive(weatherDir, weatherDest)) {
+        this._recordFilesFromDir(weatherDest, "weather", checksums, files);
+      }
     }
 
     // ── Config scope ──
@@ -344,6 +573,17 @@ class CloudBackupService {
             // skip unreadable log files
           }
         }
+      }
+      const forecastLogSrc = this.programDataDir
+        ? path.join(this.programDataDir, "logs", "forecast_dayahead.log")
+        : null;
+      if (forecastLogSrc && fs.existsSync(forecastLogSrc)) {
+        const logDest = path.join(dir, "logs");
+        fs.mkdirSync(logDest, { recursive: true });
+        const dst = path.join(logDest, "forecast_dayahead.log");
+        fs.copyFileSync(forecastLogSrc, dst);
+        checksums["logs/forecast_dayahead.log"] = sha256File(dst);
+        files.push({ name: "logs/forecast_dayahead.log", size: fs.statSync(dst).size });
       }
     }
 
@@ -444,7 +684,7 @@ class CloudBackupService {
     let uploadedCount = 0;
 
     for (const provider of providers) {
-      const adapter = provider === "onedrive" ? this.onedrive : this.gdrive;
+      const adapter = this._getProviderAdapter(provider);
       if (!adapter?.isConnected()) {
         errors.push(`${provider}: not connected`);
         continue;
@@ -457,32 +697,39 @@ class CloudBackupService {
       });
       try {
         const cloudFiles = {};
-        const allFiles = listFilesRecursive(dir);
-        if (!allFiles.length) {
-          throw new Error("No files found in backup package");
-        }
-
-        for (let i = 0; i < allFiles.length; i++) {
-          const fname = allFiles[i];
-          const localPath = path.join(dir, ...fname.split("/"));
-          const remoteName = `${backupId}/${fname}`;
-          const result = await adapter.uploadFile(
-            localPath,
-            remoteName,
-            (pct) => {
-              const overall = 75 + Math.round(((i + pct / 100) / allFiles.length) * 20);
-              this._setProgress({ pct: Math.min(overall, 95) });
-            },
+        if (provider === "s3") {
+          Object.assign(
+            cloudFiles,
+            await this._uploadS3DeduplicatedBackup(dir, backupId, manifest, adapter),
           );
-          cloudFiles[fname] = result;
-        }
+        } else {
+          const allFiles = listFilesRecursive(dir);
+          if (!allFiles.length) {
+            throw new Error("No files found in backup package");
+          }
 
-        // Update manifest cloud metadata in the local package.
-        manifest.cloud[provider] = {
-          uploadedAt: new Date().toISOString(),
-          files: cloudFiles,
-        };
-        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+          for (let i = 0; i < allFiles.length; i++) {
+            const fname = allFiles[i];
+            const localPath = path.join(dir, ...fname.split("/"));
+            const remoteName = `${backupId}/${fname}`;
+            const result = await adapter.uploadFile(
+              localPath,
+              remoteName,
+              (pct) => {
+                const overall = 75 + Math.round(((i + pct / 100) / allFiles.length) * 20);
+                this._setProgress({ pct: Math.min(overall, 95) });
+              },
+            );
+            cloudFiles[fname] = result;
+          }
+
+          // Update manifest cloud metadata in the local package.
+          manifest.cloud[provider] = {
+            uploadedAt: new Date().toISOString(),
+            files: cloudFiles,
+          };
+          fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+        }
 
         // Update history entry.
         if (entry) {
@@ -580,7 +827,7 @@ class CloudBackupService {
    * @param {string} provider  "onedrive" | "gdrive"
    */
   async listCloudBackups(provider) {
-    const adapter = provider === "onedrive" ? this.onedrive : this.gdrive;
+    const adapter = this._getProviderAdapter(provider);
     if (!adapter?.isConnected()) {
       throw new Error(`${provider}: not connected`);
     }
@@ -594,7 +841,7 @@ class CloudBackupService {
    * @param {string} remoteName  folder name (e.g. "inverter-backup-...")
    */
   async pullFromCloud(provider, remoteId, remoteName) {
-    const adapter = provider === "onedrive" ? this.onedrive : this.gdrive;
+    const adapter = this._getProviderAdapter(provider);
     if (!adapter?.isConnected()) {
       throw new Error(`${provider}: not connected`);
     }
@@ -612,7 +859,6 @@ class CloudBackupService {
     fs.mkdirSync(dir, { recursive: true });
 
     try {
-      // Recursively list all files in the backup folder for both providers.
       let fileItems = [];
       if (provider === "onedrive") {
         const accessToken = await adapter.getAccessToken();
@@ -639,6 +885,48 @@ class CloudBackupService {
           }
         };
         await walkOneDrive(remoteId, "");
+      } else if (provider === "s3") {
+        const remoteFiles = await adapter.listBackupFiles(remoteId);
+        const manifestItem = remoteFiles.find((item) => String(item?.name || "") === "manifest.json");
+        if (!manifestItem) {
+          throw new Error("S3 backup manifest not found");
+        }
+        const manifestBuffer = await adapter.downloadBuffer(manifestItem.id);
+        const manifestPath = path.join(dir, "manifest.json");
+        fs.writeFileSync(manifestPath, manifestBuffer);
+        const remoteManifest = safeReadJson(manifestPath);
+        const s3CloudMeta =
+          remoteManifest &&
+          remoteManifest.cloud &&
+          typeof remoteManifest.cloud.s3 === "object"
+            ? remoteManifest.cloud.s3
+            : null;
+        const s3Files =
+          s3CloudMeta && s3CloudMeta.files && typeof s3CloudMeta.files === "object"
+            ? s3CloudMeta.files
+            : null;
+        if (s3CloudMeta?.layout === S3_DEDUPE_LAYOUT && s3Files) {
+          const dedupedEntries = Object.entries(s3Files);
+          const totalBytes = dedupedEntries.reduce(
+            (sum, [, meta]) => sum + Number(meta?.size || 0),
+            0,
+          );
+          let restoredBytes = 0;
+          for (const [fname, meta] of dedupedEntries) {
+            const localPath = path.join(dir, ...String(fname || "").split("/").filter(Boolean));
+            await this._downloadS3ChunkedFile(adapter, localPath, meta, (_chunkMeta, chunkBytes) => {
+              restoredBytes += Number(chunkBytes || 0);
+              const ratio = totalBytes > 0 ? restoredBytes / totalBytes : 1;
+              this._setProgress({
+                pct: Math.min(92, 10 + Math.round(ratio * 80)),
+                message: `Downloading ${fname}…`,
+              });
+            });
+          }
+          fileItems = [];
+        } else {
+          fileItems = remoteFiles.filter((item) => String(item?.name || "") !== "manifest.json");
+        }
       } else {
         const r = await fetch(
           `https://www.googleapis.com/drive/v3/files/${remoteId}?fields=id,name,mimeType`,
@@ -827,6 +1115,27 @@ class CloudBackupService {
             }
           }
         }
+        if (this.programDataDir) {
+          const srcForecastDir = path.join(dir, "forecast");
+          const srcHistoryDir = path.join(dir, "history");
+          const srcWeatherDir = path.join(dir, "weather");
+          if (fs.existsSync(srcForecastDir)) {
+            this._setProgress({ pct: 58, message: "Restoring forecast artifacts..." });
+            const destForecastDir = path.join(this.programDataDir, "forecast");
+            fs.rmSync(destForecastDir, { recursive: true, force: true });
+            copyDirRecursive(srcForecastDir, destForecastDir);
+          }
+          if (fs.existsSync(srcHistoryDir)) {
+            const destHistoryDir = path.join(this.programDataDir, "history");
+            fs.rmSync(destHistoryDir, { recursive: true, force: true });
+            copyDirRecursive(srcHistoryDir, destHistoryDir);
+          }
+          if (fs.existsSync(srcWeatherDir)) {
+            const destWeatherDir = path.join(this.programDataDir, "weather");
+            fs.rmSync(destWeatherDir, { recursive: true, force: true });
+            copyDirRecursive(srcWeatherDir, destWeatherDir);
+          }
+        }
       }
 
       if (manifest.scope?.includes("config")) {
@@ -853,6 +1162,33 @@ class CloudBackupService {
             }
           } catch (err) {
             console.warn("[CloudBackup] Settings restore failed:", err.message);
+          }
+        }
+      }
+
+      if (manifest.scope?.includes("logs")) {
+        this._setProgress({ pct: 82, message: "Restoring logs..." });
+        const srcLogsDir = path.join(dir, "logs");
+        if (fs.existsSync(srcLogsDir)) {
+          const dataLogsDir = path.join(this.dataDir, "logs");
+          fs.mkdirSync(dataLogsDir, { recursive: true });
+          for (const entry of fs.readdirSync(srcLogsDir, { withFileTypes: true })) {
+            if (!entry.isFile()) continue;
+            if (entry.name === "forecast_dayahead.log") continue;
+            const src = path.join(srcLogsDir, entry.name);
+            const dst = path.join(dataLogsDir, entry.name);
+            fs.copyFileSync(src, dst);
+          }
+          if (this.programDataDir) {
+            const srcForecastLog = path.join(srcLogsDir, "forecast_dayahead.log");
+            if (fs.existsSync(srcForecastLog)) {
+              const forecastLogsDir = path.join(this.programDataDir, "logs");
+              fs.mkdirSync(forecastLogsDir, { recursive: true });
+              fs.copyFileSync(
+                srcForecastLog,
+                path.join(forecastLogsDir, "forecast_dayahead.log"),
+              );
+            }
           }
         }
       }
@@ -1088,6 +1424,12 @@ class CloudBackupService {
       this.gdrive?.isConnected()
     ) {
       connected.push("gdrive");
+    }
+    if (
+      (pref === "auto" || pref === "s3" || pref === "both") &&
+      this.s3?.isConnected()
+    ) {
+      connected.push("s3");
     }
     return connected;
   }

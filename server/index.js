@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 const express = require("express");
 const expressWs = require("express-ws");
 const cors = require("cors");
@@ -91,6 +91,7 @@ const {
 const TokenStore = require("./tokenStore");
 const OneDriveProvider = require("./cloudProviders/onedrive");
 const GDriveProvider = require("./cloudProviders/gdrive");
+const S3CompatibleProvider = require("./cloudProviders/s3");
 const CloudBackupService = require("./cloudBackup");
 const {
   MAX_SHADOW_AGE_MS: CORE_MAX_SHADOW_AGE_MS,
@@ -544,7 +545,9 @@ let cpuSampleUsage = process.cpuUsage();
 const _tokenStore  = new TokenStore(DATA_DIR);
 const _onedrive    = new OneDriveProvider(_tokenStore);
 const _gdrive      = new GDriveProvider(_tokenStore);
-const _cloudBackup = new CloudBackupService({
+let _cloudBackup = null;
+const _s3          = new S3CompatibleProvider(_tokenStore, () => (_cloudBackup ? _cloudBackup.getCloudSettings() : {}));
+_cloudBackup = new CloudBackupService({
   dataDir:     DATA_DIR,
   db,
   getSetting,
@@ -552,8 +555,10 @@ const _cloudBackup = new CloudBackupService({
   tokenStore:  _tokenStore,
   onedrive:    _onedrive,
   gdrive:      _gdrive,
+  s3:          _s3,
   poller,
   ipConfigPath: path.join(DATA_DIR, "ipconfig.json"),
+  programDataDir: PROGRAMDATA_ROOT,
 });
 // Apply saved schedule on startup (after cron module is ready).
 setTimeout(() => {
@@ -2501,6 +2506,19 @@ function mergeAppendReplicationRow(tableName, payload, cols, authoritative = fal
         const incomingKwh = Number(payload.kwh_inc || 0);
         const existingKwh = Number(existingRow.kwh_inc || 0);
         if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
+          // ── Energy reduction alert: incoming replication row has LESS kWh than stored ──
+          // This means the gateway DB had a lower value — a common source of dashboard
+          // vs meter discrepancy. Log it so the root cause can be investigated.
+          if (incomingKwh < existingKwh - 1e-6) {
+            const diff = (existingKwh - incomingKwh).toFixed(4);
+            const bucketTime = new Date(Number(payload?.ts || 0)).toISOString();
+            console.warn(
+              `[energy] REDUCTION via replication: inv=${payload?.inverter}` +
+              ` bucket=${bucketTime}` +
+              ` stored=${existingKwh.toFixed(4)}kWh incoming=${incomingKwh.toFixed(4)}kWh` +
+              ` diff=-${diff}kWh — gateway DB had less than local; today total may decrease`,
+            );
+          }
           stmtCached(
             "update:energy_5min:kwh_inc_by_id",
             `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
@@ -6488,6 +6506,7 @@ function stopRemoteBridge() {
   remoteBridgeState.todayEnergyFetchInFlight = false;
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
+  console.log("[energy] remote carry state cleared on bridge stop — energy hand-off reset");
   remoteBridgeState.todayEnergyFetchRequestId =
     Math.max(0, Number(remoteBridgeState.todayEnergyFetchRequestId || 0)) + 1;
   remoteBridgeState.lastHealthBroadcastKey = "";
@@ -6511,6 +6530,7 @@ function startRemoteBridge() {
   clearRemoteBridgePersistState();
   remoteTodayCarryState.day = "";
   remoteTodayCarryState.byInv = Object.create(null);
+  console.log("[energy] remote carry state cleared on bridge start — fresh session");
   resetRemoteBridgeLiveSessionState(getRemoteGatewayBaseUrl());
   remoteBridgeState.running = true;
   remoteBridgeState.startedAtTs = Date.now();
@@ -13703,6 +13723,20 @@ app.post("/api/backup/auth/:provider/start", (req, res) => {
   }
 });
 
+/** POST /api/backup/auth/s3/connect — validate and store S3-compatible credentials */
+app.post("/api/backup/auth/s3/connect", async (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  try {
+    const result = await _s3.connect({
+      accessKeyId: body.accessKeyId,
+      secretAccessKey: body.secretAccessKey,
+    });
+    res.json({ ok: true, provider: "s3", info: result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 /** POST /api/backup/auth/:provider/callback  â€" complete OAuth token exchange */
 app.post("/api/backup/auth/:provider/callback", async (req, res) => {
   const provider = req.params.provider;
@@ -13738,6 +13772,7 @@ app.post("/api/backup/auth/:provider/disconnect", (req, res) => {
   try {
     if (provider === "onedrive") _onedrive.disconnect();
     else if (provider === "gdrive") _gdrive.disconnect();
+    else if (provider === "s3") _s3.disconnect();
     res.json({ ok: true, provider, connected: _tokenStore.listConnected() });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

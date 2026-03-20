@@ -1422,6 +1422,7 @@
     <tbody>
       <tr><td>OneDrive</td><td>Microsoft OAuth via Azure Client ID</td></tr>
       <tr><td>Google Drive</td><td>Google OAuth via Client ID and Client Secret</td></tr>
+      <tr><td>S3-compatible</td><td>Static access key pair validated against the configured endpoint, bucket, and prefix; unchanged backup data is reused across later backups</td></tr>
     </tbody>
   </table>
 
@@ -1434,6 +1435,8 @@
       <tr><td>Backup date tag</td><td>Date tag used for package labeling</td></tr>
     </tbody>
   </table>
+
+  <p><b>Application data</b> includes the active SQLite database plus forecast model bundles, forecast history context, Solcast reliability artifacts, weather cache, and forecast snapshots stored under ProgramData.</p>
 
   <h3>Backup Actions</h3>
   <table>

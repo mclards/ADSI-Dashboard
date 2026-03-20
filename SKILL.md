@@ -113,6 +113,16 @@ The project now uses a hot/cold telemetry model. Keep future work aligned with t
   - do not emit a fresh raise event solely because the bitmask expanded or changed
   - do not retrigger alarm sound for that node
 
+### Alarm Quick-ACK Pattern
+
+- Alarm toast notifications use `showAlarmToast()`, not the generic `showToast()`. `showAlarmToast` renders a `.toast-hdr-actions` row with an inline **ACK** button (`.toast-ack-btn`) alongside the dismiss button.
+- The notification bell panel (`#notifPanel`) renders a `.notif-footer` row per alarm entry containing the timestamp and a `.notif-ack-btn` button for unacknowledged alarms, or a `.notif-acked` label for already-acknowledged ones.
+- Both ACK paths call the existing `ackAlarm(id, btn)` which POSTs to `/api/alarms/:id/ack`, refreshes the badge, and syncs sound state.
+- Toast TTL is 12 s (longer than the generic 8 s default) to give operators time to read and ACK.
+- After ACK from a toast, the toast auto-dismisses after 1.2 s.
+- Event delegation handles both surfaces: the existing `alarmToast` delegate covers `.toast-ack-btn`; a new delegate on `#notifList` covers `.notif-ack-btn`.
+- Do not bypass this pattern and reintroduce a generic `showToast()` call for alarms — the ACK button would be lost.
+
 ### SQLite Performance Rules
 
 - The hot DB uses WAL mode with `synchronous = NORMAL`. Do not change this to `FULL` — WAL+NORMAL is already crash-safe and FULL adds costly fsync on every commit.
@@ -545,6 +555,14 @@ A compact static legend (`.pac-legend-wrap`) sits in the inverter toolbar betwee
 ### Availability Computation
 
 Availability for today is computed live via `getDailyReportRowsForDay(today, { includeTodayPartial: true })`. The `/api/report/daily?start&end` range endpoint detects when today falls in the requested range and splices in the live result rather than serving the stale persisted row. The detail panel 60 s refresh timer fetches `/api/report/daily?date=<today>` and merges the fresh rows into `State.invDetailReportRows` so the availability chip stays current.
+
+### Real-Time Metric Alignment (Analytics and Energy Pages)
+
+When the selected date on the Analytics or Energy page is today, `applyCurrentDaySummaryClient` calls `renderAnalyticsFromState()` on every WebSocket `todaySummary` push. This keeps Analytics summary cards, Energy KPI tiles, and interval charts updating at the same cadence as `TODAY MWh` in the header.
+
+- `extractCurrentDaySummary()` parses the flat `todaySummary` object from the WS payload. Do not wrap `todaySummary` in extra nesting without updating this parser.
+- `renderAnalyticsFromState()` is guarded to run only when the Analytics or Energy page is active and the selected date equals today. It does not run for historical dates.
+- Do not reintroduce a separate `patchAnalyticsSummaryLive` function — the direct `renderAnalyticsFromState()` call on each push is the canonical path.
 
 ### WebSocket Reconnection
 
