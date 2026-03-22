@@ -19,8 +19,8 @@ Copies of this file must be kept in sync at:
 - Author: Engr. Clariden Montaño REE (Engr. M.)
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.32` in `package.json`
-- Latest published GitHub release: `v2.4.32`
+- Current repo version baseline: `2.4.33` in `package.json`
+- Latest published GitHub release: `v2.4.33`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`
@@ -418,7 +418,7 @@ Solcast is a **high-authority input** — it carries real irradiance and sky-con
 **In ML training:**
 - `collect_training_data()` and `collect_history_days()` must consume Solcast snapshot data as a training feature when available for the target date.
 - Do not fall back to pure physics baseline when Solcast snapshots exist — Solcast-informed samples produce more accurate residual learning.
-- `build_solcast_reliability_artifact()` builds per-weather-bucket trust scores feeding `solcast_resolution_weight` and `solcast_resolution_support` as ML features — keep these populated.
+- `build_solcast_reliability_artifact()` builds multi-dimensional trust scores across weather regime, weather bucket, season (dry/wet), time-of-day (morning/midday/afternoon), and trend — feeding `solcast_resolution_weight` and `solcast_resolution_support` as ML features. Keep these populated.
 
 **In day-ahead generation (manual and automatic):**
 - Always attempt to load Solcast snapshots for the target date before generating.
@@ -428,7 +428,12 @@ Solcast is a **high-authority input** — it carries real irradiance and sky-con
 
 **Normalization:**
 - Raw Solcast arrives in `MW` — always normalize to `kWh per 5-minute slot` before scoring, blending, or comparison.
-- `build_solcast_reliability_artifact()` compares Solcast against `load_actual_loss_adjusted()` — never against raw inverter totals.
+- `build_solcast_reliability_artifact()` compares Solcast against `load_actual_loss_adjusted()` at 5-min slot resolution — never against raw inverter totals or day-level aggregates only.
+
+**Reliability dimensions (v2.4.33+):**
+- **Season**: dry (Dec-May) vs wet (Jun-Nov) — `lookup_solcast_reliability(artifact, regime, season=)` checks `season_regimes["{season}:{regime}"]` first
+- **Time-of-day**: morning (05:00-08:55), midday (09:00-14:55), afternoon (15:00-17:55) — per-slot blend and floor modulated by zone reliability
+- **Trend**: 30-day window split into recent/older halves — `improving`/`stable`/`degrading` signal affects blend weight (±6-8%) and residual damping
 
 ### Provider Orchestration Architecture
 
@@ -453,8 +458,9 @@ Implementation work packages:
 - WP3: quality-aware fallback — classify tomorrow state; replace weak-but-complete forecasts
 - WP4: `forecast_error_compare_daily` + `forecast_error_compare_slot`; source-aware error memory
 - WP5: replay validation over last 30–90 days before threshold tuning
+- WP6: enhanced Solcast reliability — seasonal, time-of-day, trend detection (all at 5-min slot resolution)
 
-Ship WP1+WP2 together. Ship WP3 next. WP4 after enough audit data exists. Tune thresholds only after WP5 replay confirms results.
+Ship WP1+WP2 together. Ship WP3 next. WP4 after enough audit data exists. Tune thresholds only after WP5 replay confirms results. WP6 is additive — old artifacts without new keys load safely via fallback dicts.
 
 ### Per-Inverter Transmission Loss Rules
 

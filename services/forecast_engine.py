@@ -282,6 +282,26 @@ SOLCAST_RESOLUTION_AUTHORITY_MAX = 1.00
 SOLCAST_FORECAST_FLOOR_RATIO_FRESH  = 0.95  # fresh Solcast (coverage >= 0.95): floor at 95% of Solcast (actual often exceeds Solcast by ~3%)
 SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88  # stale_usable (coverage >= 0.80): floor at 88% of Solcast total
 
+# Time-of-day zone definitions (slot indices, 5-min resolution)
+# morning: 05:00-08:55 = slots 60-107, midday: 09:00-14:55 = slots 108-179, afternoon: 15:00-17:55 = slots 180-215
+TOD_ZONES = {
+    "morning":   (SOLAR_START_SLOT, 108),
+    "midday":    (108, 180),
+    "afternoon": (180, SOLAR_END_SLOT),
+}
+TOD_ZONE_LABELS = ("morning", "midday", "afternoon")
+
+# Trend detection
+SOLCAST_TREND_MIN_DAYS_PER_HALF = 3
+SOLCAST_TREND_IMPROVING_THRESHOLD = 0.05
+SOLCAST_TREND_DEGRADING_THRESHOLD = -0.05
+SOLCAST_TREND_BOOST_MAX = 0.06
+SOLCAST_TREND_PENALTY_MAX = 0.08
+
+# Time-of-day reliability modifiers
+TOD_RELIABILITY_WEIGHT_MIN = 0.85
+TOD_RELIABILITY_WEIGHT_MAX = 1.08
+
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
 ML_BLEND_MAX = 1.00
@@ -941,6 +961,105 @@ def _season_bucket_from_day(day: str) -> str:
     except Exception:
         month = datetime.now().month
     return "dry" if month in (12, 1, 2, 3, 4, 5) else "wet"
+
+
+def _tod_zone_for_slot(slot_idx: int):
+    """Return 'morning', 'midday', 'afternoon', or None if outside solar window."""
+    for zone, (zs, ze) in TOD_ZONES.items():
+        if zs <= slot_idx < ze:
+            return zone
+    return None
+
+
+def _compute_tod_slot_metrics(actual: np.ndarray, forecast: np.ndarray, present_mask: np.ndarray) -> dict:
+    """Per-zone slot-level metrics (bias_ratio, mape, slot_count) from 288-slot arrays."""
+    result = {}
+    for zone, (zs, ze) in TOD_ZONES.items():
+        z_mask = (
+            present_mask[zs:ze]
+            & (forecast[zs:ze] > 0.0)
+        )
+        usable = int(np.count_nonzero(z_mask))
+        if usable < 4:
+            continue
+        z_actual = np.clip(actual[zs:ze][z_mask], 0.0, None)
+        z_forecast = forecast[zs:ze][z_mask]
+        bias_ratio = float(np.clip(
+            z_actual.sum() / max(float(z_forecast.sum()), 1e-6),
+            *SOLCAST_BIAS_RATIO_CLIP,
+        ))
+        mape = float(np.mean(np.abs(z_actual - z_forecast) / np.maximum(z_actual, 1e-6)))
+        result[zone] = {
+            "bias_ratio": bias_ratio,
+            "mape": mape,
+            "slot_count": usable,
+        }
+    return result
+
+
+def _compute_solcast_trend(records: list) -> dict:
+    """Compute trend signal from daily reliability records (most-recent-first)."""
+    stable_fallback = {
+        "signal": "stable",
+        "magnitude": 0.0,
+        "first_half_reliability": 0.0,
+        "second_half_reliability": 0.0,
+        "first_half_days": 0,
+        "second_half_days": 0,
+    }
+    if not records:
+        return stable_fallback
+    mid = len(records) // 2
+    first_half = records[:mid]   # more recent
+    second_half = records[mid:]  # older
+    if len(first_half) < SOLCAST_TREND_MIN_DAYS_PER_HALF or len(second_half) < SOLCAST_TREND_MIN_DAYS_PER_HALF:
+        return stable_fallback
+    first_mean_mape = float(np.mean([r["mape"] for r in first_half]))
+    second_mean_mape = float(np.mean([r["mape"] for r in second_half]))
+    first_rel = float(1.0 - min(first_mean_mape, 0.55) / 0.55)
+    second_rel = float(1.0 - min(second_mean_mape, 0.55) / 0.55)
+    magnitude = first_rel - second_rel  # positive = recent half is better = improving
+    if magnitude > SOLCAST_TREND_IMPROVING_THRESHOLD:
+        signal = "improving"
+    elif magnitude < SOLCAST_TREND_DEGRADING_THRESHOLD:
+        signal = "degrading"
+    else:
+        signal = "stable"
+    return {
+        "signal": signal,
+        "magnitude": float(magnitude),
+        "first_half_reliability": float(first_rel),
+        "second_half_reliability": float(second_rel),
+        "first_half_days": len(first_half),
+        "second_half_days": len(second_half),
+    }
+
+
+def lookup_solcast_tod_reliability(artifact, regime: str, zone: str) -> dict:
+    """Lookup ToD reliability: time_of_day_by_regime[regime][zone] -> time_of_day[zone] -> fallback."""
+    fallback = {"bias_ratio": 1.0, "mape": 0.24, "reliability": 0.62, "slot_count": 0}
+    if not artifact or not isinstance(artifact, dict):
+        return fallback
+    by_regime = artifact.get("time_of_day_by_regime")
+    if isinstance(by_regime, dict):
+        regime_zones = by_regime.get(regime)
+        if isinstance(regime_zones, dict) and zone in regime_zones:
+            out = dict(fallback)
+            out.update(regime_zones[zone])
+            return out
+    tod = artifact.get("time_of_day")
+    if isinstance(tod, dict) and zone in tod:
+        out = dict(fallback)
+        out.update(tod[zone])
+        return out
+    return fallback
+
+
+def lookup_solcast_trend(artifact) -> dict:
+    """Return trend dict from artifact, or stable fallback."""
+    if artifact and isinstance(artifact, dict) and "trend" in artifact:
+        return artifact["trend"]
+    return {"signal": "stable", "magnitude": 0.0, "first_half_reliability": 0.0, "second_half_reliability": 0.0, "first_half_days": 0, "second_half_days": 0}
 
 
 def _rolling_window_bounds(length: int, window: int, center: bool = False) -> tuple[np.ndarray, np.ndarray]:
@@ -2970,6 +3089,10 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
     resolution_bucket_dayahead: dict[str, list[dict]] = {}
     resolution_pair_solcast: dict[tuple[str, str], list[dict]] = {}
     resolution_pair_dayahead: dict[tuple[str, str], list[dict]] = {}
+    by_season: dict[str, list[dict]] = {}
+    by_season_regime: dict[str, list[dict]] = {}
+    tod_accum: dict[str, list[dict]] = {}
+    tod_regime_accum: dict[tuple, list[dict]] = {}
     lookback = max(SOLCAST_RELIABILITY_LOOKBACK_DAYS, N_TRAIN_DAYS)
     for days_ago in range(1, lookback + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
@@ -2987,6 +3110,7 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
         w5 = interpolate_5min(wdata, day)
         stats = analyse_weather_day(day, w5, actual)
         regime = classify_day_regime(stats)
+        season = _season_bucket_from_day(day)
         bucket_labels = classify_slot_weather_buckets(w5, day)
         _, constraint_meta = build_operational_constraint_mask(day)
         exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
@@ -3032,6 +3156,19 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
                         forecast_present=present,
                         exclude_mask=exclude_mask,
                     )
+                    # Seasonal accumulation
+                    record_copy = dict(records[-1])
+                    by_season.setdefault(season, []).append(record_copy)
+                    by_season_regime.setdefault(f"{season}:{regime}", []).append(record_copy)
+                    # Time-of-day accumulation
+                    tod_metrics = _compute_tod_slot_metrics(
+                        actual,
+                        np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None),
+                        actual_present,
+                    )
+                    for _tz, _tz_m in tod_metrics.items():
+                        tod_accum.setdefault(_tz, []).append(_tz_m)
+                        tod_regime_accum.setdefault((regime, _tz), []).append(_tz_m)
         dayahead_metrics = (
             compute_forecast_metrics(
                 actual,
@@ -3104,6 +3241,43 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
     for row in records:
         by_regime.setdefault(str(row["regime"]), []).append(row)
 
+    # Seasonal aggregation
+    seasons_out = {s: aggregate(rows) for s, rows in by_season.items() if len(rows) >= SOLCAST_RELIABILITY_MIN_DAYS}
+    season_regimes_out = {k: aggregate(rows) for k, rows in by_season_regime.items() if len(rows) >= 2}
+
+    # Time-of-day aggregation
+    time_of_day_out: dict[str, dict] = {}
+    for _zone, _entries in tod_accum.items():
+        _total_slots = sum(e["slot_count"] for e in _entries)
+        if _total_slots < 20:
+            continue
+        _wmape = sum(e["mape"] * e["slot_count"] for e in _entries) / _total_slots
+        _wbias = sum(e["bias_ratio"] * e["slot_count"] for e in _entries) / _total_slots
+        time_of_day_out[_zone] = {
+            "bias_ratio": float(np.clip(_wbias, *SOLCAST_BIAS_RATIO_CLIP)),
+            "mape": float(_wmape),
+            "reliability": float(1.0 - min(_wmape, 0.55) / 0.55),
+            "slot_count": int(_total_slots),
+            "day_count": len(_entries),
+        }
+    time_of_day_by_regime_out: dict[str, dict] = {}
+    for (_r, _z), _entries in tod_regime_accum.items():
+        _total_slots = sum(e["slot_count"] for e in _entries)
+        if _total_slots < 20:
+            continue
+        _wmape = sum(e["mape"] * e["slot_count"] for e in _entries) / _total_slots
+        _wbias = sum(e["bias_ratio"] * e["slot_count"] for e in _entries) / _total_slots
+        time_of_day_by_regime_out.setdefault(_r, {})[_z] = {
+            "bias_ratio": float(np.clip(_wbias, *SOLCAST_BIAS_RATIO_CLIP)),
+            "mape": float(_wmape),
+            "reliability": float(1.0 - min(_wmape, 0.55) / 0.55),
+            "slot_count": int(_total_slots),
+            "day_count": len(_entries),
+        }
+
+    # Trend detection
+    trend_out = _compute_solcast_trend(records)
+
     return {
         "created_ts": int(time.time()),
         "day_count": int(len(records)),
@@ -3113,6 +3287,11 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
             for regime, rows in sorted(by_regime.items())
             if rows
         },
+        "seasons": seasons_out,
+        "season_regimes": season_regimes_out,
+        "time_of_day": time_of_day_out,
+        "time_of_day_by_regime": time_of_day_by_regime_out,
+        "trend": trend_out,
         "resolution_profiles": {
             "created_ts": int(time.time()),
             "day_count": int(len(resolution_days)),
@@ -3416,7 +3595,7 @@ def lookup_solcast_resolution_weight_vector(
     return weights, support
 
 
-def lookup_solcast_reliability(artifact: dict | None, regime: str) -> dict:
+def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str | None = None) -> dict:
     fallback = {
         "day_count": 0,
         "mean_mape": 0.24,
@@ -3427,11 +3606,28 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str) -> dict:
     }
     if not artifact or not isinstance(artifact, dict):
         return fallback
+    # Season+regime cross-lookup (most specific)
+    if season:
+        key = f"{season}:{regime}"
+        season_regimes = artifact.get("season_regimes") or {}
+        if key in season_regimes and isinstance(season_regimes[key], dict):
+            out = dict(fallback)
+            out.update(season_regimes[key])
+            return out
+    # Regime-only lookup
     regimes = artifact.get("regimes") or {}
     if regime in regimes and isinstance(regimes[regime], dict):
         out = dict(fallback)
         out.update(regimes[regime])
         return out
+    # Season-only fallback
+    if season:
+        seasons = artifact.get("seasons") or {}
+        if season in seasons and isinstance(seasons[season], dict):
+            out = dict(fallback)
+            out.update(seasons[season])
+            return out
+    # Overall fallback
     overall = artifact.get("overall") if isinstance(artifact.get("overall"), dict) else {}
     out = dict(fallback)
     out.update(overall)
@@ -3449,7 +3645,8 @@ def solcast_prior_from_snapshot(
 
     stats = analyse_weather_day(day, w5)
     regime = classify_day_regime(stats)
-    reliability = lookup_solcast_reliability(reliability_artifact, regime)
+    season = _season_bucket_from_day(day)
+    reliability = lookup_solcast_reliability(reliability_artifact, regime, season=season)
     bucket_labels = classify_slot_weather_buckets(w5, day)
     resolution_weight, resolution_support = lookup_solcast_resolution_weight_vector(
         reliability_artifact,
@@ -3537,6 +3734,25 @@ def solcast_prior_from_snapshot(
             + (SOLCAST_RESOLUTION_PRIMARY_SCALE_MAX - SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN) * resolution_weight
         )
         blend = np.maximum(blend, primary_floor)
+
+    # Time-of-day reliability modulation
+    _overall_rel = float(np.clip(reliability.get("reliability", 0.62), 0.25, 1.0))
+    if reliability_artifact and reliability_artifact.get("time_of_day"):
+        for _zone, (_zs, _ze) in TOD_ZONES.items():
+            tod_info = lookup_solcast_tod_reliability(reliability_artifact, regime, _zone)
+            zone_rel = float(np.clip(tod_info.get("reliability", _overall_rel), 0.25, 1.0))
+            tod_factor = float(np.clip(zone_rel / max(_overall_rel, 0.30), TOD_RELIABILITY_WEIGHT_MIN, TOD_RELIABILITY_WEIGHT_MAX))
+            blend[_zs:_ze] *= tod_factor
+
+    # Trend adjustment
+    trend_info = lookup_solcast_trend(reliability_artifact)
+    _trend_signal = str(trend_info.get("signal", "stable"))
+    _trend_mag = float(trend_info.get("magnitude", 0.0))
+    if _trend_signal == "improving":
+        blend *= (1.0 + min(abs(_trend_mag), SOLCAST_TREND_BOOST_MAX))
+    elif _trend_signal == "degrading":
+        blend *= (1.0 - min(abs(_trend_mag), SOLCAST_TREND_PENALTY_MAX))
+
     blend = np.clip(blend, SOLCAST_PRIOR_BLEND_MIN, SOLCAST_PRIOR_BLEND_MAX)
     blend[~present] = 0.0
     blend[:SOLAR_START_SLOT] = 0.0
@@ -3558,6 +3774,9 @@ def solcast_prior_from_snapshot(
         "resolution_support": resolution_support,
         "primary_mode": primary_mode,
         "regime": regime,
+        "season": season,
+        "trend_signal": _trend_signal,
+        "trend_magnitude": _trend_mag,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
     }
@@ -3576,6 +3795,18 @@ def blend_physics_with_solcast(
             "bias_ratio": 1.0,
             "reliability": 0.0,
             "regime": "",
+            "season": "",
+            "trend_signal": "stable",
+            "trend_magnitude": 0.0,
+            "source": "",
+            "pulled_ts": 0,
+            "resolution_weight_mean": SOLCAST_RESOLUTION_WEIGHT_FALLBACK,
+            "resolution_support_mean": 0.0,
+            "primary_mode": False,
+            "raw_prior_total_kwh": 0.0,
+            "applied_prior_total_kwh": 0.0,
+            "raw_prior_ratio": 1.0,
+            "applied_prior_ratio": 1.0,
         }
 
     prior = np.clip(np.asarray(solcast_prior["prior_kwh"], dtype=float), 0.0, None)
@@ -3640,6 +3871,9 @@ def blend_physics_with_solcast(
         "raw_prior_ratio": raw_ratio,
         "applied_prior_ratio": applied_ratio,
         "regime": str(solcast_prior.get("regime") or ""),
+        "season": str(solcast_prior.get("season") or ""),
+        "trend_signal": str(solcast_prior.get("trend_signal") or "stable"),
+        "trend_magnitude": float(solcast_prior.get("trend_magnitude", 0.0)),
         "source": str(solcast_prior.get("source") or "solcast"),
         "pulled_ts": int(solcast_prior.get("pulled_ts", 0) or 0),
     }
@@ -6071,6 +6305,14 @@ def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
     damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
     if bool(solcast_meta.get("primary_mode")):
         damp = min(damp, SOLCAST_RESIDUAL_PRIMARY_CAP)
+    # Trend integration: improving Solcast -> damp residuals more, degrading -> let residuals through
+    _trend_sig = str(solcast_meta.get("trend_signal", "stable"))
+    _trend_m = float(solcast_meta.get("trend_magnitude", 0.0))
+    if _trend_sig == "improving":
+        damp *= (1.0 - 0.5 * min(abs(_trend_m), SOLCAST_TREND_BOOST_MAX))
+    elif _trend_sig == "degrading":
+        damp *= (1.0 + 0.5 * min(abs(_trend_m), SOLCAST_TREND_PENALTY_MAX))
+    damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
     return float(damp)
 
 
@@ -7493,10 +7735,11 @@ def run_dayahead(
         )
     )
     log.info(
-        "Solcast prior: used=%s primary=%s regime=%s cov=%.2f blend=%.2f reliability=%.2f res=%.2f bias_ratio=%.3f ratio=%.2f->%.2f source=%s",
+        "Solcast prior: used=%s primary=%s regime=%s season=%s cov=%.2f blend=%.2f reliability=%.2f res=%.2f bias_ratio=%.3f ratio=%.2f->%.2f source=%s trend=%s(%.3f)",
         bool(solcast_meta.get("used_solcast")),
         solcast_primary,
         solcast_meta.get("regime"),
+        solcast_meta.get("season", ""),
         float(solcast_meta.get("coverage_ratio", 0.0)),
         float(solcast_meta.get("mean_blend", 0.0)),
         float(solcast_meta.get("reliability", 0.0)),
@@ -7505,6 +7748,8 @@ def run_dayahead(
         float(solcast_meta.get("raw_prior_ratio", 1.0)),
         float(solcast_meta.get("applied_prior_ratio", 1.0)),
         solcast_meta.get("source"),
+        solcast_meta.get("trend_signal", "stable"),
+        float(solcast_meta.get("trend_magnitude", 0.0)),
     )
 
     # 3. ML residual correction
@@ -7762,7 +8007,18 @@ def run_dayahead(
                 _floor_ratio = 0.0
             if _floor_ratio > 0.0:
                 _fc_before = float(forecast.sum())
-                _slot_floor = _sc_kwh * _floor_ratio
+                # Time-of-day floor modulation
+                _tod_mod = np.ones(SLOTS_DAY, dtype=float)
+                if solcast_reliability is not None and isinstance(solcast_reliability, dict) and solcast_reliability.get("time_of_day"):
+                    _overall_rel_floor = float(np.clip(
+                        (lookup_solcast_reliability(solcast_reliability, solcast_meta.get("regime", "mixed")) or {}).get("reliability", 0.62),
+                        0.25, 1.0,
+                    ))
+                    for _zone, (_zs, _ze) in TOD_ZONES.items():
+                        _ztod = lookup_solcast_tod_reliability(solcast_reliability, solcast_meta.get("regime", "mixed"), _zone)
+                        _zrel = float(np.clip(_ztod.get("reliability", _overall_rel_floor), 0.25, 1.0))
+                        _tod_mod[_zs:_ze] = float(np.clip(_zrel / max(_overall_rel_floor, 0.30), 0.80, 1.10))
+                _slot_floor = _sc_kwh * _floor_ratio * _tod_mod
                 _slot_floor[:SOLAR_START_SLOT] = 0.0
                 _slot_floor[SOLAR_END_SLOT:]   = 0.0
                 # Raise each slot to at least floor_ratio × Solcast, capped at slot capacity

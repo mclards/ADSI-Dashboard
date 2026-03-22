@@ -58,7 +58,7 @@
   --top-scale: 1.5;
   --progress-h: 10px;
   --header-h: calc(58px * var(--top-scale));
-  --side-nav-w: 228px;
+  --side-nav-w: 268px;
   --font-main: Arial, "Helvetica Neue", Helvetica, sans-serif;
   --font-mono: Arial, "Helvetica Neue", Helvetica, sans-serif;
   --chart-tick: #b998a6;
@@ -160,7 +160,7 @@
   --btn-topbar-shadow:
     0 10px 24px rgba(22, 5, 11, 0.3),
     inset 0 1px 0 rgba(255, 227, 236, 0.12);
-  --app-footer-h: 42px;
+  --app-footer-h: 32px;
 }
 
 :root[data-theme="light"] {
@@ -1239,38 +1239,56 @@ body.sidebar-open .side-nav {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 8px;
+  gap: 4px;
+  padding: 12px 10px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
 }
 
 .side-about-card {
   margin-top: auto;
-  padding: 10px;
-  border-radius: 10px;
+  padding: 14px;
+  border-radius: 12px;
   border: 1px solid var(--border2);
   background: linear-gradient(160deg, var(--surface) 0%, var(--surface2) 100%);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 4px 16px rgba(0, 0, 0, 0.22);
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 6px 20px rgba(0, 0, 0, 0.28);
+  position: relative;
+  overflow: hidden;
+}
+
+.side-about-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent) 0%, transparent 100%);
+  opacity: 0.7;
+  border-radius: 12px 12px 0 0;
 }
 
 .side-about-title {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 800;
-  letter-spacing: 0.9px;
+  letter-spacing: 1px;
   color: var(--accent);
+  text-transform: uppercase;
+  opacity: 0.9;
 }
 
 .side-about-info {
-  margin-top: 8px;
+  margin-top: 12px;
   display: grid;
-  gap: 5px;
+  gap: 7px;
   font-size: 10px;
-  line-height: 1.35;
+  line-height: 1.4;
   color: var(--text2);
 }
 
@@ -1286,81 +1304,142 @@ body.sidebar-open .side-nav {
 }
 
 .side-about-actions {
-  margin-top: 10px;
+  margin-top: 14px;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 .side-about-actions .btn {
   width: 100%;
-  min-height: 30px;
-  justify-content: flex-start;
-  gap: 6px;
+  min-height: 34px;
+  justify-content: center;
+  gap: 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  border-radius: 9px;
+  transition: color 0.18s, border-color 0.18s, background 0.18s, box-shadow 0.18s, transform 0.12s;
+}
+
+.side-about-actions .btn:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.side-about-actions .btn:active {
+  transform: translateY(0);
+}
+
+.nav-section-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--text3);
+  padding: 4px 13px 6px;
+  opacity: 0.75;
 }
 
 .nav-btn {
-  height: 38px;
+  height: 40px;
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
-  padding: 0 12px;
-  border: 1px solid rgba(125, 56, 74, 0.9);
-  border-radius: 8px;
+  gap: 10px;
+  padding: 0 13px;
+  border: 1px solid rgba(125, 56, 74, 0.55);
+  border-radius: 9px;
   background: transparent;
   color: var(--text2);
   font-family: var(--font-main);
-  font-size: 10.8px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.7px;
+  letter-spacing: 0.55px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  transition: color 0.18s, border-color 0.18s, background 0.18s, box-shadow 0.18s;
+  position: relative;
+  overflow: hidden;
+}
+
+.nav-btn::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--btn-accent-1);
+  opacity: 0;
+  transform: scaleY(0.4);
+  transition: opacity 0.18s, transform 0.18s;
 }
 
 .nav-btn:hover {
   color: var(--text);
-  border-color: var(--btn-outline-border-hover);
-  background: color-mix(in srgb, var(--btn-accent-1) 10%, transparent);
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.10);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.nav-btn:hover::after {
+  opacity: 0.45;
+  transform: scaleY(0.7);
 }
 
 .nav-btn.active {
   color: var(--btn-accent-1);
   border-color: var(--btn-accent-border);
-  background: color-mix(in srgb, var(--btn-accent-2) 18%, transparent);
+  background: color-mix(in srgb, var(--btn-accent-2) 20%, transparent);
   box-shadow:
-    inset 3px 0 0 var(--btn-accent-1),
-    0 10px 22px rgba(0, 0, 0, 0.12);
+    0 4px 16px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
   font-weight: 800;
 }
 
+.nav-btn.active::after {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
 .nav-icon {
-  width: 18px;
-  min-width: 18px;
+  width: 20px;
+  min-width: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
+  opacity: 0.75;
+  transition: opacity 0.18s;
+}
+
+.nav-btn:hover .nav-icon,
+.nav-btn.active .nav-icon {
+  opacity: 1;
 }
 
 .nav-icon .mdi {
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1;
 }
 
 .nav-badge {
   margin-left: auto;
-  min-width: 15px;
+  min-width: 17px;
   border-radius: 10px;
-  padding: 1px 5px;
+  padding: 2px 5px;
   text-align: center;
-  line-height: 14px;
+  line-height: 13px;
   background: var(--red);
   color: #fff;
   font-size: 8px;
   font-weight: 800;
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--red) 55%, transparent);
 }
 
 :root[data-theme="light"] .tb-nav-toggle,
@@ -1388,10 +1467,23 @@ body.sidebar-open .side-nav {
   background: rgba(242, 232, 214, 0.62);
 }
 
+/* ::after indicator: use a darker accent so the bar reads clearly on warm beige */
+:root[data-theme="light"] .nav-btn::after {
+  background: var(--accent);
+}
+
 :root[data-theme="light"] .nav-btn:hover {
   color: #2f2418;
   border-color: var(--btn-outline-border-hover);
-  background: color-mix(in srgb, var(--btn-accent-1) 10%, rgba(242, 232, 214, 0.92));
+  background: color-mix(in srgb, var(--accent) 8%, rgba(242, 232, 214, 0.92));
+  box-shadow:
+    0 4px 14px rgba(92, 70, 40, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+:root[data-theme="light"] .nav-btn:hover::after {
+  opacity: 0.6;
+  transform: scaleY(0.7);
 }
 
 :root[data-theme="light"] .nav-btn.active {
@@ -1399,9 +1491,14 @@ body.sidebar-open .side-nav {
   border-color: var(--btn-accent-border);
   background: rgba(43, 103, 173, 0.14);
   box-shadow:
-    inset 3px 0 0 var(--btn-accent-2),
-    0 8px 18px rgba(43, 103, 173, 0.14);
+    0 4px 14px rgba(43, 103, 173, 0.18);
   font-weight: 800;
+}
+
+:root[data-theme="light"] .nav-btn.active::after {
+  background: var(--accent);
+  opacity: 1;
+  transform: scaleY(1);
 }
 
 :root[data-theme="light"] .side-about-card {
@@ -1410,6 +1507,28 @@ body.sidebar-open .side-nav {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.65),
     0 3px 10px rgba(76, 59, 37, 0.14);
+}
+
+/* Accent stripe: var(--accent) = #2b67ad in light — blue on beige, correct */
+:root[data-theme="light"] .side-about-card::before {
+  opacity: 0.85;
+}
+
+/* Version badge: accent-tinted background works; bump opacity for legibility */
+:root[data-theme="light"] .side-about-ver {
+  box-shadow: 0 1px 4px rgba(43, 103, 173, 0.18);
+}
+
+/* Separator: use border2 which is a warm brown in light — fine, just ensure visibility */
+:root[data-theme="light"] .side-about-sep {
+  opacity: 0.55;
+}
+
+/* Action buttons: warm lift shadow instead of dark-theme rgba */
+:root[data-theme="light"] .side-about-actions .btn:hover {
+  box-shadow:
+    0 5px 14px rgba(92, 70, 40, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
 #main {
@@ -2451,7 +2570,7 @@ label[data-required]::after {
 }
 
 .inv-card {
-  --card-fixed-h: calc(228px * var(--inv-card-scale));
+  --card-fixed-h: calc(186px * var(--inv-card-scale));
   --card-header-h: calc(38px * var(--inv-card-scale));
   --card-pac-h: calc(31px * var(--inv-card-scale));
   --card-rail-w: calc(100px * var(--inv-card-scale));
@@ -5029,20 +5148,34 @@ label[data-required]::after {
 
 /* About sidebar expanded styles */
 .side-about-appname {
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
   font-weight: 800;
   color: var(--text);
+  line-height: 1.2;
 }
 .side-about-ver {
-  font-size: 10px;
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
   color: var(--accent);
-  margin-left: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent);
+  border-radius: 5px;
+  padding: 2px 7px;
+  line-height: 1.4;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
 }
 .side-about-desc {
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--text2);
-  line-height: 1.4;
+  line-height: 1.5;
 }
 .side-about-link {
   display: inline-flex;
@@ -5053,29 +5186,35 @@ label[data-required]::after {
   color: var(--cyan);
   text-decoration: none;
   width: fit-content;
+  opacity: 0.85;
+  transition: opacity 0.15s, color 0.15s;
 }
 .side-about-link:hover {
   color: var(--accent);
+  opacity: 1;
 }
 .side-about-sep {
   height: 1px;
-  background: var(--border2);
-  margin: 4px 0;
+  background: linear-gradient(90deg, var(--border2) 0%, transparent 100%);
+  margin: 8px 0 3px;
+  opacity: 0.7;
 }
 .side-about-author-block {
   display: grid;
-  gap: 2px;
+  gap: 4px;
+  padding: 3px 0;
 }
 .side-about-author-label {
   font-size: 9px;
   color: var(--text3);
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.8px;
 }
 .side-about-author-name {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
   color: var(--accent);
+  line-height: 1.3;
 }
 .side-about-author-alias {
   font-size: 9.5px;
@@ -5085,13 +5224,27 @@ label[data-required]::after {
 .side-about-copyright {
   font-size: 9px;
   color: var(--text3);
-  line-height: 1.4;
-  margin-top: 3px;
+  line-height: 1.5;
+  margin-top: 2px;
 }
 .side-about-hw {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 8px;
   font-size: 9.5px;
   color: var(--text2);
-  line-height: 1.4;
+  line-height: 1.45;
+  align-items: baseline;
+}
+.side-about-hw b {
+  color: var(--text3);
+  font-weight: 600;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.side-about-hw span {
+  color: var(--text);
+  font-weight: 500;
 }
 .side-about-inline-status {
   font-family: var(--font-mono);
@@ -5109,14 +5262,28 @@ label[data-required]::after {
   color: var(--red);
 }
 .side-about-db {
+  display: grid;
+  gap: 3px;
   font-size: 9px;
   color: var(--text3);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 .side-about-db code {
   font-family: var(--font-mono);
   font-size: 8.5px;
   color: var(--cyan);
   overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.4;
+  display: block;
+  background: color-mix(in srgb, var(--cyan) 7%, transparent);
+  border-radius: 4px;
+  padding: 3px 5px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
 }
 
 /* App footer */
@@ -5132,7 +5299,7 @@ label[data-required]::after {
   align-items: center;
   justify-content: center;
   gap: 6px 10px;
-  padding: 0 20px;
+  padding: 0 16px;
   border-top: 1px solid var(--border2);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%),
@@ -7229,18 +7396,39 @@ body.mode-transition-active {
   background: transparent;
 }
 
+/* ::after indicator uses var(--btn-accent-1) = #73b4ff on classic dark — correct */
+:root[data-theme="classic"] .nav-btn::after {
+  background: var(--btn-accent-1);
+}
+
 :root[data-theme="classic"] .nav-btn:hover {
   color: #dce8fa;
   border-color: rgba(92, 130, 198, 0.95);
   background: rgba(45, 126, 247, 0.1);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(171, 204, 246, 0.05);
+}
+
+:root[data-theme="classic"] .nav-btn:hover::after {
+  opacity: 0.5;
+  transform: scaleY(0.7);
 }
 
 :root[data-theme="classic"] .nav-btn.active {
   color: #7ab8ff;
   border-color: #2d7ef7;
   background: rgba(45, 126, 247, 0.22);
-  box-shadow: inset 3px 0 0 #2d7ef7, 0 1px 6px rgba(45, 126, 247, 0.2);
+  box-shadow:
+    0 4px 14px rgba(45, 126, 247, 0.2),
+    inset 0 1px 0 rgba(171, 204, 246, 0.07);
   font-weight: 800;
+}
+
+:root[data-theme="classic"] .nav-btn.active::after {
+  background: var(--btn-accent-1);
+  opacity: 1;
+  transform: scaleY(1);
 }
 
 :root[data-theme="classic"] .side-about-card {
@@ -7249,6 +7437,24 @@ body.mode-transition-active {
   box-shadow:
     inset 0 1px 0 rgba(171, 204, 246, 0.12),
     0 3px 10px rgba(0, 0, 0, 0.26);
+}
+
+/* Accent stripe: var(--accent) = #2d7ef7 in classic — blue on near-black, correct */
+:root[data-theme="classic"] .side-about-card::before {
+  opacity: 0.75;
+}
+
+/* Version badge: color-mix(var(--accent)) resolves to translucent blue — correct */
+/* Separator: var(--border2) = #243d66 on classic dark — visible */
+:root[data-theme="classic"] .side-about-sep {
+  opacity: 0.65;
+}
+
+/* Action button hover: dark-theme shadow already fits classic dark bg */
+:root[data-theme="classic"] .side-about-actions .btn:hover {
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(171, 204, 246, 0.07);
 }
 
 :root[data-theme="classic"] .inv-card,

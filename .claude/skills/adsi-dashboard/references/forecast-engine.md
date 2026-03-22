@@ -62,6 +62,70 @@ Solcast is a **high-authority input**. It must not be skipped or treated as opti
 - Raw Solcast arrives in `MW` — always normalize to `kWh per 5-minute slot` before scoring, blending, or comparison.
 - `build_solcast_reliability_artifact()` compares Solcast against `load_actual_loss_adjusted()` — never against raw inverter totals.
 
+## Solcast Reliability Artifact (v2.4.33+)
+
+`build_solcast_reliability_artifact()` produces a multi-dimensional trust profile stored as `pv_solcast_reliability.joblib`. It compares 30 days of Solcast forecasts against loss-adjusted actuals at **5-minute slot resolution**.
+
+### Dimensions
+
+| Dimension | Keys | Purpose |
+|---|---|---|
+| Overall | `overall` | Global bias_ratio, MAPE, reliability |
+| Weather regime | `regimes` → `clear` / `mixed` / `overcast` / `rainy` | Per-regime trust |
+| Weather bucket | `resolution_profiles.buckets` → `clear_stable` / `clear_edge` / `mixed_stable` / `mixed_volatile` / `overcast` / `rainy` | Per-slot resolution weighting |
+| Season | `seasons` → `dry` (Dec-May) / `wet` (Jun-Nov) | Seasonal trust |
+| Season × regime | `season_regimes` → `dry:clear`, `wet:mixed`, etc. | Cross-dimensional |
+| Time-of-day | `time_of_day` → `morning` (05:00-08:55) / `midday` (09:00-14:55) / `afternoon` (15:00-17:55) | Per-zone reliability |
+| Time-of-day × regime | `time_of_day_by_regime` → `clear.morning`, etc. | Cross-dimensional |
+| Trend | `trend` → `signal`, `magnitude` | Recent reliability direction |
+
+### Seasonal Breakdown
+
+`_season_bucket_from_day()` classifies dry (Dec-May) vs wet (Jun-Nov). `lookup_solcast_reliability(artifact, regime, season=)` checks `season_regimes["{season}:{regime}"]` first, then falls back to `regimes[regime]` → `seasons[season]` → `overall`.
+
+### Time-of-Day Reliability
+
+Three zones defined by `TOD_ZONES`:
+- **morning**: slots 60–107 (05:00–08:55)
+- **midday**: slots 108–179 (09:00–14:55)
+- **afternoon**: slots 180–215 (15:00–17:55)
+
+`_compute_tod_slot_metrics()` computes per-zone bias_ratio and MAPE from slot-level arrays. `lookup_solcast_tod_reliability(artifact, regime, zone)` retrieves zone metrics.
+
+**Consumers:**
+- `solcast_prior_from_snapshot()` — per-slot blend weight scaled by `clip(zone_rel / overall_rel, 0.85, 1.08)`
+- `run_dayahead()` floor logic — per-slot floor modulated by `clip(zone_rel / overall_rel, 0.80, 1.10)`
+
+Effect: tighter Solcast trust at midday (where Solcast is accurate), looser at dawn/dusk.
+
+### Trend Detection
+
+`_compute_solcast_trend()` splits the 30-day window into recent half vs older half. Computes reliability for each and determines:
+- `"improving"` — recent half reliability > older by ≥ 5%
+- `"degrading"` — recent half reliability < older by ≥ 5%
+- `"stable"` — within ±5%
+
+**Consumers:**
+- `solcast_prior_from_snapshot()` — blend boosted up to +6% when improving, reduced up to -8% when degrading
+- `solcast_residual_damp_factor()` — improving → damp more (trust Solcast), degrading → damp less (let ML through)
+
+### Per-Slot Solcast Floor
+
+When Solcast is fresh, each 5-min slot is individually floored:
+- Coverage ≥ 95%: `floor = solcast[slot] × 0.95 × tod_mod[slot]`
+- Coverage ≥ 80%: `floor = solcast[slot] × 0.88 × tod_mod[slot]`
+- Coverage < 80%: floor disabled
+
+`tod_mod` adjusts floor per time-of-day zone. Only slots where ML forecast < floor are lifted; slots above floor are untouched.
+
+### Error-Memory Bias Damping
+
+When Solcast is fresh, historical error-memory bias correction is damped:
+- Coverage ≥ 95%: bias reduced by 70% (multiply by 0.30)
+- Coverage ≥ 80%: bias reduced by 50% (multiply by 0.50)
+
+Prevents old biases (built on weak-provider runs) from dragging forecast below reliable Solcast prior.
+
 ## Key Functions
 
 | Function | Purpose |
@@ -79,7 +143,14 @@ Solcast is a **high-authority input**. It must not be skipped or treated as opti
 | `collect_history_days()` | Stores `cap_dispatch_mask` per sample |
 | `forecast_qa()` | QA scoring — WAPE, MAPE, total-energy APE, slot timing error |
 | `run_backtest()` | Historical scoring without overwriting live rows |
-| `build_solcast_reliability_artifact()` | Solcast trust calibration against loss-adjusted actuals |
+| `build_solcast_reliability_artifact()` | Solcast trust calibration — seasonal, ToD, trend, regime, bucket dimensions |
+| `_compute_tod_slot_metrics()` | Per-zone (morning/midday/afternoon) bias_ratio and MAPE from slot arrays |
+| `_compute_solcast_trend()` | Half-window split trend detection (improving/stable/degrading) |
+| `lookup_solcast_reliability()` | Season+regime-aware reliability lookup with fallback chain |
+| `lookup_solcast_tod_reliability()` | Time-of-day zone reliability lookup by regime |
+| `lookup_solcast_trend()` | Trend signal and magnitude retrieval |
+| `solcast_prior_from_snapshot()` | Builds per-slot blend weights with season, ToD, and trend modulation |
+| `solcast_residual_damp_factor()` | ML residual damping — trend-aware |
 | `load_actual_loss_adjusted()` / `load_actual_loss_adjusted_with_presence()` | Loss-adjusted actual energy loaders |
 | `plant_capacity_profile()` | Returns `loss_adjusted_equiv`, `dependable_kw`, `max_kw` |
 
@@ -122,3 +193,4 @@ Loss-adjusted loaders used by: `collect_training_data()`, `collect_history_days(
 | WP3 | Quality-aware fallback — classify tomorrow state; replace weak-but-complete forecasts | Done (v2.4.30) |
 | WP4 | `forecast_error_compare_daily` + `forecast_error_compare_slot`; source-aware error memory | Done (v2.4.30) |
 | WP5 | Replay validation over last 30–90 days before threshold tuning | Pending |
+| WP6 | Enhanced Solcast reliability — seasonal, time-of-day, trend detection (all at 5-min slot resolution) | Done (v2.4.33) |
