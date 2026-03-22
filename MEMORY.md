@@ -2,12 +2,20 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.31
+- **Repo/package version baseline:** 2.4.32
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.32 Changes - Forecast Solcast Alignment Hardening (2026-03-22)
+- **Tightened ML residual cap:** `SOLCAST_RESIDUAL_PRIMARY_CAP` lowered from 0.40 to 0.30 for tighter ML residual damping when Solcast is primary.
+- **Error-memory bias damping:** When Solcast is fresh (coverage >= 0.95), historical bias correction is reduced by 70%; at coverage >= 0.80, reduced by 50%. Prevents stale historical bias from overriding fresh Solcast priors.
+- **Per-slot Solcast energy floor:** Each 5-min slot is individually floored at 95% of Solcast (fresh) or 88% (stale_usable), preserving ML shape while anchoring magnitude to Solcast.
+- **New constants:** `SOLCAST_FORECAST_FLOOR_RATIO_FRESH = 0.95`, `SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88`.
+- **Files changed:** `services/forecast_engine.py`.
+- **Validation:** `python -m py_compile services/forecast_engine.py` passed. ForecastCoreService.exe rebuilt.
 
 ## v2.4.31 Changes - Forecast Provider Parity and Audit Completeness (2026-03-22)
 - **Fixed port env var bug in Python delegation:** `_delegate_run_dayahead()` was using `IM_SERVER_PORT:3000` instead of `ADSI_SERVER_PORT:3500`, causing delegation to silently fail on the default port.
@@ -275,8 +283,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.31`
-- Current repo/package baseline: `v2.4.31`
+- Current latest published GitHub release: `v2.4.32`
+- Current repo/package baseline: `v2.4.32`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

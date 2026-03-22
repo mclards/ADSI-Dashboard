@@ -271,7 +271,7 @@ SOLCAST_PRIOR_SPREAD_FRAC_CLIP = 1.25
 SOLCAST_BIAS_RATIO_CLIP = (0.82, 1.18)
 SOLCAST_RESIDUAL_DAMP_MIN = 0.18
 SOLCAST_RESIDUAL_DAMP_MAX = 0.72
-SOLCAST_RESIDUAL_PRIMARY_CAP = 0.40
+SOLCAST_RESIDUAL_PRIMARY_CAP = 0.30
 SOLCAST_RESOLUTION_WEIGHT_FALLBACK = 0.50
 SOLCAST_RESOLUTION_BLEND_SCALE_MIN = 0.88
 SOLCAST_RESOLUTION_BLEND_SCALE_MAX = 1.12
@@ -279,6 +279,8 @@ SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN = 0.94
 SOLCAST_RESOLUTION_PRIMARY_SCALE_MAX = 1.06
 SOLCAST_RESOLUTION_AUTHORITY_MIN = 0.72
 SOLCAST_RESOLUTION_AUTHORITY_MAX = 1.00
+SOLCAST_FORECAST_FLOOR_RATIO_FRESH  = 0.95  # fresh Solcast (coverage >= 0.95): floor at 95% of Solcast (actual often exceeds Solcast by ~3%)
+SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88  # stale_usable (coverage >= 0.80): floor at 88% of Solcast total
 
 # Adaptive ML residual blending (higher uncertainty -> lower ML influence)
 ML_BLEND_MIN = 0.35
@@ -7655,6 +7657,24 @@ def run_dayahead(
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0
 
+    # When Solcast is fresh with high coverage, damp the error-memory bias correction.
+    # Historical error memory was built on runs that may not have had fresh Solcast input,
+    # so applying it at full strength can drag the forecast below the reliable Solcast prior.
+    if bool(solcast_meta.get("used_solcast")):
+        _sc_cov = float(solcast_meta.get("coverage_ratio", 0.0))
+        if _sc_cov >= 0.95:
+            _bias_damp = 0.30   # reduce bias by 70% when Solcast is very fresh (actual often exceeds Solcast)
+        elif _sc_cov >= 0.80:
+            _bias_damp = 0.50   # reduce bias by 50% when Solcast is usable
+        else:
+            _bias_damp = 1.0
+        if _bias_damp < 1.0:
+            bias_correction = bias_correction * _bias_damp
+            log.info(
+                "Bias correction damped %.0f%% for fresh Solcast (coverage=%.2f bias_damp=%.2f)",
+                (1.0 - _bias_damp) * 100.0, _sc_cov, _bias_damp,
+            )
+
     log.info(
         "Bias correction: mean=%.2f  max=%.2f kWh/slot (alpha=%.2f)",
         bias_correction[SOLAR_START_SLOT:SOLAR_END_SLOT].mean(),
@@ -7725,6 +7745,45 @@ def run_dayahead(
             forecast.sum(), max_kwh_day,
         )
         forecast *= max_kwh_day / forecast.sum()
+
+    # Solcast per-slot energy floor: for each 5-minute slot, enforce that the forecast
+    # does not fall below floor_ratio × Solcast slot kWh when Solcast is fresh.
+    # This preserves ML shape adjustments where ML is above the floor, but prevents
+    # individual slots from being dragged far below Solcast by ML residual or bias.
+    if bool(solcast_meta.get("used_solcast")):
+        _sc_cov_f = float(solcast_meta.get("coverage_ratio", 0.0))
+        _sc_kwh = np.asarray(solcast_snapshot.get("forecast_kwh", []), dtype=float)
+        if _sc_kwh.size == SLOTS_DAY:
+            if _sc_cov_f >= 0.95:
+                _floor_ratio = SOLCAST_FORECAST_FLOOR_RATIO_FRESH
+            elif _sc_cov_f >= 0.80:
+                _floor_ratio = SOLCAST_FORECAST_FLOOR_RATIO_USABLE
+            else:
+                _floor_ratio = 0.0
+            if _floor_ratio > 0.0:
+                _fc_before = float(forecast.sum())
+                _slot_floor = _sc_kwh * _floor_ratio
+                _slot_floor[:SOLAR_START_SLOT] = 0.0
+                _slot_floor[SOLAR_END_SLOT:]   = 0.0
+                # Raise each slot to at least floor_ratio × Solcast, capped at slot capacity
+                _lifted = np.where(
+                    (forecast < _slot_floor) & (_slot_floor > 0.0),
+                    np.minimum(_slot_floor, cap_slot),
+                    forecast,
+                )
+                _lifted_count = int(np.sum(
+                    (forecast[SOLAR_START_SLOT:SOLAR_END_SLOT] < _slot_floor[SOLAR_START_SLOT:SOLAR_END_SLOT])
+                    & (_slot_floor[SOLAR_START_SLOT:SOLAR_END_SLOT] > 0.0)
+                ))
+                if _lifted_count > 0:
+                    forecast = _lifted
+                    log.info(
+                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f→%.0f kWh (floor=%.0f%% coverage=%.2f)",
+                        _lifted_count, SOLAR_END_SLOT - SOLAR_START_SLOT,
+                        _fc_before, float(forecast.sum()),
+                        _floor_ratio * 100.0, _sc_cov_f,
+                    )
+
     # 6. Confidence bands
     lo, hi = confidence_bands(
         forecast,

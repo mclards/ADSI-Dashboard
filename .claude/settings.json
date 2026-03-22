@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./private/**)"
+    ]
+  },
+  "exclude": [
+    ".tmp",
+    "test-results",
+    "node_modules",
+    "release",
+    "dist",
+    "**/__pycache__",
+    "**/*.pyc"
+  ]
+}

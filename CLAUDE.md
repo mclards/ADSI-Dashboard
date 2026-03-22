@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.4.31` in `package.json` (source of truth) |
+| Repo version baseline | `2.4.32` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.4.31` |
+| Latest published release | `v2.4.32` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -44,6 +44,24 @@ Detailed history and working notes live in `MEMORY.md`.
 
 No built-in defaults for: remote gateway API token, Solcast credentials, cloud-backup OAuth.
 Live secrets go only in git-ignored `private/*.md`.
+
+---
+
+---
+
+## Forecast Day-Ahead Generation Architecture (v2.4.31+)
+
+All four generation paths route through the same Node orchestrator (`runDayAheadGenerationPlan`). Provider routing and Solcast freshness decisions are always made by Node. Python owns ML execution only.
+
+| Path | Trigger | Audit |
+|------|---------|-------|
+| Manual UI | `POST /api/forecast/generate` | Node |
+| Auto scheduler | Python loop → `_delegate_run_dayahead()` | Node |
+| Python CLI | `--generate-date` → `_delegate_run_dayahead()` | Node |
+| Python CLI fallback | Node unreachable, direct `run_dayahead(write_audit=True)` | Python |
+| Node cron | 04:30/18:30/20:00/22:00, quality-aware | Node |
+
+`_delegate_run_dayahead()` uses `ADSI_SERVER_PORT` (default 3500). Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) — only `healthy` suppresses regeneration.
 
 ---
 
