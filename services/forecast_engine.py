@@ -3727,57 +3727,193 @@ def load_intraday_adjusted(day: str) -> np.ndarray | None:
 # ERROR MEMORY  (rolling bias correction)
 # ============================================================================
 
-def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
-    """
-    Compute a weighted-average error correction vector from recent days.
-
-    Uses geometric decay so recent days matter more.
-    Only applies where both forecast and actual existed.
-    Returns a SLOTS_DAY array of kWh bias corrections.
-    """
+def _compute_error_memory_legacy(today: date) -> np.ndarray:
     weight_vectors = []
     errors = []
+    source_mismatch_penalty = 0.2
+    try:
+        start_date = (today - timedelta(days=ERR_MEMORY_DAYS)).isoformat()
+        end_date = (today - timedelta(days=1)).isoformat()
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            cols = {
+                str(row[1] or "")
+                for row in conn.execute("PRAGMA table_info(forecast_error_compare_slot)")
+            }
+            err_col = "signed_error_kwh" if "signed_error_kwh" in cols else ("error_kwh" if "error_kwh" in cols else "")
+            if not err_col:
+                return np.zeros(SLOTS_DAY, dtype=float)
+            provider_expr = "provider_used" if "provider_used" in cols else "'unknown'"
+            query = (
+                "SELECT target_date, slot, "
+                + provider_expr
+                + " AS provider_used, "
+                + err_col
+                + " AS error_val FROM forecast_error_compare_slot "
+                + "WHERE target_date >= ? AND target_date <= ?"
+            )
+            history: dict[str, dict[int, tuple[str, float]]] = {}
+            for row in conn.execute(query, (start_date, end_date)):
+                day_str = str(row[0] or "")
+                slot = int(row[1] or -1)
+                if slot < 0 or slot >= SLOTS_DAY:
+                    continue
+                err_val = row[3]
+                if err_val is None:
+                    continue
+                history.setdefault(day_str, {})[slot] = (
+                    str(row[2] or "unknown"),
+                    float(err_val),
+                )
 
-    for d in range(1, ERR_MEMORY_DAYS + 1):
-        day = (today - timedelta(days=d)).isoformat()
-        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
-        fc, fc_present = load_dayahead_with_presence(day)
-        if actual is None or fc is None or actual_present is None or fc_present is None:
-            continue
-
-        err = np.asarray(actual, dtype=float) - np.asarray(fc, dtype=float)
-        geo_day = solar_geometry(day)
-        solar_mask = (
-            (geo_day["cos_z"] > 0.05)
-            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
-            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
-        )
-        _, constraint_meta = build_operational_constraint_mask(day)
-        usable_mask = (
-            solar_mask
-            & np.asarray(actual_present, dtype=bool)
-            & np.asarray(fc_present, dtype=bool)
-            & (~np.asarray(constraint_meta.get("operational_mask"), dtype=bool))
-        )
-        if int(np.count_nonzero(usable_mask)) <= 0:
-            continue
-
-        err[~usable_mask] = 0.0
-        err = np.clip(err, -200, 200)
-        weight = ERR_MEMORY_DECAY ** (d - 1)
-        weight_vec = np.zeros(SLOTS_DAY, dtype=float)
-        weight_vec[usable_mask] = weight
-        errors.append(err)
-        weight_vectors.append(weight_vec)
+        for d in range(1, ERR_MEMORY_DAYS + 1):
+            day = (today - timedelta(days=d)).isoformat()
+            day_history = history.get(day)
+            if not day_history:
+                continue
+            _, constraint_meta = build_operational_constraint_mask(day)
+            exclude_arr = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+            err = np.zeros(SLOTS_DAY, dtype=float)
+            weight_vec = np.zeros(SLOTS_DAY, dtype=float)
+            for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+                if exclude_arr[slot] or slot not in day_history:
+                    continue
+                provider, slot_err = day_history[slot]
+                err[slot] = float(np.clip(slot_err, -200.0, 200.0))
+                w = ERR_MEMORY_DECAY ** (d - 1)
+                if provider not in ("learning", "ml_local"):
+                    w *= source_mismatch_penalty
+                weight_vec[slot] = w
+            if np.sum(weight_vec) <= 0:
+                continue
+            errors.append(err)
+            weight_vectors.append(weight_vec)
+    except Exception as e:
+        log.warning("Legacy error-memory fallback failed: %s", e)
 
     if not errors:
-        return np.zeros(SLOTS_DAY)
+        return np.zeros(SLOTS_DAY, dtype=float)
 
     weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
     weight_sum = np.sum(np.stack(weight_vectors), axis=0)
-    mem_err = np.divide(weighted_sum, np.maximum(weight_sum, 1e-9), out=np.zeros(SLOTS_DAY, dtype=float), where=weight_sum > 0)
+    mem_err = np.divide(
+        weighted_sum,
+        np.maximum(weight_sum, 1e-9),
+        out=np.zeros(SLOTS_DAY, dtype=float),
+        where=weight_sum > 0,
+    )
+    mem_err = _rolling_mean(mem_err, 7, center=True)
+    mem_err[weight_sum <= 0] = 0.0
+    mem_err[:SOLAR_START_SLOT] = 0.0
+    mem_err[SOLAR_END_SLOT:] = 0.0
+    return mem_err
 
-    # Smooth the error correction (avoid slot-level noise amplification)
+
+def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
+    """
+    Compute weighted historical bias from saved comparison rows.
+
+    Preferred source:
+      - forecast_error_compare_daily (eligible rows only)
+      - forecast_error_compare_slot (usable_for_error_memory=1)
+    Fallback source:
+      - legacy slot-only table reading.
+    """
+    del w_today_5  # explicit: current implementation uses persisted compare rows only.
+    weight_vectors = []
+    errors = []
+    try:
+        start_date = (today - timedelta(days=max(ERR_MEMORY_DAYS * 4, 30))).isoformat()
+        end_date = (today - timedelta(days=1)).isoformat()
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            daily_rows = conn.execute(
+                """
+                SELECT target_date, COALESCE(run_audit_id, 0), COALESCE(forecast_variant, ''), COALESCE(provider_expected, '')
+                  FROM forecast_error_compare_daily
+                 WHERE target_date >= ? AND target_date <= ?
+                   AND include_in_error_memory = 1
+                   AND comparison_quality = 'eligible'
+                 ORDER BY target_date DESC
+                 LIMIT ?
+                """,
+                (start_date, end_date, max(ERR_MEMORY_DAYS * 4, 60))
+            ).fetchall()
+
+            if not daily_rows:
+                return _compute_error_memory_legacy(today)
+
+            selected_days = 0
+            for day_row in daily_rows:
+                day_s = str(day_row[0] or "")
+                if not day_s:
+                    continue
+                try:
+                    days_ago = (today - datetime.strptime(day_s, "%Y-%m-%d").date()).days
+                except Exception:
+                    continue
+                if days_ago < 1:
+                    continue
+
+                run_audit_id = int(day_row[1] or 0)
+                forecast_variant = str(day_row[2] or "")
+                provider_expected = str(day_row[3] or "")
+                source_weight = _memory_source_weight(forecast_variant, provider_expected)
+                if source_weight <= 0:
+                    continue
+
+                _, constraint_meta = build_operational_constraint_mask(day_s)
+                exclude_arr = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+                err = np.zeros(SLOTS_DAY, dtype=float)
+                weight_vec = np.zeros(SLOTS_DAY, dtype=float)
+
+                for slot_row in conn.execute(
+                    """
+                    SELECT slot, signed_error_kwh, support_weight, usable_for_error_memory
+                      FROM forecast_error_compare_slot
+                     WHERE target_date = ? AND run_audit_id = ?
+                    """,
+                    (day_s, run_audit_id),
+                ):
+                    slot = int(slot_row[0] or -1)
+                    if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
+                        continue
+                    if exclude_arr[slot]:
+                        continue
+                    if int(slot_row[3] or 0) != 1:
+                        continue
+                    signed_err = slot_row[1]
+                    if signed_err is None:
+                        continue
+                    support_weight = float(slot_row[2] or 1.0)
+                    support_weight = float(np.clip(support_weight, 0.0, 1.0))
+                    base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
+                    weight_vec[slot] = base_w * source_weight * support_weight
+                    err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
+
+                if np.sum(weight_vec) <= 0:
+                    continue
+                errors.append(err)
+                weight_vectors.append(weight_vec)
+                selected_days += 1
+                if selected_days >= ERR_MEMORY_DAYS:
+                    break
+
+    except Exception as e:
+        log.warning("Failed to compute persisted error memory: %s", e)
+        return _compute_error_memory_legacy(today)
+
+    if not errors:
+        return _compute_error_memory_legacy(today)
+
+    weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
+    weight_sum = np.sum(np.stack(weight_vectors), axis=0)
+    mem_err = np.divide(
+        weighted_sum,
+        np.maximum(weight_sum, 1e-9),
+        out=np.zeros(SLOTS_DAY, dtype=float),
+        where=weight_sum > 0,
+    )
     mem_err = _rolling_mean(mem_err, 7, center=True)
     mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
@@ -6239,6 +6375,342 @@ def _format_minutes(value: int | None) -> str:
     return f"{int(value):+d}m"
 
 
+def _fetch_run_audit_meta(target_date: str) -> dict:
+    fallback = {
+        "run_audit_id": 0,
+        "generator_mode": "",
+        "provider_used": "unknown",
+        "provider_expected": "",
+        "forecast_variant": "",
+        "weather_source": "",
+        "solcast_freshness_class": "",
+    }
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            row = conn.execute(
+                """
+                SELECT id, generator_mode, provider_used, provider_expected,
+                       forecast_variant, weather_source, solcast_freshness_class
+                  FROM forecast_run_audit
+                 WHERE target_date = ?
+                   AND run_status = 'success'
+                 ORDER BY is_authoritative_runtime DESC, generated_ts DESC
+                 LIMIT 1
+                """,
+                (target_date,)
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    """
+                    SELECT id, generator_mode, provider_used, provider_expected,
+                           forecast_variant, weather_source, solcast_freshness_class
+                      FROM forecast_run_audit
+                     WHERE target_date = ?
+                     ORDER BY generated_ts DESC
+                     LIMIT 1
+                    """,
+                    (target_date,)
+                ).fetchone()
+            if row:
+                return {
+                    "run_audit_id": int(row[0] or 0),
+                    "generator_mode": str(row[1] or ""),
+                    "provider_used": str(row[2] or "unknown"),
+                    "provider_expected": str(row[3] or ""),
+                    "forecast_variant": str(row[4] or ""),
+                    "weather_source": str(row[5] or ""),
+                    "solcast_freshness_class": str(row[6] or ""),
+                }
+    except Exception as e:
+        log.warning("Failed to fetch run audit for %s: %s", target_date, e)
+    return fallback
+
+
+def _memory_source_weight(forecast_variant: str, provider_expected: str) -> float:
+    variant = str(forecast_variant or "").strip().lower()
+    expected = str(provider_expected or "").strip().lower()
+    if variant == "solcast_direct":
+        return 1.00
+    if variant == "ml_solcast_hybrid_fresh":
+        return 0.95
+    if variant == "ml_solcast_hybrid_stale":
+        return 0.35 if expected in {"solcast", "ml_local"} else 0.60
+    if variant == "ml_without_solcast":
+        return 0.20 if expected in {"solcast", "ml_local"} else 0.50
+    return 0.50
+
+
+def _persist_qa_comparison(
+    target_date: str,
+    run_audit_meta: dict,
+    daily_metrics: dict,
+    fc_slots: np.ndarray,
+    actual_slots: np.ndarray,
+    usable_mask: np.ndarray,
+    actual_present: np.ndarray,
+    forecast_present: np.ndarray,
+    operational_mask: np.ndarray,
+    manual_constraint_mask: np.ndarray,
+    cap_dispatch_mask: np.ndarray,
+    slot_weather_buckets: np.ndarray | None = None,
+    day_regime: str = "",
+    solcast_slots: np.ndarray | None = None,
+    solcast_present: np.ndarray | None = None,
+    hybrid_baseline_slots: np.ndarray | None = None,
+    rad_slots: np.ndarray | None = None,
+    cloud_slots: np.ndarray | None = None,
+) -> None:
+    provider_used = str((run_audit_meta or {}).get("provider_used") or "unknown")
+    provider_expected = str((run_audit_meta or {}).get("provider_expected") or "")
+    forecast_variant = str((run_audit_meta or {}).get("forecast_variant") or "")
+    if provider_used == "unknown":
+        return
+
+    run_audit_id = int((run_audit_meta or {}).get("run_audit_id") or 0)
+    generator_mode = str((run_audit_meta or {}).get("generator_mode") or "")
+    weather_source = str((run_audit_meta or {}).get("weather_source") or "")
+    solcast_freshness_class = str((run_audit_meta or {}).get("solcast_freshness_class") or "")
+
+    actual_present_arr = np.asarray(actual_present, dtype=bool)
+    forecast_present_arr = np.asarray(forecast_present, dtype=bool)
+    usable_arr = np.asarray(usable_mask, dtype=bool)
+    manual_arr = np.asarray(manual_constraint_mask, dtype=bool)
+    cap_arr = np.asarray(cap_dispatch_mask, dtype=bool)
+    operational_arr = np.asarray(operational_mask, dtype=bool)
+
+    solar_slice = slice(SOLAR_START_SLOT, SOLAR_END_SLOT)
+    usable_slots = int(np.count_nonzero(usable_arr[solar_slice]))
+    actual_slots_count = int(np.count_nonzero(actual_present_arr[solar_slice]))
+    forecast_slots_count = int(np.count_nonzero(forecast_present_arr[solar_slice]))
+    manual_slots_count = int(np.count_nonzero(manual_arr[solar_slice]))
+    cap_slots_count = int(np.count_nonzero(cap_arr[solar_slice]))
+    operational_slots_count = int(np.count_nonzero(operational_arr[solar_slice]))
+    masked_slots_count = int(np.count_nonzero((~usable_arr)[solar_slice]))
+    solar_slot_count = max(1, SOLAR_END_SLOT - SOLAR_START_SLOT)
+    constrained_ratio = float((manual_slots_count + cap_slots_count) / solar_slot_count)
+    degraded_variant = (
+        forecast_variant in {"ml_without_solcast", "ml_solcast_hybrid_stale"}
+        and solcast_freshness_class != "not_expected"
+    )
+    provider_mismatch = provider_expected == "solcast" and forecast_variant != "solcast_direct"
+
+    include_in_source_scoring = (
+        actual_slots_count >= 150
+        and forecast_slots_count >= 150
+    )
+    include_in_error_memory = (
+        include_in_source_scoring
+        and usable_slots >= 150
+        and constrained_ratio <= 0.25
+        and not provider_mismatch
+        and solcast_freshness_class not in {"missing", "stale_reject"}
+        and not degraded_variant
+    )
+    comparison_quality = "eligible" if include_in_error_memory else ("review" if include_in_source_scoring else "insufficient")
+
+    total_forecast_kwh = float((daily_metrics or {}).get("forecast_total_kwh", 0.0))
+    total_actual_kwh = float((daily_metrics or {}).get("actual_total_kwh", 0.0))
+    daily_wape_pct = float((daily_metrics or {}).get("wape_pct", 0.0))
+    daily_mape_pct = float((daily_metrics or {}).get("mape_pct", 0.0))
+    daily_total_ape_pct = float((daily_metrics or {}).get("total_ape_pct", 0.0)
+                                if (daily_metrics or {}).get("total_ape_pct") is not None else 0.0)
+    total_abs_error_kwh = float((daily_metrics or {}).get("abs_error_sum_kwh", 0.0))
+
+    support_base = _memory_source_weight(forecast_variant, provider_expected)
+    slot_bucket_arr = np.asarray(slot_weather_buckets, dtype=object) if slot_weather_buckets is not None else np.asarray([""] * SLOTS_DAY, dtype=object)
+    solcast_arr = np.asarray(solcast_slots, dtype=float) if solcast_slots is not None else np.zeros(SLOTS_DAY, dtype=float)
+    solcast_present_arr = np.asarray(solcast_present, dtype=bool) if solcast_present is not None else np.zeros(SLOTS_DAY, dtype=bool)
+    hybrid_arr = np.asarray(hybrid_baseline_slots, dtype=float) if hybrid_baseline_slots is not None else np.full(SLOTS_DAY, np.nan, dtype=float)
+    rad_arr = np.asarray(rad_slots, dtype=float) if rad_slots is not None else np.full(SLOTS_DAY, np.nan, dtype=float)
+    cloud_arr = np.asarray(cloud_slots, dtype=float) if cloud_slots is not None else np.full(SLOTS_DAY, np.nan, dtype=float)
+
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC) as conn:
+            daily_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_daily)").fetchall()
+            slot_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_slot)").fetchall()
+            daily_target_pk = any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in daily_table_info)
+            slot_legacy_pk = (
+                any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in slot_table_info)
+                and any(str(row[1] or "") == "slot" and int(row[5] or 0) == 2 for row in slot_table_info)
+            )
+            daily_conflict_target = "target_date" if daily_target_pk else "target_date, run_audit_id"
+            slot_conflict_target = "target_date, slot" if slot_legacy_pk else "target_date, run_audit_id, slot"
+
+            if daily_target_pk:
+                conn.execute("DELETE FROM forecast_error_compare_daily WHERE target_date = ?", (target_date,))
+
+            daily_row = conn.execute(
+                f"""
+                INSERT INTO forecast_error_compare_daily(
+                    target_date, run_audit_id, generator_mode,
+                    provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
+                    total_forecast_kwh, total_actual_kwh, total_abs_error_kwh,
+                    daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
+                    usable_slot_count, masked_slot_count,
+                    available_actual_slots, available_forecast_slots,
+                    manual_masked_slots, cap_masked_slots, operational_masked_slots,
+                    include_in_error_memory, include_in_source_scoring, comparison_quality,
+                    computed_ts, notes_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT({daily_conflict_target}) DO UPDATE SET
+                    run_audit_id=excluded.run_audit_id,
+                    generator_mode=excluded.generator_mode,
+                    provider_used=excluded.provider_used,
+                    provider_expected=excluded.provider_expected,
+                    forecast_variant=excluded.forecast_variant,
+                    weather_source=excluded.weather_source,
+                    solcast_freshness_class=excluded.solcast_freshness_class,
+                    total_forecast_kwh=excluded.total_forecast_kwh,
+                    total_actual_kwh=excluded.total_actual_kwh,
+                    total_abs_error_kwh=excluded.total_abs_error_kwh,
+                    daily_wape_pct=excluded.daily_wape_pct,
+                    daily_mape_pct=excluded.daily_mape_pct,
+                    daily_total_ape_pct=excluded.daily_total_ape_pct,
+                    usable_slot_count=excluded.usable_slot_count,
+                    masked_slot_count=excluded.masked_slot_count,
+                    available_actual_slots=excluded.available_actual_slots,
+                    available_forecast_slots=excluded.available_forecast_slots,
+                    manual_masked_slots=excluded.manual_masked_slots,
+                    cap_masked_slots=excluded.cap_masked_slots,
+                    operational_masked_slots=excluded.operational_masked_slots,
+                    include_in_error_memory=excluded.include_in_error_memory,
+                    include_in_source_scoring=excluded.include_in_source_scoring,
+                    comparison_quality=excluded.comparison_quality,
+                    computed_ts=excluded.computed_ts,
+                    notes_json=excluded.notes_json
+                """,
+                (
+                    target_date, run_audit_id, generator_mode,
+                    provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
+                    total_forecast_kwh, total_actual_kwh, total_abs_error_kwh,
+                    daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
+                    usable_slots, masked_slots_count,
+                    actual_slots_count, forecast_slots_count,
+                    manual_slots_count, cap_slots_count, operational_slots_count,
+                    int(include_in_error_memory), int(include_in_source_scoring), comparison_quality,
+                    int(time.time() * 1000),
+                    json.dumps({
+                        "degraded_variant": bool(degraded_variant),
+                        "provider_mismatch": bool(provider_mismatch),
+                        "support_base": float(support_base),
+                    }),
+                )
+            )
+            daily_compare_id = int(daily_row.lastrowid or 0)
+
+            if slot_legacy_pk:
+                conn.execute("DELETE FROM forecast_error_compare_slot WHERE target_date = ?", (target_date,))
+            else:
+                conn.execute(
+                    "DELETE FROM forecast_error_compare_slot WHERE target_date = ? AND run_audit_id = ?",
+                    (target_date, run_audit_id),
+                )
+            slot_rows = []
+            for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+                ts_local = int((datetime.fromisoformat(target_date) + timedelta(minutes=slot * SLOT_MIN)).timestamp() * 1000)
+                hh = (slot * SLOT_MIN) // 60
+                mm = (slot * SLOT_MIN) % 60
+                time_hms = f"{int(hh):02d}:{int(mm):02d}:00"
+                fc_val = float(fc_slots[slot])
+                act_present = bool(actual_present_arr[slot])
+                fc_present = bool(forecast_present_arr[slot])
+                act_val = float(actual_slots[slot]) if act_present else None
+                signed_err = (float(act_val) - fc_val) if (act_present and fc_present) else None
+                abs_err = abs(signed_err) if signed_err is not None else None
+                ape = (abs_err / max(abs(float(act_val)), 1.0) * 100.0) if (abs_err is not None and act_present) else None
+                opportunity = float(max(fc_val, 1.0))
+                normalized = (signed_err / max(opportunity, 1.0)) if signed_err is not None else None
+                slot_bucket = str(slot_bucket_arr[slot] or "")
+                support_weight = support_base
+                if opportunity < 2.0:
+                    support_weight *= 0.6
+                if slot_bucket in {"storm_risk", "rain_heavy"}:
+                    support_weight *= 0.75
+
+                usable_metrics = bool(usable_arr[slot])
+                usable_mem = bool(
+                    usable_metrics
+                    and include_in_error_memory
+                    and (not manual_arr[slot])
+                    and (not cap_arr[slot])
+                    and (not operational_arr[slot])
+                    and fc_present
+                    and act_present
+                )
+                slot_rows.append((
+                    target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
+                    provider_used, fc_val, act_val,
+                    float(solcast_arr[slot]) if bool(solcast_present_arr[slot]) else None,
+                    None,
+                    float(hybrid_arr[slot]) if np.isfinite(hybrid_arr[slot]) else None,
+                    None, None, None,
+                    signed_err, abs_err, ape, normalized, opportunity,
+                    slot_bucket, str(day_regime or ""),
+                    int(act_present), int(fc_present), int(bool(solcast_present_arr[slot])),
+                    int(usable_metrics), int(usable_mem),
+                    int(bool(manual_arr[slot])), int(bool(cap_arr[slot])), 0, int(bool(operational_arr[slot])), 1,
+                    float(rad_arr[slot]) if np.isfinite(rad_arr[slot]) else None,
+                    float(cloud_arr[slot]) if np.isfinite(cloud_arr[slot]) else None,
+                    float(max(0.0, min(1.0, support_weight))),
+                ))
+
+            if slot_rows:
+                conn.executemany(
+                    f"""
+                    INSERT INTO forecast_error_compare_slot(
+                        target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
+                        provider_used, forecast_kwh, actual_kwh, solcast_kwh, physics_kwh, hybrid_baseline_kwh,
+                        ml_residual_kwh, error_class_bias_kwh, memory_bias_kwh,
+                        signed_error_kwh, abs_error_kwh, ape_pct, normalized_error, opportunity_kwh,
+                        slot_weather_bucket, day_regime,
+                        actual_present, forecast_present, solcast_present,
+                        usable_for_metrics, usable_for_error_memory,
+                        manual_constraint_mask, cap_dispatch_mask, curtailed_mask, operational_mask, solar_mask,
+                        rad_wm2, cloud_pct, support_weight
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT({slot_conflict_target}) DO UPDATE SET
+                        run_audit_id=excluded.run_audit_id,
+                        daily_compare_id=excluded.daily_compare_id,
+                        ts_local=excluded.ts_local,
+                        time_hms=excluded.time_hms,
+                        provider_used=excluded.provider_used,
+                        forecast_kwh=excluded.forecast_kwh,
+                        actual_kwh=excluded.actual_kwh,
+                        solcast_kwh=excluded.solcast_kwh,
+                        physics_kwh=excluded.physics_kwh,
+                        hybrid_baseline_kwh=excluded.hybrid_baseline_kwh,
+                        ml_residual_kwh=excluded.ml_residual_kwh,
+                        error_class_bias_kwh=excluded.error_class_bias_kwh,
+                        memory_bias_kwh=excluded.memory_bias_kwh,
+                        signed_error_kwh=excluded.signed_error_kwh,
+                        abs_error_kwh=excluded.abs_error_kwh,
+                        ape_pct=excluded.ape_pct,
+                        normalized_error=excluded.normalized_error,
+                        opportunity_kwh=excluded.opportunity_kwh,
+                        slot_weather_bucket=excluded.slot_weather_bucket,
+                        day_regime=excluded.day_regime,
+                        actual_present=excluded.actual_present,
+                        forecast_present=excluded.forecast_present,
+                        solcast_present=excluded.solcast_present,
+                        usable_for_metrics=excluded.usable_for_metrics,
+                        usable_for_error_memory=excluded.usable_for_error_memory,
+                        manual_constraint_mask=excluded.manual_constraint_mask,
+                        cap_dispatch_mask=excluded.cap_dispatch_mask,
+                        curtailed_mask=excluded.curtailed_mask,
+                        operational_mask=excluded.operational_mask,
+                        solar_mask=excluded.solar_mask,
+                        rad_wm2=excluded.rad_wm2,
+                        cloud_pct=excluded.cloud_pct,
+                        support_weight=excluded.support_weight
+                    """,
+                    slot_rows
+                )
+            conn.commit()
+    except Exception as e:
+        log.warning("Failed to persist forecast comparison for %s: %s", target_date, e)
+
+
 def forecast_qa(today: date) -> None:
     """
     Compute and log forecast accuracy and skill score vs persistence for yesterday.
@@ -6289,6 +6761,8 @@ def forecast_qa(today: date) -> None:
         skill = float("nan")
 
     bucket_labels = None
+    weather_5min = None
+    hybrid_baseline_slots = None
     classifier_metrics = None
     snapshot = load_forecast_weather_snapshot(yesterday)
     snapshot_meta = snapshot.get("meta") if isinstance(snapshot, dict) else {}
@@ -6298,6 +6772,8 @@ def forecast_qa(today: date) -> None:
         if isinstance(debug_buckets, list) and len(debug_buckets) >= SLOTS_DAY:
             bucket_labels = np.asarray(debug_buckets[:SLOTS_DAY], dtype=object)
         hybrid_debug = error_debug.get("hybrid_baseline_kwh")
+        if isinstance(hybrid_debug, list) and len(hybrid_debug) >= SLOTS_DAY:
+            hybrid_baseline_slots = np.asarray(hybrid_debug[:SLOTS_DAY], dtype=float)
         predicted_debug = error_debug.get("predicted_labels")
         confidence_debug = error_debug.get("class_confidence")
         if (
@@ -6317,7 +6793,12 @@ def forecast_qa(today: date) -> None:
     if bucket_labels is None:
         weather_hourly = load_forecast_weather_for_day(yesterday)
         if weather_hourly is not None and not weather_hourly.empty:
-            bucket_labels = classify_slot_weather_buckets(interpolate_5min(weather_hourly, yesterday), yesterday)
+            weather_5min = interpolate_5min(weather_hourly, yesterday)
+            bucket_labels = classify_slot_weather_buckets(weather_5min, yesterday)
+    if weather_5min is None:
+        weather_hourly = load_forecast_weather_for_day(yesterday)
+        if weather_hourly is not None and not weather_hourly.empty:
+            weather_5min = interpolate_5min(weather_hourly, yesterday)
     bucket_metrics = compute_bucketed_forecast_metrics(
         actual,
         fc,
@@ -6329,6 +6810,8 @@ def forecast_qa(today: date) -> None:
     solcast_metrics = None
     solcast_bucket_metrics = {}
     solcast_snapshot = load_solcast_snapshot(yesterday)
+    solcast_forecast = np.zeros(SLOTS_DAY, dtype=float)
+    solcast_present = np.zeros(SLOTS_DAY, dtype=bool)
     if solcast_snapshot:
         solcast_forecast = np.clip(np.asarray(solcast_snapshot.get("forecast_kwh"), dtype=float), 0.0, None)
         solcast_present = np.asarray(solcast_snapshot.get("present"), dtype=bool)
@@ -6353,6 +6836,42 @@ def forecast_qa(today: date) -> None:
         or ((snapshot.get("signature") or {}).get("day_regime") if isinstance(snapshot, dict) else "")
         or ""
     )
+
+    run_audit_meta = _fetch_run_audit_meta(yesterday)
+    actual_present_arr = np.asarray(actual_present, dtype=bool)
+    fc_present_arr = np.asarray(fc_present, dtype=bool)
+    exclude_arr = np.asarray(exclude_mask, dtype=bool)
+    manual_mask_arr = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool)
+    cap_mask_arr = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+    usable_mask = actual_present_arr & fc_present_arr & (~exclude_arr)
+
+    rad_slots = None
+    cloud_slots = None
+    if weather_5min is not None and not weather_5min.empty:
+        rad_slots = pd.to_numeric(weather_5min.get("rad"), errors="coerce").fillna(0.0).values
+        cloud_slots = pd.to_numeric(weather_5min.get("cloud"), errors="coerce").fillna(0.0).values
+
+    _persist_qa_comparison(
+        yesterday,
+        run_audit_meta,
+        metrics,
+        fc,
+        actual,
+        usable_mask,
+        actual_present_arr,
+        fc_present_arr,
+        exclude_arr,
+        manual_mask_arr,
+        cap_mask_arr,
+        slot_weather_buckets=bucket_labels,
+        day_regime=day_regime,
+        solcast_slots=solcast_forecast,
+        solcast_present=solcast_present,
+        hybrid_baseline_slots=hybrid_baseline_slots,
+        rad_slots=rad_slots,
+        cloud_slots=cloud_slots,
+    )
+
     resolution_debug = _build_resolution_daily_record(
         yesterday,
         day_regime,
@@ -6539,6 +7058,147 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
             return False
 
 
+def _classify_variant_from_solcast_meta(solcast_meta: dict) -> str:
+    """Derive forecast_variant string from solcast_meta dict."""
+    if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
+        return "ml_without_solcast"
+    coverage = float(solcast_meta.get("coverage_ratio", 0.0))
+    mean_blend = float(solcast_meta.get("mean_blend", 0.0))
+    if coverage >= 0.95 and mean_blend >= 0.5:
+        return "ml_solcast_hybrid_fresh"
+    return "ml_solcast_hybrid_stale"
+
+
+def _classify_solcast_freshness_python(solcast_meta: dict) -> str:
+    """Derive Solcast freshness class from solcast_meta dict."""
+    if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
+        return "not_expected"
+    coverage = float(solcast_meta.get("coverage_ratio", 0.0))
+    if coverage >= 0.95:
+        return "fresh"
+    if coverage >= 0.80:
+        return "stale_usable"
+    return "stale_reject"
+
+
+def _write_forecast_run_audit_from_python(
+    target_date,
+    generator_mode: str,
+    weather_source: str,
+    solcast_meta: dict,
+    forecast_total_kwh: float,
+    baseline_total_kwh: float,
+    hybrid_total_kwh: float,
+    ml_total_kwh: float,
+    error_class_total_kwh: float,
+    bias_total_kwh: float,
+) -> int | None:
+    """Write a forecast_run_audit row from Python direct generation path.
+
+    Returns the new row id, or None on exception (logs warning, does not
+    fail generation).
+    """
+    if solcast_meta is None:
+        solcast_meta = {}
+    target_s = str(target_date)
+    variant = _classify_variant_from_solcast_meta(solcast_meta)
+    freshness = _classify_solcast_freshness_python(solcast_meta)
+    generated_ts = int(time.time() * 1000)
+
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC) as conn:
+            # Check for existing authoritative audit row to supersede
+            prev_row = conn.execute(
+                """
+                SELECT id FROM forecast_run_audit
+                 WHERE target_date = ?
+                   AND is_authoritative_runtime = 1
+                   AND run_status = 'success'
+                 ORDER BY generated_ts DESC LIMIT 1
+                """,
+                (target_s,),
+            ).fetchone()
+            prev_id = int(prev_row[0]) if prev_row else None
+
+            notes = json.dumps({"source": "python_direct", "generator_mode": generator_mode})
+            cur = conn.execute(
+                """
+                INSERT INTO forecast_run_audit(
+                    target_date, generated_ts, generator_mode,
+                    provider_used, provider_expected,
+                    forecast_variant, weather_source,
+                    solcast_snapshot_coverage_ratio, solcast_mean_blend,
+                    solcast_reliability, solcast_primary_mode, solcast_snapshot_source,
+                    physics_total_kwh, hybrid_total_kwh,
+                    final_forecast_total_kwh, ml_residual_total_kwh,
+                    error_class_total_kwh, bias_total_kwh,
+                    shape_skipped_for_solcast,
+                    run_status, solcast_freshness_class,
+                    is_authoritative_runtime, is_authoritative_learning,
+                    replaces_run_audit_id, notes_json
+                ) VALUES(
+                    ?, ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?
+                )
+                """,
+                (
+                    target_s, generated_ts, generator_mode,
+                    "ml_local", "ml_local",
+                    variant, weather_source,
+                    float(solcast_meta.get("coverage_ratio", 0.0)),
+                    float(solcast_meta.get("mean_blend", 0.0)),
+                    float(solcast_meta.get("reliability", 0.0)),
+                    1 if bool(solcast_meta.get("primary_mode")) else 0,
+                    str(solcast_meta.get("source", "")),
+                    float(baseline_total_kwh),
+                    float(hybrid_total_kwh),
+                    float(forecast_total_kwh),
+                    float(ml_total_kwh),
+                    float(error_class_total_kwh),
+                    float(bias_total_kwh),
+                    1 if bool(solcast_meta.get("used_solcast")) else 0,
+                    "success", freshness,
+                    1, 1,
+                    prev_id, notes,
+                ),
+            )
+            new_id = cur.lastrowid
+
+            # Supersede previous authoritative row
+            if prev_id is not None and new_id:
+                conn.execute(
+                    """
+                    UPDATE forecast_run_audit
+                       SET is_authoritative_runtime = 0,
+                           is_authoritative_learning = 0,
+                           superseded_by_run_audit_id = ?,
+                           run_status = 'superseded'
+                     WHERE id = ?
+                    """,
+                    (new_id, prev_id),
+                )
+
+            conn.commit()
+            log.info(
+                "Python audit row written for %s: id=%s variant=%s freshness=%s (replaces=%s)",
+                target_s, new_id, variant, freshness, prev_id,
+            )
+            return new_id
+    except Exception as e:
+        log.warning("Failed to write forecast_run_audit from Python for %s: %s", target_s, e)
+        return None
+
+
 def write_forecast(key: str, day: str, series: list[dict]) -> bool:
     ctx = _load_json(FORECAST_CTX)
     ctx.setdefault(key, {})[day] = series
@@ -6705,6 +7365,8 @@ def run_dayahead(
     runtime_state: dict | None = None,
     persist: bool = True,
     require_saved_snapshot_for_past: bool = False,
+    write_audit: bool = False,
+    audit_generator_mode: str = "",
 ) -> bool | dict:
     """
     Generate the day-ahead forecast for *target_date*.
@@ -7161,6 +7823,21 @@ def run_dayahead(
                 },
             },
         )
+
+    if ok and write_audit:
+        _write_forecast_run_audit_from_python(
+            target_date=target_s,
+            generator_mode=audit_generator_mode or "python_direct",
+            weather_source=weather_source,
+            solcast_meta=solcast_meta,
+            forecast_total_kwh=float(forecast.sum()),
+            baseline_total_kwh=float(baseline.sum()),
+            hybrid_total_kwh=float(hybrid_baseline.sum()),
+            ml_total_kwh=float(ml_residual.sum()),
+            error_class_total_kwh=float(error_class_term.sum()),
+            bias_total_kwh=float(bias_correction.sum()),
+        )
+
     return ok
 
 
@@ -7196,7 +7873,6 @@ def run_manual_generation(dates: list[date]) -> bool:
     today_ref = datetime.now().date()
     log.info("Manual generation start: %d date(s), reference=%s", len(dates), today_ref.isoformat())
 
-    # Train once for the batch to keep forecast basis consistent.
     trained = train_model(today_ref)
     if not trained:
         log.warning("Manual generation: model training skipped - physics fallback may be used.")
@@ -7204,13 +7880,33 @@ def run_manual_generation(dates: list[date]) -> bool:
     forecast_qa(today_ref)
 
     ok_all = True
+    node_reachable = True
+
     for d in dates:
-        ok = run_dayahead(d, today_ref)
+        ok = False
+        used_delegation = False
+
+        if node_reachable:
+            result = _delegate_run_dayahead(d, trigger="manual_cli")
+            if result is not None:
+                ok = True
+                used_delegation = True
+            else:
+                node_reachable = False
+                log.warning(
+                    "Manual generation: Node delegation failed for %s - "
+                    "falling back to direct run_dayahead for remaining dates.",
+                    d.isoformat(),
+                )
+
+        if not used_delegation:
+            ok = run_dayahead(d, today_ref, write_audit=True, audit_generator_mode="manual_cli_fallback")
+
         if ok and d == today_ref:
             run_intraday_adjusted(d)
         ok_all = ok_all and ok
         if ok:
-            log.info("Manual generation OK: %s", d.isoformat())
+            log.info("Manual generation OK: %s (delegated=%s)", d.isoformat(), used_delegation)
         else:
             log.error("Manual generation FAILED: %s", d.isoformat())
 
@@ -7561,6 +8257,40 @@ def _resolve_service_target_date(today: date, now_h: int, da_today_in_db: bool) 
     return today + timedelta(days=1)
 
 
+def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> dict | None:
+    """Delegate day-ahead generation to the Node.js orchestrator.
+
+    Returns the full response dict on success, or None on failure.
+    Python truthiness is preserved: dict is truthy, None is falsy.
+    """
+    port = os.getenv("ADSI_SERVER_PORT", "3500")
+    url = f"http://127.0.0.1:{port}/api/internal/forecast/generate-auto"
+    target_s = target_date.isoformat()
+    log.info("Delegating day-ahead generation for %s to Node.js orchestrator at %s (trigger=%s)", target_s, url, trigger)
+    try:
+        resp = requests.post(url, json={
+            "dates": [target_s],
+            "trigger": trigger,
+        }, timeout=180)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            log.error("Node.js orchestrator returned error: %s", data.get("error"))
+            return None
+        log.info(
+            "Delegation success for %s: provider_used=%s variant=%s freshness=%s total=%.1f kWh",
+            target_s,
+            data.get("provider_used", "?"),
+            data.get("variant", "?"),
+            data.get("freshness", "?"),
+            float(data.get("total_kwh", 0) or 0),
+        )
+        return data
+    except Exception as e:
+        log.error("Failed to delegate generation to Node.js: %s", e)
+        return None
+
+
 def main() -> None:
     _clear_service_stop_file()
     profile = plant_capacity_profile()
@@ -7673,7 +8403,7 @@ def main() -> None:
                         raise KeyboardInterrupt
 
                     # Generate the resolved target day-ahead
-                    ok = run_dayahead(target, today)
+                    ok = _delegate_run_dayahead(target)
                 except Exception:
                     _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
                         _consecutive_failures,
@@ -7708,7 +8438,7 @@ def main() -> None:
                 if _service_stop_requested():
                     raise KeyboardInterrupt
                 try:
-                    ok = run_dayahead(today, today)
+                    ok = _delegate_run_dayahead(today)
                 except Exception:
                     log.error("Recovery day-ahead for %s crashed", today_s, exc_info=True)
                 else:

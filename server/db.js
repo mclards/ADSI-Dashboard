@@ -489,6 +489,115 @@ db.exec(`
     PRIMARY KEY (forecast_day, slot)
   );
   CREATE INDEX IF NOT EXISTS idx_ss_day ON solcast_snapshots(forecast_day);
+
+  CREATE TABLE IF NOT EXISTS forecast_run_audit (
+    id                          INTEGER PRIMARY KEY,
+    target_date                 TEXT    NOT NULL,
+    generated_ts                INTEGER NOT NULL,
+    generator_mode              TEXT    NOT NULL,
+    provider_used               TEXT    NOT NULL,
+    provider_expected           TEXT,
+    forecast_variant            TEXT    NOT NULL,
+    weather_source              TEXT,
+    solcast_snapshot_day         TEXT,
+    solcast_snapshot_pulled_ts   INTEGER,
+    solcast_snapshot_age_sec     INTEGER,
+    solcast_snapshot_coverage_ratio REAL,
+    solcast_snapshot_source      TEXT,
+    solcast_mean_blend           REAL,
+    solcast_reliability          REAL,
+    solcast_primary_mode         INTEGER NOT NULL DEFAULT 0,
+    solcast_raw_total_kwh        REAL,
+    solcast_applied_total_kwh    REAL,
+    physics_total_kwh            REAL,
+    hybrid_total_kwh             REAL,
+    final_forecast_total_kwh     REAL,
+    ml_residual_total_kwh        REAL,
+    error_class_total_kwh        REAL,
+    bias_total_kwh               REAL,
+    shape_skipped_for_solcast    INTEGER NOT NULL DEFAULT 0,
+    run_status                   TEXT    NOT NULL,
+    solcast_freshness_class      TEXT,
+    is_authoritative_runtime     INTEGER NOT NULL DEFAULT 1,
+    is_authoritative_learning    INTEGER NOT NULL DEFAULT 1,
+    superseded_by_run_audit_id   INTEGER,
+    replaces_run_audit_id        INTEGER,
+    notes_json                   TEXT,
+    UNIQUE(target_date, generated_ts, forecast_variant)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fra_target ON forecast_run_audit(target_date);
+  CREATE INDEX IF NOT EXISTS idx_fra_variant_ts ON forecast_run_audit(forecast_variant, generated_ts DESC);
+
+  CREATE TABLE IF NOT EXISTS forecast_error_compare_daily (
+    id                        INTEGER PRIMARY KEY,
+    target_date               TEXT    NOT NULL,
+    run_audit_id              INTEGER NOT NULL DEFAULT 0,
+    generator_mode            TEXT,
+    provider_used             TEXT    NOT NULL,
+    provider_expected         TEXT,
+    forecast_variant          TEXT,
+    weather_source            TEXT,
+    solcast_freshness_class   TEXT,
+    total_forecast_kwh        REAL,
+    total_actual_kwh          REAL,
+    total_abs_error_kwh       REAL,
+    daily_wape_pct            REAL,
+    daily_mape_pct            REAL,
+    daily_total_ape_pct       REAL,
+    usable_slot_count         INTEGER NOT NULL DEFAULT 0,
+    masked_slot_count         INTEGER NOT NULL DEFAULT 0,
+    available_actual_slots    INTEGER NOT NULL DEFAULT 0,
+    available_forecast_slots  INTEGER NOT NULL DEFAULT 0,
+    manual_masked_slots       INTEGER NOT NULL DEFAULT 0,
+    cap_masked_slots          INTEGER NOT NULL DEFAULT 0,
+    operational_masked_slots  INTEGER NOT NULL DEFAULT 0,
+    include_in_error_memory   INTEGER NOT NULL DEFAULT 0,
+    include_in_source_scoring INTEGER NOT NULL DEFAULT 0,
+    comparison_quality        TEXT    NOT NULL DEFAULT 'review',
+    computed_ts               INTEGER NOT NULL,
+    notes_json                TEXT,
+    UNIQUE(target_date, run_audit_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS forecast_error_compare_slot (
+    id                        INTEGER PRIMARY KEY,
+    target_date               TEXT    NOT NULL,
+    run_audit_id              INTEGER NOT NULL DEFAULT 0,
+    daily_compare_id          INTEGER,
+    slot                      INTEGER NOT NULL,
+    ts_local                  INTEGER NOT NULL DEFAULT 0,
+    time_hms                  TEXT    NOT NULL DEFAULT '',
+    provider_used             TEXT    NOT NULL,
+    forecast_kwh              REAL,
+    actual_kwh                REAL,
+    solcast_kwh               REAL,
+    physics_kwh               REAL,
+    hybrid_baseline_kwh       REAL,
+    ml_residual_kwh           REAL,
+    error_class_bias_kwh      REAL,
+    memory_bias_kwh           REAL,
+    signed_error_kwh          REAL,
+    abs_error_kwh             REAL,
+    ape_pct                   REAL,
+    normalized_error          REAL,
+    opportunity_kwh           REAL,
+    slot_weather_bucket       TEXT,
+    day_regime                TEXT,
+    actual_present            INTEGER NOT NULL DEFAULT 0,
+    forecast_present          INTEGER NOT NULL DEFAULT 0,
+    solcast_present           INTEGER NOT NULL DEFAULT 0,
+    usable_for_metrics        INTEGER NOT NULL DEFAULT 0,
+    usable_for_error_memory   INTEGER NOT NULL DEFAULT 0,
+    manual_constraint_mask    INTEGER NOT NULL DEFAULT 0,
+    cap_dispatch_mask         INTEGER NOT NULL DEFAULT 0,
+    curtailed_mask            INTEGER NOT NULL DEFAULT 0,
+    operational_mask          INTEGER NOT NULL DEFAULT 0,
+    solar_mask                INTEGER NOT NULL DEFAULT 0,
+    rad_wm2                   REAL,
+    cloud_pct                 REAL,
+    support_weight            REAL,
+    UNIQUE(target_date, run_audit_id, slot)
+  );
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -658,12 +767,72 @@ ensureColumn(
 );
 // Migration: store plant-cap decision reason in audit_log (added 2026-03).
 ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
+// Forecast compare persistence (detailed provenance/error-memory basis).
+ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");
+ensureColumn("forecast_error_compare_daily", "provider_expected", "provider_expected TEXT");
+ensureColumn("forecast_error_compare_daily", "weather_source", "weather_source TEXT");
+ensureColumn("forecast_error_compare_daily", "solcast_freshness_class", "solcast_freshness_class TEXT");
+ensureColumn("forecast_error_compare_daily", "total_abs_error_kwh", "total_abs_error_kwh REAL");
+ensureColumn("forecast_error_compare_daily", "daily_mape_pct", "daily_mape_pct REAL");
+ensureColumn("forecast_error_compare_daily", "daily_total_ape_pct", "daily_total_ape_pct REAL");
+ensureColumn("forecast_error_compare_daily", "usable_slot_count", "usable_slot_count INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "masked_slot_count", "masked_slot_count INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "available_actual_slots", "available_actual_slots INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "available_forecast_slots", "available_forecast_slots INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "manual_masked_slots", "manual_masked_slots INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "cap_masked_slots", "cap_masked_slots INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "operational_masked_slots", "operational_masked_slots INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "include_in_error_memory", "include_in_error_memory INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "include_in_source_scoring", "include_in_source_scoring INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "comparison_quality", "comparison_quality TEXT NOT NULL DEFAULT 'review'");
+ensureColumn("forecast_error_compare_daily", "computed_ts", "computed_ts INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_daily", "notes_json", "notes_json TEXT");
+
+ensureColumn("forecast_error_compare_slot", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "daily_compare_id", "daily_compare_id INTEGER");
+ensureColumn("forecast_error_compare_slot", "ts_local", "ts_local INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "time_hms", "time_hms TEXT NOT NULL DEFAULT ''");
+ensureColumn("forecast_error_compare_slot", "solcast_kwh", "solcast_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "physics_kwh", "physics_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "hybrid_baseline_kwh", "hybrid_baseline_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "ml_residual_kwh", "ml_residual_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "error_class_bias_kwh", "error_class_bias_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "memory_bias_kwh", "memory_bias_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "signed_error_kwh", "signed_error_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "abs_error_kwh", "abs_error_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "ape_pct", "ape_pct REAL");
+ensureColumn("forecast_error_compare_slot", "normalized_error", "normalized_error REAL");
+ensureColumn("forecast_error_compare_slot", "opportunity_kwh", "opportunity_kwh REAL");
+ensureColumn("forecast_error_compare_slot", "slot_weather_bucket", "slot_weather_bucket TEXT");
+ensureColumn("forecast_error_compare_slot", "day_regime", "day_regime TEXT");
+ensureColumn("forecast_error_compare_slot", "actual_present", "actual_present INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "forecast_present", "forecast_present INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "solcast_present", "solcast_present INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "usable_for_metrics", "usable_for_metrics INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "usable_for_error_memory", "usable_for_error_memory INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "manual_constraint_mask", "manual_constraint_mask INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "cap_dispatch_mask", "cap_dispatch_mask INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "curtailed_mask", "curtailed_mask INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "operational_mask", "operational_mask INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "solar_mask", "solar_mask INTEGER NOT NULL DEFAULT 0");
+ensureColumn("forecast_error_compare_slot", "rad_wm2", "rad_wm2 REAL");
+ensureColumn("forecast_error_compare_slot", "cloud_pct", "cloud_pct REAL");
+ensureColumn("forecast_error_compare_slot", "support_weight", "support_weight REAL");
+
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_settings_updated_ts ON settings(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_summary_date_inv ON daily_readings_summary(date, inverter, unit);
   CREATE INDEX IF NOT EXISTS idx_summary_updated_ts ON daily_readings_summary(updated_ts);
+  CREATE INDEX IF NOT EXISTS idx_fra_target_authority ON forecast_run_audit(target_date, is_authoritative_runtime, generated_ts DESC);
+  CREATE INDEX IF NOT EXISTS idx_fecd_target ON forecast_error_compare_daily(target_date);
+  CREATE INDEX IF NOT EXISTS idx_fecd_mem_target ON forecast_error_compare_daily(include_in_error_memory, target_date DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_fecd_target_run ON forecast_error_compare_daily(target_date, run_audit_id);
+  CREATE INDEX IF NOT EXISTS idx_fecs_target_slot ON forecast_error_compare_slot(target_date, slot);
+  CREATE INDEX IF NOT EXISTS idx_fecs_mem_target ON forecast_error_compare_slot(usable_for_error_memory, target_date DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_fecs_target_run_slot ON forecast_error_compare_slot(target_date, run_audit_id, slot);
 `);
 
 const NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
@@ -931,6 +1100,166 @@ const stmts = {
       WHERE forecast_day = ?
       ORDER BY slot ASC`,
   ),
+  getLatestForecastRunAuditForDate: db.prepare(
+    `SELECT * FROM forecast_run_audit
+      WHERE target_date = ?
+      ORDER BY generated_ts DESC LIMIT 1`
+  ),
+  getLatestAuthoritativeForecastRunAuditForDate: db.prepare(
+    `SELECT * FROM forecast_run_audit
+      WHERE target_date = ?
+        AND run_status = 'success'
+      ORDER BY is_authoritative_runtime DESC, generated_ts DESC
+      LIMIT 1`
+  ),
+  insertForecastRunAudit: db.prepare(`
+    INSERT INTO forecast_run_audit (
+      target_date, generated_ts, generator_mode, provider_used, provider_expected,
+      forecast_variant, weather_source, solcast_snapshot_day, solcast_snapshot_pulled_ts,
+      solcast_snapshot_age_sec, solcast_snapshot_coverage_ratio, solcast_snapshot_source,
+      solcast_mean_blend, solcast_reliability, solcast_primary_mode,
+      solcast_raw_total_kwh, solcast_applied_total_kwh, physics_total_kwh, hybrid_total_kwh,
+      final_forecast_total_kwh, ml_residual_total_kwh, error_class_total_kwh, bias_total_kwh,
+      shape_skipped_for_solcast, run_status, solcast_freshness_class,
+      is_authoritative_runtime, is_authoritative_learning,
+      superseded_by_run_audit_id, replaces_run_audit_id, notes_json
+    ) VALUES (
+      @target_date, @generated_ts, @generator_mode, @provider_used, @provider_expected,
+      @forecast_variant, @weather_source, @solcast_snapshot_day, @solcast_snapshot_pulled_ts,
+      @solcast_snapshot_age_sec, @solcast_snapshot_coverage_ratio, @solcast_snapshot_source,
+      @solcast_mean_blend, @solcast_reliability, @solcast_primary_mode,
+      @solcast_raw_total_kwh, @solcast_applied_total_kwh, @physics_total_kwh, @hybrid_total_kwh,
+      @final_forecast_total_kwh, @ml_residual_total_kwh, @error_class_total_kwh, @bias_total_kwh,
+      @shape_skipped_for_solcast, @run_status, @solcast_freshness_class,
+      @is_authoritative_runtime, @is_authoritative_learning,
+      @superseded_by_run_audit_id, @replaces_run_audit_id, @notes_json
+    )
+  `),
+  updateForecastRunAudit: db.prepare(`
+    UPDATE forecast_run_audit
+       SET is_authoritative_runtime = @is_authoritative_runtime,
+           is_authoritative_learning = @is_authoritative_learning,
+           superseded_by_run_audit_id = @superseded_by_run_audit_id,
+           replaces_run_audit_id = COALESCE(@replaces_run_audit_id, replaces_run_audit_id),
+           run_status = COALESCE(@run_status, run_status),
+           notes_json = @notes_json
+     WHERE id = @id
+  `),
+  getForecastRunAuditById: db.prepare(
+    `SELECT * FROM forecast_run_audit WHERE id = ? LIMIT 1`
+  ),
+  insertForecastErrorCompareDaily: db.prepare(`
+    INSERT INTO forecast_error_compare_daily(
+      target_date, run_audit_id, generator_mode,
+      provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
+      total_forecast_kwh, total_actual_kwh, total_abs_error_kwh,
+      daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
+      usable_slot_count, masked_slot_count,
+      available_actual_slots, available_forecast_slots,
+      manual_masked_slots, cap_masked_slots, operational_masked_slots,
+      include_in_error_memory, include_in_source_scoring, comparison_quality,
+      computed_ts, notes_json
+    ) VALUES(
+      @target_date, @run_audit_id, @generator_mode,
+      @provider_used, @provider_expected, @forecast_variant, @weather_source, @solcast_freshness_class,
+      @total_forecast_kwh, @total_actual_kwh, @total_abs_error_kwh,
+      @daily_wape_pct, @daily_mape_pct, @daily_total_ape_pct,
+      @usable_slot_count, @masked_slot_count,
+      @available_actual_slots, @available_forecast_slots,
+      @manual_masked_slots, @cap_masked_slots, @operational_masked_slots,
+      @include_in_error_memory, @include_in_source_scoring, @comparison_quality,
+      @computed_ts, @notes_json
+    )
+    ON CONFLICT(target_date, run_audit_id) DO UPDATE SET
+      generator_mode=excluded.generator_mode,
+      provider_used=excluded.provider_used,
+      provider_expected=excluded.provider_expected,
+      forecast_variant=excluded.forecast_variant,
+      weather_source=excluded.weather_source,
+      solcast_freshness_class=excluded.solcast_freshness_class,
+      total_forecast_kwh=excluded.total_forecast_kwh,
+      total_actual_kwh=excluded.total_actual_kwh,
+      total_abs_error_kwh=excluded.total_abs_error_kwh,
+      daily_wape_pct=excluded.daily_wape_pct,
+      daily_mape_pct=excluded.daily_mape_pct,
+      daily_total_ape_pct=excluded.daily_total_ape_pct,
+      usable_slot_count=excluded.usable_slot_count,
+      masked_slot_count=excluded.masked_slot_count,
+      available_actual_slots=excluded.available_actual_slots,
+      available_forecast_slots=excluded.available_forecast_slots,
+      manual_masked_slots=excluded.manual_masked_slots,
+      cap_masked_slots=excluded.cap_masked_slots,
+      operational_masked_slots=excluded.operational_masked_slots,
+      include_in_error_memory=excluded.include_in_error_memory,
+      include_in_source_scoring=excluded.include_in_source_scoring,
+      comparison_quality=excluded.comparison_quality,
+      computed_ts=excluded.computed_ts,
+      notes_json=excluded.notes_json
+  `),
+  insertForecastErrorCompareSlot: db.prepare(`
+    INSERT INTO forecast_error_compare_slot(
+      target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
+      provider_used, forecast_kwh, actual_kwh, solcast_kwh, physics_kwh, hybrid_baseline_kwh,
+      ml_residual_kwh, error_class_bias_kwh, memory_bias_kwh,
+      signed_error_kwh, abs_error_kwh, ape_pct, normalized_error, opportunity_kwh,
+      slot_weather_bucket, day_regime,
+      actual_present, forecast_present, solcast_present,
+      usable_for_metrics, usable_for_error_memory,
+      manual_constraint_mask, cap_dispatch_mask, curtailed_mask, operational_mask, solar_mask,
+      rad_wm2, cloud_pct, support_weight
+    ) VALUES(
+      @target_date, @run_audit_id, @daily_compare_id, @slot, @ts_local, @time_hms,
+      @provider_used, @forecast_kwh, @actual_kwh, @solcast_kwh, @physics_kwh, @hybrid_baseline_kwh,
+      @ml_residual_kwh, @error_class_bias_kwh, @memory_bias_kwh,
+      @signed_error_kwh, @abs_error_kwh, @ape_pct, @normalized_error, @opportunity_kwh,
+      @slot_weather_bucket, @day_regime,
+      @actual_present, @forecast_present, @solcast_present,
+      @usable_for_metrics, @usable_for_error_memory,
+      @manual_constraint_mask, @cap_dispatch_mask, @curtailed_mask, @operational_mask, @solar_mask,
+      @rad_wm2, @cloud_pct, @support_weight
+    )
+    ON CONFLICT(target_date, run_audit_id, slot) DO UPDATE SET
+      daily_compare_id=excluded.daily_compare_id,
+      ts_local=excluded.ts_local,
+      time_hms=excluded.time_hms,
+      provider_used=excluded.provider_used,
+      forecast_kwh=excluded.forecast_kwh,
+      actual_kwh=excluded.actual_kwh,
+      solcast_kwh=excluded.solcast_kwh,
+      physics_kwh=excluded.physics_kwh,
+      hybrid_baseline_kwh=excluded.hybrid_baseline_kwh,
+      ml_residual_kwh=excluded.ml_residual_kwh,
+      error_class_bias_kwh=excluded.error_class_bias_kwh,
+      memory_bias_kwh=excluded.memory_bias_kwh,
+      signed_error_kwh=excluded.signed_error_kwh,
+      abs_error_kwh=excluded.abs_error_kwh,
+      ape_pct=excluded.ape_pct,
+      normalized_error=excluded.normalized_error,
+      opportunity_kwh=excluded.opportunity_kwh,
+      slot_weather_bucket=excluded.slot_weather_bucket,
+      day_regime=excluded.day_regime,
+      actual_present=excluded.actual_present,
+      forecast_present=excluded.forecast_present,
+      solcast_present=excluded.solcast_present,
+      usable_for_metrics=excluded.usable_for_metrics,
+      usable_for_error_memory=excluded.usable_for_error_memory,
+      manual_constraint_mask=excluded.manual_constraint_mask,
+      cap_dispatch_mask=excluded.cap_dispatch_mask,
+      curtailed_mask=excluded.curtailed_mask,
+      operational_mask=excluded.operational_mask,
+      solar_mask=excluded.solar_mask,
+      rad_wm2=excluded.rad_wm2,
+      cloud_pct=excluded.cloud_pct,
+      support_weight=excluded.support_weight
+  `),
+  getForecastErrorCompareSlotsForDays: db.prepare(`
+    SELECT target_date, run_audit_id, slot, provider_used,
+           forecast_kwh, actual_kwh, signed_error_kwh, abs_error_kwh,
+           usable_for_error_memory, support_weight
+      FROM forecast_error_compare_slot
+     WHERE target_date IN (SELECT value FROM json_each(?))
+     ORDER BY target_date ASC, run_audit_id ASC, slot ASC
+  `),
   deleteForecastDayAheadDate: db.prepare(
     `DELETE FROM forecast_dayahead WHERE date=?`,
   ),

@@ -2,12 +2,82 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.30
+- **Repo/package version baseline:** 2.4.31
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.31 Changes - Forecast Provider Parity and Audit Completeness (2026-03-22)
+- **Fixed port env var bug in Python delegation:** `_delegate_run_dayahead()` was using `IM_SERVER_PORT:3000` instead of `ADSI_SERVER_PORT:3500`, causing delegation to silently fail on the default port.
+- **Delegation now returns rich metadata:** `_delegate_run_dayahead()` returns provider, variant, freshness, totals instead of just a bool, enabling better operator diagnostics.
+- **Added audit helper functions:** Python-side `forecast_run_audit` row creation is now supported via dedicated audit helpers for direct-call paths.
+- **Added `write_audit` param to `run_dayahead()`:** enables audit row creation from direct-call paths that bypass Node orchestration.
+- **Rewrote `run_manual_generation()`:** now delegates to Node orchestrator first, with audit-backed fallback, instead of running independently.
+- **Added `"manual_cli"` trigger to Node generation endpoint:** `server/index.js` now recognizes `manual_cli` as a valid trigger source.
+- **Fixed supersession logic:** `run_status='superseded'` now matches Node-side behavior for authoritative run supersession.
+- **Validation:** `python -m py_compile services/forecast_engine.py` passed. ForecastCoreService.exe rebuilt. All version surfaces aligned.
+- **Files changed:** `services/forecast_engine.py`, `server/index.js`, `server/tests/forecastProviderParity.test.js`.
+
+## Post-v2.4.30 Working Changes - Day-Ahead Solcast Alignment + Script Hardening (2026-03-20)
+- **Scope completed:** implemented the day-ahead generator alignment plan across `server/index.js`, `server/db.js`, and `services/forecast_engine.py`, plus script hardening work in `scripts/` and supporting source-level tests.
+- **Manual/auto/fallback provider parity is now enforced from one orchestrator path:** day-ahead generation now normalizes and deduplicates explicit target dates, and both manual API + Python auto delegation + Node fallback all route through shared provider-aware orchestration.
+- **Critical audit write bug fixed:** audit inserts were previously attempted via `db.stmts...` (undefined path). This is now corrected to `stmts...`, so run audit rows are actually written.
+- **ML generation target-date bug fixed:** ML generation no longer assumes `tomorrow + N` only. It now supports exact dates and ranges using Python CLI routing (`--generate-date`, `--generate-range`), with per-day fallback for non-contiguous date sets.
+- **Fallback is now quality-aware (not only completeness-aware):** tomorrow quality is classified as `missing`, `incomplete`, `missing_audit`, `wrong_provider`, `stale_input`, `weak_quality`, or `healthy`; fallback regeneration triggers when policy quality is violated even if row count is complete.
+- **Added early repair window:** fallback schedule now includes `04:30` in addition to `18:30`, `20:00`, and `22:00`.
+- **Per-day Solcast freshness is now policy-based:** freshness classification uses target-day snapshot coverage and age (`fresh`, `stale_usable`, `stale_reject`, `missing`, `not_expected`) instead of a simplistic pulled-timestamp check.
+- **Per-day forecast provenance is persisted from generation time:** each target date stores its own variant (`solcast_direct`, `ml_solcast_hybrid_fresh`, `ml_solcast_hybrid_stale`, `ml_without_solcast`), freshness class, and computed day total.
+- **Authoritative run supersession is persisted:** when a newer run becomes authoritative, previous run authority flags are cleared and supersession metadata is written (`superseded_by_run_audit_id`, `replaces_run_audit_id`, `run_status='superseded'`).
+- **Failed generation attempts are now auditable:** if all provider attempts fail, a failed run-audit row is inserted with attempt metadata and reason instead of failing silently.
+- **Manual generation response now exposes more diagnostics:** API output now includes `forecastVariantsByDate`, `solcastFreshnessByDate`, and `totalsKwhByDate` for operator-side comparison/debug.
+
+- **DB schema expanded for detailed comparison persistence and memory learning gates:**
+- `forecast_error_compare_daily` now stores run linkage (`run_audit_id`), provider expectations, variant/freshness, totals/error aggregates, slot availability counts, mask counts, eligibility flags (`include_in_error_memory`, `include_in_source_scoring`), quality status (`comparison_quality`), and notes metadata.
+- `forecast_error_compare_slot` now stores run linkage, slot-local timestamps/time labels, signed/absolute/normalized errors, opportunity, Solcast/hybrid references, weather-bucket/regime markers, mask flags, `usable_for_error_memory`, and `support_weight`.
+- Migration-safe `ensureColumn(...)` coverage was added for all new compare columns so existing deployments upgrade in place.
+- Added/updated indexes for run authority lookup and error-memory selection (`idx_fra_target_authority`, `idx_fecd_mem_target`, `idx_fecs_mem_target`, plus run-based uniqueness indexes).
+- Resolved migration startup issue where new indexes referenced columns before migration by moving those index creations to the post-`ensureColumn` migration block.
+
+- **Forecast engine (Python) comparison-save path was fully upgraded:**
+- Replaced simple audit-provider fetch with richer run metadata resolver (`_fetch_run_audit_meta`).
+- Added source-quality weighting helper (`_memory_source_weight`) to support provenance-aware correction weighting.
+- `_persist_qa_comparison(...)` now writes detailed day/slot comparison rows, including eligibility rules, mask-aware filtering, and per-slot support weights.
+- QA persistence now consumes forecast masks, operational masks, bucket labels, Solcast presence, and available hybrid/weather debug vectors when present.
+- `compute_error_memory(...)` now prefers saved eligible comparison rows (`include_in_error_memory=1`, `comparison_quality='eligible'`, `usable_for_error_memory=1`) and applies decay * source weight * support weight.
+- Added `_compute_error_memory_legacy(...)` fallback to keep correction resilient on legacy DBs / migration gaps.
+- Added compatibility logic in persistence for legacy table conflict keys so both old and migrated schemas can still be written safely.
+
+- **Script-folder hardening completed (plan-adjacent maintenance + tooling safety):**
+- Added shared DOCX utilities in `scripts/_docx_utils.py` (safe IO resolution and anchor-based helpers).
+- Added robust section reorder utility `scripts/reorder_perpetual_section.py`.
+- Updated legacy wrappers `scripts/fix_order.py`, `scripts/fix_order2.py`, `scripts/fix_order3.py`, and `scripts/fix_swap.py` to delegate to the shared reorder utility.
+- Fixed `scripts/backfill_forecast_history.py` for schema compatibility (`forecast_variant` included, epoch-ms `generated_ts`, improved arguments/dry-run behavior).
+- Hardened `scripts/update_pricing.py`, `scripts/update_comparison.py`, and `scripts/update_section02.py` to avoid brittle fixed-index DOCX mutations.
+
+- **Tests and validation executed during this implementation pass:**
+- Syntax checks: `node --check server/index.js`, `node --check server/db.js`, `python -m py_compile services/forecast_engine.py`.
+- DB startup/migration load check: `node -e "require('./server/db'); console.log('db-load-ok')"` passed after migration/index ordering fix.
+- Existing source tests passed: `server/tests/forecastProviderParity.test.js`, `server/tests/scriptsSourceSanity.test.js`.
+- Added and passed new source-guard test: `server/tests/dayAheadPlanImplementation.test.js`.
+
+- **Files materially changed in this work:**
+- `server/index.js`
+- `server/db.js`
+- `services/forecast_engine.py`
+- `scripts/_docx_utils.py`
+- `scripts/reorder_perpetual_section.py`
+- `scripts/fix_order.py`
+- `scripts/fix_order2.py`
+- `scripts/fix_order3.py`
+- `scripts/fix_swap.py`
+- `scripts/backfill_forecast_history.py`
+- `scripts/update_pricing.py`
+- `scripts/update_comparison.py`
+- `scripts/update_section02.py`
+- `server/tests/dayAheadPlanImplementation.test.js`
+- `server/tests/scriptsSourceSanity.test.js`
 
 ## v2.4.30 Changes - Startup Readiness Gating and Standby Refresh Smoothing (2026-03-20)
 - **Loading screen now gates actual readiness:** the Electron main window stays hidden until the renderer reports startup complete, instead of showing the shell before the dashboard has real data. The loading screen now reflects live startup progress pushed from Electron rather than polling `/` and redirecting itself early.
@@ -205,8 +275,8 @@ Release size: ~227-228 MB installer
   - Recent history is best-effort and should use a bounded timeout.
 
 ## Default Release Publish Workflow
-- Current latest published GitHub release: `v2.4.30`
-- Current repo/package baseline: `v2.4.30`
+- Current latest published GitHub release: `v2.4.31`
+- Current repo/package baseline: `v2.4.31`
 - Default meaning of `publish latest release`:
   - determine which program surfaces changed
   - rebuild only the affected Python service EXEs in `dist/`

@@ -7211,6 +7211,135 @@ function hasCompleteDayAheadRowsForDate(day) {
   return countDayAheadSolarWindowRows(day) >= FORECAST_SOLAR_SLOT_COUNT;
 }
 
+function getSolcastSnapshotStatsForDay(day) {
+  let rows = [];
+  try {
+    rows = stmts.getSolcastSnapshotDay.all(String(day || ""));
+  } catch (err) {
+    console.warn(`[solcast-snapshot] read failed for ${day}:`, err.message);
+    rows = [];
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    return {
+      hasSnapshot: false,
+      solarRows: 0,
+      filledRows: 0,
+      coverageRatio: 0,
+      pulledTs: null,
+    };
+  }
+
+  const solarStartSlot = Math.floor((SOLCAST_SOLAR_START_H * 60) / SOLCAST_SLOT_MIN);
+  const solarEndSlot = Math.floor((SOLCAST_SOLAR_END_H * 60) / SOLCAST_SLOT_MIN);
+  const solarRows = rows.filter((r) => {
+    const slot = Number(r?.slot ?? -1);
+    return Number.isFinite(slot) && slot >= solarStartSlot && slot < solarEndSlot;
+  });
+  const filledRows = solarRows.reduce((count, r) => {
+    const value = Number(r?.forecast_kwh);
+    return count + (Number.isFinite(value) ? 1 : 0);
+  }, 0);
+  const pulledTs = solarRows.reduce((mx, r) => {
+    const ts = Number(r?.pulled_ts || 0);
+    return Number.isFinite(ts) && ts > mx ? ts : mx;
+  }, 0);
+  return {
+    hasSnapshot: solarRows.length > 0,
+    solarRows: Number(solarRows.length || 0),
+    filledRows: Number(filledRows || 0),
+    coverageRatio: solarRows.length > 0 ? Math.max(0, Math.min(1, filledRows / FORECAST_SOLAR_SLOT_COUNT)) : 0,
+    pulledTs: pulledTs > 0 ? pulledTs : null,
+  };
+}
+
+function classifySolcastFreshnessForDay(day, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const expectSolcast = Boolean(opts.expectSolcast);
+  if (!expectSolcast) return "not_expected";
+
+  const stats =
+    opts.snapshotStats && typeof opts.snapshotStats === "object"
+      ? opts.snapshotStats
+      : getSolcastSnapshotStatsForDay(day);
+  const coverage = Number(stats?.coverageRatio || 0);
+  const pulledTs =
+    Number(opts.pulledTsOverride || 0) > 0
+      ? Number(opts.pulledTsOverride)
+      : Number(stats?.pulledTs || 0) > 0
+        ? Number(stats.pulledTs)
+        : 0;
+
+  if (!stats?.hasSnapshot || coverage <= 0) return "missing";
+  if (coverage < 0.8) return "stale_reject";
+  if (!pulledTs) return "stale_reject";
+
+  const ageSec = Math.floor((Date.now() - pulledTs) / 1000);
+  if (coverage >= 0.95 && ageSec <= 7200) return "fresh";
+  if (coverage >= 0.8 && ageSec <= 43200) return "stale_usable";
+  return "stale_reject";
+}
+
+function sumDayAheadTotalKwh(day) {
+  const { startTs, endTs } = getForecastSolarWindowBounds(day);
+  const rows = getDayAheadRowsForDate(day);
+  return rows.reduce((sum, row) => {
+    const ts = Number(row?.ts || 0);
+    if (ts < startTs || ts >= endTs) return sum;
+    return sum + Math.max(0, Number(row?.kwh_inc || 0));
+  }, 0);
+}
+
+function assessTomorrowForecastQuality(date) {
+  const existingRows = countDayAheadSolarWindowRows(date);
+  if (existingRows <= 0) return "missing";
+  if (existingRows < FORECAST_SOLAR_SLOT_COUNT) return "incomplete";
+
+  try {
+    const audit =
+      stmts.getLatestAuthoritativeForecastRunAuditForDate.get(date) ||
+      stmts.getLatestForecastRunAuditForDate.get(date);
+    if (!audit) return "missing_audit";
+
+    const expected = readForecastProvider();
+    const expectSolcastInput =
+      expected === "solcast" || (expected === "ml_local" && hasUsableSolcastConfig(getSolcastConfig()));
+    const variant = String(audit?.forecast_variant || "").trim();
+    const freshness = String(audit?.solcast_freshness_class || "").trim();
+
+    if (String(audit?.run_status || "").trim() && String(audit.run_status).trim() !== "success") {
+      return "weak_quality";
+    }
+
+    if (expected === "solcast") {
+      if (String(audit?.provider_used || "").trim() !== "solcast") return "wrong_provider";
+      if (variant !== "solcast_direct") return "wrong_provider";
+      if (freshness === "stale_reject" || freshness === "missing") return "stale_input";
+      return "healthy";
+    }
+
+    if (String(audit?.provider_used || "").trim() !== "ml_local") {
+      return "wrong_provider";
+    }
+    if (!variant) {
+      return "weak_quality";
+    }
+    if (expectSolcastInput) {
+      if (variant === "ml_without_solcast") return "wrong_provider";
+      if (freshness === "missing" || freshness === "stale_reject") return "stale_input";
+      if (variant === "ml_solcast_hybrid_stale") {
+        const freshClass = classifySolcastFreshnessForDay(date, {
+          expectSolcast: true,
+        });
+        if (freshClass === "fresh") return "stale_input";
+      }
+    }
+    return "healthy";
+  } catch (err) {
+    console.warn(`[quality] Failed to assess forecast quality for ${date}:`, err.message);
+    return "weak_quality";
+  }
+}
+
 function getIncompleteDayAheadContextDays() {
   const ctx = readForecastContext();
   const root = ctx && typeof ctx === "object" ? ctx.PacEnergy_DayAhead : null;
@@ -7899,6 +8028,18 @@ function hasUsableSolcastConfig(cfg = null) {
     return !!(c.toolkitEmail && c.toolkitPassword && c.toolkitSiteRef);
   }
   return !!(c.apiKey && c.resourceId);
+}
+
+function classifySolcastFreshness(pulledTs, cfg = null) {
+  if (!pulledTs) return "missing";
+  const c = cfg || getSolcastConfig();
+  if (!hasUsableSolcastConfig(c)) return "not_expected";
+  const ageSec = Math.floor((Date.now() - pulledTs) / 1000);
+  // Fresh = pulled within the last 61 minutes
+  if (ageSec <= 3660) return "fresh";
+  // Stale usable = pulled within the last 24 hours
+  if (ageSec <= 86400) return "stale_usable";
+  return "stale_reject";
 }
 
 function computePlantMaxKwFromConfig() {
@@ -9273,6 +9414,274 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
 }
 
 /**
+ * Shared provider-aware day-ahead generation orchestrator.
+ *
+ * Both manual, automatic (Python-delegated), and fallback cron paths call this
+ * function so provider routing, Solcast freshness policy, and audit metadata
+ * are consistent regardless of trigger source.
+ *
+ * @param {Object} opts
+ * @param {string[]} opts.dates           - Target dates (YYYY-MM-DD)
+ * @param {string}   opts.trigger         - 'manual_api' | 'auto_service' | 'node_fallback'
+ * @param {boolean}  [opts.allowMlFallback=true]  - Allow ML fallback if preferred provider fails
+ * @param {string|null} [opts.expectedProvider=null] - Override provider (null = read from settings)
+ * @param {boolean}  [opts.replaceExisting=false]    - Replace existing forecast if present
+ * @returns {Promise<Object>} Result payload with provider_expected, provider_used, etc.
+ */
+async function runDayAheadGenerationPlan({
+  dates,
+  trigger = "manual_api",
+  allowMlFallback = true,
+  expectedProvider = null,
+  replaceExisting = false,
+}) {
+  const normalizedDates = Array.from(
+    new Set(
+      (Array.isArray(dates) ? dates : [])
+        .map((d) => String(d || "").trim())
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)),
+    ),
+  ).sort();
+  if (!normalizedDates.length) {
+    throw new Error("No target dates provided for day-ahead generation.");
+  }
+
+  const preferredProvider = expectedProvider || readForecastProvider();
+  const maxFutureDateMl = addDaysIso(localDateStr(), 15);
+  const outOfHorizonMl = normalizedDates.filter((d) => d > maxFutureDateMl);
+  const expectSolcastInput =
+    preferredProvider === "solcast" ||
+    (preferredProvider === "ml_local" && hasUsableSolcastConfig(getSolcastConfig()));
+
+  let providerOrder =
+    preferredProvider === "solcast"
+      ? ["solcast", ...(allowMlFallback ? ["ml_local"] : [])]
+      : hasUsableSolcastConfig(getSolcastConfig())
+        ? ["ml_local", "solcast"]
+        : ["ml_local"];
+
+  if (outOfHorizonMl.length) {
+    providerOrder = providerOrder.filter((p) => p !== "ml_local");
+    if (!providerOrder.length) {
+      throw new Error(
+        `Requested future date exceeds local ML weather horizon. Latest allowed date is ${maxFutureDateMl}.`,
+      );
+    }
+  }
+
+  const attempts = [];
+  let generation = null;
+  for (const provider of providerOrder) {
+    const started = Date.now();
+    try {
+      if (provider === "solcast") {
+        generation = await generateDayAheadWithSolcast(normalizedDates);
+      } else {
+        generation = await generateDayAheadWithMl(normalizedDates);
+      }
+      attempts.push({
+        provider,
+        ok: true,
+        durationMs: Date.now() - started,
+      });
+      break;
+    } catch (err) {
+      attempts.push({
+        provider,
+        ok: false,
+        durationMs: Date.now() - started,
+        error: String(err?.message || err || "unknown error").slice(0, 400),
+      });
+    }
+  }
+
+  if (!generation) {
+    const lastError = attempts.length
+      ? attempts[attempts.length - 1].error
+      : "Forecast generation failed.";
+    for (const day of normalizedDates) {
+      try {
+        stmts.insertForecastRunAudit.run({
+          target_date: day,
+          generated_ts: Date.now(),
+          generator_mode: trigger,
+          provider_used: attempts.length ? attempts[attempts.length - 1].provider : preferredProvider,
+          provider_expected: preferredProvider,
+          forecast_variant: "generation_failed",
+          weather_source: null,
+          solcast_snapshot_day: null,
+          solcast_snapshot_pulled_ts: null,
+          solcast_snapshot_age_sec: null,
+          solcast_snapshot_coverage_ratio: null,
+          solcast_snapshot_source: null,
+          solcast_mean_blend: null,
+          solcast_reliability: null,
+          solcast_primary_mode: 0,
+          solcast_raw_total_kwh: null,
+          solcast_applied_total_kwh: null,
+          physics_total_kwh: null,
+          hybrid_total_kwh: null,
+          final_forecast_total_kwh: null,
+          ml_residual_total_kwh: null,
+          error_class_total_kwh: null,
+          bias_total_kwh: null,
+          shape_skipped_for_solcast: 0,
+          run_status: "failed",
+          solcast_freshness_class: expectSolcastInput ? "missing" : "not_expected",
+          is_authoritative_runtime: 0,
+          is_authoritative_learning: 0,
+          superseded_by_run_audit_id: null,
+          replaces_run_audit_id: null,
+          notes_json: JSON.stringify({ attempts, error: lastError }),
+        });
+      } catch (auditErr) {
+        console.warn(`[forecast] Failed to write failed-run audit log for ${day}:`, auditErr.message);
+      }
+    }
+    throw new Error(
+      `Forecast generation failed for all providers (trigger=${trigger}). ${lastError}`,
+    );
+  }
+
+  const providerUsed = generation.providerUsed || "ml_local";
+  const variantsByDate = {};
+  const freshnessByDate = {};
+  const totalsByDate = {};
+
+  for (const day of normalizedDates) {
+    const snapshotStats = getSolcastSnapshotStatsForDay(day);
+    const freshness = classifySolcastFreshnessForDay(day, {
+      expectSolcast: providerUsed === "solcast" || expectSolcastInput,
+      pulledTsOverride:
+        providerUsed === "solcast"
+          ? generation.pulledTs
+          : generation.solcastPull?.pulledTs || null,
+      snapshotStats,
+    });
+    let forecastVariant = "ml_without_solcast";
+    if (providerUsed === "solcast") {
+      forecastVariant = "solcast_direct";
+    } else if (freshness === "fresh") {
+      forecastVariant = "ml_solcast_hybrid_fresh";
+    } else if (freshness === "stale_usable" || freshness === "stale_reject") {
+      forecastVariant = "ml_solcast_hybrid_stale";
+    } else if (expectSolcastInput) {
+      forecastVariant = "ml_without_solcast";
+    }
+
+    const dayTotalKwh = sumDayAheadTotalKwh(day);
+    variantsByDate[day] = forecastVariant;
+    freshnessByDate[day] = freshness;
+    totalsByDate[day] = Number(dayTotalKwh.toFixed(3));
+
+    const previousAuthoritative = stmts.getLatestAuthoritativeForecastRunAuditForDate.get(day) || null;
+    try {
+      const inserted = stmts.insertForecastRunAudit.run({
+        target_date: day,
+        generated_ts: Date.now(),
+        generator_mode: trigger,
+        provider_used: providerUsed,
+        provider_expected: preferredProvider,
+        forecast_variant: forecastVariant,
+        weather_source:
+          providerUsed === "solcast"
+            ? "solcast_direct"
+            : forecastVariant === "ml_without_solcast"
+              ? "archive-fallback"
+              : "solcast_snapshot",
+        solcast_snapshot_day: snapshotStats?.hasSnapshot ? day : null,
+        solcast_snapshot_pulled_ts: snapshotStats?.pulledTs || null,
+        solcast_snapshot_age_sec:
+          Number(snapshotStats?.pulledTs || 0) > 0
+            ? Math.floor((Date.now() - Number(snapshotStats.pulledTs)) / 1000)
+            : null,
+        solcast_snapshot_coverage_ratio:
+          snapshotStats?.hasSnapshot ? Number(snapshotStats.coverageRatio || 0) : null,
+        solcast_snapshot_source:
+          providerUsed === "solcast"
+            ? "direct"
+            : generation.solcastPull?.pulled
+              ? "auto_pull"
+              : snapshotStats?.hasSnapshot
+                ? "cached"
+                : null,
+        solcast_mean_blend: null,
+        solcast_reliability: null,
+        solcast_primary_mode: 0,
+        solcast_raw_total_kwh: null,
+        solcast_applied_total_kwh: null,
+        physics_total_kwh: null,
+        hybrid_total_kwh: null,
+        final_forecast_total_kwh: Number(dayTotalKwh.toFixed(3)),
+        ml_residual_total_kwh: null,
+        error_class_total_kwh: null,
+        bias_total_kwh: null,
+        shape_skipped_for_solcast: 0,
+        run_status: "success",
+        solcast_freshness_class: freshness,
+        is_authoritative_runtime: 1,
+        is_authoritative_learning: 1,
+        superseded_by_run_audit_id: null,
+        replaces_run_audit_id: previousAuthoritative?.id || null,
+        notes_json: JSON.stringify({
+          attempts,
+          replaceExisting: Boolean(replaceExisting),
+          snapshotRows: Number(snapshotStats?.solarRows || 0),
+          snapshotFilledRows: Number(snapshotStats?.filledRows || 0),
+        }),
+      });
+      const newRunId = Number(inserted?.lastInsertRowid || 0);
+      const previousId = Number(previousAuthoritative?.id || 0);
+      if (newRunId > 0 && previousId > 0 && previousId !== newRunId) {
+        const previousNotes = {
+          supersededBy: newRunId,
+          supersededAt: Date.now(),
+          reason: "new_authoritative_generation",
+        };
+        stmts.updateForecastRunAudit.run({
+          id: previousId,
+          is_authoritative_runtime: 0,
+          is_authoritative_learning: 0,
+          superseded_by_run_audit_id: newRunId,
+          replaces_run_audit_id: null,
+          run_status: "superseded",
+          notes_json: JSON.stringify(previousNotes),
+        });
+      }
+    } catch (auditErr) {
+      console.warn(`[forecast] Failed to write audit log for ${day}:`, auditErr.message);
+    }
+  }
+
+  const firstDate = normalizedDates[0];
+  const primaryVariant = variantsByDate[firstDate] || "ml_without_solcast";
+
+  return {
+    provider_expected: preferredProvider,
+    provider_used: providerUsed,
+    forecast_variant: primaryVariant,
+    forecast_variants_by_date: variantsByDate,
+    solcast_freshness_by_date: freshnessByDate,
+    totals_kwh_by_date: totalsByDate,
+    trigger,
+    solcast_pull: generation.solcastPull || null,
+    written_rows: Number(generation.writtenRows || 0),
+    normalized_rows: Number(generation.normalizedRows || 0),
+    snapshot_rows_persisted: Number(generation.snapshotRowsPersisted || 0),
+    snapshot_warnings: Array.isArray(generation.snapshotWarnings)
+      ? generation.snapshotWarnings
+      : [],
+    target_dates: normalizedDates,
+    durationMs: Number(generation.durationMs || 0),
+    endpoint: generation.endpoint || "",
+    attempts,
+    warnings: [],
+    // Pass through raw generation for response compatibility
+    _raw: generation,
+  };
+}
+
+/**
  * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
  * Silently returns { pulled: false } if Solcast is not configured or fetch fails.
  */
@@ -9303,29 +9712,63 @@ async function autoFetchSolcastSnapshots(dates) {
     console.log(
       `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted`,
     );
-    return { pulled: true, persisted, warnings };
+    return { pulled: true, persisted, warnings, pulledTs };
   } catch (err) {
     console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
-    return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300) };
+    return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300), pulledTs: null };
   }
 }
 
-async function generateDayAheadWithMl(dayCount) {
-  // Auto-pull fresh Solcast snapshots before spawning Python ML generator
-  const tomorrow = addDaysIso(localDateStr(), 1);
-  const lastDay = addDaysIso(tomorrow, dayCount - 1);
-  const dates = daysInclusive(tomorrow, lastDay);
-  const solcastPull = await autoFetchSolcastSnapshots(dates);
-
-  const args = ["--generate-days", String(dayCount)];
-  const result = await runForecastGenerator(args);
-  const exitCode = Number(result?.code ?? -1);
-  if (exitCode !== 0) {
-    const details = String(result?.stderr || result?.stdout || "")
-      .trim()
-      .slice(-2000);
-    throw new Error(`ML forecast generator failed (code ${exitCode}). ${details || ""}`.trim());
+async function generateDayAheadWithMl(dates) {
+  const targetDates = Array.from(
+    new Set(
+      (Array.isArray(dates) ? dates : [])
+        .map((d) => String(d || "").trim())
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)),
+    ),
+  ).sort();
+  if (!targetDates.length) {
+    throw new Error("No target dates provided for ML generation.");
   }
+
+  // Auto-pull fresh Solcast snapshots before spawning Python ML generator.
+  const solcastPull = await autoFetchSolcastSnapshots(targetDates);
+
+  const isContiguous = targetDates.every((day, idx) => {
+    if (idx === 0) return true;
+    return day === addDaysIso(targetDates[idx - 1], 1);
+  });
+
+  const runAndAssert = async (args) => {
+    const result = await runForecastGenerator(args);
+    const exitCode = Number(result?.code ?? -1);
+    if (exitCode !== 0) {
+      const details = String(result?.stderr || result?.stdout || "")
+        .trim()
+        .slice(-2000);
+      throw new Error(`ML forecast generator failed (code ${exitCode}). ${details || ""}`.trim());
+    }
+    return result;
+  };
+
+  let durationMs = 0;
+  if (targetDates.length === 1) {
+    const result = await runAndAssert(["--generate-date", targetDates[0]]);
+    durationMs += Number(result?.durationMs || 0);
+  } else if (isContiguous) {
+    const result = await runAndAssert([
+      "--generate-range",
+      targetDates[0],
+      targetDates[targetDates.length - 1],
+    ]);
+    durationMs += Number(result?.durationMs || 0);
+  } else {
+    for (const day of targetDates) {
+      const result = await runAndAssert(["--generate-date", day]);
+      durationMs += Number(result?.durationMs || 0);
+    }
+  }
+
   try {
     syncDayAheadFromContextIfNewer(true);
   } catch (err) {
@@ -9334,7 +9777,7 @@ async function generateDayAheadWithMl(dayCount) {
   const normalizedRows = normalizeForecastDbWindow();
   return {
     providerUsed: "ml_local",
-    durationMs: Number(result.durationMs || 0),
+    durationMs,
     normalizedRows,
     solcastPull,
   };
@@ -9383,6 +9826,7 @@ async function generateDayAheadWithSolcast(dates) {
     snapshotRowsPersisted,
     snapshotWarnings,
     normalizedRows,
+    pulledTs,
   };
 }
 
@@ -12824,10 +13268,9 @@ app.post("/api/forecast/generate", async (req, res) => {
     const body = req.body || {};
     const mode = String(body.mode || "").trim();
     let dates = [];
-    let dayCount = 1;
 
     if (!mode || mode === "dayahead-days") {
-      dayCount = clampInt(body.dayCount, 1, 31, 1);
+      const dayCount = clampInt(body.dayCount, 1, 31, 1);
       const tomorrow = addDaysIso(localDateStr(), 1);
       const lastDay = addDaysIso(tomorrow, dayCount - 1);
       dates = daysInclusive(tomorrow, lastDay);
@@ -12838,87 +13281,94 @@ app.post("/api/forecast/generate", async (req, res) => {
       });
     }
 
-    const preferredProvider = readForecastProvider();
-    const maxFutureDateMl = addDaysIso(localDateStr(), 15);
-    const outOfHorizonMl = dates.filter((d) => d > maxFutureDateMl);
-    let providerOrder =
-      preferredProvider === "solcast"
-        ? ["solcast", "ml_local"]
-        : hasUsableSolcastConfig(getSolcastConfig())
-          ? ["ml_local", "solcast"]
-          : ["ml_local"];
-    if (outOfHorizonMl.length) {
-      providerOrder = providerOrder.filter((p) => p !== "ml_local");
-      if (!providerOrder.length) {
-        return res.status(400).json({
-          ok: false,
-          error: `Requested future date exceeds local ML weather horizon. Latest allowed date is ${maxFutureDateMl}.`,
-        });
-      }
-    }
-
-    const attempts = [];
-    let generation = null;
-    for (const provider of providerOrder) {
-      const started = Date.now();
-      try {
-        if (provider === "solcast") {
-          generation = await generateDayAheadWithSolcast(dates);
-        } else {
-          generation = await generateDayAheadWithMl(dayCount);
-        }
-        attempts.push({
-          provider,
-          ok: true,
-          durationMs: Date.now() - started,
-        });
-        break;
-      } catch (err) {
-        attempts.push({
-          provider,
-          ok: false,
-          durationMs: Date.now() - started,
-          error: String(err?.message || err || "unknown error").slice(0, 400),
-        });
-      }
-    }
-
-    if (!generation) {
-      const lastError = attempts.length
-        ? attempts[attempts.length - 1].error
-        : "Forecast generation failed.";
-      return res.status(500).json({
-        ok: false,
-        error: "Forecast generation failed for all providers.",
-        details: lastError,
-        attempts,
-      });
-    }
+    const result = await runDayAheadGenerationPlan({
+      dates,
+      trigger: "manual_api",
+    });
 
     res.json({
       ok: true,
       mode,
       dates,
       count: dates.length,
-      providerPreferred: preferredProvider,
-      providerUsed: generation.providerUsed || "ml_local",
-      fallbackUsed: (generation.providerUsed || "ml_local") !== preferredProvider,
+      providerPreferred: result.provider_expected,
+      providerUsed: result.provider_used,
+      forecastVariant: result.forecast_variant,
+      forecastVariantsByDate: result.forecast_variants_by_date,
+      solcastFreshnessByDate: result.solcast_freshness_by_date,
+      totalsKwhByDate: result.totals_kwh_by_date,
+      fallbackUsed: result.provider_used !== result.provider_expected,
       fallbackReason:
-        (generation.providerUsed || "ml_local") !== preferredProvider
-          ? attempts.find((a) => a.provider === preferredProvider && !a.ok)?.error || "Preferred provider unavailable."
+        result.provider_used !== result.provider_expected
+          ? result.attempts.find((a) => a.provider === result.provider_expected && !a.ok)?.error || "Preferred provider unavailable."
           : "",
-      durationMs: Number(generation.durationMs || 0),
-      normalizedRows: Number(generation.normalizedRows || 0),
-      writtenRows: Number(generation.writtenRows || 0),
-      snapshotRowsPersisted: Number(generation.snapshotRowsPersisted || 0),
-      snapshotWarnings: Array.isArray(generation.snapshotWarnings)
-        ? generation.snapshotWarnings
-        : [],
-      endpoint: generation.endpoint || "",
-      solcastPull: generation.solcastPull || null,
-      attempts,
+      durationMs: result.durationMs,
+      normalizedRows: result.normalized_rows,
+      writtenRows: result.written_rows,
+      snapshotRowsPersisted: result.snapshot_rows_persisted,
+      snapshotWarnings: result.snapshot_warnings,
+      endpoint: result.endpoint,
+      solcastPull: result.solcast_pull,
+      attempts: result.attempts,
     });
   } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    forecastGenerating = false;
+  }
+});
+
+// ── Internal auto-generation endpoint for Python scheduler delegation ─────
+// The Python forecast service delegates day-ahead generation to this endpoint
+// so both manual and automatic paths use the same provider-aware orchestrator.
+// Localhost-only for security.
+app.post("/api/internal/forecast/generate-auto", async (req, res) => {
+  const remoteIp = String(req.ip || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
+  if (remoteIp !== "127.0.0.1" && remoteIp !== "::1" && remoteIp !== "localhost") {
+    return res.status(403).json({ ok: false, error: "Internal endpoint — localhost only." });
+  }
+  if (isRemoteMode()) {
+    return res.status(403).json({ ok: false, error: "Day-ahead generation is disabled in Client mode." });
+  }
+  if (forecastGenerating) {
+    return res.status(409).json({ ok: false, error: "Forecast generation already in progress." });
+  }
+  forecastGenerating = true;
+  try {
+    const body = req.body || {};
+    const trigger = String(body.trigger || "auto_service").trim();
+    const validTriggers = new Set(["auto_service", "node_fallback", "manual_cli"]);
+    if (!validTriggers.has(trigger)) {
+      return res.status(400).json({ ok: false, error: "Invalid trigger." });
+    }
+    let dates = Array.isArray(body.dates)
+      ? body.dates
+          .map((d) => String(d || "").trim())
+          .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      : [];
+    if (dates.length) {
+      dates = Array.from(new Set(dates)).sort();
+    }
+    if (!dates.length) {
+      const tomorrow = addDaysIso(localDateStr(), 1);
+      dates = [tomorrow];
+    }
+    console.log(
+      `[forecast:internal] Auto-generation requested: trigger=${trigger} dates=${dates.join(",")}`,
+    );
+    const result = await runDayAheadGenerationPlan({
+      dates,
+      trigger,
+    });
+    console.log(
+      `[forecast:internal] Auto-generation complete: provider=${result.provider_used} variant=${result.forecast_variant} duration=${result.durationMs}ms`,
+    );
+    res.json({
+      ok: true,
+      ...result,
+    });
+  } catch (e) {
+    console.warn("[forecast:internal] Auto-generation failed:", e.message);
     res.status(500).json({ ok: false, error: e.message });
   } finally {
     forecastGenerating = false;
@@ -13567,23 +14017,28 @@ cron.schedule("0 2 * * *", pruneOldData);
 // plus a constant post-solar checker outside the solar window, but if it
 // crashes, misses its window, or is not running, this Node cron
 // ensures tomorrow's forecast still gets generated.
-// Runs at 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
-// has a complete solar-window rowset and only generates if missing/incomplete.
+// Runs at 04:30, 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
+// is healthy (not only complete) and regenerates when provider/freshness policy fails.
 // Gateway mode only.
-for (const cronExpr of ["30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
+for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
     if (isRemoteMode()) return;
     const tomorrow = addDaysIso(localDateStr(), 1);
     try {
       const existing = countDayAheadSolarWindowRows(tomorrow);
-      if (hasCompleteDayAheadRowsForDate(tomorrow)) {
-        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing} solar slots) - skip`);
+      const quality = assessTomorrowForecastQuality(tomorrow);
+      if (quality === "healthy") {
+        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing} solar slots) and quality is healthy - skip`);
         return;
       }
-      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} incomplete (${existing}/${FORECAST_SOLAR_SLOT_COUNT} solar slots) - triggering ML generation`);
-      const result = await generateDayAheadWithMl(1);
+      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} triggers fallback. Quality: ${quality} (${existing}/${FORECAST_SOLAR_SLOT_COUNT} slots). Triggering Node fallback generator.`);
+      const result = await runDayAheadGenerationPlan({
+        dates: [tomorrow],
+        trigger: "node_fallback",
+        replaceExisting: true,
+      });
       console.log(
-        `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.providerUsed}, ${result?.durationMs || 0}ms)`,
+        `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.provider_used}, variant=${result?.forecast_variant}, ${result?.durationMs || 0}ms)`,
       );
     } catch (err) {
       console.warn(`[Cron:forecast] Fallback generation for ${tomorrow} failed:`, err.message);

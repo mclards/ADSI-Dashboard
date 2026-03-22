@@ -111,34 +111,118 @@ class ForecastEngineConstraintTests(unittest.TestCase):
         tmp_root.mkdir(parents=True, exist_ok=True)
         try:
             mod = load_module(tmp_root, "error_memory")
-
-            actual = np.zeros(mod.SLOTS_DAY, dtype=float)
-            forecast = np.zeros(mod.SLOTS_DAY, dtype=float)
-            actual[100] = 80.0
-            forecast[100] = 10.0
-            actual[101] = 60.0
-            forecast[101] = 20.0
-            present = np.zeros(mod.SLOTS_DAY, dtype=bool)
-            present[[100, 101]] = True
-            operational_mask = np.zeros(mod.SLOTS_DAY, dtype=bool)
-            operational_mask[100] = True
-
-            orig_actual = mod.load_actual_loss_adjusted_with_presence
-            orig_fc = mod.load_dayahead_with_presence
-            orig_constraints = mod.build_operational_constraint_mask
-            orig_geometry = mod.solar_geometry
+            conn = sqlite3.connect(mod.APP_DB_FILE)
             try:
-                mod.load_actual_loss_adjusted_with_presence = lambda day: (actual.copy(), present.copy())
-                mod.load_dayahead_with_presence = lambda day: (forecast.copy(), present.copy())
-                mod.build_operational_constraint_mask = lambda day: (operational_mask.copy(), {"operational_mask": operational_mask.copy()})
-                mod.solar_geometry = lambda day: {"cos_z": np.ones(mod.SLOTS_DAY, dtype=float)}
+                # Create the tables that compute_error_memory reads from
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS forecast_error_compare_daily (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_date TEXT NOT NULL,
+                        run_audit_id INTEGER NOT NULL DEFAULT 0,
+                        forecast_variant TEXT DEFAULT '',
+                        provider_expected TEXT DEFAULT '',
+                        include_in_error_memory INTEGER DEFAULT 0,
+                        include_in_source_scoring INTEGER DEFAULT 0,
+                        comparison_quality TEXT DEFAULT '',
+                        actual_slot_count INTEGER DEFAULT 0,
+                        forecast_slot_count INTEGER DEFAULT 0,
+                        usable_slot_count INTEGER DEFAULT 0,
+                        constrained_slot_count INTEGER DEFAULT 0,
+                        mae_kwh REAL DEFAULT 0,
+                        rmse_kwh REAL DEFAULT 0,
+                        mape_pct REAL DEFAULT 0,
+                        actual_total_kwh REAL DEFAULT 0,
+                        forecast_total_kwh REAL DEFAULT 0,
+                        abs_error_sum_kwh REAL DEFAULT 0,
+                        solcast_freshness_class TEXT DEFAULT '',
+                        day_regime TEXT DEFAULT '',
+                        scored_ts INTEGER DEFAULT 0,
+                        UNIQUE(target_date, run_audit_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS forecast_error_compare_slot (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_date TEXT NOT NULL,
+                        run_audit_id INTEGER NOT NULL DEFAULT 0,
+                        slot INTEGER NOT NULL,
+                        signed_error_kwh REAL,
+                        support_weight REAL DEFAULT 1.0,
+                        usable_for_error_memory INTEGER DEFAULT 0,
+                        actual_kwh REAL DEFAULT 0,
+                        forecast_kwh REAL DEFAULT 0,
+                        actual_present INTEGER DEFAULT 0,
+                        forecast_present INTEGER DEFAULT 0,
+                        operational_mask INTEGER DEFAULT 0,
+                        manual_mask INTEGER DEFAULT 0,
+                        cap_dispatch_mask INTEGER DEFAULT 0,
+                        weather_bucket TEXT DEFAULT '',
+                        UNIQUE(target_date, run_audit_id, slot)
+                    )
+                    """
+                )
+                # audit_log needed by build_operational_constraint_mask
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts INTEGER NOT NULL,
+                        operator TEXT,
+                        inverter INTEGER NOT NULL,
+                        node INTEGER NOT NULL,
+                        action TEXT NOT NULL,
+                        scope TEXT DEFAULT 'single',
+                        result TEXT DEFAULT 'ok',
+                        ip TEXT DEFAULT '',
+                        reason TEXT DEFAULT ''
+                    )
+                    """
+                )
 
-                err = mod.compute_error_memory(date(2026, 3, 20), pd.DataFrame())
+                yesterday = "2026-03-19"
+                run_audit_id = 1
+
+                # Daily row: eligible for error memory
+                conn.execute(
+                    """
+                    INSERT INTO forecast_error_compare_daily
+                        (target_date, run_audit_id, forecast_variant, provider_expected,
+                         include_in_error_memory, comparison_quality,
+                         actual_slot_count, forecast_slot_count, usable_slot_count)
+                    VALUES (?, ?, ?, ?, 1, 'eligible', 156, 156, 155)
+                    """,
+                    (yesterday, run_audit_id, "ml_solcast_hybrid_fresh", "ml_local"),
+                )
+
+                # Slot 100: operational mask = True → usable_for_error_memory = 0
+                conn.execute(
+                    """
+                    INSERT INTO forecast_error_compare_slot
+                        (target_date, run_audit_id, slot, signed_error_kwh,
+                         support_weight, usable_for_error_memory, operational_mask)
+                    VALUES (?, ?, 100, 70.0, 1.0, 0, 1)
+                    """,
+                    (yesterday, run_audit_id),
+                )
+
+                # Slot 101: no operational mask → usable_for_error_memory = 1
+                conn.execute(
+                    """
+                    INSERT INTO forecast_error_compare_slot
+                        (target_date, run_audit_id, slot, signed_error_kwh,
+                         support_weight, usable_for_error_memory, operational_mask)
+                    VALUES (?, ?, 101, 40.0, 1.0, 1, 0)
+                    """,
+                    (yesterday, run_audit_id),
+                )
+                conn.commit()
             finally:
-                mod.load_actual_loss_adjusted_with_presence = orig_actual
-                mod.load_dayahead_with_presence = orig_fc
-                mod.build_operational_constraint_mask = orig_constraints
-                mod.solar_geometry = orig_geometry
+                conn.close()
+
+            err = mod.compute_error_memory(date(2026, 3, 20), pd.DataFrame())
 
             self.assertAlmostEqual(float(err[100]), 0.0, places=6)
             self.assertGreater(float(err[101]), 0.0)
