@@ -199,7 +199,7 @@ class ForecastEngineWeatherTests(unittest.TestCase):
                     {"staged_slots": 0, "node_step_kwh": 0.0},
                 )
                 mod.apply_ramp_limit = lambda arr, max_step=320.0: arr.copy()
-                mod.confidence_bands = lambda forecast, w5, target_s, regime_confidence=1.0, error_class_meta=None: (
+                mod.confidence_bands = lambda forecast, w5, target_s, regime_confidence=1.0, error_class_meta=None, solcast_prior=None: (
                     forecast.copy(),
                     forecast.copy(),
                 )

@@ -1,25 +1,25 @@
 """
 Solar Power Forecasting System
-Day-Ahead Forecast Engine · v3.0
+Day-Ahead Forecast Engine  v3.0
 
 Architecture
-────────────
-1. Solar Geometry      – precise declination / hour-angle / air-mass / AOI
-2. Clear-Sky Model     – Ineichen simplified + humidity attenuation
-3. Cloud Transmittance – non-linear cloud-cover → transmission mapping (PH-tuned)
-4. Physics Baseline    – per-slot kWh_inc from plant specs (dependable rating)
-5. Residual ML         – GradientBoosting learns (actual − physics) residual
-                         trained on last N_TRAIN_DAYS with recency weighting
-6. Error Memory        – rolling weighted average of recent forecast errors
-                         applied as a bias-correction term
-7. Anomaly Guard       – rejects training days with irradiance/generation
-                         inconsistencies before they corrupt the model
-8. Forecast QA         – logs MAPE, MBE, skill-score vs persistence each cycle
-9. Output              – 5-min kWh_inc series with ±confidence bands
 
-Author  : Engr. Clariden Montaño REE (Engr. M.)
+1. Solar Geometry      - precise declination / hour-angle / air-mass / AOI
+2. Clear-Sky Model     - Ineichen simplified + humidity attenuation
+3. Cloud Transmittance - non-linear cloud-cover  transmission mapping (PH-tuned)
+4. Physics Baseline    - per-slot kWh_inc from plant specs (dependable rating)
+5. Residual ML         - GradientBoosting learns (actual  physics) residual
+                         trained on last N_TRAIN_DAYS with recency weighting
+6. Error Memory        - rolling weighted average of recent forecast errors
+                         applied as a bias-correction term
+7. Anomaly Guard       - rejects training days with irradiance/generation
+                         inconsistencies before they corrupt the model
+8. Forecast QA         - logs MAPE, MBE, skill-score vs persistence each cycle
+9. Output              - 5-min kWh_inc series with confidence bands
+
+Author  : Engr. Clariden Montao REE (Engr. M.)
 Version : 3.0 (Day-Ahead Hardened)
-© 2026 Engr. Clariden Montaño REE. All rights reserved.
+ 2026 Engr. Clariden Montao REE. All rights reserved.
 """
 
 import argparse
@@ -172,7 +172,7 @@ TZ_NAME  = "Asia/Manila"
 TZ_OFFSET = 8         # UTC+8
 
 SLOT_MIN      = 5           # minutes per slot
-SLOTS_DAY     = 288         # 24 Ã— 60 / 5
+SLOTS_DAY     = 288         # 24 - 60 / 5
 SOLAR_START_H = 5           # 05:00 - first forecast slot
 SOLAR_END_H   = 18          # end boundary (exclusive), last slot = 17:55
 SOLAR_SLOTS   = (SOLAR_END_H - SOLAR_START_H) * 60 // SLOT_MIN   # 156 slots
@@ -192,9 +192,9 @@ UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
 PLANT_MW_FALLBACK  = 40.0    # used when ipconfig absent
 
 # Physics thresholds
-RAD_MIN_WM2   = 8.0    # W/mÂ² â€“ ignore radiation below this
+RAD_MIN_WM2   = 8.0    # W/m " ignore radiation below this
 TEMP_REF_C    = 25.0   # STC temperature
-GAMMA_TC      = -0.004 # power temp coeff (/Â°C) â€“ typical Si module
+GAMMA_TC      = -0.004 # power temp coeff (/C) " typical Si module
 
 # ============================================================================
 # ML & TRAINING
@@ -292,11 +292,15 @@ TOD_ZONES = {
 TOD_ZONE_LABELS = ("morning", "midday", "afternoon")
 
 # Trend detection
-SOLCAST_TREND_MIN_DAYS_PER_HALF = 3
+SOLCAST_TREND_MIN_DAYS_PER_HALF = 5
 SOLCAST_TREND_IMPROVING_THRESHOLD = 0.05
 SOLCAST_TREND_DEGRADING_THRESHOLD = -0.05
 SOLCAST_TREND_BOOST_MAX = 0.06
 SOLCAST_TREND_PENALTY_MAX = 0.08
+
+# Extreme weather event detection (typhoon, severe monsoon)
+EXTREME_WEATHER_SLOT_THRESHOLD = 30        # min sustained-severe slots to flag a day as extreme
+EXTREME_WEATHER_RATIO_THRESHOLD = 0.45     # actual/solcast ratio below which a slot is "severe"
 
 # Time-of-day reliability modifiers
 TOD_RELIABILITY_WEIGHT_MIN = 0.85
@@ -347,13 +351,13 @@ ERROR_CLASS_PROFILE_STD_REF_FRAC = 0.24
 MODEL_STAGE_HOLDOUT_MIN_SAMPLES = 144
 
 # Anomaly rejection thresholds
-ANOM_MIN_CF    = 0.02   # capacity factor â€“ days below this are bad
-ANOM_MAX_CF    = 1.05   # capacity factor â€“ days above this are bad
+ANOM_MIN_CF    = 0.02   # capacity factor " days below this are bad
+ANOM_MAX_CF    = 1.05   # capacity factor " days above this are bad
 ANOM_RAD_CORR  = 0.55   # min Pearson r between radiation & generation
 
 # Confidence bands
-CONF_CLEAR_BASE = 0.08   # Â±8% on clear days
-CONF_CLOUD_ADD  = 0.20   # additional Â±20% on overcast / volatile days
+CONF_CLEAR_BASE = 0.08   # 8% on clear days
+CONF_CLOUD_ADD  = 0.20   # additional 20% on overcast / volatile days
 CLOUD_VOLATILE  = 60.0   # cloud cover % threshold for "volatile"
 
 # Forecast re-run schedule (hours UTC+8 when a new day-ahead is computed)
@@ -916,7 +920,7 @@ def slot_cap_kwh(dependable: bool = True) -> float:
 
     NOTE: The configured forecast export cap is intentionally NOT applied here.
     Applying it to the forecast curve creates an artificial flat plateau
-    that hides the true shape â€” cloud dips, afternoon shoulders, etc.
+    that hides the true shape " cloud dips, afternoon shoulders, etc.
     Export limiting is a dispatch/curtailment action, not a forecast property.
     """
     cap_kw = plant_capacity_kw(dependable)
@@ -961,6 +965,25 @@ def _season_bucket_from_day(day: str) -> str:
     except Exception:
         month = datetime.now().month
     return "dry" if month in (12, 1, 2, 3, 4, 5) else "wet"
+
+
+def _is_extreme_weather_day(
+    actual_solar: np.ndarray,
+    solcast_solar: np.ndarray,
+) -> bool:
+    """
+    Detect typhoon / severe monsoon days where generation fell far below Solcast
+    for a sustained period. These days are excluded from ML training to prevent
+    the model from learning a systematic downward bias on rainy days.
+    """
+    if actual_solar.size == 0 or solcast_solar.size == 0:
+        return False
+    usable = solcast_solar > 0.5  # only where Solcast expects meaningful generation
+    if int(np.count_nonzero(usable)) < EXTREME_WEATHER_SLOT_THRESHOLD:
+        return False
+    ratio = np.where(usable, actual_solar / np.maximum(solcast_solar, 0.01), 1.0)
+    severe_slots = int(np.count_nonzero((ratio < EXTREME_WEATHER_RATIO_THRESHOLD) & usable))
+    return severe_slots >= EXTREME_WEATHER_SLOT_THRESHOLD
 
 
 def _tod_zone_for_slot(slot_idx: int):
@@ -1039,6 +1062,7 @@ def lookup_solcast_tod_reliability(artifact, regime: str, zone: str) -> dict:
     """Lookup ToD reliability: time_of_day_by_regime[regime][zone] -> time_of_day[zone] -> fallback."""
     fallback = {"bias_ratio": 1.0, "mape": 0.24, "reliability": 0.62, "slot_count": 0}
     if not artifact or not isinstance(artifact, dict):
+        log.warning("Solcast reliability artifact unavailable - using hardcoded defaults (reliability=0.62, bias_ratio=1.0). Forecast quality may be degraded.")
         return fallback
     by_regime = artifact.get("time_of_day_by_regime")
     if isinstance(by_regime, dict):
@@ -1295,7 +1319,7 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
 def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
     """
     Resample hourly weather to 5-min with shape-preserving interpolation.
-    Radiation uses PCHIP (monotone cubic) â€“ avoids unphysical negative dips.
+    Radiation uses PCHIP (monotone cubic) " avoids unphysical negative dips.
     Other variables use linear.
     """
     df = df.copy()
@@ -1362,11 +1386,11 @@ def solar_geometry(day: str) -> dict:
     Return per-slot solar geometry arrays for *day*.
 
     Returns dict with keys:
-        zenith_deg  â€“ solar zenith angle (degrees)
-        elevation   â€“ solar elevation (radians)
-        air_mass    â€“ Kasten & Young (1989) air mass
-        cos_aoi     â€“ cosine of angle-of-incidence on horizontal plane (= cos Î¸z)
-        extra_rad   â€“ extraterrestrial radiation W/mÂ²
+        zenith_deg  " solar zenith angle (degrees)
+        elevation   " solar elevation (radians)
+        air_mass    " Kasten & Young (1989) air mass
+        cos_aoi     " cosine of angle-of-incidence on horizontal plane (= cos z)
+        extra_rad   " extraterrestrial radiation W/m
     """
     lat  = math.radians(LAT_DEG)
     doy  = datetime.strptime(day, "%Y-%m-%d").timetuple().tm_yday
@@ -1380,7 +1404,7 @@ def solar_geometry(day: str) -> dict:
 
     # Extraterrestrial radiation
     E0     = 1 + 0.033 * math.cos(math.radians(360 * doy / 365))
-    I0     = 1367.0 * E0   # W/mÂ²
+    I0     = 1367.0 * E0   # W/m
 
     zenith_arr   = np.zeros(SLOTS_DAY)
     air_mass_arr = np.zeros(SLOTS_DAY)
@@ -1421,15 +1445,15 @@ def solar_geometry(day: str) -> dict:
 
 def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.ndarray:
     """
-    Estimate per-slot clear-sky GHI (W/mÂ²) using simplified Ineichen model
+    Estimate per-slot clear-sky GHI (W/m) using simplified Ineichen model
     with Linke turbidity estimated from relative humidity.
 
     Args:
-        day        â€“ YYYY-MM-DD
-        rh_hourly  â€“ 5-min RH array (0â€“100); if None uses climatological value
+        day        " YYYY-MM-DD
+        rh_hourly  " 5-min RH array (0"100); if None uses climatological value
 
     Returns:
-        csi  â€“ clear-sky GHI array, shape (SLOTS_DAY,)
+        csi  " clear-sky GHI array, shape (SLOTS_DAY,)
     """
     geo = solar_geometry(day)
     cos_z = geo["cos_z"]
@@ -1441,7 +1465,7 @@ def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.nda
     else:
         rh_mean = 78.0   # tropical climatological mean
 
-    TL = 2.4 + 0.018 * rh_mean   # â‰ˆ 3.8â€“4.1 for Cotabato wet season
+    TL = 2.4 + 0.018 * rh_mean   #  3.8"4.1 for Cotabato wet season
 
     csi = np.zeros(SLOTS_DAY)
     for i in range(SLOTS_DAY):
@@ -1474,8 +1498,8 @@ def cloud_transmittance(cloud_pct: np.ndarray,
       - High cloud (Ci) mostly transparent
 
     PH tropical calibration:
-      High cloud cover (frequent): transmittance â‰ˆ 0.85
-      Dense low cloud / rain:      transmittance â‰ˆ 0.15â€“0.25
+      High cloud cover (frequent): transmittance  0.85
+      Dense low cloud / rain:      transmittance  0.15"0.25
     """
     c  = np.clip(cloud_pct  / 100.0, 0, 1)
     cl = np.clip(cloud_low  / 100.0, 0, 1)
@@ -1492,7 +1516,7 @@ def cloud_transmittance(cloud_pct: np.ndarray,
              - tau_mid  * cm
              - tau_high * ch)
 
-    # Non-linear enhancement at partial cloud (broken cumulus â†’ brightening)
+    # Non-linear enhancement at partial cloud (broken cumulus ' brightening)
     brightening = 0.06 * np.sin(np.pi * c) * (1 - cl)
     trans = np.clip(trans + brightening, 0.10, 1.05)
 
@@ -1500,7 +1524,7 @@ def cloud_transmittance(cloud_pct: np.ndarray,
 
 
 # ============================================================================
-# PHYSICS BASELINE  (clear-sky Ã— cloud Ã— temperature derating)
+# PHYSICS BASELINE  (clear-sky - cloud - temperature derating)
 # ============================================================================
 
 def physics_baseline(day: str, w5: pd.DataFrame) -> np.ndarray:
@@ -1508,16 +1532,16 @@ def physics_baseline(day: str, w5: pd.DataFrame) -> np.ndarray:
     Compute per-slot kWh_inc from pure physics.
 
     Steps:
-        1. Clear-sky GHI (W/mÂ²)
-        2. Ã— cloud transmittance
-        3. â†’ effective irradiance â†’ normalised vs STC
-        4. Ã— temperature derating (NOCT model)
-        5. Ã— plant capacity (dependable kW)
-        6. Ã— slot duration â†’ kWh
+        1. Clear-sky GHI (W/m)
+        2. - cloud transmittance
+        3. ' effective irradiance ' normalised vs STC
+        4. - temperature derating (NOCT model)
+        5. - plant capacity (dependable kW)
+        6. - slot duration ' kWh
 
     Args:
-        day  â€“ YYYY-MM-DD
-        w5   â€“ 5-min weather DataFrame (from interpolate_5min)
+        day  " YYYY-MM-DD
+        w5   " 5-min weather DataFrame (from interpolate_5min)
 
     Returns:
         baseline kWh_inc array (SLOTS_DAY,)
@@ -1532,8 +1556,8 @@ def physics_baseline(day: str, w5: pd.DataFrame) -> np.ndarray:
     )
     ghi_eff = csi * ctrans
 
-    # Temperature derating: Tc = T_amb + (NOCT-20)/800 Ã— Geff
-    noct    = 47.0   # Â°C (typical mono-Si module)
+    # Temperature derating: Tc = T_amb + (NOCT-20)/800 - Geff
+    noct    = 47.0   # C (typical mono-Si module)
     temp_c  = w5["temp"].values
     tc      = temp_c + ((noct - 20.0) / 800.0) * np.clip(ghi_eff, 0, 1200)
     temp_factor = 1.0 + GAMMA_TC * (tc - TEMP_REF_C)
@@ -1589,7 +1613,7 @@ def analyse_weather_day(day: str, w5: pd.DataFrame, actual: np.ndarray | None = 
     cloud_std   = float(solar_cld.std())
     rh_mean     = float(solar_rh.mean())
 
-    # Volatility index: fraction of slots where |Î”rad| > threshold
+    # Volatility index: fraction of slots where |"rad| > threshold
     drad        = np.abs(np.diff(solar_rad, prepend=solar_rad[0]))
     vol_index   = float((drad > 120).mean())   # fraction of "cloud edge" slots
 
@@ -2006,13 +2030,13 @@ def is_anomalous_day(stats: dict) -> tuple[bool, str]:
     """
     cf = stats.get("capacity_factor", 0.5)
     if cf < ANOM_MIN_CF:
-        return True, f"CF too low ({cf:.3f}) â€“ likely outage or data gap"
+        return True, f"CF too low ({cf:.3f}) - likely outage or data gap"
     if cf > ANOM_MAX_CF:
-        return True, f"CF too high ({cf:.3f}) â€“ sensor or data error"
+        return True, f"CF too high ({cf:.3f}) - sensor or data error"
 
     corr = stats.get("rad_gen_corr", 1.0)
     if stats.get("rad_mean", 0) > 100 and corr < ANOM_RAD_CORR:
-        return True, f"Rad-gen correlation too low ({corr:.2f}) â€“ inconsistent data"
+        return True, f"Rad-gen correlation too low ({corr:.2f}) - inconsistent data"
 
     return False, ""
 
@@ -2065,15 +2089,15 @@ def build_features(
     Build a feature matrix from 5-min weather for ML training/prediction.
 
     Features:
-        rad/rad_direct/rad_diffuse         â€“ spectral decomposition
-        cloud layers + gradients            â€“ cloud dynamics
-        precip/cape                         â€“ convective/rain context
-        temp/rh/wind (+ non-linear terms)   â€“ atmospheric
-        cos_z/air_mass                      â€“ geometry
-        solar progression + cyclic encodingsâ€“ time context
-        cloud_trans, kt, dni_proxy, csi     â€“ derived irradiance physics
-        lag/rolling weather terms           â€“ short-memory trend terms
-        cap_kw                              â€“ plant scale normalizer
+        rad/rad_direct/rad_diffuse         " spectral decomposition
+        cloud layers + gradients            " cloud dynamics
+        precip/cape                         " convective/rain context
+        temp/rh/wind (+ non-linear terms)   " atmospheric
+        cos_z/air_mass                      " geometry
+        solar progression + cyclic encodings" time context
+        cloud_trans, kt, dni_proxy, csi     " derived irradiance physics
+        lag/rolling weather terms           " short-memory trend terms
+        cap_kw                              " plant scale normalizer
     """
     geo  = solar_geometry(day)
     day_stats = analyse_weather_day(day, w5)
@@ -3220,6 +3244,7 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
                 resolution_pair_dayahead.setdefault((regime, bucket), []).append(dict(profile["dayahead"]))
 
     if len(records) < SOLCAST_RELIABILITY_MIN_DAYS:
+        log.warning("Solcast reliability artifact build failed: only %d usable days (min %d) - callers will use defaults", len(records), SOLCAST_RELIABILITY_MIN_DAYS)
         return None
 
     def aggregate(rows: list[dict]) -> dict:
@@ -3243,13 +3268,21 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
 
     # Seasonal aggregation
     seasons_out = {s: aggregate(rows) for s, rows in by_season.items() if len(rows) >= SOLCAST_RELIABILITY_MIN_DAYS}
-    season_regimes_out = {k: aggregate(rows) for k, rows in by_season_regime.items() if len(rows) >= 2}
+    season_regimes_out = {}
+    for k, rows in by_season_regime.items():
+        if len(rows) >= 5:
+            season_regimes_out[k] = aggregate(rows)
+        else:
+            log.debug("Season-regime combination %s excluded: only %d days (min 5)", k, len(rows))
 
     # Time-of-day aggregation
     time_of_day_out: dict[str, dict] = {}
     for _zone, _entries in tod_accum.items():
         _total_slots = sum(e["slot_count"] for e in _entries)
-        if _total_slots < 20:
+        _zone_days = len(_entries)
+        if _total_slots < 20 or _zone_days < 5:
+            if _zone_days < 5:
+                log.debug("ToD zone %s excluded: only %d days (min 5)", _zone, _zone_days)
             continue
         _wmape = sum(e["mape"] * e["slot_count"] for e in _entries) / _total_slots
         _wbias = sum(e["bias_ratio"] * e["slot_count"] for e in _entries) / _total_slots
@@ -3258,12 +3291,15 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
             "mape": float(_wmape),
             "reliability": float(1.0 - min(_wmape, 0.55) / 0.55),
             "slot_count": int(_total_slots),
-            "day_count": len(_entries),
+            "day_count": int(_zone_days),
         }
     time_of_day_by_regime_out: dict[str, dict] = {}
     for (_r, _z), _entries in tod_regime_accum.items():
         _total_slots = sum(e["slot_count"] for e in _entries)
-        if _total_slots < 20:
+        _zone_days = len(_entries)
+        if _total_slots < 20 or _zone_days < 5:
+            if _zone_days < 5:
+                log.debug("ToD zone %s (regime %s) excluded: only %d days (min 5)", _z, _r, _zone_days)
             continue
         _wmape = sum(e["mape"] * e["slot_count"] for e in _entries) / _total_slots
         _wbias = sum(e["bias_ratio"] * e["slot_count"] for e in _entries) / _total_slots
@@ -3272,7 +3308,7 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
             "mape": float(_wmape),
             "reliability": float(1.0 - min(_wmape, 0.55) / 0.55),
             "slot_count": int(_total_slots),
-            "day_count": len(_entries),
+            "day_count": int(_zone_days),
         }
 
     # Trend detection
@@ -3605,6 +3641,7 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
         "reliability": 0.62,
     }
     if not artifact or not isinstance(artifact, dict):
+        log.warning("Solcast reliability artifact unavailable - using hardcoded defaults (reliability=0.62, bias_ratio=1.0). Forecast quality may be degraded.")
         return fallback
     # Season+regime cross-lookup (most specific)
     if season:
@@ -3677,6 +3714,10 @@ def solcast_prior_from_snapshot(
     solar_rel = np.clip(solar_rel, 0.0, 1.0)
     solar_weight = 0.58 + 0.42 * np.sin(np.pi * solar_rel)
     solar_weight = np.clip(solar_weight, 0.45, 1.0)
+    # Trend lookup for primary mode check
+    trend_info = lookup_solcast_trend(reliability_artifact)
+    _trend_signal = str(trend_info.get("signal", "stable"))
+
     base_by_regime = {
         "clear": 0.54,
         "mixed": 0.50,
@@ -3691,6 +3732,10 @@ def solcast_prior_from_snapshot(
         coverage_ratio >= SOLCAST_PRIMARY_COVERAGE_MIN
         and reliability_score >= SOLCAST_PRIMARY_RELIABILITY_MIN
     )
+    # Check trend signal before activating primary mode
+    if primary_mode and _trend_signal == "degrading":
+        log.info("Solcast primary mode suppressed: trend signal is degrading")
+        primary_mode = False
     # Solcast-primary: when coverage is high and reliability is reasonable,
     # elevate base blend so Solcast becomes the primary forecast baseline.
     if primary_mode:
@@ -3745,8 +3790,6 @@ def solcast_prior_from_snapshot(
             blend[_zs:_ze] *= tod_factor
 
     # Trend adjustment
-    trend_info = lookup_solcast_trend(reliability_artifact)
-    _trend_signal = str(trend_info.get("signal", "stable"))
     _trend_mag = float(trend_info.get("magnitude", 0.0))
     if _trend_signal == "improving":
         blend *= (1.0 + min(abs(_trend_mag), SOLCAST_TREND_BOOST_MAX))
@@ -3757,6 +3800,11 @@ def solcast_prior_from_snapshot(
     blend[~present] = 0.0
     blend[:SOLAR_START_SLOT] = 0.0
     blend[SOLAR_END_SLOT:] = 0.0
+
+    # Scalar confidence from spread: mean spread_weight over solar slots where Solcast is present
+    _solar_present_mask = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    _solar_sw = np.asarray(spread_weight, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    _sc_spread_conf = float(np.clip(np.mean(_solar_sw[_solar_present_mask]), 0.50, 1.00)) if np.any(_solar_present_mask) else 0.70
 
     return {
         "available": present.astype(float),
@@ -3777,6 +3825,7 @@ def solcast_prior_from_snapshot(
         "season": season,
         "trend_signal": _trend_signal,
         "trend_magnitude": _trend_mag,
+        "spread_confidence": _sc_spread_conf,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
     }
@@ -3836,6 +3885,10 @@ def blend_physics_with_solcast(
     prior_total = float(prior_solar[solar_present].sum()) if np.any(solar_present) else 0.0
     raw_ratio = float(prior_total / max(base_total, 1.0)) if base_total > 0 else 1.0
     applied_ratio = float(np.clip(raw_ratio, *SOLCAST_PRIOR_TOTAL_RATIO_CLIP))
+    _ratio_was_clipped = abs(applied_ratio - raw_ratio) > 0.001
+    if _ratio_was_clipped:
+        log.warning("Solcast total ratio clipped: raw=%.3f  applied=%.3f (bounds: %.2f-%.2f)",
+                    raw_ratio, applied_ratio, SOLCAST_PRIOR_TOTAL_RATIO_CLIP[0], SOLCAST_PRIOR_TOTAL_RATIO_CLIP[1])
     if base_total > 0.0 and prior_total > 0.0 and np.any(solar_present):
         # Keep Solcast's intra-day shape, but constrain its daily energy against
         # the plant-aware physics baseline so raw provider totals do not dominate.
@@ -3870,6 +3923,8 @@ def blend_physics_with_solcast(
         "applied_prior_total_kwh": float(adjusted_prior[SOLAR_START_SLOT:SOLAR_END_SLOT].sum()),
         "raw_prior_ratio": raw_ratio,
         "applied_prior_ratio": applied_ratio,
+        "solcast_ratio_clipped": _ratio_was_clipped,
+        "solcast_raw_ratio": round(raw_ratio, 4),
         "regime": str(solcast_prior.get("regime") or ""),
         "season": str(solcast_prior.get("season") or ""),
         "trend_signal": str(solcast_prior.get("trend_signal") or "stable"),
@@ -4230,6 +4285,17 @@ def collect_history_days(
         usable_slots = int(np.count_nonzero(usable_mask))
         if usable_slots < MIN_SAMPLES:
             log.warning("  Reject %s - too few usable unconstrained slots (%d)", day, usable_slots)
+            continue
+
+        # Exclude extreme weather days (typhoon/severe monsoon) from training
+        _actual_solar = np.asarray(actual, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT]
+        _solcast_solar = np.zeros(SOLAR_END_SLOT - SOLAR_START_SLOT, dtype=float)
+        if snapshot is not None:
+            _sc_arr = np.asarray(snapshot.get("forecast_kwh", []), dtype=float)
+            if _sc_arr.size == SLOTS_DAY:
+                _solcast_solar = _sc_arr[SOLAR_START_SLOT:SOLAR_END_SLOT]
+        if _is_extreme_weather_day(_actual_solar, _solcast_solar):
+            log.info("  Reject %s - extreme weather event (typhoon/severe monsoon)", day)
             continue
 
         training_usable_mask = usable_mask & (~curtailed)
@@ -5252,7 +5318,12 @@ def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tupl
         valid_days += 1
 
     if valid_days < MIN_TRAIN_DAYS:
-        log.warning("Only %d valid training days - minimum is %d", valid_days, MIN_TRAIN_DAYS)
+        log.error(
+            "ML model training SKIPPED: only %d valid training days available (minimum %d). "
+            "Existing model will continue to be used. If this persists, forecast quality will degrade. "
+            "Check weather data availability and Solcast snapshots.",
+            valid_days, MIN_TRAIN_DAYS
+        )
         return None, None
 
     X_train = pd.concat(X_parts, ignore_index=True)
@@ -5388,7 +5459,12 @@ def collect_training_data_hardened(
 
     valid_days = len(X_parts)
     if valid_days < MIN_TRAIN_DAYS:
-        log.warning("Only %d valid training days - minimum is %d", valid_days, MIN_TRAIN_DAYS)
+        log.error(
+            "ML model training SKIPPED: only %d valid training days available (minimum %d). "
+            "Existing model will continue to be used. If this persists, forecast quality will degrade. "
+            "Check weather data availability and Solcast snapshots.",
+            valid_days, MIN_TRAIN_DAYS
+        )
         return None, None, None, None, None
 
     X_train = pd.concat(X_parts, ignore_index=True)
@@ -6326,10 +6402,11 @@ def confidence_bands(
     day: str,
     regime_confidence: float = 1.0,
     error_class_meta: dict | None = None,
+    solcast_prior: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Per-slot confidence bands based on:
-      - base uncertainty (Â±CONF_CLEAR_BASE on clear days)
+      - base uncertainty (CONF_CLEAR_BASE on clear days)
       - cloud volatility index
       - cloud cover level
       - time-of-day (lower confidence at dawn/dusk)
@@ -6355,7 +6432,7 @@ def confidence_bands(
     solar_prog = np.clip(
         (np.arange(SLOTS_DAY) - SOLAR_START_SLOT) / max(SOLAR_SLOTS - 1, 1), 0, 1
     )
-    # Time-of-day uncertainty (dawn/dusk Ã—1.6, noon Ã—1.0)
+    # Time-of-day uncertainty (dawn/dusk -1.6, noon -1.0)
     tod_factor = 1.0 + 0.6 * (1 - np.sin(np.pi * solar_prog))
 
     for i in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
@@ -6369,10 +6446,32 @@ def confidence_bands(
         classifier_unc = ERROR_CLASS_CONF_BAND_ADD_MAX * np.clip(1.0 - class_confidence[i], 0.0, 1.0)
         severe_unc = ERROR_CLASS_SEVERE_BAND_ADD_MAX * np.clip(severe_probability[i], 0.0, 1.0)
         conf      = (CONF_CLEAR_BASE + cloud_unc + confidence_penalty * 0.12 + classifier_unc + severe_unc) * tod_factor[i]
-        conf      = min(conf, 0.40)   # cap at Â±40%
+        conf      = min(conf, 0.40)   # cap at 40%
 
         lo[i] = v * (1.0 - conf)
         hi[i] = v * (1.0 + conf)
+
+    # Blend Solcast P10/P90 bands if available and confidence is high enough
+    if solcast_prior is not None:
+        _sc_lo = np.asarray(solcast_prior.get("prior_lo_kwh", []), dtype=float)
+        _sc_hi = np.asarray(solcast_prior.get("prior_hi_kwh", []), dtype=float)
+        _sc_conf = float(solcast_prior.get("spread_confidence", 0.0))
+        if _sc_lo.size != SLOTS_DAY or _sc_hi.size != SLOTS_DAY:
+            log.debug("Solcast P10/P90 skipped: size mismatch (lo=%d hi=%d expected=%d)", _sc_lo.size, _sc_hi.size, SLOTS_DAY)
+        elif _sc_conf < 0.65:
+            log.debug("Solcast P10/P90 blend skipped: spread_confidence=%.2f < 0.65", _sc_conf)
+        else:
+            _sc_blend = float(np.clip((_sc_conf - 0.65) / 0.35, 0.0, 1.0))
+            for _i in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+                _v = values[_i]
+                if _v <= 0 or _sc_lo[_i] <= 0 or _sc_hi[_i] <= _sc_lo[_i]:
+                    continue
+                # lo[i] and hi[i] are absolute kWh values (not deviations from v)
+                # sc_lo and sc_hi are also absolute values from prior_lo_kwh and prior_hi_kwh
+                _lo_new = (1 - _sc_blend) * lo[_i] + _sc_blend * _sc_lo[_i]
+                _hi_new = (1 - _sc_blend) * hi[_i] + _sc_blend * _sc_hi[_i]
+                lo[_i] = float(max(0.0, _lo_new))
+                hi[_i] = float(max(lo[_i], _hi_new))
 
     return lo, hi
 
@@ -7315,14 +7414,26 @@ def _classify_variant_from_solcast_meta(solcast_meta: dict) -> str:
 
 def _classify_solcast_freshness_python(solcast_meta: dict) -> str:
     """Derive Solcast freshness class from solcast_meta dict."""
+    import time as _time
     if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
         return "not_expected"
     coverage = float(solcast_meta.get("coverage_ratio", 0.0))
-    if coverage >= 0.95:
-        return "fresh"
-    if coverage >= 0.80:
-        return "stale_usable"
-    return "stale_reject"
+    freshness_class = "fresh" if coverage >= 0.95 else ("stale_usable" if coverage >= 0.80 else "stale_reject")
+
+    # Check age and downgrade if too old
+    _pulled_ts = solcast_meta.get("pulled_ts") or solcast_meta.get("fetched_at") or 0
+    _age_hours = (_time.time() - float(_pulled_ts)) / 3600.0 if _pulled_ts else 999.0
+
+    # Downgrade "fresh" to "stale_usable" if older than 4 hours
+    if freshness_class == "fresh" and _age_hours > 4.0:
+        log.debug("Solcast snapshot age %.1fh > 4h - downgraded from fresh to stale_usable", _age_hours)
+        freshness_class = "stale_usable"
+    # Downgrade "stale_usable" to "stale_reject" if older than 12 hours
+    elif freshness_class == "stale_usable" and _age_hours > 12.0:
+        log.debug("Solcast snapshot age %.1fh > 12h - downgraded to stale_reject", _age_hours)
+        freshness_class = "stale_reject"
+
+    return freshness_class
 
 
 def _write_forecast_run_audit_from_python(
@@ -7336,6 +7447,7 @@ def _write_forecast_run_audit_from_python(
     ml_total_kwh: float,
     error_class_total_kwh: float,
     bias_total_kwh: float,
+    ml_failed: bool = False,
 ) -> int | None:
     """Write a forecast_run_audit row from Python direct generation path.
 
@@ -7346,7 +7458,10 @@ def _write_forecast_run_audit_from_python(
         solcast_meta = {}
     target_s = str(target_date)
     variant = _classify_variant_from_solcast_meta(solcast_meta)
+    if ml_failed:
+        variant = f"{variant}_ml_fallback"
     freshness = _classify_solcast_freshness_python(solcast_meta)
+    quality_class = "ml_fallback" if ml_failed else "healthy"
     generated_ts = int(time.time() * 1000)
 
     try:
@@ -7433,6 +7548,8 @@ def _write_forecast_run_audit_from_python(
                 )
 
             conn.commit()
+            if ml_failed:
+                log.warning("Forecast written with ML fallback (physics baseline only) - quality degraded")
             log.info(
                 "Python audit row written for %s: id=%s variant=%s freshness=%s (replaces=%s)",
                 target_s, new_id, variant, freshness, prev_id,
@@ -7449,7 +7566,7 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
     ok_file = _save_json(FORECAST_CTX, ctx)
     ok_db = _write_forecast_db(key, day, series)
     if ok_file:
-        log.info("Wrote %s[%s] â€“ %d slots", key, day, len(series))
+        log.info("Wrote %s[%s] %d slots", key, day, len(series))
     if ok_db and not ok_file:
         log.warning("Legacy forecast JSON write failed for %s; DB write succeeded and remains authoritative.", day)
     elif ok_file and not ok_db:
@@ -7627,7 +7744,7 @@ def run_dayahead(
     Returns a boolean when `persist=True`, otherwise a result payload.
     """
     target_s = target_date.isoformat()
-    log.info("â”€â”€ Day-Ahead Forecast  target=%s â”€â”€", target_s)
+    log.info(""" Day-Ahead Forecast  target=%s """, target_s)
 
     def _load_saved_snapshot_hourly(snapshot_day: str) -> pd.DataFrame:
         snap = load_forecast_weather_snapshot(snapshot_day)
@@ -7680,7 +7797,7 @@ def run_dayahead(
         return None
 
     if raw_hourly.empty:
-        log.error("Cannot run forecast â€“ weather unavailable for %s", target_s)
+        log.error("Cannot run forecast - weather unavailable for %s", target_s)
         return False
 
     if runtime_state is not None and "weather_bias" in runtime_state:
@@ -7694,12 +7811,12 @@ def run_dayahead(
         log.error("Cannot run forecast - weather quality failed for %s: %s", target_s, reason_w5)
         return None
     if not ok_w5:
-        log.error("Cannot run forecast â€“ weather quality failed for %s: %s", target_s, reason_w5)
+        log.error("Cannot run forecast - weather quality failed for %s: %s", target_s, reason_w5)
         return False
     stats = analyse_weather_day(target_s, w5)
     target_regime = classify_day_regime(stats)
     log.info(
-        "Target weather: sky=%-14s  cloud=%.0f%%  rad_peak=%.0f W/mÂ²  "
+        "Target weather: sky=%-14s  cloud=%.0f%%  rad_peak=%.0f W/m  "
         "RH=%.0f%%  convective=%s  rainy=%s",
         stats["sky_class"], stats["cloud_mean"], stats["rad_peak"],
         stats["rh_mean"], stats["convective"], stats["rainy"],
@@ -7765,6 +7882,7 @@ def run_dayahead(
 
     ml_residual = np.zeros(SLOTS_DAY)
     error_class_term = np.zeros(SLOTS_DAY)
+    _ml_failed = False
     error_class_meta = {
         "available": False,
         "target_regime": target_regime,
@@ -7890,11 +8008,12 @@ def run_dayahead(
                 float(np.sum(error_class_term)),
             )
         except Exception as e:
-            log.error("ML prediction failed â€“ falling back to physics only: %s", e)
+            log.error("ML prediction failed - falling back to physics only: %s", e)
+            _ml_failed = True
             ml_residual = np.zeros(SLOTS_DAY)
             error_class_term = np.zeros(SLOTS_DAY)
     else:
-        log.warning("No trained model found â€“ using physics baseline only")
+        log.warning("No trained model found - using physics baseline only")
 
     # 4. Error memory bias correction
     err_mem = compute_error_memory(today, w5)
@@ -7992,7 +8111,7 @@ def run_dayahead(
         forecast *= max_kwh_day / forecast.sum()
 
     # Solcast per-slot energy floor: for each 5-minute slot, enforce that the forecast
-    # does not fall below floor_ratio × Solcast slot kWh when Solcast is fresh.
+    # does not fall below floor_ratio  Solcast slot kWh when Solcast is fresh.
     # This preserves ML shape adjustments where ML is above the floor, but prevents
     # individual slots from being dragged far below Solcast by ML residual or bias.
     if bool(solcast_meta.get("used_solcast")):
@@ -8021,7 +8140,7 @@ def run_dayahead(
                 _slot_floor = _sc_kwh * _floor_ratio * _tod_mod
                 _slot_floor[:SOLAR_START_SLOT] = 0.0
                 _slot_floor[SOLAR_END_SLOT:]   = 0.0
-                # Raise each slot to at least floor_ratio × Solcast, capped at slot capacity
+                # Raise each slot to at least floor_ratio  Solcast, capped at slot capacity
                 _lifted = np.where(
                     (forecast < _slot_floor) & (_slot_floor > 0.0),
                     np.minimum(_slot_floor, cap_slot),
@@ -8034,7 +8153,7 @@ def run_dayahead(
                 if _lifted_count > 0:
                     forecast = _lifted
                     log.info(
-                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f→%.0f kWh (floor=%.0f%% coverage=%.2f)",
+                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f%.0f kWh (floor=%.0f%% coverage=%.2f)",
                         _lifted_count, SOLAR_END_SLOT - SOLAR_START_SLOT,
                         _fc_before, float(forecast.sum()),
                         _floor_ratio * 100.0, _sc_cov_f,
@@ -8047,6 +8166,7 @@ def run_dayahead(
         target_s,
         float(bias_meta.get("regime_confidence", 1.0)),
         error_class_meta=error_class_meta if bool(error_class_meta.get("available")) else None,
+        solcast_prior=solcast_prior if isinstance(solcast_prior, dict) else None,
     )
 
     # 7. Summary log
@@ -8116,6 +8236,26 @@ def run_dayahead(
             "error_class_meta": error_class_summary,
         }
 
+    # --- Forecast sanity check ---
+    _fc_total_kwh = float(np.sum(forecast))
+    _physics_total_kwh = float(np.sum(baseline))
+    if _physics_total_kwh > 0:
+        _fc_ratio = _fc_total_kwh / _physics_total_kwh
+        if _fc_ratio < 0.30 or _fc_ratio > 2.50:
+            log.error("FORECAST SANITY FAIL: total=%.1f kWh is %.1f%% of physics baseline=%.1f kWh - suppressing write",
+                      _fc_total_kwh, _fc_ratio * 100, _physics_total_kwh)
+            return {"status": "error", "reason": "sanity_check_failed", "fc_ratio": round(_fc_ratio, 3)} if not persist else False
+        elif _fc_ratio < 0.50 or _fc_ratio > 1.80:
+            log.warning("Forecast total %.1f kWh is %.1f%% of physics - unusual but within tolerance",
+                        _fc_total_kwh, _fc_ratio * 100)
+
+    # Validate confidence bands ordering
+    if lo is not None and hi is not None:
+        _band_violations = int(np.sum(lo > hi))
+        if _band_violations > 0:
+            log.warning("Confidence band ordering violated in %d slots (lo > hi) - clamping", _band_violations)
+            hi = np.maximum(lo, hi)
+
     # 8. Write
     ok = write_forecast("PacEnergy_DayAhead", target_s, series)
     if ok and weather_source in {"forecast", "snapshot"}:
@@ -8151,6 +8291,7 @@ def run_dayahead(
             ml_total_kwh=float(ml_residual.sum()),
             error_class_total_kwh=float(error_class_term.sum()),
             bias_total_kwh=float(bias_correction.sum()),
+            ml_failed=_ml_failed,
         )
 
     return ok
@@ -8613,7 +8754,7 @@ def main() -> None:
     cap_max = float(profile["max_kw"])
 
     log.info("=" * 70)
-    log.info("Inverter Dashboard — Day-Ahead Forecast Service  v3.0")
+    log.info("Inverter Dashboard - Day-Ahead Forecast Service  v3.0")
     log.info("Site          : Configured  (%.6f N  %.6f E)", LAT_DEG, LON_DEG)
     log.info("Inverters     : %.0f kW max / %.0f kW dependable each", UNIT_KW_MAX, UNIT_KW_DEPENDABLE)
     log.info(
@@ -8650,7 +8791,7 @@ def main() -> None:
                 raise KeyboardInterrupt
             # Viewer model: skip all forecast generation in remote mode.
             if _read_operation_mode() == "remote":
-                log.debug("Remote mode — skipping forecast generation (viewer model)")
+                log.debug("Remote mode - skipping forecast generation (viewer model)")
                 _sleep_with_service_stop(60)
                 continue
 
@@ -8665,7 +8806,7 @@ def main() -> None:
             target_s   = target.isoformat()
             da_target_in_db = _has_forecast_dayahead_in_db(target_s)
 
-            # â”€â”€â”€ Decide whether to run a forecast this loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # """ Decide whether to run a forecast this loop """""""""""""""
             #
             # Run conditions (any one sufficient):
             #   A) Primary scheduled hour (DA_RUN_HOURS_PRIMARY) and we have not
@@ -8710,7 +8851,7 @@ def main() -> None:
                     if _service_stop_requested():
                         raise KeyboardInterrupt
                     if not trained:
-                        log.warning("Model training skipped â€“ will use existing model or physics")
+                        log.warning("Model training skipped - will use existing model or physics")
 
                     # Forecast quality audit of yesterday
                     forecast_qa(today)
@@ -8719,6 +8860,17 @@ def main() -> None:
 
                     # Generate the resolved target day-ahead
                     ok = _delegate_run_dayahead(target)
+                    if not ok:
+                        log.warning("Node delegation failed in auto loop - attempting direct Python generation for %s", target_s)
+                        try:
+                            _direct_result = run_dayahead(target, today, write_audit=True)
+                            if _direct_result:
+                                log.info("Auto loop Python fallback generation succeeded for %s", target_s)
+                                ok = True
+                            else:
+                                log.error("Auto loop Python fallback generation also failed for %s", target_s)
+                        except Exception as _fb_exc:
+                            log.error("Auto loop Python fallback raised: %s", _fb_exc)
                 except Exception:
                     _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
                         _consecutive_failures,
@@ -8748,12 +8900,23 @@ def main() -> None:
                         )
 
             elif run_recovery:
-                log.warning("Recovery: today %s missing day-ahead â€“ generating now", today_s)
+                log.warning("Recovery: today %s missing day-ahead - generating now", today_s)
                 clear_forecast_data_cache()
                 if _service_stop_requested():
                     raise KeyboardInterrupt
                 try:
                     ok = _delegate_run_dayahead(today)
+                    if not ok:
+                        log.warning("Node delegation failed in recovery - attempting direct Python generation for %s", today_s)
+                        try:
+                            _direct_result = run_dayahead(today, today, write_audit=True)
+                            if _direct_result:
+                                log.info("Recovery Python fallback generation succeeded for %s", today_s)
+                                ok = True
+                            else:
+                                log.error("Recovery Python fallback generation also failed for %s", today_s)
+                        except Exception as _fb_exc:
+                            log.error("Recovery Python fallback raised: %s", _fb_exc)
                 except Exception:
                     log.error("Recovery day-ahead for %s crashed", today_s, exc_info=True)
                 else:
@@ -8783,14 +8946,14 @@ def main() -> None:
             _sleep_with_service_stop(60)   # check every minute
 
         except KeyboardInterrupt:
-            log.info("Shutdown requested â€“ exiting")
+            log.info("Shutdown requested - exiting")
             break
         except Exception:
             log.critical("Unhandled exception in main loop", exc_info=True)
             try:
                 _sleep_with_service_stop(60)
             except KeyboardInterrupt:
-                log.info("Shutdown requested Ã¢â‚¬â€œ exiting")
+                log.info("Shutdown requested  exiting")
                 break
 
     _clear_service_stop_file()
