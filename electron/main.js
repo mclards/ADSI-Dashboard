@@ -1258,7 +1258,6 @@ function showLoginWindow() {
     minimizable: false,
     backgroundColor: "#050c17",
     center: true,
-    alwaysOnTop: true,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload-login.js"),

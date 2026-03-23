@@ -2435,13 +2435,18 @@ function makeReplicationRowPayload(row, cols) {
   return payload;
 }
 
-const REPLICATION_STMT_CACHE = Object.create(null);
+const REPLICATION_STMT_CACHE = new Map();
 
 function stmtCached(key, sql) {
-  if (!REPLICATION_STMT_CACHE[key]) {
-    REPLICATION_STMT_CACHE[key] = db.prepare(sql);
+  if (!REPLICATION_STMT_CACHE.get(key)) {
+    REPLICATION_STMT_CACHE.set(key, db.prepare(sql));
+    // Evict oldest (first inserted) entry if cache exceeds 200 entries
+    if (REPLICATION_STMT_CACHE.size > 200) {
+      const oldest = REPLICATION_STMT_CACHE.keys().next().value;
+      REPLICATION_STMT_CACHE.delete(oldest);
+    }
   }
-  return REPLICATION_STMT_CACHE[key];
+  return REPLICATION_STMT_CACHE.get(key);
 }
 
 function mergeAppendReplicationRow(tableName, payload, cols, authoritative = false) {
@@ -2736,8 +2741,14 @@ function buildFullDbSnapshot() {
 
   for (const def of REPLICATION_TABLE_DEFS) {
     const selectCols = def.columns.join(", ");
-    const sql = `SELECT ${selectCols} FROM ${def.name}${def.orderBy ? ` ORDER BY ${def.orderBy}` : ""}`;
-    const rows = db.prepare(sql).all();
+    // Cap rows to prevent unbounded memory allocation on large DBs
+    const limitedSql = def.orderBy
+      ? `SELECT ${selectCols} FROM ${def.name} ORDER BY ${def.orderBy} LIMIT 10000`
+      : `SELECT ${selectCols} FROM ${def.name} LIMIT 10000`;
+    const rows = db.prepare(limitedSql).all();
+    if (rows.length >= 10000) {
+      console.warn(`[Replication] buildFullDbSnapshot: ${def.name} truncated at 10000 rows`);
+    }
     tables[def.name] = rows;
     tableCounts[def.name] = rows.length;
 
@@ -9176,6 +9187,70 @@ function buildAndPersistSolcastSnapshot(day, records, estActuals, cfg, source, p
   }
 }
 
+function buildAndPersistSolcastSnapshotAllDays(records, estActuals, cfg, source, pulledTs) {
+  const daySet = new Set();
+  for (const rec of records || []) {
+    const endRaw = rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const ts = Date.parse(String(endRaw || ""));
+    if (Number.isFinite(ts) && ts > 0) {
+      daySet.add(getTzParts(ts, cfg.timeZone).date);
+    }
+  }
+  const results = {};
+  for (const day of [...daySet].sort()) {
+    try {
+      results[day] = buildAndPersistSolcastSnapshot(day, records, estActuals, cfg, source, pulledTs);
+    } catch (err) {
+      results[day] = { ok: false, warning: String(err?.message || err || "unknown error") };
+    }
+  }
+  return results;
+}
+
+function querySolcastWeekAheadDays(baseDateTz) {
+  const dates = [];
+  for (let i = 1; i <= 7; i++) dates.push(addDaysIso(baseDateTz, i));
+  const placeholders = dates.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT forecast_day, slot, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, pulled_ts
+     FROM solcast_snapshots WHERE forecast_day IN (${placeholders})
+     ORDER BY forecast_day, slot`
+  ).all(...dates);
+  const byDay = {};
+  for (const d of dates) byDay[d] = { date: d, totalKwh: 0, totalLoKwh: 0, totalHiKwh: 0, slots: 0, pulledTs: null, hasData: false };
+  for (const r of rows) {
+    const d = byDay[r.forecast_day];
+    if (!d) continue;
+    d.totalKwh   += Number(r.forecast_kwh    || 0);
+    d.totalLoKwh += Number(r.forecast_lo_kwh || 0);
+    d.totalHiKwh += Number(r.forecast_hi_kwh || 0);
+    d.slots++;
+    if (r.pulled_ts) d.pulledTs = Math.max(d.pulledTs ?? 0, Number(r.pulled_ts));
+    d.hasData = true;
+  }
+  return Object.values(byDay);
+}
+
+function querySlotRowsForWeekAhead(dates, tz) {
+  const placeholders = dates.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT forecast_day, slot, ts_local, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh
+     FROM solcast_snapshots WHERE forecast_day IN (${placeholders})
+     ORDER BY forecast_day, slot`
+  ).all(...dates);
+  const plantTz = tz || getSolcastConfig().timeZone || "Asia/Manila";
+  return rows.map((r) => {
+    const p = getTzParts(Number(r.ts_local), plantTz);
+    return {
+      date:          r.forecast_day,
+      time:          `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+      forecastKwh:   Number(r.forecast_kwh    || 0),
+      forecastLoKwh: Number(r.forecast_lo_kwh || 0),
+      forecastHiKwh: Number(r.forecast_hi_kwh || 0),
+    };
+  });
+}
+
 function classifyDailySky(row) {
   const cloud = Number(row?.cloud_pct || 0);
   const rain = Number(row?.precip_mm || 0);
@@ -9253,6 +9328,20 @@ async function fetchDailyWeatherRange(startDay, endDay, useArchive = false) {
     }
 
     weatherWeeklyCache.set(key, { ts: now, rows });
+
+    // Evict entries older than 2 weeks or if cache exceeds 52 entries
+    const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000;
+    for (const [k, v] of weatherWeeklyCache) {
+      if (now - (v.ts || 0) > TWO_WEEKS_MS) weatherWeeklyCache.delete(k);
+    }
+    if (weatherWeeklyCache.size > 52) {
+      // Delete oldest by ts
+      let oldestKey = null, oldestTs = Infinity;
+      for (const [k, v] of weatherWeeklyCache) {
+        if ((v.ts || 0) < oldestTs) { oldestTs = v.ts || 0; oldestKey = k; }
+      }
+      if (oldestKey !== null) weatherWeeklyCache.delete(oldestKey);
+    }
     return rows;
   } catch (err) {
     // Network error or API failure — serve stale cache if available, even past TTL.
@@ -13077,14 +13166,14 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     } catch (err) {
       warning = String(err?.message || err || "").slice(0, 240);
     }
-    const snapshotResult = buildAndPersistSolcastSnapshot(
-      tomorrowTz,
+    const snapshotResults = buildAndPersistSolcastSnapshotAllDays(
       records,
       estActuals || [],
       cfg,
       accessMode,
       started,
     );
+    const tomorrowSnap = snapshotResults[tomorrowTz] || {};
 
     return res.json({
       ok: true,
@@ -13101,14 +13190,52 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
         ? new Date(validTs[validTs.length - 1]).toISOString()
         : "",
       daysCovered: Array.from(daySet).sort(),
-      snapshotOk: !!snapshotResult?.ok,
-      snapshotRowsPersisted: Number(snapshotResult?.persistedRows || 0),
-      snapshotWarning: String(snapshotResult?.warning || ""),
+      snapshotOk: !!tomorrowSnap?.ok,
+      snapshotRowsPersisted: Number(tomorrowSnap?.persistedRows || 0),
+      snapshotWarning: String(tomorrowSnap?.warning || ""),
+      snapshotDaysPersisted: Object.keys(snapshotResults).sort(),
       dayAheadPreview: preview,
       warning,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/solcast/week-ahead", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const tz = getSolcastConfig().timeZone || "Asia/Manila";
+    const baseDate = localDateStrInTz(Date.now(), tz);
+    const days = querySolcastWeekAheadDays(baseDate);
+    return res.json({ ok: true, baseDate, generatedAt: Date.now(), days, expectedSlotsPerDay: FORECAST_SOLAR_SLOT_COUNT });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/export/solcast-week-ahead", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const tz = getSolcastConfig().timeZone || "Asia/Manila";
+    const baseDate = localDateStrInTz(Date.now(), tz);
+    const dates = Array.from({ length: 7 }, (_, i) => addDaysIso(baseDate, i + 1));
+    const resolution = String(req.body?.resolution || "daily").trim().toLowerCase();
+    const format = String(req.body?.format || "xlsx").trim().toLowerCase();
+
+    const days = querySolcastWeekAheadDays(baseDate);
+    const slotRows = resolution === "slot" ? querySlotRowsForWeekAhead(dates, tz) : [];
+
+    const rawOutPath = await runGatewayExportJob("solcast-week-ahead", () =>
+      exporter.exportSolcastWeekAhead({
+        days, slotRows, resolution, format,
+        startDay: dates[0], endDay: dates[dates.length - 1],
+      }),
+    );
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast");
+    return res.json(buildExportResult(outPath, { baseDate, days: days.length }));
+  } catch (err) {
+    return sendExportRouteError(res, err);
   }
 });
 
@@ -14372,7 +14499,8 @@ app.post("/api/export/forecast-actual", async (req, res) => {
   }
 });
 
-cron.schedule("0 2 * * *", pruneOldData);
+cron.schedule("30 3 * * *", pruneOldData);
+// 03:30 — avoids overlap with 02:xx alert/report crons and 04:30 forecast cron
 
 // ── Day-ahead forecast auto-generation fallback ──────────────────────────
 // The Python forecast service runs primary day-ahead passes at 06:00 and 18:00
@@ -14382,33 +14510,44 @@ cron.schedule("0 2 * * *", pruneOldData);
 // Runs at 04:30, 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
 // is healthy (not only complete) and regenerates when provider/freshness policy fails.
 // Gateway mode only.
+let _forecastCronRunning = false;
 for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
-    if (isRemoteMode()) return;
-    const tomorrow = addDaysIso(localDateStr(), 1);
+    if (_forecastCronRunning) {
+      console.warn(`[Cron:forecast] skipping ${cronExpr} — previous run still active`);
+      return;
+    }
+    _forecastCronRunning = true;
     try {
-      const existing = countDayAheadSolarWindowRows(tomorrow);
-      const quality = assessTomorrowForecastQuality(tomorrow);
-      if (quality === "healthy") {
-        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing} solar slots) and quality is healthy - skip`);
-        return;
+      if (isRemoteMode()) return;
+      const tomorrow = addDaysIso(localDateStr(), 1);
+      try {
+        const existing = countDayAheadSolarWindowRows(tomorrow);
+        const quality = assessTomorrowForecastQuality(tomorrow);
+        if (quality === "healthy") {
+          console.log(`[Cron:forecast] Day-ahead for ${tomorrow} already exists (${existing} solar slots) and quality is healthy - skip`);
+          return;
+        }
+        console.log(`[Cron:forecast] Day-ahead for ${tomorrow} triggers fallback. Quality: ${quality} (${existing}/${FORECAST_SOLAR_SLOT_COUNT} slots). Triggering Node fallback generator.`);
+        const result = await runDayAheadGenerationPlan({
+          dates: [tomorrow],
+          trigger: "node_fallback",
+          replaceExisting: true,
+        });
+        console.log(
+          `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.provider_used}, variant=${result?.forecast_variant}, ${result?.durationMs || 0}ms)`,
+        );
+      } catch (err) {
+        console.warn(`[Cron:forecast] Fallback generation for ${tomorrow} failed:`, err.message);
       }
-      console.log(`[Cron:forecast] Day-ahead for ${tomorrow} triggers fallback. Quality: ${quality} (${existing}/${FORECAST_SOLAR_SLOT_COUNT} slots). Triggering Node fallback generator.`);
-      const result = await runDayAheadGenerationPlan({
-        dates: [tomorrow],
-        trigger: "node_fallback",
-        replaceExisting: true,
-      });
-      console.log(
-        `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.provider_used}, variant=${result?.forecast_variant}, ${result?.durationMs || 0}ms)`,
-      );
-    } catch (err) {
-      console.warn(`[Cron:forecast] Fallback generation for ${tomorrow} failed:`, err.message);
+    } finally {
+      _forecastCronRunning = false;
     }
   });
 }
 
-cron.schedule("5 18 * * *", () => {
+cron.schedule("15 18 * * *", () => {
+  // 18:15 — shifted from 18:05 to avoid solar-close (17:55–18:00) archive+polling contention
   const today = localDateStr();
   try {
     const rows = buildDailyReportRowsForDate(today, {

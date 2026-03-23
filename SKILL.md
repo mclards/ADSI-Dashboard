@@ -19,8 +19,8 @@ Copies of this file must be kept in sync at:
 - Author: Engr. Clariden Montaño REE (Engr. M.)
 - Internal package name: `inverter-dashboard`
 - Internal updater app ID: `com.engr-m.inverter-dashboard`
-- Current repo version baseline: `2.4.36` in `package.json`
-- Latest published GitHub release: `v2.4.36`
+- Current repo version baseline: `2.4.37` in `package.json`
+- Latest published GitHub release: `v2.4.37`
 - Operator-noted deployed server-side app version: `2.2.32`
 - Release source of truth for versioning: `package.json`
 - GitHub release channel: `mclards/ADSI-Dashboard`

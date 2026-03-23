@@ -1000,10 +1000,14 @@ function collectSolcastRowsForRange(startTs, endTs) {
         }))
         .filter((r) => Number(r.ts) > 0);
     }
+    throw Object.assign(
+      new Error(`No Solcast snapshot data found for the selected date range.`),
+      { code: "SOLCAST_NO_DATA" }
+    );
   } catch (err) {
     console.warn('[exporter] collectSolcastRowsForRange DB query failed:', err.message);
+    throw err;
   }
-  return [];
 }
 
 function resolveExportDir(inverter, categoryFolder) {
@@ -2313,6 +2317,46 @@ async function exportSolcastPreview({
   return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
 
+async function exportSolcastWeekAhead({ days, slotRows, resolution, format, startDay, endDay }) {
+  const isSlot = String(resolution || 'daily').trim().toLowerCase() === 'slot';
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
+  const filenameBase = `Solcast_WeekAhead_${startDay}_${endDay}${isSlot ? '_Slot' : '_Daily'}`;
+
+  if (isSlot) {
+    const headers = [
+      { key: 'Date',          label: 'Date' },
+      { key: 'Time',          label: 'Time' },
+      { key: 'ForecastKWh',   label: 'Forecast (KWh)' },
+      { key: 'ForecastLoKWh', label: 'Forecast Lo (KWh)' },
+      { key: 'ForecastHiKWh', label: 'Forecast Hi (KWh)' },
+    ];
+    const rows = (slotRows || []).map((r) => ({
+      Date:          r.date,
+      Time:          r.time,
+      ForecastKWh:   r.forecastKwh,
+      ForecastLoKWh: r.forecastLoKwh,
+      ForecastHiKWh: r.forecastHiKwh,
+    }));
+    return writeExport(headers, rows, dir, filenameBase, format, { title: 'Solcast Week-Ahead Slot Export' });
+  }
+
+  const headers = [
+    { key: 'Date',          label: 'Date' },
+    { key: 'ForecastMWh',   label: 'Forecast (MWh)' },
+    { key: 'ForecastLoMWh', label: 'Forecast Lo (MWh)' },
+    { key: 'ForecastHiMWh', label: 'Forecast Hi (MWh)' },
+    { key: 'Status',        label: 'Status' },
+  ];
+  const rows = (days || []).map((d) => ({
+    Date:          d.date,
+    ForecastMWh:   Number((d.totalKwh   / 1000).toFixed(6)),
+    ForecastLoMWh: Number((d.totalLoKwh / 1000).toFixed(6)),
+    ForecastHiMWh: Number((d.totalHiKwh / 1000).toFixed(6)),
+    Status:        d.hasData ? 'Available' : 'No Data',
+  }));
+  return writeExport(headers, rows, dir, filenameBase, format, { title: 'Solcast Week-Ahead Daily Export' });
+}
+
 module.exports = {
   exportAlarms,
   exportEnergy,
@@ -2328,4 +2372,5 @@ module.exports = {
   exportDailyReport,
   exportForecastActual,
   exportSolcastPreview,
+  exportSolcastWeekAhead,
 };

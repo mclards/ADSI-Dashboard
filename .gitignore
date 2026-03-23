@@ -32,6 +32,9 @@ d*ADSI-Dashboardtest-electron.js
 test-results/
 .tmp/
 release_pre_*/
+release_prev_*/
+release_full_*/
+folder_structure.txt
 
 # Local-only licensing tools
 LICENSE-GENERATOR.md

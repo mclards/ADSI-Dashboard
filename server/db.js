@@ -319,7 +319,7 @@ const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");  // WAL+NORMAL is crash-safe; FULL adds fsync per commit that blocks the event loop
-db.pragma("busy_timeout = 5000");
+db.pragma("busy_timeout = 1500");   // Low timeout: better-sqlite3 blocks event loop during contention; fail fast
 db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
@@ -1573,8 +1573,9 @@ function clearAllChatMessages() {
 function ensureArchiveSchema(archiveDb) {
   archiveDb.pragma("journal_mode = WAL");
   archiveDb.pragma("synchronous = NORMAL");
-  archiveDb.pragma("busy_timeout = 5000");
+  archiveDb.pragma("busy_timeout = 1000");   // Low timeout: archive DBs written only during migration; fail fast
   archiveDb.pragma("temp_store = memory");
+  archiveDb.pragma("cache_size = -8000");    // 8 MB per archive DB (was 64 MB default)
   archiveDb.exec(`
     CREATE TABLE IF NOT EXISTS readings (
       ${ARCHIVE_READING_TABLE_DDL}
@@ -1594,8 +1595,19 @@ function ensureArchiveSchema(archiveDb) {
 }
 
 function createArchiveEntry(filePath) {
+  const existed = fs.existsSync(filePath);
   const archiveDb = new Database(filePath);
-  ensureArchiveSchema(archiveDb);
+  if (!existed) {
+    // New file — run full schema setup
+    ensureArchiveSchema(archiveDb);
+  } else {
+    // Existing file — only set pragmas, trust schema is already created
+    archiveDb.pragma("journal_mode = WAL");
+    archiveDb.pragma("synchronous = NORMAL");
+    archiveDb.pragma("busy_timeout = 1000");   // Low timeout: archive DBs written only during migration; fail fast
+    archiveDb.pragma("temp_store = memory");
+    archiveDb.pragma("cache_size = -8000");    // 8 MB per archive DB (was 64 MB default)
+  }
   const entry = {
     db: archiveDb,
     insertReading: archiveDb.prepare(`
@@ -1666,7 +1678,7 @@ function closeArchiveDbForMonth(monthKey) {
   const entry = ARCHIVE_DB_CACHE.get(key);
   if (!entry) return false;
   try {
-    entry.db.pragma("wal_checkpoint(TRUNCATE)");
+    entry.db.pragma("wal_checkpoint(PASSIVE)"); // PASSIVE: non-blocking — checkpoints what it can without waiting for readers
   } catch (_) {
     // Ignore archive checkpoint failures during targeted close.
   }
@@ -1738,7 +1750,7 @@ async function createSqliteTransferSnapshot(
   let sourceDb = null;
   try {
     sourceDb = new Database(resolvedSource, { fileMustExist: true });
-    try { sourceDb.pragma("busy_timeout = 5000"); } catch (_) {}
+    try { sourceDb.pragma("busy_timeout = 1000"); } catch (_) {}  // Low timeout: source DB for archive transfer; fail fast
     await sourceDb.backup(tempPath);
     const stat = await fs.promises.stat(tempPath);
     const targetMtimeMs = Math.max(0, Number(mtimeMs || stat?.mtimeMs || Date.now()));
@@ -2087,6 +2099,11 @@ function queryReadingsRangeAll(startTs, endTs) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   if (!(e >= s)) return [];
+  // Warn on ranges > 2 days
+  const MAX_RANGE_MS = 2 * 24 * 60 * 60 * 1000;
+  if (e - s > MAX_RANGE_MS) {
+    console.warn(`[DB] queryReadingsRangeAll: range ${Math.round((e-s)/86400000)}d exceeds 2d cap — please use per-inverter path or batch with yields`);
+  }
   const out = new Map();
   for (const monthKey of iterateMonthKeys(s, e)) {
     const entry = getArchiveEntry(monthKey, false);
@@ -2358,8 +2375,17 @@ async function pruneOldData(options = {}) {
     let vacuumed = false;
     if (vacuumRequested) {
       await _yieldEventLoop();
-      vacuumed = vacuumMainDb();
-      if (vacuumed) checkpointMainDb("PASSIVE");
+      // Defer VACUUM to background via setImmediate — never block event loop
+      setImmediate(() => {
+        try {
+          vacuumMainDb();
+          checkpointMainDb("PASSIVE");
+        } catch (e) {
+          console.warn("[DB] deferred VACUUM failed:", e.message);
+        }
+      });
+      vacuumed = true; // Mark as requested; actual completion is async
+      console.log("[DB] VACUUM deferred — will run in background after prune");
     }
     const mainDbBytesAfter = safeFileSize(DB_PATH);
     const archiveAfter = getArchiveDirStats();

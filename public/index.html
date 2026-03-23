@@ -671,6 +671,51 @@
             <div class="exp-result" id="expForecastResult"></div>
           </div>
 
+          <div class="exp-card" id="solcastWeekAheadCard">
+            <div class="exp-icon exp-icon-report"><span class="mdi mdi-calendar-week" aria-hidden="true"></span></div>
+            <div class="exp-title">Solcast Week-Ahead Outlook</div>
+            <div class="exp-desc">
+              7-day Solcast forecast starting from today. Reads stored snapshots from the database.
+              Use <strong>Fetch Solcast</strong> in the Solcast settings to pull fresh API data first.
+            </div>
+            <div id="solcastWeekAheadChartWrap" style="display:none; margin-bottom:0.5rem;">
+              <canvas id="solcastWeekAheadChart" height="160"></canvas>
+            </div>
+            <div id="solcastWeekAheadTableWrap" style="display:none; overflow-x:auto; margin-bottom:0.5rem;">
+              <table class="data-table" id="solcastWeekAheadTable">
+                <thead><tr>
+                  <th>Date</th><th>Forecast (MWh)</th><th>Lo (MWh)</th><th>Hi (MWh)</th><th>Slots</th>
+                </tr></thead>
+                <tbody id="solcastWeekAheadTableBody"></tbody>
+              </table>
+            </div>
+            <div class="exp-form">
+              <label>Resolution
+                <select id="solcastWeekAheadResolution" class="sel" title="Daily: one row per day. Per Slot: one row per 5-min interval.">
+                  <option value="daily" selected>Daily Summary</option>
+                  <option value="slot">Per Slot (5 min)</option>
+                </select>
+              </label>
+              <label>Format
+                <select id="solcastWeekAheadFormat" class="sel" title="Output file format.">
+                  <option value="xlsx" selected>Excel (.xlsx)</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </label>
+            </div>
+            <div class="exp-actions">
+              <button id="btnRefreshSolcastWeekAhead" class="btn btn-outline btn-full" type="button"
+                title="Reload the week-ahead table from the stored Solcast snapshots.">
+                <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh Table</span>
+              </button>
+              <button id="btnExportSolcastWeekAhead" class="btn btn-accent btn-full" type="button"
+                title="Export the 7-day Solcast outlook to a file.">
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Week-Ahead</span>
+              </button>
+            </div>
+            <div class="exp-result" id="solcastWeekAheadResult"></div>
+          </div>
+
           <div class="exp-card">
             <div class="exp-icon exp-icon-energy"><span class="mdi mdi-database-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Operational Data Export</div>

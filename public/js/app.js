@@ -1657,6 +1657,7 @@ const EXPORT_DATE_RANGE_IDS = [
   ["expReportStart", "expReportEnd"],
 ];
 const EXPORT_SINGLE_DATE_IDS = [
+  "expForecastDate",
   "expAlarmDate",
   "expEnergyDate",
   "expInvDataDate",
@@ -11752,6 +11753,109 @@ async function runForecastActualExport() {
   }
 }
 
+// ─── Solcast Week-Ahead ──────────────────────────────────────────────────────
+
+function renderSolcastWeekAheadTable(days, expectedSlots) {
+  const tbody = $("solcastWeekAheadTableBody");
+  const wrap = $("solcastWeekAheadTableWrap");
+  if (!tbody || !wrap) return;
+  tbody.innerHTML = "";
+  for (const d of days || []) {
+    const mwh    = (d.totalKwh   / 1000).toFixed(3);
+    const loMwh  = (d.totalLoKwh / 1000).toFixed(3);
+    const hiMwh  = (d.totalHiKwh / 1000).toFixed(3);
+    const slotCount = d.slots || 0;
+    const complete  = expectedSlots && slotCount >= expectedSlots;
+    const partial   = slotCount > 0 && !complete;
+    const slotsLabel = expectedSlots ? `${slotCount}/${expectedSlots}` : String(slotCount);
+    const tr = document.createElement("tr");
+    [d.date, mwh, loMwh, hiMwh, slotsLabel].forEach((val, i) => {
+      const td = document.createElement("td");
+      td.textContent = val;
+      if (i === 4) {
+        if (!d.hasData)  td.style.color = "var(--color-danger, #ef4444)";
+        else if (partial) td.style.color = "var(--color-warning, #f59e0b)";
+        else if (complete) td.style.color = "var(--color-success, #10b981)";
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  wrap.style.display = "";
+}
+
+function renderSolcastWeekAheadChart(days) {
+  const canvas = $("solcastWeekAheadChart");
+  const wrap = $("solcastWeekAheadChartWrap");
+  if (!canvas || !wrap) return;
+
+  const labels   = (days || []).map((d) => d.date);
+  const forecast = (days || []).map((d) => Number(((d.totalKwh   || 0) / 1000).toFixed(3)));
+  const lo       = (days || []).map((d) => Number(((d.totalLoKwh || 0) / 1000).toFixed(3)));
+  const hi       = (days || []).map((d) => Number(((d.totalHiKwh || 0) / 1000).toFixed(3)));
+
+  const existing = State.charts.solcastWeekAhead;
+  if (existing) {
+    existing.data.labels                = labels;
+    existing.data.datasets[0].data      = forecast;
+    existing.data.datasets[1].data      = lo;
+    existing.data.datasets[2].data      = hi;
+    existing.update("none");
+    wrap.style.display = "";
+    return;
+  }
+
+  State.charts.solcastWeekAhead = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        { label: "Forecast (MWh)", data: forecast, backgroundColor: "rgba(59,130,246,0.7)", borderColor: "#3b82f6", borderWidth: 1 },
+        { label: "Lo (MWh)",       data: lo,       backgroundColor: "rgba(16,185,129,0.4)", borderColor: "#10b981", borderWidth: 1 },
+        { label: "Hi (MWh)",       data: hi,       backgroundColor: "rgba(245,158,11,0.4)", borderColor: "#f59e0b", borderWidth: 1 },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: true } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: "MWh" } } },
+    },
+  });
+  wrap.style.display = "";
+}
+
+async function loadSolcastWeekAhead() {
+  const resultEl = $("solcastWeekAheadResult");
+  if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "Loading…"; }
+  try {
+    const data = await api("/api/solcast/week-ahead", "GET");
+    renderSolcastWeekAheadTable(data.days || [], data.expectedSlotsPerDay || 0);
+    renderSolcastWeekAheadChart(data.days || []);
+    if (resultEl) resultEl.textContent = "";
+  } catch (err) {
+    if (resultEl) { resultEl.className = "exp-result error"; resultEl.textContent = "✗ " + err.message; }
+  }
+}
+
+async function runSolcastWeekAheadExport() {
+  const resultEl = $("solcastWeekAheadResult");
+  const resolution = $("solcastWeekAheadResolution")?.value || "daily";
+  const format     = $("solcastWeekAheadFormat")?.value     || "xlsx";
+  if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "Exporting…"; }
+  setExportButtonState("btnExportSolcastWeekAhead", "loading");
+  try {
+    const r = await api("/api/export/solcast-week-ahead", "POST", { resolution, format });
+    if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "✔ Saved: " + r.path; }
+    await openExportPathFolder(r.path);
+    setExportButtonState("btnExportSolcastWeekAhead", "ok");
+  } catch (e) {
+    if (resultEl) { resultEl.className = "exp-result error"; resultEl.textContent = "✗ " + e.message; }
+    setExportButtonState("btnExportSolcastWeekAhead", "fail");
+  }
+}
+
+// ─── End Solcast Week-Ahead ───────────────────────────────────────────────────
+
 function getAnalyticsForecastExportResolution() {
   const intervalMin = Number($("anaInterval")?.value || State.analyticsIntervalMin || 5);
   if (intervalMin === 15) return "15min";
@@ -12586,6 +12690,8 @@ function bindEventHandlers() {
     ));
   $("btnRunEnergyExport")?.addEventListener("click", runEnergyExport);
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
+  $("btnRefreshSolcastWeekAhead")?.addEventListener("click", loadSolcastWeekAhead);
+  $("btnExportSolcastWeekAhead")?.addEventListener("click", runSolcastWeekAheadExport);
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
   $("btnExportAudit")?.addEventListener("click", () =>
     runSingleDateExport(
@@ -13080,6 +13186,7 @@ async function init() {
     syncDayAheadGeneratorAvailability();
     bindExportUiStatePersistence();
     setupExportUiStateFlush();
+    setTimeout(() => loadSolcastWeekAhead(), 0);
 
     reportStartupProgress({
       step: 3,
