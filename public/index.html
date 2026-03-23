@@ -621,8 +621,11 @@
             </div>
             <div class="exp-form">
               <label
-                >Date<input type="date" id="expForecastDate" class="inp" title="Date for the day-ahead forecast export."
-              /></label>
+                >Date<input type="date" id="expForecastDate" class="inp" title="Date for the day-ahead forecast export." />
+                <select id="expForecastDateSelect" class="sel" title="Select from dates that have stored Solcast snapshot data." hidden>
+                  <option value="">Loading dates…</option>
+                </select>
+              </label>
               <label
                 >Source
                 <select id="expForecastSource" class="sel" title="Forecast data source: Analytics uses the trained ML model, Solcast uses stored API snapshots.">
@@ -671,49 +674,40 @@
             <div class="exp-result" id="expForecastResult"></div>
           </div>
 
-          <div class="exp-card" id="solcastWeekAheadCard">
-            <div class="exp-icon exp-icon-report"><span class="mdi mdi-calendar-week" aria-hidden="true"></span></div>
-            <div class="exp-title">Solcast Week-Ahead Outlook</div>
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-report"><span class="mdi mdi-weather-sunny-alert" aria-hidden="true"></span></div>
+            <div class="exp-title">Solcast Week-Ahead Export</div>
             <div class="exp-desc">
-              7-day Solcast forecast starting from today. Reads stored snapshots from the database.
-              Use <strong>Fetch Solcast</strong> in the Solcast settings to pull fresh API data first.
-            </div>
-            <div id="solcastWeekAheadChartWrap" style="display:none; margin-bottom:0.5rem;">
-              <canvas id="solcastWeekAheadChart" height="160"></canvas>
-            </div>
-            <div id="solcastWeekAheadTableWrap" style="display:none; overflow-x:auto; margin-bottom:0.5rem;">
-              <table class="data-table" id="solcastWeekAheadTable">
-                <thead><tr>
-                  <th>Date</th><th>Forecast (MWh)</th><th>Lo (MWh)</th><th>Hi (MWh)</th><th>Slots</th>
-                </tr></thead>
-                <tbody id="solcastWeekAheadTableBody"></tbody>
-              </table>
+              Export the 7-day Solcast generation forecast as a 5-minute slot breakdown,
+              with highest and lowest MWh slots highlighted per day and daily totals.
             </div>
             <div class="exp-form">
               <label>Resolution
-                <select id="solcastWeekAheadResolution" class="sel" title="Daily: one row per day. Per Slot: one row per 5-min interval.">
-                  <option value="daily" selected>Daily Summary</option>
-                  <option value="slot">Per Slot (5 min)</option>
+                <select id="expWeekAheadResolution" class="sel" title="Time resolution for the week-ahead export slots.">
+                  <option value="5min">5-min</option>
+                  <option value="15min">15-min</option>
+                  <option value="30min">30-min</option>
+                  <option value="1hr" selected>Hourly</option>
                 </select>
               </label>
               <label>Format
-                <select id="solcastWeekAheadFormat" class="sel" title="Output file format.">
+                <select id="expWeekAheadFormat" class="sel" title="Output file format for the week-ahead export.">
                   <option value="xlsx" selected>Excel (.xlsx)</option>
                   <option value="csv">CSV</option>
                 </select>
               </label>
             </div>
             <div class="exp-actions">
-              <button id="btnRefreshSolcastWeekAhead" class="btn btn-outline btn-full" type="button"
-                title="Reload the week-ahead table from the stored Solcast snapshots.">
-                <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh Table</span>
-              </button>
-              <button id="btnExportSolcastWeekAhead" class="btn btn-accent btn-full" type="button"
-                title="Export the 7-day Solcast outlook to a file.">
-                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Week-Ahead</span>
+              <button
+                id="btnRunWeekAheadExport"
+                class="btn btn-accent btn-full"
+                type="button"
+                title="Export the 7-day Solcast week-ahead forecast with 5-minute resolution."
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Week-Ahead Forecast</span>
               </button>
             </div>
-            <div class="exp-result" id="solcastWeekAheadResult"></div>
+            <div class="exp-result" id="expWeekAheadResult"></div>
           </div>
 
           <div class="exp-card">
@@ -1572,23 +1566,6 @@
                     <option value="mw">MW</option>
                   </select>
                 </label>
-                <label class="forecast-preview-field-resolution"
-                  >Export Resolution
-                  <select id="solcastPreviewResolution" class="sel" title="Time interval for exported data rows. Finer resolutions produce more rows per day.">
-                    <option value="PT5M">PT5M</option>
-                    <option value="PT10M">PT10M</option>
-                    <option value="PT15M">PT15M</option>
-                    <option value="PT30M">PT30M</option>
-                    <option value="PT60M">PT60M</option>
-                  </select>
-                </label>
-                <label class="forecast-preview-field-format"
-                  >Export Format
-                  <select id="solcastPreviewExportFormat" class="sel" title="Standard: one row per time slot with forecast and actual columns. Average Table: grouped averages per resolution bucket.">
-                    <option value="standard">Standard</option>
-                    <option value="average-table">Average Table</option>
-                  </select>
-                </label>
                 <div class="forecast-preview-toolbar-action forecast-preview-toolbar-buttons"
                   ><button
                     id="btnSolcastPreviewRefresh"
@@ -1598,15 +1575,6 @@
                     aria-label="Refresh Solcast preview"
                   >
                     <span class="mdi mdi-chart-line-variant" aria-hidden="true"></span><span>Refresh Preview</span>
-                  </button>
-                  <button
-                    id="btnSolcastPreviewExport"
-                    class="btn btn-outline"
-                    type="button"
-                    title="Export the selected Solcast toolkit preview range to Excel."
-                    aria-label="Export Solcast preview to Excel"
-                  >
-                    <span class="mdi mdi-file-excel-outline" aria-hidden="true"></span><span>Export XLSX</span>
                   </button>
                 </div>
               </div>

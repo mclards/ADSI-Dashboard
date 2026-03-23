@@ -14,7 +14,19 @@
       "Bash(xargs grep:*)",
       "Bash(ls /d/ADSI-Dashboard/server/*.js)",
       "Bash(grep -n \"rebuildDailyReadingsSummaryForDate\" /d/ADSI-Dashboard/server/*.js)",
-      "Bash(grep -iE \"WHERE.*\\\\+|WHERE.*\\\\`\")"
+      "Bash(grep -iE \"WHERE.*\\\\+|WHERE.*\\\\`\")",
+      "Bash(npx playwright:*)",
+      "Bash(for f:*)",
+      "Bash(do node:*)",
+      "Bash(echo \"✓ $f\")",
+      "Bash(done)",
+      "Bash(cd /d \"d:\\\\ADSI-Dashboard\")",
+      "Bash(npm install:*)",
+      "Bash(chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf=\"/d/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.pdf\" --print-to-pdf-no-header \"file:///d/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.html\")",
+      "WebFetch(domain:forum.pvoutput.org)",
+      "WebFetch(domain:solcast.com)",
+      "WebFetch(domain:emhass.readthedocs.io)",
+      "WebFetch(domain:www.nrel.gov)"
     ],
     "deny": [
       "Read(./.env)",

@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.37`
+**Applies to:** ADSI Inverter Dashboard `v2.4.38`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -539,18 +539,13 @@ Operational note:
 The analytics side card includes:
 
 - `Days` input
-- `Format` selector using the same `Standard` and `Average Table` export choices as the Solcast preview export
 - `Generate` button
-- `Export` button
 
 Operational rule:
 
-- day-ahead generation is available on the `Gateway` workstation
+- day-ahead generation is available on the `Gateway` workstation only
 - in `Remote` mode, generation is blocked and should be performed from the gateway workstation
-- when `Average Table` is selected, the analytics export writes only the clean day-ahead forecast table in the same tableized-average style used by the Solcast forecast export
-- analytics day-ahead export files are saved under `All Inverters\Forecast\Analytics` inside the configured export root for both `Standard` and `Average Table`
-- legacy flat forecast-export files are repaired into the correct forecast subfolder automatically by current builds
-- the selected forecast export mode remains authoritative across Analytics, Forecast, and Export page controls, even when pages are rendered later
+- generated day-ahead data can be exported from the dedicated Export page
 
 ### Weekly Weather Outlook
 
@@ -612,8 +607,6 @@ When toolkit preview is enabled, the forecast workspace provides:
 | `Start Day` | First day shown in preview |
 | `Days to Display` | Number of days included |
 | `Chart Unit` | View values as `MWh` or `MW` |
-| `Export Resolution` | Preview export interval such as `PT5M`, `PT10M`, `PT15M`, `PT30M`, `PT60M` |
-| `Export Format` | `Standard` or `Average Table` |
 | `Forecast Total` | Total forecasted energy in the selected window |
 | `Estimated Actual` | Estimated actual value for comparison |
 | `Selected Range` | Exact date window shown |
@@ -625,13 +618,8 @@ When toolkit preview is enabled, the forecast workspace provides:
 | --- | --- |
 | `Save Forecast Settings` | Saves forecast settings using the same settings save flow |
 | `Refresh Preview` | Reloads toolkit preview using current form values |
-| `Export XLSX` | Exports the current preview |
 | `Save and Test Solcast` | Saves active values, then tests the chosen Solcast mode |
 
-Operational note:
-
-- Solcast preview export files are saved under `All Inverters\Forecast\Solcast` inside the configured export root
-- the shared `Standard` / `Average Table` forecast-export mode is honored by the forecast export workflows, and `Average Table` forces `.xlsx`
 | `Test Solcast Connection` | Tests current values without saving |
 
 ---

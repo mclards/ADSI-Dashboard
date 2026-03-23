@@ -4228,17 +4228,19 @@ label[data-required]::after {
 
 .analytics-gen-row {
   display: grid;
-  grid-template-columns: minmax(74px, 90px) minmax(120px, 150px) minmax(0, 1fr);
+  grid-template-columns: minmax(74px, 90px) minmax(0, 1fr);
   gap: 6px;
   align-items: end;
   margin-top: 6px;
 }
 
 .analytics-gen-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
-  align-items: center;
+  display: flex;
+  align-items: flex-end;
+}
+
+.analytics-gen-actions .btn {
+  flex: 1;
 }
 
 .analytics-gen-field {
@@ -4632,6 +4634,27 @@ label[data-required]::after {
   padding: 12px;
   overflow-y: auto;
   align-content: start;
+}
+.exp-card--wide {
+  grid-column: span 2;
+  height: auto;
+  min-height: auto;
+}
+
+.exp-card--wide .exp-form {
+  flex-direction: row;
+  align-items: flex-end;
+}
+
+.exp-card--wide .exp-form label {
+  flex: 1;
+  min-width: 100px;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.exp-card--wide .exp-actions {
+  grid-template-columns: 1fr 1fr;
 }
 
 .exp-card {
@@ -9006,24 +9029,16 @@ body.mode-transition-active {
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-day {
-  grid-column: span 2;
+  grid-column: span 4;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-days,
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-unit {
-  grid-column: span 1;
-}
-
-:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-resolution {
-  grid-column: span 1;
-}
-
-:is(#page-settings, #page-forecast) #forecastSection .forecast-preview-field-format {
-  grid-column: span 2;
+  grid-column: span 4;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-buttons {
-  grid-column: span 5;
+  grid-column: span 12;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action {
@@ -9067,20 +9082,6 @@ body.mode-transition-active {
   --btn-shine: rgba(214, 230, 255, 0.24);
 }
 
-:is(#page-settings, #page-forecast) #forecastSection #btnSolcastPreviewExport {
-  --btn-color: #ffffff;
-  --btn-border: color-mix(in srgb, var(--green2) 76%, var(--border2));
-  --btn-bg-1: color-mix(in srgb, var(--green) 88%, #ffffff 12%);
-  --btn-bg-2: color-mix(in srgb, var(--green2) 92%, #000000 8%);
-  --btn-shine: rgba(228, 255, 241, 0.22);
-}
-
-:is(#page-settings, #page-forecast) #forecastSection #btnSolcastPreviewExport:disabled {
-  --btn-color: color-mix(in srgb, #ffffff 92%, transparent);
-  --btn-border: color-mix(in srgb, var(--green2) 38%, var(--border2));
-  --btn-bg-1: color-mix(in srgb, var(--green) 36%, var(--surface) 64%);
-  --btn-bg-2: color-mix(in srgb, var(--green2) 32%, var(--surface2) 68%);
-}
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-toolbar-action > span {
   display: block;

@@ -9210,14 +9210,16 @@ function buildAndPersistSolcastSnapshotAllDays(records, estActuals, cfg, source,
 function querySolcastWeekAheadDays(baseDateTz) {
   const dates = [];
   for (let i = 1; i <= 7; i++) dates.push(addDaysIso(baseDateTz, i));
-  const placeholders = dates.map(() => "?").join(",");
   const rows = db.prepare(
     `SELECT forecast_day, slot, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, pulled_ts
-     FROM solcast_snapshots WHERE forecast_day IN (${placeholders})
-     ORDER BY forecast_day, slot`
+     FROM solcast_snapshots
+     WHERE forecast_day IN (${dates.map(() => "?").join(",")})
+     ORDER BY forecast_day, slot`,
   ).all(...dates);
   const byDay = {};
-  for (const d of dates) byDay[d] = { date: d, totalKwh: 0, totalLoKwh: 0, totalHiKwh: 0, slots: 0, pulledTs: null, hasData: false };
+  for (const d of dates) {
+    byDay[d] = { date: d, totalKwh: 0, totalLoKwh: 0, totalHiKwh: 0, slots: 0, pulledTs: null, hasData: false };
+  }
   for (const r of rows) {
     const d = byDay[r.forecast_day];
     if (!d) continue;
@@ -9231,19 +9233,22 @@ function querySolcastWeekAheadDays(baseDateTz) {
   return Object.values(byDay);
 }
 
-function querySlotRowsForWeekAhead(dates, tz) {
-  const placeholders = dates.map(() => "?").join(",");
+function querySlotRowsForWeekAhead(dates) {
+  if (!dates || !dates.length) return [];
   const rows = db.prepare(
-    `SELECT forecast_day, slot, ts_local, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh
-     FROM solcast_snapshots WHERE forecast_day IN (${placeholders})
-     ORDER BY forecast_day, slot`
+    `SELECT forecast_day, slot, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh
+     FROM solcast_snapshots
+     WHERE forecast_day IN (${dates.map(() => "?").join(",")})
+     ORDER BY forecast_day, slot`,
   ).all(...dates);
-  const plantTz = tz || getSolcastConfig().timeZone || "Asia/Manila";
   return rows.map((r) => {
-    const p = getTzParts(Number(r.ts_local), plantTz);
+    const slotNum = Number(r.slot || 0);
+    const hh = Math.floor((slotNum * 5) / 60);
+    const mm = (slotNum * 5) % 60;
     return {
-      date:          r.forecast_day,
-      time:          `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+      date: r.forecast_day,
+      slot: slotNum,
+      time: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`,
       forecastKwh:   Number(r.forecast_kwh    || 0),
       forecastLoKwh: Number(r.forecast_lo_kwh || 0),
       forecastHiKwh: Number(r.forecast_hi_kwh || 0),
@@ -13202,42 +13207,6 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
   }
 });
 
-app.get("/api/solcast/week-ahead", async (req, res) => {
-  if (isRemoteMode()) return proxyToRemote(req, res);
-  try {
-    const tz = getSolcastConfig().timeZone || "Asia/Manila";
-    const baseDate = localDateStrInTz(Date.now(), tz);
-    const days = querySolcastWeekAheadDays(baseDate);
-    return res.json({ ok: true, baseDate, generatedAt: Date.now(), days, expectedSlotsPerDay: FORECAST_SOLAR_SLOT_COUNT });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-app.post("/api/export/solcast-week-ahead", async (req, res) => {
-  if (isRemoteMode()) return proxyToRemote(req, res);
-  try {
-    const tz = getSolcastConfig().timeZone || "Asia/Manila";
-    const baseDate = localDateStrInTz(Date.now(), tz);
-    const dates = Array.from({ length: 7 }, (_, i) => addDaysIso(baseDate, i + 1));
-    const resolution = String(req.body?.resolution || "daily").trim().toLowerCase();
-    const format = String(req.body?.format || "xlsx").trim().toLowerCase();
-
-    const days = querySolcastWeekAheadDays(baseDate);
-    const slotRows = resolution === "slot" ? querySlotRowsForWeekAhead(dates, tz) : [];
-
-    const rawOutPath = await runGatewayExportJob("solcast-week-ahead", () =>
-      exporter.exportSolcastWeekAhead({
-        days, slotRows, resolution, format,
-        startDay: dates[0], endDay: dates[dates.length - 1],
-      }),
-    );
-    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast");
-    return res.json(buildExportResult(outPath, { baseDate, days: days.length }));
-  } catch (err) {
-    return sendExportRouteError(res, err);
-  }
-});
 
 app.post("/api/forecast/solcast/preview", async (req, res) => {
   try {
@@ -13440,7 +13409,7 @@ app.post("/api/export/solcast-preview", async (req, res) => {
         format: "xlsx",
       }),
     );
-    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast");
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast/Preview");
     return res.json(buildExportResult(outPath, {
       day: preview.day,
       dayCount: preview.dayCount,
@@ -13449,6 +13418,65 @@ app.post("/api/export/solcast-preview", async (req, res) => {
     }));
   } catch (e) {
     return sendExportRouteError(res, e);
+  }
+});
+
+app.get("/api/solcast/snapshot-dates", (req, res) => {
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT forecast_day FROM solcast_snapshots ORDER BY forecast_day DESC`
+    ).all();
+    return res.json({ ok: true, dates: rows.map((r) => r.forecast_day) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/analytics/forecast-dates", (req, res) => {
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT date FROM forecast_dayahead ORDER BY date DESC`
+    ).all();
+    return res.json({ ok: true, dates: rows.map((r) => r.date) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/solcast/week-ahead", (req, res) => {
+  try {
+    const tz = getSolcastConfig()?.timeZone || "Asia/Manila";
+    const baseDate = localDateStrInTz(Date.now(), tz);
+    const days = querySolcastWeekAheadDays(baseDate);
+    return res.json({ ok: true, baseDate, generatedAt: Date.now(), days });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/export/solcast-week-ahead", async (req, res) => {
+  try {
+    const tz = getSolcastConfig()?.timeZone || "Asia/Manila";
+    const baseDate = localDateStrInTz(Date.now(), tz);
+    const dates = Array.from({ length: 7 }, (_, i) => addDaysIso(baseDate, i + 1));
+    const format = String(req.body?.format || "xlsx").trim().toLowerCase();
+    const resolution = String(req.body?.resolution || "1hr").trim().toLowerCase();
+    const days = querySolcastWeekAheadDays(baseDate);
+    const slotRows = querySlotRowsForWeekAhead(dates);
+    const rawOutPath = await runGatewayExportJob("solcast-week-ahead", () =>
+      exporter.exportSolcastWeekAhead({
+        days,
+        slotRows,
+        format,
+        resolution,
+        startDay: dates[0],
+        endDay: dates[dates.length - 1],
+      }),
+    );
+    const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, "Solcast/Week-Ahead");
+    return res.json(buildExportResult(outPath, { baseDate, days: days.length }));
+  } catch (err) {
+    return sendExportRouteError(res, err, "solcast-week-ahead");
   }
 });
 
@@ -14112,11 +14140,11 @@ function normalizeForecastExportRelativePathForRoute(routePath, relativePath, pa
   const route = String(routePath || "").trim();
   if (route === "/api/export/forecast-actual") {
     const source = String(payload?.source || "analytics").trim().toLowerCase();
-    const subFolder = source === "solcast" ? "Solcast" : "Analytics";
+    const subFolder = source === "solcast" ? "Solcast/Day-Ahead" : "Analytics/Day-Ahead";
     return exporter.rewriteForecastExportRelativePath(relativePath, subFolder);
   }
   if (route === "/api/export/solcast-preview") {
-    return exporter.rewriteForecastExportRelativePath(relativePath, "Solcast");
+    return exporter.rewriteForecastExportRelativePath(relativePath, "Solcast/Preview");
   }
   return relativePath;
 }
@@ -14491,7 +14519,7 @@ app.post("/api/export/forecast-actual", async (req, res) => {
         ),
       }),
     );
-    const subFolder = isSolcast ? "Solcast" : "Analytics";
+    const subFolder = isSolcast ? "Solcast/Day-Ahead" : "Analytics/Day-Ahead";
     const outPath = await exporter.ensureForecastExportSubfolder(rawOutPath, subFolder);
     return res.json(buildExportResult(outPath));
   } catch (e) {

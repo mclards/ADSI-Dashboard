@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.37</span>
+    <span><b>Version:</b> 2.4.38</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -544,9 +544,10 @@
     <a href="#s16"><span class="toc-num">16</span> Operator Messaging</a>
     <a href="#s17"><span class="toc-num">17</span> Cloud Backup &amp; Restore</a>
     <a href="#s18"><span class="toc-num">18</span> Workflows</a>
-    <a href="#s19"><span class="toc-num">19</span> Keyboard Shortcuts</a>
-    <a href="#s20"><span class="toc-num">20</span> Troubleshooting</a>
-    <a href="#s21"><span class="toc-num">21</span> Quick Reference</a>
+    <a href="#s19"><span class="toc-num">19</span> IP Configuration</a>
+    <a href="#s20"><span class="toc-num">20</span> Keyboard Shortcuts</a>
+    <a href="#s21"><span class="toc-num">21</span> Troubleshooting</a>
+    <a href="#s22"><span class="toc-num">22</span> Quick Reference</a>
   </div>
 </nav>
 
@@ -831,7 +832,41 @@
   </table>
 
   <h3>Cap Status Panel</h3>
-  <p>The panel reports current plant MW, configured MW band, controller mode and status, reason text, controlled inverter count, last automatic action, planner warnings, and the next-step preview table.</p>
+  <p>The status panel below the controls shows the current cap state at a glance:</p>
+  <table>
+    <thead><tr><th>Field</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Status</td><td>Current cap mode: <strong>Active</strong>, <strong>Idle</strong>, or <strong>Cooldown</strong></td></tr>
+      <tr><td>Reason</td><td>Why the cap triggered — e.g. "Exceeded threshold" or "Manual override"</td></tr>
+      <tr><td>Last Action</td><td>Timestamp of the most recent cap event</td></tr>
+      <tr><td>Cooldown</td><td>Remaining cooldown time before the cap can re-engage</td></tr>
+      <tr><td>Curtailed</td><td>Total energy curtailed (MWh) in the current cap session</td></tr>
+      <tr><td>Controllable</td><td>Number of inverters available for cap dispatch</td></tr>
+      <tr><td>Pending</td><td>Inverters currently in a pending stop/start state</td></tr>
+      <tr><td>Exempted</td><td>Inverters excluded from cap control (e.g. isolated or in error)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Controlled Inverters Table</h3>
+  <p>When the cap is active, the table lists each stopped inverter:</p>
+  <table>
+    <thead><tr><th>Column</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter</td><td>Inverter label</td></tr>
+      <tr><td>Stopped At</td><td>Time the cap stop command was issued</td></tr>
+      <tr><td>Duration</td><td>How long the inverter has been stopped</td></tr>
+      <tr><td>Pac Removed</td><td>Output power (kW) removed from the plant by stopping this unit</td></tr>
+      <tr><td>Nodes</td><td>Number of nodes stopped</td></tr>
+      <tr><td>Rated kW</td><td>Nominal rated output of the inverter</td></tr>
+      <tr><td>Depend. kW</td><td>Dependent output estimate used in cap calculations</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Cap-Stopped Card Indicators</h3>
+  <p>Each inverter card in the main grid shows a visual indicator when it has been stopped by the cap controller. The indicator distinguishes a cap-stop from a manual stop so operators can immediately identify cap-affected units.</p>
+
+  <h3>Cap Plan Preview</h3>
+  <p>Before committing a dispatch, the cap controller displays a preview of the planned stop sequence — which inverters will be stopped, in what order, and the estimated power removal at each step. This allows operators to review the plan before execution when manual confirmation is enabled.</p>
 
   <div class="info-card warn">
     <div class="info-card-label">Important</div>
@@ -887,9 +922,10 @@
       <tr><td>Peak Interval</td><td>Highest interval energy with timestamp</td></tr>
     </tbody>
   </table>
+  <p><strong>Live updates:</strong> When today's date is selected, the summary card and interval charts refresh automatically on each server push at the same cadence as the header energy counter — no manual reload is required. For past dates, data loads on demand when you click <strong>Load View</strong>.</p>
 
   <h3>Day-Ahead Generator</h3>
-  <p>Available on the gateway workstation only. Includes Days input, Format selector (Standard or Average Table), Generate button, and Export button.</p>
+  <p>Available on the gateway workstation only. Enter a Days value and click Generate to produce the day-ahead forecast. Export is handled on the dedicated Export page.</p>
 
   <h3>7-Day Weather Outlook</h3>
   <p>Daily weather context: sky condition, temperature range, rainfall, cloud percentage, wind speed, and solar irradiance. Serves stale cached data when the weather API is unavailable.</p>
@@ -903,7 +939,7 @@
     <span class="section-num">8</span>
     <h2>Forecast Page</h2>
   </div>
-  <p>Dedicated workspace for forecast configuration, Solcast validation, toolkit preview, and export.</p>
+  <p>Dedicated workspace for forecast configuration, Solcast validation, and toolkit preview.</p>
 
   <h3>Forecast Source Options</h3>
   <table>
@@ -943,8 +979,6 @@
       <tr><td>Start Day</td><td>First day shown in preview</td></tr>
       <tr><td>Days to Display</td><td>Number of days included</td></tr>
       <tr><td>Chart Unit</td><td>View values as MWh or MW</td></tr>
-      <tr><td>Export Resolution</td><td>Preview export interval</td></tr>
-      <tr><td>Export Format</td><td>Standard or Average Table</td></tr>
       <tr><td>Forecast Total</td><td>Total forecasted energy in selected window</td></tr>
       <tr><td>Estimated Actual</td><td>Estimated actual value for comparison</td></tr>
     </tbody>
@@ -956,7 +990,6 @@
     <tbody>
       <tr><td>Save and Test Solcast</td><td>Saves active values, then tests the chosen Solcast mode</td></tr>
       <tr><td>Refresh Preview</td><td>Reloads toolkit preview using current form values</td></tr>
-      <tr><td>Export XLSX</td><td>Exports the current preview</td></tr>
     </tbody>
   </table>
 
@@ -1074,6 +1107,7 @@
     <h2>Energy Page</h2>
   </div>
   <p>5-minute interval energy records by inverter for detailed production verification.</p>
+  <p><strong>Live updates:</strong> When today's date is selected, the Energy page refreshes interval data automatically with each server push. For past dates, use <strong>Load View</strong> to fetch data on demand.</p>
 
   <h3>KPI Summary Tiles</h3>
   <table>
@@ -1118,12 +1152,16 @@
       <tr><td>Inverter</td><td>Affected inverter</td></tr>
       <tr><td>Node</td><td>Affected node or aggregated scope</td></tr>
       <tr><td>Action</td><td>START, STOP, etc.</td></tr>
+      <tr><td>Reason</td><td>Why the action was taken — e.g. "User request", "Cap dispatch", "Cooldown"</td></tr>
       <tr><td>Scope</td><td>single, inverter, selected, or plant-cap</td></tr>
       <tr><td>Result</td><td>OK or ERROR</td></tr>
       <tr><td>IP</td><td>Source workstation address</td></tr>
     </tbody>
   </table>
   <p>All columns support sorting. An inline filter row enables targeted review by operator, action, scope, result, or IP address.</p>
+
+  <h3>Plant-Cap Scope Indicator</h3>
+  <p>Audit entries generated by the Plant Output Cap Controller are tagged with a scope indicator. This visually distinguishes cap-initiated commands (bulk automated dispatch) from operator-initiated commands, making it straightforward to review cap activity separately from manual operations.</p>
 
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
@@ -1492,13 +1530,16 @@
   <div class="wf-card">
     <h4>Plant Output Cap Workflow</h4>
     <ol class="steps">
-      <li>Open the <b>Inverters</b> page and click <b>Show Cap</b>.</li>
-      <li>Set <b>Upper Limit</b> and <b>Lower Limit</b> in MW.</li>
-      <li>Choose the inverter <b>Sequence</b> and add exemptions if needed.</li>
-      <li>Click <b>Preview Plan</b> to review proposed actions.</li>
-      <li>Click <b>Enable Cap</b> and complete authorization.</li>
-      <li>Monitor status, reason, controlled count, and planner warnings.</li>
-      <li>Use <b>Release Controlled Inverters</b> to end the session.</li>
+      <li>Navigate to the <strong>Cap</strong> page.</li>
+      <li>Set the <strong>Target MW</strong> threshold — plant output above this value will trigger curtailment.</li>
+      <li>Set the <strong>Priority Order</strong> — defines which inverters are stopped first (e.g. smallest output first, or a custom sequence).</li>
+      <li>Configure <strong>Cooldown</strong> — minimum time between cap events to prevent rapid cycling.</li>
+      <li>Enable <strong>Auto-Release</strong> if you want stopped inverters restarted automatically when output drops below threshold.</li>
+      <li>Review the <strong>Cap Plan Preview</strong> to confirm the planned stop sequence before activating.</li>
+      <li>Click <strong>Activate Cap</strong> to arm the controller. Status changes to <strong>Active</strong>.</li>
+      <li>Monitor the <strong>Cap Status Panel</strong> and <strong>Controlled Inverters Table</strong> for real-time dispatch state.</li>
+      <li>To release all stopped inverters early, click <strong>Release All</strong>. The cap remains armed unless explicitly disabled.</li>
+      <li>To disarm, click <strong>Deactivate Cap</strong>. All stopped inverters are released and the controller returns to <strong>Idle</strong>.</li>
     </ol>
   </div>
 
@@ -1540,10 +1581,46 @@
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 19. Keyboard Shortcuts ──── -->
+<!-- ──── 19. IP Configuration ──── -->
 <section id="s19">
+  <span class="section-num">19</span>
+  <h2>IP Configuration</h2>
+  <p>Open from <strong>Settings → IP Configuration</strong> or <kbd>Ctrl+I</kbd>. An authentication code is required to access this panel. The session remains active for 1 hour after successful authentication.</p>
+
+  <h3>Configuration Table</h3>
+  <p>Each row in the table represents one inverter. Columns:</p>
+  <table>
+    <thead><tr><th>Column</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Inverter</td><td>Inverter label</td></tr>
+      <tr><td>IP Address</td><td>Modbus TCP target address</td></tr>
+      <tr><td>Polling Interval</td><td>Data refresh rate in milliseconds</td></tr>
+      <tr><td>Enabled Units</td><td>Number of active nodes to poll</td></tr>
+      <tr><td>Loss %</td><td>Estimated cable/connection loss — used by forecast engine</td></tr>
+      <tr><td>Save</td><td>Saves changes for that inverter row</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Loss % and Forecasting</h3>
+  <p>When a Loss % value is set for an inverter, the forecast engine reduces that inverter's historical energy contribution by that percentage when building training data, computing error corrections, and scoring forecast quality. This improves forecast accuracy for inverters with known cable or connection degradation.</p>
+
+  <h3>Additional Controls</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Check Status</td><td>Tests the current IP configuration by polling each inverter</td></tr>
+      <tr><td>Open Topology</td><td>Opens the network topology view (separate authentication required, 10-minute session)</td></tr>
+      <tr><td>Theme toggle</td><td>Switch between light and dark display modes</td></tr>
+    </tbody>
+  </table>
+
+  <a href="#toc" class="back-top">&uarr; Back to top</a>
+</section>
+
+<!-- ──── 20. Keyboard Shortcuts ──── -->
+<section id="s20">
   <div class="section-head">
-    <span class="section-num">19</span>
+    <span class="section-num">20</span>
     <h2>Keyboard Shortcuts</h2>
   </div>
   <table>
@@ -1560,20 +1637,19 @@
 
   <h3>Interface Tips</h3>
   <ul>
-    <li>Use the alarm bell for active alarm review without changing pages</li>
-    <li>Use the operator message bubble for shift notes and remote coordination</li>
-    <li>Use <b>Open Folder</b> in Settings to verify export output quickly</li>
-    <li>Hover over controls and metrics for tooltip descriptions</li>
-    <li>Use <b>Check for Updates</b> and <b>Refresh License</b> during planned maintenance windows</li>
+    <li>The <strong>alarm bell icon</strong> in the header shows a badge count for active unacknowledged alarms. Clicking it opens the alarm notification panel — a slide-in drawer that lists recent alarm events with inverter, severity, and timestamp. You can acknowledge individual alarms or clear all from this panel without navigating to the full Alarms page.</li>
+    <li>The <strong>sidebar navigation</strong> collapses to icons-only on narrow windows. Hover over an icon to see the page label tooltip.</li>
+    <li>Use <kbd>Ctrl+R</kbd> on any data page to force a full data reload from the server.</li>
+    <li>The <strong>theme toggle</strong> (sun/moon icon) in the header switches between light and dark mode. The preference is saved locally.</li>
   </ul>
 
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 20. Troubleshooting ──── -->
-<section id="s20">
+<!-- ──── 21. Troubleshooting ──── -->
+<section id="s21">
   <div class="section-head">
-    <span class="section-num">20</span>
+    <span class="section-num">21</span>
     <h2>Troubleshooting</h2>
   </div>
   <table>
@@ -1645,10 +1721,10 @@
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>
 
-<!-- ──── 21. Quick Reference ──── -->
-<section id="s21">
+<!-- ──── 22. Quick Reference ──── -->
+<section id="s22">
   <div class="section-head">
-    <span class="section-num">21</span>
+    <span class="section-num">22</span>
     <h2>Quick Reference</h2>
   </div>
 
@@ -1719,7 +1795,7 @@
 
 <!-- ═══════ FOOTER ═══════ -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.37</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.4.38</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

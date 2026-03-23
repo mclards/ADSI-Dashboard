@@ -561,6 +561,18 @@ async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
   const widths = labels.map((label) =>
     inferXlsxColumnWidth(label, label, options),
   );
+  // Expand widths to fit actual cell content
+  const WIDE_COL_RE = /(description|message|notes?|reason|status|path|url|range|label|site|operator|plant)/i;
+  for (const row of rows) {
+    if (!row || isBlankXlsxRow(row, keys)) continue;
+    for (let ci = 0; ci < keys.length; ci++) {
+      const raw = String(row[keys[ci]] ?? '').trim();
+      if (!raw) continue;
+      const maxW = WIDE_COL_RE.test(labels[ci]) ? 72 : 44;
+      const needed = Math.min(maxW, raw.length + 2);
+      if (needed > widths[ci]) widths[ci] = needed;
+    }
+  }
   const ws = wb.addWorksheet(String(sheetName || 'Export').slice(0, 31), {
     views: [{ state: 'frozen', ySplit: Number(options?.freezeHeader ? 1 : 0) }],
   });
@@ -571,7 +583,7 @@ async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
     style: { alignment: { horizontal: 'left', vertical: 'middle' } },
   }));
   ws.properties.defaultRowHeight = 20;
-  if (options?.autoFilter !== false && keys.length > 0) {
+  if (options?.autoFilter === true && keys.length > 0) {
     ws.autoFilter = `A1:${columnNumberToLetter(keys.length)}1`;
   }
 
@@ -697,7 +709,7 @@ async function writeXlsxExport(headers, rows, xlsxPath, options = {}) {
     rows,
     {
       freezeHeader: true,
-      autoFilter: options?.autoFilter !== false,
+      autoFilter: false,
       worksheetKind: options?.worksheetKind || 'data',
     },
   );
@@ -726,17 +738,20 @@ const EXPORT_FOLDERS = {
   forecast: 'Forecast',
 };
 const FORECAST_EXPORT_SUBFOLDERS = {
-  analytics: 'Analytics',
-  solcast: 'Solcast',
+  analytics:        'Analytics',
+  analyticsDay:     'Analytics/Day-Ahead',
+  solcast:          'Solcast',
+  solcastDayAhead:  'Solcast/Day-Ahead',
+  solcastPreview:   'Solcast/Preview',
+  solcastWeekAhead: 'Solcast/Week-Ahead',
 };
 
 function normalizeForecastExportSubfolder(subFolder) {
-  const raw = String(subFolder || '').trim().toLowerCase();
-  if (raw === 'analytics') return FORECAST_EXPORT_SUBFOLDERS.analytics;
-  if (raw === 'solcast') return FORECAST_EXPORT_SUBFOLDERS.solcast;
-  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(String(subFolder || '').trim())) {
-    return String(subFolder || '').trim();
-  }
+  const raw = String(subFolder || '').trim();
+  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(raw)) return raw;
+  const lc = raw.toLowerCase();
+  if (lc === 'analytics') return FORECAST_EXPORT_SUBFOLDERS.analytics;
+  if (lc === 'solcast') return FORECAST_EXPORT_SUBFOLDERS.solcast;
   throw new Error(`[exporter] Invalid forecast export subfolder: "${subFolder}"`);
 }
 
@@ -760,12 +775,19 @@ function rewriteForecastExportRelativePath(relativePath, subFolder) {
     return path.normalize(parts.join(path.sep));
   }
 
-  const nextPart = parts[forecastRootIdx + 1] || '';
-  if (Object.values(FORECAST_EXPORT_SUBFOLDERS).includes(nextPart)) {
-    parts[forecastRootIdx + 1] = normalizedSubFolder;
-  } else {
-    parts.splice(forecastRootIdx + 1, 0, normalizedSubFolder);
+  // Build set of all known subfolder segment names for replacement detection
+  const knownSegments = new Set(
+    Object.values(FORECAST_EXPORT_SUBFOLDERS).flatMap((v) => v.split('/')),
+  );
+  // Count how many consecutive known-segment parts follow Forecast/
+  const afterForecast = parts.slice(forecastRootIdx + 1);
+  let subFolderPartCount = 0;
+  for (const p of afterForecast) {
+    if (!knownSegments.has(p)) break;
+    subFolderPartCount++;
   }
+  const newSubFolderParts = normalizedSubFolder.split('/').filter(Boolean);
+  parts.splice(forecastRootIdx + 1, subFolderPartCount, ...newSubFolderParts);
   return path.normalize(parts.join(path.sep));
 }
 
@@ -1032,10 +1054,11 @@ function resolveExportSubDir(inverter, categoryFolder, subFolder = '') {
   const baseDir = resolveExportDir(inverter, categoryFolder);
   const normalizedSubFolder = String(subFolder || '').trim();
   if (!normalizedSubFolder) return baseDir;
-  if (normalizedSubFolder.includes('\\') || normalizedSubFolder.includes('/')) {
+  const parts = normalizedSubFolder.split(/[\\/]+/).filter(Boolean);
+  if (parts.some((p) => p === '..' || p === '.')) {
     throw new Error(`[exporter] Invalid export subfolder: "${subFolder}"`);
   }
-  const target = path.join(baseDir, normalizedSubFolder);
+  const target = path.join(baseDir, ...parts);
   ensureDir(target);
   return target;
 }
@@ -1353,7 +1376,7 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
 function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
-  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
+  const dir = resolveExportSubDir(inverter, EXPORT_FOLDERS.energy, 'Summary');
   const headers = [
     { key: 'Date',       label: 'Date' },
     { key: 'Inverter_Number',   label: 'Inverter Number' },
@@ -1465,7 +1488,7 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ 5-min Energy CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function export5min({ startTs, endTs, inverter, format, resolution }) {
-  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.energy);
+  const dir = resolveExportSubDir(inverter, EXPORT_FOLDERS.energy, '5-Minute');
 
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
@@ -1690,7 +1713,7 @@ async function exportForecastActual({
 }) {
   const isSolcast = String(source || '').trim().toLowerCase() === 'solcast';
   const dir = resolveForecastExportDir(
-    isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics,
+    isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcastDayAhead : FORECAST_EXPORT_SUBFOLDERS.analyticsDay,
   );
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
@@ -1813,7 +1836,7 @@ async function exportForecastActual({
   });
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
-  const averageResolutionCode = `PT${Math.max(5, Number(spec.minutes || 5))}M`;
+  const averageResolutionCode = 'PT5M'; // Average Table always uses 5-min regardless of selected resolution
   const sourceTag = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
   const fileBase = exportDateAwareFileBase(
     s,
@@ -1932,23 +1955,14 @@ function buildSolcastPreviewFileBase(startDay, endDay, resolution, exportFormat)
   return exportDateAwareFileBase(s, e, 'all', suffix);
 }
 
-function buildSolcastAverageTableBuckets(values, bucketMinutes) {
-  const span = Math.max(1, Math.floor(bucketMinutes / 5));
-  const ordered = SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) => values.get(minute));
-  const buckets = [];
-  for (let i = 0; i < ordered.length; i += span) {
-    const slice = ordered
-      .slice(i, i + span)
-      .map((value) => Number(value))
-      .filter((value) => Number.isFinite(value));
-    if (!slice.length) continue;
-    const avg = slice.reduce((sum, value) => sum + value, 0) / slice.length;
-    buckets.push(avg);
-  }
-  if (!buckets.length) return null;
-  return roundSolcastExportNumber(
-    buckets.reduce((sum, value) => sum + value, 0) / buckets.length,
-  );
+function buildSolcastAverageTableBuckets(values) {
+  // Always 12 five-min slots per hour; average = sum / 12 (nulls treated as 0)
+  const finite = SOLCAST_AVERAGE_TABLE_MINUTES.map((m) => {
+    const v = values.get(m);
+    return v != null && Number.isFinite(Number(v)) ? Number(v) : 0;
+  });
+  if (!finite.some((v) => v > 0)) return null;
+  return roundSolcastExportNumber(finite.reduce((sum, v) => sum + v, 0) / 12);
 }
 
 function buildSolcastAverageTableDays(rawRows, resolution) {
@@ -1999,7 +2013,7 @@ function buildSolcastAverageTableDays(rawRows, resolution) {
         values: SOLCAST_AVERAGE_TABLE_MINUTES.map((minute) =>
           hourEntry.values.has(minute) ? hourEntry.values.get(minute) : null,
         ),
-        average: buildSolcastAverageTableBuckets(hourEntry.values, bucketMinutes),
+        average: buildSolcastAverageTableBuckets(hourEntry.values),
       })),
     }));
 }
@@ -2076,10 +2090,25 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
   const ws = wb.addWorksheet(sheetName, {
     views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
   });
+  // Compute column widths from actual content
+  const _hourW = Math.max(
+    'HOURS'.length + 2,
+    ...resolvedDayEntry.rows.map((r) => String(r.hour ?? '').length + 2),
+  );
+  const _avgW = Math.max(
+    averageLabel.length + 2,
+    ...resolvedDayEntry.rows.map((r) => String(r.average ?? '').length + 2),
+  );
+  const _minW = Math.max(
+    ...SOLCAST_AVERAGE_TABLE_MINUTES.map((m) => String(m).length + 2),
+    ...resolvedDayEntry.rows.flatMap((r) =>
+      (r.values || []).map((v) => (v == null ? 0 : String(v).length + 2)),
+    ),
+  );
   ws.columns = [
-    { width: 10 },
-    ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: 11 })),
-    { width: 18 },
+    { width: _hourW },
+    ...SOLCAST_AVERAGE_TABLE_MINUTES.map(() => ({ width: _minW })),
+    { width: _avgW },
   ];
   ws.properties.defaultRowHeight = 20;
   ws.getRow(1).height = 24;
@@ -2159,7 +2188,8 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
   totalLabelCell.border = AVERAGE_TABLE_BORDER;
 
   const totalValueCell = ws.getCell(totalRowIndex, 14);
-  totalValueCell.value = resolvedDayEntry.totalMwh == null ? 0 : resolvedDayEntry.totalMwh;
+  const avgColTotal = renderedRows.reduce((sum, row) => sum + (row.average == null ? 0 : row.average), 0);
+  totalValueCell.value = roundSolcastExportNumber(avgColTotal);
   totalValueCell.numFmt = '0.000000';
   totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
   totalValueCell.font = { bold: true };
@@ -2190,7 +2220,7 @@ function buildForecastActualAverageTableRows(rawRows) {
 async function writeSolcastAverageTableXlsx(rawRows, startDay, endDay, resolution, exportFormat) {
   const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
   const days = buildSolcastAverageTableDays(rawRows, normalizedResolution);
-  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcastPreview);
   const fileBase = buildSolcastPreviewFileBase(
     startDay,
     endDay,
@@ -2239,7 +2269,7 @@ async function writeDayAheadAverageTableXlsx({
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
 
-  const subFolder = isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcast : FORECAST_EXPORT_SUBFOLDERS.analytics;
+  const subFolder = isSolcast ? FORECAST_EXPORT_SUBFOLDERS.solcastDayAhead : FORECAST_EXPORT_SUBFOLDERS.analyticsDay;
   const dir = resolveForecastExportDir(subFolder);
   const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
   const metaLabel = isSolcast ? 'Solcast Day-Ahead Average Table Export' : 'Trained Day-Ahead Average Table Export';
@@ -2269,7 +2299,7 @@ async function exportSolcastPreview({
   exportFormat,
   format,
 }) {
-  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcastPreview);
   const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
   const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
   if (normalizedExportFormat === 'average-table') {
@@ -2317,44 +2347,211 @@ async function exportSolcastPreview({
   return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
 
-async function exportSolcastWeekAhead({ days, slotRows, resolution, format, startDay, endDay }) {
-  const isSlot = String(resolution || 'daily').trim().toLowerCase() === 'slot';
-  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcast);
-  const filenameBase = `Solcast_WeekAhead_${startDay}_${endDay}${isSlot ? '_Slot' : '_Daily'}`;
 
-  if (isSlot) {
-    const headers = [
-      { key: 'Date',          label: 'Date' },
-      { key: 'Time',          label: 'Time' },
-      { key: 'ForecastKWh',   label: 'Forecast (KWh)' },
-      { key: 'ForecastLoKWh', label: 'Forecast Lo (KWh)' },
-      { key: 'ForecastHiKWh', label: 'Forecast Hi (KWh)' },
-    ];
-    const rows = (slotRows || []).map((r) => ({
-      Date:          r.date,
-      Time:          r.time,
-      ForecastKWh:   r.forecastKwh,
-      ForecastLoKWh: r.forecastLoKwh,
-      ForecastHiKWh: r.forecastHiKwh,
-    }));
-    return writeExport(headers, rows, dir, filenameBase, format, { title: 'Solcast Week-Ahead Slot Export' });
+async function exportSolcastWeekAhead({ days, slotRows, format, resolution, startDay, endDay }) {
+  const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcastWeekAhead);
+  ensureDir(dir);
+  const startTs = parseIsoDayStart(startDay) || Date.now();
+  const endTs   = parseIsoDayStart(endDay || startDay) || startTs;
+
+  // Normalize resolution and derive slot aggregation step
+  const rawRes = String(resolution || '5min').trim().toLowerCase().replace(/\s+/g, '');
+  const normRes = rawRes === '15min' ? '15min'
+               : rawRes === '30min' ? '30min'
+               : (rawRes === '1hr' || rawRes === '1h' || rawRes === 'hourly') ? '1hr'
+               : '5min';
+  const slotStep = { '5min': 1, '15min': 3, '30min': 6, '1hr': 12 }[normRes];
+
+  const fileBase = exportDateAwareFileBase(startTs, endTs, 'all', `Solcast Week-Ahead ${normRes}`);
+
+  const sortedDays = [...(days || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const dateList = sortedDays.map((d) => String(d.date));
+
+  // Solar window: slot 61 = 05:05 (first generation slot), slot 216 = 18:00 (end of day)
+  // Buckets are labeled by their END slot time: e.g. Hourly bucket 5:05-6:00 → label "06:00"
+  const SOLAR_START = 61;
+  const SOLAR_END   = 216;
+
+  // Build raw 288-slot pivot per date
+  const rawPivot = new Map();
+  for (const d of dateList) rawPivot.set(d, new Array(288).fill(null));
+  for (const r of (slotRows || [])) {
+    if (!rawPivot.has(r.date)) continue;
+    const idx = Number(r.slot);
+    if (idx >= 0 && idx < 288) {
+      rawPivot.get(r.date)[idx] = roundSolcastExportNumber((r.forecastKwh || 0) / 1000);
+    }
   }
 
-  const headers = [
-    { key: 'Date',          label: 'Date' },
-    { key: 'ForecastMWh',   label: 'Forecast (MWh)' },
-    { key: 'ForecastLoMWh', label: 'Forecast Lo (MWh)' },
-    { key: 'ForecastHiMWh', label: 'Forecast Hi (MWh)' },
-    { key: 'Status',        label: 'Status' },
-  ];
-  const rows = (days || []).map((d) => ({
-    Date:          d.date,
-    ForecastMWh:   Number((d.totalKwh   / 1000).toFixed(6)),
-    ForecastLoMWh: Number((d.totalLoKwh / 1000).toFixed(6)),
-    ForecastHiMWh: Number((d.totalHiKwh / 1000).toFixed(6)),
-    Status:        d.hasData ? 'Available' : 'No Data',
+  // Build solar-window buckets labeled by END slot time
+  const buckets = [];
+  for (let i = SOLAR_START; i <= SOLAR_END; i += slotStep) {
+    const endIdx = Math.min(i + slotStep - 1, SOLAR_END);
+    const endMin = endIdx * 5;
+    const hh = Math.floor(endMin / 60);
+    const mm = endMin % 60;
+    buckets.push({
+      label: `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
+      startIdx: i,
+      endIdx,
+    });
+  }
+
+  // Aggregate raw slots into buckets per date
+  const aggPivot = new Map();
+  for (const d of dateList) {
+    const raw = rawPivot.get(d);
+    aggPivot.set(d, buckets.map((b) => {
+      let sum = null;
+      for (let i = b.startIdx; i <= b.endIdx; i++) {
+        if (raw[i] != null) sum = (sum || 0) + raw[i];
+      }
+      return sum != null ? roundSolcastExportNumber(sum) : null;
+    }));
+  }
+
+  // Pre-compute per-day stats from aggregated values
+  const dayStats = new Map();
+  for (const d of dateList) {
+    const arr = aggPivot.get(d);
+    let maxIdx = -1, maxVal = -Infinity, minIdx = -1, minVal = Infinity, total = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v == null) continue;
+      total += v;
+      if (v > maxVal) { maxVal = v; maxIdx = i; }
+      if (v > 0 && v < minVal) { minVal = v; minIdx = i; }
+    }
+    dayStats.set(d, {
+      maxIdx: maxIdx >= 0 ? maxIdx : -1,
+      maxVal: maxIdx >= 0 ? roundSolcastExportNumber(maxVal) : 0,
+      minIdx: minIdx >= 0 ? minIdx : -1,
+      minVal: minIdx >= 0 ? roundSolcastExportNumber(minVal) : 0,
+      total: roundSolcastExportNumber(total),
+    });
+  }
+
+  const isCsv = String(format || 'xlsx').trim().toLowerCase() === 'csv';
+  if (isCsv) {
+    const headers = [
+      { key: 'date', header: 'Date' },
+      { key: 'time', header: 'Time' },
+      { key: 'forecastMwh', header: 'Forecast MWh' },
+    ];
+    const csvRows = [];
+    for (const d of dateList) {
+      const agg = aggPivot.get(d);
+      for (let bIdx = 0; bIdx < buckets.length; bIdx++) {
+        const v = agg[bIdx];
+        csvRows.push({ date: d, time: buckets[bIdx].label, forecastMwh: v != null ? v : '' });
+      }
+    }
+    return await writeExport(headers, csvRows, dir, fileBase, 'csv');
+  }
+
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MON_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function fmtColDate(iso) {
+    const d = new Date(`${iso}T00:00:00`);
+    return `${DAY_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  }
+
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+  const wb = new ExcelJS.Workbook();
+  setWorkbookMetadata(wb, 'Solcast Week-Ahead Generation Forecast');
+  const ws = wb.addWorksheet('Week-Ahead');
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  // Compute column widths from actual content
+  const _timeColW = Math.max(
+    'Time'.length + 2,
+    ...buckets.map((b) => b.label.length + 2),
+  );
+  const _dateColW = Math.max(
+    ...dateList.map((d) => fmtColDate(d).length + 2),
+    ...buckets.flatMap((b, bIdx) =>
+      dateList.map((d) => {
+        const v = aggPivot.get(d)[bIdx];
+        return v != null ? String(v).length + 2 : 0;
+      }),
+    ),
+  );
+  ws.columns = [{ width: _timeColW }, ...dateList.map(() => ({ width: _dateColW }))];
+
+  const highFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } };
+  const lowFill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD6E4BC' } };
+  const totFill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCE6F1' } };
+
+  // Header row
+  const hdrRow = ws.addRow(['Time', ...dateList.map(fmtColDate)]);
+  hdrRow.height = 22;
+  hdrRow.eachCell({ includeEmpty: true }, (cell) => {
+    cell.fill = XLSX_THEME.headerFill;
+    cell.font = { ...XLSX_THEME.headerFont, size: 10 };
+    cell.border = XLSX_THEME.headerBorder;
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false };
+  });
+
+  // Data rows (solar window buckets only)
+  for (let bIdx = 0; bIdx < buckets.length; bIdx++) {
+    const rowVals = [buckets[bIdx].label, ...dateList.map((d) => {
+      const v = aggPivot.get(d)[bIdx];
+      return v != null ? v : '';
+    })];
+    const row = ws.addRow(rowVals);
+    row.height = 16;
+    const isAlt = bIdx % 2 === 1;
+    row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+      cell.border = XLSX_THEME.cellBorder;
+      if (colNum === 1) {
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.font = { size: 9 };
+        if (isAlt) cell.fill = XLSX_THEME.altRowFill;
+      } else {
+        const d = dateList[colNum - 2];
+        const s = d ? dayStats.get(d) : null;
+        cell.numFmt = '0.000000';
+        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+        if (s && s.maxIdx === bIdx) {
+          cell.fill = highFill;
+          cell.font = { size: 9, bold: true };
+        } else if (s && s.minIdx === bIdx) {
+          cell.fill = lowFill;
+          cell.font = { size: 9, bold: true };
+        } else {
+          cell.font = { size: 9 };
+          if (isAlt) cell.fill = XLSX_THEME.altRowFill;
+        }
+      }
+    });
+  }
+
+  // Summary rows
+  function addSummaryRow(label, fill, vals) {
+    const row = ws.addRow([label, ...vals]);
+    row.height = 20;
+    row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+      cell.fill = fill;
+      cell.font = { bold: true, size: 10 };
+      cell.border = XLSX_THEME.cellBorder;
+      cell.alignment = colNum === 1
+        ? { horizontal: 'center', vertical: 'middle' }
+        : { horizontal: 'right', vertical: 'middle' };
+      if (colNum > 1) cell.numFmt = '0.000000';
+    });
+  }
+
+  addSummaryRow('HIGHEST', highFill, dateList.map((d) => {
+    const s = dayStats.get(d); return s && s.maxVal > 0 ? s.maxVal : '';
   }));
-  return writeExport(headers, rows, dir, filenameBase, format, { title: 'Solcast Week-Ahead Daily Export' });
+  addSummaryRow('LOWEST', lowFill, dateList.map((d) => {
+    const s = dayStats.get(d); return s && s.minVal > 0 ? s.minVal : '';
+  }));
+  addSummaryRow('TOTAL', totFill, dateList.map((d) => {
+    const s = dayStats.get(d); return s ? s.total : '';
+  }));
+
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
 }
 
 module.exports = {

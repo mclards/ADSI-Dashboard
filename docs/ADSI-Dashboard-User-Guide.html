@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.37</span>
+    <span><b>Version:</b> 2.4.38</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -934,7 +934,7 @@
   <p><strong>Live updates:</strong> When today&rsquo;s date is selected, the summary card and interval charts refresh automatically on each server push &mdash; no manual reload needed. For past dates, press <b>Load View</b>.</p>
 
   <h3>Day-Ahead Generator</h3>
-  <p>Available on the gateway workstation only. Includes Days input, Format selector (Standard or Average Table), Generate button, and Export button.</p>
+  <p>Available on the gateway workstation only. Enter a Days value and click Generate to produce the day-ahead forecast. Export is handled on the dedicated Export page.</p>
 
   <h3>7-Day Weather Outlook</h3>
   <p>Daily weather context: sky condition, temperature range, rainfall, cloud percentage, wind speed, and solar irradiance. Serves stale cached data when the weather API is unavailable.</p>
@@ -948,7 +948,7 @@
     <span class="section-num">8</span>
     <h2>Forecast Page</h2>
   </div>
-  <p>Dedicated workspace for forecast configuration, Solcast validation, toolkit preview, and export.</p>
+  <p>Dedicated workspace for forecast configuration, Solcast validation, and toolkit preview.</p>
 
   <h3>Forecast Source Options</h3>
   <table>
@@ -988,8 +988,6 @@
       <tr><td>Start Day</td><td>First day shown in preview</td></tr>
       <tr><td>Days to Display</td><td>Number of days included</td></tr>
       <tr><td>Chart Unit</td><td>View values as MWh or MW</td></tr>
-      <tr><td>Export Resolution</td><td>Preview export interval</td></tr>
-      <tr><td>Export Format</td><td>Standard or Average Table</td></tr>
       <tr><td>Forecast Total</td><td>Total forecasted energy in selected window</td></tr>
       <tr><td>Estimated Actual</td><td>Estimated actual value for comparison</td></tr>
     </tbody>
@@ -1001,7 +999,6 @@
     <tbody>
       <tr><td>Save and Test Solcast</td><td>Saves active values, then tests the chosen Solcast mode</td></tr>
       <tr><td>Refresh Preview</td><td>Reloads toolkit preview using current form values</td></tr>
-      <tr><td>Export XLSX</td><td>Exports the current preview</td></tr>
     </tbody>
   </table>
 
@@ -1808,7 +1805,7 @@
 
 <!-- ═══════ FOOTER ═══════ -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.37</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.4.38</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

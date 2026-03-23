@@ -426,19 +426,12 @@ function normalizeSolcastPreviewExportFormatClient(value) {
   return raw === "average-table" ? "average-table" : "standard";
 }
 
-function getSelectedSolcastPreviewResolution() {
-  return normalizeSolcastPreviewResolutionClient(
-    $("solcastPreviewResolution")?.value || State.solcastPreview.resolution || "PT5M",
-  );
-}
 
 function getSharedForecastExportFormat() {
   return normalizeSolcastPreviewExportFormatClient(
     State.forecastExportFormat ||
       State.solcastPreview.exportFormat ||
-      $("anaDayAheadExportFormat")?.value ||
       $("expForecastExportFormat")?.value ||
-      $("solcastPreviewExportFormat")?.value ||
       "standard",
   );
 }
@@ -454,11 +447,12 @@ function syncForecastActualFileFormatControl(exportFormat) {
   formatSel.disabled = forceXlsx;
 }
 
+
 function syncSharedForecastExportFormatControls(value) {
   const normalized = normalizeSolcastPreviewExportFormatClient(value);
   State.forecastExportFormat = normalized;
   State.solcastPreview.exportFormat = normalized;
-  ["solcastPreviewExportFormat", "anaDayAheadExportFormat", "expForecastExportFormat"].forEach((id) => {
+  ["expForecastExportFormat"].forEach((id) => {
     const input = $(id);
     if (!input || input.value === normalized) return;
     input.value = normalized;
@@ -467,9 +461,6 @@ function syncSharedForecastExportFormatControls(value) {
   return normalized;
 }
 
-function getSelectedSolcastPreviewExportFormat() {
-  return getSharedForecastExportFormat();
-}
 
 function normalizeInvGridLayout(value) {
   const v = String(value || "")
@@ -3968,18 +3959,12 @@ function syncForecastProviderUi() {
   }
   const previewDay = $("solcastPreviewDay");
   const previewDayCount = $("solcastPreviewDayCount");
-  const previewResolution = $("solcastPreviewResolution");
   const previewUnit = $("solcastPreviewUnit");
-  const previewExportFormat = $("solcastPreviewExportFormat");
   const previewBtn = $("btnSolcastPreviewRefresh");
-  const previewExportBtn = $("btnSolcastPreviewExport");
   if (previewDay) previewDay.disabled = apiMode;
   if (previewDayCount) previewDayCount.disabled = apiMode;
-  if (previewResolution) previewResolution.disabled = apiMode;
   if (previewUnit) previewUnit.disabled = apiMode;
-  if (previewExportFormat) previewExportFormat.disabled = apiMode;
   if (previewBtn) previewBtn.disabled = apiMode;
-  if (previewExportBtn) previewExportBtn.disabled = apiMode;
   if (apiMode) clearSolcastPreview(false);
   updateForecastSidebarSummary();
 }
@@ -4091,9 +4076,7 @@ function clearSolcastPreview(resetDays = false) {
     fillSolcastPreviewDayOptions([], "");
     syncSolcastPreviewDayCountOptions([], "", 1);
   }
-  const resolutionSel = $("solcastPreviewResolution");
   const unitSel = $("solcastPreviewUnit");
-  if (resolutionSel && resetDays) resolutionSel.value = "PT5M";
   if (unitSel && resetDays) unitSel.value = "mwh";
   updateSolcastPreviewUnitUi();
   setSolcastPreviewTotals("—", "—", "—", "05:00-18:00");
@@ -4415,41 +4398,6 @@ async function loadSolcastPreview(options = {}) {
   }
 }
 
-async function exportSolcastPreviewXlsx() {
-  const accessMode = String(
-    $("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit",
-  )
-    .trim()
-    .toLowerCase();
-  if (accessMode !== "toolkit") {
-    showMsg("solcastPreviewMsg", "Toolkit preview export is available only in Toolkit Login mode.", "error");
-    return;
-  }
-  const btn = $("btnSolcastPreviewExport");
-  if (btn) btn.disabled = true;
-  State.solcastPreview.exportFormat = getSelectedSolcastPreviewExportFormat();
-  showMsg("solcastPreviewMsg", "Exporting Solcast preview to Excel...", "");
-  try {
-    const payload = {
-      ...readSolcastSettingsForm(),
-      day: $("solcastPreviewDay")?.value || State.solcastPreview.day || "",
-      dayCount:
-        $("solcastPreviewDayCount")?.value || State.solcastPreview.dayCount || 1,
-      resolution: getSelectedSolcastPreviewResolution(),
-      exportFormat: getSelectedSolcastPreviewExportFormat(),
-    };
-    const result = await api("/api/export/solcast-preview", "POST", payload);
-    showMsg("solcastPreviewMsg", `✔ Saved: ${result.path}`, "");
-    await openExportPathFolder(result.path);
-    return result;
-  } catch (err) {
-    showMsg("solcastPreviewMsg", `✗ Export failed: ${err.message}`, "error");
-    throw err;
-  } finally {
-    if (btn) btn.disabled = false;
-    syncForecastProviderUi();
-  }
-}
 
 function syncOperationModeUi() {
   const selectedMode = getSelectedOperationModeClient();
@@ -10877,13 +10825,6 @@ function ensureAnalyticsCards() {
             title="Number of consecutive days to generate day-ahead forecasts for (1-31)."
           />
         </label>
-        <label for="anaDayAheadExportFormat" class="analytics-gen-field analytics-gen-field-format">
-          <span class="analytics-gen-label">Format</span>
-          <select id="anaDayAheadExportFormat" class="sel analytics-gen-select" title="Standard: one row per time slot. Average Table: grouped averages per resolution bucket.">
-            <option value="standard">Standard</option>
-            <option value="average-table">Average Table</option>
-          </select>
-        </label>
         <div class="analytics-gen-actions">
           <button
             id="btnDayAheadGenerate"
@@ -10892,14 +10833,6 @@ function ensureAnalyticsCards() {
             title="Generate day-ahead forecast from the selected date."
           >
             Generate
-          </button>
-          <button
-            id="btnDayAheadExport"
-            class="btn btn-outline analytics-gen-btn analytics-gen-export-btn"
-            type="button"
-            title="Export day-ahead vs actual for the selected date and chart interval."
-          >
-            Export
           </button>
         </div>
       </div>
@@ -10920,10 +10853,6 @@ function ensureAnalyticsCards() {
     genInput.value = String(
       Math.min(31, Math.max(1, Math.trunc(savedDayCount))),
     );
-  }
-  const analyticsFormatSel = totalSideCard.querySelector("#anaDayAheadExportFormat");
-  if (analyticsFormatSel) {
-    analyticsFormatSel.value = getSharedForecastExportFormat();
   }
   bindExportUiStatePersistence();
   syncDayAheadGeneratorAvailability();
@@ -11688,17 +11617,56 @@ async function runEnergyExport() {
   }
 }
 
-async function runForecastActualExport() {
-  const fcInput = $("expForecastDate");
-  if (fcInput) {
-    let v = sanitizeDateInputValue(fcInput.value);
-    if (!v) { v = today(); fcInput.value = v; }
-    // No max cap — day-ahead forecasts can be for future dates.
-    delete fcInput.max;
+function fillForecastDateSelectOptions(dates, selectedDate) {
+  const sel = $("expForecastDateSelect");
+  if (!sel) return;
+  sel.innerHTML = "";
+  if (!dates || !dates.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No snapshot dates available";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
   }
-  await persistExportUiState().catch(() => {});
-  const day = fcInput?.value;
+  dates.forEach((d) => {
+    const opt = document.createElement("option");
+    opt.value = d;
+    opt.textContent = d;
+    if (d === selectedDate) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.disabled = false;
+}
+
+async function loadForecastDateOptions(source) {
+  const sel = $("expForecastDateSelect");
+  if (!sel) return;
+  const url = source === "solcast"
+    ? "/api/solcast/snapshot-dates"
+    : "/api/analytics/forecast-dates";
+  try {
+    const r = await api(url, "GET");
+    const dates = Array.isArray(r?.dates) ? r.dates : [];
+    const current = sel.value;
+    fillForecastDateSelectOptions(dates, dates.includes(current) ? current : (dates[0] || ""));
+  } catch (e) {
+    fillForecastDateSelectOptions([], "");
+  }
+}
+
+function syncForecastDatePickerToSource(source) {
+  const input = $("expForecastDate");
+  const sel = $("expForecastDateSelect");
+  if (input) input.hidden = true;
+  if (sel) sel.hidden = false;
+  loadForecastDateOptions(source).catch(() => {});
+}
+
+async function runForecastActualExport() {
   const source = $("expForecastSource")?.value || "analytics";
+  await persistExportUiState().catch(() => {});
+  const day = $("expForecastDateSelect")?.value || "";
   const exportFormat = getSharedForecastExportFormat();
   const format = exportFormat === "average-table"
     ? "xlsx"
@@ -11753,108 +11721,22 @@ async function runForecastActualExport() {
   }
 }
 
-// ─── Solcast Week-Ahead ──────────────────────────────────────────────────────
-
-function renderSolcastWeekAheadTable(days, expectedSlots) {
-  const tbody = $("solcastWeekAheadTableBody");
-  const wrap = $("solcastWeekAheadTableWrap");
-  if (!tbody || !wrap) return;
-  tbody.innerHTML = "";
-  for (const d of days || []) {
-    const mwh    = (d.totalKwh   / 1000).toFixed(3);
-    const loMwh  = (d.totalLoKwh / 1000).toFixed(3);
-    const hiMwh  = (d.totalHiKwh / 1000).toFixed(3);
-    const slotCount = d.slots || 0;
-    const complete  = expectedSlots && slotCount >= expectedSlots;
-    const partial   = slotCount > 0 && !complete;
-    const slotsLabel = expectedSlots ? `${slotCount}/${expectedSlots}` : String(slotCount);
-    const tr = document.createElement("tr");
-    [d.date, mwh, loMwh, hiMwh, slotsLabel].forEach((val, i) => {
-      const td = document.createElement("td");
-      td.textContent = val;
-      if (i === 4) {
-        if (!d.hasData)  td.style.color = "var(--color-danger, #ef4444)";
-        else if (partial) td.style.color = "var(--color-warning, #f59e0b)";
-        else if (complete) td.style.color = "var(--color-success, #10b981)";
-      }
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  }
-  wrap.style.display = "";
-}
-
-function renderSolcastWeekAheadChart(days) {
-  const canvas = $("solcastWeekAheadChart");
-  const wrap = $("solcastWeekAheadChartWrap");
-  if (!canvas || !wrap) return;
-
-  const labels   = (days || []).map((d) => d.date);
-  const forecast = (days || []).map((d) => Number(((d.totalKwh   || 0) / 1000).toFixed(3)));
-  const lo       = (days || []).map((d) => Number(((d.totalLoKwh || 0) / 1000).toFixed(3)));
-  const hi       = (days || []).map((d) => Number(((d.totalHiKwh || 0) / 1000).toFixed(3)));
-
-  const existing = State.charts.solcastWeekAhead;
-  if (existing) {
-    existing.data.labels                = labels;
-    existing.data.datasets[0].data      = forecast;
-    existing.data.datasets[1].data      = lo;
-    existing.data.datasets[2].data      = hi;
-    existing.update("none");
-    wrap.style.display = "";
-    return;
-  }
-
-  State.charts.solcastWeekAhead = new Chart(canvas, {
-    type: "bar",
-    data: {
-      labels,
-      datasets: [
-        { label: "Forecast (MWh)", data: forecast, backgroundColor: "rgba(59,130,246,0.7)", borderColor: "#3b82f6", borderWidth: 1 },
-        { label: "Lo (MWh)",       data: lo,       backgroundColor: "rgba(16,185,129,0.4)", borderColor: "#10b981", borderWidth: 1 },
-        { label: "Hi (MWh)",       data: hi,       backgroundColor: "rgba(245,158,11,0.4)", borderColor: "#f59e0b", borderWidth: 1 },
-      ],
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { display: true } },
-      scales: { y: { beginAtZero: true, title: { display: true, text: "MWh" } } },
-    },
-  });
-  wrap.style.display = "";
-}
-
-async function loadSolcastWeekAhead() {
-  const resultEl = $("solcastWeekAheadResult");
-  if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "Loading…"; }
-  try {
-    const data = await api("/api/solcast/week-ahead", "GET");
-    renderSolcastWeekAheadTable(data.days || [], data.expectedSlotsPerDay || 0);
-    renderSolcastWeekAheadChart(data.days || []);
-    if (resultEl) resultEl.textContent = "";
-  } catch (err) {
-    if (resultEl) { resultEl.className = "exp-result error"; resultEl.textContent = "✗ " + err.message; }
-  }
-}
-
 async function runSolcastWeekAheadExport() {
-  const resultEl = $("solcastWeekAheadResult");
-  const resolution = $("solcastWeekAheadResolution")?.value || "daily";
-  const format     = $("solcastWeekAheadFormat")?.value     || "xlsx";
-  if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "Exporting…"; }
-  setExportButtonState("btnExportSolcastWeekAhead", "loading");
+  const res = $("expWeekAheadResult");
+  if (res) { res.className = "exp-result"; res.textContent = "Exporting…"; }
+  setExportButtonState("btnRunWeekAheadExport", "loading");
   try {
-    const r = await api("/api/export/solcast-week-ahead", "POST", { resolution, format });
-    if (resultEl) { resultEl.className = "exp-result"; resultEl.textContent = "✔ Saved: " + r.path; }
+    const format = $("expWeekAheadFormat")?.value || "xlsx";
+    const resolution = $("expWeekAheadResolution")?.value || "1hr";
+    const r = await api("/api/export/solcast-week-ahead", "POST", { format, resolution });
+    if (res) { res.className = "exp-result"; res.textContent = `✔ Saved: ${r.path}`; }
     await openExportPathFolder(r.path);
-    setExportButtonState("btnExportSolcastWeekAhead", "ok");
+    setExportButtonState("btnRunWeekAheadExport", "ok");
   } catch (e) {
-    if (resultEl) { resultEl.className = "exp-result error"; resultEl.textContent = "✗ " + e.message; }
-    setExportButtonState("btnExportSolcastWeekAhead", "fail");
+    if (res) { res.className = "exp-result error"; res.textContent = "✗ " + e.message; }
+    setExportButtonState("btnRunWeekAheadExport", "fail");
   }
 }
-
-// ─── End Solcast Week-Ahead ───────────────────────────────────────────────────
 
 function getAnalyticsForecastExportResolution() {
   const intervalMin = Number($("anaInterval")?.value || State.analyticsIntervalMin || 5);
@@ -11864,41 +11746,6 @@ function getAnalyticsForecastExportResolution() {
   return "5min";
 }
 
-async function runAnalyticsDayAheadExport() {
-  const day = String($("anaDate")?.value || today()).trim();
-  const res = $("genDayResult");
-  const bounds = day ? getAnalyticsSolarWindowBounds(day) : null;
-  const startTs = bounds?.startTs;
-  const endTs = bounds?.endTs;
-  const resolution = getAnalyticsForecastExportResolution();
-  const exportFormat = getSharedForecastExportFormat();
-
-  if (res) {
-    res.className = "exp-result";
-    res.textContent = "Exporting…";
-  }
-
-  try {
-    const r = await api("/api/export/forecast-actual", "POST", {
-      startTs,
-      endTs,
-      resolution,
-      format: "xlsx",
-      exportFormat,
-      source: "analytics",
-    });
-    if (res) {
-      res.className = "exp-result";
-      res.textContent = `✔ Exported ${day} (${resolution}${exportFormat === "average-table" ? ", average table" : ""})`;
-    }
-    await openExportPathFolder(r.path);
-  } catch (e) {
-    if (res) {
-      res.className = "exp-result error";
-      res.textContent = `✗ ${e.message}`;
-    }
-  }
-}
 
 async function runDayAheadGeneration() {
   if (isClientModeActive()) {
@@ -12690,8 +12537,10 @@ function bindEventHandlers() {
     ));
   $("btnRunEnergyExport")?.addEventListener("click", runEnergyExport);
   $("btnRunForecastExport")?.addEventListener("click", runForecastActualExport);
-  $("btnRefreshSolcastWeekAhead")?.addEventListener("click", loadSolcastWeekAhead);
-  $("btnExportSolcastWeekAhead")?.addEventListener("click", runSolcastWeekAheadExport);
+  $("expForecastSource")?.addEventListener("change", (e) => syncForecastDatePickerToSource(e.target.value));
+  syncForecastDatePickerToSource($("expForecastSource")?.value || "analytics");
+  $("btnRunWeekAheadExport")?.addEventListener("click", runSolcastWeekAheadExport);
+
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
   $("btnExportAudit")?.addEventListener("click", () =>
     runSingleDateExport(
@@ -12728,9 +12577,6 @@ function bindEventHandlers() {
   $("btnSolcastPreviewRefresh")?.addEventListener("click", () =>
     loadSolcastPreview({ silent: false }).catch(() => {}),
   );
-  $("btnSolcastPreviewExport")?.addEventListener("click", () =>
-    exportSolcastPreviewXlsx().catch(() => {}),
-  );
   $("solcastPreviewDay")?.addEventListener("change", (event) => {
     const nextDay = String(event?.target?.value || "").trim();
     if (!nextDay) return;
@@ -12745,16 +12591,8 @@ function bindEventHandlers() {
     const nextCount = normalizeSolcastPreviewDayCountClient(event?.target?.value || 1);
     loadSolcastPreview({ dayCount: nextCount, silent: true }).catch(() => {});
   });
-  $("solcastPreviewResolution")?.addEventListener("change", (event) => {
-    State.solcastPreview.resolution = normalizeSolcastPreviewResolutionClient(
-      event?.target?.value || "PT5M",
-    );
-  });
   $("solcastPreviewUnit")?.addEventListener("change", () => {
     rerenderSolcastPreviewChartFromState();
-  });
-  $("solcastPreviewExportFormat")?.addEventListener("change", (event) => {
-    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
   });
   $("expForecastExportFormat")?.addEventListener("change", (event) => {
     syncSharedForecastExportFormatControls(event?.target?.value || "standard");
@@ -12935,15 +12773,6 @@ function bindEventHandlers() {
   $("page-analytics")?.addEventListener("click", (e) => {
     if (e.target.closest("#btnDayAheadGenerate")) {
       runDayAheadGeneration();
-      return;
-    }
-    if (e.target.closest("#btnDayAheadExport")) {
-      runAnalyticsDayAheadExport();
-    }
-  });
-  $("page-analytics")?.addEventListener("change", (e) => {
-    if (e.target?.id === "anaDayAheadExportFormat") {
-      syncSharedForecastExportFormatControls(e.target.value);
     }
   });
 
@@ -13186,8 +13015,6 @@ async function init() {
     syncDayAheadGeneratorAvailability();
     bindExportUiStatePersistence();
     setupExportUiStateFlush();
-    setTimeout(() => loadSolcastWeekAhead(), 0);
-
     reportStartupProgress({
       step: 3,
       progress: 48,
