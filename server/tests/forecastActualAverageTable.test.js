@@ -54,16 +54,34 @@ async function run() {
 
   const mappedRows = buildForecastActualAverageTableRows(rawRows);
   assert.strictEqual(mappedRows.length, 3, "Expected 3 mapped 5-minute rows.");
-  assert.strictEqual(mappedRows[0].time, "05:05");
+  // period_start 05:05 → period_end 05:10
+  assert.strictEqual(mappedRows[0].time, "05:10");
   assert.strictEqual(mappedRows[0].forecastMw, 0.006);
   assert.strictEqual(mappedRows[2].forecastMwh, 0.0015);
 
   const days = buildSolcastAverageTableDays(mappedRows, "PT15M");
   assert.strictEqual(days.length, 1, "Expected a single day entry.");
   assert.strictEqual(days[0].day, "2026-03-14");
-  assert.deepStrictEqual(days[0].rows[4].values.slice(0, 3), [0.006, 0.012, 0.018]);
-  assert.strictEqual(days[0].rows[4].average, 0.012);
+  // Minute 5 is now null (no slot ends at 05:05); Minute 10=0.006, Minute 15=0.012
+  assert.deepStrictEqual(days[0].rows[4].values.slice(0, 3), [null, 0.006, 0.012]);
+  // PT15M buckets: bucket0=[null,0.006,0.012]→avg=0.009, bucket1=[0.018]→avg=0.018 → mean=0.0135
+  assert.strictEqual(days[0].rows[4].average, 0.0135);
   assert.strictEqual(days[0].totalMwh, 0.003);
+
+  // Boundary: day-ahead period_start 05:55 → period_end 06:00 → Hour 5, Minute 60 (index 11)
+  const boundaryRaw = [{ ts: new Date("2026-03-14T05:55:00").getTime(), kwh_inc: 2.0 }];
+  const boundaryMapped = buildForecastActualAverageTableRows(boundaryRaw);
+  assert.strictEqual(boundaryMapped.length, 1, "05:55 slot should survive solar-window filter.");
+  assert.strictEqual(boundaryMapped[0].time, "06:00", "05:55 period_start should map to 06:00 period_end.");
+  const boundaryDays = buildSolcastAverageTableDays(boundaryMapped, "PT5M");
+  assert.strictEqual(boundaryDays[0].rows[4].values[11], 0.024, "05:55 slot should land at Hour 5, Minute 60.");
+  assert.strictEqual(boundaryDays[0].rows[5].values[11], null, "05:55 slot must NOT land at Hour 6, Minute 60.");
+
+  // Boundary: Solcast period_end 06:00 → Hour 5, Minute 60 (not Hour 6)
+  const solcastBoundaryRows = [{ date: "2026-03-14", time: "06:00", forecastMw: 0.006, forecastMwh: 0.0005 }];
+  const solcastBoundaryDays = buildSolcastAverageTableDays(solcastBoundaryRows, "PT5M");
+  assert.strictEqual(solcastBoundaryDays[0].rows[4].values[11], 0.006, "Solcast 06:00 period_end should land at Hour 5, Minute 60.");
+  assert.strictEqual(solcastBoundaryDays[0].rows[5].values[11], null, "Solcast 06:00 must NOT land at Hour 6, Minute 60.");
 
   assert(
     appSource.includes('id="anaDayAheadExportFormat"'),
@@ -98,7 +116,7 @@ async function run() {
   );
   assert(
     indexServerSource.includes("normalizeForecastExportRelativePathForRoute") &&
-      indexServerSource.includes('ensureForecastExportSubfolder(rawOutPath, "Analytics")') &&
+      indexServerSource.includes('isSolcast ? "Solcast" : "Analytics"') &&
       indexServerSource.includes('ensureForecastExportSubfolder(rawOutPath, "Solcast")') &&
       indexServerSource.includes("relativePath: remoteRelativePath"),
     "Server routes should repair legacy flat forecast export paths for local and remote flows.",

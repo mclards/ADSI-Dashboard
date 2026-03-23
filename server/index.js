@@ -11070,6 +11070,10 @@ app.ws("/ws", (ws) => {
       settings: {
         inverterCount: Number(getSetting("inverterCount", 27)),
         plantName: getSetting("plantName", "ADSI Plant"),
+        exportLimitMw: (() => {
+          const n = Number(getSetting("forecastExportLimitMw", "24") || "24");
+          return Number.isFinite(n) && n > 0 ? n : 24;
+        })(),
       },
       plantCap: plantCap || null,
     }),
@@ -12021,6 +12025,74 @@ app.post("/api/plant-cap/release", async (req, res) => {
     return res
       .status(Number(err?.status || 500))
       .json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/plant-cap/history", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const rows = db
+      .prepare(
+        `SELECT ts, operator, inverter, node, action, scope, result, ip, reason
+         FROM audit_log
+         WHERE scope = 'plant-cap'
+         ORDER BY ts DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(limit, offset);
+    return res.json({ ok: true, history: rows, limit, offset });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/plant-cap/forecast-impact", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const upperMw = Number(req.query.upperMw);
+    if (!Number.isFinite(upperMw) || upperMw <= 0) {
+      return res.status(400).json({ ok: false, error: "upperMw must be a positive number" });
+    }
+    const now = new Date();
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const pad = (n) => String(n).padStart(2, "0");
+    const defaultDate = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}`;
+    const date = String(req.query.date || defaultDate).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+    }
+    const rows = db
+      .prepare("SELECT kwh_inc FROM forecast_dayahead WHERE date = ? AND kwh_inc > 0")
+      .all(date);
+    const slotCapKwh = upperMw * 1000 * 5 / 60;
+    let totalKwh = 0;
+    let curtailedKwh = 0;
+    let affectedSlots = 0;
+    for (const r of rows) {
+      const kwh = Number(r.kwh_inc || 0);
+      totalKwh += kwh;
+      if (kwh > slotCapKwh) {
+        curtailedKwh += kwh - slotCapKwh;
+        affectedSlots++;
+      }
+    }
+    return res.json({
+      ok: true,
+      date,
+      upperMw,
+      totalSlots: rows.length,
+      affectedSlots,
+      totalKwh: Math.round(totalKwh * 1000) / 1000,
+      curtailedKwh: Math.round(curtailedKwh * 1000) / 1000,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -13251,6 +13323,46 @@ app.post("/api/export/solcast-preview", async (req, res) => {
 });
 
 let forecastGenerating = false;
+const _forecastJobs = new Map(); // jobId → {status, startedAt, dates, result, error}
+
+function _gcForecastJobs() {
+  const runningCutoff = Date.now() - 30 * 60 * 1000;
+  const doneCutoff = Date.now() - 2 * 60 * 1000; // completed jobs freed after 2 min
+  for (const [id, job] of _forecastJobs) {
+    if (job.startedAt < runningCutoff) { _forecastJobs.delete(id); continue; }
+    if ((job.status === "done" || job.status === "error") && job.completedAt && job.completedAt < doneCutoff) {
+      _forecastJobs.delete(id);
+    }
+  }
+}
+
+function _forecastResultToResponse(r, extra = {}) {
+  return {
+    ok: true,
+    dates: r._dates,
+    count: r._dates ? r._dates.length : 0,
+    providerPreferred: r.provider_expected,
+    providerUsed: r.provider_used,
+    forecastVariant: r.forecast_variant,
+    forecastVariantsByDate: r.forecast_variants_by_date,
+    solcastFreshnessByDate: r.solcast_freshness_by_date,
+    totalsKwhByDate: r.totals_kwh_by_date,
+    fallbackUsed: r.provider_used !== r.provider_expected,
+    fallbackReason:
+      r.provider_used !== r.provider_expected
+        ? r.attempts?.find((a) => a.provider === r.provider_expected && !a.ok)?.error || "Preferred provider unavailable."
+        : "",
+    durationMs: r.durationMs,
+    normalizedRows: r.normalized_rows,
+    writtenRows: r.written_rows,
+    snapshotRowsPersisted: r.snapshot_rows_persisted,
+    snapshotWarnings: r.snapshot_warnings,
+    endpoint: r.endpoint,
+    solcastPull: r.solcast_pull,
+    attempts: r.attempts,
+    ...extra,
+  };
+}
 
 app.post("/api/forecast/generate", async (req, res) => {
   if (isRemoteMode()) {
@@ -13263,59 +13375,68 @@ app.post("/api/forecast/generate", async (req, res) => {
   if (forecastGenerating) {
     return res.status(409).json({ ok: false, error: "Forecast generation already in progress." });
   }
+
+  const body = req.body || {};
+  const mode = String(body.mode || "").trim();
+  let dates = [];
+  if (!mode || mode === "dayahead-days") {
+    const dayCount = clampInt(body.dayCount, 1, 31, 1);
+    const tomorrow = addDaysIso(localDateStr(), 1);
+    const lastDay = addDaysIso(tomorrow, dayCount - 1);
+    dates = daysInclusive(tomorrow, lastDay);
+  } else {
+    return res.status(400).json({ ok: false, error: "Invalid mode. Use 'dayahead-days'." });
+  }
+
   forecastGenerating = true;
+
+  // Async mode: fire-and-forget, return jobId immediately so the client
+  // can poll /api/forecast/generate/status/:jobId instead of blocking.
+  if (body.async === true) {
+    const jobId = crypto.randomUUID();
+    _forecastJobs.set(jobId, { status: "running", startedAt: Date.now(), dates, result: null, error: null });
+    _gcForecastJobs();
+    runDayAheadGenerationPlan({ dates, trigger: "manual_api" })
+      .then((result) => {
+        result._dates = dates;
+        const job = _forecastJobs.get(jobId);
+        if (job) { job.status = "done"; job.result = result; job.completedAt = Date.now(); }
+      })
+      .catch((e) => {
+        const job = _forecastJobs.get(jobId);
+        if (job) { job.status = "error"; job.error = e.message; job.completedAt = Date.now(); }
+      })
+      .finally(() => { forecastGenerating = false; });
+    return res.json({ ok: true, jobId, status: "running", dates, count: dates.length });
+  }
+
+  // Sync mode (original behaviour — used by Python delegate and legacy callers).
   try {
-    const body = req.body || {};
-    const mode = String(body.mode || "").trim();
-    let dates = [];
-
-    if (!mode || mode === "dayahead-days") {
-      const dayCount = clampInt(body.dayCount, 1, 31, 1);
-      const tomorrow = addDaysIso(localDateStr(), 1);
-      const lastDay = addDaysIso(tomorrow, dayCount - 1);
-      dates = daysInclusive(tomorrow, lastDay);
-    } else {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid mode. Use 'dayahead-days'.",
-      });
-    }
-
-    const result = await runDayAheadGenerationPlan({
-      dates,
-      trigger: "manual_api",
-    });
-
-    res.json({
-      ok: true,
-      mode,
-      dates,
-      count: dates.length,
-      providerPreferred: result.provider_expected,
-      providerUsed: result.provider_used,
-      forecastVariant: result.forecast_variant,
-      forecastVariantsByDate: result.forecast_variants_by_date,
-      solcastFreshnessByDate: result.solcast_freshness_by_date,
-      totalsKwhByDate: result.totals_kwh_by_date,
-      fallbackUsed: result.provider_used !== result.provider_expected,
-      fallbackReason:
-        result.provider_used !== result.provider_expected
-          ? result.attempts.find((a) => a.provider === result.provider_expected && !a.ok)?.error || "Preferred provider unavailable."
-          : "",
-      durationMs: result.durationMs,
-      normalizedRows: result.normalized_rows,
-      writtenRows: result.written_rows,
-      snapshotRowsPersisted: result.snapshot_rows_persisted,
-      snapshotWarnings: result.snapshot_warnings,
-      endpoint: result.endpoint,
-      solcastPull: result.solcast_pull,
-      attempts: result.attempts,
-    });
+    const result = await runDayAheadGenerationPlan({ dates, trigger: "manual_api" });
+    result._dates = dates;
+    res.json({ mode, ...(_forecastResultToResponse(result)) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   } finally {
     forecastGenerating = false;
   }
+});
+
+app.get("/api/forecast/generate/status/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) {
+    return res.status(400).json({ ok: false, error: "Invalid job ID format." });
+  }
+  const job = _forecastJobs.get(jobId);
+  if (!job) return res.status(404).json({ ok: false, error: "Job not found or expired." });
+  const elapsedMs = Date.now() - job.startedAt;
+  if (job.status === "done") {
+    return res.json({ status: "done", elapsedMs, ...(_forecastResultToResponse(job.result)) });
+  }
+  if (job.status === "error") {
+    return res.status(500).json({ ok: false, status: "error", elapsedMs, error: job.error });
+  }
+  res.json({ ok: true, status: "running", elapsedMs, dates: job.dates, count: job.dates.length });
 });
 
 // ── Internal auto-generation endpoint for Python scheduler delegation ─────
@@ -14072,6 +14193,9 @@ if (Number(pendingArchiveApplyResult?.failed || 0) > 0) {
     `[archive] ${Number(pendingArchiveApplyResult.failed || 0)} staged archive replacement(s) still pending after startup.`,
   );
 }
+
+// Periodic GC for forecast job store — runs every 10 min regardless of traffic.
+setInterval(_gcForecastJobs, 10 * 60 * 1000).unref();
 
 const httpServer = app.listen(PORT, () => {
   // Keep gateway sockets alive longer so remote bridge keep-alive connections

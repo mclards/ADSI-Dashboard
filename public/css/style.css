@@ -1257,6 +1257,9 @@ body.sidebar-open .side-nav {
     0 6px 20px rgba(0, 0, 0, 0.28);
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .side-about-card::before {
@@ -1290,6 +1293,12 @@ body.sidebar-open .side-nav {
   font-size: 10px;
   line-height: 1.4;
   color: var(--text2);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+  padding-right: 4px;
 }
 
 .side-about-info b {

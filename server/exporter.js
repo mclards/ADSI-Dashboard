@@ -1957,7 +1957,9 @@ function buildSolcastAverageTableDays(rawRows, resolution) {
     if (!day || !match) continue;
     const hour = Number(match[1] || 0);
     const minuteRaw = Number(match[2] || 0);
-    const hourLabel = hour === 0 ? 24 : hour;
+    let h = hour;
+    if (minuteRaw === 0) h = h > 0 ? h - 1 : 23;
+    const hourLabel = h === 0 ? 24 : h;
     const minuteLabel = minuteRaw === 0 ? 60 : minuteRaw;
     if (!SOLCAST_AVERAGE_TABLE_MINUTES.includes(minuteLabel)) continue;
     let dayEntry = grouped.get(day);
@@ -2173,7 +2175,7 @@ function buildForecastActualAverageTableRows(rawRows) {
       if (!(ts > 0) || !isWithinSolarWindowTs(ts)) return null;
       return {
         date: fmtDate(ts),
-        time: fmtTime(ts).slice(0, 5),
+        time: fmtTime(ts + 5 * 60 * 1000).slice(0, 5),
         forecastMw: roundSolcastExportNumber((kwh * 12) / 1000),
         forecastMwh: roundSolcastExportNumber(kwh / 1000),
       };

@@ -41,6 +41,12 @@ import requests
 from joblib import dump, load
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 
+try:
+    import lightgbm as lgb
+    _LIGHTGBM_AVAILABLE = True
+except ImportError:
+    _LIGHTGBM_AVAILABLE = False
+
 
 class IdentityFeatureScaler:
     """Legacy-compatible no-op transformer for standalone scaler artifacts."""
@@ -365,6 +371,24 @@ DA_RUN_HOURS_PRIMARY = {6, 18}   # always run (retrain + generate)
 MIN_HOURLY_POINTS = 20
 MIN_5MIN_POINTS = 240
 OPERATIONAL_CONSTRAINT_LOOKBACK_DAYS = 90
+
+# Step 3 — LightGBM Optional Model Backend
+FORECAST_USE_LIGHTGBM = os.environ.get("FORECAST_USE_LIGHTGBM", "").lower() in ("1", "true", "yes")
+
+# Step 4 — Analog Ensemble (AnEn) Post-Correction
+ANEN_LOOKBACK_DAYS    = 90
+ANEN_K                = 5
+ANEN_CORRECTION_CLIP  = 0.15   # max ±15% adjustment
+ANEN_MIN_USABLE_DAYS  = 3
+
+# Step 6 — EMOS-B Spread Calibration
+# TODO: EMOS-B deferred — daily_report table lacks forecast band columns (lo_kwh, hi_kwh).
+# Implementation requires per-day forecast band widths stored alongside kwh_total.
+# Stubs below for future enhancement once schema migration is available.
+EMOS_LOOKBACK_DAYS    = 30
+EMOS_MIN_DAYS         = 7
+EMOS_SPREAD_SCALE_MIN = 0.70
+EMOS_SPREAD_SCALE_MAX = 1.30
 
 # ============================================================================
 # I/O HELPERS
@@ -994,13 +1018,15 @@ def _tod_zone_for_slot(slot_idx: int):
     return None
 
 
-def _compute_tod_slot_metrics(actual: np.ndarray, forecast: np.ndarray, present_mask: np.ndarray) -> dict:
+def _compute_tod_slot_metrics(actual: np.ndarray, forecast: np.ndarray, present_mask: np.ndarray, exclude_mask: np.ndarray | None = None) -> dict:
     """Per-zone slot-level metrics (bias_ratio, mape, slot_count) from 288-slot arrays."""
     result = {}
     for zone, (zs, ze) in TOD_ZONES.items():
+        _exclude_zone = exclude_mask[zs:ze] if exclude_mask is not None else np.zeros(ze - zs, dtype=bool)
         z_mask = (
             present_mask[zs:ze]
             & (forecast[zs:ze] > 0.0)
+            & (~_exclude_zone)
         )
         usable = int(np.count_nonzero(z_mask))
         if usable < 4:
@@ -1158,6 +1184,88 @@ def _normalize_profile(values: np.ndarray) -> np.ndarray:
     if total <= 0:
         return np.full(arr.size, 1.0 / arr.size, dtype=float)
     return arr / total
+
+
+def _anen_find_analogs(
+    target_day: str,
+    lookback: int = ANEN_LOOKBACK_DAYS,
+) -> list:
+    """Return up to ANEN_K historical analog days for ensemble correction.
+
+    Scoring is recency-only (score = days_ago * 0.001 — lower is better).
+    Joins daily_report (actual plant total) with forecast_run_audit (authoritative
+    forecast total) so the ratio actual/forecast is meaningful.  Days without a
+    matching successful forecast run are skipped.
+    """
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    dr.date,
+                    SUM(dr.kwh_total) AS actual_kwh,
+                    (
+                        SELECT fra.final_forecast_total_kwh
+                        FROM   forecast_run_audit fra
+                        WHERE  fra.target_date = dr.date
+                          AND  fra.is_authoritative_runtime = 1
+                          AND  fra.run_status = 'success'
+                          AND  fra.final_forecast_total_kwh > 0
+                        ORDER BY fra.generated_ts DESC
+                        LIMIT 1
+                    ) AS forecast_kwh
+                FROM daily_report dr
+                WHERE dr.date < ? AND dr.date >= date(?, ?)
+                GROUP BY dr.date
+                HAVING actual_kwh > 0 AND forecast_kwh IS NOT NULL AND forecast_kwh > 0
+                ORDER BY dr.date DESC
+                """,
+                (target_day, target_day, f"-{lookback} days"),
+            ).fetchall()
+    except Exception as e:
+        log.warning("_anen_find_analogs: DB query failed for %s: %s", target_day, e)
+        return []
+    if not rows:
+        return []
+    target_date_obj = date.fromisoformat(target_day)
+    candidates = []
+    for row in rows:
+        day_str, actual_kwh, forecast_kwh = str(row[0]), float(row[1] or 0.0), float(row[2] or 0.0)
+        if actual_kwh <= 0 or forecast_kwh <= 0:
+            continue
+        days_ago = max(1, (target_date_obj - date.fromisoformat(day_str)).days)
+        candidates.append({
+            "day": day_str,
+            "actual_kwh": actual_kwh,
+            "forecast_kwh": forecast_kwh,
+            "score": days_ago * 0.001,
+            "days_ago": days_ago,
+        })
+    candidates.sort(key=lambda x: x["score"])
+    return candidates[:ANEN_K]
+
+
+def _anen_correction_ratio(analogs: list) -> float:
+    """Weighted ratio correction from analog days. Returns 1.0 if insufficient data."""
+    if len(analogs) < ANEN_MIN_USABLE_DAYS:
+        return 1.0
+    total_w = 0.0
+    weighted_ratio = 0.0
+    for a in analogs:
+        forecast_kwh = float(a.get("forecast_kwh", 0.0))
+        actual_kwh = float(a.get("actual_kwh", 0.0))
+        if actual_kwh <= 0 or forecast_kwh <= 0:
+            continue
+        ratio = actual_kwh / forecast_kwh
+        recency_w = 1.0 / max(1, a.get("days_ago", 1))
+        sim_w = 1.0 / max(a["score"], 1e-6)
+        w = recency_w * sim_w
+        weighted_ratio += w * ratio
+        total_w += w
+    if total_w <= 0:
+        return 1.0
+    raw_ratio = weighted_ratio / total_w
+    return float(np.clip(raw_ratio, 1.0 - ANEN_CORRECTION_CLIP, 1.0 + ANEN_CORRECTION_CLIP))
 
 
 def _find_first_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
@@ -3138,6 +3246,14 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
         bucket_labels = classify_slot_weather_buckets(w5, day)
         _, constraint_meta = build_operational_constraint_mask(day)
         exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+        # Build export-curtailed exclusion using actual generation and Solcast forecast as baseline proxy
+        try:
+            _actual_f = np.asarray(actual, dtype=float)
+            _prior_f = np.asarray(np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None), dtype=float) if snapshot else np.zeros(SLOTS_DAY, dtype=float)
+            _curtailed = curtailed_mask(_actual_f, _prior_f)
+            exclude_mask = exclude_mask | _curtailed
+        except Exception:
+            pass  # silently skip if curtailed_mask fails for this day
         solcast_metrics = None
         solcast_bucket_metrics: dict[str, dict] = {}
         if snapshot:
@@ -3147,6 +3263,7 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
                 & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
                 & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
                 & (np.asarray(snapshot["forecast_kwh"], dtype=float) > 0.0)
+                & (~exclude_mask)
             )
             usable = int(np.count_nonzero(mask))
             if usable >= SOLCAST_MIN_USABLE_SLOTS:
@@ -3189,6 +3306,7 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
                         actual,
                         np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None),
                         actual_present,
+                        exclude_mask=exclude_mask,
                     )
                     for _tz, _tz_m in tod_metrics.items():
                         tod_accum.setdefault(_tz, []).append(_tz_m)
@@ -5482,7 +5600,30 @@ def collect_training_data_hardened(
     return X_train, y_train, w_train, class_scale_train, day_train
 
 
-def _make_residual_regressor(n_estimators: int | None = None) -> GradientBoostingRegressor:
+def _make_residual_regressor_lgbm():
+    if not _LIGHTGBM_AVAILABLE:
+        raise RuntimeError("LightGBM is not installed")
+    return lgb.LGBMRegressor(
+        n_estimators=600, learning_rate=0.045, max_depth=7, num_leaves=63,
+        subsample=0.80, colsample_bytree=0.80, min_child_samples=20,
+        reg_alpha=0.05, reg_lambda=0.10, n_jobs=-1, random_state=42,
+        verbose=-1,
+    )
+
+
+def _make_error_classifier_lgbm():
+    if not _LIGHTGBM_AVAILABLE:
+        raise RuntimeError("LightGBM is not installed")
+    return lgb.LGBMClassifier(
+        n_estimators=400, learning_rate=0.05, max_depth=6, num_leaves=47,
+        subsample=0.80, colsample_bytree=0.80, min_child_samples=20,
+        n_jobs=-1, random_state=42, verbose=-1,
+    )
+
+
+def _make_residual_regressor(n_estimators: int | None = None):
+    if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
+        return _make_residual_regressor_lgbm()
     return GradientBoostingRegressor(
         n_estimators=int(n_estimators or 500),
         learning_rate=0.025,
@@ -5499,7 +5640,9 @@ def _make_residual_regressor(n_estimators: int | None = None) -> GradientBoostin
     )
 
 
-def _make_error_classifier(n_estimators: int | None = None) -> GradientBoostingClassifier:
+def _make_error_classifier(n_estimators: int | None = None):
+    if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
+        return _make_error_classifier_lgbm()
     return GradientBoostingClassifier(
         n_estimators=int(n_estimators or 320),
         learning_rate=0.04,
@@ -7611,6 +7754,14 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     cap_free_mask = actual_present_arr & (~cap_dispatch_mask)
     fallback_mask = actual_present_arr.copy()
 
+    try:
+        _actual_f = np.asarray(actual, dtype=float)
+        _dayahead_f = np.asarray(dayahead, dtype=float)
+        export_curtailed = curtailed_mask(_actual_f, _dayahead_f)
+    except Exception:
+        export_curtailed = np.zeros(len(actual_present_arr), dtype=bool)
+    unconstrained_mask = unconstrained_mask & (~export_curtailed)
+
     def solar_slots(mask: np.ndarray) -> np.ndarray:
         return np.where(np.asarray(mask, dtype=bool)[SOLAR_START_SLOT:SOLAR_END_SLOT])[0] + SOLAR_START_SLOT
 
@@ -8159,6 +8310,18 @@ def run_dayahead(
                         _floor_ratio * 100.0, _sc_cov_f,
                     )
 
+    # 5b. Analog Ensemble (AnEn) post-correction
+    _day_stats = stats if isinstance(stats, dict) else {}
+    _anen_analogs = _anen_find_analogs(target_s)
+    _anen_ratio = _anen_correction_ratio(_anen_analogs)
+    if abs(_anen_ratio - 1.0) > 0.005:
+        forecast = np.clip(forecast * _anen_ratio, 0.0, None)
+        log.info(
+            "AnEn correction: ratio=%.4f analogs=%d",
+            _anen_ratio,
+            len(_anen_analogs),
+        )
+
     # 6. Confidence bands
     lo, hi = confidence_bands(
         forecast,
@@ -8234,6 +8397,8 @@ def run_dayahead(
             "error_class_total_kwh": float(error_class_term.sum()),
             "bias_total_kwh": float(bias_correction.sum()),
             "error_class_meta": error_class_summary,
+            "anen_ratio": _anen_ratio,
+            "anen_analog_count": len(_anen_analogs),
         }
 
     # --- Forecast sanity check ---
@@ -8777,6 +8942,7 @@ def main() -> None:
     )
     log.info("Train Window  : %d days  (min %d)", N_TRAIN_DAYS, MIN_TRAIN_DAYS)
     log.info("Actual Source : AppData energy_5min (hot + archive), legacy JSON fallback only")
+    log.info("ML backend    : %s", "LightGBM" if (FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE) else "sklearn GBR")
     log.info("=" * 70)
 
     last_run_hour = -1   # track which hour we last ran in

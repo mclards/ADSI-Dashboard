@@ -6077,6 +6077,10 @@ function buildPlantCapPanel() {
             <span>Mode</span>
             <strong id="plantCapModeValue">Idle</strong>
           </div>
+          <div class="plant-cap-metric" title="Forecast export limit in MW. Slots above this threshold are excluded from Solcast reliability and intraday ratio calculations.">
+            <span>Export Limit</span>
+            <strong id="plantCapExportLimitMw">—</strong>
+          </div>
         </div>
       </div>
     </div>
@@ -6192,6 +6196,31 @@ function buildPlantCapPanel() {
           </table>
         </div>
       </div>
+      <div class="plant-cap-history-section">
+        <div class="plant-cap-history-head" id="plantCapHistoryToggle" title="Show or hide the cap action history log.">
+          <span class="plant-cap-history-title">Cap Action History</span>
+          <span id="plantCapHistoryChevron" class="plant-cap-history-chevron">▼</span>
+        </div>
+        <div id="plantCapHistoryWrap" class="plant-cap-history-wrap" hidden>
+          <div class="plant-cap-history-table-wrap">
+            <table class="plant-cap-history-table">
+              <thead>
+                <tr>
+                  <th title="Timestamp of the action.">Time</th>
+                  <th title="Action taken by the controller.">Action</th>
+                  <th title="Reason for the action.">Reason</th>
+                  <th title="Inverter number involved.">Inverter</th>
+                  <th title="Node number involved.">Node</th>
+                  <th title="Result of the action.">Result</th>
+                </tr>
+              </thead>
+              <tbody id="plantCapHistoryBody">
+                <tr class="table-empty"><td colspan="6">No cap history yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>`;
   if (State.plantCapPanelCollapsed) {
     wrap.classList.add("is-collapsed");
@@ -6201,6 +6230,40 @@ function buildPlantCapPanel() {
     wrap.setAttribute("aria-hidden", "true");
   }
   return wrap;
+}
+
+function togglePlantCapHistory() {
+  const wrap = $("plantCapHistoryWrap");
+  const chevron = $("plantCapHistoryChevron");
+  if (!wrap) return;
+  const isHidden = wrap.hidden;
+  wrap.hidden = !isHidden;
+  if (chevron) chevron.textContent = isHidden ? "▲" : "▼";
+  if (isHidden) loadPlantCapHistory();
+}
+
+async function loadPlantCapHistory() {
+  const tbody = $("plantCapHistoryBody");
+  if (!tbody) return;
+  try {
+    const data = await api("/api/plant-cap/history?limit=50", "GET", null, { progress: false });
+    const rows = Array.isArray(data.history) ? data.history : [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr class="table-empty"><td colspan="6">No cap history yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map((r) => {
+      const ts = r.ts ? new Date(Number(r.ts)).toLocaleString() : "—";
+      const action = escapeHtml(String(r.action || "—"));
+      const reason = escapeHtml(String(r.reason || "—"));
+      const inv = r.inverter ? String(r.inverter) : "—";
+      const node = r.node ? String(r.node) : "—";
+      const result = escapeHtml(String(r.result || "—"));
+      return `<tr><td>${ts}</td><td>${action}</td><td>${reason}</td><td>${inv}</td><td>${node}</td><td>${result}</td></tr>`;
+    }).join("");
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr class="table-empty"><td colspan="6">Failed to load history: ${escapeHtml(err.message)}</td></tr>`;
+  }
 }
 
 function normalizePlantCapStatusClient(raw) {
@@ -6521,6 +6584,14 @@ function renderPlantCapPanel() {
   renderPlantCapPreviewTable(
     State.plantCap.preview || status.preview || null,
   );
+  renderPlantCapExportLimit();
+}
+
+function renderPlantCapExportLimit() {
+  const el_ = $("plantCapExportLimitMw");
+  if (!el_) return;
+  const lim = Number(State.settings.forecastExportLimitMw || 24);
+  el_.textContent = Number.isFinite(lim) ? `${lim.toFixed(1)} MW` : "—";
 }
 
 function applyPlantCapStatusClient(statusRaw, options = {}) {
@@ -7827,7 +7898,7 @@ async function previewPlantCap(options = {}) {
   return data.preview || null;
 }
 
-function buildPlantCapEnableConfirmText(preview) {
+function buildPlantCapEnableConfirmText(preview, forecastImpact = null) {
   const warnings = Array.isArray(preview?.warnings) ? preview.warnings : [];
   const warningText = warnings
     .slice(0, 2)
@@ -7849,9 +7920,16 @@ function buildPlantCapEnableConfirmText(preview) {
       : actionText === "START" && preview?.selectedRestart
         ? `Next restart candidate: INV-${String(preview.selectedRestart.inverter || 0).padStart(2, "0")}.`
         : "No immediate inverter action is currently planned.";
-  return [plantText, bandText, `Recommended action: ${actionText}.`, recommendation, warningText]
-    .filter(Boolean)
-    .join("\n\n");
+  const parts = [plantText, bandText, `Recommended action: ${actionText}.`, recommendation, warningText];
+  if (forecastImpact && forecastImpact.ok && forecastImpact.affectedSlots > 0) {
+    const upperMw = preview?.upperMw || 0;
+    const curtMwh = (forecastImpact.curtailedKwh / 1000).toFixed(3);
+    const slots = forecastImpact.affectedSlots;
+    const date = forecastImpact.date || "today";
+    const impactNote = `Forecast impact (${date}): ${slots} slot${slots !== 1 ? "s" : ""} above ${upperMw} MW cap — estimated ${curtMwh} MWh curtailed from day-ahead forecast.`;
+    parts.push(impactNote);
+  }
+  return parts.filter(Boolean).join("\n\n");
 }
 
 async function enablePlantCapControl() {
@@ -7862,9 +7940,17 @@ async function enablePlantCapControl() {
     showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
     return;
   }
+  // Fetch forecast impact for the configured upper limit
+  let forecastImpact = null;
+  const upperMw = Number(readPlantCapRequestValues("live").upperMw);
+  if (upperMw > 0) {
+    try {
+      forecastImpact = await api(`/api/plant-cap/forecast-impact?upperMw=${upperMw}`, "GET", null, { progress: false });
+    } catch (_) { /* non-fatal */ }
+  }
   const ok = await appConfirm(
     "Enable Plant Output Cap",
-    buildPlantCapEnableConfirmText(preview),
+    buildPlantCapEnableConfirmText(preview, forecastImpact),
     { ok: "Enable" },
   );
   if (!ok) return;
@@ -8846,6 +8932,9 @@ function handleWS(msg) {
     if (msg.settings) {
       State.settings.inverterCount = msg.settings.inverterCount || 27;
       State.settings.plantName = msg.settings.plantName || "ADSI Plant";
+      if (msg.settings.exportLimitMw !== undefined) {
+        State.settings.forecastExportLimitMw = Number(msg.settings.exportLimitMw) || 24;
+      }
       if ($("plantNameDisplay"))
         $("plantNameDisplay").textContent = State.settings.plantName;
     }
@@ -11733,20 +11822,55 @@ async function runDayAheadGeneration() {
     res.textContent = "Generating…";
   }
   try {
-    const r = await api("/api/forecast/generate", "POST", {
+    // Kick off async generation — returns immediately with a jobId.
+    const startReply = await api("/api/forecast/generate", "POST", {
       mode: "dayahead-days",
       dayCount,
+      async: true,
     });
+    const jobId = startReply?.jobId;
+    if (!jobId) throw new Error(startReply?.error || "Generation failed to start.");
+
+    // Poll every 2 s and show elapsed time so the user knows work is happening.
+    // Hard cap at 15 min to prevent indefinite resource consumption if the job
+    // becomes orphaned (server restart, DB corruption, etc.).
+    const startedAt = Date.now();
+    const r = await new Promise((resolve, reject) => {
+      const MAX_POLL_MS = 15 * 60 * 1000;
+      const tOut = setTimeout(() => {
+        clearInterval(iv);
+        reject(new Error("Forecast generation timed out after 15 minutes."));
+      }, MAX_POLL_MS);
+      const iv = setInterval(async () => {
+        try {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          if (res) res.textContent = `Generating… (${elapsed}s)`;
+          const status = await api(`/api/forecast/generate/status/${jobId}`, "GET");
+          if (status.status === "done") {
+            clearInterval(iv); clearTimeout(tOut);
+            resolve(status);
+          } else if (status.status === "error") {
+            clearInterval(iv); clearTimeout(tOut);
+            reject(new Error(status.error || "Generation failed."));
+          }
+        } catch (e) {
+          clearInterval(iv); clearTimeout(tOut);
+          reject(e);
+        }
+      }, 2000);
+    });
+
     if (res) {
       res.className = "exp-result";
       const start = r?.dates?.[0] || "";
-      const end = r?.dates?.[r.dates.length - 1] || "";
+      const end = r?.dates?.[r.dates?.length - 1] || "";
       const provider = String(r?.providerUsed || "ml_local")
         .replace("ml_local", "Local ML")
         .replace("solcast", "Solcast");
       const fb = r?.fallbackUsed ? " (fallback)" : "";
       const solcastInfo = r?.solcastPull?.pulled ? " + Solcast" : "";
-      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${solcastInfo}${fb}`;
+      const durS = r?.elapsedMs ? ` in ${Math.round(r.elapsedMs / 1000)}s` : "";
+      res.textContent = `✔ Generated ${Number(r.count || 0)} day(s) from ${start} to ${end} via ${provider}${solcastInfo}${fb}${durS}`;
       if (r?.fallbackUsed && r?.fallbackReason) {
         showToast(`Forecast fallback: ${r.fallbackReason}`, "warning", 5000);
       }
@@ -12633,6 +12757,7 @@ function bindEventHandlers() {
     if (t.closest("#btnPlantCapEnable"))  { enablePlantCapControl().catch(() => {}); return; }
     if (t.closest("#btnPlantCapDisable")) { disablePlantCapControl().catch(() => {}); return; }
     if (t.closest("#btnPlantCapRelease")) { releasePlantCapControl().catch(() => {}); return; }
+    if (t.closest("#plantCapHistoryToggle")) { togglePlantCapHistory(); return; }
   });
 
   document.addEventListener("input", (e) => {
