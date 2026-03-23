@@ -57,6 +57,9 @@ const {
   getChatInboxAfterId,
   markChatReadUpToId,
   clearAllChatMessages,
+  getScheduledMaintenance,
+  insertScheduledMaintenance,
+  deleteScheduledMaintenance,
 } = require("./db");
 const {
   registerClient,
@@ -13649,6 +13652,244 @@ app.get("/api/report/latest-date", (req, res) => {
       latestDate: latestDate || "",
       hasData: Boolean(latestDate),
     });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Gap 1: Multi-day availability trend ────────────────────────────────────
+app.get("/api/report/availability-trend", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const days = Math.min(365, Math.max(1, Number(req.query.days || 30)));
+    const invFilter =
+      req.query.inverter !== undefined ? Number(req.query.inverter) : null;
+    const today = localDateStr();
+    const startDate = localDateStr(Date.now() - (days - 1) * 86400000);
+    let rows = stmts.getDailyReportRange.all(startDate, today);
+    if (invFilter !== null) {
+      rows = rows.filter((r) => Number(r.inverter) === invFilter);
+    }
+    // Group by date
+    const byDate = {};
+    for (const r of rows) {
+      const d = r.date;
+      if (!byDate[d]) byDate[d] = { date: d, avail_sum: 0, kwh_sum: 0, count: 0 };
+      byDate[d].avail_sum += Number(r.availability_pct || 0);
+      byDate[d].kwh_sum += Number(r.kwh_total || 0);
+      byDate[d].count += 1;
+    }
+    const trend = Object.values(byDate)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((d) => ({
+        date: d.date,
+        availability_avg_pct:
+          d.count > 0
+            ? Math.round((d.avail_sum / d.count) * 100) / 100
+            : null,
+        total_kwh: Math.round(d.kwh_sum * 1000) / 1000,
+        inverter_count: d.count,
+      }));
+    return res.json({ ok: true, days, inverter: invFilter, trend });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Gap 2: Date-range availability aggregation ──────────────────────────────
+app.get("/api/report/availability-range", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const today = localDateStr();
+    const start = parseIsoDateStrict(req.query.start || today, "start");
+    const end = parseIsoDateStrict(req.query.end || today, "end");
+    if (end < start)
+      return res.status(400).json({ ok: false, error: "end must be >= start" });
+    const invFilter =
+      req.query.inverter !== undefined ? Number(req.query.inverter) : null;
+    let rows = stmts.getDailyReportRange.all(start, end);
+    if (invFilter !== null) {
+      rows = rows.filter((r) => Number(r.inverter) === invFilter);
+    }
+    // Per-inverter summary
+    const byInv = {};
+    for (const r of rows) {
+      const inv = Number(r.inverter);
+      if (!byInv[inv]) {
+        byInv[inv] = {
+          inverter: inv,
+          avail_sum: 0,
+          kwh_sum: 0,
+          uptime_s: 0,
+          day_count: 0,
+        };
+      }
+      byInv[inv].avail_sum += Number(r.availability_pct || 0);
+      byInv[inv].kwh_sum += Number(r.kwh_total || 0);
+      byInv[inv].uptime_s += Number(r.uptime_s || 0);
+      byInv[inv].day_count += 1;
+    }
+    const inverters = Object.values(byInv)
+      .sort((a, b) => a.inverter - b.inverter)
+      .map((d) => ({
+        inverter: d.inverter,
+        availability_avg_pct:
+          d.day_count > 0
+            ? Math.round((d.avail_sum / d.day_count) * 100) / 100
+            : null,
+        total_kwh: Math.round(d.kwh_sum * 1000) / 1000,
+        uptime_h: Math.round((d.uptime_s / 3600) * 100) / 100,
+        day_count: d.day_count,
+      }));
+    const overall =
+      inverters.length > 0
+        ? {
+            availability_avg_pct:
+              Math.round(
+                (inverters.reduce((s, r) => s + (r.availability_avg_pct || 0), 0) /
+                  inverters.length) *
+                  100,
+              ) / 100,
+            total_kwh: Math.round(
+              inverters.reduce((s, r) => s + r.total_kwh, 0) * 1000,
+            ) / 1000,
+            inverter_count: inverters.length,
+          }
+        : null;
+    return res.json({ ok: true, start, end, overall, inverters });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Gap 6: Scheduled maintenance CRUD ──────────────────────────────────────
+app.get("/api/maintenance", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const invFilter =
+      req.query.inverter !== undefined ? Number(req.query.inverter) : undefined;
+    const startTs =
+      req.query.start !== undefined
+        ? new Date(req.query.start).getTime()
+        : undefined;
+    const endTs =
+      req.query.end !== undefined
+        ? new Date(req.query.end).getTime()
+        : undefined;
+    const entries = getScheduledMaintenance({
+      inverter: invFilter,
+      startTs,
+      endTs,
+    });
+    return res.json({ ok: true, entries });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/maintenance", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res.status(403).json({ ok: false, error: "Unauthorized" });
+  }
+  try {
+    const { inverter, start_ts, end_ts, reason } = req.body || {};
+    const id = insertScheduledMaintenance({ inverter, start_ts, end_ts, reason });
+    return res.json({ ok: true, id });
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete("/api/maintenance/:id", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res.status(403).json({ ok: false, error: "Unauthorized" });
+  }
+  try {
+    const changes = deleteScheduledMaintenance(req.params.id);
+    if (!changes) {
+      return res.status(404).json({ ok: false, error: "Not found" });
+    }
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Gap 7: Downtime drill-down ──────────────────────────────────────────────
+app.get("/api/report/downtime", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const day = parseIsoDateStrict(
+      req.query.date || localDateStr(),
+      "date",
+    );
+    const invFilter =
+      req.query.inverter !== undefined ? Number(req.query.inverter) : null;
+
+    const { startTs: winStart, endTs: winEnd } = getReportSolarWindowBounds(day, false);
+
+    // Load all summary rows for this day (or just one inverter)
+    const allSummaryRows = stmts.getDailyReadingsSummaryDay.all(day);
+    const summaryRows =
+      invFilter !== null
+        ? allSummaryRows.filter((r) => Number(r.inverter) === invFilter)
+        : allSummaryRows;
+
+    // Group by inverter
+    const byInv = {};
+    for (const r of summaryRows) {
+      const inv = Number(r.inverter);
+      if (!byInv[inv]) byInv[inv] = [];
+      // intervals_json is [[startMs, endMs], ...]
+      let intervals = [];
+      try {
+        intervals = JSON.parse(r.intervals_json || "[]");
+      } catch {
+        intervals = [];
+      }
+      byInv[inv].push(...intervals);
+    }
+
+    // For each inverter, merge online intervals clipped to solar window,
+    // then compute downtime gaps
+    const result = [];
+    for (const [invStr, rawIntervals] of Object.entries(byInv)) {
+      const inv = Number(invStr);
+      const clipped = clipIntervalsToWindowMs(rawIntervals, winStart, winEnd);
+      // Sort and merge overlapping online intervals
+      const sorted = clipped.slice().sort((a, b) => a[0] - b[0]);
+      const merged = [];
+      for (const iv of sorted) {
+        if (merged.length === 0 || iv[0] > merged[merged.length - 1][1]) {
+          merged.push([iv[0], iv[1]]);
+        } else {
+          merged[merged.length - 1][1] = Math.max(
+            merged[merged.length - 1][1],
+            iv[1],
+          );
+        }
+      }
+      // Downtime gaps = solar window minus online intervals
+      const gaps = [];
+      let cursor = winStart;
+      for (const [onStart, onEnd] of merged) {
+        if (onStart > cursor) {
+          gaps.push({ start_ts: cursor, end_ts: onStart, duration_s: Math.round((onStart - cursor) / 1000) });
+        }
+        cursor = Math.max(cursor, onEnd);
+      }
+      if (cursor < winEnd) {
+        gaps.push({ start_ts: cursor, end_ts: winEnd, duration_s: Math.round((winEnd - cursor) / 1000) });
+      }
+      if (gaps.length > 0) {
+        result.push({ inverter: inv, downtime: gaps });
+      }
+    }
+
+    result.sort((a, b) => a.inverter - b.inverter);
+    return res.json({ ok: true, date: day, window_start_ts: winStart, window_end_ts: winEnd, result });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }

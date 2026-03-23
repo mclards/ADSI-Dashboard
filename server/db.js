@@ -598,6 +598,15 @@ db.exec(`
     support_weight            REAL,
     UNIQUE(target_date, run_audit_id, slot)
   );
+  CREATE TABLE IF NOT EXISTS scheduled_maintenance (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter   INTEGER NOT NULL DEFAULT 0,
+    start_ts   INTEGER NOT NULL,
+    end_ts     INTEGER NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_maintenance_time ON scheduled_maintenance(start_ts, end_ts);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -2416,6 +2425,50 @@ function closeDb() {
   }
 }
 
+// ---------- Scheduled Maintenance CRUD ----------
+
+function getScheduledMaintenance({ inverter, startTs, endTs } = {}) {
+  let sql =
+    "SELECT * FROM scheduled_maintenance WHERE 1=1";
+  const params = [];
+  if (inverter !== undefined && inverter !== null) {
+    sql += " AND inverter = ?";
+    params.push(Number(inverter));
+  }
+  // Return entries that overlap the requested time window
+  if (startTs !== undefined && startTs !== null) {
+    sql += " AND end_ts >= ?";
+    params.push(Number(startTs));
+  }
+  if (endTs !== undefined && endTs !== null) {
+    sql += " AND start_ts <= ?";
+    params.push(Number(endTs));
+  }
+  sql += " ORDER BY start_ts ASC";
+  return db.prepare(sql).all(...params);
+}
+
+function insertScheduledMaintenance({ inverter, start_ts, end_ts, reason }) {
+  const inv = Number(inverter || 0);
+  const s = Number(start_ts);
+  const e = Number(end_ts);
+  if (!(e > s)) throw new Error("end_ts must be after start_ts");
+  const result = db
+    .prepare(
+      `INSERT INTO scheduled_maintenance (inverter, start_ts, end_ts, reason)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .run(inv, s, e, String(reason || "").trim());
+  return result.lastInsertRowid;
+}
+
+function deleteScheduledMaintenance(id) {
+  const result = db
+    .prepare("DELETE FROM scheduled_maintenance WHERE id = ?")
+    .run(Number(id));
+  return result.changes;
+}
+
 module.exports = {
   db,
   stmts,
@@ -2464,4 +2517,7 @@ module.exports = {
   getLatestChatInboundId,
   markChatReadUpToId,
   clearAllChatMessages,
+  getScheduledMaintenance,
+  insertScheduledMaintenance,
+  deleteScheduledMaintenance,
 };
