@@ -8991,6 +8991,7 @@ function buildDayAheadRowsFromSolcast(day, records, cfg) {
       const p = getTzParts(midTs, cfg.timeZone);
       if (p.date === day && p.minuteOfDay >= startMin && p.minuteOfDay < endMin) {
         const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+        if (slot < 0 || slot >= 288) continue; // defensive: guard against constant drift
         const overlapH = (segEnd - segStart) / 3600000;
         slotKwh[slot] += powerToKwh(kw, overlapH);
         slotLo[slot] += powerToKwh(kwLo, overlapH);
@@ -13666,6 +13667,95 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
   }
 });
 
+// ── Forecast performance monitoring endpoints ──────────────────────────────
+
+// GET /api/forecast/qa-history?days=N
+// Returns the last N days of daily QA comparison rows for performance charts.
+app.get("/api/forecast/qa-history", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const days = Math.min(180, Math.max(7, parseInt(req.query.days, 10) || 30));
+    const rows = db
+      .prepare(
+        `SELECT
+           target_date,
+           provider_used,
+           forecast_variant,
+           solcast_freshness_class,
+           comparison_quality,
+           include_in_error_memory,
+           total_forecast_kwh,
+           total_forecast_lo_kwh,
+           total_forecast_hi_kwh,
+           total_actual_kwh,
+           total_abs_error_kwh,
+           daily_wape_pct,
+           daily_mape_pct,
+           usable_slot_count,
+           masked_slot_count,
+           computed_ts
+         FROM forecast_error_compare_daily
+         ORDER BY target_date DESC, computed_ts DESC
+         LIMIT ?`,
+      )
+      .all(days);
+    return res.json({ ok: true, rows });
+  } catch (e) {
+    console.warn("[forecast/qa-history] query failed:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/forecast/engine-health
+// Returns ML training state (consecutive rejections) and latest audit run for health badge.
+app.get("/api/forecast/engine-health", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const trainStatePath = path.join(PROGRAMDATA_ROOT, "forecast", "ml_train_state.json");
+    let trainState = {};
+    try {
+      if (fs.existsSync(trainStatePath)) {
+        trainState = JSON.parse(fs.readFileSync(trainStatePath, "utf8"));
+      }
+    } catch {
+      // non-fatal — return empty state
+    }
+
+    const latestAudit = db
+      .prepare(
+        `SELECT target_date, generated_ts, provider_used, forecast_variant,
+                run_status, solcast_freshness_class, final_forecast_total_kwh,
+                is_authoritative_runtime, attempt_number, notes_json
+         FROM forecast_run_audit
+         ORDER BY generated_ts DESC LIMIT 1`,
+      )
+      .get();
+
+    const recentQuality = db
+      .prepare(
+        `SELECT comparison_quality, COUNT(*) AS cnt
+         FROM forecast_error_compare_daily
+         WHERE computed_ts >= ?
+         GROUP BY comparison_quality`,
+      )
+      .all(Date.now() - 14 * 24 * 3600 * 1000);
+
+    return res.json({
+      ok: true,
+      trainState: {
+        consecutiveRejections: Number(trainState.consecutive_train_rejection_count || 0),
+        lastRejectionTs: trainState.last_rejection_ts || null,
+        lastSuccessfulTrainTs: trainState.last_successful_train_ts || null,
+      },
+      latestAudit: latestAudit || null,
+      recentQualityBreakdown: recentQuality,
+    });
+  } catch (e) {
+    console.warn("[forecast/engine-health] failed:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/api/energy/today", (req, res) => {
   try {
     const rows = buildCurrentDayEnergySnapshot().rows;
@@ -14554,7 +14644,11 @@ let _forecastCronRunning = false;
 for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
     if (_forecastCronRunning) {
-      console.warn(`[Cron:forecast] skipping ${cronExpr} — previous run still active`);
+      console.warn(`[Cron:forecast] skipping ${cronExpr} — previous cron run still active`);
+      return;
+    }
+    if (forecastGenerating) {
+      console.warn(`[Cron:forecast] skipping ${cronExpr} — manual forecast generation in progress`);
       return;
     }
     _forecastCronRunning = true;

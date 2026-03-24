@@ -25,6 +25,17 @@ for pkg in (
     binaries += b
     hiddenimports += h
 
+try:
+    d, b, h = collect_all("lightgbm")
+    datas += d
+    binaries += b
+    hiddenimports += h
+except ImportError:
+    pass  # lightgbm not installed on build machine; runtime will fall back to sklearn GBR
+except Exception as e:
+    print(f"WARNING: collect_all('lightgbm') failed unexpectedly: {e}")
+    # Continue build without lightgbm; runtime guard (_LIGHTGBM_AVAILABLE) will handle it
+
 a = Analysis(
     [os.path.join(ROOT_DIR, "ForecastCoreService.py")],
     pathex=[ROOT_DIR],

@@ -9633,3 +9633,307 @@ body.mode-transition-active {
 
   .inv-detail-body { grid-template-columns: 1fr; }
 }
+
+/* ── Forecast Performance Monitor panel ────────────────────────────────────── */
+.fperf-card {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  padding: 18px 20px 16px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fperf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.fperf-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fperf-toggle-btn {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text2);
+  font-size: 20px;
+  transition: color 0.2s ease;
+}
+
+.fperf-toggle-btn:hover {
+  color: var(--text);
+}
+
+.fperf-toggle-btn:focus-visible {
+  outline: 2px solid var(--chart-actual, #22d3ee);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.fperf-chevron {
+  display: inline-block;
+  transition: transform 0.25s ease;
+}
+
+.fperf-chevron-rotated {
+  transform: rotate(-90deg);
+}
+
+.fperf-icon {
+  font-size: 18px;
+  color: var(--chart-actual, #22d3ee);
+}
+
+.fperf-title {
+  font-size: 13px;
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.fperf-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Collapsible body */
+.fperf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 2000px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.25s ease;
+  opacity: 1;
+}
+
+.fperf-body.fperf-body-collapsed {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.fperf-days-sel {
+  min-width: 128px;
+  height: 30px;
+  font-size: 11px;
+  padding: 0 8px;
+}
+
+.fperf-refresh-btn {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.fperf-refresh-btn:hover {
+  background: rgba(34, 211, 238, 0.12);
+  border-color: var(--chart-actual, #22d3ee);
+}
+.fperf-refresh-btn:active {
+  transform: scale(0.95);
+}
+.fperf-refresh-btn:disabled,
+.fperf-refresh-btn:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  background: transparent;
+}
+.fperf-days-sel:focus,
+.fperf-refresh-btn:focus-visible {
+  outline: 2px solid var(--chart-actual, #22d3ee);
+  outline-offset: 1px;
+}
+
+/* Health chips */
+.fperf-health-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fperf-hchip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 13px 8px;
+  min-width: 120px;
+  flex: 1 1 120px;
+}
+
+.fperf-hchip-label {
+  font-size: 9px;
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+.fperf-hchip-val {
+  font-size: 12px;
+  font-weight: var(--fw-semibold);
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fperf-hchip.chip-ok .fperf-hchip-val    { color: var(--green); }
+.fperf-hchip.chip-warn .fperf-hchip-val  { color: var(--orange); }
+.fperf-hchip.chip-error .fperf-hchip-val { color: var(--red); }
+.fperf-hchip.chip-cyan .fperf-hchip-val  { color: var(--chart-actual, #22d3ee); }
+
+/* Charts row */
+.fperf-charts-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.fperf-chart-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fperf-chart-title {
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+.fperf-chart-wrap {
+  position: relative;
+  height: 180px;
+}
+
+.fperf-chart-wrap canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Recent QA table */
+.fperf-table-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fperf-table-title {
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+.fperf-table-wrap {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.fperf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.fperf-table th {
+  background: var(--surface2);
+  color: var(--text3);
+  font-weight: var(--fw-semibold);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.fperf-table td {
+  color: var(--text2);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.fperf-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.fperf-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.024);
+}
+
+.fperf-table td.td-date {
+  color: var(--text);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.fperf-table td.td-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.fperf-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fperf-badge.q-good     { background: rgba(16,179,112,.16); color: var(--green); }
+.fperf-badge.q-ok       { background: rgba(34,211,238,.12); color: var(--chart-actual, #22d3ee); }
+.fperf-badge.q-review   { background: rgba(240,144,0,.14);  color: var(--orange); }
+.fperf-badge.q-bad      { background: rgba(224,53,96,.16);  color: var(--red); }
+.fperf-badge.q-excluded { background: rgba(150,118,132,.12); color: var(--text3); }
+
+.fperf-mem-yes { color: var(--green);  font-weight: var(--fw-semibold); }
+.fperf-mem-no  { color: var(--text3); }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .fperf-charts-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .fperf-card {
+    padding: 12px 12px 12px;
+  }
+
+  .fperf-hchip {
+    flex: 1 1 100%;
+  }
+}

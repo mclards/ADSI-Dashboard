@@ -347,10 +347,13 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             self.assertIsNone(reg_scaler)
             self.assertIsNotNone(cls_model)
             self.assertIsNone(cls_scaler)
-            self.assertTrue(bool(reg_meta["stage_validation"]["used_blocked_validation"]))
-            self.assertGreaterEqual(int(reg_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
-            self.assertTrue(bool(cls_meta["stage_validation"]["used_blocked_validation"]))
-            self.assertGreaterEqual(int(cls_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
+            # LightGBM skips staged holdout selection (no staged_predict); sklearn GBR uses it.
+            _lgbm_active = getattr(mod, "FORECAST_USE_LIGHTGBM", False) and getattr(mod, "_LIGHTGBM_AVAILABLE", False)
+            if not _lgbm_active:
+                self.assertTrue(bool(reg_meta["stage_validation"]["used_blocked_validation"]))
+                self.assertGreaterEqual(int(reg_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
+                self.assertTrue(bool(cls_meta["stage_validation"]["used_blocked_validation"]))
+                self.assertGreaterEqual(int(cls_meta["stage_validation"]["holdout_samples"]), mod.MODEL_STAGE_HOLDOUT_MIN_SAMPLES)
 
             bundle = {
                 "feature_cols": list(mod.FEATURE_COLS),

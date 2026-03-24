@@ -522,6 +522,7 @@ db.exec(`
     is_authoritative_learning    INTEGER NOT NULL DEFAULT 1,
     superseded_by_run_audit_id   INTEGER,
     replaces_run_audit_id        INTEGER,
+    attempt_number               INTEGER NOT NULL DEFAULT 1,
     notes_json                   TEXT,
     UNIQUE(target_date, generated_ts, forecast_variant)
   );
@@ -539,6 +540,8 @@ db.exec(`
     weather_source            TEXT,
     solcast_freshness_class   TEXT,
     total_forecast_kwh        REAL,
+    total_forecast_lo_kwh     REAL,
+    total_forecast_hi_kwh     REAL,
     total_actual_kwh          REAL,
     total_abs_error_kwh       REAL,
     daily_wape_pct            REAL,
@@ -798,6 +801,11 @@ ensureColumn("forecast_error_compare_daily", "comparison_quality", "comparison_q
 ensureColumn("forecast_error_compare_daily", "computed_ts", "computed_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "notes_json", "notes_json TEXT");
 
+// Migration: forecast confidence band totals for EMOS-B spread calibration (added 2026-03).
+ensureColumn("forecast_error_compare_daily", "total_forecast_lo_kwh", "total_forecast_lo_kwh REAL");
+ensureColumn("forecast_error_compare_daily", "total_forecast_hi_kwh", "total_forecast_hi_kwh REAL");
+// Migration: track retry attempt number per forecast run (added 2026-03).
+ensureColumn("forecast_run_audit", "attempt_number", "attempt_number INTEGER NOT NULL DEFAULT 1");
 ensureColumn("forecast_error_compare_slot", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_slot", "daily_compare_id", "daily_compare_id INTEGER");
 ensureColumn("forecast_error_compare_slot", "ts_local", "ts_local INTEGER NOT NULL DEFAULT 0");

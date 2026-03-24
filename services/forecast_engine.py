@@ -86,6 +86,7 @@ ARTIFACT_FILE = BASE / "forecast/pv_dayahead_artifacts.joblib"
 WEATHER_BIAS_FILE = BASE / "forecast/pv_weather_bias.joblib"
 SOLCAST_RELIABILITY_FILE = BASE / "forecast/pv_solcast_reliability.joblib"
 FORECAST_SNAPSHOT_DIR = BASE / "forecast/snapshots"
+ML_TRAIN_STATE_FILE   = BASE / "forecast/ml_train_state.json"
 WEATHER_DIR   = BASE / "weather"
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
 SERVICE_STOP_FILE_RAW = str(
@@ -261,7 +262,7 @@ WEATHER_BIAS_CLOUD_DELTA_CLIP = (-16.0, 16.0)
 INTRADAY_MIN_OBS_SLOTS = 6
 INTRADAY_MAX_OBS_SLOTS = 36
 INTRADAY_RATIO_CLIP = (0.65, 1.35)
-INTRADAY_RECENT_RATIO_CLIP = (0.55, 1.45)
+INTRADAY_RECENT_RATIO_CLIP = (0.55, 1.35)  # upper bound tightened from 1.45 → 1.35 to match global clip
 INTRADAY_BLEND_MAX = 0.72
 SOLCAST_MIN_USABLE_SLOTS = 48
 SOLCAST_RELIABILITY_LOOKBACK_DAYS = 30
@@ -373,7 +374,8 @@ MIN_5MIN_POINTS = 240
 OPERATIONAL_CONSTRAINT_LOOKBACK_DAYS = 90
 
 # Step 3 — LightGBM Optional Model Backend
-FORECAST_USE_LIGHTGBM = os.environ.get("FORECAST_USE_LIGHTGBM", "").lower() in ("1", "true", "yes")
+# Default: enabled when LightGBM is installed. Override with FORECAST_USE_LIGHTGBM=0 to force sklearn GBR.
+FORECAST_USE_LIGHTGBM = os.environ.get("FORECAST_USE_LIGHTGBM", "1").lower() in ("1", "true", "yes")
 
 # Step 4 — Analog Ensemble (AnEn) Post-Correction
 ANEN_LOOKBACK_DAYS    = 90
@@ -382,9 +384,9 @@ ANEN_CORRECTION_CLIP  = 0.15   # max ±15% adjustment
 ANEN_MIN_USABLE_DAYS  = 3
 
 # Step 6 — EMOS-B Spread Calibration
-# TODO: EMOS-B deferred — daily_report table lacks forecast band columns (lo_kwh, hi_kwh).
-# Implementation requires per-day forecast band widths stored alongside kwh_total.
-# Stubs below for future enhancement once schema migration is available.
+# Forecast band totals (total_forecast_lo_kwh, total_forecast_hi_kwh) are now persisted in
+# forecast_error_compare_daily by _persist_qa_comparison via _load_dayahead_bands_from_db.
+# EMOS-B implementation can query those columns from eligible rows for spread calibration.
 EMOS_LOOKBACK_DAYS    = 30
 EMOS_MIN_DAYS         = 7
 EMOS_SPREAD_SCALE_MIN = 0.70
@@ -414,6 +416,41 @@ def _save_json(path: Path, data: dict) -> bool:
     except Exception as e:
         log.error("JSON save failed %s: %s", path, e)
         return False
+
+
+_TRAIN_REJECTION_ALERT_THRESHOLD = 3  # consecutive skipped runs before a prominent warning
+
+
+def _increment_train_rejection_streak() -> int:
+    """Increment the consecutive ML training rejection counter and return the new value.
+
+    Emits a prominent WARNING once the streak reaches _TRAIN_REJECTION_ALERT_THRESHOLD so
+    that operators are alerted when valid_days < MIN_TRAIN_DAYS persists across runs.
+    """
+    state = _load_json(ML_TRAIN_STATE_FILE)
+    streak = int(state.get("consecutive_train_rejection_count", 0)) + 1
+    state["consecutive_train_rejection_count"] = streak
+    state["last_rejection_ts"] = int(time.time() * 1000)
+    _save_json(ML_TRAIN_STATE_FILE, state)
+    if streak >= _TRAIN_REJECTION_ALERT_THRESHOLD:
+        log.warning(
+            "ML TRAINING SKIPPED %d CONSECUTIVE RUN(S): insufficient valid training days. "
+            "Forecast quality is degrading. Investigate weather data availability, Solcast "
+            "snapshots, and historical actuals coverage.",
+            streak,
+        )
+    return streak
+
+
+def _reset_train_rejection_streak() -> None:
+    """Reset the consecutive ML training rejection counter after a successful training run."""
+    state = _load_json(ML_TRAIN_STATE_FILE)
+    prev = int(state.get("consecutive_train_rejection_count", 0))
+    if prev > 0:
+        log.info("ML training rejection streak cleared (was %d consecutive skips).", prev)
+    state["consecutive_train_rejection_count"] = 0
+    state["last_successful_train_ts"] = int(time.time() * 1000)
+    _save_json(ML_TRAIN_STATE_FILE, state)
 
 
 def _has_forecast_dayahead_in_db(day: str) -> bool:
@@ -2974,6 +3011,9 @@ def _load_actual_loss_adjusted_from_appdata(
     return out, present
 
 
+# Cache lifetime equals subprocess lifetime — safe in the current spawn model.
+# If the engine is ever converted to a long-running daemon this cache must be
+# time-bounded or invalidated on each generation run to avoid stale actuals.
 @lru_cache(maxsize=256)
 def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Loss-adjusted (values, presence) pair for forecast-engine consumers."""
@@ -2994,6 +3034,7 @@ def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None
     )
 
 
+# See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
 @lru_cache(maxsize=256)
 def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
     """Loss-adjusted 5-min actual for forecast training / day-ahead / QA.
@@ -3043,6 +3084,38 @@ def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | No
             return None, None
 
 
+def _load_dayahead_bands_from_db(day: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return (kwh_lo, kwh_hi) slot arrays for a stored day-ahead forecast.
+
+    Both arrays default to zero if the table has no rows for the day or if
+    the lo/hi columns are missing (older schema).  Never raises.
+    """
+    lo = _empty_slot_values()
+    hi = _empty_slot_values()
+    if not APP_DB_FILE.exists():
+        return lo, hi
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            cur = conn.execute(
+                """
+                SELECT slot, kwh_lo, kwh_hi
+                  FROM forecast_dayahead
+                 WHERE date=?
+                 ORDER BY slot ASC
+                """,
+                (str(day),),
+            )
+            for slot, kwh_lo_val, kwh_hi_val in cur.fetchall():
+                slot_i = int(slot or 0)
+                if 0 <= slot_i < SLOTS_DAY:
+                    lo[slot_i] = _coerce_non_negative_float(kwh_lo_val)
+                    hi[slot_i] = _coerce_non_negative_float(kwh_hi_val)
+    except Exception as e:
+        log.warning("DB day-ahead bands load failed [%s]: %s", day, e)
+    return lo, hi
+
+
 def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     ctx = _load_json(FORECAST_CTX)
     da  = ctx.get("PacEnergy_DayAhead", {}).get(day)
@@ -3063,6 +3136,7 @@ def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray 
     return (out, present) if present.any() else (None, None)
 
 
+# See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
 @lru_cache(maxsize=256)
 def load_dayahead_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_rows, db_present = _load_dayahead_from_db(day)
@@ -4215,6 +4289,7 @@ def _compute_error_memory_legacy(today: date) -> np.ndarray:
     mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
     mem_err[SOLAR_END_SLOT:] = 0.0
+    mem_err = np.clip(mem_err, -100.0, 100.0)
     return mem_err
 
 
@@ -4327,6 +4402,10 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
     mem_err[SOLAR_END_SLOT:] = 0.0
+    # Guard against correlated-bias weeks producing an outsized correction.
+    # Persistent bias > ±100 kWh/slot suggests a model or hardware issue, not
+    # something error memory should silently absorb.
+    mem_err = np.clip(mem_err, -100.0, 100.0)
     return mem_err
 
 
@@ -5671,6 +5750,10 @@ def _select_residual_regressor_stage(
         "mae_full": None,
         "mae_best": None,
     }
+    # LightGBM uses native early-stopping during fit; staged_predict is not available.
+    # Skip blocked-holdout selection — the factory hyperparameters are regularised enough.
+    if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
+        return meta
     holdout_mask = _blocked_day_holdout_mask(day_keys)
     if holdout_mask.size != len(y) or not np.any(holdout_mask):
         return meta
@@ -5722,6 +5805,9 @@ def _select_error_classifier_stage(
         "nll_full": None,
         "nll_best": None,
     }
+    # LightGBM does not expose staged_predict_proba; skip holdout stage selection.
+    if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
+        return meta
     holdout_mask = _blocked_day_holdout_mask(day_keys)
     if holdout_mask.size != len(labels) or not np.any(holdout_mask):
         return meta
@@ -5926,7 +6012,9 @@ def build_training_state(today: date) -> dict | None:
         solcast_reliability=solcast_reliability,
     )
     if X is None:
+        _increment_train_rejection_streak()
         return None
+    _reset_train_rejection_streak()
 
     global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight, day_keys=day_keys)
     error_classifier_model, error_classifier_scaler, error_classifier_meta = fit_error_classifier(
@@ -6946,6 +7034,8 @@ def _persist_qa_comparison(
     hybrid_baseline_slots: np.ndarray | None = None,
     rad_slots: np.ndarray | None = None,
     cloud_slots: np.ndarray | None = None,
+    lo_slots: np.ndarray | None = None,
+    hi_slots: np.ndarray | None = None,
 ) -> None:
     provider_used = str((run_audit_meta or {}).get("provider_used") or "unknown")
     provider_expected = str((run_audit_meta or {}).get("provider_expected") or "")
@@ -7003,6 +7093,11 @@ def _persist_qa_comparison(
                                 if (daily_metrics or {}).get("total_ape_pct") is not None else 0.0)
     total_abs_error_kwh = float((daily_metrics or {}).get("abs_error_sum_kwh", 0.0))
 
+    lo_arr = np.asarray(lo_slots, dtype=float) if lo_slots is not None else np.zeros(SLOTS_DAY, dtype=float)
+    hi_arr = np.asarray(hi_slots, dtype=float) if hi_slots is not None else np.zeros(SLOTS_DAY, dtype=float)
+    total_forecast_lo_kwh: float | None = float(np.sum(lo_arr[solar_slice])) if lo_slots is not None else None
+    total_forecast_hi_kwh: float | None = float(np.sum(hi_arr[solar_slice])) if hi_slots is not None else None
+
     support_base = _memory_source_weight(forecast_variant, provider_expected)
     slot_bucket_arr = np.asarray(slot_weather_buckets, dtype=object) if slot_weather_buckets is not None else np.asarray([""] * SLOTS_DAY, dtype=object)
     solcast_arr = np.asarray(solcast_slots, dtype=float) if solcast_slots is not None else np.zeros(SLOTS_DAY, dtype=float)
@@ -7031,14 +7126,15 @@ def _persist_qa_comparison(
                 INSERT INTO forecast_error_compare_daily(
                     target_date, run_audit_id, generator_mode,
                     provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
-                    total_forecast_kwh, total_actual_kwh, total_abs_error_kwh,
+                    total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
+                    total_actual_kwh, total_abs_error_kwh,
                     daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
                     usable_slot_count, masked_slot_count,
                     available_actual_slots, available_forecast_slots,
                     manual_masked_slots, cap_masked_slots, operational_masked_slots,
                     include_in_error_memory, include_in_source_scoring, comparison_quality,
                     computed_ts, notes_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT({daily_conflict_target}) DO UPDATE SET
                     run_audit_id=excluded.run_audit_id,
                     generator_mode=excluded.generator_mode,
@@ -7048,6 +7144,8 @@ def _persist_qa_comparison(
                     weather_source=excluded.weather_source,
                     solcast_freshness_class=excluded.solcast_freshness_class,
                     total_forecast_kwh=excluded.total_forecast_kwh,
+                    total_forecast_lo_kwh=excluded.total_forecast_lo_kwh,
+                    total_forecast_hi_kwh=excluded.total_forecast_hi_kwh,
                     total_actual_kwh=excluded.total_actual_kwh,
                     total_abs_error_kwh=excluded.total_abs_error_kwh,
                     daily_wape_pct=excluded.daily_wape_pct,
@@ -7069,7 +7167,8 @@ def _persist_qa_comparison(
                 (
                     target_date, run_audit_id, generator_mode,
                     provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
-                    total_forecast_kwh, total_actual_kwh, total_abs_error_kwh,
+                    total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
+                    total_actual_kwh, total_abs_error_kwh,
                     daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
                     usable_slots, masked_slots_count,
                     actual_slots_count, forecast_slots_count,
@@ -7207,6 +7306,7 @@ def forecast_qa(today: date) -> None:
 
     actual, actual_present = load_actual_loss_adjusted_with_presence(yesterday)
     fc, fc_present = load_dayahead_with_presence(yesterday)
+    fc_lo, fc_hi = _load_dayahead_bands_from_db(yesterday)
     pers, pers_present = load_actual_loss_adjusted_with_presence(day2ago)   # persistence proxy
 
     if (
@@ -7356,6 +7456,8 @@ def forecast_qa(today: date) -> None:
         hybrid_baseline_slots=hybrid_baseline_slots,
         rad_slots=rad_slots,
         cloud_slots=cloud_slots,
+        lo_slots=fc_lo,
+        hi_slots=fc_hi,
     )
 
     resolution_debug = _build_resolution_daily_record(

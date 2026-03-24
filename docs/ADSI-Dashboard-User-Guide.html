@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.39</span>
+    <span><b>Version:</b> 2.4.41</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -1055,6 +1055,86 @@
     <div class="info-card warn" style="margin-top:12px">
       <div class="info-card-label">Important</div>
       The forecast engine depends on the <code>plant-cap</code> scope tag in the audit log to distinguish automated cap stops from manual stops. Do not modify or clear audit log records without understanding this dependency.
+    </div>
+  </div>
+
+  <h3>Forecast Performance Monitor</h3>
+  <p>The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. It is available on the Forecast page under the &ldquo;Performance&rdquo; tab.</p>
+
+  <h4>Health Chips</h4>
+  <table>
+    <thead><tr><th>Chip</th><th>What it shows</th></tr></thead>
+    <tbody>
+      <tr><td>ML Training</td><td>Status of the last model training run: <em>Trained</em>, <em>Rejected (N consecutive)</em>, or <em>No data</em></td></tr>
+      <tr><td>Last Run</td><td>Outcome of the most recent day-ahead generation attempt and its timestamp</td></tr>
+      <tr><td>Provider</td><td>Data provider used for the last run: <em>Local ML</em> or <em>Solcast</em></td></tr>
+      <tr><td>Recent Quality</td><td>Aggregate quality rating over the selected window: <em>Good</em>, <em>Acceptable</em>, or <em>Poor</em></td></tr>
+    </tbody>
+  </table>
+
+  <h4>Compare Chart</h4>
+  <p>Overlays the day-ahead forecast (line) against actual generation (bars) for each date in the window. A shaded confidence band shows the forecast high&ndash;low range where available.</p>
+
+  <h4>WAPE Chart</h4>
+  <p>Plots the daily Weighted Absolute Percentage Error (WAPE) as a bar chart. Lower values indicate higher accuracy. Bar colour reflects the quality tier for that day.</p>
+
+  <h4>History Table</h4>
+  <table>
+    <thead><tr><th>Column</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Date</td><td>Target date of the forecast</td></tr>
+      <tr><td>Provider</td><td>Data provider used (<em>Local ML</em> or <em>Solcast</em>)</td></tr>
+      <tr><td>Variant</td><td>Forecast variant tag (e.g. <em>day_ahead</em>)</td></tr>
+      <tr><td>WAPE %</td><td>Weighted Absolute Percentage Error for that day</td></tr>
+      <tr><td>Forecast MWh</td><td>Forecasted daily energy total</td></tr>
+      <tr><td>Actual MWh</td><td>Observed actual energy total</td></tr>
+      <tr><td>Freshness</td><td>Solcast input freshness classification</td></tr>
+      <tr><td>Quality</td><td>Overall quality tier for that forecast run</td></tr>
+      <tr><td>In-Memory</td><td>Whether the forecast is held in the in-memory error-correction pool</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Controls</h4>
+  <table>
+    <thead><tr><th>Control</th><th>Function</th></tr></thead>
+    <tbody>
+      <tr><td>Day-range selector</td><td>Sets the look-back window: 7, 14, 30, 60, 90, or 180 days</td></tr>
+      <tr><td>Refresh</td><td>Reloads all panel data from the server</td></tr>
+    </tbody>
+  </table>
+
+  <h3>ML Backend &mdash; LightGBM</h3>
+  <div class="info-card ml-highlight">
+    <div class="info-card-label" style="color:var(--accent)">LightGBM Installation &amp; Requirements</div>
+    <p>The forecast engine uses <b>LightGBM</b> as its primary ML backend when available (enabled by default from v2.4.40). LightGBM delivers faster training and improved accuracy on tabular solar data compared to the built-in sklearn Gradient Boosting Regressor fallback.</p>
+
+    <h4>Installation</h4>
+    <p>Install LightGBM into the Python environment used by the Forecast Service:</p>
+    <pre><code>pip install lightgbm</code></pre>
+    <p>If LightGBM is not installed the engine falls back automatically to sklearn GBR &mdash; no configuration change is required. Switching is fully transparent: the same training pipeline and hyper-parameters apply.</p>
+
+    <h4>Requirements</h4>
+    <table>
+      <thead><tr><th>Requirement</th><th>Details</th></tr></thead>
+      <tbody>
+        <tr><td>Python</td><td>3.8 or later</td></tr>
+        <tr><td>LightGBM package</td><td>3.x or later &mdash; <code>pip install lightgbm</code></td></tr>
+        <tr><td>Visual C++ Redistributable (Windows)</td><td>Usually already present; required by the LightGBM DLL</td></tr>
+        <tr><td>CPU / RAM</td><td>No GPU required; standard workstation hardware is sufficient</td></tr>
+        <tr><td>Disk</td><td>~50 MB for the LightGBM package and its DLLs</td></tr>
+      </tbody>
+    </table>
+
+    <h4>Verifying the Active Backend</h4>
+    <ul>
+      <li>Check the <b>ML Training</b> health chip in the Forecast Performance Monitor after the next training run.</li>
+      <li>The Forecast Service log prints <code>[LightGBM]</code> entries during model fit when LightGBM is active.</li>
+      <li>To force the sklearn fallback (e.g. for debugging), set the environment variable <code>FORECAST_USE_LIGHTGBM=0</code> before starting the Forecast Service.</li>
+    </ul>
+
+    <div class="info-card tip" style="margin-top:12px">
+      <div class="info-card-label">Note</div>
+      PyInstaller builds bundle LightGBM automatically if it is installed on the build machine. If the build machine does not have LightGBM, the packaged EXE will use the sklearn fallback at runtime.
     </div>
   </div>
 

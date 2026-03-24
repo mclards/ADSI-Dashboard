@@ -275,6 +275,15 @@ const State = {
   invDetailAlarmRows: [],   // cached alarm rows for live chip refresh
   invDetailReportRows: [],  // cached report rows for live chip refresh
   invDetailRefreshTimer: null, // setInterval ref for periodic kWh refresh
+  fperf: {
+    mounted: false,
+    loading: false,
+    requestId: 0,
+    days: 30,
+    qaRows: [],
+    health: null,
+    collapsed: false,
+  },
 };
 const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re-fetch after that
 const MAX_INV_UNITS = 4;
@@ -1464,6 +1473,22 @@ function refreshChartsTheme() {
         chart.data.datasets[3].borderColor = pal.ahead;
         chart.data.datasets[3].backgroundColor = pal.aheadFill;
         chart.data.datasets[3].pointBackgroundColor = pal.ahead;
+      }
+    }
+    if (key === "fperfCompare" && Array.isArray(chart.data?.datasets)) {
+      if (chart.data.datasets[0]) {
+        chart.data.datasets[0].borderColor = pal.actual;
+        chart.data.datasets[0].backgroundColor = pal.actualFill;
+      }
+      if (chart.data.datasets[1]) {
+        chart.data.datasets[1].borderColor = pal.ahead;
+      }
+      if (chart.data.datasets[2]) {
+        chart.data.datasets[2].borderColor = pal.bandBorder;
+        chart.data.datasets[2].backgroundColor = pal.bandFill;
+      }
+      if (chart.data.datasets[3]) {
+        chart.data.datasets[3].borderColor = pal.bandBorder;
       }
     }
     chart.update("none");
@@ -3812,6 +3837,412 @@ function mountForecastSection() {
   host.appendChild(section);
 }
 
+// ── Forecast Performance Monitor ─────────────────────────────────────────────
+
+function mountForecastPerfPanel() {
+  const host = $("forecastPageSections");
+  if (!host || $("fperfPanel")) return;
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+<div class="fperf-card" id="fperfPanel">
+  <div class="fperf-head">
+    <div class="fperf-head-left">
+      <button id="fperfToggleBtn" class="fperf-toggle-btn" type="button" title="Toggle panel" aria-label="Toggle Forecast Performance Monitor panel" aria-expanded="true">
+        <span class="mdi mdi-chevron-down fperf-chevron" aria-hidden="true"></span>
+      </button>
+      <span class="fperf-icon mdi mdi-chart-line" aria-hidden="true"></span>
+      <span class="fperf-title">Forecast Performance Monitor</span>
+    </div>
+    <div class="fperf-head-right">
+      <select id="fperfDaysSelect" class="sel fperf-days-sel" title="History window for charts and table">
+        <option value="7">Last 7 days</option>
+        <option value="14">Last 14 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="60">Last 60 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+      <button id="btnRefreshFperf" class="btn btn-outline fperf-refresh-btn" type="button"
+              title="Refresh forecast performance data" aria-label="Refresh forecast performance">
+        <span class="mdi mdi-refresh" aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+  <div class="fperf-body" id="fperfBody">
+    <div class="fperf-health-bar" id="fperfHealthBar">
+      <div class="fperf-hchip" id="fperfChipTrain">
+        <span class="fperf-hchip-label">ML Training</span>
+        <span class="fperf-hchip-val" id="fperfTrainVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipLastRun">
+        <span class="fperf-hchip-label">Last Run</span>
+        <span class="fperf-hchip-val" id="fperfLastRunVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipProvider">
+        <span class="fperf-hchip-label">Provider</span>
+        <span class="fperf-hchip-val" id="fperfProviderVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipQuality">
+        <span class="fperf-hchip-label">Recent Quality (14d)</span>
+        <span class="fperf-hchip-val" id="fperfQualityVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipAvgWape">
+        <span class="fperf-hchip-label">Avg WAPE (window)</span>
+        <span class="fperf-hchip-val" id="fperfAvgWapeVal">—</span>
+      </div>
+    </div>
+    <div class="fperf-charts-row">
+      <div class="fperf-chart-panel">
+        <div class="fperf-chart-title">Forecast vs Actual (MWh/day)</div>
+        <div class="fperf-chart-wrap"><canvas id="fperfCompareChart"></canvas></div>
+      </div>
+      <div class="fperf-chart-panel">
+        <div class="fperf-chart-title">WAPE % per Day</div>
+        <div class="fperf-chart-wrap"><canvas id="fperfWapeChart"></canvas></div>
+      </div>
+    </div>
+    <div class="fperf-table-section">
+      <div class="fperf-table-title">Recent QA Log</div>
+      <div class="fperf-table-wrap">
+        <table class="fperf-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Provider</th>
+              <th>Variant</th>
+              <th class="td-num">WAPE %</th>
+              <th class="td-num">Forecast MWh</th>
+              <th class="td-num">Actual MWh</th>
+              <th>Freshness</th>
+              <th>Quality</th>
+              <th>In Memory</th>
+            </tr>
+          </thead>
+          <tbody id="fperfTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <span class="smsg" id="fperfMsg"></span>
+  </div>
+</div>`;
+  host.insertBefore(wrap.firstElementChild, host.firstChild);
+  State.fperf.mounted = true;
+
+  // Load collapsed state from localStorage; default is collapsed
+  const savedCollapsed = localStorage.getItem("fperfCollapsed");
+  State.fperf.collapsed = savedCollapsed === null ? true : savedCollapsed === "true";
+  applyFperfCollapsedState();
+
+  $("btnRefreshFperf").addEventListener("click", () => loadForecastPerfData());
+  $("fperfDaysSelect").addEventListener("change", (e) => {
+    State.fperf.days = parseInt(e.target.value, 10) || 30;
+    loadForecastPerfData();
+  });
+  $("fperfToggleBtn").addEventListener("click", () => toggleFperfPanel());
+}
+
+function toggleFperfPanel() {
+  State.fperf.collapsed = !State.fperf.collapsed;
+  localStorage.setItem("fperfCollapsed", String(State.fperf.collapsed));
+  applyFperfCollapsedState();
+}
+
+function applyFperfCollapsedState() {
+  const body = $("fperfBody");
+  const btn = $("fperfToggleBtn");
+  const chevron = btn?.querySelector(".fperf-chevron");
+
+  if (!body) return;
+
+  if (State.fperf.collapsed) {
+    body.classList.add("fperf-body-collapsed");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+    if (chevron) chevron.classList.add("fperf-chevron-rotated");
+  } else {
+    body.classList.remove("fperf-body-collapsed");
+    if (btn) btn.setAttribute("aria-expanded", "true");
+    if (chevron) chevron.classList.remove("fperf-chevron-rotated");
+  }
+}
+
+async function loadForecastPerfData() {
+  if (State.fperf.loading) return;
+  State.fperf.loading = true;
+  const rid = ++State.fperf.requestId;
+  const msg = $("fperfMsg");
+  const btn = $("btnRefreshFperf");
+  if (msg) msg.textContent = "";
+  if (btn) btn.disabled = true;
+  try {
+    const [qaResult, healthResult] = await Promise.allSettled([
+      api(`/api/forecast/qa-history?days=${State.fperf.days}`),
+      api("/api/forecast/engine-health"),
+    ]);
+    if (State.fperf.requestId !== rid) return; // stale response — newer request in flight
+    const qaRes     = qaResult.status     === "fulfilled" ? qaResult.value     : null;
+    const healthRes = healthResult.status === "fulfilled" ? healthResult.value : null;
+    State.fperf.qaRows = Array.isArray(qaRes?.rows) ? qaRes.rows : [];
+    State.fperf.health = healthRes || null;
+    if (qaResult.status !== "fulfilled" || healthResult.status !== "fulfilled") {
+      const failed = [qaResult, healthResult]
+        .filter((r) => r.status !== "fulfilled")
+        .map((r) => r.reason?.message || "unknown error")
+        .join("; ");
+      if (msg) msg.textContent = `Partial load failure: ${failed}`;
+    }
+    renderForecastPerfHealth(healthRes);
+    renderForecastPerfCharts(State.fperf.qaRows);
+    renderForecastPerfTable(State.fperf.qaRows);
+  } catch (e) {
+    if (msg) msg.textContent = `Load failed: ${e.message}`;
+  } finally {
+    State.fperf.loading = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderForecastPerfHealth(health) {
+  if (!health) return;
+
+  // ML Training chip
+  const trainChip = $("fperfChipTrain");
+  const trainVal  = $("fperfTrainVal");
+  if (trainVal) {
+    const rej = Number(health.trainState?.consecutiveRejections || 0);
+    if (rej === 0) {
+      trainVal.textContent = "Healthy";
+      if (trainChip) { trainChip.className = "fperf-hchip chip-ok"; }
+    } else if (rej < 3) {
+      trainVal.textContent = `${rej} consecutive skip${rej > 1 ? "s" : ""}`;
+      if (trainChip) { trainChip.className = "fperf-hchip chip-warn"; }
+    } else {
+      trainVal.textContent = `${rej} consecutive skips`;
+      if (trainChip) { trainChip.className = "fperf-hchip chip-error"; }
+    }
+  }
+
+  // Last run chip
+  const runVal = $("fperfLastRunVal");
+  if (runVal && health.latestAudit) {
+    const a = health.latestAudit;
+    const dt = a.generated_ts ? new Date(a.generated_ts) : null;
+    const dtStr = dt
+      ? `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`
+      : "—";
+    runVal.textContent = `${a.target_date || "—"} @ ${dtStr}`;
+    const runChip = $("fperfChipLastRun");
+    if (runChip) {
+      runChip.className =
+        a.run_status === "success" ? "fperf-hchip chip-ok" : "fperf-hchip chip-error";
+    }
+  }
+
+  // Provider chip
+  const provVal = $("fperfProviderVal");
+  if (provVal && health.latestAudit) {
+    const prov = String(health.latestAudit.provider_used || "—").trim();
+    const variant = String(health.latestAudit.forecast_variant || "").trim();
+    provVal.textContent = variant ? `${prov} / ${variant}` : prov;
+    const provChip = $("fperfChipProvider");
+    if (provChip) provChip.className = "fperf-hchip chip-cyan";
+  }
+
+  // Quality breakdown chip (14d)
+  const qualVal = $("fperfQualityVal");
+  if (qualVal && Array.isArray(health.recentQualityBreakdown)) {
+    const qmap = {};
+    health.recentQualityBreakdown.forEach((r) => { qmap[r.comparison_quality] = r.cnt; });
+    const good  = (qmap.good || 0) + (qmap.excellent || 0);
+    const total = Object.values(qmap).reduce((s, v) => s + v, 0);
+    if (total === 0) {
+      qualVal.textContent = "No data";
+    } else {
+      qualVal.textContent = `${good}/${total} good`;
+      const qualChip = $("fperfChipQuality");
+      if (qualChip) {
+        const ratio = good / total;
+        qualChip.className = ratio >= 0.7 ? "fperf-hchip chip-ok"
+          : ratio >= 0.4 ? "fperf-hchip chip-warn"
+          : "fperf-hchip chip-error";
+      }
+    }
+  }
+}
+
+function renderForecastPerfCharts(rows) {
+  const pal = getChartPalette();
+  const sorted = [...rows].sort((a, b) => (a.target_date > b.target_date ? 1 : -1));
+  const labels = sorted.map((r) => r.target_date.slice(5)); // MM-DD
+
+  // ── Compare chart ──
+  const actualVals   = sorted.map((r) => r.total_actual_kwh   != null ? +(r.total_actual_kwh   / 1000).toFixed(3) : null);
+  const forecastVals = sorted.map((r) => r.total_forecast_kwh != null ? +(r.total_forecast_kwh / 1000).toFixed(3) : null);
+  const loVals       = sorted.map((r) => r.total_forecast_lo_kwh != null ? +(r.total_forecast_lo_kwh / 1000).toFixed(3) : null);
+  const hiVals       = sorted.map((r) => r.total_forecast_hi_kwh != null ? +(r.total_forecast_hi_kwh / 1000).toFixed(3) : null);
+  const hasLoHi      = sorted.some((r) => r.total_forecast_lo_kwh != null);
+
+  const compareCanvas = $("fperfCompareChart");
+  const existingCompare = State.charts.fperfCompare;
+  const compareSets = [
+    {
+      label: "Actual",
+      data: actualVals,
+      borderColor: pal.actual,
+      backgroundColor: pal.actualFill,
+      borderWidth: 2,
+      pointRadius: sorted.length <= 14 ? 2.4 : 0,
+      pointHoverRadius: 3,
+      tension: 0.25,
+      fill: true,
+      order: 1,
+    },
+    {
+      label: "Forecast",
+      data: forecastVals,
+      borderColor: pal.ahead,
+      backgroundColor: "transparent",
+      borderWidth: 2,
+      pointRadius: sorted.length <= 14 ? 2.4 : 0,
+      pointHoverRadius: 3,
+      tension: 0.25,
+      fill: false,
+      order: 2,
+    },
+  ];
+  if (hasLoHi) {
+    compareSets.push(
+      {
+        label: "Lo Band",
+        data: loVals,
+        borderColor: pal.bandBorder,
+        backgroundColor: pal.bandFill,
+        borderWidth: 1,
+        borderDash: [3, 3],
+        pointRadius: 0,
+        tension: 0.25,
+        fill: "+1",
+        order: 3,
+      },
+      {
+        label: "Hi Band",
+        data: hiVals,
+        borderColor: pal.bandBorder,
+        backgroundColor: "transparent",
+        borderWidth: 1,
+        borderDash: [3, 3],
+        pointRadius: 0,
+        tension: 0.25,
+        fill: false,
+        order: 4,
+      },
+    );
+  }
+  if (existingCompare) {
+    existingCompare.data.labels = labels;
+    existingCompare.data.datasets = compareSets;
+    existingCompare.update("none");
+  } else if (compareCanvas) {
+    State.charts.fperfCompare = new Chart(compareCanvas, {
+      type: "line",
+      data: { labels, datasets: compareSets },
+      options: chartOpts("MWh", true),
+    });
+  }
+
+  // ── WAPE chart ──
+  const wapeVals = sorted.map((r) => r.daily_wape_pct != null ? +Number(r.daily_wape_pct).toFixed(2) : null);
+  const wapeColors = sorted.map((r) => {
+    const q = r.comparison_quality || "review";
+    if (q === "good" || q === "excellent") return "rgba(16,179,112,.72)";
+    if (q === "review")                    return "rgba(240,144,0,.72)";
+    return "rgba(224,53,96,.72)";
+  });
+
+  const wapeCanvas = $("fperfWapeChart");
+  const existingWape = State.charts.fperfWape;
+  const wapeOpts = chartOpts("WAPE %", false);
+  if (existingWape) {
+    existingWape.data.labels = labels;
+    if (!existingWape.data.datasets?.length) existingWape.data.datasets = [{}];
+    existingWape.data.datasets[0].data = wapeVals;
+    existingWape.data.datasets[0].backgroundColor = wapeColors;
+    existingWape.update("none");
+  } else if (wapeCanvas) {
+    State.charts.fperfWape = new Chart(wapeCanvas, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "WAPE %",
+            data: wapeVals,
+            backgroundColor: wapeColors,
+            borderRadius: 3,
+          },
+        ],
+      },
+      options: wapeOpts,
+    });
+  }
+
+  // Avg WAPE chip
+  const avgWapeEl = $("fperfAvgWapeVal");
+  const avgWapeChip = $("fperfChipAvgWape");
+  if (avgWapeEl) {
+    const valid = wapeVals.filter((v) => v != null);
+    if (valid.length === 0) {
+      avgWapeEl.textContent = "—";
+    } else {
+      const avg = valid.reduce((s, v) => s + v, 0) / valid.length;
+      avgWapeEl.textContent = `${avg.toFixed(1)}%`;
+      if (avgWapeChip) {
+        avgWapeChip.className = avg <= 10 ? "fperf-hchip chip-ok"
+          : avg <= 20 ? "fperf-hchip chip-warn"
+          : "fperf-hchip chip-error";
+      }
+    }
+  }
+}
+
+function renderForecastPerfTable(rows) {
+  const tbody = $("fperfTableBody");
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:16px;color:var(--text3)">No QA data available for this window.</td></tr>`;
+    return;
+  }
+  const sorted = [...rows].sort((a, b) => (a.target_date > b.target_date ? -1 : 1));
+  const qBadge = (q) => {
+    const cls = q === "good" || q === "excellent" ? "q-good"
+      : q === "ok" ? "q-ok"
+      : q === "review" ? "q-review"
+      : q === "bad" ? "q-bad"
+      : "q-excluded";
+    return `<span class="fperf-badge ${cls}">${q || "—"}</span>`;
+  };
+  tbody.innerHTML = sorted.map((r) => {
+    const fmwh = r.total_forecast_kwh != null ? (r.total_forecast_kwh / 1000).toFixed(3) : "—";
+    const amwh = r.total_actual_kwh   != null ? (r.total_actual_kwh   / 1000).toFixed(3) : "—";
+    const wape = r.daily_wape_pct     != null ? Number(r.daily_wape_pct).toFixed(2) + "%" : "—";
+    const prov = escapeHtml(String(r.provider_used || "—").trim());
+    const variant = escapeHtml(String(r.forecast_variant || "").trim());
+    const fresh = escapeHtml(String(r.solcast_freshness_class || "—").trim());
+    const inMem = r.include_in_error_memory
+      ? `<span class="fperf-mem-yes">✓</span>`
+      : `<span class="fperf-mem-no">—</span>`;
+    return `<tr>
+      <td class="td-date">${r.target_date}</td>
+      <td>${prov}</td>
+      <td>${variant || "—"}</td>
+      <td class="td-num">${wape}</td>
+      <td class="td-num">${fmwh}</td>
+      <td class="td-num">${amwh}</td>
+      <td>${fresh}</td>
+      <td>${qBadge(r.comparison_quality)}</td>
+      <td style="text-align:center">${inMem}</td>
+    </tr>`;
+  }).join("");
+}
+
 function updateForecastSidebarSummary() {
   const chip = $("forecastSidebarCurrentChip");
   if (!chip) return;
@@ -3825,10 +4256,12 @@ function updateForecastSidebarSummary() {
 
 function initForecastPage() {
   mountForecastSection();
+  mountForecastPerfPanel();
   unlockSettingsInputs();
   syncForecastProviderUi();
   updateForecastSidebarSummary();
   updateSolcastPreviewUnitUi();
+  loadForecastPerfData().catch(() => {});
   const useToolkitPreview =
     String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
       .trim()

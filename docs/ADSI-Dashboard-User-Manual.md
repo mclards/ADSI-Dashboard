@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.39`
+**Applies to:** ADSI Inverter Dashboard `v2.4.41`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -621,6 +621,76 @@ When toolkit preview is enabled, the forecast workspace provides:
 | `Save and Test Solcast` | Saves active values, then tests the chosen Solcast mode |
 
 | `Test Solcast Connection` | Tests current values without saving |
+
+### Forecast Performance Monitor
+
+The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. Access it from the **Performance** tab on the Forecast page.
+
+#### Health Chips
+
+| Chip | What it shows |
+| --- | --- |
+| `ML Training` | Status of the last model training run: *Trained*, *Rejected (N consecutive)*, or *No data* |
+| `Last Run` | Outcome of the most recent day-ahead generation attempt and its timestamp |
+| `Provider` | Data provider used for the last run: *Local ML* or *Solcast* |
+| `Recent Quality` | Aggregate quality rating over the selected window: *Good*, *Acceptable*, or *Poor* |
+
+#### Charts
+
+| Chart | Description |
+| --- | --- |
+| Compare | Overlays day-ahead forecast (line) against actual generation (bars) with a shaded confidence band |
+| WAPE | Daily Weighted Absolute Percentage Error bar chart; bar colour reflects quality tier |
+
+#### History Table Columns
+
+| Column | Description |
+| --- | --- |
+| `Date` | Target date of the forecast |
+| `Provider` | Data provider used (*Local ML* or *Solcast*) |
+| `Variant` | Forecast variant tag (e.g. *day_ahead*) |
+| `WAPE %` | Weighted Absolute Percentage Error for that day |
+| `Forecast MWh` | Forecasted daily energy total |
+| `Actual MWh` | Observed actual energy total |
+| `Freshness` | Solcast input freshness classification |
+| `Quality` | Overall quality tier for that forecast run |
+| `In-Memory` | Whether the forecast is held in the in-memory error-correction pool |
+
+#### Controls
+
+| Control | Function |
+| --- | --- |
+| Day-range selector | Sets the look-back window: 7, 14, 30, 60, 90, or 180 days |
+| Refresh | Reloads all panel data from the server |
+
+### ML Backend — LightGBM
+
+The forecast engine uses **LightGBM** as its primary ML backend when installed (enabled by default from v2.4.40). If LightGBM is not installed the engine falls back automatically to sklearn's Gradient Boosting Regressor — no configuration change is required.
+
+#### Installation
+
+```
+pip install lightgbm
+```
+
+Install into the Python environment used by the Forecast Service. On Windows the Visual C++ Redistributable (usually already present) is also required by the LightGBM DLL.
+
+#### Requirements
+
+| Requirement | Details |
+| --- | --- |
+| Python | 3.8 or later |
+| LightGBM package | 3.x or later (`pip install lightgbm`) |
+| Visual C++ Redistributable | Windows only — usually already present |
+| CPU / RAM | Standard workstation hardware; no GPU required |
+| Disk | ~50 MB for package and DLLs |
+
+#### Verifying the Active Backend
+
+- Check the **ML Training** health chip in the Forecast Performance Monitor after the next training run.
+- The Forecast Service log prints `[LightGBM]` entries during model fit when LightGBM is active.
+- To force the sklearn fallback (e.g. for debugging), set `FORECAST_USE_LIGHTGBM=0` before starting the Forecast Service.
+- PyInstaller builds bundle LightGBM automatically if it is installed on the build machine; if not, the packaged EXE uses the sklearn fallback at runtime.
 
 ---
 
