@@ -4085,25 +4085,27 @@ function renderForecastPerfHealth(health) {
   const mlChip = $("fperfChipMlBackend");
   const mlVal = $("fperfChipMlBackendVal");
   if (mlVal && health.mlBackend) {
-    const { type, modelPath, modelAgeHours } = health.mlBackend;
-    let text = "—";
-    let colorClass = "chip-warn";
+    const { type, modelPath, modelAgeHours, available } = health.mlBackend;
+    let text, colorClass, titleText;
 
     if (type === "lightgbm") {
       text = "LightGBM";
       colorClass = "chip-ok";
+      titleText = `Model age: ${modelAgeHours != null ? modelAgeHours + "h" : "—"} | Path: ${modelPath || "—"}`;
     } else if (type === "sklearn_gbr") {
       text = "sklearn GBR";
       colorClass = "chip-info";
+      titleText = `Model age: ${modelAgeHours != null ? modelAgeHours + "h" : "—"} | Path: ${modelPath || "—"}`;
     } else {
-      text = "Unknown";
+      text = available ? "Detecting…" : "No model";
       colorClass = "chip-warn";
+      titleText = "Restart forecast service to detect backend type";
     }
 
     mlVal.textContent = text;
     if (mlChip) {
       mlChip.className = `fperf-hchip ${colorClass}`;
-      mlChip.title = `Model age: ${modelAgeHours}h | Path: ${modelPath || "—"}`;
+      mlChip.title = titleText;
     }
   } else if (mlVal) {
     mlVal.textContent = "—";
@@ -4302,8 +4304,10 @@ function renderForecastPerfTable(rows) {
       : q === "ok" ? "q-ok"
       : q === "review" ? "q-review"
       : q === "bad" ? "q-bad"
+      : q === "preview" ? "q-excluded"
       : "q-excluded";
-    return `<span class="fperf-badge ${cls}">${q || "—"}</span>`;
+    const label = q === "preview" ? "Preview" : (q || "—");
+    return `<span class="fperf-badge ${cls}">${label}</span>`;
   };
   tbody.innerHTML = sorted.map((r) => {
     const fmwh = r.total_forecast_kwh != null ? (r.total_forecast_kwh / 1000).toFixed(3) : "—";

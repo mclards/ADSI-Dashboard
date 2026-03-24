@@ -13675,30 +13675,63 @@ app.get("/api/forecast/qa-history", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   try {
     const days = Math.min(180, Math.max(7, parseInt(req.query.days, 10) || 30));
-    const rows = db
+
+    // Primary source: QA-verified comparison table
+    let rows = db
       .prepare(
-        `SELECT
-           target_date,
-           provider_used,
-           forecast_variant,
-           solcast_freshness_class,
-           comparison_quality,
-           include_in_error_memory,
-           total_forecast_kwh,
-           total_forecast_lo_kwh,
-           total_forecast_hi_kwh,
-           total_actual_kwh,
-           total_abs_error_kwh,
-           daily_wape_pct,
-           daily_mape_pct,
-           usable_slot_count,
-           masked_slot_count,
-           computed_ts
+        `SELECT target_date, provider_used, forecast_variant,
+                solcast_freshness_class, comparison_quality,
+                include_in_error_memory, total_forecast_kwh,
+                total_forecast_lo_kwh, total_forecast_hi_kwh,
+                total_actual_kwh, total_abs_error_kwh,
+                daily_wape_pct, daily_mape_pct,
+                usable_slot_count, masked_slot_count, computed_ts
          FROM forecast_error_compare_daily
          ORDER BY target_date DESC, computed_ts DESC
          LIMIT ?`,
       )
       .all(days);
+
+    // Fallback: derive from forecast_run_audit + daily_report when QA table is empty
+    if (rows.length === 0) {
+      rows = db
+        .prepare(
+          `SELECT fra.target_date,
+                  fra.provider_used,
+                  fra.forecast_variant,
+                  fra.solcast_freshness_class,
+                  'preview'  AS comparison_quality,
+                  0          AS include_in_error_memory,
+                  fra.final_forecast_total_kwh          AS total_forecast_kwh,
+                  NULL                                  AS total_forecast_lo_kwh,
+                  NULL                                  AS total_forecast_hi_kwh,
+                  dr.actual_kwh                         AS total_actual_kwh,
+                  CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
+                       THEN ABS(fra.final_forecast_total_kwh - dr.actual_kwh) END AS total_abs_error_kwh,
+                  CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
+                       THEN ROUND(ABS(fra.final_forecast_total_kwh - dr.actual_kwh) / dr.actual_kwh, 4) END AS daily_wape_pct,
+                  NULL AS daily_mape_pct,
+                  NULL AS usable_slot_count,
+                  NULL AS masked_slot_count,
+                  fra.generated_ts AS computed_ts
+           FROM forecast_run_audit fra
+           JOIN (
+             SELECT target_date, MAX(generated_ts) AS max_ts
+             FROM forecast_run_audit
+             WHERE is_authoritative_runtime = 1 AND run_status = 'ok'
+             GROUP BY target_date
+           ) latest ON latest.target_date = fra.target_date AND latest.max_ts = fra.generated_ts
+           LEFT JOIN (
+             SELECT date, SUM(kwh_total) AS actual_kwh
+             FROM daily_report
+             GROUP BY date
+           ) dr ON dr.date = fra.target_date
+           ORDER BY fra.target_date DESC
+           LIMIT ?`,
+        )
+        .all(days);
+    }
+
     return res.json({ ok: true, rows });
   } catch (e) {
     console.warn("[forecast/qa-history] query failed:", e.message);

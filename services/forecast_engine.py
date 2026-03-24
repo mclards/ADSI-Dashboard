@@ -9103,6 +9103,18 @@ def main() -> None:
     log.info("ML backend    : %s", "LightGBM" if (FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE) else "sklearn GBR")
     log.info("=" * 70)
 
+    # Persist ml_backend_type at startup so UI chip works before first training run
+    try:
+        _su_state = _load_json(ML_TRAIN_STATE_FILE)
+        _su_state["ml_backend_type"] = _detect_ml_backend()
+        _su_mf = MODEL_BUNDLE_FILE if MODEL_BUNDLE_FILE.exists() else (MODEL_FILE if MODEL_FILE.exists() else None)
+        if _su_mf:
+            _su_state["model_file_path"] = str(_su_mf)
+            _su_state["model_file_mtime_ms"] = int(_su_mf.stat().st_mtime * 1000)
+        _save_json(ML_TRAIN_STATE_FILE, _su_state)
+    except Exception as _su_err:
+        log.warning("Startup: could not persist ml_backend_type to train state: %s", _su_err)
+
     last_run_hour = -1   # track which hour we last ran in
     last_intraday_slot_key = ""
     _fail_cooldown_until = 0.0       # monotonic time until retry is allowed
