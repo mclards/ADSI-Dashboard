@@ -9782,13 +9782,13 @@ async function runDayAheadGenerationPlan({
  * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
  * Silently returns { pulled: false } if Solcast is not configured or fetch fails.
  */
-async function autoFetchSolcastSnapshots(dates) {
+async function autoFetchSolcastSnapshots(dates, options = {}) {
   try {
     const cfg = getSolcastConfig();
     if (!hasUsableSolcastConfig(cfg)) {
       return { pulled: false, reason: "not_configured" };
     }
-    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg);
+    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg, options);
     const pulledTs = Date.now();
     const warnings = [];
     let persisted = 0;
@@ -13456,11 +13456,23 @@ app.get("/api/solcast/week-ahead", (req, res) => {
 
 app.post("/api/export/solcast-week-ahead", async (req, res) => {
   try {
-    const tz = getSolcastConfig()?.timeZone || "Asia/Manila";
+    const cfg = getSolcastConfig();
+    const tz = cfg?.timeZone || "Asia/Manila";
     const baseDate = localDateStrInTz(Date.now(), tz);
     const dates = Array.from({ length: 7 }, (_, i) => addDaysIso(baseDate, i + 1));
     const format = String(req.body?.format || "xlsx").trim().toLowerCase();
     const resolution = String(req.body?.resolution || "1hr").trim().toLowerCase();
+    // Mirror the Toolkit Preview fetch: compute hours the same way the preview endpoint does
+    // (startDay=dates[0], dayCount=7, availableSpan=SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS=7).
+    // For a week starting tomorrow this yields (1+7+1)*24=216 → capped to 192 h, which fully
+    // covers all 7 export days.  The 48-h default would leave days 3-7 empty.
+    const toolkitHours = computeSolcastPreviewHoursForRequest(
+      dates[0],
+      7,
+      cfg,
+      SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+    );
+    await autoFetchSolcastSnapshots(dates, { toolkitHours });
     const days = querySolcastWeekAheadDays(baseDate);
     const slotRows = querySlotRowsForWeekAhead(dates);
     const rawOutPath = await runGatewayExportJob("solcast-week-ahead", () =>

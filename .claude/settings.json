@@ -26,7 +26,13 @@
       "WebFetch(domain:forum.pvoutput.org)",
       "WebFetch(domain:solcast.com)",
       "WebFetch(domain:emhass.readthedocs.io)",
-      "WebFetch(domain:www.nrel.gov)"
+      "WebFetch(domain:www.nrel.gov)",
+      "Bash(ls -la /d/ADSI-Dashboard/public/*.html)",
+      "Edit(~/.claude/skills/learned/**)",
+      "Bash(python -c \"import sys,json; p=json.load\\(sys.stdin\\); print\\(json.dumps\\(p.get\\(''''scripts'''',{}\\), indent=2\\)\\)\")",
+      "Bash(npx jest:*)",
+      "Bash(chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf=\"docs/ADSI-Dashboard-User-Guide.pdf\" --print-to-pdf-no-header \"docs/ADSI-Dashboard-User-Guide.html\")",
+      "Bash(\"C:/Program Files/Google/Chrome/Application/chrome.exe\" --headless=new --disable-gpu --no-sandbox --print-to-pdf=\"d:/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.pdf\" --print-to-pdf-no-header \"d:/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.html\")"
     ],
     "deny": [
       "Read(./.env)",

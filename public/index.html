@@ -451,16 +451,6 @@
               >Date <input type="date" id="reportDate" class="inp" title="Select the date for the daily performance report."
             /></label>
             <button id="btnFetchReport" class="btn btn-accent" title="Load the daily performance report for the selected date.">Load Report</button>
-            <label
-              >Format
-              <select id="reportExportFormat" class="sel" title="File format for the exported report.">
-                <option value="xlsx" selected>Excel (.xlsx)</option>
-                <option value="csv">CSV</option>
-              </select>
-            </label>
-            <button id="btnExportDailyReport" class="btn btn-outline" title="Export the loaded daily report to the selected file format.">
-              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Report</span>
-            </button>
           </div>
           <div class="tl-right" id="reportKpis"></div>
         </div>
@@ -550,7 +540,7 @@
                   class="inp"
                   min="0"
                   step="1"
-                  value="0"
+                  value="15"
                   title="Exclude alarms shorter than this duration from the export."
                 /></label>
               <label
@@ -621,16 +611,16 @@
             </div>
             <div class="exp-form">
               <label
-                >Date<input type="date" id="expForecastDate" class="inp" title="Date for the day-ahead forecast export." />
-                <select id="expForecastDateSelect" class="sel" title="Select from dates that have stored Solcast snapshot data." hidden>
-                  <option value="">Loading dates…</option>
+                >Source
+                <select id="expForecastSource" class="sel" title="Forecast data source: Analytics uses the trained ML model, Solcast uses stored API snapshots.">
+                  <option value="analytics">Analytics</option>
+                  <option value="solcast" selected>Solcast</option>
                 </select>
               </label>
               <label
-                >Source
-                <select id="expForecastSource" class="sel" title="Forecast data source: Analytics uses the trained ML model, Solcast uses stored API snapshots.">
-                  <option value="analytics" selected>Analytics</option>
-                  <option value="solcast">Solcast</option>
+                >Date<input type="date" id="expForecastDate" class="inp" title="Date for the day-ahead forecast export." />
+                <select id="expForecastDateSelect" class="sel" title="Select from dates that have stored Solcast snapshot data." hidden>
+                  <option value="">Loading dates…</option>
                 </select>
               </label>
               <label
@@ -646,8 +636,8 @@
               <label
                 >Export Format
                 <select id="expForecastExportFormat" class="sel" title="Standard: one row per time slot. Average Table: grouped averages per resolution bucket.">
-                  <option value="standard" selected>Standard</option>
-                  <option value="average-table">Average Table</option>
+                  <option value="standard">Standard</option>
+                  <option value="average-table" selected>Average Table</option>
                 </select>
               </label>
               <label

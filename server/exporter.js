@@ -1438,6 +1438,7 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
         Online: r.online ? 'YES' : 'NO',
       });
     }
+    await yieldToEventLoop();
   }
 
   const headers = [
@@ -1558,6 +1559,7 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
   const raw = inverter && inverter !== 'all'
     ? db.prepare('SELECT * FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
     : db.prepare('SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
+  await yieldToEventLoop();
 
   const mapped = raw.map(r => ({
     Date: fmtDate(r.ts), Time: fmtTime(r.ts), Plant: getSetting('plantName','ADSI Plant'),
@@ -1697,6 +1699,7 @@ async function exportDailyReport({ startTs, endTs, date, format, rowsByDate }) {
     if (dayIdx < reportDates.length - 1) {
       finalRows.push({ ...blankRow });
     }
+    await yieldToEventLoop();
   }
 
   const fileBase = exportDateAwareFileBase(s, e, 'all', 'Daily Report');

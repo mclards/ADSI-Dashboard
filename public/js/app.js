@@ -90,7 +90,7 @@ const State = {
   energyReqId: 0,
   auditReqId: 0,
   reportReqId: 0,
-  forecastExportFormat: "standard",
+  forecastExportFormat: "average-table",
   analyticsRealtimeTimer: null,
   analyticsFetchTimer: null,
   analyticsFetchInFlight: false,
@@ -215,7 +215,7 @@ const State = {
     payload: null,
     resolution: "PT5M",
     unit: "mwh",
-    exportFormat: "standard",
+    exportFormat: "average-table",
   },
   xfer: {
     slots: {
@@ -385,6 +385,7 @@ const pad2 = (n) => String(n).padStart(2, "0");
 const dateStr = (d = new Date()) =>
   `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const today = () => dateStr(new Date());
+const daysBackFromToday = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dateStr(d); };
 const relTime = (ts) => {
   if (!ts) return "—";
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -432,7 +433,7 @@ function getSharedForecastExportFormat() {
     State.forecastExportFormat ||
       State.solcastPreview.exportFormat ||
       $("expForecastExportFormat")?.value ||
-      "standard",
+      "average-table",
   );
 }
 
@@ -1464,8 +1465,6 @@ const EXPORT_DATE_FIELD_IDS = [
   "expForecastDate",
   "expInvDataDate",
   "expAuditDate",
-  "expReportStart",
-  "expReportEnd",
 ];
 const EXPORT_NUM_FIELD_RULES = {
   genDayCount: { min: 1, max: 31, fallback: 1 },
@@ -1645,7 +1644,7 @@ function bindExportNumberValidators() {
 }
 
 const EXPORT_DATE_RANGE_IDS = [
-  ["expReportStart", "expReportEnd"],
+  ["expReportStart", "expReportEnd", { defaultStartDaysBack: 7 }],
 ];
 const EXPORT_SINGLE_DATE_IDS = [
   "expForecastDate",
@@ -1663,7 +1662,7 @@ function clampExportDateToToday(value) {
 }
 
 function normalizeExportDatePair(startId, endId, options = {}) {
-  const { forceDefault = false, preferred = "start" } = options;
+  const { forceDefault = false, preferred = "start", defaultStartDaysBack = 0 } = options;
   const startInput = $(startId);
   const endInput = $(endId);
   if (!startInput || !endInput) return { start: "", end: "" };
@@ -1673,8 +1672,8 @@ function normalizeExportDatePair(startId, endId, options = {}) {
   let endValue = clampExportDateToToday(endInput.value);
 
   if (forceDefault && !startValue && !endValue) {
-    startValue = maxDate;
     endValue = maxDate;
+    startValue = defaultStartDaysBack > 0 ? daysBackFromToday(defaultStartDaysBack) : maxDate;
   } else if (!startValue && endValue) {
     startValue = endValue;
   } else if (startValue && !endValue) {
@@ -1708,8 +1707,8 @@ function normalizeExportSingleDateInput(inputId, options = {}) {
 }
 
 function normalizeAllExportDateInputs(options = {}) {
-  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
-    normalizeExportDatePair(startId, endId, options);
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId, pairDefaults = {}]) => {
+    normalizeExportDatePair(startId, endId, { ...pairDefaults, ...options });
   });
   EXPORT_SINGLE_DATE_IDS.forEach((inputId) => {
     normalizeExportSingleDateInput(inputId, options);
@@ -1717,13 +1716,14 @@ function normalizeAllExportDateInputs(options = {}) {
 }
 
 function bindExportDateValidators() {
-  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId]) => {
+  EXPORT_DATE_RANGE_IDS.forEach(([startId, endId, pairDefaults = {}]) => {
     const startInput = $(startId);
     const endInput = $(endId);
     if (startInput && startInput.dataset.exportDateBound !== "1") {
       startInput.dataset.exportDateBound = "1";
       const syncFromStart = () => {
         normalizeExportDatePair(startId, endId, {
+          ...pairDefaults,
           forceDefault: true,
           preferred: "start",
         });
@@ -1736,6 +1736,7 @@ function bindExportDateValidators() {
       endInput.dataset.exportDateBound = "1";
       const syncFromEnd = () => {
         normalizeExportDatePair(startId, endId, {
+          ...pairDefaults,
           forceDefault: true,
           preferred: "end",
         });
@@ -4314,7 +4315,7 @@ function applySolcastPreviewPayload(payload) {
     : [];
   State.solcastPreview.rangeLabel = String(payload?.rangeLabel || "").trim();
   State.solcastPreview.loaded = true;
-  syncSharedForecastExportFormatControls(State.solcastPreview.exportFormat || "standard");
+  syncSharedForecastExportFormatControls(State.solcastPreview.exportFormat || "average-table");
   updateSolcastPreviewUnitUi();
   fillSolcastPreviewDayOptions(days, day);
   syncSolcastPreviewDayCountOptions(days, day, dayCount);
@@ -9357,7 +9358,7 @@ function getConfiguredInverterIp(inv) {
 }
 
 function getInverterBaseLabel(inv) {
-  return `INV-${String(Number(inv || 0)).padStart(2, "0")}`;
+  return `INVERTER ${String(Number(inv || 0)).padStart(2, "0")}`;
 }
 
 function getInverterDisplayLabel(inv, options = {}) {
@@ -10288,31 +10289,6 @@ function renderReportKpis() {
     <div class="kpi-box"><div class="kpi-label">Weekly Plant Performance</div><div class="kpi-val">${Number(weekly.performance_pct || 0).toFixed(1)}%</div></div>`;
 }
 
-async function exportDailyReport() {
-  await persistExportUiState().catch(() => {});
-  const date = $("reportDate").value || today();
-  if (!$("reportDate").value) $("reportDate").value = date;
-  const ts = localDateStartMs(date);
-  const format = $("reportExportFormat")?.value || "xlsx";
-  setExportButtonState("btnExportDailyReport", "loading");
-  try {
-    // Ensure report rows are materialized in DB before export.
-    await api(`/api/report/daily?date=${encodeURIComponent(date)}&refresh=1`, "GET");
-    const r = await api("/api/export/daily-report", "POST", {
-      date,
-      startTs: ts,
-      endTs: ts + 86399999,
-      format,
-    });
-    if (!r?.path) throw new Error("Export did not return output path.");
-    showToast("Saved to: " + r.path, "success", 5000);
-    await openExportPathFolder(r.path);
-    setExportButtonState("btnExportDailyReport", "ok");
-  } catch (e) {
-    showToast("Export error: " + e.message, "fault", 5000);
-    setExportButtonState("btnExportDailyReport", "fail");
-  }
-}
 
 // ─── Analytics ────────────────────────────────────────────────────────────────
 function initAnalytics() {
@@ -11858,13 +11834,14 @@ async function runDailyReportExport() {
   normalizeExportDatePair("expReportStart", "expReportEnd", {
     forceDefault: true,
     preferred: "start",
+    defaultStartDaysBack: 7,
   });
   await persistExportUiState().catch(() => {});
   let start = $("expReportStart").value;
   let end = $("expReportEnd").value;
   if (!start && !end) {
-    start = today();
-    end = start;
+    end = today();
+    start = daysBackFromToday(7);
     if ($("expReportStart")) $("expReportStart").value = start;
     if ($("expReportEnd")) $("expReportEnd").value = end;
   } else if (start && !end) {
@@ -12520,8 +12497,6 @@ function bindEventHandlers() {
 
   // Daily Report page
   $("btnFetchReport")?.addEventListener("click", fetchReport);
-  $("btnExportDailyReport")?.addEventListener("click", exportDailyReport);
-
   // Export page
   $("btnExportAlarms")?.addEventListener("click", () =>
     runSingleDateExport(
@@ -12595,7 +12570,7 @@ function bindEventHandlers() {
     rerenderSolcastPreviewChartFromState();
   });
   $("expForecastExportFormat")?.addEventListener("change", (event) => {
-    syncSharedForecastExportFormatControls(event?.target?.value || "standard");
+    syncSharedForecastExportFormatControls(event?.target?.value || "average-table");
   });
   $("btnUploadLicense")?.addEventListener("click", uploadLicenseFromSettings);
   $("btnRefreshLicense")?.addEventListener("click", refreshLicenseSection);
