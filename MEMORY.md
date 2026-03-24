@@ -2,12 +2,22 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.32
+- **Repo/package version baseline:** 2.4.42
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.4.42 Changes - Forecast Performance Monitor Extended Diagnostics (2026-03-25)
+- **Forecast Performance Monitor second chip row:** added ML Backend, Training Data, and Data Quality diagnostic chips below forecast health status.
+- **Extended /api/forecast/engine-health endpoint:** returns mlBackend, trainingSummary, and dataQualityFlags objects alongside existing forecast generation metrics.
+- **Extended ml_train_state.json:** added ml_backend_type, model_file_path, model_file_mtime_ms, training_samples_count, training_features_count, training_regimes_count, training_result, last_training_date, data_warnings fields.
+- **New Python helpers:** _detect_ml_backend() identifies active LightGBM vs sklearn, _collect_data_quality_warnings() audits data state (stale features, low sample count, regime imbalance, etc.).
+- **Fixed build_training_state() call order:** _reset_train_rejection_streak() now called after bundle exists, not before.
+- **Panel defaults to collapsed:** Forecast Performance Monitor panel collapses on first load to reduce initial dashboard clutter.
+- **Validation:** All 31/31 unit smoke tests passed.
+- **Files changed:** `services/forecast_engine.py`, `server/index.js`, `public/js/app.js`, `public/css/style.css`.
 
 ## v2.4.32 Changes - Forecast Solcast Alignment Hardening (2026-03-22)
 - **Tightened ML residual cap:** `SOLCAST_RESIDUAL_PRIMARY_CAP` lowered from 0.40 to 0.30 for tighter ML residual damping when Solcast is primary.
