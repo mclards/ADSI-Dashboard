@@ -3552,6 +3552,14 @@ ipcMain.handle("license-get-audit", async () => {
   }
 });
 
+ipcMain.handle("license-get-fingerprint", () => {
+  try {
+    return { ok: true, fingerprint: getDeviceFingerprint() };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.handle("app-update-get-state", async () => {
   try {
     return buildPublicAppUpdateState();

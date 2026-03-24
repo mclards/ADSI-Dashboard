@@ -2128,6 +2128,40 @@
       </div>
     </div>
 
+    <!-- License Request Modal — shows device fingerprint before upload -->
+    <div
+      id="licenseRequestModal"
+      class="modal-backdrop hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="licenseRequestTitle"
+    >
+      <div class="auth-modal-card">
+        <button id="licenseRequestClose" class="auth-modal-close" type="button" aria-label="Close">&times;</button>
+        <div class="auth-modal-title" id="licenseRequestTitle">Request a License</div>
+        <div class="auth-modal-message">
+          Share your Device ID with your license provider.<br>
+          They will use it to generate a license file bound to this machine.
+        </div>
+        <label class="auth-modal-label">Device ID (Fingerprint)</label>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+          <input
+            id="licenseRequestFp"
+            class="inp auth-modal-input"
+            type="text"
+            readonly
+            style="font-family:monospace;font-size:11px;"
+          />
+          <button id="licenseRequestCopy" class="btn btn-outline" type="button" title="Copy Device ID to clipboard">Copy</button>
+        </div>
+        <div id="licenseRequestCopyMsg" style="font-size:11px;color:var(--ok);min-height:16px;margin-bottom:8px;"></div>
+        <div class="auth-modal-actions">
+          <button id="licenseRequestCancel" class="btn btn-outline" type="button">Cancel</button>
+          <button id="licenseRequestUpload" class="btn btn-accent" type="button">Continue to Upload</button>
+        </div>
+      </div>
+    </div>
+
     <script src="js/app.js"></script>
 
     <!-- App-level confirm dialog (replaces native window.confirm) -->

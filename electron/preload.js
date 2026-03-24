@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // License
   getLicenseStatus: () => ipcRenderer.invoke("license-get-status"),
   getLicenseAudit: () => ipcRenderer.invoke("license-get-audit"),
+  getLicenseFingerprint: () => ipcRenderer.invoke("license-get-fingerprint"),
   uploadLicense: () => ipcRenderer.invoke("license-upload"),
   onLicenseStatus: (cb) => {
     const handler = (_, payload) => cb(payload);

@@ -982,6 +982,9 @@ function bindLicenseNoticeUpload() {
   if (!btn || btn.dataset.bound === "1") return;
   btn.dataset.bound = "1";
   btn.addEventListener("click", async () => {
+    initLicenseRequestModal();
+    const proceed = await openLicenseRequestModal();
+    if (!proceed) return;
     try {
       const res = await window.electronAPI?.uploadLicense?.();
       if (!res?.ok) {
@@ -1003,7 +1006,55 @@ function bindLicenseNoticeUpload() {
   });
 }
 
+const LicenseRequest = { resolver: null };
+
+async function openLicenseRequestModal() {
+  const modal = $("licenseRequestModal");
+  const fpEl = $("licenseRequestFp");
+  const copyMsg = $("licenseRequestCopyMsg");
+  if (!modal || !fpEl) return true; // fallback: proceed without modal
+  fpEl.value = "Loading\u2026";
+  if (copyMsg) copyMsg.textContent = "";
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  try {
+    const res = await window.electronAPI?.getLicenseFingerprint?.();
+    fpEl.value = res?.ok ? (res.fingerprint || "Unavailable") : "Unavailable";
+  } catch (_) {
+    fpEl.value = "Unavailable";
+  }
+  return new Promise((resolve) => { LicenseRequest.resolver = resolve; });
+}
+
+function closeLicenseRequestModal(proceed) {
+  const modal = $("licenseRequestModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  const done = LicenseRequest.resolver;
+  LicenseRequest.resolver = null;
+  if (typeof done === "function") done(!!proceed);
+}
+
+function initLicenseRequestModal() {
+  const modal = $("licenseRequestModal");
+  if (!modal || modal.dataset.bound === "1") return;
+  modal.dataset.bound = "1";
+  $("licenseRequestClose")?.addEventListener("click", () => closeLicenseRequestModal(false));
+  $("licenseRequestCancel")?.addEventListener("click", () => closeLicenseRequestModal(false));
+  $("licenseRequestUpload")?.addEventListener("click", () => closeLicenseRequestModal(true));
+  $("licenseRequestCopy")?.addEventListener("click", () => {
+    const fp = $("licenseRequestFp")?.value || "";
+    if (!fp || fp === "Unavailable" || fp.startsWith("Loading")) return;
+    navigator.clipboard?.writeText(fp).then(() => {
+      const msg = $("licenseRequestCopyMsg");
+      if (msg) { msg.textContent = "Copied!"; setTimeout(() => { msg.textContent = ""; }, 2000); }
+    });
+  });
+  modal.addEventListener("click", (e) => { if (e.target === modal) closeLicenseRequestModal(false); });
+}
+
 async function initLicenseBridge() {
+  initLicenseRequestModal();
   bindLicenseNoticeUpload();
   try {
     if (window.electronAPI?.onLicenseStatus) {
@@ -1141,6 +1192,9 @@ async function refreshLicenseSection() {
 }
 
 async function uploadLicenseFromSettings() {
+  initLicenseRequestModal();
+  const proceed = await openLicenseRequestModal();
+  if (!proceed) return;
   try {
     const res = await window.electronAPI?.uploadLicense?.();
     if (!res?.ok) {
