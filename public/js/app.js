@@ -3890,6 +3890,20 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-val" id="fperfAvgWapeVal">—</span>
       </div>
     </div>
+    <div class="fperf-chip-row fperf-chip-row2">
+      <div class="fperf-hchip" id="fperfChipMlBackend">
+        <span class="fperf-hchip-label">ML Backend</span>
+        <span class="fperf-hchip-val" id="fperfChipMlBackendVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipTrainData">
+        <span class="fperf-hchip-label">Training Data</span>
+        <span class="fperf-hchip-val" id="fperfChipTrainDataVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipDataQual">
+        <span class="fperf-hchip-label">Data Quality</span>
+        <span class="fperf-hchip-val" id="fperfChipDataQualVal">—</span>
+      </div>
+    </div>
     <div class="fperf-charts-row">
       <div class="fperf-chart-panel">
         <div class="fperf-chart-title">Forecast vs Actual (MWh/day)</div>
@@ -4064,6 +4078,78 @@ function renderForecastPerfHealth(health) {
           : ratio >= 0.4 ? "fperf-hchip chip-warn"
           : "fperf-hchip chip-error";
       }
+    }
+  }
+
+  // ML Backend chip
+  const mlChip = $("fperfChipMlBackend");
+  const mlVal = $("fperfChipMlBackendVal");
+  if (mlVal && health.mlBackend) {
+    const { type, modelPath, modelAgeHours } = health.mlBackend;
+    let text = "—";
+    let colorClass = "chip-warn";
+
+    if (type === "lightgbm") {
+      text = "LightGBM";
+      colorClass = "chip-ok";
+    } else if (type === "sklearn_gbr") {
+      text = "sklearn GBR";
+      colorClass = "chip-info";
+    } else {
+      text = "Unknown";
+      colorClass = "chip-warn";
+    }
+
+    mlVal.textContent = text;
+    if (mlChip) {
+      mlChip.className = `fperf-hchip ${colorClass}`;
+      mlChip.title = `Model age: ${modelAgeHours}h | Path: ${modelPath || "—"}`;
+    }
+  } else if (mlVal) {
+    mlVal.textContent = "—";
+    if (mlChip) mlChip.className = "fperf-hchip";
+  }
+
+  // Training Data chip
+  const trainDataChip = $("fperfChipTrainData");
+  const trainDataVal = $("fperfChipTrainDataVal");
+  if (trainDataVal && health.trainingSummary) {
+    const { samplesUsed, featuresUsed, regimesCount, lastTrainingDate, trainingResult } = health.trainingSummary;
+    const samplesStr = samplesUsed != null ? String(samplesUsed) : "—";
+    const featuresStr = featuresUsed != null ? String(featuresUsed) : "—";
+    trainDataVal.textContent = `${samplesStr} smp / ${featuresStr} feat`;
+    if (trainDataChip) {
+      trainDataChip.className = "fperf-hchip chip-info";
+      trainDataChip.title = `Last trained: ${lastTrainingDate || "—"} | Regimes: ${regimesCount || "—"} | Result: ${trainingResult || "—"}`;
+    }
+  } else if (trainDataVal) {
+    trainDataVal.textContent = "—";
+    if (trainDataChip) trainDataChip.className = "fperf-hchip";
+  }
+
+  // Data Quality chip
+  const qualDataChip = $("fperfChipDataQual");
+  const qualDataVal = $("fperfChipDataQualVal");
+  if (qualDataVal) {
+    const flags = health.dataQualityFlags || [];
+    let text = "—";
+    let colorClass = "chip-ok";
+
+    if (flags.length === 0) {
+      text = "Healthy";
+      colorClass = "chip-ok";
+    } else if (flags.length === 1) {
+      text = "1 Warning";
+      colorClass = "chip-warn";
+    } else {
+      text = `${flags.length} Warnings`;
+      colorClass = "chip-error";
+    }
+
+    qualDataVal.textContent = text;
+    if (qualDataChip) {
+      qualDataChip.className = `fperf-hchip ${colorClass}`;
+      qualDataChip.title = flags.length > 0 ? flags.join("\n") : "";
     }
   }
 }

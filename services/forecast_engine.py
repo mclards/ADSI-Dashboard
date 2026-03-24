@@ -442,7 +442,7 @@ def _increment_train_rejection_streak() -> int:
     return streak
 
 
-def _reset_train_rejection_streak() -> None:
+def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
     """Reset the consecutive ML training rejection counter after a successful training run."""
     state = _load_json(ML_TRAIN_STATE_FILE)
     prev = int(state.get("consecutive_train_rejection_count", 0))
@@ -450,6 +450,19 @@ def _reset_train_rejection_streak() -> None:
         log.info("ML training rejection streak cleared (was %d consecutive skips).", prev)
     state["consecutive_train_rejection_count"] = 0
     state["last_successful_train_ts"] = int(time.time() * 1000)
+
+    # Add training metadata if bundle is provided
+    if isinstance(bundle, dict):
+        state["ml_backend_type"] = _detect_ml_backend()
+        state["model_file_path"] = str(MODEL_FILE)
+        state["model_file_mtime_ms"] = int(MODEL_FILE.stat().st_mtime * 1000) if MODEL_FILE.exists() else None
+        state["training_samples_count"] = bundle.get("model_bundle", {}).get("global", {}).get("meta", {}).get("sample_count")
+        state["training_features_count"] = bundle.get("model_bundle", {}).get("global", {}).get("meta", {}).get("feature_count")
+        state["training_regimes_count"] = len(bundle.get("model_bundle", {}).get("regimes", {}))
+        state["training_result"] = "accepted"
+        state["last_training_date"] = bundle.get("training_date")
+        state["data_warnings"] = _collect_data_quality_warnings(bundle.get("model_bundle", {}))
+
     _save_json(ML_TRAIN_STATE_FILE, state)
 
 
@@ -5700,6 +5713,48 @@ def _make_error_classifier_lgbm():
     )
 
 
+def _detect_ml_backend() -> str:
+    """Return 'lightgbm' or 'sklearn_gbr' based on active config and availability."""
+    if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
+        return "lightgbm"
+    return "sklearn_gbr"
+
+
+def _collect_data_quality_warnings(bundle: dict) -> list:
+    """
+    Check for known data quality issues and return a list of warning string codes.
+
+    Returns:
+        list: May include 'insufficient_training_days', 'high_rejection_streak',
+              'no_regime_data', 'lgbm_unavailable_fallback'. May be empty (healthy).
+    """
+    warnings = []
+
+    # Check for insufficient training days
+    day_count = bundle.get("history_days", 0)
+    if isinstance(day_count, int) and day_count < N_TRAIN_DAYS:
+        warnings.append("insufficient_training_days")
+
+    # Check for high rejection streak
+    try:
+        train_state = _load_json(ML_TRAIN_STATE_FILE)
+        if int(train_state.get("consecutive_train_rejection_count", 0)) >= 3:
+            warnings.append("high_rejection_streak")
+    except Exception:
+        pass
+
+    # Check for no regime data
+    regimes = bundle.get("regimes", {})
+    if not regimes:
+        warnings.append("no_regime_data")
+
+    # Check for LightGBM fallback
+    if FORECAST_USE_LIGHTGBM and not _LIGHTGBM_AVAILABLE:
+        warnings.append("lgbm_unavailable_fallback")
+
+    return warnings
+
+
 def _make_residual_regressor(n_estimators: int | None = None):
     if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
         return _make_residual_regressor_lgbm()
@@ -6014,7 +6069,6 @@ def build_training_state(today: date) -> dict | None:
     if X is None:
         _increment_train_rejection_streak()
         return None
-    _reset_train_rejection_streak()
 
     global_model, global_scaler, global_meta = fit_residual_model(X, y, sample_weight, day_keys=day_keys)
     error_classifier_model, error_classifier_scaler, error_classifier_meta = fit_error_classifier(
@@ -6090,7 +6144,7 @@ def build_training_state(today: date) -> dict | None:
                 "meta": cls_meta,
             }
 
-    return {
+    training_state = {
         "created_ts": int(time.time()),
         "training_date": today.isoformat(),
         "history_days": history_days,
@@ -6099,6 +6153,8 @@ def build_training_state(today: date) -> dict | None:
         "weather_bias": build_weather_bias_artifact(today),
         "solcast_reliability": solcast_reliability,
     }
+    _reset_train_rejection_streak(training_state)
+    return training_state
 
 
 def save_model_bundle(bundle: dict) -> bool:

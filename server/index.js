@@ -13740,6 +13740,7 @@ app.get("/api/forecast/engine-health", (req, res) => {
       )
       .all(Date.now() - 14 * 24 * 3600 * 1000);
 
+    const modelMtime = trainState.model_file_mtime_ms || null;
     return res.json({
       ok: true,
       trainState: {
@@ -13747,6 +13748,20 @@ app.get("/api/forecast/engine-health", (req, res) => {
         lastRejectionTs: trainState.last_rejection_ts || null,
         lastSuccessfulTrainTs: trainState.last_successful_train_ts || null,
       },
+      mlBackend: {
+        type: trainState.ml_backend_type || "unknown",
+        modelPath: trainState.model_file_path || null,
+        modelAgeHours: modelMtime ? Math.round((Date.now() - modelMtime) / 3600000) : null,
+        available: !!trainState.model_file_path,
+      },
+      trainingSummary: {
+        samplesUsed: trainState.training_samples_count ?? null,
+        featuresUsed: trainState.training_features_count ?? null,
+        regimesCount: trainState.training_regimes_count ?? null,
+        lastTrainingDate: trainState.last_training_date || null,
+        trainingResult: trainState.training_result || null,
+      },
+      dataQualityFlags: Array.isArray(trainState.data_warnings) ? trainState.data_warnings : [],
       latestAudit: latestAudit || null,
       recentQualityBreakdown: recentQuality,
     });

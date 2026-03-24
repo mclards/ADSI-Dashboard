@@ -9766,6 +9766,16 @@ body.mode-transition-active {
   gap: 8px;
 }
 
+.fperf-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fperf-chip-row2 {
+  margin-top: 6px;
+}
+
 .fperf-hchip {
   display: flex;
   flex-direction: column;
@@ -9799,6 +9809,7 @@ body.mode-transition-active {
 .fperf-hchip.chip-warn .fperf-hchip-val  { color: var(--orange); }
 .fperf-hchip.chip-error .fperf-hchip-val { color: var(--red); }
 .fperf-hchip.chip-cyan .fperf-hchip-val  { color: var(--chart-actual, #22d3ee); }
+.fperf-hchip.chip-info .fperf-hchip-val  { color: var(--text2); }
 
 /* Charts row */
 .fperf-charts-row {
