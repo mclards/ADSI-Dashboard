@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.4.43</span>
+    <span><b>Version:</b> 2.5.0</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -1059,7 +1059,7 @@
   </div>
 
   <h3>Forecast Performance Monitor</h3>
-  <p>The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. It is available on the Forecast page under the &ldquo;Performance&rdquo; tab.</p>
+  <p>The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. It is available on the <b>Analytics</b> page (scroll below the analytics charts).</p>
 
   <h4>Health Chips</h4>
   <table>
@@ -1137,6 +1137,11 @@
       PyInstaller builds bundle LightGBM automatically if it is installed on the build machine. If the build machine does not have LightGBM, the packaged EXE will use the sklearn fallback at runtime.
     </div>
   </div>
+
+  <h3>Solcast Tri-Band Integration</h3>
+  <p>When Solcast Toolkit data is available, the forecast engine automatically leverages all three Solcast confidence levels as ML features: the standard forecast value alongside P10 (low confidence) and P90 (high confidence) intervals. This gives the model explicit insight into weather uncertainty, which improves accuracy especially on partly cloudy or unpredictable-weather days.</p>
+  <p>The tri-band enhancement is completely transparent — no configuration, no manual steps. The model automatically detects and uses all three bands when your Solcast Toolkit feed provides them. Historical forecasts without tri-band data continue to work normally, and switching to full tri-band data happens seamlessly as new data arrives.</p>
+  <p>By learning how weather unpredictability correlates with generation variance and timing shifts, the model produces more robust day-ahead predictions under uncertain conditions.</p>
 
   <a href="#toc" class="back-top">&uarr; Back to top</a>
 </section>

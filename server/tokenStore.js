@@ -9,6 +9,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
+const { resolvedTokenFile } = require("./storagePaths");
 
 const ALGORITHM = "aes-256-gcm";
 const CONTEXT = "inverter-dashboard-cloud-tokens-v1";
@@ -41,7 +42,7 @@ function decrypt(payload, key) {
 
 class TokenStore {
   constructor(dataDir) {
-    this._storeFile = require("path").join(dataDir, "cloud_tokens.enc");
+    this._storeFile = resolvedTokenFile(dataDir);
     this._key = deriveKey();
     this._cache = {};
     this._load();

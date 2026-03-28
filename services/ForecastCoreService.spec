@@ -36,6 +36,10 @@ except Exception as e:
     print(f"WARNING: collect_all('lightgbm') failed unexpectedly: {e}")
     # Continue build without lightgbm; runtime guard (_LIGHTGBM_AVAILABLE) will handle it
 
+# v2.5.0+ tri-band Solcast features (P10/Lo, forecast, P90/Hi) require LightGBM
+# for training on expanded feature space (FEATURE_COLS: 62 → 68 columns).
+# Legacy sklearn GBR models still supported with zero-spread fallback.
+
 a = Analysis(
     [os.path.join(ROOT_DIR, "ForecastCoreService.py")],
     pathex=[ROOT_DIR],

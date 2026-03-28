@@ -9,16 +9,21 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { getExplicitDataDir, getPortableDataRoot } = require("./runtimeEnvPaths");
+const { resolvedDbDir } = require("./storagePaths");
 
 const EXPLICIT_DATA_DIR = getExplicitDataDir();
 const PORTABLE_ROOT = getPortableDataRoot();
 function resolveDataDir() {
   if (EXPLICIT_DATA_DIR) return EXPLICIT_DATA_DIR;
   if (PORTABLE_ROOT) return path.join(PORTABLE_ROOT, "db");
+  // v2.4.43+: prefer consolidated layout under %PROGRAMDATA%\InverterDashboard\db
+  const newDir = resolvedDbDir();
+  if (newDir) return newDir;
+  // Legacy fallback for pre-migration installs.
   if (process.env.APPDATA) {
     const preferred = path.join(process.env.APPDATA, "Inverter-Dashboard");
     const legacy    = path.join(process.env.APPDATA, "ADSI-Dashboard");
-    // Migrate: if old dir exists and new does not, rename it transparently.
+    // Rename pre-v2.x dir transparently on first run.
     if (!fs.existsSync(preferred) && fs.existsSync(legacy)) {
       try { fs.renameSync(legacy, preferred); } catch (_) { return legacy; }
     }

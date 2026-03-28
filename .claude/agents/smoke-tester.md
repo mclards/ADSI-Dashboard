@@ -18,9 +18,14 @@ node --check server/index.js
 node --check server/db.js
 node --check server/poller.js
 node --check server/exporter.js
+node --check server/storagePaths.js
+node --check server/cloudBackup.js
+node --check server/tokenStore.js
 node --check public/js/app.js
 node --check electron/main.js
 node --check electron/preload.js
+node --check electron/storageConsolidationMigration.js
+node --check electron/storageConsolidationPaths.js
 ```
 
 **Python syntax check** — after any Python edit:

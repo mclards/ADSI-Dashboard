@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.4.43`
+**Applies to:** ADSI Inverter Dashboard `v2.5.0`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -624,7 +624,7 @@ When toolkit preview is enabled, the forecast workspace provides:
 
 ### Forecast Performance Monitor
 
-The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. Access it from the **Performance** tab on the Forecast page.
+The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. Access it from the **Analytics** page (scroll below the analytics charts).
 
 #### Health Chips
 
@@ -691,6 +691,14 @@ Install into the Python environment used by the Forecast Service. On Windows the
 - The Forecast Service log prints `[LightGBM]` entries during model fit when LightGBM is active.
 - To force the sklearn fallback (e.g. for debugging), set `FORECAST_USE_LIGHTGBM=0` before starting the Forecast Service.
 - PyInstaller builds bundle LightGBM automatically if it is installed on the build machine; if not, the packaged EXE uses the sklearn fallback at runtime.
+
+### Solcast Tri-Band Integration
+
+When Solcast Toolkit data is available, the forecast engine automatically uses all three confidence levels — the standard forecast value plus Solcast's P10 (low confidence) and P90 (high confidence) intervals — as additional ML features. This provides the model with explicit weather uncertainty information, which is especially valuable on partly cloudy or changeable-weather days.
+
+The tri-band integration is fully transparent to the operator. No configuration or action is required — the model automatically detects and incorporates tri-band data when it is available from your Solcast Toolkit feed. Historical forecasts generated without tri-band data continue to work normally, and the model gracefully switches to using all three bands as new data arrives.
+
+This enhancement improves forecast accuracy across uncertain weather regimes by helping the model learn how weather unpredictability affects generation variance and timing.
 
 ---
 

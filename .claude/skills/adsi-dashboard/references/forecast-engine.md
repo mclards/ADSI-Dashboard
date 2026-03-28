@@ -62,70 +62,6 @@ Solcast is a **high-authority input**. It must not be skipped or treated as opti
 - Raw Solcast arrives in `MW` — always normalize to `kWh per 5-minute slot` before scoring, blending, or comparison.
 - `build_solcast_reliability_artifact()` compares Solcast against `load_actual_loss_adjusted()` — never against raw inverter totals.
 
-## Solcast Reliability Artifact (v2.4.33+)
-
-`build_solcast_reliability_artifact()` produces a multi-dimensional trust profile stored as `pv_solcast_reliability.joblib`. It compares 30 days of Solcast forecasts against loss-adjusted actuals at **5-minute slot resolution**.
-
-### Dimensions
-
-| Dimension | Keys | Purpose |
-|---|---|---|
-| Overall | `overall` | Global bias_ratio, MAPE, reliability |
-| Weather regime | `regimes` → `clear` / `mixed` / `overcast` / `rainy` | Per-regime trust |
-| Weather bucket | `resolution_profiles.buckets` → `clear_stable` / `clear_edge` / `mixed_stable` / `mixed_volatile` / `overcast` / `rainy` | Per-slot resolution weighting |
-| Season | `seasons` → `dry` (Dec-May) / `wet` (Jun-Nov) | Seasonal trust |
-| Season × regime | `season_regimes` → `dry:clear`, `wet:mixed`, etc. | Cross-dimensional |
-| Time-of-day | `time_of_day` → `morning` (05:00-08:55) / `midday` (09:00-14:55) / `afternoon` (15:00-17:55) | Per-zone reliability |
-| Time-of-day × regime | `time_of_day_by_regime` → `clear.morning`, etc. | Cross-dimensional |
-| Trend | `trend` → `signal`, `magnitude` | Recent reliability direction |
-
-### Seasonal Breakdown
-
-`_season_bucket_from_day()` classifies dry (Dec-May) vs wet (Jun-Nov). `lookup_solcast_reliability(artifact, regime, season=)` checks `season_regimes["{season}:{regime}"]` first, then falls back to `regimes[regime]` → `seasons[season]` → `overall`.
-
-### Time-of-Day Reliability
-
-Three zones defined by `TOD_ZONES`:
-- **morning**: slots 60–107 (05:00–08:55)
-- **midday**: slots 108–179 (09:00–14:55)
-- **afternoon**: slots 180–215 (15:00–17:55)
-
-`_compute_tod_slot_metrics()` computes per-zone bias_ratio and MAPE from slot-level arrays. `lookup_solcast_tod_reliability(artifact, regime, zone)` retrieves zone metrics.
-
-**Consumers:**
-- `solcast_prior_from_snapshot()` — per-slot blend weight scaled by `clip(zone_rel / overall_rel, 0.85, 1.08)`
-- `run_dayahead()` floor logic — per-slot floor modulated by `clip(zone_rel / overall_rel, 0.80, 1.10)`
-
-Effect: tighter Solcast trust at midday (where Solcast is accurate), looser at dawn/dusk.
-
-### Trend Detection
-
-`_compute_solcast_trend()` splits the 30-day window into recent half vs older half. Computes reliability for each and determines:
-- `"improving"` — recent half reliability > older by ≥ 5%
-- `"degrading"` — recent half reliability < older by ≥ 5%
-- `"stable"` — within ±5%
-
-**Consumers:**
-- `solcast_prior_from_snapshot()` — blend boosted up to +6% when improving, reduced up to -8% when degrading
-- `solcast_residual_damp_factor()` — improving → damp more (trust Solcast), degrading → damp less (let ML through)
-
-### Per-Slot Solcast Floor
-
-When Solcast is fresh, each 5-min slot is individually floored:
-- Coverage ≥ 95%: `floor = solcast[slot] × 0.95 × tod_mod[slot]`
-- Coverage ≥ 80%: `floor = solcast[slot] × 0.88 × tod_mod[slot]`
-- Coverage < 80%: floor disabled
-
-`tod_mod` adjusts floor per time-of-day zone. Only slots where ML forecast < floor are lifted; slots above floor are untouched.
-
-### Error-Memory Bias Damping
-
-When Solcast is fresh, historical error-memory bias correction is damped:
-- Coverage ≥ 95%: bias reduced by 70% (multiply by 0.30)
-- Coverage ≥ 80%: bias reduced by 50% (multiply by 0.50)
-
-Prevents old biases (built on weak-provider runs) from dragging forecast below reliable Solcast prior.
-
 ## Key Functions
 
 | Function | Purpose |
@@ -143,14 +79,7 @@ Prevents old biases (built on weak-provider runs) from dragging forecast below r
 | `collect_history_days()` | Stores `cap_dispatch_mask` per sample |
 | `forecast_qa()` | QA scoring — WAPE, MAPE, total-energy APE, slot timing error |
 | `run_backtest()` | Historical scoring without overwriting live rows |
-| `build_solcast_reliability_artifact()` | Solcast trust calibration — seasonal, ToD, trend, regime, bucket dimensions |
-| `_compute_tod_slot_metrics()` | Per-zone (morning/midday/afternoon) bias_ratio and MAPE from slot arrays |
-| `_compute_solcast_trend()` | Half-window split trend detection (improving/stable/degrading) |
-| `lookup_solcast_reliability()` | Season+regime-aware reliability lookup with fallback chain |
-| `lookup_solcast_tod_reliability()` | Time-of-day zone reliability lookup by regime |
-| `lookup_solcast_trend()` | Trend signal and magnitude retrieval |
-| `solcast_prior_from_snapshot()` | Builds per-slot blend weights with season, ToD, and trend modulation |
-| `solcast_residual_damp_factor()` | ML residual damping — trend-aware |
+| `build_solcast_reliability_artifact()` | Solcast trust calibration against loss-adjusted actuals |
 | `load_actual_loss_adjusted()` / `load_actual_loss_adjusted_with_presence()` | Loss-adjusted actual energy loaders |
 | `plant_capacity_profile()` | Returns `loss_adjusted_equiv`, `dependable_kw`, `max_kw` |
 
@@ -193,4 +122,88 @@ Loss-adjusted loaders used by: `collect_training_data()`, `collect_history_days(
 | WP3 | Quality-aware fallback — classify tomorrow state; replace weak-but-complete forecasts | Done (v2.4.30) |
 | WP4 | `forecast_error_compare_daily` + `forecast_error_compare_slot`; source-aware error memory | Done (v2.4.30) |
 | WP5 | Replay validation over last 30–90 days before threshold tuning | Pending |
-| WP6 | Enhanced Solcast reliability — seasonal, time-of-day, trend detection (all at 5-min slot resolution) | Done (v2.4.33) |
+
+---
+
+## Solcast Alignment Hardening (v2.4.32)
+
+- `SOLCAST_RESIDUAL_PRIMARY_CAP` lowered from 0.40 to 0.30 — tighter ML residual damping when Solcast is primary
+- Error-memory bias damping: fresh Solcast (coverage ≥ 0.95) reduces historical bias correction by 70%; coverage ≥ 0.80 reduces by 50%
+- Per-slot Solcast energy floor: each 5-min slot floored at 95% of Solcast (fresh) or 88% (stale_usable)
+- Constants: `SOLCAST_FORECAST_FLOOR_RATIO_FRESH = 0.95`, `SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88`
+
+---
+
+## Solcast Reliability Dimensions (v2.4.33+)
+
+`build_solcast_reliability_artifact()` produces a multi-dimensional trust profile at 5-min slot resolution:
+
+| Dimension | Artifact Key | Effect |
+|---|---|---|
+| Weather regime | `regimes` (clear/mixed/overcast/rainy) | Per-regime bias_ratio + reliability |
+| Season | `seasons` (dry/wet), `season_regimes` | Season-aware lookup in `lookup_solcast_reliability()` |
+| Time-of-day | `time_of_day` (morning/midday/afternoon), `time_of_day_by_regime` | Per-slot blend and floor modulation |
+| Trend | `trend` (improving/stable/degrading) | Blend ±6-8%, residual damping adjustment |
+
+All lookups have backward-compatible fallbacks — old artifacts without new keys load safely.
+
+---
+
+## Forecast Performance Monitor (v2.4.42)
+
+`/api/forecast/engine-health` returns extended diagnostics:
+- `mlBackend` — active backend type (LightGBM vs sklearn)
+- `trainingSummary` — sample count, feature count, regime count, last training date
+- `dataQualityFlags` — warnings for stale features, low sample count, regime imbalance
+
+New Python helpers:
+- `_detect_ml_backend()` — identifies active ML backend
+- `_collect_data_quality_warnings()` — audits data state and returns warning list
+
+`ml_train_state.json` extended fields: `ml_backend_type`, `model_file_path`, `model_file_mtime_ms`,
+`training_samples_count`, `training_features_count`, `training_regimes_count`, `training_result`,
+`last_training_date`, `data_warnings`.
+
+The Forecast Performance Monitor panel defaults to collapsed on first dashboard load.
+
+---
+
+## Solcast Tri-Band LightGBM Features (v2.5.0+)
+
+`solcast_prior_from_snapshot()` now exposes tri-band P10/Lo and P90/Hi values alongside the forecast point estimate.
+`build_features()` derives 6 new feature columns to train LightGBM on forecast uncertainty:
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `solcast_lo_kwh` | P10 percentile from Solcast Toolkit | Lower bound (10th percentile) forecast |
+| `solcast_hi_kwh` | P90 percentile from Solcast Toolkit | Upper bound (90th percentile) forecast |
+| `solcast_lo_vs_physics` | `lo_kwh / slot_cap_kwh` | Normalized lower bound (0–1.5 scale) |
+| `solcast_hi_vs_physics` | `hi_kwh / slot_cap_kwh` | Normalized upper bound (0–1.5 scale) |
+| `solcast_spread_pct` | `100 × (hi - lo) / forecast` | Uncertainty as percentage of point estimate (0–200%) |
+| `solcast_spread_ratio` | `(hi - lo) / (hi + lo)` | Symmetric spread metric, scale-robust (-1 to 1) |
+
+**FEATURE_COLS expansion:** 62 → 68 columns. Updated feature count must match active ML bundles; legacy 62-feature models auto-align via `_align_bundle_features()` padding new columns with zeros.
+
+**Data availability:**
+- P10/P90 available only from Solcast Toolkit API for **future-dated requests** (forecast generation, not historical backfill)
+- When unavailable or stale, `has_triband=False` in `solcast_prior_from_snapshot()` — new features fall back to zero spread (lo/hi both equal forecast)
+- No DB migration required — `solcast_snapshots` already stores `forecast_lo_kwh`, `forecast_hi_kwh` from Solcast API
+
+**Backward compatibility:**
+- Old 62-feature trained models load safely when loaded by new 68-feature code
+- Auto-alignment pads missing tri-band features with zeros (valid for zero-spread data)
+- Training with zero-spread data (before tri-band availability) produces redundant tri-band features; model ignores or learns zero importance
+
+**LightGBM hyperparameter tuning for expanded feature space:**
+- `n_estimators=650` (larger ensemble for wider feature space)
+- `learning_rate=0.040` (moderate learning rate for stability)
+- `max_depth=8, num_leaves=71` (deeper trees to capture feature interactions)
+- `subsample=0.78, colsample_bytree=0.75` (aggressive subsampling for robustness)
+- `min_child_samples=22` (regularization to prevent overfitting)
+- `reg_alpha=0.08, reg_lambda=0.12` (L1/L2 penalty for sparsity)
+
+**Feature importance expectations:**
+- Tri-band features combined typically contribute 4–5% of total importance
+- `solcast_spread_ratio` often higher importance than percentage variant (more stable numerically)
+- `solcast_lo_vs_physics` and `solcast_hi_vs_physics` capture quantile-specific physics alignment
+- Under-cloud conditions: spread features aid model detection of high-variance regimes

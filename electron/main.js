@@ -102,8 +102,15 @@ const DEFAULT_LOGIN_USERNAME = "admin";
 const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
-const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard");
-const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
+const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
+const LICENSE_DIR = (() => {
+  // Post-migration: license lives under the unified InverterDashboard root.
+  // Pre-migration fallback: keep the old ADSI-InverterDashboard namespace if
+  // the new location doesn't exist yet (first boot before migration runs).
+  const newDir = path.join(PROGRAMDATA_DIR, "license");
+  const oldDir = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard", "license");
+  return (fs.existsSync(newDir) || !fs.existsSync(oldDir)) ? newDir : oldDir;
+})();
 const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
 const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
 const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
@@ -1280,10 +1287,21 @@ function showLoginWindow() {
   });
 }
 
-function startAfterLogin() {
+async function startAfterLogin() {
   if (bootStarted) return;
   bootStarted = true;
   showLoadingWindow();
+  updateLoadingStartupState({
+    step: 1,
+    progress: 8,
+    text: "Organizing storage...",
+  });
+  try {
+    const { runStorageMigration } = require("./storageConsolidationMigration");
+    await runStorageMigration();
+  } catch (err) {
+    console.warn("[main] Storage migration error (non-fatal):", err.message);
+  }
   updateLoadingStartupState({
     step: 1,
     progress: 12,
@@ -3618,7 +3636,7 @@ ipcMain.on("login-success", async () => {
     loginWin = null;
   }
   broadcastLicenseStatus(true);
-  startAfterLogin();
+  await startAfterLogin();
 });
 
 ipcMain.on("window-minimize", () => mainWin?.minimize());

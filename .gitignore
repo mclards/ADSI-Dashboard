@@ -28,6 +28,11 @@ services/__pycache__/
 
 # Throwaway test / stale files
 test-electron.js
+
+# Temporary planning / implementation docs
+SOLCAST_TRI_BAND_*.md
+IMPLEMENTATION_*.md
+IMPLEMENTATION_*.txt
 d*ADSI-Dashboardtest-electron.js
 test-results/
 .tmp/
@@ -66,6 +71,7 @@ ipconfig.json
 server/ipconfig.json
 .vscode/settings.json
 .vscode/.tmp/
+.agents/
 
 # OS
 .DS_Store

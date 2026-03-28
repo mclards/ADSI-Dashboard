@@ -35,7 +35,17 @@
       "Bash(\"C:/Program Files/Google/Chrome/Application/chrome.exe\" --headless=new --disable-gpu --no-sandbox --print-to-pdf=\"d:/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.pdf\" --print-to-pdf-no-header \"d:/ADSI-Dashboard/docs/ADSI-Dashboard-User-Guide.html\")",
       "Bash(find /d/ADSI-Dashboard -name *.py -type f)",
       "Bash(grep -E \"\\\\.py$\")",
-      "Bash(grep -E \"\\\\.js$|^d\")"
+      "Bash(grep -E \"\\\\.js$|^d\")",
+      "Bash(find d:/ADSI-Dashboard/services -type f -name *.py)",
+      "Bash(python3:*)",
+      "Bash(cd /d d:/ADSI-Dashboard)",
+      "Bash(python -m unittest discover -s services/tests -p \"test_*.py\" -v)",
+      "Bash(python -m unittest discover -s \"d:/ADSI-Dashboard/services/tests\" -p \"test_*.py\" -v)",
+      "Bash(python -m unittest discover -s \"d:/ADSI-Dashboard/services/tests\" -p \"test_*.py\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''services/forecast_engine.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(grep -n \"run_status = ''ok''\" \"d:/ADSI-Dashboard/server/index.js\")",
+      "Edit(/.claude/skills/adsi-dashboard/**)",
+      "Bash(node -e \"console.log\\(require\\(''./package.json''\\).version\\)\")"
     ],
     "deny": [
       "Read(./.env)",

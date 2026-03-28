@@ -34,11 +34,24 @@ Data flow: `Modbus TCP → safe_read() → poll_inverter() → shared[ip] → /d
 ## ipconfig Loading Priority
 
 1. `ipConfigJson` key from SQLite settings table (Node is source of truth)
-2. AppData `ipconfig.json` fallback
-3. Legacy paths fallback
-4. Default config (27 inverters, `192.168.1.101–127`, 2.5% loss)
+2. `DATA_DIR / "ipconfig.json"` — consolidated storage (`%PROGRAMDATA%\InverterDashboard\db\`)
+3. `PROGRAMDATA_DIR / "config" / "ipconfig.json"` — legacy ProgramData path
+4. `PROGRAMDATA_DIR / "ipconfig.json"` — legacy flat path
+5. Script-relative and CWD fallbacks
+6. Default config (27 inverters, `192.168.1.101–127`, 2.5% loss)
+
+Portable mode uses `PORTABLE_ROOT / "config" / "ipconfig.json"` and skips the fallback chain.
 
 `_sanitize_ipconfig()` enforces defaults for missing/invalid values. Default loss is `2.5%` per inverter. Loss values are stored but used only by the forecast engine — never alter telemetry.
+
+## Storage Consolidation (v2.4.43+)
+
+All app data now lives under `%PROGRAMDATA%\InverterDashboard\`. Migration runs during the Electron loading screen (`electron/storageConsolidationMigration.js`). Key paths:
+- DB: `%PROGRAMDATA%\InverterDashboard\db\` (adsi.db, ipconfig.json)
+- Archive: `%PROGRAMDATA%\InverterDashboard\archive\`
+- License: `%PROGRAMDATA%\InverterDashboard\license\`
+
+`server/storagePaths.js` provides runtime path resolution with automatic fallback to legacy APPDATA locations when migration hasn't run.
 
 ## Service Stop Contract
 

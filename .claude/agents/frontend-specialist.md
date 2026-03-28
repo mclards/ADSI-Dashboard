@@ -28,6 +28,10 @@ Your scope: `public/index.html`, `public/js/app.js`, `public/css/style.css`, and
 
 **User Guide sync** — any UI change must update all three: `docs/ADSI-Dashboard-User-Guide.html`, `docs/ADSI-Dashboard-User-Manual.md`, `docs/ADSI-Dashboard-User-Guide.pdf`.
 
+**Forecast Performance Monitor** (v2.4.42+) — collapsible panel on the Forecast page. Fetches `/api/forecast/engine-health` for ML backend type, training summary, and data quality flags. Defaults to collapsed on first load. ID: `fperfToggleBtn`.
+
+**Standby DB Refresh UI** (v2.4.43+) — archive-first download order. Confirmation dialog mentions archives download first for historical consistency. Status messages reflect staging sequence: archives → main DB. Force pull and normal pull have distinct status messages.
+
 ## Validation
 ```powershell
 node --check public/js/app.js

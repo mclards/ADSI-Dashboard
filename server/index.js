@@ -189,6 +189,7 @@ const SOLCAST_SOLAR_END_H = 18;
 const FORECAST_SOLAR_SLOT_COUNT =
   ((SOLCAST_SOLAR_END_H - SOLCAST_SOLAR_START_H) * 60) / SOLCAST_SLOT_MIN;
 const SOLCAST_UNIT_KW_MAX = 997.0;
+const NODE_KW_MAX = 244.25;  // per-node maximum (250 kW × 97.7%)
 const SOLCAST_ACCESS_MODE_API = "api";
 const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
 const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
@@ -3356,9 +3357,43 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
   const priorityPause = pauseRemoteLiveBridgeForPriorityTransfer("standby-refresh");
   const priorityNote = buildPriorityTransferNote(includeArchive);
   try {
-    // Step 1 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
+    // Step 1 — Pull archive DB files first (when requested) so historical data is staged
+    //          before the main DB snapshot, minimising the gap on an interrupted transfer.
+    let archive = {
+      ok: true,
+      availableFiles: 0,
+      transferredFiles: 0,
+      skippedFiles: 0,
+      totalBytes: 0,
+      transferredBytes: 0,
+      files: [],
+      unsupported: false,
+    };
+    if (includeArchive) {
+      throwIfManualReplicationAborted(signal);
+      updateManualReplicationJob({
+        summary: `Downloading archive DB files from gateway first. ${priorityNote}`,
+        priorityMode: true,
+        livePaused: true,
+      });
+      archive = await pullArchiveFilesFromRemote(baseUrl, {
+        forceAll: true,
+        concurrency: PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY,
+        priorityMode: true,
+        livePaused: true,
+        note: priorityNote,
+        signal,
+        runControl,
+      });
+    }
+
+    // Step 2 — Pull a fresh gateway main DB snapshot and stage it for restart-safe replacement.
+    //          Archive manifest-level failures (ok=false) are non-fatal — main DB is the
+    //          critical piece for mode-switching.  The failure surfaces in the final summary.
+    const archiveOk = !includeArchive || archive.ok || archive.unsupported;
+    throwIfManualReplicationAborted(signal);
     updateManualReplicationJob({
-      summary: `Downloading fresh gateway main database. ${priorityNote}`,
+      summary: `${includeArchive ? (archiveOk ? "Archives staged. " : "Archive pull incomplete. ") : ""}Downloading fresh gateway main database. ${priorityNote}`,
       priorityMode: true,
       livePaused: true,
     });
@@ -3383,39 +3418,20 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       );
     }
 
-    let archive = {
-      ok: true,
-      availableFiles: 0,
-      transferredFiles: 0,
-      skippedFiles: 0,
-      totalBytes: 0,
-      transferredBytes: 0,
-      files: [],
-      unsupported: false,
-    };
-    if (includeArchive) {
-      throwIfManualReplicationAborted(signal);
-      updateManualReplicationJob({
-        summary: `Main DB staged. Downloading archive DB files from gateway. ${priorityNote}`,
-        priorityMode: true,
-        livePaused: true,
-      });
-      archive = await pullArchiveFilesFromRemote(baseUrl, {
-        forceAll: true,
-        concurrency: PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY,
-        priorityMode: true,
-        livePaused: true,
-        note: priorityNote,
-        signal,
-        runControl,
-      });
-    }
+    // Step 3 — Gateway readiness check: warn if ipconfig.json is absent at the expected path.
+    const ipconfigMissing = !fs.existsSync(path.join(DATA_DIR, "ipconfig.json"));
+
     const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
     const archiveSummary = includeArchive
-      ? archive.unsupported
-        ? "archive skipped (remote build has no archive sync)"
-        : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
+      ? !archive.ok && !archive.unsupported
+        ? `archive download failed: ${String(archive.error || "unknown error")} (main DB still staged)`
+        : archive.unsupported
+          ? "archive skipped (remote build has no archive sync)"
+          : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
       : "archive skipped";
+    const readinessNote = ipconfigMissing
+      ? " | WARNING: Gateway IP configuration not found — configure IP settings before switching to Gateway mode."
+      : "";
     return {
       needsRestart: true,
       direction: String(remoteBridgeState.lastSyncDirection || "idle"),
@@ -3423,7 +3439,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       mainDb,
       archive,
       priorityMode: true,
-      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}. Remote live stream resumes automatically. Restart the app to apply the new gateway database.`,
+      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}${readinessNote}. Remote live stream resumes automatically. Restart the app to apply the new gateway database.`,
     };
   } finally {
     // Force immediate energy refresh after pull so the TODAY MWh metric
@@ -8059,11 +8075,10 @@ function classifySolcastFreshness(pulledTs, cfg = null) {
 function computePlantMaxKwFromConfig() {
   try {
     const enabledNodes = getConfiguredNodeSet(loadIpConfigFromDb()).size;
-    const eqInv = Math.max(0, Number(enabledNodes || 0)) / 4;
-    return Math.max(0, eqInv * SOLCAST_UNIT_KW_MAX);
+    return Math.max(0, Number(enabledNodes || 0) * NODE_KW_MAX);
   } catch {
-    // Safe fallback when config is unavailable.
-    return 27 * SOLCAST_UNIT_KW_MAX;
+    // Safe fallback: ~108 nodes × 244.25 kW = 26.4 MW
+    return 108 * NODE_KW_MAX;
   }
 }
 
@@ -10551,7 +10566,7 @@ function getReportRatedKwForNodeCount(nodeCount) {
     Math.min(REPORT_MAX_NODES_PER_INVERTER, Number(nodeCount || 0)),
   );
   if (count <= 0) return 0;
-  return (REPORT_UNIT_KW_MAX * count) / REPORT_MAX_NODES_PER_INVERTER;
+  return NODE_KW_MAX * count;
 }
 
 function buildDailyReportRowsForDate(dateText, options = {}) {
@@ -13694,6 +13709,8 @@ app.get("/api/forecast/qa-history", (req, res) => {
 
     // Fallback: derive from forecast_run_audit + daily_report when QA table is empty
     if (rows.length === 0) {
+      console.warn("[forecast/qa-history] QA table empty — using fallback from forecast_run_audit + daily_report (quality marked 'preview')");
+
       rows = db
         .prepare(
           `SELECT fra.target_date,
@@ -13709,7 +13726,7 @@ app.get("/api/forecast/qa-history", (req, res) => {
                   CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
                        THEN ABS(fra.final_forecast_total_kwh - dr.actual_kwh) END AS total_abs_error_kwh,
                   CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
-                       THEN ROUND(ABS(fra.final_forecast_total_kwh - dr.actual_kwh) / dr.actual_kwh, 4) END AS daily_wape_pct,
+                       THEN ROUND(ABS(fra.final_forecast_total_kwh - dr.actual_kwh) / dr.actual_kwh * 100, 2) END AS daily_wape_pct,
                   NULL AS daily_mape_pct,
                   NULL AS usable_slot_count,
                   NULL AS masked_slot_count,
@@ -13718,7 +13735,7 @@ app.get("/api/forecast/qa-history", (req, res) => {
            JOIN (
              SELECT target_date, MAX(generated_ts) AS max_ts
              FROM forecast_run_audit
-             WHERE is_authoritative_runtime = 1 AND run_status = 'ok'
+             WHERE is_authoritative_runtime = 1 AND run_status = 'success'
              GROUP BY target_date
            ) latest ON latest.target_date = fra.target_date AND latest.max_ts = fra.generated_ts
            LEFT JOIN (
@@ -13773,6 +13790,53 @@ app.get("/api/forecast/engine-health", (req, res) => {
       )
       .all(Date.now() - 14 * 24 * 3600 * 1000);
 
+    // 3.1 sourceFreshness: Solcast age, weather source, last actuals date
+    const _tomorrow = localDateStr(Date.now() + 86400000);
+    const _today    = localDateStr();
+    let _solcastPullTs = null;
+    try {
+      const _scRow = db.prepare(
+        `SELECT MAX(pulled_ts) AS max_ts FROM solcast_snapshots WHERE forecast_day IN (?, ?)`
+      ).get(_tomorrow, _today);
+      _solcastPullTs = _scRow?.max_ts ? Number(_scRow.max_ts) : null;
+    } catch { /* non-fatal */ }
+    const _solcastAgeHours = _solcastPullTs
+      ? Math.round((Date.now() - _solcastPullTs) / 3600000)
+      : null;
+
+    let _lastActualsDate = null;
+    try {
+      const _actRow = db.prepare(
+        `SELECT MAX(date) AS last_date FROM daily_report WHERE kwh_total > 0`
+      ).get();
+      _lastActualsDate = _actRow?.last_date || null;
+    } catch { /* non-fatal */ }
+
+    let _metSource = null;
+    if (latestAudit?.notes_json) {
+      try {
+        const _notes = JSON.parse(latestAudit.notes_json);
+        _metSource = _notes?.weather_source_breakdown?.met_source || null;
+      } catch { /* ignore */ }
+    }
+
+    // 3.2 recentBias: signed mean % bias from last 7 eligible QA rows
+    let _recentBiasPct = null;
+    try {
+      const _biasRows = db.prepare(
+        `SELECT total_forecast_kwh, total_actual_kwh
+         FROM forecast_error_compare_daily
+         WHERE comparison_quality = 'eligible' AND total_actual_kwh > 0
+         ORDER BY target_date DESC LIMIT 7`
+      ).all();
+      if (_biasRows.length > 0) {
+        const _biasVals = _biasRows.map(
+          (r) => ((Number(r.total_forecast_kwh) - Number(r.total_actual_kwh)) / Number(r.total_actual_kwh)) * 100,
+        );
+        _recentBiasPct = Math.round((_biasVals.reduce((a, b) => a + b, 0) / _biasVals.length) * 10) / 10;
+      }
+    } catch { /* non-fatal */ }
+
     const modelMtime = trainState.model_file_mtime_ms || null;
     return res.json({
       ok: true,
@@ -13797,6 +13861,16 @@ app.get("/api/forecast/engine-health", (req, res) => {
       dataQualityFlags: Array.isArray(trainState.data_warnings) ? trainState.data_warnings : [],
       latestAudit: latestAudit || null,
       recentQualityBreakdown: recentQuality,
+      sourceFreshness: {
+        solcastAgeHours: _solcastAgeHours,
+        solcastPulledTs: _solcastPullTs,
+        weatherSource: _metSource || null,
+        lastActualsDate: _lastActualsDate,
+      },
+      recentBias: {
+        signedBiasPct: _recentBiasPct,
+        rowsUsed: _recentBiasPct !== null ? 7 : 0,
+      },
     });
   } catch (e) {
     console.warn("[forecast/engine-health] failed:", e.message);

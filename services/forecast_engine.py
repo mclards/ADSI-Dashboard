@@ -102,8 +102,16 @@ if EXPLICIT_DATA_DIR:
 elif PORTABLE_ROOT is not None:
     APP_DB_FILE = PORTABLE_ROOT / "db" / "adsi.db"
 else:
-    APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".inverter-dashboard")))
-    APP_DB_FILE = APPDATA_ROOT / "Inverter-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
+    # v2.4.43+: prefer consolidated layout under BASE/db/ when migration is done
+    # (sentinel file written by Electron storageConsolidationMigration.js).
+    _new_db = BASE / "db" / "adsi.db"
+    _sentinel = BASE / ".adsi-migration-v2.4.43.json"
+    _migration_done = _sentinel.exists() or _new_db.exists()
+    if _migration_done:
+        APP_DB_FILE = _new_db
+    else:
+        APPDATA_ROOT = Path(os.getenv("APPDATA") or (str(Path.home() / ".inverter-dashboard")))
+        APP_DB_FILE = APPDATA_ROOT / "Inverter-Dashboard" / "adsi.db" if os.getenv("APPDATA") else APPDATA_ROOT / "adsi.db"
 
 if PORTABLE_ROOT is not None:
     IPCONFIG_FILE = PORTABLE_ROOT / "config" / "ipconfig.json"
@@ -111,7 +119,7 @@ if PORTABLE_ROOT is not None:
 else:
     IPCONFIG_FILE = APP_DB_FILE.parent / "ipconfig.json"
     LEGACY_IPCONFIG_FILES = []
-    for candidate in [BASE / "ipconfig.json", Path(__file__).resolve().parent / "ipconfig.json", Path.cwd() / "ipconfig.json"]:
+    for candidate in [BASE / "config" / "ipconfig.json", BASE / "ipconfig.json", Path(__file__).resolve().parent / "ipconfig.json", Path.cwd() / "ipconfig.json"]:
         if candidate != IPCONFIG_FILE and candidate not in LEGACY_IPCONFIG_FILES:
             LEGACY_IPCONFIG_FILES.append(candidate)
 
@@ -196,7 +204,7 @@ IPCONFIG_SETTING_KEY = "ipConfigJson"
 DEFAULT_INVERTER_LOSS_PCT = 2.5
 UNIT_KW_MAX        = 997.0   # kW peak per inverter (4-node complete)
 UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
-PLANT_MW_FALLBACK  = 40.0    # used when ipconfig absent
+PLANT_MW_FALLBACK  = 26.4    # used when ipconfig absent (108 nodes × NODE_KW_MAX = 26.4 MW)
 
 # Physics thresholds
 RAD_MIN_WM2   = 8.0    # W/m " ignore radiation below this
@@ -226,7 +234,9 @@ ACTIVITY_MIN_FRACTION = 0.0022
 LOW_POWER_STAGE_FRACTION = 0.16
 STAGING_BLEND_MAX = 0.72
 MODULES_PER_INVERTER = 4
-NODE_KW_NOMINAL = 226.73
+NODE_KW_NOMINAL    = 250.0                                   # per-node nameplate (kW)
+NODE_KW_MAX        = round(NODE_KW_NOMINAL * 0.977, 2)       # per-node maximum (250 × 97.7% = 244.25 kW)
+NODE_KW_DEPENDABLE = 91.75                                   # per-node dependable (kW)
 REGIME_MODEL_MIN_DAYS = 6
 REGIME_MODEL_MIN_SAMPLES = 320
 REGIME_BLEND_BASE = 0.52
@@ -877,9 +887,9 @@ def _sanitize_units(raw) -> list[int]:
 
 def plant_capacity_profile() -> dict:
     """
-    Capacity model from ipconfig:
-      - 1 inverter full rating == 4 nodes
-      - partial inverter scales by enabled_nodes / 4
+    Capacity model from ipconfig — **node-based** (v2.4.44+).
+      - Each enabled node contributes NODE_KW_DEPENDABLE / NODE_KW_MAX directly.
+      - Per-inverter transmission loss is applied to that inverter's node count.
       - if units entry is missing for a configured inverter, assume 4 nodes
       - if units entry is [], inverter contributes 0 nodes
     """
@@ -897,7 +907,7 @@ def plant_capacity_profile() -> dict:
         return {
             "configured_inverters": 0,
             "enabled_nodes": 0,
-            "equiv_inverters": fb_kw / max(UNIT_KW_DEPENDABLE, 1.0),
+            "loss_adjusted_nodes": fb_kw / max(NODE_KW_DEPENDABLE, 1.0),
             "dependable_kw": fb_kw,
             "max_kw": fb_kw,
             "source": "fallback",
@@ -916,7 +926,7 @@ def plant_capacity_profile() -> dict:
 
     configured = 0
     enabled_nodes = 0
-    loss_adjusted_equiv = 0.0
+    loss_adjusted_nodes = 0.0
     for inv_id in sorted(all_ids, key=_sort_key):
         ip = str(inv_map.get(inv_id, "") or "").strip()
 
@@ -941,15 +951,14 @@ def plant_capacity_profile() -> dict:
             pass
         if loss_pct < 0 or loss_pct > 100:
             loss_pct = 0.0
-        inv_equiv = n_nodes / 4.0
-        loss_adjusted_equiv += inv_equiv * (1.0 - loss_pct / 100.0)
+        loss_adjusted_nodes += n_nodes * (1.0 - loss_pct / 100.0)
 
     if configured == 0:
         fb_kw = PLANT_MW_FALLBACK * 1000.0
         return {
             "configured_inverters": 0,
             "enabled_nodes": 0,
-            "equiv_inverters": fb_kw / max(UNIT_KW_DEPENDABLE, 1.0),
+            "loss_adjusted_nodes": fb_kw / max(NODE_KW_DEPENDABLE, 1.0),
             "dependable_kw": fb_kw,
             "max_kw": fb_kw,
             "source": "fallback",
@@ -957,15 +966,13 @@ def plant_capacity_profile() -> dict:
             "ipconfig_path": str(ipconfig_meta.get("path", IPCONFIG_FILE)),
         }
 
-    equiv_inverters = enabled_nodes / 4.0
-    dependable_kw = loss_adjusted_equiv * UNIT_KW_DEPENDABLE
-    max_kw = loss_adjusted_equiv * UNIT_KW_MAX
+    dependable_kw = loss_adjusted_nodes * NODE_KW_DEPENDABLE
+    max_kw = loss_adjusted_nodes * NODE_KW_MAX
 
     return {
         "configured_inverters": configured,
         "enabled_nodes": enabled_nodes,
-        "equiv_inverters": equiv_inverters,
-        "loss_adjusted_equiv": loss_adjusted_equiv,
+        "loss_adjusted_nodes": loss_adjusted_nodes,
         "dependable_kw": dependable_kw,
         "max_kw": max_kw,
         "source": "ipconfig",
@@ -979,11 +986,11 @@ def plant_capacity_kw(dependable: bool = True) -> float:
     p = plant_capacity_profile()
     cap = float(p["dependable_kw"] if dependable else p["max_kw"])
     log.debug(
-        "Plant capacity [%s]: cfg_inv=%d enabled_nodes=%d equiv_inv=%.3f dep=%.1f kW max=%.1f kW",
+        "Plant capacity [%s]: cfg_inv=%d enabled_nodes=%d loss_adj_nodes=%.3f dep=%.1f kW max=%.1f kW",
         p["source"],
         p["configured_inverters"],
         p["enabled_nodes"],
-        p["equiv_inverters"],
+        p["loss_adjusted_nodes"],
         p["dependable_kw"],
         p["max_kw"],
     )
@@ -2386,7 +2393,57 @@ def build_features(
         solcast_bias_ratio = 1.0
         solcast_resolution_weight = np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float)
         solcast_resolution_support = np.zeros(SLOTS_DAY, dtype=float)
+
+    # TRI-BAND SOLCAST FEATURES (NEW)
+    if solcast_prior and solcast_prior.get("has_triband", False):
+        solcast_lo_kwh = np.clip(
+            np.asarray(solcast_prior.get("prior_lo_kwh"), dtype=float),
+            0.0,
+            None
+        )[:SLOTS_DAY]
+        solcast_hi_kwh = np.clip(
+            np.asarray(solcast_prior.get("prior_hi_kwh"), dtype=float),
+            0.0,
+            None
+        )[:SLOTS_DAY]
+        # Enforce constraint: lo <= forecast <= hi
+        solcast_lo_kwh = np.minimum(solcast_lo_kwh, solcast_kwh)
+        solcast_hi_kwh = np.maximum(solcast_hi_kwh, solcast_kwh)
+    else:
+        # No tri-band data: fallback to forecast value (zero spread)
+        solcast_lo_kwh = solcast_kwh.copy()
+        solcast_hi_kwh = solcast_kwh.copy()
+
+    # Per-slot capacity for normalization
     slot_cap_arr = np.full(SLOTS_DAY, max(cap_kw * SLOT_MIN / 60.0, 0.05), dtype=float)
+
+    # Lo/Hi as fraction of slot capacity
+    solcast_lo_vs_physics = np.clip(solcast_lo_kwh / slot_cap_arr, 0.0, 1.5)
+    solcast_hi_vs_physics = np.clip(solcast_hi_kwh / slot_cap_arr, 0.0, 1.5)
+
+    # Spread as percentage of forecast (avoid division by zero)
+    solcast_spread_pct = np.zeros(SLOTS_DAY, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        valid_spread = solcast_kwh > 0.05
+        solcast_spread_pct[valid_spread] = np.clip(
+            100.0 * (
+                solcast_hi_kwh[valid_spread] - solcast_lo_kwh[valid_spread]
+            ) / solcast_kwh[valid_spread],
+            0.0,
+            200.0,  # Cap at 200% to avoid extreme outliers
+        )
+
+    # Spread ratio: (Hi - Lo) / (Hi + Lo) — symmetric, robust to scale
+    solcast_spread_ratio = np.zeros(SLOTS_DAY, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sum_bands = solcast_hi_kwh + solcast_lo_kwh
+        valid_ratio = sum_bands > 0.1
+        solcast_spread_ratio[valid_ratio] = np.clip(
+            (solcast_hi_kwh[valid_ratio] - solcast_lo_kwh[valid_ratio])
+            / sum_bands[valid_ratio],
+            -1.0,
+            1.0,
+        )
     solcast_vs_physics = np.clip(solcast_kwh / slot_cap_arr, 0.0, 1.5)
     irr_proxy = np.maximum((np.clip(rad, 0.0, None) / 1000.0) * slot_cap_arr, 0.05)
     solcast_vs_irradiance = np.clip(solcast_kwh / irr_proxy, 0.0, 4.0)
@@ -2460,6 +2517,13 @@ def build_features(
         "solcast_bias_ratio": np.full(SLOTS_DAY, solcast_bias_ratio),
         "solcast_resolution_weight": solcast_resolution_weight,
         "solcast_resolution_support": solcast_resolution_support,
+        # Solcast tri-band (NEW)
+        "solcast_lo_kwh": solcast_lo_kwh,
+        "solcast_hi_kwh": solcast_hi_kwh,
+        "solcast_lo_vs_physics": solcast_lo_vs_physics,
+        "solcast_hi_vs_physics": solcast_hi_vs_physics,
+        "solcast_spread_pct": solcast_spread_pct,
+        "solcast_spread_ratio": solcast_spread_ratio,
         # Plant
         "expected_nodes": expected_nodes,
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
@@ -2484,6 +2548,11 @@ FEATURE_COLS = [
     "solcast_prior_blend", "solcast_prior_vs_physics", "solcast_prior_vs_irradiance",
     "solcast_day_coverage", "solcast_day_reliability", "solcast_bias_ratio",
     "solcast_resolution_weight", "solcast_resolution_support",
+    # Solcast tri-band (NEW)
+    "solcast_lo_kwh", "solcast_hi_kwh",
+    "solcast_lo_vs_physics", "solcast_hi_vs_physics",
+    "solcast_spread_pct", "solcast_spread_ratio",
+    # Plant
     "expected_nodes", "cap_kw",
 ]
 
@@ -4011,6 +4080,12 @@ def solcast_prior_from_snapshot(
     _solar_sw = np.asarray(spread_weight, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT]
     _sc_spread_conf = float(np.clip(np.mean(_solar_sw[_solar_present_mask]), 0.50, 1.00)) if np.any(_solar_present_mask) else 0.70
 
+    # NEW: Detect if tri-band data is present
+    has_triband = bool(
+        np.any(prior_lo < prior_kwh - 0.01)
+        and np.any(prior_hi > prior_kwh + 0.01)
+    )
+
     return {
         "available": present.astype(float),
         "present": present,
@@ -4031,6 +4106,7 @@ def solcast_prior_from_snapshot(
         "trend_signal": _trend_signal,
         "trend_magnitude": _trend_mag,
         "spread_confidence": _sc_spread_conf,
+        "has_triband": has_triband,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
     }
@@ -5696,9 +5772,9 @@ def _make_residual_regressor_lgbm():
     if not _LIGHTGBM_AVAILABLE:
         raise RuntimeError("LightGBM is not installed")
     return lgb.LGBMRegressor(
-        n_estimators=600, learning_rate=0.045, max_depth=7, num_leaves=63,
-        subsample=0.80, colsample_bytree=0.80, min_child_samples=20,
-        reg_alpha=0.05, reg_lambda=0.10, n_jobs=-1, random_state=42,
+        n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71,
+        subsample=0.78, colsample_bytree=0.75, min_child_samples=22,
+        reg_alpha=0.08, reg_lambda=0.12, n_jobs=-1, random_state=42,
         verbose=-1,
     )
 
@@ -7749,6 +7825,7 @@ def _write_forecast_run_audit_from_python(
     error_class_total_kwh: float,
     bias_total_kwh: float,
     ml_failed: bool = False,
+    notes_extra: dict | None = None,
 ) -> int | None:
     """Write a forecast_run_audit row from Python direct generation path.
 
@@ -7780,7 +7857,10 @@ def _write_forecast_run_audit_from_python(
             ).fetchone()
             prev_id = int(prev_row[0]) if prev_row else None
 
-            notes = json.dumps({"source": "python_direct", "generator_mode": generator_mode})
+            notes_dict: dict = {"source": "python_direct", "generator_mode": generator_mode}
+            if notes_extra:
+                notes_dict.update(notes_extra)
+            notes = json.dumps(notes_dict)
             cur = conn.execute(
                 """
                 INSERT INTO forecast_run_audit(
@@ -8192,6 +8272,7 @@ def run_dayahead(
     ml_residual = np.zeros(SLOTS_DAY)
     error_class_term = np.zeros(SLOTS_DAY)
     _ml_failed = False
+    model_meta = None  # set if ML prediction succeeds
     error_class_meta = {
         "available": False,
         "target_regime": target_regime,
@@ -8603,6 +8684,55 @@ def run_dayahead(
         )
 
     if ok and write_audit:
+        # Build audit enrichment notes (Phase 2 gaps)
+        _sc_kwh_snap = np.asarray(solcast_snapshot.get("forecast_kwh", []) if solcast_snapshot else [], dtype=float)
+        _sc_lo_snap  = np.asarray(solcast_snapshot.get("forecast_lo_kwh", []) if solcast_snapshot else [], dtype=float)
+        _sc_hi_snap  = np.asarray(solcast_snapshot.get("forecast_hi_kwh", []) if solcast_snapshot else [], dtype=float)
+
+        # 2.1 weather_source_breakdown
+        _wsb = {
+            "met_source": weather_source,
+            "solcast_used": bool(solcast_meta.get("used_solcast")),
+            "solcast_coverage_ratio": float(solcast_meta.get("coverage_ratio", 0.0)),
+        }
+
+        # 2.2 solcast_gap_profile (per-zone zero-slot count in solar window)
+        _gap_profile: dict = {}
+        if _sc_kwh_snap.size == SLOTS_DAY:
+            for _zone, (_zs, _ze) in TOD_ZONES.items():
+                _gap_profile[_zone] = int(np.sum(_sc_kwh_snap[_zs:_ze] <= 0.0))
+
+        # 2.3 forecast lo/hi band totals
+        _lo_total = float(_sc_lo_snap.sum()) if _sc_lo_snap.size == SLOTS_DAY else None
+        _hi_total = float(_sc_hi_snap.sum()) if _sc_hi_snap.size == SLOTS_DAY else None
+
+        # 2.4 ml_model_routing
+        if not _ml_failed and model_meta is not None:
+            _mlr: dict = {
+                "target_regime": model_meta.get("target_regime"),
+                "used_regime_model": bool(model_meta.get("used_regime_model")),
+                "blend": float(model_meta.get("blend", 0.0)),
+                "regime_days": int(model_meta.get("regime_days", 0)),
+                "ml_fallback": False,
+            }
+        else:
+            _mlr = {"target_regime": target_regime, "ml_fallback": True}
+
+        # 2.5 zero-filled weather feature warnings
+        _data_warnings: list[str] = []
+        for _wcol in ("rad", "cloud", "rh", "precip", "cape"):
+            if _wcol not in w5.columns or float(pd.to_numeric(w5[_wcol], errors="coerce").fillna(0.0).abs().max()) == 0.0:
+                _data_warnings.append(f"weather_col_zero_filled:{_wcol}")
+
+        _notes_extra: dict = {
+            "weather_source_breakdown": _wsb,
+            "solcast_gap_profile": _gap_profile,
+            "ml_model_routing": _mlr,
+            "forecast_lo_total_kwh": _lo_total,
+            "forecast_hi_total_kwh": _hi_total,
+            # data_warnings is the authoritative source in ml_train_state.json; not duplicated here
+        }
+
         _write_forecast_run_audit_from_python(
             target_date=target_s,
             generator_mode=audit_generator_mode or "python_direct",
@@ -8615,6 +8745,7 @@ def run_dayahead(
             error_class_total_kwh=float(error_class_term.sum()),
             bias_total_kwh=float(bias_correction.sum()),
             ml_failed=_ml_failed,
+            notes_extra=_notes_extra,
         )
 
     return ok
@@ -9081,10 +9212,10 @@ def main() -> None:
     log.info("Site          : Configured  (%.6f N  %.6f E)", LAT_DEG, LON_DEG)
     log.info("Inverters     : %.0f kW max / %.0f kW dependable each", UNIT_KW_MAX, UNIT_KW_DEPENDABLE)
     log.info(
-        "Configured    : %d inverter rows  |  enabled nodes=%d  (equiv inv=%.3f)",
+        "Configured    : %d inverter rows  |  enabled nodes=%d  (loss-adj nodes=%.3f)",
         profile["configured_inverters"],
         profile["enabled_nodes"],
-        profile["equiv_inverters"],
+        profile["loss_adjusted_nodes"],
     )
     log.info(
         "IPConfig      : source=%s  path=%s",

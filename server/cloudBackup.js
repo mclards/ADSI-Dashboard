@@ -22,6 +22,7 @@ const cron = require("node-cron");
 const fetch = require("node-fetch");
 
 const APP_VERSION = require("../package.json").version;
+const { resolvedBackupDir, resolvedBackupHistoryFile } = require("./storagePaths");
 const DB_SCHEMA_VERSION = "2";
 
 // Limit how many local backup packages to keep.
@@ -126,8 +127,8 @@ class CloudBackupService {
     this.ipConfigPath = deps.ipConfigPath || null;
     this.programDataDir = deps.programDataDir || null;
 
-    this.backupDir = path.join(this.dataDir, "cloud_backups");
-    this.historyFile = path.join(this.dataDir, "backup_history.json");
+    this.backupDir = resolvedBackupDir(this.dataDir);
+    this.historyFile = resolvedBackupHistoryFile(this.dataDir);
 
     fs.mkdirSync(this.backupDir, { recursive: true });
 

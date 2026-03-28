@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.4.43` in `package.json` (source of truth) |
+| Repo version baseline | `2.5.0` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.4.42` |
+| Latest published release | `v2.5.0` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -47,14 +47,12 @@ Live secrets go only in git-ignored `private/*.md`.
 
 ---
 
----
-
 ## Forecast Day-Ahead Generation Architecture (v2.4.31+)
 
 All four generation paths route through the same Node orchestrator (`runDayAheadGenerationPlan`). Provider routing and Solcast freshness decisions are always made by Node. Python owns ML execution only.
 
 | Path | Trigger | Audit |
-|------|---------|-------|
+|---|---|---|
 | Manual UI | `POST /api/forecast/generate` | Node |
 | Auto scheduler | Python loop → `_delegate_run_dayahead()` | Node |
 | Python CLI | `--generate-date` → `_delegate_run_dayahead()` | Node |
@@ -77,6 +75,33 @@ All four generation paths route through the same Node orchestrator (`runDayAhead
 | Trend | `trend` (improving/stable/degrading) | Blend ±6-8%, residual damping adjustment |
 
 All lookups have backward-compatible fallbacks — old artifacts without new keys load safely.
+
+---
+
+## Forecast Performance Monitor (v2.4.42)
+
+`/api/forecast/engine-health` returns extended diagnostics including `mlBackend`, `trainingSummary`,
+and `dataQualityFlags`. The Forecast Performance Monitor panel defaults to collapsed on first load.
+
+New Python helpers:
+- `_detect_ml_backend()` — identifies active LightGBM vs sklearn
+- `_collect_data_quality_warnings()` — audits stale features, low sample count, regime imbalance
+
+`ml_train_state.json` extended fields: `ml_backend_type`, `model_file_path`, `model_file_mtime_ms`,
+`training_samples_count`, `training_features_count`, `training_regimes_count`, `training_result`,
+`last_training_date`, `data_warnings`.
+
+---
+
+## Solcast Tri-Band LightGBM Features (v2.5.0+)
+
+`solcast_prior_from_snapshot()` exposes Solcast P10/Lo and P90/Hi percentiles. `build_features()` derives 6 tri-band features:
+`solcast_lo_kwh`, `solcast_hi_kwh`, `solcast_lo_vs_physics`, `solcast_hi_vs_physics`, `solcast_spread_pct`, `solcast_spread_ratio`.
+
+FEATURE_COLS: 62 → 68. Legacy models auto-align with zero-spread fallback. P10/P90 available only from Solcast Toolkit for future-dated requests.
+LightGBM hyperparams tuned: n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71, subsample=0.78, colsample_bytree=0.75, min_child_samples=22, reg_alpha=0.08, reg_lambda=0.12.
+
+See `references/forecast-engine.md` for full feature formulas, training details, and backward-compatibility rules.
 
 ---
 

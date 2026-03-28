@@ -3840,7 +3840,7 @@ function mountForecastSection() {
 // ── Forecast Performance Monitor ─────────────────────────────────────────────
 
 function mountForecastPerfPanel() {
-  const host = $("forecastPageSections");
+  const host = $("analyticsCharts");
   if (!host || $("fperfPanel")) return;
   const wrap = document.createElement("div");
   wrap.innerHTML = `
@@ -3903,15 +3903,27 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-label">Data Quality</span>
         <span class="fperf-hchip-val" id="fperfChipDataQualVal">—</span>
       </div>
+      <div class="fperf-hchip" id="fperfChipSolcastAge">
+        <span class="fperf-hchip-label">Solcast Age</span>
+        <span class="fperf-hchip-val" id="fperfChipSolcastAgeVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipWeatherSrc">
+        <span class="fperf-hchip-label">Weather Source</span>
+        <span class="fperf-hchip-val" id="fperfChipWeatherSrcVal">—</span>
+      </div>
+      <div class="fperf-hchip" id="fperfChipBias">
+        <span class="fperf-hchip-label">Recent Bias (7d)</span>
+        <span class="fperf-hchip-val" id="fperfChipBiasVal">—</span>
+      </div>
     </div>
     <div class="fperf-charts-row">
       <div class="fperf-chart-panel">
         <div class="fperf-chart-title">Forecast vs Actual (MWh/day)</div>
-        <div class="fperf-chart-wrap"><canvas id="fperfCompareChart"></canvas></div>
+        <div class="fperf-chart-wrap" id="fperfCompareWrap"><canvas id="fperfCompareChart"></canvas></div>
       </div>
       <div class="fperf-chart-panel">
         <div class="fperf-chart-title">WAPE % per Day</div>
-        <div class="fperf-chart-wrap"><canvas id="fperfWapeChart"></canvas></div>
+        <div class="fperf-chart-wrap" id="fperfWapeWrap"><canvas id="fperfWapeChart"></canvas></div>
       </div>
     </div>
     <div class="fperf-table-section">
@@ -3941,7 +3953,7 @@ function mountForecastPerfPanel() {
   host.insertBefore(wrap.firstElementChild, host.firstChild);
   State.fperf.mounted = true;
 
-  // Load collapsed state from localStorage; default is collapsed
+  // Load collapsed state from localStorage; default is collapsed (hidden until user expands)
   const savedCollapsed = localStorage.getItem("fperfCollapsed");
   State.fperf.collapsed = savedCollapsed === null ? true : savedCollapsed === "true";
   applyFperfCollapsedState();
@@ -4015,7 +4027,22 @@ async function loadForecastPerfData() {
 }
 
 function renderForecastPerfHealth(health) {
-  if (!health) return;
+  if (!health) {
+    // Show "No data" state across all chips when health endpoint returns null
+    const chipIds = [
+      "fperfChipTrain", "fperfChipLastRun", "fperfChipProvider", "fperfChipQuality",
+      "fperfChipAvgWape", "fperfChipMlBackend", "fperfChipTrainData", "fperfChipDataQual",
+      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias",
+    ];
+    chipIds.forEach((id) => {
+      const chip = $(id);
+      if (!chip) return;
+      chip.className = "fperf-hchip chip-disabled";
+      const val = chip.querySelector(".fperf-hchip-val");
+      if (val) val.textContent = "No data";
+    });
+    return;
+  }
 
   // ML Training chip
   const trainChip = $("fperfChipTrain");
@@ -4065,12 +4092,13 @@ function renderForecastPerfHealth(health) {
   if (qualVal && Array.isArray(health.recentQualityBreakdown)) {
     const qmap = {};
     health.recentQualityBreakdown.forEach((r) => { qmap[r.comparison_quality] = r.cnt; });
-    const good  = (qmap.good || 0) + (qmap.excellent || 0);
+    // eligible = Python's "good" value; also accept legacy good/excellent
+    const good  = (qmap.eligible || 0) + (qmap.good || 0) + (qmap.excellent || 0);
     const total = Object.values(qmap).reduce((s, v) => s + v, 0);
     if (total === 0) {
       qualVal.textContent = "No data";
     } else {
-      qualVal.textContent = `${good}/${total} good`;
+      qualVal.textContent = `${good}/${total} eligible`;
       const qualChip = $("fperfChipQuality");
       if (qualChip) {
         const ratio = good / total;
@@ -4101,6 +4129,22 @@ function renderForecastPerfHealth(health) {
       colorClass = "chip-warn";
       titleText = "Restart forecast service to detect backend type";
     }
+
+    // Enrich tooltip with ml_model_routing from latest audit notes_json
+    try {
+      const notesRaw = health.latestAudit?.notes_json;
+      if (notesRaw) {
+        const notes = typeof notesRaw === "string" ? JSON.parse(notesRaw) : notesRaw;
+        const mlr = notes?.ml_model_routing;
+        if (mlr) {
+          const regime = mlr.target_regime || "—";
+          const used = mlr.used_regime_model || "—";
+          const blend = mlr.blend != null ? `${(mlr.blend * 100).toFixed(0)}%` : "—";
+          const fallback = mlr.ml_fallback ? " (fallback)" : "";
+          titleText += ` | Regime: ${regime} | Used: ${used} | Blend: ${blend}${fallback}`;
+        }
+      }
+    } catch { /* ignore JSON parse errors */ }
 
     mlVal.textContent = text;
     if (mlChip) {
@@ -4154,9 +4198,99 @@ function renderForecastPerfHealth(health) {
       qualDataChip.title = flags.length > 0 ? flags.join("\n") : "";
     }
   }
+
+  // Solcast Age chip
+  const scAgeChip = $("fperfChipSolcastAge");
+  const scAgeVal  = $("fperfChipSolcastAgeVal");
+  if (scAgeVal) {
+    const sf = health.sourceFreshness;
+    const h = sf?.solcastAgeHours;
+    let scTitle = sf?.solcastPulledTs ? `Pulled: ${new Date(sf.solcastPulledTs).toLocaleString()}` : "";
+
+    // Enrich tooltip with solcast_gap_profile from latest audit notes_json
+    try {
+      const notesRaw = health.latestAudit?.notes_json;
+      if (notesRaw) {
+        const notes = typeof notesRaw === "string" ? JSON.parse(notesRaw) : notesRaw;
+        const gp = notes?.solcast_gap_profile;
+        if (gp) {
+          const parts = [];
+          if (gp.morning != null) parts.push(`morning ${gp.morning} gaps`);
+          if (gp.midday != null) parts.push(`midday ${gp.midday} gaps`);
+          if (gp.afternoon != null) parts.push(`afternoon ${gp.afternoon} gaps`);
+          if (parts.length) scTitle += (scTitle ? " | " : "") + parts.join(", ");
+        }
+      }
+    } catch { /* ignore */ }
+
+    if (h == null) {
+      scAgeVal.textContent = "No data";
+      if (scAgeChip) { scAgeChip.className = "fperf-hchip chip-warn"; if (scTitle) scAgeChip.title = scTitle; }
+    } else {
+      scAgeVal.textContent = `${h}h ago`;
+      if (scAgeChip) {
+        scAgeChip.className = h <= 6 ? "fperf-hchip chip-ok"
+          : h <= 12 ? "fperf-hchip chip-warn"
+          : "fperf-hchip chip-error";
+        if (scTitle) scAgeChip.title = scTitle;
+      }
+    }
+  }
+
+  // Weather Source chip
+  const wSrcChip = $("fperfChipWeatherSrc");
+  const wSrcVal  = $("fperfChipWeatherSrcVal");
+  if (wSrcVal) {
+    const src = health.sourceFreshness?.weatherSource || "—";
+    wSrcVal.textContent = src;
+    if (wSrcChip) {
+      wSrcChip.className = (src === "forecast" || src === "snapshot") ? "fperf-hchip chip-ok"
+        : (src === "snapshot-fallback" || src === "archive-fallback") ? "fperf-hchip chip-warn"
+        : "fperf-hchip";
+    }
+  }
+
+  // Recent Bias chip
+  const biasChip = $("fperfChipBias");
+  const biasVal  = $("fperfChipBiasVal");
+  if (biasVal) {
+    const b = health.recentBias?.signedBiasPct;
+    if (b == null) {
+      biasVal.textContent = "—";
+      if (biasChip) biasChip.className = "fperf-hchip";
+    } else {
+      const sign = b >= 0 ? "+" : "";
+      biasVal.textContent = `${sign}${b.toFixed(1)}%`;
+      if (biasChip) {
+        biasChip.className = Math.abs(b) <= 5 ? "fperf-hchip chip-ok"
+          : Math.abs(b) <= 10 ? "fperf-hchip chip-warn"
+          : "fperf-hchip chip-error";
+        biasChip.title = `Mean signed bias from last ${health.recentBias.rowsUsed} eligible rows. +% = over-forecast.`;
+      }
+    }
+  }
 }
 
 function renderForecastPerfCharts(rows) {
+  // Empty-state overlays
+  ["fperfCompareWrap", "fperfWapeWrap"].forEach((wrapId) => {
+    const wrap = $(wrapId);
+    if (!wrap) return;
+    let overlay = wrap.querySelector(".fperf-no-data");
+    if (rows.length === 0) {
+      if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.className = "fperf-no-data";
+        overlay.textContent = "No QA data for selected window.";
+        wrap.appendChild(overlay);
+      }
+      overlay.style.display = "flex";
+    } else if (overlay) {
+      overlay.style.display = "none";
+    }
+  });
+  if (rows.length === 0) return;
+
   const pal = getChartPalette();
   const sorted = [...rows].sort((a, b) => (a.target_date > b.target_date ? 1 : -1));
   const labels = sorted.map((r) => r.target_date.slice(5)); // MM-DD
@@ -4240,9 +4374,9 @@ function renderForecastPerfCharts(rows) {
   const wapeVals = sorted.map((r) => r.daily_wape_pct != null ? +Number(r.daily_wape_pct).toFixed(2) : null);
   const wapeColors = sorted.map((r) => {
     const q = r.comparison_quality || "review";
-    if (q === "good" || q === "excellent") return "rgba(16,179,112,.72)";
-    if (q === "review")                    return "rgba(240,144,0,.72)";
-    return "rgba(224,53,96,.72)";
+    if (q === "eligible" || q === "good" || q === "excellent") return "rgba(16,179,112,.72)";
+    if (q === "review")                                        return "rgba(240,144,0,.72)";
+    return "rgba(224,53,96,.72)";  // insufficient, preview, bad
   });
 
   const wapeCanvas = $("fperfWapeChart");
@@ -4300,13 +4434,15 @@ function renderForecastPerfTable(rows) {
   }
   const sorted = [...rows].sort((a, b) => (a.target_date > b.target_date ? -1 : 1));
   const qBadge = (q) => {
-    const cls = q === "good" || q === "excellent" ? "q-good"
-      : q === "ok" ? "q-ok"
-      : q === "review" ? "q-review"
-      : q === "bad" ? "q-bad"
+    const cls = q === "eligible" || q === "good" || q === "excellent" ? "q-good"
+      : q === "review" || q === "ok" ? "q-review"
+      : q === "insufficient" || q === "bad" ? "q-bad"
       : q === "preview" ? "q-excluded"
       : "q-excluded";
-    const label = q === "preview" ? "Preview" : (q || "—");
+    const label = q === "eligible" ? "Eligible"
+      : q === "insufficient" ? "Insufficient"
+      : q === "preview" ? "Preview"
+      : (q || "—");
     return `<span class="fperf-badge ${cls}">${label}</span>`;
   };
   tbody.innerHTML = sorted.map((r) => {
@@ -4346,12 +4482,10 @@ function updateForecastSidebarSummary() {
 
 function initForecastPage() {
   mountForecastSection();
-  mountForecastPerfPanel();
   unlockSettingsInputs();
   syncForecastProviderUi();
   updateForecastSidebarSummary();
   updateSolcastPreviewUnitUi();
-  loadForecastPerfData().catch(() => {});
   const useToolkitPreview =
     String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
       .trim()
@@ -6368,7 +6502,7 @@ async function runReplicationPullNow() {
   if (!ensureRemoteModeForReplicationActions()) return;
   const includeArchive = isManualArchiveSyncSelected();
   const archiveLine = includeArchive
-    ? "\n\nGateway archive DB files will be included. Expect a longer transfer."
+    ? "\n\nGateway archive DB files will be downloaded first for historical consistency, then the main database. Expect a longer transfer."
     : "\n\nArchive files: Skipped for this run.";
   const _pullOk = await appConfirm(
     "Refresh Standby Database",
@@ -6403,10 +6537,10 @@ async function runReplicationPullNow() {
       "replicationMsg",
       forcePull
         ? includeArchive
-          ? "Force Pull started. The gateway database will overwrite newer local standby data, then gateway archive DB files will be staged while live streaming is paused."
+          ? "Force Pull started. Staging gateway archive DB files first, then the gateway database will overwrite newer local standby data. Live streaming is paused during transfer."
           : "Force Pull started. The gateway database will overwrite newer local standby data while live streaming is paused."
         : includeArchive
-          ? "Priority download started. Staging the gateway database first. Gateway archive DB files will follow while live streaming is paused."
+          ? "Priority download started. Staging gateway archive DB files first, then the gateway main database. Live streaming is paused during transfer."
           : "Priority download started. Staging the gateway database while live streaming is paused.",
       "",
     );
@@ -10876,6 +11010,8 @@ function initAnalytics() {
   if (State.analyticsBaseRows.length > 0) renderAnalyticsFromState();
   ensureAnalyticsAutoRefresh();
   loadAnalytics({ force: true });
+  mountForecastPerfPanel();
+  loadForecastPerfData().catch(() => {});
 }
 
 async function loadAnalytics(options = {}) {

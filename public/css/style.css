@@ -4120,6 +4120,7 @@ label[data-required]::after {
 .analytics-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-content: start;
+  padding-top: 4px;
 }
 
 .analytics-grid .chart-total-card {
@@ -9639,11 +9640,16 @@ body.mode-transition-active {
   background: var(--surface);
   border: 1px solid var(--border2);
   border-radius: 14px;
-  padding: 18px 20px 16px;
-  margin-bottom: 18px;
+  padding: 8px 14px 8px;
+  margin-bottom: 4px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
+  grid-column: 1 / -1;
+}
+.fperf-card:has(.fperf-body-collapsed) {
+  padding-bottom: 8px;
+  border-radius: 10px;
 }
 
 .fperf-head {
@@ -9805,11 +9811,12 @@ body.mode-transition-active {
   text-overflow: ellipsis;
 }
 
-.fperf-hchip.chip-ok .fperf-hchip-val    { color: var(--green); }
-.fperf-hchip.chip-warn .fperf-hchip-val  { color: var(--orange); }
-.fperf-hchip.chip-error .fperf-hchip-val { color: var(--red); }
-.fperf-hchip.chip-cyan .fperf-hchip-val  { color: var(--chart-actual, #22d3ee); }
-.fperf-hchip.chip-info .fperf-hchip-val  { color: var(--text2); }
+.fperf-hchip.chip-ok .fperf-hchip-val       { color: var(--green); }
+.fperf-hchip.chip-warn .fperf-hchip-val     { color: var(--orange); }
+.fperf-hchip.chip-error .fperf-hchip-val    { color: var(--red); }
+.fperf-hchip.chip-cyan .fperf-hchip-val     { color: var(--chart-actual, #22d3ee); }
+.fperf-hchip.chip-info .fperf-hchip-val     { color: var(--text2); }
+.fperf-hchip.chip-disabled .fperf-hchip-val { color: var(--text3); opacity: 0.5; }
 
 /* Charts row */
 .fperf-charts-row {
@@ -9845,6 +9852,18 @@ body.mode-transition-active {
   display: block;
   width: 100% !important;
   height: 100% !important;
+}
+
+.fperf-no-data {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.82rem;
+  color: var(--text3);
+  background: var(--card-bg, var(--bg2));
+  z-index: 2;
 }
 
 /* Recent QA table */
