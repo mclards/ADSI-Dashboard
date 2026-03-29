@@ -13741,22 +13741,28 @@ app.get("/api/forecast/qa-history", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   try {
     const days = Math.min(180, Math.max(7, parseInt(req.query.days, 10) || 30));
+    const cutoff = localDateStr(Date.now() - days * 86400000);
 
-    // Primary source: QA-verified comparison table
+    // Primary source: QA-verified comparison table (latest row per target_date)
     let rows = db
       .prepare(
-        `SELECT target_date, provider_used, forecast_variant,
-                solcast_freshness_class, comparison_quality,
-                include_in_error_memory, total_forecast_kwh,
-                total_forecast_lo_kwh, total_forecast_hi_kwh,
-                total_actual_kwh, total_abs_error_kwh,
-                daily_wape_pct, daily_mape_pct,
-                usable_slot_count, masked_slot_count, computed_ts
-         FROM forecast_error_compare_daily
-         ORDER BY target_date DESC, computed_ts DESC
-         LIMIT ?`,
+        `SELECT e.target_date, e.provider_used, e.forecast_variant,
+                e.solcast_freshness_class, e.comparison_quality,
+                e.include_in_error_memory, e.total_forecast_kwh,
+                e.total_forecast_lo_kwh, e.total_forecast_hi_kwh,
+                e.total_actual_kwh, e.total_abs_error_kwh,
+                e.daily_wape_pct, e.daily_mape_pct,
+                e.usable_slot_count, e.masked_slot_count, e.computed_ts
+         FROM forecast_error_compare_daily e
+         INNER JOIN (
+           SELECT target_date, MAX(computed_ts) AS max_ts
+           FROM forecast_error_compare_daily
+           WHERE target_date >= ?
+           GROUP BY target_date
+         ) latest ON e.target_date = latest.target_date AND e.computed_ts = latest.max_ts
+         ORDER BY e.target_date DESC`,
       )
-      .all(days);
+      .all(cutoff);
 
     // Fallback: derive from forecast_run_audit + daily_report when QA table is empty
     if (rows.length === 0) {
@@ -13794,10 +13800,10 @@ app.get("/api/forecast/qa-history", (req, res) => {
              FROM daily_report
              GROUP BY date
            ) dr ON dr.date = fra.target_date
-           ORDER BY fra.target_date DESC
-           LIMIT ?`,
+           WHERE fra.target_date >= ?
+           ORDER BY fra.target_date DESC`,
         )
-        .all(days);
+        .all(cutoff);
     }
 
     return res.json({ ok: true, rows });
@@ -13826,7 +13832,7 @@ app.get("/api/forecast/engine-health", (req, res) => {
       .prepare(
         `SELECT target_date, generated_ts, provider_used, forecast_variant,
                 run_status, solcast_freshness_class, final_forecast_total_kwh,
-                is_authoritative_runtime, attempt_number, notes_json
+                is_authoritative_runtime, attempt_number, notes_json, weather_source
          FROM forecast_run_audit
          ORDER BY generated_ts DESC LIMIT 1`,
       )
@@ -13869,6 +13875,9 @@ app.get("/api/forecast/engine-health", (req, res) => {
         const _notes = JSON.parse(latestAudit.notes_json);
         _metSource = _notes?.weather_source_breakdown?.met_source || null;
       } catch { /* ignore */ }
+    }
+    if (!_metSource && latestAudit?.weather_source) {
+      _metSource = latestAudit.weather_source;
     }
 
     // 3.2 recentBias: signed mean % bias from last 7 eligible QA rows

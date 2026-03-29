@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   reportStartupProgress: (payload) => ipcRenderer.send("dashboard-startup-progress", payload),
   reportStartupReady: (payload) => ipcRenderer.send("dashboard-startup-ready", payload),
   reportStartupFailure: (message) => ipcRenderer.send("dashboard-startup-failed", message),
+  reportRemoteConnectivityFailure: (message) => ipcRenderer.send("dashboard-remote-connectivity-failed", message),
+  switchOperationMode: (mode) => ipcRenderer.send("switch-operation-mode", mode),
 
   // Cloud Backup OAuth
   // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }

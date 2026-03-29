@@ -4345,6 +4345,7 @@ label[data-required]::after {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-content: start;
   padding-top: 4px;
+  overflow: visible;
 }
 
 .analytics-grid .chart-total-card {

@@ -32,9 +32,9 @@ Detailed reference material lives in `references/` — read those files when wor
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.5.2` — source of truth: `package.json` |
+| Repo version baseline | `2.5.3` — source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.5.2` |
+| Latest published release | `v2.5.3` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
 
@@ -116,11 +116,11 @@ Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebS
 
 **`gateway`** — polls plant locally; authoritative source of truth for live data, reports, forecasts, and replication snapshots; the only mode in which forecast generation runs.
 
-**`remote`** — gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy.
+**`remote`** — gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy. If the gateway is unreachable during startup, a **Connection Mode** picker appears on the loading screen allowing the operator to switch to `gateway` or retry `remote`.
 
 Live bridge health states: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, `config-error`.
 
-Switching from `remote` to `gateway` must immediately abort in-flight remote fetches, close the remote WebSocket, and stop remote chat polling.
+Switching from `remote` to `gateway` must immediately abort in-flight remote fetches, close the remote WebSocket, and stop remote chat polling. The mode picker on the loading screen persists the chosen mode via `/api/settings` POST (with direct SQLite fallback) then calls `retryServerStartup()`.
 
 ---
 

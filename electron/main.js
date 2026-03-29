@@ -3470,6 +3470,23 @@ function readOperationModeFromLocalDb() {
   }
 }
 
+function writeOperationModeToLocalDb(mode) {
+  const normalized = String(mode || "").toLowerCase() === "remote" ? "remote" : "gateway";
+  const dbPath = getLocalSettingsDbPath();
+  if (!dbPath) throw new Error("No settings DB path resolved");
+  let db = null;
+  try {
+    db = new Database(dbPath, { timeout: 2000 });
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run("operationMode", normalized);
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
+}
+
 function defaultConfig() {
   const cfg = { inverters: {}, poll_interval: {}, units: {}, losses: {} };
   for (let i = 1; i <= 27; i++) {
@@ -4131,6 +4148,61 @@ ipcMain.on("dashboard-startup-failed", (event, message) => {
   const safeMessage = String(message || "").trim() || "Dashboard startup failed.";
   console.error("[main] Renderer startup failed:", safeMessage);
   showLoadingErrorMessage(safeMessage);
+});
+
+// Remote connectivity failure — show mode picker instead of generic error
+ipcMain.on("dashboard-remote-connectivity-failed", (event, message) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  clearMainRendererReadyTimer();
+  const safeMessage = String(message || "").trim() || "The remote gateway did not respond.";
+  console.warn("[main] Remote connectivity failed:", safeMessage);
+  startupErrorShown = true;
+  if (!loadingWin || loadingWin.isDestroyed()) return;
+  loadingWin.webContents
+    .executeJavaScript(
+      `if (typeof window.showModePicker === "function") {
+         window.showModePicker(${JSON.stringify(safeMessage)});
+       } else {
+         window.showStartupError?.(${JSON.stringify(safeMessage)});
+       }`,
+    )
+    .catch(() => {});
+});
+
+// Mode switch from loading screen — save settings and retry startup
+ipcMain.on("switch-operation-mode", async (event, mode) => {
+  if (!loadingWin || event.sender !== loadingWin.webContents) return;
+  const targetMode = String(mode || "").toLowerCase() === "remote" ? "remote" : "gateway";
+  console.log(`[main] User requested mode switch to: ${targetMode}`);
+  try {
+    const http = require("http");
+    const postData = JSON.stringify({ operationMode: targetMode });
+    await new Promise((resolve, reject) => {
+      const req = http.request(
+        { hostname: "127.0.0.1", port: SERVER_PORT, path: "/api/settings", method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+          timeout: 3000,
+        },
+        (res) => {
+          res.resume();
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+          else reject(new Error(`HTTP ${res.statusCode}`));
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      req.end(postData);
+    });
+    console.log(`[main] Settings saved: operationMode=${targetMode}`);
+  } catch (err) {
+    console.warn("[main] Failed to save operation mode via API, attempting direct DB write:", err.message);
+    try {
+      writeOperationModeToLocalDb(targetMode);
+    } catch (dbErr) {
+      console.error("[main] Direct DB write also failed:", dbErr.message);
+    }
+  }
+  retryServerStartup();
 });
 
 // ─── Cleanup ──────────────────────────────────────────────────────────────────

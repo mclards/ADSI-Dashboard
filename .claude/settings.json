@@ -45,7 +45,10 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\(''services/forecast_engine.py'', doraise=True\\); print\\(''OK''\\)\")",
       "Bash(grep -n \"run_status = ''ok''\" \"d:/ADSI-Dashboard/server/index.js\")",
       "Edit(/.claude/skills/adsi-dashboard/**)",
-      "Bash(node -e \"console.log\\(require\\(''./package.json''\\).version\\)\")"
+      "Bash(node -e \"console.log\\(require\\(''./package.json''\\).version\\)\")",
+      "Bash(node -e \"require\\(''./server/exporter.js''\\); console.log\\(''exporter.js loads OK''\\)\")",
+      "Bash(xxd)",
+      "Bash(node --check server/cloudBackup.js)"
     ],
     "deny": [
       "Read(./.env)",
@@ -53,7 +56,8 @@
       "Read(./private/**)"
     ],
     "additionalDirectories": [
-      "d:\\ADSI-Dashboard\\.claude"
+      "d:\\ADSI-Dashboard\\.claude",
+      "C:\\Users\\User\\.claude\\sessions"
     ]
   },
   "exclude": [

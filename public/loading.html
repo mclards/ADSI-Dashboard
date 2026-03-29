@@ -421,6 +421,65 @@
         display: block;
         animation: fadeSlideIn 0.32s ease-out;
       }
+
+      /* Mode picker panel */
+      #modePickerPanel {
+        background: rgba(25, 50, 90, 0.22);
+        border-color: rgba(77, 163, 255, 0.28);
+      }
+
+      .mode-picker-options {
+        display: flex;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .mode-btn {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        padding: 14px 10px 12px;
+        border: 1px solid rgba(134, 156, 198, 0.18);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        cursor: pointer;
+        transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+      }
+
+      .mode-btn:hover {
+        background: rgba(77, 163, 255, 0.10);
+        border-color: var(--accent);
+        box-shadow: 0 0 18px rgba(77, 163, 255, 0.12);
+      }
+
+      .mode-btn:active { transform: translateY(1px); }
+
+      .mode-btn-icon {
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .mode-btn-label {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .mode-btn-desc {
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .mode-btn-gateway { border-color: rgba(49, 203, 136, 0.22); }
+      .mode-btn-gateway:hover {
+        background: rgba(49, 203, 136, 0.10);
+        border-color: var(--ok);
+        box-shadow: 0 0 18px rgba(49, 203, 136, 0.14);
+      }
     </style>
   </head>
   <body>
@@ -477,12 +536,32 @@
         </div>
 
         <div class="error-panel" id="errorPanel">
-          <div class="error-title">Startup Check Required</div>
+          <div class="error-title" id="errorTitle">Startup Check Required</div>
           <div class="error-text" id="errorMsg">
             The application did not finish starting. Verify the local services and try again.
           </div>
-          <div class="error-actions">
+          <div class="error-actions" id="errorActions">
             <button class="retry-btn" type="button" onclick="location.reload()">Retry Startup</button>
+          </div>
+        </div>
+
+        <!-- Mode-selection panel: shown when Remote mode fails due to unreachable gateway -->
+        <div class="error-panel" id="modePickerPanel">
+          <div class="error-title" style="color: var(--accent-2);">Connection Mode</div>
+          <div class="error-text" id="modePickerMsg">
+            The remote gateway did not respond. Choose how to proceed:
+          </div>
+          <div class="mode-picker-options">
+            <button class="mode-btn mode-btn-gateway" type="button" id="btnPickGateway">
+              <span class="mode-btn-icon">&#9878;</span>
+              <span class="mode-btn-label">Gateway Mode</span>
+              <span class="mode-btn-desc">Run as a local gateway — poll inverters directly via Modbus.</span>
+            </button>
+            <button class="mode-btn mode-btn-remote" type="button" id="btnPickRemote">
+              <span class="mode-btn-icon">&#8644;</span>
+              <span class="mode-btn-label">Remote Mode</span>
+              <span class="mode-btn-desc">Retry connecting to the remote gateway server.</span>
+            </button>
           </div>
         </div>
       </div>
@@ -533,8 +612,50 @@
 
       window.showStartupError = showStartupError;
 
+      function showModePicker(message) {
+        if (spinner) spinner.style.display = "none";
+        if (statusText) statusText.textContent = "Connection mode selection";
+        if (progressFill) progressFill.classList.add("error");
+        for (let i = 1; i <= STEP_COUNT; i += 1) {
+          if (i < currentStep) markStep(i, "done");
+          else if (i === currentStep) markStep(i, "failed");
+          else markStep(i, "");
+        }
+        const modePanel = document.getElementById("modePickerPanel");
+        const modeMsg = document.getElementById("modePickerMsg");
+        if (modeMsg && message) modeMsg.textContent = String(message);
+        if (modePanel) modePanel.classList.add("visible");
+        // Hide the generic error panel if showing
+        if (errorPanel) errorPanel.classList.remove("visible");
+      }
+
+      window.showModePicker = showModePicker;
+
+      // Mode picker button handlers — communicate back to Electron main process
+      document.getElementById("btnPickGateway")?.addEventListener("click", () => {
+        const modePanel = document.getElementById("modePickerPanel");
+        if (modePanel) modePanel.classList.remove("visible");
+        if (spinner) spinner.style.display = "inline-flex";
+        if (progressFill) progressFill.classList.remove("error");
+        if (statusText) statusText.textContent = "Switching to Gateway mode\u2026";
+        // Tell main process to switch mode and retry
+        try { window.electronAPI?.switchOperationMode?.("gateway"); } catch (_) {}
+      });
+
+      document.getElementById("btnPickRemote")?.addEventListener("click", () => {
+        const modePanel = document.getElementById("modePickerPanel");
+        if (modePanel) modePanel.classList.remove("visible");
+        if (spinner) spinner.style.display = "inline-flex";
+        if (progressFill) progressFill.classList.remove("error");
+        if (statusText) statusText.textContent = "Retrying Remote connection\u2026";
+        // Retry by reloading — same as existing Retry Startup
+        location.reload();
+      });
+
       function updateStartupState(state = {}) {
         if (errorPanel) errorPanel.classList.remove("visible");
+        const modePanel = document.getElementById("modePickerPanel");
+        if (modePanel) modePanel.classList.remove("visible");
         if (progressFill) progressFill.classList.remove("error");
         if (spinner) spinner.style.display = "inline-flex";
 

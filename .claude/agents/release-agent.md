@@ -24,7 +24,7 @@ You are the release specialist for the ADSI Inverter Dashboard at `d:\ADSI-Dashb
 - Electron/server/frontend only → skip
 
 **3. Bump version** — update `package.json`, then align all these together:
-`package.json`, `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `MEMORY.md`, `docs/ADSI-Dashboard-User-Guide.html`, `docs/ADSI-Dashboard-User-Manual.md`, `docs/ADSI-Dashboard-User-Guide.pdf`, `public/user-guide.html`
+`package.json`, `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `MEMORY.md`, `public/index.html` (`.side-about-ver` span), `public/js/app.js` (verify dynamic version sync in `initApp`), `docs/ADSI-Dashboard-User-Guide.html`, `docs/ADSI-Dashboard-User-Manual.md`, `docs/ADSI-Dashboard-User-Guide.pdf`, `public/user-guide.html`
 
 The User Guide version header inside `docs/ADSI-Dashboard-User-Guide.html` and `docs/ADSI-Dashboard-User-Manual.md` must match `package.json` — update it explicitly, do not leave it on the old version.
 

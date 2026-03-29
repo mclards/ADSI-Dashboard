@@ -4210,49 +4210,65 @@ function renderForecastPerfHealth(health) {
 
   // Last run chip
   const runVal = $("fperfLastRunVal");
-  if (runVal && health.latestAudit) {
-    const a = health.latestAudit;
-    const dt = a.generated_ts ? new Date(a.generated_ts) : null;
-    const dtStr = dt
-      ? `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`
-      : "—";
-    runVal.textContent = `${a.target_date || "—"} @ ${dtStr}`;
-    const runChip = $("fperfChipLastRun");
-    if (runChip) {
-      runChip.className =
-        a.run_status === "success" ? "fperf-hchip chip-ok" : "fperf-hchip chip-error";
+  const runChip = $("fperfChipLastRun");
+  if (runVal) {
+    if (health.latestAudit) {
+      const a = health.latestAudit;
+      const dt = a.generated_ts ? new Date(a.generated_ts) : null;
+      const dtStr = dt
+        ? `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`
+        : "—";
+      runVal.textContent = `${a.target_date || "—"} @ ${dtStr}`;
+      if (runChip) {
+        runChip.className =
+          a.run_status === "success" ? "fperf-hchip chip-ok" : "fperf-hchip chip-error";
+      }
+    } else {
+      runVal.textContent = "No runs";
+      if (runChip) runChip.className = "fperf-hchip chip-disabled";
     }
   }
 
   // Provider chip
   const provVal = $("fperfProviderVal");
-  if (provVal && health.latestAudit) {
-    const prov = String(health.latestAudit.provider_used || "—").trim();
-    const variant = String(health.latestAudit.forecast_variant || "").trim();
-    provVal.textContent = variant ? `${prov} / ${variant}` : prov;
-    const provChip = $("fperfChipProvider");
-    if (provChip) provChip.className = "fperf-hchip chip-cyan";
+  const provChip = $("fperfChipProvider");
+  if (provVal) {
+    if (health.latestAudit) {
+      const prov = String(health.latestAudit.provider_used || "—").trim();
+      const variant = String(health.latestAudit.forecast_variant || "").trim();
+      provVal.textContent = variant ? `${prov} / ${variant}` : prov;
+      if (provChip) provChip.className = "fperf-hchip chip-cyan";
+    } else {
+      provVal.textContent = "Unknown";
+      if (provChip) provChip.className = "fperf-hchip chip-disabled";
+    }
   }
 
   // Quality breakdown chip (14d)
   const qualVal = $("fperfQualityVal");
-  if (qualVal && Array.isArray(health.recentQualityBreakdown)) {
-    const qmap = {};
-    health.recentQualityBreakdown.forEach((r) => { qmap[r.comparison_quality] = r.cnt; });
-    // eligible = Python's "good" value; also accept legacy good/excellent
-    const good  = (qmap.eligible || 0) + (qmap.good || 0) + (qmap.excellent || 0);
-    const total = Object.values(qmap).reduce((s, v) => s + v, 0);
-    if (total === 0) {
-      qualVal.textContent = "No data";
-    } else {
-      qualVal.textContent = `${good}/${total} eligible`;
-      const qualChip = $("fperfChipQuality");
-      if (qualChip) {
-        const ratio = good / total;
-        qualChip.className = ratio >= 0.7 ? "fperf-hchip chip-ok"
-          : ratio >= 0.4 ? "fperf-hchip chip-warn"
-          : "fperf-hchip chip-error";
+  const qualChip = $("fperfChipQuality");
+  if (qualVal) {
+    if (Array.isArray(health.recentQualityBreakdown) && health.recentQualityBreakdown.length > 0) {
+      const qmap = {};
+      health.recentQualityBreakdown.forEach((r) => { qmap[r.comparison_quality] = r.cnt; });
+      // eligible = Python's "good" value; also accept legacy good/excellent
+      const good  = (qmap.eligible || 0) + (qmap.good || 0) + (qmap.excellent || 0);
+      const total = Object.values(qmap).reduce((s, v) => s + v, 0);
+      if (total === 0) {
+        qualVal.textContent = "No data";
+        if (qualChip) qualChip.className = "fperf-hchip chip-disabled";
+      } else {
+        qualVal.textContent = `${good}/${total} eligible`;
+        if (qualChip) {
+          const ratio = good / total;
+          qualChip.className = ratio >= 0.7 ? "fperf-hchip chip-ok"
+            : ratio >= 0.4 ? "fperf-hchip chip-warn"
+            : "fperf-hchip chip-error";
+        }
       }
+    } else {
+      qualVal.textContent = "No data";
+      if (qualChip) qualChip.className = "fperf-hchip chip-disabled";
     }
   }
 
@@ -4299,8 +4315,8 @@ function renderForecastPerfHealth(health) {
       mlChip.title = titleText;
     }
   } else if (mlVal) {
-    mlVal.textContent = "—";
-    if (mlChip) mlChip.className = "fperf-hchip";
+    mlVal.textContent = "No model";
+    if (mlChip) { mlChip.className = "fperf-hchip chip-disabled"; mlChip.title = ""; }
   }
 
   // Training Data chip
@@ -4316,8 +4332,8 @@ function renderForecastPerfHealth(health) {
       trainDataChip.title = `Last trained: ${lastTrainingDate || "—"} | Regimes: ${regimesCount || "—"} | Result: ${trainingResult || "—"}`;
     }
   } else if (trainDataVal) {
-    trainDataVal.textContent = "—";
-    if (trainDataChip) trainDataChip.className = "fperf-hchip";
+    trainDataVal.textContent = "No training data";
+    if (trainDataChip) { trainDataChip.className = "fperf-hchip chip-disabled"; trainDataChip.title = ""; }
   }
 
   // Data Quality chip
@@ -4372,7 +4388,10 @@ function renderForecastPerfHealth(health) {
 
     if (h == null) {
       scAgeVal.textContent = "No data";
-      if (scAgeChip) { scAgeChip.className = "fperf-hchip chip-warn"; if (scTitle) scAgeChip.title = scTitle; }
+      if (scAgeChip) {
+        scAgeChip.className = "fperf-hchip chip-disabled";
+        scAgeChip.title = scTitle || "No Solcast snapshot pulled yet for today/tomorrow";
+      }
     } else {
       scAgeVal.textContent = `${h}h ago`;
       if (scAgeChip) {
@@ -4388,12 +4407,13 @@ function renderForecastPerfHealth(health) {
   const wSrcChip = $("fperfChipWeatherSrc");
   const wSrcVal  = $("fperfChipWeatherSrcVal");
   if (wSrcVal) {
-    const src = health.sourceFreshness?.weatherSource || "—";
-    wSrcVal.textContent = src;
+    const src = health.sourceFreshness?.weatherSource || null;
+    wSrcVal.textContent = src || "Unknown";
     if (wSrcChip) {
       wSrcChip.className = (src === "forecast" || src === "snapshot") ? "fperf-hchip chip-ok"
         : (src === "snapshot-fallback" || src === "archive-fallback") ? "fperf-hchip chip-warn"
-        : "fperf-hchip";
+        : src ? "fperf-hchip chip-info"
+        : "fperf-hchip chip-disabled";
     }
   }
 
@@ -4403,8 +4423,8 @@ function renderForecastPerfHealth(health) {
   if (biasVal) {
     const b = health.recentBias?.signedBiasPct;
     if (b == null) {
-      biasVal.textContent = "—";
-      if (biasChip) biasChip.className = "fperf-hchip";
+      biasVal.textContent = "No data";
+      if (biasChip) { biasChip.className = "fperf-hchip chip-disabled"; biasChip.title = ""; }
     } else {
       const sign = b >= 0 ? "+" : "";
       biasVal.textContent = `${sign}${b.toFixed(1)}%`;
@@ -4559,7 +4579,8 @@ function renderForecastPerfCharts(rows) {
   if (avgWapeEl) {
     const valid = wapeVals.filter((v) => v != null);
     if (valid.length === 0) {
-      avgWapeEl.textContent = "—";
+      avgWapeEl.textContent = "No data";
+      if (avgWapeChip) avgWapeChip.className = "fperf-hchip chip-disabled";
     } else {
       const avg = valid.reduce((s, v) => s + v, 0) / valid.length;
       avgWapeEl.textContent = `${avg.toFixed(1)}%`;
@@ -4587,9 +4608,11 @@ function renderForecastPerfTable(rows) {
       : q === "preview" ? "q-excluded"
       : "q-excluded";
     const label = q === "eligible" ? "Eligible"
-      : q === "insufficient" ? "Insufficient"
+      : q === "good" || q === "excellent" ? "Eligible"
+      : q === "insufficient" || q === "bad" ? "Insufficient"
+      : q === "review" || q === "ok" ? "Review"
       : q === "preview" ? "Preview"
-      : (q || "—");
+      : "Unknown";
     return `<span class="fperf-badge ${cls}">${label}</span>`;
   };
   tbody.innerHTML = sorted.map((r) => {
@@ -9654,6 +9677,14 @@ function reportStartupFailure(message) {
   } catch (_) {}
 }
 
+function reportRemoteConnectivityFailure(message) {
+  try {
+    window.electronAPI?.reportRemoteConnectivityFailure?.(
+      String(message || "The remote gateway did not respond."),
+    );
+  } catch (_) {}
+}
+
 function resetStartupLiveWaiters() {
   State.startupLiveReady = false;
   const waiters = Array.isArray(State.startupLiveWaiters) ? State.startupLiveWaiters.splice(0) : [];
@@ -14288,6 +14319,12 @@ async function init() {
       await waitForInitialLiveData(12000);
     } catch (err) {
       console.warn("[startup] live telemetry warmup:", err.message);
+      if (isClientModeActive()) {
+        reportRemoteConnectivityFailure(
+          "Remote gateway is unreachable — live telemetry timed out.",
+        );
+        return; // stop init; mode picker takes over
+      }
     }
 
     reportStartupProgress({

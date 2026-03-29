@@ -3,40 +3,60 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide</title>
+<title>ADSI Inverter Dashboard — User Guide v2.5.2</title>
 <style>
+  /* ══════════════════════════════════════════════
+     CSS VARIABLES & RESET
+     ══════════════════════════════════════════════ */
   :root {
-    --bg: #0e1117;
-    --surface: #161b22;
-    --card: #1c2128;
-    --border: #30363d;
-    --accent: #58a6ff;
-    --accent2: #d2a8ff;
-    --green: #3fb950;
-    --yellow: #d29922;
-    --orange: #db6d28;
-    --red: #f85149;
-    --text: #e6edf3;
-    --text2: #8b949e;
-    --text3: #6e7681;
-    --link: #58a6ff;
-    --tbl-head: #21262d;
-    --tbl-alt: rgba(56,62,71,.35);
-    --section-bg: linear-gradient(135deg, #161b22 0%, #0e1117 100%);
+    --bg: #0b0e14;
+    --surface: #141820;
+    --card: #1a1f2e;
+    --card2: #1e2436;
+    --border: #2a3042;
+    --border2: #343c54;
+    --accent: #4d9fff;
+    --accent-light: #7ab8ff;
+    --accent2: #c084fc;
+    --accent2-light: #d4a5ff;
+    --green: #34d399;
+    --green-dim: rgba(52,211,153,.12);
+    --yellow: #fbbf24;
+    --yellow-dim: rgba(251,191,36,.10);
+    --orange: #fb923c;
+    --red: #f87171;
+    --red-dim: rgba(248,113,113,.10);
+    --text: #e8edf5;
+    --text2: #94a3b8;
+    --text3: #64748b;
+    --link: #4d9fff;
+    --tbl-head: #1e2436;
+    --tbl-alt: rgba(42,48,66,.4);
+    --glow-accent: rgba(77,159,255,.15);
+    --glow-accent2: rgba(192,132,252,.10);
+    --gradient-accent: linear-gradient(135deg, var(--accent), var(--accent2));
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 4px 24px rgba(0,0,0,.25);
+    --shadow-sm: 0 2px 12px rgba(0,0,0,.18);
   }
+
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html { scroll-behavior: smooth; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
-    line-height: 1.6;
-    font-size: 15px;
+    line-height: 1.7;
+    font-size: 14.5px;
+    -webkit-font-smoothing: antialiased;
   }
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* ── Cover ── */
+  /* ══════════════════════════════════════════════
+     COVER PAGE
+     ══════════════════════════════════════════════ */
   .cover {
     min-height: 100vh;
     display: flex;
@@ -44,489 +64,950 @@
     align-items: center;
     justify-content: center;
     text-align: center;
-    background: linear-gradient(160deg, #0d1117 0%, #161b22 40%, #1a1e2e 70%, #0d1117 100%);
-    padding: 60px 24px;
+    background: linear-gradient(160deg, #080b10 0%, #0f1318 30%, #141a28 60%, #0b0e14 100%);
+    padding: 60px 32px;
     position: relative;
     overflow: hidden;
   }
   .cover::before {
     content: '';
     position: absolute;
-    top: -50%;
-    left: -50%;
-    width: 200%;
-    height: 200%;
-    background: radial-gradient(circle at 30% 40%, rgba(88,166,255,.08) 0%, transparent 50%),
-                radial-gradient(circle at 70% 60%, rgba(210,168,255,.06) 0%, transparent 50%),
-                radial-gradient(circle at 50% 80%, rgba(63,185,80,.04) 0%, transparent 40%);
+    inset: 0;
+    background:
+      radial-gradient(ellipse 600px 400px at 25% 35%, rgba(77,159,255,.07) 0%, transparent 100%),
+      radial-gradient(ellipse 500px 350px at 75% 55%, rgba(192,132,252,.05) 0%, transparent 100%),
+      radial-gradient(ellipse 400px 300px at 50% 80%, rgba(52,211,153,.04) 0%, transparent 100%);
     pointer-events: none;
-    animation: coverGlow 12s ease-in-out infinite alternate;
+    animation: coverPulse 10s ease-in-out infinite alternate;
   }
-  @keyframes coverGlow {
-    0% { opacity: .7; transform: scale(1) rotate(0deg); }
-    100% { opacity: 1; transform: scale(1.05) rotate(2deg); }
+  @keyframes coverPulse {
+    0% { opacity: .6; } 100% { opacity: 1; }
+  }
+
+  .cover-icon {
+    margin-bottom: 32px;
+    position: relative;
+    filter: drop-shadow(0 0 30px rgba(77,159,255,.3));
   }
   .cover-badge {
     display: inline-block;
-    padding: 6px 18px;
-    border-radius: 20px;
-    border: 1px solid var(--accent);
+    padding: 7px 22px;
+    border-radius: 24px;
+    border: 1px solid rgba(77,159,255,.4);
     color: var(--accent);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
     text-transform: uppercase;
-    margin-bottom: 28px;
+    margin-bottom: 24px;
     position: relative;
-    box-shadow: 0 0 20px rgba(88,166,255,.15), inset 0 0 12px rgba(88,166,255,.06);
+    background: rgba(77,159,255,.06);
   }
   .cover h1 {
-    font-size: clamp(32px, 5vw, 56px);
+    font-size: clamp(34px, 5vw, 54px);
     font-weight: 800;
-    letter-spacing: -1px;
-    margin-bottom: 16px;
-    background: linear-gradient(135deg, #e6edf3 0%, #58a6ff 50%, #d2a8ff 100%);
+    letter-spacing: -1.5px;
+    margin-bottom: 14px;
+    background: linear-gradient(135deg, #e8edf5 0%, #4d9fff 45%, #c084fc 100%);
     background-size: 200% 200%;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
     position: relative;
-    animation: titleShimmer 6s ease-in-out infinite alternate;
+    animation: shimmer 8s ease-in-out infinite alternate;
   }
-  @keyframes titleShimmer {
-    0% { background-position: 0% 50%; }
-    100% { background-position: 100% 50%; }
-  }
+  @keyframes shimmer { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+
   .cover-sub {
-    font-size: 18px;
+    font-size: 17px;
     color: var(--text2);
-    max-width: 640px;
-    margin-bottom: 40px;
+    max-width: 620px;
+    margin-bottom: 48px;
     position: relative;
+    line-height: 1.7;
   }
   .cover-meta {
     display: flex;
-    gap: 32px;
+    gap: 36px;
     flex-wrap: wrap;
     justify-content: center;
-    color: var(--text3);
-    font-size: 13px;
     position: relative;
   }
-  .cover-meta span { display: flex; align-items: center; gap: 6px; }
-  .cover-meta b { color: var(--text2); }
-
-  /* ── Table of Contents ── */
-  .toc {
-    max-width: 880px;
-    margin: 0 auto;
-    padding: 60px 24px 40px;
-  }
-  .toc h2 {
+  .cover-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     font-size: 13px;
+    color: var(--text2);
+  }
+  .cover-meta-item svg { flex-shrink: 0; }
+  .cover-meta-item b { color: var(--text); font-weight: 600; }
+
+  /* ══════════════════════════════════════════════
+     TABLE OF CONTENTS
+     ══════════════════════════════════════════════ */
+  .toc {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 56px 32px 40px;
+  }
+  .toc-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 2px;
+    letter-spacing: 2.5px;
     color: var(--accent);
-    margin-bottom: 24px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 28px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border);
   }
   .toc-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 6px;
   }
   .toc-grid a {
-    display: block;
-    padding: 10px 14px;
-    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 16px;
+    border-radius: var(--radius-sm);
     color: var(--text);
-    font-size: 14px;
+    font-size: 13.5px;
+    font-weight: 500;
     border: 1px solid transparent;
-    transition: background .2s, border-color .2s, transform .2s;
+    transition: all .2s;
   }
   .toc-grid a:hover {
     background: var(--card);
-    border-color: rgba(88,166,255,.2);
+    border-color: var(--border);
     text-decoration: none;
-    transform: translateX(4px);
+    transform: translateX(3px);
   }
-  .toc-grid a .toc-num {
+  .toc-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: rgba(77,159,255,.1);
     color: var(--accent);
-    font-weight: 700;
-    margin-right: 8px;
-    font-size: 13px;
+    font-weight: 800;
+    font-size: 12px;
+    flex-shrink: 0;
   }
 
-  /* ── Sections ── */
+  /* ══════════════════════════════════════════════
+     CONTENT CONTAINER
+     ══════════════════════════════════════════════ */
   .content {
     max-width: 920px;
     margin: 0 auto;
-    padding: 0 24px 80px;
+    padding: 0 32px 80px;
   }
+
+  /* ══════════════════════════════════════════════
+     SECTION HEADERS
+     ══════════════════════════════════════════════ */
   section {
-    margin-bottom: 56px;
+    margin-bottom: 52px;
     scroll-margin-top: 24px;
   }
   .section-head {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
     margin-bottom: 24px;
-    padding-bottom: 14px;
-    border-bottom: none;
-    background-image: linear-gradient(to right, var(--accent), var(--accent2), transparent);
-    background-size: 100% 2px;
-    background-repeat: no-repeat;
-    background-position: bottom;
+    padding-bottom: 16px;
+    position: relative;
   }
-  .section-num {
-    display: inline-flex;
+  .section-head::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2), transparent 80%);
+    border-radius: 2px;
+  }
+  .section-icon {
+    display: flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
-    background: linear-gradient(135deg, rgba(88,166,255,.18), rgba(210,168,255,.12));
-    color: var(--accent);
-    font-weight: 800;
-    font-size: 15px;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius);
+    background: linear-gradient(135deg, rgba(77,159,255,.15), rgba(192,132,252,.10));
+    border: 1px solid rgba(77,159,255,.2);
     flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(88,166,255,.10);
   }
   .section-head h2 {
     font-size: 22px;
     font-weight: 700;
+    letter-spacing: -0.3px;
   }
+
+  /* ══════════════════════════════════════════════
+     TYPOGRAPHY
+     ══════════════════════════════════════════════ */
   h3 {
     font-size: 16px;
     font-weight: 600;
-    color: var(--accent2);
-    margin: 28px 0 12px;
+    color: var(--accent2-light);
+    margin: 30px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h3::before {
+    content: '';
+    width: 3px;
+    height: 18px;
+    background: var(--accent2);
+    border-radius: 2px;
+    flex-shrink: 0;
   }
   h4 {
     font-size: 14px;
     font-weight: 600;
     color: var(--text);
-    margin: 20px 0 8px;
+    margin: 22px 0 8px;
   }
   p, ul, ol { margin-bottom: 14px; }
   ul, ol { padding-left: 24px; }
   li { margin-bottom: 6px; }
   li::marker { color: var(--accent); }
+  code {
+    background: rgba(77,159,255,.1);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--accent-light);
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  }
+  strong, b { font-weight: 600; }
 
-  /* ── Info cards ── */
+  /* ══════════════════════════════════════════════
+     CARDS
+     ══════════════════════════════════════════════ */
   .info-card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px 20px;
-    box-shadow: 0 4px 16px rgba(0,0,0,.15);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    box-shadow: var(--shadow-sm);
     margin: 16px 0;
+    position: relative;
+    overflow: hidden;
   }
-  .info-card.warn {
-    border-color: var(--yellow);
-    background: rgba(210,153,34,.08);
+  .info-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px;
+    height: 100%;
+    border-radius: 4px 0 0 4px;
   }
-  .info-card.tip {
-    border-color: var(--green);
-    background: rgba(63,185,80,.06);
-  }
+  .info-card.warn { border-color: rgba(251,191,36,.3); background: rgba(251,191,36,.05); }
+  .info-card.warn::before { background: var(--yellow); }
+  .info-card.tip { border-color: rgba(52,211,153,.25); background: rgba(52,211,153,.04); }
+  .info-card.tip::before { background: var(--green); }
+  .info-card.note { border-color: rgba(77,159,255,.25); background: rgba(77,159,255,.04); }
+  .info-card.note::before { background: var(--accent); }
+  .info-card.danger { border-color: rgba(248,113,113,.25); background: rgba(248,113,113,.04); }
+  .info-card.danger::before { background: var(--red); }
+
   .info-card-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 10.5px;
+    font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 6px;
+    letter-spacing: 1.5px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .info-card.warn .info-card-label { color: var(--yellow); }
   .info-card.tip .info-card-label { color: var(--green); }
+  .info-card.note .info-card-label { color: var(--accent); }
+  .info-card.danger .info-card-label { color: var(--red); }
 
-  /* ── Tables ── */
+  /* ══════════════════════════════════════════════
+     TABLES
+     ══════════════════════════════════════════════ */
   table {
     width: 100%;
     border-collapse: collapse;
     margin: 14px 0 20px;
-    font-size: 13.5px;
-    border-radius: 8px;
+    font-size: 13px;
+    border-radius: var(--radius);
     overflow: hidden;
-    box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--border);
   }
   thead th {
-    background: linear-gradient(180deg, var(--tbl-head), rgba(22,27,34,.95));
+    background: var(--tbl-head);
     color: var(--text2);
     text-align: left;
-    padding: 11px 14px;
+    padding: 12px 16px;
     font-weight: 700;
-    font-size: 11.5px;
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: .7px;
+    letter-spacing: .8px;
     border-bottom: 2px solid var(--accent);
   }
   tbody td {
-    padding: 9px 14px;
-    border-bottom: 1px solid rgba(48,54,61,.4);
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(42,48,66,.5);
     vertical-align: top;
   }
   tbody tr:nth-child(even) { background: var(--tbl-alt); }
-  tbody tr:hover { background: rgba(88,166,255,.06); }
+  tbody tr:hover { background: rgba(77,159,255,.04); }
   td code, th code {
-    background: rgba(88,166,255,.1);
+    background: rgba(77,159,255,.1);
     padding: 2px 6px;
     border-radius: 4px;
-    font-size: 12.5px;
-    color: var(--accent);
+    font-size: 12px;
+    color: var(--accent-light);
   }
 
-  /* ── Feature grid ── */
+  /* ══════════════════════════════════════════════
+     FEATURE GRID
+     ══════════════════════════════════════════════ */
   .feat-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
     gap: 14px;
     margin: 20px 0;
   }
   .feat-item {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 18px;
-    transition: transform .2s, box-shadow .2s, border-color .2s;
+    border-radius: var(--radius);
+    padding: 20px;
+    transition: all .25s;
+    position: relative;
+    overflow: hidden;
   }
   .feat-item:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 24px rgba(88,166,255,.08);
-    border-color: rgba(88,166,255,.3);
+    border-color: rgba(77,159,255,.3);
+    box-shadow: 0 8px 32px rgba(77,159,255,.08);
+    transform: translateY(-2px);
   }
   .feat-item-icon {
-    font-size: 22px;
-    margin-bottom: 8px;
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    background: linear-gradient(135deg, rgba(77,159,255,.12), rgba(192,132,252,.08));
   }
-  .feat-item h4 {
-    margin: 0 0 6px;
-    font-size: 14px;
-    font-weight: 600;
-  }
-  .feat-item p {
-    font-size: 13px;
-    color: var(--text2);
-    margin: 0;
-  }
+  .feat-item h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  .feat-item p { font-size: 12.5px; color: var(--text2); margin: 0; line-height: 1.6; }
 
-  /* ── Legend colors ── */
-  .legend-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 16px; }
-  .legend-chip {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 13px; font-weight: 500;
-  }
-  .legend-dot {
-    width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
-  }
-
-  /* ── Shortcut keys ── */
-  kbd {
-    display: inline-block;
-    padding: 2px 8px;
-    font-size: 12px;
-    font-family: inherit;
+  /* ══════════════════════════════════════════════
+     SVG DIAGRAM CONTAINERS
+     ══════════════════════════════════════════════ */
+  .diagram-container {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 5px;
-    box-shadow: inset 0 -1px 0 var(--border);
-    color: var(--text);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 20px 0;
+    text-align: center;
+    box-shadow: var(--shadow-sm);
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    max-width: 100%;
+    height: auto;
+  }
+  .diagram-caption {
+    font-size: 11.5px;
+    color: var(--text3);
+    margin-top: 12px;
+    font-style: italic;
   }
 
-  /* ── Step list ── */
+  /* ══════════════════════════════════════════════
+     LEGEND
+     ══════════════════════════════════════════════ */
+  .legend-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 12px 0 18px;
+    padding: 14px 18px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .legend-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,.1);
+  }
+
+  /* ══════════════════════════════════════════════
+     STEP LIST
+     ══════════════════════════════════════════════ */
   .steps { counter-reset: step; list-style: none; padding-left: 0; }
   .steps li {
     counter-increment: step;
     position: relative;
-    padding-left: 44px;
-    margin-bottom: 14px;
+    padding-left: 48px;
+    margin-bottom: 16px;
+    line-height: 1.65;
   }
   .steps li::before {
     content: counter(step);
     position: absolute;
-    left: 0;
-    top: 0;
-    width: 28px;
-    height: 28px;
+    left: 0; top: 1px;
+    width: 30px; height: 30px;
     border-radius: 50%;
-    background: rgba(88,166,255,.12);
+    background: linear-gradient(135deg, rgba(77,159,255,.15), rgba(192,132,252,.10));
+    border: 1px solid rgba(77,159,255,.25);
     color: var(--accent);
-    font-size: 13px;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 800;
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
-  /* ── ML highlight card ── */
-  .ml-highlight {
-    border-color: var(--accent);
-    background: linear-gradient(135deg, rgba(88,166,255,.08) 0%, rgba(210,168,255,.04) 100%);
-    border-left: 4px solid var(--accent);
-    box-shadow: 0 4px 20px rgba(88,166,255,.10), inset 0 0 40px rgba(88,166,255,.03);
-    position: relative;
-  }
-  .ml-highlight::before {
-    content: '';
-    position: absolute;
-    top: 0; right: 0;
-    width: 80px; height: 80px;
-    background: radial-gradient(circle, rgba(88,166,255,.08) 0%, transparent 70%);
-    pointer-events: none;
-  }
-  .ml-highlight h4 {
-    color: var(--accent);
-    margin-top: 16px;
-  }
-  .ml-highlight p, .ml-highlight li {
-    font-size: 14px;
-    line-height: 1.65;
+  /* ══════════════════════════════════════════════
+     KEYBOARD SHORTCUTS
+     ══════════════════════════════════════════════ */
+  kbd {
+    display: inline-block;
+    padding: 3px 9px;
+    font-size: 11.5px;
+    font-family: 'Segoe UI', sans-serif;
+    background: var(--card2);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    box-shadow: 0 2px 0 var(--border);
+    color: var(--text);
+    font-weight: 600;
   }
 
-  /* ── Workflow cards ── */
+  /* ══════════════════════════════════════════════
+     WORKFLOW CARDS
+     ══════════════════════════════════════════════ */
   .wf-card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
-    margin: 16px 0;
-    box-shadow: 0 2px 12px rgba(0,0,0,.12);
-    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    margin: 18px 0;
+    box-shadow: var(--shadow-sm);
+    position: relative;
+    overflow: hidden;
+  }
+  .wf-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px; height: 100%;
+    background: var(--gradient-accent);
+    border-radius: 4px 0 0 4px;
   }
   .wf-card h4 {
-    margin: 0 0 12px;
-    color: var(--accent);
+    margin: 0 0 14px;
+    color: var(--accent-light);
     font-size: 15px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  /* ── Back to top ── */
+  /* ══════════════════════════════════════════════
+     ML HIGHLIGHT
+     ══════════════════════════════════════════════ */
+  .ml-highlight {
+    background: linear-gradient(135deg, rgba(77,159,255,.06), rgba(192,132,252,.04));
+    border: 1px solid rgba(77,159,255,.25);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 20px 0;
+    box-shadow: var(--shadow-sm);
+  }
+  .ml-highlight h4 { color: var(--accent-light); margin-top: 18px; }
+  .ml-highlight p, .ml-highlight li { font-size: 13.5px; line-height: 1.7; }
+
+  /* ══════════════════════════════════════════════
+     STAT ROW
+     ══════════════════════════════════════════════ */
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--accent-light);
+    margin-bottom: 4px;
+  }
+  .stat-card .stat-label {
+    font-size: 11px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+  }
+
+  /* ══════════════════════════════════════════════
+     BACK TO TOP
+     ══════════════════════════════════════════════ */
   .back-top {
-    display: inline-block;
-    margin-top: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 18px;
     font-size: 12px;
     color: var(--text3);
+    font-weight: 500;
   }
 
-  /* ── Footer ── */
+  /* ══════════════════════════════════════════════
+     FOOTER
+     ══════════════════════════════════════════════ */
   .guide-footer {
     text-align: center;
-    padding: 48px 24px;
-    border-top: none;
-    background-image: linear-gradient(to right, transparent, var(--accent), var(--accent2), transparent);
-    background-size: 100% 2px;
-    background-repeat: no-repeat;
-    background-position: top;
+    padding: 48px 32px;
+    position: relative;
     color: var(--text3);
     font-size: 13px;
   }
+  .guide-footer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 10%;
+    right: 10%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+    border-radius: 2px;
+  }
+  .guide-footer b { color: var(--text2); }
 
-  /* ── Print ── */
+  /* ══════════════════════════════════════════════
+     PRINT / PDF STYLES
+     ══════════════════════════════════════════════ */
   @media print {
-    :root {
-      --bg: #ffffff; --surface: #f8f9fa; --card: #f4f5f6;
-      --border: #d0d5dd; --accent: #1a6ad4; --accent2: #6f42c1;
-      --text: #1a1a1a; --text2: #4a4a4a; --text3: #777;
-      --tbl-head: #eaecef; --tbl-alt: #f6f8fa;
+    /* ── Page setup ── */
+    @page {
+      size: A4 portrait;
+      margin: 2cm 1.8cm 2.4cm 1.8cm;
     }
-    body { background: #fff !important; color: #1a1a1a !important; font-size: 10.5pt; -webkit-print-color-adjust: exact; }
+    @page :first {
+      margin-top: 0;
+    }
 
-    * { animation: none !important; }
+    /* ── Global resets ── */
+    :root {
+      --bg: #ffffff; --surface: #f8f9fb; --card: #f3f5f8; --card2: #eef1f5;
+      --border: #d5dae3; --border2: #c8cfd9; --accent: #1a6ad4; --accent-light: #1a6ad4;
+      --accent2: #7c3aed; --accent2-light: #7c3aed; --green: #059669; --yellow: #b45309;
+      --orange: #c2410c; --red: #dc2626; --text: #111827; --text2: #4b5563;
+      --text3: #6b7280; --link: #1a6ad4; --tbl-head: #e5e9f0; --tbl-alt: #f8f9fb;
+    }
+    html { font-size: 10pt; }
+    body {
+      background: #fff !important;
+      color: #111827 !important;
+      font-size: 10pt;
+      line-height: 1.55;
+      max-width: 100% !important;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+    * {
+      animation: none !important;
+      transition: none !important;
+      box-shadow: none !important;
+    }
 
-    /* Cover */
-    .cover { min-height: auto; padding: 48px 24px; background: #fff !important; }
+    /* ── Orphan / Widow control ── */
+    p, li, dd, dt, blockquote {
+      orphans: 3;
+      widows: 3;
+    }
+    h2, h3, h4 {
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+
+    /* ── Cover page ── */
+    .cover {
+      min-height: auto;
+      padding: 100px 50px 80px;
+      background: #fff !important;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      page-break-after: always;
+      break-after: page;
+    }
     .cover::before { display: none; }
-    .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; color: #1a1a1a !important; font-size: 32pt; animation: none !important; }
-    .cover-badge { border-color: #1a6ad4; color: #1a6ad4; background: #f0f7ff !important; }
-    .cover-sub { color: #444 !important; }
-    .cover-meta { color: #555 !important; }
-    .cover-meta b { color: #222 !important; }
+    .cover h1 {
+      background: none !important;
+      -webkit-text-fill-color: #1a6ad4 !important;
+      color: #1a6ad4 !important;
+      font-size: 32pt;
+      letter-spacing: -0.5pt;
+      border-bottom: 3px solid #1a6ad4;
+      padding-bottom: 12px;
+    }
+    .cover-icon svg * { stroke: #1a6ad4 !important; fill: none !important; }
+    .cover-icon svg rect[fill], .cover-icon svg circle[fill] {
+      fill: rgba(26,106,212,.06) !important;
+    }
+    .cover-badge {
+      background: #eef3ff !important;
+      border: 2px solid #1a6ad4 !important;
+      color: #1a6ad4 !important;
+      font-weight: 700;
+    }
+    .cover-sub { color: #4b5563 !important; font-size: 12pt; }
+    .cover-meta { margin-top: 24px; }
+    .cover-meta-item {
+      background: #f3f5f8 !important;
+      border: 1px solid #d5dae3 !important;
+      padding: 8px 14px;
+    }
+    .cover-meta-item b { color: #111827 !important; }
 
-    /* Section heads */
-    .section-head { background-image: linear-gradient(to right, #1a6ad4, #6f42c1, transparent) !important; }
-    .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; box-shadow: none !important; }
-    .section-head h2 { color: #1a1a1a !important; }
-    h3 { color: #6f42c1 !important; }
-    h4 { color: #1a1a1a !important; }
-    p, li, ul, ol { color: #2a2a2a !important; }
+    /* ── Table of Contents ── */
+    .toc {
+      page-break-after: always;
+      break-after: page;
+      padding: 40px 20px;
+    }
+    .toc-title {
+      color: #1a6ad4 !important;
+      border-color: #d5dae3 !important;
+      font-size: 18pt;
+    }
+    .toc-num {
+      background: #eef3ff !important;
+      color: #1a6ad4 !important;
+      font-weight: 700;
+    }
+    .toc-grid a {
+      color: #111827 !important;
+      text-decoration: none !important;
+    }
+    .toc-grid a::after {
+      content: leader('.') target-counter(attr(href), page);
+      color: #6b7280;
+    }
 
-    /* Tables */
-    table { border: 1px solid #ccc !important; box-shadow: none !important; }
-    thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; border-bottom: 2px solid #1a6ad4 !important; }
-    tbody td { border: 1px solid #ddd !important; color: #2a2a2a !important; }
-    tbody tr:nth-child(even) { background: #f6f8fa !important; }
+    /* ── Section headings ── */
+    .section-head {
+      page-break-after: avoid;
+      break-after: avoid;
+      margin-top: 0;
+      padding-top: 8px;
+    }
+    .section-head::after {
+      background: linear-gradient(90deg, #1a6ad4, #7c3aed, transparent 80%) !important;
+      height: 2px;
+    }
+    .section-icon {
+      background: #eef3ff !important;
+      border: 2px solid #c8d6e5 !important;
+    }
+    .section-icon svg * { stroke: #1a6ad4 !important; }
+    .section-head h2 {
+      color: #111827 !important;
+      font-size: 16pt;
+    }
+    h3 {
+      color: #7c3aed !important;
+      font-size: 12pt;
+      margin-top: 14px;
+    }
+    h3::before { background: #7c3aed !important; }
+    h4 {
+      color: #111827 !important;
+      font-size: 10.5pt;
+    }
+
+    /* ── Tables ── */
+    table {
+      border: 1px solid #d5dae3 !important;
+      font-size: 9pt;
+      width: 100% !important;
+      page-break-inside: auto !important;
+    }
+    thead {
+      display: table-header-group;
+    }
+    thead th {
+      background: #e5e9f0 !important;
+      color: #374151 !important;
+      border-bottom: 2px solid #1a6ad4 !important;
+      font-size: 9pt;
+      padding: 6px 10px !important;
+    }
+    tbody td {
+      border-bottom: 1px solid #e5e9f0 !important;
+      color: #1f2937 !important;
+      padding: 5px 10px !important;
+    }
+    tbody tr {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    tbody tr:nth-child(even) { background: #f8f9fb !important; }
     tbody tr:hover { background: transparent !important; }
-    td code, th code { background: #e8f0fe !important; color: #1a6ad4 !important; }
+    td code, th code { background: #eef3ff !important; color: #1a6ad4 !important; font-size: 8.5pt; }
+    code { background: #eef3ff !important; color: #1a6ad4 !important; font-size: 8.5pt; }
 
-    /* Cards */
-    .info-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
-    .info-card.warn { background: #fef9e7 !important; border-color: #d29922 !important; }
-    .info-card.tip { background: #eafbf0 !important; border-color: #3fb950 !important; }
-    .info-card.warn .info-card-label { color: #8a6914 !important; }
-    .info-card.tip .info-card-label { color: #1a7f37 !important; }
+    /* ── Info cards ── */
+    .info-card {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      margin: 10px 0;
+    }
+    .info-card.warn { background: #fffbeb !important; border-color: #f59e0b !important; }
+    .info-card.warn::before { background: #f59e0b !important; }
+    .info-card.warn .info-card-label { color: #92400e !important; }
+    .info-card.tip { background: #ecfdf5 !important; border-color: #059669 !important; }
+    .info-card.tip::before { background: #059669 !important; }
+    .info-card.tip .info-card-label { color: #065f46 !important; }
+    .info-card.note { background: #eef3ff !important; border-color: #1a6ad4 !important; }
+    .info-card.note::before { background: #1a6ad4 !important; }
+    .info-card.note .info-card-label { color: #1a6ad4 !important; }
+    .info-card.danger { background: #fef2f2 !important; border-color: #dc2626 !important; }
+    .info-card.danger::before { background: #dc2626 !important; }
+    .info-card.danger .info-card-label { color: #991b1b !important; }
 
-    .feat-item { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
-    .feat-item h4 { color: #1a1a1a !important; }
-    .feat-item p { color: #4a4a4a !important; }
+    /* ── Feature items ── */
+    .feat-item {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .feat-item h4 { color: #111827 !important; }
+    .feat-item p { color: #4b5563 !important; }
+    .feat-item-icon { background: #eef3ff !important; }
+    .feat-item-icon svg * { stroke: #1a6ad4 !important; }
 
-    .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; border-left: 3px solid #1a6ad4 !important; box-shadow: none !important; }
+    /* ── Workflow cards ── */
+    .wf-card {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .wf-card::before { background: linear-gradient(180deg, #1a6ad4, #7c3aed) !important; }
     .wf-card h4 { color: #1a6ad4 !important; }
 
-    .info-card { box-shadow: none !important; }
-    .feat-item { box-shadow: none !important; }
+    /* ── ML highlights ── */
+    .ml-highlight {
+      background: #eef3ff !important;
+      border-color: #1a6ad4 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .ml-highlight h4 { color: #1a6ad4 !important; }
 
-    /* Legend */
-    .legend-chip { color: #2a2a2a !important; }
+    /* ── Diagrams & SVGs ── */
+    .diagram-container {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      margin: 12px 0;
+    }
+    .diagram-container svg {
+      max-width: 100% !important;
+      height: auto !important;
+    }
+    .diagram-container svg text { fill: #111827 !important; }
+    .diagram-container svg rect[fill*="rgba"] { opacity: 1 !important; }
+    .diagram-container svg line, .diagram-container svg path {
+      stroke-opacity: 1 !important;
+    }
+    .diagram-caption { color: #6b7280 !important; font-size: 8.5pt; }
 
-    /* Steps */
-    .steps li::before { background: #e8f0fe !important; color: #1a6ad4 !important; }
-    .steps li { color: #2a2a2a !important; }
+    /* ── Legend ── */
+    .legend-row {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+    }
+    .legend-chip { color: #1f2937 !important; }
 
-    /* Keyboard */
-    kbd { background: #eee !important; border-color: #bbb !important; color: #1a1a1a !important; box-shadow: inset 0 -1px 0 #bbb !important; }
+    /* ── Stat cards ── */
+    .stat-card {
+      background: #f8f9fb !important;
+      border: 1px solid #d5dae3 !important;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .stat-card .stat-value { color: #1a6ad4 !important; }
+    .stat-card .stat-label { color: #6b7280 !important; }
 
-    /* Links & misc */
-    a { color: #1a6ad4 !important; }
+    /* ── Steps ── */
+    .steps li {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .steps li::before {
+      background: #eef3ff !important;
+      border-color: #c8d6e5 !important;
+      color: #1a6ad4 !important;
+    }
+
+    /* ── Keyboard ── */
+    kbd {
+      background: #f3f5f8 !important;
+      border: 1px solid #d5dae3 !important;
+      color: #111827 !important;
+      box-shadow: none !important;
+    }
+
+    /* ── Hide non-print elements ── */
     .back-top { display: none !important; }
-    .guide-footer { background: #fff !important; background-image: linear-gradient(to right, transparent, #1a6ad4, #6f42c1, transparent) !important; color: #666 !important; }
-    .guide-footer b { color: #333 !important; }
 
-    /* ML highlight card */
-    .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; box-shadow: none !important; }
-    .ml-highlight::before { display: none !important; }
-    .ml-highlight h3, .ml-highlight h4 { color: #1a6ad4 !important; }
+    /* ── Footer ── */
+    .guide-footer {
+      background: #fff !important;
+      page-break-before: avoid;
+    }
+    .guide-footer::before { background: linear-gradient(90deg, transparent, #1a6ad4, #7c3aed, transparent) !important; }
+    .guide-footer b { color: #374151 !important; }
+    .guide-footer p { color: #6b7280 !important; }
 
-    /* Page breaks */
-    section { page-break-inside: avoid; }
-    .cover { page-break-after: always; }
-    table { page-break-inside: auto; }
-    tr { page-break-inside: avoid; }
+    /* ── Page-break strategy ── */
+    section {
+      page-break-before: auto;
+      page-break-inside: auto;
+    }
+    /* Keep section heading with its first content block */
+    section > .section-head + p,
+    section > .section-head + .info-card,
+    section > .section-head + table,
+    section > .section-head + .feat-grid,
+    section > .section-head + .diagram-container {
+      page-break-before: avoid;
+      break-before: avoid;
+    }
+    .feat-grid {
+      page-break-inside: auto;
+    }
+    .feat-grid > .feat-item {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    /* ── Links: show URL after text for printouts ── */
+    a[href^="http"]::after {
+      content: " (" attr(href) ")";
+      font-size: 7.5pt;
+      color: #6b7280;
+      word-break: break-all;
+    }
+    /* Don't show URLs for internal TOC links */
+    .toc-grid a::after,
+    .back-top::after,
+    a[href^="#"]::after {
+      content: none !important;
+    }
   }
 </style>
 </head>
 <body>
 
-<!-- ═══════ COVER ═══════ -->
+<!-- COVER PAGE -->
 <div class="cover">
+  <div class="cover-icon">
+    <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="35" width="80" height="50" rx="4" stroke="#4d9fff" stroke-width="2" fill="rgba(77,159,255,.06)"/>
+      <line x1="20" y1="47.5" x2="100" y2="47.5" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <line x1="20" y1="60" x2="100" y2="60" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <line x1="20" y1="72.5" x2="100" y2="72.5" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <line x1="40" y1="35" x2="40" y2="85" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <line x1="60" y1="35" x2="60" y2="85" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <line x1="80" y1="35" x2="80" y2="85" stroke="#4d9fff" stroke-width="1" opacity=".5"/>
+      <circle cx="60" cy="18" r="8" stroke="#fbbf24" stroke-width="2" fill="rgba(251,191,36,.1)"/>
+      <line x1="60" y1="5" x2="60" y2="8" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="48" y1="10" x2="50" y2="12" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="72" y1="10" x2="70" y2="12" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="44" y1="18" x2="47" y2="18" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="73" y1="18" x2="76" y2="18" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/>
+      <rect x="42" y="92" width="36" height="20" rx="3" stroke="#c084fc" stroke-width="2" fill="rgba(192,132,252,.06)"/>
+      <text x="60" y="105" text-anchor="middle" fill="#c084fc" font-size="8" font-weight="700" font-family="Segoe UI, sans-serif">INV</text>
+      <line x1="60" y1="85" x2="60" y2="92" stroke="#34d399" stroke-width="1.5" stroke-dasharray="3 2"/>
+      <path d="M104 55 Q108 50, 112 55 Q116 60, 120 55" stroke="#4d9fff" stroke-width="1.5" fill="none" opacity=".6"/>
+      <path d="M106 62 Q110 57, 114 62" stroke="#4d9fff" stroke-width="1.5" fill="none" opacity=".4"/>
+    </svg>
+  </div>
   <div class="cover-badge">Official User Guide</div>
   <h1>ADSI Inverter Dashboard</h1>
-  <p class="cover-sub">
-    Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
-  </p>
+  <p class="cover-sub">Professional plant monitoring, energy analytics, forecast generation, and controlled remote coordination for utility-scale solar inverter fleets.</p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.5.2</span>
-    <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
-    <span><b>Date:</b> March 2026</span>
+    <div class="cover-meta-item">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="#4d9fff" stroke-width="1.5"/></svg>
+      <span><b>Version 2.5.2</b></span>
+    </div>
+    <div class="cover-meta-item">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span><b>Engr. Clariden Monta&ntilde;o REE</b></span>
+    </div>
+    <div class="cover-meta-item">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="2" stroke="#34d399" stroke-width="1.5"/><path d="M2 7h12M5 1v4M11 1v4" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span><b>March 2026</b></span>
+    </div>
   </div>
 </div>
 
-<!-- ═══════ TABLE OF CONTENTS ═══════ -->
+<!-- TABLE OF CONTENTS -->
 <nav class="toc" id="toc">
-  <h2>Table of Contents</h2>
+  <div class="toc-title">
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="14" height="14" rx="2" stroke="#4d9fff" stroke-width="1.5"/><path d="M5 6h8M5 9h6M5 12h7" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Table of Contents
+  </div>
   <div class="toc-grid">
-    <a href="#s1"><span class="toc-num">1</span> Overview &amp; Purpose</a>
+    <a href="#s1"><span class="toc-num">1</span> Overview &amp; Architecture</a>
     <a href="#s2"><span class="toc-num">2</span> System Requirements</a>
     <a href="#s3"><span class="toc-num">3</span> Getting Started</a>
     <a href="#s4"><span class="toc-num">4</span> Interface Layout</a>
@@ -534,1363 +1015,442 @@
     <a href="#s6"><span class="toc-num">6</span> Plant Output Capping</a>
     <a href="#s7"><span class="toc-num">7</span> Analytics Page</a>
     <a href="#s8"><span class="toc-num">8</span> Forecast Page</a>
-    <a href="#s9"><span class="toc-num">9</span> Alarms Page</a>
-    <a href="#s10"><span class="toc-num">10</span> Energy Page</a>
-    <a href="#s11"><span class="toc-num">11</span> Audit Page</a>
-    <a href="#s12"><span class="toc-num">12</span> Report Page</a>
-    <a href="#s13"><span class="toc-num">13</span> Export Page</a>
-    <a href="#s14"><span class="toc-num">14</span> Settings</a>
-    <a href="#s15"><span class="toc-num">15</span> Operating Modes</a>
-    <a href="#s16"><span class="toc-num">16</span> Operator Messaging</a>
-    <a href="#s17"><span class="toc-num">17</span> Cloud Backup &amp; Restore</a>
-    <a href="#s18"><span class="toc-num">18</span> Workflows</a>
-    <a href="#s19"><span class="toc-num">19</span> IP Configuration</a>
-    <a href="#s20"><span class="toc-num">20</span> Keyboard Shortcuts</a>
-    <a href="#s21"><span class="toc-num">21</span> Troubleshooting</a>
-    <a href="#s22"><span class="toc-num">22</span> Quick Reference</a>
+    <a href="#s9"><span class="toc-num">9</span> Forecast Performance Monitor</a>
+    <a href="#s10"><span class="toc-num">10</span> Alarms Page</a>
+    <a href="#s11"><span class="toc-num">11</span> Energy Page</a>
+    <a href="#s12"><span class="toc-num">12</span> Audit Page</a>
+    <a href="#s13"><span class="toc-num">13</span> Report Page</a>
+    <a href="#s14"><span class="toc-num">14</span> Export Page</a>
+    <a href="#s15"><span class="toc-num">15</span> Settings</a>
+    <a href="#s16"><span class="toc-num">16</span> Operating Modes</a>
+    <a href="#s17"><span class="toc-num">17</span> Operator Messaging</a>
+    <a href="#s18"><span class="toc-num">18</span> Cloud Backup &amp; Restore</a>
+    <a href="#s19"><span class="toc-num">19</span> Standard Workflows</a>
+    <a href="#s20"><span class="toc-num">20</span> IP Configuration</a>
+    <a href="#s21"><span class="toc-num">21</span> Keyboard Shortcuts &amp; Tips</a>
+    <a href="#s22"><span class="toc-num">22</span> Troubleshooting</a>
+    <a href="#s23"><span class="toc-num">23</span> Quick Reference</a>
   </div>
 </nav>
 
-<!-- ═══════ CONTENT ═══════ -->
+<!-- CONTENT -->
 <div class="content">
 
-<!-- ──── 1. Overview ──── -->
+<!-- 1. OVERVIEW -->
 <section id="s1">
   <div class="section-head">
-    <span class="section-num">1</span>
-    <h2>Overview &amp; Purpose</h2>
+    <div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="9" stroke="#4d9fff" stroke-width="1.8"/><path d="M11 6v5l3.5 2" stroke="#4d9fff" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+    <h2>Overview &amp; Architecture</h2>
   </div>
-  <p>ADSI Inverter Dashboard provides centralized operational visibility for a utility-scale solar inverter fleet. The application consolidates live status, interval energy, alarms, audit activity, and formal reporting in one workstation interface.</p>
-
+  <p>ADSI Inverter Dashboard provides centralized operational visibility for a utility-scale solar inverter fleet. The application consolidates live status, interval energy accumulation, alarms, audit activity, day-ahead generation forecasting, and formal reporting into one workstation interface built on Electron.</p>
+  <div class="stat-row">
+    <div class="stat-card"><div class="stat-value">997</div><div class="stat-label">kW Per Inverter</div></div>
+    <div class="stat-card"><div class="stat-value">4</div><div class="stat-label">Nodes / Inverter</div></div>
+    <div class="stat-card"><div class="stat-value">249.25</div><div class="stat-label">kW Per Node</div></div>
+    <div class="stat-card"><div class="stat-value">917</div><div class="stat-label">kW Dependable</div></div>
+  </div>
   <div class="feat-grid">
-    <div class="feat-item">
-      <span class="feat-item-icon">&#9889;</span>
-      <h4>Live Monitoring</h4>
-      <p>Real-time inverter and node-level status with supervised control actions.</p>
-    </div>
-    <div class="feat-item">
-      <span class="feat-item-icon">&#128200;</span>
-      <h4>Analytics &amp; Forecasting</h4>
-      <p>Daily analytics with interval charts and day-ahead forecast comparison.</p>
-    </div>
-    <div class="feat-item">
-      <span class="feat-item-icon">&#128276;</span>
-      <h4>Alarm Management</h4>
-      <p>Episode tracking with severity, duration, and acknowledgement state.</p>
-    </div>
-    <div class="feat-item">
-      <span class="feat-item-icon">&#128196;</span>
-      <h4>Reporting &amp; Export</h4>
-      <p>Daily performance reports and structured exports in Excel or CSV.</p>
-    </div>
-    <div class="feat-item">
-      <span class="feat-item-icon">&#127760;</span>
-      <h4>Remote Operations</h4>
-      <p>Gateway-linked remote viewing and write control from authorized workstations.</p>
-    </div>
-    <div class="feat-item">
-      <span class="feat-item-icon">&#9729;&#65039;</span>
-      <h4>Cloud Backup</h4>
-      <p>Scheduled cloud backup with OneDrive or Google Drive integration.</p>
-    </div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h4>Live Monitoring</h4><p>Real-time inverter and node-level telemetry with supervised START/STOP control actions.</p></div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><polyline points="3,17 7,10 11,14 15,6 19,9" stroke="#34d399" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h4>Analytics &amp; Forecasting</h4><p>Interval charts with ML-trained day-ahead forecast comparison and Solcast tri-band integration.</p></div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v2M11 17v2M3 11h2M17 11h2M5.6 5.6l1.4 1.4M15 15l1.4 1.4M5.6 16.4l1.4-1.4M15 7l1.4-1.4" stroke="#f87171" stroke-width="1.5" stroke-linecap="round"/><circle cx="11" cy="11" r="3" stroke="#f87171" stroke-width="1.5"/></svg></div><h4>Alarm Management</h4><p>Episode tracking with severity, duration, bitmask change logic, and quick-ACK notifications.</p></div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="2" stroke="#c084fc" stroke-width="1.5"/><path d="M3 8h16M8 8v11" stroke="#c084fc" stroke-width="1.5"/></svg></div><h4>Reporting &amp; Export</h4><p>Daily performance reports with availability calculation and multi-format structured exports.</p></div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="7" cy="11" r="4" stroke="#4d9fff" stroke-width="1.5"/><circle cx="15" cy="11" r="4" stroke="#4d9fff" stroke-width="1.5"/></svg></div><h4>Remote Operations</h4><p>Gateway-linked remote viewing and write control via Tailscale, VPN, or direct LAN.</p></div>
+    <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M5 17V8a6 6 0 0112 0v9" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/><path d="M3 17h16" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/><path d="M8 14l3-3 3 3" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h4>Cloud Backup</h4><p>Scheduled backup with OneDrive, Google Drive, and S3-compatible storage integration.</p></div>
   </div>
+  <h3>System Architecture</h3>
+  <div class="diagram-container">
+    <svg width="780" height="220" viewBox="0 0 780 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="10" y="80" width="120" height="60" rx="8" fill="rgba(251,191,36,.08)" stroke="#fbbf24" stroke-width="1.5"/><text x="70" y="105" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700" font-family="Segoe UI">Modbus TCP</text><text x="70" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">Inverter Fleet</text>
+      <line x1="130" y1="110" x2="170" y2="110" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="170,106 178,110 170,114" fill="#64748b"/>
+      <rect x="180" y="80" width="130" height="60" rx="8" fill="rgba(52,211,153,.08)" stroke="#34d399" stroke-width="1.5"/><text x="245" y="105" text-anchor="middle" fill="#34d399" font-size="11" font-weight="700" font-family="Segoe UI">Python FastAPI</text><text x="245" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">Port 9000</text>
+      <line x1="310" y1="110" x2="350" y2="110" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="350,106 358,110 350,114" fill="#64748b"/>
+      <rect x="360" y="80" width="130" height="60" rx="8" fill="rgba(77,159,255,.08)" stroke="#4d9fff" stroke-width="1.5"/><text x="425" y="105" text-anchor="middle" fill="#4d9fff" font-size="11" font-weight="700" font-family="Segoe UI">Express Server</text><text x="425" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">Port 3500</text>
+      <line x1="425" y1="140" x2="425" y2="170" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="421,170 425,178 429,170" fill="#64748b"/>
+      <rect x="380" y="180" width="90" height="30" rx="6" fill="rgba(192,132,252,.08)" stroke="#c084fc" stroke-width="1.5"/><text x="425" y="200" text-anchor="middle" fill="#c084fc" font-size="10" font-weight="600" font-family="Segoe UI">SQLite DB</text>
+      <line x1="490" y1="110" x2="530" y2="110" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="530,106 538,110 530,114" fill="#64748b"/>
+      <rect x="540" y="80" width="100" height="60" rx="8" fill="rgba(52,211,153,.08)" stroke="#34d399" stroke-width="1.5"/><text x="590" y="105" text-anchor="middle" fill="#34d399" font-size="11" font-weight="700" font-family="Segoe UI">WebSocket</text><text x="590" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">Live Push</text>
+      <line x1="640" y1="110" x2="680" y2="110" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/><polygon points="680,106 688,110 680,114" fill="#64748b"/>
+      <rect x="690" y="80" width="80" height="60" rx="8" fill="rgba(77,159,255,.08)" stroke="#4d9fff" stroke-width="1.5"/><text x="730" y="105" text-anchor="middle" fill="#4d9fff" font-size="11" font-weight="700" font-family="Segoe UI">Browser</text><text x="730" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Segoe UI">Electron UI</text>
+      <line x1="245" y1="80" x2="245" y2="35" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3"/>
+      <rect x="185" y="5" width="120" height="30" rx="6" fill="rgba(251,191,36,.08)" stroke="#fbbf24" stroke-width="1.5"/><text x="245" y="25" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="600" font-family="Segoe UI">ML Forecast Engine</text>
+      <text x="390" y="65" text-anchor="middle" fill="#64748b" font-size="9" font-family="Segoe UI" font-style="italic">Data Flow: Modbus TCP &#8594; FastAPI &#8594; Express &#8594; SQLite &#8594; WebSocket &#8594; Browser</text>
+    </svg>
+    <div class="diagram-caption">Fig 1 &mdash; ADSI Dashboard system architecture and data flow pipeline</div>
+  </div>
+  <h3>Technology Stack</h3>
+  <table>
+    <thead><tr><th>Layer</th><th>Technology</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td>Desktop Shell</td><td>Electron 29</td><td>Native window management, file dialogs, licensing</td></tr>
+      <tr><td>API Server</td><td>Express 4</td><td>REST API, polling orchestration, WebSocket broadcast</td></tr>
+      <tr><td>Database</td><td>SQLite via <code>better-sqlite3</code></td><td>Persistent storage for telemetry, reports, forecasts</td></tr>
+      <tr><td>Frontend</td><td>Vanilla JS + Chart.js 4</td><td>Real-time UI rendering and interactive charts</td></tr>
+      <tr><td>Inverter Service</td><td>Python FastAPI (port 9000)</td><td>Modbus TCP polling and inverter command dispatch</td></tr>
+      <tr><td>Forecast Engine</td><td>Python ML (LightGBM)</td><td>Day-ahead generation model with Solcast tri-band</td></tr>
+    </tbody>
+  </table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 2. System Requirements ──── -->
+<!-- 2. SYSTEM REQUIREMENTS -->
 <section id="s2">
-  <div class="section-head">
-    <span class="section-num">2</span>
-    <h2>System Requirements</h2>
-  </div>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="4" y="2" width="14" height="18" rx="2" stroke="#4d9fff" stroke-width="1.8"/><path d="M8 6h6M8 10h6M8 14h4" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>System Requirements</h2></div>
   <table>
     <thead><tr><th>Requirement</th><th>Details</th></tr></thead>
     <tbody>
       <tr><td>Operating System</td><td>Windows 10 / 11 (64-bit)</td></tr>
-      <tr><td>Display</td><td>1920 &times; 1080 minimum; scales up at 2200px+ and 3000px+</td></tr>
-      <tr><td>Administrator Rights</td><td>Required &mdash; the installed app requests elevation automatically</td></tr>
-      <tr><td>Network</td><td>LAN access to inverter fleet (Gateway mode) or secure network path to gateway (Remote mode)</td></tr>
-      <tr><td>Disk Space</td><td>Sufficient for database, archive, and export storage</td></tr>
+      <tr><td>Display</td><td>1920 &times; 1080 minimum; enhanced at 2200px+ and 3000px+</td></tr>
+      <tr><td>Administrator Rights</td><td>Required &mdash; installer requests elevation automatically</td></tr>
+      <tr><td>Network</td><td>LAN access to inverter fleet (Gateway) or secure path to gateway (Remote)</td></tr>
+      <tr><td>Disk Space</td><td>Sufficient for database, archives, exports, and forecast model bundles</td></tr>
+      <tr><td>Ports</td><td>3500 (Express API), 9000 (Python FastAPI / Modbus proxy)</td></tr>
     </tbody>
   </table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 3. Getting Started ──── -->
+<!-- 3. GETTING STARTED -->
 <section id="s3">
-  <div class="section-head">
-    <span class="section-num">3</span>
-    <h2>Getting Started</h2>
-  </div>
-
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M9 18l6-7H9l1-8-6 7h6l-1 8z" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Getting Started</h2></div>
   <h3>Installation</h3>
   <ol class="steps">
     <li>Run the installer (<code>Inverter-Dashboard-Setup-x.x.x.exe</code>).</li>
-    <li>Accept the Windows User Account Control prompt to allow administrator elevation.</li>
+    <li>Accept the Windows UAC prompt to allow administrator elevation.</li>
     <li>Choose the installation directory (default is recommended).</li>
     <li>Complete the wizard and launch the application.</li>
   </ol>
-
   <h3>First Sign-In</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Default Value</th></tr></thead>
-    <tbody>
-      <tr><td>Username</td><td><code>admin</code></td></tr>
-      <tr><td>Password</td><td><code>1234</code></td></tr>
-    </tbody>
-  </table>
-
-  <div class="info-card tip">
-    <div class="info-card-label">Tip</div>
-    Change your credentials after first login using the <b>Update Username and Password</b> link on the sign-in screen. You will need the Authorization Key.
-  </div>
-
+  <table><thead><tr><th>Field</th><th>Default Value</th></tr></thead><tbody><tr><td>Username</td><td><code>admin</code></td></tr><tr><td>Password</td><td><code>1234</code></td></tr></tbody></table>
+  <div class="info-card tip"><div class="info-card-label">Tip</div>Change your credentials immediately after first login via the <b>Update Username and Password</b> link on the sign-in screen. The Authorization Key is required.</div>
   <h3>Credential Management</h3>
-  <table>
-    <thead><tr><th>Action</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td>Update Username and Password</td><td>Change credentials using the Authorization Key</td></tr>
-      <tr><td>Recover with Authorization Key</td><td>Restore default credentials (<code>admin</code> / <code>1234</code>)</td></tr>
-      <tr><td>Remember credentials</td><td>Persists login on the workstation</td></tr>
-    </tbody>
-  </table>
-
-  <p>After successful sign-in, the application maximizes to full screen and begins service initialization.</p>
+  <table><thead><tr><th>Action</th><th>Description</th></tr></thead><tbody><tr><td>Update Username and Password</td><td>Change credentials using the Authorization Key</td></tr><tr><td>Recover with Authorization Key</td><td>Restore default credentials (<code>admin</code> / <code>1234</code>)</td></tr><tr><td>Remember credentials</td><td>Persists login on the workstation</td></tr></tbody></table>
+  <p>After successful sign-in, the application maximizes to full screen and begins service initialization. Wait for the startup loading screen to complete before evaluating live values.</p>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 4. Interface Layout ──── -->
+<!-- 4. INTERFACE LAYOUT -->
 <section id="s4">
-  <div class="section-head">
-    <span class="section-num">4</span>
-    <h2>Interface Layout</h2>
-  </div>
-
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="18" height="18" rx="3" stroke="#4d9fff" stroke-width="1.8"/><path d="M2 7h18M7 7v13" stroke="#4d9fff" stroke-width="1.5"/></svg></div><h2>Interface Layout</h2></div>
   <h3>Header Bar</h3>
-  <p>The fixed header is the primary global status strip, always visible at the top.</p>
-  <table>
-    <thead><tr><th>Element</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td>Plant Logo / Title</td><td>Identifies the plant and dashboard instance</td></tr>
-      <tr><td><code>TOTAL POWER OUTPUT (Pac)</code></td><td>Combined AC power from all online inverters in real time (kW)</td></tr>
-      <tr><td><code>TOTAL ENERGY GENERATED</code></td><td>Today&rsquo;s cumulative plant energy (MWh)</td></tr>
-      <tr><td>Clock &amp; Date</td><td>Local workstation time, updates every second</td></tr>
-      <tr><td>Theme Toggle</td><td>Switch between <b>Dark</b>, <b>Light</b>, and <b>Classic</b> themes</td></tr>
-      <tr><td>Alarm Sound</td><td>Mute or unmute alarm audio notifications</td></tr>
-      <tr><td>Connection Indicator</td><td>Green dot when live data is streaming; red when disconnected</td></tr>
-      <tr><td>Menu Button</td><td>Toggle the side navigation panel</td></tr>
-    </tbody>
-  </table>
-
+  <div class="diagram-container">
+    <svg width="760" height="56" viewBox="0 0 760 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="760" height="56" rx="8" fill="rgba(26,31,46,.8)" stroke="#2a3042" stroke-width="1.5"/>
+      <rect x="12" y="14" width="100" height="28" rx="4" fill="rgba(77,159,255,.08)" stroke="rgba(77,159,255,.2)" stroke-width="1"/><text x="62" y="32" text-anchor="middle" fill="#4d9fff" font-size="10" font-weight="700" font-family="Segoe UI">ADSI Plant</text>
+      <rect x="124" y="14" width="130" height="28" rx="4" fill="rgba(52,211,153,.06)" stroke="rgba(52,211,153,.2)" stroke-width="1"/><text x="189" y="26" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="Segoe UI">TOTAL PAC</text><text x="189" y="38" text-anchor="middle" fill="#34d399" font-size="11" font-weight="700" font-family="Segoe UI">24,567 kW</text>
+      <rect x="266" y="14" width="130" height="28" rx="4" fill="rgba(192,132,252,.06)" stroke="rgba(192,132,252,.2)" stroke-width="1"/><text x="331" y="26" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="Segoe UI">TODAY MWh</text><text x="331" y="38" text-anchor="middle" fill="#c084fc" font-size="11" font-weight="700" font-family="Segoe UI">126.45 MWh</text>
+      <text x="560" y="33" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">14:32:05</text>
+      <circle cx="620" cy="28" r="10" fill="rgba(251,191,36,.08)" stroke="rgba(251,191,36,.3)" stroke-width="1"/><text x="620" y="32" text-anchor="middle" fill="#fbbf24" font-size="10">&#9788;</text>
+      <circle cx="648" cy="28" r="10" fill="rgba(77,159,255,.08)" stroke="rgba(77,159,255,.3)" stroke-width="1"/><text x="648" y="32" text-anchor="middle" fill="#4d9fff" font-size="10">&#9835;</text>
+      <circle cx="676" cy="28" r="5" fill="#34d399"/>
+      <circle cx="704" cy="28" r="10" fill="rgba(248,113,113,.08)" stroke="rgba(248,113,113,.3)" stroke-width="1"/><text x="704" y="32" text-anchor="middle" fill="#f87171" font-size="10">&#9888;</text>
+      <rect x="724" y="18" width="24" height="20" rx="4" fill="rgba(77,159,255,.08)" stroke="rgba(77,159,255,.3)" stroke-width="1"/><line x1="730" y1="24" x2="742" y2="24" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><line x1="730" y1="28" x2="742" y2="28" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><line x1="730" y1="32" x2="742" y2="32" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <div class="diagram-caption">Fig 2 &mdash; Header bar layout with global status indicators</div>
+  </div>
+  <table><thead><tr><th>Element</th><th>Description</th></tr></thead><tbody><tr><td>Plant Logo / Title</td><td>Identifies the plant and dashboard instance</td></tr><tr><td><code>TOTAL PAC</code></td><td>Combined AC power from all online inverters (kW)</td></tr><tr><td><code>TODAY MWh</code></td><td>Today's cumulative plant energy (MWh)</td></tr><tr><td>Clock &amp; Date</td><td>Local workstation time, updates every second</td></tr><tr><td>Theme Toggle</td><td>Cycle between Dark, Light, and Classic themes</td></tr><tr><td>Alarm Sound</td><td>Mute or unmute alarm audio notifications</td></tr><tr><td>Connection Indicator</td><td>Green = live streaming; Red = disconnected</td></tr><tr><td>Alarm Bell</td><td>Badge count of active unacknowledged alarms; opens quick-ACK panel</td></tr><tr><td>Menu Button</td><td>Toggle the side navigation panel</td></tr></tbody></table>
   <h3>Side Navigation</h3>
-  <p>The navigation panel provides access to all main pages:</p>
-  <table>
-    <thead><tr><th>Page</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td><b>Inverters</b></td><td>Live inverter status, node-level control, and real-time output monitoring</td></tr>
-      <tr><td><b>Analytics</b></td><td>Daily energy analytics with interval charts and day-ahead forecast comparison</td></tr>
-      <tr><td><b>Forecast</b></td><td>Dedicated forecast workspace for day-ahead generation and Solcast provider management</td></tr>
-      <tr><td><b>Alarms</b></td><td>Alarm episode history with severity, duration, and acknowledgement tracking</td></tr>
-      <tr><td><b>Energy</b></td><td>5-minute interval energy records by inverter for the selected date</td></tr>
-      <tr><td><b>Audit</b></td><td>Operator command history with timestamps, scope, and results</td></tr>
-      <tr><td><b>Report</b></td><td>Daily performance report with energy, output, availability, and alarm counts per inverter</td></tr>
-      <tr><td><b>Export</b></td><td>Export operational data, alarms, reports, and forecasts to Excel or CSV</td></tr>
-      <tr><td><b>Settings</b></td><td>Plant configuration, connectivity, license, updates, and cloud backup management</td></tr>
-    </tbody>
-  </table>
-
-  <h3>About Section</h3>
-  <p>The bottom of the sidebar shows application and license information including installed version, license state, update state, and data directory. The <b>Open User Guide</b> button launches this guide.</p>
-
+  <table><thead><tr><th>Page</th><th>Purpose</th></tr></thead><tbody><tr><td><b>Inverters</b></td><td>Live status, node-level control, real-time output</td></tr><tr><td><b>Analytics</b></td><td>Daily energy with interval charts and day-ahead comparison</td></tr><tr><td><b>Forecast</b></td><td>Day-ahead generation and Solcast management</td></tr><tr><td><b>Alarms</b></td><td>Episode history with severity, duration, ACK</td></tr><tr><td><b>Energy</b></td><td>5-minute interval energy by inverter</td></tr><tr><td><b>Audit</b></td><td>Operator command history</td></tr><tr><td><b>Report</b></td><td>Daily performance with availability</td></tr><tr><td><b>Export</b></td><td>Export to Excel or CSV</td></tr><tr><td><b>Settings</b></td><td>Config, connectivity, license, updates, backup</td></tr></tbody></table>
   <h3>Visual Themes</h3>
-  <p>Three themes are available. Theme selection persists between restarts.</p>
-  <table>
-    <thead><tr><th>Theme</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td><b>Dark</b></td><td>Default theme with dark backgrounds and high-contrast text</td></tr>
-      <tr><td><b>Light</b></td><td>Light backgrounds for well-lit environments</td></tr>
-      <tr><td><b>Classic</b></td><td>Alternative dark palette with warmer tones</td></tr>
-    </tbody>
-  </table>
+  <div class="legend-row"><span class="legend-chip"><span class="legend-dot" style="background:linear-gradient(135deg,#0b0e14,#1a1f2e);border-color:#2a3042"></span> Dark (default)</span><span class="legend-chip"><span class="legend-dot" style="background:linear-gradient(135deg,#f8f9fb,#e5e9f0);border-color:#c8cfd9"></span> Light</span><span class="legend-chip"><span class="legend-dot" style="background:linear-gradient(135deg,#1a1410,#2a2018);border-color:#3a3028"></span> Classic</span></div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 5. Inverters Page ──── -->
+<!-- 5. INVERTERS PAGE -->
 <section id="s5">
-  <div class="section-head">
-    <span class="section-num">5</span>
-    <h2>Inverters Page</h2>
-  </div>
-  <p>The Inverters page is the primary live operations page for monitoring the full inverter fleet, reviewing node-level status, and sending control commands.</p>
-
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="7" height="11" rx="2" stroke="#34d399" stroke-width="1.8"/><rect x="12" y="4" width="7" height="15" rx="2" stroke="#4d9fff" stroke-width="1.8"/></svg></div><h2>Inverters Page</h2></div>
+  <p>The primary live operations workspace for monitoring the full inverter fleet, reviewing node-level status, and sending control commands.</p>
   <h3>Toolbar Controls</h3>
-  <table>
-    <thead><tr><th>Control</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Inverter Filter</td><td>Show all inverters, or filter by Online, Offline, or Alarmed status</td></tr>
-      <tr><td>Layout</td><td>Change the grid column layout (Auto, 2–7 columns)</td></tr>
-      <tr><td>Show Cap / Hide Cap</td><td>Toggle the plant output cap panel</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Filter</td><td>All, Online, Offline, or Alarmed</td></tr><tr><td>Layout</td><td>Auto, 2&ndash;7 column grid</td></tr><tr><td>Show/Hide Cap</td><td>Toggle the plant output cap panel</td></tr></tbody></table>
   <h3>Fleet Status Chips</h3>
-  <p>Quick counts displayed on the toolbar:</p>
-  <table>
-    <thead><tr><th>Chip</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td><b>Inverters</b></td><td>Active / Total inverter count</td></tr>
-      <tr><td><b>Nodes</b></td><td>Active / Total node count</td></tr>
-      <tr><td><b>Online</b></td><td>Inverters currently producing power</td></tr>
-      <tr><td><b>Alarmed</b></td><td>Inverters with active unacknowledged alarms</td></tr>
-      <tr><td><b>Offline</b></td><td>Inverters not responding</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Chip</th><th>Meaning</th></tr></thead><tbody><tr><td><b>Inverters</b></td><td>Active / Total</td></tr><tr><td><b>Nodes</b></td><td>Active / Total</td></tr><tr><td><b>Online</b></td><td>Currently producing</td></tr><tr><td><b>Alarmed</b></td><td>Active unACK'd alarms</td></tr><tr><td><b>Offline</b></td><td>Not responding</td></tr></tbody></table>
   <h3>PAC Output Band Legend</h3>
-  <p>Node output level indicators based on percentage of rated node capacity:</p>
-  <div class="legend-row">
-    <span class="legend-chip"><span class="legend-dot" style="background:#00cf00"></span> &ge;90% High</span>
-    <span class="legend-chip"><span class="legend-dot" style="background:#e8e800"></span> &gt;70% Moderate</span>
-    <span class="legend-chip"><span class="legend-dot" style="background:#ffa500"></span> &gt;40% Mild</span>
-    <span class="legend-chip"><span class="legend-dot" style="background:#ff0000"></span> &le;40% Low</span>
-    <span class="legend-chip"><span class="legend-dot" style="background:#ff0000; animation: blink 1s infinite"></span> Alarm</span>
+  <div class="legend-row"><span class="legend-chip"><span class="legend-dot" style="background:#00cf00"></span> &ge;90% High</span><span class="legend-chip"><span class="legend-dot" style="background:#e8e800"></span> &gt;70% Moderate</span><span class="legend-chip"><span class="legend-dot" style="background:#ffa500"></span> &gt;40% Mild</span><span class="legend-chip"><span class="legend-dot" style="background:#ff0000"></span> &le;40% Low</span><span class="legend-chip"><span class="legend-dot" style="background:#ff0000;box-shadow:0 0 6px #ff0000"></span> Alarm (blink)</span></div>
+  <h3>Inverter Card</h3>
+  <div class="diagram-container">
+    <svg width="320" height="210" viewBox="0 0 320 210" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="318" height="208" rx="10" fill="rgba(26,31,46,.6)" stroke="#2a3042" stroke-width="1.5"/>
+      <rect x="10" y="10" width="300" height="32" rx="6" fill="rgba(77,159,255,.06)"/>
+      <text x="20" y="30" fill="#e8edf5" font-size="12" font-weight="700" font-family="Segoe UI">INVERTER 01</text>
+      <rect x="120" y="15" width="48" height="20" rx="4" fill="rgba(52,211,153,.12)" stroke="rgba(52,211,153,.3)" stroke-width="1"/><text x="144" y="29" text-anchor="middle" fill="#34d399" font-size="8" font-weight="700" font-family="Segoe UI">ONLINE</text>
+      <rect x="200" y="15" width="44" height="20" rx="4" fill="rgba(52,211,153,.12)" stroke="rgba(52,211,153,.3)" stroke-width="1"/><text x="222" y="29" text-anchor="middle" fill="#34d399" font-size="8" font-weight="600" font-family="Segoe UI">START</text>
+      <rect x="250" y="15" width="44" height="20" rx="4" fill="rgba(248,113,113,.12)" stroke="rgba(248,113,113,.3)" stroke-width="1"/><text x="272" y="29" text-anchor="middle" fill="#f87171" font-size="8" font-weight="600" font-family="Segoe UI">STOP</text>
+      <text x="20" y="58" fill="#94a3b8" font-size="9" font-family="Segoe UI">Pdc: <tspan fill="#e8edf5" font-weight="600">248.5 kW</tspan>  |  Pac: <tspan fill="#34d399" font-weight="600">245.2 kW</tspan></text>
+      <rect x="10" y="66" width="300" height="18" rx="0" fill="rgba(30,36,54,.8)"/>
+      <text x="28" y="79" fill="#64748b" font-size="7.5" font-weight="700" font-family="Segoe UI">NODE</text><text x="78" y="79" fill="#64748b" font-size="7.5" font-weight="700" font-family="Segoe UI">ALARM</text><text x="138" y="79" fill="#64748b" font-size="7.5" font-weight="700" font-family="Segoe UI">Pdc (W)</text><text x="208" y="79" fill="#64748b" font-size="7.5" font-weight="700" font-family="Segoe UI">Pac (W)</text><text x="275" y="79" fill="#64748b" font-size="7.5" font-weight="700" font-family="Segoe UI">CTRL</text>
+      <text x="33" y="100" text-anchor="middle" fill="#e8edf5" font-size="9.5" font-weight="600" font-family="Segoe UI">N1</text><text x="88" y="100" fill="#34d399" font-size="9.5" font-family="Segoe UI">0000H</text><text x="150" y="100" fill="#e8edf5" font-size="9.5" font-family="Segoe UI">62,400</text><text x="218" y="100" fill="#00cf00" font-size="9.5" font-weight="600" font-family="Segoe UI">61,800</text><circle cx="282" cy="96" r="5" fill="rgba(52,211,153,.15)" stroke="#34d399" stroke-width="1"/>
+      <text x="33" y="118" text-anchor="middle" fill="#e8edf5" font-size="9.5" font-weight="600" font-family="Segoe UI">N2</text><text x="88" y="118" fill="#34d399" font-size="9.5" font-family="Segoe UI">0000H</text><text x="150" y="118" fill="#e8edf5" font-size="9.5" font-family="Segoe UI">61,200</text><text x="218" y="118" fill="#00cf00" font-size="9.5" font-weight="600" font-family="Segoe UI">60,500</text><circle cx="282" cy="114" r="5" fill="rgba(52,211,153,.15)" stroke="#34d399" stroke-width="1"/>
+      <text x="33" y="136" text-anchor="middle" fill="#e8edf5" font-size="9.5" font-weight="600" font-family="Segoe UI">N3</text><text x="88" y="136" fill="#34d399" font-size="9.5" font-family="Segoe UI">0000H</text><text x="150" y="136" fill="#e8edf5" font-size="9.5" font-family="Segoe UI">63,100</text><text x="218" y="136" fill="#e8e800" font-size="9.5" font-weight="600" font-family="Segoe UI">58,200</text><circle cx="282" cy="132" r="5" fill="rgba(52,211,153,.15)" stroke="#34d399" stroke-width="1"/>
+      <text x="33" y="154" text-anchor="middle" fill="#e8edf5" font-size="9.5" font-weight="600" font-family="Segoe UI">N4</text><text x="88" y="154" fill="#34d399" font-size="9.5" font-family="Segoe UI">0000H</text><text x="150" y="154" fill="#e8edf5" font-size="9.5" font-family="Segoe UI">61,800</text><text x="218" y="154" fill="#00cf00" font-size="9.5" font-weight="600" font-family="Segoe UI">64,700</text><circle cx="282" cy="150" r="5" fill="rgba(52,211,153,.15)" stroke="#34d399" stroke-width="1"/>
+      <text x="20" y="183" fill="#64748b" font-size="8.5" font-family="Segoe UI">Last Seen: <tspan fill="#94a3b8">14:32:05</tspan></text><text x="200" y="183" fill="#64748b" font-size="8.5" font-family="Segoe UI">Today: <tspan fill="#c084fc" font-weight="600">4.82 MWh</tspan></text>
+    </svg>
+    <div class="diagram-caption">Fig 3 &mdash; Inverter card with node-level telemetry and controls</div>
   </div>
-  <style>@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }</style>
-
-  <h3>Inverter Card Contents</h3>
-  <p>Each inverter card displays:</p>
-  <ul>
-    <li><b>INVERTER XX</b> &mdash; title with current state badge</li>
-    <li><b>Start / Stop buttons</b> &mdash; inverter-wide control (icon-only in 7-column layout)</li>
-    <li><b>Pdc / Pac summary</b> &mdash; combined DC and AC power</li>
-    <li><b>Node table</b> &mdash; per-node Alarm, Pdc, Pac, Last Seen, and Control columns</li>
-  </ul>
-
-  <h3>Inverter Detail Panel</h3>
-  <p>Clicking any inverter card opens a detail panel showing:</p>
-  <ul>
-    <li>Live inverter statistics (Today Energy, Peak Pac, Avg Pac, Uptime)</li>
-    <li>Today&rsquo;s alarm activity</li>
-    <li>Last 7 days performance summary</li>
-  </ul>
-
   <h3>Node Controls</h3>
-  <table>
-    <thead><tr><th>Action Type</th><th>Scope</th><th>Authorization</th></tr></thead>
-    <tbody>
-      <tr><td>Node button</td><td>Single node</td><td>None (confirmation only)</td></tr>
-      <tr><td>Card Start / Stop</td><td>Entire inverter (all nodes)</td><td>None (confirmation only)</td></tr>
-      <tr><td>Bulk START / STOP SELECTED</td><td>Selected inverter set</td><td>Authorization key required</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Action</th><th>Scope</th><th>Authorization</th></tr></thead><tbody><tr><td>Node button</td><td>Single node</td><td>Confirmation only</td></tr><tr><td>Card Start/Stop</td><td>Entire inverter</td><td>Confirmation only</td></tr><tr><td>Bulk START/STOP</td><td>Selected set</td><td>Authorization key required</td></tr></tbody></table>
   <h3>Bulk Inverter Commands</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Inverter Numbers / Ranges</td><td>Enter values like <code>1-13, 16, 18, 23-27</code></td></tr>
-      <tr><td>All Inverters</td><td>Auto-fills the full valid inverter range</td></tr>
-      <tr><td>Clear</td><td>Clears the current selection</td></tr>
-      <tr><td>START SELECTED</td><td>Starts configured nodes in selected inverters</td></tr>
-      <tr><td>STOP SELECTED</td><td>Stops configured nodes in selected inverters</td></tr>
-    </tbody>
-  </table>
-
-  <div class="info-card warn">
-    <div class="info-card-label">Important</div>
-    Bulk control actions (<b>START SELECTED</b> / <b>STOP SELECTED</b>) require a separate authorization key from authorized personnel. Isolated inverters are skipped automatically.
-  </div>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <table><thead><tr><th>Field</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Ranges</td><td>Enter <code>1-13, 16, 18, 23-27</code></td></tr><tr><td>All Inverters</td><td>Auto-fill full range</td></tr><tr><td>Clear</td><td>Clear selection</td></tr><tr><td>START / STOP SELECTED</td><td>Execute on selected inverters</td></tr></tbody></table>
+  <div class="info-card warn"><div class="info-card-label">Important</div>Bulk control requires a time-sensitive authorization key. Isolated inverters are skipped automatically.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 6. Plant Output Capping ──── -->
+<!-- 6. PLANT OUTPUT CAPPING -->
 <section id="s6">
-  <div class="section-head">
-    <span class="section-num">6</span>
-    <h2>Plant Output Auto Capping</h2>
-  </div>
-  <p>Automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters. Operators set upper and lower limits, exempt specific units, and preview the control plan before activation.</p>
-
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17h16M3 17l4-6 3 3 4-5 5 8" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" y1="8" x2="19" y2="8" stroke="#f87171" stroke-width="1.5" stroke-dasharray="3 2"/></svg></div><h2>Plant Output Auto Capping</h2></div>
+  <p>Automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters.</p>
   <h3>Cap Configuration</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Upper Limit (MW)</td><td>Upper plant MW threshold that triggers automatic stop decisions</td></tr>
-      <tr><td>Lower Limit (MW)</td><td>Lower threshold for restarting eligible stopped non-exempt inverters</td></tr>
-      <tr><td>Sequence</td><td>Inverter selection mode: Ascending, Descending, or Exemption</td></tr>
-      <tr><td>Exempted Inverter Numbers</td><td>Comma-separated inverter numbers excluded from automatic stop selection</td></tr>
-      <tr><td>Cooldown (s)</td><td>Settling time between each automatic action (default: 30)</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Field</th><th>Function</th></tr></thead><tbody><tr><td>Upper Limit (MW)</td><td>Threshold that triggers automatic stop</td></tr><tr><td>Lower Limit (MW)</td><td>Threshold for restarting stopped inverters</td></tr><tr><td>Sequence</td><td>Ascending, Descending, or Exemption mode</td></tr><tr><td>Exempted Inverters</td><td>Comma-separated exclusion list</td></tr><tr><td>Cooldown (s)</td><td>Settling time between actions (default: 30s)</td></tr></tbody></table>
   <h3>Cap Actions</h3>
-  <table>
-    <thead><tr><th>Action</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Preview Plan</td><td>Simulates next stop or restart decision using live plant state</td></tr>
-      <tr><td>Enable Cap</td><td>Enables gateway-side plant output capping (requires authorization)</td></tr>
-      <tr><td>Disable Monitoring</td><td>Stops automation without restarting controller-owned inverters</td></tr>
-      <tr><td>Release Controlled Inverters</td><td>Restarts controller-owned inverters sequentially and ends the session</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Action</th><th>Function</th></tr></thead><tbody><tr><td>Preview Plan</td><td>Simulates next decision using live state</td></tr><tr><td>Enable Cap</td><td>Arms the controller (requires authorization)</td></tr><tr><td>Disable Monitoring</td><td>Stops automation without restarting stopped inverters</td></tr><tr><td>Release Controlled</td><td>Restarts stopped inverters sequentially and ends session</td></tr></tbody></table>
   <h3>Cap Status Panel</h3>
-  <p>The status panel reports live controller state through a set of labeled metrics:</p>
-  <table>
-    <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Status</td><td>Controller state: Idle, Monitoring, Stopping, Starting, Paused, or Fault</td></tr>
-      <tr><td>Reason</td><td>Human-readable explanation of the current state or pending action</td></tr>
-      <tr><td>Last Action</td><td>Most recent automatic stop or restart, with inverter number and timestamp</td></tr>
-      <tr><td>Cooldown</td><td>Remaining settling time after the most recent controller action</td></tr>
-      <tr><td>Curtailed</td><td>Total MW removed by controller-owned stops (sum of Pac at each stop time)</td></tr>
-      <tr><td>Controllable</td><td>Number of inverters eligible for stop selection</td></tr>
-      <tr><td>Pending</td><td>In-flight controller action, if any</td></tr>
-      <tr><td>Exempted</td><td>Inverter numbers excluded from automatic stop selection</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Controlled Inverters Table</h3>
-  <p>When the controller owns one or more stopped inverters, a detailed table appears inside the cap panel:</p>
-  <table>
-    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Inverter</td><td>Inverter number stopped by the controller</td></tr>
-      <tr><td>Stopped At</td><td>Time the controller issued the stop command</td></tr>
-      <tr><td>Duration</td><td>Elapsed time since the stop (e.g. 12m 35s or 2h 05m)</td></tr>
-      <tr><td>Pac Removed (kW)</td><td>AC power output at the moment of stop</td></tr>
-      <tr><td>Nodes</td><td>Enabled node count at the time of stop</td></tr>
-      <tr><td>Rated kW</td><td>Node-adjusted rated inverter capacity</td></tr>
-      <tr><td>Depend. kW</td><td>Node-adjusted dependable inverter capacity</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Cap-Stopped Inverter Card Indicators</h3>
-  <p>Inverters stopped by the plant cap controller are visually distinct in the inverter grid:</p>
-  <ul>
-    <li>The card badge changes from <b>OFFLINE</b> to <b>CAP STOPPED</b> (blue)</li>
-    <li>A stoppage timestamp appears below the badge showing when the controller stopped the inverter</li>
-    <li>The card border and icon shift to a blue accent instead of the dimmed gray used for regular offline inverters</li>
-    <li>The card stays at full opacity, unlike ordinary offline cards which are dimmed</li>
-  </ul>
-  <p>These indicators appear on all three themes (dark, light, classic) and clear automatically when the inverter is released or the cap session ends.</p>
-
-  <h3>Cap Plan Preview</h3>
-  <p>The preview table shows each candidate inverter in sequence order with its node count, rated and dependable capacity, estimated step kW, projected plant MW after the step, and the planner&rsquo;s decision reason. The selected candidate (next action) is highlighted.</p>
-
-  <div class="info-card warn">
-    <div class="info-card-label">Important</div>
-    <ul style="margin:0">
-      <li>Current builds use whole-inverter sequential control only</li>
-      <li>Very narrow MW bands may not settle cleanly with whole-inverter steps</li>
-      <li>While plant cap is enabled, all non-exempted inverters stay under controller authority</li>
-      <li>Manual start/stop for non-exempted inverters is blocked until plant cap is disabled or the inverter is exempted</li>
-      <li>If a manual write bypasses the API guard and reaches a controller-owned inverter, the cap controller pauses as a safety fallback and requires re-enable after review</li>
-      <li>In Remote mode, cap actions are proxied to the gateway workstation</li>
-      <li>All cap controller stop and start actions are recorded in the <a href="#s11">Audit</a> page with scope <b>PLANT-CAP</b></li>
-    </ul>
-  </div>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Status</td><td>Active, Idle, or Cooldown</td></tr><tr><td>Reason</td><td>Human-readable trigger explanation</td></tr><tr><td>Last Action</td><td>Timestamp of most recent event</td></tr><tr><td>Cooldown</td><td>Remaining time before re-engagement</td></tr><tr><td>Curtailed</td><td>Total MW removed</td></tr><tr><td>Controllable</td><td>Inverters available for dispatch</td></tr><tr><td>Pending</td><td>In-flight actions</td></tr><tr><td>Exempted</td><td>Excluded numbers</td></tr></tbody></table>
+  <div class="info-card warn"><div class="info-card-label">Important</div><ul style="margin:0"><li>Whole-inverter sequential control only</li><li>Narrow bands may not settle cleanly</li><li>Non-exempted inverters stay under controller authority while cap is enabled</li><li>Manual control is blocked for non-exempted inverters until cap is disabled</li><li>In Remote mode, cap actions proxy to the gateway</li></ul></div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 7. Analytics Page ──── -->
+<!-- 7. ANALYTICS PAGE -->
 <section id="s7">
-  <div class="section-head">
-    <span class="section-num">7</span>
-    <h2>Analytics Page</h2>
-  </div>
-  <p>Interval-based review of production with day-ahead forecast comparison.</p>
-
-  <h3>Controls</h3>
-  <table>
-    <thead><tr><th>Control</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Date</td><td>Select the day to analyze</td></tr>
-      <tr><td>Interval</td><td>Chart grouping: 5 min, 15 min, 30 min, or 1 hour</td></tr>
-      <tr><td>Load View</td><td>Loads analytics for the selected date and interval</td></tr>
-    </tbody>
-  </table>
-
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><polyline points="3,17 7,10 11,14 15,6 19,9" stroke="#34d399" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Analytics Page</h2></div>
+  <p>Interval-based production review with day-ahead forecast comparison and weather context.</p>
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Date</td><td>Select the day to analyze</td></tr><tr><td>Interval</td><td>5 min, 15 min, 30 min, 1 hour</td></tr><tr><td>Load View</td><td>Load data for selected date and interval</td></tr></tbody></table>
   <h3>Summary Metrics</h3>
-  <table>
-    <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Interval</td><td>Selected time bucket size</td></tr>
-      <tr><td>Total Energy</td><td>Plant total for the day (MWh)</td></tr>
-      <tr><td>Peak Plant Output</td><td>Highest combined AC power (kW)</td></tr>
-      <tr><td>Reporting Inverters</td><td>Count of inverters with data</td></tr>
-      <tr><td>Latest Interval</td><td>Timestamp of last recorded interval</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Metric</th><th>Meaning</th></tr></thead><tbody><tr><td>Total Energy</td><td>Plant total (MWh)</td></tr><tr><td>Peak Output</td><td>Highest AC power (kW)</td></tr><tr><td>Reporting Inverters</td><td>Count with data</td></tr><tr><td>Latest Interval</td><td>Last recorded timestamp</td></tr></tbody></table>
   <h3>Selected Date Summary</h3>
-  <table>
-    <thead><tr><th>Item</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Actual MWh</td><td>Authoritative total daily energy &mdash; updates automatically when today&rsquo;s date is selected</td></tr>
-      <tr><td>Day-ahead MWh</td><td>Forecasted total daily energy</td></tr>
-      <tr><td>Variance MWh</td><td>Difference between actual and forecast</td></tr>
-      <tr><td>Peak Interval</td><td>Highest interval energy with timestamp</td></tr>
-    </tbody>
-  </table>
-  <p><strong>Live updates:</strong> When today&rsquo;s date is selected, the summary card and interval charts refresh automatically on each server push &mdash; no manual reload needed. For past dates, press <b>Load View</b>.</p>
-
+  <table><thead><tr><th>Item</th><th>Meaning</th></tr></thead><tbody><tr><td>Actual MWh</td><td>Authoritative total daily energy</td></tr><tr><td>Day-ahead MWh</td><td>Forecasted total</td></tr><tr><td>Variance MWh</td><td>Difference between actual and forecast</td></tr><tr><td>Peak Interval</td><td>Highest interval energy with timestamp</td></tr></tbody></table>
+  <div class="info-card tip"><div class="info-card-label">Live Updates</div>When today is selected, charts and summary auto-refresh with each server push. Past dates load on demand.</div>
   <h3>Day-Ahead Generator</h3>
-  <p>Available on the gateway workstation only. Enter a Days value and click Generate to produce the day-ahead forecast. Export is handled on the dedicated Export page.</p>
-
+  <p>Gateway only. Enter <b>Days</b> and click <b>Generate</b>. Blocked in Remote mode.</p>
   <h3>7-Day Weather Outlook</h3>
-  <p>Daily weather context: sky condition, temperature range, rainfall, cloud percentage, wind speed, and solar irradiance. Serves stale cached data when the weather API is unavailable.</p>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <p>Daily cards: sky condition, temperature range, rainfall, cloud %, wind speed, solar irradiance. Serves cached data when the API is unavailable.</p>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 8. Forecast Page ──── -->
+<!-- 8. FORECAST PAGE -->
 <section id="s8">
-  <div class="section-head">
-    <span class="section-num">8</span>
-    <h2>Forecast Page</h2>
-  </div>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="8" r="5" stroke="#fbbf24" stroke-width="1.8"/><line x1="11" y1="1" x2="11" y2="3" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/><line x1="4" y1="5" x2="5.5" y2="6.5" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/><line x1="18" y1="5" x2="16.5" y2="6.5" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/><path d="M5 16h12M7 19h8" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Forecast Page</h2></div>
   <p>Dedicated workspace for forecast configuration, Solcast validation, and toolkit preview.</p>
-
-  <h3>Forecast Source Options</h3>
-  <table>
-    <thead><tr><th>Source</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Local ML (Current)</td><td>Standard local ML-trained forecasting source</td></tr>
-      <tr><td>Solcast</td><td>External forecast source for validation or alternate use</td></tr>
-    </tbody>
-  </table>
-
+  <h3>Forecast Sources</h3>
+  <table><thead><tr><th>Source</th><th>Use</th></tr></thead><tbody><tr><td>Local ML</td><td>LightGBM-trained forecasting from historical data</td></tr><tr><td>Solcast</td><td>External forecast for validation or standalone use</td></tr></tbody></table>
   <h3>Solcast Access Modes</h3>
-  <table>
-    <thead><tr><th>Mode</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Toolkit Login</td><td>Reads the Solcast toolkit chart feed using account sign-in</td></tr>
-      <tr><td>API Key</td><td>Uses formal Solcast API credentials and resource ID</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Solcast Toolkit Settings</h3>
-  <p>Instead of entering a full URL, operators configure structured fields. The application constructs the Solcast toolkit URL internally.</p>
-  <table>
-    <thead><tr><th>Field</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td>Plant Resource ID</td><td>Your plant&rsquo;s unique Solcast site identifier</td></tr>
-      <tr><td>Forecast Days</td><td>Number of days to forecast (1&ndash;7, default: 2)</td></tr>
-      <tr><td>Resolution</td><td>Forecast interval: PT5M, PT10M, PT15M, PT30M, PT60M (default: PT5M)</td></tr>
-      <tr><td>Toolkit Email</td><td>Solcast toolkit account email</td></tr>
-      <tr><td>Toolkit Password</td><td>Solcast toolkit account password</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Toolkit Preview</h3>
-  <table>
-    <thead><tr><th>Control / Metric</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td>Start Day</td><td>First day shown in preview</td></tr>
-      <tr><td>Days to Display</td><td>Number of days included</td></tr>
-      <tr><td>Chart Unit</td><td>View values as MWh or MW</td></tr>
-      <tr><td>Forecast Total</td><td>Total forecasted energy in selected window</td></tr>
-      <tr><td>Estimated Actual</td><td>Estimated actual value for comparison</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Forecast Actions</h3>
-  <table>
-    <thead><tr><th>Button</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Save and Test Solcast</td><td>Saves active values, then tests the chosen Solcast mode</td></tr>
-      <tr><td>Refresh Preview</td><td>Reloads toolkit preview using current form values</td></tr>
-    </tbody>
-  </table>
-
-  <div class="info-card tip">
-    <div class="info-card-label">Note</div>
-    Day-ahead forecast generation is only available on the Gateway workstation. In Remote mode, run generation from the gateway.
-  </div>
-
-  <div class="info-card ml-highlight">
-    <div class="info-card-label" style="color:var(--accent)">Day-Ahead Generator &mdash; ML Training Engine</div>
-    <p>The day-ahead forecast is produced by a <b>trained machine-learning model</b> that learns your plant&rsquo;s unique generation profile from historical operating data. The engine runs on the gateway workstation and builds a production forecast for the next day based on weather inputs and observed performance patterns.</p>
-
+  <table><thead><tr><th>Mode</th><th>Use</th></tr></thead><tbody><tr><td>Toolkit Login</td><td>Chart feed via account sign-in</td></tr><tr><td>API Key</td><td>Formal API credentials and resource ID</td></tr></tbody></table>
+  <h3>Solcast Settings</h3>
+  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;7 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
+  <div class="ml-highlight">
+    <div class="info-card-label" style="color:var(--accent)">ML Training Engine &mdash; Day-Ahead Generation</div>
+    <p>The day-ahead forecast uses a <b>trained LightGBM model</b> (default since v2.4.40) that learns your plant's generation profile from historical data. It runs on the gateway and produces next-day forecasts from weather inputs and observed patterns.</p>
     <h4>How Training Works</h4>
-    <ul>
-      <li>The engine collects historical irradiance, weather, and production data to build a training dataset.</li>
-      <li>Training samples are filtered by an <b>operational constraint mask</b> to exclude periods where the plant was not operating normally (manual stops, faults, or partial shutdowns).</li>
-      <li>A hardened data collector rejects outliers, flat-line artifacts, and low-confidence samples to improve model quality.</li>
-      <li>The trained model produces a full-day energy forecast at configurable intervals (5 min to 1 hour).</li>
-    </ul>
-
+    <ul><li>Collects historical irradiance, weather, and production data</li><li>Applies an <b>operational constraint mask</b> to exclude abnormal periods</li><li>Rejects outliers, flat-line artifacts, and low-confidence samples</li><li>Produces full-day forecasts at configurable intervals</li></ul>
     <h4>Plant Cap Awareness</h4>
-    <p>When the <b>Plant Output Cap</b> controller stops inverters to limit plant output, the ML engine treats these periods differently from manual stops or faults:</p>
-    <ul>
-      <li><b>Cap-dispatched stops</b> (logged with scope <code>plant-cap</code> in the audit log) are identified separately from manual operator stops.</li>
-      <li>During cap-only periods (no concurrent manual stop or fault), the engine <b>reconstructs</b> what the plant would have produced at full capacity using a physics/hybrid baseline.</li>
-      <li>This preserves high-irradiance training samples that would otherwise be lost &mdash; the model sees the reconstructed output instead of the artificially capped value.</li>
-      <li>Only manually constrained slots are excluded from training. Cap-reconstructed slots contribute normally with near-zero residual.</li>
-    </ul>
-
-    <h4>Intraday Adjustment</h4>
-    <ul>
-      <li>Throughout the day, the engine compares observed actual output against the day-ahead forecast to compute an adjustment ratio.</li>
-      <li><b>Cap-depressed observations are excluded</b> from this ratio so that curtailed output does not propagate as an under-forecast bias into remaining slots.</li>
-      <li>If too few uncapped observations are available, the engine falls back to the full observation set.</li>
-    </ul>
-
-    <h4>Error Memory</h4>
-    <ul>
-      <li>A rolling error correction system tracks forecast accuracy over recent days.</li>
-      <li>All operationally constrained slots (including cap dispatch) are excluded from error correction to prevent false negative bias from curtailed actuals.</li>
-    </ul>
-
-    <h4>Operational Impact</h4>
-    <table>
-      <thead><tr><th>Scenario</th><th>Effect on Forecast Training</th></tr></thead>
-      <tbody>
-        <tr><td>Normal operation (all inverters running)</td><td>All data used directly for training</td></tr>
-        <tr><td>Manual inverter stop or fault</td><td>Affected slots excluded from training</td></tr>
-        <tr><td>Plant cap controller stops inverters</td><td>Output reconstructed to full-capacity baseline; training preserved</td></tr>
-        <tr><td>Mixed (cap + manual stop together)</td><td>Slot excluded from training (treated as manually constrained)</td></tr>
-      </tbody>
-    </table>
-
-    <div class="info-card warn" style="margin-top:12px">
-      <div class="info-card-label">Important</div>
-      The forecast engine depends on the <code>plant-cap</code> scope tag in the audit log to distinguish automated cap stops from manual stops. Do not modify or clear audit log records without understanding this dependency.
-    </div>
+    <ul><li>Cap-dispatched stops (scope <code>plant-cap</code>) identified separately from manual stops</li><li>During cap-only periods, engine <b>reconstructs</b> full-capacity output using physics baseline</li><li>Preserves high-irradiance training samples; only manually constrained slots are excluded</li></ul>
+    <h4>Intraday Adjustment &amp; Error Memory</h4>
+    <ul><li>Compares observed vs forecast to compute an adjustment ratio (cap-depressed observations excluded)</li><li>Rolling error correction tracks recent accuracy, excluding all operationally constrained slots</li></ul>
+    <table><thead><tr><th>Scenario</th><th>Effect on Training</th></tr></thead><tbody><tr><td>Normal operation</td><td>All data used</td></tr><tr><td>Manual stop / fault</td><td>Slots excluded</td></tr><tr><td>Plant cap stop</td><td>Reconstructed to full capacity</td></tr><tr><td>Mixed (cap + manual)</td><td>Slots excluded</td></tr></tbody></table>
   </div>
-
-  <h3>Forecast Performance Monitor</h3>
-  <p>The Forecast Performance Monitor provides a visual audit of the ML forecast engine: health status, accuracy trends, and a per-day comparison table for the selected look-back window. It is available on the <b>Analytics</b> page (scroll below the analytics charts).</p>
-
-  <h4>Health Chips</h4>
-  <table>
-    <thead><tr><th>Chip</th><th>What it shows</th></tr></thead>
-    <tbody>
-      <tr><td>ML Training</td><td>Status of the last model training run: <em>Trained</em>, <em>Rejected (N consecutive)</em>, or <em>No data</em></td></tr>
-      <tr><td>Last Run</td><td>Outcome of the most recent day-ahead generation attempt and its timestamp</td></tr>
-      <tr><td>Provider</td><td>Data provider used for the last run: <em>Local ML</em> or <em>Solcast</em></td></tr>
-      <tr><td>Recent Quality</td><td>Aggregate quality rating over the selected window: <em>Good</em>, <em>Acceptable</em>, or <em>Poor</em></td></tr>
-    </tbody>
-  </table>
-
-  <h4>Compare Chart</h4>
-  <p>Overlays the day-ahead forecast (line) against actual generation (bars) for each date in the window. A shaded confidence band shows the forecast high&ndash;low range where available.</p>
-
-  <h4>WAPE Chart</h4>
-  <p>Plots the daily Weighted Absolute Percentage Error (WAPE) as a bar chart. Lower values indicate higher accuracy. Bar colour reflects the quality tier for that day.</p>
-
-  <h4>History Table</h4>
-  <table>
-    <thead><tr><th>Column</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td>Date</td><td>Target date of the forecast</td></tr>
-      <tr><td>Provider</td><td>Data provider used (<em>Local ML</em> or <em>Solcast</em>)</td></tr>
-      <tr><td>Variant</td><td>Forecast variant tag (e.g. <em>day_ahead</em>)</td></tr>
-      <tr><td>WAPE %</td><td>Weighted Absolute Percentage Error for that day</td></tr>
-      <tr><td>Forecast MWh</td><td>Forecasted daily energy total</td></tr>
-      <tr><td>Actual MWh</td><td>Observed actual energy total</td></tr>
-      <tr><td>Freshness</td><td>Solcast input freshness classification</td></tr>
-      <tr><td>Quality</td><td>Overall quality tier for that forecast run</td></tr>
-      <tr><td>In-Memory</td><td>Whether the forecast is held in the in-memory error-correction pool</td></tr>
-    </tbody>
-  </table>
-
-  <h4>Controls</h4>
-  <table>
-    <thead><tr><th>Control</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Day-range selector</td><td>Sets the look-back window: 7, 14, 30, 60, 90, or 180 days</td></tr>
-      <tr><td>Refresh</td><td>Reloads all panel data from the server</td></tr>
-    </tbody>
-  </table>
-
-  <h3>ML Backend &mdash; LightGBM</h3>
-  <div class="info-card ml-highlight">
-    <div class="info-card-label" style="color:var(--accent)">LightGBM Installation &amp; Requirements</div>
-    <p>The forecast engine uses <b>LightGBM</b> as its primary ML backend when available (enabled by default from v2.4.40). LightGBM delivers faster training and improved accuracy on tabular solar data compared to the built-in sklearn Gradient Boosting Regressor fallback.</p>
-
-    <h4>Installation</h4>
-    <p>Install LightGBM into the Python environment used by the Forecast Service:</p>
-    <pre><code>pip install lightgbm</code></pre>
-    <p>If LightGBM is not installed the engine falls back automatically to sklearn GBR &mdash; no configuration change is required. Switching is fully transparent: the same training pipeline and hyper-parameters apply.</p>
-
-    <h4>Requirements</h4>
-    <table>
-      <thead><tr><th>Requirement</th><th>Details</th></tr></thead>
-      <tbody>
-        <tr><td>Python</td><td>3.8 or later</td></tr>
-        <tr><td>LightGBM package</td><td>3.x or later &mdash; <code>pip install lightgbm</code></td></tr>
-        <tr><td>Visual C++ Redistributable (Windows)</td><td>Usually already present; required by the LightGBM DLL</td></tr>
-        <tr><td>CPU / RAM</td><td>No GPU required; standard workstation hardware is sufficient</td></tr>
-        <tr><td>Disk</td><td>~50 MB for the LightGBM package and its DLLs</td></tr>
-      </tbody>
-    </table>
-
-    <h4>Verifying the Active Backend</h4>
-    <ul>
-      <li>Check the <b>ML Training</b> health chip in the Forecast Performance Monitor after the next training run.</li>
-      <li>The Forecast Service log prints <code>[LightGBM]</code> entries during model fit when LightGBM is active.</li>
-      <li>To force the sklearn fallback (e.g. for debugging), set the environment variable <code>FORECAST_USE_LIGHTGBM=0</code> before starting the Forecast Service.</li>
-    </ul>
-
-    <div class="info-card tip" style="margin-top:12px">
-      <div class="info-card-label">Note</div>
-      PyInstaller builds bundle LightGBM automatically if it is installed on the build machine. If the build machine does not have LightGBM, the packaged EXE will use the sklearn fallback at runtime.
-    </div>
-  </div>
-
-  <h3>Solcast Tri-Band Integration</h3>
-  <p>When Solcast Toolkit data is available, the forecast engine automatically leverages all three Solcast confidence levels as ML features: the standard forecast value alongside P10 (low confidence) and P90 (high confidence) intervals. This gives the model explicit insight into weather uncertainty, which improves accuracy especially on partly cloudy or unpredictable-weather days.</p>
-  <p>The tri-band enhancement is completely transparent — no configuration, no manual steps. The model automatically detects and uses all three bands when your Solcast Toolkit feed provides them. Historical forecasts without tri-band data continue to work normally, and switching to full tri-band data happens seamlessly as new data arrives.</p>
-  <p>By learning how weather unpredictability correlates with generation variance and timing shifts, the model produces more robust day-ahead predictions under uncertain conditions.</p>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="info-card note"><div class="info-card-label">Note</div>Day-ahead generation is only available on the Gateway workstation.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 9. Alarms Page ──── -->
+<!-- 9. FORECAST PERFORMANCE MONITOR -->
 <section id="s9">
-  <div class="section-head">
-    <span class="section-num">9</span>
-    <h2>Alarms Page</h2>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="3" stroke="#c084fc" stroke-width="1.8"/><path d="M7 13V9M11 13V7M15 13V10" stroke="#c084fc" stroke-width="2" stroke-linecap="round"/></svg></div><h2>Forecast Performance Monitor</h2></div>
+  <p>Real-time diagnostics of ML training health, forecast accuracy trends, and data quality flags (v2.4.42+). Defaults to <b>collapsed</b>.</p>
+  <h3>Health Chips</h3>
+  <table><thead><tr><th>Chip</th><th>Meaning</th></tr></thead><tbody><tr><td>ML Training</td><td>Training state and ML backend (LightGBM/sklearn)</td></tr><tr><td>Last Run</td><td>Timestamp of last generation run</td></tr><tr><td>Provider</td><td>Active provider (ML or Solcast)</td></tr><tr><td>Recent Quality</td><td>Quality classification of latest forecast</td></tr></tbody></table>
+  <h3>Accuracy Charts</h3>
+  <table><thead><tr><th>Chart</th><th>Shows</th></tr></thead><tbody><tr><td>Compare Chart</td><td>Forecast vs Actual with confidence band (P10/P90)</td></tr><tr><td>WAPE Chart</td><td>Daily Weighted Absolute Percentage Error trend</td></tr></tbody></table>
+  <h3>Solcast Tri-Band Integration (v2.5.0+)</h3>
+  <div class="diagram-container">
+    <svg width="500" height="130" viewBox="0 0 500 130" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="40" y="10" width="420" height="28" rx="6" fill="rgba(52,211,153,.06)" stroke="#34d399" stroke-width="1"/><text x="250" y="29" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600" font-family="Segoe UI">P90 / Hi Band (Optimistic)</text>
+      <rect x="40" y="48" width="420" height="28" rx="6" fill="rgba(77,159,255,.08)" stroke="#4d9fff" stroke-width="1.5"/><text x="250" y="67" text-anchor="middle" fill="#4d9fff" font-size="11" font-weight="700" font-family="Segoe UI">Forecast (Central Estimate)</text>
+      <rect x="40" y="86" width="420" height="28" rx="6" fill="rgba(251,191,36,.06)" stroke="#fbbf24" stroke-width="1"/><text x="250" y="105" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600" font-family="Segoe UI">P10 / Lo Band (Conservative)</text>
+    </svg>
+    <div class="diagram-caption">Fig 4 &mdash; Solcast tri-band confidence envelope (P10 / Forecast / P90)</div>
   </div>
-  <p>Formal alarm review and acknowledgement workspace.</p>
-
-  <h3>Controls</h3>
-  <table>
-    <thead><tr><th>Control</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Inverter</td><td>Filter by specific inverter or all</td></tr>
-      <tr><td>Date</td><td>Select review date</td></tr>
-      <tr><td>Load Records</td><td>Query alarms for the selected scope</td></tr>
-      <tr><td>Min Duration</td><td>Filter out alarms shorter than N seconds</td></tr>
-      <tr><td>Acknowledge All</td><td>Acknowledge all active alarms in scope</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Alarm Table Columns</h3>
-  <table>
-    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Alarm Time</td><td>Timestamp when alarm was first raised</td></tr>
-      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
-      <tr><td>Node</td><td>Node number within inverter</td></tr>
-      <tr><td>Alarm Code</td><td>Hexadecimal alarm code from inverter register</td></tr>
-      <tr><td>Severity</td><td>Classification: Critical, Warning, Info</td></tr>
-      <tr><td>Description</td><td>Human-readable alarm description</td></tr>
-      <tr><td>Cleared</td><td>Time the alarm resolved (or &mdash; if still active)</td></tr>
-      <tr><td>Duration</td><td>Active or total duration</td></tr>
-      <tr><td>Status</td><td>Active or Cleared</td></tr>
-      <tr><td>Ack.</td><td>Acknowledged or unacknowledged</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Alarm Sound Behavior</h3>
-  <ul>
-    <li>Sound triggers only for unacknowledged active alarms lasting at least <b>5 seconds</b></li>
-    <li>Very short alarm blips are ignored to prevent false noise</li>
-    <li>If a node already has an active alarm and the alarm value changes, the same episode continues &mdash; no new sound is triggered</li>
-    <li>Use the header mute button to silence alarms without disabling detection</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <p>Exposes P10/Lo and P90/Hi percentile forecasts, feeding 6 additional LightGBM features:</p>
+  <table><thead><tr><th>Feature</th><th>Description</th></tr></thead><tbody><tr><td><code>solcast_lo_kwh</code></td><td>P10 energy (conservative)</td></tr><tr><td><code>solcast_hi_kwh</code></td><td>P90 energy (optimistic)</td></tr><tr><td><code>solcast_lo_vs_physics</code></td><td>P10 vs physics ratio</td></tr><tr><td><code>solcast_hi_vs_physics</code></td><td>P90 vs physics ratio</td></tr><tr><td><code>solcast_spread_pct</code></td><td>% spread between P10 and P90</td></tr><tr><td><code>solcast_spread_ratio</code></td><td>Spread as ratio of central estimate</td></tr></tbody></table>
+  <div class="info-card note"><div class="info-card-label">Backward Compatibility</div>Legacy models auto-align with zero-spread fallback. Feature count: 62 &rarr; 68. P10/P90 available only from Solcast Toolkit for future dates.</div>
+  <h3>Reliability Dimensions (v2.4.33+)</h3>
+  <table><thead><tr><th>Dimension</th><th>Key</th><th>Effect</th></tr></thead><tbody><tr><td>Weather regime</td><td>clear/mixed/overcast/rainy</td><td>Per-regime bias and reliability</td></tr><tr><td>Season</td><td>dry/wet</td><td>Season-aware blend coefficients</td></tr><tr><td>Time-of-day</td><td>morning/midday/afternoon</td><td>Per-slot blend modulation</td></tr><tr><td>Trend</td><td>improving/stable/degrading</td><td>Blend &plusmn;6&ndash;8%, damping adjustment</td></tr></tbody></table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 10. Energy Page ──── -->
+<!-- 10. ALARMS -->
 <section id="s10">
-  <div class="section-head">
-    <span class="section-num">10</span>
-    <h2>Energy Page</h2>
-  </div>
-  <p>5-minute interval energy records by inverter for detailed production verification.</p>
-
-  <h3>KPI Summary Tiles</h3>
-  <table>
-    <thead><tr><th>Tile</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Date Total</td><td>Total MWh for selected date across all inverters</td></tr>
-      <tr><td>Average per Interval</td><td>Mean MWh per 5-minute bucket</td></tr>
-      <tr><td>Peak Interval</td><td>Highest single interval value with timestamp</td></tr>
-      <tr><td>Reporting Inverters</td><td>Count of unique inverters with data</td></tr>
-      <tr><td>Latest Interval End</td><td>End time of the most recent recorded interval</td></tr>
-    </tbody>
-  </table>
-  <p><strong>Live updates:</strong> When today&rsquo;s date is selected, all KPI tiles update automatically on each server push &mdash; no manual reload needed. For past dates, press <b>Load Records</b>.</p>
-
-  <h3>Energy Table Columns</h3>
-  <table>
-    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Date</td><td>Calendar date of interval</td></tr>
-      <tr><td>Interval End</td><td>Timestamp when 5-min bucket closed</td></tr>
-      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
-      <tr><td>Interval Energy (MWh)</td><td>Energy produced during that interval</td></tr>
-    </tbody>
-  </table>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3C7 3 4 7 4 11v4l-1 2h16l-1-2v-4c0-4-3-8-7-8z" stroke="#f87171" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 19a2 2 0 004 0" stroke="#f87171" stroke-width="1.8"/></svg></div><h2>Alarms Page</h2></div>
+  <table><thead><tr><th>Column</th><th>Meaning</th></tr></thead><tbody><tr><td>Alarm Time</td><td>When alarm was raised</td></tr><tr><td>Inverter / Node</td><td>Affected equipment</td></tr><tr><td>Alarm Code</td><td>Hex code from register</td></tr><tr><td>Severity</td><td>Critical, Warning, Info</td></tr><tr><td>Description</td><td>Human-readable text</td></tr><tr><td>Cleared / Duration</td><td>Resolution time and total duration</td></tr><tr><td>Status / Ack</td><td>Active or Cleared; Acknowledged state</td></tr></tbody></table>
+  <h3>Alarm Episode Model</h3>
+  <ul><li>New alarm = new episode</li><li>Bitmask change on active node = same episode</li><li>ACK state preserved across changes</li></ul>
+  <h3>Quick-ACK System</h3>
+  <ul><li>Toast notification (12s TTL) with inline ACK button</li><li>Bell panel with ACK for up to 50 recent alarms</li><li>Auto-dismiss 1.2s after ACK</li><li>Sound triggers after <b>5 seconds</b> unacknowledged</li><li>Mute button silences audio only, not visual alerts</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 11. Audit Page ──── -->
+<!-- 11. ENERGY -->
 <section id="s11">
-  <div class="section-head">
-    <span class="section-num">11</span>
-    <h2>Audit Page</h2>
-  </div>
-  <p>Operator command accountability and traceability records.</p>
-
-  <h3>Audit Table Columns</h3>
-  <table>
-    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Date/Time</td><td>Command timestamp</td></tr>
-      <tr><td>Operator</td><td>Operator name recorded at execution</td></tr>
-      <tr><td>Inverter</td><td>Affected inverter</td></tr>
-      <tr><td>Node</td><td>Affected node or aggregated scope (ALL if the command targeted all nodes)</td></tr>
-      <tr><td>Action</td><td>START or STOP</td></tr>
-      <tr><td>Scope</td><td>SINGLE, INVERTER, SELECTED, ALL, or PLANT-CAP</td></tr>
-      <tr><td>Result</td><td>OK or ERROR</td></tr>
-      <tr><td>IP</td><td>Source workstation or inverter IP address</td></tr>
-      <tr><td>Reason</td><td>Controller decision reason for automatic actions (plant-cap scope); blank for manual commands</td></tr>
-    </tbody>
-  </table>
-  <p>All columns support sorting. An inline filter row enables targeted review by operator, action, scope, result, or IP address.</p>
-
-  <h3>Plant-Cap Scope Indicator</h3>
-  <p>Audit entries generated by the <a href="#s6">Plant Output Cap</a> controller display a <b>PLANT-CAP</b> badge in the Scope column with a blue highlight on the row. The <b>Reason</b> column shows the controller&rsquo;s decision reason (e.g. &ldquo;Keeps projected plant output above the lower limit.&rdquo;), making it straightforward to distinguish automatic cap actions from manual operator commands.</p>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Energy Page</h2></div>
+  <p>5-minute interval energy records by inverter. Auto-refreshes when today is selected.</p>
+  <table><thead><tr><th>Tile</th><th>Meaning</th></tr></thead><tbody><tr><td>Date Total</td><td>Total MWh across all inverters</td></tr><tr><td>Average/Interval</td><td>Mean MWh per 5-min bucket</td></tr><tr><td>Peak Interval</td><td>Highest value with timestamp</td></tr><tr><td>Reporting Inverters</td><td>Count with data</td></tr><tr><td>Latest Interval End</td><td>Most recent interval close</td></tr></tbody></table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 12. Report Page ──── -->
+<!-- 12. AUDIT -->
 <section id="s12">
-  <div class="section-head">
-    <span class="section-num">12</span>
-    <h2>Report Page</h2>
-  </div>
-  <p>Daily inverter-by-inverter performance summary for formal reporting and management handoff.</p>
-
-  <h3>Report Table Columns</h3>
-  <table>
-    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Inverter</td><td>Inverter identifier</td></tr>
-      <tr><td>Energy (MWh)</td><td>Daily energy total</td></tr>
-      <tr><td>Peak Pac (kW)</td><td>Highest AC output for the day</td></tr>
-      <tr><td>Avg Pac (kW)</td><td>Average AC output during the window</td></tr>
-      <tr><td>Uptime (h)</td><td>Operating hours</td></tr>
-      <tr><td>Alarms</td><td>Alarm episode count</td></tr>
-      <tr><td>Availability (%)</td><td>Uptime as percentage of the inverter&rsquo;s dynamic production window (see below)</td></tr>
-      <tr><td>Performance (%)</td><td>Ratio of actual to expected output</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Availability Calculation</h3>
-  <div class="info-card tip">
-    <div class="info-card-label">How It Works</div>
-    <p>Availability is calculated <b>per inverter</b> using a <b>dynamic production window</b> rather than a fixed solar window:</p>
-    <ul>
-      <li><b>Window Start</b> &mdash; the timestamp of the first non-zero PAC reading for that inverter, at or after 5:00 AM.</li>
-      <li><b>Window End</b> &mdash; the timestamp of the last interval end (zero-PAC transition) for that inverter, at or before 6:00 PM (or current time if today).</li>
-      <li><b>Formula</b> &mdash; <code>Availability = (Online Uptime / Dynamic Window) &times; 100%</code></li>
-    </ul>
-    <p>This ensures inverters are not penalized for the gap between the fixed 5 AM boundary and their actual generation start, or between their last generation and 6 PM.</p>
-  </div>
-  <div class="info-card warn">
-    <div class="info-card-label">Plant Availability</div>
-    The <b>TOTAL</b> row averages availability across <b>all configured inverters</b>, including inactive ones. Inverters that did not produce any energy contribute 0% to the plant average, reflecting true fleet-level availability.
-  </div>
-  <p>Reports can be exported in Excel or CSV format.</p>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2h-4" stroke="#4d9fff" stroke-width="1.8"/><rect x="7" y="1" width="8" height="4" rx="1" stroke="#4d9fff" stroke-width="1.8"/></svg></div><h2>Audit Page</h2></div>
+  <p>Operator command accountability log. All columns support sorting with inline filters.</p>
+  <table><thead><tr><th>Column</th><th>Meaning</th></tr></thead><tbody><tr><td>Date/Time</td><td>Command timestamp</td></tr><tr><td>Operator</td><td>Recorded identity</td></tr><tr><td>Inverter / Node</td><td>Affected equipment</td></tr><tr><td>Action</td><td>START, STOP, etc.</td></tr><tr><td>Reason</td><td>User request, Cap dispatch, Cooldown, etc.</td></tr><tr><td>Scope</td><td><code>single</code>, <code>inverter</code>, <code>selected</code>, or <code>plant-cap</code></td></tr><tr><td>Result / IP</td><td>OK or ERROR; source workstation address</td></tr></tbody></table>
+  <p>The <code>plant-cap</code> scope badge distinguishes automated dispatch from manual commands.</p>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 13. Export Page ──── -->
+<!-- 13. REPORT -->
 <section id="s13">
-  <div class="section-head">
-    <span class="section-num">13</span>
-    <h2>Export Page</h2>
-  </div>
-  <p>Dedicated export workspace with six structured export packages.</p>
-
-  <div class="feat-grid">
-    <div class="feat-item">
-      <h4>Alarm History Export</h4>
-      <p>Alarm records for selected date including code, severity, duration, and acknowledgement state.</p>
-    </div>
-    <div class="feat-item">
-      <h4>Energy Summary Export</h4>
-      <p>Daily operational energy summaries by inverter and reporting node with calculated totals.</p>
-    </div>
-    <div class="feat-item">
-      <h4>Day-Ahead Forecast Export</h4>
-      <p>Forecast-versus-actual comparison. Source: Analytics (ML) or Solcast. Format: Standard or Average Table.</p>
-    </div>
-    <div class="feat-item">
-      <h4>Operational Data Export</h4>
-      <p>Interval-sampled inverter operating data for analysis and troubleshooting.</p>
-    </div>
-    <div class="feat-item">
-      <h4>Operator Audit Export</h4>
-      <p>Operator command history with timestamp, scope, result, and affected equipment.</p>
-    </div>
-    <div class="feat-item">
-      <h4>Daily Performance Report</h4>
-      <p>Multi-day inverter performance summary with energy, availability, and alarm counts.</p>
-    </div>
-  </div>
-
-  <h3>Common Export Behavior</h3>
-  <ul>
-    <li>Exports are written to the configured export folder</li>
-    <li>Format options: Excel (.xlsx) and CSV</li>
-    <li>XLSX exports include fitted column widths, colored headers, bordered cells, and highlighted total rows</li>
-    <li>Cancel button is available during active exports</li>
-    <li>Result text shows filename, file size, and completion timestamp</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="2" stroke="#34d399" stroke-width="1.8"/><path d="M3 8h16M8 8v11" stroke="#34d399" stroke-width="1.5"/></svg></div><h2>Report Page</h2></div>
+  <table><thead><tr><th>Column</th><th>Meaning</th></tr></thead><tbody><tr><td>Energy (MWh)</td><td>Daily total</td></tr><tr><td>Peak Pac (kW)</td><td>Highest AC output</td></tr><tr><td>Avg Pac (kW)</td><td>Average during window</td></tr><tr><td>Uptime (h)</td><td>Operating hours</td></tr><tr><td>Alarms</td><td>Episode count</td></tr><tr><td>Availability (%)</td><td>Dynamic window-based uptime ratio</td></tr><tr><td>Performance (%)</td><td>Actual vs expected output ratio</td></tr></tbody></table>
+  <div class="info-card tip"><div class="info-card-label">Availability Calculation</div><p><b>Per inverter</b> using dynamic window: Start = first non-zero PAC at/after 5 AM; End = last interval at/before 6 PM. <code>Availability = Online Uptime / Dynamic Window &times; 100%</code></p></div>
+  <div class="info-card warn"><div class="info-card-label">Plant Availability</div>TOTAL row averages across <b>all configured inverters</b>, including inactive ones (0% contribution).</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 14. Settings ──── -->
+<!-- 14. EXPORT -->
 <section id="s14">
-  <div class="section-head">
-    <span class="section-num">14</span>
-    <h2>Settings</h2>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v12M7 11l4 4 4-4" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Export Page</h2></div>
+  <div class="feat-grid">
+    <div class="feat-item"><h4>Alarm History</h4><p>Records with code, severity, duration, ACK state.</p></div>
+    <div class="feat-item"><h4>Energy Summary</h4><p>Daily energy by inverter and reporting node.</p></div>
+    <div class="feat-item"><h4>Day-Ahead Comparison</h4><p>Forecast vs actual, standard and average table.</p></div>
+    <div class="feat-item"><h4>Operational Data</h4><p>Interval-sampled inverter operating data.</p></div>
+    <div class="feat-item"><h4>Operator Audit</h4><p>Command history with scope and result.</p></div>
+    <div class="feat-item"><h4>Daily Performance</h4><p>Multi-day summary with availability and alarm counts.</p></div>
   </div>
-  <p>The administrative center organized as section-based configuration.</p>
-
-  <h3>Global Actions</h3>
-  <table>
-    <thead><tr><th>Action</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Save Settings</td><td>Saves the active configuration</td></tr>
-      <tr><td>Export Settings</td><td>Downloads a configuration file (JSON)</td></tr>
-      <tr><td>Import Settings</td><td>Loads a saved configuration file</td></tr>
-      <tr><td>Export Folder&hellip;</td><td>Select the export destination path</td></tr>
-      <tr><td>Open Folder</td><td>Opens the current export path in Explorer</td></tr>
-      <tr><td>IP Configuration</td><td>Opens the network configuration window</td></tr>
-      <tr><td>Restore Defaults</td><td>Resets settings with confirmation</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Plant Configuration</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Default</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Plant Name</td><td>ADSI Plant</td><td>Display and document naming</td></tr>
-      <tr><td>Operator Name</td><td>OPERATOR</td><td>Recorded operator identity in audit entries</td></tr>
-      <tr><td>Inverter Count</td><td>27</td><td>Total inverters configured</td></tr>
-      <tr><td>Nodes/Inverter</td><td>4</td><td>Reporting nodes per inverter</td></tr>
-      <tr><td>Plant Latitude</td><td>&mdash;</td><td>Geographic latitude for weather context</td></tr>
-      <tr><td>Plant Longitude</td><td>&mdash;</td><td>Geographic longitude for weather context</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Data &amp; Polling</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Data API URL</td><td>Read-side service endpoint</td></tr>
-      <tr><td>Write API URL</td><td>Command/write service endpoint</td></tr>
-      <tr><td>Export Folder</td><td>Destination for generated files</td></tr>
-      <tr><td>Retention Window (days)</td><td>Days kept in main database before archival</td></tr>
-      <tr><td>Modbus Timeout (s)</td><td>Max wait time for read response</td></tr>
-      <tr><td>Reconnect Delay (s)</td><td>Delay before read retry after reconnect</td></tr>
-      <tr><td>Read Spacing (s)</td><td>Pause between register groups</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Plant Output Cap Defaults</h3>
-  <p>These settings define the default values loaded into the live Plant Output Cap panel. The settings page also shows a planner summary for selection mode, band gap, controllable inverter count, and smallest step.</p>
-  <table>
-    <thead><tr><th>Field</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Upper Limit (MW)</td><td>Default upper plant MW cap threshold</td></tr>
-      <tr><td>Lower Limit (MW)</td><td>Default lower plant MW threshold</td></tr>
-      <tr><td>Sequence</td><td>Default inverter selection mode</td></tr>
-      <tr><td>Exempted Inverter Numbers</td><td>Default comma-separated exclusion list</td></tr>
-      <tr><td>Cooldown (s)</td><td>Default settling delay after each controller action</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Connectivity &amp; Sync</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Use</th></tr></thead>
-    <tbody>
-      <tr><td>Operation Mode</td><td>Gateway or Remote</td></tr>
-      <tr><td>Remote Gateway URL</td><td>URL of the gateway workstation</td></tr>
-      <tr><td>Remote API Token</td><td>Shared API token for remote access</td></tr>
-      <tr><td>Tailscale Device Hint</td><td>Optional identifier for secure-network status</td></tr>
-    </tbody>
-  </table>
-  <p>Connectivity actions include: Test Remote Gateway, Check Tailscale, Refresh, and Refresh Standby DB.</p>
-
-  <h3>Runtime Health</h3>
-  <p>Displays real-time application health: CPU, memory, uptime, polling cycles, fetch errors, rows persisted, and connected clients.</p>
-
-  <h3>License</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td>Status</td><td>Current license state</td></tr>
-      <tr><td>Source</td><td>Where the license was loaded from</td></tr>
-      <tr><td>Expiry</td><td>License expiry date</td></tr>
-      <tr><td>Remaining Days</td><td>Days remaining on current term</td></tr>
-      <tr><td>Upload Replacement</td><td>Apply a new license file</td></tr>
-      <tr><td>Refresh License</td><td>Reload license state</td></tr>
-    </tbody>
-  </table>
-
-  <h3>App Updates</h3>
-  <table>
-    <thead><tr><th>Action</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Check for Updates</td><td>Query the update channel for newer builds</td></tr>
-      <tr><td>Download Update</td><td>Download the update package when available</td></tr>
-      <tr><td>Restart &amp; Install</td><td>Orderly shutdown then installer handoff</td></tr>
-    </tbody>
-  </table>
-
-  <div class="info-card warn">
-    <div class="info-card-label">Important</div>
-    Do not power off the workstation or relaunch the app manually while the restart/install handoff is in progress. After restart, wait for the first local poll cycle before relying on fresh data.
-  </div>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <ul><li>Exports written to configured export folder</li><li>Formats: Excel (.xlsx with styled headers) and CSV</li><li>Cancel button available during active exports</li><li>Result shows filename, size, and timestamp</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 15. Operating Modes ──── -->
+<!-- 15. SETTINGS -->
 <section id="s15">
-  <div class="section-head">
-    <span class="section-num">15</span>
-    <h2>Operating Modes</h2>
-  </div>
-
-  <table>
-    <thead><tr><th>Mode</th><th>Purpose</th><th>Main Behavior</th></tr></thead>
-    <tbody>
-      <tr><td><b>Gateway</b></td><td>Local plant-connected workstation</td><td>Polls and persists plant data locally; authoritative source of truth</td></tr>
-      <tr><td><b>Remote</b></td><td>Gateway-linked viewer workstation</td><td>Streams live data from gateway; proxies historical access; no local persistence</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Gateway Mode</h3>
-  <ul>
-    <li>Polls the plant directly and persists data locally</li>
-    <li>Is the authoritative source of truth for live data, reports, forecasts, and replication</li>
-    <li>Is the only mode that can generate day-ahead and intraday-adjusted forecasts</li>
-  </ul>
-
-  <h3>Remote Mode</h3>
-  <ul>
-    <li>Displays live gateway data in-memory only &mdash; no local DB persistence from the live stream</li>
-    <li>Historical views, reports, analytics, and exports are served from the gateway via proxy</li>
-    <li>Inverter on/off write control stays enabled via gateway proxy</li>
-    <li>Forecast generation is disabled</li>
-    <li>When gateway is unavailable, historical pages show &ldquo;Gateway unavailable&rdquo;</li>
-  </ul>
-
-  <h3>Standby Database Refresh</h3>
-  <p>The <b>Refresh Standby DB</b> action stages archive DB files first (when included) for historical consistency, then downloads the gateway main database for local standby use. The staged database is not applied immediately — a restart is needed to activate the new data.</p>
-
-  <div class="info-card tip">
-    <div class="info-card-label">Best Practice</div>
-    Use <b>Refresh Standby DB</b> before switching a remote workstation back to Gateway mode to ensure fresh local history is available.
-  </div>
-
-  <h3>Gateway Link Health States</h3>
-  <table>
-    <thead><tr><th>State</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Connected</td><td>Live data streaming normally</td></tr>
-      <tr><td>Degraded</td><td>Data arriving with elevated latency</td></tr>
-      <tr><td>Stale</td><td>Last snapshot shown while fresh data is temporarily unavailable</td></tr>
-      <tr><td>Disconnected</td><td>No active connection to the gateway</td></tr>
-      <tr><td>Auth Error</td><td>API token mismatch or expired</td></tr>
-      <tr><td>Config Error</td><td>Gateway URL or configuration is invalid</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Connectivity Options</h3>
-  <p>Remote-to-gateway connectivity can use any of these methods:</p>
-  <ul>
-    <li><b>Tailscale</b> &mdash; Zero-config mesh VPN; recommended for simplicity and security</li>
-    <li><b>Traditional VPN</b> &mdash; Site-to-site or client VPN (OpenVPN, WireGuard, IPsec)</li>
-    <li><b>Port Forwarding</b> &mdash; Direct port exposure through the router/firewall (requires HTTPS and strong tokens)</li>
-    <li><b>Cloud Relay / Tunnel</b> &mdash; Services like Cloudflare Tunnel or ngrok for NAT traversal</li>
-    <li><b>LAN / Same-Network</b> &mdash; Direct IP access when both machines share a network</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="3" stroke="#94a3b8" stroke-width="1.8"/><path d="M11 2v3M11 17v3M2 11h3M17 11h3M4.9 4.9l2.1 2.1M15 15l2.1 2.1M4.9 17.1l2.1-2.1M15 7l2.1-2.1" stroke="#94a3b8" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Settings</h2></div>
+  <p>Administrative center with 8 configuration sections: Plant, Data &amp; Polling, Cap Defaults, Connectivity &amp; Sync, Forecast, License, App Updates, and Cloud Backup.</p>
+  <h3>Plant Configuration</h3>
+  <table><thead><tr><th>Field</th><th>Default</th><th>Use</th></tr></thead><tbody><tr><td>Plant Name</td><td>ADSI Plant</td><td>Display naming</td></tr><tr><td>Operator Name</td><td>OPERATOR</td><td>Audit identity</td></tr><tr><td>Inverter Count</td><td>27</td><td>Total configured</td></tr><tr><td>Nodes/Inverter</td><td>4</td><td>Reporting nodes</td></tr><tr><td>Latitude / Longitude</td><td>&mdash;</td><td>Weather context</td></tr></tbody></table>
+  <h3>Connectivity &amp; Sync</h3>
+  <table><thead><tr><th>Field</th><th>Use</th></tr></thead><tbody><tr><td>Operation Mode</td><td>Gateway or Remote</td></tr><tr><td>Gateway URL</td><td>URL of gateway workstation</td></tr><tr><td>API Token</td><td>Shared token for remote access</td></tr><tr><td>Tailscale Hint</td><td>Optional device identifier</td></tr></tbody></table>
+  <h3>Runtime Health</h3>
+  <p>Real-time metrics: CPU %, Memory RSS, Uptime, Poll Ticks, Duration, Fetch Errors, Persist Rows, WS Clients/Drops.</p>
+  <h3>License</h3>
+  <table><thead><tr><th>Field</th><th>Purpose</th></tr></thead><tbody><tr><td>Status / Expiry</td><td>Current state and expiry date</td></tr><tr><td>Upload Replacement</td><td>Apply a new license file</td></tr><tr><td>Audit Trail</td><td>Timestamp, Event, Details history</td></tr></tbody></table>
+  <h3>App Updates</h3>
+  <table><thead><tr><th>Action</th><th>Function</th></tr></thead><tbody><tr><td>Check for Updates</td><td>Query update channel</td></tr><tr><td>Download Update</td><td>Download package</td></tr><tr><td>Restart &amp; Install</td><td>Orderly shutdown + installer handoff</td></tr></tbody></table>
+  <div class="info-card warn"><div class="info-card-label">Important</div>Do not power off during restart/install handoff. Wait for first poll after restart.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 16. Operator Messaging ──── -->
+<!-- 16. OPERATING MODES -->
 <section id="s16">
-  <div class="section-head">
-    <span class="section-num">16</span>
-    <h2>Operator Messaging</h2>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="7" cy="11" r="4" stroke="#4d9fff" stroke-width="1.8"/><circle cx="15" cy="11" r="4" stroke="#34d399" stroke-width="1.8"/></svg></div><h2>Operating Modes</h2></div>
+  <div class="diagram-container">
+    <svg width="620" height="160" viewBox="0 0 620 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="20" width="230" height="120" rx="10" fill="rgba(77,159,255,.06)" stroke="#4d9fff" stroke-width="1.5"/><text x="135" y="45" text-anchor="middle" fill="#4d9fff" font-size="14" font-weight="700" font-family="Segoe UI">Gateway Mode</text><text x="135" y="65" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Local Modbus polling</text><text x="135" y="80" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Source of truth</text><text x="135" y="95" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Forecast generation ON</text><text x="135" y="110" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">SQLite persistence</text><text x="135" y="130" text-anchor="middle" fill="#34d399" font-size="10" font-weight="600" font-family="Segoe UI">Primary Workstation</text>
+      <line x1="260" y1="80" x2="360" y2="80" stroke="#64748b" stroke-width="1.5"/><polygon points="355,76 363,80 355,84" fill="#64748b"/><text x="310" y="72" text-anchor="middle" fill="#64748b" font-size="9" font-family="Segoe UI">API + WS</text>
+      <rect x="370" y="20" width="230" height="120" rx="10" fill="rgba(192,132,252,.06)" stroke="#c084fc" stroke-width="1.5"/><text x="485" y="45" text-anchor="middle" fill="#c084fc" font-size="14" font-weight="700" font-family="Segoe UI">Remote Mode</text><text x="485" y="65" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Streams from gateway</text><text x="485" y="80" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">No local persistence</text><text x="485" y="95" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Proxied history</text><text x="485" y="110" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Segoe UI">Write control via proxy</text><text x="485" y="130" text-anchor="middle" fill="#c084fc" font-size="10" font-weight="600" font-family="Segoe UI">Viewer Workstation</text>
+    </svg>
+    <div class="diagram-caption">Fig 5 &mdash; Gateway vs Remote operating modes</div>
   </div>
-  <p>A compact gateway-to-remote note channel for operational communication between workstations.</p>
-  <ul>
-    <li>Access via the floating message bubble in the bottom corner</li>
-    <li>Messages are stored on the gateway and synced to remote workstations</li>
-    <li>Audio notification for new inbound messages (silent for self-sent echoes)</li>
-    <li>Clear thread action with confirmation and gateway sync</li>
-    <li>Rate limited: 10 messages per 60 seconds per machine</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <h3>Gateway Link Health States</h3>
+  <table><thead><tr><th>State</th><th>Meaning</th></tr></thead><tbody><tr><td>Connected</td><td>Live data streaming normally</td></tr><tr><td>Degraded</td><td>Elevated latency</td></tr><tr><td>Stale</td><td>Last snapshot shown</td></tr><tr><td>Disconnected</td><td>No active connection</td></tr><tr><td>Auth Error</td><td>Token mismatch or expired</td></tr><tr><td>Config Error</td><td>Invalid URL or configuration</td></tr></tbody></table>
+  <h3>Connectivity Options</h3>
+  <ul><li><b>Tailscale</b> &mdash; Zero-config mesh VPN (recommended)</li><li><b>Traditional VPN</b> &mdash; OpenVPN, WireGuard, IPsec</li><li><b>Port Forwarding</b> &mdash; Direct exposure (requires HTTPS + strong tokens)</li><li><b>Cloud Relay</b> &mdash; Cloudflare Tunnel, ngrok</li><li><b>LAN</b> &mdash; Direct IP on shared network</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 17. Cloud Backup ──── -->
+<!-- 17. OPERATOR MESSAGING -->
 <section id="s17">
-  <div class="section-head">
-    <span class="section-num">17</span>
-    <h2>Cloud Backup &amp; Restore</h2>
-  </div>
-
-  <h3>Supported Providers</h3>
-  <table>
-    <thead><tr><th>Provider</th><th>Authorization</th></tr></thead>
-    <tbody>
-      <tr><td>OneDrive</td><td>Microsoft OAuth via Azure Client ID</td></tr>
-      <tr><td>Google Drive</td><td>Google OAuth via Client ID and Client Secret</td></tr>
-      <tr><td>S3-compatible</td><td>Static access key pair validated against the configured endpoint, bucket, and prefix; unchanged backup data is reused across later backups</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Backup Policy</h3>
-  <table>
-    <thead><tr><th>Setting</th><th>Options</th></tr></thead>
-    <tbody>
-      <tr><td>Schedule</td><td>Manual only, Daily at 3:00 AM, Every 6 hours</td></tr>
-      <tr><td>Scope</td><td>Application data, Configuration files, Logs (optional)</td></tr>
-      <tr><td>Backup date tag</td><td>Date tag used for package labeling</td></tr>
-    </tbody>
-  </table>
-
-  <p><b>Application data</b> includes the active SQLite database plus forecast model bundles, forecast history context, Solcast reliability artifacts, weather cache, and forecast snapshots stored under ProgramData.</p>
-
-  <h3>Backup Actions</h3>
-  <table>
-    <thead><tr><th>Action</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td>Backup Now</td><td>Create and upload a backup package immediately</td></tr>
-      <tr><td>Refresh Cloud List</td><td>List available cloud backups</td></tr>
-      <tr><td>Refresh backup history</td><td>Refresh local backup activity and restore list</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Restore Behavior</h3>
-  <ul>
-    <li>Restore creates a safety backup first</li>
-    <li>Restore overwrites the active database and configuration</li>
-    <li>Application restart is required to complete the restore</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 4h14a2 2 0 012 2v8a2 2 0 01-2 2H8l-4 4v-4a2 2 0 01-2-2V6a2 2 0 012-2z" stroke="#4d9fff" stroke-width="1.8"/></svg></div><h2>Operator Messaging</h2></div>
+  <ul><li>Floating message bubble in bottom corner</li><li>Stored on gateway, synced to remote workstations</li><li>Audio notification for inbound messages</li><li>Read state tracking per workstation</li><li>Rate limited: 10 per 60s per machine; 500-row retention</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 18. Workflows ──── -->
+<!-- 18. CLOUD BACKUP -->
 <section id="s18">
-  <div class="section-head">
-    <span class="section-num">18</span>
-    <h2>Standard Operating Workflows</h2>
-  </div>
-
-  <div class="wf-card">
-    <h4>Daily Startup Check</h4>
-    <ol class="steps">
-      <li>Launch the application and complete sign-in.</li>
-      <li>Wait for the startup loading screen to finish before evaluating live values.</li>
-      <li>Confirm the license notice area is clear.</li>
-      <li>Check the header connection dot and clock.</li>
-      <li>Review <b>TOTAL PAC</b> and <b>TODAY MWh</b>.</li>
-      <li>Open the <b>Inverters</b> page and confirm fleet status chips.</li>
-      <li>If operating remotely, confirm Connectivity &amp; Sync status in Settings.</li>
-    </ol>
-  </div>
-
-  <div class="wf-card">
-    <h4>Live Control Workflow</h4>
-    <ol class="steps">
-      <li>Open the <b>Inverters</b> page.</li>
-      <li>Select the target inverter or node.</li>
-      <li>Review current alarm state and freshness.</li>
-      <li>Send the required START or STOP action.</li>
-      <li>Confirm the result via status updates and audit history.</li>
-    </ol>
-  </div>
-
-  <div class="wf-card">
-    <h4>Plant Output Cap Workflow</h4>
-    <ol class="steps">
-      <li>Open the <b>Inverters</b> page and click <b>Show Cap</b>.</li>
-      <li>Set <b>Upper Limit</b> and <b>Lower Limit</b> in MW.</li>
-      <li>Choose the inverter <b>Sequence</b> and add exemptions if needed.</li>
-      <li>Click <b>Preview Plan</b> to review proposed actions.</li>
-      <li>Click <b>Enable Cap</b> and complete authorization.</li>
-      <li>Monitor status, reason, controlled count, and planner warnings.</li>
-      <li>Cap-stopped inverter cards show a blue <b>CAP STOPPED</b> badge with the stoppage time for at-a-glance identification.</li>
-      <li>Review the <b>Controlled Inverters</b> table inside the cap panel for duration, removed Pac, rated kW, and dependable kW per inverter.</li>
-      <li>Use <b>Release Controlled Inverters</b> to end the session, or <b>Disable Monitoring</b> to pause automation without restarting.</li>
-      <li>Check the <b>Audit</b> page for a full record of cap controller actions (scope: <b>PLANT-CAP</b>) with decision reasons.</li>
-    </ol>
-  </div>
-
-  <div class="wf-card">
-    <h4>Daily Performance Review</h4>
-    <ol class="steps">
-      <li>Open <b>Analytics</b> for interval review and day-ahead comparison.</li>
-      <li>Open <b>Energy</b> for interval production detail.</li>
-      <li>Open <b>Report</b> for the formal daily inverter summary.</li>
-      <li>Export the required package from <b>Report</b> or <b>Export</b>.</li>
-    </ol>
-  </div>
-
-  <div class="wf-card">
-    <h4>Remote Standby Refresh Workflow</h4>
-    <ol class="steps">
-      <li>Confirm the workstation is in <b>Remote</b> mode.</li>
-      <li>Open <b>Settings &rarr; Connectivity &amp; Sync</b>.</li>
-      <li>Review gateway link and transfer monitor status.</li>
-      <li>Run <b>Refresh Standby DB</b>.</li>
-      <li>Allow the preflight phase to finish before expecting the heavier snapshot transfer to begin.</li>
-      <li>If newer local data is detected, decide whether to cancel or <b>Force Pull</b>.</li>
-      <li>Wait for completion and confirm success.</li>
-      <li>Restart the application to apply the staged database — the new data is not active until restart.</li>
-      <li>After restart, wait for the startup loading screen and first local poll cycle before relying on live totals.</li>
-    </ol>
-  </div>
-
-  <div class="wf-card">
-    <h4>Cloud Backup Workflow</h4>
-    <ol class="steps">
-      <li>Configure provider access and authorize.</li>
-      <li>Save backup settings and select scope.</li>
-      <li>Run <b>Backup Now</b> or rely on the configured schedule.</li>
-      <li>Review history and cloud file listings.</li>
-    </ol>
-  </div>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M5 17a5 5 0 01-.5-10A7 7 0 0118 10a4 4 0 01-1 8H5z" stroke="#34d399" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Cloud Backup &amp; Restore</h2></div>
+  <table><thead><tr><th>Provider</th><th>Authorization</th></tr></thead><tbody><tr><td>OneDrive</td><td>Microsoft OAuth via Azure Client ID</td></tr><tr><td>Google Drive</td><td>Google OAuth</td></tr><tr><td>S3-compatible</td><td>Static access key pair</td></tr></tbody></table>
+  <table><thead><tr><th>Setting</th><th>Options</th></tr></thead><tbody><tr><td>Schedule</td><td>Manual, Daily 3 AM, Every 6 hours</td></tr><tr><td>Scope</td><td>App data, Config files, Logs (optional)</td></tr></tbody></table>
+  <p><b>App data</b> = SQLite DB + forecast model bundles + Solcast artifacts + weather cache.</p>
+  <ul><li>Restore creates safety backup first</li><li>Overwrites active database and config</li><li>Restart required to complete restore</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 19. IP Configuration ──── -->
+<!-- 19. WORKFLOWS -->
 <section id="s19">
-  <div class="section-head">
-    <span class="section-num">19</span>
-    <h2>IP Configuration</h2>
-  </div>
-  <p>The <b>IP Configuration</b> window manages per-inverter network and operational settings. Open it from <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Access requires an auth gate key (<code>adsiM</code> or <code>adsiMM</code>, where M is the current minute). The session lasts 1 hour.</p>
-
-  <h3>Configuration Table</h3>
-  <p>Each of the 27 inverters has one row with the following fields:</p>
-  <table>
-    <thead><tr><th>Column</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td><b>Inverter</b></td><td>Inverter number and device label (INV-01 &ndash; INV-27). Click the gear icon to open the inverter web page.</td></tr>
-      <tr><td><b>IP Address</b></td><td>IPv4 address of the inverter on the local network.</td></tr>
-      <tr><td><b>Polling Interval (s)</b></td><td>How often the gateway polls this inverter, in seconds (min 0.01, default 0.05).</td></tr>
-      <tr><td><b>Enabled Units</b></td><td>Which nodes (1&ndash;4) are active. Use <b>All</b> to toggle all four. An empty selection disables the inverter.</td></tr>
-      <tr><td><b>Loss %</b></td><td>Estimated MW transmission loss from this inverter to the substation (0&ndash;100%). Accounts for cable degradation or distance. Used exclusively by the forecast engine for substation-level accuracy; it does <em>not</em> affect live dashboard readings, energy totals, or exports.</td></tr>
-      <tr><td><b>Save</b></td><td>Saves the individual row. Use <b>Save All Changes</b> at the bottom to save every row at once.</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Loss % and Forecasting</h3>
-  <p>When a non-zero Loss % is configured, the day-ahead forecast engine adjusts historical 5-minute energy data per inverter before training. This means the ML model learns substation-level output patterns rather than raw inverter output, producing more accurate day-ahead and intraday-adjusted forecasts.</p>
-  <p>Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far from substation), the forecast engine reduces their historical energy contributions by those percentages when building training data, computing error corrections, and scoring forecast quality.</p>
-
-  <h3>Additional Controls</h3>
-  <ul>
-    <li><b>Check Status</b> &ndash; scans all configured IPs for reachability and shows an online count.</li>
-    <li><b>Open Topology</b> &ndash; opens the visual plant topology map.</li>
-    <li><b>Theme toggle</b> &ndash; switches between light and dark mode for this window.</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 6h16M3 11h16M3 16h16" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/><circle cx="7" cy="6" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="12" cy="11" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="9" cy="16" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/></svg></div><h2>Standard Operating Workflows</h2></div>
+  <div class="wf-card"><h4>Daily Startup Check</h4><ol class="steps"><li>Launch and sign in.</li><li>Wait for startup loading screen to finish.</li><li>If Remote and gateway unreachable, choose Gateway or retry in the Connection Mode picker.</li><li>Confirm license area is clear.</li><li>Check connection dot, clock, TOTAL PAC, and TODAY MWh.</li><li>Open Inverters page and confirm fleet status chips.</li></ol></div>
+  <div class="wf-card"><h4>Live Control</h4><ol class="steps"><li>Open Inverters page.</li><li>Select target inverter or node.</li><li>Review alarm state and data freshness.</li><li>Send START or STOP action.</li><li>Confirm via status updates and audit log.</li></ol></div>
+  <div class="wf-card"><h4>Plant Output Cap</h4><ol class="steps"><li>Show the Cap panel on Inverters page.</li><li>Set Upper/Lower Limit, Sequence, Cooldown, and Exemptions.</li><li>Click Preview Plan to review.</li><li>Click Enable Cap (authorization required).</li><li>Monitor Cap Status and Controlled Inverters Table.</li><li>Release: click Release Controlled. Disarm: click Disable Monitoring.</li></ol></div>
+  <div class="wf-card"><h4>Daily Performance Review</h4><ol class="steps"><li>Open Analytics for interval review and day-ahead comparison.</li><li>Open Energy for interval detail.</li><li>Open Report for formal summary.</li><li>Export from Report or Export page.</li></ol></div>
+  <div class="wf-card"><h4>Remote Standby Refresh</h4><ol class="steps"><li>Confirm Remote mode.</li><li>Open Settings &rarr; Connectivity &amp; Sync.</li><li>Click Refresh Standby DB.</li><li>Allow preflight, then wait for snapshot transfer.</li><li>Restart to apply staged database.</li></ol></div>
+  <div class="wf-card"><h4>Cloud Backup</h4><ol class="steps"><li>Configure and authorize provider.</li><li>Save settings and select scope.</li><li>Run Backup Now or rely on schedule.</li><li>Review backup history.</li></ol></div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 20. Keyboard Shortcuts ──── -->
+<!-- 20. IP CONFIGURATION -->
 <section id="s20">
-  <div class="section-head">
-    <span class="section-num">20</span>
-    <h2>Keyboard Shortcuts</h2>
-  </div>
-  <table>
-    <thead><tr><th>Shortcut</th><th>Function</th></tr></thead>
-    <tbody>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>T</kbd></td><td>Open the Topology window</td></tr>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>I</kbd></td><td>Open the IP Configuration window</td></tr>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>=</kbd></td><td>Zoom in</td></tr>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>-</kbd></td><td>Zoom out</td></tr>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>0</kbd></td><td>Reset zoom</td></tr>
-      <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>Theme toggle in auxiliary windows</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Interface Tips</h3>
-  <ul>
-    <li>Use the alarm bell panel to quickly review and <b>acknowledge alarms without changing pages</b> &mdash; each unacknowledged alarm has an inline <b>&#x2714; ACK</b> button; alarm toast pop-ups also include an <b>ACK</b> button</li>
-    <li>Use the operator message bubble for shift notes and remote coordination</li>
-    <li>Use <b>Open Folder</b> in Settings to verify export output quickly</li>
-    <li>Hover over controls and metrics for tooltip descriptions</li>
-    <li>Use <b>Check for Updates</b> and <b>Refresh License</b> during planned maintenance windows</li>
-  </ul>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>IP Configuration</h2></div>
+  <p>Open via <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Auth code required, 1-hour session.</p>
+  <table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td>Inverter</td><td>Label</td></tr><tr><td>IP Address</td><td>Modbus TCP target</td></tr><tr><td>Polling Interval</td><td>Refresh rate (ms)</td></tr><tr><td>Enabled Units</td><td>Active nodes to poll</td></tr><tr><td>Loss %</td><td>Cable/connection loss (used by forecast engine)</td></tr></tbody></table>
+  <p>Additional: <b>Check Status</b> (test config), <b>Open Topology</b> (separate auth, 10-min session), <b>Theme toggle</b>.</p>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 21. Troubleshooting ──── -->
+<!-- 21. KEYBOARD SHORTCUTS -->
 <section id="s21">
-  <div class="section-head">
-    <span class="section-num">21</span>
-    <h2>Troubleshooting</h2>
-  </div>
-  <table>
-    <thead><tr><th>Symptom</th><th>Likely Cause</th><th>Recommended Action</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>Connection dot shows disconnected</td>
-        <td>Live link is unavailable</td>
-        <td>Check mode, gateway URL, token, and Tailscale status</td>
-      </tr>
-      <tr>
-        <td>Stale status appears</td>
-        <td>Last retained snapshot is being shown</td>
-        <td>Check live link health and recent gateway contact</td>
-      </tr>
-      <tr>
-        <td>Refresh Standby DB completes but data unchanged</td>
-        <td>Standby DB is staged, not yet active</td>
-        <td>Restart the application</td>
-      </tr>
-      <tr>
-        <td>Refresh Standby DB blocked with newer-local warning</td>
-        <td>Local standby copy has newer data than gateway</td>
-        <td>Cancel to preserve local data, or use Force Pull if overwrite is intentional</td>
-      </tr>
-      <tr>
-        <td>TODAY MWh looks old right after startup or after switching to Gateway</td>
-        <td>Local polling has not caught up yet</td>
-        <td>Run Refresh Standby DB if needed, restart, and wait for the startup loading screen plus first poll cycle</td>
-      </tr>
-      <tr>
-        <td>Day-ahead generation unavailable</td>
-        <td>Workstation is in Remote mode</td>
-        <td>Run generation from the gateway workstation</td>
-      </tr>
-      <tr>
-        <td>Plant-cap fails with &ldquo;Cannot POST&rdquo;</td>
-        <td>Older gateway build or wrong remote gateway target</td>
-        <td>Update gateway app and verify Remote Gateway URL</td>
-      </tr>
-      <tr>
-        <td>Cap band warning: limits too close</td>
-        <td>Whole-inverter step size exceeds configured deadband</td>
-        <td>Increase gap between Lower and Upper limits</td>
-      </tr>
-      <tr>
-        <td>Cloud restore unavailable</td>
-        <td>Provider or backup state not ready</td>
-        <td>Refresh cloud list and verify provider authorization</td>
-      </tr>
-      <tr>
-        <td>IP Configuration cannot be opened</td>
-        <td>Current mode is Remote or access restricted</td>
-        <td>Use the gateway workstation</td>
-      </tr>
-      <tr>
-        <td>Alarm sound is silent</td>
-        <td>Sound muted or system audio unavailable</td>
-        <td>Re-enable alarm sound and check workstation audio</td>
-      </tr>
-      <tr>
-        <td>Export fails</td>
-        <td>Path, date, format, or dataset issue</td>
-        <td>Verify export folder, input filters, and current mode</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="7" width="18" height="10" rx="2" stroke="#94a3b8" stroke-width="1.8"/><path d="M6 11h2M10 11h2M14 11h2M8 14h6" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Keyboard Shortcuts &amp; Tips</h2></div>
+  <table><thead><tr><th>Shortcut</th><th>Function</th></tr></thead><tbody><tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Topology window</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>IP Configuration</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd></td><td>Zoom in</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Zoom out</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset zoom</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Theme toggle (aux windows)</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Force full data reload</td></tr></tbody></table>
+  <ul><li><b>Alarm bell</b>: badge count, click to open quick-ACK drawer</li><li><b>Sidebar</b>: collapses to icons on narrow windows; hover for tooltips</li><li><b>Inverter cards</b>: click to expand detail panel</li><li><b>Message bubble</b>: bottom corner, opens operator messaging</li></ul>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- ──── 22. Quick Reference ──── -->
+<!-- 22. TROUBLESHOOTING -->
 <section id="s22">
-  <div class="section-head">
-    <span class="section-num">22</span>
-    <h2>Quick Reference</h2>
-  </div>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="9" stroke="#f87171" stroke-width="1.8"/><path d="M11 7v4M11 14v1" stroke="#f87171" stroke-width="2" stroke-linecap="round"/></svg></div><h2>Troubleshooting</h2></div>
+  <table><thead><tr><th>Symptom</th><th>Likely Cause</th><th>Action</th></tr></thead><tbody>
+    <tr><td>Connection dot disconnected</td><td>Live link unavailable</td><td>Check mode, URL, token, Tailscale</td></tr>
+    <tr><td>Stale status</td><td>Retained snapshot</td><td>Check gateway health</td></tr>
+    <tr><td>Standby DB unchanged</td><td>Staged, not active</td><td>Restart the application</td></tr>
+    <tr><td>Newer-local warning</td><td>Local copy newer</td><td>Cancel or Force Pull</td></tr>
+    <tr><td>TODAY MWh old after startup</td><td>Polling not caught up</td><td>Refresh Standby DB, restart, wait</td></tr>
+    <tr><td>Connection Mode picker</td><td>Remote startup failed</td><td>Choose Gateway or retry Remote</td></tr>
+    <tr><td>Day-ahead unavailable</td><td>Remote mode</td><td>Generate from gateway</td></tr>
+    <tr><td>Cap "Cannot POST"</td><td>Old gateway or wrong URL</td><td>Update gateway, verify URL</td></tr>
+    <tr><td>Cap limits too close</td><td>Step &gt; deadband</td><td>Increase Upper/Lower gap</td></tr>
+    <tr><td>Cloud restore unavailable</td><td>Provider not ready</td><td>Refresh list, verify auth</td></tr>
+    <tr><td>IP Config blocked</td><td>Remote mode</td><td>Use gateway workstation</td></tr>
+    <tr><td>Silent alarms</td><td>Muted or no audio</td><td>Re-enable sound, check audio</td></tr>
+    <tr><td>Export fails</td><td>Path/date/format issue</td><td>Verify folder, filters, mode</td></tr>
+    <tr><td>High WAPE</td><td>Stale Solcast or retraining needed</td><td>Check Performance Monitor</td></tr>
+  </tbody></table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
+</section>
 
+<!-- 23. QUICK REFERENCE -->
+<section id="s23">
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="2" stroke="#fbbf24" stroke-width="1.8"/><path d="M7 8h8M7 11h6M7 14h7" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Quick Reference</h2></div>
   <h3>Defaults &amp; Constants</h3>
-  <table>
-    <thead><tr><th>Item</th><th>Value</th></tr></thead>
-    <tbody>
-      <tr><td>Default Username</td><td><code>admin</code></td></tr>
-      <tr><td>Default Password</td><td><code>1234</code></td></tr>
-      <tr><td>Default Plant Name</td><td>ADSI Plant</td></tr>
-      <tr><td>Default Operator Name</td><td>OPERATOR</td></tr>
-      <tr><td>Inverter Rated Capacity</td><td>997.0 kW</td></tr>
-      <tr><td>Inverter Dependable Capacity</td><td>917.0 kW</td></tr>
-      <tr><td>Nodes per Inverter</td><td>4</td></tr>
-      <tr><td>Node Rated Capacity</td><td>249.25 kW</td></tr>
-      <tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM (availability uses per-inverter dynamic window within these bounds)</td></tr>
-      <tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated / Dependable</td><td>997.0 kW / 917.0 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.25 kW each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
   <h3>Page Quick Finder</h3>
-  <table>
-    <thead><tr><th>Need</th><th>Best Page</th></tr></thead>
-    <tbody>
-      <tr><td>Live plant status</td><td>Inverters</td></tr>
-      <tr><td>Interval production analysis</td><td>Analytics and Energy</td></tr>
-      <tr><td>Day-ahead comparison</td><td>Analytics and Export</td></tr>
-      <tr><td>Forecast source setup</td><td>Forecast</td></tr>
-      <tr><td>Alarm review and acknowledgement</td><td>Alarms</td></tr>
-      <tr><td>Operator action traceability</td><td>Audit</td></tr>
-      <tr><td>Formal daily summary</td><td>Report</td></tr>
-      <tr><td>File generation</td><td>Export</td></tr>
-      <tr><td>Mode, link, standby DB</td><td>Settings &rarr; Connectivity &amp; Sync</td></tr>
-      <tr><td>License and updates</td><td>Settings &rarr; License / App Updates</td></tr>
-      <tr><td>Backup and restore</td><td>Settings &rarr; Cloud Backup &amp; Restore</td></tr>
-      <tr><td>Network configuration</td><td>IP Configuration</td></tr>
-      <tr><td>Visual plant map</td><td>Topology</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr></tbody></table>
   <h3>Data Units</h3>
-  <table>
-    <thead><tr><th>Item</th><th>Unit</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>PAC</td><td>W or kW</td><td>Active AC output power</td></tr>
-      <tr><td>PDC</td><td>W or kW</td><td>DC-side input power</td></tr>
-      <tr><td>Energy</td><td>MWh</td><td>Produced electrical energy</td></tr>
-      <tr><td>Duration</td><td>sec / min / hrs</td><td>Event age, uptime, or interval</td></tr>
-    </tbody>
-  </table>
-
+  <table><thead><tr><th>Item</th><th>Unit</th></tr></thead><tbody><tr><td>PAC / PDC</td><td>W or kW</td></tr><tr><td>Energy</td><td>MWh</td></tr><tr><td>Duration</td><td>sec / min / hrs</td></tr><tr><td>WAPE</td><td>%</td></tr></tbody></table>
   <h3>Status Terms</h3>
-  <table>
-    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Online</td><td>Fresh data available, unit communicating normally</td></tr>
-      <tr><td>Offline</td><td>No current live data available</td></tr>
-      <tr><td>Stale</td><td>Last snapshot shown while fresh data is temporarily unavailable</td></tr>
-      <tr><td>Alarm</td><td>Alarm condition is active</td></tr>
-      <tr><td>Acknowledged</td><td>Alarm has been operator-acknowledged</td></tr>
-    </tbody>
-  </table>
-
-  <a href="#toc" class="back-top">&uarr; Back to top</a>
+  <table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td>Online</td><td>Communicating normally</td></tr><tr><td>Offline</td><td>No live data</td></tr><tr><td>Stale</td><td>Last snapshot shown</td></tr><tr><td>Alarm</td><td>Active alarm</td></tr><tr><td>Acknowledged</td><td>Operator-ACK'd</td></tr><tr><td>CAP STOPPED</td><td>Stopped by cap controller</td></tr></tbody></table>
+  <h3>Day-Ahead Generation Paths</h3>
+  <table><thead><tr><th>Path</th><th>Trigger</th><th>Audit</th></tr></thead><tbody><tr><td>Manual UI</td><td>POST /api/forecast/generate</td><td>Node</td></tr><tr><td>Auto scheduler</td><td>Python loop &rarr; delegate</td><td>Node</td></tr><tr><td>Python CLI</td><td>--generate-date</td><td>Node</td></tr><tr><td>CLI fallback</td><td>Node unreachable</td><td>Python</td></tr><tr><td>Node cron</td><td>04:30/18:30/20:00/22:00</td><td>Node</td></tr></tbody></table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
 </div>
 
-<!-- ═══════ FOOTER ═══════ -->
+<!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.4.43</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.5.2</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

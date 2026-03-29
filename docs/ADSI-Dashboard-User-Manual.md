@@ -34,6 +34,8 @@ The dashboard is a plant operations workstation for centralized inverter supervi
 | `Gateway` | Local plant-connected workstation | Polls and persists plant data locally | Main on-site control and reporting station |
 | `Remote` | Gateway-linked viewer workstation | Streams live data from the gateway and proxies historical access | Off-site monitoring, review, and supervised control |
 
+If the application starts in `Remote` mode and the gateway is unreachable, the startup loading screen displays a **Connection Mode** picker. The picker allows the operator to switch to `Gateway` mode immediately or retry the `Remote` connection without restarting the application manually.
+
 ### 2.3 Data Architecture
 
 | Data Layer | Description | Used For |
@@ -1194,11 +1196,12 @@ Operational note:
 
 1. Launch the application and complete sign-in if required.
 2. Wait for the startup loading screen to finish before evaluating live values.
-3. Confirm the license notice area is clear.
-4. Check the header connection dot and clock.
-5. Review `TOTAL PAC` and `TODAY MWh`.
-6. Open the `Inverters` page and confirm online, alarmed, and offline counts.
-7. If operating remotely, confirm `Connectivity & Sync` status in Settings.
+3. If operating in `Remote` mode and the gateway is unreachable, the loading screen will present a **Connection Mode** picker instead of a generic error. Choose **Gateway Mode** to switch to local Modbus polling, or choose **Remote Mode** to retry the gateway connection.
+4. Confirm the license notice area is clear.
+5. Check the header connection dot and clock.
+6. Review `TOTAL PAC` and `TODAY MWh`.
+7. Open the `Inverters` page and confirm online, alarmed, and offline counts.
+8. If operating remotely, confirm `Connectivity & Sync` status in Settings.
 
 ## 8.2 Live Control Workflow
 
@@ -1320,6 +1323,7 @@ Important:
 | `Refresh Standby DB` stops with a newer-local warning or `Force Pull` prompt | The local standby copy has newer replicated data than the gateway | Review which machine is authoritative. Cancel to preserve local standby data, or use `Force Pull` only if overwriting local standby data is intentional |
 | `TODAY MWh` looks older immediately after returning to `Gateway` mode | Local polling has not caught up yet or standby data was not refreshed before restart | Run `Refresh Standby DB`, restart, and wait for the first local poll cycle |
 | Live totals or forecast status look old immediately after `Restart & Install` | Background services are still completing clean shutdown/startup handoff or the first local poll cycle has not finished yet | Wait for the app to reopen fully, confirm gateway mode/runtime health, and allow the first local poll cycle to complete before judging data freshness |
+| Startup loading screen shows a **Connection Mode** picker | The workstation is in `Remote` mode and the remote gateway did not respond within the connection timeout | Choose **Gateway Mode** to switch to local Modbus polling, or choose **Remote Mode** to retry the gateway connection. If the gateway is expected to be online, verify the `Remote Gateway URL`, API token, and network connectivity (e.g. Tailscale) before retrying |
 | Day-ahead generation is unavailable | Workstation is in `Remote` mode | Run generation from the gateway workstation |
 | Plant-cap preview or control fails with `Cannot POST /api/plant-cap/...` | The request reached a server that does not expose the plant-cap routes, usually an older gateway build or a wrong remote gateway target | Restart or update the gateway app, then verify `Remote Gateway URL` and token settings |
 | Plant-cap band warning says the limits are too close | Whole-inverter step size is larger than the configured deadband or close to it | Increase the gap between `Lower Limit` and `Upper Limit`, or review exempted inverters and node counts |
