@@ -298,18 +298,18 @@
           </div>
         </div>
         <div class="table-wrap">
-          <table class="data-table">
+          <table class="data-table" id="alarmTable">
             <thead>
               <tr>
-                <th title="Date and time the alarm was first raised.">Alarm Time</th>
-                <th title="Inverter number where the alarm originated.">Inverter</th>
-                <th title="Node number within the inverter.">Node</th>
+                <th class="sortable" data-sort-key="alarm_time" title="Date and time the alarm was first raised.">Alarm Time</th>
+                <th class="sortable" data-sort-key="inverter" title="Inverter number where the alarm originated.">Inverter</th>
+                <th class="sortable" data-sort-key="node" title="Node number within the inverter.">Node</th>
                 <th title="Hexadecimal alarm code from the inverter register.">Alarm Code</th>
-                <th title="Alarm severity classification.">Severity</th>
+                <th class="sortable" data-sort-key="severity" title="Alarm severity classification.">Severity</th>
                 <th title="Human-readable alarm description.">Description</th>
-                <th title="Date and time the alarm condition was resolved.">Cleared</th>
-                <th title="How long the alarm episode lasted.">Duration</th>
-                <th title="Whether the alarm is still active or has been cleared.">Status</th>
+                <th class="sortable" data-sort-key="cleared" title="Date and time the alarm condition was resolved.">Cleared</th>
+                <th class="sortable" data-sort-key="duration_ms" title="How long the alarm episode lasted.">Duration</th>
+                <th class="sortable" data-sort-key="status" title="Whether the alarm is still active or has been cleared.">Status</th>
                 <th title="Whether an operator has acknowledged this alarm.">Ack.</th>
               </tr>
             </thead>
@@ -370,10 +370,10 @@
           <table class="data-table" id="energyTable">
             <thead>
               <tr>
-                <th title="Calendar date of the energy interval.">Date</th>
-                <th title="End timestamp of the 5-minute interval.">Interval End</th>
-                <th title="Inverter number that produced this energy.">Inverter</th>
-                <th title="Energy generated during this interval in megawatt-hours.">Interval Energy (MWh)</th>
+                <th class="sortable" data-sort-key="date" title="Calendar date of the energy interval.">Date</th>
+                <th class="sortable" data-sort-key="ts" title="End timestamp of the 5-minute interval.">Interval End</th>
+                <th class="sortable" data-sort-key="inverter" title="Inverter number that produced this energy.">Inverter</th>
+                <th class="sortable" data-sort-key="kwh_inc" title="Energy generated during this interval in megawatt-hours.">Interval Energy (MWh)</th>
               </tr>
             </thead>
             <tbody id="energyBody"></tbody>
@@ -2247,6 +2247,17 @@
         </div>
       </div>
     </div>
+    <!-- Theme Preview Modal -->
+    <div id="themePreviewModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="themePreviewTitle">
+      <div class="theme-preview-modal-card">
+        <div class="theme-preview-modal-header">
+          <span class="theme-preview-modal-title" id="themePreviewTitle">Choose Theme</span>
+          <button class="auth-modal-close" id="themePreviewClose" aria-label="Close theme preview" title="Close">✕</button>
+        </div>
+        <div class="theme-preview-grid" id="themePreviewGrid"></div>
+      </div>
+    </div>
+
     <div id="modeTransitionOverlay" class="mode-transition-overlay hidden" aria-live="assertive" aria-hidden="true">
       <div class="mode-transition-card">
         <div class="mode-transition-spinner" aria-hidden="true"></div>

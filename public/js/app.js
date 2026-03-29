@@ -299,6 +299,7 @@ const ANALYTICS_VIEW_END_HOUR = 18;
 const ANALYTICS_VIEW_END_MIN = 0;
 const ANALYTICS_CHART_RENDER_BATCH = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
+const CARD_ORDER_STORAGE_KEY = "adsi_inv_card_order";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
@@ -378,6 +379,34 @@ const el = (tag, cls, html = "") => {
   if (html) e.innerHTML = html;
   return e;
 };
+function renderEmptyState(container, opts) {
+  if (!container) return;
+  const { icon, title, description, actionLabel, actionFn } = opts;
+  container.innerHTML = "";
+  const wrap = el("div", "empty-state");
+  if (icon) {
+    const iconEl = el("div", "empty-state-icon");
+    iconEl.innerHTML = `<span class="mdi ${icon}"></span>`;
+    wrap.appendChild(iconEl);
+  }
+  const titleEl = el("div", "empty-state-title");
+  titleEl.textContent = title;
+  wrap.appendChild(titleEl);
+  if (description) {
+    const descEl = el("div", "empty-state-desc");
+    descEl.textContent = description;
+    wrap.appendChild(descEl);
+  }
+  if (actionLabel && actionFn) {
+    const actionDiv = el("div", "empty-state-action");
+    const btn = el("button", "btn btn-accent");
+    btn.textContent = actionLabel;
+    btn.addEventListener("click", actionFn);
+    actionDiv.appendChild(btn);
+    wrap.appendChild(actionDiv);
+  }
+  container.appendChild(wrap);
+}
 const fmtKW = (v) => (v == null ? "—" : (v / 1000).toFixed(2));
 const fmtKWh = (v) => (v == null ? "—" : Number(v).toFixed(2));
 const fmtMWh = (kwh, d = 6) =>
@@ -1005,17 +1034,17 @@ function bindLicenseNoticeUpload() {
         const msg = res?.canceled
           ? "License upload cancelled."
           : res?.error || "License upload failed.";
-        pushToast("warning", msg);
+        Toast.warning(msg);
         return;
       }
-      pushToast("success", "License uploaded successfully.");
+      Toast.success("License uploaded successfully.");
       if (res.status) {
         State.licenseStatus = res.status;
         renderLicenseNotice(res.status);
         renderLicenseSummary();
       }
     } catch (err) {
-      pushToast("error", `License upload failed: ${err.message || err}`);
+      Toast.error(`License upload failed: ${err.message || err}`);
     }
   });
 }
@@ -1514,6 +1543,25 @@ function getStoredTheme() {
   }
 }
 
+function getStoredInverterCardOrder() {
+  try {
+    const raw = localStorage.getItem(CARD_ORDER_STORAGE_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map(Number).filter(n => Number.isFinite(n) && n > 0) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistInverterCardOrder(orderArr) {
+  try {
+    localStorage.setItem(CARD_ORDER_STORAGE_KEY, JSON.stringify(orderArr));
+  } catch (err) {
+    console.warn("[app] persistInverterCardOrder failed:", err.message);
+  }
+}
+
 function applyTheme(theme, persist = true) {
   const active = SUPPORTED_THEMES.includes(theme) ? theme : "dark";
   document.documentElement.setAttribute("data-theme", active);
@@ -1534,16 +1582,86 @@ function applyTheme(theme, persist = true) {
   refreshChartsTheme();
 }
 
+// ─── Theme Preview Modal ──────────────────────────────────────────────────────
+
+const THEME_PREVIEW_COLORS = {
+  dark:    { bg: "#130a0d", header: "#1e1014", accent: "#d86a8b", bar: "#3a1c24", text: "#f0d5de", label: "Maroon" },
+  light:   { bg: "#e8dfcf", header: "#f0ece2", accent: "#2b67ad", bar: "#c4bfb2", text: "#2e2b27", label: "Light"  },
+  classic: { bg: "#060d19", header: "#0d1a2e", accent: "#2d7ef7", bar: "#152133", text: "#c5daf5", label: "Classic"},
+};
+
+function buildThemePreviewGrid() {
+  const grid = $("themePreviewGrid");
+  if (!grid) return;
+  const current = document.documentElement.getAttribute("data-theme") || "dark";
+  grid.innerHTML = "";
+  SUPPORTED_THEMES.forEach(theme => {
+    const c = THEME_PREVIEW_COLORS[theme];
+    const isActive = theme === current;
+    const swatch = document.createElement("div");
+    swatch.className = "theme-preview-swatch" + (isActive ? " active" : "");
+    swatch.dataset.theme = theme;
+    swatch.innerHTML =
+      `<div class="theme-swatch-preview" style="background:${c.bg}">` +
+        `<div class="theme-swatch-header" style="background:${c.header}">` +
+          `<div class="theme-swatch-dot" style="background:${c.accent}"></div>` +
+          `<div class="theme-swatch-dot" style="background:${c.bar};opacity:0.6"></div>` +
+          `<div class="theme-swatch-dot" style="background:${c.bar};opacity:0.4"></div>` +
+        `</div>` +
+        `<div class="theme-swatch-accent-strip" style="background:${c.accent}"></div>` +
+        `<div class="theme-swatch-body">` +
+          `<div class="theme-swatch-bar" style="background:${c.bar};width:100%"></div>` +
+          `<div class="theme-swatch-bar" style="background:${c.bar};width:80%"></div>` +
+          `<div class="theme-swatch-bar" style="background:${c.bar};width:60%"></div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="theme-swatch-label" style="background:${c.header};color:${c.text}">` +
+        `<span>${c.label}</span>` +
+        `<span class="theme-swatch-check" style="background:${c.accent};color:#fff">${isActive ? "✓" : ""}</span>` +
+      `</div>`;
+    swatch.addEventListener("click", () => {
+      applyTheme(theme, true);
+      closeThemePreviewModal();
+    });
+    grid.appendChild(swatch);
+  });
+}
+
+function openThemePreviewModal() {
+  const modal = $("themePreviewModal");
+  if (!modal) return;
+  buildThemePreviewGrid();
+  modal.classList.remove("hidden");
+  const closeBtn = $("themePreviewClose");
+  if (closeBtn) {
+    closeBtn.onclick = closeThemePreviewModal;
+    closeBtn.focus();
+  }
+  const onBackdrop = (e) => { if (e.target === modal) closeThemePreviewModal(); };
+  modal._backdropHandler = onBackdrop;
+  modal.addEventListener("click", onBackdrop);
+}
+
+function closeThemePreviewModal() {
+  const modal = $("themePreviewModal");
+  if (!modal) return;
+  if (modal._backdropHandler) {
+    modal.removeEventListener("click", modal._backdropHandler);
+    modal._backdropHandler = null;
+  }
+  modal.classList.add("hidden");
+}
+
 function initThemeToggle() {
   applyTheme(getStoredTheme(), false);
   const btn = $("themeToggleBtn");
   if (!btn) return;
-  btn.addEventListener("click", () => {
-    const current =
-      document.documentElement.getAttribute("data-theme") || "dark";
-    const idx = SUPPORTED_THEMES.indexOf(current);
-    const next = SUPPORTED_THEMES[(idx + 1) % SUPPORTED_THEMES.length];
-    applyTheme(next, true);
+  btn.addEventListener("click", () => openThemePreviewModal());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const modal = $("themePreviewModal");
+      if (modal && !modal.classList.contains("hidden")) closeThemePreviewModal();
+    }
   });
 }
 const EXPORT_DATE_FIELD_IDS = [
@@ -2355,10 +2473,11 @@ function fmtBytes(b) {
   return `${(b / 1048576).toFixed(2)} MB`;
 }
 
-function renderEmptyRow(tbody, colspan, message) {
+function renderEmptyRow(tbody, colspan, message, icon) {
   if (!tbody) return;
   const tr = el("tr", "table-empty");
-  tr.innerHTML = `<td colspan="${colspan}">${message}</td>`;
+  const iconHtml = icon ? `<span class="mdi ${icon}" style="font-size:28px;opacity:0.4;display:block;margin-bottom:6px"></span>` : "";
+  tr.innerHTML = `<td colspan="${colspan}" style="text-align:center;padding:32px 16px;color:var(--text3)">${iconHtml}${message}</td>`;
   tbody.appendChild(tr);
 }
 
@@ -3672,6 +3791,7 @@ function setupNav() {
     btn.addEventListener("click", () => switchPage(btn.dataset.page));
   });
 }
+
 function switchPage(page) {
   State.currentPage = page;
   if (page !== "analytics") {
@@ -5953,6 +6073,7 @@ async function saveSettings() {
       saveMsg,
       "",
     );
+    Toast.success(transitionWarning ? "Settings saved (with warnings)." : "Settings saved.", 3500);
     buildInverterGrid();
     scheduleInverterCardsUpdate(true); // render cards immediately with cleared/current data
     buildSelects();
@@ -5985,6 +6106,7 @@ async function saveSettings() {
     return true;
   } catch (e) {
     showMsg(settingsMsgId, "✗ Save failed: " + e.message, "error");
+    Toast.error("Save failed: " + e.message, 5000);
     return false;
   }
 }
@@ -7300,16 +7422,110 @@ function buildInverterGrid() {
   State.nodeOrderSig = {};
   const count = State.settings.inverterCount;
   const nodes = State.settings.nodeCount || 4;
+  const storedOrder = getStoredInverterCardOrder();
+  const seen = new Set();
+  const ordered = [];
+  if (storedOrder) {
+    for (const i of storedOrder) {
+      if (i >= 1 && i <= count && !seen.has(i)) { ordered.push(i); seen.add(i); }
+    }
+  }
+  for (let i = 1; i <= count; i++) {
+    if (!seen.has(i)) ordered.push(i);
+  }
   const frag = document.createDocumentFragment();
   frag.appendChild(buildPlantCapPanel());
   frag.appendChild(buildBulkControlPanel());
-  for (let i = 1; i <= count; i++) {
+  for (const i of ordered) {
     frag.appendChild(buildInverterCard(i, nodes));
   }
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
   syncPlantCapFormsFromSettingsState();
   renderPlantCapPanel();
+  initInverterGridDrag();
+}
+
+function initInverterGridDrag() {
+  const grid = $("invGrid");
+  if (!grid || grid.dataset.dragInit === "1") return;
+  grid.dataset.dragInit = "1";
+  let dragSrcId = null;
+  let placeholder = null;
+
+  function removePlaceholder() {
+    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+    placeholder = null;
+  }
+
+  // Returns the DOM node to insertBefore (null = append at end).
+  // Splits the target card at its vertical midpoint: top half → before, bottom half → after.
+  function getInsertRef(targetCard, mouseY) {
+    const r = targetCard.getBoundingClientRect();
+    return mouseY < r.top + r.height / 2 ? targetCard : (targetCard.nextSibling || null);
+  }
+
+  grid.addEventListener("dragstart", (e) => {
+    const card = e.target.closest(".inv-card[draggable='true']");
+    if (!card) return;
+    dragSrcId = card.id;
+    // Delay class add one frame so the browser captures the un-faded card as drag image
+    requestAnimationFrame(() => card.classList.add("dragging"));
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", card.id);
+  });
+
+  grid.addEventListener("dragend", () => {
+    grid.querySelectorAll(".inv-card.dragging, .inv-card.drag-over").forEach(c => {
+      c.classList.remove("dragging", "drag-over");
+    });
+    removePlaceholder();
+    dragSrcId = null;
+  });
+
+  grid.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    if (!dragSrcId) return;
+    const card = e.target.closest(".inv-card[draggable='true']");
+    if (!card || card.id === dragSrcId) return;
+    e.dataTransfer.dropEffect = "move";
+
+    const insertRef = getInsertRef(card, e.clientY);
+    // Skip DOM work when the placeholder is already in the right spot
+    if (placeholder && placeholder.nextSibling === insertRef) return;
+
+    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+
+    placeholder = document.createElement("div");
+    placeholder.className = "inv-card drag-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    grid.insertBefore(placeholder, insertRef);
+  });
+
+  grid.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget || !grid.contains(e.relatedTarget)) {
+      grid.querySelectorAll(".inv-card.drag-over").forEach(c => c.classList.remove("drag-over"));
+      removePlaceholder();
+    }
+  });
+
+  grid.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const srcCard = dragSrcId ? $(dragSrcId) : null;
+    if (srcCard && placeholder && placeholder.parentNode) {
+      grid.insertBefore(srcCard, placeholder);
+    } else if (srcCard) {
+      const targetCard = e.target.closest(".inv-card[draggable='true']");
+      if (targetCard && targetCard.id !== dragSrcId) grid.insertBefore(srcCard, targetCard);
+    }
+    grid.querySelectorAll(".inv-card.drag-over").forEach(c => c.classList.remove("drag-over"));
+    removePlaceholder();
+    dragSrcId = null;
+    const newOrder = [...grid.querySelectorAll(".inv-card[draggable='true']")]
+      .map(c => parseInt(c.id.replace("inv-card-", ""), 10))
+      .filter(n => Number.isFinite(n) && n > 0);
+    persistInverterCardOrder(newOrder);
+  });
 }
 
 function currentOperator() {
@@ -7823,9 +8039,11 @@ function buildBulkControlPanel() {
   return wrap;
 }
 
+
 function buildInverterCard(inv, nodeCount) {
   const card = el("div", "inv-card");
   card.id = `inv-card-${inv}`;
+  card.draggable = true;
   const invLabel = getInverterBaseLabel(inv);
   const invIp = getConfiguredInverterIp(inv);
   card.innerHTML = `
@@ -8110,9 +8328,10 @@ function updateInverterCards() {
     }
 
     // PAC
-    const pacKw = (pac / 1000).toFixed(2);
-    pacEl.textContent = pacKw;
-    pacEl.className = "pac-val" + (pac === 0 ? " zero" : " active");
+    if (pacEl) {
+      pacEl.textContent = (pac / 1000).toFixed(2);
+      pacEl.className = "pac-val" + (pac === 0 ? " zero" : " active");
+    }
     if (pdcSumEl) {
       pdcSumEl.textContent = (pdc / 1000).toFixed(2);
       pdcSumEl.className = "pac-val" + (pdc === 0 ? " zero" : " active");
@@ -9260,7 +9479,7 @@ async function loadInverterDetail(inv) {
       } catch (_) { /* silent — stale values stay */ }
     }, 60000);
   } catch (err) {
-    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Unable to load detail view: ${err.message}</span></div>`;
+    if (statsEl) statsEl.innerHTML = `<div class="inv-detail-stat"><span class="inv-detail-stat-label" style="color:var(--red)">Unable to load detail view: ${escapeHtml(err.message)}</span></div>`;
   } finally {
     State.invDetailLoading = false;
   }
@@ -9995,7 +10214,7 @@ function renderAlarmTable(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
   if (!safeRows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 10, "No alarm records for the selected date.");
+    renderEmptyRow(tbody, 10, "No alarm records for the selected date.", "mdi-bell-off-outline");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -10017,6 +10236,13 @@ function renderAlarmTable(rows) {
       : `<button class="ack-btn" data-alarm-id="${r.id}">ACK</button>`;
     const tr = el("tr");
     tr.id = `alarm-row-${r.id}`;
+    tr.dataset.alarm_time = occurredTs;
+    tr.dataset.inverter = Number(r.inverter || 0);
+    tr.dataset.node = Number(r.unit || 0);
+    tr.dataset.severity = r.severity || "fault";
+    tr.dataset.cleared = clearedTs || 0;
+    tr.dataset.duration_ms = Number(r.duration_ms || 0);
+    tr.dataset.status = statusRaw;
     tr.innerHTML = `
       <td>${fmtDateTime(occurredTs)}</td>
       <td>INV-${String(r.inverter).padStart(2, "0")}</td>
@@ -10032,6 +10258,7 @@ function renderAlarmTable(rows) {
   });
   tbody.textContent = "";
   tbody.appendChild(frag);
+  reapplyTableSort("alarmTable", tbody);
 }
 
 async function ackAlarm(id, btn) {
@@ -10302,6 +10529,7 @@ function renderEnergyTable(rows) {
       tbody,
       4,
       "No 5-minute energy records for the selected date.",
+      "mdi-chart-box-outline",
     );
     return;
   }
@@ -10316,6 +10544,10 @@ function renderEnergyTable(rows) {
   ordered.forEach((r) => {
     const dt = new Date(r.ts);
     const tr = el("tr");
+    tr.dataset.date = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+    tr.dataset.ts = Number(r.ts || 0);
+    tr.dataset.inverter = Number(r.inverter || 0);
+    tr.dataset.kwh_inc = Number(r.kwh_inc || 0);
     tr.innerHTML = `
       <td>${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}</td>
       <td>${pad2(dt.getHours())}:${pad2(dt.getMinutes())}</td>
@@ -10325,6 +10557,7 @@ function renderEnergyTable(rows) {
   });
   tbody.textContent = "";
   tbody.appendChild(frag);
+  reapplyTableSort("energyTable", tbody);
 }
 
 function renderEnergySummaryFromStats(summary) {
@@ -10469,7 +10702,7 @@ function renderAuditTable(rows) {
   if (!tbody) return;
   if (!rows.length) {
     tbody.textContent = "";
-    renderEmptyRow(tbody, 9, "No audit records for the selected date.");
+    renderEmptyRow(tbody, 9, "No audit records for the selected date.", "mdi-file-document-outline");
     return;
   }
   const frag = document.createDocumentFragment();
@@ -10921,7 +11154,7 @@ function renderReportTable(rows, totalRows = rows.length) {
         ? "No rows match current report filters."
         : "No daily report rows for this date.";
     tbody.textContent = "";
-    renderEmptyRow(tbody, 8, msg);
+    renderEmptyRow(tbody, 8, msg, "mdi-file-chart-outline");
     return;
   }
 
@@ -11970,6 +12203,7 @@ function buildAnalyticsDisplayTimeline(intervalMin = 5) {
   for (let ts = startTs; ts <= endTs; ts += stepMs) out.push(ts);
   return out;
 }
+
 
 function chartOpts(unit, showLegend) {
   const pal = getChartPalette();
@@ -13340,6 +13574,75 @@ async function _lbPollUntilDone(labelEl, barEl) {
   throw new Error("Operation timed out");
 }
 
+// ─── Sortable Tables ─────────────────────────────────────────────────────────
+const _sortState = {};
+
+function sortTableRows(tbody, key, dir) {
+  const rows = Array.from(tbody.querySelectorAll("tr:not(.table-empty)"));
+  if (rows.length < 2) return;
+  rows.sort((a, b) => {
+    const aVal = (a.dataset[key] || a.querySelector(`[data-${key}]`)?.dataset[key] || "").toString();
+    const bVal = (b.dataset[key] || b.querySelector(`[data-${key}]`)?.dataset[key] || "").toString();
+    const aNum = parseFloat(aVal);
+    const bNum = parseFloat(bVal);
+    const isNum = !isNaN(aNum) && !isNaN(bNum);
+    let cmp = isNum ? aNum - bNum : aVal.localeCompare(bVal, undefined, { numeric: true });
+    return dir === "asc" ? cmp : -cmp;
+  });
+  const frag = document.createDocumentFragment();
+  rows.forEach((r) => frag.appendChild(r));
+  tbody.appendChild(frag);
+}
+
+function makeTableSortable(tableId, tbodyId, defaultKey, defaultDir = "desc") {
+  const table = document.getElementById(tableId);
+  if (!table || table.dataset.sortableInit === "1") return;
+  table.dataset.sortableInit = "1";
+  const tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  const stateKey = `sort_${tableId}`;
+  const saved = (() => { try { return JSON.parse(localStorage.getItem(stateKey) || "null"); } catch { return null; } })();
+  _sortState[tableId] = saved || { key: defaultKey, dir: defaultDir };
+
+  const applySort = (key, dir) => {
+    _sortState[tableId] = { key, dir };
+    try { localStorage.setItem(stateKey, JSON.stringify({ key, dir })); } catch {}
+    table.querySelectorAll("thead th.sortable").forEach((th) => {
+      th.classList.remove("sorted-asc", "sorted-desc");
+      if (th.dataset.sortKey === key) th.classList.add(dir === "asc" ? "sorted-asc" : "sorted-desc");
+    });
+    sortTableRows(tbody, key, dir);
+  };
+
+  table.querySelectorAll("thead th.sortable").forEach((th) => {
+    th.addEventListener("click", () => {
+      const cur = _sortState[tableId];
+      const newDir = cur.key === th.dataset.sortKey && cur.dir === "desc" ? "asc" : "desc";
+      applySort(th.dataset.sortKey, newDir);
+    });
+  });
+
+  // Apply initial sort indicator (rows may not be populated yet — observer handles live re-sorts)
+  const cur = _sortState[tableId];
+  if (cur && cur.key) {
+    table.querySelectorAll("thead th.sortable").forEach((th) => {
+      if (th.dataset.sortKey === cur.key) th.classList.add(cur.dir === "asc" ? "sorted-asc" : "sorted-desc");
+    });
+  }
+}
+
+// Re-sort a table after its tbody has been repopulated
+function reapplyTableSort(tableId, tbody) {
+  const state = _sortState[tableId];
+  if (!state) return;
+  sortTableRows(tbody, state.key, state.dir);
+  const table = document.getElementById(tableId);
+  table?.querySelectorAll("thead th.sortable").forEach((th) => {
+    th.classList.remove("sorted-asc", "sorted-desc");
+    if (th.dataset.sortKey === state.key) th.classList.add(state.dir === "asc" ? "sorted-asc" : "sorted-desc");
+  });
+}
+
 function escapeHtml(str) {
   return String(str || "")
     .replace(/&/g, "&amp;")
@@ -13347,6 +13650,82 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+// ─── Toast Notification System ────────────────────────────────────────────────
+const Toast = (() => {
+  const MAX_STACK = 6;
+  const TYPE_META = {
+    success: { icon: "✅", label: "Success" },
+    error:   { icon: "❌", label: "Error" },
+    warning: { icon: "⚠️", label: "Warning" },
+    info:    { icon: "ℹ️", label: "Info" },
+  };
+
+  function getContainer() {
+    let c = document.getElementById("toastContainerModern");
+    if (!c) {
+      c = document.createElement("div");
+      c.id = "toastContainerModern";
+      c.className = "toast-container-modern";
+      document.body.appendChild(c);
+    }
+    return c;
+  }
+
+  function dismiss(toastEl, container) {
+    if (toastEl._dismissed) return;
+    toastEl._dismissed = true;
+    toastEl.classList.add("toast-dismissing");
+    toastEl.addEventListener("animationend", () => {
+      if (toastEl.parentNode === container) container.removeChild(toastEl);
+    }, { once: true });
+  }
+
+  function show(msg, type = "info", ttlMs = 5000) {
+    const container = getContainer();
+    while (container.children.length >= MAX_STACK) {
+      dismiss(container.firstElementChild, container);
+    }
+    const meta = TYPE_META[type] || TYPE_META.info;
+    const toastEl = document.createElement("div");
+    toastEl.className = `toast-modern toast-${type}`;
+    const safeTtl = Math.max(1500, Number(ttlMs) || 5000);
+    toastEl.innerHTML = `
+      <span class="toast-modern-icon">${meta.icon}</span>
+      <div class="toast-modern-body">
+        <div class="toast-modern-title">${escapeHtml(meta.label)}</div>
+        <div class="toast-modern-msg">${escapeHtml(msg)}</div>
+      </div>
+      <button class="toast-modern-close" aria-label="Dismiss">✕</button>
+      <div class="toast-modern-progress"></div>`;
+    container.appendChild(toastEl);
+
+    const progressEl = toastEl.querySelector(".toast-modern-progress");
+    progressEl.style.animation = `toastProgress ${safeTtl}ms linear forwards`;
+
+    toastEl.querySelector(".toast-modern-close").addEventListener("click", () => {
+      dismiss(toastEl, container);
+    });
+
+    let timer = setTimeout(() => dismiss(toastEl, container), safeTtl);
+    toastEl.addEventListener("mouseenter", () => {
+      clearTimeout(timer);
+      progressEl.style.animationPlayState = "paused";
+    });
+    toastEl.addEventListener("mouseleave", () => {
+      timer = setTimeout(() => dismiss(toastEl, container), 1500);
+      progressEl.style.animationPlayState = "running";
+    });
+  }
+
+  return {
+    show,
+    success: (msg, ttl) => show(msg, "success", ttl),
+    error:   (msg, ttl) => show(msg, "error",   ttl),
+    warning: (msg, ttl) => show(msg, "warning",  ttl),
+    info:    (msg, ttl) => show(msg, "info",     ttl),
+  };
+})();
 
 // ─── Event Bindings ───────────────────────────────────────────────────────────
 function bindEventHandlers() {
@@ -13894,6 +14273,8 @@ async function init() {
     await seedTodayEnergyFromDb();
     startTodayMwhSyncTimer();
     buildInverterGrid();
+    makeTableSortable("alarmTable", "alarmBody", "alarm_time", "desc");
+    makeTableSortable("energyTable", "energyBody", "ts", "desc");
     buildSelects();
 
     reportStartupProgress({

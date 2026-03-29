@@ -13941,6 +13941,37 @@ app.get("/api/energy/today", (req, res) => {
   }
 });
 
+// Daily energy totals per inverter for a time range — used by sparklines.
+app.get("/api/energy/daily", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const end = req.query.end ? Number(req.query.end) : Date.now();
+    const start = req.query.start ? Number(req.query.start) : end - 7 * 86400000;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
+      return res.status(400).json({ ok: false, error: "invalid range" });
+    }
+    const rows = queryEnergy5minRangeAll(start, end);
+    const byInvDate = {};
+    for (const row of rows) {
+      const inv = Number(row.inverter || 0);
+      if (!inv) continue;
+      const dt = new Date(Number(row.ts || 0)).toISOString().slice(0, 10);
+      const key = `${inv}|${dt}`;
+      byInvDate[key] = (byInvDate[key] || 0) + Number(row.kwh_inc || 0);
+    }
+    const result = Object.entries(byInvDate).map(([k, kwh_total]) => {
+      const [inverter, date] = k.split("|");
+      return { inverter: Number(inverter), date, kwh_total };
+    });
+    return res.json(result);
+  } catch (e) {
+    console.warn("[energy/daily] failed:", e.message);
+    return res.json([]);
+  }
+});
+
 app.get("/api/report/daily", (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
