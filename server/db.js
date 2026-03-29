@@ -9,7 +9,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { getExplicitDataDir, getPortableDataRoot } = require("./runtimeEnvPaths");
-const { resolvedDbDir } = require("./storagePaths");
+const { resolvedDbDir, getNewRoot, isMigrationComplete } = require("./storagePaths");
 
 const EXPLICIT_DATA_DIR = getExplicitDataDir();
 const PORTABLE_ROOT = getPortableDataRoot();
@@ -95,7 +95,15 @@ const MAIN_DB_PENDING_REPLACEMENT_PATH = path.join(
   DATA_DIR,
   ".pending-main-db-replacement.json",
 );
-const ARCHIVE_DIR = path.join(DATA_DIR, "archive");
+// v2.5.0+ consolidated layout: archive lives at %PROGRAMDATA%\InverterDashboard\archive\
+// (one level above DATA_DIR which is the db/ subdirectory). Explicit data-dir overrides
+// and portable mode continue to use DATA_DIR/archive as before.
+const ARCHIVE_DIR = (() => {
+  if (EXPLICIT_DATA_DIR || PORTABLE_ROOT) return path.join(DATA_DIR, "archive");
+  const newArchive = path.join(getNewRoot(), "archive");
+  if (isMigrationComplete() || fs.existsSync(newArchive)) return newArchive;
+  return path.join(DATA_DIR, "archive");
+})();
 const SUMMARY_SOLAR_START_H = 5;
 const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;

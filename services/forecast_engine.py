@@ -124,7 +124,14 @@ else:
         if candidate != IPCONFIG_FILE and candidate not in LEGACY_IPCONFIG_FILES:
             LEGACY_IPCONFIG_FILES.append(candidate)
 
-ARCHIVE_DIR = APP_DB_FILE.parent / "archive"
+if EXPLICIT_DATA_DIR or PORTABLE_ROOT is not None:
+    ARCHIVE_DIR = APP_DB_FILE.parent / "archive"
+else:
+    _new_archive = BASE / "archive"
+    if _migration_done or _new_archive.exists():
+        ARCHIVE_DIR = _new_archive
+    else:
+        ARCHIVE_DIR = APP_DB_FILE.parent / "archive"
 SQLITE_READ_TIMEOUT_SEC = 8.0
 SQLITE_WRITE_TIMEOUT_SEC = 20.0
 SQLITE_RETRY_ATTEMPTS = 3

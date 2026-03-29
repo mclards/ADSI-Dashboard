@@ -15,6 +15,7 @@ const crypto = require("crypto");
 const Database = require("better-sqlite3");
 const { autoUpdater } = require("electron-updater");
 const { getExplicitDataDir, getPortableDataRoot } = require("../server/runtimeEnvPaths");
+const { resolvedDbDir } = require("../server/storagePaths");
 
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -3423,6 +3424,17 @@ function getLocalSettingsDbPath() {
   if (portableRoot) {
     return path.join(portableRoot, "db", "adsi.db");
   }
+
+  // v2.5.0+ consolidated layout: %PROGRAMDATA%\InverterDashboard\db\adsi.db
+  // resolvedDbDir() returns the new dir once migration is complete (or the DB
+  // file already exists there). Without this check the old APPDATA DB (never
+  // deleted by the zero-deletion migration) would be found first and could
+  // return a stale operationMode — causing ip-config / topology to appear
+  // locked even after the user switched back to gateway mode.
+  try {
+    const dir = resolvedDbDir();
+    if (dir) return path.join(dir, "adsi.db");
+  } catch (_) {}
 
   if (process.env.APPDATA) {
     const preferred = path.join(process.env.APPDATA, "Inverter-Dashboard", "adsi.db");

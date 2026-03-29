@@ -13764,46 +13764,53 @@ app.get("/api/forecast/qa-history", (req, res) => {
       )
       .all(cutoff);
 
-    // Fallback: derive from forecast_run_audit + daily_report when QA table is empty
+    // Gap-fill: supplement QA rows with preview rows from forecast_run_audit for dates
+    // not yet in the QA table. Previously this fallback only ran when the QA table was
+    // completely empty, so a single QA row suppressed all historical preview data.
+    const coveredDates = new Set(rows.map((r) => r.target_date));
+    const fallbackRows = db
+      .prepare(
+        `SELECT fra.target_date,
+                fra.provider_used,
+                fra.forecast_variant,
+                fra.solcast_freshness_class,
+                'preview'  AS comparison_quality,
+                0          AS include_in_error_memory,
+                fra.final_forecast_total_kwh          AS total_forecast_kwh,
+                NULL                                  AS total_forecast_lo_kwh,
+                NULL                                  AS total_forecast_hi_kwh,
+                dr.actual_kwh                         AS total_actual_kwh,
+                CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
+                     THEN ABS(fra.final_forecast_total_kwh - dr.actual_kwh) END AS total_abs_error_kwh,
+                CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
+                     THEN ROUND(ABS(fra.final_forecast_total_kwh - dr.actual_kwh) / dr.actual_kwh * 100, 2) END AS daily_wape_pct,
+                NULL AS daily_mape_pct,
+                NULL AS usable_slot_count,
+                NULL AS masked_slot_count,
+                fra.generated_ts AS computed_ts
+         FROM forecast_run_audit fra
+         JOIN (
+           SELECT target_date, MAX(generated_ts) AS max_ts
+           FROM forecast_run_audit
+           WHERE is_authoritative_runtime = 1 AND run_status = 'success'
+           GROUP BY target_date
+         ) latest ON latest.target_date = fra.target_date AND latest.max_ts = fra.generated_ts
+         LEFT JOIN (
+           SELECT date, SUM(kwh_total) AS actual_kwh
+           FROM daily_report
+           GROUP BY date
+         ) dr ON dr.date = fra.target_date
+         WHERE fra.target_date >= ?
+         ORDER BY fra.target_date DESC`,
+      )
+      .all(cutoff);
+    const gapRows = fallbackRows.filter((r) => !coveredDates.has(r.target_date));
+    if (gapRows.length > 0) {
+      rows = [...rows, ...gapRows];
+      rows.sort((a, b) => (a.target_date > b.target_date ? -1 : 1));
+    }
     if (rows.length === 0) {
-      console.warn("[forecast/qa-history] QA table empty — using fallback from forecast_run_audit + daily_report (quality marked 'preview')");
-
-      rows = db
-        .prepare(
-          `SELECT fra.target_date,
-                  fra.provider_used,
-                  fra.forecast_variant,
-                  fra.solcast_freshness_class,
-                  'preview'  AS comparison_quality,
-                  0          AS include_in_error_memory,
-                  fra.final_forecast_total_kwh          AS total_forecast_kwh,
-                  NULL                                  AS total_forecast_lo_kwh,
-                  NULL                                  AS total_forecast_hi_kwh,
-                  dr.actual_kwh                         AS total_actual_kwh,
-                  CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
-                       THEN ABS(fra.final_forecast_total_kwh - dr.actual_kwh) END AS total_abs_error_kwh,
-                  CASE WHEN dr.actual_kwh > 0 AND fra.final_forecast_total_kwh IS NOT NULL
-                       THEN ROUND(ABS(fra.final_forecast_total_kwh - dr.actual_kwh) / dr.actual_kwh * 100, 2) END AS daily_wape_pct,
-                  NULL AS daily_mape_pct,
-                  NULL AS usable_slot_count,
-                  NULL AS masked_slot_count,
-                  fra.generated_ts AS computed_ts
-           FROM forecast_run_audit fra
-           JOIN (
-             SELECT target_date, MAX(generated_ts) AS max_ts
-             FROM forecast_run_audit
-             WHERE is_authoritative_runtime = 1 AND run_status = 'success'
-             GROUP BY target_date
-           ) latest ON latest.target_date = fra.target_date AND latest.max_ts = fra.generated_ts
-           LEFT JOIN (
-             SELECT date, SUM(kwh_total) AS actual_kwh
-             FROM daily_report
-             GROUP BY date
-           ) dr ON dr.date = fra.target_date
-           WHERE fra.target_date >= ?
-           ORDER BY fra.target_date DESC`,
-        )
-        .all(cutoff);
+      console.warn("[forecast/qa-history] No data found in QA table or forecast_run_audit for the requested window.");
     }
 
     return res.json({ ok: true, rows });
