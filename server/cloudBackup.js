@@ -20,9 +20,10 @@ const path = require("path");
 const crypto = require("crypto");
 const cron = require("node-cron");
 const fetch = require("node-fetch");
+const { execFileSync } = require("child_process");
 
 const APP_VERSION = require("../package.json").version;
-const { resolvedBackupDir, resolvedBackupHistoryFile } = require("./storagePaths");
+const { resolvedBackupDir, resolvedBackupHistoryFile, resolvedLicenseDir, getNewRoot } = require("./storagePaths");
 const DB_SCHEMA_VERSION = "2";
 
 // Limit how many local backup packages to keep.
@@ -1450,6 +1451,341 @@ class CloudBackupService {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     return { ok: true };
+  }
+
+  // ─── Portable Backup (Full System) ────────────────────────────────────────
+
+  /**
+   * Create a full-system backup and export as a portable .adsibak file.
+   * Includes: database, config, forecast, archive, license, auth.
+   * @param {string} destPath  Destination file path (.adsibak)
+   * @returns {Promise<{ok, path, manifest}>}
+   */
+  async createPortableBackup(destPath) {
+    if (
+      this.progress.status !== "idle" &&
+      this.progress.status !== "done" &&
+      this.progress.status !== "error"
+    ) {
+      throw new Error("A backup/restore operation is already in progress");
+    }
+
+    this._setProgress({
+      status: "creating",
+      pct: 2,
+      message: "Creating full system backup…",
+      startedAt: Date.now(),
+      error: null,
+      finishedAt: null,
+    });
+
+    try {
+      // Step 1: Create standard backup with database + config + logs
+      this._setProgress({ pct: 5, message: "Backing up database and config…" });
+      const { id, dir, manifest } = await this.createLocalBackup({
+        scope: ["database", "config", "logs"],
+        tag: "portable-full",
+      });
+
+      // Step 2: Copy additional directories into the package
+      const root = getNewRoot();
+
+      // Archive databases
+      const archiveDir = path.join(root, "archive");
+      if (fs.existsSync(archiveDir)) {
+        this._setProgress({ pct: 50, message: "Backing up archive databases…" });
+        const archiveDest = path.join(dir, "archive");
+        copyDirRecursive(archiveDir, archiveDest);
+        this._recordFilesFromDir(archiveDest, "archive", manifest.checksums, manifest.files);
+      }
+
+      // License files
+      const licenseDir = resolvedLicenseDir();
+      if (licenseDir && fs.existsSync(licenseDir)) {
+        this._setProgress({ pct: 58, message: "Backing up license files…" });
+        const licenseDest = path.join(dir, "license");
+        copyDirRecursive(licenseDir, licenseDest);
+        this._recordFilesFromDir(licenseDest, "license", manifest.checksums, manifest.files);
+      }
+
+      // Auth tokens
+      const authDir = path.join(root, "auth");
+      if (fs.existsSync(authDir)) {
+        this._setProgress({ pct: 62, message: "Backing up auth tokens…" });
+        const authDest = path.join(dir, "auth");
+        copyDirRecursive(authDir, authDest);
+        this._recordFilesFromDir(authDest, "auth", manifest.checksums, manifest.files);
+      }
+
+      // Update manifest with full scope
+      manifest.scope = ["database", "config", "logs", "archive", "license", "auth"];
+      manifest.tag = "portable-full";
+      manifest.totalSize = manifest.files.reduce((s, f) => s + f.size, 0);
+      const manifestPath = path.join(dir, "manifest.json");
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      // Step 3: Zip the package then rename to .adsibak
+      // PowerShell Compress-Archive only supports .zip extension
+      this._setProgress({ pct: 70, message: "Compressing backup…" });
+      const zipTmp = destPath.replace(/\.adsibak$/i, ".zip");
+
+      execFileSync("powershell", [
+        "-NoProfile", "-Command",
+        `Compress-Archive -Path '${String(dir).replace(/'/g, "''")}\\*' -DestinationPath '${String(zipTmp).replace(/'/g, "''")}' -Force`,
+      ], { timeout: 300000, windowsHide: true });
+
+      if (!fs.existsSync(zipTmp)) {
+        throw new Error("Failed to create backup archive");
+      }
+      fs.renameSync(zipTmp, destPath);
+
+      const archiveSize = fs.statSync(destPath).size;
+
+      // Step 4: Clean up the temporary package directory
+      this._setProgress({ pct: 90, message: "Cleaning up…" });
+      this.deleteLocalBackup(id);
+
+      this._addHistoryEntry({
+        id: `portable-${Date.now()}`,
+        createdAt: manifest.createdAt,
+        scope: manifest.scope,
+        tag: "portable-full",
+        totalSize: archiveSize,
+        status: "exported",
+        cloud: {},
+        dir: null,
+        exportedTo: destPath,
+      });
+
+      this._setProgress({
+        status: "done",
+        pct: 100,
+        message: `Backup exported (${(archiveSize / 1048576).toFixed(1)} MB)`,
+        finishedAt: Date.now(),
+      });
+
+      console.log(`[CloudBackup] Portable backup exported: ${destPath}`);
+      return { ok: true, path: destPath, manifest, archiveSize };
+    } catch (err) {
+      this._setProgress({
+        status: "error",
+        pct: 0,
+        message: err.message,
+        error: err.message,
+        finishedAt: Date.now(),
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Import a portable .adsibak file, validate it, and make it available for restore.
+   * @param {string} srcPath  Path to the .adsibak file
+   * @returns {Promise<{ok, id, manifest}>}
+   */
+  async importPortableBackup(srcPath) {
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Backup file not found: ${srcPath}`);
+    }
+
+    if (
+      this.progress.status !== "idle" &&
+      this.progress.status !== "done" &&
+      this.progress.status !== "error"
+    ) {
+      throw new Error("A backup/restore operation is already in progress");
+    }
+
+    this._setProgress({
+      status: "creating",
+      pct: 5,
+      message: "Importing backup file…",
+      startedAt: Date.now(),
+      error: null,
+      finishedAt: null,
+    });
+
+    try {
+      // Step 1: Extract to a temporary directory
+      const nowIso = new Date().toISOString().replace(/[:.]/g, "-");
+      const id = `imported-backup-${nowIso}`;
+      const dir = path.join(this.backupDir, id);
+      fs.mkdirSync(dir, { recursive: true });
+
+      this._setProgress({ pct: 20, message: "Extracting backup archive…" });
+
+      // Expand-Archive only supports .zip — copy to a temp .zip, extract, then clean up
+      const zipTmp = path.join(this.backupDir, `_import-${Date.now()}.zip`);
+      try {
+        fs.copyFileSync(srcPath, zipTmp);
+        execFileSync("powershell", [
+          "-NoProfile", "-Command",
+          `Expand-Archive -Path '${String(zipTmp).replace(/'/g, "''")}' -DestinationPath '${String(dir).replace(/'/g, "''")}' -Force`,
+        ], { timeout: 300000, windowsHide: true });
+      } finally {
+        try { fs.unlinkSync(zipTmp); } catch (_) { /* best-effort cleanup */ }
+      }
+
+      // Step 2: Read and validate manifest
+      this._setProgress({ pct: 50, message: "Validating backup…" });
+      const manifest = safeReadJson(path.join(dir, "manifest.json"));
+      if (!manifest) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        throw new Error("Invalid backup file: manifest.json not found or corrupted");
+      }
+
+      // Check compatibility
+      this._checkCompatibility(manifest);
+
+      // Step 3: Verify checksums
+      this._setProgress({ pct: 60, message: "Verifying file integrity…" });
+      const checksumOk = this._verifyChecksums(dir, manifest);
+      if (!checksumOk) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        throw new Error("Backup integrity check failed (checksum mismatch)");
+      }
+
+      // Step 4: Add to history
+      this._setProgress({ pct: 85, message: "Registering backup…" });
+      this._addHistoryEntry({
+        id,
+        createdAt: manifest.createdAt,
+        scope: manifest.scope || ["database", "config"],
+        tag: manifest.tag || "imported",
+        totalSize: manifest.totalSize || 0,
+        status: "imported",
+        cloud: {},
+        dir,
+        importedFrom: srcPath,
+      });
+
+      this._setProgress({
+        status: "done",
+        pct: 100,
+        message: "Backup imported and validated. Ready to restore.",
+        finishedAt: Date.now(),
+      });
+
+      console.log(`[CloudBackup] Portable backup imported: ${id}`);
+      return { ok: true, id, manifest };
+    } catch (err) {
+      this._setProgress({
+        status: "error",
+        pct: 0,
+        message: err.message,
+        error: err.message,
+        finishedAt: Date.now(),
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Validate a portable .adsibak file without importing it.
+   * Returns manifest info for user preview.
+   * @param {string} srcPath  Path to the .adsibak file
+   * @returns {Promise<{ok, manifest, fileCount, totalSize}>}
+   */
+  async validatePortableBackup(srcPath) {
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Backup file not found: ${srcPath}`);
+    }
+
+    // Extract to temp dir for validation
+    const tempDir = path.join(this.backupDir, `_validate-${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    // Expand-Archive only supports .zip — copy to a temp .zip, extract, then clean up
+    const zipTmp = path.join(this.backupDir, `_validate-${Date.now()}.zip`);
+    try {
+      fs.copyFileSync(srcPath, zipTmp);
+      execFileSync("powershell", [
+        "-NoProfile", "-Command",
+        `Expand-Archive -Path '${String(zipTmp).replace(/'/g, "''")}' -DestinationPath '${String(tempDir).replace(/'/g, "''")}' -Force`,
+      ], { timeout: 300000, windowsHide: true });
+      try { fs.unlinkSync(zipTmp); } catch (_) { /* best-effort cleanup */ }
+
+      const manifest = safeReadJson(path.join(tempDir, "manifest.json"));
+      if (!manifest) {
+        throw new Error("Invalid backup: manifest.json not found");
+      }
+
+      this._checkCompatibility(manifest);
+      const checksumOk = this._verifyChecksums(tempDir, manifest);
+
+      return {
+        ok: true,
+        manifest: {
+          appVersion: manifest.appVersion,
+          schemaVersion: manifest.schemaVersion,
+          createdAt: manifest.createdAt,
+          scope: manifest.scope,
+          tag: manifest.tag,
+        },
+        fileCount: Array.isArray(manifest.files) ? manifest.files.length : 0,
+        totalSize: manifest.totalSize || 0,
+        archiveSize: fs.statSync(srcPath).size,
+        checksumOk,
+      };
+    } finally {
+      try { fs.unlinkSync(zipTmp); } catch (_) { /* already cleaned or never created */ }
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Restore a portable backup including archive, license, and auth directories.
+   * Extends standard restoreBackup with extra scope handling.
+   * @param {string} backupId  ID of the imported backup package
+   * @returns {Promise<{ok, manifest}>}
+   */
+  async restorePortableBackup(backupId) {
+    // First run the standard restore (handles database, config, logs)
+    const result = await this.restoreBackup(backupId);
+    const dir =
+      this.history.find((h) => h.id === backupId)?.dir ||
+      path.join(this.backupDir, backupId);
+
+    if (!fs.existsSync(dir)) return result;
+
+    const manifest = safeReadJson(path.join(dir, "manifest.json"));
+    const scope = manifest?.scope || [];
+    const root = getNewRoot();
+
+    // Restore archive databases
+    if (scope.includes("archive")) {
+      const srcArchive = path.join(dir, "archive");
+      if (fs.existsSync(srcArchive)) {
+        const destArchive = path.join(root, "archive");
+        fs.mkdirSync(destArchive, { recursive: true });
+        copyDirRecursive(srcArchive, destArchive);
+        console.log("[CloudBackup] Archive databases restored.");
+      }
+    }
+
+    // Restore license files
+    if (scope.includes("license")) {
+      const srcLicense = path.join(dir, "license");
+      if (fs.existsSync(srcLicense)) {
+        const destLicense = resolvedLicenseDir();
+        fs.mkdirSync(destLicense, { recursive: true });
+        copyDirRecursive(srcLicense, destLicense);
+        console.log("[CloudBackup] License files restored.");
+      }
+    }
+
+    // Restore auth tokens
+    if (scope.includes("auth")) {
+      const srcAuth = path.join(dir, "auth");
+      if (fs.existsSync(srcAuth)) {
+        const destAuth = path.join(root, "auth");
+        fs.mkdirSync(destAuth, { recursive: true });
+        copyDirRecursive(srcAuth, destAuth);
+        console.log("[CloudBackup] Auth tokens restored.");
+      }
+    }
+
+    return result;
   }
 }
 

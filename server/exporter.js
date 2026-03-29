@@ -855,6 +855,22 @@ function exportDateAwareFileBase(startTs, endTs, inverter, suffix) {
     : exportFileBase(s, e, inverter, suffix);
 }
 
+/** Plant-wide export filename — no inverter label (used for forecast/Solcast/daily exports). */
+function plantWideFileBase(startTs, endTs, suffix) {
+  const s = Number(startTs || 0) || Date.now();
+  const e = Number(endTs || 0) || s;
+  const sameDay = fmtDate(s) === fmtDate(e);
+  const dateTag = sameDay ? fmtDDMMYY(s) : `${fmtDDMMYY(s)}-${fmtDDMMYY(e)}`;
+  const base = `${dateTag} ${suffix}`;
+  return base.length > 200 ? base.slice(0, 200) : base;
+}
+
+/** Convert ISO duration codes (PT5M, PT60M) to human labels (5min, 1hr). */
+function isoToHumanResolution(iso) {
+  const map = { PT5M: '5min', PT10M: '10min', PT15M: '15min', PT30M: '30min', PT60M: '1hr' };
+  return map[iso] || iso;
+}
+
 function normalizeEnergyResolution(resolution) {
   const raw = String(resolution || '5min').trim().toLowerCase().replace(/\s+/g, '');
   if (raw === '15' || raw === '15min' || raw === '15m') {
@@ -1702,7 +1718,7 @@ async function exportDailyReport({ startTs, endTs, date, format, rowsByDate }) {
     await yieldToEventLoop();
   }
 
-  const fileBase = exportDateAwareFileBase(s, e, 'all', 'Daily Report');
+  const fileBase = plantWideFileBase(s, e, 'Daily Report');
   return await writeExport(headers, finalRows, dir, fileBase, format);
 }
 async function exportForecastActual({
@@ -1839,14 +1855,12 @@ async function exportForecastActual({
   });
 
   const resLabel = spec.mode === 'day' ? 'Daily' : spec.label;
-  const averageResolutionCode = 'PT5M'; // Average Table always uses 5-min regardless of selected resolution
   const sourceTag = isSolcast ? 'Solcast Day-Ahead' : 'Trained Day-Ahead';
-  const fileBase = exportDateAwareFileBase(
+  const fileBase = plantWideFileBase(
     s,
     e,
-    'all',
     useAverageTable
-      ? `${sourceTag} ${averageResolutionCode} AvgTable 05-18`
+      ? `${sourceTag} AvgTable 05-18`
       : `${sourceTag} vs Actual ${resLabel}`,
   );
   if (useAverageTable) {
@@ -1951,11 +1965,12 @@ function buildSolcastPreviewFileBase(startDay, endDay, resolution, exportFormat)
   const e = parseIsoDayStart(endDay || startDay) || s;
   const normalizedResolution = normalizeSolcastPreviewResolution(resolution);
   const normalizedExportFormat = normalizeSolcastPreviewExportFormat(exportFormat);
+  const resLabel = isoToHumanResolution(normalizedResolution);
   const suffix =
     normalizedExportFormat === 'average-table'
-      ? `Solcast Toolkit ${normalizedResolution} AvgTable 05-18`
-      : `Solcast Toolkit ${normalizedResolution} 05-18`;
-  return exportDateAwareFileBase(s, e, 'all', suffix);
+      ? `Solcast Toolkit AvgTable 05-18`
+      : `Solcast Toolkit ${resLabel} 05-18`;
+  return plantWideFileBase(s, e, suffix);
 }
 
 function buildSolcastAverageTableBuckets(values) {
@@ -2365,7 +2380,7 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
                : '5min';
   const slotStep = { '5min': 1, '15min': 3, '30min': 6, '1hr': 12 }[normRes];
 
-  const fileBase = exportDateAwareFileBase(startTs, endTs, 'all', `Solcast Week-Ahead ${normRes}`);
+  const fileBase = plantWideFileBase(startTs, endTs, `Solcast Week-Ahead ${normRes}`);
 
   const sortedDays = [...(days || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const dateList = sortedDays.map((d) => String(d.date));

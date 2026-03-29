@@ -32,9 +32,9 @@ Detailed reference material lives in `references/` — read those files when wor
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.5.0` — source of truth: `package.json` |
+| Repo version baseline | `2.5.1` — source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.5.0` |
+| Latest published release | `v2.5.1` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
 
@@ -67,7 +67,7 @@ No built-in defaults for: remote gateway API token, Solcast credentials, cloud-b
 | Database | SQLite via `better-sqlite3` |
 | Frontend | Vanilla JS + Chart.js 4 — `public/js/app.js` |
 | Inverter service | Python FastAPI port 9000, Modbus TCP — `services/inverter_engine.py` |
-| Forecast service | Python ML engine — `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.0+ |
+| Forecast service | Python ML engine — `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.1+ |
 | Modbus driver | `drivers/modbus_tcp.py` |
 
 Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebSocket → Browser`

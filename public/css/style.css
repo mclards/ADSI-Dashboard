@@ -4108,13 +4108,20 @@ label[data-required]::after {
   display: none !important;
 }
 
-.chart-grid {
+.analytics-scroll-wrap {
   flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.chart-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   padding: 12px;
-  overflow: auto;
 }
 
 .analytics-grid {
@@ -9261,6 +9268,14 @@ body.mode-transition-active {
   flex-wrap: wrap;
 }
 
+/* Local Backup: all children full-width */
+#page-settings #localBackupSection .cb-subsection,
+#page-settings #localBackupSection .cb-progress-wrap,
+#page-settings #localBackupSection > .sgroup-actions,
+#page-settings #localBackupSection > .sinfo {
+  grid-column: 1 / -1;
+}
+
 @media (max-width: 1280px) {
   #page-settings .settings-shell {
     grid-template-columns: 280px minmax(0, 1fr);
@@ -9645,7 +9660,6 @@ body.mode-transition-active {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  grid-column: 1 / -1;
 }
 .fperf-card:has(.fperf-body-collapsed) {
   padding-bottom: 8px;
@@ -9906,6 +9920,10 @@ body.mode-transition-active {
   border-bottom: 1px solid var(--border);
 }
 
+.fperf-table th.td-num {
+  text-align: right;
+}
+
 .fperf-table td {
   color: var(--text2);
   padding: 6px 10px;
@@ -9921,6 +9939,7 @@ body.mode-transition-active {
   background: rgba(255, 255, 255, 0.024);
 }
 
+.fperf-table th.td-date,
 .fperf-table td.td-date {
   color: var(--text);
   font-weight: var(--fw-medium);

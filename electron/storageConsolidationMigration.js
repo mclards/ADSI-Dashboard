@@ -39,6 +39,26 @@ const {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Grant BUILTIN\Users modify access to a directory (and children via /T).
+ * Required because %PROGRAMDATA% inherits restrictive ACLs where
+ * Users only get Read & Execute — which makes SQLite open the DB read-only
+ * when the app runs without elevation.
+ */
+function grantUsersWriteAccess(dirPath) {
+  if (process.platform !== "win32") return;
+  try {
+    const { spawnSync } = require("child_process");
+    const r = spawnSync("icacls", [dirPath, "/grant", "Users:(OI)(CI)M", "/T", "/Q"], {
+      windowsHide: true,
+      timeout: 15000,
+    });
+    if (r.error) throw r.error;
+  } catch (err) {
+    console.warn("[migration] Could not grant Users write access to", dirPath, ":", err.message);
+  }
+}
+
 function readState() {
   try {
     if (!fs.existsSync(MIGRATION_STATE_FILE)) return {};
@@ -48,12 +68,16 @@ function readState() {
   }
 }
 
+/** Write migration sentinel. Returns true on success, false on failure. */
 function writeState(state) {
   try {
     fs.mkdirSync(path.dirname(MIGRATION_STATE_FILE), { recursive: true });
     fs.writeFileSync(MIGRATION_STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+    return true;
   } catch (err) {
-    console.warn("[migration] Could not write migration state:", err.message);
+    console.error("[migration] FAILED to write migration sentinel:", err.message,
+      "— migration will re-run on next boot (safe but slow)");
+    return false;
   }
 }
 
@@ -86,7 +110,17 @@ function copyDirSafe(srcDir, dstDir, errors) {
     for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
       const src = path.join(srcDir, entry.name);
       const dst = path.join(dstDir, entry.name);
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        // Resolve symlink target and copy as a regular file/dir
+        try {
+          const realSrc = fs.realpathSync(src);
+          const stat = fs.statSync(realSrc);
+          if (stat.isDirectory()) copyDirSafe(realSrc, dst, errors);
+          else if (stat.isFile()) copyFileSafe(realSrc, dst, errors);
+        } catch (err) {
+          errors.push(`symlink ${src}: ${err.message}`);
+        }
+      } else if (entry.isDirectory()) {
         copyDirSafe(src, dst, errors);
       } else if (entry.isFile()) {
         copyFileSafe(src, dst, errors);
@@ -149,6 +183,9 @@ async function runStorageMigration() {
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
   }
 
+  // Grant Users modify access so the app works without elevation.
+  grantUsersWriteAccess(NEW_ROOT);
+
   const errors = [];
 
   // ── 1. Main database files ─────────────────────────────────────────────────
@@ -199,15 +236,19 @@ async function runStorageMigration() {
   copyDirSafe(OLD_LICENSE_DIR, NEW_LICENSE_DIR, errors);
 
   // ── 7. Write sentinel ─────────────────────────────────────────────────────
-  writeState({
+  const sentinelOk = writeState({
     version: MIGRATION_VERSION,
     status: errors.length ? "completed-with-errors" : "complete",
     completedAt: Date.now(),
     errors: errors.length ? errors : undefined,
   });
 
+  if (!sentinelOk) {
+    errors.push("sentinel write failed — migration will re-run on next boot");
+  }
+
   if (errors.length) {
-    console.warn(`[migration] Completed with ${errors.length} non-fatal error(s).`);
+    console.warn(`[migration] Completed with ${errors.length} non-fatal error(s):`, errors);
   } else {
     console.log("[migration] Storage consolidation complete.");
   }

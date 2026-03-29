@@ -126,7 +126,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.4.32</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.5.0</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -881,6 +881,10 @@
                   <span class="settings-menu-label">Cloud Backup</span>
                   <span class="settings-menu-copy">Provider access, backup policy, restore actions, and history.</span>
                 </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="localBackupSection">
+                  <span class="settings-menu-label">Local Backup</span>
+                  <span class="settings-menu-copy">Portable .adsibak export and restore for OS migration.</span>
+                </button>
               </div>
             </div>
 
@@ -1306,7 +1310,7 @@
                 </div>
               </div>
               <div class="srow">
-                <label class="chk-inline" title="Optional: include archived monthly files in the next standby DB refresh. The gateway main database always stages first.">
+                <label class="chk-inline" title="Optional: include archived monthly files in the next standby DB refresh. Archives download first for historical consistency, then the main database.">
                   <input type="checkbox" id="setReplicationIncludeArchive" />
                   <span>Include archived files in the next standby DB refresh</span>
                 </label>
@@ -1316,7 +1320,7 @@
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh gateway link status, standby refresh counters, and transfer diagnostics." aria-label="Refresh gateway link status">
                   <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
                 </button>
-                <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Download the gateway database for local standby use. Requires restart to apply.">
+                <button id="btnRunReplicationPull" class="btn btn-accent" type="button" title="Download the gateway database for local standby use. Restart is needed to apply the staged data.">
                   Refresh Standby DB
                 </button>
                 <button id="btnCancelReplicationJob" class="btn btn-outline rep-cancel-btn" type="button" title="Force-cancel the current standby DB refresh and clean up staged partial transfer files." disabled>
@@ -1950,6 +1954,71 @@
                     <tr class="table-empty"><td colspan="3">No cloud backups available.</td></tr>
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="sgroup settings-card" id="localBackupSection" hidden>
+            <div class="sgroup-title"><span class="mdi mdi-archive-arrow-down-outline icon-inline" aria-hidden="true"></span> Local Backup &amp; Restore</div>
+            <p class="settings-section-copy">Create a portable <code>.adsibak</code> backup of all dashboard data for OS reinstall or machine migration. Includes database, archive, license, auth tokens, forecast models, and configuration.</p>
+
+            <!-- Export -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title">Export Backup</div>
+              <p class="settings-section-copy">Creates a complete snapshot of all ProgramData and packs it into a single portable file.</p>
+              <div class="sgroup-actions">
+                <button id="btnLocalBackupExport" class="btn btn-accent" type="button" title="Choose a save location and create a portable .adsibak backup file.">
+                  <span class="mdi mdi-export icon-inline" aria-hidden="true"></span><span>Export .adsibak</span>
+                </button>
+                <span class="smsg" id="localBackupExportMsg"></span>
+              </div>
+              <div class="cb-progress-wrap" id="localBackupExportProgress" hidden>
+                <div class="cb-progress-row">
+                  <span class="cb-progress-icon mdi mdi-timer-sand" aria-hidden="true"></span>
+                  <span class="cb-progress-label" id="localBackupExportLabel">Preparing backup…</span>
+                  <span class="cb-progress-pct" id="localBackupExportPct"></span>
+                </div>
+                <div class="cb-progress-bar-track">
+                  <div class="cb-progress-bar-fill" id="localBackupExportBar"></div>
+                </div>
+              </div>
+              <div id="localBackupExportResult" class="sinfo" hidden></div>
+            </div>
+
+            <!-- Import & Restore -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title">Import &amp; Restore</div>
+              <p class="settings-section-copy">Import a <code>.adsibak</code> file, preview its contents, and restore all data. The app will restart after restore.</p>
+              <div class="sgroup-actions">
+                <button id="btnLocalBackupImport" class="btn btn-outline" type="button" title="Browse for a .adsibak file to import and validate.">
+                  <span class="mdi mdi-import icon-inline" aria-hidden="true"></span><span>Import .adsibak</span>
+                </button>
+                <span class="smsg" id="localBackupImportMsg"></span>
+              </div>
+              <!-- Validation preview (shown after import) -->
+              <div id="localBackupPreview" class="cb-subsection" hidden>
+                <div class="cb-sub-title">Backup Preview</div>
+                <div class="cb-history-table-wrap">
+                  <table class="data-table">
+                    <tbody id="localBackupPreviewBody"></tbody>
+                  </table>
+                </div>
+                <div class="sgroup-actions">
+                  <button id="btnLocalBackupRestore" class="btn btn-accent" type="button" title="Restore all data from the imported backup. The app will restart.">
+                    <span class="mdi mdi-backup-restore icon-inline" aria-hidden="true"></span><span>Restore &amp; Restart</span>
+                  </button>
+                  <button id="btnLocalBackupCancel" class="btn btn-outline" type="button" title="Cancel and discard the imported backup.">Cancel</button>
+                </div>
+              </div>
+              <div class="cb-progress-wrap" id="localBackupRestoreProgress" hidden>
+                <div class="cb-progress-row">
+                  <span class="cb-progress-icon mdi mdi-timer-sand" aria-hidden="true"></span>
+                  <span class="cb-progress-label" id="localBackupRestoreLabel">Restoring…</span>
+                  <span class="cb-progress-pct" id="localBackupRestorePct"></span>
+                </div>
+                <div class="cb-progress-bar-track">
+                  <div class="cb-progress-bar-fill" id="localBackupRestoreBar"></div>
+                </div>
               </div>
             </div>
           </div>

@@ -373,6 +373,54 @@
       .retry-btn:active {
         transform: translateY(1px);
       }
+
+      /* Error-state progress bar */
+      .progress-fill.error {
+        background:
+          linear-gradient(90deg, #ff9f43, #ff6b6b 60%, #ee5a24);
+        box-shadow: 0 0 18px rgba(255, 107, 107, 0.28);
+      }
+
+      .progress-fill.error::after {
+        animation: none;
+        background: none;
+      }
+
+      /* Failed step bullet */
+      .step.failed {
+        color: #ffafbf;
+      }
+
+      .step.failed .step-bullet {
+        background: #e74c3c;
+        box-shadow: 0 0 14px rgba(231, 76, 60, 0.32);
+        color: transparent;
+        font-size: 0;
+      }
+
+      .step.failed .step-bullet::before {
+        content: "!";
+        color: #fff;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      /* Fade-slide-in for error panel */
+      @keyframes fadeSlideIn {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .error-panel.visible {
+        display: block;
+        animation: fadeSlideIn 0.32s ease-out;
+      }
     </style>
   </head>
   <body>
@@ -466,25 +514,28 @@
       function markStep(stepNum, state) {
         const el = document.getElementById(`step${stepNum}`);
         if (!el) return;
-        el.classList.remove("active", "done");
+        el.classList.remove("active", "done", "failed");
         if (state) el.classList.add(state);
       }
 
       function showStartupError(message) {
         if (spinner) spinner.style.display = "none";
         if (statusText) statusText.textContent = "Startup requires attention";
-        setProgress(100);
+        if (progressFill) progressFill.classList.add("error");
         for (let i = 1; i <= STEP_COUNT; i += 1) {
-          markStep(i, i < currentStep ? "done" : "");
+          if (i < currentStep) markStep(i, "done");
+          else if (i === currentStep) markStep(i, "failed");
+          else markStep(i, "");
         }
         if (errorMsg) errorMsg.textContent = String(message || "The dashboard could not finish starting.");
-        if (errorPanel) errorPanel.style.display = "block";
+        if (errorPanel) errorPanel.classList.add("visible");
       }
 
       window.showStartupError = showStartupError;
 
       function updateStartupState(state = {}) {
-        if (errorPanel) errorPanel.style.display = "none";
+        if (errorPanel) errorPanel.classList.remove("visible");
+        if (progressFill) progressFill.classList.remove("error");
         if (spinner) spinner.style.display = "inline-flex";
 
         const nextStep = Math.max(1, Math.min(STEP_COUNT, Math.trunc(Number(state.step) || currentStep)));

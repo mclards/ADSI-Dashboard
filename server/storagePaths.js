@@ -47,9 +47,14 @@ function isMigrationComplete() {
  */
 function resolvedDbDir() {
   const newDir = path.join(getNewRoot(), "db");
-  if (isMigrationComplete() || fs.existsSync(path.join(newDir, "adsi.db"))) {
-    return newDir;
-  }
+  if (isMigrationComplete()) return newDir;
+  // Fallback: check the DB file exists AND is non-empty (SQLite header is 100 bytes).
+  // A 0-byte file from a partial copy must not be treated as a valid database.
+  try {
+    const dbPath = path.join(newDir, "adsi.db");
+    const stat = fs.statSync(dbPath);
+    if (stat.isFile() && stat.size >= 100) return newDir;
+  } catch { /* file doesn't exist — fall through */ }
   return null;
 }
 

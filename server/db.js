@@ -64,6 +64,32 @@ const DATA_DIR = resolveDataDir();
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// On Windows, %PROGRAMDATA% directories default to Users:RX only.
+// Ensure the DB directory is writable so SQLite can open in WAL mode.
+(function ensureWritableOnWindows() {
+  if (process.platform !== "win32") return;
+  if (!DATA_DIR.toLowerCase().includes("programdata")) return;
+  try {
+    // Quick probe: try creating a temp file to verify write access.
+    const probe = path.join(DATA_DIR, ".write-probe");
+    fs.writeFileSync(probe, "", { flag: "w" });
+    fs.unlinkSync(probe);
+  } catch {
+    // Write failed — attempt to fix ACL.
+    try {
+      const { spawnSync } = require("child_process");
+      const r = spawnSync("icacls", [DATA_DIR, "/grant", "Users:(OI)(CI)M", "/T", "/Q"], {
+        windowsHide: true,
+        timeout: 15000,
+      });
+      if (r.error) throw r.error;
+      console.log("[db] Granted Users write access to", DATA_DIR);
+    } catch (err) {
+      console.warn("[db] Could not grant Users write access to", DATA_DIR, ":", err.message);
+    }
+  }
+})();
+
 const DB_PATH = path.join(DATA_DIR, "adsi.db");
 const MAIN_DB_PENDING_REPLACEMENT_PATH = path.join(
   DATA_DIR,
@@ -356,6 +382,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_e5_inv_ts ON energy_5min(inverter, ts);
   CREATE INDEX IF NOT EXISTS idx_e5_ts     ON energy_5min(ts);
+
+  CREATE TABLE IF NOT EXISTS availability_5min (
+    ts              INTEGER PRIMARY KEY,
+    online_count    INTEGER NOT NULL DEFAULT 0,
+    expected_count  INTEGER NOT NULL DEFAULT 0
+  );
 
   CREATE TABLE IF NOT EXISTS alarms (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -970,6 +1002,13 @@ const stmts = {
   ),
   insertEnergy5: db.prepare(
     `INSERT INTO energy_5min(ts,inverter,kwh_inc) VALUES(?,?,?)`,
+  ),
+  upsertAvailability5min: db.prepare(
+    `INSERT INTO availability_5min(ts, online_count, expected_count) VALUES(?, ?, ?)
+     ON CONFLICT(ts) DO UPDATE SET online_count=excluded.online_count, expected_count=excluded.expected_count`,
+  ),
+  getAvailability5minRange: db.prepare(
+    `SELECT ts, online_count, expected_count FROM availability_5min WHERE ts BETWEEN ? AND ? ORDER BY ts ASC`,
   ),
   getActiveAlarms: db.prepare(
     `SELECT * FROM alarms WHERE cleared_ts IS NULL ORDER BY ts DESC`,
@@ -2559,4 +2598,8 @@ module.exports = {
   getScheduledMaintenance,
   insertScheduledMaintenance,
   deleteScheduledMaintenance,
+  upsertAvailability5min: (ts, onlineCount, expectedCount) =>
+    stmts.upsertAvailability5min.run(ts, onlineCount, expectedCount),
+  getAvailability5minRange: (startTs, endTs) =>
+    stmts.getAvailability5minRange.all(startTs, endTs),
 };

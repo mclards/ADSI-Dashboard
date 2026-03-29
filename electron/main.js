@@ -103,16 +103,16 @@ const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
 const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
-const LICENSE_DIR = (() => {
-  // Post-migration: license lives under the unified InverterDashboard root.
-  // Pre-migration fallback: keep the old ADSI-InverterDashboard namespace if
-  // the new location doesn't exist yet (first boot before migration runs).
+// Lazy license path resolution — must NOT be evaluated at module load because
+// storage migration runs later during the Electron loading screen.  Evaluating
+// eagerly would freeze the path to the old namespace for the entire session.
+function getLicenseDir() {
   const newDir = path.join(PROGRAMDATA_DIR, "license");
   const oldDir = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard", "license");
   return (fs.existsSync(newDir) || !fs.existsSync(oldDir)) ? newDir : oldDir;
-})();
-const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
-const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
+}
+function getLicenseStatePath() { return path.join(getLicenseDir(), "license-state.json"); }
+function getLicenseFileMirror() { return path.join(getLicenseDir(), "license.dat"); }
 const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TRIAL_DAYS = 7;
@@ -154,6 +154,8 @@ let mainPageLoadedOnce = false;
 let initialLoadRetries = 0;
 let initialLoadRetryTimer = null;
 let mainRendererReady = false;
+let startupErrorShown = false;
+let loadingWinLoadCount = 0;
 let mainRendererReadyTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
@@ -1193,6 +1195,19 @@ function showLoadingWindow() {
   });
   loadingWin.loadFile(path.join(PUBLIC_DIR, "loading.html"));
   loadingWin.show();
+
+  // Retry handler: when the loading page reloads (from the Retry button),
+  // detect it and re-attempt server startup instead of just reloading the UI.
+  loadingWinLoadCount = 0;
+  startupErrorShown = false;
+  loadingWin.webContents.removeAllListeners("did-finish-load");
+  loadingWin.webContents.on("did-finish-load", () => {
+    loadingWinLoadCount += 1;
+    if (loadingWinLoadCount > 1 && startupErrorShown) {
+      startupErrorShown = false;
+      retryServerStartup();
+    }
+  });
 }
 
 function registerShortcutsOnce() {
@@ -1714,7 +1729,7 @@ function loadLicensePublicKeys() {
       console.warn("[license] failed to read configured public key path:", err.message);
     }
   } else {
-    const defaultPath = path.join(LICENSE_DIR, "public-key.pem");
+    const defaultPath = path.join(getLicenseDir(), "public-key.pem");
     if (fs.existsSync(defaultPath)) {
       try {
         addKey(fs.readFileSync(defaultPath, "utf8"), defaultPath);
@@ -1852,10 +1867,10 @@ function resolveLicenseActivationAnchor(priorLicense, nextFingerprint, durationM
 
 function tryRestoreMirroredLicense(priorLicense) {
   try {
-    if (!fs.existsSync(LICENSE_FILE_MIRROR)) return null;
-    const raw = fs.readFileSync(LICENSE_FILE_MIRROR, "utf8").replace(/^\uFEFF/, "");
+    if (!fs.existsSync(getLicenseFileMirror())) return null;
+    const raw = fs.readFileSync(getLicenseFileMirror(), "utf8").replace(/^\uFEFF/, "");
     const payload = JSON.parse(raw);
-    const normalized = normalizeLicensePayload(payload, LICENSE_FILE_MIRROR, priorLicense);
+    const normalized = normalizeLicensePayload(payload, getLicenseFileMirror(), priorLicense);
     return normalized.ok ? normalized.license : null;
   } catch (err) {
     console.warn("[license] mirror restore failed:", err.message);
@@ -1907,10 +1922,10 @@ function normalizeLicenseAudit(entries) {
 }
 
 function loadLicenseState() {
-  ensureDir(LICENSE_DIR);
+  ensureDir(getLicenseDir());
   const regState = loadLicenseRegistryMarker();
   try {
-    if (!fs.existsSync(LICENSE_STATE_PATH)) {
+    if (!fs.existsSync(getLicenseStatePath())) {
       const resolved = resolvePersistedLicense(null, regState);
       const def = defaultLicenseState();
       const state = {
@@ -1939,12 +1954,12 @@ function loadLicenseState() {
             ]
           : []),
       ]);
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
       licenseStateCache = state;
       return state;
     }
-    const raw = JSON.parse(fs.readFileSync(LICENSE_STATE_PATH, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(getLicenseStatePath(), "utf8"));
     const resolved = resolvePersistedLicense(raw?.license, regState);
     const def = defaultLicenseState();
     const state = {
@@ -1968,7 +1983,7 @@ function loadLicenseState() {
         ...(Array.isArray(raw?.audit) ? raw.audit : []),
       ]),
     };
-    fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
     saveLicenseRegistryMarker(state);
     licenseStateCache = state;
     return state;
@@ -2005,7 +2020,7 @@ function loadLicenseState() {
       ),
     };
     try {
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
     } catch (writeErr) {
       console.error("[license] fallback state write failed:", writeErr.message);
@@ -2016,12 +2031,12 @@ function loadLicenseState() {
 }
 
 function saveLicenseState(state) {
-  ensureDir(LICENSE_DIR);
+  ensureDir(getLicenseDir());
   state.audit = normalizeLicenseAudit(state.audit);
   // Write to a temp file then atomically rename to avoid corruption on crash.
-  const tmpPath = LICENSE_STATE_PATH + ".tmp";
+  const tmpPath = getLicenseStatePath() + ".tmp";
   fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf8");
-  fs.renameSync(tmpPath, LICENSE_STATE_PATH);
+  fs.renameSync(tmpPath, getLicenseStatePath());
   saveLicenseRegistryMarker(state);
   licenseStateCache = state;
 }
@@ -2162,7 +2177,7 @@ function installLicenseFromFile(filePath) {
     saveLicenseState(state);
 
     try {
-      fs.copyFileSync(fullPath, LICENSE_FILE_MIRROR);
+      fs.copyFileSync(fullPath, getLicenseFileMirror());
     } catch (err) {
       console.warn("[license] mirror copy failed:", err.message);
     }
@@ -2526,8 +2541,80 @@ function startEmbeddedServer(serverEntry) {
   }
 }
 
+// ─── Startup Error Helpers ───────────────────────────────────────────────────
+
+function humanizeServerError(rawMsg) {
+  const msg = String(rawMsg || "").toLowerCase();
+  if (msg.includes("readonly database") || msg.includes("read-only database")) {
+    return (
+      "The database could not be opened for writing.\n" +
+      "This can happen if another dashboard instance is still running, " +
+      "if antivirus software is temporarily locking the file, or if " +
+      "the database folder has restricted permissions.\n\n" +
+      "Close any other dashboard windows, then retry."
+    );
+  }
+  if (msg.includes("database is locked") || msg.includes("busy")) {
+    return (
+      "The database is locked by another process.\n" +
+      "Close any other dashboard instances or tools accessing the database, then retry."
+    );
+  }
+  if (msg.includes("malformed") || msg.includes("corrupt") || msg.includes("not a database")) {
+    return (
+      "The database file appears to be damaged.\n" +
+      "The dashboard will attempt to recover on the next successful start. " +
+      "If the problem persists, contact support."
+    );
+  }
+  if (msg.includes("disk i/o error") || msg.includes("disk full")) {
+    return (
+      "A disk error occurred while accessing the database.\n" +
+      "Check that the drive has enough free space and is working correctly, then retry."
+    );
+  }
+  return rawMsg || "Unknown startup error.";
+}
+
+function isRetryableStartupError(errMsg) {
+  const msg = String(errMsg || "").toLowerCase();
+  return (
+    msg.includes("readonly database") ||
+    msg.includes("read-only database") ||
+    msg.includes("database is locked") ||
+    msg.includes("busy")
+  );
+}
+
+function clearServerModuleCache() {
+  try {
+    const serverDir = path.resolve(__dirname, "..", "server");
+    Object.keys(require.cache).forEach((key) => {
+      // Normalise for Windows backslashes
+      const normalised = key.replace(/\\/g, "/");
+      const normDir = serverDir.replace(/\\/g, "/");
+      if (normalised.startsWith(normDir)) delete require.cache[key];
+    });
+  } catch (_) {}
+  embeddedServerStarted = false;
+}
+
+function retryServerStartup() {
+  clearServerModuleCache();
+  serverBootError = "";
+  serverReadyFired = false;
+
+  updateLoadingStartupState({
+    step: 2,
+    progress: 18,
+    text: "Retrying dashboard services\u2026",
+  });
+  startServer(0, true);
+}
+
 function showLoadingErrorMessage(message) {
   if (!loadingWin || loadingWin.isDestroyed()) return;
+  startupErrorShown = true;
   const safeMessage = String(message || "").replace(/<br\s*\/?>/gi, "\n");
   const fallbackHtml = `<div style="font-family:Segoe UI,sans-serif;color:#ffd8df;padding:20px;text-align:center;line-height:1.6;background:#09121f">${safeMessage
     .replace(/&/g, "&amp;")
@@ -2624,18 +2711,23 @@ function killImageNames(imageNames = []) {
   }
 }
 
-function startServer() {
-  // Ensure no stale backend instances accumulate across repeated starts.
-  killImageNames(LEGACY_SERVICE_IMAGE_NAMES);
-  killImageNames(BACKEND_EXE_NAMES);
-  killImageNames(FORECAST_EXE_NAMES);
+const SERVER_START_MAX_RETRIES = 2;
+const SERVER_START_RETRY_DELAY_MS = 2000;
 
-  startBackendProcess();
+function startServer(retryCount = 0, skipProcessSetup = false) {
+  if (!skipProcessSetup) {
+    // Ensure no stale backend instances accumulate across repeated starts.
+    killImageNames(LEGACY_SERVICE_IMAGE_NAMES);
+    killImageNames(BACKEND_EXE_NAMES);
+    killImageNames(FORECAST_EXE_NAMES);
+
+    startBackendProcess();
+  }
 
   const serverEntry = resolveServerEntry();
   if (!serverEntry) {
     console.error("[main] Web server entry not found.");
-    showLoadingErrorMessage("Web server entry not found.<br/>Please reinstall the dashboard.");
+    showLoadingErrorMessage("Web server entry not found.\nPlease reinstall the dashboard.");
     return;
   }
 
@@ -2643,9 +2735,22 @@ function startServer() {
   // This avoids stale detached dev server processes serving old backend code.
   const ok = startEmbeddedServer(serverEntry);
   if (!ok) {
-    showLoadingErrorMessage(
-      `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
-    );
+    // Auto-retry for transient database errors (locked, readonly from AV scan, etc.)
+    if (retryCount < SERVER_START_MAX_RETRIES && isRetryableStartupError(serverBootError)) {
+      const attempt = retryCount + 1;
+      console.log(
+        `[main] Auto-retrying server start (${attempt}/${SERVER_START_MAX_RETRIES}) in ${SERVER_START_RETRY_DELAY_MS}ms\u2026`,
+      );
+      updateLoadingStartupState({
+        step: 2,
+        progress: 14 + attempt * 3,
+        text: `Database temporarily unavailable \u2014 retrying (${attempt}/${SERVER_START_MAX_RETRIES})\u2026`,
+      });
+      clearServerModuleCache();
+      setTimeout(() => startServer(attempt, true), SERVER_START_RETRY_DELAY_MS);
+      return;
+    }
+    showLoadingErrorMessage(humanizeServerError(serverBootError));
     return;
   }
   startForecastModeSync();
@@ -3825,6 +3930,37 @@ ipcMain.handle("download-user-guide-pdf", async (event) => {
   } catch (err) {
     console.error("[main] download-user-guide-pdf failed:", err.message);
     return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle("save-adsibak", async () => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const ts = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(targetWin, {
+      title: "Save Portable Backup",
+      defaultPath: path.join(app.getPath("documents"), `InverterDashboard-${ts}.adsibak`),
+      filters: [{ name: "ADSI Backup", extensions: ["adsibak"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    return result.filePath;
+  } catch (err) {
+    console.error("[main] save-adsibak failed:", err.message);
+    return null;
+  }
+});
+ipcMain.handle("open-adsibak", async () => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const result = await dialog.showOpenDialog(targetWin, {
+      title: "Open Portable Backup",
+      properties: ["openFile"],
+      filters: [{ name: "ADSI Backup", extensions: ["adsibak"] }],
+    });
+    if (result.canceled || !result.filePaths?.length) return null;
+    return result.filePaths[0];
+  } catch (err) {
+    console.error("[main] open-adsibak failed:", err.message);
+    return null;
   }
 });
 ipcMain.handle("open-folder", async (_, folder) => {

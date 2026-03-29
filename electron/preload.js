@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveTextFile: (options) => ipcRenderer.invoke("save-text-file", options),
   openTextFile: (options) => ipcRenderer.invoke("open-text-file", options),
   downloadUserGuidePdf: () => ipcRenderer.invoke("download-user-guide-pdf"),
+  saveAdsibak: () => ipcRenderer.invoke("save-adsibak"),
+  openAdsibak: () => ipcRenderer.invoke("open-adsibak"),
 
   // IP config
   getConfig: () => ipcRenderer.invoke("config-get"),

@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.5.0`
+**Applies to:** ADSI Inverter Dashboard `v2.5.1`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -102,7 +102,7 @@ Implementation guidance for this repository:
 
 ### 2.4 Important Standby DB Rule
 
-The `Refresh Standby DB` action downloads and stages the gateway main database for local use. The new database is **not** activated immediately. A restart is required before the staged standby database becomes the active local database.
+The `Refresh Standby DB` action stages archive DB files first (when included) for historical consistency, then downloads the gateway main database for local use. The staged database is **not** applied immediately — a restart is needed to activate the new data.
 
 The staged standby refresh also preserves the gateway's current-day energy baseline so that, after restart and switch back to `Gateway` mode, `TODAY MWh` can bridge cleanly while the local poller catches up.
 
@@ -979,7 +979,7 @@ This section defines whether the workstation is acting locally at the plant or a
 | `Test Remote Gateway` | Confirms the configured remote URL is reachable |
 | `Check Tailscale` | Verifies Tailscale installation and connection state |
 | `Refresh` | Refreshes replication and link-health information |
-| `Refresh Standby DB` | Downloads a fresh gateway main DB snapshot and current-day standby baseline for local later use; if newer local standby data exists, the app blocks first and offers explicit `Force Pull` |
+| `Refresh Standby DB` | Stages archive DB files first (when included) for historical consistency, then downloads a fresh gateway main DB snapshot for local use; if newer local standby data exists, the app blocks and offers explicit `Force Pull` |
 
 #### Gateway Link and Standby Fields
 
@@ -1316,7 +1316,7 @@ Important:
 | --- | --- | --- |
 | Connection dot shows disconnected | Live link is unavailable | Check mode, gateway URL, token, and Tailscale status |
 | `Stale` status appears | Last retained snapshot is being shown | Check live link health and recent gateway contact |
-| `Refresh Standby DB` completes but data is unchanged locally | Standby DB is staged, not active yet | Restart the application |
+| `Refresh Standby DB` completes but data is unchanged locally | Staged data is not applied until restart | Restart the application to activate the new database |
 | `Refresh Standby DB` stops with a newer-local warning or `Force Pull` prompt | The local standby copy has newer replicated data than the gateway | Review which machine is authoritative. Cancel to preserve local standby data, or use `Force Pull` only if overwriting local standby data is intentional |
 | `TODAY MWh` looks older immediately after returning to `Gateway` mode | Local polling has not caught up yet or standby data was not refreshed before restart | Run `Refresh Standby DB`, restart, and wait for the first local poll cycle |
 | Live totals or forecast status look old immediately after `Restart & Install` | Background services are still completing clean shutdown/startup handoff or the first local poll cycle has not finished yet | Wait for the app to reopen fully, confirm gateway mode/runtime health, and allow the first local poll cycle to complete before judging data freshness |

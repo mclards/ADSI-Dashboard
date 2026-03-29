@@ -1971,11 +1971,11 @@ function buildManualReplicationScope() {
       push:
         "Push is disabled in the viewer model. Gateway remains the only authoritative source for shared data.",
       pull:
-        "Pull downloads a fresh gateway main DB snapshot and stages it for restart-safe local replacement. Optional monthly archive DB files can follow. During manual standby refresh, the remote live bridge pauses temporarily so the transfer gets priority.",
+        "Pull stages archive DB files first for historical consistency, then downloads a fresh gateway main DB snapshot for restart-safe local replacement. During manual standby refresh, the remote live bridge pauses temporarily so the transfer gets priority.",
       liveBridge:
         "Live bridge polling stays lightweight. Manual standby refresh temporarily pauses the viewer-side live bridge, then resumes it automatically when the transfer finishes.",
       hotPriority:
-        "The gateway main DB snapshot is always staged first. Archive DB files are optional and intended for historical catch-up only.",
+        "Archive DB files are staged first when included, followed by the gateway main DB snapshot. Archives are optional and intended for historical catch-up.",
     },
   };
 }
@@ -3421,13 +3421,13 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
     // Step 3 — Gateway readiness check: warn if ipconfig.json is absent at the expected path.
     const ipconfigMissing = !fs.existsSync(path.join(DATA_DIR, "ipconfig.json"));
 
-    const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB (applied after restart)`;
+    const mainDbSummary = `main DB staged=${(Math.max(0, Number(mainDb.size || 0)) / (1024 * 1024)).toFixed(2)} MB`;
     const archiveSummary = includeArchive
       ? !archive.ok && !archive.unsupported
         ? `archive download failed: ${String(archive.error || "unknown error")} (main DB still staged)`
         : archive.unsupported
           ? "archive skipped (remote build has no archive sync)"
-          : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()} (applied after restart)`
+          : `archive files staged=${Number(archive.transferredFiles || 0).toLocaleString()}`
       : "archive skipped";
     const readinessNote = ipconfigMissing
       ? " | WARNING: Gateway IP configuration not found — configure IP settings before switching to Gateway mode."
@@ -3439,7 +3439,7 @@ async function runManualPullSync(baseUrl, includeArchive = true, forcePull = fal
       mainDb,
       archive,
       priorityMode: true,
-      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}${readinessNote}. Remote live stream resumes automatically. Restart the app to apply the new gateway database.`,
+      summary: `Standby DB refresh complete | ${mainDbSummary} | ${archiveSummary}${readinessNote}. Remote live stream resumes automatically. Restart is needed to apply the staged database.`,
     };
   } finally {
     // Force immediate energy refresh after pull so the TODAY MWh metric
@@ -11975,7 +11975,7 @@ app.post("/api/replication/pull-now", async (req, res) => {
         forcePull,
         job: started.job,
         message:
-          "Background standby DB refresh started. The gateway main database will be staged for restart-safe local replacement.",
+          "Background standby DB refresh started. Archives are staged first (when included), then the gateway main database. Restart is needed to apply.",
       });
     }
 
@@ -13512,8 +13512,8 @@ let forecastGenerating = false;
 const _forecastJobs = new Map(); // jobId → {status, startedAt, dates, result, error}
 
 function _gcForecastJobs() {
-  const runningCutoff = Date.now() - 30 * 60 * 1000;
-  const doneCutoff = Date.now() - 2 * 60 * 1000; // completed jobs freed after 2 min
+  const runningCutoff = Date.now() - 60 * 60 * 1000; // FIX-10: 60 min for multi-date generation (was 30)
+  const doneCutoff = Date.now() - 5 * 60 * 1000; // FIX-10: completed jobs freed after 5 min (was 2)
   for (const [id, job] of _forecastJobs) {
     if (job.startedAt < runningCutoff) { _forecastJobs.delete(id); continue; }
     if ((job.status === "done" || job.status === "error") && job.completedAt && job.completedAt < doneCutoff) {
@@ -13550,6 +13550,10 @@ function _forecastResultToResponse(r, extra = {}) {
   };
 }
 
+// FIX-13: Rate limiting cooldown for forecast generation
+let _lastForecastRequestTime = 0;
+const FORECAST_COOLDOWN_MS = 30 * 1000; // 30 seconds between requests
+
 app.post("/api/forecast/generate", async (req, res) => {
   if (isRemoteMode()) {
     return res.status(403).json({
@@ -13558,6 +13562,15 @@ app.post("/api/forecast/generate", async (req, res) => {
         "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.",
     });
   }
+  // FIX-13: Cooldown rate limiting
+  const now = Date.now();
+  if (now - _lastForecastRequestTime < FORECAST_COOLDOWN_MS) {
+    return res.status(429).json({
+      ok: false,
+      error: `Please wait ${Math.ceil((FORECAST_COOLDOWN_MS - (now - _lastForecastRequestTime)) / 1000)}s before retrying.`,
+    });
+  }
+  _lastForecastRequestTime = now;
   if (forecastGenerating) {
     return res.status(409).json({ ok: false, error: "Forecast generation already in progress." });
   }
@@ -13576,6 +13589,14 @@ app.post("/api/forecast/generate", async (req, res) => {
 
   forecastGenerating = true;
 
+  // Safety timeout: auto-reset if generation hangs for 45 minutes
+  const _forecastGuardTimer = setTimeout(() => {
+    if (forecastGenerating) {
+      console.warn("[forecast] Safety timeout: forecastGenerating flag auto-reset after 45 minutes");
+      forecastGenerating = false;
+    }
+  }, 45 * 60 * 1000);
+
   // Async mode: fire-and-forget, return jobId immediately so the client
   // can poll /api/forecast/generate/status/:jobId instead of blocking.
   if (body.async === true) {
@@ -13592,7 +13613,7 @@ app.post("/api/forecast/generate", async (req, res) => {
         const job = _forecastJobs.get(jobId);
         if (job) { job.status = "error"; job.error = e.message; job.completedAt = Date.now(); }
       })
-      .finally(() => { forecastGenerating = false; });
+      .finally(() => { forecastGenerating = false; clearTimeout(_forecastGuardTimer); });
     return res.json({ ok: true, jobId, status: "running", dates, count: dates.length });
   }
 
@@ -13602,9 +13623,14 @@ app.post("/api/forecast/generate", async (req, res) => {
     result._dates = dates;
     res.json({ mode, ...(_forecastResultToResponse(result)) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    const msg = String(e.message || "");
+    const isClientError = msg.includes("No target dates") ||
+                          msg.includes("exceeds") ||
+                          msg.includes("Invalid mode");
+    res.status(isClientError ? 400 : 500).json({ ok: false, error: e.message });
   } finally {
     forecastGenerating = false;
+    clearTimeout(_forecastGuardTimer);
   }
 });
 
@@ -13629,6 +13655,10 @@ app.get("/api/forecast/generate/status/:jobId", (req, res) => {
 // The Python forecast service delegates day-ahead generation to this endpoint
 // so both manual and automatic paths use the same provider-aware orchestrator.
 // Localhost-only for security.
+// FIX-14: Rate limiting cooldown for internal forecast endpoint
+let _lastInternalForecastTime = 0;
+const INTERNAL_FORECAST_COOLDOWN_MS = 60 * 1000; // 1 minute
+
 app.post("/api/internal/forecast/generate-auto", async (req, res) => {
   const remoteIp = String(req.ip || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
   if (remoteIp !== "127.0.0.1" && remoteIp !== "::1" && remoteIp !== "localhost") {
@@ -13637,17 +13667,33 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
   if (isRemoteMode()) {
     return res.status(403).json({ ok: false, error: "Day-ahead generation is disabled in Client mode." });
   }
+  // FIX-14: Cooldown rate limiting for internal endpoint
+  const now = Date.now();
+  if (now - _lastInternalForecastTime < INTERNAL_FORECAST_COOLDOWN_MS) {
+    return res.status(429).json({ ok: false, error: "Internal cooldown active." });
+  }
+  _lastInternalForecastTime = now;
+  // Validate trigger before acquiring the lock or starting timers
+  const body = req.body || {};
+  const trigger = String(body.trigger || "auto_service").trim();
+  const validTriggers = new Set(["auto_service", "auto_service_fallback", "node_fallback", "manual_cli"]);
+  if (!validTriggers.has(trigger)) {
+    return res.status(400).json({ ok: false, error: "Invalid trigger." });
+  }
   if (forecastGenerating) {
     return res.status(409).json({ ok: false, error: "Forecast generation already in progress." });
   }
   forecastGenerating = true;
-  try {
-    const body = req.body || {};
-    const trigger = String(body.trigger || "auto_service").trim();
-    const validTriggers = new Set(["auto_service", "node_fallback", "manual_cli"]);
-    if (!validTriggers.has(trigger)) {
-      return res.status(400).json({ ok: false, error: "Invalid trigger." });
+
+  // Safety timeout: auto-reset if generation hangs for 45 minutes
+  const _internalGuardTimer = setTimeout(() => {
+    if (forecastGenerating) {
+      console.warn("[forecast:internal] Safety timeout: forecastGenerating flag auto-reset after 45 minutes");
+      forecastGenerating = false;
     }
+  }, 45 * 60 * 1000);
+
+  try {
     let dates = Array.isArray(body.dates)
       ? body.dates
           .map((d) => String(d || "").trim())
@@ -13676,9 +13722,14 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
     });
   } catch (e) {
     console.warn("[forecast:internal] Auto-generation failed:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    const msg = String(e.message || "");
+    const isClientError = msg.includes("No target dates") ||
+                          msg.includes("exceeds") ||
+                          msg.includes("Invalid trigger");
+    res.status(isClientError ? 400 : 500).json({ ok: false, error: e.message });
   } finally {
     forecastGenerating = false;
+    clearTimeout(_internalGuardTimer);
   }
 });
 
@@ -13871,6 +13922,7 @@ app.get("/api/forecast/engine-health", (req, res) => {
         signedBiasPct: _recentBiasPct,
         rowsUsed: _recentBiasPct !== null ? 7 : 0,
       },
+      outageSummary: trainState.outage_summary || null,
     });
   } catch (e) {
     console.warn("[forecast/engine-health] failed:", e.message);
@@ -14774,6 +14826,13 @@ for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]
       return;
     }
     _forecastCronRunning = true;
+    // FIX-08: Safety timeout — auto-reset if cron generation hangs for 45 minutes
+    const cronSafetyTimer = setTimeout(() => {
+      if (_forecastCronRunning) {
+        console.warn("[Cron:forecast] Safety timeout: cron running flag auto-reset after 45 minutes");
+        _forecastCronRunning = false;
+      }
+    }, 45 * 60 * 1000);
     try {
       if (isRemoteMode()) return;
       const tomorrow = addDaysIso(localDateStr(), 1);
@@ -14798,6 +14857,7 @@ for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]
       }
     } finally {
       _forecastCronRunning = false;
+      clearTimeout(cronSafetyTimer);
     }
   });
 }
@@ -15120,6 +15180,74 @@ app.delete("/api/backup/:id", (req, res) => {
   try {
     const result = _cloudBackup.deleteLocalBackup(backupId);
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// --- Portable Backup (.adsibak) -----------------------------------------------
+
+function _validateAdsibakPath(p, mustExist) {
+  if (typeof p !== "string" || !p.trim()) return "path required";
+  if (!p.toLowerCase().endsWith(".adsibak")) return "file must have .adsibak extension";
+  if (mustExist && !fs.existsSync(p)) return "file not found";
+  return null;
+}
+
+/** POST /api/backup/create-portable -- export full system backup to .adsibak */
+app.post("/api/backup/create-portable", (req, res) => {
+  const { destPath } = req.body || {};
+  const err = _validateAdsibakPath(destPath, false);
+  if (err) return res.status(400).json({ ok: false, error: err });
+  try {
+    const q = enqueueCloudOp("createPortableBackup", async () => {
+      return _cloudBackup.createPortableBackup(destPath);
+    });
+    res.json({ ok: true, status: "queued", queuePosition: q.position, message: "Portable backup queued." });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/validate-portable -- preview .adsibak without importing */
+app.post("/api/backup/validate-portable", async (req, res) => {
+  const { srcPath } = req.body || {};
+  const err = _validateAdsibakPath(srcPath, true);
+  if (err) return res.status(400).json({ ok: false, error: err });
+  try {
+    const result = await _cloudBackup.validatePortableBackup(srcPath);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/import-portable -- extract and register .adsibak */
+app.post("/api/backup/import-portable", (req, res) => {
+  const { srcPath } = req.body || {};
+  const err = _validateAdsibakPath(srcPath, true);
+  if (err) return res.status(400).json({ ok: false, error: err });
+  try {
+    const q = enqueueCloudOp("importPortableBackup", async () => {
+      return _cloudBackup.importPortableBackup(srcPath);
+    });
+    res.json({ ok: true, status: "queued", queuePosition: q.position, message: "Import queued." });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/restore-portable/:id -- full restore including archive/license/auth */
+app.post("/api/backup/restore-portable/:id", (req, res) => {
+  const backupId = decodeURIComponent(req.params.id);
+  const { skipSafetyBackup } = req.body || {};
+  try {
+    const q = enqueueCloudOp("restorePortableBackup", async () => {
+      await _cloudBackup.restorePortableBackup(backupId, {
+        skipSafetyBackup: !!skipSafetyBackup,
+      });
+    });
+    res.json({ ok: true, status: "queued", queuePosition: q.position, message: "Portable restore queued." });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

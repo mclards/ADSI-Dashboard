@@ -516,7 +516,7 @@
     Professional plant monitoring, reporting, forecast review, and controlled remote coordination for utility-scale solar inverter fleets.
   </p>
   <div class="cover-meta">
-    <span><b>Version:</b> 2.5.0</span>
+    <span><b>Version:</b> 2.5.1</span>
     <span><b>Author:</b> Engr. Clariden Monta&ntilde;o REE</span>
     <span><b>Date:</b> March 2026</span>
   </div>
@@ -1490,7 +1490,7 @@
   </ul>
 
   <h3>Standby Database Refresh</h3>
-  <p>The <b>Refresh Standby DB</b> action downloads the gateway main database for local standby use. The staged database is not activated until a restart.</p>
+  <p>The <b>Refresh Standby DB</b> action stages archive DB files first (when included) for historical consistency, then downloads the gateway main database for local standby use. The staged database is not applied immediately — a restart is needed to activate the new data.</p>
 
   <div class="info-card tip">
     <div class="info-card-label">Best Practice</div>
@@ -1657,7 +1657,7 @@
       <li>Allow the preflight phase to finish before expecting the heavier snapshot transfer to begin.</li>
       <li>If newer local data is detected, decide whether to cancel or <b>Force Pull</b>.</li>
       <li>Wait for completion and confirm success.</li>
-      <li>Restart the application when the refreshed DB is needed.</li>
+      <li>Restart the application to apply the staged database — the new data is not active until restart.</li>
       <li>After restart, wait for the startup loading screen and first local poll cycle before relying on live totals.</li>
     </ol>
   </div>

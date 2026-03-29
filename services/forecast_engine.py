@@ -23,6 +23,7 @@ Version : 3.0 (Day-Ahead Hardened)
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -372,6 +373,12 @@ ANOM_MIN_CF    = 0.02   # capacity factor " days below this are bad
 ANOM_MAX_CF    = 1.05   # capacity factor " days above this are bad
 ANOM_RAD_CORR  = 0.55   # min Pearson r between radiation & generation
 
+# Availability / outage detection thresholds (Phase 2)
+AVAIL_OUTAGE_THRESHOLD   = 0.95   # ratio below which a slot is outage-tainted
+AVAIL_DAY_MINOR_PCT      = 0.05   # ≥5% of solar slots tainted → minor
+AVAIL_DAY_MODERATE_PCT   = 0.15   # ≥15% → moderate
+AVAIL_DAY_SEVERE_PCT     = 0.30   # ≥30% → severe
+
 # Confidence bands
 CONF_CLEAR_BASE = 0.08   # 8% on clear days
 CONF_CLOUD_ADD  = 0.20   # additional 20% on overcast / volatile days
@@ -472,6 +479,7 @@ def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
         state["training_result"] = "accepted"
         state["last_training_date"] = bundle.get("training_date")
         state["data_warnings"] = _collect_data_quality_warnings(bundle.get("model_bundle", {}))
+        state["outage_summary"] = bundle.get("model_bundle", {}).get("outage_summary", {})
 
     _save_json(ML_TRAIN_STATE_FILE, state)
 
@@ -2529,6 +2537,17 @@ def build_features(
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
     })
 
+    # FIX-07: Assert feature column count matches FEATURE_COLS
+    if len(df.columns) != len(FEATURE_COLS):
+        log.error(
+            "build_features column count mismatch: got %d, expected %d. Extra: %s, Missing: %s",
+            len(df.columns), len(FEATURE_COLS),
+            sorted(set(df.columns) - set(FEATURE_COLS)),
+            sorted(set(FEATURE_COLS) - set(df.columns)),
+        )
+    assert len(df.columns) == len(FEATURE_COLS), (
+        f"build_features returned {len(df.columns)} columns, expected {len(FEATURE_COLS)}"
+    )
     return df
 
 
@@ -2959,6 +2978,132 @@ def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int)
             log.warning("DB actual load failed [%s]: %s", db_path, e)
             break
     return out
+
+
+# ── Availability / Outage Detection (Phase 2) ──────────────────────────────
+
+def _query_availability_5min(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, tuple[int, int]]:
+    """Query availability_5min table for a day range.
+
+    Returns dict {ts_ms: (online_count, expected_count)}.
+    Silently returns empty dict if table doesn't exist (old DB).
+    """
+    if not db_path.exists():
+        return {}
+    sql = """
+        SELECT ts, online_count, expected_count
+          FROM availability_5min
+         WHERE ts >= ? AND ts < ?
+         ORDER BY ts ASC
+    """
+    out: dict[int, tuple[int, int]] = {}
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cur = conn.execute(sql, (int(day_start_ms), int(day_end_ms)))
+                for ts, online, expected in cur.fetchall():
+                    ts_i = int(ts or 0)
+                    if ts_i <= 0:
+                        continue
+                    out[ts_i] = (int(online or 0), int(expected or 0))
+            return out
+        except Exception as e:
+            msg = str(e).lower()
+            if "no such table" in msg:
+                return {}
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB availability load retry %d/%d [%s]: %s",
+                    attempt, SQLITE_RETRY_ATTEMPTS, db_path.name, e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB availability load failed [%s]: %s", db_path, e)
+            break
+    return out
+
+
+def _load_availability_for_day(day: str) -> dict[int, tuple[int, int]]:
+    """Load availability data for a day from hot DB + archives (merge)."""
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return {}
+
+    merged = _query_availability_5min(APP_DB_FILE, day_start_ms, day_end_ms)
+    for month_key in _archive_month_keys_for_range(day_start_ms, day_end_ms):
+        archive_path = ARCHIVE_DIR / f"{month_key}.db"
+        archive_rows = _query_availability_5min(archive_path, day_start_ms, day_end_ms)
+        for ts, counts in archive_rows.items():
+            if ts not in merged:
+                merged[ts] = counts
+    return merged
+
+
+def _detect_outage_slots(day: str) -> np.ndarray:
+    """Build a boolean mask (288 slots) where True = outage-tainted slot.
+
+    A slot is outage-tainted when online_count / expected_count < AVAIL_OUTAGE_THRESHOLD.
+    Returns all-False if no availability data exists (backward compatible).
+    """
+    avail = _load_availability_for_day(day)
+    mask = np.zeros(SLOTS_DAY, dtype=bool)
+    if not avail:
+        return mask
+
+    day_start_ms, _ = _day_bounds_ms(day)
+    if day_start_ms is None:
+        return mask
+
+    slot_ms = SLOT_MIN * 60 * 1000
+    for ts, (online, expected) in avail.items():
+        slot = int((int(ts) - day_start_ms) // slot_ms)
+        if 0 <= slot < SLOTS_DAY and expected > 0:
+            ratio = online / expected
+            if ratio < AVAIL_OUTAGE_THRESHOLD:
+                mask[slot] = True
+    return mask
+
+
+def _classify_day_outage_severity(day: str, outage_mask: np.ndarray | None = None) -> str:
+    """Classify a day's outage severity based on the fraction of solar slots affected.
+
+    Returns one of: 'no_outage', 'minor', 'moderate', 'severe'.
+    """
+    if outage_mask is None:
+        outage_mask = _detect_outage_slots(day)
+
+    solar_slots = SOLAR_END_SLOT - SOLAR_START_SLOT
+    if solar_slots <= 0:
+        return "no_outage"
+
+    solar_outage_count = int(np.count_nonzero(outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+    frac = solar_outage_count / solar_slots
+
+    if frac >= AVAIL_DAY_SEVERE_PCT:
+        return "severe"
+    if frac >= AVAIL_DAY_MODERATE_PCT:
+        return "moderate"
+    if frac >= AVAIL_DAY_MINOR_PCT:
+        return "minor"
+    return "no_outage"
+
+
+def _outage_slot_summary(day: str, outage_mask: np.ndarray | None = None) -> dict[str, int | str | bool]:
+    """Return a summary dict of outage metrics for a given day.
+
+    Keys: outage_slot_count, solar_outage_slot_count, severity, has_availability_data.
+    """
+    if outage_mask is None:
+        outage_mask = _detect_outage_slots(day)
+
+    solar_outage = int(np.count_nonzero(outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+    return {
+        "outage_slot_count": int(np.count_nonzero(outage_mask)),
+        "solar_outage_slot_count": solar_outage,
+        "severity": _classify_day_outage_severity(day, outage_mask),
+        "has_availability_data": bool(np.any(outage_mask)) or bool(_load_availability_for_day(day)),
+    }
 
 
 def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -3906,6 +4051,7 @@ def lookup_solcast_resolution_weight_vector(
 
 
 def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str | None = None) -> dict:
+    _MIN_RELIABILITY_SAMPLES = 10  # FIX-18: Minimum day_count to trust regime-specific corrections
     fallback = {
         "day_count": 0,
         "mean_mape": 0.24,
@@ -3922,15 +4068,25 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
         key = f"{season}:{regime}"
         season_regimes = artifact.get("season_regimes") or {}
         if key in season_regimes and isinstance(season_regimes[key], dict):
-            out = dict(fallback)
-            out.update(season_regimes[key])
-            return out
+            cell = season_regimes[key]
+            # FIX-18: Skip low-sample cells
+            if int(cell.get("day_count", 0)) < _MIN_RELIABILITY_SAMPLES:
+                log.debug("Reliability cell '%s' has only %d samples — falling through", key, int(cell.get("day_count", 0)))
+            else:
+                out = dict(fallback)
+                out.update(cell)
+                return out
     # Regime-only lookup
     regimes = artifact.get("regimes") or {}
     if regime in regimes and isinstance(regimes[regime], dict):
-        out = dict(fallback)
-        out.update(regimes[regime])
-        return out
+        cell = regimes[regime]
+        # FIX-18: Skip low-sample cells
+        if int(cell.get("day_count", 0)) < _MIN_RELIABILITY_SAMPLES:
+            log.debug("Reliability cell '%s' has only %d samples — falling through to overall", regime, int(cell.get("day_count", 0)))
+        else:
+            out = dict(fallback)
+            out.update(cell)
+            return out
     # Season-only fallback
     if season:
         seasons = artifact.get("seasons") or {}
@@ -3980,6 +4136,17 @@ def solcast_prior_from_snapshot(
     prior_lo *= bias_ratio
     prior_hi *= bias_ratio
     prior_mw *= bias_ratio
+
+    # Enforce P10 <= forecast <= P90 ordering constraint
+    violated = int(np.sum((prior_lo > prior_kwh) | (prior_hi < prior_kwh)))
+    if violated > 0:
+        log.warning(
+            "Solcast P10/P90 ordering violated in %d slots for %s — clamping",
+            violated, day,
+        )
+    prior_lo = np.minimum(prior_lo, prior_kwh)
+    prior_hi = np.maximum(prior_hi, prior_kwh)
+
     prior_kwh[:SOLAR_START_SLOT] = 0.0
     prior_kwh[SOLAR_END_SLOT:] = 0.0
 
@@ -4398,6 +4565,8 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     try:
         start_date = (today - timedelta(days=max(ERR_MEMORY_DAYS * 4, 30))).isoformat()
         end_date = (today - timedelta(days=1)).isoformat()
+        # FIX-12: SQLite WAL mode + readonly=True provides snapshot isolation —
+        # all reads within this connection see a consistent point-in-time view.
         with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             conn.execute("PRAGMA query_only = ON")
             daily_rows = conn.execute(
@@ -4547,6 +4716,18 @@ def collect_history_days(
         manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy()
         rad_arr = pd.to_numeric(feature_frame["rad"], errors="coerce").fillna(0.0).values
 
+        # ── Outage-aware slot masking ──
+        # Severe outages (≥30% solar slots with <95% inverter availability) indicate
+        # systemic events (campus-wide trip, grid outage) that corrupt training signal.
+        # Minor/moderate days are retained with outage slots excluded per-slot.
+        outage_mask = _detect_outage_slots(day)
+        outage_severity = _classify_day_outage_severity(day, outage_mask)
+        outage_solar_count = int(np.count_nonzero(outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+
+        if outage_severity == "severe":
+            log.warning("  Reject %s - severe inverter outage (%d solar slots affected)", day, outage_solar_count)
+            continue
+
         actual_effective = np.asarray(actual, dtype=float).copy()
         actual_effective[cap_dispatch_mask] = history_baseline[cap_dispatch_mask]
         actual_eval = actual_effective.copy()
@@ -4565,6 +4746,7 @@ def collect_history_days(
             solar_slot_mask
             & actual_present_arr
             & (~manual_constraint_mask)
+            & (~outage_mask)
             & (history_baseline > 0.0)
             & (rad_arr >= RAD_MIN_WM2)
         )
@@ -4628,14 +4810,19 @@ def collect_history_days(
             "manual_constraint_slot_count": int(constraint_meta.get("manual_constraint_slot_count", 0)),
             "event_count": int(constraint_meta.get("event_count", 0)),
             "usable_slots": usable_slots,
+            "outage_mask": outage_mask,
+            "outage_severity": outage_severity,
+            "outage_solar_slot_count": outage_solar_count,
         })
         log.info(
-            "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  solcast=%s",
+            "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  outage=%s(%d)  solcast=%s",
             day,
             stats["sky_class"],
             usable_slots,
             int(constraint_meta.get("manual_constraint_slot_count", 0)),
             int(constraint_meta.get("cap_dispatch_slot_count", 0)),
+            outage_severity,
+            outage_solar_count,
             "yes" if hybrid_meta.get("used_solcast") else "no",
         )
 
@@ -5802,7 +5989,8 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
 
     Returns:
         list: May include 'insufficient_training_days', 'high_rejection_streak',
-              'no_regime_data', 'lgbm_unavailable_fallback'. May be empty (healthy).
+              'no_regime_data', 'lgbm_unavailable_fallback',
+              'outage_days_detected'. May be empty (healthy).
     """
     warnings = []
 
@@ -5827,6 +6015,11 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
     # Check for LightGBM fallback
     if FORECAST_USE_LIGHTGBM and not _LIGHTGBM_AVAILABLE:
         warnings.append("lgbm_unavailable_fallback")
+
+    # Check for outage-affected days in training window
+    outage_summary = bundle.get("outage_summary", {})
+    if outage_summary.get("days_with_outages", 0) > 0:
+        warnings.append("outage_days_detected")
 
     return warnings
 
@@ -5989,6 +6182,14 @@ def fit_residual_model(
     stage_meta = _select_residual_regressor_stage(X, y, sample_weight, day_keys)
     model = _make_residual_regressor(stage_meta.get("best_n_estimators"))
     model.fit(X.reset_index(drop=True), y, sample_weight=sample_weight)
+    # FIX-15: Feature importance logging
+    _feat_imp_top10 = []
+    if hasattr(model, "feature_importances_"):
+        _importances = dict(zip(X.columns, model.feature_importances_))
+        _sorted_imp = sorted(_importances.items(), key=lambda x: x[1], reverse=True)
+        log.info("Top-10 features: %s", [(k, f"{v:.1f}") for k, v in _sorted_imp[:10]])
+        log.info("Bottom-5 features: %s", [(k, f"{v:.1f}") for k, v in _sorted_imp[-5:]])
+        _feat_imp_top10 = [{"name": k, "importance": float(v)} for k, v in _sorted_imp[:10]]
     meta = {
         "sample_count": int(len(y)),
         "feature_count": int(X.shape[1]),
@@ -5996,6 +6197,7 @@ def fit_residual_model(
         "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
         "estimators_used": int(getattr(model, "n_estimators_", model.n_estimators)),
         "stage_validation": stage_meta,
+        "feature_importance_top10": _feat_imp_top10,
     }
     return model, None, meta
 
@@ -6087,10 +6289,12 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
             manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             actual[cap_dispatch_mask] = hybrid[cap_dispatch_mask]
+            _outage = np.asarray(sample.get("outage_mask"), dtype=bool) if sample.get("outage_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             usable_mask = (
                 solar_mask
                 & actual_present
                 & (~manual_constraint_mask)
+                & (~_outage)
                 & (~curtailed_mask(actual, hybrid))
                 & (feat["rad"].values >= RAD_MIN_WM2)
                 & (hybrid > 0.0)
@@ -6154,11 +6358,24 @@ def build_training_state(today: date) -> dict | None:
         opportunity_kwh=class_scale,
         day_keys=day_keys,
     )
+    # Aggregate outage summary from history days
+    _outage_days = [h for h in history_days if h.get("outage_severity", "no_outage") != "no_outage"]
+    _outage_summary = {
+        "days_with_outages": len(_outage_days),
+        "total_outage_solar_slots": sum(h.get("outage_solar_slot_count", 0) for h in _outage_days),
+        "severity_counts": {
+            "minor": sum(1 for h in _outage_days if h.get("outage_severity") == "minor"),
+            "moderate": sum(1 for h in _outage_days if h.get("outage_severity") == "moderate"),
+            "severe": 0,  # severe days are fully rejected by collect_history_days(), never in accepted list
+        },
+    }
+
     bundle = {
         "created_ts": int(time.time()),
         "training_basis": "actual archived weather + cleaned actual generation (+ Solcast prior when available)",
         "history_days": int(len(history_days)),
         "feature_cols": list(X.columns),
+        "outage_summary": _outage_summary,
         "global": {
             "model": global_model,
             "scaler": global_scaler,
@@ -6236,7 +6453,29 @@ def build_training_state(today: date) -> dict | None:
 def save_model_bundle(bundle: dict) -> bool:
     try:
         MODEL_BUNDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        dump(bundle, MODEL_BUNDLE_FILE)
+        # Keep last 3 checkpoints (FIX-17)
+        # Delete oldest first, then shift: prev2→prev3, prev1→prev2
+        oldest = MODEL_BUNDLE_FILE.with_suffix(".prev3.joblib")
+        if oldest.exists():
+            oldest.unlink()
+        for i in range(2, 0, -1):
+            src = MODEL_BUNDLE_FILE.with_suffix(f".prev{i}.joblib")
+            dst = MODEL_BUNDLE_FILE.with_suffix(f".prev{i+1}.joblib")
+            if src.exists():
+                src.rename(dst)
+        if MODEL_BUNDLE_FILE.exists():
+            MODEL_BUNDLE_FILE.rename(MODEL_BUNDLE_FILE.with_suffix(".prev1.joblib"))
+        # Atomic write: save to temp file, then rename
+        tmp_path = MODEL_BUNDLE_FILE.with_suffix(".tmp")
+        dump(bundle, tmp_path)
+        # Compute SHA256 of the saved file
+        sha256 = hashlib.sha256(tmp_path.read_bytes()).hexdigest()
+        tmp_path.rename(MODEL_BUNDLE_FILE)
+        # Persist checksum in ml_train_state.json
+        state = _load_json(ML_TRAIN_STATE_FILE)
+        state["model_file_sha256"] = sha256
+        _save_json(ML_TRAIN_STATE_FILE, state)
+        log.info("Model bundle saved: %s (sha256=%s)", MODEL_BUNDLE_FILE.name, sha256[:16])
         return True
     except Exception as e:
         log.error("Model bundle save failed %s: %s", MODEL_BUNDLE_FILE, e)
@@ -6246,6 +6485,17 @@ def save_model_bundle(bundle: dict) -> bool:
 def load_model_bundle() -> dict | None:
     if MODEL_BUNDLE_FILE.exists():
         try:
+            # Validate checksum if available (FIX-06 load-side)
+            train_state = _load_json(ML_TRAIN_STATE_FILE)
+            expected_sha = train_state.get("model_file_sha256")
+            if expected_sha:
+                actual_sha = hashlib.sha256(MODEL_BUNDLE_FILE.read_bytes()).hexdigest()
+                if actual_sha != expected_sha:
+                    log.error(
+                        "Model bundle checksum mismatch! Expected %s, got %s. File may be corrupted.",
+                        expected_sha[:16], actual_sha[:16],
+                    )
+                    return None  # Force physics-only fallback
             data = load(MODEL_BUNDLE_FILE)
             if isinstance(data, dict):
                 return data
@@ -6305,9 +6555,18 @@ def _align_bundle_features(
     elif hasattr(model, "n_features_in_"):
         expected_count = int(model.n_features_in_)
     if expected_count is not None and expected_count != int(X_pred.shape[1]):
-        raise ValueError(
-            f"Feature count mismatch for model bundle (expected {expected_count}, got {int(X_pred.shape[1])})"
-        )
+        if expected_count < int(X_pred.shape[1]):
+            # Legacy model with fewer features — truncate to match (new cols are appended at end)
+            log.info(
+                "Legacy model alignment: truncating %d -> %d features (dropping newest columns)",
+                int(X_pred.shape[1]), expected_count,
+            )
+            return X_pred.iloc[:, :expected_count]
+        else:
+            raise ValueError(
+                f"Feature count mismatch for model bundle (expected {expected_count}, "
+                f"got {int(X_pred.shape[1])}). Model expects more features than available."
+            )
     return X_pred
 
 
@@ -6335,14 +6594,35 @@ def predict_residual_with_bundle(
     X_pred = _align_bundle_features(global_block, list(bundle.get("feature_cols") or []), X_pred)
 
     X_global = _transform_bundle_features(global_block, X_pred)
-    global_pred = np.asarray(global_model.predict(X_global), dtype=float)
+    try:
+        global_pred = np.asarray(global_model.predict(X_global), dtype=float)
+    except Exception as e:
+        log.error(
+            "Global model prediction failed: %s (X shape=%s, model type=%s)",
+            e, X_global.shape, type(global_model).__name__,
+        )
+        return np.zeros(len(X_pred), dtype=float), {
+            "target_regime": target_regime, "used_regime_model": False,
+            "blend": 0.0, "prediction_error": str(e),
+        }
+
     regime_block = ((bundle.get("regimes") or {}).get(target_regime) or {})
     regime_model = regime_block.get("model")
     if regime_model is None:
         return global_pred, {"target_regime": target_regime, "used_regime_model": False, "blend": 0.0}
 
     X_regime = _transform_bundle_features(regime_block, X_pred)
-    regime_pred = np.asarray(regime_model.predict(X_regime), dtype=float)
+    try:
+        regime_pred = np.asarray(regime_model.predict(X_regime), dtype=float)
+    except Exception as e:
+        log.warning(
+            "Regime model prediction failed for '%s': %s (X shape=%s). Falling back to global.",
+            target_regime, e, X_regime.shape,
+        )
+        return global_pred, {
+            "target_regime": target_regime, "used_regime_model": False,
+            "blend": 0.0, "regime_prediction_error": str(e),
+        }
     regime_meta = regime_block.get("meta") or {}
     regime_days = int(regime_meta.get("day_count", 0))
     blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
@@ -6775,6 +7055,10 @@ def confidence_bands(
       - time-of-day (lower confidence at dawn/dusk)
     """
     stats = analyse_weather_day(day, w5)
+    # FIX-11: Guard against w5 having fewer rows than SLOTS_DAY
+    if len(w5) < SLOTS_DAY:
+        log.warning("confidence_bands: w5 has %d rows, expected %d — padding with forward-fill", len(w5), SLOTS_DAY)
+        w5 = w5.reindex(range(SLOTS_DAY)).ffill().fillna(0.0)
     lo    = np.zeros(SLOTS_DAY)
     hi    = np.zeros(SLOTS_DAY)
     confidence_penalty = float(np.clip(1.0 - float(regime_confidence), 0.0, 0.4))
@@ -6804,6 +7088,9 @@ def confidence_bands(
             continue
 
         cloud_i  = w5["cloud"].values[i]
+        # FIX-11: NaN safety for cloud value
+        if not np.isfinite(cloud_i):
+            cloud_i = 50.0  # conservative mid-range fallback
         # Additional uncertainty from cloud layer presence
         cloud_unc = CONF_CLOUD_ADD * np.clip((cloud_i - 30) / 70.0, 0, 1)
         classifier_unc = ERROR_CLASS_CONF_BAND_ADD_MAX * np.clip(1.0 - class_confidence[i], 0.0, 1.0)
@@ -8732,6 +9019,9 @@ def run_dayahead(
             "forecast_hi_total_kwh": _hi_total,
             # data_warnings is the authoritative source in ml_train_state.json; not duplicated here
         }
+        # FIX-09: Tag fallback reason when Node delegation failed
+        if "fallback" in (audit_generator_mode or ""):
+            _notes_extra["fallback_reason"] = "node_delegation_failed"
 
         _write_forecast_run_audit_from_python(
             target_date=target_s,
@@ -9328,9 +9618,9 @@ def main() -> None:
                     # Generate the resolved target day-ahead
                     ok = _delegate_run_dayahead(target)
                     if not ok:
-                        log.warning("Node delegation failed in auto loop - attempting direct Python generation for %s", target_s)
+                        log.warning("Node delegation failed in auto loop - attempting direct Python fallback for %s", target_s)
                         try:
-                            _direct_result = run_dayahead(target, today, write_audit=True)
+                            _direct_result = run_dayahead(target, today, write_audit=True, audit_generator_mode="auto_service_fallback")
                             if _direct_result:
                                 log.info("Auto loop Python fallback generation succeeded for %s", target_s)
                                 ok = True
@@ -9374,9 +9664,9 @@ def main() -> None:
                 try:
                     ok = _delegate_run_dayahead(today)
                     if not ok:
-                        log.warning("Node delegation failed in recovery - attempting direct Python generation for %s", today_s)
+                        log.warning("Node delegation failed in recovery - attempting direct Python fallback for %s", today_s)
                         try:
-                            _direct_result = run_dayahead(today, today, write_audit=True)
+                            _direct_result = run_dayahead(today, today, write_audit=True, audit_generator_mode="auto_service_fallback")
                             if _direct_result:
                                 log.info("Recovery Python fallback generation succeeded for %s", today_s)
                                 ok = True

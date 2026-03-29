@@ -3,6 +3,7 @@ const {
   bulkInsertPollerBatch,
   getSetting,
   sumEnergy5minByInverterRange,
+  upsertAvailability5min,
 } = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
@@ -638,6 +639,7 @@ function markMissingKey(key, now) {
 // ─── 5-min energy bucketing ──────────────────────────────────────────────────
 
 const energyBuckets = {}; // `${inv}` -> { bucketStart, kwhStart, day }
+let lastAvailabilityBucketTs = 0; // last written availability_5min boundary
 
 function floorToFiveMinute(ts) {
   const FIVE = 5 * 60 * 1000;
@@ -1025,6 +1027,37 @@ async function poll() {
   }
 
   const totals = buildTotals(now);
+
+  // ── Availability snapshot at 5-min boundaries ──
+  // Records how many inverters are online vs configured for each 5-min slot.
+  // Used by forecast engine to detect partial outages in training data.
+  // Only writes once liveData has received at least one inverter reading
+  // (Object.keys(liveData).length > 0) to avoid artificial (0, N) on startup.
+  const availBucket = floorToFiveMinute(now);
+  if (fetchOk && availBucket > lastAvailabilityBucketTs && Object.keys(liveData).length > 0) {
+    const onlineInverters = new Set();
+    for (const d of Object.values(liveData)) {
+      if (Number(d.online || 0) === 1 && (now - Number(d.ts || 0)) <= OFFLINE_MS) {
+        onlineInverters.add(Number(d.inverter || 0));
+      }
+    }
+    const expectedInverters = new Set();
+    for (let inv = 1; inv <= 27; inv++) {
+      const ip = String(
+        ipConfig?.inverters?.[inv] ?? ipConfig?.inverters?.[String(inv)] ?? "",
+      ).trim();
+      if (ip) expectedInverters.add(inv);
+    }
+    if (expectedInverters.size > 0) {
+      try {
+        upsertAvailability5min(availBucket, onlineInverters.size, expectedInverters.size);
+        lastAvailabilityBucketTs = availBucket;
+      } catch (err) {
+        console.error("[poller] availability_5min upsert failed:", err.message);
+      }
+    }
+  }
+
   updateTodayEnergyHealthFromTotals(totals, now);
   updateLiveSnapshotCache();
   broadcastUpdate({ type: 'live', data: liveData, totals });

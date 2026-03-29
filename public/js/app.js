@@ -317,6 +317,7 @@ const SETTINGS_SECTION_IDS = [
   "licenseSection",
   "appUpdateSection",
   "cloudBackupSection",
+  "localBackupSection",
 ];
 const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const SETTINGS_SECTION_META = {
@@ -343,6 +344,10 @@ const SETTINGS_SECTION_META = {
   cloudBackupSection: {
     title: "Cloud Backup",
     copy: "Configure approved providers, backup scope, restore actions, and backup history.",
+  },
+  localBackupSection: {
+    title: "Local Backup",
+    copy: "Portable .adsibak export and restore for OS migration.",
   },
 };
 const SETTINGS_CONFIG_KIND = "adsi-settings-config";
@@ -1273,6 +1278,10 @@ function renderAppUpdateSummary() {
   if (detailEl) detailEl.textContent = detailText;
   const aboutVersion = $("aboutAppVersion");
   if (aboutVersion) aboutVersion.textContent = currentVersion;
+  const headerVer = document.querySelector(".side-about-ver");
+  if (headerVer && currentVersion && currentVersion !== "—") {
+    headerVer.textContent = currentVersion.startsWith("v") ? currentVersion : "v" + currentVersion;
+  }
   const aboutStatus = $("aboutUpdateStatus");
   if (aboutStatus) aboutStatus.textContent = detailText;
 
@@ -3841,7 +3850,8 @@ function mountForecastSection() {
 
 function mountForecastPerfPanel() {
   const host = $("analyticsCharts");
-  if (!host || $("fperfPanel")) return;
+  // Insert as sibling BEFORE the chart grid — not inside it — so ensureAnalyticsCards() innerHTML wipe cannot destroy the panel
+  if (!host || !host.parentNode || $("fperfPanel")) return;
   const wrap = document.createElement("div");
   wrap.innerHTML = `
 <div class="fperf-card" id="fperfPanel">
@@ -3885,7 +3895,7 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-label">Recent Quality (14d)</span>
         <span class="fperf-hchip-val" id="fperfQualityVal">—</span>
       </div>
-      <div class="fperf-hchip" id="fperfChipAvgWape">
+      <div class="fperf-hchip" id="fperfChipAvgWape" title="Weighted Absolute Percentage Error — average across the selected window">
         <span class="fperf-hchip-label">Avg WAPE (window)</span>
         <span class="fperf-hchip-val" id="fperfAvgWapeVal">—</span>
       </div>
@@ -3922,7 +3932,7 @@ function mountForecastPerfPanel() {
         <div class="fperf-chart-wrap" id="fperfCompareWrap"><canvas id="fperfCompareChart"></canvas></div>
       </div>
       <div class="fperf-chart-panel">
-        <div class="fperf-chart-title">WAPE % per Day</div>
+        <div class="fperf-chart-title">WAPE (Weighted Absolute Percentage Error) % per Day</div>
         <div class="fperf-chart-wrap" id="fperfWapeWrap"><canvas id="fperfWapeChart"></canvas></div>
       </div>
     </div>
@@ -3932,15 +3942,15 @@ function mountForecastPerfPanel() {
         <table class="fperf-table">
           <thead>
             <tr>
-              <th>Date</th>
+              <th class="td-date">Date</th>
               <th>Provider</th>
               <th>Variant</th>
-              <th class="td-num">WAPE %</th>
+              <th class="td-num" title="Weighted Absolute Percentage Error">WAPE %</th>
               <th class="td-num">Forecast MWh</th>
               <th class="td-num">Actual MWh</th>
               <th>Freshness</th>
               <th>Quality</th>
-              <th>In Memory</th>
+              <th style="text-align:center">In Memory</th>
             </tr>
           </thead>
           <tbody id="fperfTableBody"></tbody>
@@ -3950,7 +3960,17 @@ function mountForecastPerfPanel() {
     <span class="smsg" id="fperfMsg"></span>
   </div>
 </div>`;
-  host.insertBefore(wrap.firstElementChild, host.firstChild);
+  // Wrap both FPM and chart-grid in a scroll container so the entire
+  // analytics content scrolls together (FPM is not sticky/blocking).
+  let scrollWrap = $("analyticsScrollWrap");
+  if (!scrollWrap) {
+    scrollWrap = document.createElement("div");
+    scrollWrap.id = "analyticsScrollWrap";
+    scrollWrap.className = "analytics-scroll-wrap";
+    host.parentNode.insertBefore(scrollWrap, host);
+    scrollWrap.appendChild(host);
+  }
+  scrollWrap.insertBefore(wrap.firstElementChild, host);
   State.fperf.mounted = true;
 
   // Load collapsed state from localStorage; default is collapsed (hidden until user expands)
@@ -3970,6 +3990,13 @@ function toggleFperfPanel() {
   State.fperf.collapsed = !State.fperf.collapsed;
   localStorage.setItem("fperfCollapsed", String(State.fperf.collapsed));
   applyFperfCollapsedState();
+  // After expanding, re-render charts so Chart.js picks up the new canvas size
+  // (charts created while collapsed have zero dimensions)
+  if (!State.fperf.collapsed && State.fperf.qaRows?.length) {
+    setTimeout(() => {
+      renderForecastPerfCharts(State.fperf.qaRows);
+    }, 300); // wait for CSS max-height transition (0.25s)
+  }
 }
 
 function applyFperfCollapsedState() {
@@ -5766,7 +5793,7 @@ async function confirmGatewayModeSwitch(nextMode, prevMode) {
     String(job?.status || "").trim().toLowerCase() === "completed";
   const restartCapable = isGatewayModeRestartCapable();
   const bodyText = stagedStandbyReady
-    ? "A refreshed standby database is already staged locally.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts from the staged local database.\n\nContinue with the Gateway mode switch?"
+    ? "A refreshed standby database is already staged locally.\n\nA restart is needed after saving this mode change so Gateway mode starts from the staged database.\n\nContinue with the Gateway mode switch?"
     : "Remote mode does not keep the local database current.\n\nRun Refresh Standby DB first if you need current local history before switching to Gateway mode.\n\nSaving this mode change should be followed by an app restart so Gateway mode starts cleanly.\n\nContinue with the Gateway mode switch?";
 
   return appConfirm(
@@ -6199,7 +6226,7 @@ function updateReplicationActionButtons(job, mode) {
   if (pullBtn) {
     pullBtn.disabled = !canStartPull;
     pullBtn.title = canStartPull
-      ? "Download the gateway database for local standby use. Requires restart to apply."
+      ? "Download the gateway database for local standby use. Restart is needed to apply the staged data."
       : activeMode !== "remote"
         ? "Available only in Remote mode."
         : "A standby DB refresh is already running.";
@@ -6229,8 +6256,8 @@ async function promptReplicationRestart(job) {
   const summary = String(j.summary || "").trim();
   const ok = await appConfirm(
     "Standby DB Refresh Complete",
-    `Standby DB refresh finished.\n\n${summary || "The transfer is complete."}\n\nRestart the app now to reload runtime state and archive metadata?`,
-    { ok: "Restart Now", cancel: "Later" },
+    `Standby DB refresh finished.\n\n${summary || "The transfer is complete."}\n\nA restart is needed to apply the staged database. The new gateway data will become active after the app restarts.`,
+    { ok: "Restart Now", cancel: "Restart Later" },
   );
   if (!ok) return;
   try {
@@ -6507,11 +6534,11 @@ async function runReplicationPullNow() {
   const _pullOk = await appConfirm(
     "Refresh Standby Database",
     "Download the gateway database for local standby use.\n\n" +
-    "The gateway snapshot will replace your local database on restart.\n\n" +
+    "The staged snapshot is not applied immediately — a restart is needed to activate the new database.\n\n" +
     "While the standby refresh is running, the remote live stream will pause temporarily so the download gets priority.\n\n" +
     "Local-only settings (operation mode, gateway URL/token, tailnet hint, and export path) are preserved." +
     archiveLine +
-    "\n\nYou will be prompted to restart after completion.",
+    "\n\nYou will be prompted to restart when the download completes.",
     { ok: "Start Download" },
   );
   if (!_pullOk) return;
@@ -13164,6 +13191,155 @@ async function cbDeleteBackup(backupId) {
   }
 }
 
+// ─── Local Portable Backup (.adsibak) ────────────────────────────────────────
+
+let _lbImportedId = null;
+
+async function lbExport() {
+  let destPath = null;
+  if (window.electronAPI?.saveAdsibak) {
+    destPath = await window.electronAPI.saveAdsibak();
+  }
+  if (!destPath) return;
+
+  const resultEl = $("localBackupExportResult");
+  const progEl = $("localBackupExportProgress");
+  if (resultEl) { resultEl.hidden = true; resultEl.textContent = ""; }
+  if (progEl) progEl.hidden = false;
+  const labelEl = $("localBackupExportLabel");
+  const barEl = $("localBackupExportBar");
+  if (labelEl) labelEl.textContent = "Creating portable backup…";
+  if (barEl) barEl.style.width = "10%";
+
+  try {
+    await api("/api/backup/create-portable", "POST", { destPath });
+    if (labelEl) labelEl.textContent = "Backup queued — packing files…";
+    if (barEl) barEl.style.width = "30%";
+    // Poll progress via standard progress endpoint
+    await _lbPollUntilDone(labelEl, barEl);
+    if (resultEl) {
+      resultEl.innerHTML = `<span class="text-success">Backup saved to <strong>${escapeHtml(destPath)}</strong></span>`;
+      resultEl.hidden = false;
+    }
+    if (progEl) progEl.hidden = true;
+    showToast("Portable backup created successfully", "success");
+  } catch (err) {
+    if (labelEl) labelEl.textContent = `Failed: ${err.message}`;
+    if (barEl) barEl.style.width = "0%";
+    if (resultEl) {
+      resultEl.innerHTML = `<span class="text-error">${escapeHtml(err.message)}</span>`;
+      resultEl.hidden = false;
+    }
+    showToast(`Backup failed: ${err.message}`, "error");
+  }
+}
+
+async function lbImport() {
+  let srcPath = null;
+  if (window.electronAPI?.openAdsibak) {
+    srcPath = await window.electronAPI.openAdsibak();
+  }
+  if (!srcPath) return;
+
+  _lbImportedId = null;
+  const previewEl = $("localBackupPreview");
+  const bodyEl = $("localBackupPreviewBody");
+  if (previewEl) previewEl.hidden = true;
+
+  try {
+    // Validate first
+    const info = await api("/api/backup/validate-portable", "POST", { srcPath });
+    if (!info.ok) throw new Error(info.error || "Validation failed");
+
+    // Import
+    const imp = await api("/api/backup/import-portable", "POST", { srcPath });
+    if (!imp.ok) throw new Error(imp.error || "Import queuing failed");
+    // Poll until import completes
+    await _lbPollUntilDone();
+
+    // Re-validate to get the id from history
+    const hist = await api("/api/backup/history");
+    const imported = (hist.history || []).find(h => h.status === "imported" || h.tag === "imported");
+    _lbImportedId = imported?.id || null;
+
+    // Show preview
+    if (bodyEl) {
+      const m = info.manifest || {};
+      const rows = [
+        ["Source", escapeHtml(srcPath.split(/[\\/]/).pop())],
+        ["App Version", escapeHtml(m.appVersion || "?")],
+        ["Created", m.createdAt ? new Date(m.createdAt).toLocaleString() : "?"],
+        ["Scope", escapeHtml((m.scope || []).join(", "))],
+        ["Files", String(info.fileCount || "?")],
+        ["Size", cbFormatSize(info.totalSize || info.archiveSize)],
+        ["Checksums", info.checksumOk ? "Verified" : "⚠ Mismatch"],
+      ];
+      bodyEl.innerHTML = rows.map(([k, v]) => `<tr><td><strong>${k}</strong></td><td>${v}</td></tr>`).join("");
+    }
+    if (previewEl) previewEl.hidden = false;
+    showToast("Backup imported — review and click Restore", "info");
+  } catch (err) {
+    showToast(`Import failed: ${err.message}`, "error");
+  }
+}
+
+async function lbRestore() {
+  if (!_lbImportedId) { showToast("No imported backup to restore", "error"); return; }
+  if (!await appConfirm("Restore Backup", "This will overwrite all current data with the backup contents.\n\nThe app will restart after restore completes.", { ok: "Restore & Restart" })) return;
+
+  const progEl = $("localBackupRestoreProgress");
+  const labelEl = $("localBackupRestoreLabel");
+  const barEl = $("localBackupRestoreBar");
+  if (progEl) progEl.hidden = false;
+  if (labelEl) labelEl.textContent = "Restoring data…";
+  if (barEl) barEl.style.width = "10%";
+
+  try {
+    await api(`/api/backup/restore-portable/${encodeURIComponent(_lbImportedId)}`, "POST", {});
+    if (labelEl) labelEl.textContent = "Restore queued…";
+    if (barEl) barEl.style.width = "30%";
+    await _lbPollUntilDone(labelEl, barEl);
+    showToast("Restore complete — restarting app…", "success");
+    if (barEl) barEl.style.width = "100%";
+    if (labelEl) labelEl.textContent = "Restarting…";
+    // Trigger app restart after a short delay
+    setTimeout(() => {
+      if (window.electronAPI?.restartApp) window.electronAPI.restartApp();
+      else location.reload();
+    }, 2000);
+  } catch (err) {
+    if (labelEl) labelEl.textContent = `Restore failed: ${err.message}`;
+    showToast(`Restore failed: ${err.message}`, "error");
+  }
+}
+
+function lbCancelImport() {
+  _lbImportedId = null;
+  const previewEl = $("localBackupPreview");
+  if (previewEl) previewEl.hidden = true;
+  showToast("Import cancelled", "info");
+}
+
+async function _lbPollUntilDone(labelEl, barEl) {
+  const maxWait = 300000; // 5 min
+  const interval = 1500;
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    await new Promise(r => setTimeout(r, interval));
+    try {
+      const data = await api("/api/backup/progress");
+      const p = data.progress || {};
+      if (labelEl && p.message) labelEl.textContent = p.message;
+      if (barEl && p.pct) barEl.style.width = `${p.pct}%`;
+      if (p.status === "done" || p.status === "success") return;
+      if (p.status === "error" || p.status === "failed") throw new Error(p.message || "Operation failed");
+    } catch (e) {
+      if (e.message && e.message !== "Operation failed") throw e;
+    }
+  }
+  throw new Error("Operation timed out");
+}
+
 function escapeHtml(str) {
   return String(str || "")
     .replace(/&/g, "&amp;")
@@ -13370,6 +13546,12 @@ function bindEventHandlers() {
   $("btnClearRestoreDate")?.addEventListener("click", () => { if ($("cbRestoreDate")) { $("cbRestoreDate").value = ""; cbRefreshHistory(); } });
   $("cbOneDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade") || window.open("https://portal.azure.com"); });
   $("cbGDriveSetupLink")?.addEventListener("click", (e) => { e.preventDefault(); window.electronAPI?.openOAuthWindow?.("https://console.cloud.google.com/apis/credentials") || window.open("https://console.cloud.google.com"); });
+
+  // Local Portable Backup
+  $("btnLocalBackupExport")?.addEventListener("click", lbExport);
+  $("btnLocalBackupImport")?.addEventListener("click", lbImport);
+  $("btnLocalBackupRestore")?.addEventListener("click", lbRestore);
+  $("btnLocalBackupCancel")?.addEventListener("click", lbCancelImport);
 
   // Bulk command form (static-param buttons built in buildBulkCommandTpl)
   document.addEventListener("click", (e) => {
