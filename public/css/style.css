@@ -438,7 +438,7 @@ html {
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   background: linear-gradient(180deg, rgba(76, 17, 34, 0.98) 0%, rgba(45, 9, 20, 0.98) 100%);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(6px);
   box-shadow:
     0 1px 0 var(--border),
     0 4px 20px rgba(0, 0, 0, 0.4);
@@ -2270,6 +2270,7 @@ label[data-required]::after {
   display: flex;
   flex-direction: column;
   gap: calc(12px * var(--inv-card-scale));
+  contain: layout style;
 }
 
 .inv-grid {
@@ -2737,7 +2738,7 @@ label[data-required]::after {
   border-radius: calc(10px * var(--inv-card-scale));
   border: 1px solid var(--border);
   background: linear-gradient(160deg, #2a121a 0%, #1b0c12 100%);
-  transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s, height 0.22s ease, min-height 0.22s ease, max-height 0.22s ease;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
 }
 
 .inv-card:hover {
@@ -2868,7 +2869,7 @@ label[data-required]::after {
   max-height: var(--card-header-h);
   border-bottom: 1px solid var(--border);
   background: linear-gradient(90deg, rgba(86, 28, 45, 0.9) 0%, rgba(55, 16, 29, 0.82) 100%);
-  transition: height 0.2s ease, min-height 0.2s ease, max-height 0.2s ease, padding 0.2s ease, gap 0.2s ease;
+  transition: border-color 0.2s;
 }
 
 .card-hdr-left {
@@ -3006,7 +3007,6 @@ label[data-required]::after {
   max-height: var(--card-pac-h);
   border-bottom: 1px solid var(--border);
   background: var(--border);
-  transition: height 0.2s ease, min-height 0.2s ease, max-height 0.2s ease;
 }
 
 .pac-controls {
@@ -3185,12 +3185,10 @@ label[data-required]::after {
   background: rgba(30, 15, 22, 0.78);
   box-shadow: inset 0 0 0 1px #5b2f3e;
   background-clip: padding-box;
-  transition: padding 0.2s ease, font-size 0.2s ease;
 }
 
 .card-table tbody tr {
   height: var(--card-row-h);
-  transition: filter 0.12s, background 0.12s;
 }
 
 .card-table tbody td:first-child {
@@ -3603,21 +3601,11 @@ label[data-required]::after {
 @keyframes alarmBlink {
   0%, 100% {
     opacity: 1;
-    box-shadow: 0 0 0 rgba(224, 53, 96, 0), inset 0 0 10px rgba(224, 53, 96, 0.1);
     transform: scale(1);
-  }
-  25% {
-    box-shadow: 0 0 14px rgba(224, 53, 96, 0.5), inset 0 0 12px rgba(224, 53, 96, 0.18);
-    transform: scale(1.02);
   }
   50% {
     opacity: 0.38;
-    box-shadow: 0 0 20px rgba(224, 53, 96, 0.7), inset 0 0 8px rgba(224, 53, 96, 0.14);
     transform: scale(1.04);
-  }
-  75% {
-    box-shadow: 0 0 14px rgba(224, 53, 96, 0.5), inset 0 0 12px rgba(224, 53, 96, 0.18);
-    transform: scale(1.02);
   }
 }
 
@@ -3656,11 +3644,11 @@ label[data-required]::after {
 
 @keyframes alarmBtnPulse {
   0%, 100% {
-    box-shadow: 0 0 0 rgba(224, 53, 96, 0);
+    opacity: 1;
     transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 16px rgba(224, 53, 96, 0.65), inset 0 0 8px rgba(224, 53, 96, 0.22);
+    opacity: 0.55;
     transform: scale(1.03);
   }
 }
@@ -4330,6 +4318,7 @@ label[data-required]::after {
   flex-direction: column;
   gap: 4px;
   min-height: 0;
+  contain: layout style;
 }
 
 .chart-grid {
@@ -4355,7 +4344,8 @@ label[data-required]::after {
 
 .analytics-grid .chart-total-side-card {
   grid-column: 3 / span 1;
-  min-height: 420px;
+  min-height: 380px;
+  max-height: 420px;
   padding: 10px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -10254,10 +10244,12 @@ body.mode-transition-active {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-height: 2000px;
-  overflow: hidden;
-  transition: max-height 0.25s ease, opacity 0.25s ease;
+  max-height: 460px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: max-height 0.15s ease-out, opacity 0.15s ease-out;
   opacity: 1;
+  contain: layout style;
 }
 
 .fperf-body.fperf-body-collapsed {

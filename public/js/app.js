@@ -3813,6 +3813,7 @@ function switchPage(page) {
   if (btn) btn.classList.add("active");
   if (window.innerWidth <= 1200) setSideNavOpen(false, true);
 
+  if (page === "inverters") scheduleInverterCardsUpdate(true);
   if (page === "alarms") initAlarmsPage();
   if (page === "analytics") initAnalytics();
   if (page === "energy") initEnergyPage();
@@ -4115,7 +4116,7 @@ function toggleFperfPanel() {
   if (!State.fperf.collapsed && State.fperf.qaRows?.length) {
     setTimeout(() => {
       renderForecastPerfCharts(State.fperf.qaRows);
-    }, 300); // wait for CSS max-height transition (0.25s)
+    }, 200); // wait for CSS max-height transition (0.15s)
   }
 }
 
@@ -8225,6 +8226,8 @@ function updateInverterCards() {
     activeNodes = 0,
     totalNodes = 0;
 
+  const cardsVisible = State.currentPage === "inverters";
+
   for (let inv = 1; inv <= invCount; inv++) {
     const configuredUnits = getConfiguredUnits(inv, nodeCount);
     const configuredSet = new Set(configuredUnits);
@@ -8269,6 +8272,21 @@ function updateInverterCards() {
       ),
     );
 
+    // Aggregate counters (always needed for header metrics regardless of page)
+    if (!anyOnline) { offline++; }
+    else if (staleSnapshot) { online++; }
+    else if (topSev === "critical") { alarmed++; online++; }
+    else if (anyAlarm) { alarmed++; if (anyOnline) online++; }
+    else if (anyOnline) { online++; }
+
+    for (const row of (unitsByInv[inv] || [])) {
+      if (!configuredSet.has(Number(row?.unit || 0))) continue;
+      if (row.online && now - getLiveFreshTsClient(row) <= DATA_FRESH_MS) activeNodes++;
+    }
+
+    // Skip expensive card DOM updates when inverter page isn't visible
+    if (!cardsVisible) continue;
+
     const card = $(`inv-card-${inv}`);
     const badge = $(`badge-${inv}`);
     const iconEl = $(`icon-${inv}`);
@@ -8279,23 +8297,10 @@ function updateInverterCards() {
 
     // Card class
     card.className = "inv-card";
-    if (!anyOnline) {
-      card.classList.add("offline");
-      offline++;
-    } else if (staleSnapshot) {
-      card.classList.add("stale");
-      online++;
-    } else if (topSev === "critical") {
-      card.classList.add("critical");
-      alarmed++;
-      online++;
-    } else if (anyAlarm) {
-      card.classList.add("alarm");
-      alarmed++;
-      if (anyOnline) online++;
-    } else if (anyOnline) {
-      online++;
-    }
+    if (!anyOnline) card.classList.add("offline");
+    else if (staleSnapshot) card.classList.add("stale");
+    else if (topSev === "critical") card.classList.add("critical");
+    else if (anyAlarm) card.classList.add("alarm");
     if (iconEl) {
       iconEl.className = "card-inv-icon";
       if (!anyOnline) iconEl.classList.add("offline");
@@ -8410,7 +8415,6 @@ function updateInverterCards() {
       const nodeReachable =
         d && d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
       const rowStale = staleSnapshot && rowVisible && !nodeReachable;
-      if (nodeReachable) activeNodes++;
       const nodeOn =
         (staleSnapshot ? rowVisible : nodeReachable) && Number(d?.on_off) === 1
           ? 1
@@ -9880,8 +9884,8 @@ function handleWS(msg) {
       applyPlantCapStatusClient(msg.plantCap, { preservePreview: true });
     }
     scheduleInverterCardsUpdate();
-    // Keep detail panel stat chips live on every WS tick
-    if (State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv);
+    // Keep detail panel stat chips live on every WS tick (only when visible)
+    if (State.currentPage === "inverters" && State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv);
     syncAlarmStateFromLiveData().catch((err) => {
       console.warn("[app] live alarm sync failed:", err.message);
     });

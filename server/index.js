@@ -207,6 +207,7 @@ const REPORT_SOLAR_END_H = SOLCAST_SOLAR_END_H;
 const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
 const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
+const AVAIL_OFFLINE_TOLERANCE_S = 60; // bridge offline gaps ≤ 60s (comms blips / Modbus timeouts)
 const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
 const REMOTE_BRIDGE_INTERVAL_MS = 800;
 const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
@@ -228,8 +229,8 @@ const REMOTE_REPLICATION_RETRY_MS = 30000;
 const REMOTE_INCREMENTAL_INTERVAL_MS = 3000;
 const REMOTE_INCREMENTAL_APPEND_LIMIT = 25000;
 const REMOTE_PUSH_DELTA_LIMIT = 50000;
-const REMOTE_PUSH_CHUNK_MAX_ROWS = 6000;
-const REMOTE_PUSH_CHUNK_TARGET_BYTES = 4 * 1024 * 1024;
+const REMOTE_PUSH_CHUNK_MAX_ROWS = 15000; // fewer round trips over Tailscale (was 6000)
+const REMOTE_PUSH_CHUNK_TARGET_BYTES = 12 * 1024 * 1024; // 12 MB per chunk (was 4 MB)
 const REMOTE_PUSH_FETCH_RETRIES = 3;
 const REMOTE_PUSH_FETCH_RETRY_BASE_MS = 1200;
 const REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES = 200;
@@ -242,12 +243,11 @@ const CHAT_THREAD_LIMIT = 20;
 const CHAT_RETENTION_COUNT = 500;
 const CHAT_MESSAGE_MAX_LEN = 500;
 const CHAT_PROXY_TIMEOUT_MS = 8000;
-const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 1; // default low-impact archive transfer lane
-// Keep priority standby pulls low-impact on the gateway. The viewer-side live
-// bridge is already paused, so preserving gateway responsiveness matters more
-// than maximum archive throughput.
-const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 1;
-const REPLICATION_TRANSFER_STREAM_HWM = 1024 * 1024;
+const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 3; // parallel archive file downloads (was 1)
+// Priority standby pulls also benefit from parallel downloads — the live bridge
+// is already paused, so we can use the headroom for faster archive transfer.
+const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 3;
+const REPLICATION_TRANSFER_STREAM_HWM = 4 * 1024 * 1024; // 4 MB stream buffers (was 1 MB)
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
 const GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
 const GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS = 10 * 60 * 1000;
@@ -3885,7 +3885,7 @@ async function buildGatewayMainDbSnapshotForTransfer() {
 
 function createReplicationGzipStream() {
   return zlib.createGzip({
-    level: zlib.constants.Z_BEST_SPEED,
+    level: 4, // balanced speed/ratio for SQLite payloads (was Z_BEST_SPEED=1)
     chunkSize: REPLICATION_TRANSFER_STREAM_HWM,
   });
 }
@@ -10458,7 +10458,30 @@ function buildNodeOnlineIntervalsMs(rows, maxGapS = AVAIL_MAX_GAP_S) {
     const start = Number(last?.ts || 0);
     if (start > 0) intervals.push([start, start + 1000]);
   }
-  return intervals;
+
+  // Bridge brief offline gaps (comms blips, Modbus timeouts) so they
+  // don't penalise availability.  Two online intervals separated by a
+  // gap ≤ AVAIL_OFFLINE_TOLERANCE_S are merged into one continuous span.
+  return bridgeShortOfflineGaps(intervals, AVAIL_OFFLINE_TOLERANCE_S);
+}
+
+function bridgeShortOfflineGaps(intervals, toleranceS) {
+  if (intervals.length < 2 || !(toleranceS > 0)) return intervals;
+  const tolMs = toleranceS * 1000;
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0]);
+  const out = [[sorted[0][0], sorted[0][1]]];
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prev = out[out.length - 1];
+    const [s, e] = sorted[i];
+    if (s - prev[1] <= tolMs) {
+      // Gap is within tolerance — bridge it
+      if (e > prev[1]) prev[1] = e;
+    } else {
+      out.push([s, e]);
+    }
+  }
+  return out;
 }
 
 function clipIntervalsToWindowMs(intervals, startMs, endMs) {
