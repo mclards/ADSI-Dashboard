@@ -3992,6 +3992,42 @@ ipcMain.handle("download-user-guide-pdf", async (event) => {
     return { ok: false, error: err.message };
   }
 });
+ipcMain.handle("download-credentials-pdf", async (event) => {
+  try {
+    const ownerWin = BrowserWindow.fromWebContents(event.sender) || mainWin || undefined;
+    const result = await dialog.showSaveDialog(ownerWin, {
+      title: "Save Credentials Reference as PDF",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        "ADSI-Credentials-Reference.pdf"
+      ),
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false };
+    const hidden = new BrowserWindow({
+      width: 800,
+      height: 900,
+      show: false,
+      webPreferences: { offscreen: true },
+    });
+    await hidden.loadURL(`${SERVER_URL}/api/credentials-reference?authKey=admin`);
+    await new Promise((r) => setTimeout(r, 800));
+    const pdfBuf = await hidden.webContents.printToPDF({
+      printBackground: true,
+      landscape: false,
+      margins: { top: 0.4, bottom: 0.4, left: 0.5, right: 0.5 },
+      pageSize: "Letter",
+      preferCSSPageSize: false,
+    });
+    hidden.close();
+    fs.writeFileSync(result.filePath, pdfBuf);
+    shell.showItemInFolder(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    console.error("[main] download-credentials-pdf failed:", err.message);
+    return { ok: false, error: err.message };
+  }
+});
 ipcMain.handle("save-adsibak", async () => {
   try {
     const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;

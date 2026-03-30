@@ -4306,10 +4306,38 @@ label[data-required]::after {
   gap: 10px;
 }
 
-.plant-cap-panel.is-hidden,
-#page-inverters.plant-cap-panel-collapsed #plantCapPanel {
+.plant-cap-panel.is-hidden {
   display: none !important;
 }
+
+/* ─── Plant Cap Dedicated Page ─────────────────────────────────────────────── */
+.plant-cap-page-container {
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.plant-cap-page-container .plant-cap-panel {
+  border-radius: 0;
+  border: none;
+  margin: 0;
+}
+
+#page-plant-cap .toolbar-info {
+  font-size: 0.8125rem;
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+#page-plant-cap .toolbar-info b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.cap-toolbar-enabled { color: var(--green, #22c55e); }
+.cap-toolbar-paused  { color: var(--orange, #f59e0b); }
+.cap-toolbar-idle    { color: var(--text3); }
 
 .analytics-scroll-wrap {
   flex: 1;
@@ -10533,5 +10561,494 @@ body.mode-transition-active {
 
   .btn {
     transition: none !important;
+  }
+}
+
+/* ─── Scheduled Auto-Cap Summary Card ──────────────────────────────────────── */
+.plant-cap-sched-summary {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+}
+
+.plant-cap-sched-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.plant-cap-sched-summary-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text1);
+  letter-spacing: 0.02em;
+}
+
+.plant-cap-sched-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plant-cap-sched-chips-empty {
+  font-size: 12px;
+  color: var(--text3);
+  padding: 6px 0;
+}
+
+.plant-cap-sched-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface3, var(--surface1));
+  border: 1px solid var(--border2);
+  font-size: 12px;
+  transition: border-color 0.15s;
+}
+
+.plant-cap-sched-chip--active {
+  border-color: var(--green, #22c55e);
+  background: color-mix(in srgb, var(--green, #22c55e) 6%, var(--surface2));
+}
+
+.plant-cap-sched-chip--paused {
+  border-color: var(--amber, #f59e0b);
+}
+
+.plant-cap-sched-chip--disabled {
+  opacity: 0.55;
+}
+
+.plant-cap-sched-chip-time {
+  font-weight: 600;
+  color: var(--text1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 100px;
+}
+
+.plant-cap-sched-chip-name {
+  color: var(--text2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plant-cap-sched-chip-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.plant-cap-sched-chip-badge--active {
+  background: color-mix(in srgb, var(--green, #22c55e) 15%, transparent);
+  color: var(--green, #22c55e);
+}
+
+.plant-cap-sched-chip-badge--waiting {
+  background: color-mix(in srgb, var(--blue, #3b82f6) 15%, transparent);
+  color: var(--blue, #3b82f6);
+}
+
+.plant-cap-sched-chip-badge--paused {
+  background: color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent);
+  color: var(--amber, #f59e0b);
+}
+
+.plant-cap-sched-chip-badge--completed {
+  background: color-mix(in srgb, var(--text3) 15%, transparent);
+  color: var(--text3);
+}
+
+.plant-cap-sched-chip-badge--disabled {
+  background: color-mix(in srgb, var(--text3) 10%, transparent);
+  color: var(--text3);
+}
+
+.plant-cap-sched-chip-edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.plant-cap-sched-chip-edit:hover {
+  background: var(--surface1);
+  color: var(--text1);
+}
+
+/* ─── Cap Schedule Section ──────────────────────────────────────────────────── */
+.cap-sched-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.cap-sched-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.cap-sched-card.is-active {
+  border-color: var(--green, #22c55e);
+  box-shadow: 0 0 0 1px var(--green, #22c55e) inset;
+}
+
+.cap-sched-card.is-paused {
+  border-color: var(--yellow, #f59e0b);
+}
+
+.cap-sched-card.is-disabled {
+  opacity: 0.55;
+}
+
+.cap-sched-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cap-sched-card-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cap-sched-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cap-sched-badge--waiting {
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--text2);
+}
+
+.cap-sched-badge--active {
+  background: rgba(34, 197, 94, 0.18);
+  color: #22c55e;
+}
+
+.cap-sched-badge--paused {
+  background: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+}
+
+.cap-sched-badge--completed {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+}
+
+.cap-sched-badge--disabled {
+  background: rgba(128, 128, 128, 0.10);
+  color: var(--text3, #888);
+}
+
+.cap-sched-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cap-sched-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.cap-sched-meta-item .mdi {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.cap-sched-card-safety {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cap-sched-safety-chip {
+  font-size: 10px;
+  color: var(--text3, #888);
+  background: rgba(128, 128, 128, 0.12);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.cap-sched-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.cap-sched-list-actions {
+  margin-top: 4px;
+}
+
+.cap-sched-intro {
+  font-size: 12px;
+  color: var(--text2);
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+
+.cap-sched-form-title,
+.cap-sched-remarks-subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+
+/* Cap Schedule Modal */
+.cap-sched-modal-card {
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+  width: min(480px, 94vw);
+  max-height: min(85vh, 640px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cap-sched-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.cap-sched-modal-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text1);
+  letter-spacing: 0.03em;
+}
+.cap-sched-modal-close {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--btn-outline-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--btn-outline-1) 0%, var(--btn-outline-2) 100%);
+  color: var(--btn-outline-color);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.16s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.cap-sched-modal-close:hover {
+  transform: translateY(-1px);
+  color: var(--text);
+  border-color: var(--btn-outline-border-hover);
+}
+.cap-sched-modal-card .cap-sched-form {
+  padding: 16px 18px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Schedule form */
+.cap-sched-form-wrap {
+  border-top: 1px solid var(--border2);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
+.cap-sched-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.cap-sched-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cap-sched-field-wide {
+  grid-column: 1 / -1;
+}
+
+.cap-sched-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.cap-sched-req {
+  color: var(--red, #ef4444);
+  margin-left: 1px;
+}
+
+.cap-sched-help {
+  font-size: 10px;
+  color: var(--text3, #888);
+  margin-top: 1px;
+}
+
+.cap-sched-form-error {
+  margin-bottom: 6px;
+  border-radius: 6px;
+}
+
+.cap-sched-form-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+}
+
+/* Modal input and select styling */
+.cap-sched-modal-card .inp,
+.cap-sched-modal-card .sel {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--input-bg, var(--surface));
+  border: 1px solid var(--border2);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.cap-sched-modal-card .inp:focus,
+.cap-sched-modal-card .sel:focus {
+  border-color: var(--accent);
+}
+
+/* Remarks feed */
+.cap-sched-remarks {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+
+.cap-sched-remarks-empty {
+  padding: 14px;
+  font-size: 11px;
+  color: var(--text3, #888);
+  text-align: center;
+}
+
+.cap-sched-remark {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border2);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cap-sched-remark:last-child {
+  border-bottom: none;
+}
+
+.cap-sched-remark-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  margin-top: 1px;
+}
+
+.cap-sched-remark--info  .cap-sched-remark-icon { color: var(--text3, #888); }
+.cap-sched-remark--warn  .cap-sched-remark-icon { color: #f59e0b; }
+.cap-sched-remark--error .cap-sched-remark-icon { color: var(--red, #ef4444); }
+.cap-sched-remark--info  .mdi-check-circle-outline { color: var(--green, #22c55e); }
+
+.cap-sched-remark-body {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.cap-sched-remark-ts {
+  font-size: 10px;
+  color: var(--text3, #888);
+  display: block;
+  margin-bottom: 1px;
+}
+
+.cap-sched-remark-name {
+  font-weight: 700;
+  color: var(--text2);
+  margin-right: 4px;
+}
+
+.cap-sched-remark-msg {
+  color: var(--text);
+}
+
+/* Smsg variants used by form error */
+.smsg-error {
+  color: var(--red, #ef4444);
+  background: rgba(224, 53, 96, 0.08);
+  border: 1px solid rgba(224, 53, 96, 0.22);
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
+@media (max-width: 768px) {
+  .cap-sched-form-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.5.9</title>
+<title>ADSI Inverter Dashboard — User Guide v2.6.0</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -1160,7 +1160,7 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="7" height="11" rx="2" stroke="#34d399" stroke-width="1.8"/><rect x="12" y="4" width="7" height="15" rx="2" stroke="#4d9fff" stroke-width="1.8"/></svg></div><h2>Inverters Page</h2></div>
   <p>The primary live operations workspace for monitoring the full inverter fleet, reviewing node-level status, and sending control commands.</p>
   <h3>Toolbar Controls</h3>
-  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Filter</td><td>All, Online, Offline, or Alarmed</td></tr><tr><td>Layout</td><td>Auto, 2&ndash;7 column grid</td></tr><tr><td>Show/Hide Cap</td><td>Toggle the plant output cap panel</td></tr></tbody></table>
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Filter</td><td>All, Online, Offline, or Alarmed</td></tr><tr><td>Layout</td><td>Auto, 2&ndash;7 column grid</td></tr></tbody></table>
   <h3>Fleet Status Chips</h3>
   <table><thead><tr><th>Chip</th><th>Meaning</th></tr></thead><tbody><tr><td><b>Inverters</b></td><td>Active / Total</td></tr><tr><td><b>Nodes</b></td><td>Active / Total</td></tr><tr><td><b>Online</b></td><td>Currently producing</td></tr><tr><td><b>Alarmed</b></td><td>Active unACK'd alarms</td></tr><tr><td><b>Offline</b></td><td>Not responding</td></tr></tbody></table>
   <h3>PAC Output Band Legend</h3>
@@ -1193,14 +1193,23 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 6. PLANT OUTPUT CAPPING -->
+<!-- 6. PLANT OUTPUT CAPPING (Dedicated Page) -->
 <section id="s6">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17h16M3 17l4-6 3 3 4-5 5 8" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" y1="8" x2="19" y2="8" stroke="#f87171" stroke-width="1.5" stroke-dasharray="3 2"/></svg></div><h2>Plant Output Auto Capping</h2></div>
-  <p>Automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters.</p>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17h16M3 17l4-6 3 3 4-5 5 8" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" y1="8" x2="19" y2="8" stroke="#f87171" stroke-width="1.5" stroke-dasharray="3 2"/></svg></div><h2>Plant Cap Page</h2></div>
+  <p>The <b>Plant Cap</b> page is a dedicated workspace for plant output capping, accessible from the navigation bar. It automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters.</p>
+  <h3>Page Toolbar</h3>
+  <p>The toolbar at the top of the page shows live summary indicators and a quick-access button:</p>
+  <table><thead><tr><th>Element</th><th>Function</th></tr></thead><tbody><tr><td>Status badge</td><td>Current controller mode: <b>Enabled</b>, <b>Paused</b>, or <b>Idle</b></td></tr><tr><td>Plant MW</td><td>Current plant total AC output from live PAC data</td></tr><tr><td>Band</td><td>Configured lower&ndash;upper MW cap band</td></tr><tr><td><b>+ Add Schedule</b></td><td>Opens the schedule creation modal</td></tr></tbody></table>
   <h3>Cap Configuration</h3>
   <table><thead><tr><th>Field</th><th>Function</th></tr></thead><tbody><tr><td>Upper Limit (MW)</td><td>Threshold that triggers automatic stop</td></tr><tr><td>Lower Limit (MW)</td><td>Threshold for restarting stopped inverters</td></tr><tr><td>Sequence</td><td>Ascending, Descending, or Exemption mode</td></tr><tr><td>Exempted Inverters</td><td>Comma-separated exclusion list</td></tr><tr><td>Cooldown (s)</td><td>Settling time between actions (default: 30s)</td></tr></tbody></table>
   <h3>Cap Actions</h3>
   <table><thead><tr><th>Action</th><th>Function</th></tr></thead><tbody><tr><td>Preview Plan</td><td>Simulates next decision using live state</td></tr><tr><td>Enable Cap</td><td>Arms the controller (requires authorization)</td></tr><tr><td>Disable Monitoring</td><td>Stops automation without restarting stopped inverters</td></tr><tr><td>Release Controlled</td><td>Restarts stopped inverters sequentially and ends session</td></tr></tbody></table>
+  <h3>Scheduled Auto-Cap</h3>
+  <p>The <b>Scheduled Auto-Cap</b> section displays compact chip cards for each configured schedule, showing the time window, name, and current state badge (Active, Waiting, Paused, Completed, or Disabled).</p>
+  <table><thead><tr><th>Action</th><th>How</th></tr></thead><tbody><tr><td>Create schedule</td><td>Click <b>+ Add Schedule</b> in the toolbar or <b>+ Add</b> in the chip section</td></tr><tr><td>Edit schedule</td><td>Click the pencil icon on any schedule chip</td></tr><tr><td>Delete schedule</td><td>Use the delete option in the schedule detail</td></tr></tbody></table>
+  <h4>Schedule Form (Modal)</h4>
+  <p>The schedule form opens as a centered modal overlay. Fields:</p>
+  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Name</td><td>Display label for the schedule</td></tr><tr><td>Start Time *</td><td>24-hour HH:MM when the cap activates daily</td></tr><tr><td>Stop Time *</td><td>24-hour HH:MM when the cap releases daily (must be after start)</td></tr><tr><td>Upper MW</td><td>Override for this schedule (blank uses global default)</td></tr><tr><td>Lower MW</td><td>Override for this schedule (blank uses global default)</td></tr><tr><td>Sequence Mode</td><td>Override inverter selection order (blank uses global default)</td></tr><tr><td>Cooldown (s)</td><td>Override cooldown seconds (blank uses global default)</td></tr><tr><td>Auth Key *</td><td>Plant-wide control authorization key (required for all mutations)</td></tr></tbody></table>
   <h3>Cap Status Panel</h3>
   <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Status</td><td>Active, Idle, or Cooldown</td></tr><tr><td>Reason</td><td>Human-readable trigger explanation</td></tr><tr><td>Last Action</td><td>Timestamp of most recent event</td></tr><tr><td>Cooldown</td><td>Remaining time before re-engagement</td></tr><tr><td>Curtailed</td><td>Total MW removed</td></tr><tr><td>Controllable</td><td>Inverters available for dispatch</td></tr><tr><td>Pending</td><td>In-flight actions</td></tr><tr><td>Exempted</td><td>Excluded numbers</td></tr></tbody></table>
   <div class="info-card warn"><div class="info-card-label">Important</div><ul style="margin:0"><li>Whole-inverter sequential control only</li><li>Narrow bands may not settle cleanly</li><li>Non-exempted inverters stay under controller authority while cap is enabled</li><li>Manual control is blocked for non-exempted inverters until cap is disabled</li><li>In Remote mode, cap actions proxy to the gateway</li></ul></div>
@@ -1384,7 +1393,8 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 6h16M3 11h16M3 16h16" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/><circle cx="7" cy="6" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="12" cy="11" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="9" cy="16" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/></svg></div><h2>Standard Operating Workflows</h2></div>
   <div class="wf-card"><h4>Daily Startup Check</h4><ol class="steps"><li>Launch and sign in.</li><li>Wait for startup loading screen to finish.</li><li>If Remote and gateway unreachable, choose Gateway or retry in the Connection Mode picker.</li><li>Confirm license area is clear.</li><li>Check connection dot, clock, TOTAL PAC, and TODAY MWh.</li><li>Open Inverters page and confirm fleet status chips.</li></ol></div>
   <div class="wf-card"><h4>Live Control</h4><ol class="steps"><li>Open Inverters page.</li><li>Select target inverter or node.</li><li>Review alarm state and data freshness.</li><li>Send START or STOP action.</li><li>Confirm via status updates and audit log.</li></ol></div>
-  <div class="wf-card"><h4>Plant Output Cap</h4><ol class="steps"><li>Show the Cap panel on Inverters page.</li><li>Set Upper/Lower Limit, Sequence, Cooldown, and Exemptions.</li><li>Click Preview Plan to review.</li><li>Click Enable Cap (authorization required).</li><li>Monitor Cap Status and Controlled Inverters Table.</li><li>Release: click Release Controlled. Disarm: click Disable Monitoring.</li></ol></div>
+  <div class="wf-card"><h4>Plant Output Cap</h4><ol class="steps"><li>Open the <b>Plant Cap</b> page from the navigation bar.</li><li>Set Upper/Lower Limit, Sequence, Cooldown, and Exemptions.</li><li>Click Preview Plan to review.</li><li>Click Enable Cap (authorization required).</li><li>Monitor Cap Status and Controlled Inverters Table.</li><li>Release: click Release Controlled. Disarm: click Disable Monitoring.</li></ol></div>
+  <div class="wf-card"><h4>Scheduled Auto-Cap</h4><ol class="steps"><li>Open the <b>Plant Cap</b> page.</li><li>Click <b>+ Add Schedule</b> in the toolbar.</li><li>Fill in Name, Start/Stop Time, and optional MW/Sequence overrides.</li><li>Enter the Auth Key and click Save.</li><li>Monitor schedule chips for state transitions (Waiting &rarr; Active &rarr; Completed).</li><li>Edit or delete schedules via the pencil icon on each chip.</li></ol></div>
   <div class="wf-card"><h4>Daily Performance Review</h4><ol class="steps"><li>Open Analytics for interval review and day-ahead comparison.</li><li>Open Energy for interval detail.</li><li>Open Report for formal summary.</li><li>Export from Report or Export page.</li></ol></div>
   <div class="wf-card"><h4>Remote Standby Refresh</h4><ol class="steps"><li>Confirm Remote mode.</li><li>Open Settings &rarr; Connectivity &amp; Sync.</li><li>Click Refresh Standby DB.</li><li>Allow preflight, then wait for snapshot transfer.</li><li>Restart to apply staged database.</li></ol></div>
   <div class="wf-card"><h4>Cloud Backup</h4><ol class="steps"><li>Configure and authorize provider.</li><li>Save settings and select scope.</li><li>Run Backup Now or rely on schedule.</li><li>Review backup history.</li></ol></div>
@@ -1436,7 +1446,7 @@
   <h3>Defaults &amp; Constants</h3>
   <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated / Dependable</td><td>997.0 kW / 917.0 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.25 kW each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
   <h3>Page Quick Finder</h3>
-  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr></tbody></table>
+  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Plant output capping</td><td>Plant Cap</td></tr><tr><td>Cap schedules</td><td>Plant Cap &rarr; Scheduled Auto-Cap</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr></tbody></table>
   <h3>Data Units</h3>
   <table><thead><tr><th>Item</th><th>Unit</th></tr></thead><tbody><tr><td>PAC / PDC</td><td>W or kW</td></tr><tr><td>Energy</td><td>MWh</td></tr><tr><td>Duration</td><td>sec / min / hrs</td></tr><tr><td>WAPE</td><td>%</td></tr></tbody></table>
   <h3>Status Terms</h3>
@@ -1450,7 +1460,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.5.9</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.6.0</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

@@ -120,13 +120,16 @@
         <button class="nav-btn" data-page="export" title="Export operational data, alarms, reports, and forecasts to Excel or CSV.">
           <span class="nav-icon"><span class="mdi mdi-export-variant"></span></span><span>EXPORT</span>
         </button>
+        <button class="nav-btn" data-page="plant-cap" title="Plant output capping controller, schedules, and action history.">
+          <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>PLANT CAP</span>
+        </button>
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
           <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.5.9</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.6.0</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -162,6 +165,10 @@
               <span class="mdi mdi-book-open-page-variant-outline" aria-hidden="true"></span>
               <span>Open User Guide</span>
             </button>
+            <button id="btnOpenCredentials" class="btn btn-outline" title="View credentials and authorization keys (requires admin auth key).">
+              <span class="mdi mdi-shield-key-outline" aria-hidden="true"></span>
+              <span>Credentials Reference</span>
+            </button>
           </div>
         </section>
       </nav>
@@ -193,16 +200,6 @@
                 <option value="7">7 Columns</option>
               </select>
             </label>
-            <button
-              id="btnPlantCapToolbarToggle"
-              class="btn btn-outline btn-xs inv-toolbar-cap-toggle"
-              type="button"
-              aria-controls="plantCapPanel"
-              aria-expanded="false"
-              title="Show plant output cap panel"
-            >
-              Show Cap
-            </button>
           </div>
           <div class="tl-center pac-legend-wrap" title="Node output level indicator — based on percentage of rated capacity per node.">
             <span class="pac-leg" title="Node output at 90% or above rated capacity."><span class="pac-leg-ind pac-leg-high"></span>&#x2265;90%&nbsp;High</span>
@@ -843,6 +840,23 @@
             <div class="forecast-page-sections" id="forecastPageSections"></div>
           </div>
         </div>
+      </section>
+
+      <!-- --- PAGE: PLANT CAP ------------------------------------------------------ -->
+      <section id="page-plant-cap" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <span class="toolbar-info" title="Current controller mode.">Status: <b id="capPageStatusBadge">Idle</b></span>
+          </div>
+          <div class="tl-right">
+            <span class="toolbar-info" title="Current plant MW from live PAC data.">Plant: <b id="capPagePlantMw">—</b> MW</span>
+            <span class="toolbar-info" title="Configured lower–upper MW cap band.">Band: <b id="capPageBandLabel">—</b></span>
+            <button type="button" class="btn btn-xs btn-accent" id="btnAddCapScheduleToolbar" title="Create a new cap schedule">
+              <span class="mdi mdi-plus icon-inline" aria-hidden="true"></span> Add Schedule
+            </button>
+          </div>
+        </div>
+        <div id="plantCapPageContainer" class="plant-cap-page-container"></div>
       </section>
 
       <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->
@@ -2234,6 +2248,74 @@
 
     <script src="js/app.js"></script>
 
+    <!-- Cap Schedule Form Modal -->
+    <div id="capScheduleModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="capScheduleFormTitle">
+      <div class="cap-sched-modal-card">
+        <div class="cap-sched-modal-header">
+          <span class="cap-sched-modal-title" id="capScheduleFormTitle">New Schedule</span>
+          <button type="button" class="cap-sched-modal-close" id="btnCloseCapSchedModal" title="Close">
+            <span class="mdi mdi-close" aria-hidden="true"></span>
+          </button>
+        </div>
+        <form id="capScheduleForm" class="cap-sched-form" autocomplete="off" onsubmit="return false;">
+          <input type="hidden" id="capSchedId" value="" />
+          <div class="cap-sched-form-grid">
+            <label class="cap-sched-field cap-sched-field-wide" title="Display name for this schedule.">
+              <span class="cap-sched-label">Name</span>
+              <input type="text" id="capSchedName" class="inp" maxlength="60" placeholder="Morning Cap" autocomplete="off" />
+            </label>
+            <label class="cap-sched-field" title="Daily start time (HH:MM, 24-hour). Cap activates at this time each day.">
+              <span class="cap-sched-label">Start Time <span class="cap-sched-req" aria-hidden="true">*</span></span>
+              <input type="time" id="capSchedStart" class="inp" required />
+              <small class="cap-sched-help">24-hour format. Controller activates at this time.</small>
+            </label>
+            <label class="cap-sched-field" title="Daily stop time (HH:MM, 24-hour). Cap releases at this time each day.">
+              <span class="cap-sched-label">Stop Time <span class="cap-sched-req" aria-hidden="true">*</span></span>
+              <input type="time" id="capSchedStop" class="inp" required />
+              <small class="cap-sched-help">Must be after start time. Controller releases here.</small>
+            </label>
+            <label class="cap-sched-field" title="Upper MW cap override for this schedule. Leave blank to use the global default.">
+              <span class="cap-sched-label">Upper MW</span>
+              <input type="number" id="capSchedUpperMw" class="inp" min="0.1" max="100" step="0.001" inputmode="decimal" placeholder="Global default" />
+              <small class="cap-sched-help">Blank uses the global cap setting.</small>
+            </label>
+            <label class="cap-sched-field" title="Lower MW cap override for this schedule. Leave blank to use the global default.">
+              <span class="cap-sched-label">Lower MW</span>
+              <input type="number" id="capSchedLowerMw" class="inp" min="0" max="100" step="0.001" inputmode="decimal" placeholder="Global default" />
+              <small class="cap-sched-help">Blank uses the global cap setting.</small>
+            </label>
+            <label class="cap-sched-field" title="Inverter stop/start selection order override for this schedule.">
+              <span class="cap-sched-label">Sequence Mode</span>
+              <select id="capSchedSeqMode" class="sel">
+                <option value="">Global default</option>
+                <option value="ascending">Ascending</option>
+                <option value="descending">Descending</option>
+                <option value="exemption">Exemption list</option>
+              </select>
+              <small class="cap-sched-help">Inverter selection order during this window.</small>
+            </label>
+            <label class="cap-sched-field" title="Cooldown seconds between controller actions. Blank uses the global default.">
+              <span class="cap-sched-label">Cooldown (s)</span>
+              <input type="number" id="capSchedCooldown" class="inp" min="5" max="600" step="1" inputmode="numeric" placeholder="Global default" />
+              <small class="cap-sched-help">Seconds between automatic actions.</small>
+            </label>
+            <label class="cap-sched-field cap-sched-field-wide" title="Plant-wide control auth key required to create, edit, or delete schedules.">
+              <span class="cap-sched-label">Auth Key <span class="cap-sched-req" aria-hidden="true">*</span></span>
+              <input type="password" id="capSchedAuthKey" class="inp" placeholder="Plant-wide control key" autocomplete="off" />
+              <small class="cap-sched-help">Required for all schedule mutations.</small>
+            </label>
+          </div>
+          <div id="capScheduleFormError" class="cap-sched-form-error smsg smsg-error" hidden></div>
+          <div class="cap-sched-form-actions">
+            <button type="button" class="btn btn-sm btn-accent" id="btnSaveCapSchedule">
+              <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span> Save
+            </button>
+            <button type="button" class="btn btn-sm btn-outline" id="btnCancelCapSchedule">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- App-level confirm dialog (replaces native window.confirm) -->
     <div id="appConfirmModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
       <div class="confirm-dialog">
@@ -2244,6 +2326,22 @@
         <div class="confirm-dialog-actions">
           <button id="confirmCancel" class="btn btn-outline confirm-btn">Cancel</button>
           <button id="confirmOk" class="btn btn-accent confirm-btn">Confirm</button>
+        </div>
+      </div>
+    </div>
+    <!-- App-level prompt dialog (auth key and single-value input) -->
+    <div id="appPromptModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="appPromptTitle">
+      <div class="confirm-dialog">
+        <div class="confirm-dialog-header">
+          <span id="appPromptTitle" class="confirm-dialog-title">Enter Value</span>
+        </div>
+        <div id="appPromptBody" class="confirm-dialog-body"></div>
+        <div class="confirm-dialog-body">
+          <input type="password" id="appPromptInput" class="inp" placeholder="" autocomplete="off" />
+        </div>
+        <div class="confirm-dialog-actions">
+          <button id="appPromptCancel" class="btn btn-outline confirm-btn">Cancel</button>
+          <button id="appPromptOk" class="btn btn-accent confirm-btn">OK</button>
         </div>
       </div>
     </div>

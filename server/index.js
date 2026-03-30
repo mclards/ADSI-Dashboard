@@ -87,6 +87,7 @@ const {
 const {
   normalizeSequenceMode: normalizePlantCapSequenceMode,
   normalizeSequenceCustom: normalizePlantCapSequenceCustom,
+  ScheduleEngine,
   PlantCapController,
 } = require("./plantCapController");
 
@@ -144,6 +145,11 @@ const staticNoCache = {
   },
 };
 app.use("/assets", express.static(path.join(__dirname, "../assets"), staticNoCache));
+/* Block direct static access to credentials reference — must go through auth-gated endpoint */
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/") && req.path.toLowerCase().includes("credentials-reference")) return res.status(403).end();
+  next();
+});
 app.use(express.static(path.join(__dirname, "../public"), staticNoCache));
 app.use("/api", remoteApiTokenGate);
 const PORT = Math.max(1, Math.min(65535, Number(process.env.ADSI_SERVER_PORT || 3500) || 3500));
@@ -11124,6 +11130,7 @@ plantCapController = new PlantCapController({
   isRemoteMode: () => isRemoteMode(),
   executeWrite: (body) => executeLocalControlWriteRequest(body, { skipBulkAuth: true }),
   broadcast: (payload) => broadcastUpdate(payload),
+  getDb: () => db,
   liveFreshMs: LIVE_FRESH_MS,
   operatorName: "PLANT CAP",
 });
@@ -12230,6 +12237,233 @@ app.get("/api/plant-cap/forecast-impact", (req, res) => {
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── Plant Cap Schedule CRUD ──────────────────────────────────────────────────
+
+function normalizeScheduleInput(body) {
+  const name    = String(body.name || "").trim().slice(0, 60) || "Schedule";
+  const enabled = body.enabled !== undefined ? (body.enabled ? 1 : 0) : 1;
+
+  const timeRe     = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  const start_time = timeRe.test(String(body.start_time || "")) ? body.start_time : null;
+  const stop_time  = timeRe.test(String(body.stop_time  || "")) ? body.stop_time  : null;
+  if (!start_time || !stop_time) {
+    return { error: "start_time and stop_time are required in HH:MM format." };
+  }
+  if (start_time >= stop_time) {
+    return { error: "stop_time must be after start_time. Midnight-spanning schedules are not supported." };
+  }
+
+  const upper_mw = (body.upper_mw !== undefined && body.upper_mw !== null)
+    ? Number(body.upper_mw) : null;
+  const lower_mw = (body.lower_mw !== undefined && body.lower_mw !== null)
+    ? Number(body.lower_mw) : null;
+  if (upper_mw !== null && (!Number.isFinite(upper_mw) || upper_mw <= 0)) {
+    return { error: "upper_mw must be a positive number." };
+  }
+  if (lower_mw !== null && (!Number.isFinite(lower_mw) || lower_mw < 0)) {
+    return { error: "lower_mw must be >= 0." };
+  }
+  if (upper_mw !== null && lower_mw !== null && lower_mw >= upper_mw) {
+    return { error: "lower_mw must be less than upper_mw." };
+  }
+
+  const sequence_mode = body.sequence_mode
+    ? String(body.sequence_mode).trim() : null;
+  let sequence_custom_json = "[]";
+  if (Array.isArray(body.sequence_custom)) {
+    sequence_custom_json = JSON.stringify(body.sequence_custom.map(Number).filter(Number.isFinite));
+  } else if (typeof body.sequence_custom_json === "string") {
+    try {
+      const parsed = JSON.parse(body.sequence_custom_json);
+      if (!Array.isArray(parsed)) return { error: "sequence_custom_json must be a JSON array." };
+      sequence_custom_json = JSON.stringify(parsed.map(Number).filter(Number.isFinite));
+    } catch (_) {
+      return { error: "sequence_custom_json must be valid JSON." };
+    }
+  }
+
+  const cooldown_sec = (body.cooldown_sec !== undefined && body.cooldown_sec !== null)
+    ? Math.max(0, Math.min(3600, Math.trunc(Number(body.cooldown_sec)))) : null;
+
+  return { name, enabled, start_time, stop_time, upper_mw, lower_mw, sequence_mode, sequence_custom_json, cooldown_sec };
+}
+
+app.get("/api/plant-cap/schedule-status", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const schedules = plantCapController?.scheduleEngine?.getScheduleStatus() || [];
+    const remarks   = plantCapController?.scheduleEngine?.getRemarks(50) || [];
+    return res.json({ ok: true, schedules, remarks });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/plant-cap/schedules", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const rows = db.prepare("SELECT * FROM plant_cap_schedules ORDER BY id").all();
+    return res.json({ ok: true, schedules: rows });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/schedules", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
+  }
+  const input = normalizeScheduleInput(req.body || {});
+  if (input.error) return res.status(400).json({ ok: false, error: input.error });
+  try {
+    const result = db.prepare(`
+      INSERT INTO plant_cap_schedules
+        (name, enabled, start_time, stop_time, upper_mw, lower_mw,
+         sequence_mode, sequence_custom_json, cooldown_sec)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.name, input.enabled, input.start_time, input.stop_time,
+      input.upper_mw, input.lower_mw, input.sequence_mode,
+      input.sequence_custom_json, input.cooldown_sec,
+    );
+    const row = db.prepare("SELECT * FROM plant_cap_schedules WHERE id = ?").get(result.lastInsertRowid);
+    if (plantCapController?.scheduleEngine) plantCapController.scheduleEngine._cache = null;
+    return res.json({ ok: true, schedule: row });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/plant-cap/schedules/:id", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const id = Math.trunc(Number(req.params.id));
+    if (!Number.isFinite(id) || id < 1) {
+      return res.status(400).json({ ok: false, error: "Invalid schedule id" });
+    }
+    const row = db.prepare("SELECT * FROM plant_cap_schedules WHERE id = ?").get(id);
+    if (!row) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    return res.json({ ok: true, schedule: row });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put("/api/plant-cap/schedules/:id", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
+  }
+  const id = Math.trunc(Number(req.params.id));
+  if (!Number.isFinite(id) || id < 1) {
+    return res.status(400).json({ ok: false, error: "Invalid schedule id" });
+  }
+  const input = normalizeScheduleInput(req.body || {});
+  if (input.error) return res.status(400).json({ ok: false, error: input.error });
+  try {
+    const existing = db
+      .prepare("SELECT id, current_state FROM plant_cap_schedules WHERE id = ?")
+      .get(id);
+    if (!existing) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    if (existing.current_state === "active") {
+      return res.status(409).json({ ok: false, error: "Cannot edit an active schedule — disable it first." });
+    }
+    db.prepare(`
+      UPDATE plant_cap_schedules SET
+        name = ?, enabled = ?, start_time = ?, stop_time = ?,
+        upper_mw = ?, lower_mw = ?, sequence_mode = ?,
+        sequence_custom_json = ?, cooldown_sec = ?,
+        current_state = 'waiting', updated_ts = ?
+      WHERE id = ?
+    `).run(
+      input.name, input.enabled, input.start_time, input.stop_time,
+      input.upper_mw, input.lower_mw, input.sequence_mode,
+      input.sequence_custom_json, input.cooldown_sec,
+      Date.now(), id,
+    );
+    const row = db.prepare("SELECT * FROM plant_cap_schedules WHERE id = ?").get(id);
+    if (plantCapController?.scheduleEngine) plantCapController.scheduleEngine._cache = null;
+    return res.json({ ok: true, schedule: row });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete("/api/plant-cap/schedules/:id", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const authBody = req.body && typeof req.body === "object" ? req.body : {};
+  if (!isAuthorizedPlantWideControl(authBody)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
+  }
+  const id = Math.trunc(Number(req.params.id));
+  if (!Number.isFinite(id) || id < 1) {
+    return res.status(400).json({ ok: false, error: "Invalid schedule id" });
+  }
+  try {
+    const existing = db
+      .prepare("SELECT id, current_state FROM plant_cap_schedules WHERE id = ?")
+      .get(id);
+    if (!existing) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    if (existing.current_state === "active") {
+      return res.status(409).json({ ok: false, error: "Cannot delete an active schedule — disable it first." });
+    }
+    db.prepare("DELETE FROM plant_cap_schedules WHERE id = ?").run(id);
+    if (plantCapController?.scheduleEngine) plantCapController.scheduleEngine._cache = null;
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/schedules/:id/toggle", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {})) {
+    return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
+  }
+  const id = Math.trunc(Number(req.params.id));
+  if (!Number.isFinite(id) || id < 1) {
+    return res.status(400).json({ ok: false, error: "Invalid schedule id" });
+  }
+  try {
+    const existing = db
+      .prepare("SELECT id, enabled, current_state FROM plant_cap_schedules WHERE id = ?")
+      .get(id);
+    if (!existing) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    const newEnabled = existing.enabled ? 0 : 1;
+    // If disabling an active schedule, move it to paused; otherwise reset to waiting
+    const newState = newEnabled === 0 && existing.current_state === "active"
+      ? "paused"
+      : (newEnabled === 1 ? "waiting" : existing.current_state);
+    db.prepare(
+      "UPDATE plant_cap_schedules SET enabled = ?, current_state = ?, safety_pause_reason = ?, updated_ts = ? WHERE id = ?"
+    ).run(
+      newEnabled,
+      newState,
+      newEnabled === 0 && existing.current_state === "active" ? "disabled_by_toggle" : null,
+      Date.now(),
+      id,
+    );
+    const row = db.prepare("SELECT * FROM plant_cap_schedules WHERE id = ?").get(id);
+    if (plantCapController?.scheduleEngine) plantCapController.scheduleEngine._cache = null;
+    return res.json({ ok: true, schedule: row });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* Auth-gated credentials reference — requires authKey=admin */
+app.get("/api/credentials-reference", (req, res) => {
+  const key = String(req.query.authKey || "").trim();
+  if (key !== "admin") {
+    return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  }
+  const filePath = path.join(__dirname, "../public/credentials-reference.html");
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) res.status(500).json({ ok: false, error: "File not found." });
+  });
 });
 
 app.get("/api/settings", (req, res) => {

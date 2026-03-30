@@ -655,6 +655,31 @@ db.exec(`
     created_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
   );
   CREATE INDEX IF NOT EXISTS idx_maintenance_time ON scheduled_maintenance(start_ts, end_ts);
+
+  CREATE TABLE IF NOT EXISTS plant_cap_schedules (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                     TEXT NOT NULL DEFAULT 'Schedule',
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    start_time               TEXT NOT NULL DEFAULT '08:00',
+    stop_time                TEXT NOT NULL DEFAULT '17:00',
+    upper_mw                 REAL,
+    lower_mw                 REAL,
+    sequence_mode            TEXT DEFAULT NULL,
+    sequence_custom_json     TEXT NOT NULL DEFAULT '[]',
+    cooldown_sec             INTEGER DEFAULT NULL,
+    current_state            TEXT NOT NULL DEFAULT 'waiting',
+    active_session_id        TEXT DEFAULT NULL,
+    total_stop_actions       INTEGER NOT NULL DEFAULT 0,
+    total_start_actions      INTEGER NOT NULL DEFAULT 0,
+    inverter_stop_count_json TEXT NOT NULL DEFAULT '{}',
+    continuous_run_minutes   INTEGER NOT NULL DEFAULT 0,
+    safety_pause_reason      TEXT DEFAULT NULL,
+    watchdog_last_tick_at    INTEGER DEFAULT NULL,
+    last_activated_at        INTEGER DEFAULT NULL,
+    last_run_date            TEXT DEFAULT NULL,
+    created_ts               INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    updated_ts               INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
 `);
 
 function finalizePendingMainDbReplacementSync(database) {

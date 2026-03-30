@@ -328,7 +328,7 @@ The `Inverters` page is the primary live operations page.
 - monitor the full inverter fleet in real time
 - review node-by-node operating state
 - send start or stop commands
-- review or supervise plant-wide MW capping
+- review or supervise plant-wide MW capping (now on the dedicated **Plant Cap** page)
 - inspect current alarms and recent inverter history
 
 ### Toolbar Controls
@@ -337,7 +337,7 @@ The `Inverters` page is the primary live operations page.
 | --- | --- |
 | `All Inverters` filter | Show the full fleet or focus on one inverter |
 | `Layout` | Change the grid column layout |
-| `Show Cap` / `Hide Cap` | Expands or collapses the plant output cap panel |
+| _(Plant Cap has moved to its own dedicated page — see Section 5.2)_ | |
 | Status legend | Shows output-band colors and alarm state meaning |
 | Fleet stat chips | Summarize inverter count, node count, online, alarmed, and offline totals |
 
@@ -399,9 +399,20 @@ Important behavior:
 - current builds batch whole-inverter and selected-inverter node writes per inverter so one inverter action does not wait for a separate gateway HTTP request per node
 - selected multi-inverter actions require an authorization key from authorized personnel
 
-### Plant Output Cap Panel
+### 5.2 Plant Cap Page
 
-The `Plant Output Cap` panel is located on the `Inverters` page and is hidden by default behind the toolbar `Show Cap` button.
+The **Plant Cap** page is a dedicated workspace accessible from the navigation bar. It contains the full plant output cap controller, schedule management, and action history.
+
+#### Page Toolbar
+
+The toolbar at the top displays live summary indicators:
+
+| Element | Function |
+| --- | --- |
+| `Status` badge | Current controller mode: **Enabled**, **Paused**, or **Idle** |
+| `Plant MW` | Current total plant AC output from live PAC data |
+| `Band` | Configured lower–upper MW cap band |
+| `+ Add Schedule` button | Opens the schedule creation modal |
 
 #### Cap Inputs
 
@@ -479,6 +490,31 @@ The preview table shows each candidate inverter in sequence order with its node 
 - in `Remote` mode, the panel remains viewable and the requests are proxied to the gateway workstation
 - if a remote workstation reports `Cannot POST /api/plant-cap/...`, the gateway is usually running an older build or the remote gateway target is incorrect
 - all cap controller stop and start actions are recorded in the Audit page with scope `PLANT-CAP`
+
+#### Scheduled Auto-Cap
+
+The **Scheduled Auto-Cap** section displays compact chip cards for each configured schedule. Each chip shows the time window, schedule name, and a state badge (Active, Waiting, Paused, Completed, or Disabled).
+
+| Action | How |
+| --- | --- |
+| Create schedule | Click **+ Add Schedule** in the toolbar or **+ Add** in the chip section |
+| Edit schedule | Click the pencil icon on any schedule chip |
+| Delete schedule | Use the delete option in the schedule detail |
+
+##### Schedule Form (Modal)
+
+The schedule form opens as a centered modal overlay:
+
+| Field | Description |
+| --- | --- |
+| `Name` | Display label for the schedule |
+| `Start Time` * | 24-hour HH:MM when the cap activates daily |
+| `Stop Time` * | 24-hour HH:MM when the cap releases daily (must be after start) |
+| `Upper MW` | Override for this schedule (blank uses global default) |
+| `Lower MW` | Override for this schedule (blank uses global default) |
+| `Sequence Mode` | Override inverter selection order (blank uses global default) |
+| `Cooldown (s)` | Override cooldown seconds (blank uses global default) |
+| `Auth Key` * | Plant-wide control authorization key (required for all mutations) |
 
 ### Inverter Detail Panel
 
@@ -951,7 +987,7 @@ The `Settings` page is the administrative center. It is organized as a section-b
 
 #### Plant Output Cap Defaults
 
-These settings define the default values loaded into the live `Plant Output Cap` panel on the `Inverters` page. The settings view now also shows a small planner summary for selection mode, band gap, controllable inverter count, and the smallest available controller step.
+These settings define the default values loaded into the **Plant Cap** page. The settings view also shows a small planner summary for selection mode, band gap, controllable inverter count, and the smallest available controller step.
 
 | Field | Use |
 | --- | --- |
@@ -1221,19 +1257,27 @@ Operational note:
 
 ## 8.4 Plant Output Cap Workflow
 
-1. Open the `Inverters` page.
-2. Click `Show Cap`.
-3. Enter the required `Upper Limit (MW)` and `Lower Limit (MW)`.
-4. Choose the inverter `Sequence` and add any `Exempted Inverter Numbers` if needed.
-5. Review the client warnings, especially narrow-band warnings.
-6. Click `Preview Plan`.
-7. Review the proposed inverter step, projected plant MW, and reason text.
-8. Click `Enable Cap` and complete the required authorization.
-9. Monitor `Status`, `Reason`, `Last Action`, `Cooldown`, `Curtailed`, and planner warnings while the session is active.
-10. Cap-stopped inverter cards show a blue `CAP STOPPED` badge with the stoppage time for at-a-glance identification in the inverter grid.
-11. Review the `Controlled Inverters` table inside the cap panel for duration, removed Pac, rated kW, and dependable kW per stopped inverter.
-12. Use `Disable Monitoring` to stop automation without restarting controller-owned inverters, or use `Release Controlled Inverters` to restart them sequentially and end the session.
-13. Check the `Audit` page for a full record of cap controller actions (scope: `PLANT-CAP`) with decision reasons.
+1. Open the **Plant Cap** page from the navigation bar.
+2. Enter the required `Upper Limit (MW)` and `Lower Limit (MW)`.
+3. Choose the inverter `Sequence` and add any `Exempted Inverter Numbers` if needed.
+4. Review the client warnings, especially narrow-band warnings.
+5. Click `Preview Plan`.
+6. Review the proposed inverter step, projected plant MW, and reason text.
+7. Click `Enable Cap` and complete the required authorization.
+8. Monitor `Status`, `Reason`, `Last Action`, `Cooldown`, `Curtailed`, and planner warnings while the session is active.
+9. Cap-stopped inverter cards show a blue `CAP STOPPED` badge with the stoppage time for at-a-glance identification in the inverter grid.
+10. Review the `Controlled Inverters` table inside the cap panel for duration, removed Pac, rated kW, and dependable kW per stopped inverter.
+11. Use `Disable Monitoring` to stop automation without restarting controller-owned inverters, or use `Release Controlled Inverters` to restart them sequentially and end the session.
+12. Check the `Audit` page for a full record of cap controller actions (scope: `PLANT-CAP`) with decision reasons.
+
+## 8.5 Scheduled Auto-Cap Workflow
+
+1. Open the **Plant Cap** page.
+2. Click **+ Add Schedule** in the toolbar.
+3. Fill in Name, Start Time, Stop Time, and optional MW/Sequence/Cooldown overrides.
+4. Enter the Auth Key and click **Save**.
+5. Monitor schedule chips for state transitions (Waiting → Active → Completed).
+6. Edit or delete schedules via the pencil icon on each chip.
 
 Important:
 

@@ -8,6 +8,13 @@ const DEFAULT_BREACH_HOLD_MS = 8000;
 const DEFAULT_SETTLE_SEC = 30;
 const DEFAULT_LIVE_FRESH_MS = 15000;
 
+// ─── Schedule Engine Constants ────────────────────────────────────────────────
+const SCHEDULE_MAX_CONTINUOUS_RUN_MS = 4 * 60 * 60 * 1000; // 4 h
+const SCHEDULE_INVERTER_STOP_LIMIT   = 20;                  // per session
+const SCHEDULE_STALE_THRESHOLD_MS    = 30 * 60 * 1000;     // 30 min
+const SCHEDULE_PLANT_MIN_KW          = 100;                 // kW
+const SCHEDULE_TICK_CACHE_MS         = 5000;                // 5 s
+
 function clampInt(value, min, max, fallback) {
   const n = Math.trunc(Number(value));
   if (!Number.isFinite(n)) return fallback;
@@ -663,6 +670,453 @@ function buildPlantCapPreview({
   };
 }
 
+// ─── Schedule Engine ─────────────────────────────────────────────────────────
+// Manages time-based auto-enable / auto-disable of the plant output cap.
+// Runs as part of PlantCapController.tick() on every 2-second interval.
+class ScheduleEngine {
+  constructor(options = {}) {
+    this.getDb     = typeof options.getDb     === "function" ? options.getDb     : () => null;
+    this.broadcast = typeof options.broadcast === "function" ? options.broadcast : () => {};
+    this.now       = typeof options.now       === "function" ? options.now       : () => Date.now();
+    this._cache         = null;
+    this._cacheTs       = 0;
+    this._remarks       = []; // ring buffer, max 200
+    this._dailyResetTs  = 0;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  _hhmm(ts) {
+    const d = new Date(ts);
+    return (
+      String(d.getHours()).padStart(2, "0") +
+      ":" +
+      String(d.getMinutes()).padStart(2, "0")
+    );
+  }
+
+  _todayTs(hhmm) {
+    const d = new Date(this.now());
+    const [h, m] = hhmm.split(":").map(Number);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0).getTime();
+  }
+
+  _inWindow(startTime, stopTime, hhmm) {
+    return hhmm >= startTime && hhmm < stopTime;
+  }
+
+  _pastStop(stopTime, hhmm) {
+    return hhmm >= stopTime;
+  }
+
+  // ── DB access ──────────────────────────────────────────────────────────────
+
+  _loadSchedules(force = false) {
+    const now = this.now();
+    if (!force && this._cache && now - this._cacheTs < SCHEDULE_TICK_CACHE_MS) {
+      return this._cache;
+    }
+    const db = this.getDb();
+    if (!db) return [];
+    try {
+      const rows = db
+        .prepare("SELECT * FROM plant_cap_schedules WHERE enabled = 1 ORDER BY id")
+        .all();
+      this._cache = rows;
+      this._cacheTs = now;
+      return rows;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  _updateState(id, patch) {
+    const db = this.getDb();
+    if (!db) return;
+    try {
+      patch.updated_ts = this.now();
+      const sets = Object.keys(patch).map((k) => `${k} = ?`).join(", ");
+      const vals = [...Object.values(patch), id];
+      db.prepare(`UPDATE plant_cap_schedules SET ${sets} WHERE id = ?`).run(...vals);
+      this._cache = null;
+    } catch (_) {}
+  }
+
+  _getActiveConflict(excludeId) {
+    const db = this.getDb();
+    if (!db) return null;
+    try {
+      return (
+        db
+          .prepare(
+            "SELECT id FROM plant_cap_schedules WHERE current_state = 'active' AND id != ?"
+          )
+          .get(excludeId) || null
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ── Remarks ────────────────────────────────────────────────────────────────
+
+  _remark(scheduleId, severity, code, message, scheduleName = null) {
+    const entry = { ts: this.now(), scheduleId, scheduleName, severity, code, message };
+    this._remarks.push(entry);
+    if (this._remarks.length > 200) this._remarks.shift();
+    try {
+      const db = this.getDb();
+      if (db) {
+        db.prepare(
+          "INSERT INTO audit_log(ts, operator, inverter, action, scope, result, reason) VALUES(?,?,?,?,?,?,?)"
+        ).run(
+          entry.ts,
+          "SCHEDULE",
+          0,
+          code,
+          "plant-cap-schedule",
+          severity,
+          `[${scheduleId}] ${message}`
+        );
+      }
+    } catch (_) {}
+    this.broadcast({ type: "plant_cap_schedule_remark", remark: entry });
+  }
+
+  getRemarks(limit = 50) {
+    return this._remarks.slice(-Math.max(1, limit));
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  getScheduleStatus() {
+    const db = this.getDb();
+    if (!db) return [];
+    try {
+      return db.prepare("SELECT * FROM plant_cap_schedules ORDER BY id").all();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /** Called by PlantCapController.executeInverterAction when a stop is issued under schedule control. */
+  recordInverterStop(scheduleId, inverterId) {
+    const db = this.getDb();
+    if (!db) return;
+    try {
+      const row = db
+        .prepare(
+          "SELECT inverter_stop_count_json, total_stop_actions FROM plant_cap_schedules WHERE id = ? AND current_state = 'active'"
+        )
+        .get(scheduleId);
+      if (!row) return;
+      let counts = {};
+      try { counts = JSON.parse(row.inverter_stop_count_json || "{}"); } catch (_) {}
+      counts[String(inverterId)] = (counts[String(inverterId)] || 0) + 1;
+      db.prepare(
+        "UPDATE plant_cap_schedules SET inverter_stop_count_json = ?, total_stop_actions = ?, updated_ts = ? WHERE id = ?"
+      ).run(JSON.stringify(counts), (row.total_stop_actions || 0) + 1, this.now(), scheduleId);
+      this._cache = null;
+    } catch (_) {}
+  }
+
+  /** Called by PlantCapController.executeInverterAction when a start is issued under schedule control. */
+  recordInverterStart(scheduleId) {
+    const db = this.getDb();
+    if (!db) return;
+    try {
+      const row = db
+        .prepare(
+          "SELECT total_start_actions FROM plant_cap_schedules WHERE id = ? AND current_state = 'active'"
+        )
+        .get(scheduleId);
+      if (!row) return;
+      db.prepare(
+        "UPDATE plant_cap_schedules SET total_start_actions = ?, updated_ts = ? WHERE id = ?"
+      ).run((row.total_start_actions || 0) + 1, this.now(), scheduleId);
+      this._cache = null;
+    } catch (_) {}
+  }
+
+  // ── Daily reset ────────────────────────────────────────────────────────────
+
+  _dailyReset() {
+    const now    = this.now();
+    const d      = new Date(now);
+    const resetT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 1, 0).getTime();
+    if (now >= resetT && this._dailyResetTs < resetT) {
+      this._dailyResetTs = resetT;
+      const db = this.getDb();
+      if (!db) return;
+      try {
+        db.prepare(`
+          UPDATE plant_cap_schedules
+          SET current_state            = 'waiting',
+              total_stop_actions       = 0,
+              total_start_actions      = 0,
+              inverter_stop_count_json = '{}',
+              continuous_run_minutes   = 0,
+              safety_pause_reason      = NULL,
+              active_session_id        = NULL,
+              watchdog_last_tick_at    = NULL,
+              updated_ts               = ?
+          WHERE enabled = 1 AND current_state IN ('completed', 'paused')
+        `).run(now);
+        this._cache = null;
+      } catch (_) {}
+    }
+  }
+
+  // ── Main tick ──────────────────────────────────────────────────────────────
+
+  async tick(controller, now) {
+    this._dailyReset();
+    const hhmm      = this._hhmm(now);
+    const schedules = this._loadSchedules();
+    for (const sched of schedules) {
+      try {
+        await this._processSched(sched, controller, now, hhmm);
+      } catch (err) {
+        this._remark(sched.id, "error", "sched_tick_error", `Tick error: ${err.message}`, sched.name);
+      }
+    }
+    this.broadcast({
+      type:      "plant_cap_schedule_status",
+      schedules: this.getScheduleStatus(),
+      remarks:   this.getRemarks(20),
+    });
+  }
+
+  async _processSched(sched, controller, now, hhmm) {
+    const state    = sched.current_state || "idle";
+    const inWindow = this._inWindow(sched.start_time, sched.stop_time, hhmm);
+    const pastStop = this._pastStop(sched.stop_time, hhmm);
+
+    // ── waiting → activate when time arrives ─────────────────────────────────
+    if (state === "waiting") {
+      if (!inWindow) return;
+
+      // Stale guard: skip if server was offline past the threshold
+      const startTs = this._todayTs(sched.start_time);
+      if (now - startTs > SCHEDULE_STALE_THRESHOLD_MS) {
+        this._updateState(sched.id, {
+          current_state: "completed",
+          last_run_date: new Date(now).toISOString().slice(0, 10),
+        });
+        this._remark(
+          sched.id, "warning", "sched_stale",
+          `Schedule "${sched.name}" skipped — server was offline past the 30-min stale window.`,
+          sched.name
+        );
+        this.broadcast({ type: "plant_cap_schedule_completed", scheduleId: sched.id, reason: "stale" });
+        return;
+      }
+
+      // Pre-start: wait for fresh data silently
+      const cs = controller.getStatus({ refresh: true, includePreview: false });
+      if (!cs.dataFresh) return;
+
+      // Pre-start: plant output must be above minimum
+      if ((cs.currentPlantKw || 0) < SCHEDULE_PLANT_MIN_KW) {
+        this._remark(
+          sched.id, "warning", "sched_low_plant",
+          `Schedule "${sched.name}" waiting — plant output ${(cs.currentPlantKw || 0).toFixed(1)} kW is below minimum ${SCHEDULE_PLANT_MIN_KW} kW.`,
+          sched.name
+        );
+        return;
+      }
+
+      // Conflict: another schedule is already active
+      const conflict = this._getActiveConflict(sched.id);
+      if (conflict) {
+        this._remark(
+          sched.id, "warning", "sched_conflict",
+          `Schedule "${sched.name}" waiting — schedule ID ${conflict.id} is already active.`,
+          sched.name
+        );
+        return;
+      }
+
+      // Activate the schedule
+      const sessionId = `sched_${sched.id}_${now}`;
+      this._updateState(sched.id, {
+        current_state:            "active",
+        active_session_id:        sessionId,
+        continuous_run_minutes:   0,
+        total_stop_actions:       0,
+        total_start_actions:      0,
+        inverter_stop_count_json: "{}",
+        safety_pause_reason:      null,
+        watchdog_last_tick_at:    now,
+        last_activated_at:        now,
+        last_run_date:            new Date(now).toISOString().slice(0, 10),
+      });
+
+      const overrides = this._buildOverrides(sched);
+      try {
+        await controller.enable(overrides);
+      } catch (err) {
+        // Revert to waiting so it retries next tick
+        this._updateState(sched.id, { current_state: "waiting" });
+        this._remark(
+          sched.id, "error", "sched_enable_failed",
+          `Schedule "${sched.name}" failed to activate: ${err.message}`,
+          sched.name
+        );
+        return;
+      }
+      this._remark(
+        sched.id, "success", "sched_activated",
+        `Schedule "${sched.name}" activated — capping started. Window: ${sched.start_time}–${sched.stop_time}.`,
+        sched.name
+      );
+      this.broadcast({ type: "plant_cap_schedule_activated", scheduleId: sched.id, sessionId });
+      return;
+    }
+
+    // ── active → monitor safety and handle stop time ──────────────────────────
+    if (state === "active") {
+      // Stop time reached — graceful shutdown
+      if (pastStop) {
+        await this._deactivate(sched, controller, now, "stop_time_reached");
+        return;
+      }
+
+      // Watchdog heartbeat
+      this._updateState(sched.id, { watchdog_last_tick_at: now });
+
+      // Continuous run safety check
+      const activatedAt = Number(sched.last_activated_at || this._todayTs(sched.start_time));
+      const runMs       = now - activatedAt;
+      this._updateState(sched.id, { continuous_run_minutes: Math.floor(runMs / 60000) });
+
+      if (runMs >= SCHEDULE_MAX_CONTINUOUS_RUN_MS) {
+        await this._safetyPause(
+          sched, controller, now,
+          "continuous_run_limit",
+          `Continuous run limit of ${SCHEDULE_MAX_CONTINUOUS_RUN_MS / 3600000}h reached.`
+        );
+        return;
+      }
+
+      // Inverter stop count safety check
+      let stopCounts = {};
+      try { stopCounts = JSON.parse(sched.inverter_stop_count_json || "{}"); } catch (_) {}
+      const totalStops = Object.values(stopCounts).reduce((a, b) => a + b, 0);
+      if (totalStops >= SCHEDULE_INVERTER_STOP_LIMIT) {
+        await this._safetyPause(
+          sched, controller, now,
+          "inverter_stop_limit",
+          `Inverter stop limit of ${SCHEDULE_INVERTER_STOP_LIMIT} per session reached.`
+        );
+        return;
+      }
+
+      // Operator override: controller was manually disabled
+      const cs = controller.getStatus({ refresh: false, includePreview: false });
+      if (!cs.enabled) {
+        this._updateState(sched.id, {
+          current_state:       "paused",
+          safety_pause_reason: "operator_disabled",
+        });
+        this._remark(
+          sched.id, "warning", "sched_op_pause",
+          `Schedule "${sched.name}" paused — operator manually disabled capping.`,
+          sched.name
+        );
+        this.broadcast({
+          type:       "plant_cap_schedule_paused",
+          scheduleId: sched.id,
+          reason:     "operator_disabled",
+        });
+      }
+      return;
+    }
+
+    // ── paused → check for resume or window expiry ────────────────────────────
+    if (state === "paused") {
+      if (pastStop) {
+        this._updateState(sched.id, {
+          current_state: "completed",
+          last_run_date: new Date(now).toISOString().slice(0, 10),
+        });
+        this._remark(
+          sched.id, "info", "sched_completed",
+          `Schedule "${sched.name}" completed — stop time reached while paused.`,
+          sched.name
+        );
+        this.broadcast({
+          type: "plant_cap_schedule_completed", scheduleId: sched.id, reason: "stop_time",
+        });
+        return;
+      }
+      // Operator-paused: resume automatically if operator re-enables and still in window
+      if (sched.safety_pause_reason === "operator_disabled") {
+        const cs = controller.getStatus({ refresh: false, includePreview: false });
+        if (cs.enabled && inWindow) {
+          this._updateState(sched.id, {
+            current_state:         "active",
+            safety_pause_reason:   null,
+            watchdog_last_tick_at: now,
+          });
+          this._remark(
+            sched.id, "info", "sched_resumed",
+            `Schedule "${sched.name}" resumed — operator re-enabled capping.`,
+            sched.name
+          );
+          this.broadcast({
+            type: "plant_cap_schedule_activated", scheduleId: sched.id, reason: "resumed",
+          });
+        }
+      }
+      return;
+    }
+
+    // idle / completed — nothing to do
+  }
+
+  _buildOverrides(sched) {
+    const o = {};
+    if (sched.upper_mw !== null && sched.upper_mw !== undefined) o.upperMw = sched.upper_mw;
+    if (sched.lower_mw !== null && sched.lower_mw !== undefined) o.lowerMw = sched.lower_mw;
+    if (sched.sequence_mode)       o.sequenceMode  = sched.sequence_mode;
+    if (sched.sequence_custom_json) {
+      try { o.sequenceCustom = JSON.parse(sched.sequence_custom_json); } catch (_) {}
+    }
+    if (sched.cooldown_sec !== null && sched.cooldown_sec !== undefined) {
+      o.cooldownSec = sched.cooldown_sec;
+    }
+    return Object.keys(o).length ? o : null;
+  }
+
+  async _deactivate(sched, controller, now, reason) {
+    await controller.releaseControlled();
+    controller.disable("schedule_stop", `Schedule "${sched.name}" stop time reached — capping disabled and inverters released.`);
+    this._updateState(sched.id, {
+      current_state: "completed",
+      last_run_date: new Date(now).toISOString().slice(0, 10),
+    });
+    this._remark(
+      sched.id, "success", "sched_completed",
+      `Schedule "${sched.name}" completed — all controlled inverters released.`,
+      sched.name
+    );
+    this.broadcast({ type: "plant_cap_schedule_completed", scheduleId: sched.id, reason });
+  }
+
+  async _safetyPause(sched, controller, now, reasonCode, message) {
+    controller.disable("schedule_safety_pause", message);
+    await controller.releaseControlled();
+    this._updateState(sched.id, {
+      current_state:       "paused",
+      safety_pause_reason: reasonCode,
+    });
+    this._remark(sched.id, "error", `sched_safety_${reasonCode}`, `"${sched.name}" safety pause — ${message}`, sched.name);
+    this.broadcast({ type: "plant_cap_schedule_paused", scheduleId: sched.id, reason: reasonCode });
+  }
+}
+
+// ─── Plant Cap Controller ─────────────────────────────────────────────────────
 class PlantCapController {
   constructor(options = {}) {
     this.getLiveData =
@@ -681,7 +1135,8 @@ class PlantCapController {
           };
     this.broadcast =
       typeof options.broadcast === "function" ? options.broadcast : () => {};
-    this.now = typeof options.now === "function" ? options.now : () => Date.now();
+    this.now    = typeof options.now    === "function" ? options.now    : () => Date.now();
+    this.getDb  = typeof options.getDb  === "function" ? options.getDb  : () => null;
     this.tickMs = clampInt(options.tickMs, 250, 60000, DEFAULT_TICK_MS);
     this.breachHoldMs = clampInt(
       options.breachHoldMs,
@@ -698,6 +1153,12 @@ class PlantCapController {
     this.operatorName = String(options.operatorName || "PLANT CAP").trim() || "PLANT CAP";
     this.timer = null;
     this.lastBroadcastKey = "";
+    this._scheduleTickRunning = false;
+    this.scheduleEngine = new ScheduleEngine({
+      getDb:     this.getDb,
+      broadcast: this.broadcast,
+      now:       this.now,
+    });
     this.state = {
       enabled: false,
       status: "idle",
@@ -1129,6 +1590,17 @@ class PlantCapController {
       return this.getStatus({ refresh: false, includePreview: false });
     }
 
+    // Schedule engine — runs every tick regardless of enabled state.
+    // Re-entrance guard prevents recursion when enable() calls tick() internally.
+    if (!this._scheduleTickRunning) {
+      this._scheduleTickRunning = true;
+      try {
+        await this.scheduleEngine.tick(this, now);
+      } finally {
+        this._scheduleTickRunning = false;
+      }
+    }
+
     if (!this.state.enabled) {
       if (this.state.status !== "paused" || this.state.reasonCode === "disabled") {
         this.state.status = "idle";
@@ -1256,6 +1728,10 @@ module.exports = {
   DEFAULT_BREACH_HOLD_MS,
   DEFAULT_SETTLE_SEC,
   DEFAULT_LIVE_FRESH_MS,
+  SCHEDULE_MAX_CONTINUOUS_RUN_MS,
+  SCHEDULE_INVERTER_STOP_LIMIT,
+  SCHEDULE_STALE_THRESHOLD_MS,
+  SCHEDULE_PLANT_MIN_KW,
   normalizeSequenceMode,
   normalizeSequenceCustom,
   normalizePlantCapSettings,
@@ -1263,5 +1739,6 @@ module.exports = {
   buildSequenceOrder,
   buildInverterProfiles,
   buildPlantCapPreview,
+  ScheduleEngine,
   PlantCapController,
 };

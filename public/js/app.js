@@ -74,6 +74,7 @@ const State = {
     preview: null,
   },
   plantCapPanelCollapsed: true,
+  capSchedules: { schedules: [], remarks: [] },
   todayKwh: {}, // key: inverter → kWh today
   alarmFilter: "all",
   ws: null,
@@ -596,32 +597,14 @@ function getStoredPlantCapPanelCollapsed() {
 }
 
 function syncPlantCapPanelCollapsedUi() {
-  const inverterPage = $("page-inverters");
+  // Plant cap panel lives on the dedicated plant-cap page — always visible there
   const panel = $("plantCapPanel");
-  const toolbarToggle = $("btnPlantCapToolbarToggle");
-  const collapsed = Boolean(State.plantCapPanelCollapsed);
-  if (inverterPage) {
-    inverterPage.classList.toggle("plant-cap-panel-collapsed", collapsed);
-  }
-  if (panel) {
-    panel.classList.toggle("is-collapsed", collapsed);
-    panel.classList.toggle("is-hidden", collapsed);
-    panel.hidden = collapsed;
-    panel.style.display = collapsed ? "none" : "";
-    panel.setAttribute("aria-hidden", collapsed ? "true" : "false");
-  }
-  if (toolbarToggle) {
-    // Plant cap remains available in Remote mode via gateway proxy, so the
-    // toolbar toggle must always stay usable even if broader control sweeps
-    // temporarily disable nearby buttons.
-    toolbarToggle.disabled = false;
-    toolbarToggle.removeAttribute("disabled");
-    toolbarToggle.setAttribute("aria-disabled", "false");
-    toolbarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    toolbarToggle.textContent = collapsed ? "Show Cap" : "Hide Cap";
-    toolbarToggle.title = collapsed
-      ? "Show plant output cap panel"
-      : "Hide plant output cap panel";
+  if (!panel) return;
+  if (State.currentPage === "plant-cap") {
+    panel.classList.remove("is-collapsed", "is-hidden");
+    panel.hidden = false;
+    panel.style.display = "";
+    panel.removeAttribute("aria-hidden");
   }
 }
 
@@ -3821,12 +3804,52 @@ function switchPage(page) {
   if (page === "report") initReportPage();
   if (page === "export") initExportPage();
   if (page === "forecast") initForecastPage();
+  if (page === "plant-cap") initPlantCapPage();
   if (page === "settings") {
     initSettingsSectionNav();
     unlockSettingsInputs();
     refreshLicenseSection().catch(() => {});
     startReplicationHealthPolling();
     cbLoadSettings().catch(() => {});
+    loadCapScheduleStatus().catch(() => {});
+  }
+}
+
+function initPlantCapPage() {
+  const container = $("plantCapPageContainer");
+  if (!container) return;
+  if (!$("plantCapPanel")) {
+    container.innerHTML = "";
+    container.appendChild(buildPlantCapPanel());
+  }
+  const panel = $("plantCapPanel");
+  if (panel) {
+    panel.classList.remove("is-collapsed", "is-hidden");
+    panel.hidden = false;
+    panel.style.display = "";
+    panel.removeAttribute("aria-hidden");
+  }
+  syncPlantCapFormsFromSettingsState();
+  renderPlantCapPanel();
+  refreshPlantCapStatus(true).catch(() => {});
+  loadCapScheduleStatus().catch(() => {});
+}
+
+function syncPlantCapPageToolbar() {
+  const status = normalizePlantCapStatusClient(State.plantCap.status || {});
+  const badge = $("capPageStatusBadge");
+  const plantMw = $("capPagePlantMw");
+  const band = $("capPageBandLabel");
+  if (badge) {
+    const mode = status.enabled ? "Enabled" : status.status === "paused" ? "Paused" : "Idle";
+    badge.textContent = mode;
+    badge.className = status.enabled ? "cap-toolbar-enabled" : status.status === "paused" ? "cap-toolbar-paused" : "cap-toolbar-idle";
+  }
+  if (plantMw) {
+    plantMw.textContent = status.currentPlantMw == null ? "—" : Number(status.currentPlantMw).toFixed(3);
+  }
+  if (band) {
+    band.textContent = formatPlantCapBandLabel(status);
   }
 }
 
@@ -3834,8 +3857,21 @@ function openGuideModal() {
   const m = $("guideModal");
   if (!m) return;
   const iframe = $("guideIframe");
-  if (iframe && (!iframe.src || iframe.src === "about:blank")) {
-    iframe.src = "/user-guide.html";
+  if (iframe) {
+    iframe.removeAttribute("srcdoc");
+    if (!iframe.src || iframe.src === "about:blank" || !iframe.src.endsWith("/user-guide.html")) {
+      iframe.src = "/user-guide.html";
+    }
+  }
+  const title = m.querySelector(".guide-modal-title");
+  if (title) title.textContent = "ADSI Inverter Dashboard \u2014 User Guide";
+  const pdfBtn = $("btnDownloadGuidePdf");
+  if (pdfBtn) {
+    if (pdfBtn._credClickHandler) pdfBtn.removeEventListener("click", pdfBtn._credClickHandler);
+    if (pdfBtn._guideClickHandler) {
+      pdfBtn.removeEventListener("click", pdfBtn._guideClickHandler);
+      pdfBtn.addEventListener("click", pdfBtn._guideClickHandler);
+    }
   }
   m.classList.remove("hidden");
   document.body.classList.add("modal-open");
@@ -3846,6 +3882,14 @@ function closeGuideModal() {
   if (!m) return;
   m.classList.add("hidden");
   document.body.classList.remove("modal-open");
+  const pdfBtn = $("btnDownloadGuidePdf");
+  if (pdfBtn) {
+    if (pdfBtn._credClickHandler) pdfBtn.removeEventListener("click", pdfBtn._credClickHandler);
+    if (pdfBtn._guideClickHandler) {
+      pdfBtn.removeEventListener("click", pdfBtn._guideClickHandler);
+      pdfBtn.addEventListener("click", pdfBtn._guideClickHandler);
+    }
+  }
 }
 
 async function downloadGuidePdf() {
@@ -3880,12 +3924,74 @@ function initGuideModal() {
   m.addEventListener("click", (e) => {
     if (e.target === m) closeGuideModal();
   });
-  $("btnDownloadGuidePdf")?.addEventListener("click", downloadGuidePdf);
+  const pdfBtn = $("btnDownloadGuidePdf");
+  if (pdfBtn) {
+    pdfBtn._guideClickHandler = downloadGuidePdf;
+    pdfBtn.addEventListener("click", downloadGuidePdf);
+  }
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && m && !m.classList.contains("hidden")) {
       closeGuideModal();
     }
   });
+}
+
+async function downloadCredentialsPdf() {
+  const btn = $("btnDownloadGuidePdf");
+  if (!btn) return;
+  if (typeof window.electronAPI?.downloadCredentialsPdf !== "function") {
+    showToast("PDF download is only available in the desktop app.", "warn");
+    return;
+  }
+  const origText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="mdi mdi-loading mdi-spin"></span> Generating PDF…';
+  try {
+    const res = await window.electronAPI.downloadCredentialsPdf();
+    if (res?.ok) {
+      showToast("Credentials Reference saved as PDF.", "ok");
+    } else if (res?.error) {
+      showToast("PDF generation failed: " + res.error, "err");
+    }
+  } catch (err) {
+    showToast("PDF download error.", "err");
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origText;
+  }
+}
+
+async function openCredentialsReference() {
+  const key = await appPrompt("Credentials Reference", "Enter admin auth key to view credentials:", { placeholder: "Auth key" });
+  if (!key) return;
+  try {
+    const res = await fetch(`/api/credentials-reference?authKey=${encodeURIComponent(key.trim())}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || "Access denied.", "err");
+      return;
+    }
+    const html = await res.text();
+    const m = $("guideModal");
+    if (!m) return;
+    const iframe = $("guideIframe");
+    if (iframe) {
+      iframe.srcdoc = html;
+    }
+    const title = m.querySelector(".guide-modal-title");
+    if (title) title.textContent = "Credentials & Authorization Reference";
+    const pdfBtn = $("btnDownloadGuidePdf");
+    if (pdfBtn) {
+      pdfBtn._guideClickHandler = pdfBtn._guideClickHandler || downloadGuidePdf;
+      pdfBtn.removeEventListener("click", pdfBtn._guideClickHandler);
+      pdfBtn._credClickHandler = pdfBtn._credClickHandler || downloadCredentialsPdf;
+      pdfBtn.addEventListener("click", pdfBtn._credClickHandler);
+    }
+    m.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  } catch (err) {
+    showToast("Failed to load credentials reference.", "err");
+  }
 }
 
 function normalizeSettingsSectionId(value) {
@@ -7055,15 +7161,86 @@ function buildPlantCapPanel() {
           </div>
         </div>
       </div>
+      <div class="plant-cap-sched-summary" id="plantCapSchedSummary">
+        <div class="plant-cap-sched-summary-head">
+          <span class="plant-cap-sched-summary-title">Scheduled Auto-Cap</span>
+          <button type="button" class="btn btn-xs btn-outline" id="btnAddCapSchedule" title="Create a new cap schedule">
+            <span class="mdi mdi-plus icon-inline" aria-hidden="true"></span> Add
+          </button>
+        </div>
+        <div id="plantCapSchedChips" class="plant-cap-sched-chips">
+          <div class="plant-cap-sched-chips-empty">No schedules configured.</div>
+        </div>
+      </div>
+      <div class="plant-cap-history-section">
+        <div class="plant-cap-history-head" id="plantCapScheduleToggle" title="Show or hide the cap output schedule configuration.">
+          <span class="plant-cap-history-title">Cap Output Schedule</span>
+          <span id="plantCapScheduleChevron" class="plant-cap-history-chevron">▼</span>
+        </div>
+        <div id="plantCapScheduleWrap" class="plant-cap-history-wrap" hidden>
+          <p class="cap-sched-intro">Automatically engage and disengage the plant output cap within a daily time window. Each schedule activates the controller at its start time and releases it at the stop time.</p>
+          <div id="capScheduleList" class="cap-sched-list" aria-live="polite"></div>
+          <div class="cap-sched-list-actions">
+            <button type="button" class="btn btn-sm" id="btnNewCapSchedule" title="Create a new cap output schedule">
+              <span class="mdi mdi-plus icon-inline" aria-hidden="true"></span> New Schedule
+            </button>
+          </div>
+          <div id="capScheduleRemarksWrap">
+            <div class="cap-sched-remarks-subtitle">Activity Log</div>
+            <div id="capScheduleRemarks" class="cap-sched-remarks" aria-live="polite">
+              <div class="cap-sched-remarks-empty">No activity yet.</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>`;
-  if (State.plantCapPanelCollapsed) {
-    wrap.classList.add("is-collapsed");
-    wrap.classList.add("is-hidden");
-    wrap.hidden = true;
-    wrap.style.display = "none";
-    wrap.setAttribute("aria-hidden", "true");
-  }
   return wrap;
+}
+
+function togglePlantCapSchedule() {
+  const wrap    = $("plantCapScheduleWrap");
+  const chevron = $("plantCapScheduleChevron");
+  if (!wrap) return;
+  const isHidden = wrap.hidden;
+  wrap.hidden = !isHidden;
+  if (chevron) chevron.textContent = isHidden ? "▲" : "▼";
+  if (isHidden) loadCapScheduleStatus().catch(() => {});
+}
+
+function renderPlantCapSchedChips() {
+  const container = $("plantCapSchedChips");
+  if (!container) return;
+  const schedules = State.capSchedules.schedules;
+  if (!schedules || !schedules.length) {
+    container.innerHTML = '<div class="plant-cap-sched-chips-empty">No schedules configured.</div>';
+    return;
+  }
+  container.innerHTML = "";
+  schedules.forEach((sched) => {
+    const { label, cls } = _capSchedStateInfo(sched);
+    const chip = el("div", `plant-cap-sched-chip plant-cap-sched-chip--${cls}`);
+
+    const timeSpan = el("span", "plant-cap-sched-chip-time");
+    timeSpan.textContent = `${sched.start_time} – ${sched.stop_time}`;
+    chip.appendChild(timeSpan);
+
+    const nameSpan = el("span", "plant-cap-sched-chip-name");
+    nameSpan.textContent = sched.name || "Schedule";
+    chip.appendChild(nameSpan);
+
+    const badgeSpan = el("span", `plant-cap-sched-chip-badge plant-cap-sched-chip-badge--${cls}`);
+    badgeSpan.textContent = label;
+    chip.appendChild(badgeSpan);
+
+    const editBtn = el("button", "plant-cap-sched-chip-edit");
+    editBtn.type = "button";
+    editBtn.title = "Edit this schedule";
+    editBtn.dataset.schedId = String(sched.id);
+    editBtn.innerHTML = '<span class="mdi mdi-pencil-outline" aria-hidden="true"></span>';
+    chip.appendChild(editBtn);
+
+    container.appendChild(chip);
+  });
 }
 
 function togglePlantCapHistory() {
@@ -7419,6 +7596,7 @@ function renderPlantCapPanel() {
     State.plantCap.preview || status.preview || null,
   );
   renderPlantCapExportLimit();
+  if (State.currentPage === "plant-cap") syncPlantCapPageToolbar();
 }
 
 function renderPlantCapExportLimit() {
@@ -7458,15 +7636,12 @@ function buildInverterGrid() {
     if (!seen.has(i)) ordered.push(i);
   }
   const frag = document.createDocumentFragment();
-  frag.appendChild(buildPlantCapPanel());
   frag.appendChild(buildBulkControlPanel());
   for (const i of ordered) {
     frag.appendChild(buildInverterCard(i, nodes));
   }
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
-  syncPlantCapFormsFromSettingsState();
-  renderPlantCapPanel();
   initInverterGridDrag();
 }
 
@@ -8992,6 +9167,321 @@ async function releasePlantCapControl() {
   }
 }
 
+// ─── Cap Schedule Management ──────────────────────────────────────────────────
+async function loadCapScheduleStatus() {
+  try {
+    const data = await api("/api/plant-cap/schedule-status");
+    State.capSchedules.schedules = Array.isArray(data.schedules) ? data.schedules : [];
+    State.capSchedules.remarks   = Array.isArray(data.remarks)   ? data.remarks   : [];
+    renderCapScheduleSection();
+  } catch (err) {
+    console.warn("[capSched] loadCapScheduleStatus failed:", err.message);
+  }
+}
+
+function renderCapScheduleSection() {
+  renderPlantCapSchedChips();
+  renderCapScheduleList();
+  renderCapScheduleRemarks();
+}
+
+function _capSchedStateInfo(sched) {
+  if (!sched.enabled) return { label: "Disabled",  cls: "disabled" };
+  switch (sched.current_state) {
+    case "active":    return { label: "Active",    cls: "active"    };
+    case "paused":    return { label: "Paused",    cls: "paused"    };
+    case "completed": return { label: "Completed", cls: "completed" };
+    default:          return { label: "Waiting",   cls: "waiting"   };
+  }
+}
+
+function _capSchedBandLabel(sched) {
+  const u = sched.upper_mw != null ? Number(sched.upper_mw).toFixed(3) : null;
+  const l = sched.lower_mw != null ? Number(sched.lower_mw).toFixed(3) : null;
+  if (u != null && l != null) return `${l} – ${u} MW`;
+  if (u != null)               return `≤ ${u} MW`;
+  return "Global defaults";
+}
+
+function buildCapScheduleCard(sched) {
+  const { label, cls } = _capSchedStateInfo(sched);
+  const band   = _capSchedBandLabel(sched);
+  const safeId = Number(sched.id);
+
+  const cardCls = [
+    "cap-sched-card",
+    sched.current_state === "active" ? "is-active" : "",
+    sched.current_state === "paused" ? "is-paused" : "",
+    !sched.enabled ? "is-disabled" : "",
+  ].filter(Boolean).join(" ");
+
+  const card = el("div", cardCls);
+  card.dataset.id = safeId;
+
+  // Header: name + state badge
+  const header  = el("div", "cap-sched-card-header");
+  const nameEl  = el("div", "cap-sched-card-name");
+  nameEl.textContent = sched.name || "Schedule";
+  const badge   = el("span", `cap-sched-badge cap-sched-badge--${cls}`);
+  badge.textContent = label;
+  header.appendChild(nameEl);
+  header.appendChild(badge);
+  card.appendChild(header);
+
+  // Meta: time window + band + sequence mode
+  const meta = el("div", "cap-sched-card-meta");
+
+  const timeItem = el("div", "cap-sched-meta-item");
+  const timeIcon = el("span", "mdi mdi-clock-outline");
+  timeIcon.setAttribute("aria-hidden", "true");
+  timeItem.appendChild(timeIcon);
+  timeItem.appendChild(document.createTextNode(` ${sched.start_time} – ${sched.stop_time}`));
+  meta.appendChild(timeItem);
+
+  const bandItem = el("div", "cap-sched-meta-item");
+  const bandIcon = el("span", "mdi mdi-flash-outline");
+  bandIcon.setAttribute("aria-hidden", "true");
+  bandItem.appendChild(bandIcon);
+  bandItem.appendChild(document.createTextNode(` ${band}`));
+  meta.appendChild(bandItem);
+
+  if (sched.sequence_mode) {
+    const seqItem = el("div", "cap-sched-meta-item");
+    seqItem.appendChild(document.createTextNode(`Seq: ${sched.sequence_mode}`));
+    meta.appendChild(seqItem);
+  }
+  card.appendChild(meta);
+
+  // Safety counters (only non-zero)
+  const stopCnt  = Number(sched.total_stop_actions)     || 0;
+  const startCnt = Number(sched.total_start_actions)    || 0;
+  const runMin   = Number(sched.continuous_run_minutes) || 0;
+  const pauseReason = sched.safety_pause_reason;
+  if (stopCnt || startCnt || (runMin && sched.current_state === "active") || pauseReason) {
+    const safety = el("div", "cap-sched-card-safety");
+    if (stopCnt) {
+      const chip = el("span", "cap-sched-safety-chip");
+      chip.textContent = `${stopCnt} stop${stopCnt !== 1 ? "s" : ""} today`;
+      safety.appendChild(chip);
+    }
+    if (startCnt) {
+      const chip = el("span", "cap-sched-safety-chip");
+      chip.textContent = `${startCnt} start${startCnt !== 1 ? "s" : ""} today`;
+      safety.appendChild(chip);
+    }
+    if (runMin && sched.current_state === "active") {
+      const chip = el("span", "cap-sched-safety-chip");
+      chip.textContent = `Running ${runMin} min`;
+      safety.appendChild(chip);
+    }
+    if (pauseReason) {
+      const chip = el("span", "cap-sched-safety-chip");
+      chip.textContent = `Paused: ${pauseReason}`;
+      safety.appendChild(chip);
+    }
+    card.appendChild(safety);
+  }
+
+  // Action buttons
+  const actions = el("div", "cap-sched-card-actions");
+
+  const editBtn = el("button", "btn btn-xs");
+  editBtn.type = "button";
+  editBtn.title = "Edit schedule";
+  editBtn.innerHTML = `<span class="mdi mdi-pencil icon-inline" aria-hidden="true"></span> Edit`;
+  editBtn.onclick = () => openCapScheduleForm(sched);
+  actions.appendChild(editBtn);
+
+  const toggleBtn = el("button", "btn btn-xs");
+  toggleBtn.type = "button";
+  if (sched.enabled) {
+    toggleBtn.title = "Disable schedule";
+    toggleBtn.innerHTML = `<span class="mdi mdi-pause-circle-outline icon-inline" aria-hidden="true"></span> Disable`;
+  } else {
+    toggleBtn.title = "Enable schedule";
+    toggleBtn.innerHTML = `<span class="mdi mdi-play-circle-outline icon-inline" aria-hidden="true"></span> Enable`;
+  }
+  toggleBtn.onclick = () => toggleCapScheduleEnabled(safeId);
+  actions.appendChild(toggleBtn);
+
+  const delBtn = el("button", "btn btn-xs btn-red");
+  delBtn.type  = "button";
+  delBtn.title = "Delete schedule";
+  delBtn.innerHTML = `<span class="mdi mdi-delete-outline icon-inline" aria-hidden="true"></span> Delete`;
+  delBtn.onclick = () => deleteCapSchedule(safeId, sched.name || "Schedule");
+  actions.appendChild(delBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+function renderCapScheduleList() {
+  const list = $("capScheduleList");
+  if (!list) return;
+  list.innerHTML = "";
+  const schedules = State.capSchedules.schedules;
+  if (!schedules.length) {
+    const empty = el("div", "cap-sched-remarks-empty");
+    empty.textContent = "No schedules defined. Create one to automate the output cap window.";
+    list.appendChild(empty);
+    return;
+  }
+  schedules.forEach((sched) => list.appendChild(buildCapScheduleCard(sched)));
+}
+
+function renderCapScheduleRemarks() {
+  const wrap = $("capScheduleRemarks");
+  if (!wrap) return;
+  const remarks = State.capSchedules.remarks;
+  if (!remarks.length) {
+    wrap.innerHTML = `<div class="cap-sched-remarks-empty">No activity yet.</div>`;
+    return;
+  }
+  wrap.innerHTML = "";
+  remarks.forEach((r) => {
+    const rawSev = r.severity || "info";
+    // Normalize server severity names to CSS modifier names
+    const sev = rawSev === "warning" ? "warn" : rawSev === "success" ? "info" : rawSev;
+    const row  = el("div", `cap-sched-remark cap-sched-remark--${sev}`);
+    const icon = el("span", "cap-sched-remark-icon mdi");
+    icon.setAttribute("aria-hidden", "true");
+    if (sev === "error") icon.classList.add("mdi-alert-circle-outline");
+    else if (sev === "warn") icon.classList.add("mdi-alert-outline");
+    else if (rawSev === "success") icon.classList.add("mdi-check-circle-outline");
+    else icon.classList.add("mdi-information-outline");
+    const body = el("div", "cap-sched-remark-body");
+    const tsEl = el("span", "cap-sched-remark-ts");
+    tsEl.textContent = r.ts ? new Date(r.ts).toLocaleString() : "";
+    const textLine = el("span");
+    const nameSpan = el("span", "cap-sched-remark-name");
+    nameSpan.textContent = r.scheduleName ? `[${r.scheduleName}]` : "";
+    const msgSpan  = el("span", "cap-sched-remark-msg");
+    msgSpan.textContent = ` ${r.message || ""}`;
+    textLine.appendChild(nameSpan);
+    textLine.appendChild(msgSpan);
+    body.appendChild(tsEl);
+    body.appendChild(textLine);
+    row.appendChild(icon);
+    row.appendChild(body);
+    wrap.appendChild(row);
+  });
+}
+
+function openCapScheduleForm(sched) {
+  const modal = $("capScheduleModal");
+  const title = $("capScheduleFormTitle");
+  const errEl = $("capScheduleFormError");
+  if (!modal) return;
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+  $("capSchedId").value       = sched ? String(sched.id)   : "";
+  $("capSchedName").value     = sched ? (sched.name || "")  : "";
+  $("capSchedStart").value    = sched ? (sched.start_time || "") : "";
+  $("capSchedStop").value     = sched ? (sched.stop_time  || "") : "";
+  $("capSchedUpperMw").value  = sched && sched.upper_mw  != null ? sched.upper_mw  : "";
+  $("capSchedLowerMw").value  = sched && sched.lower_mw  != null ? sched.lower_mw  : "";
+  $("capSchedSeqMode").value  = sched ? (sched.sequence_mode  || "") : "";
+  $("capSchedCooldown").value = sched && sched.cooldown_sec != null ? sched.cooldown_sec : "";
+  $("capSchedAuthKey").value  = "";
+  if (title) title.textContent = sched ? `Edit: ${sched.name || "Schedule"}` : "New Schedule";
+  modal.classList.remove("hidden");
+  requestAnimationFrame(() => $("capSchedName")?.focus());
+}
+
+function closeCapScheduleForm() {
+  const modal = $("capScheduleModal");
+  const errEl = $("capScheduleFormError");
+  if (modal) modal.classList.add("hidden");
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+}
+
+async function submitCapScheduleForm() {
+  const errEl   = $("capScheduleFormError");
+  const saveBtn = $("btnSaveCapSchedule");
+  const id      = ($("capSchedId")?.value || "").trim();
+  const authKey = ($("capSchedAuthKey")?.value || "").trim();
+
+  function showErr(msg) {
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.hidden = false;
+      errEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }
+
+  if (!authKey) { showErr("Auth key is required."); return; }
+
+  const startVal = $("capSchedStart")?.value  || "";
+  const stopVal  = $("capSchedStop")?.value   || "";
+  if (!startVal) { showErr("Start time is required."); return; }
+  if (!stopVal)  { showErr("Stop time is required.");  return; }
+  if (stopVal <= startVal) { showErr("Stop time must be after start time."); return; }
+
+  const upperVal = $("capSchedUpperMw")?.value;
+  const lowerVal = $("capSchedLowerMw")?.value;
+  const coolVal  = $("capSchedCooldown")?.value;
+
+  // Clear auth key from the DOM before sending over the network
+  if ($("capSchedAuthKey")) $("capSchedAuthKey").value = "";
+
+  const body = {
+    authKey,
+    name:          ($("capSchedName")?.value || "").trim() || "Schedule",
+    start_time:    startVal,
+    stop_time:     stopVal,
+    upper_mw:      upperVal !== "" && upperVal != null ? Number(upperVal) : null,
+    lower_mw:      lowerVal !== "" && lowerVal != null ? Number(lowerVal) : null,
+    sequence_mode: $("capSchedSeqMode")?.value || null,
+    cooldown_sec:  coolVal !== "" && coolVal != null ? Number(coolVal) : null,
+  };
+
+  if (saveBtn) saveBtn.disabled = true;
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+  try {
+    if (id) {
+      await api(`/api/plant-cap/schedules/${encodeURIComponent(id)}`, "PUT", body, { progress: false });
+    } else {
+      await api("/api/plant-cap/schedules", "POST", body, { progress: false });
+    }
+    closeCapScheduleForm();
+    await loadCapScheduleStatus();
+    showToast(id ? "Schedule updated." : "Schedule created.", "success", 3000);
+  } catch (err) {
+    showErr(err.message || "Save failed.");
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function toggleCapScheduleEnabled(id) {
+  const authKey = await appPrompt("Authorization", "Enter the plant-wide control key to toggle this schedule:");
+  if (authKey == null) return;
+  try {
+    await api(`/api/plant-cap/schedules/${encodeURIComponent(id)}/toggle`, "POST", { authKey }, { progress: false });
+    await loadCapScheduleStatus();
+    showToast("Schedule toggled.", "success", 2800);
+  } catch (err) {
+    showToast(`Toggle failed: ${err.message}`, "fault", 5000);
+  }
+}
+
+async function deleteCapSchedule(id, name) {
+  const ok = await appConfirm(
+    "Delete Schedule",
+    `Delete schedule "${name}"?\n\nThis cannot be undone. An active schedule must be stopped before deletion.`,
+    { ok: "Delete", cancel: "Cancel" }
+  );
+  if (!ok) return;
+  const authKey = await appPrompt("Authorization", "Enter the plant-wide control key to delete this schedule:");
+  if (authKey == null) return;
+  try {
+    await api(`/api/plant-cap/schedules/${encodeURIComponent(id)}`, "DELETE", { authKey }, { progress: false });
+    await loadCapScheduleStatus();
+    showToast("Schedule deleted.", "success", 3000);
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, "fault", 5000);
+  }
+}
+
 async function runControlTasksWithConcurrency(tasksRaw, limit = 3) {
   const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
   if (!tasks.length) return [];
@@ -9899,6 +10389,46 @@ function handleWS(msg) {
   }
   if (msg.type === "plant_cap_status") {
     applyPlantCapStatusClient(msg.plantCap || null, { preservePreview: true });
+  }
+  if (msg.type === "plant_cap_schedule_status") {
+    if (Array.isArray(msg.schedules)) {
+      State.capSchedules.schedules = msg.schedules;
+    }
+    if (Array.isArray(msg.remarks) && msg.remarks.length) {
+      const existing = State.capSchedules.remarks;
+      // Server returns oldest-first; reverse so newest is at index 0 (matches unshift order)
+      const merged   = [...[...msg.remarks].reverse(), ...existing];
+      const seen     = new Set();
+      State.capSchedules.remarks = merged.filter((r) => {
+        const key = `${r.ts}-${r.scheduleId}-${r.code}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 50);
+    }
+    if (State.currentPage === "settings" || State.currentPage === "plant-cap") {
+      renderCapScheduleSection();
+    }
+  }
+  if (msg.type === "plant_cap_schedule_remark") {
+    const r = msg.remark;
+    if (r && r.ts && r.code) {
+      const key = `${r.ts}-${r.scheduleId}-${r.code}`;
+      const already = State.capSchedules.remarks.some(
+        (x) => `${x.ts}-${x.scheduleId}-${x.code}` === key
+      );
+      if (!already) {
+        State.capSchedules.remarks.unshift(r);
+        if (State.capSchedules.remarks.length > 50) State.capSchedules.remarks.pop();
+      }
+      if (!already && (r.severity === "error" || r.severity === "warning")) {
+        const name = r.scheduleName ? `<strong>${r.scheduleName}</strong>: ` : "";
+        showToast(`${name}${r.message}`, r.severity === "error" ? "err" : "warn", 7000);
+      }
+      if (State.currentPage === "settings" || State.currentPage === "plant-cap") {
+        renderCapScheduleRemarks();
+      }
+    }
   }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;
@@ -13943,6 +14473,7 @@ function bindEventHandlers() {
   $("btnInstallAppUpdate")?.addEventListener("click", installUpdateNow);
   $("btnAboutCheckUpdate")?.addEventListener("click", checkForUpdatesNow);
   $("btnOpenGuide")?.addEventListener("click", openGuideModal);
+  $("btnOpenCredentials")?.addEventListener("click", openCredentialsReference);
 
   // Cloud Backup
   $("cbEmail")?.addEventListener("input", () => cbSuggestProvider($("cbEmail").value));
@@ -13971,7 +14502,6 @@ function bindEventHandlers() {
   document.addEventListener("click", (e) => {
     const t = e.target instanceof Element ? e.target : null;
     if (!t) return;
-    if (t.closest("#btnPlantCapToolbarToggle")) { togglePlantCapPanelCollapsed(); return; }
     if (t.closest("#btnFillAllTargets")) { fillAllCommandTargets(); return; }
     if (t.closest("#btnClearTargets"))   { clearCommandTargets();   return; }
     if (t.closest("#btnStartSelected"))  { sendSelectedNodes(1);    return; }
@@ -13985,7 +14515,30 @@ function bindEventHandlers() {
     if (t.closest("#btnPlantCapEnable"))  { enablePlantCapControl().catch(() => {}); return; }
     if (t.closest("#btnPlantCapDisable")) { disablePlantCapControl().catch(() => {}); return; }
     if (t.closest("#btnPlantCapRelease")) { releasePlantCapControl().catch(() => {}); return; }
-    if (t.closest("#plantCapHistoryToggle")) { togglePlantCapHistory(); return; }
+    if (t.closest("#plantCapHistoryToggle"))  { togglePlantCapHistory(); return; }
+    if (t.closest("#plantCapScheduleToggle")) { togglePlantCapSchedule(); return; }
+    if (t.closest("#btnAddCapSchedule") || t.closest("#btnAddCapScheduleToolbar")) {
+      const wrap = $("plantCapScheduleWrap");
+      if (wrap && wrap.hidden) togglePlantCapSchedule();
+      openCapScheduleForm(null);
+      return;
+    }
+    if (t.closest(".plant-cap-sched-chip-edit")) {
+      const schedId = Number(t.closest(".plant-cap-sched-chip-edit").dataset.schedId);
+      const sched = (State.capSchedules.schedules || []).find(s => s.id === schedId);
+      if (sched) {
+        const wrap = $("plantCapScheduleWrap");
+        if (wrap && wrap.hidden) togglePlantCapSchedule();
+        openCapScheduleForm(sched);
+      }
+      return;
+    }
+    if (t.closest("#btnNewCapSchedule"))      { openCapScheduleForm(null); return; }
+    if (t.closest("#btnSaveCapSchedule"))     { submitCapScheduleForm(); return; }
+    if (t.closest("#btnCancelCapSchedule"))   { closeCapScheduleForm(); return; }
+    if (t.closest("#btnCloseCapSchedModal"))  { closeCapScheduleForm(); return; }
+    /* Backdrop click-to-close for cap schedule modal */
+    if (t.id === "capScheduleModal")          { closeCapScheduleForm(); return; }
   });
 
   document.addEventListener("input", (e) => {
@@ -14237,6 +14790,47 @@ function appConfirm(title, bodyText, { ok = "OK", cancel = "Cancel" } = {}) {
   });
 }
 
+// ─── App Prompt Modal ─────────────────────────────────────────────────────────
+const _appPromptState = { resolver: null };
+
+function _resolvePrompt(value) {
+  const modal = $("appPromptModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  const done = _appPromptState.resolver;
+  _appPromptState.resolver = null;
+  if (typeof done === "function") done(value);
+}
+
+function initPromptModal() {
+  const modal    = $("appPromptModal");
+  if (!modal || modal.dataset.bound === "1") return;
+  modal.dataset.bound = "1";
+  $("appPromptOk")?.addEventListener("click", () => _resolvePrompt($("appPromptInput")?.value ?? ""));
+  $("appPromptCancel")?.addEventListener("click", () => _resolvePrompt(null));
+  $("appPromptInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter")  _resolvePrompt($("appPromptInput")?.value ?? "");
+    if (e.key === "Escape") _resolvePrompt(null);
+  });
+  modal.addEventListener("click", (e) => { if (e.target === modal) _resolvePrompt(null); });
+}
+
+function appPrompt(title, bodyText, { placeholder = "" } = {}) {
+  return new Promise((resolve) => {
+    _appPromptState.resolver = resolve;
+    const modal  = $("appPromptModal");
+    const titleEl = $("appPromptTitle");
+    const bodyEl  = $("appPromptBody");
+    const input   = $("appPromptInput");
+    if (titleEl) titleEl.textContent = title;
+    if (bodyEl)  bodyEl.innerHTML = bodyText ? `<p>${escapeHtml(bodyText)}</p>` : "";
+    if (input)   { input.value = ""; input.placeholder = placeholder || ""; }
+    if (modal)   { modal.classList.remove("hidden"); }
+    document.body.classList.add("modal-open");
+    setTimeout(() => { $("appPromptInput")?.focus(); }, 50);
+  });
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
   resetStartupLiveWaiters();
@@ -14255,6 +14849,7 @@ async function init() {
     setupSideNav();
     initGuideModal();
     initConfirmModal();
+    initPromptModal();
     setupNav();
     initSettingsSectionNav();
     const resumeAlarmAudio = () => {
