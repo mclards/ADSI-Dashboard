@@ -2,12 +2,24 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.4.42
+- **Repo/package version baseline:** 2.5.7
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.5.7 Changes - Analytics and Settings UI Refinements (2026-03-30)
+- **Analytics card row heights:** Reduced to 0.75x in the analytics section CSS. All card heights, canvas sizes, and label minimums scaled proportionally:
+  - `chart-total-card` min-height: 420px → 315px
+  - `chart-total-side-card` min-height/max-height: 380px/420px → 285px/315px
+  - `chart-card` min-height: 330px → 248px
+  - Chart canvas heights: 255px → 191px (cards), 360px → 270px (total card)
+  - Label min-height: 54px → 41px
+  - Category list max-height: 260px → 195px
+- **Settings page sidebar redesign:** COMMON ACTIONS panel now sticky/fixed at bottom of sidebar; menu/options panel above made scrollable with flex layout. `overflow: hidden` applied to sidebar container, first card uses `flex: 1 1 0; min-height: 0; overflow-y: auto`.
+- **Electron UI smoke test:** Updated artifacts to match new layout.
+- **Files changed:** `public/css/style.css`, `server/tests/artifacts/electron-ui-smoke.png`.
 
 ## v2.4.42 Changes - Forecast Performance Monitor Extended Diagnostics (2026-03-25)
 - **Forecast Performance Monitor second chip row:** added ML Backend, Training Data, and Data Quality diagnostic chips below forecast health status.
