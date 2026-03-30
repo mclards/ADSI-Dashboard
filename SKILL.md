@@ -32,9 +32,9 @@ Detailed reference material lives in `references/` — read those files when wor
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.5.8` — source of truth: `package.json` |
+| Repo version baseline | `2.5.9` — source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.5.8` |
+| Latest published release | `v2.5.9` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
 
