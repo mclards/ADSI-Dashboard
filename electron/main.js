@@ -10,6 +10,7 @@ const http = require("http");
 const https = require("https");
 const { spawn, execFile, execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const net = require("net");
 const crypto = require("crypto");
 const Database = require("better-sqlite3");
@@ -2911,7 +2912,37 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
   });
 }
 
+/**
+ * Purge stale PyInstaller _MEI* temp directories left by force-killed processes.
+ * Each --onefile EXE extracts to %TEMP%\_MEI<pid>; if the process is killed
+ * before cleanup the directory persists indefinitely. We attempt removal of
+ * every _MEI* entry — directories still locked by a running process will
+ * simply fail with EBUSY/EPERM and be skipped.
+ */
+function cleanStalePyInstallerTempDirs() {
+  try {
+    const tmpDir = os.tmpdir();
+    const entries = fs.readdirSync(tmpDir).filter((n) => /^_MEI\d+$/i.test(n));
+    if (entries.length === 0) return;
+    let removed = 0;
+    for (const name of entries) {
+      try {
+        fs.rmSync(path.join(tmpDir, name), { recursive: true, force: true });
+        removed++;
+      } catch (_) {
+        // locked by running process — skip
+      }
+    }
+    if (removed > 0) {
+      console.log(`[main] Cleaned ${removed}/${entries.length} stale _MEI temp dirs`);
+    }
+  } catch (err) {
+    console.warn("[main] _MEI cleanup skipped:", err.message);
+  }
+}
+
 function startBackendProcess() {
+  cleanStalePyInstallerTempDirs();
   const backendLaunch = resolveBackendLaunch();
   if (!backendLaunch) {
     console.error("[main] Backend not found. Set ADSI_BACKEND_PATH or place backend executable.");
