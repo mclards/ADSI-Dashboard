@@ -1867,7 +1867,7 @@ async function exportForecastActual({
     return writeDayAheadAverageTableXlsx({
       startTs: s,
       endTs: e,
-      resolution: averageResolutionCode,
+      resolution: 'PT5M',
       fileBase,
       dayAheadRawRows: dayAheadRaw,
       isSolcast,
