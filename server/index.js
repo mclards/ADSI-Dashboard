@@ -15080,16 +15080,6 @@ app.post("/api/export/forecast-actual", async (req, res) => {
     const payload = req.body || {};
     const source = String(payload.source || "analytics").trim().toLowerCase();
     const isSolcast = source === "solcast";
-    if (isRemoteMode() && isSolcast) {
-      return sendExportRouteError(res, Object.assign(
-        new Error(
-          "Solcast Day-Ahead export is not available in remote mode — " +
-          "Solcast snapshot data is stored on the gateway and is not replicated to remote clients. " +
-          "To export this data, open the dashboard directly on the gateway machine."
-        ),
-        { code: "SOLCAST_REMOTE_UNSUPPORTED" }
-      ));
-    }
     if (isRemoteMode()) {
       return res.json(
         await downloadRemoteExportToLocal("/api/export/forecast-actual", req.body || {}),
