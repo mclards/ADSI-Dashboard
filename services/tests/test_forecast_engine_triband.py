@@ -72,6 +72,7 @@ class TestTriBandFeatureConstruction:
             "rad": np.random.uniform(0, 800, SLOTS_DAY),
             "cloud": np.random.uniform(0, 100, SLOTS_DAY),
             "temp": np.random.uniform(20, 35, SLOTS_DAY),
+            "rh": np.random.uniform(40, 90, SLOTS_DAY),
         })
 
     def test_solcast_prior_from_snapshot_exposes_triband(self):
@@ -178,7 +179,7 @@ class TestTrainingDataWithTriBand:
 
     def test_feature_count_consistency(self):
         """Verify FEATURE_COLS count matches actual features."""
-        assert len(FEATURE_COLS) == 53, f"Expected 53 features, got {len(FEATURE_COLS)}"
+        assert len(FEATURE_COLS) == 70, f"Expected 70 features, got {len(FEATURE_COLS)}"
 
 
 if __name__ == "__main__":

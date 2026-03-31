@@ -336,9 +336,15 @@ ML_BLEND_MIN = 0.35
 ML_BLEND_MAX = 1.00
 ML_BLEND_ALPHA = 0.45
 
+# Ramp slot detection and weighting (Phase 2.1)
+RAMP_DETECTION_DRAD_THRESHOLD = 200.0   # W/m² per 5min change that flags a ramp slot
+RAMP_SLOT_BLEND_SCALE = 0.62            # reduce ML blend at ramp slots (38% reduction)
+RAMP_ONSET_SLOTS = 6                     # within ~30 min of sunrise/sunset edge
+
 # Error memory
 ERR_MEMORY_DAYS   = 7      # days used for bias correction
 ERR_MEMORY_DECAY  = 0.72   # older day weight decay (geometric series)
+ERR_MEMORY_REGIME_MISMATCH_PENALTY = 0.25  # penalty for regime mismatch
 ERROR_ALPHA       = 0.28   # fraction of error correction to apply
 ERROR_CLASS_NAMES = (
     "strong_over",
@@ -354,6 +360,7 @@ ERROR_CLASS_OPPORTUNITY_FLOOR_FRAC = 0.12
 ERROR_CLASS_BLEND_MIN = 0.10
 ERROR_CLASS_BLEND_MAX = 0.35
 ERROR_CLASS_BLEND_CONFIDENCE_FLOOR = 0.40
+ERROR_CLASS_CONFIDENCE_GATE = 0.35  # zero error class term below this confidence
 ERROR_CLASS_BIAS_CAP_FRAC = 0.18
 ERROR_CLASS_CONF_BAND_ADD_MAX = 0.14
 ERROR_CLASS_SEVERE_BAND_ADD_MAX = 0.08
@@ -2345,6 +2352,11 @@ def build_features(
     # 1-hour lagged radiation (12 slots)
     rad_lag = np.roll(rad, 12)
     rad_lag[:12] = rad[:12]
+    # Thermal lag features (Phase 2.2): inverter output lags irradiance by 1-2 slots
+    rad_lag_1slot = np.roll(rad, 1)
+    rad_lag_1slot[0] = rad[0]
+    rad_lag_2slots = np.roll(rad, 2)
+    rad_lag_2slots[:2] = rad[:2]
     rad_grad_15m = np.diff(rad, prepend=rad[0])
     cloud_grad_15m = np.diff(cloud, prepend=cloud[0])
     precip_1h = np.nan_to_num(_rolling_sum(precip, 12), nan=0.0)
@@ -2469,6 +2481,8 @@ def build_features(
         "rad_direct":    rad_direct,
         "rad_diffuse":   rad_diffuse,
         "rad_lag_1h":    rad_lag,
+        "rad_lag_1slot": rad_lag_1slot,
+        "rad_lag_2slots": rad_lag_2slots,
         "rad_grad_15m":  rad_grad_15m,
         # Cloud
         "cloud":         cloud,
@@ -2559,7 +2573,7 @@ def build_features(
 
 
 FEATURE_COLS = [
-    "rad", "rad_direct", "rad_diffuse", "rad_lag_1h", "rad_grad_15m",
+    "rad", "rad_direct", "rad_diffuse", "rad_lag_1h", "rad_lag_1slot", "rad_lag_2slots", "rad_grad_15m",
     "cloud", "cloud_low", "cloud_mid", "cloud_high", "cloud_std_1h", "cloud_grad_15m", "cloud_trans",
     "csi", "kt", "dni_proxy",
     "precip", "precip_1h", "cape", "cape_sqrt",
@@ -4194,6 +4208,21 @@ def solcast_prior_from_snapshot(
         )
     spread_weight = 1.0 - 0.42 * np.clip(spread_frac / max(SOLCAST_PRIOR_SPREAD_FRAC_CLIP, 0.1), 0.0, 1.0)
     blend = base_by_regime * reliability_score * (0.55 + 0.45 * coverage_ratio) * spread_weight * solar_weight
+
+    # Per-slot weather-bucket blend modulation (Phase 1.1)
+    _bucket_multiplier = np.ones(SLOTS_DAY, dtype=float)
+    _bucket_map = {
+        "clear_stable": 1.12,
+        "clear_edge": 1.08,
+        "mixed_stable": 1.00,
+        "mixed_volatile": 0.88,
+        "overcast": 0.78,
+        "rainy": 0.65,
+    }
+    for _bname, _bmul in _bucket_map.items():
+        _bucket_multiplier[bucket_labels == _bname] = _bmul
+    blend = blend * _bucket_multiplier
+
     resolution_scale = (
         SOLCAST_RESOLUTION_BLEND_SCALE_MIN
         + (SOLCAST_RESOLUTION_BLEND_SCALE_MAX - SOLCAST_RESOLUTION_BLEND_SCALE_MIN) * resolution_weight
@@ -4311,6 +4340,7 @@ def blend_physics_with_solcast(
             "applied_prior_total_kwh": 0.0,
             "raw_prior_ratio": 1.0,
             "applied_prior_ratio": 1.0,
+            "spread_frac_mean": 0.0,
         }
 
     prior = np.clip(np.asarray(solcast_prior["prior_kwh"], dtype=float), 0.0, None)
@@ -4386,6 +4416,11 @@ def blend_physics_with_solcast(
         "trend_magnitude": float(solcast_prior.get("trend_magnitude", 0.0)),
         "source": str(solcast_prior.get("source") or "solcast"),
         "pulled_ts": int(solcast_prior.get("pulled_ts", 0) or 0),
+        "spread_frac_mean": float(
+            np.mean(_spread_solar)
+            if (_spread_solar := np.asarray(solcast_prior.get("spread_frac", np.zeros(SLOTS_DAY)), dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT][present[SOLAR_START_SLOT:SOLAR_END_SLOT]]).size > 0
+            else 0.0
+        ),
     }
 
 
@@ -4556,7 +4591,7 @@ def _compute_error_memory_legacy(today: date) -> np.ndarray:
     return mem_err
 
 
-def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
+def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: str = "") -> np.ndarray:
     """
     Compute weighted historical bias from saved comparison rows.
 
@@ -4565,6 +4600,11 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
       - forecast_error_compare_slot (usable_for_error_memory=1)
     Fallback source:
       - legacy slot-only table reading.
+
+    Args:
+        today: Target date for error memory
+        w_today_5: DataFrame with weather data (not used in current implementation)
+        target_regime: Target day's weather regime; historical days with mismatched regime are penalized
     """
     del w_today_5  # explicit: current implementation uses persisted compare rows only.
     weight_vectors = []
@@ -4578,7 +4618,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
             conn.execute("PRAGMA query_only = ON")
             daily_rows = conn.execute(
                 """
-                SELECT target_date, COALESCE(run_audit_id, 0), COALESCE(forecast_variant, ''), COALESCE(provider_expected, '')
+                SELECT target_date, COALESCE(run_audit_id, 0), COALESCE(forecast_variant, ''), COALESCE(provider_expected, ''), COALESCE(notes_json, '')
                   FROM forecast_error_compare_daily
                  WHERE target_date >= ? AND target_date <= ?
                    AND include_in_error_memory = 1
@@ -4607,9 +4647,24 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
                 run_audit_id = int(day_row[1] or 0)
                 forecast_variant = str(day_row[2] or "")
                 provider_expected = str(day_row[3] or "")
+                notes_json_str = str(day_row[4] or "")
                 source_weight = _memory_source_weight(forecast_variant, provider_expected)
                 if source_weight <= 0:
                     continue
+
+                # Extract regime from notes_json for regime-aware weighting
+                hist_regime = ""
+                try:
+                    if notes_json_str:
+                        notes_dict = json.loads(notes_json_str)
+                        hist_regime = str(notes_dict.get("forecast_regime", ""))
+                except Exception:
+                    pass
+
+                # Regime mismatch penalty: if both regimes are known and don't match, reduce weight
+                regime_factor = 1.0
+                if target_regime and hist_regime and target_regime != hist_regime:
+                    regime_factor = ERR_MEMORY_REGIME_MISMATCH_PENALTY
 
                 _, constraint_meta = build_operational_constraint_mask(day_s)
                 exclude_arr = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
@@ -4637,7 +4692,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
                     support_weight = float(slot_row[2] or 1.0)
                     support_weight = float(np.clip(support_weight, 0.0, 1.0))
                     base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
-                    weight_vec[slot] = base_w * source_weight * support_weight
+                    weight_vec[slot] = base_w * source_weight * support_weight * regime_factor
                     err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
 
                 if np.sum(weight_vec) <= 0:
@@ -4667,6 +4722,35 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame) -> np.ndarray:
     mem_err[weight_sum <= 0] = 0.0
     mem_err[:SOLAR_START_SLOT] = 0.0
     mem_err[SOLAR_END_SLOT:] = 0.0
+
+    # Per-TOD floor: ensure error memory doesn't vanish in zones with consistent bias.
+    # Split solar window into 3 TOD zones: morning, midday, afternoon.
+    _solar_len = SOLAR_END_SLOT - SOLAR_START_SLOT
+    _tod_thirds = _solar_len // 3
+    for _tod_start, _tod_end in [
+        (SOLAR_START_SLOT, SOLAR_START_SLOT + _tod_thirds),
+        (SOLAR_START_SLOT + _tod_thirds, SOLAR_START_SLOT + 2 * _tod_thirds),
+        (SOLAR_START_SLOT + 2 * _tod_thirds, SOLAR_END_SLOT),
+    ]:
+        _zone = mem_err[_tod_start:_tod_end]
+        _zone_weights = weight_sum[_tod_start:_tod_end]
+        _zone_active = _zone_weights > 0
+        if np.sum(_zone_active) < 3:
+            continue
+        _zone_mean = np.mean(_zone[_zone_active])
+        _zone_abs_mean = np.abs(_zone_mean)
+        # If zone has consistent bias direction (>80% same sign), apply floor
+        if _zone_abs_mean > 1.0:  # At least 1 kWh/slot bias
+            _same_sign = np.sum(np.sign(_zone[_zone_active]) == np.sign(_zone_mean))
+            _consistency = _same_sign / max(np.sum(_zone_active), 1)
+            if _consistency > 0.80:
+                # Floor: at least 40% of zone mean persists
+                _floor = _zone_mean * 0.40
+                if _zone_mean > 0:
+                    mem_err[_tod_start:_tod_end] = np.maximum(mem_err[_tod_start:_tod_end], _floor)
+                else:
+                    mem_err[_tod_start:_tod_end] = np.minimum(mem_err[_tod_start:_tod_end], _floor)
+
     # Guard against correlated-bias weeks producing an outsized correction.
     # Persistent bias > ±100 kWh/slot suggests a model or hardware issue, not
     # something error memory should silently absorb.
@@ -6956,6 +7040,14 @@ def apply_ramp_limit(arr: np.ndarray, max_step: float = 320.0) -> np.ndarray:
     return arr
 
 
+def identify_ramp_slots(rad: np.ndarray, sunrise_rel: np.ndarray, sunset_rel: np.ndarray) -> np.ndarray:
+    """Identify sunrise/sunset ramp slots with high irradiance gradient near solar edges."""
+    drad = np.abs(np.diff(rad, prepend=rad[0]))
+    high_grad = drad > RAMP_DETECTION_DRAD_THRESHOLD
+    near_edge = (sunrise_rel < RAMP_ONSET_SLOTS) | (sunset_rel < RAMP_ONSET_SLOTS)
+    return high_grad & near_edge
+
+
 def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float = 1.0) -> np.ndarray:
     """
     Compute per-slot ML blending factor [ML_BLEND_MIN..ML_BLEND_MAX].
@@ -7003,6 +7095,13 @@ def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float =
 
     confidence_scale = float(np.clip(regime_confidence, 0.60, 1.0))
     blend = solar_conf * (1.0 - ML_BLEND_ALPHA * uncertainty) * confidence_scale
+
+    # Ramp slot weighting (Phase 2.1): reduce ML trust at sunrise/sunset ramps
+    sunrise_slots_rel = np.clip(idx - SOLAR_START_SLOT, 0, SOLAR_SLOTS)
+    sunset_slots_rel = np.clip((SOLAR_END_SLOT - 1) - idx, 0, SOLAR_SLOTS)
+    ramp_mask = identify_ramp_slots(rad, sunrise_slots_rel, sunset_slots_rel)
+    blend[ramp_mask] *= RAMP_SLOT_BLEND_SCALE
+
     blend = np.clip(blend, ML_BLEND_MIN, ML_BLEND_MAX)
     blend[:SOLAR_START_SLOT] = 0.0
     blend[SOLAR_END_SLOT:] = 0.0
@@ -7029,6 +7128,16 @@ def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
     )
     damp = 1.0 - 0.70 * mean_blend * (0.35 + 0.65 * reliability) * (0.55 + 0.45 * coverage) * resolution_authority
     damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
+
+    # Spread-aware dampening (Phase 1.2): high spread = less damp (trust ML more)
+    _raw_spread = solcast_meta.get("spread_frac_mean", 0.0)
+    spread_frac = float(np.clip(_raw_spread if np.isfinite(_raw_spread) else 0.0, 0.0, 1.0))
+    if spread_frac > 0.05:
+        # When spread is high, Solcast is uncertain → let ML residuals through more
+        spread_relief = 0.18 * np.clip((spread_frac - 0.05) / 0.35, 0.0, 1.0)
+        damp = damp + spread_relief * (1.0 - damp)  # move damp toward 1.0
+        damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
+
     if bool(solcast_meta.get("primary_mode")):
         damp = min(damp, SOLCAST_RESIDUAL_PRIMARY_CAP)
     # Trend integration: improving Solcast -> damp residuals more, degrading -> let residuals through
@@ -7605,6 +7714,7 @@ def _persist_qa_comparison(
                         "degraded_variant": bool(degraded_variant),
                         "provider_mismatch": bool(provider_mismatch),
                         "support_base": float(support_base),
+                        "forecast_regime": str(day_regime or ""),
                     }),
                 )
             )
@@ -8652,6 +8762,9 @@ def run_dayahead(
             class_cap_kwh = cap_kwh * class_cap_frac
             error_class_term = np.clip(error_class_term, -class_cap_kwh, class_cap_kwh)
             class_confidence = np.asarray(classifier_meta.get("confidence"), dtype=float)
+            # Hard confidence gate: zero out error class term for very low confidence slots
+            _low_conf_mask = class_confidence < ERROR_CLASS_CONFIDENCE_GATE
+            error_class_term[_low_conf_mask] = 0.0
             class_blend = ERROR_CLASS_BLEND_MIN + (
                 ERROR_CLASS_BLEND_MAX - ERROR_CLASS_BLEND_MIN
             ) * np.clip(
@@ -8670,6 +8783,9 @@ def run_dayahead(
                 class_blend[clear_slot_mask] *= (1.0 - 0.35 * clear_solcast_priority)
             error_class_term = error_class_term * blend
             error_class_term = _rolling_mean(error_class_term, 3, center=True)
+            # Re-apply confidence gate after rolling mean (smoothing can bleed signal
+            # from neighbors into gated slots).
+            error_class_term[_low_conf_mask] = 0.0
             if solcast_residual_scale < 0.999:
                 error_class_term = error_class_term * solcast_residual_scale
             error_class_term = error_class_term * class_blend
@@ -8700,7 +8816,7 @@ def run_dayahead(
         log.warning("No trained model found - using physics baseline only")
 
     # 4. Error memory bias correction
-    err_mem = compute_error_memory(today, w5)
+    err_mem = compute_error_memory(today, w5, target_regime=target_regime)
     bias_correction = ERROR_ALPHA * err_mem
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0

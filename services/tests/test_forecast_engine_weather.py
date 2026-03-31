@@ -185,7 +185,7 @@ class ForecastEngineWeatherTests(unittest.TestCase):
                 )
                 mod.load_forecast_artifacts = lambda today, allow_build=True: {}
                 mod.load_model_bundle = lambda: None
-                mod.compute_error_memory = lambda today, w5: np.zeros(mod.SLOTS_DAY, dtype=float)
+                mod.compute_error_memory = lambda today, w5, **kw: np.zeros(mod.SLOTS_DAY, dtype=float)
                 mod.apply_hour_shape_correction = lambda forecast, target_s, w5, artifacts: (
                     forecast.copy(),
                     {"hours_shaped": 0, "avg_matches": 0.0, "avg_score": None},

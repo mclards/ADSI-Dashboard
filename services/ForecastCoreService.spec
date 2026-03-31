@@ -37,7 +37,7 @@ except Exception as e:
     # Continue build without lightgbm; runtime guard (_LIGHTGBM_AVAILABLE) will handle it
 
 # v2.5.0+ tri-band Solcast features (P10/Lo, forecast, P90/Hi) require LightGBM
-# for training on expanded feature space (FEATURE_COLS: 62 → 68 columns).
+# for training on expanded feature space (FEATURE_COLS: 68 → 70 columns).
 # Legacy sklearn GBR models still supported with zero-spread fallback.
 
 a = Analysis(

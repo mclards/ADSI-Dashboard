@@ -137,6 +137,7 @@ class ForecastEngineConstraintTests(unittest.TestCase):
                         abs_error_sum_kwh REAL DEFAULT 0,
                         solcast_freshness_class TEXT DEFAULT '',
                         day_regime TEXT DEFAULT '',
+                        notes_json TEXT,
                         scored_ts INTEGER DEFAULT 0,
                         UNIQUE(target_date, run_audit_id)
                     )
