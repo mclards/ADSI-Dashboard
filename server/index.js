@@ -17,6 +17,7 @@ const WebSocket = require("ws");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
 const { getPortableDataRoot } = require("./runtimeEnvPaths");
+const streaming = require("./streaming");
 
 const {
   getSetting,
@@ -11221,6 +11222,39 @@ app.ws("/ws", (ws) => {
       plantCap: plantCap || null,
     }),
   );
+});
+
+/* ── Camera RTSP → MPEG1/TS WebSocket ─────────────────────────────── */
+app.ws("/ws/camera", (ws, req) => {
+  let registered = false;
+
+  function tryStart(rtspUrl) {
+    if (registered || !rtspUrl) return;
+    registered = true;
+    streaming.registerStreamClient(ws);
+    if (streaming.getCameraStatus() === "stopped" || streaming.getCameraStatus() === "error") {
+      if (!streaming.startCameraStream(rtspUrl)) {
+        streaming.unregisterStreamClient(ws);
+        registered = false;
+        ws.close(4002, "Failed to start camera stream");
+      }
+    }
+  }
+
+  // Support RTSP URL via query parameter (used by jsmpeg's built-in WS source)
+  const qUrl = req.query && req.query.url;
+  if (qUrl) tryStart(qUrl);
+
+  // Also support JSON message approach (manual WS clients)
+  ws.on("message", (msg) => {
+    try {
+      const data = JSON.parse(msg);
+      if (data.type === "start" && data.rtspUrl) tryStart(data.rtspUrl);
+    } catch (_) {}
+  });
+
+  ws.on("close", () => { if (registered) streaming.unregisterStreamClient(ws); });
+  ws.on("error", () => { if (registered) streaming.unregisterStreamClient(ws); });
 });
 
 app.get("/api/live", (req, res) => {

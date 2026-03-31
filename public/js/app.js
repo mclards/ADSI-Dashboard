@@ -1532,7 +1532,8 @@ function getStoredInverterCardOrder() {
     const raw = localStorage.getItem(CARD_ORDER_STORAGE_KEY);
     if (!raw) return null;
     const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.map(Number).filter(n => Number.isFinite(n) && n > 0) : null;
+    if (!Array.isArray(arr)) return null;
+    return arr.map(v => v === "cam" ? "cam" : Number(v)).filter(v => v === "cam" || (Number.isFinite(v) && v > 0));
   } catch {
     return null;
   }
@@ -3904,6 +3905,9 @@ function initNavDrag() {
 
 function switchPage(page) {
   State.currentPage = page;
+  if (page !== "inverters" && cameraPlayer) {
+    cameraPlayer.stop();
+  }
   if (page !== "analytics") {
     stopAnalyticsRealtime();
     stopAnalyticsAutoRefresh();
@@ -3923,7 +3927,12 @@ function switchPage(page) {
   if (btn) btn.classList.add("active");
   if (window.innerWidth <= 1200) setSideNavOpen(false, true);
 
-  if (page === "inverters") scheduleInverterCardsUpdate(true);
+  if (page === "inverters") {
+    scheduleInverterCardsUpdate(true);
+    if ($("cameraCard") && cameraPlayer) {
+      cameraPlayer.start();
+    }
+  }
   if (page === "alarms") initAlarmsPage();
   if (page === "analytics") initAnalytics();
   if (page === "energy") initEnergyPage();
@@ -7754,22 +7763,27 @@ function buildInverterGrid() {
   const storedOrder = getStoredInverterCardOrder();
   const seen = new Set();
   const ordered = [];
+  let camPlaced = false;
   if (storedOrder) {
     for (const i of storedOrder) {
-      if (i >= 1 && i <= count && !seen.has(i)) { ordered.push(i); seen.add(i); }
+      if (i === "cam" && !camPlaced) { ordered.push("cam"); camPlaced = true; }
+      else if (typeof i === "number" && i >= 1 && i <= count && !seen.has(i)) { ordered.push(i); seen.add(i); }
     }
   }
   for (let i = 1; i <= count; i++) {
     if (!seen.has(i)) ordered.push(i);
   }
+  if (!camPlaced) ordered.push("cam");
   const frag = document.createDocumentFragment();
   frag.appendChild(buildBulkControlPanel());
   for (const i of ordered) {
-    frag.appendChild(buildInverterCard(i, nodes));
+    if (i === "cam") frag.appendChild(buildCameraCard());
+    else frag.appendChild(buildInverterCard(i, nodes));
   }
   grid.appendChild(frag);
   applyInverterGridLayout(State.settings.invGridLayout);
   initInverterGridDrag();
+  initCameraPlayer();
 }
 
 function initInverterGridDrag() {
@@ -7791,18 +7805,25 @@ function initInverterGridDrag() {
     return mouseY < r.top + r.height / 2 ? targetCard : (targetCard.nextSibling || null);
   }
 
+  const DRAG_SEL = ".inv-card[draggable='true'], .camera-card[draggable='true']";
+  function findDragCard(target) { return target.closest(DRAG_SEL); }
+
   grid.addEventListener("dragstart", (e) => {
-    const card = e.target.closest(".inv-card[draggable='true']");
+    const card = findDragCard(e.target);
     if (!card) return;
+    // Prevent drag from starting on interactive elements inside camera card
+    if (card.classList.contains("camera-card") && e.target.closest(".cam-modal-backdrop, .cam-controls, button, input, select")) {
+      e.preventDefault();
+      return;
+    }
     dragSrcId = card.id;
-    // Delay class add one frame so the browser captures the un-faded card as drag image
     requestAnimationFrame(() => card.classList.add("dragging"));
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", card.id);
   });
 
   grid.addEventListener("dragend", () => {
-    grid.querySelectorAll(".inv-card.dragging, .inv-card.drag-over").forEach(c => {
+    grid.querySelectorAll(".dragging, .drag-over").forEach(c => {
       c.classList.remove("dragging", "drag-over");
     });
     removePlaceholder();
@@ -7812,12 +7833,11 @@ function initInverterGridDrag() {
   grid.addEventListener("dragover", (e) => {
     e.preventDefault();
     if (!dragSrcId) return;
-    const card = e.target.closest(".inv-card[draggable='true']");
+    const card = findDragCard(e.target);
     if (!card || card.id === dragSrcId) return;
     e.dataTransfer.dropEffect = "move";
 
     const insertRef = getInsertRef(card, e.clientY);
-    // Skip DOM work when the placeholder is already in the right spot
     if (placeholder && placeholder.nextSibling === insertRef) return;
 
     if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
@@ -7830,7 +7850,7 @@ function initInverterGridDrag() {
 
   grid.addEventListener("dragleave", (e) => {
     if (!e.relatedTarget || !grid.contains(e.relatedTarget)) {
-      grid.querySelectorAll(".inv-card.drag-over").forEach(c => c.classList.remove("drag-over"));
+      grid.querySelectorAll(".drag-over").forEach(c => c.classList.remove("drag-over"));
       removePlaceholder();
     }
   });
@@ -7841,15 +7861,16 @@ function initInverterGridDrag() {
     if (srcCard && placeholder && placeholder.parentNode) {
       grid.insertBefore(srcCard, placeholder);
     } else if (srcCard) {
-      const targetCard = e.target.closest(".inv-card[draggable='true']");
+      const targetCard = findDragCard(e.target);
       if (targetCard && targetCard.id !== dragSrcId) grid.insertBefore(srcCard, targetCard);
     }
-    grid.querySelectorAll(".inv-card.drag-over").forEach(c => c.classList.remove("drag-over"));
+    grid.querySelectorAll(".drag-over").forEach(c => c.classList.remove("drag-over"));
     removePlaceholder();
     dragSrcId = null;
-    const newOrder = [...grid.querySelectorAll(".inv-card[draggable='true']")]
-      .map(c => parseInt(c.id.replace("inv-card-", ""), 10))
-      .filter(n => Number.isFinite(n) && n > 0);
+    // Persist order: inverter cards as numbers, camera card as "cam"
+    const newOrder = [...grid.querySelectorAll(DRAG_SEL)]
+      .map(c => c.id === "cameraCard" ? "cam" : parseInt(c.id.replace("inv-card-", ""), 10))
+      .filter(v => v === "cam" || (Number.isFinite(v) && v > 0));
     persistInverterCardOrder(newOrder);
   });
 }
@@ -8327,6 +8348,7 @@ function resetChatState() {
   closeChatPanel();
 }
 
+
 function buildBulkControlPanel() {
   const wrap = el("div", "bulk-control-bar");
   wrap.innerHTML = `
@@ -8365,6 +8387,95 @@ function buildBulkControlPanel() {
   return wrap;
 }
 
+/* ── Camera Card Builder ─────────────────────────────────────────── */
+function buildCameraCard() {
+  const wrap = el("div", "camera-card");
+  wrap.id = "cameraCard";
+  wrap.draggable = true;
+  wrap.innerHTML = `
+    <div class="camera-body" id="cameraBody">
+      <video id="cameraVideo" muted playsinline autoplay style="display:none"></video>
+      <canvas id="cameraCanvas" style="display:none"></canvas>
+      <div class="cam-label" id="camLabel">Plant Camera</div>
+      <div class="cam-live-dot" id="camLiveDot"></div>
+      <div class="cam-controls" id="camControls">
+        <button class="cam-ctrl-btn" id="btnCamSettings" title="Camera settings">
+          <span class="mdi mdi-cog"></span>
+        </button>
+        <button class="cam-ctrl-btn" id="btnCamMute" title="Toggle mute" style="display:none">
+          <span class="mdi mdi-volume-off"></span>
+        </button>
+        <button class="cam-ctrl-btn" id="btnCamFullscreen" title="Fullscreen">
+          <span class="mdi mdi-fullscreen"></span>
+        </button>
+      </div>
+      <div class="camera-overlay" id="cameraOverlay">
+        <span class="mdi mdi-cctv camera-overlay-icon" id="cameraOverlayIcon"></span>
+        <span class="camera-overlay-text" id="cameraOverlayText">Click ⚙ to configure camera</span>
+        <button class="cam-retry-btn" id="camRetryBtn" style="display:none">Retry</button>
+      </div>
+    </div>
+    <div class="cam-modal-backdrop" id="camModalBackdrop" style="display:none">
+      <div class="cam-modal">
+        <div class="cam-modal-title">
+          <span>Camera Settings</span>
+          <button class="cam-modal-close" id="btnCamModalClose">&times;</button>
+        </div>
+        <label>Stream Mode</label>
+        <select id="camMode" class="cam-inp">
+          <option value="hls">go2rtc (HLS)</option>
+          <option value="webrtc">go2rtc (WebRTC)</option>
+          <option value="ffmpeg">Direct FFmpeg (RTSP)</option>
+        </select>
+        <div class="cam-rtsp-warn" id="camRtspWarn">
+          ⚠ Direct FFmpeg mode requires FFmpeg installed on the server. The server transcodes RTSP to MPEG1 for the browser.
+        </div>
+        <div class="cam-section-fields" id="camGo2rtcFields">
+          <label>go2rtc Tailscale IP</label>
+          <input type="text" id="camGo2rtcIp" class="cam-inp" placeholder="100.93.11.9" autocomplete="off" />
+          <div class="cam-modal-row">
+            <div>
+              <label>API Port</label>
+              <input type="number" id="camGo2rtcPort" class="cam-inp" placeholder="1984" min="1" max="65535" autocomplete="off" />
+            </div>
+            <div>
+              <label>Stream Key</label>
+              <input type="text" id="camStreamKey" class="cam-inp" placeholder="tapo_cam" autocomplete="off" />
+            </div>
+          </div>
+        </div>
+        <div class="cam-section-fields" id="camRtspFields">
+          <div class="cam-modal-row">
+            <div>
+              <label>Camera IP</label>
+              <input type="text" id="camIp" class="cam-inp" placeholder="192.168.4.211" autocomplete="off" />
+            </div>
+            <div>
+              <label>RTSP Port</label>
+              <input type="number" id="camRtspPort" class="cam-inp" placeholder="554" min="1" max="65535" autocomplete="off" />
+            </div>
+          </div>
+          <label>Stream Path</label>
+          <select id="camStreamPath" class="cam-inp">
+            <option value="stream1">stream1 (High Quality)</option>
+            <option value="stream2">stream2 (Low Quality)</option>
+          </select>
+          <label>Username</label>
+          <input type="text" id="camUser" class="cam-inp" placeholder="Adsicamera" autocomplete="off" />
+          <label>Password</label>
+          <div class="cam-pw-wrap">
+            <input type="password" id="camPass" class="cam-inp" placeholder="••••••••" autocomplete="off" />
+            <button type="button" class="cam-pw-toggle" id="btnCamPwToggle" title="Show/hide password">👁</button>
+          </div>
+        </div>
+        <div class="cam-modal-actions">
+          <button class="cam-btn-apply" id="btnCamApply">Apply &amp; Connect</button>
+          <button class="cam-btn-reset" id="btnCamReset">Reset</button>
+        </div>
+      </div>
+    </div>`;
+  return wrap;
+}
 
 function buildInverterCard(inv, nodeCount) {
   const card = el("div", "inv-card");
@@ -10443,6 +10554,447 @@ function connectWS() {
       ws.close();
     }
   };
+}
+
+/* ── Camera Streaming ──────────────────────────────────────────────── */
+let cameraPlayer = null;
+
+const CAM_DEFAULTS = {
+  mode: "hls",
+  go2rtcIp: "100.93.11.9",
+  go2rtcPort: "1984",
+  streamKey: "tapo_cam",
+  ip: "192.168.4.211",
+  rtspPort: "554",
+  streamPath: "stream1",
+  user: "Adsicamera",
+  pass: "",
+};
+
+const CAM_LS_KEYS = {
+  mode: "cam_mode",
+  go2rtcIp: "cam_go2rtc_ip",
+  go2rtcPort: "cam_go2rtc_port",
+  streamKey: "cam_stream_key",
+  ip: "cam_ip",
+  rtspPort: "cam_rtsp_port",
+  streamPath: "cam_stream_path",
+  user: "cam_user",
+  pass: "cam_pass",
+};
+
+function camLoadSettings() {
+  const s = {};
+  for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
+    s[k] = localStorage.getItem(lsKey) || CAM_DEFAULTS[k];
+  }
+  return s;
+}
+function camSaveSettings(s) {
+  for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
+    if (s[k] != null) localStorage.setItem(lsKey, s[k]);
+  }
+}
+function camResetSettings() {
+  for (const lsKey of Object.values(CAM_LS_KEYS)) localStorage.removeItem(lsKey);
+}
+
+class CameraPlayer {
+  constructor() {
+    this.mode = "hls";      // "hls" | "webrtc" | "ffmpeg"
+    this.active = false;
+    this.hlsInstance = null; // hls.js instance
+    this.rtcPeer = null;     // RTCPeerConnection
+    this.jsmpegPlayer = null; // JSMpeg.Player
+    this._reconnectTimer = null;
+    this._reconnectCount = 0;
+  }
+
+  start() {
+    if (this.active) return;
+    this.active = true;
+    this._reconnectCount = 0;
+    const s = camLoadSettings();
+    this.mode = s.mode;
+    this._connect(s);
+  }
+
+  stop() {
+    this.active = false;
+    this._clearReconnect();
+    this._teardown();
+    this._showOverlay("Camera offline", "mdi-cctv");
+    this._setLive(false);
+    this._hideRetry();
+  }
+
+  reconnect() {
+    this._clearReconnect();
+    this._teardown();
+    this.active = true;
+    this._reconnectCount = 0;
+    const s = camLoadSettings();
+    this.mode = s.mode;
+    this._connect(s);
+  }
+
+  /* ── Private ──────────────────────────────────── */
+
+  _connect(s) {
+    this._teardown();
+    this._showOverlay("Connecting...", "mdi-loading mdi-spin");
+    this._hideRetry();
+    this._setLive(false);
+
+    if (s.mode === "hls") this._startHls(s);
+    else if (s.mode === "webrtc") this._startWebRTC(s);
+    else if (s.mode === "ffmpeg") this._startFfmpeg(s);
+  }
+
+  /* ── HLS via hls.js ──────────────────────────── */
+  _startHls(s) {
+    const video = $("cameraVideo");
+    const canvas = $("cameraCanvas");
+    if (!video) return;
+    if (canvas) canvas.style.display = "none";
+    video.style.display = "block";
+    video.muted = true;
+
+    const url = `http://${s.go2rtcIp}:${s.go2rtcPort}/api/stream.m3u8?src=${encodeURIComponent(s.streamKey)}`;
+
+    if (typeof Hls !== "undefined" && Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
+        liveDurationInfinity: true,
+        maxBufferLength: 4,
+        maxMaxBufferLength: 8,
+      });
+      this.hlsInstance = hls;
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {});
+        this._hideOverlay();
+        this._setLive(true);
+      });
+      hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (data.fatal) {
+          console.warn("[camera] HLS fatal error:", data.type, data.details);
+          this._onStreamError("HLS stream error");
+        }
+      });
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Native HLS (Safari)
+      video.src = url;
+      video.addEventListener("loadedmetadata", () => {
+        video.play().catch(() => {});
+        this._hideOverlay();
+        this._setLive(true);
+      }, { once: true });
+      video.addEventListener("error", () => {
+        this._onStreamError("HLS stream error");
+      }, { once: true });
+    } else {
+      this._showOverlay("HLS not supported", "mdi-alert-circle-outline");
+      this._showRetry();
+    }
+  }
+
+  /* ── WebRTC via go2rtc ───────────────────────── */
+  _startWebRTC(s) {
+    const video = $("cameraVideo");
+    const canvas = $("cameraCanvas");
+    if (!video) return;
+    if (canvas) canvas.style.display = "none";
+    video.style.display = "block";
+    video.muted = true;
+
+    const apiBase = `http://${s.go2rtcIp}:${s.go2rtcPort}`;
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    this.rtcPeer = pc;
+
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    pc.ontrack = (ev) => {
+      if (ev.streams && ev.streams[0]) {
+        video.srcObject = ev.streams[0];
+        video.play().catch(() => {});
+        this._hideOverlay();
+        this._setLive(true);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+        this._onStreamError("WebRTC connection lost");
+      }
+    };
+
+    pc.createOffer().then((offer) => {
+      pc.setLocalDescription(offer);
+      return fetch(`${apiBase}/api/webrtc?src=${encodeURIComponent(s.streamKey)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "offer",
+          sdp: offer.sdp,
+        }),
+      });
+    }).then((r) => {
+      if (!r.ok) throw new Error("WebRTC offer rejected: " + r.status);
+      return r.json();
+    }).then((answer) => {
+      pc.setRemoteDescription(new RTCSessionDescription(answer));
+    }).catch((err) => {
+      console.warn("[camera] WebRTC error:", err.message);
+      this._onStreamError("WebRTC connection failed");
+    });
+  }
+
+  /* ── FFmpeg / jsmpeg via /ws/camera ──────────── */
+  _startFfmpeg(s) {
+    const video = $("cameraVideo");
+    const canvas = $("cameraCanvas");
+    if (!canvas) return;
+    if (video) video.style.display = "none";
+    canvas.style.display = "block";
+
+    if (typeof JSMpeg === "undefined") {
+      this._showOverlay("jsmpeg library not loaded", "mdi-alert-circle-outline");
+      this._showRetry();
+      return;
+    }
+
+    // Build RTSP URL from parts
+    const auth = s.user ? `${encodeURIComponent(s.user)}:${encodeURIComponent(s.pass)}@` : "";
+    const rtspUrl = `rtsp://${auth}${s.ip}:${s.rtspPort}/${s.streamPath}`;
+
+    // Pass RTSP URL as query parameter — server reads req.query.url on WS connect
+    const wsProto = location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${wsProto}://${location.host}/ws/camera?url=${encodeURIComponent(rtspUrl)}`;
+
+    // jsmpeg manages its own WebSocket connection
+    this.jsmpegPlayer = new JSMpeg.Player(wsUrl, {
+      canvas: canvas,
+      autoplay: true,
+      audio: false,
+      videoBufferSize: 512 * 1024,
+      onSourceEstablished: () => {
+        this._hideOverlay();
+        this._setLive(true);
+      },
+      onSourceCompleted: () => {
+        if (this.active) this._onStreamError("Stream ended");
+      },
+    });
+  }
+
+  /* ── Teardown helpers ────────────────────────── */
+  _teardown() {
+    if (this.hlsInstance) {
+      try { this.hlsInstance.destroy(); } catch (_) {}
+      this.hlsInstance = null;
+    }
+    if (this.rtcPeer) {
+      try { this.rtcPeer.close(); } catch (_) {}
+      this.rtcPeer = null;
+    }
+    if (this.jsmpegPlayer) {
+      try { this.jsmpegPlayer.destroy(); } catch (_) {}
+      this.jsmpegPlayer = null;
+    }
+    const video = $("cameraVideo");
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.srcObject = null;
+      video.style.display = "none";
+    }
+    const canvas = $("cameraCanvas");
+    if (canvas) canvas.style.display = "none";
+  }
+
+  /* ── Reconnect logic ─────────────────────────── */
+  _onStreamError(msg) {
+    if (!this.active) return;
+    this._teardown();
+    this._setLive(false);
+    if (this._reconnectCount < 3) {
+      this._reconnectCount++;
+      const delay = 3000 * Math.pow(2, this._reconnectCount - 1);
+      this._showOverlay(`${msg}. Reconnecting (#${this._reconnectCount})...`, "mdi-loading mdi-spin");
+      this._hideRetry();
+      this._reconnectTimer = setTimeout(() => {
+        this._reconnectTimer = null;
+        if (this.active) this._connect(camLoadSettings());
+      }, delay);
+    } else {
+      this._showOverlay(msg, "mdi-video-off-outline");
+      this._showRetry();
+    }
+  }
+
+  _clearReconnect() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+  }
+
+  /* ── UI helpers ──────────────────────────────── */
+  _showOverlay(text, iconClass) {
+    const ov = $("cameraOverlay");
+    if (!ov) return;
+    ov.style.display = "flex";
+    const icon = $("cameraOverlayIcon");
+    if (icon) icon.className = `mdi ${iconClass} camera-overlay-icon`;
+    const txt = $("cameraOverlayText");
+    if (txt) txt.textContent = text;
+  }
+  _hideOverlay() {
+    const ov = $("cameraOverlay");
+    if (ov) ov.style.display = "none";
+  }
+  _setLive(on) {
+    const dot = $("camLiveDot");
+    if (dot) dot.classList.toggle("active", on);
+  }
+  _showRetry() {
+    const btn = $("camRetryBtn");
+    if (btn) btn.style.display = "";
+  }
+  _hideRetry() {
+    const btn = $("camRetryBtn");
+    if (btn) btn.style.display = "none";
+  }
+}
+
+/* ── Camera Player Initialization ────────────────────────────────── */
+function initCameraPlayer() {
+  const card = $("cameraCard");
+  if (!card) return;
+
+  cameraPlayer = new CameraPlayer();
+
+  // ── Settings Modal ──
+  const backdrop = $("camModalBackdrop");
+  const modeSelect = $("camMode");
+  const go2rtcFields = $("camGo2rtcFields");
+  const rtspFields = $("camRtspFields");
+  const rtspWarn = $("camRtspWarn");
+
+  function updateFieldVisibility() {
+    const mode = modeSelect ? modeSelect.value : "hls";
+    const isGo2rtc = mode === "hls" || mode === "webrtc";
+    const isFfmpeg = mode === "ffmpeg";
+    if (go2rtcFields) go2rtcFields.style.display = isGo2rtc ? "" : "none";
+    if (rtspFields) rtspFields.style.display = isFfmpeg ? "" : "none";
+    if (rtspWarn) rtspWarn.classList.toggle("visible", isFfmpeg);
+  }
+
+  function loadFormFromStorage() {
+    const s = camLoadSettings();
+    if (modeSelect) modeSelect.value = s.mode;
+    if ($("camGo2rtcIp")) $("camGo2rtcIp").value = s.go2rtcIp;
+    if ($("camGo2rtcPort")) $("camGo2rtcPort").value = s.go2rtcPort;
+    if ($("camStreamKey")) $("camStreamKey").value = s.streamKey;
+    if ($("camIp")) $("camIp").value = s.ip;
+    if ($("camRtspPort")) $("camRtspPort").value = s.rtspPort;
+    if ($("camStreamPath")) $("camStreamPath").value = s.streamPath;
+    if ($("camUser")) $("camUser").value = s.user;
+    if ($("camPass")) $("camPass").value = s.pass;
+    updateFieldVisibility();
+  }
+
+  function readFormSettings() {
+    return {
+      mode: modeSelect ? modeSelect.value : "hls",
+      go2rtcIp: ($("camGo2rtcIp") || {}).value || CAM_DEFAULTS.go2rtcIp,
+      go2rtcPort: ($("camGo2rtcPort") || {}).value || CAM_DEFAULTS.go2rtcPort,
+      streamKey: ($("camStreamKey") || {}).value || CAM_DEFAULTS.streamKey,
+      ip: ($("camIp") || {}).value || CAM_DEFAULTS.ip,
+      rtspPort: ($("camRtspPort") || {}).value || CAM_DEFAULTS.rtspPort,
+      streamPath: ($("camStreamPath") || {}).value || CAM_DEFAULTS.streamPath,
+      user: ($("camUser") || {}).value || CAM_DEFAULTS.user,
+      pass: ($("camPass") || {}).value || "",
+    };
+  }
+
+  // Open / close modal
+  $("btnCamSettings")?.addEventListener("click", () => {
+    loadFormFromStorage();
+    if (backdrop) backdrop.style.display = "flex";
+  });
+  $("btnCamModalClose")?.addEventListener("click", () => {
+    if (backdrop) backdrop.style.display = "none";
+  });
+  backdrop?.addEventListener("click", (e) => {
+    if (e.target === backdrop) backdrop.style.display = "none";
+  });
+
+  // Mode selector change
+  modeSelect?.addEventListener("change", updateFieldVisibility);
+
+  // Password show/hide
+  $("btnCamPwToggle")?.addEventListener("click", () => {
+    const pw = $("camPass");
+    if (!pw) return;
+    pw.type = pw.type === "password" ? "text" : "password";
+  });
+
+  // Apply & Connect
+  $("btnCamApply")?.addEventListener("click", () => {
+    const s = readFormSettings();
+    camSaveSettings(s);
+    if (backdrop) backdrop.style.display = "none";
+    cameraPlayer.reconnect();
+  });
+
+  // Reset to defaults
+  $("btnCamReset")?.addEventListener("click", () => {
+    camResetSettings();
+    loadFormFromStorage();
+  });
+
+  // Retry button
+  $("camRetryBtn")?.addEventListener("click", () => {
+    cameraPlayer.reconnect();
+  });
+
+  // ── Fullscreen ──
+  $("btnCamFullscreen")?.addEventListener("click", () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      card.requestFullscreen().catch((err) => {
+        console.warn("[camera] fullscreen failed:", err.message);
+      });
+    }
+  });
+  document.addEventListener("fullscreenchange", () => {
+    const icon = $("btnCamFullscreen")?.querySelector(".mdi");
+    if (!icon) return;
+    icon.className = document.fullscreenElement ? "mdi mdi-fullscreen-exit" : "mdi mdi-fullscreen";
+  });
+
+  // ── Mute / unmute (for HLS/WebRTC with audio) ──
+  $("btnCamMute")?.addEventListener("click", () => {
+    const video = $("cameraVideo");
+    if (!video) return;
+    video.muted = !video.muted;
+    const icon = $("btnCamMute")?.querySelector(".mdi");
+    if (icon) icon.className = video.muted ? "mdi mdi-volume-off" : "mdi mdi-volume-high";
+  });
+
+  // ── Auto-start if settings exist ──
+  const saved = camLoadSettings();
+  if (saved.mode && (saved.go2rtcIp || saved.ip)) {
+    cameraPlayer.start();
+  }
 }
 
 function handleWS(msg) {
@@ -14784,6 +15336,7 @@ function bindEventHandlers() {
 
   // Cleanup intervals on page unload
   window.addEventListener("beforeunload", () => {
+    if (cameraPlayer) cameraPlayer.stop();
     clearInterval(State.clockTimer);
     clearInterval(State.alarmBadgeTimer);
     clearChatDismissTimer();
