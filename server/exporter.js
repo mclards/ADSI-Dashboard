@@ -525,9 +525,9 @@ function inferXlsxColumnWidth(value, header, options = {}) {
   const label = String(typeof header === 'object' ? header.label : header || '').trim();
   const raw = String(value ?? '');
   const needsWideText = /(description|message|notes?|reason|status|path|url|range|label|site|operator|plant)/i.test(label);
-  const maxWidth = needsWideText ? 72 : 44;
-  const minWidth = options?.worksheetKind === 'summary' ? 16 : 10;
-  return Math.min(maxWidth, Math.max(minWidth, raw.length + 2, label.length + 2));
+  const maxWidth = needsWideText ? 80 : 50;
+  const minWidth = options?.worksheetKind === 'summary' ? 18 : 16;
+  return Math.min(maxWidth, Math.max(minWidth, raw.length + 4, label.length + 4));
 }
 
 function inferXlsxCellAlignment(value, header, options = {}) {
@@ -568,8 +568,8 @@ async function writeXlsxWorksheet(wb, sheetName, headers, rows, options = {}) {
     for (let ci = 0; ci < keys.length; ci++) {
       const raw = String(row[keys[ci]] ?? '').trim();
       if (!raw) continue;
-      const maxW = WIDE_COL_RE.test(labels[ci]) ? 72 : 44;
-      const needed = Math.min(maxW, raw.length + 2);
+      const maxW = WIDE_COL_RE.test(labels[ci]) ? 80 : 50;
+      const needed = Math.min(maxW, raw.length + 4);
       if (needed > widths[ci]) widths[ci] = needed;
     }
   }
@@ -2108,19 +2108,24 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
   const ws = wb.addWorksheet(sheetName, {
     views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
   });
-  // Compute column widths from actual content
+  // Compute column widths from actual content.
+  // ExcelJS width ≈ character-count for Calibri 11pt, but numFmt '0.000000'
+  // and cell padding need extra room — use floor 16 for all value columns.
   const _hourW = Math.max(
-    'HOURS'.length + 2,
-    ...resolvedDayEntry.rows.map((r) => String(r.hour ?? '').length + 2),
+    10,
+    'HOURS'.length + 4,
+    ...resolvedDayEntry.rows.map((r) => String(r.hour ?? '').length + 4),
   );
   const _avgW = Math.max(
-    averageLabel.length + 2,
-    ...resolvedDayEntry.rows.map((r) => String(r.average ?? '').length + 2),
+    16,
+    averageLabel.length + 4,
+    ...resolvedDayEntry.rows.map((r) => String(r.average ?? '').length + 4),
   );
   const _minW = Math.max(
-    ...SOLCAST_AVERAGE_TABLE_MINUTES.map((m) => String(m).length + 2),
+    16,
+    ...SOLCAST_AVERAGE_TABLE_MINUTES.map((m) => String(m).length + 4),
     ...resolvedDayEntry.rows.flatMap((r) =>
-      (r.values || []).map((v) => (v == null ? 0 : String(v).length + 2)),
+      (r.values || []).map((v) => (v == null ? 0 : String(v).length + 4)),
     ),
   );
   ws.columns = [
@@ -2481,15 +2486,17 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
   ws.views = [{ state: 'frozen', ySplit: 1 }];
   // Compute column widths from actual content
   const _timeColW = Math.max(
-    'Time'.length + 2,
-    ...buckets.map((b) => b.label.length + 2),
+    16,
+    'Time'.length + 4,
+    ...buckets.map((b) => b.label.length + 4),
   );
   const _dateColW = Math.max(
-    ...dateList.map((d) => fmtColDate(d).length + 2),
+    16,
+    ...dateList.map((d) => fmtColDate(d).length + 4),
     ...buckets.flatMap((b, bIdx) =>
       dateList.map((d) => {
         const v = aggPivot.get(d)[bIdx];
-        return v != null ? String(v).length + 2 : 0;
+        return v != null ? String(v).length + 4 : 0;
       }),
     ),
   );

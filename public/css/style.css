@@ -1497,6 +1497,25 @@ body.sidebar-open .side-nav {
   opacity: 1;
 }
 
+.nav-btn[draggable="true"] {
+  cursor: grab;
+}
+.nav-btn[draggable="true"]:active {
+  cursor: grabbing;
+}
+.nav-btn.nav-dragging {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.nav-drag-placeholder {
+  height: 3px;
+  margin: 0 8px;
+  border-radius: 2px;
+  background: var(--accent, #4fc3f7);
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
 .nav-icon .mdi {
   font-size: 17px;
   line-height: 1;

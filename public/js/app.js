@@ -301,6 +301,7 @@ const ANALYTICS_VIEW_END_MIN = 0;
 const ANALYTICS_CHART_RENDER_BATCH = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
 const CARD_ORDER_STORAGE_KEY = "adsi_inv_card_order";
+const NAV_ORDER_STORAGE_KEY = "adsi_nav_order";
 const SUPPORTED_THEMES = ["dark", "light", "classic"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
@@ -1542,6 +1543,25 @@ function persistInverterCardOrder(orderArr) {
     localStorage.setItem(CARD_ORDER_STORAGE_KEY, JSON.stringify(orderArr));
   } catch (err) {
     console.warn("[app] persistInverterCardOrder failed:", err.message);
+  }
+}
+
+function getStoredNavOrder() {
+  try {
+    const raw = localStorage.getItem(NAV_ORDER_STORAGE_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter(s => typeof s === "string" && s) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistNavOrder(orderArr) {
+  try {
+    localStorage.setItem(NAV_ORDER_STORAGE_KEY, JSON.stringify(orderArr));
+  } catch (err) {
+    console.warn("[app] persistNavOrder failed:", err.message);
   }
 }
 
@@ -3770,8 +3790,115 @@ function setupSideNav() {
 function setupNav() {
   const nav = $("mainNav");
   if (!nav) return;
+
+  // Apply stored nav order
+  const storedOrder = getStoredNavOrder();
+  if (storedOrder) {
+    const buttons = [...nav.querySelectorAll(".nav-btn")];
+    const byPage = new Map(buttons.map((b) => [b.dataset.page, b]));
+    const sectionLabel = nav.querySelector(".nav-section-label");
+    const seen = new Set();
+    const ordered = [];
+    for (const page of storedOrder) {
+      const btn = byPage.get(page);
+      if (btn && !seen.has(page)) { ordered.push(btn); seen.add(page); }
+    }
+    for (const btn of buttons) {
+      if (!seen.has(btn.dataset.page)) ordered.push(btn);
+    }
+    const aboutSection = nav.querySelector("#aboutSection");
+    for (const btn of ordered) {
+      nav.insertBefore(btn, aboutSection);
+    }
+  }
+
   nav.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchPage(btn.dataset.page));
+  });
+  initNavDrag();
+}
+
+function initNavDrag() {
+  const nav = $("mainNav");
+  if (!nav || nav.dataset.navDragInit === "1") return;
+  nav.dataset.navDragInit = "1";
+  let dragSrcPage = null;
+  let placeholder = null;
+
+  function setNavDraggable(enabled) {
+    nav.querySelectorAll(".nav-btn").forEach((b) => { b.draggable = !!enabled; });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Shift" && !dragSrcPage) setNavDraggable(true);
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "Shift" && !dragSrcPage) setNavDraggable(false);
+  });
+  window.addEventListener("blur", () => {
+    if (!dragSrcPage) setNavDraggable(false);
+  });
+
+  function removePlaceholder() {
+    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+    placeholder = null;
+  }
+
+  function getInsertRef(targetBtn, mouseY) {
+    const r = targetBtn.getBoundingClientRect();
+    return mouseY < r.top + r.height / 2 ? targetBtn : (targetBtn.nextElementSibling || null);
+  }
+
+  nav.addEventListener("dragstart", (e) => {
+    const btn = e.target.closest(".nav-btn[draggable='true']");
+    if (!btn) return;
+    dragSrcPage = btn.dataset.page;
+    requestAnimationFrame(() => btn.classList.add("nav-dragging"));
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", btn.dataset.page);
+  });
+
+  nav.addEventListener("dragend", () => {
+    nav.querySelectorAll(".nav-btn.nav-dragging").forEach((b) => b.classList.remove("nav-dragging"));
+    removePlaceholder();
+    dragSrcPage = null;
+  });
+
+  nav.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    if (!dragSrcPage) return;
+    const btn = e.target.closest(".nav-btn[draggable='true']");
+    if (!btn || btn.dataset.page === dragSrcPage) return;
+    e.dataTransfer.dropEffect = "move";
+    const insertRef = getInsertRef(btn, e.clientY);
+    if (placeholder && placeholder.nextSibling === insertRef) return;
+    removePlaceholder();
+    placeholder = document.createElement("div");
+    placeholder.className = "nav-drag-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    nav.insertBefore(placeholder, insertRef);
+  });
+
+  nav.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget || !nav.contains(e.relatedTarget)) {
+      removePlaceholder();
+    }
+  });
+
+  nav.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const srcBtn = dragSrcPage ? nav.querySelector(`.nav-btn[data-page="${dragSrcPage}"]`) : null;
+    if (srcBtn && placeholder && placeholder.parentNode) {
+      nav.insertBefore(srcBtn, placeholder);
+    } else if (srcBtn) {
+      const targetBtn = e.target.closest(".nav-btn[draggable='true']");
+      if (targetBtn && targetBtn.dataset.page !== dragSrcPage) nav.insertBefore(srcBtn, targetBtn);
+    }
+    removePlaceholder();
+    dragSrcPage = null;
+    const newOrder = [...nav.querySelectorAll(".nav-btn")]
+      .map((b) => b.dataset.page)
+      .filter(Boolean);
+    persistNavOrder(newOrder);
   });
 }
 
