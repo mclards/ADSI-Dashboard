@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.6.4` in `package.json` (source of truth) |
+| Repo version baseline | `2.6.5` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.6.4` |
+| Latest published release | `v2.6.5` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -98,7 +98,7 @@ New Python helpers:
 `solcast_prior_from_snapshot()` exposes Solcast P10/Lo and P90/Hi percentiles. `build_features()` derives 6 tri-band features:
 `solcast_lo_kwh`, `solcast_hi_kwh`, `solcast_lo_vs_physics`, `solcast_hi_vs_physics`, `solcast_spread_pct`, `solcast_spread_ratio`.
 
-FEATURE_COLS: 62 → 68. Legacy models auto-align with zero-spread fallback. P10/P90 available only from Solcast Toolkit for future-dated requests.
+FEATURE_COLS: 62 → 70. Legacy models auto-align with zero-spread fallback. P10/P90 available only from Solcast Toolkit for future-dated requests.
 LightGBM hyperparams tuned: n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71, subsample=0.78, colsample_bytree=0.75, min_child_samples=22, reg_alpha=0.08, reg_lambda=0.12.
 
 See `references/forecast-engine.md` for full feature formulas, training details, and backward-compatibility rules.

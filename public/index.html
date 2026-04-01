@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.6.4</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.6.5</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -2349,6 +2349,155 @@
         </div>
       </div>
     </div>
+    <!-- Camera Settings Modal (page-level) -->
+    <div id="camSettingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="camSettingsTitle">
+      <div class="cam-settings-card">
+        <div class="cam-settings-header">
+          <span class="cam-settings-title" id="camSettingsTitle">
+            <span class="mdi mdi-cctv"></span> Camera Settings
+          </span>
+          <button class="auth-modal-close" id="btnCamModalClose" type="button" aria-label="Close">&times;</button>
+        </div>
+
+        <div class="cam-settings-body">
+          <!-- ── Stream Mode Selector ─────────────────── -->
+          <div class="cam-section-label">Stream Mode</div>
+          <div class="cam-mode-cards" id="camModeCards">
+            <button type="button" class="cam-mode-card active" data-mode="hls">
+              <span class="mdi mdi-video-wireless-outline cam-mode-icon"></span>
+              <div class="cam-mode-info">
+                <div class="cam-mode-name">HLS</div>
+                <div class="cam-mode-desc">Streams via go2rtc. Best compatibility, slight delay.</div>
+              </div>
+            </button>
+            <button type="button" class="cam-mode-card" data-mode="webrtc">
+              <span class="mdi mdi-lightning-bolt-outline cam-mode-icon"></span>
+              <div class="cam-mode-info">
+                <div class="cam-mode-name">WebRTC</div>
+                <div class="cam-mode-desc">Ultra-low latency via go2rtc. Requires STUN/TURN.</div>
+              </div>
+            </button>
+            <button type="button" class="cam-mode-card" data-mode="ffmpeg">
+              <span class="mdi mdi-console-line cam-mode-icon"></span>
+              <div class="cam-mode-info">
+                <div class="cam-mode-name">FFmpeg</div>
+                <div class="cam-mode-desc">Direct RTSP transcode. Requires FFmpeg on the server.</div>
+              </div>
+            </button>
+          </div>
+          <!-- Hidden select to keep JS compatibility -->
+          <select id="camMode" class="cam-field-input" style="display:none" aria-hidden="true">
+            <option value="hls">HLS</option>
+            <option value="webrtc">WebRTC</option>
+            <option value="ffmpeg">FFmpeg</option>
+          </select>
+
+          <div class="cam-rtsp-warn" id="camRtspWarn">
+            <span class="mdi mdi-alert-outline"></span>
+            Direct FFmpeg mode requires FFmpeg installed on the server. The server transcodes RTSP to MPEG1/TS via WebSocket.
+          </div>
+
+          <!-- ── go2rtc Connection ────────────────────── -->
+          <div id="camGo2rtcFields">
+            <div class="cam-section-label">go2rtc Connection</div>
+            <div class="cam-field-row">
+              <div style="flex:2">
+                <label class="cam-field-label">Tailscale / Server IP</label>
+                <input type="text" id="camGo2rtcIp" class="cam-field-input" placeholder="100.93.11.9" autocomplete="off" />
+              </div>
+              <div style="flex:1">
+                <label class="cam-field-label">API Port</label>
+                <input type="number" id="camGo2rtcPort" class="cam-field-input" placeholder="1984" min="1" max="65535" autocomplete="off" />
+              </div>
+            </div>
+            <label class="cam-field-label">Stream Key</label>
+            <input type="text" id="camStreamKey" class="cam-field-input" placeholder="tapo_cam" autocomplete="off" />
+          </div>
+
+          <!-- ── RTSP / FFmpeg Connection ─────────────── -->
+          <div id="camRtspFields">
+            <div class="cam-section-label">RTSP Connection</div>
+            <div class="cam-field-row">
+              <div style="flex:2">
+                <label class="cam-field-label">Camera IP</label>
+                <input type="text" id="camIp" class="cam-field-input" placeholder="192.168.4.211" autocomplete="off" />
+              </div>
+              <div style="flex:1">
+                <label class="cam-field-label">RTSP Port</label>
+                <input type="number" id="camRtspPort" class="cam-field-input" placeholder="554" min="1" max="65535" autocomplete="off" />
+              </div>
+            </div>
+            <label class="cam-field-label">Stream Path</label>
+            <select id="camStreamPath" class="cam-field-input">
+              <option value="stream1">stream1 (High Quality)</option>
+              <option value="stream2">stream2 (Low Quality)</option>
+            </select>
+            <div class="cam-field-row">
+              <div>
+                <label class="cam-field-label">Username</label>
+                <input type="text" id="camUser" class="cam-field-input" placeholder="Adsicamera" autocomplete="off" />
+              </div>
+              <div>
+                <label class="cam-field-label">Password</label>
+                <div class="cam-pw-wrap">
+                  <input type="password" id="camPass" class="cam-field-input" placeholder="••••••••" autocomplete="off" />
+                  <button type="button" class="cam-pw-toggle" id="btnCamPwToggle" title="Show/hide password">
+                    <span class="mdi mdi-eye-outline"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── go2rtc Service (gateway mode only) ───── -->
+          <div class="cam-section-divider"></div>
+          <div id="camServiceSection">
+            <div class="cam-section-label">
+              <span class="mdi mdi-cog-play-outline"></span> go2rtc Service
+            </div>
+            <div class="cam-service-grid">
+              <div class="cam-service-item">
+                <div class="cam-service-label">Status</div>
+                <div class="cam-service-value" id="go2rtcStatusVal">-</div>
+              </div>
+              <div class="cam-service-item">
+                <div class="cam-service-label">PID</div>
+                <div class="cam-service-value" id="go2rtcPidVal">-</div>
+              </div>
+              <div class="cam-service-item">
+                <div class="cam-service-label">Crashes</div>
+                <div class="cam-service-value" id="go2rtcCrashVal">0</div>
+              </div>
+              <div class="cam-service-item">
+                <div class="cam-service-label">Health</div>
+                <div class="cam-service-value" id="go2rtcHealthVal">-</div>
+              </div>
+            </div>
+            <div class="cam-service-controls">
+              <label class="cam-auto-start-label" title="Automatically start go2rtc when the dashboard server boots in gateway mode.">
+                <input type="checkbox" id="setGo2rtcAutoStart" />
+                <span>Auto-start on server boot</span>
+              </label>
+              <div class="cam-service-btns">
+                <button id="btnGo2rtcStart" class="btn btn-accent btn-sm" type="button" title="Start go2rtc">
+                  <span class="mdi mdi-play-circle-outline"></span> Start
+                </button>
+                <button id="btnGo2rtcStop" class="btn btn-outline btn-sm" type="button" title="Stop go2rtc">
+                  <span class="mdi mdi-stop-circle-outline"></span> Stop
+                </button>
+                <span class="smsg" id="go2rtcMsg"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cam-settings-actions">
+          <button class="btn btn-outline" id="btnCamReset" type="button">Reset Defaults</button>
+          <button class="btn btn-accent" id="btnCamApply" type="button">Apply &amp; Connect</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Theme Preview Modal -->
     <div id="themePreviewModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="themePreviewTitle">
       <div class="theme-preview-modal-card">

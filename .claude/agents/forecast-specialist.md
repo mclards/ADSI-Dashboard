@@ -35,7 +35,7 @@ Your scope: `services/forecast_engine.py`, `ForecastCoreService.py`, `services/s
 `solcast_prior_from_snapshot()` exposes P10/Lo and P90/Hi percentiles. `build_features()` derives 6 tri-band features:
 `solcast_lo_kwh`, `solcast_hi_kwh`, `solcast_lo_vs_physics`, `solcast_hi_vs_physics`, `solcast_spread_pct`, `solcast_spread_ratio`.
 
-FEATURE_COLS: 62 → 68. Legacy models auto-align with zero-spread fallback (P10/P90 unavailable → `solcast_lo_kwh = solcast_hi_kwh = solcast_kwh`). P10/P90 available only from Solcast Toolkit for future-dated requests.
+FEATURE_COLS: 62 → 70. Legacy models auto-align with zero-spread fallback (P10/P90 unavailable → `solcast_lo_kwh = solcast_hi_kwh = solcast_kwh`). P10/P90 available only from Solcast Toolkit for future-dated requests.
 
 ## ML Backend Detection & Data Quality (v2.4.42+)
 

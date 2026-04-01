@@ -2555,19 +2555,59 @@ label[data-required]::after {
     gap: calc(4px * var(--inv-card-scale));
   }
 
-  /* ── 2-4 col: tighter rows ─────────────────────────────────────────────── */
-  :is(.inv-grid.layout-2, .inv-grid.layout-3, .inv-grid.layout-4) .inv-card,
-  :is(.inv-grid.layout-2, .inv-grid.layout-3, .inv-grid.layout-4)
-    .bulk-control-bar,
-  :is(.inv-grid.layout-2, .inv-grid.layout-3, .inv-grid.layout-4) .camera-card {
+  /* ── 2 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-2 .inv-card {
     --card-row-h: calc(17px * var(--inv-card-scale));
     height: auto;
     min-height: 0;
     max-height: none;
   }
+  .inv-grid.layout-2 .bulk-control-bar {
+    --card-row-h: calc(17px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-2 .camera-card {
+    height: calc(190px * var(--inv-card-scale));
+  }
 
-  /* ── 5+ col: compact card and table ─────────────────────────────────────── */
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .inv-card {
+  /* ── 3 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-3 .inv-card {
+    --card-row-h: calc(17px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-3 .bulk-control-bar {
+    --card-row-h: calc(17px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-3 .camera-card {
+    height: calc(198px * var(--inv-card-scale));
+  }
+
+  /* ── 4 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-4 .inv-card {
+    --card-row-h: calc(17px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-4 .bulk-control-bar {
+    --card-row-h: calc(17px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-4 .camera-card {
+    height: calc(196px * var(--inv-card-scale));
+  }
+
+  /* ── 5 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-5 .inv-card {
     --card-table-head-h: calc(17px * var(--inv-card-scale));
     --card-row-h: calc(18px * var(--inv-card-scale));
     --card-row-gap: calc(2px * var(--inv-card-scale));
@@ -2577,12 +2617,53 @@ label[data-required]::after {
     min-height: 0;
     max-height: none;
   }
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7)
-    .bulk-control-bar,
-  :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .camera-card {
+  .inv-grid.layout-5 .bulk-control-bar {
     height: auto;
     min-height: 0;
     max-height: none;
+  }
+  .inv-grid.layout-5 .camera-card {
+    height: calc(170px * var(--inv-card-scale));
+  }
+
+  /* ── 6 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-6 .inv-card {
+    --card-table-head-h: calc(17px * var(--inv-card-scale));
+    --card-row-h: calc(18px * var(--inv-card-scale));
+    --card-row-gap: calc(2px * var(--inv-card-scale));
+    --card-content-pad-x: calc(5px * var(--inv-card-scale));
+    --card-content-gap-x: calc(5px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-6 .bulk-control-bar {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-6 .camera-card {
+    height: calc(152px * var(--inv-card-scale));
+  }
+
+  /* ── 7 col ────────────────────────────────────────────────────────────── */
+  .inv-grid.layout-7 .inv-card {
+    --card-table-head-h: calc(17px * var(--inv-card-scale));
+    --card-row-h: calc(18px * var(--inv-card-scale));
+    --card-row-gap: calc(2px * var(--inv-card-scale));
+    --card-content-pad-x: calc(5px * var(--inv-card-scale));
+    --card-content-gap-x: calc(5px * var(--inv-card-scale));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-7 .bulk-control-bar {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .inv-grid.layout-7 .camera-card {
+    height: calc(152px * var(--inv-card-scale));
   }
 
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7)
@@ -2904,7 +2985,7 @@ label[data-required]::after {
   }
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7)
     .bulk-quick-btn {
-    height: calc(20px * var(--inv-card-scale));
+    height: calc(22px * var(--inv-card-scale));
     font-size: calc(8px * var(--inv-card-scale)) !important;
     border-radius: calc(4px * var(--inv-card-scale));
   }
@@ -2921,12 +3002,12 @@ label[data-required]::after {
   }
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7)
     .bulk-cmd-btn {
-    height: calc(24px * var(--inv-card-scale));
+    height: calc(22px * var(--inv-card-scale));
     font-size: calc(9.5px * var(--inv-card-scale)) !important;
     border-radius: calc(4px * var(--inv-card-scale));
   }
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .bulk-info {
-    font-size: calc(6px * var(--inv-card-scale));
+    display: none;
   }
 
   /* ── 6+ col: further bulk card compaction ──────────────────────────── */
@@ -4104,8 +4185,8 @@ label[data-required]::after {
   --card-fixed-h: calc(186px * var(--inv-card-scale));
   min-width: 0;
   height: var(--card-fixed-h);
-  min-height: var(--card-fixed-h);
-  max-height: var(--card-fixed-h);
+  min-height: 0;
+  max-height: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -4422,9 +4503,290 @@ label[data-required]::after {
   max-width: 360px;
 }
 
+/* ── Camera Settings Modal (page-level) ─────────────────────────────── */
+.cam-settings-card {
+  width: min(400px, 92vw);
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: linear-gradient(180deg, #1a1a2e 0%, #141420 100%);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(80, 80, 120, 0.2);
+  padding: 14px 16px 16px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  color: var(--text1, #ddd);
+  font-size: 11px;
+}
+
+.cam-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cam-settings-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text1, #ddd);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cam-settings-title .mdi { font-size: 15px; }
+
+.cam-settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.cam-settings-body::-webkit-scrollbar { width: 5px; }
+.cam-settings-body::-webkit-scrollbar-track { background: transparent; }
+.cam-settings-body::-webkit-scrollbar-thumb {
+  background: var(--border2, #444);
+  border-radius: 3px;
+}
+
+/* Section labels */
+.cam-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text2, #999);
+  margin: 12px 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cam-section-label:first-child { margin-top: 0; }
+
+/* Stream-mode tab cards */
+.cam-mode-cards {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.cam-mode-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  background: var(--input-bg, #161622);
+  color: var(--text1, #ddd);
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+  text-align: center;
+  font-size: 11px;
+}
+.cam-mode-card:hover {
+  border-color: var(--border2, #555);
+  background: rgba(255, 255, 255, 0.03);
+}
+.cam-mode-card.active {
+  border-color: var(--accent, #4fc3f7);
+  background: rgba(79, 195, 247, 0.08);
+  box-shadow: 0 0 0 1px rgba(79, 195, 247, 0.18);
+}
+
+.cam-mode-icon {
+  font-size: 18px;
+  color: var(--text2, #999);
+}
+.cam-mode-card.active .cam-mode-icon {
+  color: var(--accent, #4fc3f7);
+}
+
+.cam-mode-info { min-width: 0; }
+
+.cam-mode-name {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text1, #ddd);
+}
+
+.cam-mode-desc {
+  font-size: 8px;
+  color: var(--text2, #999);
+  line-height: 1.3;
+  margin-top: 2px;
+}
+
+/* RTSP warning banner */
+.cam-settings-body > .cam-rtsp-warn {
+  background: rgba(255, 152, 0, 0.12);
+  border: 1px solid rgba(255, 152, 0, 0.35);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 9px;
+  color: #ffb74d;
+  margin-bottom: 10px;
+  display: none;
+  align-items: flex-start;
+  gap: 5px;
+  line-height: 1.35;
+}
+.cam-settings-body > .cam-rtsp-warn .mdi {
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.cam-settings-body > .cam-rtsp-warn.visible {
+  display: flex;
+}
+
+/* Field rows & inputs */
+.cam-field-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cam-field-row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.cam-field-label {
+  display: block;
+  font-size: 10px;
+  color: var(--text2, #999);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.cam-field-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  background: var(--input-bg, #161622);
+  color: var(--text1, #ddd);
+  margin-bottom: 8px;
+  box-sizing: border-box;
+  font-family: inherit;
+  transition: border-color 0.18s;
+}
+.cam-field-input:focus {
+  outline: none;
+  border-color: var(--accent, #4fc3f7);
+  box-shadow: 0 0 0 2px rgba(79, 195, 247, 0.12);
+}
+.cam-field-input::placeholder {
+  color: var(--text3, #666);
+  opacity: 0.8;
+}
+select.cam-field-input { appearance: auto; }
+
+/* Password toggle */
+.cam-settings-body .cam-pw-wrap {
+  position: relative;
+}
+.cam-settings-body .cam-pw-wrap .cam-field-input {
+  padding-right: 30px;
+}
+.cam-settings-body .cam-pw-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-65%);
+  background: none;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px;
+  transition: color 0.18s;
+}
+.cam-settings-body .cam-pw-toggle:hover {
+  color: var(--text1);
+}
+
+/* Section divider */
+.cam-section-divider {
+  height: 1px;
+  background: var(--border, #333);
+  margin: 10px 0 4px;
+}
+
+/* Service status grid */
+.cam-service-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.cam-service-item {
+  border: 1px solid var(--border, #333);
+  border-radius: 5px;
+  background: var(--input-bg, #161622);
+  padding: 6px 8px;
+}
+
+.cam-service-label {
+  font-size: 9px;
+  color: var(--text2, #999);
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.cam-service-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text1, #ddd);
+}
+
+/* Service controls */
+.cam-service-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cam-auto-start-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text1, #ddd);
+  cursor: pointer;
+  user-select: none;
+}
+.cam-auto-start-label input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent, #4fc3f7);
+}
+
+.cam-service-btns {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Bottom actions */
+.cam-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, #333);
+}
+.cam-settings-actions .btn {
+  flex: 1;
+}
+
 /* ── Bulk command card ─────────────────────────────────────────────── */
 .bulk-control-bar {
-  --card-fixed-h: calc(228px * var(--inv-card-scale));
+  --card-fixed-h: calc(186px * var(--inv-card-scale));
   min-width: 0;
   height: var(--card-fixed-h);
   min-height: var(--card-fixed-h);
@@ -4449,7 +4811,7 @@ label[data-required]::after {
   display: flex;
   align-items: center;
   gap: calc(6px * var(--inv-card-scale));
-  padding: calc(6px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
+  padding: calc(4px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
   border-bottom: 1px solid var(--border);
   background: linear-gradient(
     180deg,
@@ -4476,8 +4838,8 @@ label[data-required]::after {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: calc(6px * var(--inv-card-scale));
-  padding: calc(8px * var(--inv-card-scale));
+  gap: calc(3px * var(--inv-card-scale));
+  padding: calc(5px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
   min-height: 0;
 }
 
@@ -4557,7 +4919,7 @@ label[data-required]::after {
 .bulk-sep {
   height: 1px;
   background: var(--border);
-  margin: calc(2px * var(--inv-card-scale)) 0;
+  margin: calc(1px * var(--inv-card-scale)) 0;
 }
 
 .bulk-cmd-label {
@@ -4573,11 +4935,11 @@ label[data-required]::after {
 }
 
 .bulk-info {
-  font-size: calc(7.5px * var(--inv-card-scale));
+  font-size: calc(7px * var(--inv-card-scale));
   color: var(--text3);
   text-align: center;
   letter-spacing: 0.2px;
-  line-height: 1.35;
+  line-height: 1.2;
   margin-top: auto;
   opacity: 0.7;
   padding: 0 calc(2px * var(--inv-card-scale));
@@ -4585,7 +4947,7 @@ label[data-required]::after {
 
 .bulk-cmd-btn {
   flex: 1;
-  height: calc(26px * var(--inv-card-scale));
+  height: calc(22px * var(--inv-card-scale));
   min-width: 0 !important;
   padding: 0 !important;
   border-radius: calc(9px * var(--inv-card-scale));
@@ -5327,6 +5689,33 @@ label[data-required]::after {
 }
 
 .analytics-weather-empty {
+  font-size: 9px;
+  color: var(--text3);
+  padding: 4px 0;
+}
+
+.ana-hourly-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ana-hourly-chart-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ana-hourly-chart-label {
+  font-size: 9px;
+  color: var(--text2);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.ana-hourly-empty {
   font-size: 9px;
   color: var(--text3);
   padding: 4px 0;
@@ -8513,6 +8902,14 @@ body.mode-transition-active {
   color: #4a3d2c;
 }
 
+:root[data-theme="light"] .ana-hourly-chart-label {
+  color: #614d36;
+}
+
+:root[data-theme="light"] .ana-hourly-empty {
+  color: #6c573d;
+}
+
 :root[data-theme="light"] .analytics-gen-label {
   color: #614d36;
 }
@@ -9311,6 +9708,14 @@ body.mode-transition-active {
 
 :root[data-theme="classic"] .analytics-side-value {
   color: #e8f2ff;
+}
+
+:root[data-theme="classic"] .ana-hourly-chart-label {
+  color: #8aa3cc;
+}
+
+:root[data-theme="classic"] .ana-hourly-empty {
+  color: #6a8ac4;
 }
 
 :root[data-theme="classic"] .analytics-gen-input {
@@ -10183,7 +10588,7 @@ body.mode-transition-active {
 #page-settings .settings-utility-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 #page-settings #settingsGlobalActions {
@@ -10195,10 +10600,10 @@ body.mode-transition-active {
 
 #page-settings .settings-utility-card .btn {
   width: 100%;
-  height: 38px;
-  min-height: 38px;
-  padding: 0 12px;
-  border-radius: 10px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
   font-size: 11px;
   letter-spacing: 0.2px;
   line-height: 1;
@@ -10239,7 +10644,7 @@ body.mode-transition-active {
 #page-settings .settings-utility-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
 #page-settings .settings-utility-wide {

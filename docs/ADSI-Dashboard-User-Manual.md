@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.6.4`
+**Applies to:** ADSI Inverter Dashboard `v2.6.5`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -197,6 +197,7 @@ The `About` card also shows:
 | Bulk authorization modal | Required for selected multi-inverter control actions |
 | Mode transition overlay | Temporarily blocks normal actions while the selected runtime becomes ready |
 | Confirm dialogs | Used before important actions such as restore, mode switch, refresh, or delete |
+| Camera Settings modal | Configures camera stream mode, connection, and go2rtc service controls |
 
 ---
 
@@ -1171,6 +1172,115 @@ Restore behavior:
 
 ---
 
+## 6.10 Camera Viewer
+
+The `Camera Viewer` is a live IP camera card displayed within the main inverter grid. It supports three streaming modes and includes an integrated go2rtc process manager for RTSP-to-browser streaming.
+
+### Camera Card
+
+The camera card is a draggable card that participates in the inverter grid layout alongside inverter cards. It displays:
+
+- **Live video viewport** filling the card body
+- **Top-left overlay**: Camera name label (e.g., `Tapo C110 - Live`)
+- **Top-right overlay**: Blinking red dot indicator when the stream is active
+- **Bottom controls bar**:
+  - ⚙️ Settings — opens the Camera Settings modal
+  - 🔇/🔊 Mute/unmute toggle
+  - ⛶ Fullscreen toggle
+- **Loading spinner** while buffering
+- **Error overlay** with `Retry` button when the stream fails
+- **Auto-reconnect** every 5 seconds on stream drop
+
+### Stream Modes
+
+| Mode | Backend | Description |
+| --- | --- | --- |
+| **HLS** | go2rtc | HTTP Live Streaming. Best compatibility, ~2-5 s delay. Default mode. |
+| **WebRTC** | go2rtc | Ultra-low latency (<1 s). Requires STUN/TURN for NAT traversal. |
+| **FFmpeg** | Server | Direct RTSP transcode via FFmpeg. MPEG1/TS over WebSocket. Requires FFmpeg installed on server. |
+
+### Camera Settings Modal
+
+Click the **⚙️ Settings** icon on the camera card to open the modal. The modal is a page-level dialog centered on the screen (not card-scoped).
+
+#### Stream Mode Selection
+
+Three visual mode cards at the top of the modal. Click a card to select that mode. The selected card is highlighted with an accent-colored border. Selecting a mode dynamically shows or hides the relevant input sections below.
+
+#### go2rtc Connection Fields (HLS and WebRTC modes)
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `Tailscale / Server IP` | `100.93.11.9` | IP address where go2rtc is reachable (localhost or Tailscale VPN IP) |
+| `API Port` | `1984` | go2rtc API port |
+| `Stream Key` | `tapo_cam` | Stream name configured in `go2rtc.yaml` |
+
+#### RTSP Connection Fields (FFmpeg mode)
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `Camera IP` | `192.168.4.211` | RTSP camera IP address |
+| `RTSP Port` | `554` | RTSP port |
+| `Stream Path` | `stream1` (High Quality) | `stream1` or `stream2` (Low Quality) |
+| `Username` | `Adsicamera` | Camera login username |
+| `Password` | *(empty)* | Camera login password (masked with show/hide toggle) |
+
+A warning banner appears in FFmpeg mode: *Direct FFmpeg mode requires FFmpeg installed on the server.*
+
+#### go2rtc Service Controls (HLS and WebRTC modes, gateway mode only)
+
+This section is hidden when FFmpeg mode is selected or when operating in remote mode.
+
+| Control | Description |
+| --- | --- |
+| **Status** | Current process state: `running`, `stopped`, `starting`, `error` |
+| **PID** | Process ID when running |
+| **Crashes** | Consecutive crash count (resets on manual start) |
+| **Health** | Timestamp of last successful health check |
+| **Auto-start on server boot** | When checked, go2rtc starts automatically when the Express server boots in gateway mode |
+| **Start** | Starts the go2rtc process |
+| **Stop** | Stops the go2rtc process gracefully |
+
+The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds while the modal is open. Polling stops when the modal is closed.
+
+#### Modal Actions
+
+| Button | Function |
+| --- | --- |
+| `Reset Defaults` | Restores all fields to factory defaults |
+| `Apply & Connect` | Saves settings to localStorage, persists auto-start to server, closes modal, and reconnects stream |
+
+### Settings Persistence
+
+| Setting | Storage | Scope |
+| --- | --- | --- |
+| Stream mode, IPs, ports, credentials | `localStorage` (per key) | Browser/client |
+| go2rtc auto-start | Server setting (`go2rtcAutoStart`) | Server-wide |
+
+### go2rtc Service Behavior
+
+| Behavior | Detail |
+| --- | --- |
+| **Gateway-mode only** | Start is blocked with HTTP 403 in remote mode |
+| **Localhost-only binding** | API on `127.0.0.1:1984`, WebRTC on `127.0.0.1:8555` |
+| **Auto-restart on crash** | Up to 3 consecutive crashes, then stops with `error` status |
+| **Non-blocking** | go2rtc failure never blocks server startup or other dashboard features |
+| **Graceful shutdown** | Stopped automatically during app shutdown, update install, or server stop |
+| **Config override** | Place a `go2rtc.yaml` in `C:\ProgramData\InverterDashboard\go2rtc\` to override bundled defaults |
+
+### Troubleshooting
+
+| Problem | Likely Cause | Action |
+| --- | --- | --- |
+| Stream fails to load | go2rtc not running | Open camera settings, check Status, click Start |
+| go2rtc won't start | Port 1984 or 8555 already in use | Stop conflicting process or change ports in `go2rtc.yaml` |
+| WebRTC shows no video | NAT or firewall blocking UDP | Ensure STUN server is reachable, configure TURN if behind strict NAT |
+| FFmpeg mode shows no video | FFmpeg not installed | Install FFmpeg and add to system PATH |
+| Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
+| Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
+
+---
+
 ## 7. Auxiliary Windows
 
 ## 7.1 IP Configuration
@@ -1340,6 +1450,23 @@ Important:
 4. Confirm the restore action.
 5. Allow the app to create a safety backup.
 6. Restart when prompted to apply the restored state.
+
+## 8.10 Camera Setup Workflow
+
+1. Ensure the workstation is in `Gateway` mode (camera streaming is gateway-only).
+2. Click the **⚙️ gear icon** on the camera card to open Camera Settings.
+3. Select the desired stream mode (HLS, WebRTC, or FFmpeg).
+4. For HLS or WebRTC:
+   a. Enter the go2rtc server IP (localhost or Tailscale IP) and API port.
+   b. Enter the stream key matching `go2rtc.yaml` (default: `tapo_cam`).
+   c. In the go2rtc Service section, click **Start** to launch the go2rtc process.
+   d. Optionally check **Auto-start on server boot** for automatic startup.
+5. For FFmpeg:
+   a. Enter the camera IP, RTSP port, stream path, username, and password.
+   b. Ensure FFmpeg is installed on the server and available on PATH.
+6. Click **Apply & Connect**.
+7. Verify the live feed appears in the camera card.
+8. If the stream fails, check the go2rtc service status, verify network connectivity, and retry.
 
 ---
 

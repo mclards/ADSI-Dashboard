@@ -103,6 +103,8 @@ const State = {
   analyticsActualSummarySyncDay: "",
   analyticsWeeklyWeather: [],
   analyticsWeatherDate: "",
+  hourlyIrradianceChart: null,
+  hourlyCloudChart: null,
   analyticsRenderTimer: null,
   analyticsRenderToken: 0,
   // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
@@ -594,7 +596,8 @@ function formatPlantCapSequenceInputClient(valuesRaw) {
 }
 
 function getStoredPlantCapPanelCollapsed() {
-  return true;
+  const v = localStorage.getItem("plantCapPanelCollapsed");
+  return v === null ? true : v === "1";
 }
 
 function syncPlantCapPanelCollapsedUi() {
@@ -611,6 +614,7 @@ function syncPlantCapPanelCollapsedUi() {
 
 function setPlantCapPanelCollapsed(collapsed) {
   State.plantCapPanelCollapsed = !!collapsed;
+  localStorage.setItem("plantCapPanelCollapsed", collapsed ? "1" : "0");
   syncPlantCapPanelCollapsedUi();
 }
 
@@ -4493,10 +4497,10 @@ function renderForecastPerfHealth(health) {
   if (qualVal) {
     if (Array.isArray(health.recentQualityBreakdown) && health.recentQualityBreakdown.length > 0) {
       const qmap = {};
-      health.recentQualityBreakdown.forEach((r) => { qmap[r.comparison_quality] = r.cnt; });
+      health.recentQualityBreakdown.forEach((r) => { if (r.comparison_quality != null) qmap[r.comparison_quality] = Number(r.cnt) || 0; });
       // eligible = Python's "good" value; also accept legacy good/excellent
       const good  = (qmap.eligible || 0) + (qmap.good || 0) + (qmap.excellent || 0);
-      const total = Object.values(qmap).reduce((s, v) => s + v, 0);
+      const total = Object.values(qmap).reduce((s, v) => s + (Number(v) || 0), 0);
       if (total === 0) {
         qualVal.textContent = "No data";
         if (qualChip) qualChip.className = "fperf-hchip chip-disabled";
@@ -4665,7 +4669,7 @@ function renderForecastPerfHealth(health) {
   const biasVal  = $("fperfChipBiasVal");
   if (biasVal) {
     const b = health.recentBias?.signedBiasPct;
-    if (b == null) {
+    if (b == null || isNaN(b)) {
       biasVal.textContent = "No data";
       if (biasChip) { biasChip.className = "fperf-hchip chip-disabled"; biasChip.title = ""; }
     } else {
@@ -5551,6 +5555,7 @@ function syncOperationModeUi() {
     "",
   );
   syncDayAheadGeneratorAvailability();
+  syncGo2rtcSectionVisibility();
 }
 
 function hasOwn(obj, key) {
@@ -6374,6 +6379,89 @@ async function saveSettings() {
     showMsg(settingsMsgId, "✗ Save failed: " + e.message, "error");
     Toast.error("Save failed: " + e.message, 5000);
     return false;
+  }
+}
+
+/* ── go2rtc service control ────────────────────────────────────────── */
+let _go2rtcPollTimer = null;
+
+async function go2rtcRefreshStatus() {
+  try {
+    const s = await api("/api/streaming/go2rtc-status");
+    const running = s.running;
+    if ($("go2rtcStatusVal")) {
+      $("go2rtcStatusVal").textContent = s.status || "stopped";
+      $("go2rtcStatusVal").style.color = running
+        ? "var(--clr-ok, #4caf50)"
+        : s.status === "error"
+          ? "var(--clr-error, #f44336)"
+          : "";
+    }
+    if ($("go2rtcPidVal")) $("go2rtcPidVal").textContent = s.pid || "-";
+    if ($("go2rtcCrashVal")) $("go2rtcCrashVal").textContent = s.crashCount ?? 0;
+    if ($("go2rtcHealthVal")) {
+      $("go2rtcHealthVal").textContent = s.lastHealthTs
+        ? new Date(s.lastHealthTs).toLocaleTimeString()
+        : "-";
+    }
+    if ($("btnGo2rtcStart")) $("btnGo2rtcStart").disabled = running;
+    if ($("btnGo2rtcStop")) $("btnGo2rtcStop").disabled = !running;
+  } catch (_) {}
+}
+
+function go2rtcStartPoll() {
+  go2rtcStopPoll();
+  go2rtcRefreshStatus();
+  _go2rtcPollTimer = setInterval(go2rtcRefreshStatus, 5000);
+}
+
+function go2rtcStopPoll() {
+  if (_go2rtcPollTimer) {
+    clearInterval(_go2rtcPollTimer);
+    _go2rtcPollTimer = null;
+  }
+}
+
+async function go2rtcStartService() {
+  const btn = $("btnGo2rtcStart");
+  if (btn) btn.disabled = true;
+  showMsg("go2rtcMsg", "Starting go2rtc...", "");
+  try {
+    const r = await api("/api/streaming/go2rtc/start", "POST");
+    if (r.ok) {
+      showMsg("go2rtcMsg", r.already ? "Already running" : `Started (PID: ${r.pid})`, "ok");
+    } else {
+      showMsg("go2rtcMsg", r.error || "Failed to start", "error");
+    }
+  } catch (e) {
+    showMsg("go2rtcMsg", e.message, "error");
+  }
+  setTimeout(go2rtcRefreshStatus, 1000);
+}
+
+async function go2rtcStopService() {
+  const btn = $("btnGo2rtcStop");
+  if (btn) btn.disabled = true;
+  showMsg("go2rtcMsg", "Stopping go2rtc...", "");
+  try {
+    await api("/api/streaming/go2rtc/stop", "POST");
+    showMsg("go2rtcMsg", "Stopped", "ok");
+  } catch (e) {
+    showMsg("go2rtcMsg", e.message, "error");
+  }
+  setTimeout(go2rtcRefreshStatus, 1000);
+}
+
+function syncGo2rtcSectionVisibility() {
+  const section = $("camServiceSection");
+  if (!section) return;
+  const mode = $("setOperationMode")?.value || State.settings.operationMode || "gateway";
+  const hidden = mode === "remote";
+  section.style.display = hidden ? "none" : "";
+  // Also toggle the divider above the service section
+  const divider = section.previousElementSibling;
+  if (divider && divider.classList.contains("cam-section-divider")) {
+    divider.style.display = hidden ? "none" : "";
   }
 }
 
@@ -7812,7 +7900,7 @@ function initInverterGridDrag() {
     const card = findDragCard(e.target);
     if (!card) return;
     // Prevent drag from starting on interactive elements inside camera card
-    if (card.classList.contains("camera-card") && e.target.closest(".cam-modal-backdrop, .cam-controls, button, input, select")) {
+    if (card.classList.contains("camera-card") && e.target.closest(".cam-controls, button, input, select")) {
       e.preventDefault();
       return;
     }
@@ -8415,65 +8503,7 @@ function buildCameraCard() {
         <button class="cam-retry-btn" id="camRetryBtn" style="display:none">Retry</button>
       </div>
     </div>
-    <div class="cam-modal-backdrop" id="camModalBackdrop" style="display:none">
-      <div class="cam-modal">
-        <div class="cam-modal-title">
-          <span>Camera Settings</span>
-          <button class="cam-modal-close" id="btnCamModalClose">&times;</button>
-        </div>
-        <label>Stream Mode</label>
-        <select id="camMode" class="cam-inp">
-          <option value="hls">go2rtc (HLS)</option>
-          <option value="webrtc">go2rtc (WebRTC)</option>
-          <option value="ffmpeg">Direct FFmpeg (RTSP)</option>
-        </select>
-        <div class="cam-rtsp-warn" id="camRtspWarn">
-          ⚠ Direct FFmpeg mode requires FFmpeg installed on the server. The server transcodes RTSP to MPEG1 for the browser.
-        </div>
-        <div class="cam-section-fields" id="camGo2rtcFields">
-          <label>go2rtc Tailscale IP</label>
-          <input type="text" id="camGo2rtcIp" class="cam-inp" placeholder="100.93.11.9" autocomplete="off" />
-          <div class="cam-modal-row">
-            <div>
-              <label>API Port</label>
-              <input type="number" id="camGo2rtcPort" class="cam-inp" placeholder="1984" min="1" max="65535" autocomplete="off" />
-            </div>
-            <div>
-              <label>Stream Key</label>
-              <input type="text" id="camStreamKey" class="cam-inp" placeholder="tapo_cam" autocomplete="off" />
-            </div>
-          </div>
-        </div>
-        <div class="cam-section-fields" id="camRtspFields">
-          <div class="cam-modal-row">
-            <div>
-              <label>Camera IP</label>
-              <input type="text" id="camIp" class="cam-inp" placeholder="192.168.4.211" autocomplete="off" />
-            </div>
-            <div>
-              <label>RTSP Port</label>
-              <input type="number" id="camRtspPort" class="cam-inp" placeholder="554" min="1" max="65535" autocomplete="off" />
-            </div>
-          </div>
-          <label>Stream Path</label>
-          <select id="camStreamPath" class="cam-inp">
-            <option value="stream1">stream1 (High Quality)</option>
-            <option value="stream2">stream2 (Low Quality)</option>
-          </select>
-          <label>Username</label>
-          <input type="text" id="camUser" class="cam-inp" placeholder="Adsicamera" autocomplete="off" />
-          <label>Password</label>
-          <div class="cam-pw-wrap">
-            <input type="password" id="camPass" class="cam-inp" placeholder="••••••••" autocomplete="off" />
-            <button type="button" class="cam-pw-toggle" id="btnCamPwToggle" title="Show/hide password">👁</button>
-          </div>
-        </div>
-        <div class="cam-modal-actions">
-          <button class="cam-btn-apply" id="btnCamApply">Apply &amp; Connect</button>
-          <button class="cam-btn-reset" id="btnCamReset">Reset</button>
-        </div>
-      </div>
-    </div>`;
+`;
   return wrap;
 }
 
@@ -10880,12 +10910,25 @@ function initCameraPlayer() {
 
   cameraPlayer = new CameraPlayer();
 
-  // ── Settings Modal ──
-  const backdrop = $("camModalBackdrop");
+  // ── Settings Modal (page-level) ──
+  const backdrop = $("camSettingsModal");
   const modeSelect = $("camMode");
+  const modeCards = $("camModeCards");
   const go2rtcFields = $("camGo2rtcFields");
   const rtspFields = $("camRtspFields");
   const rtspWarn = $("camRtspWarn");
+  const serviceSection = $("camServiceSection");
+
+  function setActiveMode(mode) {
+    if (modeSelect) modeSelect.value = mode;
+    // Sync card active states
+    if (modeCards) {
+      for (const c of modeCards.querySelectorAll(".cam-mode-card")) {
+        c.classList.toggle("active", c.dataset.mode === mode);
+      }
+    }
+    updateFieldVisibility();
+  }
 
   function updateFieldVisibility() {
     const mode = modeSelect ? modeSelect.value : "hls";
@@ -10894,11 +10937,18 @@ function initCameraPlayer() {
     if (go2rtcFields) go2rtcFields.style.display = isGo2rtc ? "" : "none";
     if (rtspFields) rtspFields.style.display = isFfmpeg ? "" : "none";
     if (rtspWarn) rtspWarn.classList.toggle("visible", isFfmpeg);
+    // Show service section for go2rtc modes, hide for ffmpeg
+    if (serviceSection) serviceSection.style.display = isGo2rtc ? "" : "none";
+    // Also hide the divider above service section when ffmpeg
+    const divider = serviceSection?.previousElementSibling;
+    if (divider && divider.classList.contains("cam-section-divider")) {
+      divider.style.display = isGo2rtc ? "" : "none";
+    }
   }
 
   function loadFormFromStorage() {
     const s = camLoadSettings();
-    if (modeSelect) modeSelect.value = s.mode;
+    setActiveMode(s.mode);
     if ($("camGo2rtcIp")) $("camGo2rtcIp").value = s.go2rtcIp;
     if ($("camGo2rtcPort")) $("camGo2rtcPort").value = s.go2rtcPort;
     if ($("camStreamKey")) $("camStreamKey").value = s.streamKey;
@@ -10907,7 +10957,11 @@ function initCameraPlayer() {
     if ($("camStreamPath")) $("camStreamPath").value = s.streamPath;
     if ($("camUser")) $("camUser").value = s.user;
     if ($("camPass")) $("camPass").value = s.pass;
-    updateFieldVisibility();
+    // Load auto-start checkbox from server settings
+    const autoStart = $("setGo2rtcAutoStart");
+    if (autoStart && State.settings) {
+      autoStart.checked = String(State.settings.go2rtcAutoStart) === "1";
+    }
   }
 
   function readFormSettings() {
@@ -10924,33 +10978,53 @@ function initCameraPlayer() {
     };
   }
 
-  // Open / close modal
-  $("btnCamSettings")?.addEventListener("click", () => {
+  function openCamModal() {
     loadFormFromStorage();
-    if (backdrop) backdrop.style.display = "flex";
-  });
-  $("btnCamModalClose")?.addEventListener("click", () => {
-    if (backdrop) backdrop.style.display = "none";
-  });
-  backdrop?.addEventListener("click", (e) => {
-    if (e.target === backdrop) backdrop.style.display = "none";
-  });
+    if (backdrop) backdrop.classList.remove("hidden");
+    go2rtcStartPoll();
+  }
 
-  // Mode selector change
-  modeSelect?.addEventListener("change", updateFieldVisibility);
+  function closeCamModal() {
+    if (backdrop) backdrop.classList.add("hidden");
+    go2rtcStopPoll();
+  }
+
+  // Mode card clicks
+  if (modeCards) {
+    modeCards.addEventListener("click", (e) => {
+      const card = e.target.closest(".cam-mode-card");
+      if (!card || !card.dataset.mode) return;
+      setActiveMode(card.dataset.mode);
+    });
+  }
+
+  // Open / close modal
+  $("btnCamSettings")?.addEventListener("click", openCamModal);
+  $("btnCamModalClose")?.addEventListener("click", closeCamModal);
+  backdrop?.addEventListener("click", (e) => {
+    if (e.target === backdrop) closeCamModal();
+  });
 
   // Password show/hide
   $("btnCamPwToggle")?.addEventListener("click", () => {
     const pw = $("camPass");
     if (!pw) return;
-    pw.type = pw.type === "password" ? "text" : "password";
+    const show = pw.type === "password";
+    pw.type = show ? "text" : "password";
+    const icon = $("btnCamPwToggle")?.querySelector(".mdi");
+    if (icon) icon.className = show ? "mdi mdi-eye-off-outline" : "mdi mdi-eye-outline";
   });
 
   // Apply & Connect
   $("btnCamApply")?.addEventListener("click", () => {
     const s = readFormSettings();
     camSaveSettings(s);
-    if (backdrop) backdrop.style.display = "none";
+    // Persist go2rtc auto-start to server settings
+    const autoStart = $("setGo2rtcAutoStart");
+    if (autoStart) {
+      api("/api/settings", "POST", { go2rtcAutoStart: autoStart.checked ? "1" : "0" }).catch(() => {});
+    }
+    closeCamModal();
     cameraPlayer.reconnect();
   });
 
@@ -10959,6 +11033,10 @@ function initCameraPlayer() {
     camResetSettings();
     loadFormFromStorage();
   });
+
+  // go2rtc service buttons (wired here since elements now live in this modal)
+  $("btnGo2rtcStart")?.addEventListener("click", go2rtcStartService);
+  $("btnGo2rtcStop")?.addEventListener("click", go2rtcStopService);
 
   // Retry button
   $("camRetryBtn")?.addEventListener("click", () => {
@@ -12582,6 +12660,11 @@ async function loadAnalytics(options = {}) {
     loadWeeklyWeather(date, force).catch((err) => {
       console.warn("weekly weather load failed:", err?.message || err);
     });
+    if (date === today()) {
+      loadHourlyWeatherCharts().catch((err) => {
+        console.warn("hourly weather chart load failed:", err?.message || err);
+      });
+    }
   } catch (e) {
     console.error("loadAnalytics:", e);
   } finally {
@@ -12659,6 +12742,162 @@ function renderWeeklyWeather(rows, selectedDate = "") {
     .join("");
 }
 
+function renderHourlyWeatherCharts(data) {
+  const wrap = $("anaHourlyChartsWrap");
+  const empty = $("anaHourlyEmpty");
+  if (!wrap) return;
+
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  if (!rows.length) {
+    if (empty) { empty.style.display = ""; }
+    return;
+  }
+  if (empty) { empty.style.display = "none"; }
+
+  const labels = rows.map(r => {
+    const t = String(r.time || "");
+    const m = t.match(/T(\d{2}:\d{2})/);
+    return m ? m[1] : t.slice(-5);
+  });
+  const ghiData = rows.map(r => Number(r.ghi_wm2) || 0);
+  const dniData = rows.map(r => Number(r.dni_wm2) || 0);
+  const cloudData = rows.map(r => Number(r.cloud_pct) || 0);
+
+  const chartFont = { family: "var(--font-mono, monospace)", size: 9 };
+  const gridColor = "rgba(255,255,255,0.06)";
+  const tickColor = "rgba(255,255,255,0.4)";
+
+  // Irradiance chart
+  const irrCanvas = $("chartHourlyIrradiance");
+  if (irrCanvas) {
+    if (State.hourlyIrradianceChart) {
+      State.hourlyIrradianceChart.destroy();
+      State.hourlyIrradianceChart = null;
+    }
+    State.hourlyIrradianceChart = new Chart(irrCanvas, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "GHI",
+            data: ghiData,
+            borderColor: "#f5c542",
+            backgroundColor: "rgba(245,197,66,0.12)",
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: true,
+            tension: 0.3,
+          },
+          {
+            label: "DNI",
+            data: dniData,
+            borderColor: "#ff7a45",
+            backgroundColor: "rgba(255,122,69,0.06)",
+            borderWidth: 1,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+            borderDash: [4, 2],
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: {
+            display: true,
+            position: "top",
+            labels: { font: chartFont, color: tickColor, boxWidth: 12, padding: 4 },
+          },
+          tooltip: { mode: "index", intersect: false },
+        },
+        scales: {
+          x: {
+            ticks: {
+              font: chartFont,
+              color: tickColor,
+              maxRotation: 0,
+              autoSkip: true,
+              maxTicksLimit: 8,
+            },
+            grid: { color: gridColor },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: { font: chartFont, color: tickColor },
+            grid: { color: gridColor },
+          },
+        },
+      },
+    });
+  }
+
+  // Cloud cover chart
+  const cloudCanvas = $("chartHourlyCloud");
+  if (cloudCanvas) {
+    if (State.hourlyCloudChart) {
+      State.hourlyCloudChart.destroy();
+      State.hourlyCloudChart = null;
+    }
+    State.hourlyCloudChart = new Chart(cloudCanvas, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Cloud %",
+            data: cloudData,
+            backgroundColor: cloudData.map(v =>
+              v >= 80 ? "rgba(108,145,194,0.7)" :
+              v >= 50 ? "rgba(162,189,224,0.55)" :
+              v >= 25 ? "rgba(200,220,245,0.4)" :
+              "rgba(130,225,160,0.4)"
+            ),
+            borderColor: cloudData.map(v =>
+              v >= 80 ? "rgba(108,145,194,0.9)" :
+              v >= 50 ? "rgba(162,189,224,0.75)" :
+              v >= 25 ? "rgba(200,220,245,0.6)" :
+              "rgba(130,225,160,0.6)"
+            ),
+            borderWidth: 1,
+            borderRadius: 2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { mode: "index", intersect: false },
+        },
+        scales: {
+          x: {
+            ticks: {
+              font: chartFont,
+              color: tickColor,
+              maxRotation: 0,
+              autoSkip: true,
+              maxTicksLimit: 8,
+            },
+            grid: { color: gridColor },
+          },
+          y: {
+            beginAtZero: true,
+            max: 100,
+            ticks: { font: chartFont, color: tickColor, stepSize: 25 },
+            grid: { color: gridColor },
+          },
+        },
+      },
+    });
+  }
+}
+
 async function loadWeeklyWeather(date, force = false) {
   const day = String(date || $("anaDate")?.value || today()).trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
@@ -12687,6 +12926,17 @@ async function loadWeeklyWeather(date, force = false) {
   State.analyticsWeeklyWeather = rows;
   State.analyticsWeatherDate = day;
   renderWeeklyWeather(rows, day);
+}
+
+async function loadHourlyWeatherCharts() {
+  try {
+    const payload = await api("/api/weather/hourly-today");
+    if (payload?.ok) {
+      renderHourlyWeatherCharts(payload);
+    }
+  } catch (e) {
+    console.warn("[weather] Hourly chart load failed:", e.message);
+  }
 }
 
 function isTodayAnalyticsDate() {
@@ -13030,6 +13280,20 @@ function ensureAnalyticsCards() {
         </div>
       </div>
       <div class="exp-result analytics-gen-result" id="genDayResult"></div>
+    </div>
+    <div class="analytics-weather-wrap" id="anaHourlyChartsWrap">
+      <div class="analytics-side-label">Today's Weather — Hourly</div>
+      <div class="ana-hourly-charts">
+        <div class="ana-hourly-chart-box">
+          <div class="ana-hourly-chart-label">Irradiance (W/m²)</div>
+          <canvas id="chartHourlyIrradiance" height="90"></canvas>
+        </div>
+        <div class="ana-hourly-chart-box">
+          <div class="ana-hourly-chart-label">Cloud Cover (%)</div>
+          <canvas id="chartHourlyCloud" height="90"></canvas>
+        </div>
+      </div>
+      <div class="ana-hourly-empty" id="anaHourlyEmpty" style="display:none">No hourly data available.</div>
     </div>
     <div class="analytics-weather-wrap">
       <div class="analytics-side-label">7-Day Weather Outlook</div>

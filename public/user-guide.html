@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.6.4</title>
+<title>ADSI Inverter Dashboard — User Guide v2.6.5</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -1021,15 +1021,16 @@
     <a href="#s12"><span class="toc-num">12</span> Audit Page</a>
     <a href="#s13"><span class="toc-num">13</span> Report Page</a>
     <a href="#s14"><span class="toc-num">14</span> Export Page</a>
-    <a href="#s15"><span class="toc-num">15</span> Settings</a>
-    <a href="#s16"><span class="toc-num">16</span> Operating Modes</a>
-    <a href="#s17"><span class="toc-num">17</span> Operator Messaging</a>
-    <a href="#s18"><span class="toc-num">18</span> Cloud Backup &amp; Restore</a>
-    <a href="#s19"><span class="toc-num">19</span> Standard Workflows</a>
-    <a href="#s20"><span class="toc-num">20</span> IP Configuration</a>
-    <a href="#s21"><span class="toc-num">21</span> Keyboard Shortcuts &amp; Tips</a>
-    <a href="#s22"><span class="toc-num">22</span> Troubleshooting</a>
-    <a href="#s23"><span class="toc-num">23</span> Quick Reference</a>
+    <a href="#sCam"><span class="toc-num">15</span> Camera Viewer</a>
+    <a href="#s15"><span class="toc-num">16</span> Settings</a>
+    <a href="#s16"><span class="toc-num">17</span> Operating Modes</a>
+    <a href="#s17"><span class="toc-num">18</span> Operator Messaging</a>
+    <a href="#s18"><span class="toc-num">19</span> Cloud Backup &amp; Restore</a>
+    <a href="#s19"><span class="toc-num">20</span> Standard Workflows</a>
+    <a href="#s20"><span class="toc-num">21</span> IP Configuration</a>
+    <a href="#s21"><span class="toc-num">22</span> Keyboard Shortcuts &amp; Tips</a>
+    <a href="#s22"><span class="toc-num">23</span> Troubleshooting</a>
+    <a href="#s23"><span class="toc-num">24</span> Quick Reference</a>
   </div>
 </nav>
 
@@ -1335,7 +1336,143 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 15. SETTINGS -->
+<!-- 15. CAMERA VIEWER -->
+<section id="sCam">
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="5" width="14" height="12" rx="2" stroke="#4d9fff" stroke-width="1.8"/><path d="M16 9l4-2v8l-4-2V9z" stroke="#4d9fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Camera Viewer</h2></div>
+  <p>Live IP camera monitoring integrated into the main dashboard as a draggable card. Supports three streaming modes via a bundled <b>go2rtc</b> process manager and a direct FFmpeg transcoding fallback. Available since <b>v2.6.4</b>.</p>
+
+  <h3>Stream Modes</h3>
+  <table><thead><tr><th>Mode</th><th>Backend</th><th>Protocol</th><th>Description</th></tr></thead><tbody>
+    <tr><td><b>HLS</b> (default)</td><td>go2rtc</td><td>HTTP Live Streaming</td><td>Best compatibility. go2rtc converts RTSP to HLS segments. Latency ~2&ndash;5 s. Uses hls.js in browser.</td></tr>
+    <tr><td><b>WebRTC</b></td><td>go2rtc</td><td>WebRTC peer-to-peer</td><td>Ultra-low latency (&lt;1 s). Requires STUN/TURN for NAT traversal. go2rtc acts as SFU.</td></tr>
+    <tr><td><b>FFmpeg</b></td><td>Server</td><td>MPEG1/TS over WebSocket</td><td>Direct RTSP transcode on the Express server. Requires FFmpeg installed on the host. Uses jsmpeg decoder in browser.</td></tr>
+  </tbody></table>
+  <div class="info-card tip"><div class="info-card-label">Choosing a Mode</div><p>Use <b>HLS</b> for reliable, low-effort streaming. Choose <b>WebRTC</b> when sub-second latency matters. Fall back to <b>FFmpeg</b> only when go2rtc is unavailable or the camera does not support standard RTSP.</p></div>
+
+  <h3>Camera Card</h3>
+  <p>The camera card is a draggable element that participates in the inverter grid layout. It renders in all layout modes (2-col through 5-col grids) and matches the sizing rules of inverter cards.</p>
+  <table><thead><tr><th>Element</th><th>Location</th><th>Function</th></tr></thead><tbody>
+    <tr><td>Video viewport</td><td>Card body</td><td>Live stream display (fills card)</td></tr>
+    <tr><td>Camera name label</td><td>Top-left overlay</td><td>Shows camera name (e.g., &ldquo;Tapo C110 &ndash; Live&rdquo;)</td></tr>
+    <tr><td>Live indicator</td><td>Top-right overlay</td><td>Blinking red dot when stream is active</td></tr>
+    <tr><td>Settings gear</td><td>Bottom bar</td><td>Opens the Camera Settings modal</td></tr>
+    <tr><td>Mute/Unmute</td><td>Bottom bar</td><td>Toggle audio (if available)</td></tr>
+    <tr><td>Fullscreen</td><td>Bottom bar</td><td>Toggle fullscreen video view</td></tr>
+    <tr><td>Loading spinner</td><td>Center overlay</td><td>Shown while stream is buffering</td></tr>
+    <tr><td>Error overlay</td><td>Center overlay</td><td>Displayed with &ldquo;Retry&rdquo; button on stream failure</td></tr>
+  </tbody></table>
+  <div class="info-card note"><div class="info-card-label">Auto-Reconnect</div><p>When a stream drops, the player automatically retries every <b>5 seconds</b> until the connection is restored.</p></div>
+
+  <h3>Camera Settings Modal</h3>
+  <p>A page-level modal opened by clicking the <b>gear icon</b> on the camera card. It consolidates all camera and go2rtc configuration in one place.</p>
+
+  <h4>1. Stream Mode Selector</h4>
+  <p>Three visual mode cards at the top of the modal. Selecting a mode dynamically shows or hides the relevant input sections below.</p>
+  <table><thead><tr><th>Mode Card</th><th>Shows</th><th>Hides</th></tr></thead><tbody>
+    <tr><td>HLS / WebRTC</td><td>go2rtc Connection, go2rtc Service</td><td>RTSP Connection</td></tr>
+    <tr><td>FFmpeg</td><td>RTSP Connection</td><td>go2rtc Connection, go2rtc Service</td></tr>
+  </tbody></table>
+
+  <h4>2. go2rtc Connection (HLS / WebRTC modes)</h4>
+  <table><thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead><tbody>
+    <tr><td>Tailscale / Server IP</td><td><code>100.93.11.9</code></td><td>IP address of the machine running go2rtc</td></tr>
+    <tr><td>API Port</td><td><code>1984</code></td><td>go2rtc HTTP API port</td></tr>
+    <tr><td>Stream Key</td><td><code>tapo_cam</code></td><td>Stream name configured in <code>go2rtc.yaml</code></td></tr>
+  </tbody></table>
+
+  <h4>3. RTSP Connection (FFmpeg mode)</h4>
+  <table><thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead><tbody>
+    <tr><td>Camera IP</td><td><code>192.168.4.211</code></td><td>IP address of the IP camera</td></tr>
+    <tr><td>RTSP Port</td><td><code>554</code></td><td>Camera RTSP port</td></tr>
+    <tr><td>Stream Path</td><td><code>stream1</code></td><td>Dropdown: <code>stream1</code> (High Quality) or <code>stream2</code> (Low Quality)</td></tr>
+    <tr><td>Username</td><td><code>Adsicamera</code></td><td>RTSP authentication username</td></tr>
+    <tr><td>Password</td><td><i>(empty)</i></td><td>RTSP authentication password (show/hide toggle)</td></tr>
+  </tbody></table>
+  <div class="info-card warn"><div class="info-card-label">FFmpeg Required</div><p>FFmpeg mode requires FFmpeg to be installed on the server host and available on PATH. A warning banner is shown inside the modal when this mode is selected.</p></div>
+
+  <h4>4. go2rtc Service (HLS / WebRTC modes, Gateway only)</h4>
+  <p>Manage the bundled go2rtc background process directly from the modal. This section is <b>hidden in Remote mode</b>.</p>
+  <table><thead><tr><th>Element</th><th>Description</th></tr></thead><tbody>
+    <tr><td>Status grid</td><td>4-column display: <b>Status</b> (stopped/starting/running/error), <b>PID</b>, <b>Crashes</b> (count), <b>Health</b> (last check time)</td></tr>
+    <tr><td>Auto-start checkbox</td><td>When checked, go2rtc starts automatically on server boot. Saved as server setting <code>go2rtcAutoStart</code>.</td></tr>
+    <tr><td>Start button</td><td>Starts go2rtc process. Disabled while already running.</td></tr>
+    <tr><td>Stop button</td><td>Gracefully stops go2rtc (SIGTERM, then SIGKILL after 3 s). Disabled while stopped.</td></tr>
+    <tr><td>Status message</td><td>Feedback area for start/stop results and errors.</td></tr>
+  </tbody></table>
+  <div class="info-card note"><div class="info-card-label">Status Polling</div><p>While the modal is open, the dashboard polls <code>/api/streaming/go2rtc-status</code> every <b>5 seconds</b> and updates the status grid in real time. Polling stops when the modal closes.</p></div>
+
+  <h4>5. Modal Actions</h4>
+  <table><thead><tr><th>Button</th><th>Function</th></tr></thead><tbody>
+    <tr><td><b>Reset Defaults</b></td><td>Restores all fields to factory defaults (see defaults table below)</td></tr>
+    <tr><td><b>Apply &amp; Connect</b></td><td>Saves settings to localStorage, persists auto-start to server, closes modal, and reconnects the stream</td></tr>
+  </tbody></table>
+
+  <h3>Default Configuration</h3>
+  <table><thead><tr><th>Setting</th><th>Default Value</th><th>Storage Key</th></tr></thead><tbody>
+    <tr><td>Stream Mode</td><td><code>hls</code></td><td><code>cam_mode</code></td></tr>
+    <tr><td>go2rtc IP</td><td><code>100.93.11.9</code></td><td><code>cam_go2rtc_ip</code></td></tr>
+    <tr><td>go2rtc API Port</td><td><code>1984</code></td><td><code>cam_go2rtc_port</code></td></tr>
+    <tr><td>Stream Key</td><td><code>tapo_cam</code></td><td><code>cam_stream_key</code></td></tr>
+    <tr><td>Camera IP</td><td><code>192.168.4.211</code></td><td><code>cam_ip</code></td></tr>
+    <tr><td>RTSP Port</td><td><code>554</code></td><td><code>cam_rtsp_port</code></td></tr>
+    <tr><td>Stream Path</td><td><code>stream1</code></td><td><code>cam_stream_path</code></td></tr>
+    <tr><td>Username</td><td><code>Adsicamera</code></td><td><code>cam_user</code></td></tr>
+    <tr><td>Password</td><td><i>(empty)</i></td><td><code>cam_pass</code></td></tr>
+  </tbody></table>
+
+  <h3>go2rtc Service Defaults</h3>
+  <table><thead><tr><th>Setting</th><th>Default</th><th>Notes</th></tr></thead><tbody>
+    <tr><td>Auto-start on boot</td><td>Disabled (<code>0</code>)</td><td>Server setting <code>go2rtcAutoStart</code></td></tr>
+    <tr><td>API bind address</td><td><code>127.0.0.1:1984</code></td><td>Localhost only (security)</td></tr>
+    <tr><td>WebRTC bind address</td><td><code>127.0.0.1:8555</code></td><td>Localhost only (security)</td></tr>
+    <tr><td>Max crash restarts</td><td>3</td><td>After 3 crashes, status becomes &ldquo;error&rdquo;</td></tr>
+    <tr><td>Health check interval</td><td>5 seconds</td><td>HTTP GET to go2rtc API</td></tr>
+    <tr><td>Health check timeout</td><td>2 seconds</td><td>Per health-check request</td></tr>
+  </tbody></table>
+
+  <h3>go2rtc Process Lifecycle</h3>
+  <div class="diagram-container">
+    <svg width="520" height="100" viewBox="0 0 520 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="10" y="35" width="90" height="30" rx="6" fill="rgba(148,163,184,.08)" stroke="#94a3b8" stroke-width="1.2"/>
+      <text x="55" y="55" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600" font-family="Segoe UI">stopped</text>
+      <line x1="100" y1="50" x2="145" y2="50" stroke="#64748b" stroke-width="1.2"/><polygon points="140,46 148,50 140,54" fill="#64748b"/>
+      <text x="123" y="42" text-anchor="middle" fill="#64748b" font-size="8" font-family="Segoe UI">start()</text>
+      <rect x="148" y="35" width="90" height="30" rx="6" fill="rgba(251,191,36,.08)" stroke="#fbbf24" stroke-width="1.2"/>
+      <text x="193" y="55" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600" font-family="Segoe UI">starting</text>
+      <line x1="238" y1="50" x2="283" y2="50" stroke="#64748b" stroke-width="1.2"/><polygon points="278,46 286,50 278,54" fill="#64748b"/>
+      <text x="261" y="42" text-anchor="middle" fill="#64748b" font-size="8" font-family="Segoe UI">health OK</text>
+      <rect x="286" y="35" width="90" height="30" rx="6" fill="rgba(52,211,153,.08)" stroke="#34d399" stroke-width="1.2"/>
+      <text x="331" y="55" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600" font-family="Segoe UI">running</text>
+      <line x1="376" y1="50" x2="421" y2="50" stroke="#64748b" stroke-width="1.2"/><polygon points="416,46 424,50 416,54" fill="#64748b"/>
+      <text x="399" y="42" text-anchor="middle" fill="#64748b" font-size="8" font-family="Segoe UI">3 crashes</text>
+      <rect x="424" y="35" width="80" height="30" rx="6" fill="rgba(248,113,113,.08)" stroke="#f87171" stroke-width="1.2"/>
+      <text x="464" y="55" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600" font-family="Segoe UI">error</text>
+      <path d="M331 65 C331 85 55 85 55 65" stroke="#64748b" stroke-width="1" stroke-dasharray="4 2" fill="none"/>
+      <text x="193" y="82" text-anchor="middle" fill="#64748b" font-size="8" font-family="Segoe UI">stop() or crash &lt;3</text>
+    </svg>
+    <div class="diagram-caption">Fig 5a &mdash; go2rtc process state machine</div>
+  </div>
+
+  <h3>Security</h3>
+  <ul>
+    <li><b>Localhost-only binding</b> &mdash; go2rtc API (<code>127.0.0.1:1984</code>) and WebRTC (<code>127.0.0.1:8555</code>) are not accessible from external networks.</li>
+    <li><b>Gateway-mode only</b> &mdash; go2rtc start is blocked with HTTP 403 in Remote mode. The service section is hidden in the UI.</li>
+    <li><b>STUN server</b> &mdash; Uses Google&rsquo;s public STUN server (<code>stun:stun.l.google.com:19302</code>) for WebRTC ICE negotiation.</li>
+  </ul>
+
+  <h3>Troubleshooting</h3>
+  <table><thead><tr><th>Issue</th><th>Cause</th><th>Resolution</th></tr></thead><tbody>
+    <tr><td>&ldquo;Stream failed&rdquo; error</td><td>go2rtc not running or wrong IP/port</td><td>Open camera settings, verify go2rtc IP and port, click Start in service section</td></tr>
+    <tr><td>go2rtc won&rsquo;t start</td><td>Port 1984 or 8555 in use</td><td>Stop conflicting process or edit <code>go2rtc.yaml</code> ports</td></tr>
+    <tr><td>WebRTC no video</td><td>NAT/firewall blocking</td><td>Ensure STUN server is reachable; consider configuring TURN</td></tr>
+    <tr><td>FFmpeg mode no video</td><td>FFmpeg not installed on server</td><td>Install FFmpeg and ensure it is on PATH</td></tr>
+    <tr><td>Service section hidden</td><td>Remote mode active</td><td>Switch to Gateway mode in Settings &rarr; Connectivity</td></tr>
+    <tr><td>Auto-restart stopped</td><td>3+ consecutive crashes</td><td>Check go2rtc logs, fix RTSP source, then manually restart</td></tr>
+  </tbody></table>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
+</section>
+
+<!-- 16. SETTINGS -->
 <section id="s15">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="3" stroke="#94a3b8" stroke-width="1.8"/><path d="M11 2v3M11 17v3M2 11h3M17 11h3M4.9 4.9l2.1 2.1M15 15l2.1 2.1M4.9 17.1l2.1-2.1M15 7l2.1-2.1" stroke="#94a3b8" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Settings</h2></div>
   <p>Administrative center with 8 configuration sections: Plant, Data &amp; Polling, Cap Defaults, Connectivity &amp; Sync, Forecast, License, App Updates, and Cloud Backup.</p>
@@ -1398,6 +1535,7 @@
   <div class="wf-card"><h4>Daily Performance Review</h4><ol class="steps"><li>Open Analytics for interval review and day-ahead comparison.</li><li>Open Energy for interval detail.</li><li>Open Report for formal summary.</li><li>Export from Report or Export page.</li></ol></div>
   <div class="wf-card"><h4>Remote Standby Refresh</h4><ol class="steps"><li>Confirm Remote mode.</li><li>Open Settings &rarr; Connectivity &amp; Sync.</li><li>Click Refresh Standby DB.</li><li>Allow preflight, then wait for snapshot transfer.</li><li>Restart to apply staged database.</li></ol></div>
   <div class="wf-card"><h4>Cloud Backup</h4><ol class="steps"><li>Configure and authorize provider.</li><li>Save settings and select scope.</li><li>Run Backup Now or rely on schedule.</li><li>Review backup history.</li></ol></div>
+  <div class="wf-card"><h4>Camera Setup</h4><ol class="steps"><li>On the Dashboard, locate the camera card (or drag it into position).</li><li>Click the gear icon on the camera card to open Camera Settings.</li><li>Select a stream mode: <b>HLS</b> (recommended), <b>WebRTC</b>, or <b>FFmpeg</b>.</li><li>For HLS/WebRTC: enter the go2rtc IP, port, and stream key. In the Service section, click <b>Start</b> to launch go2rtc.</li><li>For FFmpeg: enter camera IP, RTSP port, stream path, username, and password.</li><li>Optionally check <b>Auto-start on server boot</b> to persist go2rtc across restarts.</li><li>Click <b>Apply &amp; Connect</b>. The stream should appear in the camera card.</li><li>If the stream fails, check the troubleshooting table in the Camera Viewer section.</li></ol></div>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1436,6 +1574,9 @@
     <tr><td>Silent alarms</td><td>Muted or no audio</td><td>Re-enable sound, check audio</td></tr>
     <tr><td>Export fails</td><td>Path/date/format issue</td><td>Verify folder, filters, mode</td></tr>
     <tr><td>High WAPE</td><td>Stale Solcast or retraining needed</td><td>Check Performance Monitor</td></tr>
+    <tr><td>Camera &ldquo;Stream failed&rdquo;</td><td>go2rtc not running or wrong IP</td><td>Open Camera Settings, verify IP/port, Start service</td></tr>
+    <tr><td>go2rtc won&rsquo;t start</td><td>Port 1984/8555 in use</td><td>Stop conflicting process or change ports</td></tr>
+    <tr><td>Camera service hidden</td><td>Remote mode active</td><td>Switch to Gateway mode</td></tr>
   </tbody></table>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
@@ -1446,7 +1587,7 @@
   <h3>Defaults &amp; Constants</h3>
   <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated / Dependable</td><td>997.0 kW / 917.0 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.25 kW each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
   <h3>Page Quick Finder</h3>
-  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Plant output capping</td><td>Plant Cap</td></tr><tr><td>Cap schedules</td><td>Plant Cap &rarr; Scheduled Auto-Cap</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr></tbody></table>
+  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Plant output capping</td><td>Plant Cap</td></tr><tr><td>Cap schedules</td><td>Plant Cap &rarr; Scheduled Auto-Cap</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr><tr><td>Live camera feed</td><td>Camera card (Dashboard)</td></tr><tr><td>Camera / go2rtc config</td><td>Camera Settings modal</td></tr></tbody></table>
   <h3>Data Units</h3>
   <table><thead><tr><th>Item</th><th>Unit</th></tr></thead><tbody><tr><td>PAC / PDC</td><td>W or kW</td></tr><tr><td>Energy</td><td>MWh</td></tr><tr><td>Duration</td><td>sec / min / hrs</td></tr><tr><td>WAPE</td><td>%</td></tr></tbody></table>
   <h3>Status Terms</h3>

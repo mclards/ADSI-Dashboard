@@ -18,6 +18,7 @@ const fetch = require("node-fetch");
 const cron = require("node-cron");
 const { getPortableDataRoot } = require("./runtimeEnvPaths");
 const streaming = require("./streaming");
+const go2rtcManager = require("./go2rtcManager");
 
 const {
   getSetting,
@@ -189,6 +190,14 @@ const WEATHER_DAILY_FIELDS = [
   "shortwave_radiation_sum",
 ].join(",");
 const weatherWeeklyCache = new Map();
+const weatherHourlyCache = new Map();
+const WEATHER_HOURLY_FIELDS = [
+  "shortwave_radiation",
+  "direct_normal_irradiance",
+  "diffuse_radiation",
+  "cloud_cover",
+  "temperature_2m",
+].join(",");
 const SOLCAST_TIMEOUT_MS = 20000;
 const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
@@ -9279,6 +9288,28 @@ function querySlotRowsForWeekAhead(dates) {
   });
 }
 
+async function fetchWeatherWithRetry(url, opts = {}, maxRetries = 2) {
+  const delays = [1000, 3000];
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const r = await fetch(url, { timeout: 20000, ...opts });
+      if (r.ok) return r;
+      if (r.status >= 500 && attempt < maxRetries) {
+        await new Promise(ok => setTimeout(ok, delays[attempt] || 3000));
+        continue;
+      }
+      throw new Error(`HTTP ${r.status}`);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxRetries) {
+        await new Promise(ok => setTimeout(ok, delays[attempt] || 3000));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 function classifyDailySky(row) {
   const cloud = Number(row?.cloud_pct || 0);
   const rain = Number(row?.precip_mm || 0);
@@ -9312,7 +9343,7 @@ async function fetchDailyWeatherRange(startDay, endDay, useArchive = false) {
     `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
 
   try {
-    const r = await fetch(url, { timeout: 20000 });
+    const r = await fetchWeatherWithRetry(url);
     if (!r.ok) {
       throw new Error(`Weather API HTTP ${r.status}`);
     }
@@ -9421,6 +9452,62 @@ async function getWeeklyWeather(startDay) {
       sky: "N/A",
     };
   });
+}
+
+async function fetchHourlyWeatherToday() {
+  const todayStr = localDateStr();
+  const now = Date.now();
+  const cached = weatherHourlyCache.get(todayStr);
+  if (cached && now - Number(cached.ts || 0) <= WEATHER_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const _lat = Number(getSetting("plantLatitude", WEATHER_LAT));
+  const _lon = Number(getSetting("plantLongitude", WEATHER_LON));
+  const url =
+    `https://api.open-meteo.com/v1/forecast?latitude=${_lat}&longitude=${_lon}` +
+    `&hourly=${encodeURIComponent(WEATHER_HOURLY_FIELDS)}` +
+    `&start_date=${todayStr}&end_date=${todayStr}` +
+    `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
+
+  try {
+    const r = await fetchWeatherWithRetry(url);
+    const payload = await r.json();
+    const h = payload?.hourly || {};
+    const time = Array.isArray(h.time) ? h.time : [];
+    const ghi = Array.isArray(h.shortwave_radiation) ? h.shortwave_radiation : [];
+    const dni = Array.isArray(h.direct_normal_irradiance) ? h.direct_normal_irradiance : [];
+    const dhi = Array.isArray(h.diffuse_radiation) ? h.diffuse_radiation : [];
+    const cloud = Array.isArray(h.cloud_cover) ? h.cloud_cover : [];
+    const temp = Array.isArray(h.temperature_2m) ? h.temperature_2m : [];
+
+    const rows = [];
+    for (let i = 0; i < time.length; i++) {
+      rows.push({
+        time: String(time[i] || ""),
+        ghi_wm2: Number.isFinite(Number(ghi[i])) ? Math.round(Number(ghi[i])) : 0,
+        dni_wm2: Number.isFinite(Number(dni[i])) ? Math.round(Number(dni[i])) : 0,
+        dhi_wm2: Number.isFinite(Number(dhi[i])) ? Math.round(Number(dhi[i])) : 0,
+        cloud_pct: Number.isFinite(Number(cloud[i])) ? Math.round(Number(cloud[i])) : 0,
+        temp_c: Number.isFinite(Number(temp[i])) ? Number(Number(temp[i]).toFixed(1)) : null,
+      });
+    }
+
+    const data = { date: todayStr, rows };
+    weatherHourlyCache.set(todayStr, { ts: now, data });
+
+    // Evict old entries
+    for (const [k, v] of weatherHourlyCache) {
+      if (now - (v.ts || 0) > 24 * 60 * 60 * 1000) weatherHourlyCache.delete(k);
+    }
+    return data;
+  } catch (err) {
+    if (cached && cached.data) {
+      console.warn(`[weather] Hourly API unavailable (${err.message}); serving stale cache`);
+      return cached.data;
+    }
+    throw err;
+  }
 }
 
 function resolveForecastLaunch() {
@@ -11255,6 +11342,30 @@ app.ws("/ws/camera", (ws, req) => {
 
   ws.on("close", () => { if (registered) streaming.unregisterStreamClient(ws); });
   ws.on("error", () => { if (registered) streaming.unregisterStreamClient(ws); });
+});
+
+/* ── go2rtc process control (gateway-mode only) ───────────────────── */
+app.get("/api/streaming/go2rtc-status", (req, res) => {
+  res.json(go2rtcManager.getStatus());
+});
+
+app.post("/api/streaming/go2rtc/start", (req, res) => {
+  if (isRemoteMode()) {
+    return res
+      .status(403)
+      .json({ ok: false, error: "go2rtc is only available in gateway mode." });
+  }
+  go2rtcManager
+    .start(true)
+    .then((r) => res.json(r))
+    .catch((e) => res.status(500).json({ ok: false, error: e.message }));
+});
+
+app.post("/api/streaming/go2rtc/stop", (req, res) => {
+  go2rtcManager
+    .stop()
+    .then(() => res.json({ ok: true }))
+    .catch((e) => res.status(500).json({ ok: false, error: e.message }));
 });
 
 app.get("/api/live", (req, res) => {
@@ -13398,6 +13509,18 @@ app.get("/api/weather/weekly", async (req, res) => {
   }
 });
 
+app.get("/api/weather/hourly-today", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const data = await fetchHourlyWeatherToday();
+    return res.json({ ok: true, ...data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/forecast/solcast/test", async (req, res) => {
   try {
     const cfg = buildSolcastConfigFromInput(req.body || {});
@@ -15282,6 +15405,16 @@ const httpServer = app.listen(PORT, () => {
     plantCapController.start();
   }
   applyRuntimeMode();
+  // Auto-start go2rtc if enabled and in gateway mode
+  if (!isRemoteMode() && getSetting("go2rtcAutoStart", "0") === "1") {
+    go2rtcManager
+      .start(true)
+      .then((r) => {
+        if (r.ok) console.log(`[go2rtc] auto-started (PID: ${r.pid})`);
+        else console.warn(`[go2rtc] auto-start failed: ${r.error || "unknown"}`);
+      })
+      .catch((err) => console.warn(`[go2rtc] auto-start error: ${err.message}`));
+  }
   if (process.send) process.send("ready");
 });
 
@@ -15620,6 +15753,7 @@ function _beginShutdown(mode, reason) {
     } catch (_) {}
   }
   try { poller.stop(); } catch (_) {}
+  try { go2rtcManager.stop(); } catch (_) {}
 
   _shutdownPromise = new Promise((resolve) => {
     let settled = false;

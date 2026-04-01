@@ -57,7 +57,9 @@
     ],
     "additionalDirectories": [
       "d:\\ADSI-Dashboard\\.claude",
-      "C:\\Users\\User\\.claude\\sessions"
+      "C:\\Users\\User\\.claude\\sessions",
+      "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard\\references",
+      "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard"
     ]
   },
   "exclude": [

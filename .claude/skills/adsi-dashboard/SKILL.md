@@ -32,9 +32,9 @@ Detailed reference material lives in `references/` — read those files when wor
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.4.33` — source of truth: `package.json` |
+| Repo version baseline | `2.6.4` — source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.4.33` |
+| Latest published release | `v2.6.4` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
 
@@ -67,7 +67,8 @@ No built-in defaults for: remote gateway API token, Solcast credentials, cloud-b
 | Database | SQLite via `better-sqlite3` |
 | Frontend | Vanilla JS + Chart.js 4 — `public/js/app.js` |
 | Inverter service | Python FastAPI port 9000, Modbus TCP — `services/inverter_engine.py` |
-| Forecast service | Python ML engine — `services/forecast_engine.py` |
+| Forecast service | Python ML engine — `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.1+ |
+| Camera streaming | Bundled go2rtc (HLS/WebRTC) + FFmpeg fallback — `server/go2rtcManager.js`, `server/go2rtc/` |
 | Modbus driver | `drivers/modbus_tcp.py` |
 
 Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebSocket → Browser`
@@ -82,6 +83,7 @@ Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebS
 | `electron/` | `main.js`, `preload.js` |
 | `server/` | Express server, DB, poller, exporter, subsystem modules |
 | `server/cloudProviders/` | OneDrive, Google Drive, S3 |
+| `server/go2rtc/` | Bundled go2rtc binary + YAML config (extraResources → `backend/go2rtc/`) |
 | `server/tests/` | Node.js smoke tests, Playwright UI spec |
 | `services/` | Python backend, shared data layer, PyInstaller specs |
 | `services/tests/` | Python unit tests |
@@ -116,11 +118,11 @@ Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebS
 
 **`gateway`** — polls plant locally; authoritative source of truth for live data, reports, forecasts, and replication snapshots; the only mode in which forecast generation runs.
 
-**`remote`** — gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy.
+**`remote`** — gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy. If the gateway is unreachable during startup, a **Connection Mode** picker appears on the loading screen allowing the operator to switch to `gateway` or retry `remote`.
 
 Live bridge health states: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, `config-error`.
 
-Switching from `remote` to `gateway` must immediately abort in-flight remote fetches, close the remote WebSocket, and stop remote chat polling.
+Switching from `remote` to `gateway` must immediately abort in-flight remote fetches, close the remote WebSocket, and stop remote chat polling. The mode picker on the loading screen persists the chosen mode via `/api/settings` POST (with direct SQLite fallback) then calls `retryServerStartup()`.
 
 ---
 
@@ -130,7 +132,7 @@ Switching from `remote` to `gateway` must immediately abort in-flight remote fet
 |---|---|
 | Electron | `electron/main.js`, `electron/preload.js` |
 | Server — core | `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js` |
-| Server — subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js` |
+| Server — subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js`, `server/go2rtcManager.js` |
 | Frontend | `public/index.html`, `public/js/app.js`, `public/css/style.css` |
 | Python | `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `services/InverterCoreService.spec`, `services/ForecastCoreService.spec`, `drivers/modbus_tcp.py` |
 

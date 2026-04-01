@@ -49,7 +49,7 @@ Run authority order: `solcast_direct` > `ml_solcast_hybrid_fresh` > `ml_solcast_
 Solcast is a **high-authority input**. It must not be skipped or treated as optional when available.
 
 **In ML training:**
-- `collect_training_data()` and `collect_history_days()` must consume Solcast snapshot data as a training feature when available.
+- `collect_training_data_hardened()` and `collect_history_days()` must consume Solcast snapshot data as a training feature when available.
 - Do not fall back to pure physics baseline when Solcast snapshots exist.
 - `build_solcast_reliability_artifact()` builds per-weather-bucket trust scores feeding `solcast_resolution_weight` and `solcast_resolution_support` as ML features.
 
@@ -75,7 +75,7 @@ Solcast is a **high-authority input**. It must not be skipped or treated as opti
 | `_fetch_run_audit_meta()` | Resolves rich run metadata for QA persistence |
 | `_memory_source_weight()` | Source-quality weighting for provenance-aware correction |
 | `_persist_qa_comparison()` | Writes day/slot comparison rows with eligibility rules and support weights |
-| `collect_training_data()` / `collect_training_data_hardened()` | Training data with cap-dispatch reconstruction |
+| `collect_training_data_hardened()` | Training data with cap-dispatch reconstruction |
 | `collect_history_days()` | Stores `cap_dispatch_mask` per sample |
 | `forecast_qa()` | QA scoring — WAPE, MAPE, total-energy APE, slot timing error |
 | `run_backtest()` | Historical scoring without overwriting live rows |
@@ -107,7 +107,7 @@ Do not remove the `scope` column from `audit_log` or change the `"plant-cap"` ta
 
 Loss factors in `ipconfig.json` under `losses: { "1": 2.5, ... }`. Default 2.5%. Affect forecast engine only — never raw telemetry, dashboard, or exports.
 
-Loss-adjusted loaders used by: `collect_training_data()`, `collect_history_days()`, `compute_error_memory()`, `build_intraday_adjusted_forecast()`, `forecast_qa()`, `run_backtest()`, `build_solcast_reliability_artifact()`. When all losses are 0, short-circuit to raw `load_actual()` cache.
+Loss-adjusted loaders used by: `collect_training_data_hardened()`, `collect_history_days()`, `compute_error_memory()`, `build_intraday_adjusted_forecast()`, `forecast_qa()`, `run_backtest()`, `build_solcast_reliability_artifact()`. When all losses are 0, short-circuit to raw `load_actual()` cache.
 
 ## Forecast Export Ceiling
 
@@ -182,7 +182,7 @@ The Forecast Performance Monitor panel defaults to collapsed on first dashboard 
 | `solcast_spread_pct` | `100 × (hi - lo) / forecast` | Uncertainty as percentage of point estimate (0–200%) |
 | `solcast_spread_ratio` | `(hi - lo) / (hi + lo)` | Symmetric spread metric, scale-robust (-1 to 1) |
 
-**FEATURE_COLS expansion:** 62 → 68 columns. Updated feature count must match active ML bundles; legacy 62-feature models auto-align via `_align_bundle_features()` padding new columns with zeros.
+**FEATURE_COLS expansion:** 62 → 70 columns. Updated feature count must match active ML bundles; legacy 62-feature models auto-align via `_align_bundle_features()` padding new columns with zeros.
 
 **Data availability:**
 - P10/P90 available only from Solcast Toolkit API for **future-dated requests** (forecast generation, not historical backfill)
@@ -190,7 +190,7 @@ The Forecast Performance Monitor panel defaults to collapsed on first dashboard 
 - No DB migration required — `solcast_snapshots` already stores `forecast_lo_kwh`, `forecast_hi_kwh` from Solcast API
 
 **Backward compatibility:**
-- Old 62-feature trained models load safely when loaded by new 68-feature code
+- Old 62-feature trained models load safely when loaded by new 70-feature code
 - Auto-alignment pads missing tri-band features with zeros (valid for zero-spread data)
 - Training with zero-spread data (before tri-band availability) produces redundant tri-band features; model ignores or learns zero importance
 

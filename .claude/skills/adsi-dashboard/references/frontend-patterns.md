@@ -100,3 +100,36 @@ Any UI change must update all three formats before handoff:
 PDF regeneration: `chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf="<pdf>" --print-to-pdf-no-header "<html>"`
 
 User Guide version header tracks `package.json`.
+
+## Camera Settings Modal
+
+Page-level modal (`#camSettingsModal`) using `position: fixed; z-index: 12000` with `.modal-backdrop.hidden` toggle pattern (same as `#appConfirmModal`). Not card-scoped — centered on the screen.
+
+### Structure
+- **Mode selector**: `#camModeCards` — 3 `.cam-mode-card` buttons (hls, webrtc, ffmpeg). Active card gets `.active` class with accent border.
+- **Hidden select**: `#camMode` — synced with mode cards for JS compatibility.
+- **go2rtc fields**: `#camGo2rtcFields` (IP, port, stream key) — shown in HLS/WebRTC.
+- **RTSP fields**: `#camRtspFields` (camera IP, RTSP port, stream path, username, password) — shown in FFmpeg.
+- **Service section**: `#camServiceSection` with `.cam-service-grid` (4-column status: Status, PID, Crashes, Health), auto-start checkbox, Start/Stop buttons. Hidden in Remote mode via `syncGo2rtcSectionVisibility()`.
+
+### Key Functions
+- `initCameraPlayer()` — modal wiring, mode card click handlers, open/close handlers.
+- `setActiveMode(mode)` — updates mode card `.active` state and hidden select.
+- `updateFieldVisibility(mode)` — toggles `#camGo2rtcFields`, `#camRtspFields`, `#camServiceSection` display.
+- `loadFormFromStorage()` / `saveFormToStorage()` — localStorage persistence for `cam_*` keys.
+- `openCamModal()` / `closeCamModal()` — show/hide modal + start/stop go2rtc status polling.
+- `go2rtcRefreshStatus()` — polls `/api/streaming/go2rtc-status`, updates service grid.
+- `go2rtcStartPoll()` / `go2rtcStopPoll()` — 5-second interval for status refresh while modal is open.
+- `go2rtcStartService()` / `go2rtcStopService()` — `api("/api/streaming/go2rtc/start", "POST")` / `api("/api/streaming/go2rtc/stop", "POST")`.
+- `syncGo2rtcSectionVisibility()` — called from `syncOperationModeUi()` on mode change; hides service section + preceding divider in Remote mode.
+
+### Defaults
+`CAM_DEFAULTS` object (line ~10588 in `app.js`): `mode: "hls"`, `go2rtc_ip: "100.93.11.9"`, `go2rtc_port: "1984"`, `stream_key: "tapo_cam"`, `ip: "192.168.4.211"`, `rtsp_port: "554"`, `stream_path: "stream1"`, `user: "Adsicamera"`, `pass: ""`.
+
+`CAM_LS_KEYS` maps field names to `localStorage` keys: `cam_mode`, `cam_go2rtc_ip`, etc.
+
+### CSS
+`.cam-settings-card` (480px width), `.cam-mode-cards` (flex row), `.cam-mode-card` (accent border on `.active`), `.cam-service-grid` (4-column grid), `.cam-service-controls`, `.cam-settings-actions`, `.cam-section-divider`.
+
+### Camera Card
+`buildCameraCard()` constructs the camera card DOM. It participates in the inverter grid like `.inv-card`. Video viewport fills the card. Bottom bar has gear/mute/fullscreen controls. Auto-reconnect every 5 s on stream drop.
