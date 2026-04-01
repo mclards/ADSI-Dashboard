@@ -4149,6 +4149,22 @@ def solcast_prior_from_snapshot(
     spread_frac = np.clip(np.asarray(snapshot["spread_frac"], dtype=float), 0.0, SOLCAST_PRIOR_SPREAD_FRAC_CLIP)
     present = np.asarray(snapshot["present"], dtype=bool).copy()
 
+    # CRITICAL: Validate array sizes to prevent silent data corruption
+    for array_name, array_obj in [
+        ("prior_kwh", prior_kwh),
+        ("prior_lo", prior_lo),
+        ("prior_hi", prior_hi),
+        ("prior_mw", prior_mw),
+        ("spread_frac", spread_frac),
+        ("present", present),
+    ]:
+        if array_obj.size != SLOTS_DAY:
+            log.error(
+                "Solcast snapshot array size mismatch for %s (%s): got %d slots, expected %d — rejecting snapshot",
+                day, array_name, array_obj.size, SLOTS_DAY,
+            )
+            return None
+
     bias_ratio = float(np.clip(reliability.get("bias_ratio", 1.0), *SOLCAST_BIAS_RATIO_CLIP))
     reliability_score = float(np.clip(reliability.get("reliability", 0.62), 0.25, 1.0))
     coverage_ratio = float(np.clip(snapshot.get("coverage_ratio", 0.0), 0.0, 1.0))
@@ -4344,6 +4360,35 @@ def blend_physics_with_solcast(
         }
 
     prior = np.clip(np.asarray(solcast_prior["prior_kwh"], dtype=float), 0.0, None)
+
+    # CRITICAL: Validate prior array size to prevent silent data corruption from truncated Solcast snapshots
+    if prior.size != SLOTS_DAY:
+        log.error(
+            "Solcast prior array size mismatch: got %d slots, expected %d — cannot blend, falling back to baseline",
+            prior.size, SLOTS_DAY,
+        )
+        return base.copy(), {
+            "used_solcast": False,
+            "coverage_ratio": 0.0,
+            "mean_blend": 0.0,
+            "bias_ratio": 1.0,
+            "reliability": 0.0,
+            "regime": "",
+            "season": "",
+            "trend_signal": "stable",
+            "trend_magnitude": 0.0,
+            "source": "",
+            "pulled_ts": 0,
+            "resolution_weight_mean": SOLCAST_RESOLUTION_WEIGHT_FALLBACK,
+            "resolution_support_mean": 0.0,
+            "primary_mode": False,
+            "raw_prior_total_kwh": 0.0,
+            "applied_prior_total_kwh": 0.0,
+            "raw_prior_ratio": 1.0,
+            "applied_prior_ratio": 1.0,
+            "spread_frac_mean": 0.0,
+        }
+
     blend = np.clip(np.asarray(solcast_prior["blend"], dtype=float), 0.0, 1.0)
     present = np.asarray(solcast_prior["present"], dtype=bool)
     resolution_weight = np.clip(
@@ -5793,109 +5838,6 @@ def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndar
 # MODEL TRAINING
 # ============================================================================
 
-def collect_training_data(today: date) -> tuple[pd.DataFrame, np.ndarray] | tuple[None, None]:
-    """
-    Collect and validate training data from the last N_TRAIN_DAYS days.
-
-    Each day is:
-      1. Loaded from weather cache + actual generation
-      2. Analysed for anomalies (rejected if bad)
-      3. Features built
-      4. Weighted by recency
-
-    Returns (X_train, y_train) or (None, None) if insufficient data.
-    """
-    X_parts = []
-    y_parts = []
-    valid_days = 0
-
-    log.info("Collecting training data from last %d days...", N_TRAIN_DAYS)
-
-    for d in range(1, N_TRAIN_DAYS + 1):
-        day = (today - timedelta(days=d)).isoformat()
-        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
-        wdata = fetch_weather(day, source="archive")
-
-        if actual is None or actual_present is None or wdata is None:
-            log.debug("  Skip %s - missing data", day)
-            continue
-
-        w5 = interpolate_5min(wdata, day)
-        ok_w5, reason_w5 = validate_weather_5min(day, w5)
-        if not ok_w5:
-            log.warning("  Reject %s - weather quality failed: %s", day, reason_w5)
-            continue
-        base = physics_baseline(day, w5)
-        _, constraint_meta = build_operational_constraint_mask(day)
-        actual_present_arr = np.asarray(actual_present, dtype=bool)
-        operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
-        cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
-        manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool)
-        actual_train = np.asarray(actual, dtype=float).copy()
-        actual_train[cap_dispatch_mask] = base[cap_dispatch_mask]
-        actual_eval = actual_train.copy()
-        actual_eval[(~actual_present_arr) | operational_mask] = base[(~actual_present_arr) | operational_mask]
-        stats = analyse_weather_day(day, w5, actual_eval)
-        bad, reason = training_day_rejection(stats, actual_eval, base)
-
-        if bad:
-            log.warning("  Reject %s - %s", day, reason)
-            continue
-
-        log.info(
-            "  Accept %s  sky=%-14s  CF=%.3f  corr=%.2f  vol=%.2f  manual_slots=%d  cap_slots=%d",
-            day,
-            stats["sky_class"],
-            stats["capacity_factor"],
-            stats.get("rad_gen_corr", 0),
-            stats["vol_index"],
-            int(constraint_meta.get("manual_constraint_slot_count", 0)),
-            int(constraint_meta.get("cap_dispatch_slot_count", 0)),
-        )
-
-        feat = build_features(w5, day)
-        curtailed = curtailed_mask(actual_train, base)
-        mask = (
-            (base > 0)
-            & actual_present_arr
-            & (~manual_constraint_mask)
-            & (~curtailed)
-            & (feat["rad"].values >= RAD_MIN_WM2)
-            & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
-            & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
-        )
-
-        if mask.sum() < MIN_SAMPLES:
-            log.warning("  Reject %s - too few usable slots (%d)", day, int(mask.sum()))
-            continue
-
-        residual = np.clip(actual_train - base, -500.0, 500.0)
-        X = feat.loc[mask, FEATURE_COLS]
-        y = residual[mask]
-
-        recency_w = max(1, round(RECENCY_BASE ** (N_TRAIN_DAYS - d)))
-        X = pd.concat([X] * recency_w, ignore_index=True)
-        y = np.tile(y, recency_w)
-
-        X_parts.append(X)
-        y_parts.append(y)
-        valid_days += 1
-
-    if valid_days < MIN_TRAIN_DAYS:
-        log.error(
-            "ML model training SKIPPED: only %d valid training days available (minimum %d). "
-            "Existing model will continue to be used. If this persists, forecast quality will degrade. "
-            "Check weather data availability and Solcast snapshots.",
-            valid_days, MIN_TRAIN_DAYS
-        )
-        return None, None
-
-    X_train = pd.concat(X_parts, ignore_index=True)
-    y_train = np.concatenate(y_parts)
-    log.info("Training set: %d samples from %d days", len(y_train), valid_days)
-    return X_train, y_train
-
-
 def collect_training_data_hardened(
     today: date,
     history_days: list[dict] | None = None,
@@ -6590,6 +6532,12 @@ def load_model_bundle() -> dict | None:
             data = load(MODEL_BUNDLE_FILE)
             if isinstance(data, dict):
                 return data
+            else:
+                # HIGH: Corrupted bundle file with wrong type
+                log.error(
+                    "Model bundle has invalid type %s (expected dict) — file may be corrupted, falling back to legacy or physics-only",
+                    type(data).__name__,
+                )
         except Exception as e:
             log.warning("Model bundle load failed %s: %s", MODEL_BUNDLE_FILE, e)
 
@@ -6632,11 +6580,19 @@ def _align_bundle_features(
     expected_cols = list((block.get("meta") or {}).get("feature_names") or bundle_feature_cols or [])
     if expected_cols:
         X_aligned = pd.DataFrame(index=X_pred.index)
+        missing_cols = []
         for col in expected_cols:
             if col in X_pred.columns:
                 X_aligned[col] = pd.to_numeric(X_pred[col], errors="coerce").fillna(0.0)
             else:
                 X_aligned[col] = 0.0
+                missing_cols.append(col)
+        if missing_cols:
+            # MEDIUM: Log missing features for audit trail (zero-fill masks data loss)
+            log.debug(
+                "Feature alignment: %d features missing from prediction data, using 0.0 fallback: %s",
+                len(missing_cols), ", ".join(missing_cols[:5]) + ("..." if len(missing_cols) > 5 else ""),
+            )
         return X_aligned
     scaler = block.get("scaler")
     model = block.get("model")
@@ -7174,7 +7130,12 @@ def confidence_bands(
     # FIX-11: Guard against w5 having fewer rows than SLOTS_DAY
     if len(w5) < SLOTS_DAY:
         log.warning("confidence_bands: w5 has %d rows, expected %d — padding with forward-fill", len(w5), SLOTS_DAY)
-        w5 = w5.reindex(range(SLOTS_DAY)).ffill().fillna(0.0)
+        # MEDIUM: Use conservative cloud cover (50%) instead of 0.0 for missing data
+        # 0.0 is too optimistic; 50% is neutral baseline for uncertainty
+        w5 = w5.reindex(range(SLOTS_DAY)).ffill()
+        # For cloud cover, use 50.0 (mid-range); for other columns use 0.0
+        w5["cloud"] = w5["cloud"].fillna(50.0)
+        w5 = w5.fillna(0.0)
     lo    = np.zeros(SLOTS_DAY)
     hi    = np.zeros(SLOTS_DAY)
     confidence_penalty = float(np.clip(1.0 - float(regime_confidence), 0.0, 0.4))
@@ -8243,7 +8204,27 @@ def _write_forecast_run_audit_from_python(
     if ml_failed:
         variant = f"{variant}_ml_fallback"
     freshness = _classify_solcast_freshness_python(solcast_meta)
-    quality_class = "ml_fallback" if ml_failed else "healthy"
+
+    # Compute quality class based on generation outcome
+    quality_class = "healthy"  # default
+    if ml_failed:
+        quality_class = "weak_quality"
+    elif freshness == "stale_reject":
+        quality_class = "stale_input"
+    elif not bool(solcast_meta.get("used_solcast")):
+        # Solcast was not used — check if it should have been
+        coverage = float(solcast_meta.get("coverage_ratio", 0.0))
+        if coverage > 0.0 and coverage < 0.80:
+            quality_class = "incomplete"  # Partial Solcast data
+        # else: no Solcast available, which is acceptable for weather-only fallback
+    else:
+        # Solcast was used — check for quality issues
+        coverage = float(solcast_meta.get("coverage_ratio", 0.0))
+        if coverage < 0.80:
+            quality_class = "incomplete"
+        elif freshness == "stale_usable":
+            quality_class = "stale_input"
+
     generated_ts = int(time.time() * 1000)
 
     try:
@@ -8711,6 +8692,16 @@ def run_dayahead(
             ml_residual           = np.zeros(SLOTS_DAY)
             ml_residual[:] = raw_residual
 
+            # MEDIUM: Check for NaN/Inf in ML residual (could indicate model corruption or scaling failure)
+            if not np.all(np.isfinite(ml_residual)):
+                nan_count = int(np.sum(~np.isfinite(ml_residual)))
+                log.error(
+                    "ML residual contains %d NaN/Inf values — reverting to zeros (possible model/scaler corruption)",
+                    nan_count,
+                )
+                ml_residual = np.zeros(SLOTS_DAY)
+                _ml_failed = True
+
             # Zero residual outside solar hours & below radiation threshold
             ml_residual[:SOLAR_START_SLOT]  = 0.0
             ml_residual[SOLAR_END_SLOT:]    = 0.0
@@ -8953,7 +8944,7 @@ def run_dayahead(
                 if _lifted_count > 0:
                     forecast = _lifted
                     log.info(
-                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f%.0f kWh (floor=%.0f%% coverage=%.2f)",
+                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f→%.0f kWh (floor=%.0f%% coverage=%.2f)",
                         _lifted_count, SOLAR_END_SLOT - SOLAR_START_SLOT,
                         _fc_before, float(forecast.sum()),
                         _floor_ratio * 100.0, _sc_cov_f,
