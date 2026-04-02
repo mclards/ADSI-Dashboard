@@ -73,6 +73,10 @@ server/ipconfig.json
 .vscode/.tmp/
 .agents/
 
+# Bundled binaries (too large for git — download during build)
+server/ffmpeg/ffmpeg.exe
+server/ffmpeg/*.zip
+
 # OS
 .DS_Store
 Thumbs.db

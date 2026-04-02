@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.6.7",
+  "version": "2.6.8",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -65,6 +65,11 @@
       {
         "from": "server/go2rtc",
         "to": "backend/go2rtc"
+      },
+      {
+        "from": "server/ffmpeg",
+        "to": "backend/ffmpeg",
+        "filter": ["**/*.exe"]
       }
     ],
     "win": {

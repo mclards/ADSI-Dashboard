@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.6.7</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.6.8</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -2377,11 +2377,11 @@
                 <div class="cam-mode-desc">Ultra-low latency via go2rtc. Requires STUN/TURN.</div>
               </div>
             </button>
-            <button type="button" class="cam-mode-card" data-mode="mse">
-              <span class="mdi mdi-play-network-outline cam-mode-icon"></span>
+            <button type="button" class="cam-mode-card" data-mode="ffmpeg">
+              <span class="mdi mdi-console-line cam-mode-icon"></span>
               <div class="cam-mode-info">
-                <div class="cam-mode-name">MSE</div>
-                <div class="cam-mode-desc">Low-latency via go2rtc Media Source. Good browser support.</div>
+                <div class="cam-mode-name">FFmpeg</div>
+                <div class="cam-mode-desc">Direct RTSP transcode. Requires FFmpeg on the server.</div>
               </div>
             </button>
           </div>
@@ -2389,24 +2389,29 @@
           <select id="camMode" class="cam-field-input" style="display:none" aria-hidden="true">
             <option value="hls">HLS</option>
             <option value="webrtc">WebRTC</option>
-            <option value="mse">MSE</option>
+            <option value="ffmpeg">FFmpeg</option>
           </select>
 
-          <div class="cam-rtsp-warn" id="camRtspWarn" style="display:none">
+          <div class="cam-rtsp-warn" id="camRtspWarn">
             <span class="mdi mdi-alert-outline"></span>
-            MSE mode uses go2rtc for low-latency streaming via Media Source Extensions.
+            Direct FFmpeg mode requires FFmpeg installed on the server. The server transcodes RTSP to MPEG1/TS via WebSocket.
           </div>
 
           <!-- ── go2rtc Connection ────────────────────── -->
           <div id="camGo2rtcFields">
             <div class="cam-section-label">go2rtc Connection</div>
+            <div class="cam-field-row">
+              <div style="flex:2">
+                <label class="cam-field-label">Tailscale / Server IP</label>
+                <input type="text" id="camGo2rtcIp" class="cam-field-input" placeholder="100.93.11.9" autocomplete="off" />
+              </div>
+              <div style="flex:1">
+                <label class="cam-field-label">API Port</label>
+                <input type="number" id="camGo2rtcPort" class="cam-field-input" placeholder="1984" min="1" max="65535" autocomplete="off" />
+              </div>
+            </div>
             <label class="cam-field-label">Stream Key</label>
             <input type="text" id="camStreamKey" class="cam-field-input" placeholder="tapo_cam" autocomplete="off" />
-            <input type="hidden" id="camGo2rtcIp" value="127.0.0.1" />
-            <input type="hidden" id="camGo2rtcPort" value="1984" />
-            <p style="margin:6px 0 0;font-size:0.78rem;color:var(--text-secondary,#888);">
-              go2rtc runs locally on this server. Remote clients stream through the dashboard automatically.
-            </p>
           </div>
 
           <!-- ── RTSP / FFmpeg Connection ─────────────── -->

@@ -15,12 +15,14 @@ let currentRtspUrl = "";
 /* ── FFmpeg path resolution ────────────────────────────────────────── */
 function resolveFfmpegPath() {
   if (ffmpegBinPath) return ffmpegBinPath;
-  // 1. Bundled (Electron production — extraResources)
-  const bundled = path.join(__dirname, "..", "resources", "ffmpeg", "ffmpeg.exe");
-  if (fs.existsSync(bundled)) { ffmpegBinPath = bundled; return bundled; }
-  // 2. Vendor dir (development)
-  const vendor = path.join(__dirname, "..", "vendor", "ffmpeg.exe");
-  if (fs.existsSync(vendor)) { ffmpegBinPath = vendor; return vendor; }
+  // 1. Packaged Electron (extraResources)
+  if (process.resourcesPath) {
+    const packaged = path.join(process.resourcesPath, "backend", "ffmpeg", "ffmpeg.exe");
+    if (fs.existsSync(packaged)) { ffmpegBinPath = packaged; return packaged; }
+  }
+  // 2. Development — alongside this module
+  const dev = path.join(__dirname, "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(dev)) { ffmpegBinPath = dev; return dev; }
   // 3. System PATH
   ffmpegBinPath = "ffmpeg";
   return "ffmpeg";
