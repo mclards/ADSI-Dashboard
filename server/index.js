@@ -7836,6 +7836,8 @@ function buildSettingsSnapshot() {
     inverterPollConfig: sanitizePollConfig(
       readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG),
     ),
+    go2rtcAutoStart: getSetting("go2rtcAutoStart", "0"),
+    cameraSettings: readJsonSetting("cameraSettings", null),
     dataDir: DATA_DIR,
   };
 }
@@ -11368,6 +11370,212 @@ app.post("/api/streaming/go2rtc/stop", (req, res) => {
     .catch((e) => res.status(500).json({ ok: false, error: e.message }));
 });
 
+/* ── Camera settings (server-side persistence) ────────────────────── */
+const CAM_SETTINGS_DEFAULTS = {
+  mode: "hls",
+  go2rtcIp: "127.0.0.1",
+  go2rtcPort: "1984",
+  streamKey: "tapo_cam",
+  ip: "192.168.4.211",
+  rtspPort: "554",
+  streamPath: "stream1",
+  user: "Adsicamera",
+  pass: "",
+};
+
+function getCameraSettings() {
+  const saved = readJsonSetting("cameraSettings", null);
+  return saved ? { ...CAM_SETTINGS_DEFAULTS, ...saved } : { ...CAM_SETTINGS_DEFAULTS };
+}
+
+app.get("/api/camera/settings", (req, res) => {
+  const s = getCameraSettings();
+  // Never send password in plaintext to GET — mask it
+  res.json({ ...s, pass: s.pass ? "••••" : "" });
+});
+
+app.post("/api/camera/settings", async (req, res) => {
+  const body = req.body || {};
+  const prev = getCameraSettings();
+  const s = {
+    mode: ["hls", "webrtc", "mse"].includes(body.mode) ? body.mode : prev.mode,
+    go2rtcIp: String(body.go2rtcIp || prev.go2rtcIp).trim().slice(0, 200),
+    go2rtcPort: String(body.go2rtcPort || prev.go2rtcPort).trim().slice(0, 6),
+    streamKey: String(body.streamKey || prev.streamKey).trim().slice(0, 100),
+    ip: String(body.ip || prev.ip).trim().slice(0, 200),
+    rtspPort: String(body.rtspPort || prev.rtspPort).trim().slice(0, 6),
+    streamPath: String(body.streamPath || prev.streamPath).trim().slice(0, 200),
+    user: String(body.user ?? prev.user).trim().slice(0, 100),
+    pass: body.pass !== undefined && body.pass !== "••••" ? String(body.pass).slice(0, 200) : prev.pass,
+  };
+  setSetting("cameraSettings", JSON.stringify(s));
+
+  // If RTSP source changed, update go2rtc.yaml and restart
+  const rtspChanged =
+    s.ip !== prev.ip || s.rtspPort !== prev.rtspPort || s.streamPath !== prev.streamPath ||
+    s.user !== prev.user || (body.pass !== undefined && body.pass !== "••••" && s.pass !== prev.pass) ||
+    s.streamKey !== prev.streamKey;
+
+  let go2rtcRestarted = false;
+  if (rtspChanged && !isRemoteMode()) {
+    try {
+      updateGo2rtcYaml(s);
+      if (go2rtcManager.isRunning()) {
+        await go2rtcManager.stop();
+        await go2rtcManager.start(true);
+        go2rtcRestarted = true;
+      }
+    } catch (err) {
+      console.error("[camera] go2rtc config update failed:", err.message);
+    }
+  }
+
+  res.json({ ok: true, settings: { ...s, pass: s.pass ? "••••" : "" }, go2rtcRestarted });
+});
+
+/* ── go2rtc.yaml dynamic management ──────────────────────────���────── */
+function updateGo2rtcYaml(camSettings) {
+  const yaml = require("js-yaml");
+  const go2rtcDir = path.join(
+    process.env.PROGRAMDATA || "C:\\ProgramData",
+    "InverterDashboard",
+    "go2rtc",
+  );
+  const yamlPath = path.join(go2rtcDir, "go2rtc.yaml");
+
+  // Read existing config or start fresh
+  let cfg = {};
+  try {
+    if (fs.existsSync(yamlPath)) {
+      cfg = yaml.load(fs.readFileSync(yamlPath, "utf8")) || {};
+    }
+  } catch (_) {}
+
+  // Build RTSP URL
+  const auth = camSettings.user
+    ? `${encodeURIComponent(camSettings.user)}:${encodeURIComponent(camSettings.pass || "")}@`
+    : "";
+  const rtspUrl = `rtsp://${auth}${camSettings.ip}:${camSettings.rtspPort}/${camSettings.streamPath}`;
+
+  // Update streams
+  if (!cfg.streams) cfg.streams = {};
+  cfg.streams[camSettings.streamKey || "tapo_cam"] = [rtspUrl];
+
+  // Ensure API config
+  if (!cfg.api) cfg.api = {};
+  if (!cfg.api.listen) cfg.api.listen = "127.0.0.1:1984";
+  if (!cfg.api.origin) cfg.api.origin = "*";
+
+  // Ensure WebRTC config
+  if (!cfg.webrtc) cfg.webrtc = {};
+  if (!cfg.webrtc.listen) cfg.webrtc.listen = ":8555";
+  if (!cfg.webrtc.ice_servers) {
+    cfg.webrtc.ice_servers = [{ urls: ["stun:stun.l.google.com:19302"] }];
+  }
+
+  fs.mkdirSync(go2rtcDir, { recursive: true });
+  fs.writeFileSync(yamlPath, yaml.dump(cfg, { lineWidth: 120 }), "utf8");
+  console.log(`[camera] updated go2rtc config: ${yamlPath}`);
+}
+
+/* ── go2rtc API proxy routes ─────────────────────────���────────────── */
+function proxyGo2rtc(req, res, targetPath, method) {
+  const camS = getCameraSettings();
+  const port = parseInt(camS.go2rtcPort, 10) || 1984;
+  // Lock proxy target to loopback — prevent SSRF to arbitrary hosts
+  const rawIp = camS.go2rtcIp || "127.0.0.1";
+  const ip = (rawIp === "127.0.0.1" || rawIp === "localhost") ? rawIp : "127.0.0.1";
+  if (port < 1 || port > 65535) {
+    return res.status(400).json({ ok: false, error: "Invalid go2rtc port" });
+  }
+
+  const options = {
+    hostname: ip,
+    port,
+    path: targetPath,
+    method: method || req.method,
+    headers: { ...req.headers, host: `${ip}:${port}` },
+    timeout: 10000,
+  };
+  // Remove hop-by-hop and sensitive headers
+  delete options.headers["transfer-encoding"];
+  delete options.headers.connection;
+  delete options.headers.authorization;
+  delete options.headers.cookie;
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, { end: true });
+  });
+  proxyReq.on("error", (err) => {
+    if (!res.headersSent) {
+      res.status(502).json({ ok: false, error: `go2rtc proxy error: ${err.message}` });
+    }
+  });
+  proxyReq.on("timeout", () => {
+    proxyReq.destroy();
+    if (!res.headersSent) {
+      res.status(504).json({ ok: false, error: "go2rtc proxy timeout" });
+    }
+  });
+  if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+    const bodyStr = JSON.stringify(req.body);
+    proxyReq.setHeader("Content-Type", "application/json");
+    proxyReq.setHeader("Content-Length", Buffer.byteLength(bodyStr));
+    proxyReq.write(bodyStr);
+  }
+  proxyReq.end();
+}
+
+// HLS proxy — go2rtc /api/stream.m3u8 and segment files
+app.get("/api/camera/proxy/stream.m3u8", (req, res) => {
+  const src = req.query.src || getCameraSettings().streamKey;
+  proxyGo2rtc(req, res, `/api/stream.m3u8?src=${encodeURIComponent(src)}`);
+});
+app.get("/api/camera/proxy/stream.ts", (req, res) => {
+  const src = req.query.src || getCameraSettings().streamKey;
+  proxyGo2rtc(req, res, `/api/stream.ts?src=${encodeURIComponent(src)}`);
+});
+
+// WebRTC proxy — go2rtc /api/webrtc
+app.post("/api/camera/proxy/webrtc", (req, res) => {
+  const src = req.query.src || getCameraSettings().streamKey;
+  proxyGo2rtc(req, res, `/api/webrtc?src=${encodeURIComponent(src)}`, "POST");
+});
+
+// MSE WebSocket proxy — go2rtc /api/ws
+app.ws("/ws/camera/mse", (ws, req) => {
+  const camS = getCameraSettings();
+  const port = parseInt(camS.go2rtcPort, 10) || 1984;
+  const rawIp = camS.go2rtcIp || "127.0.0.1";
+  const ip = (rawIp === "127.0.0.1" || rawIp === "localhost") ? rawIp : "127.0.0.1";
+  const src = req.query.src || camS.streamKey;
+  const WebSocket = require("ws");
+
+  const target = new WebSocket(`ws://${ip}:${port}/api/ws?src=${encodeURIComponent(src)}`);
+
+  target.on("open", () => {
+    // go2rtc expects a JSON message to start the stream
+    target.send(JSON.stringify({ type: "mse" }));
+  });
+
+  target.on("message", (data) => {
+    if (ws.readyState === 1) ws.send(data);
+  });
+
+  target.on("close", () => ws.close());
+  target.on("error", (err) => {
+    console.warn("[camera] MSE proxy error:", err.message);
+    ws.close();
+  });
+
+  ws.on("message", (data) => {
+    if (target.readyState === 1) target.send(data);
+  });
+  ws.on("close", () => target.close());
+  ws.on("error", () => target.close());
+});
+
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
   // Supports ETag for direct consumers that can tolerate cached heartbeat data.
@@ -12711,6 +12919,7 @@ app.post("/api/settings", (req, res) => {
     plantCapSequenceMode,
     plantCapSequenceCustom,
     plantCapCooldownSec,
+    go2rtcAutoStart,
   } =
     req.body || {};
 
@@ -12979,6 +13188,9 @@ app.post("/api/settings", (req, res) => {
   }
   if (inverterPollConfig !== undefined) {
     updates.inverterPollConfig = JSON.stringify(sanitizePollConfig(inverterPollConfig));
+  }
+  if (go2rtcAutoStart !== undefined) {
+    updates.go2rtcAutoStart = go2rtcAutoStart === "1" || go2rtcAutoStart === true ? "1" : "0";
   }
 
   const effectiveMode = sanitizeOperationMode(

@@ -10591,7 +10591,7 @@ let cameraPlayer = null;
 
 const CAM_DEFAULTS = {
   mode: "hls",
-  go2rtcIp: "100.93.11.9",
+  go2rtcIp: "127.0.0.1",
   go2rtcPort: "1984",
   streamKey: "tapo_cam",
   ip: "192.168.4.211",
@@ -10601,43 +10601,56 @@ const CAM_DEFAULTS = {
   pass: "",
 };
 
-const CAM_LS_KEYS = {
-  mode: "cam_mode",
-  go2rtcIp: "cam_go2rtc_ip",
-  go2rtcPort: "cam_go2rtc_port",
-  streamKey: "cam_stream_key",
-  ip: "cam_ip",
-  rtspPort: "cam_rtsp_port",
-  streamPath: "cam_stream_path",
-  user: "cam_user",
-  pass: "cam_pass",
-};
+// Server-side camera settings cache (loaded on init)
+let _camSettingsCache = null;
+
+async function camLoadSettingsFromServer() {
+  try {
+    const r = await api("/api/camera/settings");
+    if (r && r.mode) {
+      _camSettingsCache = r;
+      return { ...CAM_DEFAULTS, ...r };
+    }
+  } catch (_) {}
+  return { ...CAM_DEFAULTS };
+}
 
 function camLoadSettings() {
-  const s = {};
-  for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
-    s[k] = localStorage.getItem(lsKey) || CAM_DEFAULTS[k];
-  }
-  return s;
+  // Return cached server settings or defaults
+  if (_camSettingsCache) return { ...CAM_DEFAULTS, ..._camSettingsCache };
+  return { ...CAM_DEFAULTS };
 }
-function camSaveSettings(s) {
-  for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
-    if (s[k] != null) localStorage.setItem(lsKey, s[k]);
+
+async function camSaveSettings(s) {
+  _camSettingsCache = { ...s };
+  try {
+    const r = await api("/api/camera/settings", "POST", s);
+    if (r && r.settings) _camSettingsCache = r.settings;
+  } catch (err) {
+    console.warn("[camera] settings save failed:", err.message);
   }
 }
+
 function camResetSettings() {
-  for (const lsKey of Object.values(CAM_LS_KEYS)) localStorage.removeItem(lsKey);
+  _camSettingsCache = null;
+  api("/api/camera/settings", "POST", { ...CAM_DEFAULTS }).catch(() => {});
 }
 
 class CameraPlayer {
   constructor() {
-    this.mode = "hls";      // "hls" | "webrtc" | "ffmpeg"
+    this.mode = "hls";      // "hls" | "webrtc" | "mse"
     this.active = false;
     this.hlsInstance = null; // hls.js instance
     this.rtcPeer = null;     // RTCPeerConnection
     this.jsmpegPlayer = null; // JSMpeg.Player
     this._reconnectTimer = null;
     this._reconnectCount = 0;
+    // MSE mode state
+    this._mseWs = null;
+    this._mseMs = null;
+    this._mseSb = null;
+    this._mseQueue = [];
+    this._mseBlobUrl = null;
   }
 
   start() {
@@ -10678,10 +10691,11 @@ class CameraPlayer {
 
     if (s.mode === "hls") this._startHls(s);
     else if (s.mode === "webrtc") this._startWebRTC(s);
-    else if (s.mode === "ffmpeg") this._startFfmpeg(s);
+    else if (s.mode === "mse") this._startMse(s);
+    else if (s.mode === "ffmpeg") this._startMse(s); // legacy fallback
   }
 
-  /* ── HLS via hls.js ──────────────────────────── */
+  /* ── HLS via hls.js (proxied through Express) ── */
   _startHls(s) {
     const video = $("cameraVideo");
     const canvas = $("cameraCanvas");
@@ -10690,7 +10704,7 @@ class CameraPlayer {
     video.style.display = "block";
     video.muted = true;
 
-    const url = `http://${s.go2rtcIp}:${s.go2rtcPort}/api/stream.m3u8?src=${encodeURIComponent(s.streamKey)}`;
+    const url = `${location.origin}/api/camera/proxy/stream.m3u8?src=${encodeURIComponent(s.streamKey)}`;
 
     if (typeof Hls !== "undefined" && Hls.isSupported()) {
       const hls = new Hls({
@@ -10733,7 +10747,7 @@ class CameraPlayer {
     }
   }
 
-  /* ── WebRTC via go2rtc ───────────────────────── */
+  /* ── WebRTC via go2rtc (proxied through Express) */
   _startWebRTC(s) {
     const video = $("cameraVideo");
     const canvas = $("cameraCanvas");
@@ -10742,8 +10756,9 @@ class CameraPlayer {
     video.style.display = "block";
     video.muted = true;
 
-    const apiBase = `http://${s.go2rtcIp}:${s.go2rtcPort}`;
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
     this.rtcPeer = pc;
 
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -10759,67 +10774,141 @@ class CameraPlayer {
     };
 
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+      const st = pc.iceConnectionState;
+      if (st === "failed" || st === "disconnected") {
         this._onStreamError("WebRTC connection lost");
       }
     };
 
-    pc.createOffer().then((offer) => {
-      pc.setLocalDescription(offer);
-      return fetch(`${apiBase}/api/webrtc?src=${encodeURIComponent(s.streamKey)}`, {
+    // Wait for ICE gathering to complete before sending offer
+    pc.createOffer().then((offer) => pc.setLocalDescription(offer)).then(() => {
+      // Wait for ICE gathering or timeout after 2s
+      return new Promise((resolve) => {
+        if (pc.iceGatheringState === "complete") return resolve();
+        const t = setTimeout(() => { pc.removeEventListener("icegatheringstatechange", onIce); resolve(); }, 2000);
+        function onIce() {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(t);
+            pc.removeEventListener("icegatheringstatechange", onIce);
+            resolve();
+          }
+        }
+        pc.addEventListener("icegatheringstatechange", onIce);
+      });
+    }).then(() => {
+      return fetch(`${location.origin}/api/camera/proxy/webrtc?src=${encodeURIComponent(s.streamKey)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: "offer",
-          sdp: offer.sdp,
+          sdp: pc.localDescription.sdp,
         }),
       });
     }).then((r) => {
       if (!r.ok) throw new Error("WebRTC offer rejected: " + r.status);
       return r.json();
     }).then((answer) => {
-      pc.setRemoteDescription(new RTCSessionDescription(answer));
+      pc.setRemoteDescription(answer);
     }).catch((err) => {
       console.warn("[camera] WebRTC error:", err.message);
       this._onStreamError("WebRTC connection failed");
     });
   }
 
-  /* ── FFmpeg / jsmpeg via /ws/camera ──────────── */
-  _startFfmpeg(s) {
+  /* ── MSE via go2rtc WebSocket (replaces FFmpeg) ─ */
+  _startMse(s) {
     const video = $("cameraVideo");
     const canvas = $("cameraCanvas");
-    if (!canvas) return;
-    if (video) video.style.display = "none";
-    canvas.style.display = "block";
+    if (!video) return;
+    if (canvas) canvas.style.display = "none";
+    video.style.display = "block";
+    video.muted = true;
 
-    if (typeof JSMpeg === "undefined") {
-      this._showOverlay("jsmpeg library not loaded", "mdi-alert-circle-outline");
+    if (typeof MediaSource === "undefined" || !MediaSource.isTypeSupported("video/mp4")) {
+      this._showOverlay("MSE not supported in this browser", "mdi-alert-circle-outline");
       this._showRetry();
       return;
     }
 
-    // Build RTSP URL from parts
-    const auth = s.user ? `${encodeURIComponent(s.user)}:${encodeURIComponent(s.pass)}@` : "";
-    const rtspUrl = `rtsp://${auth}${s.ip}:${s.rtspPort}/${s.streamPath}`;
-
-    // Pass RTSP URL as query parameter — server reads req.query.url on WS connect
     const wsProto = location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = `${wsProto}://${location.host}/ws/camera?url=${encodeURIComponent(rtspUrl)}`;
+    const src = encodeURIComponent(s.streamKey || "tapo_cam");
+    const wsUrl = `${wsProto}://${location.host}/ws/camera/mse?src=${src}`;
 
-    // jsmpeg manages its own WebSocket connection
-    this.jsmpegPlayer = new JSMpeg.Player(wsUrl, {
-      canvas: canvas,
-      autoplay: true,
-      audio: false,
-      videoBufferSize: 512 * 1024,
-      onSourceEstablished: () => {
+    const ws = new WebSocket(wsUrl);
+    this._mseWs = ws;
+    let ms = null;
+    let sb = null;
+    let queue = [];
+    let mimeCodec = null;
+
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      console.log("[camera] MSE WebSocket connected");
+    };
+
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        // go2rtc sends codec info as first text message
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "mse") {
+            mimeCodec = msg.value || 'video/mp4; codecs="avc1.640029"';
+            this._initMse(video, mimeCodec, ws);
+          }
+        } catch (_) {}
+        return;
+      }
+      // Binary frame — append to SourceBuffer
+      if (this._mseSb && !this._mseSb.updating) {
+        try { this._mseSb.appendBuffer(ev.data); } catch (_) {}
+      } else if (this._mseSb) {
+        this._mseQueue.push(ev.data);
+      }
+    };
+
+    ws.onerror = () => {
+      console.warn("[camera] MSE WebSocket error");
+      this._onStreamError("MSE stream error");
+    };
+
+    ws.onclose = () => {
+      if (this.active) this._onStreamError("MSE stream ended");
+    };
+  }
+
+  _initMse(video, mimeCodec, ws) {
+    const ms = new MediaSource();
+    this._mseMs = ms;
+    this._mseQueue = [];
+    this._mseBlobUrl = URL.createObjectURL(ms);
+    video.src = this._mseBlobUrl;
+
+    ms.addEventListener("sourceopen", () => {
+      try {
+        const sb = ms.addSourceBuffer(mimeCodec);
+        this._mseSb = sb;
+        sb.mode = "segments";
+        sb.addEventListener("updateend", () => {
+          // Flush queued buffers
+          if (this._mseQueue.length > 0 && !sb.updating) {
+            try { sb.appendBuffer(this._mseQueue.shift()); } catch (_) {}
+          }
+          // Keep buffer trimmed to 4 seconds to stay low-latency
+          if (video.buffered.length > 0) {
+            const end = video.buffered.end(video.buffered.length - 1);
+            if (end - video.currentTime > 4) {
+              video.currentTime = end - 1;
+            }
+          }
+        });
+        video.play().catch(() => {});
         this._hideOverlay();
         this._setLive(true);
-      },
-      onSourceCompleted: () => {
-        if (this.active) this._onStreamError("Stream ended");
-      },
+      } catch (err) {
+        console.warn("[camera] MSE sourceopen error:", err.message);
+        this._onStreamError("MSE codec not supported");
+      }
     });
   }
 
@@ -10837,6 +10926,20 @@ class CameraPlayer {
       try { this.jsmpegPlayer.destroy(); } catch (_) {}
       this.jsmpegPlayer = null;
     }
+    if (this._mseWs) {
+      try { this._mseWs.close(); } catch (_) {}
+      this._mseWs = null;
+    }
+    if (this._mseMs && this._mseMs.readyState === "open") {
+      try { this._mseMs.endOfStream(); } catch (_) {}
+    }
+    if (this._mseBlobUrl) {
+      try { URL.revokeObjectURL(this._mseBlobUrl); } catch (_) {}
+      this._mseBlobUrl = null;
+    }
+    this._mseMs = null;
+    this._mseSb = null;
+    this._mseQueue = [];
     const video = $("cameraVideo");
     if (video) {
       video.pause();
@@ -10932,36 +11035,36 @@ function initCameraPlayer() {
 
   function updateFieldVisibility() {
     const mode = modeSelect ? modeSelect.value : "hls";
-    const isGo2rtc = mode === "hls" || mode === "webrtc";
-    const isFfmpeg = mode === "ffmpeg";
-    if (go2rtcFields) go2rtcFields.style.display = isGo2rtc ? "" : "none";
-    if (rtspFields) rtspFields.style.display = isFfmpeg ? "" : "none";
-    if (rtspWarn) rtspWarn.classList.toggle("visible", isFfmpeg);
-    // Show service section for go2rtc modes, hide for ffmpeg
-    if (serviceSection) serviceSection.style.display = isGo2rtc ? "" : "none";
-    // Also hide the divider above service section when ffmpeg
+    // All modes now use go2rtc — always show go2rtc fields, hide RTSP-only fields
+    if (go2rtcFields) go2rtcFields.style.display = "";
+    if (rtspFields) rtspFields.style.display = "none";
+    if (rtspWarn) rtspWarn.classList.remove("visible");
+    if (serviceSection) serviceSection.style.display = "";
     const divider = serviceSection?.previousElementSibling;
     if (divider && divider.classList.contains("cam-section-divider")) {
-      divider.style.display = isGo2rtc ? "" : "none";
+      divider.style.display = "";
     }
   }
 
-  function loadFormFromStorage() {
-    const s = camLoadSettings();
+  function loadFormFromSettings(s) {
     setActiveMode(s.mode);
-    if ($("camGo2rtcIp")) $("camGo2rtcIp").value = s.go2rtcIp;
-    if ($("camGo2rtcPort")) $("camGo2rtcPort").value = s.go2rtcPort;
-    if ($("camStreamKey")) $("camStreamKey").value = s.streamKey;
-    if ($("camIp")) $("camIp").value = s.ip;
-    if ($("camRtspPort")) $("camRtspPort").value = s.rtspPort;
-    if ($("camStreamPath")) $("camStreamPath").value = s.streamPath;
-    if ($("camUser")) $("camUser").value = s.user;
-    if ($("camPass")) $("camPass").value = s.pass;
-    // Load auto-start checkbox from server settings
+    if ($("camGo2rtcIp")) $("camGo2rtcIp").value = s.go2rtcIp || "";
+    if ($("camGo2rtcPort")) $("camGo2rtcPort").value = s.go2rtcPort || "";
+    if ($("camStreamKey")) $("camStreamKey").value = s.streamKey || "";
+    if ($("camIp")) $("camIp").value = s.ip || "";
+    if ($("camRtspPort")) $("camRtspPort").value = s.rtspPort || "";
+    if ($("camStreamPath")) $("camStreamPath").value = s.streamPath || "";
+    if ($("camUser")) $("camUser").value = s.user || "";
+    if ($("camPass")) $("camPass").value = s.pass || "";
     const autoStart = $("setGo2rtcAutoStart");
     if (autoStart && State.settings) {
       autoStart.checked = String(State.settings.go2rtcAutoStart) === "1";
     }
+  }
+
+  async function loadFormFromServer() {
+    const s = await camLoadSettingsFromServer();
+    loadFormFromSettings(s);
   }
 
   function readFormSettings() {
@@ -10979,7 +11082,7 @@ function initCameraPlayer() {
   }
 
   function openCamModal() {
-    loadFormFromStorage();
+    loadFormFromServer();
     if (backdrop) backdrop.classList.remove("hidden");
     go2rtcStartPoll();
   }
@@ -11016,9 +11119,9 @@ function initCameraPlayer() {
   });
 
   // Apply & Connect
-  $("btnCamApply")?.addEventListener("click", () => {
+  $("btnCamApply")?.addEventListener("click", async () => {
     const s = readFormSettings();
-    camSaveSettings(s);
+    await camSaveSettings(s);
     // Persist go2rtc auto-start to server settings
     const autoStart = $("setGo2rtcAutoStart");
     if (autoStart) {
@@ -11031,7 +11134,7 @@ function initCameraPlayer() {
   // Reset to defaults
   $("btnCamReset")?.addEventListener("click", () => {
     camResetSettings();
-    loadFormFromStorage();
+    loadFormFromSettings(CAM_DEFAULTS);
   });
 
   // go2rtc service buttons (wired here since elements now live in this modal)
@@ -11068,11 +11171,12 @@ function initCameraPlayer() {
     if (icon) icon.className = video.muted ? "mdi mdi-volume-off" : "mdi mdi-volume-high";
   });
 
-  // ── Auto-start if settings exist ──
-  const saved = camLoadSettings();
-  if (saved.mode && (saved.go2rtcIp || saved.ip)) {
-    cameraPlayer.start();
-  }
+  // ── Auto-start: load settings from server then start ──
+  camLoadSettingsFromServer().then((saved) => {
+    if (saved.mode && (saved.go2rtcIp || saved.ip)) {
+      cameraPlayer.start();
+    }
+  });
 }
 
 function handleWS(msg) {

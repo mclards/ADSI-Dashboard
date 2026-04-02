@@ -49,8 +49,8 @@ function fmtDDMMYY(ts) {
   const d = new Date(ts);
   const dd = pad2(d.getDate());
   const mm = pad2(d.getMonth() + 1);
-  const yy = String(d.getFullYear()).slice(-2);
-  return `${dd}${mm}${yy}`;
+  const yyyy = String(d.getFullYear());
+  return `${dd}-${mm}${yyyy}`;
 }
 function fmtTime(ts) {
   const d = new Date(ts);
