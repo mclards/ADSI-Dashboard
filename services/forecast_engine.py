@@ -1733,7 +1733,7 @@ def physics_baseline(day: str, w5: pd.DataFrame) -> np.ndarray:
     Returns:
         baseline kWh_inc array (SLOTS_DAY,)
     """
-    cap_kw = plant_capacity_kw(dependable=True)
+    cap_kw = plant_capacity_kw(dependable=False)
 
     csi  = clear_sky_radiation(day, w5["rh"].values)
     ctrans = cloud_transmittance(
@@ -1840,7 +1840,7 @@ def analyse_weather_day(day: str, w5: pd.DataFrame, actual: np.ndarray | None = 
 
     # Generation metrics if actual provided
     if actual is not None:
-        cap_kwh_day = plant_capacity_kw(True) * (SOLAR_END_H - SOLAR_START_H) / 1.0
+        cap_kwh_day = plant_capacity_kw(False) * (SOLAR_END_H - SOLAR_START_H) / 1.0
         cf = float(actual.sum()) / max(cap_kwh_day, 1.0)
         stats["capacity_factor"] = cf
         stats["total_kwh"]       = float(actual.sum())
@@ -2210,12 +2210,30 @@ def hour_weather_signature(day: str, w5: pd.DataFrame, hour: int, csi_arr: np.nd
     }
 
 
-def is_anomalous_day(stats: dict) -> tuple[bool, str]:
+def is_anomalous_day(
+    stats: dict,
+    solcast_mid: np.ndarray | None = None,
+    actual: np.ndarray | None = None,
+) -> tuple[bool, str]:
     """
     Return (True, reason) if the day looks like bad training data.
     Reasons: inverter outage, data gaps, irradiance inconsistency.
+
+    PHASE 2: If solcast_mid and actual provided, compute CF relative to Solcast
+    instead of using pre-computed stats CF (which was physics-based).
     """
-    cf = stats.get("capacity_factor", 0.5)
+    # PHASE 2: Prefer Solcast-based CF if available
+    if solcast_mid is not None and actual is not None and solcast_mid.size == SLOTS_DAY:
+        solar_actual = np.clip(np.asarray(actual, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+        solar_solcast = np.clip(np.asarray(solcast_mid, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+        solcast_total = float(solar_solcast.sum())
+        if solcast_total > 1.0:
+            cf = float(solar_actual.sum() / solcast_total)
+        else:
+            cf = stats.get("capacity_factor", 0.5)
+    else:
+        cf = stats.get("capacity_factor", 0.5)
+
     if cf < ANOM_MIN_CF:
         return True, f"CF too low ({cf:.3f}) - likely outage or data gap"
     if cf > ANOM_MAX_CF:
@@ -2231,15 +2249,27 @@ def is_anomalous_day(stats: dict) -> tuple[bool, str]:
 def training_day_rejection(
     stats: dict,
     actual: np.ndarray,
-    baseline: np.ndarray,
+    solcast_mid: np.ndarray | None = None,
 ) -> tuple[bool, str]:
-    """Stricter training-day filter used by the hardened residual model."""
-    bad, reason = is_anomalous_day(stats)
+    """
+    Stricter training-day filter used by the hardened residual model.
+
+    PHASE 2: Uses Solcast mid as reference instead of physics baseline.
+    """
+    # PHASE 2: Pass solcast_mid and actual to is_anomalous_day for CF computation
+    bad, reason = is_anomalous_day(stats, solcast_mid=solcast_mid, actual=actual)
     if bad:
         return bad, reason
 
     solar_actual = np.clip(np.asarray(actual, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
-    solar_base = np.clip(np.asarray(baseline, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+
+    # PHASE 2: Reference Solcast mid instead of physics baseline
+    if solcast_mid is None or solcast_mid.size != SLOTS_DAY:
+        log.warning("training_day_rejection called without valid Solcast reference")
+        return True, "No Solcast reference available"
+
+    solar_ref = np.clip(np.asarray(solcast_mid, dtype=float)[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+
     cap_slot = max(slot_cap_kwh(False), 1.0)
     peak_ratio = float(solar_actual.max() / cap_slot) if solar_actual.size else 0.0
     if peak_ratio > 1.10:
@@ -2254,11 +2284,11 @@ def training_day_rejection(
         if flatline_ratio > 0.96 and stats.get("rad_gen_corr", 1.0) < 0.80:
             return True, f"Active period is implausibly flat ({flatline_ratio:.2f})"
 
-    base_total = float(solar_base.sum())
-    if base_total > 0 and stats.get("rad_mean", 0) > 180 and not stats.get("rainy", False):
-        energy_ratio = float(solar_actual.sum() / base_total)
+    ref_total = float(solar_ref.sum())
+    if ref_total > 0 and stats.get("rad_mean", 0) > 180 and not stats.get("rainy", False):
+        energy_ratio = float(solar_actual.sum() / ref_total)
         if energy_ratio < 0.08:
-            return True, f"Generation far below physics baseline ({energy_ratio:.2f})"
+            return True, f"Generation far below Solcast baseline ({energy_ratio:.2f})"
 
     return False, ""
 
@@ -4958,6 +4988,15 @@ def collect_history_days(
             log.debug("  Skip %s - missing history basis", day)
             continue
 
+        # PHASE 1: Require Solcast snapshot for training — skip days without it
+        if snapshot is None:
+            log.debug("  Skip %s - no Solcast snapshot available for training", day)
+            continue
+        forecast_kwh = snapshot.get("forecast_kwh")
+        if forecast_kwh is None or (isinstance(forecast_kwh, (list, np.ndarray)) and len(forecast_kwh) == 0):
+            log.debug("  Skip %s - no Solcast forecast data available for training", day)
+            continue
+
         w5 = interpolate_5min(wdata, day)
         ok_w5, reason_w5 = validate_weather_5min(day, w5)
         if not ok_w5:
@@ -4966,6 +5005,23 @@ def collect_history_days(
 
         baseline = physics_baseline(day, w5)
         solcast_prior = solcast_prior_from_snapshot(day, w5, snapshot, solcast_reliability)
+
+        # PHASE 1: Extract Solcast mid as the primary baseline reference
+        if solcast_prior is None:
+            log.warning("  Reject %s - Failed to build Solcast prior", day)
+            continue
+
+        prior_kwh = solcast_prior.get("prior_kwh")
+        if prior_kwh is None:
+            log.warning("  Reject %s - Solcast prior missing 'prior_kwh'", day)
+            continue
+
+        solcast_mid_kwh = np.asarray(prior_kwh, dtype=float)
+        if solcast_mid_kwh.size != SLOTS_DAY:
+            log.warning("  Reject %s - Solcast snapshot has invalid size: got %d, expected %d", day, solcast_mid_kwh.size, SLOTS_DAY)
+            continue
+
+        # Keep physics baseline and hybrid baseline for diagnostics only
         history_baseline, hybrid_meta = blend_physics_with_solcast(baseline, solcast_prior)
         feature_frame = build_features(w5, day, solcast_prior)
         slot_weather_buckets = classify_slot_weather_buckets(w5, day)
@@ -4991,26 +5047,31 @@ def collect_history_days(
             log.warning("  Reject %s - severe inverter outage (%d solar slots affected)", day, outage_solar_count)
             continue
 
+        # PHASE 1: Use Solcast mid for cap_dispatch reconstruction instead of history_baseline
         actual_effective = np.asarray(actual, dtype=float).copy()
-        actual_effective[cap_dispatch_mask] = history_baseline[cap_dispatch_mask]
+        actual_effective[cap_dispatch_mask] = solcast_mid_kwh[cap_dispatch_mask]
         actual_eval = actual_effective.copy()
         fill_mask = (~actual_present_arr) | inverter_outage_mask
-        actual_eval[fill_mask] = history_baseline[fill_mask]
-        residual = np.clip(actual_effective - history_baseline, -500.0, 500.0)
+        # PHASE 1: Fill gaps with Solcast mid instead of history_baseline
+        actual_eval[fill_mask] = solcast_mid_kwh[fill_mask]
+        # PHASE 1: Training residual is now actual - solcast_mid instead of actual - physics
+        residual = np.clip(actual_effective - solcast_mid_kwh, -500.0, 500.0)
         curtailed = curtailed_mask(actual_effective, history_baseline)
 
         stats = analyse_weather_day(day, w5, actual_eval)
-        bad, reason = training_day_rejection(stats, actual_eval, history_baseline)
+        # PHASE 1: Pass solcast_mid_kwh to training_day_rejection instead of history_baseline
+        bad, reason = training_day_rejection(stats, actual_eval, solcast_mid=solcast_mid_kwh)
         if bad:
             log.warning("  Reject %s - %s", day, reason)
             continue
 
+        # PHASE 1: Reference solcast_mid in usable_mask instead of history_baseline
         usable_mask = (
             solar_slot_mask
             & actual_present_arr
             & (~inverter_outage_mask)
             & (~outage_mask)
-            & (history_baseline > 0.0)
+            & (solcast_mid_kwh > 0.0)
             & (rad_arr >= RAD_MIN_WM2)
         )
         usable_slots = int(np.count_nonzero(usable_mask))
@@ -5032,9 +5093,10 @@ def collect_history_days(
         training_usable_mask = usable_mask & (~curtailed)
         training_feature_frame = feature_frame.loc[training_usable_mask, FEATURE_COLS].reset_index(drop=True)
         training_residual = residual[training_usable_mask]
+        # PHASE 1: Normalize against solcast_mid baseline instead of hybrid_baseline
         training_class_scale = _error_class_normalizer(
             training_residual,
-            baseline_kwh=np.asarray(history_baseline, dtype=float)[training_usable_mask],
+            baseline_kwh=np.asarray(solcast_mid_kwh, dtype=float)[training_usable_mask],
         )
 
         history.append({
@@ -5046,6 +5108,7 @@ def collect_history_days(
             "weather": w5,
             "baseline": np.asarray(baseline, dtype=float),
             "hybrid_baseline": np.asarray(history_baseline, dtype=float),
+            "solcast_mid_kwh": np.asarray(solcast_mid_kwh, dtype=float),  # PHASE 1: Store Solcast mid reference
             "residual": residual,
             "feature_frame": feature_frame,
             "slot_weather_buckets": slot_weather_buckets,
@@ -8742,15 +8805,50 @@ def run_dayahead(
         float(bias_meta.get("morning_shift_slots", 0.0)),
     )
 
-    # 2. Physics baseline
-    baseline = physics_baseline(target_s, w5)
+    # 2. PHASE 4: Use Solcast mid as baseline (not physics)
+    # Load Solcast snapshot and prior first
     solcast_snapshot = load_solcast_snapshot(target_s)
+    if solcast_snapshot is None:
+        log.error("Day-ahead requires Solcast snapshot - none available for %s", target_s)
+        return False if persist else None
+    forecast_kwh = solcast_snapshot.get("forecast_kwh")
+    if forecast_kwh is None or (isinstance(forecast_kwh, (list, np.ndarray)) and len(forecast_kwh) == 0):
+        log.error("Day-ahead requires Solcast forecast data - none available for %s", target_s)
+        return False if persist else None
+
     if runtime_state is not None and "solcast_reliability" in runtime_state:
         solcast_reliability = runtime_state.get("solcast_reliability")
     else:
         solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
+
     solcast_prior = solcast_prior_from_snapshot(target_s, w5, solcast_snapshot, solcast_reliability)
-    hybrid_baseline, solcast_meta = blend_physics_with_solcast(baseline, solcast_prior)
+    if solcast_prior is None:
+        log.error("Solcast prior failed to load for %s", target_s)
+        return False if persist else None
+    prior_kwh = solcast_prior.get("prior_kwh")
+    if prior_kwh is None:
+        log.error("Solcast prior missing 'prior_kwh' for %s", target_s)
+        return False if persist else None
+
+    # PHASE 4: Extract Solcast mid as primary baseline
+    solcast_mid_kwh = np.asarray(solcast_prior.get("prior_kwh", []), dtype=float)
+    if solcast_mid_kwh.size != SLOTS_DAY:
+        log.error("Solcast snapshot has invalid size: got %d, expected %d", solcast_mid_kwh.size, SLOTS_DAY)
+        return False if persist else None
+
+    # Use Solcast mid as the baseline (not physics)
+    baseline = solcast_mid_kwh.copy()
+    hybrid_baseline = baseline.copy()
+
+    # Build solcast_meta for diagnostic use (physics is now demoted)
+    physics_baseline_arr = physics_baseline(target_s, w5)  # Compute for diagnostic comparison only
+    hybrid_baseline, solcast_meta = blend_physics_with_solcast(physics_baseline_arr, solcast_prior)
+    # Override to indicate Solcast is 100% of baseline now
+    solcast_meta = {
+        **solcast_meta,
+        "used_solcast": True,
+        "mean_blend": 1.0,  # Solcast is 100% of baseline
+    }
     if runtime_state is not None and "forecast_artifacts" in runtime_state:
         artifacts = runtime_state.get("forecast_artifacts")
     else:
@@ -8974,8 +9072,9 @@ def run_dayahead(
         ERROR_ALPHA,
     )
 
-    # 5. Combine
-    forecast = hybrid_baseline + ml_residual + error_class_term + bias_correction
+    # 5. PHASE 4: Combine using Solcast-mid baseline instead of hybrid_baseline
+    # hybrid_baseline was remapped to solcast_mid above
+    forecast = baseline + ml_residual + error_class_term + bias_correction
 
     # Hard capacity constraints:
     # - dependable cap is used in physics baseline shaping
@@ -9087,6 +9186,23 @@ def run_dayahead(
                         _floor_ratio * 100.0, _sc_cov_f,
                     )
 
+    # 5a. PHASE 4: Solcast per-slot ceiling - do not exceed Solcast P90 (hi)
+    if bool(solcast_meta.get("used_solcast")):
+        _sc_hi_snap = np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float)
+        if _sc_hi_snap.size == SLOTS_DAY:
+            _exceeds_hi = forecast[SOLAR_START_SLOT:SOLAR_END_SLOT] > _sc_hi_snap[SOLAR_START_SLOT:SOLAR_END_SLOT]
+            _exceeds_count = int(np.sum(_exceeds_hi))
+            if _exceeds_count > 0:
+                forecast[SOLAR_START_SLOT:SOLAR_END_SLOT] = np.minimum(
+                    forecast[SOLAR_START_SLOT:SOLAR_END_SLOT],
+                    _sc_hi_snap[SOLAR_START_SLOT:SOLAR_END_SLOT]
+                )
+                log.info(
+                    "Solcast per-slot ceiling applied: forecast clamped to Solcast P90 in %d/%d slots",
+                    _exceeds_count,
+                    SOLAR_END_SLOT - SOLAR_START_SLOT,
+                )
+
     # 5b. Analog Ensemble (AnEn) post-correction
     _day_stats = stats if isinstance(stats, dict) else {}
     _anen_analogs = _anen_find_analogs(target_s)
@@ -9109,14 +9225,13 @@ def run_dayahead(
         solcast_prior=solcast_prior if isinstance(solcast_prior, dict) else None,
     )
 
-    # 7. Summary log
+    # 7. PHASE 4: Summary log - reference Solcast baseline
     log.info(
         "Forecast summary: total=%.0f kWh  peak=%.2f kWh/slot  "
-        "baseline_total=%.0f kWh  hybrid_total=%.0f kWh  ml_corr=%.0f kWh  class_corr=%.0f kWh  bias_corr=%.0f kWh",
+        "solcast_mid_total=%.0f kWh  ml_corr=%.0f kWh  class_corr=%.0f kWh  bias_corr=%.0f kWh",
         forecast.sum(),
         forecast.max(),
         baseline.sum(),
-        hybrid_baseline.sum(),
         ml_residual.sum(),
         error_class_term.sum(),
         bias_correction.sum(),
@@ -9155,7 +9270,7 @@ def run_dayahead(
             "day": target_s,
             "series": series,
             "forecast": forecast,
-            "hybrid_baseline": hybrid_baseline,
+            "solcast_mid_baseline": baseline,  # PHASE 4: Renamed from hybrid_baseline
             "lo": lo,
             "hi": hi,
             "weather_source": weather_source,
@@ -9167,8 +9282,10 @@ def run_dayahead(
             "shape_meta": shape_meta,
             "activity_meta": activity_meta,
             "staging_meta": staging_meta,
-            "baseline_total_kwh": float(baseline.sum()),
-            "hybrid_total_kwh": float(hybrid_baseline.sum()),
+            "baseline_total_kwh": float(baseline.sum()),  # PHASE 4: Now Solcast mid total
+            "solcast_lo_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float).sum()),  # PHASE 4: NEW
+            "solcast_hi_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()),  # PHASE 4: NEW
+            "baseline_is_solcast_mid": True,  # PHASE 4: NEW - flag new architecture
             "forecast_total_kwh": float(forecast.sum()),
             "ml_total_kwh": float(ml_residual.sum()),
             "error_class_total_kwh": float(error_class_term.sum()),
@@ -9178,17 +9295,17 @@ def run_dayahead(
             "anen_analog_count": len(_anen_analogs),
         }
 
-    # --- Forecast sanity check ---
+    # --- PHASE 4: Forecast sanity check using Solcast mid baseline ---
     _fc_total_kwh = float(np.sum(forecast))
-    _physics_total_kwh = float(np.sum(baseline))
-    if _physics_total_kwh > 0:
-        _fc_ratio = _fc_total_kwh / _physics_total_kwh
+    _solcast_total_kwh = float(np.sum(baseline))  # baseline IS Solcast mid now
+    if _solcast_total_kwh > 0:
+        _fc_ratio = _fc_total_kwh / _solcast_total_kwh
         if _fc_ratio < 0.30 or _fc_ratio > 2.50:
-            log.error("FORECAST SANITY FAIL: total=%.1f kWh is %.1f%% of physics baseline=%.1f kWh - suppressing write",
-                      _fc_total_kwh, _fc_ratio * 100, _physics_total_kwh)
+            log.error("FORECAST SANITY FAIL: total=%.1f kWh is %.1f%% of Solcast baseline=%.1f kWh - suppressing write",
+                      _fc_total_kwh, _fc_ratio * 100, _solcast_total_kwh)
             return {"status": "error", "reason": "sanity_check_failed", "fc_ratio": round(_fc_ratio, 3)} if not persist else False
         elif _fc_ratio < 0.50 or _fc_ratio > 1.80:
-            log.warning("Forecast total %.1f kWh is %.1f%% of physics - unusual but within tolerance",
+            log.warning("Forecast total %.1f kWh is %.1f%% of Solcast baseline - unusual but within tolerance",
                         _fc_total_kwh, _fc_ratio * 100)
 
     # Validate confidence bands ordering

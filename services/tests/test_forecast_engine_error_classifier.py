@@ -865,6 +865,7 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             orig_classify = mod.classify_day_regime
             orig_physics = mod.physics_baseline
             orig_load_solcast_snapshot = mod.load_solcast_snapshot
+            orig_solcast_prior_from_snapshot = mod.solcast_prior_from_snapshot
             orig_load_solcast_rel = mod.load_solcast_reliability_artifact
             orig_blend_solcast = mod.blend_physics_with_solcast
             orig_load_artifacts = mod.load_forecast_artifacts
@@ -890,11 +891,48 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
                 }
                 mod.classify_day_regime = lambda stats: "clear"
                 mod.physics_baseline = lambda day, w5: solar_forecast.copy()
-                mod.load_solcast_snapshot = lambda day: None
+                # PHASE 4: Mock Solcast snapshot for day-ahead requirement
+                mod.load_solcast_snapshot = lambda day: {
+                    "coverage_slots": mod.SLOTS_DAY,
+                    "forecast_kwh": solar_forecast.copy(),
+                    "forecast_lo_kwh": solar_forecast.copy() * 0.85,
+                    "forecast_hi_kwh": solar_forecast.copy() * 1.15,
+                    "forecast_mw": solar_forecast.copy() / 200.0,
+                    "spread_frac": np.ones(mod.SLOTS_DAY, dtype=float) * 0.15,
+                    "present": np.ones(mod.SLOTS_DAY, dtype=bool),
+                }
+                # Return a full solcast_prior dict with all expected fields
+                def mock_solcast_prior(day, w5, snapshot, rel):
+                    present_arr = np.ones(mod.SLOTS_DAY, dtype=bool)
+                    return {
+                        "available": present_arr.astype(float),
+                        "present": present_arr,
+                        "prior_kwh": solar_forecast.copy(),
+                        "prior_lo_kwh": solar_forecast.copy() * 0.85,
+                        "prior_hi_kwh": solar_forecast.copy() * 1.15,
+                        "prior_mw": solar_forecast.copy() / 200.0,
+                        "spread_frac": np.ones(mod.SLOTS_DAY, dtype=float) * 0.15,
+                        "blend": np.ones(mod.SLOTS_DAY, dtype=float) * 0.8,
+                        "coverage_ratio": 1.0,
+                        "bias_ratio": 1.0,
+                        "reliability": 0.8,
+                        "resolution_weight": np.ones(mod.SLOTS_DAY, dtype=float),
+                        "resolution_support": np.ones(mod.SLOTS_DAY, dtype=float),
+                        "primary_mode": True,
+                        "regime": "clear",
+                        "season": "dry",
+                        "trend_signal": "stable",
+                        "trend_magnitude": 0.0,
+                        "spread_confidence": 0.85,
+                        "has_triband": True,
+                        "source": "solcast",
+                        "pulled_ts": 0,
+                    }
+                mod.solcast_prior_from_snapshot = mock_solcast_prior
                 mod.load_solcast_reliability_artifact = lambda today, allow_build=True: None
                 mod.blend_physics_with_solcast = lambda baseline, prior: (
                     baseline.copy(),
-                    {"used_solcast": False, "coverage_ratio": 0.0, "mean_blend": 0.0, "reliability": 0.0, "bias_ratio": 1.0, "raw_prior_ratio": 1.0, "applied_prior_ratio": 1.0, "regime": "", "source": ""},
+                    {"used_solcast": True, "coverage_ratio": 1.0, "mean_blend": 1.0, "reliability": 0.8, "bias_ratio": 1.0, "raw_prior_ratio": 1.0, "applied_prior_ratio": 1.0, "regime": "clear", "source": "test"},
                 )
                 mod.load_forecast_artifacts = lambda today, allow_build=True: {}
                 mod.load_model_bundle = lambda: bundle
@@ -923,6 +961,7 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
                 mod.classify_day_regime = orig_classify
                 mod.physics_baseline = orig_physics
                 mod.load_solcast_snapshot = orig_load_solcast_snapshot
+                mod.solcast_prior_from_snapshot = orig_solcast_prior_from_snapshot
                 mod.load_solcast_reliability_artifact = orig_load_solcast_rel
                 mod.blend_physics_with_solcast = orig_blend_solcast
                 mod.load_forecast_artifacts = orig_load_artifacts
@@ -940,7 +979,8 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             self.assertTrue(result["error_class_meta"]["weather_bucket_forecast_summary"])
             self.assertIn("mean_profile_reliability", result["error_class_meta"])
             self.assertIn("class_support_weights", result["error_class_meta"])
-            self.assertGreater(float(result["forecast_total_kwh"]), float(result["hybrid_total_kwh"]))
+            # PHASE 4: Updated assertion for new return format
+            self.assertGreater(float(result["forecast_total_kwh"]), float(result["baseline_total_kwh"]))
         finally:
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
