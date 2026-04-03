@@ -15434,6 +15434,21 @@ cron.schedule("15 18 * * *", () => {
   }
 });
 
+// ── Post-solar QA evaluation ─────────────────────────────────────────────
+// 18:20 — right after daily report (18:15), solar window closes at 18:00.
+// Evaluates today's forecast vs actual so the dashboard shows eligible/insufficient
+// the same evening instead of waiting for the next day's generation cycle.
+cron.schedule("20 18 * * *", async () => {
+  if (isRemoteMode()) return;
+  try {
+    console.log("[Cron:qa] Running post-solar QA evaluation for today...");
+    const result = await runForecastGenerator(["--qa-today"]);
+    console.log(`[Cron:qa] QA evaluation complete (${result?.durationMs || 0}ms)`);
+  } catch (e) {
+    console.warn("[Cron:qa] Post-solar QA evaluation failed:", e.message);
+  }
+});
+
 const pendingArchiveApplyResult = applyPendingArchiveReplacementsSync();
 if (Number(pendingArchiveApplyResult?.applied || 0) > 0) {
   console.log(

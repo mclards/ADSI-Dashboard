@@ -7866,13 +7866,13 @@ def _persist_qa_comparison(
     provider_mismatch = provider_expected == "solcast" and forecast_variant != "solcast_direct"
 
     include_in_source_scoring = (
-        actual_slots_count >= 150
-        and forecast_slots_count >= 150
+        actual_slots_count >= 132
+        and forecast_slots_count >= 132
     )
     include_in_error_memory = (
         include_in_source_scoring
-        and usable_slots >= 150
-        and constrained_ratio <= 0.25
+        and usable_slots >= 132
+        and constrained_ratio <= 0.30
         and not provider_mismatch
         and solcast_freshness_class not in {"missing", "stale_reject"}
         and not degraded_variant
@@ -9492,7 +9492,7 @@ def run_dayahead(
             if _above_count > 0:
                 forecast[_solar] = np.where(
                     _above_p90,
-                    _sc_hi_final[_solar],
+                    np.minimum(_sc_hi_final[_solar], cap_slot),
                     forecast[_solar],
                 )
                 _triband_log_parts.append(f"P90 ceiling clamped {_above_count} slots")
@@ -9977,6 +9977,11 @@ def parse_cli_args():
         metavar="DAYS",
         help="Re-run QA comparison for the last N days (default 15) to apply est_actual reconstruction.",
     )
+    parser.add_argument(
+        "--qa-today",
+        action="store_true",
+        help="Run QA evaluation for today's completed solar data (use after solar window closes).",
+    )
     return parser.parse_args()
 
 
@@ -10029,6 +10034,14 @@ def run_cli_generation(args) -> int:
             days = _iter_days(start_d, end_d)
             ok = run_backtest(days)
             return 0 if ok else 2
+
+        if args.qa_today:
+            # Evaluate today's solar data right after solar window closes.
+            # forecast_qa(ref) processes ref-1, so pass tomorrow to process today.
+            tomorrow_ref = datetime.now(_TZ_UTC8).date() + timedelta(days=1)
+            log.info("QA-today: evaluating %s", (tomorrow_ref - timedelta(days=1)).isoformat())
+            forecast_qa(tomorrow_ref)
+            return 0
 
         if args.backfill_qa is not None:
             n = backfill_qa_comparisons(args.backfill_qa)

@@ -2844,7 +2844,8 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
   console.log(logPrefix, backendLaunch.cmd, ...backendLaunch.args);
   backendProc = spawn(backendLaunch.cmd, backendLaunch.args, {
     cwd: backendLaunch.cwd,
-    stdio: "inherit",
+    stdio: "ignore",
+    windowsHide: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
@@ -2882,7 +2883,8 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
   console.log(logPrefix, forecastLaunch.cmd, ...forecastLaunch.args);
   forecastProc = spawn(forecastLaunch.cmd, forecastLaunch.args, {
     cwd: forecastLaunch.cwd,
-    stdio: "inherit",
+    stdio: "ignore",
+    windowsHide: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
