@@ -7837,6 +7837,7 @@ function buildSettingsSnapshot() {
     inverterPollConfig: sanitizePollConfig(
       readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG),
     ),
+    go2rtcAutoStart: getSetting("go2rtcAutoStart", "0"),
     dataDir: DATA_DIR,
   };
 }
@@ -12795,6 +12796,7 @@ app.post("/api/settings", (req, res) => {
     plantCapSequenceMode,
     plantCapSequenceCustom,
     plantCapCooldownSec,
+    go2rtcAutoStart,
   } =
     req.body || {};
 
@@ -13089,6 +13091,10 @@ app.post("/api/settings", (req, res) => {
           "Remote mode cannot use localhost or 127.0.0.1 as the gateway URL. Use the gateway workstation IP, hostname, or Tailscale address.",
       });
     }
+  }
+
+  if (go2rtcAutoStart !== undefined) {
+    updates.go2rtcAutoStart = go2rtcAutoStart === "1" || go2rtcAutoStart === true ? "1" : "0";
   }
 
   db.transaction(() => {
