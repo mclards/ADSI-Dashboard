@@ -32,6 +32,7 @@ const {
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
   bulkUpsertSolcastSnapshot,
+  bulkBackfillSolcastEstActual,
   closeDb,
   getTelemetryHotCutoffTs,
   queryReadingsRangeAll,
@@ -211,8 +212,8 @@ const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
 const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
 const SOLCAST_TOOLKIT_PERIOD = "PT5M";
 const SOLCAST_PREVIEW_RESOLUTIONS = new Set(["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"]);
-const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 7;
-const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 192;
+const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 14;
+const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 360;
 const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
   "utility_scale_sites",
   "rooftop_sites",
@@ -8014,7 +8015,7 @@ function getSolcastConfig() {
     toolkitSiteRef: String(
       getSetting("solcastToolkitSiteRef", "") || "",
     ).trim(),
-    toolkitDays: Math.max(1, Math.min(7, Math.trunc(Number(getSetting("solcastToolkitDays", "2")) || 2))),
+    toolkitDays: Math.max(1, Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.trunc(Number(getSetting("solcastToolkitDays", "2")) || 2))),
     toolkitPeriod: String(getSetting("solcastToolkitPeriod", SOLCAST_TOOLKIT_PERIOD) || SOLCAST_TOOLKIT_PERIOD).trim(),
     timeZone:
       String(getSetting("solcastTimezone", WEATHER_TZ) || "").trim() ||
@@ -8053,7 +8054,7 @@ function buildSolcastConfigFromInput(input = null) {
         base.toolkitSiteRef ??
         "",
     ).trim(),
-    toolkitDays: Math.max(1, Math.min(7, Math.trunc(
+    toolkitDays: Math.max(1, Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.trunc(
       Number(src.solcastToolkitDays ?? src.toolkitDays ?? base.toolkitDays ?? 2) || 2,
     ))),
     toolkitPeriod: String(
@@ -9895,7 +9896,64 @@ async function runDayAheadGenerationPlan({
 }
 
 /**
+ * Backfill est_actual_mw/est_actual_kwh into existing snapshot rows for past
+ * dates whose estActual data is available in the toolkit response.
+ * Only updates rows that currently have NULL or 0 est_actual — never overwrites
+ * existing est_actual or forecast columns.
+ */
+function backfillEstActualFromFetch(estActuals, cfg, targetDateSet) {
+  if (!Array.isArray(estActuals) || !estActuals.length) return { backfilledDates: 0, backfilledSlots: 0 };
+
+  const startMin = SOLCAST_SOLAR_START_H * 60;
+  const endMin   = SOLCAST_SOLAR_END_H * 60;
+  const accessMode = normalizeSolcastAccessMode(cfg?.accessMode);
+  const KWH_PER_MW = 1000 * (SOLCAST_SLOT_MIN / 60);
+
+  // Group estActual records by local date
+  const byDate = new Map();
+  for (const rec of estActuals) {
+    const endRaw = rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
+    const endTs  = Date.parse(String(endRaw || ""));
+    if (!Number.isFinite(endTs) || endTs <= 0) continue;
+    const p = getTzParts(endTs, cfg.timeZone);
+    if (p.minuteOfDay < startMin || p.minuteOfDay >= endMin) continue;
+    // Skip dates that are already in the target set (they get full upsert)
+    if (targetDateSet.has(p.date)) continue;
+    const slot = Math.floor(p.minuteOfDay / SOLCAST_SLOT_MIN);
+    const mw = convertSolcastPowerToMw(
+      rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
+      accessMode,
+    );
+    if (mw == null) continue;
+    if (!byDate.has(p.date)) byDate.set(p.date, []);
+    byDate.get(p.date).push({
+      slot,
+      est_actual_mw:  Number(mw.toFixed(6)),
+      est_actual_kwh: Number((mw * KWH_PER_MW).toFixed(6)),
+    });
+  }
+
+  let backfilledDates = 0;
+  let backfilledSlots = 0;
+  for (const [day, slotRows] of byDate) {
+    try {
+      const updated = bulkBackfillSolcastEstActual(day, slotRows);
+      if (updated > 0) {
+        backfilledDates++;
+        backfilledSlots += updated;
+        console.log(`[solcast-backfill] ${day}: backfilled est_actual for ${updated}/${slotRows.length} slots`);
+      }
+    } catch (err) {
+      console.warn(`[solcast-backfill] ${day}: failed -`, err.message);
+    }
+  }
+  return { backfilledDates, backfilledSlots };
+}
+
+/**
  * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
+ * Also backfills est_actual data for recent past dates present in the toolkit
+ * response (satellite-derived estimated actuals for outage reconstruction).
  * Silently returns { pulled: false } if Solcast is not configured or fetch fails.
  */
 async function autoFetchSolcastSnapshots(dates, options = {}) {
@@ -9904,10 +9962,18 @@ async function autoFetchSolcastSnapshots(dates, options = {}) {
     if (!hasUsableSolcastConfig(cfg)) {
       return { pulled: false, reason: "not_configured" };
     }
-    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg, options);
+    // Request wider toolkit window to capture est_actual for past dates (backfill).
+    // Toolkit supports ~30 days (15 past + 15 future); use max available hours
+    // unless the caller explicitly set a narrower window.
+    const fetchOptions = { ...options };
+    if (!fetchOptions.toolkitHours) {
+      fetchOptions.toolkitHours = SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS;
+    }
+    const { records, estActuals, accessMode } = await fetchSolcastForecastRecords(cfg, fetchOptions);
     const pulledTs = Date.now();
     const warnings = [];
     let persisted = 0;
+    const targetDateSet = new Set(dates);
     for (const day of dates) {
       const snap = buildAndPersistSolcastSnapshot(
         day,
@@ -9922,10 +9988,19 @@ async function autoFetchSolcastSnapshots(dates, options = {}) {
         warnings.push(String(snap.warning));
       }
     }
+
+    // Backfill est_actual for past dates present in the toolkit response
+    const backfill = backfillEstActualFromFetch(estActuals, cfg, targetDateSet);
+    if (backfill.backfilledSlots > 0) {
+      console.log(
+        `[forecast] Est-actual backfill: ${backfill.backfilledSlots} slots across ${backfill.backfilledDates} past date(s)`,
+      );
+    }
+
     console.log(
       `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted`,
     );
-    return { pulled: true, persisted, warnings, pulledTs };
+    return { pulled: true, persisted, warnings, pulledTs, backfill };
   } catch (err) {
     console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
     return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300), pulledTs: null };
@@ -10030,6 +10105,8 @@ async function generateDayAheadWithSolcast(dates) {
       snapshotWarnings.push(String(snapshotResult.warning));
     }
   }
+  // Backfill est_actual for past dates present in the toolkit response
+  const backfill = backfillEstActualFromFetch(estActuals, cfg, new Set(dates));
   const normalizedRows = normalizeForecastDbWindow();
   return {
     providerUsed: "solcast",
@@ -10040,6 +10117,7 @@ async function generateDayAheadWithSolcast(dates) {
     snapshotWarnings,
     normalizedRows,
     pulledTs,
+    estActualBackfill: backfill,
   };
 }
 
@@ -14361,6 +14439,7 @@ app.get("/api/forecast/engine-health", (req, res) => {
         rowsUsed: _recentBiasPct !== null ? 7 : 0,
       },
       outageSummary: trainState.outage_summary || null,
+      estActualReconstruction: (trainState.outage_summary || {}).est_actual_reconstruction || null,
       solcastBaseline: {
         isActive: !!(latestAudit?.baseline_is_solcast_mid),
         baselineTotalKwh: latestAudit?.hybrid_total_kwh ?? null,

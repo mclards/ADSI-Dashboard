@@ -306,6 +306,7 @@ SOLCAST_RESOLUTION_AUTHORITY_MIN = 0.72
 SOLCAST_RESOLUTION_AUTHORITY_MAX = 1.00
 SOLCAST_FORECAST_FLOOR_RATIO_FRESH  = 0.95  # fresh Solcast (coverage >= 0.95): floor at 95% of Solcast (actual often exceeds Solcast by ~3%)
 SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88  # stale_usable (coverage >= 0.80): floor at 88% of Solcast total
+SOLCAST_WEATHER_DIVERGENCE_RATIO    = 2.0   # per-slot: if solcast/physics or physics/solcast exceeds this, treat Solcast as unreliable for that slot
 
 # Time-of-day zone definitions (slot indices, 5-min resolution)
 # morning: 05:00-08:55 = slots 60-107, midday: 09:00-14:55 = slots 108-179, afternoon: 15:00-17:55 = slots 180-215
@@ -392,6 +393,8 @@ AVAIL_OUTAGE_THRESHOLD   = 0.95   # ratio below which a slot is outage-tainted
 AVAIL_DAY_MINOR_PCT      = 0.05   # ≥5% of solar slots tainted → minor
 AVAIL_DAY_MODERATE_PCT   = 0.15   # ≥15% → moderate
 AVAIL_DAY_SEVERE_PCT     = 0.30   # ≥30% → severe
+EST_ACTUAL_RECOVER_MIN   = 0.80   # need ≥80% est_actual coverage to recover severe outage day
+EST_ACTUAL_WEIGHT_FACTOR = 0.85   # training weight discount for slots reconstructed from est_actual
 
 # Confidence bands
 CONF_CLEAR_BASE = 0.08   # 8% on clear days
@@ -3625,6 +3628,42 @@ def load_solcast_snapshot(day: str) -> dict | None:
                 if row[10]:
                     source = str(row[10])
 
+            # ── Est-actual fallback for past dates with sparse forecast_kwh ──
+            # When Solcast snapshots for past dates were overwritten by re-fetch,
+            # forecast_kwh may be sparse while est_actual_kwh (satellite-measured)
+            # is rich. For training purposes, est_actual is a valid proxy for the
+            # Solcast forecast — it represents what actually happened under real
+            # irradiance, which is at least as informative as the original forecast.
+            est_actual_backfill_count = 0
+            try:
+                day_date = date.fromisoformat(str(day))
+                today_local = datetime.now(_TZ_UTC8).date()
+                is_past = day_date < today_local
+            except (ValueError, TypeError):
+                is_past = False
+
+            if is_past:
+                for si in range(SLOTS_DAY):
+                    if (forecast_kwh[si] <= 0.0
+                            and est_actual_kwh[si] > 0.0
+                            and np.isfinite(est_actual_kwh[si])
+                            and np.isfinite(est_actual_mw[si])):
+                        forecast_kwh[si] = est_actual_kwh[si]
+                        forecast_mw[si] = est_actual_mw[si]
+                        # Use est_actual as lo/hi too (zero spread — it's observed)
+                        forecast_lo_kwh[si] = est_actual_kwh[si]
+                        forecast_hi_kwh[si] = est_actual_kwh[si]
+                        forecast_lo_mw[si] = est_actual_mw[si]
+                        forecast_hi_mw[si] = est_actual_mw[si]
+                        present[si] = True
+                        est_actual_backfill_count += 1
+
+                if est_actual_backfill_count > 0:
+                    log.info(
+                        "Solcast snapshot %s: backfilled %d sparse forecast slots from est_actual",
+                        day, est_actual_backfill_count,
+                    )
+
             solar_present = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
             coverage_slots = int(np.count_nonzero(solar_present))
             if coverage_slots <= 0:
@@ -3660,6 +3699,7 @@ def load_solcast_snapshot(day: str) -> dict | None:
                 "energy_unit": "kwh_per_slot",
                 "pulled_ts": int(pulled_ts),
                 "source": source or "solcast",
+                "est_actual_backfill_slots": est_actual_backfill_count,
             }
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
@@ -4862,11 +4902,9 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 if target_regime and hist_regime and target_regime != hist_regime:
                     regime_factor = ERR_MEMORY_REGIME_MISMATCH_PENALTY
 
-                _, constraint_meta = build_operational_constraint_mask(day_s)
-                # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
-                inverter_outage = _build_1000h_inverter_outage_mask(day_s)
-                cap_dispatch = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
-                exclude_arr = inverter_outage | cap_dispatch
+                # Trust the persisted usable_for_error_memory flag from QA comparison.
+                # It already accounts for est_actual reconstruction (constrained slots
+                # replaced with Solcast estimated actuals have their flags cleared).
                 err = np.zeros(SLOTS_DAY, dtype=float)
                 weight_vec = np.zeros(SLOTS_DAY, dtype=float)
 
@@ -4880,8 +4918,6 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 ):
                     slot = int(slot_row[0] or -1)
                     if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
-                        continue
-                    if exclude_arr[slot]:
                         continue
                     if int(slot_row[3] or 0) != 1:
                         continue
@@ -5035,25 +5071,52 @@ def collect_history_days(
         cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool).copy()
         rad_arr = pd.to_numeric(feature_frame["rad"], errors="coerce").fillna(0.0).values
 
-        # ── Outage-aware slot masking ──
-        # Severe outages (≥30% solar slots with <95% inverter availability) indicate
-        # systemic events (campus-wide trip, grid outage) that corrupt training signal.
-        # Minor/moderate days are retained with outage slots excluded per-slot.
+        # ── Outage-aware slot masking with Solcast est_actual reconstruction ──
+        # When inverters are offline (outage), actual generation is artificially low.
+        # Solcast estimated actuals (satellite-derived) represent what the plant SHOULD
+        # have generated under actual irradiance conditions — use these to reconstruct
+        # outage slots instead of discarding them.
         outage_mask = _detect_outage_slots(day)
         outage_severity = _classify_day_outage_severity(day, outage_mask)
         outage_solar_count = int(np.count_nonzero(outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT]))
 
+        # Extract Solcast estimated actuals for outage reconstruction
+        est_actual_kwh = np.asarray(snapshot.get("est_actual_kwh", np.zeros(SLOTS_DAY)), dtype=float)
+        est_actual_available = (est_actual_kwh > 0.0) & solar_slot_mask
+
+        # Combined outage: both availability-based and 1000H alarm-based
+        combined_outage = inverter_outage_mask | outage_mask
+        outage_with_est = combined_outage & est_actual_available
+        outage_reconstructed_count = int(np.count_nonzero(outage_with_est[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+
         if outage_severity == "severe":
-            log.warning("  Reject %s - severe inverter outage (%d solar slots affected)", day, outage_solar_count)
-            continue
+            if outage_solar_count > 0 and outage_reconstructed_count < int(outage_solar_count * EST_ACTUAL_RECOVER_MIN):
+                log.warning(
+                    "  Reject %s - severe outage (%d solar slots), insufficient est_actual coverage (%d/%d)",
+                    day, outage_solar_count, outage_reconstructed_count, outage_solar_count,
+                )
+                continue
+            log.info(
+                "  Recover %s - severe outage (%d slots) compensated with Solcast est_actual (%d slots)",
+                day, outage_solar_count, outage_reconstructed_count,
+            )
 
         # PHASE 1: Use Solcast mid for cap_dispatch reconstruction instead of history_baseline
         actual_effective = np.asarray(actual, dtype=float).copy()
         actual_effective[cap_dispatch_mask] = solcast_mid_kwh[cap_dispatch_mask]
+
+        # Reconstruct outage slots with Solcast estimated actuals
+        actual_effective[outage_with_est] = est_actual_kwh[outage_with_est]
+        if outage_reconstructed_count > 0:
+            log.info(
+                "  %s  est_actual reconstruction: %d outage slots filled (severity=%s)",
+                day, outage_reconstructed_count, outage_severity,
+            )
+
         actual_eval = actual_effective.copy()
-        fill_mask = (~actual_present_arr) | inverter_outage_mask
-        # PHASE 1: Fill gaps with Solcast mid instead of history_baseline
-        actual_eval[fill_mask] = solcast_mid_kwh[fill_mask]
+        # Fill remaining gaps: prefer est_actual, fall back to solcast_mid
+        gap_mask = (~actual_present_arr) | (combined_outage & ~outage_with_est)
+        actual_eval[gap_mask] = solcast_mid_kwh[gap_mask]
         # PHASE 1: Training residual is now actual - solcast_mid instead of actual - physics
         residual = np.clip(actual_effective - solcast_mid_kwh, -500.0, 500.0)
         curtailed = curtailed_mask(actual_effective, history_baseline)
@@ -5066,11 +5129,13 @@ def collect_history_days(
             continue
 
         # PHASE 1: Reference solcast_mid in usable_mask instead of history_baseline
+        # Allow outage slots that were reconstructed with Solcast est_actual
+        effective_present = actual_present_arr | outage_with_est
+        unreconstructed_outage = combined_outage & ~outage_with_est
         usable_mask = (
             solar_slot_mask
-            & actual_present_arr
-            & (~inverter_outage_mask)
-            & (~outage_mask)
+            & effective_present
+            & (~unreconstructed_outage)
             & (solcast_mid_kwh > 0.0)
             & (rad_arr >= RAD_MIN_WM2)
         )
@@ -5140,9 +5205,11 @@ def collect_history_days(
             "outage_mask": outage_mask,
             "outage_severity": outage_severity,
             "outage_solar_slot_count": outage_solar_count,
+            "est_actual_reconstructed_mask": outage_with_est.copy(),
+            "est_actual_reconstructed_count": outage_reconstructed_count,
         })
         log.info(
-            "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  outage=%s(%d)  solcast=%s",
+            "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  outage=%s(%d)  est_recon=%d  solcast=%s",
             day,
             stats["sky_class"],
             usable_slots,
@@ -5150,6 +5217,7 @@ def collect_history_days(
             int(constraint_meta.get("cap_dispatch_slot_count", 0)),
             outage_severity,
             outage_solar_count,
+            outage_reconstructed_count,
             "yes" if hybrid_meta.get("used_solcast") else "no",
         )
 
@@ -6110,11 +6178,15 @@ def collect_training_data_hardened(
                 hybrid_base, hybrid_meta = blend_physics_with_solcast(base, solcast_prior)
             feat = build_features(w5, day, solcast_prior)
             actual[cap_dispatch_mask] = hybrid_base[cap_dispatch_mask]
+            # Reconstruct outage slots with est_actual (fallback path)
+            est_recon_mask = np.asarray(sample.get("est_actual_reconstructed_mask"), dtype=bool) if sample.get("est_actual_reconstructed_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+            effective_present = actual_present | est_recon_mask
+            unreconstructed_outage = inverter_outage_mask & ~est_recon_mask
             curtailed = curtailed_mask(actual, hybrid_base)
             mask = (
                 (hybrid_base > 0)
-                & actual_present
-                & (~inverter_outage_mask)
+                & effective_present
+                & (~unreconstructed_outage)
                 & (~curtailed)
                 & (feat["rad"].values >= RAD_MIN_WM2)
                 & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
@@ -6131,7 +6203,10 @@ def collect_training_data_hardened(
         recency_weight = _sample_weight_for_days_ago(int(sample.get("days_ago", N_TRAIN_DAYS)))
         corr = float(stats.get("rad_gen_corr", 0.0))
         quality_weight = float(np.clip(0.70 + 0.30 * max(corr, 0.0), 0.55, 1.0))
-        sample_weight = np.full(len(y), recency_weight * quality_weight, dtype=float)
+        # Discount weight for days with est_actual reconstruction
+        est_recon_count = int(sample.get("est_actual_reconstructed_count", 0))
+        recon_discount = EST_ACTUAL_WEIGHT_FACTOR if est_recon_count > 0 else 1.0
+        sample_weight = np.full(len(y), recency_weight * quality_weight * recon_discount, dtype=float)
 
         X_parts.append(X.reset_index(drop=True))
         y_parts.append(y)
@@ -6142,7 +6217,7 @@ def collect_training_data_hardened(
             solcast_days += 1
 
         log.info(
-            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  1000h_slots=%d  cap_slots=%d  solcast=%s blend=%.2f cov=%.2f",
+            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  1000h_slots=%d  cap_slots=%d  est_recon=%d  solcast=%s blend=%.2f cov=%.2f",
             day,
             stats["sky_class"],
             stats["capacity_factor"],
@@ -6151,6 +6226,7 @@ def collect_training_data_hardened(
             usable,
             int(np.count_nonzero(inverter_outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
             int(np.count_nonzero(cap_dispatch_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+            est_recon_count,
             "yes" if hybrid_meta.get("used_solcast") else "no",
             float(hybrid_meta.get("mean_blend", 0.0)),
             float(hybrid_meta.get("coverage_ratio", 0.0)),
@@ -6246,6 +6322,11 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
     outage_summary = bundle.get("outage_summary", {})
     if outage_summary.get("days_with_outages", 0) > 0:
         warnings.append("outage_days_detected")
+
+    # Check for est_actual reconstruction activity
+    est_recon = outage_summary.get("est_actual_reconstruction", {})
+    if est_recon.get("days_reconstructed", 0) > 0:
+        warnings.append("est_actual_reconstruction_active")
 
     # Check for missing Solcast tri-band data (new architecture dependency)
     try:
@@ -6603,13 +6684,19 @@ def build_training_state(today: date) -> dict | None:
     )
     # Aggregate outage summary from history days
     _outage_days = [h for h in history_days if h.get("outage_severity", "no_outage") != "no_outage"]
+    _recon_days = [h for h in history_days if h.get("est_actual_reconstructed_count", 0) > 0]
     _outage_summary = {
         "days_with_outages": len(_outage_days),
         "total_outage_solar_slots": sum(h.get("outage_solar_slot_count", 0) for h in _outage_days),
         "severity_counts": {
             "minor": sum(1 for h in _outage_days if h.get("outage_severity") == "minor"),
             "moderate": sum(1 for h in _outage_days if h.get("outage_severity") == "moderate"),
-            "severe": 0,  # severe days are fully rejected by collect_history_days(), never in accepted list
+            "severe": sum(1 for h in _outage_days if h.get("outage_severity") == "severe"),
+        },
+        "est_actual_reconstruction": {
+            "days_reconstructed": len(_recon_days),
+            "total_slots_reconstructed": sum(h.get("est_actual_reconstructed_count", 0) for h in _recon_days),
+            "weight_discount": EST_ACTUAL_WEIGHT_FACTOR,
         },
     }
 
@@ -7742,6 +7829,7 @@ def _persist_qa_comparison(
     cloud_slots: np.ndarray | None = None,
     lo_slots: np.ndarray | None = None,
     hi_slots: np.ndarray | None = None,
+    est_actual_recon_slots: int = 0,
 ) -> None:
     provider_used = str((run_audit_meta or {}).get("provider_used") or "unknown")
     provider_expected = str((run_audit_meta or {}).get("provider_expected") or "")
@@ -7886,6 +7974,7 @@ def _persist_qa_comparison(
                         "provider_mismatch": bool(provider_mismatch),
                         "support_base": float(support_base),
                         "forecast_regime": str(day_regime or ""),
+                        "est_actual_recon_slots": int(est_actual_recon_slots),
                     }),
                 )
             )
@@ -8134,12 +8223,95 @@ def forecast_qa(today: date) -> None:
         or ""
     )
 
+    # ── Est_actual reconstruction for QA comparison ──
+    # When actual energy data is unreliable due to capping, manual start/stops,
+    # or low inverter availability, replace with Solcast estimated actuals so
+    # the day can still be compared against the day-ahead forecast.
+    actual_recon = np.asarray(actual, dtype=float).copy()
+    actual_present_recon = np.asarray(actual_present, dtype=bool).copy()
+    est_actual_recon_slots = 0
+    manual_mask_raw = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy()
+    cap_mask_raw = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool).copy()
+    manual_mask_recon = manual_mask_raw.copy()
+    cap_mask_recon = cap_mask_raw.copy()
+    exclude_recon = np.asarray(exclude_mask, dtype=bool).copy()
+
+    if solcast_snapshot:
+        est_actual_kwh = np.asarray(
+            solcast_snapshot.get("est_actual_kwh", np.zeros(SLOTS_DAY)), dtype=float
+        )
+        solar_slot_mask = np.zeros(SLOTS_DAY, dtype=bool)
+        solar_slot_mask[SOLAR_START_SLOT:SOLAR_END_SLOT] = True
+        est_available = (est_actual_kwh > 0.0) & np.isfinite(est_actual_kwh) & solar_slot_mask
+
+        # Detect outage/low-availability slots
+        outage_mask = _detect_outage_slots(yesterday)
+        # Slots needing reconstruction: outage, cap-dispatch, manual-constraint, or 1000H alarm
+        needs_recon = (outage_mask | cap_mask_raw | manual_mask_raw | exclude_recon) & solar_slot_mask
+        recon_mask = needs_recon & est_available
+
+        if np.any(recon_mask):
+            actual_recon[recon_mask] = est_actual_kwh[recon_mask]
+            actual_present_recon[recon_mask] = True
+            # Clear constraint flags for reconstructed slots so they become usable.
+            # This flows into _persist_qa_comparison() which sets usable_for_error_memory=1,
+            # and compute_error_memory() trusts that persisted flag (no inline re-check).
+            manual_mask_recon[recon_mask] = False
+            cap_mask_recon[recon_mask] = False
+            exclude_recon[recon_mask] = False
+            est_actual_recon_slots = int(np.count_nonzero(recon_mask))
+            log.info(
+                "QA [%s] est_actual reconstruction: %d slots replaced "
+                "(outage=%d, cap=%d, manual=%d, 1000H=%d)",
+                yesterday,
+                est_actual_recon_slots,
+                int(np.count_nonzero(outage_mask & recon_mask)),
+                int(np.count_nonzero(cap_mask_raw & recon_mask)),
+                int(np.count_nonzero(manual_mask_raw & recon_mask)),
+                int(np.count_nonzero(np.asarray(exclude_mask, dtype=bool) & recon_mask)),
+            )
+
+    # Recompute metrics with reconstructed actual data
+    if est_actual_recon_slots > 0:
+        metrics = compute_forecast_metrics(
+            actual_recon,
+            fc,
+            actual_present=actual_present_recon,
+            forecast_present=fc_present,
+            exclude_mask=exclude_recon,
+        )
+        if metrics is None:
+            return
+        bucket_metrics = compute_bucketed_forecast_metrics(
+            actual_recon,
+            fc,
+            bucket_labels,
+            actual_present=actual_present_recon,
+            forecast_present=fc_present,
+            exclude_mask=exclude_recon,
+        ) if bucket_labels is not None else bucket_metrics
+        pers_metrics = (
+            compute_forecast_metrics(
+                actual_recon,
+                pers,
+                actual_present=actual_present_recon,
+                forecast_present=pers_present,
+                exclude_mask=exclude_recon,
+            )
+            if pers is not None and pers_present is not None
+            else None
+        )
+        if pers_metrics is not None and pers_metrics["rmse_kwh"] > 0:
+            skill = 1.0 - metrics["rmse_kwh"] / max(pers_metrics["rmse_kwh"], 1.0)
+        else:
+            skill = float("nan")
+
     run_audit_meta = _fetch_run_audit_meta(yesterday)
-    actual_present_arr = np.asarray(actual_present, dtype=bool)
+    actual_present_arr = np.asarray(actual_present_recon, dtype=bool)
     fc_present_arr = np.asarray(fc_present, dtype=bool)
-    exclude_arr = np.asarray(exclude_mask, dtype=bool)
-    manual_mask_arr = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool)
-    cap_mask_arr = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+    exclude_arr = exclude_recon
+    manual_mask_arr = manual_mask_recon
+    cap_mask_arr = cap_mask_recon
     usable_mask = actual_present_arr & fc_present_arr & (~exclude_arr)
 
     rad_slots = None
@@ -8153,7 +8325,7 @@ def forecast_qa(today: date) -> None:
         run_audit_meta,
         metrics,
         fc,
-        actual,
+        actual_recon,
         usable_mask,
         actual_present_arr,
         fc_present_arr,
@@ -8169,6 +8341,7 @@ def forecast_qa(today: date) -> None:
         cloud_slots=cloud_slots,
         lo_slots=fc_lo,
         hi_slots=fc_hi,
+        est_actual_recon_slots=est_actual_recon_slots,
     )
 
     resolution_debug = _build_resolution_daily_record(
@@ -8184,7 +8357,7 @@ def forecast_qa(today: date) -> None:
         update_forecast_weather_snapshot_meta(yesterday, {"resolution_debug": resolution_debug})
 
     log.info(
-        "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f",
+        "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f est_recon=%d",
         yesterday,
         metrics["usable_slot_count"],
         metrics["masked_slot_count"],
@@ -8196,6 +8369,7 @@ def forecast_qa(today: date) -> None:
         _format_minutes(metrics["first_active_error_min"]),
         _format_minutes(metrics["last_active_error_min"]),
         skill,
+        est_actual_recon_slots,
     )
     log.info("QA weather buckets [%s] %s", yesterday, _format_bucket_metric_summary(bucket_metrics))
     if overall_resolution:
@@ -8215,6 +8389,25 @@ def forecast_qa(today: date) -> None:
             f"{float(classifier_metrics['severe_hit_rate']):.3f}" if classifier_metrics.get("severe_hit_rate") is not None else "n/a",
             float(classifier_metrics.get("mean_confidence", 0.0)),
         )
+
+
+def backfill_qa_comparisons(days_back: int = 15) -> int:
+    """Re-run QA comparison for recent past dates to apply est_actual reconstruction.
+
+    Returns the number of dates successfully reprocessed.
+    """
+    today_local = datetime.now(_TZ_UTC8).date()
+    reprocessed = 0
+    for offset in range(1, days_back + 1):
+        target_today = today_local - timedelta(days=offset - 1)
+        try:
+            forecast_qa(target_today)
+            reprocessed += 1
+        except Exception as e:
+            log.warning("backfill_qa_comparisons: failed for %s: %s",
+                        target_today.isoformat(), e)
+    log.info("backfill_qa_comparisons: reprocessed %d/%d dates", reprocessed, days_back)
+    return reprocessed
 
 
 # ============================================================================
@@ -9238,6 +9431,77 @@ def run_dayahead(
             len(_anen_analogs),
         )
 
+    # 5c. FINAL Solcast tri-band hard clamp (P10 floor + P90 ceiling)
+    # This runs AFTER all corrections (AnEn, ramp, etc.) to guarantee the forecast
+    # stays within the Solcast confidence interval when Solcast data is available.
+    # EXCEPTION: per-slot override when OpenMeteo weather diverges sharply from Solcast —
+    # if physics_baseline (OpenMeteo-derived) and Solcast mid disagree by more than
+    # SOLCAST_WEATHER_DIVERGENCE_RATIO, the tri-band clamp is skipped for those slots
+    # because Solcast may be unrealistic for the actual weather conditions.
+    if bool(solcast_meta.get("used_solcast")):
+        _sc_lo_final = np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float)
+        _sc_hi_final = np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float)
+        _sc_mid_final = np.asarray(solcast_snapshot.get("forecast_kwh", []), dtype=float)
+        _sc_cov_final = float(solcast_meta.get("coverage_ratio", 0.0))
+        _solar = slice(SOLAR_START_SLOT, SOLAR_END_SLOT)
+        _triband_log_parts = []
+
+        # Per-slot weather divergence mask: where OpenMeteo physics and Solcast disagree.
+        # Threshold 2.0x is conservative — a slot where one source predicts double the other
+        # indicates fundamentally different weather assumptions (e.g., localized convection
+        # seen by satellite but missed by NWP grid, or vice versa).
+        _divergent = np.zeros(SLOTS_DAY, dtype=bool)
+        if _sc_mid_final.size == SLOTS_DAY and physics_baseline_arr.size == SLOTS_DAY:
+            _phys_solar = physics_baseline_arr[_solar]
+            _sc_solar = _sc_mid_final[_solar]
+            # Only compare where both have meaningful energy (> 5 kWh/slot avoids noise at dawn/dusk)
+            _both_valid = (_phys_solar > 5.0) & (_sc_solar > 5.0) & np.isfinite(_phys_solar) & np.isfinite(_sc_solar)
+            _ratio = np.ones_like(_phys_solar)
+            _ratio[_both_valid] = np.maximum(
+                _sc_solar[_both_valid] / _phys_solar[_both_valid],
+                _phys_solar[_both_valid] / _sc_solar[_both_valid],
+            )
+            # Treat NaN/Inf ratio as divergent (unreliable data — skip clamp for safety)
+            _divergent[_solar] = (~np.isfinite(_ratio)) | (_ratio > SOLCAST_WEATHER_DIVERGENCE_RATIO)
+            _div_count = int(np.sum(_divergent[_solar]))
+            if _div_count > 0:
+                _triband_log_parts.append(
+                    f"weather-divergent override {_div_count} slots (Solcast/OpenMeteo ratio > {SOLCAST_WEATHER_DIVERGENCE_RATIO:.1f}x)"
+                )
+
+        # P10 hard floor — never go below Solcast lo band (except divergent slots)
+        if _sc_lo_final.size == SLOTS_DAY and _sc_cov_final >= 0.80:
+            _below_p10 = (
+                (forecast[_solar] < _sc_lo_final[_solar])
+                & (_sc_lo_final[_solar] > 0.0)
+                & np.isfinite(_sc_lo_final[_solar])
+                & ~_divergent[_solar]
+            )
+            _below_count = int(np.sum(_below_p10))
+            if _below_count > 0:
+                forecast[_solar] = np.where(
+                    _below_p10,
+                    np.minimum(_sc_lo_final[_solar], cap_slot),
+                    forecast[_solar],
+                )
+                _triband_log_parts.append(f"P10 floor lifted {_below_count} slots")
+        # P90 hard ceiling — never exceed Solcast hi band (except divergent slots)
+        if _sc_hi_final.size == SLOTS_DAY and _sc_cov_final >= 0.80:
+            _above_p90 = (forecast[_solar] > _sc_hi_final[_solar]) & np.isfinite(_sc_hi_final[_solar]) & ~_divergent[_solar]
+            _above_count = int(np.sum(_above_p90))
+            if _above_count > 0:
+                forecast[_solar] = np.where(
+                    _above_p90,
+                    _sc_hi_final[_solar],
+                    forecast[_solar],
+                )
+                _triband_log_parts.append(f"P90 ceiling clamped {_above_count} slots")
+        if _triband_log_parts:
+            log.info(
+                "Solcast tri-band hard clamp: %s (coverage=%.2f)",
+                ", ".join(_triband_log_parts), _sc_cov_final,
+            )
+
     # 6. Confidence bands
     lo, hi = confidence_bands(
         forecast,
@@ -9705,6 +9969,14 @@ def parse_cli_args():
         metavar="N",
         help="Replay historical day-ahead forecasts for the last N completed days using saved forecast weather snapshots.",
     )
+    parser.add_argument(
+        "--backfill-qa",
+        type=int,
+        nargs="?",
+        const=15,
+        metavar="DAYS",
+        help="Re-run QA comparison for the last N days (default 15) to apply est_actual reconstruction.",
+    )
     return parser.parse_args()
 
 
@@ -9757,6 +10029,11 @@ def run_cli_generation(args) -> int:
             days = _iter_days(start_d, end_d)
             ok = run_backtest(days)
             return 0 if ok else 2
+
+        if args.backfill_qa is not None:
+            n = backfill_qa_comparisons(args.backfill_qa)
+            log.info("QA backfill complete: %d dates reprocessed", n)
+            return 0
 
         return -1  # no CLI generation mode requested
     except Exception as e:

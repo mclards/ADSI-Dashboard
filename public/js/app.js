@@ -4296,6 +4296,10 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-label">Solcast Baseline</span>
         <span class="fperf-hchip-val" id="fperfChipSolcastBaseVal">—</span>
       </div>
+      <div class="fperf-hchip chip-disabled" id="fperfChipEstRecon">
+        <span class="fperf-hchip-label">Est. Actual Recovery</span>
+        <span class="fperf-hchip-val" id="fperfChipEstReconVal">—</span>
+      </div>
     </div>
     <div class="fperf-charts-row">
       <div class="fperf-chart-panel">
@@ -4430,7 +4434,7 @@ function renderForecastPerfHealth(health) {
     const chipIds = [
       "fperfChipTrain", "fperfChipLastRun", "fperfChipProvider", "fperfChipQuality",
       "fperfChipAvgWape", "fperfChipMlBackend", "fperfChipTrainData", "fperfChipDataQual",
-      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias", "fperfChipSolcastBase",
+      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias", "fperfChipSolcastBase", "fperfChipEstRecon",
     ];
     chipIds.forEach((id) => {
       const chip = $(id);
@@ -4612,6 +4616,7 @@ function renderForecastPerfHealth(health) {
       no_regime_data: "No weather regime data available",
       lgbm_unavailable_fallback: "LightGBM unavailable, using sklearn fallback",
       outage_days_detected: "Outage-affected days in training window",
+      est_actual_reconstruction_active: "Outage slots reconstructed with Solcast est. actuals",
       solcast_snapshot_missing: "No Solcast snapshot for tomorrow",
       solcast_triband_missing: "Solcast tri-band (P10/P90) data missing",
     };
@@ -4720,6 +4725,23 @@ function renderForecastPerfHealth(health) {
     } else {
       scBaseVal.textContent = "No data";
       if (scBaseChip) { scBaseChip.className = "fperf-hchip chip-disabled"; scBaseChip.title = ""; }
+    }
+  }
+
+  // Est. Actual Recovery chip
+  const erChip = $("fperfChipEstRecon");
+  const erVal  = $("fperfChipEstReconVal");
+  if (erVal) {
+    const er = health.estActualReconstruction;
+    if (er && er.days_reconstructed > 0) {
+      erVal.textContent = `${er.days_reconstructed}d / ${er.total_slots_reconstructed} slots`;
+      if (erChip) {
+        erChip.className = "fperf-hchip chip-cyan";
+        erChip.title = `${er.days_reconstructed} training day(s) had outage slots reconstructed with Solcast satellite est. actuals (${er.total_slots_reconstructed} total slots, weight discount: ${((er.weight_discount || 1) * 100).toFixed(0)}%)`;
+      }
+    } else {
+      erVal.textContent = "None";
+      if (erChip) { erChip.className = "fperf-hchip chip-ok"; erChip.title = "No outage reconstruction needed in current training window"; }
     }
   }
 }

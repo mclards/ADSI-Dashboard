@@ -1233,6 +1233,15 @@ const stmts = {
       source=excluded.source,
       updated_ts=excluded.updated_ts
   `),
+  backfillSolcastEstActual: db.prepare(`
+    UPDATE solcast_snapshots
+       SET est_actual_mw  = @est_actual_mw,
+           est_actual_kwh = @est_actual_kwh,
+           updated_ts     = @updated_ts
+     WHERE forecast_day = @forecast_day
+       AND slot = @slot
+       AND est_actual_kwh IS NULL
+  `),
   getSolcastSnapshotDay: db.prepare(
     `SELECT forecast_day, slot, ts_local, period_end_utc, period,
             forecast_mw, forecast_lo_mw, forecast_hi_mw, est_actual_mw,
@@ -1632,6 +1641,28 @@ const bulkUpsertSolcastSnapshot = db.transaction((day, rows, source, pulledTs) =
       updated_ts:      now,
     });
   }
+});
+
+/**
+ * Backfill only est_actual_mw/est_actual_kwh for existing snapshot rows.
+ * Skips rows that already have est_actual data to preserve earlier writes.
+ * Returns the number of rows actually updated.
+ */
+const bulkBackfillSolcastEstActual = db.transaction((day, slotEstActuals) => {
+  const now = Date.now();
+  let updated = 0;
+  for (const r of slotEstActuals || []) {
+    if (r.est_actual_mw == null && r.est_actual_kwh == null) continue;
+    const info = stmts.backfillSolcastEstActual.run({
+      forecast_day:   String(day || ""),
+      slot:           Number(r.slot),
+      est_actual_mw:  r.est_actual_mw  != null ? Number(r.est_actual_mw)  : null,
+      est_actual_kwh: r.est_actual_kwh != null ? Number(r.est_actual_kwh) : null,
+      updated_ts:     now,
+    });
+    updated += info.changes;
+  }
+  return updated;
 });
 
 function getSolcastSnapshotForDay(day) {
@@ -2639,6 +2670,7 @@ module.exports = {
   bulkUpsertForecastDayAhead,
   bulkUpsertForecastIntradayAdjusted,
   bulkUpsertSolcastSnapshot,
+  bulkBackfillSolcastEstActual,
   getSolcastSnapshotForDay,
   getSetting,
   setSetting,

@@ -1,51 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
-from PyInstaller.utils.hooks import collect_all
 
-SPEC_PATH = os.path.abspath(
-    globals().get("__file__", os.path.join(os.getcwd(), "services", "ForecastCoreService.spec"))
-)
-BASE_DIR = os.path.abspath(os.path.dirname(SPEC_PATH))
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-
-datas = []
-binaries = []
-hiddenimports = []
-
-for pkg in (
-    "numpy",
-    "pandas",
-    "scipy",
-    "sklearn",
-    "joblib",
-    "requests",
-):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
-
-try:
-    d, b, h = collect_all("lightgbm")
-    datas += d
-    binaries += b
-    hiddenimports += h
-except ImportError:
-    pass  # lightgbm not installed on build machine; runtime will fall back to sklearn GBR
-except Exception as e:
-    print(f"WARNING: collect_all('lightgbm') failed unexpectedly: {e}")
-    # Continue build without lightgbm; runtime guard (_LIGHTGBM_AVAILABLE) will handle it
-
-# v2.5.0+ tri-band Solcast features (P10/Lo, forecast, P90/Hi) require LightGBM
-# for training on expanded feature space (FEATURE_COLS: 68 → 70 columns).
-# Legacy sklearn GBR models still supported with zero-spread fallback.
 
 a = Analysis(
-    [os.path.join(ROOT_DIR, "ForecastCoreService.py")],
-    pathex=[ROOT_DIR],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    ['forecast_engine.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -61,14 +22,14 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="ForecastCoreService",
+    name='ForecastCoreService',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -1243,7 +1243,7 @@
   <h3>Solcast Access Modes</h3>
   <table><thead><tr><th>Mode</th><th>Use</th></tr></thead><tbody><tr><td>Toolkit Login</td><td>Chart feed via account sign-in</td></tr><tr><td>API Key</td><td>Formal API credentials and resource ID</td></tr></tbody></table>
   <h3>Solcast Settings</h3>
-  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;7 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
+  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;15 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
   <div class="ml-highlight">
     <div class="info-card-label" style="color:var(--accent)">ML Training Engine &mdash; Day-Ahead Generation</div>
     <p>The day-ahead forecast uses a <b>trained LightGBM model</b> (default since v2.4.40) that learns your plant's generation profile from historical data. It runs on the gateway and produces next-day forecasts from weather inputs and observed patterns.</p>
