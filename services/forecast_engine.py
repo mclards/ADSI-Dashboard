@@ -8513,7 +8513,7 @@ def _write_forecast_run_audit_from_python(
 
             conn.commit()
             if ml_failed:
-                log.warning("Forecast written with ML fallback (physics baseline only) - quality degraded")
+                log.warning("Forecast written with ML fallback (Solcast baseline only) - quality degraded")
             log.info(
                 "Python audit row written for %s: id=%s variant=%s freshness=%s (replaces=%s)",
                 target_s, new_id, variant, freshness, prev_id,
@@ -9039,7 +9039,7 @@ def run_dayahead(
             ml_residual = np.zeros(SLOTS_DAY)
             error_class_term = np.zeros(SLOTS_DAY)
     else:
-        log.warning("No trained model found - using physics baseline only")
+        log.warning("No trained model found - using Solcast baseline only")
 
     # 4. Error memory bias correction
     err_mem = compute_error_memory(today, w5, target_regime=target_regime)
@@ -9180,7 +9180,7 @@ def run_dayahead(
                 if _lifted_count > 0:
                     forecast = _lifted
                     log.info(
-                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f→%.0f kWh (floor=%.0f%% coverage=%.2f)",
+                        "Solcast per-slot floor applied: %d/%d slots lifted, %.0f->%.0f kWh (floor=%.0f%% coverage=%.2f)",
                         _lifted_count, SOLAR_END_SLOT - SOLAR_START_SLOT,
                         _fc_before, float(forecast.sum()),
                         _floor_ratio * 100.0, _sc_cov_f,
