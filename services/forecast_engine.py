@@ -6247,6 +6247,22 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
     if outage_summary.get("days_with_outages", 0) > 0:
         warnings.append("outage_days_detected")
 
+    # Check for missing Solcast tri-band data (new architecture dependency)
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC) as conn:
+            _tomorrow = (date.today() + timedelta(days=1)).isoformat()
+            _row = conn.execute(
+                "SELECT forecast_lo_kwh, forecast_hi_kwh FROM solcast_snapshots "
+                "WHERE forecast_day = ? AND slot >= ? AND slot < ? LIMIT 1",
+                (_tomorrow, SOLAR_START_SLOT, SOLAR_END_SLOT),
+            ).fetchone()
+            if _row is None:
+                warnings.append("solcast_snapshot_missing")
+            elif _row[0] is None or _row[1] is None:
+                warnings.append("solcast_triband_missing")
+    except Exception:
+        pass  # non-fatal
+
     return warnings
 
 
@@ -8389,6 +8405,8 @@ def _write_forecast_run_audit_from_python(
     bias_total_kwh: float,
     ml_failed: bool = False,
     notes_extra: dict | None = None,
+    solcast_lo_total_kwh: float | None = None,
+    solcast_hi_total_kwh: float | None = None,
 ) -> int | None:
     """Write a forecast_run_audit row from Python direct generation path.
 
@@ -8458,7 +8476,8 @@ def _write_forecast_run_audit_from_python(
                     shape_skipped_for_solcast,
                     run_status, solcast_freshness_class,
                     is_authoritative_runtime, is_authoritative_learning,
-                    replaces_run_audit_id, notes_json
+                    replaces_run_audit_id, notes_json,
+                    solcast_lo_total_kwh, solcast_hi_total_kwh, baseline_is_solcast_mid
                 ) VALUES(
                     ?, ?, ?,
                     ?, ?,
@@ -8471,7 +8490,8 @@ def _write_forecast_run_audit_from_python(
                     ?,
                     ?, ?,
                     ?, ?,
-                    ?, ?
+                    ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -8493,6 +8513,9 @@ def _write_forecast_run_audit_from_python(
                     "success", freshness,
                     1, 1,
                     prev_id, notes,
+                    float(solcast_lo_total_kwh) if solcast_lo_total_kwh is not None else None,
+                    float(solcast_hi_total_kwh) if solcast_hi_total_kwh is not None else None,
+                    1,  # baseline_is_solcast_mid: always true in new architecture
                 ),
             )
             new_id = cur.lastrowid
@@ -9404,6 +9427,8 @@ def run_dayahead(
             bias_total_kwh=float(bias_correction.sum()),
             ml_failed=_ml_failed,
             notes_extra=_notes_extra,
+            solcast_lo_total_kwh=float(np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float).sum()) if solcast_snapshot else None,
+            solcast_hi_total_kwh=float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()) if solcast_snapshot else None,
         )
 
     return ok

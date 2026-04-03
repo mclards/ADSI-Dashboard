@@ -9739,6 +9739,9 @@ async function runDayAheadGenerationPlan({
           is_authoritative_learning: 0,
           superseded_by_run_audit_id: null,
           replaces_run_audit_id: null,
+          solcast_lo_total_kwh: null,
+          solcast_hi_total_kwh: null,
+          baseline_is_solcast_mid: 0,
           notes_json: JSON.stringify({ attempts, error: lastError }),
         });
       } catch (auditErr) {
@@ -9830,6 +9833,9 @@ async function runDayAheadGenerationPlan({
         is_authoritative_learning: 1,
         superseded_by_run_audit_id: null,
         replaces_run_audit_id: previousAuthoritative?.id || null,
+        solcast_lo_total_kwh: null,
+        solcast_hi_total_kwh: null,
+        baseline_is_solcast_mid: providerUsed === "solcast" ? 1 : 0,
         notes_json: JSON.stringify({
           attempts,
           replaceExisting: Boolean(replaceExisting),
@@ -14253,7 +14259,9 @@ app.get("/api/forecast/engine-health", (req, res) => {
       .prepare(
         `SELECT target_date, generated_ts, provider_used, forecast_variant,
                 run_status, solcast_freshness_class, final_forecast_total_kwh,
-                is_authoritative_runtime, attempt_number, notes_json, weather_source
+                is_authoritative_runtime, attempt_number, notes_json, weather_source,
+                physics_total_kwh, hybrid_total_kwh,
+                solcast_lo_total_kwh, solcast_hi_total_kwh, baseline_is_solcast_mid
          FROM forecast_run_audit
          ORDER BY generated_ts DESC LIMIT 1`,
       )
@@ -14353,6 +14361,14 @@ app.get("/api/forecast/engine-health", (req, res) => {
         rowsUsed: _recentBiasPct !== null ? 7 : 0,
       },
       outageSummary: trainState.outage_summary || null,
+      solcastBaseline: {
+        isActive: !!(latestAudit?.baseline_is_solcast_mid),
+        baselineTotalKwh: latestAudit?.hybrid_total_kwh ?? null,
+        physicsTotalKwh: latestAudit?.physics_total_kwh ?? null,
+        solcastLoTotalKwh: latestAudit?.solcast_lo_total_kwh ?? null,
+        solcastHiTotalKwh: latestAudit?.solcast_hi_total_kwh ?? null,
+        forecastTotalKwh: latestAudit?.final_forecast_total_kwh ?? null,
+      },
     });
   } catch (e) {
     console.warn("[forecast/engine-health] failed:", e.message);
@@ -15272,11 +15288,11 @@ cron.schedule("30 3 * * *", pruneOldData);
 // plus a constant post-solar checker outside the solar window, but if it
 // crashes, misses its window, or is not running, this Node cron
 // ensures tomorrow's forecast still gets generated.
-// Runs at 04:30, 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
+// Runs at 04:30, 09:30, 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
 // is healthy (not only complete) and regenerates when provider/freshness policy fails.
 // Gateway mode only.
 let _forecastCronRunning = false;
-for (const cronExpr of ["30 4 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
+for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
     if (_forecastCronRunning) {
       console.warn(`[Cron:forecast] skipping ${cronExpr} — previous cron run still active`);

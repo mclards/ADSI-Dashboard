@@ -4292,6 +4292,10 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-label">Recent Bias (7d)</span>
         <span class="fperf-hchip-val" id="fperfChipBiasVal">—</span>
       </div>
+      <div class="fperf-hchip" id="fperfChipSolcastBase">
+        <span class="fperf-hchip-label">Solcast Baseline</span>
+        <span class="fperf-hchip-val" id="fperfChipSolcastBaseVal">—</span>
+      </div>
     </div>
     <div class="fperf-charts-row">
       <div class="fperf-chart-panel">
@@ -4426,7 +4430,7 @@ function renderForecastPerfHealth(health) {
     const chipIds = [
       "fperfChipTrain", "fperfChipLastRun", "fperfChipProvider", "fperfChipQuality",
       "fperfChipAvgWape", "fperfChipMlBackend", "fperfChipTrainData", "fperfChipDataQual",
-      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias",
+      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias", "fperfChipSolcastBase",
     ];
     chipIds.forEach((id) => {
       const chip = $(id);
@@ -4602,10 +4606,19 @@ function renderForecastPerfHealth(health) {
       colorClass = "chip-error";
     }
 
+    const _flagLabels = {
+      insufficient_training_days: "Not enough training days",
+      high_rejection_streak: "Multiple consecutive training rejections",
+      no_regime_data: "No weather regime data available",
+      lgbm_unavailable_fallback: "LightGBM unavailable, using sklearn fallback",
+      outage_days_detected: "Outage-affected days in training window",
+      solcast_snapshot_missing: "No Solcast snapshot for tomorrow",
+      solcast_triband_missing: "Solcast tri-band (P10/P90) data missing",
+    };
     qualDataVal.textContent = text;
     if (qualDataChip) {
       qualDataChip.className = `fperf-hchip ${colorClass}`;
-      qualDataChip.title = flags.length > 0 ? flags.join("\n") : "";
+      qualDataChip.title = flags.length > 0 ? flags.map((f) => _flagLabels[f] || f).join("\n") : "";
     }
   }
 
@@ -4681,6 +4694,32 @@ function renderForecastPerfHealth(health) {
           : "fperf-hchip chip-error";
         biasChip.title = `Mean signed bias from last ${health.recentBias.rowsUsed} eligible rows. +% = over-forecast.`;
       }
+    }
+  }
+
+  // Solcast Baseline chip
+  const scBaseChip = $("fperfChipSolcastBase");
+  const scBaseVal  = $("fperfChipSolcastBaseVal");
+  if (scBaseVal) {
+    const sb = health.solcastBaseline;
+    if (sb && sb.isActive && sb.baselineTotalKwh != null) {
+      const baseMwh = (sb.baselineTotalKwh / 1000).toFixed(1);
+      const fcMwh = sb.forecastTotalKwh != null ? (sb.forecastTotalKwh / 1000).toFixed(1) : "—";
+      scBaseVal.textContent = `${fcMwh} / ${baseMwh} MWh`;
+      let titleParts = [`Solcast mid baseline: ${baseMwh} MWh`, `Final forecast: ${fcMwh} MWh`];
+      if (sb.solcastLoTotalKwh != null && sb.solcastHiTotalKwh != null) {
+        titleParts.push(`Tri-band: ${(sb.solcastLoTotalKwh / 1000).toFixed(1)} - ${(sb.solcastHiTotalKwh / 1000).toFixed(1)} MWh (P10-P90)`);
+      }
+      if (scBaseChip) {
+        scBaseChip.className = "fperf-hchip chip-cyan";
+        scBaseChip.title = titleParts.join(" | ");
+      }
+    } else if (sb && !sb.isActive) {
+      scBaseVal.textContent = "Physics mode";
+      if (scBaseChip) { scBaseChip.className = "fperf-hchip chip-warn"; scBaseChip.title = "Baseline: physics model (legacy)"; }
+    } else {
+      scBaseVal.textContent = "No data";
+      if (scBaseChip) { scBaseChip.className = "fperf-hchip chip-disabled"; scBaseChip.title = ""; }
     }
   }
 }

@@ -876,6 +876,54 @@ ensureColumn("forecast_error_compare_daily", "total_forecast_lo_kwh", "total_for
 ensureColumn("forecast_error_compare_daily", "total_forecast_hi_kwh", "total_forecast_hi_kwh REAL");
 // Migration: track retry attempt number per forecast run (added 2026-03).
 ensureColumn("forecast_run_audit", "attempt_number", "attempt_number INTEGER NOT NULL DEFAULT 1");
+// Migration: Solcast tri-band baseline totals for FPM pipeline (added 2026-04).
+ensureColumn("forecast_run_audit", "solcast_lo_total_kwh", "solcast_lo_total_kwh REAL");
+ensureColumn("forecast_run_audit", "solcast_hi_total_kwh", "solcast_hi_total_kwh REAL");
+ensureColumn("forecast_run_audit", "baseline_is_solcast_mid", "baseline_is_solcast_mid INTEGER NOT NULL DEFAULT 0");
+// Backfill: mark all rows as Solcast-based, backfill mid baseline, clear stale physics.
+// NOTE: solcast_lo/hi_total_kwh are NOT backfilled from snapshots — tri-band P10/P90
+// only exists for day-ahead (future) slots. Past dates have estimated actuals, not real bands.
+try {
+  // 1. Mark all rows as Solcast-based (new architecture)
+  db.prepare(
+    `UPDATE forecast_run_audit SET baseline_is_solcast_mid = 1 WHERE baseline_is_solcast_mid = 0`
+  ).run();
+
+  // 2. Backfill hybrid_total_kwh (Solcast mid) from snapshots for rows missing it
+  const _auditRows = db.prepare(
+    `SELECT DISTINCT target_date FROM forecast_run_audit WHERE hybrid_total_kwh IS NULL`
+  ).all();
+  if (_auditRows.length > 0) {
+    const _updMid = db.prepare(`
+      UPDATE forecast_run_audit
+         SET hybrid_total_kwh = @mid
+       WHERE target_date = @day AND hybrid_total_kwh IS NULL
+    `);
+    const _getSnapMid = db.prepare(`
+      SELECT ROUND(SUM(forecast_kwh), 2) AS mid FROM solcast_snapshots WHERE forecast_day = ?
+    `);
+    let _filled = 0;
+    for (const { target_date } of _auditRows) {
+      const snap = _getSnapMid.get(target_date);
+      if (snap && snap.mid > 0) {
+        _updMid.run({ day: target_date, mid: snap.mid });
+        _filled++;
+      }
+    }
+    if (_filled > 0) console.log(`[db] Backfilled Solcast mid baseline on ${_filled} audit date(s)`);
+  }
+
+  // 3. Clear stale physics_total_kwh and incorrectly-backfilled lo/hi on historical rows
+  db.prepare(
+    `UPDATE forecast_run_audit SET physics_total_kwh = NULL WHERE physics_total_kwh IS NOT NULL`
+  ).run();
+  const _clearedLo = db.prepare(
+    `UPDATE forecast_run_audit SET solcast_lo_total_kwh = NULL, solcast_hi_total_kwh = NULL
+     WHERE solcast_lo_total_kwh IS NOT NULL
+       AND target_date < date('now', '+1 day')`
+  ).run();
+  if (_clearedLo.changes > 0) console.log(`[db] Cleared historical lo/hi on ${_clearedLo.changes} audit rows (tri-band only valid for day-ahead)`);
+} catch (e) { console.warn("[db] Solcast baseline backfill warning:", e.message); }
 ensureColumn("forecast_error_compare_slot", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_slot", "daily_compare_id", "daily_compare_id INTEGER");
 ensureColumn("forecast_error_compare_slot", "ts_local", "ts_local INTEGER NOT NULL DEFAULT 0");
@@ -1216,7 +1264,8 @@ const stmts = {
       final_forecast_total_kwh, ml_residual_total_kwh, error_class_total_kwh, bias_total_kwh,
       shape_skipped_for_solcast, run_status, solcast_freshness_class,
       is_authoritative_runtime, is_authoritative_learning,
-      superseded_by_run_audit_id, replaces_run_audit_id, notes_json
+      superseded_by_run_audit_id, replaces_run_audit_id, notes_json,
+      solcast_lo_total_kwh, solcast_hi_total_kwh, baseline_is_solcast_mid
     ) VALUES (
       @target_date, @generated_ts, @generator_mode, @provider_used, @provider_expected,
       @forecast_variant, @weather_source, @solcast_snapshot_day, @solcast_snapshot_pulled_ts,
@@ -1226,7 +1275,8 @@ const stmts = {
       @final_forecast_total_kwh, @ml_residual_total_kwh, @error_class_total_kwh, @bias_total_kwh,
       @shape_skipped_for_solcast, @run_status, @solcast_freshness_class,
       @is_authoritative_runtime, @is_authoritative_learning,
-      @superseded_by_run_audit_id, @replaces_run_audit_id, @notes_json
+      @superseded_by_run_audit_id, @replaces_run_audit_id, @notes_json,
+      @solcast_lo_total_kwh, @solcast_hi_total_kwh, @baseline_is_solcast_mid
     )
   `),
   updateForecastRunAudit: db.prepare(`
