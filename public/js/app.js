@@ -4242,6 +4242,11 @@ function mountForecastPerfPanel() {
               title="Refresh forecast performance data" aria-label="Refresh forecast performance">
         <span class="mdi mdi-refresh" aria-hidden="true"></span>
       </button>
+      <button id="btnBackfillQa" class="btn btn-outline fperf-refresh-btn" type="button"
+              title="Re-evaluate QA for all displayed days (backfill)" aria-label="Reprocess QA history"
+              style="margin-left:4px;font-size:0.82em;gap:3px;display:inline-flex;align-items:center;">
+        <span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span> Reprocess QA
+      </button>
     </div>
   </div>
   <div class="fperf-body" id="fperfBody">
@@ -4354,6 +4359,24 @@ function mountForecastPerfPanel() {
   applyFperfCollapsedState();
 
   $("btnRefreshFperf").addEventListener("click", () => loadForecastPerfData());
+  $("btnBackfillQa").addEventListener("click", async () => {
+    const btn = $("btnBackfillQa");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="mdi mdi-spin mdi-loading" aria-hidden="true"></span> Reprocessing...';
+    try {
+      const days = State.fperf.days || 15;
+      const result = await api(`/api/forecast/backfill-qa?days=${days}`, "POST");
+      const dur = result?.durationMs ? ` (${(result.durationMs / 1000).toFixed(1)}s)` : "";
+      showToast(`QA backfill complete${dur} — refreshing table...`, "success");
+      await loadForecastPerfData();
+    } catch (e) {
+      showToast(`QA backfill failed: ${e.message}`, "error");
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span> Reprocess QA';
+    }
+  });
   $("fperfDaysSelect").addEventListener("change", (e) => {
     State.fperf.days = parseInt(e.target.value, 10) || 30;
     loadForecastPerfData();
@@ -4964,6 +4987,12 @@ function initForecastPage() {
   syncForecastProviderUi();
   updateForecastSidebarSummary();
   updateSolcastPreviewUnitUi();
+  // Initialize preview day-count from the saved solcastToolkitDays setting
+  const savedDays = $("setSolcastToolkitDays")?.value || State.settings.solcastToolkitDays || "2";
+  const previewDayCountSel = $("solcastPreviewDayCount");
+  if (previewDayCountSel && !State.solcastPreview.dayCount) {
+    previewDayCountSel.value = String(Math.min(15, Math.max(1, parseInt(savedDays, 10) || 2)));
+  }
   const useToolkitPreview =
     String($("setSolcastAccessMode")?.value || State.settings.solcastAccessMode || "toolkit")
       .trim()
@@ -5213,7 +5242,7 @@ function fillSolcastPreviewDayOptions(days, selectedDay) {
 function normalizeSolcastPreviewDayCountClient(value) {
   const n = Math.trunc(Number(value || 1));
   if (!Number.isFinite(n) || n <= 0) return 1;
-  return Math.min(7, Math.max(1, n));
+  return Math.min(15, Math.max(1, n));
 }
 
 function syncSolcastPreviewDayCountOptions(days, selectedDay, selectedCount) {
@@ -5222,7 +5251,7 @@ function syncSolcastPreviewDayCountOptions(days, selectedDay, selectedCount) {
   const safeDays = Array.isArray(days) ? days.filter(Boolean) : [];
   const idx = Math.max(0, safeDays.indexOf(String(selectedDay || "").trim()));
   const maxAllowed = safeDays.length
-    ? Math.min(7, Math.max(1, safeDays.length - idx))
+    ? Math.min(15, Math.max(1, safeDays.length - idx))
     : 1;
   Array.from(sel.options).forEach((opt) => {
     const count = normalizeSolcastPreviewDayCountClient(opt.value);

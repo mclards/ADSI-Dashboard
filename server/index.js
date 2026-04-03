@@ -212,7 +212,7 @@ const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
 const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
 const SOLCAST_TOOLKIT_PERIOD = "PT5M";
 const SOLCAST_PREVIEW_RESOLUTIONS = new Set(["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"]);
-const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 14;
+const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 15;
 const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 360;
 const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
   "utility_scale_sites",
@@ -12944,7 +12944,7 @@ app.post("/api/settings", (req, res) => {
     updates.solcastToolkitSiteRef = ref.slice(0, 500);
   }
   if (solcastToolkitDays !== undefined) {
-    const d = Math.max(1, Math.min(7, Math.trunc(Number(solcastToolkitDays) || 2)));
+    const d = Math.max(1, Math.min(SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS, Math.trunc(Number(solcastToolkitDays) || 2)));
     updates.solcastToolkitDays = String(d);
   }
   if (solcastToolkitPeriod !== undefined) {
@@ -14321,6 +14321,42 @@ app.get("/api/forecast/qa-history", (req, res) => {
   } catch (e) {
     console.warn("[forecast/qa-history] query failed:", e.message);
     return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /api/forecast/backfill-qa?days=N
+// Re-runs QA evaluation for the last N days (default 15, max 30).
+// Use after updating forecast engine thresholds to reclassify historical days.
+let _lastBackfillRequestTime = 0;
+app.post("/api/forecast/backfill-qa", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (forecastGenerating) {
+    return res.status(409).json({ ok: false, error: "Forecast operation already in progress. Please wait." });
+  }
+  const now = Date.now();
+  if (now - _lastBackfillRequestTime < 10000) {
+    return res.status(429).json({ ok: false, error: `Please wait ${Math.ceil((10000 - (now - _lastBackfillRequestTime)) / 1000)}s before retrying.` });
+  }
+  _lastBackfillRequestTime = now;
+  const days = Math.min(30, Math.max(1, parseInt(req.query.days || req.body?.days, 10) || 15));
+  forecastGenerating = true;
+  const _backfillGuardTimer = setTimeout(() => {
+    if (forecastGenerating) {
+      console.warn("[forecast/backfill-qa] Safety timeout: auto-reset after 45 minutes");
+      forecastGenerating = false;
+    }
+  }, 45 * 60 * 1000);
+  try {
+    console.log(`[forecast/backfill-qa] Starting QA backfill for ${days} days...`);
+    const result = await runForecastGenerator(["--backfill-qa", String(days)]);
+    console.log(`[forecast/backfill-qa] Complete (${result?.durationMs || 0}ms)`);
+    return res.json({ ok: true, days, durationMs: result?.durationMs || 0 });
+  } catch (e) {
+    console.warn("[forecast/backfill-qa] Failed:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    forecastGenerating = false;
+    clearTimeout(_backfillGuardTimer);
   }
 });
 
