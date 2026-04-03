@@ -111,9 +111,9 @@ class TestTriBandFeatureConstruction:
         assert len(features) == SLOTS_DAY
         assert features.shape[1] == len(FEATURE_COLS)
 
-        # Check spread computation (20% for test data)
+        # Check spread computation: 100*(hi-lo)/forecast = 100*(12-8)/10 = 40%
         solar_spread = features.loc[SOLAR_START_SLOT:SOLAR_END_SLOT-1, "solcast_spread_pct"]
-        assert np.allclose(solar_spread[solar_spread > 0], 20.0, atol=2.0)
+        assert np.allclose(solar_spread[solar_spread > 0], 40.0, atol=2.0)
 
     def test_build_features_without_triband(self):
         """Verify fallback when tri-band not available."""

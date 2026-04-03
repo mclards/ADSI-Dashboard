@@ -31,7 +31,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -2612,6 +2612,116 @@ def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = 0.97) 
 
 
 # ============================================================================
+# 1000H ALARM-BASED INVERTER OUTAGE MASK (for QA)
+# ============================================================================
+
+def _get_inverter_node_map() -> dict[int, list[int]]:
+    """Return {inverter_id: [node1, node2, ...]} from ipconfig."""
+    ipconfig_meta = load_ipconfig_authoritative()
+    cfg = ipconfig_meta.get("config", {}) if isinstance(ipconfig_meta, dict) else {}
+    inv_map = cfg.get("inverters", {}) or {}
+    unit_map = cfg.get("units", {}) or {}
+    inv_map = {str(k): v for k, v in inv_map.items()}
+    unit_map = {str(k): v for k, v in unit_map.items()}
+    all_ids = set(inv_map.keys()) | set(unit_map.keys())
+    result: dict[int, list[int]] = {}
+    for inv_id in all_ids:
+        ip = str(inv_map.get(inv_id, "") or "").strip()
+        if inv_map and inv_id in inv_map and not ip:
+            continue
+        raw_units = unit_map.get(inv_id, None)
+        nodes = _sanitize_units(raw_units) if raw_units is not None else [1, 2, 3, 4]
+        if nodes:
+            try:
+                result[int(inv_id)] = nodes
+            except (ValueError, TypeError):
+                pass
+    return result
+
+
+@lru_cache(maxsize=256)
+def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
+    """Build a per-slot boolean mask: True where at least one *entire* inverter
+    is down with alarm 1000H (0x1000 = 4096).
+
+    Only marks a slot as excluded when ALL configured nodes of an inverter
+    show the 1000H manual-stop alarm in their readings for that slot.
+    Individual node stops or 0-Pac from MPPT clipping do NOT trigger exclusion.
+    """
+    mask = np.zeros(SLOTS_DAY, dtype=bool)
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return mask
+    inv_node_map = _get_inverter_node_map()
+    if not inv_node_map:
+        log.warning("1000H mask: no inverter node mapping from ipconfig — skipping outage detection")
+        return mask
+
+    slot_ms = SLOT_MIN * 60 * 1000
+    # Query readings for alarm & 0x1000 per slot/inverter/node
+    sql = """
+        SELECT CAST((ts - ?) / ? AS INT) AS slot_idx,
+               inverter,
+               unit,
+               MAX(CASE WHEN (alarm & 4096) != 0 THEN 1 ELSE 0 END) AS has_1000h
+          FROM readings
+         WHERE ts >= ? AND ts < ?
+         GROUP BY slot_idx, inverter, unit
+    """
+    # Collect results: {(slot, inverter, node): has_1000h}
+    slot_alarm: dict[tuple[int, int, int], bool] = {}
+    db_paths = list(_iter_history_db_paths(int(day_start_ms), int(day_end_ms)))
+    query_ok = 0
+    for db_path in db_paths:
+        try:
+            with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                rows = conn.execute(sql, (
+                    int(day_start_ms), int(slot_ms),
+                    int(day_start_ms), int(day_end_ms),
+                )).fetchall()
+            query_ok += 1
+            for row in rows:
+                s_idx = int(row[0]) if row[0] is not None else -1
+                inv = int(row[1] or 0)
+                unit = int(row[2] or 0)
+                if not (0 <= s_idx < SLOTS_DAY) or inv <= 0 or unit <= 0:
+                    continue
+                has = bool(row[3])
+                key = (s_idx, inv, unit)
+                slot_alarm[key] = slot_alarm.get(key, False) or has
+        except Exception as e:
+            if "no such table" in str(e).lower() or "no such column" in str(e).lower():
+                continue  # Expected for old archive DBs without readings table
+            log.warning("1000H mask: readings query failed [%s]: %s", db_path, e)
+
+    if query_ok == 0 and db_paths:
+        log.error("1000H mask: ALL %d db paths failed for %s — returning empty mask (no outage assumed)", len(db_paths), day)
+
+    if not slot_alarm:
+        return mask
+
+    # For each slot, check if ALL nodes of any inverter have 1000H
+    for slot_idx in range(SLOTS_DAY):
+        for inv_id, expected_nodes in inv_node_map.items():
+            if not expected_nodes:
+                continue
+            all_down = True
+            for node in expected_nodes:
+                if not slot_alarm.get((slot_idx, inv_id, node), False):
+                    all_down = False
+                    break
+            if all_down:
+                mask[slot_idx] = True
+                break  # one full inverter down is enough to mark slot
+
+    down_count = int(np.count_nonzero(mask))
+    if down_count > 0:
+        log.info("1000H outage mask for %s: %d/%d slots with full-inverter outage", day, down_count, SLOTS_DAY)
+    return mask
+
+
+# ============================================================================
 # OPERATIONAL CONSTRAINTS (manual stops vs plant-cap curtailment)
 # ============================================================================
 
@@ -2862,19 +2972,24 @@ def build_operational_constraint_mask(day: str) -> tuple[np.ndarray, dict]:
 # ENERGY DATA LOADERS
 # ============================================================================
 
+_TZ_UTC8 = timezone(timedelta(hours=TZ_OFFSET))
+
+
 def _day_bounds_ms(day: str) -> tuple[int, int] | tuple[None, None]:
+    """Return (start_ms, end_ms) for a day string, explicitly in UTC+8."""
     try:
-        start = datetime.strptime(str(day).strip(), "%Y-%m-%d")
+        start_naive = datetime.strptime(str(day).strip(), "%Y-%m-%d")
     except Exception:
         return None, None
-    end = start + timedelta(days=1)
+    start = start_naive.replace(tzinfo=_TZ_UTC8)
+    end = (start_naive + timedelta(days=1)).replace(tzinfo=_TZ_UTC8)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
 
 
 def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[str]:
     try:
-        start_dt = datetime.fromtimestamp(max(0, int(start_ms)) / 1000.0)
-        end_dt = datetime.fromtimestamp(max(0, int(end_ms_exclusive - 1)) / 1000.0)
+        start_dt = datetime.fromtimestamp(max(0, int(start_ms)) / 1000.0, tz=_TZ_UTC8)
+        end_dt = datetime.fromtimestamp(max(0, int(end_ms_exclusive - 1)) / 1000.0, tz=_TZ_UTC8)
     except Exception:
         return []
     keys = []
@@ -3567,7 +3682,10 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
         season = _season_bucket_from_day(day)
         bucket_labels = classify_slot_weather_buckets(w5, day)
         _, constraint_meta = build_operational_constraint_mask(day)
-        exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+        # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
+        inverter_outage = _build_1000h_inverter_outage_mask(day)
+        cap_dispatch = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+        exclude_mask = inverter_outage | cap_dispatch
         # Build export-curtailed exclusion using actual generation and Solcast forecast as baseline proxy
         try:
             _actual_f = np.asarray(actual, dtype=float)
@@ -4598,7 +4716,10 @@ def _compute_error_memory_legacy(today: date) -> np.ndarray:
             if not day_history:
                 continue
             _, constraint_meta = build_operational_constraint_mask(day)
-            exclude_arr = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+            # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
+            inverter_outage = _build_1000h_inverter_outage_mask(day)
+            cap_dispatch = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+            exclude_arr = inverter_outage | cap_dispatch
             err = np.zeros(SLOTS_DAY, dtype=float)
             weight_vec = np.zeros(SLOTS_DAY, dtype=float)
             for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
@@ -4712,7 +4833,10 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                     regime_factor = ERR_MEMORY_REGIME_MISMATCH_PENALTY
 
                 _, constraint_meta = build_operational_constraint_mask(day_s)
-                exclude_arr = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+                # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
+                inverter_outage = _build_1000h_inverter_outage_mask(day_s)
+                cap_dispatch = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+                exclude_arr = inverter_outage | cap_dispatch
                 err = np.zeros(SLOTS_DAY, dtype=float)
                 weight_vec = np.zeros(SLOTS_DAY, dtype=float)
 
@@ -4847,9 +4971,12 @@ def collect_history_days(
         slot_weather_buckets = classify_slot_weather_buckets(w5, day)
         _, constraint_meta = build_operational_constraint_mask(day)
         actual_present_arr = np.asarray(actual_present, dtype=bool).copy()
-        operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool).copy()
+        # Use 1000H alarm-based outage detection instead of audit_log masks.
+        # Audit_log STOP/START entries carry over from stale events (90-day lookback)
+        # and falsely mask slots.  Only alarm 0x1000 on ALL nodes of an inverter
+        # indicates a true inverter outage.
+        inverter_outage_mask = _build_1000h_inverter_outage_mask(day).copy()
         cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool).copy()
-        manual_constraint_mask = np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy()
         rad_arr = pd.to_numeric(feature_frame["rad"], errors="coerce").fillna(0.0).values
 
         # ── Outage-aware slot masking ──
@@ -4867,7 +4994,7 @@ def collect_history_days(
         actual_effective = np.asarray(actual, dtype=float).copy()
         actual_effective[cap_dispatch_mask] = history_baseline[cap_dispatch_mask]
         actual_eval = actual_effective.copy()
-        fill_mask = (~actual_present_arr) | operational_mask
+        fill_mask = (~actual_present_arr) | inverter_outage_mask
         actual_eval[fill_mask] = history_baseline[fill_mask]
         residual = np.clip(actual_effective - history_baseline, -500.0, 500.0)
         curtailed = curtailed_mask(actual_effective, history_baseline)
@@ -4881,7 +5008,7 @@ def collect_history_days(
         usable_mask = (
             solar_slot_mask
             & actual_present_arr
-            & (~manual_constraint_mask)
+            & (~inverter_outage_mask)
             & (~outage_mask)
             & (history_baseline > 0.0)
             & (rad_arr >= RAD_MIN_WM2)
@@ -4935,9 +5062,10 @@ def collect_history_days(
             "solcast_snapshot": snapshot,
             "solcast_prior": solcast_prior,
             "used_solcast": bool(hybrid_meta.get("used_solcast")),
-            "operational_mask": operational_mask,
+            "operational_mask": np.asarray(constraint_meta.get("operational_mask"), dtype=bool).copy(),
             "cap_dispatch_mask": cap_dispatch_mask,
-            "manual_constraint_mask": manual_constraint_mask,
+            "manual_constraint_mask": np.asarray(constraint_meta.get("manual_constraint_mask"), dtype=bool).copy(),
+            "inverter_outage_mask": inverter_outage_mask,
             "commanded_off_nodes": np.asarray(constraint_meta.get("commanded_off_nodes"), dtype=int).copy(),
             "cap_dispatched_off_nodes": np.asarray(constraint_meta.get("cap_dispatched_off_nodes"), dtype=int).copy(),
             "manual_off_nodes": np.asarray(constraint_meta.get("manual_off_nodes"), dtype=int).copy(),
@@ -4976,7 +5104,8 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
         day = str(sample["day"])
         actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float)
         actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
-        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+        # Use 1000H alarm-based outage mask instead of stale audit_log manual_constraint_mask
+        inverter_outage_mask = np.asarray(sample.get("inverter_outage_mask"), dtype=bool) if sample.get("inverter_outage_mask") is not None else _build_1000h_inverter_outage_mask(str(sample["day"])).copy()
         w5 = sample["weather"]
         stats = sample["stats"]
         first_slot = sample.get("first_active_slot")
@@ -4986,7 +5115,7 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
         if (
             first_slot is not None
             and last_slot is not None
-            and not np.any(manual_constraint_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])
+            and not np.any(inverter_outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])
         ):
             activity_records.append({
                 "day": day,
@@ -5003,7 +5132,7 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
 
         for hour in range(SOLAR_START_H, SOLAR_END_H):
             start, end = _solar_hour_bounds(hour)
-            usable_hour_mask = actual_present[start:end] & (~manual_constraint_mask[start:end])
+            usable_hour_mask = actual_present[start:end] & (~inverter_outage_mask[start:end])
             if int(np.count_nonzero(usable_hour_mask)) < max(4, (60 // SLOT_MIN) // 2):
                 continue
             hour_total = float(actual[start:end].sum())
@@ -5874,7 +6003,8 @@ def collect_training_data_hardened(
     for sample in samples:
         day = str(sample["day"])
         stats = sample["stats"]
-        manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+        # Use 1000H alarm-based outage mask instead of stale audit_log manual_constraint_mask
+        inverter_outage_mask = np.asarray(sample.get("inverter_outage_mask"), dtype=bool) if sample.get("inverter_outage_mask") is not None else _build_1000h_inverter_outage_mask(day).copy()
         cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
         X = sample.get("training_feature_frame")
         y = np.asarray(sample.get("training_residual"), dtype=float) if sample.get("training_residual") is not None else np.asarray([], dtype=float)
@@ -5921,7 +6051,7 @@ def collect_training_data_hardened(
             mask = (
                 (hybrid_base > 0)
                 & actual_present
-                & (~manual_constraint_mask)
+                & (~inverter_outage_mask)
                 & (~curtailed)
                 & (feat["rad"].values >= RAD_MIN_WM2)
                 & (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT)
@@ -5949,14 +6079,14 @@ def collect_training_data_hardened(
             solcast_days += 1
 
         log.info(
-            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  manual_slots=%d  cap_slots=%d  solcast=%s blend=%.2f cov=%.2f",
+            "  Train %s  sky=%-14s  CF=%.3f  corr=%.2f  weight=%.3f  usable=%d  1000h_slots=%d  cap_slots=%d  solcast=%s blend=%.2f cov=%.2f",
             day,
             stats["sky_class"],
             stats["capacity_factor"],
             corr,
             float(sample_weight[0]) if len(sample_weight) else 0.0,
             usable,
-            int(np.count_nonzero(manual_constraint_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+            int(np.count_nonzero(inverter_outage_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
             int(np.count_nonzero(cap_dispatch_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
             "yes" if hybrid_meta.get("used_solcast") else "no",
             float(hybrid_meta.get("mean_blend", 0.0)),
@@ -6319,14 +6449,15 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
             actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float).copy()
             hybrid = np.asarray(sample.get("hybrid_baseline", sample["baseline"]), dtype=float).copy()
             actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
-            manual_constraint_mask = np.asarray(sample.get("manual_constraint_mask"), dtype=bool) if sample.get("manual_constraint_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
+            # Use 1000H alarm-based outage mask instead of stale audit_log manual_constraint_mask
+            inverter_outage_mask = np.asarray(sample.get("inverter_outage_mask"), dtype=bool) if sample.get("inverter_outage_mask") is not None else _build_1000h_inverter_outage_mask(day).copy()
             cap_dispatch_mask = np.asarray(sample.get("cap_dispatch_mask"), dtype=bool) if sample.get("cap_dispatch_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             actual[cap_dispatch_mask] = hybrid[cap_dispatch_mask]
             _outage = np.asarray(sample.get("outage_mask"), dtype=bool) if sample.get("outage_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             usable_mask = (
                 solar_mask
                 & actual_present
-                & (~manual_constraint_mask)
+                & (~inverter_outage_mask)
                 & (~_outage)
                 & (~curtailed_mask(actual, hybrid))
                 & (feat["rad"].values >= RAD_MIN_WM2)
@@ -7816,7 +7947,11 @@ def forecast_qa(today: date) -> None:
         return
 
     _, constraint_meta = build_operational_constraint_mask(yesterday)
-    exclude_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+    # QA exclusion based on 1000H alarm (true inverter manual-stop), NOT audit_log
+    # STOP commands.  A node going to 0 Pac is normal MPPT clipping — only alarm
+    # 0x1000 indicates the node is genuinely stopped.  Slots are excluded only when
+    # ALL nodes of at least one inverter show 1000H (entire inverter down).
+    exclude_mask = _build_1000h_inverter_outage_mask(yesterday).copy()
     metrics = compute_forecast_metrics(
         actual,
         fc,
@@ -8358,8 +8493,10 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     dayahead, _ = load_dayahead_with_presence(day_s)
     actual, actual_present = load_actual_loss_adjusted_with_presence(day_s)
     _, constraint_meta = build_operational_constraint_mask(day_s)
-    operational_mask = np.asarray(constraint_meta.get("operational_mask"), dtype=bool)
+    # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
+    inverter_outage_mask = _build_1000h_inverter_outage_mask(day_s)
     cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+    operational_mask = inverter_outage_mask | cap_dispatch_mask
     meta = {
         "day": day_s,
         "observed_slots": 0,
@@ -9286,11 +9423,15 @@ def run_backtest(dates: list[date]) -> bool:
             continue
 
         _, constraint_meta = build_operational_constraint_mask(target_s)
+        # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
+        _bt_outage = _build_1000h_inverter_outage_mask(target_s)
+        _bt_cap = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
+        _bt_exclude = _bt_outage | _bt_cap
         metrics = compute_forecast_metrics(
             actual,
             np.asarray(result["forecast"], dtype=float),
             actual_present=actual_present,
-            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+            exclude_mask=_bt_exclude,
         )
         if metrics is None:
             skipped_forecast += 1
@@ -9302,7 +9443,7 @@ def run_backtest(dates: list[date]) -> bool:
             np.asarray(result["forecast"], dtype=float),
             (result.get("error_class_meta") or {}).get("slot_weather_buckets"),
             actual_present=actual_present,
-            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+            exclude_mask=_bt_exclude,
         )
         class_metrics = compute_error_class_metrics(
             actual,
@@ -9310,7 +9451,7 @@ def run_backtest(dates: list[date]) -> bool:
             (result.get("error_class_meta") or {}).get("predicted_labels"),
             class_confidence=(result.get("error_class_meta") or {}).get("class_confidence"),
             actual_present=actual_present,
-            exclude_mask=np.asarray(constraint_meta.get("operational_mask"), dtype=bool),
+            exclude_mask=_bt_exclude,
         )
 
         rows.append({
