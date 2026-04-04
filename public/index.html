@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.7.5</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.7.6</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -2522,6 +2522,50 @@
           <button class="auth-modal-close" id="themePreviewClose" aria-label="Close theme preview" title="Close">✕</button>
         </div>
         <div class="theme-preview-grid" id="themePreviewGrid"></div>
+      </div>
+    </div>
+
+    <!-- Substation Meter Modal -->
+    <div id="substationMeterModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="substation-meter-modal-card">
+        <div class="substation-meter-modal-header">
+          <span class="substation-meter-modal-title">Substation Meter Input</span>
+          <button class="auth-modal-close" id="substationMeterClose" aria-label="Close" title="Close">&#10005;</button>
+        </div>
+        <div class="substation-meter-modal-body">
+          <div class="substation-meter-auth" id="substationMeterAuth">
+            <label class="substation-meter-label">Authorization Key</label>
+            <div class="substation-meter-auth-row">
+              <input type="password" id="substationMeterKey" class="inp" placeholder="Enter key" autocomplete="off" />
+              <button class="btn btn-accent btn-sm" id="substationMeterUnlock" type="button">Unlock</button>
+            </div>
+            <div class="substation-meter-auth-err" id="substationMeterAuthErr"></div>
+          </div>
+          <div class="substation-meter-content hidden" id="substationMeterContent">
+            <div class="substation-meter-date-row">
+              <span>Date: <b id="substationMeterDate"></b></span>
+              <span class="substation-meter-status-badge" id="substationMeterBadge"></span>
+            </div>
+            <div class="substation-meter-upload-row">
+              <label class="btn btn-outline btn-sm substation-meter-upload-label">
+                Upload Metered xlsx
+                <input type="file" id="substationMeterFile" accept=".xlsx,.xls" style="display:none" />
+              </label>
+              <span class="substation-meter-filename" id="substationMeterFilename"></span>
+            </div>
+            <div class="substation-meter-summary hidden" id="substationMeterSummary"></div>
+            <div class="substation-meter-table-wrap hidden" id="substationMeterTableWrap">
+              <table class="substation-meter-table">
+                <thead><tr><th>Time</th><th>MW-hr</th></tr></thead>
+                <tbody id="substationMeterTableBody"></tbody>
+              </table>
+            </div>
+            <div class="substation-meter-actions hidden" id="substationMeterActions">
+              <button class="btn btn-accent btn-sm" id="substationMeterSave" type="button">Save Readings</button>
+              <span class="substation-meter-save-status" id="substationMeterSaveStatus"></span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

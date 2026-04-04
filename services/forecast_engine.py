@@ -209,7 +209,7 @@ SOLAR_END_SLOT   = SOLAR_END_H   * 60 // SLOT_MIN
 EXPORT_MW          = 24.0   # fallback export ceiling when no explicit setting exists
 FORECAST_EXPORT_LIMIT_SETTING_KEY = "forecastExportLimitMw"
 IPCONFIG_SETTING_KEY = "ipConfigJson"
-DEFAULT_INVERTER_LOSS_PCT = 2.5
+DEFAULT_INVERTER_LOSS_PCT = 3.0   # midpoint of observed 2.5%-3.6% range
 UNIT_KW_MAX        = 997.0   # kW peak per inverter (4-node complete)
 UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
 PLANT_MW_FALLBACK  = 26.4    # used when ipconfig absent (108 nodes × NODE_KW_MAX = 26.4 MW)
@@ -394,7 +394,7 @@ AVAIL_DAY_MINOR_PCT      = 0.05   # ≥5% of solar slots tainted → minor
 AVAIL_DAY_MODERATE_PCT   = 0.15   # ≥15% → moderate
 AVAIL_DAY_SEVERE_PCT     = 0.30   # ≥30% → severe
 EST_ACTUAL_RECOVER_MIN   = 0.80   # need ≥80% est_actual coverage to recover severe outage day
-EST_ACTUAL_WEIGHT_FACTOR = 0.85   # training weight discount for slots reconstructed from est_actual
+EST_ACTUAL_WEIGHT_FACTOR = 0.93   # satellite-derived, nearly accurate per operator validation (7% discount)
 
 # Confidence bands
 CONF_CLEAR_BASE = 0.08   # 8% on clear days
@@ -3149,6 +3149,141 @@ def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int)
     return out
 
 
+# ── Substation Metered Energy (E3) ────────────────────────────────────────────
+
+def _query_substation_metered_15min(day: str) -> dict[int, float]:
+    """Query substation_metered_energy for a date.
+
+    Returns dict {ts_epoch_ms: mwh_15min}.
+    """
+    sql = "SELECT ts, mwh FROM substation_metered_energy WHERE date = ? ORDER BY ts"
+    out: dict[int, float] = {}
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                for ts, mwh in conn.execute(sql, (day,)).fetchall():
+                    ts_i = int(ts or 0)
+                    if ts_i > 0 and mwh is not None:
+                        out[ts_i] = float(mwh)
+            return out
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB substation metered load failed: %s", e)
+            break
+    return out
+
+
+def interpolate_15min_to_5min(
+    metered_15min: dict[int, float],
+    inverter_5min: dict[int, float],
+) -> np.ndarray:
+    """Shape-preserving interpolation of 15-min metered MWh to 5-min resolution.
+
+    For each 15-min window with metered data, distributes the 15-min MWh across
+    its three 5-min sub-slots proportionally to the inverter energy profile.
+    Falls back to flat (mwh/3) if inverter data is unavailable for the window.
+
+    Returns: np.ndarray of shape (SLOTS_DAY,) with kWh values (MWh×1000).
+    Slots without metered data remain 0.0.
+    """
+    result = np.zeros(SLOTS_DAY, dtype=float)
+    ms_5min = SLOT_MIN * 60 * 1000  # 300000
+
+    for ts_15, mwh_15 in metered_15min.items():
+        if mwh_15 <= 0:
+            continue
+        kwh_15 = mwh_15 * 1000.0  # convert MWh to kWh
+        # Three 5-min sub-slots within this 15-min window
+        sub_ts = [ts_15, ts_15 + ms_5min, ts_15 + 2 * ms_5min]
+        sub_kwh = [inverter_5min.get(t, 0.0) for t in sub_ts]
+        total_inv = sum(sub_kwh)
+
+        for i, t in enumerate(sub_ts):
+            # Slot index from epoch ms
+            # Use local time offset: UTC+8
+            local_ms = t + 8 * 3600 * 1000
+            day_ms = local_ms % (86400 * 1000)
+            slot_idx = int(day_ms // (ms_5min))
+            if 0 <= slot_idx < SLOTS_DAY:
+                if total_inv > 0:
+                    result[slot_idx] = kwh_15 * (sub_kwh[i] / total_inv)
+                else:
+                    log.debug("interpolate_15min_to_5min: no inverter data at slot %d (ts=%d), flat fallback", slot_idx, t)
+                    result[slot_idx] = kwh_15 / 3.0
+
+    return result
+
+
+def resolve_actual_5min_for_date(day: str) -> tuple[np.ndarray, np.ndarray, str]:
+    """E4 fallback chain: resolve best-available actual energy for a date.
+
+    Priority: metered substation → loss-adjusted inverter → Solcast est_actual.
+    Per-slot: if metered covers partial solar window, remaining slots fall back.
+
+    Returns (actual_kwh[288], present_mask[288], source_label)
+    where source_label is 'metered', 'estimated', or 'mixed'.
+    """
+    actual = np.zeros(SLOTS_DAY, dtype=float)
+    present = np.zeros(SLOTS_DAY, dtype=bool)
+    source = "estimated"
+
+    # Shared: compute day bounds and load inverter 5-min data (used by steps 1 & 2)
+    d_dt = datetime.strptime(day, "%Y-%m-%d")
+    day_start_ms = int(
+        d_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+    )
+    day_end_ms = day_start_ms + 86400 * 1000
+    loss_factors = _load_inverter_loss_factors()
+    inv_5min = _query_energy_5min_loss_adjusted(APP_DB_FILE, day_start_ms, day_end_ms, loss_factors)
+
+    # Step 1: Check for metered substation data
+    metered_15min = _query_substation_metered_15min(day)
+    if metered_15min:
+        metered_5min = interpolate_15min_to_5min(metered_15min, inv_5min)
+
+        metered_present = metered_5min > 0
+        if np.any(metered_present):
+            actual[metered_present] = metered_5min[metered_present]
+            present[metered_present] = True
+            source = "metered"
+
+    # Step 2: Fill remaining from loss-adjusted inverter
+    if not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+        for ts_ms, kwh in inv_5min.items():
+            local_ms = ts_ms + 8 * 3600 * 1000
+            day_ms = local_ms % (86400 * 1000)
+            slot_idx = int(day_ms // (SLOT_MIN * 60 * 1000))
+            if 0 <= slot_idx < SLOTS_DAY and not present[slot_idx] and kwh > 0:
+                actual[slot_idx] = kwh
+                present[slot_idx] = True
+
+        if source == "metered" and not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+            source = "mixed"
+
+    # Step 3: Fill remaining from Solcast est_actual
+    if not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+        snap = load_solcast_snapshot(day)
+        if snap:
+            est_kwh = np.asarray(
+                snap.get("est_actual_kwh", np.zeros(SLOTS_DAY)), dtype=float
+            )
+            solar_mask = np.zeros(SLOTS_DAY, dtype=bool)
+            solar_mask[SOLAR_START_SLOT:SOLAR_END_SLOT] = True
+            fill_mask = (~present) & solar_mask & (est_kwh > 0) & np.isfinite(est_kwh)
+            if np.any(fill_mask):
+                actual[fill_mask] = est_kwh[fill_mask]
+                present[fill_mask] = True
+                if source == "estimated":
+                    source = "estimated"  # still estimated if only solcast
+                else:
+                    source = "mixed"
+
+    return actual, present, source
+
+
 # ── Availability / Outage Detection (Phase 2) ──────────────────────────────
 
 def _query_availability_5min(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, tuple[int, int]]:
@@ -3735,13 +3870,11 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
     lookback = max(SOLCAST_RELIABILITY_LOOKBACK_DAYS, N_TRAIN_DAYS)
     for days_ago in range(1, lookback + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
-        # Solcast's raw provider unit is MW, normalized to per-slot kWh for
-        # forecast scoring, and already substation-level. Calibrate it against
-        # the same loss-adjusted actual basis used by training, QA, and backtest.
-        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
+        # E5 priority chain: metered substation → loss-adjusted inverter → Solcast est_actual
+        actual, actual_present, _ = resolve_actual_5min_for_date(day)
         snapshot = load_solcast_snapshot(day)
         dayahead, dayahead_present = load_dayahead_with_presence(day)
-        if actual is None or actual_present is None:
+        if not np.any(actual_present):
             continue
         wdata = fetch_weather(day, source="archive")
         if wdata is None:
@@ -5017,10 +5150,11 @@ def collect_history_days(
 
     for days_ago in range(1, lookback_days + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
-        actual, actual_present = load_actual_loss_adjusted_with_presence(day)
+        # E5 priority chain: metered substation → loss-adjusted inverter → Solcast est_actual
+        actual, actual_present, actual_source = resolve_actual_5min_for_date(day)
         wdata = fetch_weather(day, source="archive")
         snapshot = load_solcast_snapshot(day)
-        if actual is None or actual_present is None or wdata is None:
+        if not np.any(actual_present) or wdata is None:
             log.debug("  Skip %s - missing history basis", day)
             continue
 
@@ -5207,6 +5341,7 @@ def collect_history_days(
             "outage_solar_slot_count": outage_solar_count,
             "est_actual_reconstructed_mask": outage_with_est.copy(),
             "est_actual_reconstructed_count": outage_reconstructed_count,
+            "actual_source": actual_source,
         })
         log.info(
             "  History %s  sky=%-14s  usable=%d  manual_slots=%d  cap_slots=%d  outage=%s(%d)  est_recon=%d  solcast=%s",
@@ -6181,6 +6316,26 @@ def collect_training_data_hardened(
             # Reconstruct outage slots with est_actual (fallback path)
             est_recon_mask = np.asarray(sample.get("est_actual_reconstructed_mask"), dtype=bool) if sample.get("est_actual_reconstructed_mask") is not None else np.zeros(SLOTS_DAY, dtype=bool)
             effective_present = actual_present | est_recon_mask
+
+            # A3: Gap-fill — slots where metered actual is missing but est_actual
+            # is available.  Individual gap-filled slots get full weight (no day-level
+            # discount) because the satellite measurement for that slot is accurate.
+            if solcast_prior and isinstance(solcast_prior, dict):
+                est_actual_train = np.asarray(
+                    solcast_prior.get("est_actual_kwh", np.zeros(SLOTS_DAY)), dtype=float
+                )
+                solar_mask_t = np.zeros(SLOTS_DAY, dtype=bool)
+                solar_mask_t[SOLAR_START_SLOT:SOLAR_END_SLOT] = True
+                est_avail_t = (est_actual_train > 0.0) & np.isfinite(est_actual_train) & solar_mask_t
+                gap_fill_t = (~effective_present) & est_avail_t
+                if np.any(gap_fill_t):
+                    actual[gap_fill_t] = est_actual_train[gap_fill_t]
+                    effective_present = effective_present | gap_fill_t
+                    log.debug(
+                        "  Train [%s] est_actual gap-fill: %d slots",
+                        day, int(np.count_nonzero(gap_fill_t)),
+                    )
+
             unreconstructed_outage = inverter_outage_mask & ~est_recon_mask
             curtailed = curtailed_mask(actual, hybrid_base)
             mask = (
@@ -6204,8 +6359,10 @@ def collect_training_data_hardened(
         corr = float(stats.get("rad_gen_corr", 0.0))
         quality_weight = float(np.clip(0.70 + 0.30 * max(corr, 0.0), 0.55, 1.0))
         # Discount weight for days with est_actual reconstruction
+        # Metered substation data gets full weight (1.0) — no discount
         est_recon_count = int(sample.get("est_actual_reconstructed_count", 0))
-        recon_discount = EST_ACTUAL_WEIGHT_FACTOR if est_recon_count > 0 else 1.0
+        actual_src = sample.get("actual_source", "estimated")
+        recon_discount = 1.0 if actual_src == "metered" else (EST_ACTUAL_WEIGHT_FACTOR if est_recon_count > 0 else 1.0)
         sample_weight = np.full(len(y), recency_weight * quality_weight * recon_discount, dtype=float)
 
         X_parts.append(X.reset_index(drop=True))
@@ -8100,19 +8257,20 @@ def forecast_qa(today: date) -> None:
     yesterday = (today - timedelta(days=1)).isoformat()
     day2ago   = (today - timedelta(days=2)).isoformat()
 
-    actual, actual_present = load_actual_loss_adjusted_with_presence(yesterday)
+    # E5 priority chain: metered substation → loss-adjusted inverter → Solcast est_actual
+    actual, actual_present, actual_source = resolve_actual_5min_for_date(yesterday)
     fc, fc_present = load_dayahead_with_presence(yesterday)
     fc_lo, fc_hi = _load_dayahead_bands_from_db(yesterday)
-    pers, pers_present = load_actual_loss_adjusted_with_presence(day2ago)   # persistence proxy
+    pers, pers_present, _ = resolve_actual_5min_for_date(day2ago)   # persistence proxy
 
     if (
-        actual is None
+        not np.any(actual_present)
         or fc is None
-        or actual_present is None
         or fc_present is None
     ):
         log.info("QA: no data for %s", yesterday)
         return
+    log.info("QA: actual source for %s = %s", yesterday, actual_source)
 
     _, constraint_meta = build_operational_constraint_mask(yesterday)
     # QA exclusion based on 1000H alarm (true inverter manual-stop), NOT audit_log
@@ -8236,6 +8394,7 @@ def forecast_qa(today: date) -> None:
     cap_mask_recon = cap_mask_raw.copy()
     exclude_recon = np.asarray(exclude_mask, dtype=bool).copy()
 
+    est_actual_gap_fill_slots = 0
     if solcast_snapshot:
         est_actual_kwh = np.asarray(
             solcast_snapshot.get("est_actual_kwh", np.zeros(SLOTS_DAY)), dtype=float
@@ -8243,6 +8402,20 @@ def forecast_qa(today: date) -> None:
         solar_slot_mask = np.zeros(SLOTS_DAY, dtype=bool)
         solar_slot_mask[SOLAR_START_SLOT:SOLAR_END_SLOT] = True
         est_available = (est_actual_kwh > 0.0) & np.isfinite(est_actual_kwh) & solar_slot_mask
+
+        # A2: Gap-fill — slots where actual is missing but est_actual is available.
+        # This captures brief inverter comm drops and partial data gaps not flagged
+        # as formal outages.  Gap-filled slots get full trust (no constraint flag).
+        gap_fill_mask = (~actual_present_recon) & est_available
+        if np.any(gap_fill_mask):
+            actual_recon[gap_fill_mask] = est_actual_kwh[gap_fill_mask]
+            actual_present_recon[gap_fill_mask] = True
+            est_actual_gap_fill_slots = int(np.count_nonzero(gap_fill_mask))
+            log.info(
+                "QA [%s] est_actual gap-fill: %d missing solar slots filled from Solcast",
+                yesterday,
+                est_actual_gap_fill_slots,
+            )
 
         # Detect outage/low-availability slots
         outage_mask = _detect_outage_slots(yesterday)
@@ -8271,8 +8444,8 @@ def forecast_qa(today: date) -> None:
                 int(np.count_nonzero(np.asarray(exclude_mask, dtype=bool) & recon_mask)),
             )
 
-    # Recompute metrics with reconstructed actual data
-    if est_actual_recon_slots > 0:
+    # Recompute metrics with reconstructed/gap-filled actual data
+    if est_actual_recon_slots > 0 or est_actual_gap_fill_slots > 0:
         metrics = compute_forecast_metrics(
             actual_recon,
             fc,
@@ -8357,7 +8530,7 @@ def forecast_qa(today: date) -> None:
         update_forecast_weather_snapshot_meta(yesterday, {"resolution_debug": resolution_debug})
 
     log.info(
-        "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f est_recon=%d",
+        "QA [%s] usable=%d masked=%d WAPE=%.1f%% MAPE=%.1f%% TotalAPE=%.1f%% MBE=%.1f kWh/slot RMSE=%.1f kWh/slot First=%s Last=%s Skill=%.3f est_recon=%d gap_fill=%d",
         yesterday,
         metrics["usable_slot_count"],
         metrics["masked_slot_count"],
@@ -8370,6 +8543,7 @@ def forecast_qa(today: date) -> None:
         _format_minutes(metrics["last_active_error_min"]),
         skill,
         est_actual_recon_slots,
+        est_actual_gap_fill_slots,
     )
     log.info("QA weather buckets [%s] %s", yesterday, _format_bucket_metric_summary(bucket_metrics))
     if overall_resolution:
@@ -9798,8 +9972,9 @@ def run_backtest(dates: list[date]) -> bool:
 
     for target_date in dates:
         target_s = target_date.isoformat()
-        actual, actual_present = load_actual_loss_adjusted_with_presence(target_s)
-        if actual is None or actual_present is None:
+        # E5 priority chain: metered substation → loss-adjusted inverter → Solcast est_actual
+        actual, actual_present, _ = resolve_actual_5min_for_date(target_s)
+        if not np.any(actual_present):
             skipped_actual += 1
             log.warning("Backtest skip [%s] - actual 5-minute history unavailable", target_s)
             continue
@@ -9982,6 +10157,12 @@ def parse_cli_args():
         action="store_true",
         help="Run QA evaluation for today's completed solar data (use after solar window closes).",
     )
+    parser.add_argument(
+        "--qa-date",
+        type=str,
+        metavar="YYYY-MM-DD",
+        help="Re-run QA evaluation for a specific date (e.g. after substation meter data entry).",
+    )
     return parser.parse_args()
 
 
@@ -10041,6 +10222,13 @@ def run_cli_generation(args) -> int:
             tomorrow_ref = datetime.now(_TZ_UTC8).date() + timedelta(days=1)
             log.info("QA-today: evaluating %s", (tomorrow_ref - timedelta(days=1)).isoformat())
             forecast_qa(tomorrow_ref)
+            return 0
+
+        if args.qa_date:
+            target = _parse_iso_date_safe(args.qa_date)
+            ref_today = target + timedelta(days=1)
+            log.info("QA-date: evaluating %s", target.isoformat())
+            forecast_qa(ref_today)
             return 0
 
         if args.backfill_qa is not None:

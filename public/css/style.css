@@ -5494,6 +5494,16 @@ select.cam-field-input { appearance: auto; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
+.analytics-side-grid.analytics-side-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.analytics-side-grid.analytics-side-grid-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.analytics-side-grid.analytics-side-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 6px;
+}
 
 .analytics-side-item {
   border: 1px solid rgba(105, 49, 65, 0.85);
@@ -5539,6 +5549,191 @@ select.cam-field-input { appearance: auto; }
 
 .analytics-side-peak {
   font-size: 13px;
+}
+
+.analytics-side-values-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.analytics-side-value-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.analytics-side-sub-label {
+  font-size: 8px;
+  color: var(--text3);
+  opacity: 0.7;
+  margin-top: 1px;
+  letter-spacing: 0.3px;
+}
+
+.analytics-substation-val {
+}
+
+/* Substation Meter UI */
+.analytics-substation-meter-wrap {
+  margin-top: 8px;
+  border: 1px solid rgba(105, 49, 65, 0.65);
+  border-radius: 8px;
+  background: rgba(40, 17, 26, 0.6);
+  padding: 8px;
+}
+.analytics-substation-meter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.analytics-substation-btn {
+  font-size: 10px;
+  padding: 3px 10px;
+}
+.analytics-substation-status {
+  font-size: 9px;
+  color: var(--text3);
+  opacity: 0.8;
+}
+.analytics-substation-status.has-data {
+  color: var(--green);
+  opacity: 1;
+}
+.substation-meter-modal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(520px, 92vw);
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.substation-meter-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border, #693141);
+}
+.substation-meter-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text1, #fff);
+}
+.substation-meter-modal-body {
+  padding: 16px;
+}
+.substation-meter-label {
+  font-size: 11px;
+  color: var(--text2, #ccc);
+  margin-bottom: 6px;
+  display: block;
+}
+.substation-meter-auth-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.substation-meter-auth-row .inp {
+  flex: 1;
+  font-size: 12px;
+}
+.substation-meter-auth-err {
+  font-size: 10px;
+  color: var(--accent-red, #ff4d4d);
+  margin-top: 4px;
+  min-height: 14px;
+}
+.substation-meter-date-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text2, #ccc);
+}
+.substation-meter-status-badge {
+  font-size: 9px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.substation-meter-status-badge.has-data {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+.substation-meter-status-badge.no-data {
+  background: rgba(250, 204, 21, 0.15);
+  color: #facc15;
+}
+.substation-meter-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.substation-meter-upload-label {
+  cursor: pointer;
+  font-size: 10px;
+}
+.substation-meter-filename {
+  font-size: 10px;
+  color: var(--text3, #999);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.substation-meter-summary {
+  font-size: 11px;
+  color: var(--text2, #ccc);
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+  line-height: 1.6;
+}
+.substation-meter-summary .warn {
+  color: #facc15;
+}
+.substation-meter-table-wrap {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.substation-meter-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.substation-meter-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text2);
+  font-weight: 600;
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.substation-meter-table td {
+  padding: 3px 8px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border2);
+}
+.substation-meter-table tr:hover td {
+  background: var(--surface2);
+}
+.substation-meter-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.substation-meter-save-status {
+  font-size: 10px;
+  color: var(--text3, #999);
 }
 
 .analytics-gen-wrap {
@@ -8860,7 +9055,8 @@ body.mode-transition-active {
   color: #a32342;
 }
 
-:root[data-theme="light"] .analytics-gen-wrap {
+:root[data-theme="light"] .analytics-gen-wrap,
+:root[data-theme="light"] .analytics-substation-meter-wrap {
   border-color: #b49f81;
   background: linear-gradient(
     180deg,
@@ -9681,7 +9877,8 @@ body.mode-transition-active {
 }
 
 :root[data-theme="classic"] .analytics-side-item,
-:root[data-theme="classic"] .analytics-gen-wrap {
+:root[data-theme="classic"] .analytics-gen-wrap,
+:root[data-theme="classic"] .analytics-substation-meter-wrap {
   border-color: rgba(58, 88, 128, 0.85);
   background: rgba(13, 24, 42, 0.84);
 }

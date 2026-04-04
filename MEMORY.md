@@ -2,12 +2,25 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.5.7
+- **Repo/package version baseline:** 2.7.6
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.7.6 Changes - Substation Meter Gateway Proxy, Auth Gate Removal, Blueprint Completion (2026-04-05)
+- **Substation meter gateway proxy:** Added `_proxySubstationMeterToGateway()` helper in `server/index.js`. POST /api/substation-meter/:date now mirrors writes to the gateway when running in remote mode (Option A per blueprint E4b).
+- **Auth gate removal:** Removed `requireSubstationAuth` middleware from three substation meter endpoints (save, upload-xlsx, recalculate) per user directive on 2026-04-05.
+- **Frontend modal:** Removed time-based auth gate from `openSubstationMeterModal()` in `public/js/app.js`. Modal now shows content directly without x-substation-key header.
+- **Est-actual weight calibration:** Updated `EST_ACTUAL_WEIGHT_FACTOR` from 0.85 to 0.93 (7% discount) per operator validation in `services/forecast_engine.py`.
+- **Transmission loss calibration:** Updated `DEFAULT_INVERTER_LOSS_PCT` from 2.5 to 3.0 (midpoint of observed 2.5%-3.6% range) in `services/forecast_engine.py`.
+- **Substation metering functions:** Added `_query_substation_metered_15min()`, `interpolate_15min_to_5min()`, and `resolve_actual_5min_for_date()` to forecast engine (E3/E4 fallback chain).
+- **Gateway sync toast warning:** Added warning toast when gatewaySynced returns false in frontend.
+- **Proxy timeout rule:** Added 20s timeout rule for `/api/substation-meter/` in PROXY_TIMEOUT_RULES.
+- **Blueprint verification:** Phase 1-13 est-actual trust and loss calibration completed and verified.
+- **Files changed:** `server/index.js`, `public/js/app.js`, `public/css/style.css`, `server/db.js`, `services/forecast_engine.py`.
+- **Documentation:** Blueprint post-implementation notes added to `docs/blueprint-est-actual-trust-and-loss-calibration.md`.
 
 ## v2.5.7 Changes - Analytics and Settings UI Refinements (2026-03-30)
 - **Analytics card row heights:** Reduced to 0.75x in the analytics section CSS. All card heights, canvas sizes, and label minimums scaled proportionally:

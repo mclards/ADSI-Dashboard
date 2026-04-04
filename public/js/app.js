@@ -4433,6 +4433,11 @@ async function loadForecastPerfData() {
     const healthRes = healthResult.status === "fulfilled" ? healthResult.value : null;
     State.fperf.qaRows = Array.isArray(qaRes?.rows) ? qaRes.rows : [];
     State.fperf.health = healthRes || null;
+    // C3: Cache plant-average loss % for Analytics substation column
+    if (healthRes?.plantAvgLossPct != null) {
+      State.plantAvgLossPct = Number(healthRes.plantAvgLossPct);
+      State.lossFactorSource = healthRes.lossFactorSource || "default";
+    }
     if (qaResult.status !== "fulfilled" || healthResult.status !== "fulfilled") {
       const failed = [qaResult, healthResult]
         .filter((r) => r.status !== "fulfilled")
@@ -13324,22 +13329,39 @@ function ensureAnalyticsCards() {
   totalSideCard.id = "analyticsTotalSideCard";
   totalSideCard.innerHTML = `
     <div class="chart-title">📊 Selected Date Summary</div>
-    <div class="analytics-side-grid">
-      <div class="analytics-side-item" title="Total measured energy generated for the selected date.">
-        <div class="analytics-side-label">Actual MWh</div>
+    <div class="analytics-side-grid analytics-side-grid-3">
+      <div class="analytics-side-item" title="Total measured inverter energy generated for the selected date.">
+        <div class="analytics-side-label">Inverter MWh</div>
         <div class="analytics-side-value" id="anaSideActual">—</div>
+      </div>
+      <div class="analytics-side-item" title="Estimated energy delivered to substation after transmission losses.">
+        <div class="analytics-side-label" id="anaSideSubstationLabel">Substation (est.)</div>
+        <div class="analytics-side-value analytics-substation-val" id="anaSideSubstation">—</div>
+      </div>
+      <div class="analytics-side-item" title="Metered substation energy from uploaded data log.">
+        <div class="analytics-side-label">Subs. Metered MWh</div>
+        <div class="analytics-side-value" id="anaSideScadaActual">—</div>
+        <div class="analytics-side-sub-label" id="anaSideScadaSource"></div>
       </div>
       <div class="analytics-side-item" title="Forecasted day-ahead energy for the selected date.">
         <div class="analytics-side-label">Day-ahead MWh</div>
         <div class="analytics-side-value" id="anaSideDayAhead">—</div>
       </div>
-      <div class="analytics-side-item" title="Difference between actual and forecasted energy (actual minus forecast).">
+      <div class="analytics-side-item" title="Difference between metered actual and forecasted energy.">
         <div class="analytics-side-label">Variance MWh</div>
         <div class="analytics-side-value" id="anaSideVariance">—</div>
       </div>
       <div class="analytics-side-item" title="Highest single interval energy reading and when it occurred.">
         <div class="analytics-side-label">Peak Interval</div>
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
+      </div>
+    </div>
+    <div class="analytics-substation-meter-wrap" id="anaSubstationMeterWrap" style="display:none;">
+      <div class="analytics-side-label">Substation Meter Input</div>
+      <div class="analytics-substation-meter-row">
+        <button id="btnSubstationMeter" class="btn btn-sm analytics-substation-btn" type="button"
+          title="Upload or manually enter substation meter data for the selected date.">Upload Metered</button>
+        <span class="analytics-substation-status" id="anaSubstationStatus"></span>
       </div>
     </div>
     <div class="analytics-gen-wrap">
@@ -13737,7 +13759,11 @@ function renderAnalyticsSummary(
       .reduce((s, v) => s + Number(v || 0), 0)
       .toFixed(6),
   );
-  const varianceMwh = Number((totalMwh - dayAheadTotalMwh).toFixed(6));
+  // C1: Substation-estimated MWh (loss-adjusted)
+  const plantAvgLossPct = Number(State.plantAvgLossPct || 3.0);
+  const substationTotalMwh = Number((totalMwh * (1.0 - plantAvgLossPct / 100.0)).toFixed(6));
+  // C1b: Variance rebased to substation vs forecast
+  const varianceMwh = Number((substationTotalMwh - dayAheadTotalMwh).toFixed(6));
   const activeInverters = new Set(
     (rows || [])
       .filter((r) => Number(r?.kwh_inc || 0) > 0)
@@ -13770,19 +13796,38 @@ function renderAnalyticsSummary(
   `;
 
   const sideActual = $("anaSideActual");
+  const sideSubstation = $("anaSideSubstation");
   const sideDayAhead = $("anaSideDayAhead");
   const sideVariance = $("anaSideVariance");
   const sidePeak = $("anaSidePeak");
-  if (sideActual) sideActual.textContent = `${totalMwh.toFixed(6)} MWh`;
+  if (sideActual) sideActual.textContent = `${totalMwh.toFixed(4)} MWh`;
+  if (sideSubstation) {
+    sideSubstation.textContent = `${substationTotalMwh.toFixed(4)} MWh`;
+    sideSubstation.title = `Estimated energy delivered to substation after transmission losses (${plantAvgLossPct.toFixed(1)}%).`;
+  }
+  // Reset Subs. Metered card immediately before async check (prevents stale value on date change)
+  const sideScada = $("anaSideScadaActual");
+  if (sideScada) sideScada.textContent = "—";
+  const stBadge = $("anaSubstationStatus");
+  if (stBadge) { stBadge.textContent = ""; stBadge.className = "analytics-substation-status"; }
+  // Check for metered substation data — populates Subs. Metered card
+  const anaDateStr = String($("anaDate")?.value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(anaDateStr)) {
+    _checkMeteredSubstation(anaDateStr, sideVariance, dayAheadTotalMwh);
+  }
   if (sideDayAhead)
-    sideDayAhead.textContent = `${dayAheadTotalMwh.toFixed(6)} MWh`;
+    sideDayAhead.textContent = `${dayAheadTotalMwh.toFixed(4)} MWh`;
   if (sideVariance) {
-    sideVariance.textContent = `${varianceMwh >= 0 ? "+" : ""}${varianceMwh.toFixed(6)} MWh`;
+    sideVariance.textContent = `${varianceMwh >= 0 ? "+" : ""}${varianceMwh.toFixed(4)} MWh`;
     sideVariance.classList.toggle("pos", varianceMwh >= 0);
     sideVariance.classList.toggle("neg", varianceMwh < 0);
   }
   if (sidePeak)
-    sidePeak.textContent = `${peakIntervalMwh.toFixed(6)} MWh @ ${peakAt}`;
+    sidePeak.textContent = `${peakIntervalMwh.toFixed(4)} MWh @ ${peakAt}`;
+
+  // Show substation meter button (auth gated via modal)
+  const meterWrap = $("anaSubstationMeterWrap");
+  if (meterWrap) meterWrap.style.display = "";
 }
 
 function buildAnalyticsDisplayTimeline(intervalMin = 5) {
@@ -14387,6 +14432,354 @@ async function runDayAheadGeneration() {
       res.textContent = `✗ ${e.message}`;
     }
   }
+}
+
+// ─── Substation Meter Modal (E2c) ─────────────────────────────────────────────
+
+const SubstationMeter = {
+  authKey: null,
+  parsedReadings: null,
+  parsedDaily: null,
+};
+
+function getSubstationMinuteKeys() {
+  const m = new Date().getMinutes();
+  return [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
+}
+
+function verifySubstationKey(v) {
+  const key = String(v || "").trim().toLowerCase();
+  const m = new Date().getMinutes();
+  const mPrev = (m + 59) % 60;
+  const valid = [
+    `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
+    `adsi${mPrev}`, `adsi${String(mPrev).padStart(2, "0")}`,
+  ];
+  return valid.includes(key);
+}
+
+function openSubstationMeterModal() {
+  const modal = $("substationMeterModal");
+  if (!modal) return;
+  const dateStr = String($("anaDate")?.value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    showToast("Select a valid date first.", "warning", 3000);
+    return;
+  }
+  $("substationMeterDate").textContent = dateStr;
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+
+  // Reset state
+  SubstationMeter.parsedReadings = null;
+  SubstationMeter.parsedDaily = null;
+  SubstationMeter.saveDate = null;
+  const content = $("substationMeterContent");
+  const auth = $("substationMeterAuth");
+  if (auth) auth.classList.add("hidden");
+  if (content) content.classList.remove("hidden");
+  loadSubstationMeterData(dateStr);
+}
+
+function closeSubstationMeterModal() {
+  const modal = $("substationMeterModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function loadSubstationMeterData(dateStr) {
+  const badge = $("substationMeterBadge");
+  const tableWrap = $("substationMeterTableWrap");
+  const tableBody = $("substationMeterTableBody");
+  const summary = $("substationMeterSummary");
+  const actions = $("substationMeterActions");
+  const fileEl = $("substationMeterFile");
+  const filenameEl = $("substationMeterFilename");
+  const saveStatus = $("substationMeterSaveStatus");
+
+  // Reset
+  if (tableWrap) tableWrap.classList.add("hidden");
+  if (summary) summary.classList.add("hidden");
+  if (actions) actions.classList.add("hidden");
+  if (tableBody) tableBody.innerHTML = "";
+  if (filenameEl) filenameEl.textContent = "";
+  if (fileEl) fileEl.value = "";
+  if (saveStatus) saveStatus.textContent = "";
+
+  try {
+    const data = await api(`/api/substation-meter/${dateStr}`);
+    if (data?.readings?.length > 0) {
+      if (badge) {
+        badge.textContent = `${data.readings.length} readings`;
+        badge.className = "substation-meter-status-badge has-data";
+      }
+      renderSubstationMeterTable(data.readings, tableBody, tableWrap);
+      if (data.daily) {
+        renderSubstationMeterSummary(data.daily, data.readings.length, summary);
+      }
+    } else {
+      if (badge) {
+        badge.textContent = "No data";
+        badge.className = "substation-meter-status-badge no-data";
+      }
+    }
+  } catch (e) {
+    if (badge) {
+      badge.textContent = "No data";
+      badge.className = "substation-meter-status-badge no-data";
+    }
+  }
+}
+
+function renderSubstationMeterTable(readings, tbody, wrap) {
+  if (!tbody || !wrap) return;
+  tbody.innerHTML = "";
+  for (const r of readings) {
+    const tr = document.createElement("tr");
+    const ts = new Date(r.ts);
+    const hh = String(ts.getUTCHours !== undefined ? ts.getHours() : ts.getHours()).padStart(2, "0");
+    const mm = String(ts.getMinutes()).padStart(2, "0");
+    tr.innerHTML = `<td>${hh}:${mm}</td><td>${Number(r.mwh).toFixed(6)}</td>`;
+    tbody.appendChild(tr);
+  }
+  wrap.classList.remove("hidden");
+}
+
+function _escHtml(s) { const d = document.createElement("span"); d.textContent = s; return d.innerHTML; }
+function renderSubstationMeterSummary(daily, rowCount, summaryEl) {
+  if (!summaryEl) return;
+  let html = `<b>${rowCount}</b> intervals`;
+  if (daily.total_gen_mwhr != null) html += ` | Total: <b>${Number(daily.total_gen_mwhr).toFixed(3)} MWh</b>`;
+  if (daily.sync_time) html += ` | Sync: ${_escHtml(daily.sync_time)}`;
+  if (daily.desync_time) html += ` | Desync: ${_escHtml(daily.desync_time)}`;
+  if (daily.net_kwh != null) html += ` | Net: ${Number(daily.net_kwh).toLocaleString()} kWh`;
+  if (daily.deviation_pct != null && daily.deviation_pct > 1) {
+    html += ` | <span class="warn">Deviation: ${Number(daily.deviation_pct).toFixed(1)}%</span>`;
+  }
+  summaryEl.innerHTML = html;
+  summaryEl.classList.remove("hidden");
+}
+
+async function handleSubstationXlsxUpload(file) {
+  const dateStr = $("substationMeterDate")?.textContent || "";
+  if (!dateStr) return;
+  const filenameEl = $("substationMeterFilename");
+  const saveStatus = $("substationMeterSaveStatus");
+  if (filenameEl) filenameEl.textContent = file.name;
+  if (saveStatus) saveStatus.textContent = "Parsing...";
+
+  try {
+    const buf = await file.arrayBuffer();
+    const r = await fetch(`/api/substation-meter/${dateStr}/upload-xlsx`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: buf,
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || "Parse failed.");
+
+    SubstationMeter.parsedReadings = data.readings;
+    SubstationMeter.parsedDaily = data.daily;
+    // Track the actual file date so save always targets the right DB row
+    SubstationMeter.saveDate = data.fileDate || dateStr;
+
+    // If file date differs from selected date, warn and update the modal header
+    if (data.dateMismatch) {
+      showToast(
+        `File contains data for ${data.fileDate}, not ${data.requestedDate}. Will save under ${data.fileDate}.`,
+        "warning",
+        7000
+      );
+      const dateEl = $("substationMeterDate");
+      if (dateEl) dateEl.textContent = data.fileDate;
+    }
+
+    const tableBody = $("substationMeterTableBody");
+    const tableWrap = $("substationMeterTableWrap");
+    const summary = $("substationMeterSummary");
+    const actions = $("substationMeterActions");
+
+    renderSubstationMeterTable(data.readings, tableBody, tableWrap);
+    renderSubstationMeterSummary(data.daily, data.readings.length, summary);
+
+    if (data.summary?.deviationWarning) {
+      showToast(data.summary.deviationWarning, "warning", 6000);
+    }
+
+    if (actions) actions.classList.remove("hidden");
+    if (saveStatus) saveStatus.textContent = `${data.readings.length} readings parsed. Review and save.`;
+  } catch (e) {
+    if (saveStatus) saveStatus.textContent = "";
+    showToast(`Parse error: ${e.message}`, "fault", 5000);
+  }
+}
+
+async function saveSubstationMeterReadings() {
+  // Use fileDate detected from xlsx (set during upload) — falls back to modal header date
+  const dateStr = SubstationMeter.saveDate || $("substationMeterDate")?.textContent || "";
+  if (!dateStr || !SubstationMeter.parsedReadings?.length) return;
+  const saveStatus = $("substationMeterSaveStatus");
+  const saveBtn = $("substationMeterSave");
+  if (saveBtn) saveBtn.disabled = true;
+  if (saveStatus) saveStatus.textContent = "Saving...";
+
+  try {
+    const r = await fetch(`/api/substation-meter/${dateStr}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        readings: SubstationMeter.parsedReadings,
+        daily: SubstationMeter.parsedDaily,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || "Save failed.");
+
+    if (saveStatus) saveStatus.textContent = `Saved ${data.rowsUpserted} readings (${data.totalMwh} MWh).`;
+    if (data.deviationWarning) {
+      showToast(data.deviationWarning, "warning", 5000);
+    }
+    if (data.gatewaySynced && data.gatewaySynced !== "ok") {
+      showToast(`Saved locally. Gateway sync failed: ${data.gatewaySynced.replace("failed: ", "")}`, "warning", 6000);
+    }
+    showToast(`Substation meter data saved for ${dateStr}.`, "info", 3000);
+
+    // Update badge
+    const badge = $("substationMeterBadge");
+    if (badge) {
+      badge.textContent = `${data.rowsUpserted} readings`;
+      badge.className = "substation-meter-status-badge has-data";
+    }
+
+    // Update the status in the analytics side card
+    const statusEl = $("anaSubstationStatus");
+    if (statusEl) statusEl.textContent = `${data.rowsUpserted} metered readings`;
+  } catch (e) {
+    if (saveStatus) saveStatus.textContent = "";
+    showToast(`Save error: ${e.message}`, "fault", 5000);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+// E6: Async check for metered substation data — updates display if available
+let _checkMeteredAbortCtl = null;
+async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh) {
+  if (_checkMeteredAbortCtl) _checkMeteredAbortCtl.abort();
+  const ctrl = new AbortController();
+  _checkMeteredAbortCtl = ctrl;
+  try {
+    const res = await fetch(`/api/substation-meter/${encodeURIComponent(dateStr)}`, { signal: ctrl.signal });
+    if (ctrl.signal.aborted) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.ok || !Array.isArray(data.readings) || data.readings.length === 0) {
+      // No metered data — clear the card
+      const scadaEl = $("anaSideScadaActual");
+      if (scadaEl) scadaEl.textContent = "—";
+      const st = $("anaSubstationStatus");
+      if (st) { st.textContent = ""; st.className = "analytics-substation-status"; }
+      return;
+    }
+    // Metered data exists — show in Subs. Metered card (not the est. card)
+    const meteredMwh = data.readings.reduce((s, r) => s + Number(r.mwh || 0), 0);
+    const scadaEl = $("anaSideScadaActual");
+    const scadaSrcEl = $("anaSideScadaSource");
+    if (scadaEl) scadaEl.textContent = `${meteredMwh.toFixed(4)} MWh`;
+    if (scadaSrcEl) scadaSrcEl.textContent = "";
+    // Abort any in-flight QA fetch so it doesn't overwrite metered value
+    if (typeof _fetchScadaAbortCtl !== "undefined" && _fetchScadaAbortCtl) {
+      _fetchScadaAbortCtl.abort();
+    }
+    // Recompute variance: metered vs day-ahead
+    if (varEl) {
+      const meteredVariance = Number((meteredMwh - dayAheadMwh).toFixed(4));
+      varEl.textContent = `${meteredVariance >= 0 ? "+" : ""}${meteredVariance.toFixed(4)} MWh`;
+      varEl.classList.toggle("pos", meteredVariance >= 0);
+      varEl.classList.toggle("neg", meteredVariance < 0);
+    }
+    // Update status badge
+    const st = $("anaSubstationStatus");
+    if (st) {
+      st.textContent = "Has data";
+      st.className = "analytics-substation-status has-data";
+    }
+  } catch (e) {
+    if (e.name === "AbortError") return;
+    // Silently fail — display remains as estimated fallback
+  }
+}
+
+// Fetch QA-verified SCADA actual for a date and update display
+let _fetchScadaAbortCtl = null;
+async function _fetchScadaActual(dateStr, scadaEl, srcEl, varEl, dayAheadMwh) {
+  if (_fetchScadaAbortCtl) _fetchScadaAbortCtl.abort();
+  const ctrl = new AbortController();
+  _fetchScadaAbortCtl = ctrl;
+  try {
+    const res = await fetch(`/api/forecast/qa-actual/${encodeURIComponent(dateStr)}`, { signal: ctrl.signal });
+    if (ctrl.signal.aborted) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.ok || !data.found || data.total_actual_kwh == null) {
+      if (scadaEl) scadaEl.textContent = "—";
+      if (srcEl) srcEl.textContent = "No QA data";
+      return;
+    }
+    const actualMwh = Number(data.total_actual_kwh) / 1000;
+    if (scadaEl) scadaEl.textContent = `${actualMwh.toFixed(4)} MWh`;
+    if (srcEl) {
+      const quality = data.comparison_quality || "preview";
+      const wape = data.daily_wape_pct != null ? ` | WAPE ${Number(data.daily_wape_pct).toFixed(1)}%` : "";
+      srcEl.textContent = `${quality}${wape}`;
+    }
+    // Update variance to use SCADA actual vs day-ahead
+    if (varEl && Number.isFinite(actualMwh) && Number.isFinite(dayAheadMwh)) {
+      const scadaVariance = Number((actualMwh - dayAheadMwh).toFixed(4));
+      varEl.textContent = `${scadaVariance >= 0 ? "+" : ""}${scadaVariance.toFixed(4)} MWh`;
+      varEl.classList.toggle("pos", scadaVariance >= 0);
+      varEl.classList.toggle("neg", scadaVariance < 0);
+    }
+  } catch (e) {
+    if (e.name === "AbortError") return;
+  }
+}
+
+// Bind substation meter modal events (called once during init)
+function initSubstationMeterModal() {
+  const modal = $("substationMeterModal");
+  if (!modal || modal.dataset.bound === "1") return;
+  modal.dataset.bound = "1";
+
+  $("substationMeterClose")?.addEventListener("click", closeSubstationMeterModal);
+  modal.addEventListener("click", (e) => { if (e.target === modal) closeSubstationMeterModal(); });
+
+  $("substationMeterUnlock")?.addEventListener("click", () => {
+    const key = $("substationMeterKey")?.value || "";
+    const err = $("substationMeterAuthErr");
+    if (!verifySubstationKey(key)) {
+      if (err) err.textContent = "Invalid authorization key.";
+      $("substationMeterKey")?.select();
+      return;
+    }
+    if (err) err.textContent = "";
+    SubstationMeter.authKey = key;
+    $("substationMeterAuth")?.classList.add("hidden");
+    $("substationMeterContent")?.classList.remove("hidden");
+    const dateStr = $("substationMeterDate")?.textContent || "";
+    if (dateStr) loadSubstationMeterData(dateStr);
+  });
+
+  $("substationMeterKey")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("substationMeterUnlock")?.click();
+  });
+
+  $("substationMeterFile")?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (file) handleSubstationXlsxUpload(file);
+  });
+
+  $("substationMeterSave")?.addEventListener("click", saveSubstationMeterReadings);
 }
 
 async function runInverterDataExport() {
@@ -15644,6 +16037,9 @@ function bindEventHandlers() {
     if (e.target.closest("#btnDayAheadGenerate")) {
       runDayAheadGeneration();
     }
+    if (e.target.closest("#btnSubstationMeter")) {
+      openSubstationMeterModal();
+    }
   });
 
   // Alarm sound toggle
@@ -15905,6 +16301,7 @@ async function init() {
     document.addEventListener("keydown", resumeAlarmAudio, { passive: true });
     window.addEventListener("resize", rerenderResponsiveChartsDebounced, { passive: true });
     bindEventHandlers();
+    initSubstationMeterModal();
     syncPlantCapPanelCollapsedUi();
     renderChatSendState();
     renderChatBadge();

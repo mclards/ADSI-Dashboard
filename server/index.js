@@ -5174,6 +5174,7 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/audit",           20000],  // 20 s  — audit queries
   ["/api/chat/",           10000],  // 10 s  — chat messaging
   ["/api/backup/",         60000],  // 60 s  — cloud backup operations
+  ["/api/substation-meter/", 20000],  // 20 s  — substation meter reads/writes
 ];
 
 function resolveProxyTimeout(targetUrl) {
@@ -12751,6 +12752,359 @@ app.post("/api/ip-config", (req, res) => {
   }
 });
 
+// ───── Substation Meter Endpoints (E2a-c) ─────
+
+function requireSubstationAuth(req, res, next) {
+  const key = String(req.headers["x-substation-key"] || "").trim().toLowerCase();
+  if (!key) return res.status(401).json({ ok: false, error: "Authorization required." });
+  const m = new Date().getMinutes();
+  const valid = [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
+  // Allow ±1 minute tolerance for clock skew
+  const mPrev = (m + 59) % 60;
+  valid.push(`adsi${mPrev}`, `adsi${String(mPrev).padStart(2, "0")}`);
+  if (!valid.includes(key)) return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  next();
+}
+
+const SUBSTATION_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const SUBSTATION_MAX_MWH = 5.0; // plant max ~20 MW × 0.25h
+const SUBSTATION_MAX_ROWS = 96; // 24h ÷ 15min
+const SUBSTATION_15MIN_MS = 15 * 60 * 1000;
+
+function validateSubstationDate(dateStr) {
+  if (!SUBSTATION_DATE_RE.test(dateStr)) return "Invalid date format (YYYY-MM-DD required).";
+  const d = new Date(dateStr + "T00:00:00+08:00");
+  if (isNaN(d.getTime())) return "Invalid date.";
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  if (dateStr > todayStr) return "Future dates not allowed.";
+  return null;
+}
+
+function validateSubstationReadings(readings) {
+  if (!Array.isArray(readings)) return "readings must be an array.";
+  if (readings.length === 0) return "readings array is empty.";
+  if (readings.length > SUBSTATION_MAX_ROWS) return `Too many readings (max ${SUBSTATION_MAX_ROWS}).`;
+  for (let i = 0; i < readings.length; i++) {
+    const r = readings[i];
+    if (typeof r.ts !== "number" || !Number.isFinite(r.ts) || r.ts <= 0)
+      return `readings[${i}].ts must be a positive epoch-ms number.`;
+    if (r.ts % (SUBSTATION_15MIN_MS) !== 0)
+      return `readings[${i}].ts must align to 15-min boundary.`;
+    if (typeof r.mwh !== "number" || !Number.isFinite(r.mwh))
+      return `readings[${i}].mwh must be a finite number.`;
+    if (r.mwh < 0 || r.mwh > SUBSTATION_MAX_MWH)
+      return `readings[${i}].mwh out of range (0-${SUBSTATION_MAX_MWH}).`;
+  }
+  return null;
+}
+
+// GET /api/substation-meter/:date — retrieve readings for a date
+app.get("/api/substation-meter/:date", (req, res) => {
+  const dateStr = req.params.date;
+  const dateErr = validateSubstationDate(dateStr);
+  if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
+  try {
+    const rows = db.prepare(
+      "SELECT date, ts, mwh, entered_by, entered_at, updated_by, updated_at FROM substation_metered_energy WHERE date = ? ORDER BY ts"
+    ).all(dateStr);
+    const daily = db.prepare(
+      "SELECT * FROM substation_meter_daily WHERE date = ?"
+    ).bind(dateStr).get() || null;
+    res.json({ ok: true, date: dateStr, readings: rows, daily });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Proxy substation meter save to the gateway in remote mode (Option A)
+async function _proxySubstationMeterToGateway(dateStr, body) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) return { ok: false, error: "No gateway URL configured." };
+  if (isUnsafeRemoteLoop(base)) return { ok: false, error: "Gateway URL cannot be localhost." };
+  const target = `${base}/api/substation-meter/${encodeURIComponent(dateStr)}`;
+  try {
+    const upstream = await fetch(
+      target,
+      buildRemoteFetchOptions(
+        target,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...buildRemoteProxyHeaders(),
+          },
+          body: JSON.stringify(body),
+        },
+        "default",
+      ),
+    );
+    const text = await upstream.text();
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) {}
+    if (!upstream.ok) return { ok: false, error: parsed?.error || `Gateway ${upstream.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+// POST /api/substation-meter/:date — upsert 15-min readings
+app.post("/api/substation-meter/:date", async (req, res) => {
+  const dateStr = req.params.date;
+  const dateErr = validateSubstationDate(dateStr);
+  if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
+  const { readings, daily } = req.body || {};
+  const readingsErr = validateSubstationReadings(readings);
+  if (readingsErr) return res.status(400).json({ ok: false, error: readingsErr });
+  try {
+    const now = Date.now();
+    const upsert = db.prepare(`
+      INSERT INTO substation_metered_energy (date, ts, mwh, entered_by, entered_at)
+      VALUES (?, ?, ?, 'admin', ?)
+      ON CONFLICT(date, ts) DO UPDATE SET
+        mwh = excluded.mwh,
+        updated_by = 'admin',
+        updated_at = ?
+    `);
+    const tx = db.transaction(() => {
+      for (const r of readings) {
+        upsert.run(dateStr, r.ts, r.mwh, now, now);
+      }
+      // Upsert daily metadata if provided
+      if (daily && typeof daily === "object") {
+        // Sanitize time fields — only allow digits + 'H' pattern (e.g. "0538H")
+        const timeRe = /^\d{3,4}H$/i;
+        const safeSyncTime = (typeof daily.sync_time === "string" && timeRe.test(daily.sync_time.trim())) ? daily.sync_time.trim() : null;
+        const safeDesyncTime = (typeof daily.desync_time === "string" && timeRe.test(daily.desync_time.trim())) ? daily.desync_time.trim() : null;
+        db.prepare(`
+          INSERT INTO substation_meter_daily (date, sync_time, desync_time, total_gen_mwhr, net_kwh, deviation_pct, entered_by, entered_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'admin', ?)
+          ON CONFLICT(date) DO UPDATE SET
+            sync_time = excluded.sync_time,
+            desync_time = excluded.desync_time,
+            total_gen_mwhr = excluded.total_gen_mwhr,
+            net_kwh = excluded.net_kwh,
+            deviation_pct = excluded.deviation_pct
+        `).run(
+          dateStr,
+          safeSyncTime,
+          safeDesyncTime,
+          typeof daily.total_gen_mwhr === "number" ? daily.total_gen_mwhr : null,
+          typeof daily.net_kwh === "number" ? daily.net_kwh : null,
+          typeof daily.deviation_pct === "number" ? daily.deviation_pct : null,
+          now
+        );
+      }
+    });
+    tx();
+    // Cross-check: sum of MWh vs net_kwh
+    const totalMwh = readings.reduce((s, r) => s + r.mwh, 0);
+    let deviationWarning = null;
+    if (daily?.net_kwh && daily.net_kwh > 0) {
+      const netMwh = daily.net_kwh / 1000;
+      const devPct = Math.abs(totalMwh - netMwh) / netMwh * 100;
+      if (devPct > 1) {
+        deviationWarning = `Sum of MW-hr (${totalMwh.toFixed(3)}) deviates ${devPct.toFixed(1)}% from Net kWh (${daily.net_kwh}).`;
+      }
+    }
+    // In remote mode, mirror the save to the gateway so the forecast engine gets the data
+    let gatewaySynced = null;
+    if (isRemoteMode()) {
+      const gwResult = await _proxySubstationMeterToGateway(dateStr, req.body);
+      gatewaySynced = gwResult.ok ? "ok" : `failed: ${gwResult.error}`;
+      if (!gwResult.ok) {
+        console.warn(`[substation-meter] Gateway sync failed for ${dateStr}: ${gwResult.error}`);
+      }
+    }
+    res.json({
+      ok: true, date: dateStr, rowsUpserted: readings.length,
+      totalMwh: Number(totalMwh.toFixed(6)),
+      deviationWarning,
+      ...(gatewaySynced !== null && { gatewaySynced }),
+    });
+    // Auto-trigger debounced QA recalculation
+    _triggerSubstationRecalc(dateStr);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /api/substation-meter/:date/upload-xlsx — parse SCADA xlsx and return preview
+app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "application/octet-stream", limit: "10mb" }), async (req, res) => {
+  const dateStr = req.params.date;
+  const dateErr = validateSubstationDate(dateStr);
+  if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
+  try {
+    const ExcelJS = require("exceljs");
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.body);
+
+    // Find the 69kV sheet or fallback to first sheet with datetime data
+    let ws = wb.getWorksheet("69kV") || wb.getWorksheet("69KV");
+    if (!ws) {
+      for (const sheet of wb.worksheets) {
+        const cellA2 = sheet.getCell("A2").value;
+        if (cellA2 instanceof Date || (typeof cellA2 === "string" && /\d{4}/.test(cellA2))) {
+          ws = sheet;
+          break;
+        }
+      }
+    }
+    if (!ws) return res.status(400).json({ ok: false, error: "No valid sheet found (expected '69kV')." });
+
+    const readings = [];
+    let syncTime = null, desyncTime = null, netKwh = null, summaryMwhr = null;
+    let fileDate = null; // date detected from file's datetime column
+
+    const pad2 = (n) => String(n).padStart(2, "0");
+
+    ws.eachRow((row, rowNum) => {
+      if (rowNum <= 1) return; // skip header
+      const cellA = row.getCell(1).value; // column A — datetime
+      const cellP = row.getCell(16).value; // column P — MW-hr
+      const cellK = row.getCell(11).value; // column K — Net kWh
+      const cellF = row.getCell(6).value;  // column F — Sync Time
+      const cellH = row.getCell(8).value;  // column H — Desync Time
+
+      // Parse datetime from column A
+      let dt = null;
+      if (cellA instanceof Date) {
+        dt = cellA;
+      } else if (typeof cellA === "string") {
+        const parsed = new Date(cellA);
+        if (!isNaN(parsed.getTime())) dt = parsed;
+      } else if (typeof cellA === "number") {
+        // Excel serial date
+        const d = new Date(Math.round((cellA - 25569) * 86400 * 1000));
+        if (!isNaN(d.getTime())) dt = d;
+      }
+
+      const mwh = typeof cellP === "number" ? cellP : parseFloat(cellP);
+
+      if (dt && Number.isFinite(mwh) && mwh > 0) {
+        // Detect file date from first valid datetime row (local PHT methods)
+        if (!fileDate) {
+          fileDate = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+        }
+        // Convert to epoch ms aligned to 15-min boundary (UTC+8)
+        const utc8Ms = dt.getTime();
+        // Align to 15-min boundary
+        const aligned = Math.round(utc8Ms / SUBSTATION_15MIN_MS) * SUBSTATION_15MIN_MS;
+        // Format time as local string (PHT) — avoid toISOString which shifts to UTC
+        const localTime = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+        readings.push({ ts: aligned, mwh: Number(mwh.toFixed(6)), time: localTime });
+      } else if (!dt) {
+        // Summary row — check for totals and metadata
+        if (Number.isFinite(mwh) && mwh > 0 && !summaryMwhr) {
+          summaryMwhr = mwh;
+        }
+        const kVal = typeof cellK === "number" ? cellK : parseFloat(cellK);
+        if (Number.isFinite(kVal) && kVal > 100 && !netKwh) {
+          netKwh = kVal;
+        }
+        const fVal = String(cellF || "").trim();
+        if (/^\d{3,4}H$/i.test(fVal) && !syncTime) syncTime = fVal;
+        const hVal = String(cellH || "").trim();
+        if (/^\d{3,4}H$/i.test(hVal) && !desyncTime) desyncTime = hVal;
+      }
+    });
+
+    if (readings.length === 0) {
+      return res.status(400).json({ ok: false, error: "No valid MW-hr readings found in the file." });
+    }
+
+    // Sort by timestamp
+    readings.sort((a, b) => a.ts - b.ts);
+
+    const totalMwh = readings.reduce((s, r) => s + r.mwh, 0);
+    let deviationPct = null;
+    if (netKwh && netKwh > 0) {
+      const netMwh = netKwh / 1000;
+      deviationPct = Number((Math.abs(totalMwh - netMwh) / netMwh * 100).toFixed(2));
+    }
+
+    const dateMismatch = fileDate && fileDate !== dateStr;
+    res.json({
+      ok: true,
+      date: fileDate || dateStr,   // always report the file's actual date
+      fileDate: fileDate || dateStr,
+      requestedDate: dateStr,
+      dateMismatch: dateMismatch || false,
+      readings,
+      daily: {
+        sync_time: syncTime,
+        desync_time: desyncTime,
+        total_gen_mwhr: Number(totalMwh.toFixed(6)),
+        net_kwh: netKwh,
+        deviation_pct: deviationPct,
+      },
+      summary: {
+        rowCount: readings.length,
+        totalMwh: Number(totalMwh.toFixed(6)),
+        summaryMwhr: summaryMwhr ? Number(summaryMwhr.toFixed(6)) : null,
+        netKwh,
+        deviationPct,
+        deviationWarning: deviationPct !== null && deviationPct > 1
+          ? `Sum of MW-hr (${totalMwh.toFixed(3)}) deviates ${deviationPct.toFixed(1)}% from Net kWh (${netKwh}).`
+          : null,
+      },
+    });
+  } catch (e) {
+    console.error("[substation-meter] xlsx parse error:", e.message);
+    res.status(400).json({ ok: false, error: `Failed to parse xlsx: ${e.message}` });
+  }
+});
+
+// Substation meter QA recalculation — debounce + lock
+const _substationRecalcTimers = new Map(); // date -> timer
+const _substationRecalcLocks = new Set();  // dates currently being recalculated
+const _SUBSTATION_MAX_PENDING = 50;        // max concurrent debounce dates
+function _triggerSubstationRecalc(dateStr) {
+  if (_substationRecalcLocks.has(dateStr)) return false;
+  if (_substationRecalcTimers.has(dateStr)) {
+    clearTimeout(_substationRecalcTimers.get(dateStr));
+  }
+  // Evict oldest pending date if at capacity
+  if (_substationRecalcTimers.size >= _SUBSTATION_MAX_PENDING && !_substationRecalcTimers.has(dateStr)) {
+    const oldest = _substationRecalcTimers.keys().next().value;
+    clearTimeout(_substationRecalcTimers.get(oldest));
+    _substationRecalcTimers.delete(oldest);
+  }
+  const timer = setTimeout(async () => {
+    _substationRecalcTimers.delete(dateStr);
+    if (_substationRecalcLocks.has(dateStr)) return;
+    _substationRecalcLocks.add(dateStr);
+    try {
+      console.log(`[substation-meter] Recalculating QA for ${dateStr}...`);
+      const result = await runForecastGenerator(["--qa-date", dateStr]);
+      console.log(`[substation-meter] QA recalculate done for ${dateStr} (${result?.durationMs || 0}ms)`);
+      broadcastUpdate({ type: "substation_recalc_done", date: dateStr, ok: true });
+    } catch (e) {
+      console.error(`[substation-meter] QA recalculate failed for ${dateStr}:`, e.message);
+      broadcastUpdate({ type: "substation_recalc_done", date: dateStr, ok: false, error: e.message });
+    } finally {
+      _substationRecalcLocks.delete(dateStr);
+    }
+  }, 5000);
+  _substationRecalcTimers.set(dateStr, timer);
+  return true;
+}
+
+// POST /api/substation-meter/:date/recalculate — explicit re-run QA for a date
+app.post("/api/substation-meter/:date/recalculate", (req, res) => {
+  const dateStr = req.params.date;
+  const dateErr = validateSubstationDate(dateStr);
+  if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
+
+  if (_substationRecalcLocks.has(dateStr)) {
+    return res.status(409).json({ ok: false, error: "Recalculation already in progress for this date." });
+  }
+
+  _triggerSubstationRecalc(dateStr);
+  res.status(202).json({ ok: true, message: `QA recalculation for ${dateStr} scheduled (5s debounce).` });
+});
+
 app.post("/api/settings", (req, res) => {
   const updates = {};
   let exportDirCreated = false;
@@ -14239,6 +14593,26 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
 
 // ── Forecast performance monitoring endpoints ──────────────────────────────
 
+// GET /api/forecast/qa-actual/:date — QA-verified actual for a single date
+app.get("/api/forecast/qa-actual/:date", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const dateStr = req.params.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ ok: false });
+  try {
+    const row = db.prepare(
+      `SELECT total_actual_kwh, total_forecast_kwh, total_abs_error_kwh,
+              daily_wape_pct, comparison_quality, usable_slot_count
+       FROM forecast_error_compare_daily
+       WHERE target_date = ?
+       ORDER BY computed_ts DESC LIMIT 1`
+    ).get(dateStr);
+    if (!row || row.total_actual_kwh == null) return res.json({ ok: true, found: false });
+    res.json({ ok: true, found: true, ...row });
+  } catch (e) {
+    res.json({ ok: true, found: false });
+  }
+});
+
 // GET /api/forecast/qa-history?days=N
 // Returns the last N days of daily QA comparison rows for performance charts.
 app.get("/api/forecast/qa-history", (req, res) => {
@@ -14446,6 +14820,39 @@ app.get("/api/forecast/engine-health", (req, res) => {
       }
     } catch { /* non-fatal */ }
 
+    // C3: Compute plant-average transmission loss % from ipconfig (mirrors Python plant_capacity_profile)
+    let plantAvgLossPct = 3.0;  // fallback = DEFAULT_INVERTER_LOSS_PCT
+    let lossFactorSource = "default";
+    try {
+      const _ipCfg = loadIpConfigFromDb();
+      const _invMap = _ipCfg?.inverters || {};
+      const _unitMap = _ipCfg?.units || {};
+      const _lossMap = _ipCfg?.losses || {};
+      const _allIds = new Set([
+        ...Object.keys(_invMap),
+        ...Object.keys(_unitMap),
+      ]);
+      if (_allIds.size > 0) {
+        let _enabledNodes = 0;
+        let _lossAdjNodes = 0;
+        for (const invId of _allIds) {
+          const ip = String(_invMap[invId] || "").trim();
+          if (Object.keys(_invMap).length > 0 && invId in _invMap && !ip) continue;
+          const rawUnits = _unitMap[invId] ?? _unitMap[String(invId)];
+          const nNodes = rawUnits === undefined ? 4
+            : (Array.isArray(rawUnits) ? rawUnits.filter(n => Number(n) >= 1 && Number(n) <= 4).length : 0);
+          _enabledNodes += nNodes;
+          let lossPct = parseFloat(_lossMap[invId] ?? _lossMap[String(invId)] ?? 0) || 0;
+          if (lossPct < 0 || lossPct > 100) lossPct = 0;
+          _lossAdjNodes += nNodes * (1.0 - lossPct / 100.0);
+        }
+        if (_enabledNodes > 0) {
+          plantAvgLossPct = Number(((1.0 - _lossAdjNodes / _enabledNodes) * 100).toFixed(2));
+          lossFactorSource = "ipconfig";
+        }
+      }
+    } catch { /* non-fatal — use default */ }
+
     const modelMtime = trainState.model_file_mtime_ms || null;
     return res.json({
       ok: true,
@@ -14490,6 +14897,8 @@ app.get("/api/forecast/engine-health", (req, res) => {
         solcastHiTotalKwh: latestAudit?.solcast_hi_total_kwh ?? null,
         forecastTotalKwh: latestAudit?.final_forecast_total_kwh ?? null,
       },
+      plantAvgLossPct,
+      lossFactorSource,
     });
   } catch (e) {
     console.warn("[forecast/engine-health] failed:", e.message);

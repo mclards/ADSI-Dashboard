@@ -1,0 +1,308 @@
+================================================================================
+SECURITY REVIEW SUMMARY: Substation Meter Auth Removal & Gateway Proxy
+================================================================================
+
+DATE: 2026-04-05
+REVIEWER: Claude Code Security
+STATUS: CRITICAL VULNERABILITY CONFIRMED
+REMEDIATION: REQUIRED IMMEDIATELY
+
+================================================================================
+CRITICAL ISSUES (3 FOUND)
+================================================================================
+
+[CRITICAL] Issue #1: Unauthenticated Write Access to Metered Energy
+────────────────────────────────────────────────────────────────────
+Location: server/index.js lines 12853, 12934, 13095
+Severity: CRITICAL (CVSS 9.1)
+Status: UNFIXED
+
+Description:
+  The requireSubstationAuth middleware was removed from three POST endpoints:
+  • POST /api/substation-meter/:date (upsert readings to DB)
+  • POST /api/substation-meter/:date/upload-xlsx (parse SCADA files)
+  • POST /api/substation-meter/:date/recalculate (trigger QA)
+
+  These endpoints are now completely unauthenticated and accessible to any
+  HTTP client on the network.
+
+Impact:
+  • Attacker can inject false metered energy readings
+  • Data flows directly into ML model training at weight 1.0 (highest priority)
+  • Forecast model becomes poisoned → systematic prediction errors
+  • Real-world dispatch decisions affected
+
+Attack Example:
+  curl -X POST http://localhost:3500/api/substation-meter/2026-04-04 \
+    -H "Content-Type: application/json" \
+    -d '{"readings": [{"ts": 1712217600000, "mwh": 5.0}]}'
+
+  → Unauthenticated POST succeeds, writes fake data to database
+  → Next training run includes poisoned data
+  → Model learns incorrect patterns
+
+Remediation:
+  1. Re-apply requireSubstationAuth middleware to all three routes
+  2. Restore x-substation-key header in frontend fetch calls
+  3. (See SECURITY_REMEDIATION_substation_meter.md for code)
+
+────────────────────────────────────────────────────────────────────────────
+
+[CRITICAL] Issue #2: No Global Express Authentication
+────────────────────────────────────────────────────────────────
+Location: server/index.js lines 118-150
+Severity: CRITICAL
+Status: DESIGN LIMITATION
+
+Description:
+  Express app has NO global auth middleware. All authentication is per-endpoint.
+  Since substation meter auth was removed, these endpoints are now open.
+
+Impact:
+  • Requires network-level isolation (assumes local network only)
+  • No defense-in-depth if one endpoint's auth is missing
+
+Recommendation:
+  For now, re-enable the per-endpoint auth (Issue #1 fix).
+  Future: Implement global session-based auth for entire app.
+
+────────────────────────────────────────────────────────────────────────────
+
+[MEDIUM] Issue #3: Private IP Ranges Not Blocked in Gateway Proxy
+──────────────────────────────────────────────────────────────────
+Location: server/index.js line 3521-3525
+Severity: MEDIUM (SSRF)
+Status: UNFIXED
+
+Description:
+  isUnsafeRemoteLoop() blocks localhost (127.0.0.1, ::1) but NOT private
+  IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+
+Impact:
+  • Attacker on corporate network can configure gateway URL to internal IP
+  • Proxy becomes SSRF vector to internal systems
+  • Requires network-level access (moderate threat)
+
+Remediation:
+  Expand isUnsafeRemoteLoop() regex to block private IPs:
+    /^https?:\/\/(localhost|127\.0\.0\.1|::1|10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168\.)/i
+
+================================================================================
+HIGH SEVERITY ISSUES (1 FOUND)
+================================================================================
+
+[HIGH] Issue #4: Hardcoded 'admin' User in Audit Trail
+──────────────────────────────────────────────────────
+Location: server/index.js lines 12864, 12867
+Severity: HIGH
+Status: UNFIXED
+
+Description:
+  All metered data inserts have entered_by='admin' hardcoded, regardless of
+  actual source. Makes it impossible to audit who uploaded which data.
+
+Impact:
+  • Insider threats can hide malicious uploads
+  • Forensics cannot determine data origin
+  • Violates audit trail requirements
+
+Remediation:
+  • Short-term: Include client IP + timestamp in entered_by
+  • Long-term: Implement session auth, use req.session.userId
+
+================================================================================
+MEDIUM SEVERITY ISSUES (3 FOUND)
+================================================================================
+
+[MEDIUM] Issue #5: Input Validation Cannot Prevent Model Poisoning
+──────────────────────────────────────────────────────────
+Location: server/index.js lines 12769-12800
+Severity: MEDIUM
+Status: BY DESIGN
+
+Description:
+  While input validation exists (date format, MWh ranges, 15-min alignment),
+  it cannot prevent poisoning attacks. Attacker can submit any valid readings
+  that match the constraints but are factually wrong.
+
+Remediation:
+  Add sanity validation layer in Python:
+  • Check metered total against Solcast baseline (±30% tolerance)
+  • Reject unrealistic generation spikes (>plant peak capacity)
+  • Flag inconsistencies with inverter data
+  (See SECURITY_REMEDIATION_substation_meter.md for code)
+
+─────────────────────────────────────────────────────────
+
+[MEDIUM] Issue #6: No Rate Limiting on File Uploads
+─────────────────────────────────────────────────────
+Location: server/index.js line 12934
+Severity: MEDIUM (DoS)
+Status: UNFIXED
+
+Description:
+  POST /api/substation-meter/:date/upload-xlsx accepts 10MB files with no
+  rate limiting. Attacker can spam large file uploads → DoS.
+
+Remediation:
+  Add rate-limit middleware:
+    const rateLimitXlsx = rateLimit({ windowMs: 60*1000, max: 5 });
+    app.post("/api/substation-meter/:date/upload-xlsx",
+      requireSubstationAuth,
+      rateLimitXlsx,
+      express.raw(...),
+      async (req, res) => {...}
+    );
+
+─────────────────────────────────────────────────────────
+
+[MEDIUM] Issue #7: Frontend Auth Removal
+──────────────────────────────────────────
+Location: public/js/app.js lines 14573, 14627
+Severity: MEDIUM
+Status: UNFIXED
+
+Description:
+  Frontend no longer sends x-substation-key header in fetch requests.
+  Any network client can directly call API without auth header.
+
+Remediation:
+  Restore getSubstationAuthKey() helper and send in all POST requests.
+  (See SECURITY_REMEDIATION_substation_meter.md for code)
+
+================================================================================
+INFORMATIONAL / POSITIVE FINDINGS
+================================================================================
+
+[GOOD] Gateway Proxy: Proper Token Transmission
+─────────────────────────────────────────────────
+Location: server/index.js lines 5153-5161
+Status: SECURE ✓
+
+Finding:
+  buildRemoteProxyHeaders() correctly adds remote API token to gateway
+  requests. No token leakage or insecure transmission.
+
+─────────────────────────────────────────────────
+
+[GOOD] Path Traversal Protection
+──────────────────────────────────
+Location: server/index.js line 12825
+Status: SECURE ✓
+
+Finding:
+  dateStr parameter properly encoded with encodeURIComponent() and validated
+  against SUBSTATION_DATE_RE regex. No path traversal possible.
+
+─────────────────────────────────────────────────
+
+[GOOD] Model Training Data Chain Verified
+───────────────────────────────────────────
+Location: services/forecast_engine.py
+Status: CHAIN CONFIRMED ✓
+
+Finding:
+  Metered data flows correctly from DB → resolve_actual_5min_for_date() →
+  training loop. Integration is sound (problem is the auth gate, not the
+  integration itself).
+
+================================================================================
+RECOMMENDED IMMEDIATE ACTIONS
+================================================================================
+
+1. APPLY SECURITY_REMEDIATION #1 & #2 TODAY
+   • Re-apply requireSubstationAuth middleware to 3 routes
+   • Restore x-substation-key header in frontend
+   • Estimated time: 15 minutes
+   • Risk: NONE (reverting auth removal)
+
+2. TEST WITH PROVIDED CHECKLIST
+   • Verify auth is required (401 response)
+   • Verify auth key works (200 response)
+   • Verify audit trail captures user
+
+3. DEPLOY TO STAGING & PRODUCTION
+   • Recommend: Create new commit, NOT amend
+   • Smoke test: Manual substation meter upload via UI
+   • Verify: Next forecast generation completes without errors
+
+4. OPTIONAL BUT RECOMMENDED (within next sprint)
+   • Apply REMEDIATION #3 (audit trail improvement)
+   • Apply REMEDIATION #4 (data validation layer)
+   • Apply REMEDIATION #5 (confidence weighting)
+   • Expand SSRF protection (private IP blocking)
+   • Add rate limiting to upload endpoint
+
+================================================================================
+FILE PATHS & REFERENCES
+================================================================================
+
+SECURITY DOCUMENTS CREATED:
+  /d/ADSI-Dashboard/SECURITY_REVIEW_substation_meter.md
+    → Full vulnerability analysis with CVSS scoring
+
+  /d/ADSI-Dashboard/SECURITY_REMEDIATION_substation_meter.md
+    → Step-by-step remediation code with testing plan
+
+CODE FILES TO MODIFY:
+  /d/ADSI-Dashboard/server/index.js
+    - Line 12853: Add requireSubstationAuth to POST /api/substation-meter/:date
+    - Line 12934: Add requireSubstationAuth to POST /api/substation-meter/:date/upload-xlsx
+    - Line 13095: Add requireSubstationAuth to POST /api/substation-meter/:date/recalculate
+
+  /d/ADSI-Dashboard/public/js/app.js
+    - Line 14573: Add x-substation-key header to fetch call
+    - Line 14627: Add x-substation-key header to fetch call
+    - Add: getSubstationAuthKey() helper function
+
+OPTIONAL ENHANCEMENTS:
+  /d/ADSI-Dashboard/services/forecast_engine.py
+    - Add: _validate_metered_plausibility() function
+    - Modify: resolve_actual_5min_for_date() to call validation
+    - Add: _get_source_weight_multiplier() for confidence weighting
+
+================================================================================
+QUESTIONS FOR PROJECT OWNER
+================================================================================
+
+Q1: Why was requireSubstationAuth removed?
+    → Was it intentional or accidental removal?
+    → Is there a business requirement for unauthenticated metered uploads?
+
+Q2: Who has access to upload substation meter data?
+    → Should only SCADA operators have access?
+    → Should it be IP-restricted or credential-restricted?
+
+Q3: Should we implement full session auth for the entire Express app?
+    → Currently only time-based keys for specific operations
+    → Would require login flow for UI (broader change)
+
+Q4: What trust level should metered data have vs. inverter data?
+    → Currently: metered=1.0 (highest), inverter=0.85, solcast=varies
+    → Should metered data require approval before training?
+
+================================================================================
+SECURITY METRICS
+================================================================================
+
+CVSS v3.1 Score (Issue #1): 9.1 CRITICAL
+  Base Score: 9.1 (AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H)
+  Attack Vector: Network
+  Attack Complexity: Low
+  Privileges Required: None
+  User Interaction: None
+  Scope: Unchanged
+  Impact: High integrity, High availability
+  Remediation: APPLY IMMEDIATELY
+
+Overall Risk Level: CRITICAL
+Critical Issues: 2 (Auth removal + No global auth)
+High Issues: 1 (Audit trail)
+Medium Issues: 3 (Validation, RateLimit, SSRF)
+Informational: 3 (All positive findings)
+
+Recommendation: DO NOT DEPLOY WITHOUT REMEDIATION #1 & #2
+
+================================================================================
+END OF SUMMARY
+================================================================================

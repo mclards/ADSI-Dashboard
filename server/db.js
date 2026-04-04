@@ -680,6 +680,28 @@ db.exec(`
     created_ts               INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
     updated_ts               INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
   );
+
+  CREATE TABLE IF NOT EXISTS substation_metered_energy (
+    date         TEXT NOT NULL,
+    ts           INTEGER NOT NULL,
+    mwh          REAL NOT NULL,
+    entered_by   TEXT DEFAULT 'admin',
+    entered_at   INTEGER DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    updated_by   TEXT,
+    updated_at   INTEGER,
+    PRIMARY KEY (date, ts)
+  );
+
+  CREATE TABLE IF NOT EXISTS substation_meter_daily (
+    date            TEXT PRIMARY KEY,
+    sync_time       TEXT,
+    desync_time     TEXT,
+    total_gen_mwhr  REAL,
+    net_kwh         REAL,
+    deviation_pct   REAL,
+    entered_by      TEXT DEFAULT 'admin',
+    entered_at      INTEGER DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
