@@ -896,6 +896,9 @@ ensureColumn("forecast_error_compare_daily", "notes_json", "notes_json TEXT");
 // Migration: forecast confidence band totals for EMOS-B spread calibration (added 2026-03).
 ensureColumn("forecast_error_compare_daily", "total_forecast_lo_kwh", "total_forecast_lo_kwh REAL");
 ensureColumn("forecast_error_compare_daily", "total_forecast_hi_kwh", "total_forecast_hi_kwh REAL");
+// Migration: track actual data source (metered, mixed, estimated) for error memory & loss calibration (added 2026-04).
+ensureColumn("forecast_error_compare_daily", "actual_source", "actual_source TEXT DEFAULT 'estimated'");
+ensureColumn("forecast_error_compare_slot", "actual_source", "actual_source TEXT DEFAULT 'estimated'");
 // Migration: track retry attempt number per forecast run (added 2026-03).
 ensureColumn("forecast_run_audit", "attempt_number", "attempt_number INTEGER NOT NULL DEFAULT 1");
 // Migration: Solcast tri-band baseline totals for FPM pipeline (added 2026-04).

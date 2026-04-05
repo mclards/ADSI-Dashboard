@@ -26,7 +26,9 @@ def load_module(temp_root: Path, tag: str):
 
 
 class ForecastEngineIpConfigTests(unittest.TestCase):
-    def test_missing_ipconfig_defaults_to_2_5_percent_losses_for_forecast_only(self):
+    def test_missing_ipconfig_defaults_to_3_0_percent_losses_for_forecast_only(self):
+        # Blueprint B1 (v2.7.6): raised DEFAULT_INVERTER_LOSS_PCT from 2.5 to 3.0
+        # — midpoint of observed 2.5%–3.6% range per operator validation.
         tmp_root = WORK_TMP / "default-losses"
         shutil.rmtree(tmp_root, ignore_errors=True)
         tmp_root.mkdir(parents=True, exist_ok=True)
@@ -38,8 +40,8 @@ class ForecastEngineIpConfigTests(unittest.TestCase):
             profile = mod.plant_capacity_profile()
 
             self.assertEqual(meta["source"], "default")
-            self.assertAlmostEqual(float(losses["1"]), 0.025, places=6)
-            self.assertAlmostEqual(float(losses["27"]), 0.025, places=6)
+            self.assertAlmostEqual(float(losses["1"]), 0.030, places=6)
+            self.assertAlmostEqual(float(losses["27"]), 0.030, places=6)
             self.assertEqual(profile["configured_inverters"], 0)
             self.assertEqual(profile["source"], "fallback")
         finally:

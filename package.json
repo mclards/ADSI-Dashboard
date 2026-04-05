@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.7.6",
+  "version": "2.7.7",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -88,8 +88,7 @@
       "artifactName": "Inverter-Dashboard-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
-      "include": "build/uninstaller.nsh"
+      "deleteAppDataOnUninstall": false
     },
     "publish": [
       {

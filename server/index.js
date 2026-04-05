@@ -12801,6 +12801,8 @@ function validateSubstationReadings(readings) {
 
 // GET /api/substation-meter/:date — retrieve readings for a date
 app.get("/api/substation-meter/:date", (req, res) => {
+  // In remote mode the gateway is the authoritative store — never read from the local DB.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const dateStr = req.params.date;
   const dateErr = validateSubstationDate(dateStr);
   if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
@@ -12817,40 +12819,10 @@ app.get("/api/substation-meter/:date", (req, res) => {
   }
 });
 
-// Proxy substation meter save to the gateway in remote mode (Option A)
-async function _proxySubstationMeterToGateway(dateStr, body) {
-  const base = getRemoteGatewayBaseUrl();
-  if (!base) return { ok: false, error: "No gateway URL configured." };
-  if (isUnsafeRemoteLoop(base)) return { ok: false, error: "Gateway URL cannot be localhost." };
-  const target = `${base}/api/substation-meter/${encodeURIComponent(dateStr)}`;
-  try {
-    const upstream = await fetch(
-      target,
-      buildRemoteFetchOptions(
-        target,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...buildRemoteProxyHeaders(),
-          },
-          body: JSON.stringify(body),
-        },
-        "default",
-      ),
-    );
-    const text = await upstream.text();
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch (_) {}
-    if (!upstream.ok) return { ok: false, error: parsed?.error || `Gateway ${upstream.status}` };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
-  }
-}
-
 // POST /api/substation-meter/:date — upsert 15-min readings
 app.post("/api/substation-meter/:date", async (req, res) => {
+  // In remote mode, write exclusively to the gateway — never touch the local proxy DB.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const dateStr = req.params.date;
   const dateErr = validateSubstationDate(dateStr);
   if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
@@ -12908,20 +12880,12 @@ app.post("/api/substation-meter/:date", async (req, res) => {
         deviationWarning = `Sum of MW-hr (${totalMwh.toFixed(3)}) deviates ${devPct.toFixed(1)}% from Net kWh (${daily.net_kwh}).`;
       }
     }
-    // In remote mode, mirror the save to the gateway so the forecast engine gets the data
-    let gatewaySynced = null;
-    if (isRemoteMode()) {
-      const gwResult = await _proxySubstationMeterToGateway(dateStr, req.body);
-      gatewaySynced = gwResult.ok ? "ok" : `failed: ${gwResult.error}`;
-      if (!gwResult.ok) {
-        console.warn(`[substation-meter] Gateway sync failed for ${dateStr}: ${gwResult.error}`);
-      }
-    }
+    // Remote mode is short-circuited above to proxy straight to the gateway,
+    // so this path only runs in local/gateway mode.
     res.json({
       ok: true, date: dateStr, rowsUpserted: readings.length,
       totalMwh: Number(totalMwh.toFixed(6)),
       deviationWarning,
-      ...(gatewaySynced !== null && { gatewaySynced }),
     });
     // Auto-trigger debounced QA recalculation
     _triggerSubstationRecalc(dateStr);
@@ -12958,12 +12922,31 @@ app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "applica
     let fileDate = null; // date detected from file's datetime column
 
     const pad2 = (n) => String(n).padStart(2, "0");
+    // ExcelJS stores formula results on the cell itself. Shared-formula child cells
+    // have `{sharedFormula:"P9"}` as their `.value` with no inline result, but the
+    // computed value is still available via `cell.result`. Prefer that accessor,
+    // and fall back to the plain value for non-formula cells.
+    const cellNumeric = (cell) => {
+      if (cell === null || cell === undefined) return NaN;
+      // Raw primitive (when caller passes .value directly)
+      if (typeof cell === "number") return cell;
+      if (typeof cell === "string") return parseFloat(cell);
+      // Formula cell — cell.result is the cached computed value
+      if (typeof cell.result === "number") return cell.result;
+      const v = cell.value;
+      if (v === null || v === undefined) return NaN;
+      if (typeof v === "number") return v;
+      if (typeof v === "object") {
+        if (typeof v.result === "number") return v.result;
+        if ("result" in v) return parseFloat(v.result);
+      }
+      return parseFloat(v);
+    };
 
     ws.eachRow((row, rowNum) => {
       if (rowNum <= 1) return; // skip header
       const cellA = row.getCell(1).value; // column A — datetime
-      const cellP = row.getCell(16).value; // column P — MW-hr
-      const cellK = row.getCell(11).value; // column K — Net kWh
+      const cellK = row.getCell(11);       // column K — MW instantaneous (source of truth)
       const cellF = row.getCell(6).value;  // column F — Sync Time
       const cellH = row.getCell(8).value;  // column H — Desync Time
 
@@ -12980,26 +12963,36 @@ app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "applica
         if (!isNaN(d.getTime())) dt = d;
       }
 
-      const mwh = typeof cellP === "number" ? cellP : parseFloat(cellP);
+      // Derive MW-hr from column K (instantaneous MW) for a 15-min interval,
+      // clamping pre-sunrise / night-time negative readings to zero. This matches
+      // the workbook's own formula in column P (=IF(K<0, 0, K/4)) but avoids
+      // depending on whether Excel cached the formula result.
+      const mwInstant = cellNumeric(cellK);
+      const mwh = Number.isFinite(mwInstant) ? Math.max(mwInstant, 0) / 4 : NaN;
 
-      if (dt && Number.isFinite(mwh) && mwh > 0) {
-        // Detect file date from first valid datetime row (local PHT methods)
+      if (dt && Number.isFinite(mwh) && mwh >= 0) {
+        // ExcelJS parses Excel datetime cells as UTC regardless of timezone intent,
+        // so the wall-clock digits the operator typed ("05:45") live in the UTC getters.
+        // We treat those digits as local PHT time (UTC+8).
+        const yy = dt.getUTCFullYear();
+        const mm = dt.getUTCMonth();
+        const dd = dt.getUTCDate();
+        const hh = dt.getUTCHours();
+        const mi = dt.getUTCMinutes();
         if (!fileDate) {
-          fileDate = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+          fileDate = `${yy}-${pad2(mm + 1)}-${pad2(dd)}`;
         }
-        // Convert to epoch ms aligned to 15-min boundary (UTC+8)
-        const utc8Ms = dt.getTime();
-        // Align to 15-min boundary
-        const aligned = Math.round(utc8Ms / SUBSTATION_15MIN_MS) * SUBSTATION_15MIN_MS;
-        // Format time as local string (PHT) — avoid toISOString which shifts to UTC
-        const localTime = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+        // Build a real epoch ms assuming PHT (+08:00): local = UTC+8 → UTC = local-8.
+        const phtEpochMs = Date.UTC(yy, mm, dd, hh, mi) - 8 * 3600 * 1000;
+        const aligned = Math.round(phtEpochMs / SUBSTATION_15MIN_MS) * SUBSTATION_15MIN_MS;
+        const localTime = `${yy}-${pad2(mm + 1)}-${pad2(dd)} ${pad2(hh)}:${pad2(mi)}`;
         readings.push({ ts: aligned, mwh: Number(mwh.toFixed(6)), time: localTime });
       } else if (!dt) {
         // Summary row — check for totals and metadata
         if (Number.isFinite(mwh) && mwh > 0 && !summaryMwhr) {
           summaryMwhr = mwh;
         }
-        const kVal = typeof cellK === "number" ? cellK : parseFloat(cellK);
+        const kVal = cellNumeric(cellK);
         if (Number.isFinite(kVal) && kVal > 100 && !netKwh) {
           netKwh = kVal;
         }
@@ -13093,6 +13086,8 @@ function _triggerSubstationRecalc(dateStr) {
 
 // POST /api/substation-meter/:date/recalculate — explicit re-run QA for a date
 app.post("/api/substation-meter/:date/recalculate", (req, res) => {
+  // Remote proxies have no local substation data — defer QA recalc to the gateway.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const dateStr = req.params.date;
   const dateErr = validateSubstationDate(dateStr);
   if (dateErr) return res.status(400).json({ ok: false, error: dateErr });
@@ -14899,6 +14894,10 @@ app.get("/api/forecast/engine-health", (req, res) => {
       },
       plantAvgLossPct,
       lossFactorSource,
+      trainingActualSourceDistribution: trainState.training_actual_source_distribution || null,
+      meteredTrainingDays: trainState.metered_training_days || [],
+      estActualWeightEffective: trainState.est_actual_weight_effective || null,
+      lossCalibrationAudit: trainState.loss_calibration_audit || null,
     });
   } catch (e) {
     console.warn("[forecast/engine-health] failed:", e.message);

@@ -13789,7 +13789,7 @@ function renderAnalyticsSummary(
     <span class="toolbar-info">Interval: <b>${intervalMin}m</b></span>
     <span class="toolbar-info">Total: <b>${totalMwh.toFixed(3)} MWh</b></span>
     <span class="toolbar-info">Day-ahead: <b>${dayAheadTotalMwh.toFixed(3)} MWh</b></span>
-    <span class="toolbar-info">Variance: <b>${varianceMwh >= 0 ? "+" : ""}${varianceMwh.toFixed(3)} MWh</b></span>
+    <span class="toolbar-info" id="anaToolbarVarianceWrap" title="Substation (est.) vs Day-ahead. Overridden by metered substation when available.">Variance: <b id="anaToolbarVariance">${varianceMwh >= 0 ? "+" : ""}${varianceMwh.toFixed(3)} MWh</b> <span class="toolbar-info-sub" id="anaToolbarVarianceBasis">est</span></span>
     <span class="toolbar-info">Plant Peak (${intervalMin}m): <b>${peakIntervalMwh.toFixed(3)} MWh</b> @ <b>${peakAt}</b></span>
     <span class="toolbar-info">Active Inv: <b>${activeInverters}</b></span>
     <span class="toolbar-info">Last: <b>${lastLabel}</b></span>
@@ -13813,7 +13813,7 @@ function renderAnalyticsSummary(
   // Check for metered substation data — populates Subs. Metered card
   const anaDateStr = String($("anaDate")?.value || "").trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(anaDateStr)) {
-    _checkMeteredSubstation(anaDateStr, sideVariance, dayAheadTotalMwh);
+    _checkMeteredSubstation(anaDateStr, sideVariance, dayAheadTotalMwh, varianceMwh);
   }
   if (sideDayAhead)
     sideDayAhead.textContent = `${dayAheadTotalMwh.toFixed(4)} MWh`;
@@ -14474,6 +14474,7 @@ function openSubstationMeterModal() {
   SubstationMeter.parsedReadings = null;
   SubstationMeter.parsedDaily = null;
   SubstationMeter.saveDate = null;
+  setSubstationMeterStatus("hidden");
   const content = $("substationMeterContent");
   const auth = $("substationMeterAuth");
   if (auth) auth.classList.add("hidden");
@@ -14505,6 +14506,7 @@ async function loadSubstationMeterData(dateStr) {
   if (filenameEl) filenameEl.textContent = "";
   if (fileEl) fileEl.value = "";
   if (saveStatus) saveStatus.textContent = "";
+  setSubstationMeterStatus("hidden");
 
   try {
     const data = await api(`/api/substation-meter/${dateStr}`);
@@ -14560,16 +14562,38 @@ function renderSubstationMeterSummary(daily, rowCount, summaryEl) {
   summaryEl.classList.remove("hidden");
 }
 
+// In-modal status banner helper for the Substation Meter upload modal.
+// State: "loading" | "success" | "warning" | "error" | "hidden"
+function setSubstationMeterStatus(state, title, detail) {
+  const banner = $("substationMeterStatusBanner");
+  if (!banner) return;
+  if (state === "hidden") {
+    banner.classList.add("hidden");
+    return;
+  }
+  banner.classList.remove("hidden", "loading", "success", "warning", "error");
+  banner.classList.add(state);
+  const icons = { loading: "…", success: "\u2713", warning: "!", error: "\u2715" };
+  const iconEl = $("substationMeterStatusIcon");
+  const titleEl = $("substationMeterStatusTitle");
+  const detailEl = $("substationMeterStatusDetail");
+  if (iconEl) iconEl.textContent = icons[state] || "";
+  if (titleEl) titleEl.textContent = title || "";
+  if (detailEl) detailEl.textContent = detail || "";
+}
+
 async function handleSubstationXlsxUpload(file) {
   const dateStr = $("substationMeterDate")?.textContent || "";
   if (!dateStr) return;
   const filenameEl = $("substationMeterFilename");
   const saveStatus = $("substationMeterSaveStatus");
   if (filenameEl) filenameEl.textContent = file.name;
-  if (saveStatus) saveStatus.textContent = "Parsing...";
+  if (saveStatus) saveStatus.textContent = "";
+  setSubstationMeterStatus("loading", "Reading file\u2026", file.name);
 
   try {
     const buf = await file.arrayBuffer();
+    setSubstationMeterStatus("loading", "Uploading & parsing\u2026", `${(buf.byteLength / 1024).toFixed(0)} KB \u2022 ${file.name}`);
     const r = await fetch(`/api/substation-meter/${dateStr}/upload-xlsx`, {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
@@ -14585,11 +14609,6 @@ async function handleSubstationXlsxUpload(file) {
 
     // If file date differs from selected date, warn and update the modal header
     if (data.dateMismatch) {
-      showToast(
-        `File contains data for ${data.fileDate}, not ${data.requestedDate}. Will save under ${data.fileDate}.`,
-        "warning",
-        7000
-      );
       const dateEl = $("substationMeterDate");
       if (dateEl) dateEl.textContent = data.fileDate;
     }
@@ -14602,15 +14621,32 @@ async function handleSubstationXlsxUpload(file) {
     renderSubstationMeterTable(data.readings, tableBody, tableWrap);
     renderSubstationMeterSummary(data.daily, data.readings.length, summary);
 
-    if (data.summary?.deviationWarning) {
-      showToast(data.summary.deviationWarning, "warning", 6000);
-    }
-
     if (actions) actions.classList.remove("hidden");
-    if (saveStatus) saveStatus.textContent = `${data.readings.length} readings parsed. Review and save.`;
+
+    const totalMwh = Number(data.daily?.total_gen_mwhr ?? 0);
+    const parsedMsg = `${data.readings.length} readings \u2022 ${totalMwh.toFixed(3)} MWh \u2022 file date ${data.fileDate || dateStr}`;
+
+    if (data.dateMismatch) {
+      setSubstationMeterStatus(
+        "warning",
+        `Date mismatch \u2014 will save under ${data.fileDate}`,
+        `${parsedMsg}. Review readings and click Save.`
+      );
+    } else if (data.summary?.deviationWarning) {
+      setSubstationMeterStatus(
+        "warning",
+        "Parsed with deviation warning",
+        `${parsedMsg}. ${data.summary.deviationWarning}`
+      );
+    } else {
+      setSubstationMeterStatus(
+        "success",
+        "Parsed successfully \u2014 review and save",
+        parsedMsg
+      );
+    }
   } catch (e) {
-    if (saveStatus) saveStatus.textContent = "";
-    showToast(`Parse error: ${e.message}`, "fault", 5000);
+    setSubstationMeterStatus("error", "Parse error", e.message || String(e));
   }
 }
 
@@ -14621,7 +14657,8 @@ async function saveSubstationMeterReadings() {
   const saveStatus = $("substationMeterSaveStatus");
   const saveBtn = $("substationMeterSave");
   if (saveBtn) saveBtn.disabled = true;
-  if (saveStatus) saveStatus.textContent = "Saving...";
+  if (saveStatus) saveStatus.textContent = "";
+  setSubstationMeterStatus("loading", `Saving ${SubstationMeter.parsedReadings.length} readings\u2026`, `Target date ${dateStr}`);
 
   try {
     const r = await fetch(`/api/substation-meter/${dateStr}`, {
@@ -14635,14 +14672,17 @@ async function saveSubstationMeterReadings() {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || "Save failed.");
 
-    if (saveStatus) saveStatus.textContent = `Saved ${data.rowsUpserted} readings (${data.totalMwh} MWh).`;
+    const savedMsg = `${data.rowsUpserted} readings \u2022 ${data.totalMwh} MWh \u2022 ${dateStr}`;
+
     if (data.deviationWarning) {
-      showToast(data.deviationWarning, "warning", 5000);
+      setSubstationMeterStatus(
+        "warning",
+        "Saved with warnings",
+        `${savedMsg}. ${data.deviationWarning}.`
+      );
+    } else {
+      setSubstationMeterStatus("success", "Saved successfully", savedMsg);
     }
-    if (data.gatewaySynced && data.gatewaySynced !== "ok") {
-      showToast(`Saved locally. Gateway sync failed: ${data.gatewaySynced.replace("failed: ", "")}`, "warning", 6000);
-    }
-    showToast(`Substation meter data saved for ${dateStr}.`, "info", 3000);
 
     // Update badge
     const badge = $("substationMeterBadge");
@@ -14655,8 +14695,7 @@ async function saveSubstationMeterReadings() {
     const statusEl = $("anaSubstationStatus");
     if (statusEl) statusEl.textContent = `${data.rowsUpserted} metered readings`;
   } catch (e) {
-    if (saveStatus) saveStatus.textContent = "";
-    showToast(`Save error: ${e.message}`, "fault", 5000);
+    setSubstationMeterStatus("error", "Save error", e.message || String(e));
   } finally {
     if (saveBtn) saveBtn.disabled = false;
   }
@@ -14664,7 +14703,17 @@ async function saveSubstationMeterReadings() {
 
 // E6: Async check for metered substation data — updates display if available
 let _checkMeteredAbortCtl = null;
-async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh) {
+function _setToolbarVarianceBasis(basis) {
+  const basisEl = $("anaToolbarVarianceBasis");
+  if (basisEl) basisEl.textContent = basis;
+}
+function _setToolbarVariance(mwh) {
+  const tbVar = $("anaToolbarVariance");
+  if (tbVar && Number.isFinite(mwh)) {
+    tbVar.textContent = `${mwh >= 0 ? "+" : ""}${mwh.toFixed(3)} MWh`;
+  }
+}
+async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVarianceMwh) {
   if (_checkMeteredAbortCtl) _checkMeteredAbortCtl.abort();
   const ctrl = new AbortController();
   _checkMeteredAbortCtl = ctrl;
@@ -14674,11 +14723,13 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh) {
     if (!res.ok) return;
     const data = await res.json();
     if (!data.ok || !Array.isArray(data.readings) || data.readings.length === 0) {
-      // No metered data — clear the card
+      // No metered data — clear the card and keep estimated variance in toolbar
       const scadaEl = $("anaSideScadaActual");
       if (scadaEl) scadaEl.textContent = "—";
       const st = $("anaSubstationStatus");
       if (st) { st.textContent = ""; st.className = "analytics-substation-status"; }
+      _setToolbarVarianceBasis("est");
+      if (Number.isFinite(estimatedVarianceMwh)) _setToolbarVariance(estimatedVarianceMwh);
       return;
     }
     // Metered data exists — show in Subs. Metered card (not the est. card)
@@ -14686,18 +14737,16 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh) {
     const scadaEl = $("anaSideScadaActual");
     const scadaSrcEl = $("anaSideScadaSource");
     if (scadaEl) scadaEl.textContent = `${meteredMwh.toFixed(4)} MWh`;
-    if (scadaSrcEl) scadaSrcEl.textContent = "";
-    // Abort any in-flight QA fetch so it doesn't overwrite metered value
-    if (typeof _fetchScadaAbortCtl !== "undefined" && _fetchScadaAbortCtl) {
-      _fetchScadaAbortCtl.abort();
-    }
-    // Recompute variance: metered vs day-ahead
+    if (scadaSrcEl) scadaSrcEl.textContent = `${data.readings.length} readings`;
+    // Recompute variance: metered vs day-ahead (side card + toolbar stay in sync)
+    const meteredVariance = Number((meteredMwh - dayAheadMwh).toFixed(4));
     if (varEl) {
-      const meteredVariance = Number((meteredMwh - dayAheadMwh).toFixed(4));
       varEl.textContent = `${meteredVariance >= 0 ? "+" : ""}${meteredVariance.toFixed(4)} MWh`;
       varEl.classList.toggle("pos", meteredVariance >= 0);
       varEl.classList.toggle("neg", meteredVariance < 0);
     }
+    _setToolbarVariance(meteredVariance);
+    _setToolbarVarianceBasis("metered");
     // Update status badge
     const st = $("anaSubstationStatus");
     if (st) {
@@ -14707,41 +14756,6 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh) {
   } catch (e) {
     if (e.name === "AbortError") return;
     // Silently fail — display remains as estimated fallback
-  }
-}
-
-// Fetch QA-verified SCADA actual for a date and update display
-let _fetchScadaAbortCtl = null;
-async function _fetchScadaActual(dateStr, scadaEl, srcEl, varEl, dayAheadMwh) {
-  if (_fetchScadaAbortCtl) _fetchScadaAbortCtl.abort();
-  const ctrl = new AbortController();
-  _fetchScadaAbortCtl = ctrl;
-  try {
-    const res = await fetch(`/api/forecast/qa-actual/${encodeURIComponent(dateStr)}`, { signal: ctrl.signal });
-    if (ctrl.signal.aborted) return;
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data.ok || !data.found || data.total_actual_kwh == null) {
-      if (scadaEl) scadaEl.textContent = "—";
-      if (srcEl) srcEl.textContent = "No QA data";
-      return;
-    }
-    const actualMwh = Number(data.total_actual_kwh) / 1000;
-    if (scadaEl) scadaEl.textContent = `${actualMwh.toFixed(4)} MWh`;
-    if (srcEl) {
-      const quality = data.comparison_quality || "preview";
-      const wape = data.daily_wape_pct != null ? ` | WAPE ${Number(data.daily_wape_pct).toFixed(1)}%` : "";
-      srcEl.textContent = `${quality}${wape}`;
-    }
-    // Update variance to use SCADA actual vs day-ahead
-    if (varEl && Number.isFinite(actualMwh) && Number.isFinite(dayAheadMwh)) {
-      const scadaVariance = Number((actualMwh - dayAheadMwh).toFixed(4));
-      varEl.textContent = `${scadaVariance >= 0 ? "+" : ""}${scadaVariance.toFixed(4)} MWh`;
-      varEl.classList.toggle("pos", scadaVariance >= 0);
-      varEl.classList.toggle("neg", scadaVariance < 0);
-    }
-  } catch (e) {
-    if (e.name === "AbortError") return;
   }
 }
 

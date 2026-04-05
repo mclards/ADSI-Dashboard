@@ -5497,9 +5497,6 @@ select.cam-field-input { appearance: auto; }
 .analytics-side-grid.analytics-side-grid-3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-.analytics-side-grid.analytics-side-grid-4 {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
 .analytics-side-grid.analytics-side-grid-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 6px;
@@ -5734,6 +5731,109 @@ select.cam-field-input { appearance: auto; }
 .substation-meter-save-status {
   font-size: 10px;
   color: var(--text3, #999);
+}
+
+/* Substation meter upload status banner (in-modal feedback) */
+.substation-meter-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  position: relative;
+  overflow: hidden;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.substation-meter-status-banner.hidden { display: none; }
+.substation-meter-status-icon {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--text3, #888);
+}
+.substation-meter-status-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.substation-meter-status-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+.substation-meter-status-detail {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.3;
+  margin-top: 1px;
+  word-break: break-word;
+}
+.substation-meter-status-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: transparent;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.substation-meter-status-progress-bar {
+  height: 100%;
+  width: 35%;
+  background: currentColor;
+  border-radius: 0 2px 2px 0;
+}
+.substation-meter-status-banner.loading .substation-meter-status-progress {
+  opacity: 1;
+  color: #3a8dff;
+}
+.substation-meter-status-banner.loading .substation-meter-status-progress-bar {
+  animation: substationMeterProgress 1.2s ease-in-out infinite;
+}
+@keyframes substationMeterProgress {
+  0%   { transform: translateX(-100%); width: 35%; }
+  50%  { transform: translateX(120%); width: 45%; }
+  100% { transform: translateX(280%); width: 35%; }
+}
+.substation-meter-status-banner.loading {
+  background: rgba(58, 141, 255, 0.08);
+  border-color: rgba(58, 141, 255, 0.45);
+}
+.substation-meter-status-banner.loading .substation-meter-status-icon {
+  background: #3a8dff;
+}
+.substation-meter-status-banner.success {
+  background: rgba(46, 184, 92, 0.10);
+  border-color: rgba(46, 184, 92, 0.55);
+}
+.substation-meter-status-banner.success .substation-meter-status-icon {
+  background: #2eb85c;
+}
+.substation-meter-status-banner.warning {
+  background: rgba(240, 173, 78, 0.12);
+  border-color: rgba(240, 173, 78, 0.60);
+}
+.substation-meter-status-banner.warning .substation-meter-status-icon {
+  background: #f0ad4e;
+}
+.substation-meter-status-banner.error {
+  background: rgba(217, 83, 79, 0.12);
+  border-color: rgba(217, 83, 79, 0.60);
+}
+.substation-meter-status-banner.error .substation-meter-status-icon {
+  background: #d9534f;
 }
 
 .analytics-gen-wrap {
@@ -7095,6 +7195,17 @@ select.cam-field-input { appearance: auto; }
 
 #analyticsSummary .toolbar-info b {
   color: var(--text);
+}
+
+#analyticsSummary .toolbar-info-sub {
+  font-size: 0.78em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 2px;
 }
 
 #page-analytics .chart-grid {

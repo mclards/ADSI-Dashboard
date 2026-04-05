@@ -562,12 +562,14 @@ is unreachable; a `gatewaySynced` field in the response alerts the frontend
 to warn the user on sync failure.
 
 **Items needing polish:**
-- `_fetchScadaActual()` in app.js is now disconnected from UI cards — it was the
-  QA-table lookup path that competed with `_checkMeteredSubstation()`. Can be
-  removed or repurposed for QA-sourced display in a future iteration.
-- `.analytics-side-grid-4` CSS class exists but is unused — can be cleaned up.
 - Phase 14 (B2: billing meter validation) is pending — requires accumulated
   metered data across multiple clear days to perform meaningful comparison.
+
+**Polish items resolved (2026-04-05):**
+- `_fetchScadaActual()` removed from app.js — dead code eliminated.
+- `.analytics-side-grid-4` CSS class removed — was never wired to any element.
+- `gatewaySynced` frontend reference removed from `saveSubstationMeterReadings()`
+  — backend no longer returns the field (remote mode uses transparent proxy).
 
 ---
 

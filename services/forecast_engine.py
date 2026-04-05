@@ -395,6 +395,7 @@ AVAIL_DAY_MODERATE_PCT   = 0.15   # ≥15% → moderate
 AVAIL_DAY_SEVERE_PCT     = 0.30   # ≥30% → severe
 EST_ACTUAL_RECOVER_MIN   = 0.80   # need ≥80% est_actual coverage to recover severe outage day
 EST_ACTUAL_WEIGHT_FACTOR = 0.93   # satellite-derived, nearly accurate per operator validation (7% discount)
+EST_ACTUAL_WEIGHT_EFFECTIVE = 0.93  # dynamic override based on metered accuracy; set during training
 
 # Confidence bands
 CONF_CLEAR_BASE = 0.08   # 8% on clear days
@@ -3154,10 +3155,14 @@ def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int)
 def _query_substation_metered_15min(day: str) -> dict[int, float]:
     """Query substation_metered_energy for a date.
 
-    Returns dict {ts_epoch_ms: mwh_15min}.
+    Returns dict {ts_epoch_ms: mwh_15min}. Silently returns empty dict if the
+    DB file or the substation_metered_energy table do not exist — this is the
+    expected state on fresh installs and in the test harness.
     """
-    sql = "SELECT ts, mwh FROM substation_metered_energy WHERE date = ? ORDER BY ts"
     out: dict[int, float] = {}
+    if not APP_DB_FILE.exists():
+        return out
+    sql = "SELECT ts, mwh FROM substation_metered_energy WHERE date = ? ORDER BY ts"
     for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
         try:
             with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
@@ -3167,6 +3172,15 @@ def _query_substation_metered_15min(day: str) -> dict[int, float]:
                     if ts_i > 0 and mwh is not None:
                         out[ts_i] = float(mwh)
             return out
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "no such table" in msg:
+                return out
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB substation metered load failed: %s", e)
+            break
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
                 _sleep_sqlite_retry(attempt)
@@ -3225,43 +3239,57 @@ def resolve_actual_5min_for_date(day: str) -> tuple[np.ndarray, np.ndarray, str]
 
     Returns (actual_kwh[288], present_mask[288], source_label)
     where source_label is 'metered', 'estimated', or 'mixed'.
+
+    Routes loss-adjusted loading through ``load_actual_loss_adjusted_with_presence``
+    so tests and alternate DB layouts (legacy context, archived history) resolve
+    through the same path as the rest of the engine.
     """
     actual = np.zeros(SLOTS_DAY, dtype=float)
     present = np.zeros(SLOTS_DAY, dtype=bool)
     source = "estimated"
 
-    # Shared: compute day bounds and load inverter 5-min data (used by steps 1 & 2)
-    d_dt = datetime.strptime(day, "%Y-%m-%d")
-    day_start_ms = int(
-        d_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
-    )
-    day_end_ms = day_start_ms + 86400 * 1000
-    loss_factors = _load_inverter_loss_factors()
-    inv_5min = _query_energy_5min_loss_adjusted(APP_DB_FILE, day_start_ms, day_end_ms, loss_factors)
-
-    # Step 1: Check for metered substation data
+    # Step 1: Check for metered substation data (graceful if table/DB absent).
     metered_15min = _query_substation_metered_15min(day)
     if metered_15min:
-        metered_5min = interpolate_15min_to_5min(metered_15min, inv_5min)
+        # Shape-preserving interpolation needs the raw loss-adjusted 5-min
+        # profile. Build it from the loss-adjusted loader output, keyed on
+        # epoch-ms to match interpolate_15min_to_5min's contract.
+        inv_vals, inv_present = load_actual_loss_adjusted_with_presence(day)
+        inv_5min_ts: dict[int, float] = {}
+        if inv_vals is not None and inv_present is not None:
+            d_dt = datetime.strptime(day, "%Y-%m-%d")
+            day_start_ms = int(
+                d_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+            )
+            # Convert from local-slot array back to epoch-ms keyed dict
+            # (inverse of the slot_idx computation).
+            for slot_idx in range(SLOTS_DAY):
+                if bool(inv_present[slot_idx]) and float(inv_vals[slot_idx]) > 0:
+                    # local_ms = day_start_ms + 8h offset back to UTC; since
+                    # load_actual_loss_adjusted_with_presence already emits in
+                    # plant-local slot order, we recover the original UTC ts:
+                    local_ms = slot_idx * SLOT_MIN * 60 * 1000
+                    utc_ms = day_start_ms + local_ms
+                    inv_5min_ts[utc_ms] = float(inv_vals[slot_idx])
 
+        metered_5min = interpolate_15min_to_5min(metered_15min, inv_5min_ts)
         metered_present = metered_5min > 0
         if np.any(metered_present):
             actual[metered_present] = metered_5min[metered_present]
             present[metered_present] = True
             source = "metered"
 
-    # Step 2: Fill remaining from loss-adjusted inverter
+    # Step 2: Fill remaining slots from loss-adjusted inverter (uses the
+    # canonical loader so tests and legacy-context fallbacks keep working).
     if not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
-        for ts_ms, kwh in inv_5min.items():
-            local_ms = ts_ms + 8 * 3600 * 1000
-            day_ms = local_ms % (86400 * 1000)
-            slot_idx = int(day_ms // (SLOT_MIN * 60 * 1000))
-            if 0 <= slot_idx < SLOTS_DAY and not present[slot_idx] and kwh > 0:
-                actual[slot_idx] = kwh
-                present[slot_idx] = True
-
-        if source == "metered" and not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
-            source = "mixed"
+        inv_vals, inv_present = load_actual_loss_adjusted_with_presence(day)
+        if inv_vals is not None and inv_present is not None:
+            fill_mask = (~present) & np.asarray(inv_present, dtype=bool) & (np.asarray(inv_vals, dtype=float) > 0)
+            if np.any(fill_mask):
+                actual[fill_mask] = np.asarray(inv_vals, dtype=float)[fill_mask]
+                present[fill_mask] = True
+                if source == "metered":
+                    source = "mixed"
 
     # Step 3: Fill remaining from Solcast est_actual
     if not np.all(present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
@@ -3276,12 +3304,161 @@ def resolve_actual_5min_for_date(day: str) -> tuple[np.ndarray, np.ndarray, str]
             if np.any(fill_mask):
                 actual[fill_mask] = est_kwh[fill_mask]
                 present[fill_mask] = True
-                if source == "estimated":
-                    source = "estimated"  # still estimated if only solcast
-                else:
+                if source != "estimated":
                     source = "mixed"
 
     return actual, present, source
+
+
+def audit_loss_factors(lookback_days: int = 30) -> dict:
+    """P3: Audit loss factors against metered data.
+
+    For each day with metered data in lookback, compare:
+      - metered total kWh (from substation_metered_energy)
+      - loss-adjusted plant total (from energy_5min with loss factors)
+
+    Returns {days_analyzed, avg_deviation_pct, max_deviation_pct, status, per_day: [...]}
+    """
+    today = date.today()
+    per_day_results = []
+
+    for days_ago in range(1, lookback_days + 1):
+        day = (today - timedelta(days=days_ago)).isoformat()
+
+        # Load metered data
+        metered_15min = _query_substation_metered_15min(day)
+        if not metered_15min:
+            continue
+
+        metered_kwh_total = sum(mwh * 1000.0 for mwh in metered_15min.values())
+        if metered_kwh_total <= 0:
+            continue
+
+        # Load loss-adjusted inverter data
+        d_dt = datetime.strptime(day, "%Y-%m-%d")
+        day_start_ms = int(d_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        day_end_ms = day_start_ms + 86400 * 1000
+        loss_factors = _load_inverter_loss_factors()
+        inv_5min = _query_energy_5min_loss_adjusted(APP_DB_FILE, day_start_ms, day_end_ms, loss_factors)
+        loss_adj_kwh_total = sum(inv_5min.values())
+
+        if loss_adj_kwh_total <= 0:
+            continue
+
+        # Compute deviation
+        deviation_pct = abs(metered_kwh_total - loss_adj_kwh_total) / max(metered_kwh_total, 1.0) * 100.0
+        per_day_results.append({
+            "day": day,
+            "metered_kwh": round(metered_kwh_total, 1),
+            "loss_adjusted_kwh": round(loss_adj_kwh_total, 1),
+            "deviation_pct": round(deviation_pct, 2),
+        })
+
+    if not per_day_results:
+        return {
+            "days_analyzed": 0,
+            "avg_deviation_pct": 0.0,
+            "max_deviation_pct": 0.0,
+            "status": "no_metered_data",
+            "per_day": [],
+        }
+
+    deviations = [d["deviation_pct"] for d in per_day_results]
+    avg_dev = float(np.mean(deviations))
+    max_dev = float(np.max(deviations))
+
+    status = "well_calibrated" if avg_dev < 0.5 else ("review_recommended" if avg_dev < 1.0 else "flagged")
+
+    return {
+        "days_analyzed": len(per_day_results),
+        "avg_deviation_pct": round(avg_dev, 2),
+        "max_deviation_pct": round(max_dev, 2),
+        "status": status,
+        "per_day": per_day_results[-10:],  # last 10 days
+    }
+
+
+def compute_solcast_accuracy_vs_metered(lookback_days: int = 30) -> float:
+    """P4: Compute dynamic EST_ACTUAL_WEIGHT_FACTOR based on Solcast accuracy vs metered.
+
+    Query forecast_error_compare_slot for metered days, compute Solcast MAPE.
+    Map MAPE → weight: <5% → 0.95; 5-12% → 0.93; >12% → 0.85.
+
+    Returns effective weight, or default EST_ACTUAL_WEIGHT_FACTOR if insufficient data.
+    """
+    today = date.today()
+    start_date = (today - timedelta(days=lookback_days)).isoformat()
+    end_date = (today - timedelta(days=1)).isoformat()
+
+    if not APP_DB_FILE.exists():
+        return EST_ACTUAL_WEIGHT_FACTOR
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            # actual_source column is optional on pre-v2.7.6 schemas — bail out
+            # early if the column is missing (no metered-era data yet).
+            slot_cols = {row[1] for row in conn.execute(
+                "PRAGMA table_info(forecast_error_compare_slot)"
+            ).fetchall()}
+            if "actual_source" not in slot_cols:
+                return EST_ACTUAL_WEIGHT_FACTOR
+            rows = conn.execute(
+                """
+                SELECT forecast_kwh, actual_kwh
+                  FROM forecast_error_compare_slot
+                 WHERE target_date >= ? AND target_date <= ?
+                   AND actual_source = 'metered'
+                   AND actual_kwh > 0.0
+                   AND forecast_kwh IS NOT NULL
+                """,
+                (start_date, end_date)
+            ).fetchall()
+    except Exception as e:
+        log.warning("Failed to query metered accuracy: %s", e)
+        return EST_ACTUAL_WEIGHT_FACTOR
+
+    if not rows or len(rows) < 100:  # need at least ~3 days of data
+        log.info("Insufficient metered error data for dynamic weight (%d slots); using default", len(rows))
+        return EST_ACTUAL_WEIGHT_FACTOR
+
+    # Compute MAPE vs metered actuals
+    errors = []
+    for fc_kwh, act_kwh in rows:
+        if fc_kwh is not None and act_kwh is not None and act_kwh > 0:
+            ape = abs(float(fc_kwh) - float(act_kwh)) / float(act_kwh)
+            errors.append(ape)
+
+    if not errors:
+        return EST_ACTUAL_WEIGHT_FACTOR
+
+    mape = float(np.mean(errors)) * 100.0
+    log.info("Solcast vs metered MAPE = %.2f%% (slots=%d)", mape, len(errors))
+
+    # Map MAPE → weight
+    if mape < 5.0:
+        weight = 0.95
+    elif mape < 12.0:
+        weight = 0.93
+    else:
+        weight = 0.85
+
+    log.info("Dynamic EST_ACTUAL_WEIGHT = %.3f (based on metered accuracy)", weight)
+    return weight
+
+
+def get_plant_avg_loss_pct() -> float:
+    """P5: Compute plant-average loss factor percentage."""
+    try:
+        profile = plant_capacity_profile()
+        enabled_nodes = float(profile.get("enabled_nodes", 1.0))
+        loss_adjusted_nodes = float(profile.get("loss_adjusted_nodes", 1.0))
+        if enabled_nodes <= 0:
+            return 0.0
+        loss_pct = (1.0 - loss_adjusted_nodes / enabled_nodes) * 100.0
+        return float(np.clip(loss_pct, 0.0, 10.0))
+    except Exception as e:
+        log.warning("Failed to compute plant avg loss: %s", e)
+        return 0.0
 
 
 # ── Availability / Outage Detection (Phase 2) ──────────────────────────────
@@ -4985,9 +5162,20 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         # all reads within this connection see a consistent point-in-time view.
         with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             conn.execute("PRAGMA query_only = ON")
+            # Probe schema: actual_source column is optional (added in v2.7.6+;
+            # legacy databases and test fixtures may not have run the Node
+            # ensureColumn migration yet).
+            daily_cols = {row[1] for row in conn.execute(
+                "PRAGMA table_info(forecast_error_compare_daily)"
+            ).fetchall()}
+            actual_source_expr = (
+                "COALESCE(actual_source, 'estimated')"
+                if "actual_source" in daily_cols
+                else "'estimated'"
+            )
             daily_rows = conn.execute(
-                """
-                SELECT target_date, COALESCE(run_audit_id, 0), COALESCE(forecast_variant, ''), COALESCE(provider_expected, ''), COALESCE(notes_json, '')
+                f"""
+                SELECT target_date, COALESCE(run_audit_id, 0), COALESCE(forecast_variant, ''), COALESCE(provider_expected, ''), COALESCE(notes_json, ''), {actual_source_expr}
                   FROM forecast_error_compare_daily
                  WHERE target_date >= ? AND target_date <= ?
                    AND include_in_error_memory = 1
@@ -5017,9 +5205,16 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 forecast_variant = str(day_row[2] or "")
                 provider_expected = str(day_row[3] or "")
                 notes_json_str = str(day_row[4] or "")
+                actual_src = str(day_row[5] or "estimated")
                 source_weight = _memory_source_weight(forecast_variant, provider_expected)
                 if source_weight <= 0:
                     continue
+                # Apply actual-source weight: metered gets full weight, mixed gets mid-weight, estimated gets discount
+                if actual_src == "metered":
+                    source_weight = 1.0  # full trust for metered data
+                elif actual_src == "mixed":
+                    source_weight = min(source_weight, 0.95)  # mid-trust for mixed
+                # else: estimated gets the forecast-variant-based weight (already computed)
 
                 # Extract regime from notes_json for regime-aware weighting
                 hist_regime = ""
@@ -6362,7 +6557,7 @@ def collect_training_data_hardened(
         # Metered substation data gets full weight (1.0) — no discount
         est_recon_count = int(sample.get("est_actual_reconstructed_count", 0))
         actual_src = sample.get("actual_source", "estimated")
-        recon_discount = 1.0 if actual_src == "metered" else (EST_ACTUAL_WEIGHT_FACTOR if est_recon_count > 0 else 1.0)
+        recon_discount = 1.0 if actual_src == "metered" else (EST_ACTUAL_WEIGHT_EFFECTIVE if est_recon_count > 0 else 1.0)
         sample_weight = np.full(len(y), recency_weight * quality_weight * recon_discount, dtype=float)
 
         X_parts.append(X.reset_index(drop=True))
@@ -6816,6 +7011,10 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
 
 def build_training_state(today: date) -> dict | None:
     """Build the in-memory model/artifact state for a given training cut-off date."""
+    global EST_ACTUAL_WEIGHT_EFFECTIVE
+    # P4: Compute dynamic EST_ACTUAL_WEIGHT based on Solcast accuracy vs metered
+    EST_ACTUAL_WEIGHT_EFFECTIVE = compute_solcast_accuracy_vs_metered(lookback_days=30)
+
     solcast_reliability = build_solcast_reliability_artifact(today)
     history_days = collect_history_days(
         today,
@@ -6842,6 +7041,14 @@ def build_training_state(today: date) -> dict | None:
     # Aggregate outage summary from history days
     _outage_days = [h for h in history_days if h.get("outage_severity", "no_outage") != "no_outage"]
     _recon_days = [h for h in history_days if h.get("est_actual_reconstructed_count", 0) > 0]
+    # Aggregate actual_source distribution from training history
+    _actual_source_dist = {"metered": 0, "mixed": 0, "estimated": 0}
+    _metered_days = []
+    for h in history_days:
+        src = str(h.get("actual_source", "estimated"))
+        _actual_source_dist[src] = _actual_source_dist.get(src, 0) + 1
+        if src == "metered":
+            _metered_days.append(str(h.get("day", "")))
     _outage_summary = {
         "days_with_outages": len(_outage_days),
         "total_outage_solar_slots": sum(h.get("outage_solar_slot_count", 0) for h in _outage_days),
@@ -6856,6 +7063,9 @@ def build_training_state(today: date) -> dict | None:
             "weight_discount": EST_ACTUAL_WEIGHT_FACTOR,
         },
     }
+    # P5: Compute plant average loss percentage
+    _plant_avg_loss_pct = get_plant_avg_loss_pct()
+    _loss_calibration_audit = audit_loss_factors(lookback_days=30)
 
     bundle = {
         "created_ts": int(time.time()),
@@ -6863,6 +7073,11 @@ def build_training_state(today: date) -> dict | None:
         "history_days": int(len(history_days)),
         "feature_cols": list(X.columns),
         "outage_summary": _outage_summary,
+        "training_actual_source_distribution": _actual_source_dist,
+        "metered_training_days": _metered_days[-30:],  # bounded list of last 30 metered days
+        "est_actual_weight_effective": float(EST_ACTUAL_WEIGHT_EFFECTIVE),
+        "plant_avg_loss_pct": float(_plant_avg_loss_pct),
+        "loss_calibration_audit": _loss_calibration_audit,
         "global": {
             "model": global_model,
             "scaler": global_scaler,
@@ -7971,6 +8186,7 @@ def _persist_qa_comparison(
     daily_metrics: dict,
     fc_slots: np.ndarray,
     actual_slots: np.ndarray,
+    actual_source: str,
     usable_mask: np.ndarray,
     actual_present: np.ndarray,
     forecast_present: np.ndarray,
@@ -8084,8 +8300,8 @@ def _persist_qa_comparison(
                     available_actual_slots, available_forecast_slots,
                     manual_masked_slots, cap_masked_slots, operational_masked_slots,
                     include_in_error_memory, include_in_source_scoring, comparison_quality,
-                    computed_ts, notes_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    computed_ts, notes_json, actual_source
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT({daily_conflict_target}) DO UPDATE SET
                     run_audit_id=excluded.run_audit_id,
                     generator_mode=excluded.generator_mode,
@@ -8113,7 +8329,8 @@ def _persist_qa_comparison(
                     include_in_source_scoring=excluded.include_in_source_scoring,
                     comparison_quality=excluded.comparison_quality,
                     computed_ts=excluded.computed_ts,
-                    notes_json=excluded.notes_json
+                    notes_json=excluded.notes_json,
+                    actual_source=excluded.actual_source
                 """,
                 (
                     target_date, run_audit_id, generator_mode,
@@ -8133,6 +8350,7 @@ def _persist_qa_comparison(
                         "forecast_regime": str(day_regime or ""),
                         "est_actual_recon_slots": int(est_actual_recon_slots),
                     }),
+                    str(actual_source or "estimated"),
                 )
             )
             daily_compare_id = int(daily_row.lastrowid or 0)
@@ -8191,6 +8409,7 @@ def _persist_qa_comparison(
                     float(rad_arr[slot]) if np.isfinite(rad_arr[slot]) else None,
                     float(cloud_arr[slot]) if np.isfinite(cloud_arr[slot]) else None,
                     float(max(0.0, min(1.0, support_weight))),
+                    str(actual_source or "estimated"),
                 ))
 
             if slot_rows:
@@ -8205,8 +8424,8 @@ def _persist_qa_comparison(
                         actual_present, forecast_present, solcast_present,
                         usable_for_metrics, usable_for_error_memory,
                         manual_constraint_mask, cap_dispatch_mask, curtailed_mask, operational_mask, solar_mask,
-                        rad_wm2, cloud_pct, support_weight
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        rad_wm2, cloud_pct, support_weight, actual_source
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT({slot_conflict_target}) DO UPDATE SET
                         run_audit_id=excluded.run_audit_id,
                         daily_compare_id=excluded.daily_compare_id,
@@ -8240,7 +8459,8 @@ def _persist_qa_comparison(
                         solar_mask=excluded.solar_mask,
                         rad_wm2=excluded.rad_wm2,
                         cloud_pct=excluded.cloud_pct,
-                        support_weight=excluded.support_weight
+                        support_weight=excluded.support_weight,
+                        actual_source=excluded.actual_source
                     """,
                     slot_rows
                 )
@@ -8499,6 +8719,7 @@ def forecast_qa(today: date) -> None:
         metrics,
         fc,
         actual_recon,
+        actual_source,
         usable_mask,
         actual_present_arr,
         fc_present_arr,
