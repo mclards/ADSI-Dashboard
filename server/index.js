@@ -214,6 +214,10 @@ const SOLCAST_TOOLKIT_PERIOD = "PT5M";
 const SOLCAST_PREVIEW_RESOLUTIONS = new Set(["PT5M", "PT10M", "PT15M", "PT30M", "PT60M"]);
 const SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS = 15;
 const SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS = 360;
+
+// Rate-limit lazy Solcast est_actual backfill per date (5-minute cooldown).
+const _solcastLazyBackfillAttempts = new Map(); // date (YYYY-MM-DD) -> nextRetryAt (ms)
+let SOLCAST_LAZY_BACKFILL_COOLDOWN_MS = 5 * 60 * 1000;
 const SOLCAST_TOOLKIT_SITE_TYPES = new Set([
   "utility_scale_sites",
   "rooftop_sites",
@@ -912,6 +916,10 @@ function readOperationMode() {
 }
 
 function isRemoteMode() {
+  // Allow test to override mode
+  if (process.env.NODE_ENV === "test" && global.__adsiTestHooks?._forceRemoteMode != null) {
+    return global.__adsiTestHooks._forceRemoteMode;
+  }
   return readOperationMode() === "remote";
 }
 
@@ -9953,6 +9961,44 @@ function backfillEstActualFromFetch(estActuals, cfg, targetDateSet) {
 }
 
 /**
+ * Lazy-backfill Solcast snapshots for a single date if the Analytics endpoint
+ * detects no data or all-NULL est_actual rows. Respects rate-limit cooldown per date
+ * and does not run in remote mode (remote clients proxy all requests to gateway).
+ * Returns true if the backfill task was scheduled, false otherwise.
+ */
+function lazyBackfillSolcastSnapshotIfMissing(date) {
+  // Guard: validate date format
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+    return false;
+  }
+
+  // Guard: do not backfill in remote mode (remote clients proxy to gateway)
+  if (isRemoteMode()) {
+    return false;
+  }
+
+  // Guard: check rate-limit cooldown
+  const nextRetryAt = _solcastLazyBackfillAttempts.get(date);
+  if (nextRetryAt != null && nextRetryAt > Date.now()) {
+    return false;
+  }
+
+  // Set cooldown to prevent rapid re-fetches
+  _solcastLazyBackfillAttempts.set(date, Date.now() + SOLCAST_LAZY_BACKFILL_COOLDOWN_MS);
+
+  // Fire-and-forget: schedule backfill without blocking the response
+  setImmediate(async () => {
+    try {
+      await autoFetchSolcastSnapshots([date], { toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS });
+    } catch (err) {
+      console.warn("[solcast-lazy-backfill]", date, err.message);
+    }
+  });
+
+  return true;
+}
+
+/**
  * Auto-fetch fresh Solcast snapshots for the given dates before ML generation.
  * Also backfills est_actual data for recent past dates present in the toolkit
  * response (satellite-derived estimated actuals for outage reconstruction).
@@ -13935,6 +13981,52 @@ app.get("/api/analytics/dayahead", (req, res) => {
   res.json(rows);
 });
 
+app.get("/api/analytics/solcast-est-actual", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const date = String(req.query?.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ ok: false, error: "invalid date" });
+  }
+  try {
+    const rows = stmts.getSolcastSnapshotDay.all(date);
+    const { startTs, endTs } = getForecastSolarWindowBounds(date);
+    // Solcast estimated_actuals are PT5M records — each snapshot slot stores the
+    // correct 5-min energy in est_actual_kwh (mw * 5/60 * 1000). Sum kWh then
+    // convert to MWh, matching Forecast section's buildSolcastPreviewDaySeries().
+    let totalKwh = 0;
+    let slots = 0;
+    let hasEstActualData = false;
+    for (const r of rows) {
+      const ts = Number(r?.ts_local || 0);
+      if (!ts || ts < startTs || ts >= endTs) continue;
+      if (r?.est_actual_mw == null) continue; // no est_actual data for this slot
+      hasEstActualData = true;
+      const v = Number(r.est_actual_kwh);
+      if (!Number.isFinite(v) || v < 0) continue;
+      totalKwh += v;
+      slots += 1;
+    }
+
+    // Trigger lazy backfill if no rows or no est_actual data found
+    if (!rows || rows.length === 0 || !hasEstActualData) {
+      lazyBackfillSolcastSnapshotIfMissing(date);
+    }
+
+    return res.json({
+      ok: true,
+      date,
+      totalMwh: Number((totalKwh / 1000).toFixed(6)),
+      slots,
+      hasData: slots > 0,
+    });
+  } catch (err) {
+    console.error("[solcast-est-actual] read failed:", err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/api/weather/weekly", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
@@ -16401,3 +16493,21 @@ setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
 
 module.exports = { shutdownEmbedded };
+
+// Test hooks for solcastLazyBackfill tests
+if (process.env.NODE_ENV === "test") {
+  if (!global.__adsiTestHooks) {
+    global.__adsiTestHooks = {};
+  }
+  global.__adsiTestHooks.lazyBackfillSolcastSnapshotIfMissing = lazyBackfillSolcastSnapshotIfMissing;
+  global.__adsiTestHooks.resetLazyBackfillAttempts = () => {
+    _solcastLazyBackfillAttempts.clear();
+  };
+  global.__adsiTestHooks.setSolcastLazyBackfillCooldown = (ms) => {
+    SOLCAST_LAZY_BACKFILL_COOLDOWN_MS = Number(ms || 0);
+  };
+  global.__adsiTestHooks.setRemoteMode = (enabled) => {
+    // Store in a test variable; we'll need to hook into isRemoteMode
+    global.__adsiTestHooks._forceRemoteMode = enabled;
+  };
+}

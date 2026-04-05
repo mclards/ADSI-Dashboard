@@ -99,6 +99,7 @@ const State = {
   analyticsDayAheadBaseRows: [], // raw 5-minute day-ahead rows for the selected date
   analyticsIntervalMin: 5,
   analyticsDailyTotalMwh: null,
+  analyticsSolcastEstActualMwh: null,
   analyticsActualSummarySyncAt: 0,
   analyticsActualSummarySyncDay: "",
   analyticsWeeklyWeather: [],
@@ -6148,6 +6149,7 @@ async function handleOperationModeTransition(
       State.analyticsDayAheadBaseRows = [];
       State.analyticsDayAheadCache = null;
       State.analyticsDailyTotalMwh = null;
+      State.analyticsSolcastEstActualMwh = null;
       State.analyticsActualSummarySyncAt = 0;
       State.analyticsActualSummarySyncDay = "";
     }
@@ -12714,11 +12716,15 @@ async function loadAnalytics(options = {}) {
     let rows = [];
     let dayAheadRows = [];
     let dailySummary = null;
+    let solcastEstActual = null;
     try {
-      [rows, dayAheadRows, dailySummary] = await Promise.all([
+      [rows, dayAheadRows, dailySummary, solcastEstActual] = await Promise.all([
         api(`/api/analytics/energy?${qs}`),
         api(`/api/analytics/dayahead?${qs}`).catch(() => []),
         api(`/api/report/summary?date=${encodeURIComponent(date)}`).catch(
+          () => null,
+        ),
+        api(`/api/analytics/solcast-est-actual?date=${encodeURIComponent(date)}`).catch(
           () => null,
         ),
       ]);
@@ -12737,6 +12743,10 @@ async function loadAnalytics(options = {}) {
       : [];
     State.analyticsIntervalMin = intervalMin;
     State.analyticsDayAheadCache = null;
+    State.analyticsSolcastEstActualMwh =
+      solcastEstActual && solcastEstActual.hasData
+        ? Number(solcastEstActual.totalMwh)
+        : null;
     const currentDaySummary = extractCurrentDaySummary(dailySummary);
     State.analyticsDailyTotalMwh =
       currentDaySummary && currentDaySummary.day === date
@@ -13343,6 +13353,10 @@ function ensureAnalyticsCards() {
         <div class="analytics-side-value" id="anaSideScadaActual">—</div>
         <div class="analytics-side-sub-label" id="anaSideScadaSource"></div>
       </div>
+      <div class="analytics-side-item" title="Solcast satellite-derived estimated actual energy for the selected date (plant-side, pre-loss).">
+        <div class="analytics-side-label">Solcast Est. Actual</div>
+        <div class="analytics-side-value" id="anaSideSolcastEstActual">—</div>
+      </div>
       <div class="analytics-side-item" title="Forecasted day-ahead energy for the selected date.">
         <div class="analytics-side-label">Day-ahead MWh</div>
         <div class="analytics-side-value" id="anaSideDayAhead">—</div>
@@ -13355,13 +13369,13 @@ function ensureAnalyticsCards() {
         <div class="analytics-side-label">Peak Interval</div>
         <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
       </div>
-    </div>
-    <div class="analytics-substation-meter-wrap" id="anaSubstationMeterWrap" style="display:none;">
-      <div class="analytics-side-label">Substation Meter Input</div>
-      <div class="analytics-substation-meter-row">
-        <button id="btnSubstationMeter" class="btn btn-sm analytics-substation-btn" type="button"
-          title="Upload or manually enter substation meter data for the selected date.">Upload Metered</button>
-        <span class="analytics-substation-status" id="anaSubstationStatus"></span>
+      <div class="analytics-side-item span-2" id="anaSubstationMeterWrap" style="display:none;">
+        <div class="analytics-side-label">Substation Meter Input</div>
+        <div class="analytics-substation-meter-row">
+          <button id="btnSubstationMeter" class="btn btn-sm analytics-substation-btn" type="button"
+            title="Upload or manually enter substation meter data for the selected date.">Upload Metered</button>
+          <span class="analytics-substation-status" id="anaSubstationStatus"></span>
+        </div>
       </div>
     </div>
     <div class="analytics-gen-wrap">
@@ -13824,6 +13838,13 @@ function renderAnalyticsSummary(
   }
   if (sidePeak)
     sidePeak.textContent = `${peakIntervalMwh.toFixed(4)} MWh @ ${peakAt}`;
+  const sideSolcastEst = $("anaSideSolcastEstActual");
+  if (sideSolcastEst) {
+    const estMwh = Number(State.analyticsSolcastEstActualMwh);
+    sideSolcastEst.textContent = Number.isFinite(estMwh)
+      ? `${estMwh.toFixed(4)} MWh`
+      : "—";
+  }
 
   // Show substation meter button (auth gated via modal)
   const meterWrap = $("anaSubstationMeterWrap");
