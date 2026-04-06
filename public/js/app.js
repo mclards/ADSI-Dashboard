@@ -12724,9 +12724,34 @@ async function loadAnalytics(options = {}) {
         api(`/api/report/summary?date=${encodeURIComponent(date)}`).catch(
           () => null,
         ),
-        api(`/api/analytics/solcast-est-actual?date=${encodeURIComponent(date)}`).catch(
-          () => null,
-        ),
+        (async () => {
+          try {
+            // Client-side cache: re-use result for 5 minutes per date
+            const cacheKey = `_solcastEstCache_${date}`;
+            const cached = State[cacheKey];
+            if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.data;
+            const s = State.settings || {};
+            const mode = String(s.solcastAccessMode || "toolkit").trim().toLowerCase();
+            if (mode !== "toolkit") return null;
+            if (!s.solcastToolkitEmail || !s.solcastToolkitPassword || !s.solcastToolkitSiteRef) return null;
+            const preview = await api("/api/forecast/solcast/preview", "POST", {
+              solcastBaseUrl: s.solcastBaseUrl || "https://api.solcast.com.au",
+              solcastAccessMode: mode,
+              solcastToolkitEmail: s.solcastToolkitEmail,
+              solcastToolkitPassword: s.solcastToolkitPassword,
+              solcastToolkitSiteRef: s.solcastToolkitSiteRef,
+              solcastTimezone: s.solcastTimezone || "",
+              solcastToolkitPeriod: s.solcastToolkitPeriod || "PT5M",
+              day: date,
+              dayCount: 1,
+            });
+            if (!preview || !preview.ok) return null;
+            const totalMwh = Number(preview.actualTotalMwh || 0);
+            const result = { ok: true, totalMwh, hasData: totalMwh > 0, slots: preview.rows?.filter(r => r.actualMwh != null).length || 0 };
+            State[cacheKey] = { ts: Date.now(), data: result };
+            return result;
+          } catch (_) { return null; }
+        })(),
       ]);
     } catch (err) {
       if (isClientModeActive()) throw err;

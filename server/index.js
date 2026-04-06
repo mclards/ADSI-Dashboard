@@ -2536,30 +2536,30 @@ function mergeAppendReplicationRow(tableName, payload, cols, authoritative = fal
         `SELECT id, kwh_inc FROM energy_5min WHERE ts=? AND inverter=? LIMIT 1`,
       ).get(payload.ts, payload.inverter);
       if (existingRow?.id) {
-        // Row exists. Update kwh_inc if the incoming value differs — corrects stale local rows.
+        // Row exists. Only allow upward corrections — never reduce locally-polled energy
+        // via replication, as that would create discrepancies vs physical meter readings.
         const incomingKwh = Number(payload.kwh_inc || 0);
         const existingKwh = Number(existingRow.kwh_inc || 0);
-        if (Math.abs(incomingKwh - existingKwh) > 1e-9) {
-          // ── Energy reduction alert: incoming replication row has LESS kWh than stored ──
-          // This means the gateway DB had a lower value — a common source of dashboard
-          // vs meter discrepancy. Log it so the root cause can be investigated.
-          if (incomingKwh < existingKwh - 1e-6) {
-            const diff = (existingKwh - incomingKwh).toFixed(4);
-            const bucketTime = new Date(Number(payload?.ts || 0)).toISOString();
-            console.warn(
-              `[energy] REDUCTION via replication: inv=${payload?.inverter}` +
-              ` bucket=${bucketTime}` +
-              ` stored=${existingKwh.toFixed(4)}kWh incoming=${incomingKwh.toFixed(4)}kWh` +
-              ` diff=-${diff}kWh — gateway DB had less than local; today total may decrease`,
-            );
-          }
+        if (incomingKwh > existingKwh + 1e-9) {
+          // Incoming is higher — accept the correction (gateway may have a more complete bucket).
           stmtCached(
             "update:energy_5min:kwh_inc_by_id",
             `UPDATE energy_5min SET kwh_inc=? WHERE id=?`,
           ).run(incomingKwh, existingRow.id);
           return true;
         }
-        return false; // identical — no change needed
+        if (incomingKwh < existingKwh - 1e-6) {
+          // Incoming is LOWER — reject to protect locally-polled data integrity.
+          const diff = (existingKwh - incomingKwh).toFixed(4);
+          const bucketTime = new Date(Number(payload?.ts || 0)).toISOString();
+          console.warn(
+            `[energy] REDUCTION blocked via replication: inv=${payload?.inverter}` +
+            ` bucket=${bucketTime}` +
+            ` stored=${existingKwh.toFixed(4)}kWh incoming=${incomingKwh.toFixed(4)}kWh` +
+            ` diff=-${diff}kWh — kept higher local value`,
+          );
+        }
+        return false; // identical or lower — no change
       }
     }
     const colList = cols.join(", ");
