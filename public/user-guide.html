@@ -1229,6 +1229,14 @@
   <div class="info-card tip"><div class="info-card-label">Live Updates</div>When today is selected, charts and summary auto-refresh with each server push. Past dates load on demand.</div>
   <h3>Day-Ahead Generator</h3>
   <p>Gateway only. Enter <b>Days</b> and click <b>Generate</b>. Blocked in Remote mode.</p>
+  <h4>Automatic Day-Ahead Schedule</h4>
+  <p>The system automatically generates tomorrow&rsquo;s day-ahead forecast on a fixed cron schedule. Each run checks the existing forecast&rsquo;s <b>quality</b> before deciding whether to regenerate.</p>
+  <table><thead><tr><th>Time</th><th>Role</th></tr></thead><tbody><tr><td>04:30</td><td>Early morning &mdash; first pass with overnight Solcast data</td></tr><tr><td>09:30</td><td>Pre-cutoff &mdash; catches weather data refreshes before the 10:00 AM control room submission deadline</td></tr><tr><td>18:30</td><td>Post-solar-day &mdash; refreshes with full day of actual generation data</td></tr><tr><td>20:00</td><td>Evening re-check</td></tr><tr><td>22:00</td><td>Final nightly pass</td></tr></tbody></table>
+  <h4>Quality Gate</h4>
+  <p>Before each cron run, the system classifies the existing forecast into one of these quality states:</p>
+  <table><thead><tr><th>Quality</th><th>Meaning</th><th>Action</th></tr></thead><tbody><tr><td><b>healthy</b></td><td>Complete forecast, correct provider, fresh Solcast input</td><td>Skip &mdash; no regeneration</td></tr><tr><td>missing</td><td>No forecast rows exist</td><td>Generate</td></tr><tr><td>incomplete</td><td>Fewer slots than the solar window requires</td><td>Regenerate</td></tr><tr><td>wrong_provider</td><td>Generated with a different provider than currently configured</td><td>Regenerate</td></tr><tr><td>stale_input</td><td>Solcast data has been refreshed since the forecast was built</td><td>Regenerate</td></tr><tr><td>weak_quality</td><td>Last run failed or variant is unknown</td><td>Regenerate</td></tr></tbody></table>
+  <div class="info-card tip"><div class="info-card-label">Solcast Freshness Detection</div>The quality gate compares the Solcast snapshot timestamp used at generation time against the current snapshot timestamp. If Solcast has published updated weather data since the last generation (e.g., weather changes after the 04:30 run), the 09:30 cron will detect the stale input and regenerate automatically before the 10:00 AM cutoff.</div>
+  <div class="info-card tip"><div class="info-card-label">Actuals Isolation</div>The quality assessment only reads forecast predictions, audit metadata, and Solcast weather snapshots. It never reads today&rsquo;s running energy actuals (energy_5min, inverter readings, or intraday adjustments). Live production data cannot interfere with the quality gate or trigger false regenerations.</div>
   <h3>7-Day Weather Outlook</h3>
   <p>Daily cards: sky condition, temperature range, rainfall, cloud %, wind speed, solar irradiance. Serves cached data when the API is unavailable.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
@@ -1593,7 +1601,7 @@
   <h3>Status Terms</h3>
   <table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td>Online</td><td>Communicating normally</td></tr><tr><td>Offline</td><td>No live data</td></tr><tr><td>Stale</td><td>Last snapshot shown</td></tr><tr><td>Alarm</td><td>Active alarm</td></tr><tr><td>Acknowledged</td><td>Operator-ACK'd</td></tr><tr><td>CAP STOPPED</td><td>Stopped by cap controller</td></tr></tbody></table>
   <h3>Day-Ahead Generation Paths</h3>
-  <table><thead><tr><th>Path</th><th>Trigger</th><th>Audit</th></tr></thead><tbody><tr><td>Manual UI</td><td>POST /api/forecast/generate</td><td>Node</td></tr><tr><td>Auto scheduler</td><td>Python loop &rarr; delegate</td><td>Node</td></tr><tr><td>Python CLI</td><td>--generate-date</td><td>Node</td></tr><tr><td>CLI fallback</td><td>Node unreachable</td><td>Python</td></tr><tr><td>Node cron</td><td>04:30/18:30/20:00/22:00</td><td>Node</td></tr></tbody></table>
+  <table><thead><tr><th>Path</th><th>Trigger</th><th>Audit</th></tr></thead><tbody><tr><td>Manual UI</td><td>POST /api/forecast/generate</td><td>Node</td></tr><tr><td>Auto scheduler</td><td>Python loop &rarr; delegate</td><td>Node</td></tr><tr><td>Python CLI</td><td>--generate-date</td><td>Node</td></tr><tr><td>CLI fallback</td><td>Node unreachable</td><td>Python</td></tr><tr><td>Node cron</td><td>04:30/09:30/18:30/20:00/22:00</td><td>Node</td></tr></tbody></table>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1601,7 +1609,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.6.1</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.7.10</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

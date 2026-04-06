@@ -586,6 +586,35 @@ Operational rule:
 - in `Remote` mode, generation is blocked and should be performed from the gateway workstation
 - generated day-ahead data can be exported from the dedicated Export page
 
+#### Automatic Day-Ahead Schedule
+
+The system automatically generates tomorrow's day-ahead forecast on a fixed cron schedule. Each run checks the existing forecast's **quality** before deciding whether to regenerate.
+
+| Time | Role |
+| --- | --- |
+| 04:30 | Early morning — first pass with overnight Solcast data |
+| 09:30 | Pre-cutoff — catches weather data refreshes before the 10:00 AM control room submission deadline |
+| 18:30 | Post-solar-day — refreshes with full day of actual generation data |
+| 20:00 | Evening re-check |
+| 22:00 | Final nightly pass |
+
+#### Quality Gate
+
+Before each cron run, the system classifies the existing forecast into one of these quality states:
+
+| Quality | Meaning | Action |
+| --- | --- | --- |
+| **healthy** | Complete forecast, correct provider, fresh Solcast input | Skip — no regeneration |
+| missing | No forecast rows exist | Generate |
+| incomplete | Fewer slots than the solar window requires | Regenerate |
+| wrong_provider | Generated with a different provider than currently configured | Regenerate |
+| stale_input | Solcast data has been refreshed since the forecast was built | Regenerate |
+| weak_quality | Last run failed or variant is unknown | Regenerate |
+
+> **Solcast Freshness Detection:** The quality gate compares the Solcast snapshot timestamp used at generation time against the current snapshot timestamp. If Solcast has published updated weather data since the last generation (e.g., weather changes after the 04:30 run), the 09:30 cron will detect the stale input and regenerate automatically before the 10:00 AM cutoff.
+
+> **Actuals Isolation:** The quality assessment only reads forecast predictions, audit metadata, and Solcast weather snapshots. It never reads today's running energy actuals (energy_5min, inverter readings, or intraday adjustments). Live production data cannot interfere with the quality gate or trigger false regenerations.
+
 ### Weekly Weather Outlook
 
 The `7-Day Weather Outlook` provides context for expected production behavior using:

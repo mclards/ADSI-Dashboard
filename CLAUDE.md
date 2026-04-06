@@ -57,7 +57,7 @@ All four generation paths route through the same Node orchestrator (`runDayAhead
 | Auto scheduler | Python loop → `_delegate_run_dayahead()` | Node |
 | Python CLI | `--generate-date` → `_delegate_run_dayahead()` | Node |
 | Python CLI fallback | Node unreachable, direct `run_dayahead(write_audit=True)` | Python |
-| Node cron | 04:30/18:30/20:00/22:00, quality-aware | Node |
+| Node cron | 04:30/09:30/18:30/20:00/22:00, quality-aware | Node |
 
 `_delegate_run_dayahead()` uses `ADSI_SERVER_PORT` (default 3500). Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) — only `healthy` suppresses regeneration.
 
