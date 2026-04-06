@@ -7370,6 +7370,13 @@ function assessTomorrowForecastQuality(date) {
       if (String(audit?.provider_used || "").trim() !== "solcast") return "wrong_provider";
       if (variant !== "solcast_direct") return "wrong_provider";
       if (freshness === "stale_reject" || freshness === "missing") return "stale_input";
+      // Detect if Solcast snapshots refreshed since this forecast was generated
+      const auditPulledTsSolcast = Number(audit?.solcast_snapshot_pulled_ts || 0);
+      if (auditPulledTsSolcast > 0) {
+        const currentStatsSolcast = getSolcastSnapshotStatsForDay(date);
+        const currentPulledTsSolcast = Number(currentStatsSolcast?.pulledTs || 0);
+        if (currentPulledTsSolcast > auditPulledTsSolcast) return "stale_input";
+      }
       return "healthy";
     }
 
@@ -7382,6 +7389,19 @@ function assessTomorrowForecastQuality(date) {
     if (expectSolcastInput) {
       if (variant === "ml_without_solcast") return "wrong_provider";
       if (freshness === "missing" || freshness === "stale_reject") return "stale_input";
+      // Check if Solcast snapshots have been refreshed since the forecast was generated.
+      // This catches the scenario where weather data updates between cron runs
+      // (e.g., forecast generated at 04:30, Solcast refreshes by 08:00, 09:30 cron
+      // should detect the forecast was built with older data and regenerate before
+      // the 10AM control room submission cutoff).
+      const auditPulledTs = Number(audit?.solcast_snapshot_pulled_ts || 0);
+      if (auditPulledTs > 0) {
+        const currentStats = getSolcastSnapshotStatsForDay(date);
+        const currentPulledTs = Number(currentStats?.pulledTs || 0);
+        if (currentPulledTs > auditPulledTs) {
+          return "stale_input";
+        }
+      }
       if (variant === "ml_solcast_hybrid_stale") {
         const freshClass = classifySolcastFreshnessForDay(date, {
           expectSolcast: true,
