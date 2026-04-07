@@ -72,6 +72,7 @@ const {
   getStats: getWsStats,
 } = require("./ws");
 const poller = require("./poller");
+const { getEnergyBacklogPressure } = require("./poller");
 const exporter = require("./exporter");
 const {
   getActiveAlarms,
@@ -254,6 +255,42 @@ const REMOTE_PUSH_CHUNK_MAX_ROWS = 15000; // fewer round trips over Tailscale (w
 const REMOTE_PUSH_CHUNK_TARGET_BYTES = 12 * 1024 * 1024; // 12 MB per chunk (was 4 MB)
 const REMOTE_PUSH_FETCH_RETRIES = 3;
 const REMOTE_PUSH_FETCH_RETRY_BASE_MS = 1200;
+
+// ─── Energy-replication contention coordination ──────────────────────────────
+const replicationYieldStats = {
+  yieldCount: 0,
+  yieldTotalMs: 0,
+  lastYieldTs: null,
+};
+
+async function waitForEnergyBacklogRelief(maxWaitMs = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const bp = getEnergyBacklogPressure();
+    if (bp.pressure === "normal") return "ok";
+    replicationYieldStats.yieldCount += 1;
+    replicationYieldStats.lastYieldTs = Date.now();
+    if (bp.pressure === "elevated") {
+      console.log(`[replication] Yielding to energy backlog (pressure: elevated, queue: ${bp.queueSize}/${bp.maxRows})`);
+      await new Promise(r => setTimeout(r, 500));
+      replicationYieldStats.yieldTotalMs += 500;
+      continue;
+    }
+    // critical
+    console.warn(`[replication] Energy backlog critical (${bp.queueSize}/${bp.maxRows}), pausing replication`);
+    await new Promise(r => setTimeout(r, 2000));
+    replicationYieldStats.yieldTotalMs += 2000;
+  }
+  console.warn(`[replication] Energy backlog relief timeout after ${maxWaitMs}ms`);
+  return "timeout";
+}
+
+function getReplicationChunkLimit() {
+  const bp = getEnergyBacklogPressure();
+  if (bp.pressure === "critical") return 2000;
+  if (bp.pressure === "elevated") return 8000;
+  return REMOTE_INCREMENTAL_APPEND_LIMIT;
+}
 const REMOTE_INCREMENTAL_STARTUP_MAX_BATCHES = 200;
 const REMOTE_INCREMENTAL_MANUAL_MAX_BATCHES = 200;
 const REMOTE_INCREMENTAL_CATCHUP_PASSES = 8;
@@ -2911,6 +2948,7 @@ function buildIncrementalReplicationDelta(clientCursorsRaw) {
   const tableCounts = {};
   const hasMoreByTable = {};
   let hasMoreAny = false;
+  const chunkLimit = getReplicationChunkLimit();
 
   for (const [tableName, strategy] of Object.entries(REPLICATION_INCREMENTAL_STRATEGY)) {
     const def = REPLICATION_DEF_MAP[tableName];
@@ -2921,6 +2959,7 @@ function buildIncrementalReplicationDelta(clientCursorsRaw) {
     let hasMore = false;
 
     if (strategy.mode === "append") {
+      const effectiveLimit = Number(strategy.limit || chunkLimit);
       rows = db
         .prepare(
           `SELECT ${cols}
@@ -2929,13 +2968,13 @@ function buildIncrementalReplicationDelta(clientCursorsRaw) {
             ORDER BY ${strategy.orderBy}
             LIMIT ?`,
         )
-        .all(cursor, Number(strategy.limit || REMOTE_INCREMENTAL_APPEND_LIMIT));
+        .all(cursor, effectiveLimit);
       const maxSeen = rows.length
         ? Math.max(cursor, ...rows.map((r) => Number(r?.[strategy.cursorColumn] || 0)))
         : cursor;
       nextCursors[tableName] = Number.isFinite(maxSeen) && maxSeen > 0 ? Math.floor(maxSeen) : 0;
 
-      if (rows.length >= Number(strategy.limit || REMOTE_INCREMENTAL_APPEND_LIMIT)) {
+      if (rows.length >= effectiveLimit) {
         const tail = Number(nextCursors[tableName] || 0);
         const probe = db
           .prepare(
@@ -3167,6 +3206,7 @@ async function runRemoteFullReplication(baseUrl, opts = {}) {
       throw new Error(String(data?.error || "Gateway returned invalid replication payload."));
     }
 
+    await waitForEnergyBacklogRelief();
     const stats = applyFullDbSnapshot(data.snapshot, opts);
     ensurePersistedSettings();
     try {
@@ -3221,6 +3261,8 @@ async function runRemoteIncrementalReplication(baseUrl, maxBatches = 5, opts = {
     broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "start", recvBytes: 0, label: xferLabel });
 
     do {
+      await waitForEnergyBacklogRelief();
+
       const data = await requestIncrementalDeltaWithRetry(baseUrl, cursors, (bytes) => {
         totalRecvBytes += bytes;
         broadcastUpdate({ type: "xfer_progress", dir: "rx", phase: "chunk", recvBytes: totalRecvBytes, batch: batches + 1, label: xferLabel });
@@ -11520,6 +11562,21 @@ app.post("/api/streaming/go2rtc/stop", (req, res) => {
     .catch((e) => res.status(500).json({ ok: false, error: e.message }));
 });
 
+app.get("/api/system/contention", (req, res) => {
+  const bp = getEnergyBacklogPressure();
+  res.json({
+    ok: true,
+    contention: {
+      energyBacklog: bp,
+      replicationYield: {
+        yieldCount: replicationYieldStats.yieldCount,
+        yieldTotalMs: replicationYieldStats.yieldTotalMs,
+        lastYieldTs: replicationYieldStats.lastYieldTs,
+      },
+    },
+  });
+});
+
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
   // Supports ETag for direct consumers that can tolerate cached heartbeat data.
@@ -12185,6 +12242,7 @@ app.post("/api/replication/push", async (req, res) => {
       });
     }
 
+    await waitForEnergyBacklogRelief();
     const stats = applyReplicationPushDelta(delta);
     ensurePersistedSettings();
     try {

@@ -92,6 +92,46 @@ const pollStats = {
   frameAgeMaxMs: 0,           // peak frame age seen in this session (ms)
 };
 
+// ─── Energy backlog pressure tracking ────────────────────────────────────────
+let _pressureState = "normal"; // "normal" | "elevated" | "critical"
+
+function getEnergyBacklogPressure() {
+  const queueSize = pendingEnergyQueue.size + pendingReadingQueue.size;
+  const highWater = Math.max(
+    Number(pollStats.pendingEnergyQueueHighWater || 0),
+    Number(pollStats.pendingReadingQueueHighWater || 0),
+  );
+  const lastFlushOk = !pollStats.lastDbPersistError;
+  const lastFlushTs = Number(pollStats.lastDbPersistOkTs || 0);
+
+  // Hysteresis transitions — one transition per call to prevent cascade
+  if (_pressureState === "normal") {
+    if (queueSize >= 3000) _pressureState = "elevated";
+  } else if (_pressureState === "elevated") {
+    if (queueSize >= 8000 || !lastFlushOk) {
+      _pressureState = "critical";
+    } else if (queueSize < 2500) {
+      _pressureState = "normal";
+    }
+  } else if (_pressureState === "critical") {
+    if (queueSize < 7000 && lastFlushOk) _pressureState = "elevated";
+  }
+
+  return {
+    queueSize,
+    highWater,
+    maxRows: DB_ENERGY_BACKLOG_MAX_ROWS,
+    pressure: _pressureState,
+    lastFlushOk,
+    lastFlushTs,
+    droppedEnergy: Number(pollStats.dbPersistDroppedEnergyCount || 0),
+    droppedReadings: Number(pollStats.dbPersistDroppedReadingCount || 0),
+  };
+}
+
+// ─── Flush priority retry state ──────────────────────────────────────────────
+let _flushRetryCount = 0;
+
 // Pac-based daily energy integrator (independent from kWh register).
 const pacTodayByInverter = {}; // key: inverter -> kWh
 const pacIntegratorState = {}; // key: `${inv}_${unit}` -> { ts, pac }
@@ -757,6 +797,7 @@ function flushPersistBacklog(reason = "tick") {
     pollStats.dbBulkInsertCount += 1;
     pollStats.lastDbPersistError = "";
     pollStats.lastDbPersistOkTs = Date.now();
+    _flushRetryCount = 0;
     syncPendingQueueStats();
     return true;
   } catch (err) {
@@ -765,6 +806,18 @@ function flushPersistBacklog(reason = "tick") {
     pollStats.lastDbPersistError = String(err?.message || err || "");
     syncPendingQueueStats();
     console.error(`[poller] DB persist failed (${reason}):`, pollStats.lastDbPersistError);
+
+    // Priority retry under pressure — up to 3 retries with exponential backoff
+    if (_flushRetryCount < 3) {
+      const bp = getEnergyBacklogPressure();
+      if (bp.pressure !== "normal") {
+        const backoffMs = 100 * Math.pow(2, _flushRetryCount); // 100, 200, 400
+        _flushRetryCount++;
+        pollStats.energyPriorityRetryCount = (pollStats.energyPriorityRetryCount || 0) + 1;
+        setTimeout(() => flushPersistBacklog("pressure-retry"), backoffMs);
+        return false;
+      }
+    }
     return false;
   }
 }
@@ -1212,4 +1265,5 @@ module.exports = {
   buildTodayEnergyRowsFromSeed,
   buildIpConfigLookup,
   resolveConfiguredTelemetryIdentity,
+  getEnergyBacklogPressure,
 };
