@@ -1849,7 +1849,7 @@ body.sidebar-open .side-nav {
   inset: 0 0 var(--app-footer-h) 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 4px;
   padding: 12px;
   overflow: hidden;
   opacity: 0;
@@ -5567,9 +5567,6 @@ select.cam-field-input { appearance: auto; }
   letter-spacing: 0.3px;
 }
 
-.analytics-substation-val {
-}
-
 /* Substation Meter UI */
 .analytics-substation-meter-wrap {
   margin-top: 8px;
@@ -6508,7 +6505,7 @@ select.cam-field-input { appearance: auto; }
 .srow {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 8px;
 }
 
 .srow-toolkit-5col {
@@ -6570,6 +6567,7 @@ select.cam-field-input { appearance: auto; }
 
 .replication-transfer-wrap {
   margin-top: 6px;
+  margin-bottom: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg2);
@@ -10593,7 +10591,7 @@ body.mode-transition-active {
 #page-forecast .forecast-page-sections > .sgroup.settings-card {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 14px;
+  gap: 8px;
   align-content: start;
   margin: 0;
   padding: 18px;
@@ -10971,7 +10969,7 @@ body.mode-transition-active {
   padding-right: 4px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
 }
 
 #page-settings .settings-main-header {
@@ -11024,7 +11022,7 @@ body.mode-transition-active {
   > .sgroup.settings-card.settings-section-active {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 14px;
+  gap: 8px;
   align-content: start;
 }
 
@@ -12281,7 +12279,7 @@ body.mode-transition-active {
 .fperf-body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   max-height: 460px;
   overflow-y: auto;
   overflow-x: hidden;
