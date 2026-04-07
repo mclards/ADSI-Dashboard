@@ -1779,15 +1779,15 @@ async function exportForecastActual({
       Time:        spec.mode === 'day' ? 'Daily' : fmtTime(ts),
       Resolution:  spec.mode === 'day' ? 'Daily' : spec.label,
       Plant:       plantName,
-      ActualKWh:   actualKwh.toFixed(6),
-      ActualMWh:   (actualKwh   / 1000).toFixed(6),
-      DayAheadKWh: dayAheadKwh.toFixed(6),
-      DayAheadMWh: (dayAheadKwh / 1000).toFixed(6),
-      DeltaKWh:    deltaKwh.toFixed(6),
-      DeltaMWh:    (deltaKwh    / 1000).toFixed(6),
-      AbsDeltaKWh: absDeltaKwh.toFixed(6),
-      AbsDeltaMWh: (absDeltaKwh / 1000).toFixed(6),
-      ErrorPct:    apePct == null ? '' : apePct.toFixed(3),
+      ActualKWh:   actualKwh.toFixed(1),
+      ActualMWh:   (actualKwh   / 1000).toFixed(1),
+      DayAheadKWh: dayAheadKwh.toFixed(1),
+      DayAheadMWh: (dayAheadKwh / 1000).toFixed(1),
+      DeltaKWh:    deltaKwh.toFixed(1),
+      DeltaMWh:    (deltaKwh    / 1000).toFixed(1),
+      AbsDeltaKWh: absDeltaKwh.toFixed(1),
+      AbsDeltaMWh: (absDeltaKwh / 1000).toFixed(1),
+      ErrorPct:    apePct == null ? '' : apePct.toFixed(1),
     };
   });
 
@@ -1815,19 +1815,19 @@ async function exportForecastActual({
     { Metric: 'Range End', Value: fmtDateTime(e) },
     { Metric: 'Resolution', Value: spec.mode === 'day' ? 'Daily' : spec.label },
     { Metric: 'Export Format', Value: useAverageTable ? 'Average Table' : 'Standard' },
-    { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(6) },
-    { Metric: `${forecastSourceLabel} Total (MWh)`, Value: (dayAheadTotalKwh / 1000).toFixed(6) },
-    { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(6) },
-    { Metric: 'Absolute Error Total (MWh)', Value: (absErrorTotalKwh / 1000).toFixed(6) },
+    { Metric: 'Actual Total (MWh)', Value: (actualTotalKwh / 1000).toFixed(1) },
+    { Metric: `${forecastSourceLabel} Total (MWh)`, Value: (dayAheadTotalKwh / 1000).toFixed(1) },
+    { Metric: 'Variance (MWh)', Value: (varianceTotalKwh / 1000).toFixed(1) },
+    { Metric: 'Absolute Error Total (MWh)', Value: (absErrorTotalKwh / 1000).toFixed(1) },
     {
       Metric: 'WAPE (%)',
-      Value: actualTotalKwh > 0 ? ((absErrorTotalKwh / actualTotalKwh) * 100).toFixed(3) : '',
+      Value: actualTotalKwh > 0 ? ((absErrorTotalKwh / actualTotalKwh) * 100).toFixed(1) : '',
     },
     {
       Metric: 'Mean APE (%)',
-      Value: mapeValues.length ? (mapeValues.reduce((sum, value) => sum + value, 0) / mapeValues.length).toFixed(3) : '',
+      Value: mapeValues.length ? (mapeValues.reduce((sum, value) => sum + value, 0) / mapeValues.length).toFixed(1) : '',
     },
-    { Metric: 'Peak Interval Actual (MWh)', Value: peakRow ? safeNum(peakRow.ActualMWh).toFixed(6) : '' },
+    { Metric: 'Peak Interval Actual (MWh)', Value: peakRow ? safeNum(peakRow.ActualMWh).toFixed(1) : '' },
     { Metric: 'Peak Interval Time', Value: peakRow ? String(peakRow.Time || '') : '' },
     { Metric: 'Data Rows', Value: String(rows.length) },
   ];
@@ -1914,7 +1914,7 @@ function normalizeSolcastPreviewExportFormat(value) {
   return raw === 'average-table' ? 'average-table' : 'standard';
 }
 
-function roundSolcastExportNumber(value, digits = 6) {
+function roundSolcastExportNumber(value, digits = 1) {
   const num = Number(value);
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
 }
@@ -1928,35 +1928,35 @@ function buildSolcastPreviewStandardRows(rows) {
     ForecastMW:
       row?.forecastMw == null || row?.forecastMw === ''
         ? ''
-        : Number(row.forecastMw).toFixed(6),
+        : Number(row.forecastMw).toFixed(1),
     ForecastLowMW:
       row?.forecastLoMw == null || row?.forecastLoMw === ''
         ? ''
-        : Number(row.forecastLoMw).toFixed(6),
+        : Number(row.forecastLoMw).toFixed(1),
     ForecastHighMW:
       row?.forecastHiMw == null || row?.forecastHiMw === ''
         ? ''
-        : Number(row.forecastHiMw).toFixed(6),
+        : Number(row.forecastHiMw).toFixed(1),
     EstimatedActualMW:
       row?.actualMw == null || row?.actualMw === ''
         ? ''
-        : Number(row.actualMw).toFixed(6),
+        : Number(row.actualMw).toFixed(1),
     ForecastMWh:
       row?.forecastMwh == null || row?.forecastMwh === ''
         ? ''
-        : Number(row.forecastMwh).toFixed(6),
+        : Number(row.forecastMwh).toFixed(1),
     ForecastLowMWh:
       row?.forecastLoMwh == null || row?.forecastLoMwh === ''
         ? ''
-        : Number(row.forecastLoMwh).toFixed(6),
+        : Number(row.forecastLoMwh).toFixed(1),
     ForecastHighMWh:
       row?.forecastHiMwh == null || row?.forecastHiMwh === ''
         ? ''
-        : Number(row.forecastHiMwh).toFixed(6),
+        : Number(row.forecastHiMwh).toFixed(1),
     EstimatedActualMWh:
       row?.actualMwh == null || row?.actualMwh === ''
         ? ''
-        : Number(row.actualMwh).toFixed(6),
+        : Number(row.actualMwh).toFixed(1),
   }));
 }
 
@@ -2109,7 +2109,7 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
     views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }],
   });
   // Compute column widths from actual content.
-  // ExcelJS width ≈ character-count for Calibri 11pt, but numFmt '0.000000'
+  // ExcelJS width ≈ character-count for Calibri 11pt, but numFmt '0.0'
   // and cell padding need extra room — use floor 16 for all value columns.
   const _hourW = Math.max(
     10,
@@ -2187,14 +2187,14 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
     row.values.forEach((value, valueIdx) => {
       const cell = ws.getCell(rowIndex, valueIdx + 2);
       cell.value = value == null ? '' : value;
-      cell.numFmt = value == null ? 'General' : '0.000000';
+      cell.numFmt = value == null ? 'General' : '0.0';
       cell.alignment = { horizontal: 'center', vertical: 'middle' };
       cell.border = AVERAGE_TABLE_BORDER;
       if (rowStripeFill) cell.fill = rowStripeFill;
     });
     const avgCell = ws.getCell(rowIndex, 14);
     avgCell.value = row.average == null ? '' : row.average;
-    avgCell.numFmt = row.average == null ? 'General' : '0.000000';
+    avgCell.numFmt = row.average == null ? 'General' : '0.0';
     avgCell.alignment = { horizontal: 'center', vertical: 'middle' };
     avgCell.border = AVERAGE_TABLE_BORDER;
     avgCell.fill = AVERAGE_TABLE_AVG_FILL;
@@ -2213,7 +2213,7 @@ function renderAverageTableDayWorksheet(wb, dayEntry, options = {}) {
   const totalValueCell = ws.getCell(totalRowIndex, 14);
   const avgColTotal = renderedRows.reduce((sum, row) => sum + (row.average == null ? 0 : row.average), 0);
   totalValueCell.value = roundSolcastExportNumber(avgColTotal);
-  totalValueCell.numFmt = '0.000000';
+  totalValueCell.numFmt = '0.0';
   totalValueCell.alignment = { horizontal: 'center', vertical: 'middle' };
   totalValueCell.font = { bold: true };
   totalValueCell.fill = AVERAGE_TABLE_TOTAL_FILL;
@@ -2534,7 +2534,7 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
       } else {
         const d = dateList[colNum - 2];
         const s = d ? dayStats.get(d) : null;
-        cell.numFmt = '0.000000';
+        cell.numFmt = '0.0';
         cell.alignment = { horizontal: 'right', vertical: 'middle' };
         if (s && s.maxIdx === bIdx) {
           cell.fill = highFill;
@@ -2561,7 +2561,7 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
       cell.alignment = colNum === 1
         ? { horizontal: 'center', vertical: 'middle' }
         : { horizontal: 'right', vertical: 'middle' };
-      if (colNum > 1) cell.numFmt = '0.000000';
+      if (colNum > 1) cell.numFmt = '0.0';
     });
   }
 
