@@ -48,6 +48,7 @@ let pollTimer = null;
 let running   = false;
 let liveJsonCache = "{}";
 let liveJsonCacheTs = Date.now();
+let _liveJsonDirty = true; // marks cache as needing re-serialization
 const pendingReadingQueue = new Map();
 const pendingEnergyQueue = new Map();
 const pollStats = {
@@ -90,6 +91,11 @@ const pollStats = {
   // ─── Frame latency (Python sweep lag vs Node poll interval) ─────────────────
   frameAgeAvgMs: 0,           // EMA of (Date.now() − frame.ts) across all parsed rows
   frameAgeMaxMs: 0,           // peak frame age seen in this session (ms)
+  // ─── Event-loop health ──────────────────────────────────────────────────────
+  eventLoopLagMs: 0,          // latest measured event-loop lag (actual − expected timer delay)
+  eventLoopLagMaxMs: 0,       // peak lag this session
+  eventLoopLagAvgMs: 0,       // EMA of lag (α = 0.1)
+  jsonSerializeMaxMs: 0,      // peak JSON.stringify duration for liveData cache
 };
 
 // ─── Energy backlog pressure tracking ────────────────────────────────────────
@@ -160,9 +166,15 @@ let ipConfigCacheTs = 0;
 let apiFailMs = 0;
 let apiOfflineBroadcasted = false;
 
+function markLiveSnapshotDirty() { _liveJsonDirty = true; }
+
 function updateLiveSnapshotCache() {
+  if (!_liveJsonDirty) return; // skip serialization when nothing changed
   try {
+    const t0 = Date.now();
     const next = JSON.stringify(liveData);
+    const serMs = Date.now() - t0;
+    if (serMs > (pollStats.jsonSerializeMaxMs || 0)) pollStats.jsonSerializeMaxMs = serMs;
     // Only bump the cache timestamp when the serialized payload actually changed.
     // This keeps /api/live ETag responses meaningful for direct conditional GETs.
     if (next !== liveJsonCache) {
@@ -170,6 +182,7 @@ function updateLiveSnapshotCache() {
       liveJsonCacheTs = Date.now();
       pollStats.lastCacheUpdateTs = liveJsonCacheTs;
     }
+    _liveJsonDirty = false;
   } catch (err) {
     // Keep last good snapshot; avoid throwing in hot path.
     console.warn("[poller] live snapshot cache failed:", err.message);
@@ -897,6 +910,7 @@ async function poll() {
   if (!running) return;
   const now = Date.now();
   const pollStartedAt = Date.now();
+  _liveJsonDirty = true; // every poll tick mutates liveData; mark for re-serialization
   pollStats.tickCount += 1;
   pollStats.lastPollStartedTs = pollStartedAt;
   let parsedThisTick = 0;
@@ -1134,13 +1148,20 @@ async function poll() {
 function start() {
   if (running) return;
   running = true;
+  let _expectedFireAt = 0; // 0 = first tick, skip lag measurement
   (function tick() {
     if (!running) return;
     const tickStartedAt = Date.now();
+    // Measure event-loop lag: how late did this tick fire vs when setTimeout expected it?
+    const lag = _expectedFireAt ? Math.max(0, tickStartedAt - _expectedFireAt) : 0;
+    pollStats.eventLoopLagMs = lag;
+    if (lag > pollStats.eventLoopLagMaxMs) pollStats.eventLoopLagMaxMs = lag;
+    pollStats.eventLoopLagAvgMs = pollStats.eventLoopLagAvgMs * 0.9 + lag * 0.1;
     poll()
       .catch((err) => console.error("[poller] unhandled poll error:", err.message))
       .finally(() => {
         const delay = Math.max(0, POLL_MS - (Date.now() - tickStartedAt));
+        _expectedFireAt = Date.now() + delay;
         pollTimer = setTimeout(tick, delay);
       });
   })();

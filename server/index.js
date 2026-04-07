@@ -11564,6 +11564,7 @@ app.post("/api/streaming/go2rtc/stop", (req, res) => {
 
 app.get("/api/system/contention", (req, res) => {
   const bp = getEnergyBacklogPressure();
+  const perf = poller.getPerfStats();
   res.json({
     ok: true,
     contention: {
@@ -11572,6 +11573,12 @@ app.get("/api/system/contention", (req, res) => {
         yieldCount: replicationYieldStats.yieldCount,
         yieldTotalMs: replicationYieldStats.yieldTotalMs,
         lastYieldTs: replicationYieldStats.lastYieldTs,
+      },
+      eventLoop: {
+        lagMs: perf.eventLoopLagMs,
+        lagMaxMs: perf.eventLoopLagMaxMs,
+        lagAvgMs: Number(Number(perf.eventLoopLagAvgMs || 0).toFixed(1)),
+        jsonSerializeMaxMs: perf.jsonSerializeMaxMs,
       },
     },
   });
@@ -16548,7 +16555,10 @@ process.on("unhandledRejection", (reason) => {
 // â"€â"€â"€ Periodic WAL Checkpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.
 setInterval(() => {
-  try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
+  // Defer checkpoint off the timer callback so it doesn't stack on queued work
+  setImmediate(() => {
+    try { db.pragma("wal_checkpoint(PASSIVE)"); } catch (_) {}
+  });
 }, 15 * 60 * 1000).unref();
 
 // â"€â"€â"€ Periodic DB Backup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€

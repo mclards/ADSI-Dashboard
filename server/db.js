@@ -107,7 +107,7 @@ const ARCHIVE_DIR = (() => {
 const SUMMARY_SOLAR_START_H = 5;
 const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;
-const ARCHIVE_BATCH_SIZE = 5000;
+const ARCHIVE_BATCH_SIZE = 2000; // reduced from 5000 — smaller batches keep event-loop pauses under ~80ms
 const ARCHIVE_DB_CACHE = new Map();
 const ARCHIVE_DB_REPLACE_LOCKS = new Set();
 const STARTUP_COMPACT_MAX_BYTES = 64 * 1024 * 1024;

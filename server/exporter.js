@@ -976,7 +976,7 @@ function aggregateKwhByResolution(rows, resolutionSpec) {
   return Array.from(out.entries())
     .map(([ts, kwh]) => ({
       ts:      safeNum(ts),
-      kwh_inc: Number(kwh.toFixed(6)),
+      kwh_inc: Number(kwh.toFixed(1)),
     }))
     .sort((a, b) => a.ts - b.ts);
 }
@@ -992,7 +992,7 @@ function collectDayAheadRowsForRange(startTs, endTs) {
       return dbRows
         .map((r) => ({
           ts: Number(r?.ts || 0),
-          kwh_inc: Number(Number(r?.kwh_inc || 0).toFixed(6)),
+          kwh_inc: Number(Number(r?.kwh_inc || 0).toFixed(1)),
         }))
         .filter((r) => Number(r.ts) > 0);
     }
@@ -1015,7 +1015,7 @@ function collectDayAheadRowsForRange(startTs, endTs) {
       const kwh = Number(rec?.kWh_inc ?? rec?.kwh_inc ?? 0);
       out.push({
         ts: Number(ts),
-        kwh_inc: Number.isFinite(kwh) ? Number(kwh.toFixed(6)) : 0,
+        kwh_inc: Number.isFinite(kwh) ? Number(kwh.toFixed(1)) : 0,
       });
     }
   }
