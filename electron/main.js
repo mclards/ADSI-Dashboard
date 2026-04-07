@@ -1590,6 +1590,8 @@ function saveLicenseRegistryMarker(state) {
     const activatedAt = parseDateMs(lic.activatedAt);
     if (Number.isFinite(activatedAt) && activatedAt > 0) {
       writeRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt", String(activatedAt));
+      // Persist activation anchor for duration licenses (tamper-resistant)
+      if (!lic.lifetime) setActivationAnchor(lic.fingerprint, activatedAt);
     } else {
       deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
     }
@@ -1608,6 +1610,78 @@ function saveLicenseRegistryMarker(state) {
   deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
   deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
   deleteRegistryValue(LICENSE_REG_PATH, "LicenseLifetime");
+}
+
+// ─── Activation Anchor Map ────────────────────────────────────────────────
+// Persists { fingerprint → activatedAt } in a separate registry key so that
+// even if license-state.json is deleted, we remember when a duration license
+// was first activated on this device.  This prevents re-use after expiry.
+// The map is HMAC-signed with a device-bound key to resist tampering.
+const LICENSE_ANCHOR_REG_NAME = "ActivationAnchorMap";
+const ANCHOR_MAP_MAX_ENTRIES = 100;
+
+function _anchorMapHmac(jsonStr) {
+  const key = `adsi-anchor-${getDeviceFingerprint()}-v1`;
+  return crypto.createHmac("sha256", key).update(jsonStr).digest("hex");
+}
+
+function loadActivationAnchorMap() {
+  try {
+    const raw = readRegistryValue(LICENSE_REG_PATH, LICENSE_ANCHOR_REG_NAME);
+    if (!raw) return { map: {}, tampered: false };
+    const envelope = JSON.parse(raw);
+    if (!envelope || typeof envelope !== "object") return { map: {}, tampered: false };
+    const data = String(envelope.d || "");
+    const hmac = String(envelope.h || "");
+    if (!data || !hmac) {
+      // Legacy unsigned format (pre-HMAC migration) — accept once, will be re-signed on next write
+      if (typeof envelope === "object" && !envelope.d && !envelope.h) return { map: envelope, tampered: false };
+      return { map: {}, tampered: false };
+    }
+    if (_anchorMapHmac(data) !== hmac) {
+      console.warn("[license] anchor map HMAC mismatch — possible tampering");
+      try { appendLicenseAudit("anchor_tamper_detected", "Activation anchor map HMAC verification failed.", "warning"); } catch (_) {}
+      return { map: {}, tampered: true };
+    }
+    const map = JSON.parse(data);
+    return { map: (map && typeof map === "object") ? map : {}, tampered: false };
+  } catch (_) {
+    return { map: {}, tampered: false };
+  }
+}
+
+function saveActivationAnchorMap(map) {
+  try {
+    // Prune to keep only the most recent N entries
+    const entries = Object.entries(map || {});
+    if (entries.length > ANCHOR_MAP_MAX_ENTRIES) {
+      entries.sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+      map = Object.fromEntries(entries.slice(entries.length - ANCHOR_MAP_MAX_ENTRIES));
+    }
+    const data = JSON.stringify(map);
+    const hmac = _anchorMapHmac(data);
+    writeRegistryValue(LICENSE_REG_PATH, LICENSE_ANCHOR_REG_NAME, JSON.stringify({ d: data, h: hmac }));
+  } catch (_) {}
+}
+
+function getActivationAnchor(fingerprint) {
+  if (!fingerprint) return { anchor: null, tampered: false };
+  const { map, tampered } = loadActivationAnchorMap();
+  const ts = parseDateMs(map[fingerprint]);
+  return { anchor: (Number.isFinite(ts) && ts > 0) ? ts : null, tampered };
+}
+
+function setActivationAnchor(fingerprint, activatedAt) {
+  if (!fingerprint) return;
+  const ts = parseDateMs(activatedAt);
+  if (!Number.isFinite(ts) || ts <= 0) return;
+  const { map } = loadActivationAnchorMap();
+  const existing = parseDateMs(map[fingerprint]);
+  // Keep the earliest activation — never overwrite with a later timestamp
+  if (Number.isFinite(existing) && existing > 0 && existing <= ts) return;
+  map[fingerprint] = ts;
+  saveActivationAnchorMap(map);
+  try { appendLicenseAudit("anchor_registered", `Activation anchor persisted for license ${fingerprint.slice(0, 8)}...`, "info"); } catch (_) {}
 }
 
 // ─── Credential Encryption ─────────────────────────────────────────────────
@@ -1856,15 +1930,24 @@ function mergeLicenseRecords(primary, secondary) {
 
 function resolveLicenseActivationAnchor(priorLicense, nextFingerprint, durationMs) {
   const prior = normalizeStoredLicense(priorLicense);
-  if (!prior || !Number.isFinite(durationMs) || durationMs <= 0) return null;
-  if (prior.fingerprint && nextFingerprint && prior.fingerprint !== nextFingerprint) return null;
-  const activatedAt = parseDateMs(prior.activatedAt);
-  if (Number.isFinite(activatedAt) && activatedAt > 0) return Math.trunc(activatedAt);
-  const expiresAt = parseLicenseExpiryMs(prior.expiresAt);
-  if (Number.isFinite(expiresAt) && expiresAt > 0) {
-    return Math.trunc(expiresAt - durationMs);
+  if (prior && Number.isFinite(durationMs) && durationMs > 0) {
+    if (prior.fingerprint && nextFingerprint && prior.fingerprint !== nextFingerprint) {
+      // Different key — fall through to anchor map check below
+    } else {
+      const activatedAt = parseDateMs(prior.activatedAt);
+      if (Number.isFinite(activatedAt) && activatedAt > 0) return { ts: Math.trunc(activatedAt), tampered: false };
+      const expiresAt = parseLicenseExpiryMs(prior.expiresAt);
+      if (Number.isFinite(expiresAt) && expiresAt > 0) {
+        return { ts: Math.trunc(expiresAt - durationMs), tampered: false };
+      }
+    }
   }
-  return null;
+  // Fallback: check registry activation anchor map (survives state-file deletion)
+  const { anchor, tampered } = getActivationAnchor(nextFingerprint);
+  if (anchor) return { ts: Math.trunc(anchor), tampered: false };
+  // If anchor map was tampered with and no prior state exists, block the import
+  if (tampered && !prior) return { ts: null, tampered: true };
+  return { ts: null, tampered: false };
 }
 
 function tryRestoreMirroredLicense(priorLicense) {
@@ -2121,8 +2204,11 @@ function normalizeLicensePayload(payload, sourcePath, priorLicense = null) {
       payload.endAt ||
       payload.end_at,
   );
-  const activatedAt =
-    resolveLicenseActivationAnchor(prior, fingerprint, durationMs) || now;
+  const anchorResult = resolveLicenseActivationAnchor(prior, fingerprint, durationMs);
+  if (anchorResult.tampered) {
+    return { ok: false, error: "License activation records have been tampered with. Contact your administrator." };
+  }
+  const activatedAt = anchorResult.ts || now;
   const expiresAt = lifetime
     ? null
     : Number.isFinite(explicitExpiry)
@@ -2406,8 +2492,22 @@ async function promptLicenseUpload(parentWin) {
   return installLicenseFromFile(result.filePaths[0]);
 }
 
+function migrateActivationAnchors() {
+  try {
+    const state = licenseStateCache;
+    if (!state?.license) return;
+    const lic = normalizeStoredLicense(state.license);
+    if (!lic?.fingerprint || lic.lifetime) return;
+    const activatedAt = parseDateMs(lic.activatedAt);
+    if (!Number.isFinite(activatedAt) || activatedAt <= 0) return;
+    // Register in anchor map if not already present
+    setActivationAnchor(lic.fingerprint, activatedAt);
+  } catch (_) {}
+}
+
 async function ensureLicenseAtStartup() {
   loadLicenseState();
+  migrateActivationAnchors();
   while (true) {
     const status = buildLicensePublicStatus();
     if (status.valid) return true;

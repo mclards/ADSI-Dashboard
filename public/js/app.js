@@ -1260,10 +1260,94 @@ function getUpdateStatusClass(update) {
   return "";
 }
 
+let _updatePopupShownForVersion = "";
+let _dailyUpdateTimer = null;
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const UPDATE_CHECK_STORAGE_KEY = "lastUpdateCheckTs";
+const UPDATE_DISMISS_STORAGE_KEY = "updateDismissedVersion";
+
 function applyAppUpdateState(nextState) {
   if (!nextState || typeof nextState !== "object") return;
   State.appUpdate = { ...State.appUpdate, ...nextState };
   renderAppUpdateSummary();
+  if (State.appUpdate.updateAvailable && State.appUpdate.latestVersion) {
+    maybeShowUpdatePopup();
+  }
+}
+
+function maybeShowUpdatePopup() {
+  const latest = State.appUpdate.latestVersion || "";
+  if (_updatePopupShownForVersion === latest) return;
+  try {
+    const dismissed = localStorage.getItem(UPDATE_DISMISS_STORAGE_KEY) || "";
+    if (dismissed === latest) return;
+  } catch (_) {}
+  _updatePopupShownForVersion = latest;
+  showUpdateAvailableModal();
+}
+
+function showUpdateAvailableModal() {
+  const modal = $("updateAvailableModal");
+  if (!modal) return;
+  const update = State.appUpdate || {};
+  const curEl = $("updateModalCurrent");
+  const latEl = $("updateModalLatest");
+  if (curEl) curEl.textContent = "v" + (update.appVersion || "—");
+  if (latEl) latEl.textContent = "v" + (update.latestVersion || "—");
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function hideUpdateModal(dismiss) {
+  const modal = $("updateAvailableModal");
+  if (modal) modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  if (dismiss) {
+    try {
+      const ver = State.appUpdate?.latestVersion || "";
+      if (ver) localStorage.setItem(UPDATE_DISMISS_STORAGE_KEY, ver);
+    } catch (_) {}
+  }
+}
+
+function scheduleDailyUpdateCheck() {
+  if (!window.electronAPI?.checkForUpdates) return;
+  if (_dailyUpdateTimer) return;
+  let lastCheck = 0;
+  try { lastCheck = Number(localStorage.getItem(UPDATE_CHECK_STORAGE_KEY) || 0); } catch (_) {}
+  const elapsed = Date.now() - lastCheck;
+  const delay = elapsed >= UPDATE_CHECK_INTERVAL_MS ? 15000 : (UPDATE_CHECK_INTERVAL_MS - elapsed + 5000);
+  _dailyUpdateTimer = setTimeout(async () => {
+    _dailyUpdateTimer = null;
+    try {
+      localStorage.setItem(UPDATE_CHECK_STORAGE_KEY, String(Date.now()));
+    } catch (_) {}
+    try {
+      const res = await window.electronAPI.checkForUpdates();
+      applyAppUpdateState(res?.state || {});
+    } catch (_) {}
+    scheduleDailyUpdateCheck();
+  }, delay);
+}
+
+function clearDailyUpdateTimer() {
+  if (_dailyUpdateTimer) {
+    clearTimeout(_dailyUpdateTimer);
+    _dailyUpdateTimer = null;
+  }
+}
+
+function initUpdateModal() {
+  const modal = $("updateAvailableModal");
+  if (!modal) return;
+  $("updateModalClose")?.addEventListener("click", () => hideUpdateModal(true));
+  $("updateModalSkip")?.addEventListener("click", () => hideUpdateModal(true));
+  $("updateModalDownload")?.addEventListener("click", () => {
+    hideUpdateModal(false);
+    downloadUpdateNow();
+  });
+  modal.addEventListener("click", (e) => { if (e.target === modal) hideUpdateModal(true); });
+  modal.addEventListener("keydown", (e) => { if (e.key === "Escape") hideUpdateModal(true); });
 }
 
 function renderAppUpdateSummary() {
@@ -9055,6 +9139,8 @@ function updateInverterCards() {
   $("statOnline").textContent = online;
   $("statAlarmed").textContent = alarmed;
   $("statOffline").textContent = offline;
+  const ackAllInvBtn = $("btnAckAllInv");
+  if (ackAllInvBtn) ackAllInvBtn.hidden = alarmed === 0;
 
   // Toolbar counters: active / total
   const micEl = $("metricInvCount");
@@ -13178,6 +13264,27 @@ function stopAnalyticsAutoRefresh() {
   }
 }
 
+async function refreshAnalyticsEnergy() {
+  if (State.analyticsFetchInFlight) return;
+  if (State.currentPage !== "analytics") return;
+  if (!isTodayAnalyticsDate()) return; // only auto-refresh today's data
+  State.analyticsFetchInFlight = true;
+  try {
+    const date = today();
+    const { startTs: sTs, endTs: eTs } = getAnalyticsSolarWindowBounds(date);
+    const qs = new URLSearchParams({ date, start: sTs, end: eTs, bucketMin: "5" });
+    const rows = await api(`/api/analytics/energy?${qs}`, "GET", null, { progress: false });
+    if (State.currentPage !== "analytics") return;
+    if (!isTodayAnalyticsDate()) return; // user may have changed date while fetching
+    State.analyticsBaseRows = Array.isArray(rows) ? rows.slice() : [];
+    renderAnalyticsFromState();
+  } catch (err) {
+    console.warn("[analytics] auto-refresh failed:", err?.message || err);
+  } finally {
+    State.analyticsFetchInFlight = false;
+  }
+}
+
 function ensureAnalyticsAutoRefresh() {
   stopAnalyticsAutoRefresh();
   if (State.currentPage !== "analytics") return;
@@ -13186,7 +13293,7 @@ function ensureAnalyticsAutoRefresh() {
       stopAnalyticsAutoRefresh();
       return;
     }
-    loadAnalytics().catch((e) => {
+    refreshAnalyticsEnergy().catch((e) => {
       console.warn("analytics auto-refresh failed:", e?.message || e);
     });
   }, 60000);
@@ -15804,6 +15911,7 @@ function bindEventHandlers() {
     applyAlarmTableView();
   });
   $("btnAckAll")?.addEventListener("click", ackAll);
+  $("btnAckAllInv")?.addEventListener("click", ackAll);
 
   // Energy page
   $("btnFetchEnergy")?.addEventListener("click", () => {
@@ -16161,6 +16269,7 @@ function bindEventHandlers() {
     }
     stopReplicationHealthPolling();
     stopTodayMwhSyncTimer();
+    clearDailyUpdateTimer();
   });
 }
 
@@ -16334,7 +16443,9 @@ async function init() {
     initThemeToggle();
     State.plantCapPanelCollapsed = getStoredPlantCapPanelCollapsed();
     await initLicenseBridge();
+    initUpdateModal();
     await initAppUpdateBridge();
+    scheduleDailyUpdateCheck();
     startClock();
     setupSideNav();
     initGuideModal();

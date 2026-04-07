@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.7.13</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.7.14</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -215,6 +215,7 @@
             <div class="stat-chip online" title="Inverters currently producing power.">Online: <b id="statOnline">0</b></div>
             <div class="stat-chip alarm" title="Inverters with an active unacknowledged alarm.">Alarmed: <b id="statAlarmed">0</b></div>
             <div class="stat-chip offline" title="Inverters not responding or not producing.">Offline: <b id="statOffline">0</b></div>
+            <button id="btnAckAllInv" class="btn-ack-toolbar" type="button" title="Acknowledge all active alarms" hidden><span class="mdi mdi-check-all" aria-hidden="true"></span>Ack All</button>
           </div>
         </div>
         <div class="inv-page-body">
@@ -2362,6 +2363,30 @@
         <div class="confirm-dialog-actions">
           <button id="appPromptCancel" class="btn btn-outline confirm-btn">Cancel</button>
           <button id="appPromptOk" class="btn btn-accent confirm-btn">OK</button>
+        </div>
+      </div>
+    </div>
+    <!-- Update Available Modal (startup popup) -->
+    <div id="updateAvailableModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="updateModalTitle">
+      <div class="confirm-dialog update-modal">
+        <button id="updateModalClose" class="update-modal-close" type="button" aria-label="Close">&times;</button>
+        <div class="update-modal-icon" aria-hidden="true"><span class="mdi mdi-download-circle-outline"></span></div>
+        <div class="confirm-dialog-header update-modal-header">
+          <span id="updateModalTitle" class="confirm-dialog-title">Update Available</span>
+        </div>
+        <div class="confirm-dialog-body update-modal-body">
+          <p>A new version of ADSI Inverter Dashboard is available.</p>
+          <div class="update-modal-versions">
+            <span class="update-ver-label">Installed</span>
+            <span class="update-ver-value" id="updateModalCurrent">—</span>
+            <span class="update-ver-arrow mdi mdi-arrow-right"></span>
+            <span class="update-ver-label">Latest</span>
+            <span class="update-ver-value update-ver-new" id="updateModalLatest">—</span>
+          </div>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button id="updateModalSkip" class="btn btn-outline confirm-btn">Later</button>
+          <button id="updateModalDownload" class="btn btn-accent confirm-btn"><span class="mdi mdi-download"></span> Download</button>
         </div>
       </div>
     </div>
