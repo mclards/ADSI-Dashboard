@@ -223,7 +223,7 @@ class ForecastEngineConstraintTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            err = mod.compute_error_memory(date(2026, 3, 20), pd.DataFrame())
+            err = mod.compute_error_memory(date(2026, 3, 20), pd.DataFrame(), target_regime="mixed")
 
             self.assertAlmostEqual(float(err[100]), 0.0, places=6)
             self.assertGreater(float(err[101]), 0.0)

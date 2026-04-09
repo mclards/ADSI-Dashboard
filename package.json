@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.7.16",
+  "version": "2.7.17",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",

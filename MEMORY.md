@@ -2,12 +2,25 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.7.13
+- **Repo/package version baseline:** 2.7.17
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.7.17 Changes - Rainy/Overcast Error Memory Hardening (2026-04-09)
+- **Forecast engine regime-aware lookback:** Clear regime uses 7-day lookback, mixed 10 days, overcast 14 days, rainy 21 days for error memory aggregation.
+- **Removed rainy/overcast slot support weight penalties:** Storm slots now receive full weight in rainy regimes instead of being penalized.
+- **Regime-aware Solcast fresh-damping:** Rainy regimes apply 10% cut instead of aggressive 70% reduction to Solcast confidence.
+- **Graduated regime mismatch penalty matrix:** Overcast↔rainy transitions now use 0.70 penalty instead of flat 0.25 across all mismatches.
+- **Lowered rainy/overcast reliability sample thresholds:** Reduced from 10 days to 5 days minimum for regime-specific reliability lookups.
+- **Backfill day_regime fallback:** forecast_qa() now reconstructs missing day_regime from audit_trail with full-day regime inference.
+- **Legacy error memory regime awareness:** Historical error memory functions now respect active regime for bias correction.
+- **Test updates:** test_forecast_engine_constraints.py explicitly verifies target_regime handling.
+- **Blueprint and proof files:** Added plans/rainy-overcast-error-memory-hardening.md and tests/proof_error_memory_hardening.py for documentation.
+- **Files changed:** services/forecast_engine.py (main), services/tests/test_forecast_engine_constraints.py (test), plans/rainy-overcast-error-memory-hardening.md (new), tests/proof_error_memory_hardening.py (new).
+- **Python-only release:** No Electron or EXE rebuilds needed.
 
 ## v2.7.6 Changes - Substation Meter Gateway Proxy, Auth Gate Removal, Blueprint Completion (2026-04-05)
 - **Substation meter gateway proxy:** Added `_proxySubstationMeterToGateway()` helper in `server/index.js`. POST /api/substation-meter/:date now mirrors writes to the gateway when running in remote mode (Option A per blueprint E4b).

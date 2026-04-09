@@ -343,10 +343,37 @@ RAMP_SLOT_BLEND_SCALE = 0.62            # reduce ML blend at ramp slots (38% red
 RAMP_ONSET_SLOTS = 6                     # within ~30 min of sunrise/sunset edge
 
 # Error memory
-ERR_MEMORY_DAYS   = 7      # days used for bias correction
+ERR_MEMORY_DAYS   = 7      # days used for bias correction (default / clear regime)
 ERR_MEMORY_DECAY  = 0.72   # older day weight decay (geometric series)
-ERR_MEMORY_REGIME_MISMATCH_PENALTY = 0.25  # penalty for regime mismatch
+ERR_MEMORY_REGIME_MISMATCH_PENALTY = 0.25  # penalty for regime mismatch (flat fallback)
 ERROR_ALPHA       = 0.28   # fraction of error correction to apply
+
+# Regime-aware lookback: rainy/overcast need more history because they occur less frequently.
+# Clear/mixed keep the original 7-day window.
+ERR_MEMORY_DAYS_BY_REGIME = {
+    "clear":    7,
+    "mixed":    10,
+    "overcast": 14,
+    "rainy":    21,
+}
+
+# Graduated regime mismatch penalty matrix.
+# Neighboring regimes (overcast<->rainy) share more error structure than
+# distant regimes (clear<->rainy). Values: 1.0 = same regime, lower = more different.
+ERR_MEMORY_REGIME_PENALTY_MATRIX = {
+    ("clear",    "mixed"):    0.50,
+    ("clear",    "overcast"): 0.25,
+    ("clear",    "rainy"):    0.20,
+    ("mixed",    "clear"):    0.50,
+    ("mixed",    "overcast"): 0.60,
+    ("mixed",    "rainy"):    0.35,
+    ("overcast", "clear"):    0.25,
+    ("overcast", "mixed"):    0.60,
+    ("overcast", "rainy"):    0.70,   # neighboring regimes
+    ("rainy",    "clear"):    0.20,
+    ("rainy",    "mixed"):    0.35,
+    ("rainy",    "overcast"): 0.70,   # neighboring regimes
+}
 ERROR_CLASS_NAMES = (
     "strong_over",
     "mild_over",
@@ -4571,6 +4598,7 @@ def lookup_solcast_resolution_weight_vector(
 
 def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str | None = None) -> dict:
     _MIN_RELIABILITY_SAMPLES = 10  # FIX-18: Minimum day_count to trust regime-specific corrections
+    _MIN_RELIABILITY_SAMPLES_ADVERSE = 5  # Rainy/overcast occur less frequently — lower threshold
     fallback = {
         "day_count": 0,
         "mean_mape": 0.24,
@@ -4588,9 +4616,10 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
         season_regimes = artifact.get("season_regimes") or {}
         if key in season_regimes and isinstance(season_regimes[key], dict):
             cell = season_regimes[key]
-            # FIX-18: Skip low-sample cells
-            if int(cell.get("day_count", 0)) < _MIN_RELIABILITY_SAMPLES:
-                log.debug("Reliability cell '%s' has only %d samples — falling through", key, int(cell.get("day_count", 0)))
+            # FIX-18: Skip low-sample cells (lower threshold for rainy/overcast)
+            _min_samples = _MIN_RELIABILITY_SAMPLES_ADVERSE if regime in ("rainy", "overcast") else _MIN_RELIABILITY_SAMPLES
+            if int(cell.get("day_count", 0)) < _min_samples:
+                log.debug("Reliability cell '%s' has only %d samples (min %d) — falling through", key, int(cell.get("day_count", 0)), _min_samples)
             else:
                 out = dict(fallback)
                 out.update(cell)
@@ -4599,9 +4628,10 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
     regimes = artifact.get("regimes") or {}
     if regime in regimes and isinstance(regimes[regime], dict):
         cell = regimes[regime]
-        # FIX-18: Skip low-sample cells
-        if int(cell.get("day_count", 0)) < _MIN_RELIABILITY_SAMPLES:
-            log.debug("Reliability cell '%s' has only %d samples — falling through to overall", regime, int(cell.get("day_count", 0)))
+        # FIX-18: Skip low-sample cells (lower threshold for rainy/overcast)
+        _min_samples = _MIN_RELIABILITY_SAMPLES_ADVERSE if regime in ("rainy", "overcast") else _MIN_RELIABILITY_SAMPLES
+        if int(cell.get("day_count", 0)) < _min_samples:
+            log.debug("Reliability cell '%s' has only %d samples (min %d) — falling through to overall", regime, int(cell.get("day_count", 0)), _min_samples)
         else:
             out = dict(fallback)
             out.update(cell)
@@ -5051,12 +5081,13 @@ def load_intraday_adjusted(day: str) -> np.ndarray | None:
 # ERROR MEMORY  (rolling bias correction)
 # ============================================================================
 
-def _compute_error_memory_legacy(today: date) -> np.ndarray:
+def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.ndarray:
+    _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, ERR_MEMORY_DAYS)
     weight_vectors = []
     errors = []
     source_mismatch_penalty = 0.2
     try:
-        start_date = (today - timedelta(days=ERR_MEMORY_DAYS)).isoformat()
+        start_date = (today - timedelta(days=_regime_days)).isoformat()
         end_date = (today - timedelta(days=1)).isoformat()
         with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             conn.execute("PRAGMA query_only = ON")
@@ -5090,7 +5121,7 @@ def _compute_error_memory_legacy(today: date) -> np.ndarray:
                     float(err_val),
                 )
 
-        for d in range(1, ERR_MEMORY_DAYS + 1):
+        for d in range(1, _regime_days + 1):
             day = (today - timedelta(days=d)).isoformat()
             day_history = history.get(day)
             if not day_history:
@@ -5153,10 +5184,11 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         target_regime: Target day's weather regime; historical days with mismatched regime are penalized
     """
     del w_today_5  # explicit: current implementation uses persisted compare rows only.
+    _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, ERR_MEMORY_DAYS)
     weight_vectors = []
     errors = []
     try:
-        start_date = (today - timedelta(days=max(ERR_MEMORY_DAYS * 4, 30))).isoformat()
+        start_date = (today - timedelta(days=max(_regime_days * 4, 60))).isoformat()
         end_date = (today - timedelta(days=1)).isoformat()
         # FIX-12: SQLite WAL mode + readonly=True provides snapshot isolation —
         # all reads within this connection see a consistent point-in-time view.
@@ -5183,11 +5215,11 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                  ORDER BY target_date DESC
                  LIMIT ?
                 """,
-                (start_date, end_date, max(ERR_MEMORY_DAYS * 4, 60))
+                (start_date, end_date, max(_regime_days * 4, 60))
             ).fetchall()
 
             if not daily_rows:
-                return _compute_error_memory_legacy(today)
+                return _compute_error_memory_legacy(today, target_regime)
 
             selected_days = 0
             for day_row in daily_rows:
@@ -5225,10 +5257,14 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 except Exception:
                     pass
 
-                # Regime mismatch penalty: if both regimes are known and don't match, reduce weight
+                # Graduated regime mismatch penalty: neighboring regimes (overcast<->rainy)
+                # share more error structure than distant regimes (clear<->rainy).
                 regime_factor = 1.0
                 if target_regime and hist_regime and target_regime != hist_regime:
-                    regime_factor = ERR_MEMORY_REGIME_MISMATCH_PENALTY
+                    regime_factor = ERR_MEMORY_REGIME_PENALTY_MATRIX.get(
+                        (target_regime, hist_regime),
+                        ERR_MEMORY_REGIME_MISMATCH_PENALTY,  # flat fallback for unknown pairs
+                    )
 
                 # Trust the persisted usable_for_error_memory flag from QA comparison.
                 # It already accounts for est_actual reconstruction (constrained slots
@@ -5263,15 +5299,15 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 errors.append(err)
                 weight_vectors.append(weight_vec)
                 selected_days += 1
-                if selected_days >= ERR_MEMORY_DAYS:
+                if selected_days >= _regime_days:
                     break
 
     except Exception as e:
         log.warning("Failed to compute persisted error memory: %s", e)
-        return _compute_error_memory_legacy(today)
+        return _compute_error_memory_legacy(today, target_regime)
 
     if not errors:
-        return _compute_error_memory_legacy(today)
+        return _compute_error_memory_legacy(today, target_regime)
 
     weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
     weight_sum = np.sum(np.stack(weight_vectors), axis=0)
@@ -8380,9 +8416,15 @@ def _persist_qa_comparison(
                 slot_bucket = str(slot_bucket_arr[slot] or "")
                 support_weight = support_base
                 if opportunity < 2.0:
-                    support_weight *= 0.6
+                    # During rainy/overcast regimes, low-forecast slots ARE the regime — don't penalize them.
+                    if day_regime in ("rainy", "overcast"):
+                        support_weight *= 0.90   # mild discount only (measurement noise at low generation)
+                    else:
+                        support_weight *= 0.6    # original: anomalous low slots in clear/mixed
                 if slot_bucket in {"storm_risk", "rain_heavy"}:
-                    support_weight *= 0.75
+                    if day_regime not in ("rainy", "overcast"):
+                        support_weight *= 0.75   # original: anomalous storm slots in clear/mixed
+                    # rainy/overcast: no penalty — these ARE the regime's characteristic slots
 
                 usable_metrics = bool(usable_arr[slot])
                 usable_mem = bool(
@@ -8600,6 +8642,12 @@ def forecast_qa(today: date) -> None:
         or ((snapshot.get("signature") or {}).get("day_regime") if isinstance(snapshot, dict) else "")
         or ""
     )
+    # Ensure day_regime is never empty — compute from weather data if snapshot lacked it
+    # (backfills, manual runs, or pre-v2.7.17 snapshots may not have target_regime).
+    if not day_regime and weather_5min is not None and not weather_5min.empty:
+        _qa_stats = analyse_weather_day(yesterday, weather_5min, actual)
+        day_regime = classify_day_regime(_qa_stats)
+        log.debug("QA: day_regime computed from weather data for %s: %s", yesterday, day_regime)
 
     # ── Est_actual reconstruction for QA comparison ──
     # When actual energy data is unreliable due to capping, manual start/stops,
@@ -9658,22 +9706,47 @@ def run_dayahead(
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0
 
-    # When Solcast is fresh with high coverage, damp the error-memory bias correction.
-    # Historical error memory was built on runs that may not have had fresh Solcast input,
-    # so applying it at full strength can drag the forecast below the reliable Solcast prior.
+    # Regime-aware Solcast fresh-damping: trust Solcast less during rainy/overcast because
+    # satellite cloud tracking can't resolve tropical convective cells.
     if bool(solcast_meta.get("used_solcast")):
         _sc_cov = float(solcast_meta.get("coverage_ratio", 0.0))
-        if _sc_cov >= 0.95:
-            _bias_damp = 0.30   # reduce bias by 70% when Solcast is very fresh (actual often exceeds Solcast)
-        elif _sc_cov >= 0.80:
-            _bias_damp = 0.50   # reduce bias by 50% when Solcast is usable
+        if target_regime == "rainy":
+            # Rainy: minimal damping — let error memory do its job
+            if _sc_cov >= 0.95:
+                _bias_damp = 0.90   # only 10% reduction (was 70%)
+            elif _sc_cov >= 0.80:
+                _bias_damp = 0.95   # only 5% reduction (was 50%)
+            else:
+                _bias_damp = 1.0
+        elif target_regime == "overcast":
+            # Overcast: moderate damping — Solcast is somewhat useful for uniform cloud
+            if _sc_cov >= 0.95:
+                _bias_damp = 0.70   # 30% reduction (was 70%)
+            elif _sc_cov >= 0.80:
+                _bias_damp = 0.80   # 20% reduction (was 50%)
+            else:
+                _bias_damp = 1.0
+        elif target_regime == "mixed":
+            # Mixed: slight relaxation from original
+            if _sc_cov >= 0.95:
+                _bias_damp = 0.40   # 60% reduction (was 70%)
+            elif _sc_cov >= 0.80:
+                _bias_damp = 0.55   # 45% reduction (was 50%)
+            else:
+                _bias_damp = 1.0
         else:
-            _bias_damp = 1.0
+            # Clear: keep original behavior — Solcast is most reliable here
+            if _sc_cov >= 0.95:
+                _bias_damp = 0.30   # 70% reduction (unchanged)
+            elif _sc_cov >= 0.80:
+                _bias_damp = 0.50   # 50% reduction (unchanged)
+            else:
+                _bias_damp = 1.0
         if _bias_damp < 1.0:
             bias_correction = bias_correction * _bias_damp
             log.info(
-                "Bias correction damped %.0f%% for fresh Solcast (coverage=%.2f bias_damp=%.2f)",
-                (1.0 - _bias_damp) * 100.0, _sc_cov, _bias_damp,
+                "Bias correction damped %.0f%% for Solcast (coverage=%.2f regime=%s bias_damp=%.2f)",
+                (1.0 - _bias_damp) * 100.0, _sc_cov, target_regime or "unknown", _bias_damp,
             )
 
     log.info(
