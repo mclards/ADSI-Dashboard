@@ -305,7 +305,7 @@ const ANALYTICS_CHART_RENDER_BATCH = 6;
 const THEME_STORAGE_KEY = "adsi_theme";
 const CARD_ORDER_STORAGE_KEY = "adsi_inv_card_order";
 const NAV_ORDER_STORAGE_KEY = "adsi_nav_order";
-const SUPPORTED_THEMES = ["dark", "light", "classic"];
+const SUPPORTED_THEMES = ["dark", "light", "classic", "midnight"];
 const SUPPORTED_INV_GRID_LAYOUTS = ["auto", "2", "3", "4", "5", "6", "7"];
 const TODAY_MWH_SYNC_INTERVAL_MS = 1000; // keep header near-realtime and aligned with server totals
 const TODAY_MWH_WS_FRAME_STALE_MS = 15000;
@@ -373,6 +373,10 @@ const THEME_META = {
   classic: {
     label: "Classic",
     icon: "mdi mdi-weather-night",
+  },
+  midnight: {
+    label: "Midnight",
+    icon: "mdi mdi-pine-tree",
   },
 };
 
@@ -1536,11 +1540,43 @@ function getChartPalette() {
   };
 }
 
+/** Create a vertical gradient for chart area fills */
+function makeChartGradient(canvas, topColor, bottomColor) {
+  const ctx = canvas.getContext("2d");
+  const h = canvas.parentElement?.clientHeight || canvas.height || 200;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, topColor);
+  g.addColorStop(0.6, bottomColor);
+  g.addColorStop(1, "transparent");
+  return g;
+}
+
+/** Parse "rgba(r,g,b,a)" or "#hex" into a top/bottom gradient pair */
+function gradientPair(canvas, baseColor, topAlpha, bottomAlpha) {
+  // For hex colors, convert to rgba
+  let r = 0, g = 0, b = 0;
+  if (baseColor.startsWith("#")) {
+    const hex = baseColor.replace("#", "");
+    r = parseInt(hex.substring(0, 2), 16);
+    g = parseInt(hex.substring(2, 4), 16);
+    b = parseInt(hex.substring(4, 6), 16);
+  } else {
+    const m = baseColor.match(/[\d.]+/g);
+    if (m) { r = +m[0]; g = +m[1]; b = +m[2]; }
+  }
+  return makeChartGradient(
+    canvas,
+    `rgba(${r},${g},${b},${topAlpha})`,
+    `rgba(${r},${g},${b},${bottomAlpha})`,
+  );
+}
+
 function refreshChartsTheme() {
   const pal = getChartPalette();
   Object.entries(State.charts || {}).forEach(([key, chart]) => {
     if (!chart) return;
     const opts = chart.options || {};
+    const cvs = chart.canvas;
     if (opts.plugins?.legend?.labels) {
       opts.plugins.legend.labels.color = pal.legend;
     }
@@ -1559,11 +1595,15 @@ function refreshChartsTheme() {
     if (key === "totalPac" && Array.isArray(chart.data?.datasets)) {
       if (chart.data.datasets[0]) {
         chart.data.datasets[0].borderColor = pal.actual;
-        chart.data.datasets[0].backgroundColor = pal.actualFill;
+        chart.data.datasets[0].backgroundColor = cvs
+          ? gradientPair(cvs, pal.actual, 0.26, 0.02) : pal.actualFill;
+        chart.data.datasets[0].pointBackgroundColor = pal.actual;
       }
       if (chart.data.datasets[1]) {
         chart.data.datasets[1].borderColor = pal.ahead;
-        chart.data.datasets[1].backgroundColor = pal.aheadFill;
+        chart.data.datasets[1].backgroundColor = cvs
+          ? gradientPair(cvs, pal.ahead, 0.16, 0.01) : pal.aheadFill;
+        chart.data.datasets[1].pointBackgroundColor = pal.ahead;
       }
     }
     if (key === "solcastPreview" && Array.isArray(chart.data?.datasets)) {
@@ -1572,27 +1612,31 @@ function refreshChartsTheme() {
         chart.data.datasets[0].backgroundColor = "rgba(0,0,0,0)";
       }
       if (chart.data.datasets[1]) {
-        chart.data.datasets[1].borderColor = pal.bandBorder;
+        chart.data.datasets[1].borderColor = "rgba(0,0,0,0)";
         chart.data.datasets[1].backgroundColor = pal.bandFill;
       }
       if (chart.data.datasets[2]) {
         chart.data.datasets[2].borderColor = pal.actual;
-        chart.data.datasets[2].backgroundColor = pal.actualFill;
+        chart.data.datasets[2].backgroundColor = cvs
+          ? gradientPair(cvs, pal.actual, 0.22, 0.02) : pal.actualFill;
         chart.data.datasets[2].pointBackgroundColor = pal.actual;
       }
       if (chart.data.datasets[3]) {
         chart.data.datasets[3].borderColor = pal.ahead;
-        chart.data.datasets[3].backgroundColor = pal.aheadFill;
+        chart.data.datasets[3].backgroundColor = "transparent";
         chart.data.datasets[3].pointBackgroundColor = pal.ahead;
       }
     }
     if (key === "fperfCompare" && Array.isArray(chart.data?.datasets)) {
       if (chart.data.datasets[0]) {
         chart.data.datasets[0].borderColor = pal.actual;
-        chart.data.datasets[0].backgroundColor = pal.actualFill;
+        chart.data.datasets[0].backgroundColor = cvs
+          ? gradientPair(cvs, pal.actual, 0.22, 0.02) : pal.actualFill;
+        chart.data.datasets[0].pointBackgroundColor = pal.actual;
       }
       if (chart.data.datasets[1]) {
         chart.data.datasets[1].borderColor = pal.ahead;
+        chart.data.datasets[1].pointBackgroundColor = pal.ahead;
       }
       if (chart.data.datasets[2]) {
         chart.data.datasets[2].borderColor = pal.bandBorder;
@@ -1600,6 +1644,15 @@ function refreshChartsTheme() {
       }
       if (chart.data.datasets[3]) {
         chart.data.datasets[3].borderColor = pal.bandBorder;
+      }
+    }
+    // Per-inverter charts: rebuild gradient fill on theme switch
+    if (key.startsWith("inv_") && Array.isArray(chart.data?.datasets) && chart.data.datasets[0]) {
+      const ds = chart.data.datasets[0];
+      const stroke = ds.borderColor;
+      if (cvs && stroke) {
+        ds.backgroundColor = gradientPair(cvs, stroke, 0.28, 0.02);
+        ds.pointBackgroundColor = stroke;
       }
     }
     chart.update("none");
@@ -1678,9 +1731,10 @@ function applyTheme(theme, persist = true) {
 // ─── Theme Preview Modal ──────────────────────────────────────────────────────
 
 const THEME_PREVIEW_COLORS = {
-  dark:    { bg: "#130a0d", header: "#1e1014", accent: "#d86a8b", bar: "#3a1c24", text: "#f0d5de", label: "Maroon" },
-  light:   { bg: "#e8dfcf", header: "#f0ece2", accent: "#2b67ad", bar: "#c4bfb2", text: "#2e2b27", label: "Light"  },
-  classic: { bg: "#060d19", header: "#0d1a2e", accent: "#2d7ef7", bar: "#152133", text: "#c5daf5", label: "Classic"},
+  dark:     { bg: "#0c0608", header: "#1a0e14", accent: "#e06f92", bar: "#381a24", text: "#f4eaee", label: "Maroon"   },
+  light:    { bg: "#e6dccb", header: "#f0e7d6", accent: "#1f5a9e", bar: "#c0b8a8", text: "#2a2215", label: "Light"    },
+  classic:  { bg: "#040a14", header: "#0b1424", accent: "#3584fa", bar: "#132038", text: "#e0ecfa", label: "Classic"   },
+  midnight: { bg: "#060b0e", header: "#0d1816", accent: "#26c9a0", bar: "#16302a", text: "#d4f0ea", label: "Midnight"  },
 };
 
 function buildThemePreviewGrid() {
@@ -4892,17 +4946,22 @@ function renderForecastPerfCharts(rows) {
 
   const compareCanvas = $("fperfCompareChart");
   const existingCompare = State.charts.fperfCompare;
+  const cvs = existingCompare?.canvas || compareCanvas;
+  const actualGrad = cvs ? gradientPair(cvs, pal.actual, 0.22, 0.02) : pal.actualFill;
   const compareSets = [
     {
       label: "Actual",
       data: actualVals,
       borderColor: pal.actual,
-      backgroundColor: pal.actualFill,
-      borderWidth: 2,
-      pointRadius: sorted.length <= 14 ? 2.4 : 0,
-      pointHoverRadius: 3,
-      tension: 0.25,
+      backgroundColor: actualGrad,
+      borderWidth: 2.2,
+      pointRadius: sorted.length <= 14 ? 2.8 : 0,
+      pointHoverRadius: 3.5,
+      pointBackgroundColor: pal.actual,
+      pointBorderWidth: 0,
+      tension: 0.3,
       fill: true,
+      cubicInterpolationMode: "monotone",
       order: 1,
     },
     {
@@ -4911,10 +4970,14 @@ function renderForecastPerfCharts(rows) {
       borderColor: pal.ahead,
       backgroundColor: "transparent",
       borderWidth: 2,
-      pointRadius: sorted.length <= 14 ? 2.4 : 0,
-      pointHoverRadius: 3,
-      tension: 0.25,
+      pointRadius: sorted.length <= 14 ? 2.8 : 0,
+      pointHoverRadius: 3.5,
+      pointBackgroundColor: pal.ahead,
+      pointBorderWidth: 0,
+      tension: 0.3,
       fill: false,
+      cubicInterpolationMode: "monotone",
+      borderDash: [6, 3],
       order: 2,
     },
   ];
@@ -4928,7 +4991,7 @@ function renderForecastPerfCharts(rows) {
         borderWidth: 1,
         borderDash: [3, 3],
         pointRadius: 0,
-        tension: 0.25,
+        tension: 0.3,
         fill: "+1",
         order: 3,
       },
@@ -4940,7 +5003,7 @@ function renderForecastPerfCharts(rows) {
         borderWidth: 1,
         borderDash: [3, 3],
         pointRadius: 0,
-        tension: 0.25,
+        tension: 0.3,
         fill: false,
         order: 4,
       },
@@ -4951,10 +5014,13 @@ function renderForecastPerfCharts(rows) {
     existingCompare.data.datasets = compareSets;
     existingCompare.update("none");
   } else if (compareCanvas) {
+    const opts = chartOpts("MWh", true);
+    opts.plugins.legend.labels.usePointStyle = true;
+    opts.plugins.legend.labels.pointStyle = "line";
     State.charts.fperfCompare = new Chart(compareCanvas, {
       type: "line",
       data: { labels, datasets: compareSets },
-      options: chartOpts("MWh", true),
+      options: opts,
     });
   }
 
@@ -4962,19 +5028,27 @@ function renderForecastPerfCharts(rows) {
   const wapeVals = sorted.map((r) => r.daily_wape_pct != null ? +Number(r.daily_wape_pct).toFixed(2) : null);
   const wapeColors = sorted.map((r) => {
     const q = r.comparison_quality || "review";
-    if (q === "eligible" || q === "good" || q === "excellent") return "rgba(16,179,112,.72)";
-    if (q === "review")                                        return "rgba(240,144,0,.72)";
-    return "rgba(224,53,96,.72)";  // insufficient, preview, bad
+    if (q === "eligible" || q === "good" || q === "excellent") return "rgba(16,200,120,.78)";
+    if (q === "review")                                        return "rgba(245,158,11,.78)";
+    return "rgba(234,63,100,.78)";  // insufficient, preview, bad
+  });
+  const wapeBorders = sorted.map((r) => {
+    const q = r.comparison_quality || "review";
+    if (q === "eligible" || q === "good" || q === "excellent") return "rgba(16,200,120,.95)";
+    if (q === "review")                                        return "rgba(245,158,11,.95)";
+    return "rgba(234,63,100,.95)";
   });
 
   const wapeCanvas = $("fperfWapeChart");
   const existingWape = State.charts.fperfWape;
   const wapeOpts = chartOpts("WAPE %", false);
+  wapeOpts.scales.y.beginAtZero = true;
   if (existingWape) {
     existingWape.data.labels = labels;
     if (!existingWape.data.datasets?.length) existingWape.data.datasets = [{}];
     existingWape.data.datasets[0].data = wapeVals;
     existingWape.data.datasets[0].backgroundColor = wapeColors;
+    existingWape.data.datasets[0].borderColor = wapeBorders;
     existingWape.update("none");
   } else if (wapeCanvas) {
     State.charts.fperfWape = new Chart(wapeCanvas, {
@@ -4986,7 +5060,12 @@ function renderForecastPerfCharts(rows) {
             label: "WAPE %",
             data: wapeVals,
             backgroundColor: wapeColors,
-            borderRadius: 3,
+            borderColor: wapeBorders,
+            borderWidth: 1,
+            borderRadius: 6,
+            borderSkipped: "bottom",
+            barPercentage: 0.7,
+            categoryPercentage: 0.8,
           },
         ],
       },
@@ -5532,6 +5611,8 @@ function buildSolcastPreviewChart(payload) {
   opts.plugins.legend.labels.filter = (item) =>
     !String(item?.text || "").startsWith("_");
 
+  const cvs = State.charts.solcastPreview?.canvas || canvas;
+  const actualGrad = cvs ? gradientPair(cvs, pal.actual, 0.22, 0.02) : pal.actualFill;
   const datasets = [
     {
       label: "_Forecast Band Lower",
@@ -5541,7 +5622,7 @@ function buildSolcastPreviewChart(payload) {
       borderWidth: 0,
       pointRadius: 0,
       pointHoverRadius: 0,
-      tension: 0.12,
+      tension: 0.18,
       fill: false,
       spanGaps: true,
       rawMwData: forecastLoMw,
@@ -5554,7 +5635,7 @@ function buildSolcastPreviewChart(payload) {
       borderWidth: 0,
       pointRadius: 0,
       pointHoverRadius: 0,
-      tension: 0.12,
+      tension: 0.18,
       fill: "-1",
       spanGaps: true,
       rawMwData: forecastHiMw,
@@ -5563,15 +5644,15 @@ function buildSolcastPreviewChart(payload) {
       label: "Estimated Actual",
       data: actual,
       borderColor: pal.actual,
-      backgroundColor: pal.actualFill,
-      borderWidth: 2.8,
+      backgroundColor: actualGrad,
+      borderWidth: 2.6,
       pointRadius: 0,
-      pointHoverRadius: 4,
+      pointHoverRadius: 4.5,
       pointBorderWidth: 0,
       pointBackgroundColor: pal.actual,
-      tension: 0.2,
+      tension: 0.25,
       cubicInterpolationMode: "monotone",
-      fill: false,
+      fill: true,
       spanGaps: true,
       rawMwData: actualMw,
     },
@@ -5579,15 +5660,15 @@ function buildSolcastPreviewChart(payload) {
       label: "Forecast",
       data: forecast,
       borderColor: pal.ahead,
-      backgroundColor: pal.aheadFill,
-      borderWidth: 2.8,
+      backgroundColor: "transparent",
+      borderWidth: 2.4,
       pointRadius: 0,
-      pointHoverRadius: 4,
+      pointHoverRadius: 4.5,
       pointBorderWidth: 0,
       pointBackgroundColor: pal.ahead,
-      tension: 0.2,
+      tension: 0.25,
       cubicInterpolationMode: "monotone",
-      borderDash: [10, 5],
+      borderDash: [8, 4],
       fill: false,
       spanGaps: true,
       rawMwData: forecastMw,
@@ -12979,9 +13060,11 @@ function renderHourlyWeatherCharts(data) {
   const dniData = rows.map(r => Number(r.dni_wm2) || 0);
   const cloudData = rows.map(r => Number(r.cloud_pct) || 0);
 
-  const chartFont = { family: "var(--font-mono, monospace)", size: 9 };
-  const gridColor = "rgba(255,255,255,0.06)";
-  const tickColor = "rgba(255,255,255,0.4)";
+  const pal = getChartPalette();
+  const uiFont = cssVar("--font-main", "Arial");
+  const chartFont = { family: uiFont, size: 9, weight: "500" };
+  const gridColor = pal.grid;
+  const tickColor = pal.tick;
 
   // Irradiance chart
   const irrCanvas = $("chartHourlyIrradiance");
@@ -12990,6 +13073,8 @@ function renderHourlyWeatherCharts(data) {
       State.hourlyIrradianceChart.destroy();
       State.hourlyIrradianceChart = null;
     }
+    const ghiGrad = gradientPair(irrCanvas, "#f5c542", 0.24, 0.02);
+    const dniGrad = gradientPair(irrCanvas, "#ff7a45", 0.12, 0.01);
     State.hourlyIrradianceChart = new Chart(irrCanvas, {
       type: "line",
       data: {
@@ -12999,22 +13084,30 @@ function renderHourlyWeatherCharts(data) {
             label: "GHI",
             data: ghiData,
             borderColor: "#f5c542",
-            backgroundColor: "rgba(245,197,66,0.12)",
-            borderWidth: 1.5,
+            backgroundColor: ghiGrad,
+            borderWidth: 1.8,
             pointRadius: 0,
+            pointHoverRadius: 3,
+            pointBackgroundColor: "#f5c542",
+            pointBorderWidth: 0,
             fill: true,
-            tension: 0.3,
+            tension: 0.35,
+            cubicInterpolationMode: "monotone",
           },
           {
             label: "DNI",
             data: dniData,
             borderColor: "#ff7a45",
-            backgroundColor: "rgba(255,122,69,0.06)",
-            borderWidth: 1,
+            backgroundColor: dniGrad,
+            borderWidth: 1.2,
             pointRadius: 0,
-            fill: false,
-            tension: 0.3,
-            borderDash: [4, 2],
+            pointHoverRadius: 3,
+            pointBackgroundColor: "#ff7a45",
+            pointBorderWidth: 0,
+            fill: true,
+            tension: 0.35,
+            cubicInterpolationMode: "monotone",
+            borderDash: [5, 2],
           },
         ],
       },
@@ -13026,27 +13119,48 @@ function renderHourlyWeatherCharts(data) {
           legend: {
             display: true,
             position: "top",
-            labels: { font: chartFont, color: tickColor, boxWidth: 12, padding: 4 },
+            align: "start",
+            labels: {
+              font: chartFont,
+              color: tickColor,
+              boxWidth: 14,
+              boxHeight: 3,
+              padding: 8,
+              usePointStyle: true,
+              pointStyle: "line",
+            },
           },
-          tooltip: { mode: "index", intersect: false },
+          tooltip: {
+            backgroundColor: pal.tooltipBg,
+            borderColor: pal.tooltipBorder,
+            borderWidth: 1,
+            titleColor: pal.tooltipText,
+            bodyColor: pal.tooltipText,
+            titleFont: { family: uiFont, size: 10, weight: "700" },
+            bodyFont: { family: uiFont, size: 10, weight: "500" },
+            padding: { top: 8, bottom: 8, left: 12, right: 12 },
+            cornerRadius: 8,
+            displayColors: true,
+            boxPadding: 4,
+            mode: "index",
+            intersect: false,
+          },
         },
         scales: {
           x: {
-            ticks: {
-              font: chartFont,
-              color: tickColor,
-              maxRotation: 0,
-              autoSkip: true,
-              maxTicksLimit: 8,
-            },
-            grid: { color: gridColor },
+            ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, padding: 4 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
           },
           y: {
             beginAtZero: true,
-            ticks: { font: chartFont, color: tickColor },
-            grid: { color: gridColor },
+            ticks: { font: chartFont, color: tickColor, padding: 6 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
           },
         },
+        layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
+        interaction: { mode: "index", intersect: false },
       },
     });
   }
@@ -13067,19 +13181,22 @@ function renderHourlyWeatherCharts(data) {
             label: "Cloud %",
             data: cloudData,
             backgroundColor: cloudData.map(v =>
-              v >= 80 ? "rgba(108,145,194,0.7)" :
-              v >= 50 ? "rgba(162,189,224,0.55)" :
-              v >= 25 ? "rgba(200,220,245,0.4)" :
-              "rgba(130,225,160,0.4)"
+              v >= 80 ? "rgba(108,145,194,0.75)" :
+              v >= 50 ? "rgba(142,180,225,0.6)" :
+              v >= 25 ? "rgba(180,210,245,0.45)" :
+              "rgba(100,215,150,0.5)"
             ),
             borderColor: cloudData.map(v =>
-              v >= 80 ? "rgba(108,145,194,0.9)" :
-              v >= 50 ? "rgba(162,189,224,0.75)" :
-              v >= 25 ? "rgba(200,220,245,0.6)" :
-              "rgba(130,225,160,0.6)"
+              v >= 80 ? "rgba(120,160,210,0.9)" :
+              v >= 50 ? "rgba(155,190,230,0.8)" :
+              v >= 25 ? "rgba(190,220,248,0.7)" :
+              "rgba(110,225,160,0.7)"
             ),
             borderWidth: 1,
-            borderRadius: 2,
+            borderRadius: 4,
+            borderSkipped: "bottom",
+            barPercentage: 0.75,
+            categoryPercentage: 0.85,
           },
         ],
       },
@@ -13089,26 +13206,38 @@ function renderHourlyWeatherCharts(data) {
         animation: false,
         plugins: {
           legend: { display: false },
-          tooltip: { mode: "index", intersect: false },
+          tooltip: {
+            backgroundColor: pal.tooltipBg,
+            borderColor: pal.tooltipBorder,
+            borderWidth: 1,
+            titleColor: pal.tooltipText,
+            bodyColor: pal.tooltipText,
+            titleFont: { family: uiFont, size: 10, weight: "700" },
+            bodyFont: { family: uiFont, size: 10, weight: "500" },
+            padding: { top: 8, bottom: 8, left: 12, right: 12 },
+            cornerRadius: 8,
+            displayColors: true,
+            boxPadding: 4,
+            mode: "index",
+            intersect: false,
+          },
         },
         scales: {
           x: {
-            ticks: {
-              font: chartFont,
-              color: tickColor,
-              maxRotation: 0,
-              autoSkip: true,
-              maxTicksLimit: 8,
-            },
-            grid: { color: gridColor },
+            ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, padding: 4 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
           },
           y: {
             beginAtZero: true,
             max: 100,
-            ticks: { font: chartFont, color: tickColor, stepSize: 25 },
-            grid: { color: gridColor },
+            ticks: { font: chartFont, color: tickColor, stepSize: 25, padding: 6 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
           },
         },
+        layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
+        interaction: { mode: "index", intersect: false },
       },
     });
   }
@@ -13735,28 +13864,34 @@ function upsertLineChart(
   data,
   stroke,
   fill,
-  borderWidth = 1.6,
+  borderWidth = 1.8,
 ) {
   const compact = data.length <= 2;
-  const pointRadius = compact ? 2.8 : 0;
-  const pointHoverRadius = compact ? 3.6 : 2.2;
+  const pointRadius = compact ? 3 : 0;
+  const pointHoverRadius = compact ? 4.5 : 3;
   const chart = State.charts[key];
   if (chart) {
+    const cvs = chart.canvas;
+    const gradFill = cvs ? gradientPair(cvs, stroke, 0.28, 0.02) : fill;
     chart.data.labels = labels;
     if (!chart.data.datasets?.length) chart.data.datasets = [{}];
-    chart.data.datasets[0].label = label;
-    chart.data.datasets[0].data = data;
-    chart.data.datasets[0].borderColor = stroke;
-    chart.data.datasets[0].backgroundColor = fill;
-    chart.data.datasets[0].borderWidth = borderWidth;
-    chart.data.datasets[0].pointRadius = pointRadius;
-    chart.data.datasets[0].pointHoverRadius = pointHoverRadius;
+    const ds = chart.data.datasets[0];
+    ds.label = label;
+    ds.data = data;
+    ds.borderColor = stroke;
+    ds.backgroundColor = gradFill;
+    ds.borderWidth = borderWidth;
+    ds.pointRadius = pointRadius;
+    ds.pointHoverRadius = pointHoverRadius;
+    ds.pointBackgroundColor = stroke;
+    ds.pointBorderWidth = 0;
     chart.update("none");
     return;
   }
 
   const canvas = $(canvasId);
   if (!canvas) return;
+  const gradFill = gradientPair(canvas, stroke, 0.28, 0.02);
   State.charts[key] = new Chart(canvas, {
     type: "line",
     data: {
@@ -13766,12 +13901,15 @@ function upsertLineChart(
           label,
           data,
           borderColor: stroke,
-          backgroundColor: fill,
+          backgroundColor: gradFill,
           borderWidth,
           pointRadius,
           pointHoverRadius,
-          tension: 0.2,
+          pointBackgroundColor: stroke,
+          pointBorderWidth: 0,
+          tension: 0.3,
           fill: true,
+          cubicInterpolationMode: "monotone",
         },
       ],
     },
@@ -13790,68 +13928,61 @@ function upsertTotalCompareChart(
   const chart = State.charts[key];
   const actual = Array.isArray(actualValues) ? actualValues : [];
   const ahead = Array.isArray(dayAheadValues) ? dayAheadValues : [];
-  if (chart) {
-    chart.data.labels = labels;
-    chart.data.datasets = [
+
+  function buildDatasets(cvs) {
+    const actualGrad = cvs ? gradientPair(cvs, pal.actual, 0.26, 0.02) : pal.actualFill;
+    const aheadGrad = cvs ? gradientPair(cvs, pal.ahead, 0.16, 0.01) : pal.aheadFill;
+    return [
       {
         label: "Actual (MWh)",
         data: actual,
         borderColor: pal.actual,
-        backgroundColor: pal.actualFill,
-        borderWidth: 2,
-        pointRadius: actual.length <= 2 ? 2.8 : 0,
-        pointHoverRadius: actual.length <= 2 ? 3.6 : 2.2,
-        tension: 0.2,
+        backgroundColor: actualGrad,
+        borderWidth: 2.2,
+        pointRadius: actual.length <= 2 ? 3 : 0,
+        pointHoverRadius: actual.length <= 2 ? 4.5 : 3,
+        pointBackgroundColor: pal.actual,
+        pointBorderWidth: 0,
+        tension: 0.3,
         fill: true,
+        cubicInterpolationMode: "monotone",
+        order: 2,
       },
       {
         label: "Day-ahead (MWh)",
         data: ahead,
         borderColor: pal.ahead,
-        backgroundColor: pal.aheadFill,
+        backgroundColor: aheadGrad,
         borderWidth: 2,
-        pointRadius: ahead.length <= 2 ? 2.8 : 0,
-        pointHoverRadius: ahead.length <= 2 ? 3.6 : 2.2,
-        tension: 0.2,
-        fill: false,
+        pointRadius: ahead.length <= 2 ? 3 : 0,
+        pointHoverRadius: ahead.length <= 2 ? 4.5 : 3,
+        pointBackgroundColor: pal.ahead,
+        pointBorderWidth: 0,
+        tension: 0.3,
+        fill: true,
+        cubicInterpolationMode: "monotone",
+        borderDash: [6, 3],
+        order: 1,
       },
     ];
+  }
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets = buildDatasets(chart.canvas);
     chart.update("none");
     return;
   }
 
   const canvas = $(canvasId);
   if (!canvas) return;
+  const opts = chartOpts("MWh", true);
+  opts.plugins.legend.labels.usePointStyle = true;
+  opts.plugins.legend.labels.pointStyle = "line";
   State.charts[key] = new Chart(canvas, {
     type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "Actual (MWh)",
-          data: actual,
-          borderColor: pal.actual,
-          backgroundColor: pal.actualFill,
-          borderWidth: 2,
-          pointRadius: actual.length <= 2 ? 2.8 : 0,
-          pointHoverRadius: actual.length <= 2 ? 3.6 : 2.2,
-          tension: 0.2,
-          fill: true,
-        },
-        {
-          label: "Day-ahead (MWh)",
-          data: ahead,
-          borderColor: pal.ahead,
-          backgroundColor: pal.aheadFill,
-          borderWidth: 2,
-          pointRadius: ahead.length <= 2 ? 2.8 : 0,
-          pointHoverRadius: ahead.length <= 2 ? 3.6 : 2.2,
-          tension: 0.2,
-          fill: false,
-        },
-      ],
-    },
-    options: chartOpts("MWh", true),
+    data: { labels, datasets: buildDatasets(canvas) },
+    options: opts,
   });
 }
 
@@ -14014,18 +14145,39 @@ function chartOpts(unit, showLegend) {
     plugins: {
       legend: {
         display: !!showLegend,
+        position: "top",
+        align: "start",
         labels: {
           color: pal.legend,
           font: { family: uiFont, size: chartType.legend, weight: "600" },
           boxWidth: chartType.legendBoxWidth,
           boxHeight: chartType.legendBoxHeight,
           padding: chartType.legendPadding,
+          usePointStyle: true,
+          pointStyle: "circle",
         },
       },
       decimation: {
         enabled: true,
         algorithm: "lttb",
         samples: 120,
+      },
+      tooltip: {
+        backgroundColor: pal.tooltipBg,
+        borderColor: pal.tooltipBorder,
+        borderWidth: 1,
+        titleColor: pal.tooltipText,
+        bodyColor: pal.tooltipText,
+        titleFont: { family: uiFont, size: chartType.tooltip, weight: "700" },
+        bodyFont: { family: uiFont, size: chartType.tooltip, weight: "500" },
+        padding: { top: 10, bottom: 10, left: 14, right: 14 },
+        cornerRadius: 10,
+        displayColors: true,
+        boxPadding: 6,
+        caretSize: 6,
+        caretPadding: 4,
+        mode: "index",
+        intersect: false,
       },
     },
     scales: {
@@ -14044,12 +14196,19 @@ function chartOpts(unit, showLegend) {
           },
           maxRotation: 0,
           minRotation: 0,
+          padding: 6,
         },
-        grid: { color: pal.grid },
+        grid: { color: pal.grid, drawTicks: false },
+        border: { display: false },
       },
       y: {
-        ticks: { color: pal.tick, font: { family: uiFont, size: chartType.tickY, weight: "500" } },
-        grid: { color: pal.grid },
+        ticks: {
+          color: pal.tick,
+          font: { family: uiFont, size: chartType.tickY, weight: "500" },
+          padding: 8,
+        },
+        grid: { color: pal.grid, drawTicks: false },
+        border: { display: false },
         title: {
           display: true,
           text: unit,
@@ -14059,7 +14218,7 @@ function chartOpts(unit, showLegend) {
       },
     },
     layout: {
-      padding: { top: 6, right: 6, bottom: 2, left: 4 },
+      padding: { top: 8, right: 10, bottom: 4, left: 6 },
     },
     interaction: { mode: "index", intersect: false },
   };

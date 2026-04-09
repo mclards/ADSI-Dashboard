@@ -1271,9 +1271,9 @@ function showLoginWindow() {
   }
   loginWin = new BrowserWindow({
     width: 480,
-    height: 540,
+    height: 620,
     minWidth: 480,
-    minHeight: 490,
+    minHeight: 570,
     icon: APP_ICON,
     frame: true,
     autoHideMenuBar: true,
