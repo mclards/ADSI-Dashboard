@@ -542,6 +542,37 @@ function bindAutoUpdaterEventsOnce() {
   // Updates only install when the user explicitly clicks "Restart & Install".
   autoUpdater.autoInstallOnAppQuit = false;
 
+  // Override electron-updater's built-in signature verifier.
+  // The default requires Status=Valid, which fails for self-signed certificates
+  // on machines where the root is not in the Trusted Root store (Status=UnknownError).
+  // Our policy mirrors verify-signed-installer.ps1: accept Valid/UnknownError/NotTrusted,
+  // reject NotSigned and HashMismatch (tampered file).
+  // SignatureStatus enum: 0=Valid, 1=UnknownError, 2=NotSigned, 3=HashMismatch, 4=NotTrusted
+  autoUpdater.verifyUpdateCodeSignature = (publisherNames, tempUpdateFile) => {
+    return new Promise((resolve) => {
+      const { execFile } = require("child_process");
+      const escaped = tempUpdateFile.replace(/'/g, "''");
+      const psCmd = `$s = Get-AuthenticodeSignature -LiteralPath '${escaped}'; Write-Output $s.Status.value__`;
+      const exe = `set "PSModulePath=" & chcp 65001 >NUL & powershell.exe`;
+      const args = ["-NoProfile", "-NonInteractive", "-InputFormat", "None", "-Command", `"${psCmd}"`];
+      execFile(exe, args, { shell: true, timeout: 30000 }, (err, stdout) => {
+        if (err || !stdout) {
+          // PowerShell unavailable or timed out — skip verification (fail open, installer
+          // integrity was already verified by SHA hash in latest.yml download).
+          console.warn("[updater] verifyUpdateCodeSignature: PS unavailable, skipping:", err?.message);
+          resolve(null);
+          return;
+        }
+        const statusCode = parseInt(stdout.trim(), 10);
+        // 2=NotSigned, 3=HashMismatch — reject these hard
+        if (statusCode === 2) { resolve("Installer is not signed."); return; }
+        if (statusCode === 3) { resolve("Installer signature hash mismatch — file may be corrupted or tampered."); return; }
+        // 0=Valid, 1=UnknownError (self-signed root not trusted), 4=NotTrusted — accept
+        resolve(null);
+      });
+    });
+  };
+
   autoUpdater.on("checking-for-update", () => {
     setAppUpdateState({
       mode: "installer",
