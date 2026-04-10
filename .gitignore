@@ -58,6 +58,11 @@ private/
 *.key
 *.p12
 *.pfx
+*.cer
+
+# Code signing private artifacts (explicit guard)
+build/private/
+build/private/**
 
 # Local runtime / auth / customer artifacts
 cloud_backups/

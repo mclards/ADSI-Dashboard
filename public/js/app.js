@@ -1298,6 +1298,21 @@ function showUpdateAvailableModal() {
   const latEl = $("updateModalLatest");
   if (curEl) curEl.textContent = "v" + (update.appVersion || "—");
   if (latEl) latEl.textContent = "v" + (update.latestVersion || "—");
+  // Beta channel badge
+  const badgeEl = $("updateModalChannelBadge");
+  if (badgeEl) {
+    if (String(update.channel || "").toLowerCase() === "beta") {
+      badgeEl.classList.remove("hidden");
+    } else {
+      badgeEl.classList.add("hidden");
+    }
+  }
+  // Releases / previous-versions link (rollback path)
+  const linkEl = $("updateModalReleasesLink");
+  if (linkEl) {
+    const releasesUrl = String(update.releasesUrl || "https://github.com/mclards/ADSI-Dashboard/releases");
+    linkEl.setAttribute("href", releasesUrl);
+  }
   modal.classList.remove("hidden");
   document.body.classList.add("modal-open");
 }
@@ -1352,6 +1367,41 @@ function initUpdateModal() {
   });
   modal.addEventListener("click", (e) => { if (e.target === modal) hideUpdateModal(true); });
   modal.addEventListener("keydown", (e) => { if (e.key === "Escape") hideUpdateModal(true); });
+
+  // Install confirmation modal — gates the destructive Restart & Install action.
+  const installModal = $("updateInstallConfirmModal");
+  if (installModal) {
+    const closeInstallModal = () => {
+      installModal.classList.add("hidden");
+      document.body.classList.remove("modal-open");
+    };
+    $("updateInstallConfirmClose")?.addEventListener("click", closeInstallModal);
+    $("updateInstallConfirmCancel")?.addEventListener("click", closeInstallModal);
+    $("updateInstallConfirmProceed")?.addEventListener("click", () => {
+      closeInstallModal();
+      _doInstallUpdateConfirmed();
+    });
+    installModal.addEventListener("click", (e) => { if (e.target === installModal) closeInstallModal(); });
+    installModal.addEventListener("keydown", (e) => { if (e.key === "Escape") closeInstallModal(); });
+  }
+}
+
+function showInstallConfirmModal() {
+  const modal = $("updateInstallConfirmModal");
+  if (!modal) {
+    // Modal HTML missing — fall back to native confirm() rather than silently
+    // skipping confirmation. The install action is destructive (60s outage).
+    const proceed = window.confirm(
+      "Restart & Install Update?\n\n"
+      + "This will close the dashboard and the inverter monitoring services for "
+      + "about 60 seconds while the new version installs.\n\n"
+      + "Make sure no critical operations are in progress."
+    );
+    if (proceed) _doInstallUpdateConfirmed();
+    return;
+  }
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
 }
 
 function renderAppUpdateSummary() {
@@ -1476,20 +1526,40 @@ async function downloadUpdateNow() {
   }
 }
 
-async function installUpdateNow() {
+function installUpdateNow() {
   if (!window.electronAPI?.installUpdate) {
     showMsg("updateMsg", "Updater is unavailable in this runtime.", "error");
     return;
   }
+  // Always show the confirmation modal — installing on a 24/7 dashboard
+  // is destructive (60s monitoring outage). User must explicitly proceed.
+  showInstallConfirmModal();
+}
+
+let _installInProgress = false;
+
+async function _doInstallUpdateConfirmed() {
+  if (_installInProgress) {
+    // Guard against double-click on Proceed before the IPC round-trip lands
+    return;
+  }
+  if (!window.electronAPI?.installUpdate) {
+    showMsg("updateMsg", "Updater is unavailable in this runtime.", "error");
+    return;
+  }
+  _installInProgress = true;
   showMsg("updateMsg", "Restarting app to install update...", "");
   try {
     const res = await window.electronAPI.installUpdate();
     applyAppUpdateState(res?.state || {});
     if (!res?.ok) {
       showMsg("updateMsg", `✗ ${res?.error || "Install failed."}`, "error");
+      _installInProgress = false;   // restore on failure so user can retry
     }
+    // On success the app is quitting; the flag stays true until process exit.
   } catch (err) {
     showMsg("updateMsg", `✗ Install failed: ${err.message}`, "error");
+    _installInProgress = false;
   }
 }
 

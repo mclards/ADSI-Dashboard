@@ -126,6 +126,27 @@ const LICENSE_REQUIRE_SIGNATURE =
   String(process.env.ADSI_LICENSE_REQUIRE_SIGNATURE || "0").trim() === "1";
 const UPDATE_REPO_OWNER = String(process.env.ADSI_UPDATE_REPO_OWNER || "mclards").trim();
 const UPDATE_REPO_NAME = String(process.env.ADSI_UPDATE_REPO_NAME || "ADSI-Dashboard").trim();
+// Update channel: "stable" (default) or "beta". Beta channel requires an
+// explicit ADSI_UPDATE_FEED_URL override pointing at a beta-tagged release
+// asset directory (e.g. https://github.com/owner/repo/releases/download/v2.7.18-beta).
+// Without the override, beta falls back to stable to avoid silently broken updates.
+const UPDATE_CHANNEL_REQUESTED = String(process.env.ADSI_UPDATE_CHANNEL || "stable").trim().toLowerCase();
+let UPDATE_CHANNEL_FALLBACK_NOTE = "";
+const UPDATE_CHANNEL = (() => {
+  if (UPDATE_CHANNEL_REQUESTED === "beta") {
+    if (!String(process.env.ADSI_UPDATE_FEED_URL || "").trim()) {
+      UPDATE_CHANNEL_FALLBACK_NOTE = "Beta channel requested but ADSI_UPDATE_FEED_URL is not set; using stable.";
+      console.warn(
+        "[updater] ADSI_UPDATE_CHANNEL=beta requires ADSI_UPDATE_FEED_URL to be set " +
+        "to a beta release asset URL (e.g. .../releases/download/v2.x.y-beta). " +
+        "Falling back to stable channel.",
+      );
+      return "stable";
+    }
+    return "beta";
+  }
+  return "stable";
+})();
 const UPDATE_FEED_URL = String(
   process.env.ADSI_UPDATE_FEED_URL
   || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest/download`,
@@ -184,6 +205,7 @@ let appUpdateBridgeBound = false;
 let appUpdateState = {
   mode: "disabled",
   appVersion: "0.0.0",
+  channel: "stable",
   status: "idle",
   message: "Updater not initialized.",
   checking: false,
@@ -193,6 +215,7 @@ let appUpdateState = {
   canDownload: false,
   canInstall: false,
   downloadUrl: "",
+  releasesUrl: "",
   checkedAt: 0,
   error: "",
 };
@@ -359,9 +382,14 @@ function buildPublicAppUpdateState() {
   return {
     ...appUpdateState,
     appVersion: app.getVersion(),
+    channel: UPDATE_CHANNEL,
+    channelRequested: UPDATE_CHANNEL_REQUESTED,
+    channelFallbackNote: UPDATE_CHANNEL_FALLBACK_NOTE,
+    releasesUrl: appUpdateState.releasesUrl
+      || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases`,
     modeLabel:
       appUpdateState.mode === "installer"
-        ? "Installer (Auto)"
+        ? (UPDATE_CHANNEL === "beta" ? "Installer (Beta)" : "Installer (Auto)")
         : appUpdateState.mode === "portable"
           ? "Portable (Manual)"
           : appUpdateState.mode === "dev"
@@ -509,7 +537,10 @@ function bindAutoUpdaterEventsOnce() {
   appUpdateBridgeBound = true;
 
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // SAFETY: This dashboard runs 24/7 on a gateway server. Auto-installing on
+  // accidental window close would cause an unexpected monitoring outage.
+  // Updates only install when the user explicitly clicks "Restart & Install".
+  autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on("checking-for-update", () => {
     setAppUpdateState({
@@ -616,12 +647,13 @@ function initAppUpdater() {
         provider: "generic",
         url: UPDATE_FEED_URL,
       });
-      console.log("[updater] Generic feed URL:", UPDATE_FEED_URL);
+      console.log(`[updater] Generic feed URL (${UPDATE_CHANNEL} channel):`, UPDATE_FEED_URL);
     } catch (err) {
       console.warn("[updater] setFeedURL failed:", err.message);
     }
     setAppUpdateState({
       mode,
+      channel: UPDATE_CHANNEL,
       status: "idle",
       checking: false,
       updateAvailable: false,
@@ -630,7 +662,9 @@ function initAppUpdater() {
       canDownload: false,
       canInstall: false,
       downloadUrl: "",
-      message: "Installer update channel ready.",
+      message: UPDATE_CHANNEL === "beta"
+        ? "Installer update channel ready (BETA)."
+        : "Installer update channel ready.",
       error: "",
     }, false);
     return;
@@ -835,6 +869,14 @@ function getUpdateErrorMessage(err) {
   const lower = raw.toLowerCase();
   const has404 = lower.includes(" 404") || lower.includes("http 404") || lower.includes("status code 404");
   const feedBlocked = lower.includes("releases.atom") || lower.includes("latest.yml") || lower.includes("/releases/latest/download");
+  // Signature / publisher mismatch — usually means the gateway is missing the
+  // root cert, or the publisher in the new build doesn't match the installed app's expectation.
+  if (lower.includes("err_updater_invalid_signature") || lower.includes("not signed by the application owner")) {
+    return "Code signature verification failed. The new build's publisher does not match the installed version. Check that the gateway has the codesign root certificate installed.";
+  }
+  if (lower.includes("certificate") && (lower.includes("invalid") || lower.includes("untrusted") || lower.includes("not trusted"))) {
+    return "Update certificate is not trusted on this machine. Install the codesign root certificate to Trusted Root Certification Authorities and try again.";
+  }
   if (has404 && feedBlocked) {
     return "Update feed returned 404. Ensure the release channel is reachable and has published assets.";
   }
@@ -1078,14 +1120,15 @@ function finalizeAppShutdown() {
   allowMainWindowClose = true;
   const action = normalizeAppShutdownAction(appShutdownFinalAction);
   if (action.type === "install") {
-    try {
-      autoUpdater.quitAndInstall(false, true);
-      return;
-    } catch (err) {
-      console.error("[main] quitAndInstall failed:", err.message);
+    // SAFETY GUARD: Confirm Python services are fully stopped before launching
+    // the installer. The installer will overwrite dist/ForecastCoreService.exe
+    // and dist/InverterCoreService.exe — if either subprocess still holds the
+    // file handle, the install will fail and leave the app in a broken state.
+    finalizeInstallShutdown().catch((err) => {
+      console.error("[main] Install shutdown sequence failed:", err?.message || err);
       app.exit(1);
-      return;
-    }
+    });
+    return;
   }
   if (action.type === "relaunch") {
     app.relaunch();
@@ -1097,6 +1140,82 @@ function finalizeAppShutdown() {
     return;
   }
   app.quit();
+}
+
+// Polls for a process to actually exit. Returns true if the process is gone
+// within timeoutMs, false otherwise. Used during install shutdown to ensure
+// Python service file handles are released before the installer overwrites
+// dist/*.exe.
+function waitForProcessGone(proc, label, timeoutMs = 3000, pollMs = 200) {
+  return new Promise((resolve) => {
+    if (!proc || proc.killed || proc.exitCode !== null) {
+      resolve(true);
+      return;
+    }
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (!proc || proc.killed || proc.exitCode !== null) {
+        clearInterval(timer);
+        resolve(true);
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        clearInterval(timer);
+        console.warn(`[main] ${label} still running after ${timeoutMs}ms wait`);
+        resolve(false);
+      }
+    }, pollMs);
+  });
+}
+
+async function finalizeInstallShutdown() {
+  const lingering = [];
+  if (backendProc && !backendProc.killed) lingering.push("backend");
+  if (forecastProc && !forecastProc.killed) lingering.push("forecast");
+
+  if (lingering.length) {
+    console.warn(
+      "[main] Lingering Python services before install:",
+      lingering.join(", "),
+      "- forcing kill before quitAndInstall",
+    );
+    if (backendProc && !backendProc.killed) {
+      try { forceKillProc(backendProc, "backend"); } catch (_) {}
+    }
+    if (forecastProc && !forecastProc.killed) {
+      try { forceKillProc(forecastProc, "forecast"); } catch (_) {}
+    }
+
+    // Wait until the OS confirms the processes have actually exited.
+    // taskkill is async — its callback fires before the kernel finishes
+    // releasing handles. We poll until the child reports exitCode/killed.
+    const waits = [];
+    if (backendProc) waits.push(waitForProcessGone(backendProc, "backend", 4000));
+    if (forecastProc) waits.push(waitForProcessGone(forecastProc, "forecast", 4000));
+    const results = await Promise.all(waits);
+    const allGone = results.every(Boolean);
+    if (!allGone) {
+      console.warn("[main] Some Python services did not confirm exit; install may fail");
+    }
+  }
+
+  // Additional grace period for the OS to fully release file handles
+  // (NTFS handle release can lag a few hundred ms after process exit).
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  try {
+    console.log("[main] Launching quitAndInstall now");
+    autoUpdater.quitAndInstall(false, true);
+  } catch (err) {
+    console.error("[main] quitAndInstall failed:", err.message);
+    setAppUpdateState({
+      status: "error",
+      message: `Install failed: ${err.message}`,
+      error: String(err.message || "Install failed"),
+      canInstall: false,
+    });
+    app.exit(1);
+  }
 }
 
 function requestAppShutdown(options = {}) {

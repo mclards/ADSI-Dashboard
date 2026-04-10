@@ -2373,6 +2373,7 @@
         <div class="update-modal-icon" aria-hidden="true"><span class="mdi mdi-download-circle-outline"></span></div>
         <div class="confirm-dialog-header update-modal-header">
           <span id="updateModalTitle" class="confirm-dialog-title">Update Available</span>
+          <span id="updateModalChannelBadge" class="update-channel-badge hidden">BETA</span>
         </div>
         <div class="confirm-dialog-body update-modal-body">
           <p>A new version of ADSI Inverter Dashboard is available.</p>
@@ -2383,10 +2384,31 @@
             <span class="update-ver-label">Latest</span>
             <span class="update-ver-value update-ver-new" id="updateModalLatest">—</span>
           </div>
+          <p class="update-modal-rollback">
+            <a id="updateModalReleasesLink" href="#" target="_blank" rel="noopener">View all releases &amp; previous versions</a>
+          </p>
         </div>
         <div class="confirm-dialog-actions">
           <button id="updateModalSkip" class="btn btn-outline confirm-btn">Later</button>
           <button id="updateModalDownload" class="btn btn-accent confirm-btn"><span class="mdi mdi-download"></span> Download</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="updateInstallConfirmModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="updateInstallConfirmTitle">
+      <div class="confirm-dialog update-modal">
+        <button id="updateInstallConfirmClose" class="update-modal-close" type="button" aria-label="Close">&times;</button>
+        <div class="update-modal-icon" aria-hidden="true"><span class="mdi mdi-restart"></span></div>
+        <div class="confirm-dialog-header update-modal-header">
+          <span id="updateInstallConfirmTitle" class="confirm-dialog-title">Restart &amp; Install Update?</span>
+        </div>
+        <div class="confirm-dialog-body update-modal-body">
+          <p>This will close the dashboard and the inverter monitoring services for about 60 seconds while the new version installs.</p>
+          <p><strong>The dashboard will not be monitoring inverters during this time.</strong> Make sure no critical operations are in progress.</p>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button id="updateInstallConfirmCancel" class="btn btn-outline confirm-btn">Cancel</button>
+          <button id="updateInstallConfirmProceed" class="btn btn-accent confirm-btn"><span class="mdi mdi-restart"></span> Restart &amp; Install</button>
         </div>
       </div>
     </div>

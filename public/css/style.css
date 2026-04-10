@@ -8541,6 +8541,40 @@ select.cam-field-input { appearance: auto; }
   border-top: none;
 }
 
+.update-channel-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.update-channel-badge.hidden {
+  display: none;
+}
+
+.update-modal-rollback {
+  margin-top: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text3);
+}
+
+.update-modal-rollback a {
+  color: var(--text2);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.update-modal-rollback a:hover {
+  color: var(--accent);
+}
+
 .mode-transition-overlay {
   position: fixed;
   inset: 0;

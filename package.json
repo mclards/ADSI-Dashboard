@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.7.17",
+  "version": "2.7.18",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -12,7 +12,10 @@
     "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
     "build:win": "electron-builder --win nsis --x64",
-    "build:installer": "electron-builder --win nsis --x64"
+    "build:installer": "electron-builder --win nsis --x64",
+    "build:installer:signed": "node scripts/build-installer-signed.js",
+    "codesign:generate": "powershell -ExecutionPolicy Bypass -File scripts/generate-codesign-cert.ps1",
+    "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1012.0",
@@ -75,6 +78,13 @@
     "win": {
       "icon": "icon-256.png",
       "requestedExecutionLevel": "requireAdministrator",
+      "signingHashAlgorithms": ["sha256"],
+      "signAndEditExecutable": true,
+      "rfc3161TimeStampServer": "http://timestamp.sectigo.com",
+      "timeStampServer": "http://timestamp.sectigo.com",
+      "publisherName": [
+        "Engr. Clariden D. Montaño REE"
+      ],
       "target": [
         {
           "target": "nsis",
