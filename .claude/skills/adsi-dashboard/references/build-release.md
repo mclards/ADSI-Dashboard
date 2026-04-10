@@ -4,10 +4,44 @@
 
 ```powershell
 npm run rebuild:native:electron   # rebuild better-sqlite3 for Electron ABI
-npm run build:installer           # build NSIS installer only
+npm run build:installer           # build signed NSIS installer (runs 3 safety gates)
 ```
 
-`npm run build:win` and `npm run build:installer` are equivalent — both installer-only. Neither rebuilds Python service EXEs.
+`npm run build:win`, `npm run build:installer`, and `npm run build:installer:signed` are **all aliases** for `node scripts/build-installer-signed.js`. There is no longer an unsigned direct-to-electron-builder path. All three enforce the same signing gates.
+
+Neither rebuilds Python service EXEs — do that first with `pyinstaller` if the Python code changed.
+
+## Signed Build Gates
+
+Every installer build runs through `scripts/build-installer-signed.js` and applies three gates in order:
+
+1. **Gate 1 — signing required.** The wrapper reads `build/private/codesign.env` and validates `CSC_LINK` + `CSC_KEY_PASSWORD` + PFX file exist. If any are missing, the build fails in under 2 seconds before electron-builder starts. Dev escape hatch: `ADSI_ALLOW_UNSIGNED=1 npm run build:installer` (never use this for releases — auto-update will break for existing signed installs).
+
+2. **Gate 2 — post-build signature verification.** After electron-builder finishes, the wrapper invokes `scripts/verify-signed-installer.ps1` via PowerShell to:
+   - Confirm the file was actually signed (electron-builder can silently skip signing on timestamp-server errors)
+   - Pin the signing thumbprint against `build/private/codesign-thumbprint.txt`
+   - Reject statuses `NotSigned`, `HashMismatch`, `NotSupportedFileFormat`, `Incompatible`
+   - Accept `Valid`, `NotTrusted`, `UnknownError` (CI hosts without the self-signed root installed)
+
+3. **Gate 3 — size floor + SHA-512 log.** 300 MB minimum size (historical builds are ~500-620 MB; a broken build missing Python services would be <100 MB). SHA-512 computed via streaming and logged as base64 — matches what electron-updater expects in `latest.yml`.
+
+**Pre-flight check before running any release build:**
+```powershell
+Test-Path build\private\codesign.env           # must be True
+Test-Path build\private\codesign.pfx           # must be True
+Test-Path build\private\codesign-thumbprint.txt # should be True
+```
+
+**Gate failure handling — never blindly retry:**
+
+| Output | Meaning | Fix |
+|---|---|---|
+| `FATAL: code signing is required` | Gate 1 — env file missing | Restore from password manager |
+| `FATAL: signature verification FAILED` | Gate 2 — electron-builder silently skipped signing | Check timestamp server, cert expiry, signtool.exe |
+| `FATAL: THUMBPRINT MISMATCH` | Gate 2 — wrong PFX or stale thumbprint file | Do NOT ship |
+| `FATAL: installer is only X MB, below 300 MB floor` | Gate 3 — Python service EXEs missing | Rebuild with `pyinstaller` first |
+
+A successful build always ends with `[build-installer-signed] Build OK — ready for upload` — verify this line before moving to the publish step.
 
 ## `better-sqlite3` ABI Rules
 

@@ -13461,6 +13461,15 @@ body.mode-transition-active {
   text-overflow: ellipsis;
 }
 
+.fperf-hchip-subline {
+  font-size: 9px;
+  font-weight: var(--fw-regular);
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .fperf-hchip.chip-ok .fperf-hchip-val {
   color: var(--green);
 }

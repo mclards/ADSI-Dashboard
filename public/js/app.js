@@ -287,6 +287,7 @@ const State = {
     qaRows: [],
     health: null,
     collapsed: false,
+    pollInterval: null,
   },
 };
 const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re-fetch after that
@@ -4514,6 +4515,13 @@ function mountForecastPerfPanel() {
         <span class="fperf-hchip-label">Est. Actual Recovery</span>
         <span class="fperf-hchip-val" id="fperfChipEstReconVal">—</span>
       </div>
+      <div class="fperf-hchip" id="fperfChipErrorMemory">
+        <span class="fperf-hchip-label">Error Memory</span>
+        <span class="fperf-hchip-val" id="fperfChipErrorMemoryVal">—</span>
+        <span class="fperf-hchip-subline" id="fperfChipErrorMemorySub1">—</span>
+        <span class="fperf-hchip-subline" id="fperfChipErrorMemorySub2">—</span>
+        <span class="fperf-hchip-subline" id="fperfChipErrorMemorySub3">—</span>
+      </div>
     </div>
     <div class="fperf-charts-row">
       <div class="fperf-chart-panel">
@@ -4562,10 +4570,24 @@ function mountForecastPerfPanel() {
   scrollWrap.insertBefore(wrap.firstElementChild, host);
   State.fperf.mounted = true;
 
-  // Load collapsed state from localStorage; default is collapsed (hidden until user expands)
+  // Load collapsed state from localStorage; default is expanded (false) on first load
   const savedCollapsed = localStorage.getItem("fperfCollapsed");
-  State.fperf.collapsed = savedCollapsed === null ? true : savedCollapsed === "true";
+  State.fperf.collapsed = savedCollapsed === null ? false : savedCollapsed === "true";
   applyFperfCollapsedState();
+
+  // If not collapsed on first load, start polling for updates
+  if (!State.fperf.collapsed) {
+    startFperfPollInterval();
+  }
+
+  // Listen for visibility changes to pause/resume polling
+  document.addEventListener("visibilitychange", () => {
+    if (State.fperf.collapsed || document.visibilityState === "hidden") {
+      clearFperfPollInterval();
+    } else if (!State.fperf.collapsed && document.visibilityState === "visible") {
+      startFperfPollInterval();
+    }
+  });
 
   $("btnRefreshFperf").addEventListener("click", () => loadForecastPerfData());
   $("btnBackfillQa").addEventListener("click", async () => {
@@ -4604,6 +4626,32 @@ function toggleFperfPanel() {
       renderForecastPerfCharts(State.fperf.qaRows);
     }, 200); // wait for CSS max-height transition (0.15s)
   }
+  // Manage auto-refresh polling based on collapsed state
+  if (State.fperf.collapsed) {
+    clearFperfPollInterval();
+  } else {
+    startFperfPollInterval();
+  }
+}
+
+function clearFperfPollInterval() {
+  if (State.fperf.pollInterval) {
+    clearInterval(State.fperf.pollInterval);
+    State.fperf.pollInterval = null;
+  }
+}
+
+function startFperfPollInterval() {
+  clearFperfPollInterval();
+  // Only poll if visible (not hidden by document.visibilityState)
+  const shouldPoll = () => {
+    return !State.fperf.collapsed && document.visibilityState === "visible";
+  };
+  State.fperf.pollInterval = setInterval(() => {
+    if (shouldPoll()) {
+      loadForecastPerfData().catch(() => {});
+    }
+  }, 60000); // 60 second interval
 }
 
 function applyFperfCollapsedState() {
@@ -4657,6 +4705,20 @@ async function loadForecastPerfData() {
     renderForecastPerfHealth(healthRes);
     renderForecastPerfCharts(State.fperf.qaRows);
     renderForecastPerfTable(State.fperf.qaRows);
+
+    // Force expand panel if errorMemory degradation is detected (one-shot per session)
+    if (healthRes && State.fperf.collapsed) {
+      const em = healthRes.errorMemory;
+      const flags = healthRes.dataQualityFlags || [];
+      const hasMemoryDegradation = (em && em.fallback_to_legacy) ||
+                                    flags.includes("error_memory_sparse_regime") ||
+                                    flags.includes("error_memory_stale");
+      if (hasMemoryDegradation) {
+        State.fperf.collapsed = false;
+        applyFperfCollapsedState();
+        startFperfPollInterval();
+      }
+    }
   } catch (e) {
     if (msg) msg.textContent = `Load failed: ${e.message}`;
   } finally {
@@ -4671,7 +4733,7 @@ function renderForecastPerfHealth(health) {
     const chipIds = [
       "fperfChipTrain", "fperfChipLastRun", "fperfChipProvider", "fperfChipQuality",
       "fperfChipAvgWape", "fperfChipMlBackend", "fperfChipTrainData", "fperfChipDataQual",
-      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias", "fperfChipSolcastBase", "fperfChipEstRecon",
+      "fperfChipSolcastAge", "fperfChipWeatherSrc", "fperfChipBias", "fperfChipSolcastBase", "fperfChipEstRecon", "fperfChipErrorMemory",
     ];
     chipIds.forEach((id) => {
       const chip = $(id);
@@ -4856,6 +4918,8 @@ function renderForecastPerfHealth(health) {
       est_actual_reconstruction_active: "Outage slots reconstructed with Solcast est. actuals",
       solcast_snapshot_missing: "No Solcast snapshot for tomorrow",
       solcast_triband_missing: "Solcast tri-band (P10/P90) data missing",
+      error_memory_sparse_regime: "Sparse regime memory",
+      error_memory_stale: "Stale error memory",
     };
     qualDataVal.textContent = text;
     if (qualDataChip) {
@@ -4979,6 +5043,84 @@ function renderForecastPerfHealth(health) {
     } else {
       erVal.textContent = "None";
       if (erChip) { erChip.className = "fperf-hchip chip-ok"; erChip.title = "No outage reconstruction needed in current training window"; }
+    }
+  }
+
+  // Error Memory chip
+  const emChip = $("fperfChipErrorMemory");
+  const emVal = $("fperfChipErrorMemoryVal");
+  const emSub1 = $("fperfChipErrorMemorySub1");
+  const emSub2 = $("fperfChipErrorMemorySub2");
+  const emSub3 = $("fperfChipErrorMemorySub3");
+  if (emVal) {
+    const em = health.errorMemory;
+    if (em) {
+      // Primary value: applied_bias_total_kwh
+      const bias = em.applied_bias_total_kwh;
+      const biasStr = bias != null
+        ? `${bias >= 0 ? "+" : ""}${bias.toFixed(1)} kWh`
+        : "—";
+      emVal.textContent = biasStr;
+
+      // Subline 1: regime + lookback
+      const regime = em.regime_used && em.regime_used.trim() ? em.regime_used : "";
+      const lookback = em.lookback_days_used != null ? `${em.lookback_days_used}d lookback` : "—";
+      emSub1.textContent = regime ? `${regime} · ${lookback}` : lookback;
+
+      // Subline 2: coverage
+      const selected = em.selected_days != null ? em.selected_days : "?";
+      const total = em.lookback_days_used != null ? em.lookback_days_used : "?";
+      const eligible = em.eligible_row_count != null ? em.eligible_row_count : "?";
+      emSub2.textContent = `${selected}/${total} days · ${eligible} eligible`;
+
+      // Subline 3: freshness
+      let freshnessText = "last: —";
+      if (em.last_eligible_date) {
+        const lastDate = new Date(em.last_eligible_date);
+        const today = new Date();
+        const daysAgo = Math.floor((today - lastDate) / (1000 * 60 * 60 * 24));
+        freshnessText = `last: ${em.last_eligible_date} (${daysAgo}d ago)`;
+      }
+      emSub3.textContent = freshnessText;
+
+      // Color and warning indicator
+      let colorClass = "chip-ok";
+      let warningTooltip = "";
+
+      if (em.fallback_to_legacy) {
+        colorClass = "chip-warn";
+        const _fallbackLabels = {
+          no_eligible_rows: "Fallback: no_eligible_rows",
+          sparse_regime_data: "Fallback: sparse_regime_data",
+          exception: "Fallback: exception",
+        };
+        warningTooltip = _fallbackLabels[em.fallback_reason] || `Fallback: ${em.fallback_reason || "unknown"}`;
+      }
+
+      if (bias != null && bias < 0) {
+        colorClass = "chip-error";
+      } else if (bias != null && Math.abs(bias) <= 50) {
+        colorClass = "chip-ok";
+      } else if (bias != null && Math.abs(bias) <= 150) {
+        colorClass = "chip-warn";
+      } else if (bias != null && bias > 150) {
+        colorClass = "chip-error";
+      }
+
+      if (emChip) {
+        emChip.className = `fperf-hchip ${colorClass}`;
+        emChip.title = warningTooltip;
+      }
+    } else {
+      // No error memory data
+      emVal.textContent = "—";
+      emSub1.textContent = "—";
+      emSub2.textContent = "—";
+      emSub3.textContent = "—";
+      if (emChip) {
+        emChip.className = "fperf-hchip chip-disabled";
+        emChip.title = "";
+      }
     }
   }
 }
@@ -5167,10 +5309,34 @@ function renderForecastPerfTable(rows) {
   const tbody = $("fperfTableBody");
   if (!tbody) return;
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:16px;color:var(--text3)">No QA data available for this window.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:16px;color:var(--text3)">No QA data available for this window.</td></tr>`;
     return;
   }
   const sorted = [...rows].sort((a, b) => (a.target_date > b.target_date ? -1 : 1));
+
+  // Check if the three ML audit totals are present in the data
+  const hasMlTotals = sorted.length > 0 && (
+    sorted[0].ml_residual_total_kwh != null ||
+    sorted[0].error_class_total_kwh != null ||
+    sorted[0].bias_total_kwh != null
+  );
+
+  // Update table headers if needed
+  const thead = tbody.closest("table")?.querySelector("thead tr");
+  if (thead && hasMlTotals) {
+    // Check if ML headers are already present
+    const lastHeader = thead.querySelector("th:last-child");
+    if (lastHeader && lastHeader.textContent !== "Bias kWh") {
+      // Add the three new headers
+      const mlHeaders = `
+        <th class="td-num" title="ML Residual kWh">Residual kWh</th>
+        <th class="td-num" title="Error Class kWh">Err Class kWh</th>
+        <th class="td-num" title="Bias Total kWh">Bias kWh</th>
+      `;
+      lastHeader.insertAdjacentHTML("afterend", mlHeaders);
+    }
+  }
+
   const qBadge = (q) => {
     const cls = q === "eligible" || q === "good" || q === "excellent" ? "q-good"
       : q === "review" || q === "ok" ? "q-review"
@@ -5195,6 +5361,17 @@ function renderForecastPerfTable(rows) {
     const inMem = r.include_in_error_memory
       ? `<span class="fperf-mem-yes">✓</span>`
       : `<span class="fperf-mem-no">—</span>`;
+
+    let mlTotalsHtml = "";
+    if (hasMlTotals) {
+      const residual = r.ml_residual_total_kwh != null ? r.ml_residual_total_kwh.toFixed(1) : "—";
+      const errClass = r.error_class_total_kwh != null ? r.error_class_total_kwh.toFixed(1) : "—";
+      const bias = r.bias_total_kwh != null ? r.bias_total_kwh.toFixed(1) : "—";
+      mlTotalsHtml = `<td class="td-num" title="ML Residual">${residual}</td>
+        <td class="td-num" title="Error Class">${errClass}</td>
+        <td class="td-num" title="Bias Total">${bias}</td>`;
+    }
+
     return `<tr>
       <td class="td-date">${r.target_date}</td>
       <td>${prov}</td>
@@ -5205,6 +5382,7 @@ function renderForecastPerfTable(rows) {
       <td>${fresh}</td>
       <td>${qBadge(r.comparison_quality)}</td>
       <td style="text-align:center">${inMem}</td>
+      ${mlTotalsHtml}
     </tr>`;
   }).join("");
 }

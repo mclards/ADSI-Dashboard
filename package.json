@@ -1,6 +1,6 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.7.18",
+  "version": "2.7.19",
   "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
@@ -11,8 +11,8 @@
     "rebuild:native:node": "npm rebuild better-sqlite3",
     "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-builder --win nsis --x64",
-    "build:installer": "electron-builder --win nsis --x64",
+    "build:win": "node scripts/build-installer-signed.js",
+    "build:installer": "node scripts/build-installer-signed.js",
     "build:installer:signed": "node scripts/build-installer-signed.js",
     "codesign:generate": "powershell -ExecutionPolicy Bypass -File scripts/generate-codesign-cert.ps1",
     "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1"

@@ -15,8 +15,8 @@ For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `servi
 - **Package**: `inverter-dashboard`
 - **Updater app ID**: `com.engr-m.inverter-dashboard` — do not rename
 - **Version source of truth**: `package.json` — not footer strings
-- **Repo version baseline**: `2.7.17`
-- **Latest published release**: `v2.7.17`
+- **Repo version baseline**: `2.7.19`
+- **Latest published release**: `v2.7.19`
 - **GitHub release channel**: `mclards/ADSI-Dashboard`
 
 ---
@@ -123,9 +123,16 @@ New Python helpers:
 
 ```powershell
 npm run rebuild:native:electron
-npm run build:installer
-npm run rebuild:native:node   # before plain Node shell checks
+npm run build:installer         # signed build — enforces 3 safety gates
+npm run rebuild:native:node     # before plain Node shell checks
 ```
+
+**`build:installer` is signed by default** (v2.7.18+). All three of `build:win`, `build:installer`, and `build:installer:signed` route through `scripts/build-installer-signed.js` and enforce:
+1. Signing required — fails fast if `build/private/codesign.env` is missing, unless `ADSI_ALLOW_UNSIGNED=1` is set
+2. Post-build signature verification with thumbprint pin against `build/private/codesign-thumbprint.txt`
+3. Installer size floor (300 MB) + SHA-512 log
+
+A release build must succeed all three gates before publishing. For dev-only unsigned builds: `ADSI_ALLOW_UNSIGNED=1 npm run build:installer`. See `docs/CODE_SIGNING.md` for the full signing workflow.
 
 After any `rebuild:native:node` smoke test, always run `rebuild:native:electron` before launching Electron.
 

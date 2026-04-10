@@ -186,6 +186,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("adsi.dayahead")
 
+# Module-level cache for last error_memory metadata (written by compute_error_memory, read by run_dayahead)
+_LAST_ERROR_MEMORY_META: dict = {}
+
 # ============================================================================
 # SITE & PLANT CONSTANTS
 # ============================================================================
@@ -5082,6 +5085,16 @@ def load_intraday_adjusted(day: str) -> np.ndarray | None:
 # ============================================================================
 
 def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.ndarray:
+    """
+    Fallback error memory computation for sparse-regime scenarios.
+
+    Args:
+        today: Reference date
+        target_regime: Weather regime for lookback window expansion
+
+    Returns:
+        Weighted error memory array (SLOTS_DAY,)
+    """
     _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, ERR_MEMORY_DAYS)
     weight_vectors = []
     errors = []
@@ -5099,27 +5112,62 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
             if not err_col:
                 return np.zeros(SLOTS_DAY, dtype=float)
             provider_expr = "provider_used" if "provider_used" in cols else "'unknown'"
+            has_usable_col = "usable_for_error_memory" in cols
+
+            # Build query with optional usable_for_error_memory filter
             query = (
                 "SELECT target_date, slot, "
                 + provider_expr
                 + " AS provider_used, "
                 + err_col
-                + " AS error_val FROM forecast_error_compare_slot "
-                + "WHERE target_date >= ? AND target_date <= ?"
+                + " AS error_val"
             )
+            if has_usable_col:
+                query += ", usable_for_error_memory"
+            query += " FROM forecast_error_compare_slot WHERE target_date >= ? AND target_date <= ?"
+            if has_usable_col:
+                query += " AND usable_for_error_memory = 1"
+
             history: dict[str, dict[int, tuple[str, float]]] = {}
-            for row in conn.execute(query, (start_date, end_date)):
-                day_str = str(row[0] or "")
-                slot = int(row[1] or -1)
-                if slot < 0 or slot >= SLOTS_DAY:
-                    continue
-                err_val = row[3]
-                if err_val is None:
-                    continue
-                history.setdefault(day_str, {})[slot] = (
-                    str(row[2] or "unknown"),
-                    float(err_val),
-                )
+            try:
+                for row in conn.execute(query, (start_date, end_date)):
+                    day_str = str(row[0] or "")
+                    slot = int(row[1] or -1)
+                    if slot < 0 or slot >= SLOTS_DAY:
+                        continue
+                    err_val = row[3]
+                    if err_val is None:
+                        continue
+                    history.setdefault(day_str, {})[slot] = (
+                        str(row[2] or "unknown"),
+                        float(err_val),
+                    )
+            except sqlite3.OperationalError as oe:
+                if "usable_for_error_memory" in str(oe):
+                    # Schema-defensive fallback for very old databases
+                    log.info("error_memory_legacy: usable_for_error_memory column not present — unfiltered fallback")
+                    query_fallback = (
+                        "SELECT target_date, slot, "
+                        + provider_expr
+                        + " AS provider_used, "
+                        + err_col
+                        + " AS error_val FROM forecast_error_compare_slot "
+                        + "WHERE target_date >= ? AND target_date <= ?"
+                    )
+                    for row in conn.execute(query_fallback, (start_date, end_date)):
+                        day_str = str(row[0] or "")
+                        slot = int(row[1] or -1)
+                        if slot < 0 or slot >= SLOTS_DAY:
+                            continue
+                        err_val = row[3]
+                        if err_val is None:
+                            continue
+                        history.setdefault(day_str, {})[slot] = (
+                            str(row[2] or "unknown"),
+                            float(err_val),
+                        )
+                else:
+                    raise
 
         for d in range(1, _regime_days + 1):
             day = (today - timedelta(days=d)).isoformat()
@@ -5178,15 +5226,28 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     Fallback source:
       - legacy slot-only table reading.
 
+    Metadata is written to module-level _LAST_ERROR_MEMORY_META for caller inspection.
+
     Args:
         today: Target date for error memory
         w_today_5: DataFrame with weather data (not used in current implementation)
         target_regime: Target day's weather regime; historical days with mismatched regime are penalized
+
+    Returns:
+        Weighted error memory array (SLOTS_DAY,)
     """
+    global _LAST_ERROR_MEMORY_META
+
     del w_today_5  # explicit: current implementation uses persisted compare rows only.
     _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, ERR_MEMORY_DAYS)
     weight_vectors = []
     errors = []
+    all_daily_rows = []  # Track all rows for metadata
+    last_eligible_date = None
+    selected_days = 0
+    fallback_to_legacy = False
+    fallback_reason = None
+
     try:
         start_date = (today - timedelta(days=max(_regime_days * 4, 60))).isoformat()
         end_date = (today - timedelta(days=1)).isoformat()
@@ -5219,95 +5280,140 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
             ).fetchall()
 
             if not daily_rows:
-                return _compute_error_memory_legacy(today, target_regime)
-
-            selected_days = 0
-            for day_row in daily_rows:
-                day_s = str(day_row[0] or "")
-                if not day_s:
-                    continue
-                try:
-                    days_ago = (today - datetime.strptime(day_s, "%Y-%m-%d").date()).days
-                except Exception:
-                    continue
-                if days_ago < 1:
-                    continue
-
-                run_audit_id = int(day_row[1] or 0)
-                forecast_variant = str(day_row[2] or "")
-                provider_expected = str(day_row[3] or "")
-                notes_json_str = str(day_row[4] or "")
-                actual_src = str(day_row[5] or "estimated")
-                source_weight = _memory_source_weight(forecast_variant, provider_expected)
-                if source_weight <= 0:
-                    continue
-                # Apply actual-source weight: metered gets full weight, mixed gets mid-weight, estimated gets discount
-                if actual_src == "metered":
-                    source_weight = 1.0  # full trust for metered data
-                elif actual_src == "mixed":
-                    source_weight = min(source_weight, 0.95)  # mid-trust for mixed
-                # else: estimated gets the forecast-variant-based weight (already computed)
-
-                # Extract regime from notes_json for regime-aware weighting
-                hist_regime = ""
-                try:
-                    if notes_json_str:
-                        notes_dict = json.loads(notes_json_str)
-                        hist_regime = str(notes_dict.get("forecast_regime", ""))
-                except Exception:
-                    pass
-
-                # Graduated regime mismatch penalty: neighboring regimes (overcast<->rainy)
-                # share more error structure than distant regimes (clear<->rainy).
-                regime_factor = 1.0
-                if target_regime and hist_regime and target_regime != hist_regime:
-                    regime_factor = ERR_MEMORY_REGIME_PENALTY_MATRIX.get(
-                        (target_regime, hist_regime),
-                        ERR_MEMORY_REGIME_MISMATCH_PENALTY,  # flat fallback for unknown pairs
-                    )
-
-                # Trust the persisted usable_for_error_memory flag from QA comparison.
-                # It already accounts for est_actual reconstruction (constrained slots
-                # replaced with Solcast estimated actuals have their flags cleared).
-                err = np.zeros(SLOTS_DAY, dtype=float)
-                weight_vec = np.zeros(SLOTS_DAY, dtype=float)
-
-                for slot_row in conn.execute(
-                    """
-                    SELECT slot, signed_error_kwh, support_weight, usable_for_error_memory
-                      FROM forecast_error_compare_slot
-                     WHERE target_date = ? AND run_audit_id = ?
-                    """,
-                    (day_s, run_audit_id),
-                ):
-                    slot = int(slot_row[0] or -1)
-                    if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
+                # No eligible rows found at all
+                fallback_to_legacy = True
+                fallback_reason = "no_eligible_rows"
+                log.info("Error memory: no eligible rows in daily table, using legacy fallback")
+            else:
+                all_daily_rows = list(daily_rows)
+                for day_row in daily_rows:
+                    day_s = str(day_row[0] or "")
+                    if not day_s:
                         continue
-                    if int(slot_row[3] or 0) != 1:
+                    try:
+                        days_ago = (today - datetime.strptime(day_s, "%Y-%m-%d").date()).days
+                    except Exception:
                         continue
-                    signed_err = slot_row[1]
-                    if signed_err is None:
+                    if days_ago < 1:
                         continue
-                    support_weight = float(slot_row[2] or 1.0)
-                    support_weight = float(np.clip(support_weight, 0.0, 1.0))
-                    base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
-                    weight_vec[slot] = base_w * source_weight * support_weight * regime_factor
-                    err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
 
-                if np.sum(weight_vec) <= 0:
-                    continue
-                errors.append(err)
-                weight_vectors.append(weight_vec)
-                selected_days += 1
-                if selected_days >= _regime_days:
-                    break
+                    run_audit_id = int(day_row[1] or 0)
+                    forecast_variant = str(day_row[2] or "")
+                    provider_expected = str(day_row[3] or "")
+                    notes_json_str = str(day_row[4] or "")
+                    actual_src = str(day_row[5] or "estimated")
+                    source_weight = _memory_source_weight(forecast_variant, provider_expected)
+                    if source_weight <= 0:
+                        continue
+                    # Apply actual-source weight: metered gets full weight, mixed gets mid-weight, estimated gets discount
+                    if actual_src == "metered":
+                        source_weight = 1.0  # full trust for metered data
+                    elif actual_src == "mixed":
+                        source_weight = min(source_weight, 0.95)  # mid-trust for mixed
+                    # else: estimated gets the forecast-variant-based weight (already computed)
+
+                    # Extract regime from notes_json for regime-aware weighting
+                    hist_regime = ""
+                    try:
+                        if notes_json_str:
+                            notes_dict = json.loads(notes_json_str)
+                            hist_regime = str(notes_dict.get("forecast_regime", ""))
+                    except Exception:
+                        pass
+
+                    # Graduated regime mismatch penalty: neighboring regimes (overcast<->rainy)
+                    # share more error structure than distant regimes (clear<->rainy).
+                    regime_factor = 1.0
+                    if target_regime and hist_regime and target_regime != hist_regime:
+                        regime_factor = ERR_MEMORY_REGIME_PENALTY_MATRIX.get(
+                            (target_regime, hist_regime),
+                            ERR_MEMORY_REGIME_MISMATCH_PENALTY,  # flat fallback for unknown pairs
+                        )
+
+                    # Trust the persisted usable_for_error_memory flag from QA comparison.
+                    # It already accounts for est_actual reconstruction (constrained slots
+                    # replaced with Solcast estimated actuals have their flags cleared).
+                    err = np.zeros(SLOTS_DAY, dtype=float)
+                    weight_vec = np.zeros(SLOTS_DAY, dtype=float)
+
+                    for slot_row in conn.execute(
+                        """
+                        SELECT slot, signed_error_kwh, support_weight, usable_for_error_memory
+                          FROM forecast_error_compare_slot
+                         WHERE target_date = ? AND run_audit_id = ?
+                        """,
+                        (day_s, run_audit_id),
+                    ):
+                        slot = int(slot_row[0] or -1)
+                        if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
+                            continue
+                        if int(slot_row[3] or 0) != 1:
+                            continue
+                        signed_err = slot_row[1]
+                        if signed_err is None:
+                            continue
+                        support_weight = float(slot_row[2] or 1.0)
+                        support_weight = float(np.clip(support_weight, 0.0, 1.0))
+                        base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
+                        weight_vec[slot] = base_w * source_weight * support_weight * regime_factor
+                        err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
+
+                    if np.sum(weight_vec) <= 0:
+                        continue
+                    errors.append(err)
+                    weight_vectors.append(weight_vec)
+                    selected_days += 1
+                    if last_eligible_date is None:
+                        last_eligible_date = day_s
+                    if selected_days >= _regime_days:
+                        break
+
+                # Check if we accumulated enough data; if not, fallback
+                if selected_days < max(_regime_days // 2, 3):
+                    fallback_to_legacy = True
+                    fallback_reason = "sparse_regime_data"
+                    log.info("Error memory: only %d selected days (target=%d), using legacy fallback", selected_days, _regime_days)
 
     except Exception as e:
         log.warning("Failed to compute persisted error memory: %s", e)
-        return _compute_error_memory_legacy(today, target_regime)
+        fallback_to_legacy = True
+        fallback_reason = "exception"
+        errors = []
+        weight_vectors = []
+        selected_days = 0
+
+    # Fallback to legacy if necessary
+    if fallback_to_legacy and fallback_reason:
+        mem_err = _compute_error_memory_legacy(today, target_regime)
+        # Compute applied bias for fallback case
+        bias_applied = float((ERROR_ALPHA * mem_err).sum())
+        _LAST_ERROR_MEMORY_META = {
+            "last_eligible_date": last_eligible_date,
+            "eligible_row_count": len(all_daily_rows),
+            "selected_days": 0,
+            "lookback_days_used": _regime_days,
+            "regime_used": target_regime or "",
+            "fallback_to_legacy": True,
+            "fallback_reason": fallback_reason,
+            "applied_bias_total_kwh": bias_applied,
+        }
+        return mem_err
 
     if not errors:
-        return _compute_error_memory_legacy(today, target_regime)
+        # Should not reach here if fallback_to_legacy is set, but handle it
+        mem_err = _compute_error_memory_legacy(today, target_regime)
+        bias_applied = float((ERROR_ALPHA * mem_err).sum())
+        _LAST_ERROR_MEMORY_META = {
+            "last_eligible_date": last_eligible_date,
+            "eligible_row_count": len(all_daily_rows),
+            "selected_days": 0,
+            "lookback_days_used": _regime_days,
+            "regime_used": target_regime or "",
+            "fallback_to_legacy": True,
+            "fallback_reason": "no_eligible_rows" if not fallback_reason else fallback_reason,
+            "applied_bias_total_kwh": float((ERROR_ALPHA * mem_err).sum()),
+        }
+        return mem_err
 
     weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
     weight_sum = np.sum(np.stack(weight_vectors), axis=0)
@@ -5354,6 +5460,21 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     # Persistent bias > ±100 kWh/slot suggests a model or hardware issue, not
     # something error memory should silently absorb.
     mem_err = np.clip(mem_err, -100.0, 100.0)
+
+    # Compute applied bias from the final mem_err
+    bias_applied = float((ERROR_ALPHA * mem_err).sum())
+
+    # Store metadata for later retrieval
+    _LAST_ERROR_MEMORY_META = {
+        "last_eligible_date": last_eligible_date,
+        "eligible_row_count": len(all_daily_rows),
+        "selected_days": selected_days,
+        "lookback_days_used": _regime_days,
+        "regime_used": target_regime or "",
+        "fallback_to_legacy": False,
+        "fallback_reason": None,
+        "applied_bias_total_kwh": bias_applied,
+    }
     return mem_err
 
 
@@ -6680,7 +6801,8 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
     Returns:
         list: May include 'insufficient_training_days', 'high_rejection_streak',
               'no_regime_data', 'lgbm_unavailable_fallback',
-              'outage_days_detected'. May be empty (healthy).
+              'outage_days_detected', 'error_memory_sparse_regime',
+              'error_memory_stale'. May be empty (healthy).
     """
     warnings = []
 
@@ -6694,6 +6816,30 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
         train_state = _load_json(ML_TRAIN_STATE_FILE)
         if int(train_state.get("consecutive_train_rejection_count", 0)) >= 3:
             warnings.append("high_rejection_streak")
+
+        # Check for error_memory state warnings
+        error_memory_block = train_state.get("error_memory", {})
+        if error_memory_block:
+            # Check for sparse regime fallback
+            if bool(error_memory_block.get("fallback_to_legacy")):
+                fallback_reason = str(error_memory_block.get("fallback_reason", ""))
+                if fallback_reason == "sparse_regime_data":
+                    warnings.append("error_memory_sparse_regime")
+
+            # Check for stale error memory (last eligible date > 30 days old)
+            last_eligible_str = error_memory_block.get("last_eligible_date")
+            if last_eligible_str:
+                try:
+                    last_eligible_date = datetime.strptime(str(last_eligible_str), "%Y-%m-%d").date()
+                    days_old = (date.today() - last_eligible_date).days
+                    if days_old > 30:
+                        warnings.append("error_memory_stale")
+                except Exception:
+                    pass
+            elif error_memory_block.get("eligible_row_count", 0) == 0:
+                # No eligible rows found at all
+                warnings.append("error_memory_stale")
+
     except Exception:
         pass
 
@@ -9702,6 +9848,8 @@ def run_dayahead(
 
     # 4. Error memory bias correction
     err_mem = compute_error_memory(today, w5, target_regime=target_regime)
+    # Capture error_memory metadata from module-level cache
+    error_memory_meta = _LAST_ERROR_MEMORY_META.copy() if _LAST_ERROR_MEMORY_META else {}
     bias_correction = ERROR_ALPHA * err_mem
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0
@@ -10042,9 +10190,11 @@ def run_dayahead(
             "solcast_hi_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()),  # PHASE 4: NEW
             "baseline_is_solcast_mid": True,  # PHASE 4: NEW - flag new architecture
             "forecast_total_kwh": float(forecast.sum()),
+            "ml_residual_total_kwh": float(ml_residual.sum()),
             "ml_total_kwh": float(ml_residual.sum()),
             "error_class_total_kwh": float(error_class_term.sum()),
             "bias_total_kwh": float(bias_correction.sum()),
+            "error_memory_meta": error_memory_meta,
             "error_class_meta": error_class_summary,
             "anen_ratio": _anen_ratio,
             "anen_analog_count": len(_anen_analogs),
@@ -10069,6 +10219,16 @@ def run_dayahead(
         if _band_violations > 0:
             log.warning("Confidence band ordering violated in %d slots (lo > hi) - clamping", _band_violations)
             hi = np.maximum(lo, hi)
+
+    # Persist error_memory metadata to ml_train_state.json
+    try:
+        _train_state = _load_json(ML_TRAIN_STATE_FILE)
+        if _train_state is None:
+            _train_state = {}
+        _train_state["error_memory"] = error_memory_meta
+        _save_json(ML_TRAIN_STATE_FILE, _train_state)
+    except Exception as e:
+        log.warning("Failed to persist error_memory metadata to ml_train_state.json: %s", e)
 
     # 8. Write
     ok = write_forecast("PacEnergy_DayAhead", target_s, series)
@@ -10140,6 +10300,7 @@ def run_dayahead(
             "ml_model_routing": _mlr,
             "forecast_lo_total_kwh": _lo_total,
             "forecast_hi_total_kwh": _hi_total,
+            "error_memory": error_memory_meta,
             # data_warnings is the authoritative source in ml_train_state.json; not duplicated here
         }
         # FIX-09: Tag fallback reason when Node delegation failed

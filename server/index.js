@@ -9831,6 +9831,10 @@ async function runDayAheadGenerationPlan({
   const freshnessByDate = {};
   const totalsByDate = {};
 
+  // Extract per-run Python results from generation object (new in v2.5.1)
+  // Contains: ml_residual_total_kwh, error_class_total_kwh, bias_total_kwh, error_memory_meta per date
+  const pythonResultsByDate = generation.pythonResultsByDate || {};
+
   for (const day of normalizedDates) {
     const snapshotStats = getSolcastSnapshotStatsForDay(day);
     const freshness = classifySolcastFreshnessForDay(day, {
@@ -9858,7 +9862,33 @@ async function runDayAheadGenerationPlan({
     totalsByDate[day] = Number(dayTotalKwh.toFixed(3));
 
     const previousAuthoritative = stmts.getLatestAuthoritativeForecastRunAuditForDate.get(day) || null;
+
+    // Read error memory totals from per-run Python result (v2.5.1+)
+    // Python returns: ml_residual_total_kwh, error_class_total_kwh, bias_total_kwh, error_memory_meta
+    // Safely coerce to NULL if missing or NaN
+    const pythonResult = pythonResultsByDate[day] || {};
+    const mlResidualKwh = pythonResult?.ml_residual_total_kwh != null && !Number.isNaN(pythonResult.ml_residual_total_kwh)
+      ? Number(pythonResult.ml_residual_total_kwh)
+      : null;
+    const errorClassKwh = pythonResult?.error_class_total_kwh != null && !Number.isNaN(pythonResult.error_class_total_kwh)
+      ? Number(pythonResult.error_class_total_kwh)
+      : null;
+    const biasKwh = pythonResult?.bias_total_kwh != null && !Number.isNaN(pythonResult.bias_total_kwh)
+      ? Number(pythonResult.bias_total_kwh)
+      : null;
+
     try {
+      const notesObj = {
+        attempts,
+        replaceExisting: Boolean(replaceExisting),
+        snapshotRows: Number(snapshotStats?.solarRows || 0),
+        snapshotFilledRows: Number(snapshotStats?.filledRows || 0),
+      };
+      const errorMemoryMeta = pythonResult?.error_memory_meta || null;
+      if (errorMemoryMeta) {
+        notesObj.error_memory = errorMemoryMeta;
+      }
+
       const inserted = stmts.insertForecastRunAudit.run({
         target_date: day,
         generated_ts: Date.now(),
@@ -9896,9 +9926,9 @@ async function runDayAheadGenerationPlan({
         physics_total_kwh: null,
         hybrid_total_kwh: null,
         final_forecast_total_kwh: Number(dayTotalKwh.toFixed(3)),
-        ml_residual_total_kwh: null,
-        error_class_total_kwh: null,
-        bias_total_kwh: null,
+        ml_residual_total_kwh: mlResidualKwh,
+        error_class_total_kwh: errorClassKwh,
+        bias_total_kwh: biasKwh,
         shape_skipped_for_solcast: 0,
         run_status: "success",
         solcast_freshness_class: freshness,
@@ -9909,12 +9939,7 @@ async function runDayAheadGenerationPlan({
         solcast_lo_total_kwh: null,
         solcast_hi_total_kwh: null,
         baseline_is_solcast_mid: providerUsed === "solcast" ? 1 : 0,
-        notes_json: JSON.stringify({
-          attempts,
-          replaceExisting: Boolean(replaceExisting),
-          snapshotRows: Number(snapshotStats?.solarRows || 0),
-          snapshotFilledRows: Number(snapshotStats?.filledRows || 0),
-        }),
+        notes_json: JSON.stringify(notesObj),
       });
       const newRunId = Number(inserted?.lastInsertRowid || 0);
       const previousId = Number(previousAuthoritative?.id || 0);
@@ -10137,6 +10162,9 @@ async function generateDayAheadWithMl(dates) {
     return day === addDaysIso(targetDates[idx - 1], 1);
   });
 
+  // Track per-run Python results (with totals and error_memory_meta)
+  const pythonResultsByDate = {};
+
   const runAndAssert = async (args) => {
     const result = await runForecastGenerator(args);
     const exitCode = Number(result?.code ?? -1);
@@ -10153,6 +10181,15 @@ async function generateDayAheadWithMl(dates) {
   if (targetDates.length === 1) {
     const result = await runAndAssert(["--generate-date", targetDates[0]]);
     durationMs += Number(result?.durationMs || 0);
+    // Parse Python stdout to extract per-run result (v2.5.1+)
+    try {
+      const pythonResult = JSON.parse(String(result?.stdout || "{}"));
+      if (pythonResult && targetDates[0]) {
+        pythonResultsByDate[targetDates[0]] = pythonResult;
+      }
+    } catch (parseErr) {
+      console.warn("[forecast] Failed to parse single-date ML result stdout:", parseErr.message);
+    }
   } else if (isContiguous) {
     const result = await runAndAssert([
       "--generate-range",
@@ -10160,10 +10197,32 @@ async function generateDayAheadWithMl(dates) {
       targetDates[targetDates.length - 1],
     ]);
     durationMs += Number(result?.durationMs || 0);
+    // For range, Python may return a single aggregated result or per-date results
+    // Try to parse and store; if it's aggregated, all dates will use the same result
+    try {
+      const pythonResult = JSON.parse(String(result?.stdout || "{}"));
+      if (pythonResult) {
+        // Assume single aggregated result for the range
+        for (const day of targetDates) {
+          pythonResultsByDate[day] = pythonResult;
+        }
+      }
+    } catch (parseErr) {
+      console.warn("[forecast] Failed to parse range ML result stdout:", parseErr.message);
+    }
   } else {
     for (const day of targetDates) {
       const result = await runAndAssert(["--generate-date", day]);
       durationMs += Number(result?.durationMs || 0);
+      // Parse Python stdout to extract per-run result (v2.5.1+)
+      try {
+        const pythonResult = JSON.parse(String(result?.stdout || "{}"));
+        if (pythonResult) {
+          pythonResultsByDate[day] = pythonResult;
+        }
+      } catch (parseErr) {
+        console.warn(`[forecast] Failed to parse ML result stdout for ${day}:`, parseErr.message);
+      }
     }
   }
 
@@ -10178,6 +10237,7 @@ async function generateDayAheadWithMl(dates) {
     durationMs,
     normalizedRows,
     solcastPull,
+    pythonResultsByDate,
   };
 }
 
@@ -15026,6 +15086,10 @@ app.get("/api/forecast/engine-health", (req, res) => {
     } catch { /* non-fatal — use default */ }
 
     const modelMtime = trainState.model_file_mtime_ms || null;
+
+    // Extract errorMemory from trainState (new in v2.5.1, may be absent in older files)
+    const errorMemory = trainState.error_memory || null;
+
     return res.json({
       ok: true,
       trainState: {
@@ -15047,6 +15111,7 @@ app.get("/api/forecast/engine-health", (req, res) => {
         trainingResult: trainState.training_result || null,
       },
       dataQualityFlags: Array.isArray(trainState.data_warnings) ? trainState.data_warnings : [],
+      errorMemory,
       latestAudit: latestAudit || null,
       recentQualityBreakdown: recentQuality,
       sourceFreshness: {

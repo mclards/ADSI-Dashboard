@@ -94,12 +94,29 @@ This wraps `electron-builder` and:
 4. electron-builder calls `signtool` with the PFX, applies SHA-256 signing,
    and counter-signs with the Sectigo public timestamp authority
 
-If `build/private/codesign.env` is missing, the wrapper falls back to an
-**unsigned** build with a warning. (Useful for dev builds where you don't
-need a signature.)
+All three build commands — `build:win`, `build:installer`, and
+`build:installer:signed` — route through the same wrapper script and enforce
+the same safety gates:
 
-The standard `npm run build:installer` is unchanged and produces unsigned
-builds. Use `:signed` for releases that go to the gateway.
+1. **Gate 1 — signing required.** If `build/private/codesign.env` is missing
+   or the PFX path is invalid, the build fails fast with a clear error.
+   Shipping an unsigned installer would break auto-update for existing signed
+   installs (electron-updater rejects publisher-hash mismatches).
+2. **Gate 2 — post-build signature verification.** After electron-builder
+   finishes, the wrapper calls `scripts/verify-signed-installer.ps1` which
+   runs `Get-AuthenticodeSignature` and pins the thumbprint to
+   `build/private/codesign-thumbprint.txt`.
+3. **Gate 3 — size floor + SHA-512 log.** Rejects implausibly small builds
+   (missing Python services, broken extraResources) and logs the SHA-512
+   that electron-updater will expect in `latest.yml`.
+
+For dev builds where a signature isn't needed, opt out explicitly:
+
+```bash
+ADSI_ALLOW_UNSIGNED=1 npm run build:installer
+```
+
+This skips Gate 2 (nothing to verify) but still enforces Gate 3.
 
 ---
 
