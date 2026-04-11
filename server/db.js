@@ -702,6 +702,53 @@ db.exec(`
     entered_by      TEXT DEFAULT 'admin',
     entered_at      INTEGER DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
   );
+
+  -- Day-ahead locked snapshot (v2.8+): immutable frozen Solcast P10/P50/P90
+  -- captured at or before 10 AM local for the NEXT trading day. First write
+  -- per (forecast_day, slot) wins; subsequent captures are no-ops.
+  CREATE TABLE IF NOT EXISTS solcast_dayahead_locked (
+    forecast_day    TEXT    NOT NULL,   -- YYYY-MM-DD the forecast is FOR (day D+1)
+    slot            INTEGER NOT NULL,   -- 0..287 (5-min slot of day)
+    ts_local        INTEGER NOT NULL,   -- Unix ms, start of slot in Asia/Manila
+    period_end_utc  TEXT,
+    period          TEXT,                -- e.g. "PT5M"
+    p50_mw          REAL,                -- Solcast forecast_mw at capture time
+    p10_mw          REAL,                -- Solcast forecast_lo_mw
+    p90_mw          REAL,                -- Solcast forecast_hi_mw
+    p50_kwh         REAL,
+    p10_kwh         REAL,
+    p90_kwh         REAL,
+    spread_mw       REAL,                -- p90_mw - p10_mw
+    spread_pct_cap  REAL,                -- spread_mw / plant_cap_mw * 100 (robust; NOT divided by p50)
+    captured_ts     INTEGER NOT NULL,    -- Unix ms when we froze this
+    captured_local  TEXT    NOT NULL,    -- "YYYY-MM-DDTHH:MM:SS" Asia/Manila
+    capture_reason  TEXT    NOT NULL,    -- 'scheduled_0600' | 'scheduled_0955' | 'manual' | 'backfill_approx'
+    solcast_source  TEXT    NOT NULL,    -- 'toolkit' | 'api'
+    plant_cap_mw    REAL,                -- plant capacity at capture time
+    PRIMARY KEY (forecast_day, slot)
+  );
+  CREATE INDEX IF NOT EXISTS idx_sdl_captured_ts ON solcast_dayahead_locked(captured_ts);
+  CREATE INDEX IF NOT EXISTS idx_sdl_capture_reason ON solcast_dayahead_locked(capture_reason);
+
+  -- Full append-only Solcast pull history (v2.8+): every autoFetchSolcastSnapshots()
+  -- call appends rows for all pulled slots. Used to measure band-collapse trajectory
+  -- and feed the spread-weighted learning loop. 90-day retention via prune cron.
+  CREATE TABLE IF NOT EXISTS solcast_snapshot_history (
+    forecast_day    TEXT    NOT NULL,
+    slot            INTEGER NOT NULL,
+    captured_ts     INTEGER NOT NULL,    -- unique per pull
+    pulled_ts       INTEGER NOT NULL,    -- Solcast's own pulled_ts for the record
+    p50_mw          REAL,
+    p10_mw          REAL,
+    p90_mw          REAL,
+    est_actual_mw   REAL,
+    age_sec         INTEGER,              -- at capture time, how old was Solcast's data
+    solcast_source  TEXT,
+    PRIMARY KEY (forecast_day, slot, captured_ts)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ssh_day_captured ON solcast_snapshot_history(forecast_day, captured_ts);
+  CREATE INDEX IF NOT EXISTS idx_ssh_day_slot ON solcast_snapshot_history(forecast_day, slot);
+  CREATE INDEX IF NOT EXISTS idx_ssh_captured_ts ON solcast_snapshot_history(captured_ts);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -980,6 +1027,27 @@ ensureColumn("forecast_error_compare_slot", "rad_wm2", "rad_wm2 REAL");
 ensureColumn("forecast_error_compare_slot", "cloud_pct", "cloud_pct REAL");
 ensureColumn("forecast_error_compare_slot", "support_weight", "support_weight REAL");
 
+// Migration: day-ahead locked snapshot errors (v2.8+, added 2026-04).
+// These capture the 10 AM locked P10/P50/P90 vs actual, letting the error
+// memory system learn from what was actually submittable at submission time,
+// not from "whatever Solcast said most recently".
+ensureColumn("forecast_error_compare_slot", "p50_locked_mw", "p50_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "p10_locked_mw", "p10_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "p90_locked_mw", "p90_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "spread_pct_cap_locked", "spread_pct_cap_locked REAL");
+ensureColumn("forecast_error_compare_slot", "err_vs_p50_locked_mw", "err_vs_p50_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "err_vs_p10_locked_mw", "err_vs_p10_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "err_vs_p90_locked_mw", "err_vs_p90_locked_mw REAL");
+ensureColumn("forecast_error_compare_slot", "actual_within_band", "actual_within_band INTEGER");
+// Daily roll-up of locked-snapshot accuracy (for FPM dashboard and learning-loop aggregates).
+ensureColumn("forecast_error_compare_daily", "locked_captured_ts", "locked_captured_ts INTEGER");
+ensureColumn("forecast_error_compare_daily", "locked_capture_reason", "locked_capture_reason TEXT");
+ensureColumn("forecast_error_compare_daily", "locked_spread_pct_cap_avg", "locked_spread_pct_cap_avg REAL");
+ensureColumn("forecast_error_compare_daily", "locked_total_p50_kwh", "locked_total_p50_kwh REAL");
+ensureColumn("forecast_error_compare_daily", "locked_total_p10_kwh", "locked_total_p10_kwh REAL");
+ensureColumn("forecast_error_compare_daily", "locked_total_p90_kwh", "locked_total_p90_kwh REAL");
+ensureColumn("forecast_error_compare_daily", "locked_within_band_pct", "locked_within_band_pct REAL");
+
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
@@ -1244,15 +1312,19 @@ const stmts = {
     )
     ON CONFLICT(forecast_day, slot) DO UPDATE SET
       ts_local=excluded.ts_local,
-      period_end_utc=excluded.period_end_utc,
-      period=excluded.period,
-      forecast_mw=excluded.forecast_mw,
-      forecast_lo_mw=excluded.forecast_lo_mw,
-      forecast_hi_mw=excluded.forecast_hi_mw,
+      period_end_utc=COALESCE(excluded.period_end_utc, solcast_snapshots.period_end_utc),
+      period=COALESCE(excluded.period, solcast_snapshots.period),
+      -- v2.8 audit fix (R2): COALESCE the forecast_* columns. Previous behavior
+      -- force-overwrote them, so a partial late-day fetch (e.g. network timeout
+      -- mid-parse) could erase morning slots that were good. The est_actual_*
+      -- columns already used COALESCE; this brings forecast_* in line.
+      forecast_mw=COALESCE(excluded.forecast_mw, solcast_snapshots.forecast_mw),
+      forecast_lo_mw=COALESCE(excluded.forecast_lo_mw, solcast_snapshots.forecast_lo_mw),
+      forecast_hi_mw=COALESCE(excluded.forecast_hi_mw, solcast_snapshots.forecast_hi_mw),
       est_actual_mw=COALESCE(excluded.est_actual_mw, solcast_snapshots.est_actual_mw),
-      forecast_kwh=excluded.forecast_kwh,
-      forecast_lo_kwh=excluded.forecast_lo_kwh,
-      forecast_hi_kwh=excluded.forecast_hi_kwh,
+      forecast_kwh=COALESCE(excluded.forecast_kwh, solcast_snapshots.forecast_kwh),
+      forecast_lo_kwh=COALESCE(excluded.forecast_lo_kwh, solcast_snapshots.forecast_lo_kwh),
+      forecast_hi_kwh=COALESCE(excluded.forecast_hi_kwh, solcast_snapshots.forecast_hi_kwh),
       est_actual_kwh=COALESCE(excluded.est_actual_kwh, solcast_snapshots.est_actual_kwh),
       pulled_ts=excluded.pulled_ts,
       source=excluded.source,
@@ -1275,6 +1347,68 @@ const stmts = {
        FROM solcast_snapshots
       WHERE forecast_day = ?
       ORDER BY slot ASC`,
+  ),
+  // Day-ahead locked snapshot (v2.8+): INSERT OR IGNORE — first write wins.
+  insertDayAheadLocked: db.prepare(`
+    INSERT OR IGNORE INTO solcast_dayahead_locked(
+      forecast_day, slot, ts_local, period_end_utc, period,
+      p50_mw, p10_mw, p90_mw, p50_kwh, p10_kwh, p90_kwh,
+      spread_mw, spread_pct_cap,
+      captured_ts, captured_local, capture_reason, solcast_source, plant_cap_mw
+    ) VALUES (
+      @forecast_day, @slot, @ts_local, @period_end_utc, @period,
+      @p50_mw, @p10_mw, @p90_mw, @p50_kwh, @p10_kwh, @p90_kwh,
+      @spread_mw, @spread_pct_cap,
+      @captured_ts, @captured_local, @capture_reason, @solcast_source, @plant_cap_mw
+    )
+  `),
+  countDayAheadLocked: db.prepare(
+    `SELECT COUNT(*) AS n FROM solcast_dayahead_locked WHERE forecast_day = ?`,
+  ),
+  getDayAheadLocked: db.prepare(
+    `SELECT forecast_day, slot, ts_local, period_end_utc, period,
+            p50_mw, p10_mw, p90_mw, p50_kwh, p10_kwh, p90_kwh,
+            spread_mw, spread_pct_cap,
+            captured_ts, captured_local, capture_reason, solcast_source, plant_cap_mw
+       FROM solcast_dayahead_locked
+      WHERE forecast_day = ?
+      ORDER BY slot ASC`,
+  ),
+  getDayAheadLockedMeta: db.prepare(
+    `SELECT forecast_day,
+            MIN(captured_ts)   AS captured_ts,
+            MIN(captured_local) AS captured_local,
+            MIN(capture_reason) AS capture_reason,
+            MIN(solcast_source) AS solcast_source,
+            MIN(plant_cap_mw)   AS plant_cap_mw,
+            AVG(spread_pct_cap) AS spread_pct_cap_avg,
+            MAX(spread_pct_cap) AS spread_pct_cap_max,
+            SUM(p50_kwh)        AS total_p50_kwh,
+            SUM(p10_kwh)        AS total_p10_kwh,
+            SUM(p90_kwh)        AS total_p90_kwh,
+            COUNT(*)            AS slot_count
+       FROM solcast_dayahead_locked
+      WHERE forecast_day = ?`,
+  ),
+  // Append-only snapshot history (v2.8+): every autoFetchSolcastSnapshots() call writes here.
+  insertSnapshotHistory: db.prepare(`
+    INSERT OR REPLACE INTO solcast_snapshot_history(
+      forecast_day, slot, captured_ts, pulled_ts,
+      p50_mw, p10_mw, p90_mw, est_actual_mw, age_sec, solcast_source
+    ) VALUES (
+      @forecast_day, @slot, @captured_ts, @pulled_ts,
+      @p50_mw, @p10_mw, @p90_mw, @est_actual_mw, @age_sec, @solcast_source
+    )
+  `),
+  pruneSnapshotHistoryBefore: db.prepare(
+    `DELETE FROM solcast_snapshot_history WHERE captured_ts < ?`,
+  ),
+  getSnapshotHistoryDayTrajectory: db.prepare(
+    `SELECT forecast_day, slot, captured_ts, pulled_ts,
+            p50_mw, p10_mw, p90_mw, est_actual_mw, age_sec, solcast_source
+       FROM solcast_snapshot_history
+      WHERE forecast_day = ?
+      ORDER BY slot ASC, captured_ts ASC`,
   ),
   getLatestForecastRunAuditForDate: db.prepare(
     `SELECT * FROM forecast_run_audit
@@ -1692,6 +1826,90 @@ const bulkBackfillSolcastEstActual = db.transaction((day, slotEstActuals) => {
 
 function getSolcastSnapshotForDay(day) {
   return stmts.getSolcastSnapshotDay.all(String(day || ""));
+}
+
+/**
+ * Day-ahead locked snapshot bulk insert (v2.8+).
+ * Uses INSERT OR IGNORE — first-write-wins per (forecast_day, slot).
+ * Returns the number of rows actually inserted (0 if already locked).
+ */
+const bulkInsertDayAheadLocked = db.transaction((rows) => {
+  let inserted = 0;
+  for (const r of rows || []) {
+    const info = stmts.insertDayAheadLocked.run({
+      forecast_day:    String(r.forecast_day || ""),
+      slot:            Number(r.slot),
+      ts_local:        Number(r.ts_local || 0),
+      period_end_utc:  r.period_end_utc != null ? String(r.period_end_utc) : null,
+      period:          r.period         != null ? String(r.period)         : null,
+      p50_mw:          r.p50_mw  != null ? Number(r.p50_mw)  : null,
+      p10_mw:          r.p10_mw  != null ? Number(r.p10_mw)  : null,
+      p90_mw:          r.p90_mw  != null ? Number(r.p90_mw)  : null,
+      p50_kwh:         r.p50_kwh != null ? Number(r.p50_kwh) : null,
+      p10_kwh:         r.p10_kwh != null ? Number(r.p10_kwh) : null,
+      p90_kwh:         r.p90_kwh != null ? Number(r.p90_kwh) : null,
+      spread_mw:       r.spread_mw      != null ? Number(r.spread_mw)      : null,
+      spread_pct_cap:  r.spread_pct_cap != null ? Number(r.spread_pct_cap) : null,
+      captured_ts:     Number(r.captured_ts || Date.now()),
+      captured_local:  String(r.captured_local || ""),
+      capture_reason:  String(r.capture_reason || "manual"),
+      solcast_source:  String(r.solcast_source || "toolkit"),
+      plant_cap_mw:    r.plant_cap_mw != null ? Number(r.plant_cap_mw) : null,
+    });
+    inserted += info.changes;
+  }
+  return inserted;
+});
+
+function countDayAheadLockedForDay(day) {
+  return Number(stmts.countDayAheadLocked.get(String(day || ""))?.n || 0);
+}
+
+function getDayAheadLockedForDay(day) {
+  return stmts.getDayAheadLocked.all(String(day || ""));
+}
+
+function getDayAheadLockedMetaForDay(day) {
+  return stmts.getDayAheadLockedMeta.get(String(day || ""));
+}
+
+/**
+ * Append Solcast snapshot history rows (v2.8+).
+ * Append-only; INSERT OR REPLACE used because PRIMARY KEY includes captured_ts
+ * so real duplicates should be rare but safe against collisions within the same ms.
+ */
+const bulkInsertSnapshotHistory = db.transaction((rows) => {
+  let inserted = 0;
+  for (const r of rows || []) {
+    stmts.insertSnapshotHistory.run({
+      forecast_day:   String(r.forecast_day || ""),
+      slot:           Number(r.slot),
+      captured_ts:    Number(r.captured_ts || Date.now()),
+      pulled_ts:      Number(r.pulled_ts   || 0),
+      p50_mw:         r.p50_mw        != null ? Number(r.p50_mw)        : null,
+      p10_mw:         r.p10_mw        != null ? Number(r.p10_mw)        : null,
+      p90_mw:         r.p90_mw        != null ? Number(r.p90_mw)        : null,
+      est_actual_mw:  r.est_actual_mw != null ? Number(r.est_actual_mw) : null,
+      age_sec:        r.age_sec       != null ? Number(r.age_sec)       : null,
+      solcast_source: r.solcast_source != null ? String(r.solcast_source) : null,
+    });
+    inserted += 1;
+  }
+  return inserted;
+});
+
+/**
+ * Delete snapshot history rows older than `retainDays`. Returns rows deleted.
+ */
+function pruneSnapshotHistory(retainDays = 90) {
+  const days = Math.max(1, Math.min(3650, Math.trunc(Number(retainDays || 90))));
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const info = stmts.pruneSnapshotHistoryBefore.run(cutoff);
+  return Number(info?.changes || 0);
+}
+
+function getSnapshotHistoryDayTrajectory(day) {
+  return stmts.getSnapshotHistoryDayTrajectory.all(String(day || ""));
 }
 
 function getSetting(key, def = null) {
@@ -2697,6 +2915,15 @@ module.exports = {
   bulkUpsertSolcastSnapshot,
   bulkBackfillSolcastEstActual,
   getSolcastSnapshotForDay,
+  // Day-ahead locked snapshot (v2.8+)
+  bulkInsertDayAheadLocked,
+  countDayAheadLockedForDay,
+  getDayAheadLockedForDay,
+  getDayAheadLockedMetaForDay,
+  // Solcast snapshot history (v2.8+)
+  bulkInsertSnapshotHistory,
+  pruneSnapshotHistory,
+  getSnapshotHistoryDayTrajectory,
   getSetting,
   setSetting,
   pruneOldData,

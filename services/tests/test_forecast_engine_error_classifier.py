@@ -871,7 +871,6 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             orig_load_artifacts = mod.load_forecast_artifacts
             orig_load_model = mod.load_model_bundle
             orig_error_memory = mod.compute_error_memory
-            orig_shape = mod.apply_hour_shape_correction
             orig_activity = mod.apply_activity_hysteresis
             orig_staging = mod.apply_block_staging
             orig_ramp = mod.apply_ramp_limit
@@ -937,10 +936,6 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
                 mod.load_forecast_artifacts = lambda today, allow_build=True: {}
                 mod.load_model_bundle = lambda: bundle
                 mod.compute_error_memory = lambda today, w5, **kw: np.zeros(mod.SLOTS_DAY, dtype=float)
-                mod.apply_hour_shape_correction = lambda forecast, target_s, w5, artifacts: (
-                    forecast.copy(),
-                    {"hours_shaped": 0, "avg_matches": 0.0, "avg_score": None},
-                )
                 mod.apply_activity_hysteresis = lambda forecast, target_s, w5, artifacts, bias_meta=None: (
                     forecast.copy(),
                     {"first_slot": mod.SOLAR_START_SLOT, "last_slot": mod.SOLAR_END_SLOT - 1, "history_matches": 0, "bias_shift_slots": 0},
@@ -967,7 +962,6 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
                 mod.load_forecast_artifacts = orig_load_artifacts
                 mod.load_model_bundle = orig_load_model
                 mod.compute_error_memory = orig_error_memory
-                mod.apply_hour_shape_correction = orig_shape
                 mod.apply_activity_hysteresis = orig_activity
                 mod.apply_block_staging = orig_staging
                 mod.apply_ramp_limit = orig_ramp

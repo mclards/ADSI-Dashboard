@@ -178,8 +178,14 @@ class TestTrainingDataWithTriBand:
             assert spread_vals.max() > 0.0 or len(X) < 50  # New rows if any
 
     def test_feature_count_consistency(self):
-        """Verify FEATURE_COLS count matches actual features."""
-        assert len(FEATURE_COLS) == 70, f"Expected 70 features, got {len(FEATURE_COLS)}"
+        """Verify FEATURE_COLS count matches actual features.
+
+        v2.8 housekeeping: expected count bumped 70 → 72 after the locked
+        snapshot additions (`spread_pct_cap_locked`, `hours_since_lock`).
+        Update this assertion in the same commit as any future FEATURE_COLS
+        change so the tripwire stays meaningful.
+        """
+        assert len(FEATURE_COLS) == 72, f"Expected 72 features, got {len(FEATURE_COLS)}"
 
 
 if __name__ == "__main__":

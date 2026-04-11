@@ -45,8 +45,9 @@ When code is already written and you only need to validate + ship.
 Anything in `services/forecast_engine.py` — ML tuning, Solcast logic, day-ahead paths, audit.
 
 ```
-# Start with research if topic is new:
-/everything-claude-code:deep-research <topic e.g. "per-slot Solcast reliability weighting">
+# Start with memory and research:
+/claude-mem:mem-search <topic e.g. "Solcast reliability artifact">
+/everything-claude-code:exa-search <topic e.g. "LightGBM solar irradiance forecasting">
 
 # Design the change:
 /everything-claude-code:blueprint <change description>
@@ -105,7 +106,10 @@ Anything in `services/inverter_engine.py`, Modbus TCP polling, write commands, a
 Anything in `public/js/app.js`, `public/index.html`, `public/css/style.css`.
 
 ```
-# Delegate:
+# Design first (new components or significant layout changes):
+/ui-ux-pro-max:ui-ux-pro-max <describe the component, layout, or UX goal>
+
+# Delegate implementation:
 # → Claude will invoke sub_fronter automatically
 
 # After implementation — clean up:
@@ -115,10 +119,20 @@ Anything in `public/js/app.js`, `public/index.html`, `public/css/style.css`.
 /sub_smoker
 ```
 
-**Reminder:** Any visible UI change must also update:
-- `docs/ADSI-Dashboard-User-Manual.md`
-- `docs/ADSI-Dashboard-User-Guide.html`
-- `docs/ADSI-Dashboard-User-Guide.pdf`
+**Mandatory after any visible UI change:**
+- Update `docs/ADSI-Dashboard-User-Manual.md`
+- Update `docs/ADSI-Dashboard-User-Guide.html`
+- Regenerate `docs/ADSI-Dashboard-User-Guide.pdf`
+
+**Example:**
+```
+/ui-ux-pro-max:ui-ux-pro-max
+design a compact forecast performance panel showing:
+- MAPE gauge (0–100%)
+- Regime breakdown (clear/mixed/overcast/rainy) with % weights
+- Confidence band (P10/P90) as a toggle overlay
+- Collapse on first load, expand on click
+```
 
 ---
 
@@ -161,7 +175,10 @@ Work in `server/cloudDb.js` — synced tables, cursor push, Supabase/Neon querie
 Investigating a new approach, library, or algorithm before committing to implementation.
 
 ```
-# Broad exploration:
+# Fast web search:
+/everything-claude-code:exa-search <topic>
+
+# Broad multi-source exploration:
 /everything-claude-code:deep-research <topic>
 
 # Focused API / library:
@@ -173,10 +190,13 @@ Investigating a new approach, library, or algorithm before committing to impleme
 
 **Example:**
 ```
+/everything-claude-code:exa-search
+LightGBM hyperparameter tuning for solar PV energy forecasting 2024
+
 /everything-claude-code:deep-research
 approaches to adaptive Solcast trust decay under persistent overcast regimes
 
-/everything-claude-code:docs scikit-learn GradientBoostingRegressor n_iter_no_change early stopping
+/everything-claude-code:docs lightgbm LGBMRegressor early_stopping num_boost_round
 
 /everything-claude-code:search-first
 Python exponential decay weighting for time-series reliability estimation
@@ -232,7 +252,34 @@ New endpoint, auth flow change, token handling, bulk control gate.
 
 ---
 
-## 11. Instinct / Learning Loop
+## 11. Memory-First Research
+
+Before diving into a task, search accumulated project memory first.
+
+```
+# What do we already know about this topic?
+/claude-mem:mem-search <topic>
+
+# Broader memory exploration:
+/claude-mem:smart-explore <topic>
+
+# Generate a plan grounded in project memory:
+/claude-mem:make-plan <feature or change>
+
+# View what happened over time on this topic:
+/claude-mem:timeline-report
+```
+
+**Example:**
+```
+/claude-mem:mem-search Solcast reliability
+/claude-mem:smart-explore forecast engine training pipeline
+/claude-mem:make-plan improve intraday correction for wet season
+```
+
+---
+
+## 12. Instinct / Learning Loop
 
 Extract patterns from what Claude learned this session.
 
@@ -252,13 +299,16 @@ Extract patterns from what Claude learned this session.
 
 ---
 
-## 12. Code Cleanup
+## 13. Code Cleanup
 
 After a long implementation pass — remove dead code, reduce duplication, fix style.
 
 ```
 # Identify cleanup targets:
 /everything-claude-code:simplify
+
+# Deep quality audit (if needed):
+/everything-claude-code:plankton-code-quality <file or module>
 
 # If Python was changed, confirm quality:
 /everything-claude-code:python-review
@@ -275,7 +325,7 @@ After a long implementation pass — remove dead code, reduce duplication, fix s
 
 ---
 
-## 13. New Express API Endpoint
+## 14. New Express API Endpoint
 
 Designing and shipping a new REST endpoint end-to-end.
 
@@ -313,7 +363,7 @@ invalid inverter ID, empty result set
 
 ---
 
-## 14. Codebase Onboarding
+## 15. Codebase Onboarding
 
 Getting a quick overview of a part of the codebase before diving in.
 
@@ -323,12 +373,13 @@ Getting a quick overview of a part of the codebase before diving in.
   "how does the forecast engine communicate with the Node server?"
   "what is the energy authority and where does it live?"
   "explain the Solcast reliability artifact structure"
+  "how does the cloud DB push cursor work?"
 >
 ```
 
 ---
 
-## 15. Architectural Decision Record
+## 16. Architectural Decision Record
 
 When a non-obvious architectural choice was made — document it for future reference.
 
@@ -355,14 +406,35 @@ Consequences: 2s polling lag; client must handle timeout (15 min max) and GC on 
 
 ---
 
+## 17. Multi-Agent Orchestration
+
+Running a coordinated pipeline of specialized agents.
+
+```
+/everything-claude-code:orchestrate
+<describe the pipeline, e.g.:>
+run sub_forecaster to implement seasonal blending →
+then /everything-claude-code:python-review →
+then /sub_smoker
+
+# For designing a reliable agentic workflow:
+/everything-claude-code:agentic-engineering
+<describe the autonomous task>
+```
+
+---
+
 ## Quick Reference Card
 
 | I want to... | Run this |
 |---|---|
 | Plan a feature | `/everything-claude-code:blueprint <feature>` |
+| Design a UI component | `/ui-ux-pro-max:ui-ux-pro-max <description>` |
 | Look up library docs | `/everything-claude-code:docs <lib> <topic>` |
+| Web research (Exa) | `/everything-claude-code:exa-search <topic>` |
 | Write tests first | `/everything-claude-code:tdd-workflow` |
 | Review Python code | `/everything-claude-code:python-review` |
+| Deep quality audit | `/everything-claude-code:plankton-code-quality <file>` |
 | Design a new API endpoint | `/everything-claude-code:api-design` |
 | Design Express middleware | `/everything-claude-code:backend-patterns` |
 | Improve dashboard JS | `/everything-claude-code:frontend-patterns` |
@@ -376,7 +448,9 @@ Consequences: 2s polling lag; client must handle timeout (15 min max) and GC on 
 | Resume session | `/everything-claude-code:resume-session` |
 | Browse sessions | `/everything-claude-code:sessions` |
 | Compress context | `/everything-claude-code:strategic-compact` |
-| Audit ECC config | `/everything-claude-code:security-scan` |
+| Search project memory | `/claude-mem:mem-search <topic>` |
+| Explore memory graph | `/claude-mem:smart-explore <topic>` |
+| Plan from memory | `/claude-mem:make-plan <task>` |
 | Extract session learnings | `/everything-claude-code:learn-eval` |
 | See learned patterns | `/everything-claude-code:instinct-status` |
 | Cluster instincts into skill | `/everything-claude-code:evolve` |

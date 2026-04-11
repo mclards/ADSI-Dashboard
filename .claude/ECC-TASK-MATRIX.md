@@ -9,12 +9,14 @@
 ### New Feature — Forecast Engine (Python)
 ```
 1. /everything-claude-code:blueprint <feature>
-2. /everything-claude-code:search-first <topic>        (prior art / library options)
+2. /everything-claude-code:exa-search <topic>          (web research if needed)
+   /everything-claude-code:deep-research <topic>       (multi-source if broader)
 3. /everything-claude-code:tdd-workflow                (write tests first)
 4. → implement with sub_forecaster
 5. /everything-claude-code:python-review
-6. /everything-claude-code:verification-loop
-7. /sub_smoker
+6. /everything-claude-code:plankton-code-quality       (if complex logic)
+7. /everything-claude-code:verification-loop
+8. /sub_smoker
 ```
 
 ### New Feature — Inverter Engine (Python / Modbus)
@@ -40,11 +42,11 @@
 
 ### New Feature — UI / Dashboard (HTML/CSS/JS)
 ```
-1. /everything-claude-code:blueprint <feature>
-2. /everything-claude-code:frontend-patterns           (card/chart/WS patterns)
-3. → implement with sub_fronter
-4. /everything-claude-code:simplify                    (cleanup after implementation)
-5. /sub_smoker
+1. /ui-ux-pro-max:ui-ux-pro-max <component description> (design first)
+2. → implement with sub_fronter
+3. /everything-claude-code:simplify                    (cleanup after implementation)
+4. /sub_smoker
+5. Update User Guide (HTML + MD + PDF)
 ```
 
 ### New Feature — Cloud DB / PostgreSQL
@@ -53,6 +55,15 @@
 2. /everything-claude-code:postgres-patterns           (query / schema design)
 3. → implement in server/cloudDb.js
 4. /everything-claude-code:security-review             (if query takes user input)
+5. /sub_smoker
+```
+
+### New Feature — MCP Integration
+```
+1. /everything-claude-code:mcp-server-patterns         (design the integration)
+2. /everything-claude-code:plan <feature>
+3. → implement
+4. /everything-claude-code:security-review             (if exposing sensitive data)
 5. /sub_smoker
 ```
 
@@ -71,9 +82,10 @@
 ### Bug Fix — Forecast Engine / ML
 ```
 1. /everything-claude-code:search-first <symptom>
-2. → isolate with sub_forecaster
-3. /everything-claude-code:python-review
-4. /sub_smoker
+2. /everything-claude-code:exa-search <symptom>        (if external root cause suspected)
+3. → isolate with sub_forecaster
+4. /everything-claude-code:python-review
+5. /sub_smoker
 ```
 
 ### Bug Fix — UI
@@ -97,7 +109,8 @@
 
 ### Tune ML Model / Error Memory / Solcast Reliability
 ```
-1. /everything-claude-code:deep-research <topic>
+1. /everything-claude-code:exa-search <topic>          (latest ML research)
+   /everything-claude-code:deep-research <topic>       (broader investigation)
 2. /everything-claude-code:python-patterns             (idiomatic approach)
 3. /everything-claude-code:tdd-workflow
 4. → implement with sub_forecaster
@@ -120,9 +133,10 @@
 
 ### Publish a Release
 ```
-1. /everything-claude-code:verification-loop
-2. /sub_smoker
-3. /sub_releaser
+1. /everything-claude-code:security-scan
+2. /everything-claude-code:verification-loop
+3. /sub_smoker
+4. /sub_releaser
 ```
 
 ### Pre-Release Audit Only
@@ -157,9 +171,10 @@
 
 ### Technical Research Spike
 ```
-1. /everything-claude-code:deep-research <topic>
-2. /everything-claude-code:search-first <specific question>
-3. /everything-claude-code:docs <library> <topic>
+1. /everything-claude-code:exa-search <topic>          (fast web research)
+2. /everything-claude-code:deep-research <topic>       (multi-source deep dive)
+3. /everything-claude-code:docs <library> <feature>    (specific API reference)
+4. /everything-claude-code:search-first <question>     (prior art check)
 ```
 
 ### Library / API Docs Lookup
@@ -171,7 +186,7 @@ Examples:
 /everything-claude-code:docs pymodbus ModbusTcpClient reconnect
 /everything-claude-code:docs better-sqlite3 WAL checkpoint
 /everything-claude-code:docs electron-updater autoDownload
-/everything-claude-code:docs scikit-learn GradientBoostingRegressor warm_start
+/everything-claude-code:docs lightgbm LGBMRegressor early_stopping
 ```
 
 ### When Docs Search Is Insufficient (Iterative)
@@ -204,7 +219,8 @@ Examples:
 ```
 1. /everything-claude-code:simplify                    (remove duplication, dead code)
 2. /everything-claude-code:python-review               (if Python was touched)
-3. /sub_smoker
+3. /everything-claude-code:plankton-code-quality       (if deeper quality audit needed)
+4. /sub_smoker
 ```
 
 ### Style Conventions Reference
@@ -230,7 +246,33 @@ Examples:
 ### Onboard to the Codebase
 ```
 /everything-claude-code:codebase-onboarding
-<specific area: forecast engine, inverter engine, or Node server>
+<specific area or question, e.g.:
+  "how does the forecast engine communicate with the Node server?"
+  "what is the energy authority and where does it live?"
+  "explain the Solcast reliability artifact structure"
+>
+```
+
+---
+
+## UI / UX Work
+
+### Design a New Component or Panel
+```
+1. /ui-ux-pro-max:ui-ux-pro-max <describe: layout, purpose, data displayed>
+2. Review the design output
+3. → implement with sub_fronter
+4. /everything-claude-code:simplify
+5. /sub_smoker
+6. Update User Guide (HTML + MD + PDF)
+```
+
+### Refine Existing UI / Theme
+```
+1. /ui-ux-pro-max:ui-ux-pro-max <describe: what to improve>
+2. → implement with sub_fronter
+3. /everything-claude-code:simplify public/css/style.css
+4. /sub_smoker
 ```
 
 ---
@@ -270,6 +312,36 @@ Examples:
 ### Export Instincts for Backup
 ```
 /everything-claude-code:instinct-export
+```
+
+---
+
+## Memory (claude-mem)
+
+### Search Project Memory Before Starting
+```
+/claude-mem:mem-search <topic>
+```
+Examples:
+```
+/claude-mem:mem-search Solcast reliability artifact
+/claude-mem:mem-search bulk control auth
+/claude-mem:mem-search forecast day-ahead generation
+```
+
+### Explore Memory Graph for a Topic
+```
+/claude-mem:smart-explore <topic>
+```
+
+### Generate a Memory-Grounded Plan
+```
+/claude-mem:make-plan <feature or change description>
+```
+
+### View Project Timeline
+```
+/claude-mem:timeline-report
 ```
 
 ---

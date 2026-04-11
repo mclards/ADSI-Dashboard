@@ -6024,6 +6024,46 @@ select.cam-field-input { appearance: auto; }
   padding: 4px 0;
 }
 
+.analytics-dayahead-wrap {
+  margin-top: 8px;
+  border: 1px solid rgba(105, 49, 65, 0.85);
+  border-radius: 8px;
+  background: rgba(40, 17, 26, 0.84);
+  padding: 8px;
+}
+
+.ana-dayahead-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  margin-top: 6px;
+  margin-bottom: 8px;
+  font-size: 9px;
+  color: var(--text2);
+  font-family: var(--font-mono);
+}
+
+.ana-dayahead-header span {
+  white-space: nowrap;
+}
+
+.ana-dayahead-chart-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  height: 320px;
+}
+
+.ana-dayahead-empty {
+  font-size: 9px;
+  color: var(--text3);
+  padding: 4px 0;
+}
+
 .table-wrap {
   flex: 1;
   overflow: auto;
@@ -9332,6 +9372,21 @@ body.mode-transition-active {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
+:root[data-theme="light"] .analytics-dayahead-wrap {
+  border-color: #b49f81;
+  background: linear-gradient(
+    180deg,
+    rgba(240, 230, 212, 0.98) 0%,
+    rgba(231, 220, 199, 0.98) 100%
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+:root[data-theme="light"] .ana-dayahead-chart-box {
+  background: rgba(255, 255, 255, 0.4);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
 :root[data-theme="light"] .analytics-weather-item {
   border-color: #b39f80;
   background: linear-gradient(
@@ -10387,6 +10442,16 @@ body.mode-transition-active {
   background: rgba(13, 24, 42, 0.84);
 }
 
+:root[data-theme="classic"] .analytics-dayahead-wrap {
+  border-color: rgba(58, 88, 128, 0.85);
+  background: rgba(13, 24, 42, 0.84);
+}
+
+:root[data-theme="classic"] .ana-dayahead-chart-box {
+  background: rgba(30, 45, 71, 0.3);
+  border-color: rgba(58, 88, 128, 0.4);
+}
+
 :root[data-theme="classic"] .analytics-weather-item {
   border-color: rgba(58, 88, 128, 0.68);
   background: rgba(12, 22, 38, 0.82);
@@ -10868,6 +10933,16 @@ body.mode-transition-active {
 :root[data-theme="midnight"] .analytics-weather-wrap {
   border-color: rgba(30, 58, 52, 0.7);
   background: rgba(10, 22, 18, 0.84);
+}
+
+:root[data-theme="midnight"] .analytics-dayahead-wrap {
+  border-color: rgba(30, 58, 52, 0.7);
+  background: rgba(10, 22, 18, 0.84);
+}
+
+:root[data-theme="midnight"] .ana-dayahead-chart-box {
+  background: rgba(12, 26, 22, 0.4);
+  border-color: rgba(30, 58, 52, 0.35);
 }
 
 :root[data-theme="midnight"] .analytics-weather-item {

@@ -106,6 +106,7 @@ const State = {
   analyticsWeatherDate: "",
   hourlyIrradianceChart: null,
   hourlyCloudChart: null,
+  dayAheadChart: null,
   analyticsRenderTimer: null,
   analyticsRenderToken: 0,
   // Dayahead aggregation cache — invalidated by reference/interval change (not a timer).
@@ -5055,12 +5056,27 @@ function renderForecastPerfHealth(health) {
   if (emVal) {
     const em = health.errorMemory;
     if (em) {
-      // Primary value: applied_bias_total_kwh
+      // v2.8 H5: both applied (post-damping) and raw (pre-damping) bias are
+      // exposed. Primary display stays as applied; raw is surfaced in the
+      // tooltip and a compact damping indicator on the value line when the
+      // regime-aware Solcast damping shrank the final bias from its raw
+      // learning-loop magnitude.
       const bias = em.applied_bias_total_kwh;
+      const rawBias = em.raw_bias_total_kwh;
       const biasStr = bias != null
         ? `${bias >= 0 ? "+" : ""}${bias.toFixed(1)} kWh`
         : "—";
-      emVal.textContent = biasStr;
+      // Compute damping ratio: how much the post-damp applied is of raw
+      // Only show the indicator if both values exist and raw is meaningful
+      let dampIndicator = "";
+      if (rawBias != null && bias != null && Math.abs(rawBias) > 1.0) {
+        const dampRatio = bias / rawBias;
+        // Only show when damping is material (applied < 90% of raw magnitude)
+        if (Math.abs(dampRatio) < 0.90 && Math.abs(dampRatio) >= 0) {
+          dampIndicator = ` ↓${dampRatio.toFixed(2)}×`;
+        }
+      }
+      emVal.textContent = biasStr + dampIndicator;
 
       // Subline 1: regime + lookback
       const regime = em.regime_used && em.regime_used.trim() ? em.regime_used : "";
@@ -5109,7 +5125,22 @@ function renderForecastPerfHealth(health) {
 
       if (emChip) {
         emChip.className = `fperf-hchip ${colorClass}`;
-        emChip.title = warningTooltip;
+        // v2.8 H5: tooltip shows both signals so operators can diagnose
+        // damping behavior at a glance.
+        const tooltipLines = [];
+        if (warningTooltip) tooltipLines.push(warningTooltip);
+        if (bias != null) {
+          tooltipLines.push(`Applied bias (post-damping): ${biasStr}`);
+        }
+        if (rawBias != null) {
+          const rawStr = `${rawBias >= 0 ? "+" : ""}${rawBias.toFixed(1)} kWh`;
+          tooltipLines.push(`Raw bias (pre-damping):      ${rawStr}`);
+          if (bias != null && Math.abs(rawBias) > 1.0) {
+            const ratio = bias / rawBias;
+            tooltipLines.push(`Damping factor: ${ratio.toFixed(2)}× (regime-aware Solcast)`);
+          }
+        }
+        emChip.title = tooltipLines.join("\n");
       }
     } else {
       // No error memory data
@@ -13205,6 +13236,9 @@ async function loadAnalytics(options = {}) {
     loadWeeklyWeather(date, force).catch((err) => {
       console.warn("weekly weather load failed:", err?.message || err);
     });
+    loadDayAheadChart(date).catch((err) => {
+      console.warn("dayahead chart load failed:", err?.message || err);
+    });
     if (date === today()) {
       loadHourlyWeatherCharts().catch((err) => {
         console.warn("hourly weather chart load failed:", err?.message || err);
@@ -13532,6 +13566,289 @@ async function loadHourlyWeatherCharts() {
   }
 }
 
+async function loadDayAheadChart(date) {
+  try {
+    const payload = await api(`/api/analytics/dayahead-chart?date=${encodeURIComponent(date)}`);
+    if (payload?.ok) {
+      renderDayAheadChart(payload);
+    }
+  } catch (e) {
+    console.warn("[dayahead] chart load failed:", e?.message || e);
+  }
+}
+
+function slotToHHMM(slot) {
+  if (!Number.isFinite(slot) || slot < 0 || slot > 287) return "—";
+  const minutes = slot * 5;
+  const hour = Math.floor(minutes / 60);
+  const min = minutes % 60;
+  return `${pad2(hour)}:${pad2(min)}`;
+}
+
+function renderDayAheadChart(payload) {
+  const wrap = $("anaDayAheadWrap");
+  const empty = $("anaDayAheadEmpty");
+  if (!wrap) return;
+
+  const locked = payload?.locked;
+  const intraday = payload?.intraday_solcast;
+  const actual = payload?.plant_actual;
+  const ml = payload?.ml_final;
+  const meta = payload?.meta;
+
+  if (!locked || !Array.isArray(locked.rows) || locked.rows.length === 0) {
+    if (empty) { empty.style.display = ""; }
+    return;
+  }
+  if (empty) { empty.style.display = "none"; }
+
+  // Update header fields
+  const capturedEl = $("anaDayAheadCaptured");
+  if (capturedEl) {
+    const reason = locked.capture_reason || "unknown";
+    capturedEl.textContent = `captured: ${locked.captured_local || "—"} (${reason})`;
+  }
+
+  const spreadEl = $("anaDayAheadSpread");
+  if (spreadEl) {
+    const avg = Number(locked.spread_pct_cap_avg || 0).toFixed(1);
+    const max = Number(locked.spread_pct_cap_max || 0).toFixed(1);
+    spreadEl.textContent = `spread: ${avg}% avg / ${max}% max`;
+  }
+
+  const withinBandEl = $("anaDayAheadWithinBand");
+  if (withinBandEl) {
+    const pct = Number(meta?.actual_within_band_so_far_pct || 0).toFixed(1);
+    withinBandEl.textContent = `${pct}% within band`;
+  }
+
+  const varianceEl = $("anaDayAheadVariance");
+  if (varianceEl) {
+    const variance = Number(meta?.variance_vs_p50_pct || 0);
+    const sign = variance >= 0 ? "+" : "";
+    varianceEl.textContent = `variance vs P50: ${sign}${variance.toFixed(1)}%`;
+  }
+
+  // Build unified slot grid (union of all present slots)
+  const allSlots = new Set();
+  if (Array.isArray(locked.rows)) {
+    locked.rows.forEach(r => allSlots.add(Number(r.slot)));
+  }
+  if (Array.isArray(intraday?.rows)) {
+    intraday.rows.forEach(r => allSlots.add(Number(r.slot)));
+  }
+  if (Array.isArray(actual?.rows)) {
+    actual.rows.forEach(r => allSlots.add(Number(r.slot)));
+  }
+  if (Array.isArray(ml?.rows)) {
+    ml.rows.forEach(r => allSlots.add(Number(r.slot)));
+  }
+
+  const sortedSlots = Array.from(allSlots).sort((a, b) => a - b);
+  const labels = sortedSlots.map(slotToHHMM);
+
+  // Map data by slot for each series
+  const lockedBySlot = new Map(
+    (locked.rows || []).map(r => [Number(r.slot), r])
+  );
+  const intradayBySlot = new Map(
+    (intraday?.rows || []).map(r => [Number(r.slot), r])
+  );
+  const actualBySlot = new Map(
+    (actual?.rows || []).map(r => [Number(r.slot), r])
+  );
+  const mlBySlot = new Map(
+    (ml?.rows || []).map(r => [Number(r.slot), r])
+  );
+
+  // Build datasets aligned on slot grid
+  const p90Data = sortedSlots.map(slot => {
+    const row = lockedBySlot.get(slot);
+    return row ? Number(row.p90_mw) || null : null;
+  });
+
+  const p10Data = sortedSlots.map(slot => {
+    const row = lockedBySlot.get(slot);
+    return row ? Number(row.p10_mw) || null : null;
+  });
+
+  const p50Data = sortedSlots.map(slot => {
+    const row = lockedBySlot.get(slot);
+    return row ? Number(row.p50_mw) || null : null;
+  });
+
+  const intradayData = sortedSlots.map(slot => {
+    const row = intradayBySlot.get(slot);
+    return row ? Number(row.est_actual_mw) || null : null;
+  });
+
+  const actualData = sortedSlots.map(slot => {
+    const row = actualBySlot.get(slot);
+    return row ? Number(row.actual_mw) || null : null;
+  });
+
+  const mlData = sortedSlots.map(slot => {
+    const row = mlBySlot.get(slot);
+    return row ? Number(row.ml_mw) || null : null;
+  });
+
+  // Create or update chart
+  const canvas = $("chartDayAhead");
+  if (!canvas) return;
+
+  if (State.dayAheadChart) {
+    State.dayAheadChart.destroy();
+    State.dayAheadChart = null;
+  }
+
+  const pal = getChartPalette();
+  const uiFont = cssVar("--font-main", "Arial");
+  const chartFont = { family: uiFont, size: 9, weight: "500" };
+  const gridColor = pal.grid;
+  const tickColor = pal.tick;
+
+  State.dayAheadChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "P90 (band top)",
+          data: p90Data,
+          borderColor: "rgba(80,130,220,0.65)",
+          backgroundColor: "transparent",
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "rgba(80,130,220,0.8)",
+          pointBorderWidth: 0,
+          fill: "+1",
+          tension: 0.2,
+        },
+        {
+          label: "P10 (band bottom)",
+          data: p10Data,
+          borderColor: "rgba(80,130,220,0.65)",
+          backgroundColor: "rgba(80,130,220,0.12)",
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "rgba(80,130,220,0.8)",
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+        },
+        {
+          label: "P50 (day-ahead)",
+          data: p50Data,
+          borderColor: "#3b82f6",
+          backgroundColor: "transparent",
+          borderWidth: 2.2,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "#3b82f6",
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+        },
+        {
+          label: "Solcast intraday",
+          data: intradayData,
+          borderColor: "#f59e0b",
+          backgroundColor: "transparent",
+          borderWidth: 1.8,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "#f59e0b",
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+        },
+        {
+          label: "Plant actual",
+          data: actualData,
+          borderColor: "#10b981",
+          backgroundColor: "transparent",
+          borderWidth: 2.0,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "#10b981",
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+        },
+        {
+          label: "ML final",
+          data: mlData,
+          borderColor: "#a855f7",
+          backgroundColor: "transparent",
+          borderWidth: 1.4,
+          borderDash: [2, 2],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: "#a855f7",
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: {
+          display: true,
+          position: "top",
+          align: "start",
+          labels: {
+            font: chartFont,
+            color: tickColor,
+            boxWidth: 14,
+            boxHeight: 3,
+            padding: 8,
+            usePointStyle: true,
+            pointStyle: "line",
+          },
+        },
+        tooltip: {
+          backgroundColor: pal.tooltipBg,
+          borderColor: pal.tooltipBorder,
+          borderWidth: 1,
+          titleColor: pal.tooltipText,
+          bodyColor: pal.tooltipText,
+          titleFont: { family: uiFont, size: 10, weight: "700" },
+          bodyFont: { family: uiFont, size: 10, weight: "500" },
+          padding: { top: 8, bottom: 8, left: 12, right: 12 },
+          cornerRadius: 8,
+          displayColors: true,
+          boxPadding: 4,
+          mode: "index",
+          intersect: false,
+        },
+      },
+      scales: {
+        x: {
+          ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 12, padding: 4 },
+          grid: { color: gridColor, drawTicks: false },
+          border: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { font: chartFont, color: tickColor, padding: 6 },
+          grid: { color: gridColor, drawTicks: false },
+          border: { display: false },
+        },
+      },
+      layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
+      interaction: { mode: "index", intersect: false },
+    },
+  });
+}
+
 function isTodayAnalyticsDate() {
   const d = $("anaDate")?.value;
   return !!d && d === today();
@@ -13672,6 +13989,10 @@ function ensureAnalyticsAutoRefresh() {
     }
     refreshAnalyticsEnergy().catch((e) => {
       console.warn("analytics auto-refresh failed:", e?.message || e);
+    });
+    const currentDate = String($("anaDate")?.value || today()).trim();
+    loadDayAheadChart(currentDate).catch((e) => {
+      console.warn("dayahead chart auto-refresh failed:", e?.message || e);
     });
   }, 60000);
 }
@@ -13934,6 +14255,21 @@ function ensureAnalyticsCards() {
       <div class="analytics-side-label">7-Day Weather Outlook</div>
       <div id="anaWeeklyWeather" class="analytics-weather-list">
         <div class="analytics-weather-empty">Loading weekly weather…</div>
+      </div>
+    </div>
+    <div class="analytics-dayahead-wrap" id="anaDayAheadWrap">
+      <div class="analytics-side-label">Day-Ahead vs Reality — Locked @ Previous 10 AM</div>
+      <div class="ana-dayahead-header">
+        <span id="anaDayAheadCaptured">captured: —</span>
+        <span id="anaDayAheadSpread">spread: —</span>
+        <span id="anaDayAheadWithinBand">—</span>
+        <span id="anaDayAheadVariance">—</span>
+      </div>
+      <div class="ana-dayahead-chart-box">
+        <canvas id="chartDayAhead" height="300"></canvas>
+      </div>
+      <div class="ana-dayahead-empty" id="anaDayAheadEmpty" style="display:none">
+        No locked day-ahead snapshot for this date.
       </div>
     </div>
   `;

@@ -48,7 +48,17 @@
       "Bash(node -e \"console.log\\(require\\(''./package.json''\\).version\\)\")",
       "Bash(node -e \"require\\(''./server/exporter.js''\\); console.log\\(''exporter.js loads OK''\\)\")",
       "Bash(xxd)",
-      "Bash(node --check server/cloudBackup.js)"
+      "Bash(node --check server/cloudBackup.js)",
+      "WebFetch(domain:tenday.pagasa.dost.gov.ph)",
+      "WebFetch(domain:developer.nlr.gov)",
+      "WebFetch(domain:www.panahon.gov.ph)",
+      "Read(//d//**)",
+      "Read(//c/ProgramData/InverterDashboard/**)",
+      "Bash(python scripts/probe_solcast_weather.py)",
+      "Bash(python -c \"import requests; print\\(requests.__version__\\)\")",
+      "Bash(python scripts/probe_solcast_toolkit_weather.py)",
+      "Bash(python scripts/inspect_toolkit_html.py \"C:/Users/User/AppData/Local/Temp/solcast_probe__l0tgnay/toolkit_Toolkit.html\")",
+      "Bash(python -c ':*)"
     ],
     "deny": [
       "Read(./.env)",
@@ -59,7 +69,8 @@
       "d:\\ADSI-Dashboard\\.claude",
       "C:\\Users\\User\\.claude\\sessions",
       "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard\\references",
-      "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard"
+      "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard",
+      "C:\\Users\\User\\.claude\\skills\\learned"
     ]
   },
   "exclude": [

@@ -231,13 +231,17 @@ MIN_SAMPLES    = 60    # minimum usable slots per training day
 RECENCY_BASE = 1.0     # legacy compatibility; hardened path uses sample weights
 MIN_HISTORY_SOLAR_SLOTS = MIN_SAMPLES
 MIN_DAYAHEAD_SOLAR_SLOTS = max(24, MIN_SAMPLES // 2)
+# v2.8 H3 fix: eligibility floor for error_memory inclusion at the QA persist
+# layer. `_persist_qa_comparison` requires a day to have at least this many
+# usable slots (and this many present actual/forecast slots) before marking
+# `include_in_error_memory=1`. The value is derived from SOLAR_SLOTS so that
+# any future change to SOLAR_START_H / SOLAR_END_H automatically adjusts the
+# threshold. 85% coverage = reject days with more than ~2h of missing data.
+MIN_USABLE_SLOTS_FOR_ELIGIBILITY = int(SOLAR_SLOTS * 0.85)  # 132 for 13h solar window
 TRAIN_WEIGHT_HALF_LIFE_DAYS = 14.0
 TRAIN_WEIGHT_FLOOR = 0.18
-SHAPE_LOOKBACK_DAYS = 45
-SHAPE_MIN_MATCHES = 4
-SHAPE_TOP_K = 6
-SHAPE_BLEND_MIN = 0.42
-SHAPE_BLEND_MAX = 0.78
+SHAPE_LOOKBACK_DAYS = 45  # history-window constant — also used by activity_records & training
+SHAPE_TOP_K = 6           # used by _activity_similarity_score top-K analog selection
 ACTIVITY_SUSTAIN_SLOTS = 2
 STARTUP_RAD_WM2 = 80.0
 STOPPING_RAD_WM2 = 28.0
@@ -307,9 +311,17 @@ SOLCAST_RESOLUTION_PRIMARY_SCALE_MIN = 0.94
 SOLCAST_RESOLUTION_PRIMARY_SCALE_MAX = 1.06
 SOLCAST_RESOLUTION_AUTHORITY_MIN = 0.72
 SOLCAST_RESOLUTION_AUTHORITY_MAX = 1.00
-SOLCAST_FORECAST_FLOOR_RATIO_FRESH  = 0.95  # fresh Solcast (coverage >= 0.95): floor at 95% of Solcast (actual often exceeds Solcast by ~3%)
-SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88  # stale_usable (coverage >= 0.80): floor at 88% of Solcast total
-SOLCAST_WEATHER_DIVERGENCE_RATIO    = 2.0   # per-slot: if solcast/physics or physics/solcast exceeds this, treat Solcast as unreliable for that slot
+SOLCAST_FORECAST_FLOOR_RATIO_FRESH  = 0.95  # fresh Solcast (coverage >= SOLCAST_COVERAGE_FRESH_THRESHOLD): floor at 95% of Solcast (actual often exceeds Solcast by ~3%)
+SOLCAST_FORECAST_FLOOR_RATIO_USABLE = 0.88  # stale_usable (coverage >= SOLCAST_COVERAGE_USABLE_THRESHOLD): floor at 88% of Solcast total
+# v2.8 audit (C1): named coverage thresholds. Used in many places throughout
+# the prediction + freshness pipeline. Centralized so future tuning is one
+# place, not 15+ literal callsites.
+SOLCAST_COVERAGE_FRESH_THRESHOLD  = 0.95   # at or above: snapshot is "fresh"
+SOLCAST_COVERAGE_USABLE_THRESHOLD = 0.80   # at or above: "stale_usable"; below: "stale_reject"
+# NOTE (v2.8 cleanup): SOLCAST_WEATHER_DIVERGENCE_RATIO was removed alongside
+# the Open-Meteo divergence override — Open-Meteo is unreliable for this site,
+# so letting it veto the Solcast clamp was using a low-trust source to overrule
+# a high-trust one.
 
 # Time-of-day zone definitions (slot indices, 5-min resolution)
 # morning: 05:00-08:55 = slots 60-107, midday: 09:00-14:55 = slots 108-179, afternoon: 15:00-17:55 = slots 180-215
@@ -442,11 +454,11 @@ OPERATIONAL_CONSTRAINT_LOOKBACK_DAYS = 90
 # Default: enabled when LightGBM is installed. Override with FORECAST_USE_LIGHTGBM=0 to force sklearn GBR.
 FORECAST_USE_LIGHTGBM = os.environ.get("FORECAST_USE_LIGHTGBM", "1").lower() in ("1", "true", "yes")
 
-# Step 4 — Analog Ensemble (AnEn) Post-Correction
-ANEN_LOOKBACK_DAYS    = 90
-ANEN_K                = 5
-ANEN_CORRECTION_CLIP  = 0.15   # max ±15% adjustment
-ANEN_MIN_USABLE_DAYS  = 3
+# NOTE (v2.8 cleanup): Analog Ensemble (AnEn) post-correction was removed.
+# It was a recency-only scalar bias correction (actual/forecast ratio over the
+# last 5 days, clipped ±15%) applied AFTER compute_error_memory had already
+# corrected per-slot bias with regime-aware weighting. The two corrections
+# partially cancelled — error_memory subsumes AnEn entirely with finer signal.
 
 # Step 6 — EMOS-B Spread Calibration
 # Forecast band totals (total_forecast_lo_kwh, total_forecast_hi_kwh) are now persisted in
@@ -552,29 +564,117 @@ def _has_forecast_dayahead_in_db(day: str) -> bool:
 
 
 def _is_retryable_sqlite_error(exc: Exception) -> bool:
+    """
+    Classify SQLite errors as retryable transient vs permanent.
+
+    v2.8 S4 expansion: recognizes additional transient error substrings
+    common on Windows NUC deployments where brief filesystem / file-handle
+    hiccups produce `unable to open database file` and `disk i/o error`
+    despite the underlying file being healthy. These errors usually
+    resolve within one retry backoff window.
+
+    Non-transient errors (syntax, integrity, schema mismatch) are NOT
+    retried — re-running them would produce the same failure and only
+    waste the retry budget.
+    """
     if not isinstance(exc, sqlite3.OperationalError):
         return False
-    msg = str(exc).lower()
-    return (
-        "database is locked" in msg
-        or "database is busy" in msg
-        or "locked" == msg.strip()
-        or "busy" == msg.strip()
+    msg = str(exc).lower().strip()
+    # Bare single-word matches (SQLite sometimes surfaces just "locked" or "busy")
+    if msg in {"locked", "busy"}:
+        return True
+    # Substring matches for longer error messages
+    retryable_substrings = (
+        "database is locked",
+        "database is busy",
+        "unable to open database file",  # transient Windows file-handle contention
+        "disk i/o error",                 # transient filesystem hiccup
     )
+    return any(s in msg for s in retryable_substrings)
+
+
+# v2.8 SQLite audit (M3): once-per-process WAL mode verification. If the
+# DB file is not in WAL mode, Python's synchronous=NORMAL + busy_timeout
+# assumptions are weaker than expected (DELETE journal doesn't give
+# reader/writer concurrency). Log a one-time warning so drift from a
+# fresh Python-created DB (test fixtures, backups restored into a fresh
+# install) is visible early instead of surfacing as mysterious lock
+# contention later.
+_WAL_MODE_VERIFIED: dict[str, bool] = {}
+
+
+def _verify_wal_mode_once(db_path: Path) -> None:
+    key = str(db_path)
+    if key in _WAL_MODE_VERIFIED:
+        return
+    # Mark as checked regardless of outcome — one-shot log only.
+    _WAL_MODE_VERIFIED[key] = True
+    try:
+        if not db_path.exists():
+            return
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, timeout=2.0, uri=True)
+        try:
+            row = conn.execute("PRAGMA journal_mode").fetchone()
+            mode = str(row[0] if row else "").lower()
+            if mode and mode != "wal":
+                log.warning(
+                    "DB %s journal_mode=%r (expected 'wal'). "
+                    "Python write retry / synchronous=NORMAL assumptions may not hold. "
+                    "Check that Node initialized the DB with WAL mode.",
+                    db_path.name, mode,
+                )
+        finally:
+            conn.close()
+    except Exception as e:
+        log.debug("WAL mode verification skipped for %s: %s", db_path.name, e)
 
 
 def _open_sqlite(db_path: Path, timeout_sec: float, readonly: bool = False) -> sqlite3.Connection:
+    # v2.8 M3: one-shot WAL mode check on first open per-path.
+    _verify_wal_mode_once(db_path)
     if readonly:
         uri = f"file:{db_path.as_posix()}?mode=ro"
         conn = sqlite3.connect(uri, timeout=timeout_sec, uri=True)
     else:
         conn = sqlite3.connect(str(db_path), timeout=timeout_sec)
     conn.execute(f"PRAGMA busy_timeout = {int(max(0.1, float(timeout_sec)) * 1000)}")
+    # v2.8 efficiency audit (E7): lift page cache + enable mmap for read scans.
+    # cache_size negative value = KB (16 MB here). temp_store=MEMORY keeps
+    # ORDER BY / GROUP BY scratch in RAM. mmap_size is a ceiling hint, not
+    # a pre-allocation. All three are connection-scoped and touch no disk state.
+    if readonly:
+        try:
+            conn.execute("PRAGMA cache_size = -16384")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA mmap_size = 67108864")
+        except sqlite3.Error:
+            pass  # tuning is best-effort; never fail open over pragma failure
+    else:
+        # v2.8 SQLite audit (M2): Python writers run with synchronous=FULL
+        # by default (per-page fsync). Node's main writer already uses
+        # synchronous=NORMAL in WAL mode, which is crash-safe and ~5-10x
+        # faster for bulk inserts. Matching it here means Python's
+        # occasional QA / audit / forecast writes don't pay the FULL
+        # fsync cost. Safe because Node has already set journal_mode=WAL
+        # at DB creation; synchronous is per-connection, not persistent.
+        try:
+            conn.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.Error:
+            pass  # best-effort; never fail open over pragma failure
     return conn
 
 
 def _sleep_sqlite_retry(attempt: int) -> None:
-    time.sleep(SQLITE_RETRY_BACKOFF_SEC * max(1, int(attempt)))
+    # v2.8 SQLite audit O1: exponential backoff. Previously linear
+    # (0.35 × attempt → 0.35, 0.70, 1.05 s). Exponential (0.35 × 2^(n-1)
+    # → 0.35, 0.70, 1.40 s) gives a contending writer slightly more
+    # breathing room on the third attempt without significantly
+    # extending the total retry budget. Capped at 2.0 s so retries
+    # don't blow the overall 20 s write timeout.
+    n = max(1, int(attempt))
+    delay = SQLITE_RETRY_BACKOFF_SEC * (2 ** (n - 1))
+    time.sleep(min(delay, 2.0))
 
 
 def _coerce_non_negative_float(value, default: float = 0.0) -> float:
@@ -1299,86 +1399,11 @@ def _normalize_profile(values: np.ndarray) -> np.ndarray:
     return arr / total
 
 
-def _anen_find_analogs(
-    target_day: str,
-    lookback: int = ANEN_LOOKBACK_DAYS,
-) -> list:
-    """Return up to ANEN_K historical analog days for ensemble correction.
-
-    Scoring is recency-only (score = days_ago * 0.001 — lower is better).
-    Joins daily_report (actual plant total) with forecast_run_audit (authoritative
-    forecast total) so the ratio actual/forecast is meaningful.  Days without a
-    matching successful forecast run are skipped.
-    """
-    try:
-        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    dr.date,
-                    SUM(dr.kwh_total) AS actual_kwh,
-                    (
-                        SELECT fra.final_forecast_total_kwh
-                        FROM   forecast_run_audit fra
-                        WHERE  fra.target_date = dr.date
-                          AND  fra.is_authoritative_runtime = 1
-                          AND  fra.run_status = 'success'
-                          AND  fra.final_forecast_total_kwh > 0
-                        ORDER BY fra.generated_ts DESC
-                        LIMIT 1
-                    ) AS forecast_kwh
-                FROM daily_report dr
-                WHERE dr.date < ? AND dr.date >= date(?, ?)
-                GROUP BY dr.date
-                HAVING actual_kwh > 0 AND forecast_kwh IS NOT NULL AND forecast_kwh > 0
-                ORDER BY dr.date DESC
-                """,
-                (target_day, target_day, f"-{lookback} days"),
-            ).fetchall()
-    except Exception as e:
-        log.warning("_anen_find_analogs: DB query failed for %s: %s", target_day, e)
-        return []
-    if not rows:
-        return []
-    target_date_obj = date.fromisoformat(target_day)
-    candidates = []
-    for row in rows:
-        day_str, actual_kwh, forecast_kwh = str(row[0]), float(row[1] or 0.0), float(row[2] or 0.0)
-        if actual_kwh <= 0 or forecast_kwh <= 0:
-            continue
-        days_ago = max(1, (target_date_obj - date.fromisoformat(day_str)).days)
-        candidates.append({
-            "day": day_str,
-            "actual_kwh": actual_kwh,
-            "forecast_kwh": forecast_kwh,
-            "score": days_ago * 0.001,
-            "days_ago": days_ago,
-        })
-    candidates.sort(key=lambda x: x["score"])
-    return candidates[:ANEN_K]
-
-
-def _anen_correction_ratio(analogs: list) -> float:
-    """Weighted ratio correction from analog days. Returns 1.0 if insufficient data."""
-    if len(analogs) < ANEN_MIN_USABLE_DAYS:
-        return 1.0
-    total_w = 0.0
-    weighted_ratio = 0.0
-    for a in analogs:
-        forecast_kwh = float(a.get("forecast_kwh", 0.0))
-        actual_kwh = float(a.get("actual_kwh", 0.0))
-        if actual_kwh <= 0 or forecast_kwh <= 0:
-            continue
-        ratio = actual_kwh / forecast_kwh
-        recency_w = 1.0 / max(1, a.get("days_ago", 1))
-        sim_w = 1.0 / max(a["score"], 1e-6)
-        w = recency_w * sim_w
-        weighted_ratio += w * ratio
-        total_w += w
-    if total_w <= 0:
-        return 1.0
-    raw_ratio = weighted_ratio / total_w
-    return float(np.clip(raw_ratio, 1.0 - ANEN_CORRECTION_CLIP, 1.0 + ANEN_CORRECTION_CLIP))
+# NOTE (v2.8 cleanup): `_anen_find_analogs` and `_anen_correction_ratio` were
+# removed. The Analog Ensemble post-correction was a recency-only scalar
+# `actual/forecast` ratio (clipped ±15%) that ran AFTER `compute_error_memory`
+# had already corrected per-slot bias. Both layers were solving the same
+# problem; error_memory does it with regime-aware decay + spread weighting.
 
 
 def _find_first_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
@@ -1419,6 +1444,95 @@ def _weather_cache_path(day: str, source_kind: str) -> Path:
 # WEATHER FETCH & CACHE
 # ============================================================================
 
+# v2.8 efficiency audit (E3): in-memory cache on top of disk CSV cache.
+# Keyed by (day, source_kind). Value is (cache_mtime_ns, day_df_copy).
+# Archive weather for past days is immutable, so cache hits skip the
+# CSV parse + validate entirely. Invalidated by cache-file mtime change.
+_WEATHER_MEM_CACHE: dict[tuple[str, str], tuple[int, pd.DataFrame]] = {}
+_WEATHER_MEM_CACHE_MAX = 256
+
+
+# v2.8 efficiency audit (E1a/P2): per-cycle day-keyed read cache for the
+# load_solcast_snapshot helper (the only hot-path DB reader that did NOT
+# already have an lru_cache — load_dayahead_with_presence and
+# load_actual_loss_adjusted_with_presence are already cached at
+# subprocess lifetime). Lives only for the duration of a forecast pass;
+# cleared by _reset_forecast_cycle_cache() at the top of run_dayahead so
+# downstream writes (QA, error memory) never leak through. Invalidation
+# is tied to our own control flow, not filesystem timestamps, so it is
+# robust against Node-side concurrent writes to the SQLite file.
+#
+# Soft-capped to bound memory in long-running / daemon entry points that
+# don't explicitly reset (e.g. backtest loops). Oldest ~25% evicted when
+# full — insertion order is preserved by dict since Python 3.7.
+_FORECAST_CYCLE_CACHE: dict[tuple[str, str], object] = {}
+_FORECAST_CYCLE_CACHE_MAX = 512
+_CYCLE_CACHE_MISS = object()
+
+
+def _cycle_cache_get(name: str, day: str):
+    """Return cached value or _CYCLE_CACHE_MISS sentinel if absent."""
+    return _FORECAST_CYCLE_CACHE.get((name, day), _CYCLE_CACHE_MISS)
+
+
+def _cycle_cache_put(name: str, day: str, value) -> None:
+    if len(_FORECAST_CYCLE_CACHE) >= _FORECAST_CYCLE_CACHE_MAX:
+        victims = list(_FORECAST_CYCLE_CACHE.keys())[: _FORECAST_CYCLE_CACHE_MAX // 4]
+        for k in victims:
+            _FORECAST_CYCLE_CACHE.pop(k, None)
+    _FORECAST_CYCLE_CACHE[(name, day)] = value
+
+
+def _reset_forecast_cycle_cache() -> None:
+    """
+    Clear all day-keyed read caches at the start of a forecast pass.
+
+    Also clears the lru_caches on `load_dayahead_with_presence`,
+    `load_dayahead`, `load_actual_loss_adjusted_with_presence`, and
+    `load_actual_loss_adjusted`. Those helpers carry subprocess-lifetime
+    caches whose comments flag daemon-mode staleness as a latent risk;
+    routing the reset through a single chokepoint closes that gap for
+    any caller that opts into the cycle boundary.
+    """
+    _FORECAST_CYCLE_CACHE.clear()
+    for fn_name in (
+        "load_dayahead_with_presence",
+        "load_dayahead",
+        "load_actual_loss_adjusted_with_presence",
+        "load_actual_loss_adjusted",
+    ):
+        fn = globals().get(fn_name)
+        if fn is not None and hasattr(fn, "cache_clear"):
+            try:
+                fn.cache_clear()
+            except Exception:
+                pass
+
+
+def _weather_mem_cache_get(day: str, source_kind: str, cache_path: Path) -> pd.DataFrame | None:
+    try:
+        mtime_ns = cache_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    entry = _WEATHER_MEM_CACHE.get((day, source_kind))
+    if entry is None or entry[0] != mtime_ns:
+        return None
+    return entry[1].copy()
+
+
+def _weather_mem_cache_put(day: str, source_kind: str, cache_path: Path, day_df: pd.DataFrame) -> None:
+    try:
+        mtime_ns = cache_path.stat().st_mtime_ns
+    except OSError:
+        return
+    # Cheap LRU-ish: when full, drop ~1/4 oldest entries by insertion order.
+    if len(_WEATHER_MEM_CACHE) >= _WEATHER_MEM_CACHE_MAX:
+        victims = list(_WEATHER_MEM_CACHE.keys())[: _WEATHER_MEM_CACHE_MAX // 4]
+        for k in victims:
+            _WEATHER_MEM_CACHE.pop(k, None)
+    _WEATHER_MEM_CACHE[(day, source_kind)] = (mtime_ns, day_df.copy())
+
+
 def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
     """
     Fetch hourly weather from Open-Meteo for *day* (YYYY-MM-DD).
@@ -1439,11 +1553,16 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
         try:
             if not cache.exists():
                 return None
+            # v2.8 efficiency audit (E3): in-memory tier before CSV parse.
+            mem_hit = _weather_mem_cache_get(day, source_kind, cache)
+            if mem_hit is not None:
+                return mem_hit
             df = pd.read_csv(cache, parse_dates=["time"])
             day_df = _slice_weather_day(df, day)
             ok, reason = validate_weather_hourly(day, day_df)
             if ok:
                 log.debug("Weather cache hit [%s]: %s (%d rows)", source_kind, day, len(day_df))
+                _weather_mem_cache_put(day, source_kind, cache, day_df)
                 return day_df
             log.warning("Weather cache invalid [%s] for %s: %s", source_kind, day, reason)
         except Exception:
@@ -1528,6 +1647,9 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
             return None
         day_df.to_csv(cache, index=False)
         log.info("Weather fetched & cached [%s]: %s (%d rows)", source_kind, day, len(day_df))
+        # v2.8 efficiency audit (E3): prime in-memory cache with the freshly
+        # fetched frame so immediately-following loop iterations skip disk.
+        _weather_mem_cache_put(day, source_kind, cache, day_df)
         return day_df
     except Exception as e:
         log.error("Weather fetch failed [%s] for %s: %s", source_kind, day, e)
@@ -1602,16 +1724,20 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
 # SOLAR GEOMETRY (precise)
 # ============================================================================
 
-def solar_geometry(day: str) -> dict:
+@lru_cache(maxsize=128)
+def _solar_geometry_cached(day: str) -> dict:
     """
-    Return per-slot solar geometry arrays for *day*.
+    Cached inner implementation of solar_geometry.
 
-    Returns dict with keys:
-        zenith_deg  " solar zenith angle (degrees)
-        elevation   " solar elevation (radians)
-        air_mass    " Kasten & Young (1989) air mass
-        cos_aoi     " cosine of angle-of-incidence on horizontal plane (= cos z)
-        extra_rad   " extraterrestrial radiation W/m
+    v2.8 efficiency audit (E2): this function is a pure function of
+    day-of-year (via `day`). It runs a 288-slot python loop and was being
+    recomputed ~200x per full forecast cycle. Cache on `day` — forecast
+    loops reuse the same 45-day window across reliability + training, so
+    the cache hit rate is near 100%.
+
+    Callers MUST go through `solar_geometry()` (non-cached wrapper) which
+    returns a shallow copy of the cached arrays to prevent accidental
+    in-place mutation from bleeding across callers.
     """
     lat  = math.radians(LAT_DEG)
     doy  = datetime.strptime(day, "%Y-%m-%d").timetuple().tm_yday
@@ -1660,31 +1786,35 @@ def solar_geometry(day: str) -> dict:
     }
 
 
+def solar_geometry(day: str) -> dict:
+    """
+    Return per-slot solar geometry arrays for *day*.
+
+    Returns dict with keys:
+        zenith_deg  - solar zenith angle (degrees)
+        elevation   - solar elevation (radians)
+        air_mass    - Kasten & Young (1989) air mass
+        cos_aoi     - cosine of angle-of-incidence on horizontal plane (= cos z)
+        extra_rad   - extraterrestrial radiation W/m
+
+    v2.8 efficiency audit (E2): delegates to `_solar_geometry_cached` and
+    returns a shallow-copy dict with copied numpy arrays so callers cannot
+    mutate the cached reference.
+    """
+    cached = _solar_geometry_cached(day)
+    return {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in cached.items()}
+
+
 # ============================================================================
 # CLEAR-SKY MODEL  (Ineichen simplified + humidity correction)
 # ============================================================================
 
-def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.ndarray:
-    """
-    Estimate per-slot clear-sky GHI (W/m) using simplified Ineichen model
-    with Linke turbidity estimated from relative humidity.
-
-    Args:
-        day        " YYYY-MM-DD
-        rh_hourly  " 5-min RH array (0"100); if None uses climatological value
-
-    Returns:
-        csi  " clear-sky GHI array, shape (SLOTS_DAY,)
-    """
-    geo = solar_geometry(day)
+def _clear_sky_radiation_impl(day: str, rh_mean: float) -> np.ndarray:
+    """Inner Ineichen computation shared between cached/uncached entry points."""
+    geo = _solar_geometry_cached(day)  # direct cached ref; we only read it
     cos_z = geo["cos_z"]
     am    = geo["air_mass"]
-
-    # Linke turbidity from RH (Remund et al. approximation for tropical sites)
-    if rh_hourly is not None:
-        rh_mean = np.clip(rh_hourly.mean(), 30, 95)
-    else:
-        rh_mean = 78.0   # tropical climatological mean
+    extra = geo["extra"]
 
     TL = 2.4 + 0.018 * rh_mean   #  3.8"4.1 for Cotabato wet season
 
@@ -1695,12 +1825,42 @@ def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.nda
         # Ineichen & Perez (2002) simplified
         fh1  = math.exp(-0.0148 * am[i])
         fh2  = math.exp(-0.1202 * am[i])
-        Gh   = geo["extra"][i] * cos_z[i] * math.exp(
+        Gh   = extra[i] * cos_z[i] * math.exp(
                    -0.0903 * am[i] ** 0.7241 * (TL - 1.0)
                ) * (0.9734 * fh1 + 0.0266 * fh2)
         csi[i] = max(Gh, 0.0)
 
     return csi
+
+
+@lru_cache(maxsize=128)
+def _clear_sky_radiation_climatological(day: str) -> np.ndarray:
+    """
+    v2.8 efficiency audit (E2): cached clear-sky GHI for the climatological
+    RH branch (rh_hourly=None → rh_mean=78.0). This is the branch most
+    commonly hit by day-keyed callers that don't have 5-min RH data on hand.
+    Returns a fresh copy to every public caller via clear_sky_radiation().
+    """
+    return _clear_sky_radiation_impl(day, 78.0)
+
+
+def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.ndarray:
+    """
+    Estimate per-slot clear-sky GHI (W/m) using simplified Ineichen model
+    with Linke turbidity estimated from relative humidity.
+
+    Args:
+        day        - YYYY-MM-DD
+        rh_hourly  - 5-min RH array (0-100); if None uses climatological value
+
+    Returns:
+        csi  - clear-sky GHI array, shape (SLOTS_DAY,)
+    """
+    if rh_hourly is None:
+        # Cached climatological branch — return a copy to prevent mutation.
+        return _clear_sky_radiation_climatological(day).copy()
+    rh_mean = float(np.clip(np.asarray(rh_hourly).mean(), 30, 95))
+    return _clear_sky_radiation_impl(day, rh_mean)
 
 
 # ============================================================================
@@ -1904,21 +2064,9 @@ def classify_day_regime(stats: dict) -> str:
     return "overcast"
 
 
-def classify_hour_regime(
-    cloud_mean: float,
-    cloud_std: float,
-    kt_mean: float,
-    precip_total: float,
-    cape_max: float,
-) -> str:
-    """Classify the forecast context for a single hour."""
-    if precip_total >= 0.2 or (cloud_mean >= 82.0 and cape_max >= 650.0):
-        return "rainy"
-    if kt_mean >= 0.70 and cloud_mean < 28.0 and cloud_std < 18.0:
-        return "clear"
-    if kt_mean >= 0.42 and cloud_mean < 72.0:
-        return "mixed"
-    return "overcast"
+# NOTE (v2.8 cleanup): `classify_hour_regime` was removed — only consumer
+# was `hour_weather_signature` (also removed). Day-level regime classification
+# is still done by `classify_day_regime` above.
 
 
 def classify_slot_weather_buckets(w5: pd.DataFrame, day: str) -> np.ndarray:
@@ -2206,42 +2354,9 @@ def _aggregate_scalar_series(values: list[float]) -> dict:
     }
 
 
-def hour_weather_signature(day: str, w5: pd.DataFrame, hour: int, csi_arr: np.ndarray | None = None) -> dict:
-    """Summarize the weather pattern for a single forecast hour."""
-    start, end = _solar_hour_bounds(hour)
-    if csi_arr is None:
-        rh_arr = pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values
-        csi_arr = clear_sky_radiation(day, rh_arr[:SLOTS_DAY])
-
-    rad = pd.to_numeric(w5["rad"], errors="coerce").fillna(0.0).values[start:end]
-    cloud = pd.to_numeric(w5["cloud"], errors="coerce").fillna(0.0).values[start:end]
-    rh = pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values[start:end]
-    precip = pd.to_numeric(w5["precip"], errors="coerce").fillna(0.0).values[start:end]
-    cape = pd.to_numeric(w5["cape"], errors="coerce").fillna(0.0).values[start:end]
-    clear_hour = np.asarray(csi_arr[start:end], dtype=float)
-
-    cloud_mean = float(np.mean(cloud)) if cloud.size else 0.0
-    cloud_std = float(np.std(cloud)) if cloud.size else 0.0
-    rh_mean = float(np.mean(rh)) if rh.size else 0.0
-    rad_mean = float(np.mean(rad)) if rad.size else 0.0
-    vol_index = float(np.mean(np.abs(np.diff(rad, prepend=rad[0])) > 120.0)) if rad.size else 0.0
-    kt_mean = float(rad_mean / max(float(np.mean(clear_hour)) if clear_hour.size else 0.0, 1.0))
-    precip_total = float(np.sum(precip)) if precip.size else 0.0
-    cape_max = float(np.max(cape)) if cape.size else 0.0
-
-    return {
-        "hour": int(hour),
-        "season": _season_bucket_from_day(day),
-        "cloud_mean": cloud_mean,
-        "cloud_std": cloud_std,
-        "rh_mean": rh_mean,
-        "rad_mean": rad_mean,
-        "kt_mean": float(np.clip(kt_mean, 0.0, 1.2)),
-        "vol_index": vol_index,
-        "precip_total": precip_total,
-        "cape_max": cape_max,
-        "regime": classify_hour_regime(cloud_mean, cloud_std, kt_mean, precip_total, cape_max),
-    }
+# NOTE (v2.8 cleanup): `hour_weather_signature` was removed alongside the
+# shape-correction stack — it was only consumed by the dead `shape_records`
+# pipeline and `apply_hour_shape_correction`.
 
 
 def is_anomalous_day(
@@ -2539,6 +2654,24 @@ def build_features(
     irr_proxy = np.maximum((np.clip(rad, 0.0, None) / 1000.0) * slot_cap_arr, 0.05)
     solcast_vs_irradiance = np.clip(solcast_kwh / irr_proxy, 0.0, 4.0)
 
+    # Step 12: Locked snapshot features
+    spread_pct_cap_locked = np.zeros(SLOTS_DAY, dtype=float)
+    hours_since_lock = np.zeros(SLOTS_DAY, dtype=float)
+    if solcast_prior and solcast_prior.get("has_locked_snapshot", False):
+        try:
+            locked_spread = np.asarray(solcast_prior.get("locked_spread_pct_cap", np.zeros(SLOTS_DAY)), dtype=float)
+            locked_ts = solcast_prior.get("locked_captured_ts")
+            slot_ts_local = solcast_prior.get("slot_ts_local_ms")  # milliseconds since epoch, local
+            if locked_spread is not None and len(locked_spread) >= SLOTS_DAY:
+                spread_pct_cap_locked = np.clip(locked_spread[:SLOTS_DAY], 0.0, None)
+            if locked_ts is not None and slot_ts_local is not None:
+                # Compute hours since lock for each slot
+                slot_ts_arr = np.asarray(slot_ts_local, dtype=float)
+                time_diff_ms = slot_ts_arr - float(locked_ts)
+                hours_since_lock = np.clip(time_diff_ms / (1000.0 * 3600.0), 0.0, 48.0)
+        except Exception as e:
+            log.debug("Could not compute locked snapshot features: %s", e)
+
     df = pd.DataFrame({
         # Radiation
         "rad":           rad,
@@ -2617,6 +2750,9 @@ def build_features(
         "solcast_hi_vs_physics": solcast_hi_vs_physics,
         "solcast_spread_pct": solcast_spread_pct,
         "solcast_spread_ratio": solcast_spread_ratio,
+        # Locked snapshot (NEW v2.8)
+        "spread_pct_cap_locked": spread_pct_cap_locked,
+        "hours_since_lock": hours_since_lock,
         # Plant
         "expected_nodes": expected_nodes,
         "cap_kw":        np.full(SLOTS_DAY, cap_kw),
@@ -2656,6 +2792,8 @@ FEATURE_COLS = [
     "solcast_lo_kwh", "solcast_hi_kwh",
     "solcast_lo_vs_physics", "solcast_hi_vs_physics",
     "solcast_spread_pct", "solcast_spread_ratio",
+    # Locked snapshot (NEW v2.8)
+    "spread_pct_cap_locked", "hours_since_lock",
     # Plant
     "expected_nodes", "cap_kw",
 ]
@@ -3897,7 +4035,47 @@ def load_dayahead(day: str) -> np.ndarray | None:
 
 
 def load_solcast_snapshot(day: str) -> dict | None:
-    if not APP_DB_FILE.exists():
+    """
+    Public entry point with per-cycle cache (v2.8 E1a).
+
+    Returns a deep copy on cache hit so downstream callers cannot mutate
+    the cached snapshot. None entries are also cached to avoid re-querying
+    days with no snapshot.
+    """
+    cached = _cycle_cache_get("solcast_snapshot", day)
+    if cached is not _CYCLE_CACHE_MISS:
+        if cached is None:
+            return None
+        return _deepcopy_snapshot(cached)
+    fresh = _load_solcast_snapshot_uncached(day)
+    _cycle_cache_put("solcast_snapshot", day, fresh)
+    return _deepcopy_snapshot(fresh) if fresh is not None else None
+
+
+def _deepcopy_snapshot(snap: dict) -> dict:
+    """Return a shallow-dict copy with numpy arrays copied."""
+    out = {}
+    for k, v in snap.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.copy()
+        else:
+            out[k] = v
+    return out
+
+
+def _finalize_snapshot_from_rows(day: str, rows: list) -> dict | None:
+    """
+    Build a snapshot dict from raw `solcast_snapshots` rows for *day*.
+
+    Shared by `_load_solcast_snapshot_uncached` (single-day path) and
+    `_load_solcast_snapshots_range_uncached` (E1b batch path) so the
+    est_actual fallback + spread_frac math + return shape stay in one
+    place. Each row is the 11-tuple
+    `(slot, forecast_kwh, forecast_lo_kwh, forecast_hi_kwh, est_actual_kwh,
+       forecast_mw, forecast_lo_mw, forecast_hi_mw, est_actual_mw,
+       pulled_ts, source)`.
+    """
+    if not rows:
         return None
 
     forecast_kwh = _empty_slot_values()
@@ -3911,6 +4089,110 @@ def load_solcast_snapshot(day: str) -> dict | None:
     present = _empty_slot_presence()
     pulled_ts = 0
     source = ""
+
+    for row in rows:
+        slot_i = int(row[0] or 0)
+        if not (0 <= slot_i < SLOTS_DAY):
+            continue
+        has_prior = any(value is not None for value in (row[1], row[5], row[2], row[3]))
+        row_forecast_kwh, row_forecast_mw = _normalize_solcast_slot_pair(row[1], row[5])
+        row_forecast_lo_kwh, row_forecast_lo_mw = _normalize_solcast_slot_pair(row[2], row[6])
+        row_forecast_hi_kwh, row_forecast_hi_mw = _normalize_solcast_slot_pair(row[3], row[7])
+        row_est_actual_kwh, row_est_actual_mw = _normalize_solcast_slot_pair(row[4], row[8])
+        forecast_kwh[slot_i] = float(row_forecast_kwh or 0.0)
+        forecast_mw[slot_i] = float(row_forecast_mw or 0.0)
+        forecast_lo_kwh[slot_i] = float(
+            forecast_kwh[slot_i] if row_forecast_lo_kwh is None else row_forecast_lo_kwh
+        )
+        forecast_hi_kwh[slot_i] = float(
+            forecast_kwh[slot_i] if row_forecast_hi_kwh is None else row_forecast_hi_kwh
+        )
+        est_actual_kwh[slot_i] = float(row_est_actual_kwh or 0.0)
+        forecast_lo_mw[slot_i] = float(
+            forecast_mw[slot_i] if row_forecast_lo_mw is None else row_forecast_lo_mw
+        )
+        forecast_hi_mw[slot_i] = float(
+            forecast_mw[slot_i] if row_forecast_hi_mw is None else row_forecast_hi_mw
+        )
+        est_actual_mw[slot_i] = float(row_est_actual_mw or 0.0)
+        present[slot_i] = bool(has_prior)
+        if row[9] is not None:
+            pulled_ts = max(pulled_ts, int(float(row[9] or 0)))
+        if row[10]:
+            source = str(row[10])
+
+    # ── Est-actual fallback for past dates with sparse forecast_kwh ──
+    est_actual_backfill_count = 0
+    try:
+        day_date = date.fromisoformat(str(day))
+        today_local = datetime.now(_TZ_UTC8).date()
+        is_past = day_date < today_local
+    except (ValueError, TypeError):
+        is_past = False
+
+    if is_past:
+        for si in range(SLOTS_DAY):
+            if (forecast_kwh[si] <= 0.0
+                    and est_actual_kwh[si] > 0.0
+                    and np.isfinite(est_actual_kwh[si])
+                    and np.isfinite(est_actual_mw[si])):
+                forecast_kwh[si] = est_actual_kwh[si]
+                forecast_mw[si] = est_actual_mw[si]
+                forecast_lo_kwh[si] = est_actual_kwh[si]
+                forecast_hi_kwh[si] = est_actual_kwh[si]
+                forecast_lo_mw[si] = est_actual_mw[si]
+                forecast_hi_mw[si] = est_actual_mw[si]
+                present[si] = True
+                est_actual_backfill_count += 1
+
+        if est_actual_backfill_count > 0:
+            log.info(
+                "Solcast snapshot %s: backfilled %d sparse forecast slots from est_actual",
+                day, est_actual_backfill_count,
+            )
+
+    solar_present = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
+    coverage_slots = int(np.count_nonzero(solar_present))
+    if coverage_slots <= 0:
+        return None
+
+    solar_forecast = np.clip(forecast_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+    solar_lo = np.clip(forecast_lo_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+    solar_hi = np.clip(forecast_hi_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
+    spread_frac = np.zeros(SLOTS_DAY, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        solar_spread = np.clip(
+            (solar_hi - solar_lo) / np.maximum(solar_forecast, 0.05),
+            0.0,
+            SOLCAST_PRIOR_SPREAD_FRAC_CLIP,
+        )
+    spread_frac[SOLAR_START_SLOT:SOLAR_END_SLOT] = np.where(solar_present, solar_spread, 0.0)
+
+    return {
+        "day": str(day),
+        "present": present,
+        "forecast_kwh": forecast_kwh,
+        "forecast_lo_kwh": forecast_lo_kwh,
+        "forecast_hi_kwh": forecast_hi_kwh,
+        "est_actual_kwh": est_actual_kwh,
+        "forecast_mw": forecast_mw,
+        "forecast_lo_mw": forecast_lo_mw,
+        "forecast_hi_mw": forecast_hi_mw,
+        "est_actual_mw": est_actual_mw,
+        "spread_frac": spread_frac,
+        "coverage_slots": coverage_slots,
+        "coverage_ratio": float(coverage_slots / max(SOLAR_SLOTS, 1)),
+        "power_unit": "mw",
+        "energy_unit": "kwh_per_slot",
+        "pulled_ts": int(pulled_ts),
+        "source": source or "solcast",
+        "est_actual_backfill_slots": est_actual_backfill_count,
+    }
+
+
+def _load_solcast_snapshot_uncached(day: str) -> dict | None:
+    if not APP_DB_FILE.exists():
+        return None
 
     for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
         try:
@@ -3936,113 +4218,7 @@ def load_solcast_snapshot(day: str) -> dict | None:
                     (str(day),),
                 )
                 rows = cur.fetchall()
-            if not rows:
-                return None
-
-            for row in rows:
-                slot_i = int(row[0] or 0)
-                if not (0 <= slot_i < SLOTS_DAY):
-                    continue
-                has_prior = any(value is not None for value in (row[1], row[5], row[2], row[3]))
-                row_forecast_kwh, row_forecast_mw = _normalize_solcast_slot_pair(row[1], row[5])
-                row_forecast_lo_kwh, row_forecast_lo_mw = _normalize_solcast_slot_pair(row[2], row[6])
-                row_forecast_hi_kwh, row_forecast_hi_mw = _normalize_solcast_slot_pair(row[3], row[7])
-                row_est_actual_kwh, row_est_actual_mw = _normalize_solcast_slot_pair(row[4], row[8])
-                forecast_kwh[slot_i] = float(row_forecast_kwh or 0.0)
-                forecast_mw[slot_i] = float(row_forecast_mw or 0.0)
-                forecast_lo_kwh[slot_i] = float(
-                    forecast_kwh[slot_i] if row_forecast_lo_kwh is None else row_forecast_lo_kwh
-                )
-                forecast_hi_kwh[slot_i] = float(
-                    forecast_kwh[slot_i] if row_forecast_hi_kwh is None else row_forecast_hi_kwh
-                )
-                est_actual_kwh[slot_i] = float(row_est_actual_kwh or 0.0)
-                forecast_lo_mw[slot_i] = float(
-                    forecast_mw[slot_i] if row_forecast_lo_mw is None else row_forecast_lo_mw
-                )
-                forecast_hi_mw[slot_i] = float(
-                    forecast_mw[slot_i] if row_forecast_hi_mw is None else row_forecast_hi_mw
-                )
-                est_actual_mw[slot_i] = float(row_est_actual_mw or 0.0)
-                present[slot_i] = bool(has_prior)
-                if row[9] is not None:
-                    pulled_ts = max(pulled_ts, int(float(row[9] or 0)))
-                if row[10]:
-                    source = str(row[10])
-
-            # ── Est-actual fallback for past dates with sparse forecast_kwh ──
-            # When Solcast snapshots for past dates were overwritten by re-fetch,
-            # forecast_kwh may be sparse while est_actual_kwh (satellite-measured)
-            # is rich. For training purposes, est_actual is a valid proxy for the
-            # Solcast forecast — it represents what actually happened under real
-            # irradiance, which is at least as informative as the original forecast.
-            est_actual_backfill_count = 0
-            try:
-                day_date = date.fromisoformat(str(day))
-                today_local = datetime.now(_TZ_UTC8).date()
-                is_past = day_date < today_local
-            except (ValueError, TypeError):
-                is_past = False
-
-            if is_past:
-                for si in range(SLOTS_DAY):
-                    if (forecast_kwh[si] <= 0.0
-                            and est_actual_kwh[si] > 0.0
-                            and np.isfinite(est_actual_kwh[si])
-                            and np.isfinite(est_actual_mw[si])):
-                        forecast_kwh[si] = est_actual_kwh[si]
-                        forecast_mw[si] = est_actual_mw[si]
-                        # Use est_actual as lo/hi too (zero spread — it's observed)
-                        forecast_lo_kwh[si] = est_actual_kwh[si]
-                        forecast_hi_kwh[si] = est_actual_kwh[si]
-                        forecast_lo_mw[si] = est_actual_mw[si]
-                        forecast_hi_mw[si] = est_actual_mw[si]
-                        present[si] = True
-                        est_actual_backfill_count += 1
-
-                if est_actual_backfill_count > 0:
-                    log.info(
-                        "Solcast snapshot %s: backfilled %d sparse forecast slots from est_actual",
-                        day, est_actual_backfill_count,
-                    )
-
-            solar_present = present[SOLAR_START_SLOT:SOLAR_END_SLOT]
-            coverage_slots = int(np.count_nonzero(solar_present))
-            if coverage_slots <= 0:
-                return None
-
-            solar_forecast = np.clip(forecast_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
-            solar_lo = np.clip(forecast_lo_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
-            solar_hi = np.clip(forecast_hi_kwh[SOLAR_START_SLOT:SOLAR_END_SLOT], 0.0, None)
-            spread_frac = np.zeros(SLOTS_DAY, dtype=float)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                solar_spread = np.clip(
-                    (solar_hi - solar_lo) / np.maximum(solar_forecast, 0.05),
-                    0.0,
-                    SOLCAST_PRIOR_SPREAD_FRAC_CLIP,
-                )
-            spread_frac[SOLAR_START_SLOT:SOLAR_END_SLOT] = np.where(solar_present, solar_spread, 0.0)
-
-            return {
-                "day": str(day),
-                "present": present,
-                "forecast_kwh": forecast_kwh,
-                "forecast_lo_kwh": forecast_lo_kwh,
-                "forecast_hi_kwh": forecast_hi_kwh,
-                "est_actual_kwh": est_actual_kwh,
-                "forecast_mw": forecast_mw,
-                "forecast_lo_mw": forecast_lo_mw,
-                "forecast_hi_mw": forecast_hi_mw,
-                "est_actual_mw": est_actual_mw,
-                "spread_frac": spread_frac,
-                "coverage_slots": coverage_slots,
-                "coverage_ratio": float(coverage_slots / max(SOLAR_SLOTS, 1)),
-                "power_unit": "mw",
-                "energy_unit": "kwh_per_slot",
-                "pulled_ts": int(pulled_ts),
-                "source": source or "solcast",
-                "est_actual_backfill_slots": est_actual_backfill_count,
-            }
+            return _finalize_snapshot_from_rows(day, rows)
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
                 log.warning(
@@ -4057,6 +4233,97 @@ def load_solcast_snapshot(day: str) -> dict | None:
             log.warning("DB Solcast snapshot load failed [%s]: %s", day, e)
             return None
     return None
+
+
+def _load_solcast_snapshots_range_uncached(days: list[str]) -> dict[str, dict | None]:
+    """
+    v2.8 efficiency audit (E1b): batch-load multiple solcast snapshots in a
+    single SQLite read connection.
+
+    Returns `{day: snapshot_or_None}` for every day in *days*. Days with no
+    rows in solcast_snapshots get an explicit `None` entry so callers can
+    cache the negative result without re-querying.
+    """
+    out: dict[str, dict | None] = {day: None for day in days}
+    if not APP_DB_FILE.exists() or not days:
+        return out
+
+    # Bucket raw rows by day in one pass through the cursor.
+    rows_by_day: dict[str, list] = {day: [] for day in days}
+    placeholders = ",".join("?" for _ in days)
+    sql = f"""
+        SELECT forecast_day,
+               slot,
+               forecast_kwh,
+               forecast_lo_kwh,
+               forecast_hi_kwh,
+               est_actual_kwh,
+               forecast_mw,
+               forecast_lo_mw,
+               forecast_hi_mw,
+               est_actual_mw,
+               pulled_ts,
+               source
+          FROM solcast_snapshots
+         WHERE forecast_day IN ({placeholders})
+         ORDER BY forecast_day ASC, slot ASC
+    """
+
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                for raw in conn.execute(sql, tuple(days)):
+                    day_key = str(raw[0] or "")
+                    if day_key in rows_by_day:
+                        # Drop the leading forecast_day column to match the
+                        # 11-tuple shape expected by _finalize_snapshot_from_rows.
+                        rows_by_day[day_key].append(raw[1:])
+            break
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "DB Solcast snapshot batch load retry %d/%d (%d days): %s",
+                    attempt,
+                    SQLITE_RETRY_ATTEMPTS,
+                    len(days),
+                    e,
+                )
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("DB Solcast snapshot batch load failed: %s", e)
+            return out
+
+    # Finalize each day. Empty buckets stay as None.
+    for day in days:
+        rows = rows_by_day.get(day) or []
+        if rows:
+            out[day] = _finalize_snapshot_from_rows(day, rows)
+        # else: leave as None (already in out)
+
+    return out
+
+
+def prime_solcast_snapshot_cache(days: list[str]) -> int:
+    """
+    Pre-populate the cycle cache with snapshots for *days*.
+
+    Subsequent `load_solcast_snapshot(day)` calls for any day in the list
+    will be cache hits — no DB read, no connection open.
+
+    Returns the number of days that produced a non-None snapshot. Skips
+    days that are already cached so this is safe to call repeatedly.
+    """
+    pending = [d for d in days if _cycle_cache_get("solcast_snapshot", d) is _CYCLE_CACHE_MISS]
+    if not pending:
+        return 0
+    batch = _load_solcast_snapshots_range_uncached(pending)
+    real = 0
+    for day, snap in batch.items():
+        _cycle_cache_put("solcast_snapshot", day, snap)
+        if snap is not None:
+            real += 1
+    return real
 
 
 def build_solcast_reliability_artifact(today: date) -> dict | None:
@@ -4075,6 +4342,17 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
     tod_accum: dict[str, list[dict]] = {}
     tod_regime_accum: dict[tuple, list[dict]] = {}
     lookback = max(SOLCAST_RELIABILITY_LOOKBACK_DAYS, N_TRAIN_DAYS)
+
+    # v2.8 efficiency audit (E1b/P3): batch-load all lookback snapshots in
+    # a single SQLite query and prime the per-cycle cache. Subsequent
+    # load_solcast_snapshot() calls in this loop — and in collect_history_days
+    # which replays the same date window — become O(dict) cache hits.
+    _prime_days = [(today - timedelta(days=d)).isoformat() for d in range(1, lookback + 1)]
+    try:
+        prime_solcast_snapshot_cache(_prime_days)
+    except Exception as prime_err:
+        log.debug("prime_solcast_snapshot_cache failed (non-fatal): %s", prime_err)
+
     for days_ago in range(1, lookback + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
         # E5 priority chain: metered substation → loss-adjusted inverter → Solcast est_actual
@@ -4836,6 +5114,66 @@ def solcast_prior_from_snapshot(
         and np.any(prior_hi > prior_kwh + 0.01)
     )
 
+    # Step 12 (v2.8): Locked day-ahead snapshot enrichment. Read the frozen
+    # 10 AM snapshot for this day (if any) and expose per-slot spread_pct_cap
+    # plus captured_ts, so build_features can populate the two new ML features
+    # (spread_pct_cap_locked, hours_since_lock).
+    #
+    # v2.8 audit (R6): if EVERY row for the day is `capture_reason='backfill_approx'`,
+    # treat the day as having no real locked snapshot for ML feature purposes.
+    # The backfill rows have stale captured_ts (e.g. matching an old DB backup
+    # mtime, weeks in the past) which would feed garbage `hours_since_lock`
+    # values. Backfill rows still get used by error_memory via _spread_weight
+    # (with the 0.3x discount), just not by build_features.
+    has_locked_snapshot = False
+    locked_spread_pct_cap = np.zeros(SLOTS_DAY, dtype=float)
+    locked_captured_ts = None
+    slot_ts_local_ms = None
+    try:
+        # Per-slot local-midnight timestamps in Unix ms (for hours_since_lock calc)
+        day_dt = datetime.fromisoformat(day)
+        _midnight_ms = int(day_dt.timestamp() * 1000)
+        slot_ts_local_ms = np.asarray(
+            [_midnight_ms + i * SLOT_MIN * 60 * 1000 for i in range(SLOTS_DAY)],
+            dtype=float,
+        )
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as _conn:
+            _conn.execute("PRAGMA query_only = ON")
+            _rows = _conn.execute(
+                "SELECT slot, spread_pct_cap, captured_ts, capture_reason "
+                "FROM solcast_dayahead_locked WHERE forecast_day = ?",
+                (day,),
+            ).fetchall()
+            if _rows:
+                _min_ts = None
+                _has_real_capture = False  # any non-backfill_approx row
+                for _r in _rows:
+                    _slot = int(_r[0] or -1)
+                    if 0 <= _slot < SLOTS_DAY and _r[1] is not None:
+                        locked_spread_pct_cap[_slot] = float(_r[1])
+                    if _r[2] is not None:
+                        _ts = int(_r[2])
+                        _min_ts = _ts if _min_ts is None else min(_min_ts, _ts)
+                    if _r[3] is not None and str(_r[3]) != "backfill_approx":
+                        _has_real_capture = True
+                # R6: only treat as "has locked snapshot" for build_features
+                # purposes if at least one row is from a real capture
+                # (scheduled_0600/0955/1100_catchup/manual). Backfill-only days
+                # would feed stale captured_ts into hours_since_lock.
+                if _min_ts is not None and _has_real_capture:
+                    locked_captured_ts = _min_ts
+                    has_locked_snapshot = True
+                elif _min_ts is not None:
+                    log.debug(
+                        "Locked snapshot for %s is backfill_approx only (%d rows) — "
+                        "skipping locked features in build_features (still used by error_memory)",
+                        day, len(_rows),
+                    )
+                    # Reset spread array so build_features doesn't see stale values
+                    locked_spread_pct_cap = np.zeros(SLOTS_DAY, dtype=float)
+    except Exception as _e:
+        log.debug("Could not load locked snapshot features for %s: %s", day, _e)
+
     return {
         "available": present.astype(float),
         "present": present,
@@ -4859,6 +5197,11 @@ def solcast_prior_from_snapshot(
         "has_triband": has_triband,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
+        # Step 12 (v2.8): Locked snapshot features for build_features
+        "has_locked_snapshot": has_locked_snapshot,
+        "locked_spread_pct_cap": locked_spread_pct_cap,
+        "locked_captured_ts": locked_captured_ts,
+        "slot_ts_local_ms": slot_ts_local_ms,
     }
 
 
@@ -5088,6 +5431,18 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
     """
     Fallback error memory computation for sparse-regime scenarios.
 
+    Unlike the main path, this reads `forecast_error_compare_slot` directly
+    and relies on the persisted `usable_for_error_memory=1` flag to filter
+    trustworthy rows. That flag is set by `_persist_qa_comparison` only
+    after the full daily-eligibility gate passes, so no additional
+    source/provider weighting is needed here.
+
+    v2.8 M1 fix: removed the stale-name provider penalty that was checking
+    for provider names ("learning", "ml_local") which no longer exist in
+    the codebase, causing every row to be silently discounted to 20% of
+    its intended weight. The persisted `usable_for_error_memory` flag is
+    now the single source of truth for row eligibility.
+
     Args:
         today: Reference date
         target_regime: Weather regime for lookback window expansion
@@ -5098,7 +5453,11 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
     _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, ERR_MEMORY_DAYS)
     weight_vectors = []
     errors = []
-    source_mismatch_penalty = 0.2
+    # v2.8 M1: schema-legacy fallback penalty (applied only when
+    # `usable_for_error_memory` column is missing — effectively never in
+    # production, but test fixtures may pre-date the column migration).
+    _schema_legacy_penalty = 0.5
+    _schema_legacy_mode = False
     try:
         start_date = (today - timedelta(days=_regime_days)).isoformat()
         end_date = (today - timedelta(days=1)).isoformat()
@@ -5111,63 +5470,73 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
             err_col = "signed_error_kwh" if "signed_error_kwh" in cols else ("error_kwh" if "error_kwh" in cols else "")
             if not err_col:
                 return np.zeros(SLOTS_DAY, dtype=float)
-            provider_expr = "provider_used" if "provider_used" in cols else "'unknown'"
             has_usable_col = "usable_for_error_memory" in cols
+            has_regime_col = "day_regime" in cols
+            has_spread_col = "spread_pct_cap_locked" in cols
+            if not has_usable_col:
+                _schema_legacy_mode = True
+                log.info("error_memory_legacy: schema-legacy mode active (applying %.2f penalty to unfiltered rows)", _schema_legacy_penalty)
 
-            # Build query with optional usable_for_error_memory filter
-            query = (
-                "SELECT target_date, slot, "
-                + provider_expr
-                + " AS provider_used, "
-                + err_col
-                + " AS error_val"
-            )
+            # v2.8 M2/M3: Build query schema-defensively with optional
+            # regime + spread columns. When present, the legacy path
+            # now applies the same regime penalty matrix and _spread_weight
+            # as the main path, matching its signal strength.
+            select_cols = ["target_date", "slot", err_col + " AS error_val"]
+            if has_regime_col:
+                select_cols.append("day_regime")
+            if has_spread_col:
+                select_cols.append("spread_pct_cap_locked")
             if has_usable_col:
-                query += ", usable_for_error_memory"
-            query += " FROM forecast_error_compare_slot WHERE target_date >= ? AND target_date <= ?"
+                select_cols.append("usable_for_error_memory")
+            query = (
+                "SELECT " + ", ".join(select_cols)
+                + " FROM forecast_error_compare_slot"
+                + " WHERE target_date >= ? AND target_date <= ?"
+            )
             if has_usable_col:
                 query += " AND usable_for_error_memory = 1"
 
-            history: dict[str, dict[int, tuple[str, float]]] = {}
-            try:
-                for row in conn.execute(query, (start_date, end_date)):
-                    day_str = str(row[0] or "")
-                    slot = int(row[1] or -1)
-                    if slot < 0 or slot >= SLOTS_DAY:
-                        continue
-                    err_val = row[3]
-                    if err_val is None:
-                        continue
-                    history.setdefault(day_str, {})[slot] = (
-                        str(row[2] or "unknown"),
-                        float(err_val),
-                    )
-            except sqlite3.OperationalError as oe:
-                if "usable_for_error_memory" in str(oe):
-                    # Schema-defensive fallback for very old databases
-                    log.info("error_memory_legacy: usable_for_error_memory column not present — unfiltered fallback")
-                    query_fallback = (
-                        "SELECT target_date, slot, "
-                        + provider_expr
-                        + " AS provider_used, "
-                        + err_col
-                        + " AS error_val FROM forecast_error_compare_slot "
-                        + "WHERE target_date >= ? AND target_date <= ?"
-                    )
-                    for row in conn.execute(query_fallback, (start_date, end_date)):
-                        day_str = str(row[0] or "")
-                        slot = int(row[1] or -1)
-                        if slot < 0 or slot >= SLOTS_DAY:
-                            continue
-                        err_val = row[3]
-                        if err_val is None:
-                            continue
-                        history.setdefault(day_str, {})[slot] = (
-                            str(row[2] or "unknown"),
-                            float(err_val),
-                        )
-                else:
-                    raise
+            # Layout: each slot row → (regime_or_none, spread_or_none, err_val)
+            history: dict[str, dict[int, tuple[str | None, float | None, float]]] = {}
+            for row in conn.execute(query, (start_date, end_date)):
+                day_str = str(row[0] or "")
+                slot = int(row[1] or -1)
+                if slot < 0 or slot >= SLOTS_DAY:
+                    continue
+                err_val = row[2]
+                if err_val is None:
+                    continue
+                idx = 3
+                hist_regime = None
+                if has_regime_col:
+                    hist_regime = str(row[idx] or "") or None
+                    idx += 1
+                spread_pct_cap = None
+                if has_spread_col:
+                    spread_pct_cap = row[idx]
+                    idx += 1
+                history.setdefault(day_str, {})[slot] = (
+                    hist_regime,
+                    spread_pct_cap,
+                    float(err_val),
+                )
+
+            # v2.8 M2: also pre-fetch capture_reason per day for spread
+            # weighting. One query for the whole window, keyed by day.
+            capture_reason_by_day: dict[str, str | None] = {}
+            if has_spread_col:
+                try:
+                    _day_list = list(history.keys())
+                    if _day_list:
+                        _ph = ",".join("?" for _ in _day_list)
+                        for _r in conn.execute(
+                            f"SELECT forecast_day, capture_reason FROM solcast_dayahead_locked "
+                            f"WHERE forecast_day IN ({_ph})",
+                            tuple(_day_list),
+                        ):
+                            capture_reason_by_day[str(_r[0] or "")] = _r[1]
+                except Exception:
+                    pass  # missing table or column — capture_reason stays None
 
         for d in range(1, _regime_days + 1):
             day = (today - timedelta(days=d)).isoformat()
@@ -5181,15 +5550,31 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
             exclude_arr = inverter_outage | cap_dispatch
             err = np.zeros(SLOTS_DAY, dtype=float)
             weight_vec = np.zeros(SLOTS_DAY, dtype=float)
+            base_w = ERR_MEMORY_DECAY ** (d - 1)
+            # v2.8 M1: schema-legacy mode applies a flat 0.5 penalty when
+            # the persisted `usable_for_error_memory` flag is unavailable.
+            if _schema_legacy_mode:
+                base_w *= _schema_legacy_penalty
+            # v2.8 M3: compute regime mismatch penalty once per day.
+            # Use the first slot's regime as the day's regime (all slots
+            # on a given day share the same QA-persisted day_regime).
+            _sample_slot = next(iter(day_history.values()), None)
+            _hist_regime = _sample_slot[0] if _sample_slot else None
+            regime_factor = 1.0
+            if target_regime and _hist_regime and target_regime != _hist_regime:
+                regime_factor = ERR_MEMORY_REGIME_PENALTY_MATRIX.get(
+                    (target_regime, _hist_regime),
+                    ERR_MEMORY_REGIME_MISMATCH_PENALTY,
+                )
+            _day_capture_reason = capture_reason_by_day.get(day)
             for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
                 if exclude_arr[slot] or slot not in day_history:
                     continue
-                provider, slot_err = day_history[slot]
+                _, slot_spread, slot_err = day_history[slot]
                 err[slot] = float(np.clip(slot_err, -200.0, 200.0))
-                w = ERR_MEMORY_DECAY ** (d - 1)
-                if provider not in ("learning", "ml_local"):
-                    w *= source_mismatch_penalty
-                weight_vec[slot] = w
+                # v2.8 M2: apply spread-weight multiplier when available.
+                spread_w = _spread_weight(slot_spread, _day_capture_reason)
+                weight_vec[slot] = base_w * regime_factor * spread_w
             if np.sum(weight_vec) <= 0:
                 continue
             errors.append(err)
@@ -5214,6 +5599,69 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
     mem_err[SOLAR_END_SLOT:] = 0.0
     mem_err = np.clip(mem_err, -100.0, 100.0)
     return mem_err
+
+
+def _has_sufficient_locked_history(conn, min_days: int = 30) -> bool:
+    """
+    Step 13: Feature flag checking if >=min_days distinct forecast_days exist in
+    solcast_dayahead_locked with capture_reason != 'backfill_approx'.
+
+    Returns True if sufficient real (non-approximation) locked history has accumulated.
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT forecast_day) AS n FROM solcast_dayahead_locked WHERE capture_reason != 'backfill_approx'"
+        ).fetchone()
+        return row and int(row[0] or 0) >= min_days
+    except Exception:
+        return False
+
+
+def _spread_weight(spread_pct_cap_locked: float | None, capture_reason: str | None) -> float:
+    """
+    Narrow-spread misses are the strongest learning signal; wide-spread
+    misses get discounted because the forecast was already hedged.
+
+    v2.8 H1/H2 fix: correctness of edge cases.
+
+    - Unknown spread (None or ≤ 0) no longer returns 1.0 (max trust).
+      It now returns 0.5 — a neutral mid-trust value. The old code
+      inverted the intent: a row with no v2.8 locked-snapshot spread
+      (pre-migration rows or rows missing the lock capture) is an
+      unknown-uncertainty signal, which deserves less trust than a
+      row with a measured narrow spread, not more.
+
+    - Backfill-approx rows compound with spread: a wide-spread
+      backfill row is the weakest signal in the system and returns
+      as low as 0.09. This is intentional — backfilled spread has no
+      basis in a real capture event.
+
+    Args:
+        spread_pct_cap_locked: Spread as % of plant capacity, from
+            solcast_dayahead_locked. None or ≤ 0 means unknown.
+        capture_reason: Capture reason — one of
+            'scheduled_0600', 'scheduled_0955', 'manual', 'backfill_approx',
+            or None.
+
+    Returns:
+        Weight multiplier in range [0.09, 1.0]. Typical values:
+            fresh narrow spread (≤ 5%):   0.95 - 1.00
+            fresh wide spread (~ 30%):    0.70
+            fresh very wide (~ 70%):      0.30 (soft floor)
+            unknown spread (None/0):      0.50  ← H2 fix
+            backfill narrow spread:       0.30 (= 1.0 * 0.3)
+            backfill wide spread:         0.09 - 0.20 (compound)
+    """
+    if spread_pct_cap_locked is None or spread_pct_cap_locked <= 0:
+        # Unknown or zero spread — neutral mid-trust, not max-trust.
+        # Pre-v2.8 rows hit this branch until the migration fills in
+        # locked snapshots for every training day.
+        base = 0.5
+    else:
+        base = max(0.3, 1.0 - (spread_pct_cap_locked / 100.0))
+    if capture_reason == "backfill_approx":
+        base *= 0.3
+    return base
 
 
 def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: str = "") -> np.ndarray:
@@ -5247,6 +5695,19 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     selected_days = 0
     fallback_to_legacy = False
     fallback_reason = None
+    # Step 11 (v2.8): spread-weight telemetry counters (populated inside the
+    # per-day loop so we can log a single summary line after the connection
+    # closes — see end-of-function block).
+    total_spread_weight_samples = 0
+    sum_spread_weights = 0.0
+    backfill_rows_with_spread = 0
+
+    # v2.8 M4: per-day TOD zone signed means, collected inside the day loop
+    # and consumed by the TOD-floor gate after the weighted average is built.
+    # Entries are appended in the same order the outer loop visits days
+    # (daily_rows is ORDER BY target_date DESC), so index 0 = newest.
+    # Each entry: {"days_ago": int, "zone_signed_means": [morning, midday, afternoon]}.
+    per_day_zone_stats: list[dict] = []
 
     try:
         start_date = (today - timedelta(days=max(_regime_days * 4, 60))).isoformat()
@@ -5286,6 +5747,42 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                 log.info("Error memory: no eligible rows in daily table, using legacy fallback")
             else:
                 all_daily_rows = list(daily_rows)
+
+                # v2.8 efficiency audit (E6/P3): batch-fetch capture_reason and
+                # slot rows for ALL candidate days in one query each. Replaces
+                # the N+1 per-day queries that previously ran inside the loop.
+                _target_dates = [str(r[0] or "") for r in daily_rows if r[0]]
+                _capture_reason_by_day: dict[str, str | None] = {}
+                _slot_rows_by_pair: dict[tuple[str, int], list] = {}
+                if _target_dates:
+                    _placeholders = ",".join("?" for _ in _target_dates)
+                    # Batch 1: capture_reason lookup (one row per forecast_day)
+                    try:
+                        for _r in conn.execute(
+                            f"SELECT forecast_day, capture_reason FROM solcast_dayahead_locked "
+                            f"WHERE forecast_day IN ({_placeholders})",
+                            tuple(_target_dates),
+                        ):
+                            _capture_reason_by_day[str(_r[0] or "")] = _r[1]
+                    except Exception as _cr_err:
+                        log.debug("Batch capture_reason fetch failed: %s", _cr_err)
+                    # Batch 2: slot rows — bucket by (target_date, run_audit_id)
+                    try:
+                        for _sr in conn.execute(
+                            f"""
+                            SELECT target_date, COALESCE(run_audit_id, 0), slot,
+                                   signed_error_kwh, support_weight,
+                                   usable_for_error_memory, spread_pct_cap_locked
+                              FROM forecast_error_compare_slot
+                             WHERE target_date IN ({_placeholders})
+                            """,
+                            tuple(_target_dates),
+                        ):
+                            _key = (str(_sr[0] or ""), int(_sr[1] or 0))
+                            _slot_rows_by_pair.setdefault(_key, []).append(_sr[2:])
+                    except Exception as _sr_err:
+                        log.debug("Batch slot-row fetch failed: %s", _sr_err)
+
                 for day_row in daily_rows:
                     day_s = str(day_row[0] or "")
                     if not day_s:
@@ -5336,14 +5833,13 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                     err = np.zeros(SLOTS_DAY, dtype=float)
                     weight_vec = np.zeros(SLOTS_DAY, dtype=float)
 
-                    for slot_row in conn.execute(
-                        """
-                        SELECT slot, signed_error_kwh, support_weight, usable_for_error_memory
-                          FROM forecast_error_compare_slot
-                         WHERE target_date = ? AND run_audit_id = ?
-                        """,
-                        (day_s, run_audit_id),
-                    ):
+                    # v2.8 E6/P3: capture_reason + slot rows come from the
+                    # pre-fetched batch dicts above. Zero extra DB queries
+                    # inside this per-day loop.
+                    day_capture_reason = _capture_reason_by_day.get(day_s)
+                    _slot_rows_for_day = _slot_rows_by_pair.get((day_s, run_audit_id), [])
+
+                    for slot_row in _slot_rows_for_day:
                         slot = int(slot_row[0] or -1)
                         if slot < SOLAR_START_SLOT or slot >= SOLAR_END_SLOT:
                             continue
@@ -5354,9 +5850,18 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                             continue
                         support_weight = float(slot_row[2] or 1.0)
                         support_weight = float(np.clip(support_weight, 0.0, 1.0))
+                        spread_pct_cap_locked = slot_row[4]  # May be NULL for pre-feature days
+                        # Step 11: Apply spread-weight multiplier if locked snapshot exists
+                        spread_weight = _spread_weight(spread_pct_cap_locked, day_capture_reason)
                         base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
-                        weight_vec[slot] = base_w * source_weight * support_weight * regime_factor
+                        weight_vec[slot] = base_w * source_weight * support_weight * regime_factor * spread_weight
                         err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
+                        # Track spread-weight stats for telemetry
+                        if spread_pct_cap_locked is not None:
+                            sum_spread_weights += spread_weight
+                            total_spread_weight_samples += 1
+                            if day_capture_reason == "backfill_approx":
+                                backfill_rows_with_spread += 1
 
                     if np.sum(weight_vec) <= 0:
                         continue
@@ -5365,6 +5870,30 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                     selected_days += 1
                     if last_eligible_date is None:
                         last_eligible_date = day_s
+
+                    # v2.8 M4: compute per-zone signed mean for this day so
+                    # the TOD-floor gate can check newest-3-day consistency.
+                    _solar_len_tmp = SOLAR_END_SLOT - SOLAR_START_SLOT
+                    _third = _solar_len_tmp // 3
+                    _zone_bounds = [
+                        (SOLAR_START_SLOT,                   SOLAR_START_SLOT + _third),
+                        (SOLAR_START_SLOT + _third,          SOLAR_START_SLOT + 2 * _third),
+                        (SOLAR_START_SLOT + 2 * _third,      SOLAR_END_SLOT),
+                    ]
+                    _zone_means_today: list[float] = []
+                    for _zs, _ze in _zone_bounds:
+                        _zone_err = err[_zs:_ze]
+                        _zone_wv = weight_vec[_zs:_ze]
+                        _active = _zone_wv > 0
+                        if int(np.count_nonzero(_active)) >= 3:
+                            _zone_means_today.append(float(np.mean(_zone_err[_active])))
+                        else:
+                            _zone_means_today.append(0.0)
+                    per_day_zone_stats.append({
+                        "days_ago": int(days_ago),
+                        "zone_signed_means": _zone_means_today,
+                    })
+
                     if selected_days >= _regime_days:
                         break
 
@@ -5385,8 +5914,12 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     # Fallback to legacy if necessary
     if fallback_to_legacy and fallback_reason:
         mem_err = _compute_error_memory_legacy(today, target_regime)
-        # Compute applied bias for fallback case
-        bias_applied = float((ERROR_ALPHA * mem_err).sum())
+        # v2.8 H5: record the RAW bias magnitude here (pre-damping).
+        # run_dayahead is responsible for computing the actual applied
+        # bias after regime-aware Solcast damping and stuffing it into
+        # the meta under `applied_bias_total_kwh`. This split preserves
+        # both signals: raw = learning-loop strength, applied = actual.
+        raw_bias = float((ERROR_ALPHA * mem_err).sum())
         _LAST_ERROR_MEMORY_META = {
             "last_eligible_date": last_eligible_date,
             "eligible_row_count": len(all_daily_rows),
@@ -5395,14 +5928,15 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
             "regime_used": target_regime or "",
             "fallback_to_legacy": True,
             "fallback_reason": fallback_reason,
-            "applied_bias_total_kwh": bias_applied,
+            "raw_bias_total_kwh": raw_bias,
+            "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
         }
         return mem_err
 
     if not errors:
         # Should not reach here if fallback_to_legacy is set, but handle it
         mem_err = _compute_error_memory_legacy(today, target_regime)
-        bias_applied = float((ERROR_ALPHA * mem_err).sum())
+        raw_bias = float((ERROR_ALPHA * mem_err).sum())
         _LAST_ERROR_MEMORY_META = {
             "last_eligible_date": last_eligible_date,
             "eligible_row_count": len(all_daily_rows),
@@ -5411,9 +5945,17 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
             "regime_used": target_regime or "",
             "fallback_to_legacy": True,
             "fallback_reason": "no_eligible_rows" if not fallback_reason else fallback_reason,
-            "applied_bias_total_kwh": float((ERROR_ALPHA * mem_err).sum()),
+            "raw_bias_total_kwh": raw_bias,
+            "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
         }
         return mem_err
+
+    if total_spread_weight_samples > 0:
+        avg_spread_weight = sum_spread_weights / total_spread_weight_samples
+        log.info(
+            "[error-memory] spread-weighted %d rows used (avg_spread_weight=%.2f, backfill_rows=%d)",
+            total_spread_weight_samples, avg_spread_weight, backfill_rows_with_spread
+        )
 
     weighted_sum = np.sum(np.stack([w * e for w, e in zip(weight_vectors, errors)]), axis=0)
     weight_sum = np.sum(np.stack(weight_vectors), axis=0)
@@ -5430,13 +5972,25 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
 
     # Per-TOD floor: ensure error memory doesn't vanish in zones with consistent bias.
     # Split solar window into 3 TOD zones: morning, midday, afternoon.
+    #
+    # v2.8 M4: the floor now also requires the newest 3 days of per-zone
+    # signed bias to agree in sign before it fires. This prevents the
+    # floor from locking in a stale bias after a plant-side change
+    # (module cleaning, inverter swap, reconfigured string) where the
+    # window-average still looks consistent but the most recent days
+    # have already flipped. If the newest days disagree with the
+    # window-average sign, error memory is allowed to taper to zero
+    # naturally as the window rolls over.
     _solar_len = SOLAR_END_SLOT - SOLAR_START_SLOT
     _tod_thirds = _solar_len // 3
-    for _tod_start, _tod_end in [
-        (SOLAR_START_SLOT, SOLAR_START_SLOT + _tod_thirds),
-        (SOLAR_START_SLOT + _tod_thirds, SOLAR_START_SLOT + 2 * _tod_thirds),
-        (SOLAR_START_SLOT + 2 * _tod_thirds, SOLAR_END_SLOT),
-    ]:
+    _zone_defs = [
+        (SOLAR_START_SLOT,                  SOLAR_START_SLOT + _tod_thirds,     0),
+        (SOLAR_START_SLOT + _tod_thirds,    SOLAR_START_SLOT + 2 * _tod_thirds, 1),
+        (SOLAR_START_SLOT + 2 * _tod_thirds, SOLAR_END_SLOT,                    2),
+    ]
+    # Pull the newest 3 entries (list is in days_ago ASC order per append).
+    _recent_days = sorted(per_day_zone_stats, key=lambda e: e.get("days_ago", 999))[:3]
+    for _tod_start, _tod_end, _zone_idx in _zone_defs:
         _zone = mem_err[_tod_start:_tod_end]
         _zone_weights = weight_sum[_tod_start:_tod_end]
         _zone_active = _zone_weights > 0
@@ -5449,6 +6003,32 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
             _same_sign = np.sum(np.sign(_zone[_zone_active]) == np.sign(_zone_mean))
             _consistency = _same_sign / max(np.sum(_zone_active), 1)
             if _consistency > 0.80:
+                # v2.8 M4 recency gate: require the newest days that have
+                # data for this zone to still point the same direction.
+                # A zone with a brand-new flip releases the floor even
+                # though the window-average is still consistent.
+                _recent_zone_vals = [
+                    float(e["zone_signed_means"][_zone_idx])
+                    for e in _recent_days
+                    if len(e.get("zone_signed_means") or []) > _zone_idx
+                    and abs(float(e["zone_signed_means"][_zone_idx])) > 0.01
+                ]
+                _target_sign = np.sign(_zone_mean)
+                if _recent_zone_vals:
+                    _recent_same = sum(
+                        1 for v in _recent_zone_vals if np.sign(v) == _target_sign
+                    )
+                    # Require >=2 of the newest (at least) 3 to agree.
+                    # If the newest days outright disagree, skip the floor.
+                    if _recent_same < max(2, len(_recent_zone_vals) - 1):
+                        log.info(
+                            "[error-memory] TOD zone %d floor released: newest days flipped "
+                            "(recent_vals=%s, zone_mean=%.2f)",
+                            _zone_idx,
+                            [round(v, 2) for v in _recent_zone_vals],
+                            float(_zone_mean),
+                        )
+                        continue
                 # Floor: at least 40% of zone mean persists
                 _floor = _zone_mean * 0.40
                 if _zone_mean > 0:
@@ -5461,8 +6041,14 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     # something error memory should silently absorb.
     mem_err = np.clip(mem_err, -100.0, 100.0)
 
-    # Compute applied bias from the final mem_err
-    bias_applied = float((ERROR_ALPHA * mem_err).sum())
+    # v2.8 H5: raw_bias_total_kwh is the pre-damping magnitude the
+    # learning loop *wants* to apply. run_dayahead later overwrites
+    # applied_bias_total_kwh with the actual post-damping value.
+    # v2.8 L3 note: mem_err is zeroed outside [SOLAR_START_SLOT, SOLAR_END_SLOT)
+    # so `raw_bias` is effectively a solar-window total (non-solar slots
+    # contribute nothing to the sum). The telemetry label reflects the
+    # applied forecast effect, not the raw signal range.
+    raw_bias = float((ERROR_ALPHA * mem_err).sum())
 
     # Store metadata for later retrieval
     _LAST_ERROR_MEMORY_META = {
@@ -5473,7 +6059,8 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         "regime_used": target_regime or "",
         "fallback_to_legacy": False,
         "fallback_reason": None,
-        "applied_bias_total_kwh": bias_applied,
+        "raw_bias_total_kwh": raw_bias,
+        "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
     }
     return mem_err
 
@@ -5499,6 +6086,15 @@ def collect_history_days(
         "Collecting history basis from last %d days using actual archived weather + actual generation",
         lookback_days,
     )
+
+    # v2.8 efficiency audit (E1b/P3): prime cycle cache with all lookback
+    # snapshots in one query. Idempotent — skips days already cached by
+    # build_solcast_reliability_artifact when it runs earlier in the cycle.
+    _prime_days_hist = [(today - timedelta(days=d)).isoformat() for d in range(1, lookback_days + 1)]
+    try:
+        prime_solcast_snapshot_cache(_prime_days_hist)
+    except Exception as prime_err:
+        log.debug("prime_solcast_snapshot_cache (training) failed: %s", prime_err)
 
     for days_ago in range(1, lookback_days + 1):
         day = (today - timedelta(days=days_ago)).isoformat()
@@ -5713,22 +6309,23 @@ def collect_history_days(
 
 
 def build_forecast_artifacts(history_days: list[dict]) -> dict:
-    """Build derived artifacts for shape correction and activity gating."""
-    shape_records = []
+    """Build derived artifacts for activity gating.
+
+    NOTE (v2.8 cleanup): Previously also built `shape_records` for hour-shape
+    correction. Phase 4 (Solcast as 100% baseline) made hour-shape correction
+    structurally unreachable, so the shape_records pipeline was removed.
+    Older artifacts on disk may still contain a `shape_records` key — it is
+    silently ignored by the loader.
+    """
     activity_records = []
-    threshold = activity_threshold_kwh()
 
     for sample in history_days:
         day = str(sample["day"])
-        actual = np.asarray(sample.get("actual_effective", sample["actual"]), dtype=float)
-        actual_present = np.asarray(sample.get("actual_present"), dtype=bool) if sample.get("actual_present") is not None else np.ones(SLOTS_DAY, dtype=bool)
         # Use 1000H alarm-based outage mask instead of stale audit_log manual_constraint_mask
         inverter_outage_mask = np.asarray(sample.get("inverter_outage_mask"), dtype=bool) if sample.get("inverter_outage_mask") is not None else _build_1000h_inverter_outage_mask(str(sample["day"])).copy()
-        w5 = sample["weather"]
         stats = sample["stats"]
         first_slot = sample.get("first_active_slot")
         last_slot = sample.get("last_active_slot")
-        csi_arr = clear_sky_radiation(day, pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values)
 
         if (
             first_slot is not None
@@ -5748,35 +6345,11 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
                 "last_slot": int(last_slot),
             })
 
-        for hour in range(SOLAR_START_H, SOLAR_END_H):
-            start, end = _solar_hour_bounds(hour)
-            usable_hour_mask = actual_present[start:end] & (~inverter_outage_mask[start:end])
-            if int(np.count_nonzero(usable_hour_mask)) < max(4, (60 // SLOT_MIN) // 2):
-                continue
-            hour_total = float(actual[start:end].sum())
-            if hour_total < threshold * 1.5:
-                continue
-
-            meta = hour_weather_signature(day, w5, hour, csi_arr)
-            shape_records.append({
-                "day": day,
-                "days_ago": int(sample["days_ago"]),
-                "hour": int(hour),
-                "season": meta["season"],
-                "regime": meta["regime"],
-                "cloud_mean": float(meta["cloud_mean"]),
-                "rh_mean": float(meta["rh_mean"]),
-                "kt_mean": float(meta["kt_mean"]),
-                "vol_index": float(meta["vol_index"]),
-                "profile": _normalize_profile(actual[start:end]).astype(np.float32),
-            })
-
     return {
         "created_ts": int(time.time()),
         "training_basis": "actual archived weather + cleaned actual generation",
         "lookback_days": int(SHAPE_LOOKBACK_DAYS),
         "history_days": int(len(history_days)),
-        "shape_records": shape_records,
         "activity_records": activity_records,
     }
 
@@ -6260,105 +6833,13 @@ def apply_weather_bias_adjustment(
     }
 
 
-def _shape_similarity_score(record: dict, target_meta: dict) -> float:
-    if int(record.get("hour", -1)) != int(target_meta.get("hour", -2)):
-        return float("inf")
-
-    score = 0.0
-    if record.get("season") != target_meta.get("season"):
-        score += 0.55
-    if record.get("regime") != target_meta.get("regime"):
-        score += 1.25
-    score += abs(float(record.get("cloud_mean", 0.0)) - float(target_meta.get("cloud_mean", 0.0))) / 28.0
-    score += abs(float(record.get("rh_mean", 0.0)) - float(target_meta.get("rh_mean", 0.0))) / 24.0
-    score += abs(float(record.get("kt_mean", 0.0)) - float(target_meta.get("kt_mean", 0.0))) / 0.22
-    score += abs(float(record.get("vol_index", 0.0)) - float(target_meta.get("vol_index", 0.0))) / 0.18
-    score += min(float(record.get("days_ago", SHAPE_LOOKBACK_DAYS)), float(SHAPE_LOOKBACK_DAYS)) / max(float(SHAPE_LOOKBACK_DAYS), 1.0) * 0.30
-    return score
-
-
-def select_shape_profile(shape_records: list[dict], target_meta: dict, fallback_profile: np.ndarray) -> tuple[np.ndarray, int, float | None]:
-    fallback = _normalize_profile(fallback_profile)
-    if not shape_records:
-        return fallback, 0, None
-
-    hour_records = [r for r in shape_records if int(r.get("hour", -1)) == int(target_meta.get("hour", -2))]
-    if not hour_records:
-        return fallback, 0, None
-
-    exact = [
-        r for r in hour_records
-        if r.get("season") == target_meta.get("season") and r.get("regime") == target_meta.get("regime")
-    ]
-    pool = exact if len(exact) >= SHAPE_MIN_MATCHES else hour_records
-
-    scored = []
-    for record in pool:
-        score = _shape_similarity_score(record, target_meta)
-        if not math.isfinite(score):
-            continue
-        scored.append((score, record))
-    if not scored:
-        return fallback, 0, None
-
-    scored.sort(key=lambda item: item[0])
-    top = scored[:SHAPE_TOP_K]
-    weights = np.array([1.0 / ((0.25 + score) ** 2) for score, _ in top], dtype=float)
-    profiles = np.array([np.asarray(record["profile"], dtype=float) for _, record in top], dtype=float)
-    history_profile = np.average(profiles, axis=0, weights=weights)
-    history_profile = _normalize_profile(history_profile)
-
-    blend = SHAPE_BLEND_MIN + 0.08 * max(0, len(top) - 1)
-    blend = min(blend, SHAPE_BLEND_MAX)
-    best_score = float(top[0][0])
-    if best_score > 2.0:
-        blend *= 0.82
-    if len(exact) >= SHAPE_MIN_MATCHES:
-        blend = min(SHAPE_BLEND_MAX, blend + 0.06)
-
-    final_profile = blend * history_profile + (1.0 - blend) * fallback
-    return _normalize_profile(final_profile), len(top), best_score
-
-
-def apply_hour_shape_correction(
-    forecast: np.ndarray,
-    day: str,
-    w5: pd.DataFrame,
-    artifacts: dict | None,
-) -> tuple[np.ndarray, dict]:
-    shape_records = list((artifacts or {}).get("shape_records") or [])
-    if not shape_records:
-        return np.asarray(forecast, dtype=float).copy(), {
-            "hours_shaped": 0,
-            "avg_matches": 0.0,
-            "avg_score": None,
-        }
-
-    out = np.clip(np.asarray(forecast, dtype=float), 0.0, None).copy()
-    csi_arr = clear_sky_radiation(day, pd.to_numeric(w5["rh"], errors="coerce").fillna(0.0).values)
-    match_counts = []
-    best_scores = []
-
-    for hour in range(SOLAR_START_H, SOLAR_END_H):
-        start, end = _solar_hour_bounds(hour)
-        hour_total = float(out[start:end].sum())
-        if hour_total <= 0:
-            continue
-
-        target_meta = hour_weather_signature(day, w5, hour, csi_arr)
-        fallback = out[start:end]
-        profile, matches, best_score = select_shape_profile(shape_records, target_meta, fallback)
-        out[start:end] = hour_total * profile
-        if matches > 0:
-            match_counts.append(matches)
-        if best_score is not None and math.isfinite(best_score):
-            best_scores.append(best_score)
-
-    return out, {
-        "hours_shaped": int(sum(1 for hour in range(SOLAR_START_H, SOLAR_END_H) if out[_solar_hour_bounds(hour)[0]:_solar_hour_bounds(hour)[1]].sum() > 0)),
-        "avg_matches": float(np.mean(match_counts)) if match_counts else 0.0,
-        "avg_score": float(np.mean(best_scores)) if best_scores else None,
-    }
+# NOTE (v2.8 cleanup):
+# `_shape_similarity_score`, `select_shape_profile`, and `apply_hour_shape_correction`
+# were removed in v2.8 because Phase 4 made Solcast the 100% baseline. The hour-shape
+# correction branch in run_dayahead is structurally unreachable when used_solcast=True
+# (which is now always true), so all three functions plus their backing
+# `shape_records` artifact were dead code. The activity-records pipeline below
+# (`_activity_similarity_score`, `apply_activity_hysteresis`) is unrelated and stays.
 
 
 def _activity_similarity_score(record: dict, target: dict) -> float:
@@ -6863,8 +7344,10 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
         warnings.append("est_actual_reconstruction_active")
 
     # Check for missing Solcast tri-band data (new architecture dependency)
+    # v2.8 S3: use readonly connection — this is a pure SELECT and should
+    # not take a write-tier lock or miss the read-tuned pragmas.
     try:
-        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC) as conn:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             _tomorrow = (date.today() + timedelta(days=1)).isoformat()
             _row = conn.execute(
                 "SELECT forecast_lo_kwh, forecast_hi_kwh FROM solcast_snapshots "
@@ -7525,7 +8008,12 @@ def predict_residual_with_bundle(
     regime_days = int(regime_meta.get("day_count", 0))
     blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
     blend = min(blend, REGIME_BLEND_MAX)
-    blend *= float(np.clip(regime_confidence, 0.60, 1.0))
+    # v2.8 ML audit L2: allow low-confidence regime classifications to fall
+    # through to the global model. Previous floor of 0.60 kept regime blend
+    # above 60% even when the classifier was uncertain; now uncertainty
+    # below 0.30 effectively disables regime influence, and 0.30-1.0 scales
+    # linearly into the blend factor.
+    blend *= float(np.clip(regime_confidence, 0.0, 1.0))
     return ((1.0 - blend) * global_pred + blend * regime_pred), {
         "target_regime": target_regime,
         "used_regime_model": True,
@@ -7750,7 +8238,11 @@ def predict_error_classifier_with_bundle(
         regime_samples = int(regime_meta.get("sample_count", 0))
         blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
         blend = min(blend, REGIME_BLEND_MAX)
-        blend *= float(np.clip(regime_confidence, 0.60, 1.0))
+        # v2.8 ML audit L2: allow low-confidence regime classifications to fall
+        # through to the global model. Previous floor of 0.60 kept regime blend
+        # above 60% even when the classifier was uncertain; now low confidence
+        # naturally shrinks the blend factor toward zero.
+        blend *= float(np.clip(regime_confidence, 0.0, 1.0))
         probs = ((1.0 - blend) * global_probs) + (blend * regime_probs)
         expected_bias = ((1.0 - blend) * global_bias) + (blend * regime_bias)
         used_regime_model = True
@@ -7900,7 +8392,10 @@ def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float =
     )
     uncertainty = np.clip(uncertainty, 0.0, 1.0)
 
-    confidence_scale = float(np.clip(regime_confidence, 0.60, 1.0))
+    # v2.8 ML audit L2: drop the 0.60 floor on regime confidence. When
+    # the classifier is genuinely uncertain, we want minimal blend
+    # influence instead of forcing 60%.
+    confidence_scale = float(np.clip(regime_confidence, 0.0, 1.0))
     blend = solar_conf * (1.0 - ML_BLEND_ALPHA * uncertainty) * confidence_scale
 
     # Ramp slot weighting (Phase 2.1): reduce ML trust at sunrise/sunset ramps
@@ -8421,12 +8916,12 @@ def _persist_qa_comparison(
     provider_mismatch = provider_expected == "solcast" and forecast_variant != "solcast_direct"
 
     include_in_source_scoring = (
-        actual_slots_count >= 132
-        and forecast_slots_count >= 132
+        actual_slots_count >= MIN_USABLE_SLOTS_FOR_ELIGIBILITY
+        and forecast_slots_count >= MIN_USABLE_SLOTS_FOR_ELIGIBILITY
     )
     include_in_error_memory = (
         include_in_source_scoring
-        and usable_slots >= 132
+        and usable_slots >= MIN_USABLE_SLOTS_FOR_ELIGIBILITY
         and constrained_ratio <= 0.30
         and not provider_mismatch
         and solcast_freshness_class not in {"missing", "stale_reject"}
@@ -8455,206 +8950,347 @@ def _persist_qa_comparison(
     rad_arr = np.asarray(rad_slots, dtype=float) if rad_slots is not None else np.full(SLOTS_DAY, np.nan, dtype=float)
     cloud_arr = np.asarray(cloud_slots, dtype=float) if cloud_slots is not None else np.full(SLOTS_DAY, np.nan, dtype=float)
 
-    try:
-        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC) as conn:
-            daily_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_daily)").fetchall()
-            slot_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_slot)").fetchall()
-            daily_target_pk = any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in daily_table_info)
-            slot_legacy_pk = (
-                any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in slot_table_info)
-                and any(str(row[1] or "") == "slot" and int(row[5] or 0) == 2 for row in slot_table_info)
-            )
-            daily_conflict_target = "target_date" if daily_target_pk else "target_date, run_audit_id"
-            slot_conflict_target = "target_date, slot" if slot_legacy_pk else "target_date, run_audit_id, slot"
-
-            if daily_target_pk:
-                conn.execute("DELETE FROM forecast_error_compare_daily WHERE target_date = ?", (target_date,))
-
-            daily_row = conn.execute(
-                f"""
-                INSERT INTO forecast_error_compare_daily(
-                    target_date, run_audit_id, generator_mode,
-                    provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
-                    total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
-                    total_actual_kwh, total_abs_error_kwh,
-                    daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
-                    usable_slot_count, masked_slot_count,
-                    available_actual_slots, available_forecast_slots,
-                    manual_masked_slots, cap_masked_slots, operational_masked_slots,
-                    include_in_error_memory, include_in_source_scoring, comparison_quality,
-                    computed_ts, notes_json, actual_source
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT({daily_conflict_target}) DO UPDATE SET
-                    run_audit_id=excluded.run_audit_id,
-                    generator_mode=excluded.generator_mode,
-                    provider_used=excluded.provider_used,
-                    provider_expected=excluded.provider_expected,
-                    forecast_variant=excluded.forecast_variant,
-                    weather_source=excluded.weather_source,
-                    solcast_freshness_class=excluded.solcast_freshness_class,
-                    total_forecast_kwh=excluded.total_forecast_kwh,
-                    total_forecast_lo_kwh=excluded.total_forecast_lo_kwh,
-                    total_forecast_hi_kwh=excluded.total_forecast_hi_kwh,
-                    total_actual_kwh=excluded.total_actual_kwh,
-                    total_abs_error_kwh=excluded.total_abs_error_kwh,
-                    daily_wape_pct=excluded.daily_wape_pct,
-                    daily_mape_pct=excluded.daily_mape_pct,
-                    daily_total_ape_pct=excluded.daily_total_ape_pct,
-                    usable_slot_count=excluded.usable_slot_count,
-                    masked_slot_count=excluded.masked_slot_count,
-                    available_actual_slots=excluded.available_actual_slots,
-                    available_forecast_slots=excluded.available_forecast_slots,
-                    manual_masked_slots=excluded.manual_masked_slots,
-                    cap_masked_slots=excluded.cap_masked_slots,
-                    operational_masked_slots=excluded.operational_masked_slots,
-                    include_in_error_memory=excluded.include_in_error_memory,
-                    include_in_source_scoring=excluded.include_in_source_scoring,
-                    comparison_quality=excluded.comparison_quality,
-                    computed_ts=excluded.computed_ts,
-                    notes_json=excluded.notes_json,
-                    actual_source=excluded.actual_source
-                """,
-                (
-                    target_date, run_audit_id, generator_mode,
-                    provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
-                    total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
-                    total_actual_kwh, total_abs_error_kwh,
-                    daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
-                    usable_slots, masked_slots_count,
-                    actual_slots_count, forecast_slots_count,
-                    manual_slots_count, cap_slots_count, operational_slots_count,
-                    int(include_in_error_memory), int(include_in_source_scoring), comparison_quality,
-                    int(time.time() * 1000),
-                    json.dumps({
-                        "degraded_variant": bool(degraded_variant),
-                        "provider_mismatch": bool(provider_mismatch),
-                        "support_base": float(support_base),
-                        "forecast_regime": str(day_regime or ""),
-                        "est_actual_recon_slots": int(est_actual_recon_slots),
-                    }),
-                    str(actual_source or "estimated"),
+    # v2.8 S1: retry on transient lock. Without this, a single lock
+    # contention with Node writers silently drops an entire day of QA
+    # comparison data, starving the error-memory learning loop.
+    for _qa_attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+                daily_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_daily)").fetchall()
+                slot_table_info = conn.execute("PRAGMA table_info(forecast_error_compare_slot)").fetchall()
+                daily_target_pk = any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in daily_table_info)
+                slot_legacy_pk = (
+                    any(str(row[1] or "") == "target_date" and int(row[5] or 0) == 1 for row in slot_table_info)
+                    and any(str(row[1] or "") == "slot" and int(row[5] or 0) == 2 for row in slot_table_info)
                 )
-            )
-            daily_compare_id = int(daily_row.lastrowid or 0)
+                daily_conflict_target = "target_date" if daily_target_pk else "target_date, run_audit_id"
+                slot_conflict_target = "target_date, slot" if slot_legacy_pk else "target_date, run_audit_id, slot"
 
-            if slot_legacy_pk:
-                conn.execute("DELETE FROM forecast_error_compare_slot WHERE target_date = ?", (target_date,))
-            else:
-                conn.execute(
-                    "DELETE FROM forecast_error_compare_slot WHERE target_date = ? AND run_audit_id = ?",
-                    (target_date, run_audit_id),
-                )
-            slot_rows = []
-            for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
-                ts_local = int((datetime.fromisoformat(target_date) + timedelta(minutes=slot * SLOT_MIN)).timestamp() * 1000)
-                hh = (slot * SLOT_MIN) // 60
-                mm = (slot * SLOT_MIN) % 60
-                time_hms = f"{int(hh):02d}:{int(mm):02d}:00"
-                fc_val = float(fc_slots[slot])
-                act_present = bool(actual_present_arr[slot])
-                fc_present = bool(forecast_present_arr[slot])
-                act_val = float(actual_slots[slot]) if act_present else None
-                signed_err = (float(act_val) - fc_val) if (act_present and fc_present) else None
-                abs_err = abs(signed_err) if signed_err is not None else None
-                ape = (abs_err / max(abs(float(act_val)), 1.0) * 100.0) if (abs_err is not None and act_present) else None
-                opportunity = float(max(fc_val, 1.0))
-                normalized = (signed_err / max(opportunity, 1.0)) if signed_err is not None else None
-                slot_bucket = str(slot_bucket_arr[slot] or "")
-                support_weight = support_base
-                if opportunity < 2.0:
-                    # During rainy/overcast regimes, low-forecast slots ARE the regime — don't penalize them.
-                    if day_regime in ("rainy", "overcast"):
-                        support_weight *= 0.90   # mild discount only (measurement noise at low generation)
-                    else:
-                        support_weight *= 0.6    # original: anomalous low slots in clear/mixed
-                if slot_bucket in {"storm_risk", "rain_heavy"}:
-                    if day_regime not in ("rainy", "overcast"):
-                        support_weight *= 0.75   # original: anomalous storm slots in clear/mixed
-                    # rainy/overcast: no penalty — these ARE the regime's characteristic slots
+                if daily_target_pk:
+                    conn.execute("DELETE FROM forecast_error_compare_daily WHERE target_date = ?", (target_date,))
 
-                usable_metrics = bool(usable_arr[slot])
-                usable_mem = bool(
-                    usable_metrics
-                    and include_in_error_memory
-                    and (not manual_arr[slot])
-                    and (not cap_arr[slot])
-                    and (not operational_arr[slot])
-                    and fc_present
-                    and act_present
-                )
-                slot_rows.append((
-                    target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
-                    provider_used, fc_val, act_val,
-                    float(solcast_arr[slot]) if bool(solcast_present_arr[slot]) else None,
-                    None,
-                    float(hybrid_arr[slot]) if np.isfinite(hybrid_arr[slot]) else None,
-                    None, None, None,
-                    signed_err, abs_err, ape, normalized, opportunity,
-                    slot_bucket, str(day_regime or ""),
-                    int(act_present), int(fc_present), int(bool(solcast_present_arr[slot])),
-                    int(usable_metrics), int(usable_mem),
-                    int(bool(manual_arr[slot])), int(bool(cap_arr[slot])), 0, int(bool(operational_arr[slot])), 1,
-                    float(rad_arr[slot]) if np.isfinite(rad_arr[slot]) else None,
-                    float(cloud_arr[slot]) if np.isfinite(cloud_arr[slot]) else None,
-                    float(max(0.0, min(1.0, support_weight))),
-                    str(actual_source or "estimated"),
-                ))
+                # Compute daily locked snapshot aggregates (Step 10)
+                locked_daily_captured_ts = None
+                locked_daily_capture_reason = None
+                locked_daily_spread_avg = None
+                locked_daily_p50_total = 0.0
+                locked_daily_p10_total = 0.0
+                locked_daily_p90_total = 0.0
+                locked_daily_within_band_count = 0
+                locked_daily_total_count = 0
+                try:
+                    for locked_row in conn.execute(
+                        """
+                        SELECT MIN(captured_ts), capture_reason, AVG(spread_pct_cap),
+                               SUM(p50_kwh), SUM(p10_kwh), SUM(p90_kwh)
+                          FROM solcast_dayahead_locked
+                         WHERE forecast_day = ?
+                        """,
+                        (target_date,)
+                    ):
+                        locked_daily_captured_ts = locked_row[0]
+                        locked_daily_capture_reason = locked_row[1]
+                        locked_daily_spread_avg = locked_row[2]
+                        locked_daily_p50_total = float(locked_row[3] or 0.0)
+                        locked_daily_p10_total = float(locked_row[4] or 0.0)
+                        locked_daily_p90_total = float(locked_row[5] or 0.0)
+                except Exception as e:
+                    log.debug("Could not compute daily locked aggregates for %s: %s", target_date, e)
 
-            if slot_rows:
-                conn.executemany(
+                daily_row = conn.execute(
                     f"""
-                    INSERT INTO forecast_error_compare_slot(
-                        target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
-                        provider_used, forecast_kwh, actual_kwh, solcast_kwh, physics_kwh, hybrid_baseline_kwh,
-                        ml_residual_kwh, error_class_bias_kwh, memory_bias_kwh,
-                        signed_error_kwh, abs_error_kwh, ape_pct, normalized_error, opportunity_kwh,
-                        slot_weather_bucket, day_regime,
-                        actual_present, forecast_present, solcast_present,
-                        usable_for_metrics, usable_for_error_memory,
-                        manual_constraint_mask, cap_dispatch_mask, curtailed_mask, operational_mask, solar_mask,
-                        rad_wm2, cloud_pct, support_weight, actual_source
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT({slot_conflict_target}) DO UPDATE SET
+                    INSERT INTO forecast_error_compare_daily(
+                        target_date, run_audit_id, generator_mode,
+                        provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
+                        total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
+                        total_actual_kwh, total_abs_error_kwh,
+                        daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
+                        usable_slot_count, masked_slot_count,
+                        available_actual_slots, available_forecast_slots,
+                        manual_masked_slots, cap_masked_slots, operational_masked_slots,
+                        include_in_error_memory, include_in_source_scoring, comparison_quality,
+                        computed_ts, notes_json, actual_source,
+                        locked_captured_ts, locked_capture_reason, locked_spread_pct_cap_avg,
+                        locked_total_p50_kwh, locked_total_p10_kwh, locked_total_p90_kwh
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT({daily_conflict_target}) DO UPDATE SET
                         run_audit_id=excluded.run_audit_id,
-                        daily_compare_id=excluded.daily_compare_id,
-                        ts_local=excluded.ts_local,
-                        time_hms=excluded.time_hms,
+                        generator_mode=excluded.generator_mode,
                         provider_used=excluded.provider_used,
-                        forecast_kwh=excluded.forecast_kwh,
-                        actual_kwh=excluded.actual_kwh,
-                        solcast_kwh=excluded.solcast_kwh,
-                        physics_kwh=excluded.physics_kwh,
-                        hybrid_baseline_kwh=excluded.hybrid_baseline_kwh,
-                        ml_residual_kwh=excluded.ml_residual_kwh,
-                        error_class_bias_kwh=excluded.error_class_bias_kwh,
-                        memory_bias_kwh=excluded.memory_bias_kwh,
-                        signed_error_kwh=excluded.signed_error_kwh,
-                        abs_error_kwh=excluded.abs_error_kwh,
-                        ape_pct=excluded.ape_pct,
-                        normalized_error=excluded.normalized_error,
-                        opportunity_kwh=excluded.opportunity_kwh,
-                        slot_weather_bucket=excluded.slot_weather_bucket,
-                        day_regime=excluded.day_regime,
-                        actual_present=excluded.actual_present,
-                        forecast_present=excluded.forecast_present,
-                        solcast_present=excluded.solcast_present,
-                        usable_for_metrics=excluded.usable_for_metrics,
-                        usable_for_error_memory=excluded.usable_for_error_memory,
-                        manual_constraint_mask=excluded.manual_constraint_mask,
-                        cap_dispatch_mask=excluded.cap_dispatch_mask,
-                        curtailed_mask=excluded.curtailed_mask,
-                        operational_mask=excluded.operational_mask,
-                        solar_mask=excluded.solar_mask,
-                        rad_wm2=excluded.rad_wm2,
-                        cloud_pct=excluded.cloud_pct,
-                        support_weight=excluded.support_weight,
-                        actual_source=excluded.actual_source
+                        provider_expected=excluded.provider_expected,
+                        forecast_variant=excluded.forecast_variant,
+                        weather_source=excluded.weather_source,
+                        solcast_freshness_class=excluded.solcast_freshness_class,
+                        total_forecast_kwh=excluded.total_forecast_kwh,
+                        total_forecast_lo_kwh=excluded.total_forecast_lo_kwh,
+                        total_forecast_hi_kwh=excluded.total_forecast_hi_kwh,
+                        total_actual_kwh=excluded.total_actual_kwh,
+                        total_abs_error_kwh=excluded.total_abs_error_kwh,
+                        daily_wape_pct=excluded.daily_wape_pct,
+                        daily_mape_pct=excluded.daily_mape_pct,
+                        daily_total_ape_pct=excluded.daily_total_ape_pct,
+                        usable_slot_count=excluded.usable_slot_count,
+                        masked_slot_count=excluded.masked_slot_count,
+                        available_actual_slots=excluded.available_actual_slots,
+                        available_forecast_slots=excluded.available_forecast_slots,
+                        manual_masked_slots=excluded.manual_masked_slots,
+                        cap_masked_slots=excluded.cap_masked_slots,
+                        operational_masked_slots=excluded.operational_masked_slots,
+                        include_in_error_memory=excluded.include_in_error_memory,
+                        include_in_source_scoring=excluded.include_in_source_scoring,
+                        comparison_quality=excluded.comparison_quality,
+                        computed_ts=excluded.computed_ts,
+                        notes_json=excluded.notes_json,
+                        actual_source=excluded.actual_source,
+                        locked_captured_ts=excluded.locked_captured_ts,
+                        locked_capture_reason=excluded.locked_capture_reason,
+                        locked_spread_pct_cap_avg=excluded.locked_spread_pct_cap_avg,
+                        locked_total_p50_kwh=excluded.locked_total_p50_kwh,
+                        locked_total_p10_kwh=excluded.locked_total_p10_kwh,
+                        locked_total_p90_kwh=excluded.locked_total_p90_kwh
                     """,
-                    slot_rows
+                    (
+                        target_date, run_audit_id, generator_mode,
+                        provider_used, provider_expected, forecast_variant, weather_source, solcast_freshness_class,
+                        total_forecast_kwh, total_forecast_lo_kwh, total_forecast_hi_kwh,
+                        total_actual_kwh, total_abs_error_kwh,
+                        daily_wape_pct, daily_mape_pct, daily_total_ape_pct,
+                        usable_slots, masked_slots_count,
+                        actual_slots_count, forecast_slots_count,
+                        manual_slots_count, cap_slots_count, operational_slots_count,
+                        int(include_in_error_memory), int(include_in_source_scoring), comparison_quality,
+                        int(time.time() * 1000),
+                        json.dumps({
+                            "degraded_variant": bool(degraded_variant),
+                            "provider_mismatch": bool(provider_mismatch),
+                            "support_base": float(support_base),
+                            "forecast_regime": str(day_regime or ""),
+                            "est_actual_recon_slots": int(est_actual_recon_slots),
+                        }),
+                        str(actual_source or "estimated"),
+                        locked_daily_captured_ts, locked_daily_capture_reason, locked_daily_spread_avg,
+                        locked_daily_p50_total, locked_daily_p10_total, locked_daily_p90_total,
+                    )
                 )
-            conn.commit()
-    except Exception as e:
-        log.warning("Failed to persist forecast comparison for %s: %s", target_date, e)
+                daily_compare_id = int(daily_row.lastrowid or 0)
+
+                if slot_legacy_pk:
+                    conn.execute("DELETE FROM forecast_error_compare_slot WHERE target_date = ?", (target_date,))
+                else:
+                    conn.execute(
+                        "DELETE FROM forecast_error_compare_slot WHERE target_date = ? AND run_audit_id = ?",
+                        (target_date, run_audit_id),
+                    )
+                slot_rows = []
+                # Pre-fetch locked snapshot data for this day
+                locked_rows = {}
+                try:
+                    for locked_row in conn.execute(
+                        "SELECT slot, p50_mw, p10_mw, p90_mw, spread_pct_cap, capture_reason FROM solcast_dayahead_locked WHERE forecast_day = ?",
+                        (target_date,)
+                    ):
+                        locked_rows[int(locked_row[0])] = {
+                            'p50_mw': locked_row[1],
+                            'p10_mw': locked_row[2],
+                            'p90_mw': locked_row[3],
+                            'spread_pct_cap': locked_row[4],
+                            'capture_reason': locked_row[5],
+                        }
+                except Exception as e:
+                    log.debug("Could not fetch locked snapshots for day %s: %s", target_date, e)
+
+                for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+                    ts_local = int((datetime.fromisoformat(target_date) + timedelta(minutes=slot * SLOT_MIN)).timestamp() * 1000)
+                    hh = (slot * SLOT_MIN) // 60
+                    mm = (slot * SLOT_MIN) % 60
+                    time_hms = f"{int(hh):02d}:{int(mm):02d}:00"
+                    fc_val = float(fc_slots[slot])
+                    act_present = bool(actual_present_arr[slot])
+                    fc_present = bool(forecast_present_arr[slot])
+                    act_val = float(actual_slots[slot]) if act_present else None
+                    signed_err = (float(act_val) - fc_val) if (act_present and fc_present) else None
+                    abs_err = abs(signed_err) if signed_err is not None else None
+                    ape = (abs_err / max(abs(float(act_val)), 1.0) * 100.0) if (abs_err is not None and act_present) else None
+                    opportunity = float(max(fc_val, 1.0))
+                    normalized = (signed_err / max(opportunity, 1.0)) if signed_err is not None else None
+                    slot_bucket = str(slot_bucket_arr[slot] or "")
+                    support_weight = support_base
+                    if opportunity < 2.0:
+                        # During rainy/overcast regimes, low-forecast slots ARE the regime — don't penalize them.
+                        if day_regime in ("rainy", "overcast"):
+                            support_weight *= 0.90   # mild discount only (measurement noise at low generation)
+                        else:
+                            support_weight *= 0.6    # original: anomalous low slots in clear/mixed
+                    if slot_bucket in {"storm_risk", "rain_heavy"}:
+                        if day_regime not in ("rainy", "overcast"):
+                            support_weight *= 0.75   # original: anomalous storm slots in clear/mixed
+                        # rainy/overcast: no penalty — these ARE the regime's characteristic slots
+
+                    usable_metrics = bool(usable_arr[slot])
+                    usable_mem = bool(
+                        usable_metrics
+                        and include_in_error_memory
+                        and (not manual_arr[slot])
+                        and (not cap_arr[slot])
+                        and (not operational_arr[slot])
+                        and fc_present
+                        and act_present
+                    )
+
+                    # Locked snapshot columns: Step 10
+                    p50_locked_mw = None
+                    p10_locked_mw = None
+                    p90_locked_mw = None
+                    spread_pct_cap_locked = None
+                    err_vs_p50_locked_mw = None
+                    err_vs_p10_locked_mw = None
+                    err_vs_p90_locked_mw = None
+                    actual_within_band = None
+
+                    if slot in locked_rows:
+                        locked = locked_rows[slot]
+                        p50_locked_mw = locked['p50_mw']
+                        p10_locked_mw = locked['p10_mw']
+                        p90_locked_mw = locked['p90_mw']
+                        spread_pct_cap_locked = locked['spread_pct_cap']
+                        if act_present and p50_locked_mw is not None:
+                            # Convert actual_kwh to average MW for the 5-min slot
+                            actual_mw_slot = (float(act_val) / (5.0 / 60.0)) / 1000.0
+                            p50_locked_mw = float(p50_locked_mw) if p50_locked_mw is not None else None
+                            p10_locked_mw = float(p10_locked_mw) if p10_locked_mw is not None else None
+                            p90_locked_mw = float(p90_locked_mw) if p90_locked_mw is not None else None
+                            if p50_locked_mw is not None:
+                                err_vs_p50_locked_mw = actual_mw_slot - p50_locked_mw
+                            if p10_locked_mw is not None:
+                                err_vs_p10_locked_mw = actual_mw_slot - p10_locked_mw
+                            if p90_locked_mw is not None:
+                                err_vs_p90_locked_mw = actual_mw_slot - p90_locked_mw
+                            if p10_locked_mw is not None and p90_locked_mw is not None:
+                                actual_within_band = 1 if (p10_locked_mw <= actual_mw_slot <= p90_locked_mw) else 0
+
+                    if actual_within_band is not None:
+                        locked_daily_total_count += 1
+                        if actual_within_band == 1:
+                            locked_daily_within_band_count += 1
+
+                    slot_rows.append((
+                        target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
+                        provider_used, fc_val, act_val,
+                        float(solcast_arr[slot]) if bool(solcast_present_arr[slot]) else None,
+                        None,
+                        float(hybrid_arr[slot]) if np.isfinite(hybrid_arr[slot]) else None,
+                        None, None, None,
+                        signed_err, abs_err, ape, normalized, opportunity,
+                        slot_bucket, str(day_regime or ""),
+                        int(act_present), int(fc_present), int(bool(solcast_present_arr[slot])),
+                        int(usable_metrics), int(usable_mem),
+                        int(bool(manual_arr[slot])), int(bool(cap_arr[slot])), 0, int(bool(operational_arr[slot])), 1,
+                        float(rad_arr[slot]) if np.isfinite(rad_arr[slot]) else None,
+                        float(cloud_arr[slot]) if np.isfinite(cloud_arr[slot]) else None,
+                        float(max(0.0, min(1.0, support_weight))),
+                        str(actual_source or "estimated"),
+                        p50_locked_mw, p10_locked_mw, p90_locked_mw, spread_pct_cap_locked,
+                        err_vs_p50_locked_mw, err_vs_p10_locked_mw, err_vs_p90_locked_mw, actual_within_band,
+                    ))
+
+                if slot_rows:
+                    conn.executemany(
+                        f"""
+                        INSERT INTO forecast_error_compare_slot(
+                            target_date, run_audit_id, daily_compare_id, slot, ts_local, time_hms,
+                            provider_used, forecast_kwh, actual_kwh, solcast_kwh, physics_kwh, hybrid_baseline_kwh,
+                            ml_residual_kwh, error_class_bias_kwh, memory_bias_kwh,
+                            signed_error_kwh, abs_error_kwh, ape_pct, normalized_error, opportunity_kwh,
+                            slot_weather_bucket, day_regime,
+                            actual_present, forecast_present, solcast_present,
+                            usable_for_metrics, usable_for_error_memory,
+                            manual_constraint_mask, cap_dispatch_mask, curtailed_mask, operational_mask, solar_mask,
+                            rad_wm2, cloud_pct, support_weight, actual_source,
+                            p50_locked_mw, p10_locked_mw, p90_locked_mw, spread_pct_cap_locked,
+                            err_vs_p50_locked_mw, err_vs_p10_locked_mw, err_vs_p90_locked_mw, actual_within_band
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT({slot_conflict_target}) DO UPDATE SET
+                            run_audit_id=excluded.run_audit_id,
+                            daily_compare_id=excluded.daily_compare_id,
+                            ts_local=excluded.ts_local,
+                            time_hms=excluded.time_hms,
+                            provider_used=excluded.provider_used,
+                            forecast_kwh=excluded.forecast_kwh,
+                            actual_kwh=excluded.actual_kwh,
+                            solcast_kwh=excluded.solcast_kwh,
+                            physics_kwh=excluded.physics_kwh,
+                            hybrid_baseline_kwh=excluded.hybrid_baseline_kwh,
+                            ml_residual_kwh=excluded.ml_residual_kwh,
+                            error_class_bias_kwh=excluded.error_class_bias_kwh,
+                            memory_bias_kwh=excluded.memory_bias_kwh,
+                            signed_error_kwh=excluded.signed_error_kwh,
+                            abs_error_kwh=excluded.abs_error_kwh,
+                            ape_pct=excluded.ape_pct,
+                            normalized_error=excluded.normalized_error,
+                            opportunity_kwh=excluded.opportunity_kwh,
+                            slot_weather_bucket=excluded.slot_weather_bucket,
+                            day_regime=excluded.day_regime,
+                            actual_present=excluded.actual_present,
+                            forecast_present=excluded.forecast_present,
+                            solcast_present=excluded.solcast_present,
+                            usable_for_metrics=excluded.usable_for_metrics,
+                            usable_for_error_memory=excluded.usable_for_error_memory,
+                            manual_constraint_mask=excluded.manual_constraint_mask,
+                            cap_dispatch_mask=excluded.cap_dispatch_mask,
+                            curtailed_mask=excluded.curtailed_mask,
+                            operational_mask=excluded.operational_mask,
+                            solar_mask=excluded.solar_mask,
+                            rad_wm2=excluded.rad_wm2,
+                            cloud_pct=excluded.cloud_pct,
+                            support_weight=excluded.support_weight,
+                            actual_source=excluded.actual_source,
+                            p50_locked_mw=excluded.p50_locked_mw,
+                            p10_locked_mw=excluded.p10_locked_mw,
+                            p90_locked_mw=excluded.p90_locked_mw,
+                            spread_pct_cap_locked=excluded.spread_pct_cap_locked,
+                            err_vs_p50_locked_mw=excluded.err_vs_p50_locked_mw,
+                            err_vs_p10_locked_mw=excluded.err_vs_p10_locked_mw,
+                            err_vs_p90_locked_mw=excluded.err_vs_p90_locked_mw,
+                            actual_within_band=excluded.actual_within_band
+                        """,
+                        slot_rows
+                    )
+
+                # Step 10 (v2.8): Daily within-band hit-rate aggregate.
+                # Computed after slot loop because actual_within_band is per-slot.
+                # locked_within_band_pct = % of slots where actual fell inside [P10, P90].
+                # Use (target_date, run_audit_id) instead of daily_compare_id because
+                # INSERT...ON CONFLICT DO UPDATE leaves lastrowid=0 when an existing
+                # row is updated (only set on actual insert).
+                if locked_daily_total_count > 0:
+                    locked_within_band_pct_val = (
+                        locked_daily_within_band_count / locked_daily_total_count
+                    ) * 100.0
+                    if daily_target_pk:
+                        conn.execute(
+                            "UPDATE forecast_error_compare_daily SET locked_within_band_pct = ? WHERE target_date = ?",
+                            (locked_within_band_pct_val, target_date),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE forecast_error_compare_daily SET locked_within_band_pct = ? WHERE target_date = ? AND run_audit_id = ?",
+                            (locked_within_band_pct_val, target_date, run_audit_id),
+                        )
+
+                conn.commit()
+            # v2.8 S1: success — exit the retry loop. Without this return,
+            # the for loop would continue and re-run the whole write.
+            return
+        except Exception as e:
+            if _qa_attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "QA persist retry %d/%d for %s: %s",
+                    _qa_attempt, SQLITE_RETRY_ATTEMPTS, target_date, e,
+                )
+                _sleep_sqlite_retry(_qa_attempt)
+                continue
+            log.warning("Failed to persist forecast comparison for %s: %s", target_date, e)
+            return
 
 
 def forecast_qa(today: date) -> None:
@@ -9145,7 +9781,7 @@ def _classify_variant_from_solcast_meta(solcast_meta: dict) -> str:
         return "ml_without_solcast"
     coverage = float(solcast_meta.get("coverage_ratio", 0.0))
     mean_blend = float(solcast_meta.get("mean_blend", 0.0))
-    if coverage >= 0.95 and mean_blend >= 0.5:
+    if coverage >= SOLCAST_COVERAGE_FRESH_THRESHOLD and mean_blend >= 0.5:
         return "ml_solcast_hybrid_fresh"
     return "ml_solcast_hybrid_stale"
 
@@ -9156,7 +9792,11 @@ def _classify_solcast_freshness_python(solcast_meta: dict) -> str:
     if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
         return "not_expected"
     coverage = float(solcast_meta.get("coverage_ratio", 0.0))
-    freshness_class = "fresh" if coverage >= 0.95 else ("stale_usable" if coverage >= 0.80 else "stale_reject")
+    freshness_class = (
+        "fresh"
+        if coverage >= SOLCAST_COVERAGE_FRESH_THRESHOLD
+        else ("stale_usable" if coverage >= SOLCAST_COVERAGE_USABLE_THRESHOLD else "stale_reject")
+    )
 
     # Check age and downgrade if too old
     _pulled_ts = solcast_meta.get("pulled_ts") or solcast_meta.get("fetched_at") or 0
@@ -9212,121 +9852,133 @@ def _write_forecast_run_audit_from_python(
     elif not bool(solcast_meta.get("used_solcast")):
         # Solcast was not used — check if it should have been
         coverage = float(solcast_meta.get("coverage_ratio", 0.0))
-        if coverage > 0.0 and coverage < 0.80:
+        if coverage > 0.0 and coverage < SOLCAST_COVERAGE_USABLE_THRESHOLD:
             quality_class = "incomplete"  # Partial Solcast data
         # else: no Solcast available, which is acceptable for weather-only fallback
     else:
         # Solcast was used — check for quality issues
         coverage = float(solcast_meta.get("coverage_ratio", 0.0))
-        if coverage < 0.80:
+        if coverage < SOLCAST_COVERAGE_USABLE_THRESHOLD:
             quality_class = "incomplete"
         elif freshness == "stale_usable":
             quality_class = "stale_input"
 
     generated_ts = int(time.time() * 1000)
 
-    try:
-        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC) as conn:
-            # Check for existing authoritative audit row to supersede
-            prev_row = conn.execute(
-                """
-                SELECT id FROM forecast_run_audit
-                 WHERE target_date = ?
-                   AND is_authoritative_runtime = 1
-                   AND run_status = 'success'
-                 ORDER BY generated_ts DESC LIMIT 1
-                """,
-                (target_s,),
-            ).fetchone()
-            prev_id = int(prev_row[0]) if prev_row else None
-
-            notes_dict: dict = {"source": "python_direct", "generator_mode": generator_mode}
-            if notes_extra:
-                notes_dict.update(notes_extra)
-            notes = json.dumps(notes_dict)
-            cur = conn.execute(
-                """
-                INSERT INTO forecast_run_audit(
-                    target_date, generated_ts, generator_mode,
-                    provider_used, provider_expected,
-                    forecast_variant, weather_source,
-                    solcast_snapshot_coverage_ratio, solcast_mean_blend,
-                    solcast_reliability, solcast_primary_mode, solcast_snapshot_source,
-                    physics_total_kwh, hybrid_total_kwh,
-                    final_forecast_total_kwh, ml_residual_total_kwh,
-                    error_class_total_kwh, bias_total_kwh,
-                    shape_skipped_for_solcast,
-                    run_status, solcast_freshness_class,
-                    is_authoritative_runtime, is_authoritative_learning,
-                    replaces_run_audit_id, notes_json,
-                    solcast_lo_total_kwh, solcast_hi_total_kwh, baseline_is_solcast_mid
-                ) VALUES(
-                    ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?, ?
-                )
-                """,
-                (
-                    target_s, generated_ts, generator_mode,
-                    "ml_local", "ml_local",
-                    variant, weather_source,
-                    float(solcast_meta.get("coverage_ratio", 0.0)),
-                    float(solcast_meta.get("mean_blend", 0.0)),
-                    float(solcast_meta.get("reliability", 0.0)),
-                    1 if bool(solcast_meta.get("primary_mode")) else 0,
-                    str(solcast_meta.get("source", "")),
-                    float(baseline_total_kwh),
-                    float(hybrid_total_kwh),
-                    float(forecast_total_kwh),
-                    float(ml_total_kwh),
-                    float(error_class_total_kwh),
-                    float(bias_total_kwh),
-                    1 if bool(solcast_meta.get("used_solcast")) else 0,
-                    "success", freshness,
-                    1, 1,
-                    prev_id, notes,
-                    float(solcast_lo_total_kwh) if solcast_lo_total_kwh is not None else None,
-                    float(solcast_hi_total_kwh) if solcast_hi_total_kwh is not None else None,
-                    1,  # baseline_is_solcast_mid: always true in new architecture
-                ),
-            )
-            new_id = cur.lastrowid
-
-            # Supersede previous authoritative row
-            if prev_id is not None and new_id:
-                conn.execute(
+    # v2.8 S2: retry on transient lock so the authoritative audit row
+    # isn't silently dropped when Node is mid-write. Each attempt opens
+    # a fresh write connection to avoid inheriting any partial state.
+    for _attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+                # Check for existing authoritative audit row to supersede
+                prev_row = conn.execute(
                     """
-                    UPDATE forecast_run_audit
-                       SET is_authoritative_runtime = 0,
-                           is_authoritative_learning = 0,
-                           superseded_by_run_audit_id = ?,
-                           run_status = 'superseded'
-                     WHERE id = ?
+                    SELECT id FROM forecast_run_audit
+                     WHERE target_date = ?
+                       AND is_authoritative_runtime = 1
+                       AND run_status = 'success'
+                     ORDER BY generated_ts DESC LIMIT 1
                     """,
-                    (new_id, prev_id),
-                )
+                    (target_s,),
+                ).fetchone()
+                prev_id = int(prev_row[0]) if prev_row else None
 
-            conn.commit()
-            if ml_failed:
-                log.warning("Forecast written with ML fallback (Solcast baseline only) - quality degraded")
-            log.info(
-                "Python audit row written for %s: id=%s variant=%s freshness=%s (replaces=%s)",
-                target_s, new_id, variant, freshness, prev_id,
-            )
-            return new_id
-    except Exception as e:
-        log.warning("Failed to write forecast_run_audit from Python for %s: %s", target_s, e)
-        return None
+                notes_dict: dict = {"source": "python_direct", "generator_mode": generator_mode}
+                if notes_extra:
+                    notes_dict.update(notes_extra)
+                notes = json.dumps(notes_dict)
+                cur = conn.execute(
+                    """
+                    INSERT INTO forecast_run_audit(
+                        target_date, generated_ts, generator_mode,
+                        provider_used, provider_expected,
+                        forecast_variant, weather_source,
+                        solcast_snapshot_coverage_ratio, solcast_mean_blend,
+                        solcast_reliability, solcast_primary_mode, solcast_snapshot_source,
+                        physics_total_kwh, hybrid_total_kwh,
+                        final_forecast_total_kwh, ml_residual_total_kwh,
+                        error_class_total_kwh, bias_total_kwh,
+                        shape_skipped_for_solcast,
+                        run_status, solcast_freshness_class,
+                        is_authoritative_runtime, is_authoritative_learning,
+                        replaces_run_audit_id, notes_json,
+                        solcast_lo_total_kwh, solcast_hi_total_kwh, baseline_is_solcast_mid
+                    ) VALUES(
+                        ?, ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?, ?
+                    )
+                    """,
+                    (
+                        target_s, generated_ts, generator_mode,
+                        "ml_local", "ml_local",
+                        variant, weather_source,
+                        float(solcast_meta.get("coverage_ratio", 0.0)),
+                        float(solcast_meta.get("mean_blend", 0.0)),
+                        float(solcast_meta.get("reliability", 0.0)),
+                        1 if bool(solcast_meta.get("primary_mode")) else 0,
+                        str(solcast_meta.get("source", "")),
+                        float(baseline_total_kwh),
+                        float(hybrid_total_kwh),
+                        float(forecast_total_kwh),
+                        float(ml_total_kwh),
+                        float(error_class_total_kwh),
+                        float(bias_total_kwh),
+                        1 if bool(solcast_meta.get("used_solcast")) else 0,
+                        "success", freshness,
+                        1, 1,
+                        prev_id, notes,
+                        float(solcast_lo_total_kwh) if solcast_lo_total_kwh is not None else None,
+                        float(solcast_hi_total_kwh) if solcast_hi_total_kwh is not None else None,
+                        1,  # baseline_is_solcast_mid: always true in new architecture
+                    ),
+                )
+                new_id = cur.lastrowid
+
+                # Supersede previous authoritative row
+                if prev_id is not None and new_id:
+                    conn.execute(
+                        """
+                        UPDATE forecast_run_audit
+                           SET is_authoritative_runtime = 0,
+                               is_authoritative_learning = 0,
+                               superseded_by_run_audit_id = ?,
+                               run_status = 'superseded'
+                         WHERE id = ?
+                        """,
+                        (new_id, prev_id),
+                    )
+
+                conn.commit()
+                if ml_failed:
+                    log.warning("Forecast written with ML fallback (Solcast baseline only) - quality degraded")
+                log.info(
+                    "Python audit row written for %s: id=%s variant=%s freshness=%s (replaces=%s)",
+                    target_s, new_id, variant, freshness, prev_id,
+                )
+                return new_id
+        except Exception as e:
+            if _attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                log.warning(
+                    "forecast_run_audit write retry %d/%d for %s: %s",
+                    _attempt, SQLITE_RETRY_ATTEMPTS, target_s, e,
+                )
+                _sleep_sqlite_retry(_attempt)
+                continue
+            log.warning("Failed to write forecast_run_audit from Python for %s: %s", target_s, e)
+            return None
+    return None
 
 
 def write_forecast(key: str, day: str, series: list[dict]) -> bool:
@@ -9525,6 +10177,13 @@ def run_dayahead(
     target_s = target_date.isoformat()
     log.info(""" Day-Ahead Forecast  target=%s """, target_s)
 
+    # v2.8 efficiency audit (E1a/P2): reset per-cycle read cache so this
+    # pass starts from a clean slate. Subsequent calls to
+    # load_solcast_snapshot / load_dayahead_with_presence /
+    # load_actual_loss_adjusted_with_presence dedupe within this cycle,
+    # but never leak stale rows from a previous cycle.
+    _reset_forecast_cycle_cache()
+
     def _load_saved_snapshot_hourly(snapshot_day: str) -> pd.DataFrame:
         snap = load_forecast_weather_snapshot(snapshot_day)
         if not snap:
@@ -9645,8 +10304,13 @@ def run_dayahead(
     baseline = solcast_mid_kwh.copy()
     hybrid_baseline = baseline.copy()
 
-    # Build solcast_meta for diagnostic use (physics is now demoted)
-    physics_baseline_arr = physics_baseline(target_s, w5)  # Compute for diagnostic comparison only
+    # Build solcast_meta. Physics baseline is still required by
+    # blend_physics_with_solcast to compute raw_prior_ratio / applied_prior_ratio
+    # (logged below) and to produce the normalized hybrid_baseline that gets
+    # persisted to forecast_error_compare_slot for audit/QA. The Phase 4
+    # "Solcast as 100% baseline" decision is enforced by overriding
+    # solcast_meta.mean_blend below — the physics call itself is not dead.
+    physics_baseline_arr = physics_baseline(target_s, w5)
     hybrid_baseline, solcast_meta = blend_physics_with_solcast(physics_baseline_arr, solcast_prior)
     # Override to indicate Solcast is 100% of baseline now
     solcast_meta = {
@@ -9689,10 +10353,11 @@ def run_dayahead(
     slot_weather_buckets = classify_slot_weather_buckets(w5, target_s)
     blend = residual_blend_vector(w5, target_s, float(bias_meta.get("regime_confidence", 1.0)))
     solcast_residual_scale = solcast_residual_damp_factor(solcast_meta)
-    clear_slot_mask = np.isin(slot_weather_buckets, np.asarray(["clear_stable", "clear_edge"], dtype=object))
-    clear_solcast_priority = 1.0
-    if bool(solcast_meta.get("used_solcast")) and target_regime == "clear":
-        clear_solcast_priority = float(np.clip(0.72 + 0.28 * float(solcast_meta.get("mean_blend", 0.0)), 0.72, 1.0))
+    # NOTE (v2.8 cleanup): `clear_solcast_priority` was removed — it was a
+    # third Solcast-trust damper applied on top of `solcast_residual_scale`
+    # (which already accounts for Solcast reliability) and the regime-aware
+    # `_bias_damp` (which already has a "clear" branch). Three layers of the
+    # same intent. The remaining two cover the same case correctly.
 
     ml_residual = np.zeros(SLOTS_DAY)
     error_class_term = np.zeros(SLOTS_DAY)
@@ -9756,8 +10421,6 @@ def run_dayahead(
             ml_residual = _rolling_mean(ml_residual, 3, center=True)
             if solcast_residual_scale < 0.999:
                 ml_residual = ml_residual * solcast_residual_scale
-            if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
-                ml_residual[clear_slot_mask] *= (1.0 - 0.28 * clear_solcast_priority)
 
             log.info(
                 "ML residual: mean=%.2f  std=%.2f  p95=%.2f kWh/slot  blend_mean=%.2f  solcast_scale=%.2f",
@@ -9809,9 +10472,6 @@ def run_dayahead(
                 class_trust_scale = np.pad(class_trust_scale, (0, SLOTS_DAY - class_trust_scale.size), constant_values=1.0)
             class_trust_scale = np.clip(class_trust_scale[:SLOTS_DAY], 0.0, 1.0)
             class_blend = class_blend * class_trust_scale
-            if clear_solcast_priority < 0.999 and np.any(clear_slot_mask):
-                class_blend = class_blend.copy()
-                class_blend[clear_slot_mask] *= (1.0 - 0.35 * clear_solcast_priority)
             error_class_term = error_class_term * blend
             error_class_term = _rolling_mean(error_class_term, 3, center=True)
             # Re-apply confidence gate after rolling mean (smoothing can bleed signal
@@ -9854,39 +10514,63 @@ def run_dayahead(
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0
 
-    # Regime-aware Solcast fresh-damping: trust Solcast less during rainy/overcast because
-    # satellite cloud tracking can't resolve tropical convective cells.
+    # v2.8 H4 documentation: physics-only branch (used_solcast == False).
+    # When Solcast is missing / stale-rejected and the forecast runs on
+    # physics + ML only, the regime-aware damping block below is SKIPPED
+    # and the raw `ERROR_ALPHA * mem_err` lands in the final forecast.
+    # This is intentional: without a Solcast hedge, the learned error
+    # memory is the only thing correcting plant-response drift, so we
+    # should not damp it further. The ERROR_ALPHA=0.28 scalar and the
+    # ±100 kWh/slot clip inside compute_error_memory remain the safety
+    # envelope. Tests exercising this branch live in
+    # test_forecast_engine_error_classifier.py::test_physics_only_path.
+    #
+    # Regime-aware Solcast fresh-damping: trust Solcast less during
+    # rainy/overcast because satellite cloud tracking can't resolve
+    # tropical convective cells.
     if bool(solcast_meta.get("used_solcast")):
         _sc_cov = float(solcast_meta.get("coverage_ratio", 0.0))
         if target_regime == "rainy":
+            # Step 13: Rainy-regime damping relaxation (active learning)
+            # Once 30+ days of real locked snapshots accumulate, relax damping to let error memory work better
+            _rainy_damping = 0.10  # legacy conservative
+            _sufficient_locked = False
+            try:
+                with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn_check:
+                    _sufficient_locked = _has_sufficient_locked_history(conn_check, min_days=30)
+            except Exception:
+                pass
+            if _sufficient_locked:
+                _rainy_damping = 0.28
+                log.info("[rainy-regime] sufficient locked history (30+ days) — relaxing Solcast damping from 0.10 to 0.28")
             # Rainy: minimal damping — let error memory do its job
-            if _sc_cov >= 0.95:
-                _bias_damp = 0.90   # only 10% reduction (was 70%)
-            elif _sc_cov >= 0.80:
-                _bias_damp = 0.95   # only 5% reduction (was 50%)
+            if _sc_cov >= SOLCAST_COVERAGE_FRESH_THRESHOLD:
+                _bias_damp = 1.0 - _rainy_damping   # conservative (0.90) or relaxed (0.72)
+            elif _sc_cov >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
+                _bias_damp = 1.0 - (_rainy_damping * 0.5)  # conservative (0.95) or relaxed (0.86)
             else:
                 _bias_damp = 1.0
         elif target_regime == "overcast":
             # Overcast: moderate damping — Solcast is somewhat useful for uniform cloud
-            if _sc_cov >= 0.95:
+            if _sc_cov >= SOLCAST_COVERAGE_FRESH_THRESHOLD:
                 _bias_damp = 0.70   # 30% reduction (was 70%)
-            elif _sc_cov >= 0.80:
+            elif _sc_cov >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
                 _bias_damp = 0.80   # 20% reduction (was 50%)
             else:
                 _bias_damp = 1.0
         elif target_regime == "mixed":
             # Mixed: slight relaxation from original
-            if _sc_cov >= 0.95:
+            if _sc_cov >= SOLCAST_COVERAGE_FRESH_THRESHOLD:
                 _bias_damp = 0.40   # 60% reduction (was 70%)
-            elif _sc_cov >= 0.80:
+            elif _sc_cov >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
                 _bias_damp = 0.55   # 45% reduction (was 50%)
             else:
                 _bias_damp = 1.0
         else:
             # Clear: keep original behavior — Solcast is most reliable here
-            if _sc_cov >= 0.95:
+            if _sc_cov >= SOLCAST_COVERAGE_FRESH_THRESHOLD:
                 _bias_damp = 0.30   # 70% reduction (unchanged)
-            elif _sc_cov >= 0.80:
+            elif _sc_cov >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
                 _bias_damp = 0.50   # 50% reduction (unchanged)
             else:
                 _bias_damp = 1.0
@@ -9896,6 +10580,20 @@ def run_dayahead(
                 "Bias correction damped %.0f%% for Solcast (coverage=%.2f regime=%s bias_damp=%.2f)",
                 (1.0 - _bias_damp) * 100.0, _sc_cov, target_regime or "unknown", _bias_damp,
             )
+
+    # v2.8 H5 fix: overwrite the applied_bias_total_kwh telemetry with the
+    # post-damping magnitude so operators see what actually hit the final
+    # forecast (not the pre-damping aspiration). raw_bias_total_kwh is
+    # preserved so the learning-loop strength signal is still visible.
+    try:
+        _applied_total = float(bias_correction[SOLAR_START_SLOT:SOLAR_END_SLOT].sum())
+        error_memory_meta["applied_bias_total_kwh"] = _applied_total
+        # Also mirror into the module-level cache so downstream readers
+        # (engine-health endpoint) see the corrected value.
+        if _LAST_ERROR_MEMORY_META:
+            _LAST_ERROR_MEMORY_META["applied_bias_total_kwh"] = _applied_total
+    except Exception:
+        pass
 
     log.info(
         "Bias correction: mean=%.2f  max=%.2f kWh/slot (alpha=%.2f)",
@@ -9926,15 +10624,10 @@ def run_dayahead(
     forecast[:SOLAR_START_SLOT] = 0.0
     forecast[SOLAR_END_SLOT:]   = 0.0
 
-    if bool(solcast_meta.get("used_solcast")):
-        shape_meta = {
-            "hours_shaped": 0,
-            "avg_matches": 0.0,
-            "avg_score": None,
-            "skipped_for_solcast": True,
-        }
-    else:
-        forecast, shape_meta = apply_hour_shape_correction(forecast, target_s, w5, artifacts)
+    # NOTE (v2.8 cleanup): hour-shape correction was removed — Phase 4 made
+    # Solcast the 100% baseline, so the legacy `apply_hour_shape_correction`
+    # branch was structurally unreachable. Activity hysteresis + block staging
+    # are still active.
     forecast, activity_meta = apply_activity_hysteresis(forecast, target_s, w5, artifacts, bias_meta=bias_meta)
     forecast, staging_meta = apply_block_staging(forecast, w5)
     forecast = np.clip(forecast, 0.0, cap_slot)
@@ -9942,10 +10635,7 @@ def run_dayahead(
     forecast[SOLAR_END_SLOT:]   = 0.0
 
     log.info(
-        "Hardening: shape_hours=%d avg_shape_matches=%.1f avg_shape_score=%s  start=%s end=%s hist_window=%d bias_shift=%d staged_slots=%d node_step=%.2f",
-        int(shape_meta.get("hours_shaped", 0)),
-        float(shape_meta.get("avg_matches", 0.0)),
-        f"{float(shape_meta['avg_score']):.2f}" if shape_meta.get("avg_score") is not None else "n/a",
+        "Hardening: start=%s end=%s hist_window=%d bias_shift=%d staged_slots=%d node_step=%.2f",
         activity_meta.get("first_slot"),
         activity_meta.get("last_slot"),
         int(activity_meta.get("history_matches", 0)),
@@ -9977,9 +10667,9 @@ def run_dayahead(
         _sc_cov_f = float(solcast_meta.get("coverage_ratio", 0.0))
         _sc_kwh = np.asarray(solcast_snapshot.get("forecast_kwh", []), dtype=float)
         if _sc_kwh.size == SLOTS_DAY:
-            if _sc_cov_f >= 0.95:
+            if _sc_cov_f >= SOLCAST_COVERAGE_FRESH_THRESHOLD:
                 _floor_ratio = SOLCAST_FORECAST_FLOOR_RATIO_FRESH
-            elif _sc_cov_f >= 0.80:
+            elif _sc_cov_f >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
                 _floor_ratio = SOLCAST_FORECAST_FLOOR_RATIO_USABLE
             else:
                 _floor_ratio = 0.0
@@ -10018,80 +10708,33 @@ def run_dayahead(
                         _floor_ratio * 100.0, _sc_cov_f,
                     )
 
-    # 5a. PHASE 4: Solcast per-slot ceiling - do not exceed Solcast P90 (hi)
-    if bool(solcast_meta.get("used_solcast")):
-        _sc_hi_snap = np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float)
-        if _sc_hi_snap.size == SLOTS_DAY:
-            _exceeds_hi = forecast[SOLAR_START_SLOT:SOLAR_END_SLOT] > _sc_hi_snap[SOLAR_START_SLOT:SOLAR_END_SLOT]
-            _exceeds_count = int(np.sum(_exceeds_hi))
-            if _exceeds_count > 0:
-                forecast[SOLAR_START_SLOT:SOLAR_END_SLOT] = np.minimum(
-                    forecast[SOLAR_START_SLOT:SOLAR_END_SLOT],
-                    _sc_hi_snap[SOLAR_START_SLOT:SOLAR_END_SLOT]
-                )
-                log.info(
-                    "Solcast per-slot ceiling applied: forecast clamped to Solcast P90 in %d/%d slots",
-                    _exceeds_count,
-                    SOLAR_END_SLOT - SOLAR_START_SLOT,
-                )
-
-    # 5b. Analog Ensemble (AnEn) post-correction
-    _day_stats = stats if isinstance(stats, dict) else {}
-    _anen_analogs = _anen_find_analogs(target_s)
-    _anen_ratio = _anen_correction_ratio(_anen_analogs)
-    if abs(_anen_ratio - 1.0) > 0.005:
-        forecast = np.clip(forecast * _anen_ratio, 0.0, None)
-        log.info(
-            "AnEn correction: ratio=%.4f analogs=%d",
-            _anen_ratio,
-            len(_anen_analogs),
-        )
+    # NOTE (v2.8 cleanup): the standalone "5a. Solcast per-slot ceiling"
+    # block was removed — it was a duplicate of the P90 ceiling that runs
+    # inside the tri-band hard clamp below. Same operation, twice.
+    #
+    # NOTE (v2.8 cleanup): Analog Ensemble (AnEn) post-correction was removed.
+    # See earlier comment near `_anen_*`.
 
     # 5c. FINAL Solcast tri-band hard clamp (P10 floor + P90 ceiling)
-    # This runs AFTER all corrections (AnEn, ramp, etc.) to guarantee the forecast
-    # stays within the Solcast confidence interval when Solcast data is available.
-    # EXCEPTION: per-slot override when OpenMeteo weather diverges sharply from Solcast —
-    # if physics_baseline (OpenMeteo-derived) and Solcast mid disagree by more than
-    # SOLCAST_WEATHER_DIVERGENCE_RATIO, the tri-band clamp is skipped for those slots
-    # because Solcast may be unrealistic for the actual weather conditions.
+    # Runs AFTER all corrections (ramp, staging, etc.) to guarantee the
+    # forecast stays within the Solcast confidence interval when Solcast data
+    # is available. The previous Open-Meteo "weather-divergence override" was
+    # removed (v2.8 cleanup) — Open-Meteo is unreliable for this site per
+    # operator (`project_openmeteo_rain_unreliable`), so we should not let it
+    # veto the Solcast clamp.
     if bool(solcast_meta.get("used_solcast")):
         _sc_lo_final = np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float)
         _sc_hi_final = np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float)
-        _sc_mid_final = np.asarray(solcast_snapshot.get("forecast_kwh", []), dtype=float)
         _sc_cov_final = float(solcast_meta.get("coverage_ratio", 0.0))
         _solar = slice(SOLAR_START_SLOT, SOLAR_END_SLOT)
         _triband_log_parts = []
 
-        # Per-slot weather divergence mask: where OpenMeteo physics and Solcast disagree.
-        # Threshold 2.0x is conservative — a slot where one source predicts double the other
-        # indicates fundamentally different weather assumptions (e.g., localized convection
-        # seen by satellite but missed by NWP grid, or vice versa).
-        _divergent = np.zeros(SLOTS_DAY, dtype=bool)
-        if _sc_mid_final.size == SLOTS_DAY and physics_baseline_arr.size == SLOTS_DAY:
-            _phys_solar = physics_baseline_arr[_solar]
-            _sc_solar = _sc_mid_final[_solar]
-            # Only compare where both have meaningful energy (> 5 kWh/slot avoids noise at dawn/dusk)
-            _both_valid = (_phys_solar > 5.0) & (_sc_solar > 5.0) & np.isfinite(_phys_solar) & np.isfinite(_sc_solar)
-            _ratio = np.ones_like(_phys_solar)
-            _ratio[_both_valid] = np.maximum(
-                _sc_solar[_both_valid] / _phys_solar[_both_valid],
-                _phys_solar[_both_valid] / _sc_solar[_both_valid],
-            )
-            # Treat NaN/Inf ratio as divergent (unreliable data — skip clamp for safety)
-            _divergent[_solar] = (~np.isfinite(_ratio)) | (_ratio > SOLCAST_WEATHER_DIVERGENCE_RATIO)
-            _div_count = int(np.sum(_divergent[_solar]))
-            if _div_count > 0:
-                _triband_log_parts.append(
-                    f"weather-divergent override {_div_count} slots (Solcast/OpenMeteo ratio > {SOLCAST_WEATHER_DIVERGENCE_RATIO:.1f}x)"
-                )
-
-        # P10 hard floor — never go below Solcast lo band (except divergent slots)
-        if _sc_lo_final.size == SLOTS_DAY and _sc_cov_final >= 0.80:
+        # P10 hard floor — never go below Solcast lo band
+        if _sc_lo_final.size == SLOTS_DAY and _sc_cov_final >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
             _below_p10 = (
                 (forecast[_solar] < _sc_lo_final[_solar])
                 & (_sc_lo_final[_solar] > 0.0)
                 & np.isfinite(_sc_lo_final[_solar])
-                & ~_divergent[_solar]
             )
             _below_count = int(np.sum(_below_p10))
             if _below_count > 0:
@@ -10101,9 +10744,9 @@ def run_dayahead(
                     forecast[_solar],
                 )
                 _triband_log_parts.append(f"P10 floor lifted {_below_count} slots")
-        # P90 hard ceiling — never exceed Solcast hi band (except divergent slots)
-        if _sc_hi_final.size == SLOTS_DAY and _sc_cov_final >= 0.80:
-            _above_p90 = (forecast[_solar] > _sc_hi_final[_solar]) & np.isfinite(_sc_hi_final[_solar]) & ~_divergent[_solar]
+        # P90 hard ceiling — never exceed Solcast hi band
+        if _sc_hi_final.size == SLOTS_DAY and _sc_cov_final >= SOLCAST_COVERAGE_USABLE_THRESHOLD:
+            _above_p90 = (forecast[_solar] > _sc_hi_final[_solar]) & np.isfinite(_sc_hi_final[_solar])
             _above_count = int(np.sum(_above_p90))
             if _above_count > 0:
                 forecast[_solar] = np.where(
@@ -10182,7 +10825,6 @@ def run_dayahead(
             "target_regime": target_regime,
             "bias_meta": bias_meta,
             "solcast_meta": solcast_meta,
-            "shape_meta": shape_meta,
             "activity_meta": activity_meta,
             "staging_meta": staging_meta,
             "baseline_total_kwh": float(baseline.sum()),  # PHASE 4: Now Solcast mid total
@@ -10196,8 +10838,6 @@ def run_dayahead(
             "bias_total_kwh": float(bias_correction.sum()),
             "error_memory_meta": error_memory_meta,
             "error_class_meta": error_class_summary,
-            "anen_ratio": _anen_ratio,
-            "anen_analog_count": len(_anen_analogs),
         }
 
     # --- PHASE 4: Forecast sanity check using Solcast mid baseline ---
@@ -10706,15 +11346,14 @@ def _read_setting_value(key: str) -> str | None:
     """Read a setting value from the settings table, returning None if absent."""
     if not APP_DB_FILE.exists():
         return None
+    # v2.8 SQLite audit M1: use `with` for automatic cleanup, matching
+    # the 24 other read call sites in this module.
     try:
-        conn = _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True)
-        try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
             row = conn.execute(
                 "SELECT value FROM settings WHERE key = ? LIMIT 1",
                 (str(key),),
             ).fetchone()
-        finally:
-            conn.close()
     except Exception:
         return None
     if not row or row[0] is None:

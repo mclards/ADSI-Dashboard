@@ -33,6 +33,15 @@ const {
   bulkUpsertForecastIntradayAdjusted,
   bulkUpsertSolcastSnapshot,
   bulkBackfillSolcastEstActual,
+  // Day-ahead locked snapshot + snapshot history (v2.8+).
+  // bulkInsertDayAheadLocked is consumed inside dayAheadLock.js (which
+  // requires it directly from ./db); only express-layer helpers are imported here.
+  // countDayAheadLockedForDay is used by the startup catch-up hook (R5).
+  countDayAheadLockedForDay,
+  getDayAheadLockedForDay,
+  getDayAheadLockedMetaForDay,
+  bulkInsertSnapshotHistory,
+  pruneSnapshotHistory,
   closeDb,
   getTelemetryHotCutoffTs,
   queryReadingsRangeAll,
@@ -9166,6 +9175,15 @@ function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
 
   // Accumulate forecast records into per-slot MW*h buckets
   let matched = 0;
+  // v2.8 audit (R3): track how many records actually carried tri-band data
+  // (P10/P90 distinct from P50). When Solcast omits these, the previous code
+  // silently fell back to P50 — disabling the tri-band hard clamp without
+  // any operator signal. We still apply the fallback (so downstream consumers
+  // keep working) but now we count the records that came through with real
+  // bands so we can warn at the end if coverage is suspiciously low.
+  let recordsWithRealLo = 0;
+  let recordsWithRealHi = 0;
+  let recordsWithAnyForecast = 0;
   for (const rec of records || []) {
     const periodEndRaw =
       rec?.period_end ?? rec?.periodEnd ?? rec?.period_end_utc ?? rec?.periodEndUtc;
@@ -9181,14 +9199,22 @@ function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
       rec?.pv_estimate ?? rec?.pvEstimate ?? rec?.pv_estimate_mean ?? rec?.pv_estimate_median,
       accessMode,
     );
-    const loMw = convertSolcastPowerToMw(
+    const loMwRaw = convertSolcastPowerToMw(
       rec?.pv_estimate10 ?? rec?.pv_estimate_10 ?? rec?.pv_estimate_low,
       accessMode,
-    ) ?? mw;
-    const hiMw = convertSolcastPowerToMw(
+    );
+    const hiMwRaw = convertSolcastPowerToMw(
       rec?.pv_estimate90 ?? rec?.pv_estimate_90 ?? rec?.pv_estimate_high,
       accessMode,
-    ) ?? mw;
+    );
+    if (mw != null) recordsWithAnyForecast += 1;
+    if (loMwRaw != null) recordsWithRealLo += 1;
+    if (hiMwRaw != null) recordsWithRealHi += 1;
+    // Fallback to P50 when P10/P90 absent (preserves current downstream behavior).
+    // The full semantic fix (storing NULL for absent bands) is documented in
+    // plans/audit_solcast_data_feed_reliability_v2.8.md as a follow-up.
+    const loMw = loMwRaw ?? mw;
+    const hiMw = hiMwRaw ?? mw;
     if (mw == null && loMw == null && hiMw == null) continue;
 
     let segStart = startTs;
@@ -9217,6 +9243,27 @@ function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
     throw new Error(
       `No Solcast samples matched ${day} within ${SOLCAST_SOLAR_START_H}:00-${SOLCAST_SOLAR_END_H}:00 (${cfg.timeZone}).`,
     );
+  }
+
+  // v2.8 audit (R3): warn if Solcast omitted P10/P90 for a meaningful share
+  // of records. Below this threshold the tri-band hard clamp loses bite
+  // because lo == p50 == hi for affected slots.
+  if (recordsWithAnyForecast > 0) {
+    const loRatio = recordsWithRealLo / recordsWithAnyForecast;
+    const hiRatio = recordsWithRealHi / recordsWithAnyForecast;
+    if (loRatio < 0.5 || hiRatio < 0.5) {
+      console.warn(
+        `[solcast-snapshot] ${day}: P10/P90 coverage low ` +
+          `(P10=${(loRatio * 100).toFixed(0)}%, P90=${(hiRatio * 100).toFixed(0)}% of ${recordsWithAnyForecast} records). ` +
+          `Tri-band hard clamp will be partially or fully disabled for slots without bands. ` +
+          `Check Solcast Toolkit response format / plan tier.`,
+      );
+    } else if (loRatio < 1.0 || hiRatio < 1.0) {
+      console.log(
+        `[solcast-snapshot] ${day}: tri-band partial coverage ` +
+          `(P10=${(loRatio * 100).toFixed(0)}%, P90=${(hiRatio * 100).toFixed(0)}% of ${recordsWithAnyForecast} records)`,
+      );
+    }
   }
 
   const rows = [];
@@ -10124,6 +10171,46 @@ async function autoFetchSolcastSnapshots(dates, options = {}) {
       }
     }
 
+    // ── History append (v2.8+) ──────────────────────────────────────────
+    // After persisting to solcast_snapshots, append a frozen copy to
+    // solcast_snapshot_history so we preserve the full day-ahead→intraday
+    // evolution for post-hoc analysis and spread-weighted learning.
+    // This runs on every successful Solcast pull (5–10/day in practice).
+    let historyRowsAppended = 0;
+    try {
+      const capturedTs = Date.now();
+      const historyRows = [];
+      for (const day of dates) {
+        const snapRows = stmts.getSolcastSnapshotDay.all(String(day || ""));
+        for (const r of snapRows) {
+          historyRows.push({
+            forecast_day: r.forecast_day,
+            slot: r.slot,
+            captured_ts: capturedTs,
+            pulled_ts: Number(r.pulled_ts || pulledTs),
+            p50_mw: r.forecast_mw,
+            p10_mw: r.forecast_lo_mw,
+            p90_mw: r.forecast_hi_mw,
+            est_actual_mw: r.est_actual_mw,
+            age_sec: Math.max(
+              0,
+              Math.floor((capturedTs - Number(r.pulled_ts || pulledTs)) / 1000),
+            ),
+            solcast_source: r.source || accessMode || "toolkit",
+          });
+        }
+      }
+      if (historyRows.length > 0) {
+        historyRowsAppended = bulkInsertSnapshotHistory(historyRows);
+      }
+    } catch (histErr) {
+      // Non-fatal — the live snapshot was already persisted; history is
+      // purely a research/learning artifact. Log and move on.
+      console.warn(
+        `[forecast] Snapshot history append failed: ${histErr?.message || histErr}`,
+      );
+    }
+
     // Backfill est_actual for past dates present in the toolkit response
     const backfill = backfillEstActualFromFetch(estActuals, cfg, targetDateSet);
     if (backfill.backfilledSlots > 0) {
@@ -10133,9 +10220,9 @@ async function autoFetchSolcastSnapshots(dates, options = {}) {
     }
 
     console.log(
-      `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted`,
+      `[forecast] Auto-pulled Solcast snapshots for ${dates.length} date(s): ${persisted} rows persisted, ${historyRowsAppended} history rows appended`,
     );
-    return { pulled: true, persisted, warnings, pulledTs, backfill };
+    return { pulled: true, persisted, warnings, pulledTs, backfill, historyRowsAppended };
   } catch (err) {
     console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
     return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300), pulledTs: null };
@@ -14172,6 +14259,193 @@ app.get("/api/analytics/solcast-est-actual", (req, res) => {
   }
 });
 
+// ── Day-ahead vs reality chart (v2.8+) ───────────────────────────────────
+// Returns 4 aligned series for the analytics panel:
+//   1. locked.*            — frozen 10 AM day-ahead P10/P50/P90 (immutable)
+//   2. intraday_solcast.*  — Solcast's own estimated actual (overwrite semantics)
+//   3. plant_actual.*      — plant-wide PAC-based actual MW per 5-min slot
+//   4. ml_final.*          — dashboard's ML final forecast (intraday-adjusted)
+app.get("/api/analytics/dayahead-chart", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  const date = String(req.query?.date || localDateStr()).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ ok: false, error: "invalid date" });
+  }
+  try {
+    // 1. Locked day-ahead snapshot + meta
+    const lockedRows = getDayAheadLockedForDay(date);
+    const lockedMeta = getDayAheadLockedMetaForDay(date);
+    const locked = {
+      captured_ts: Number(lockedMeta?.captured_ts || 0) || null,
+      captured_local: lockedMeta?.captured_local || null,
+      capture_reason: lockedMeta?.capture_reason || null,
+      solcast_source: lockedMeta?.solcast_source || null,
+      plant_cap_mw:
+        lockedMeta?.plant_cap_mw != null ? Number(lockedMeta.plant_cap_mw) : null,
+      spread_pct_cap_avg:
+        lockedMeta?.spread_pct_cap_avg != null
+          ? Number(lockedMeta.spread_pct_cap_avg)
+          : null,
+      spread_pct_cap_max:
+        lockedMeta?.spread_pct_cap_max != null
+          ? Number(lockedMeta.spread_pct_cap_max)
+          : null,
+      total_p50_kwh:
+        lockedMeta?.total_p50_kwh != null ? Number(lockedMeta.total_p50_kwh) : null,
+      total_p10_kwh:
+        lockedMeta?.total_p10_kwh != null ? Number(lockedMeta.total_p10_kwh) : null,
+      total_p90_kwh:
+        lockedMeta?.total_p90_kwh != null ? Number(lockedMeta.total_p90_kwh) : null,
+      rows: lockedRows.map((r) => ({
+        slot: Number(r.slot),
+        ts_local: Number(r.ts_local || 0),
+        p50_mw: r.p50_mw != null ? Number(r.p50_mw) : null,
+        p10_mw: r.p10_mw != null ? Number(r.p10_mw) : null,
+        p90_mw: r.p90_mw != null ? Number(r.p90_mw) : null,
+      })),
+    };
+
+    // 2. Intraday Solcast est_actual from solcast_snapshots (latest overwrite state)
+    let intradaySolcastRows = [];
+    try {
+      const snapRows = stmts.getSolcastSnapshotDay.all(date);
+      intradaySolcastRows = snapRows
+        .filter((r) => r?.est_actual_mw != null)
+        .map((r) => ({
+          slot: Number(r.slot),
+          ts_local: Number(r.ts_local || 0),
+          est_actual_mw: Number(r.est_actual_mw),
+        }));
+    } catch (e) {
+      console.warn(`[dayahead-chart] intraday_solcast read failed for ${date}:`, e.message);
+    }
+
+    // 3. Plant actual MW per 5-min slot — sum kwh_inc across all inverters, then
+    //    convert to average MW over the slot ((kwh / (5/60)) / 1000).
+    let plantActualRows = [];
+    try {
+      const solarWindow = getForecastSolarWindowBounds(date);
+      if (Number.isFinite(solarWindow.startTs) && Number.isFinite(solarWindow.endTs)) {
+        const energyRows = queryEnergy5minRangeAll(solarWindow.startTs, solarWindow.endTs);
+        const bySlotTs = new Map();
+        for (const r of energyRows) {
+          const ts = Number(r?.ts || 0);
+          if (!ts) continue;
+          const kwh = Number(r?.kwh_inc || 0);
+          bySlotTs.set(ts, Number(bySlotTs.get(ts) || 0) + kwh);
+        }
+        // Convert ts → slot (0..287). slot = ((ts - dayStartTs) / 300000) where
+        // dayStartTs is midnight local for `date`.
+        const midnightTs = new Date(`${date}T00:00:00`).getTime();
+        plantActualRows = Array.from(bySlotTs.entries())
+          .map(([ts, kwh]) => {
+            const slot = Math.round((ts - midnightTs) / (5 * 60 * 1000));
+            // Average MW over the 5-min slot
+            const mw = (kwh / (5 / 60)) / 1000;
+            return { slot, ts_local: ts, actual_mw: Number(mw.toFixed(4)), actual_kwh: Number(kwh.toFixed(4)) };
+          })
+          .filter((r) => r.slot >= 0 && r.slot < 288)
+          .sort((a, b) => a.slot - b.slot);
+      }
+    } catch (e) {
+      console.warn(`[dayahead-chart] plant_actual read failed for ${date}:`, e.message);
+    }
+
+    // 4. ML final = intraday-adjusted forecast (primary) with day-ahead fallback
+    //    Converted from kwh_inc (per 5-min slot) back to MW via (kwh / (5/60) / 1000).
+    let mlFinalRows = [];
+    try {
+      let srcRows = getIntradayAdjustedRowsForDate(date);
+      if (!srcRows || srcRows.length === 0) {
+        srcRows = getDayAheadRowsForDate(date);
+      }
+      const midnightTs = new Date(`${date}T00:00:00`).getTime();
+      mlFinalRows = (srcRows || []).map((r) => {
+        const ts = Number(r.ts || 0);
+        const slot = Math.round((ts - midnightTs) / (5 * 60 * 1000));
+        const kwh = Number(r.kwh_inc || 0);
+        const mw = (kwh / (5 / 60)) / 1000;
+        return {
+          slot,
+          ts_local: ts,
+          ml_mw: Number(mw.toFixed(4)),
+        };
+      }).filter((r) => r.slot >= 0 && r.slot < 288);
+    } catch (e) {
+      console.warn(`[dayahead-chart] ml_final read failed for ${date}:`, e.message);
+    }
+
+    // Meta: actuals-so-far total + variance + within-band tracking
+    const actualTotalKwhSoFar = plantActualRows.reduce(
+      (a, r) => a + Number(r.actual_kwh || 0),
+      0,
+    );
+    const p50TotalKwh = Number(locked.total_p50_kwh || 0);
+    const varianceVsP50Pct =
+      p50TotalKwh > 0
+        ? ((actualTotalKwhSoFar - p50TotalKwh) / p50TotalKwh) * 100
+        : null;
+
+    // actual_within_band: among plant_actual slots that have matching locked rows,
+    // what fraction lies between the corresponding P10 and P90?
+    let inBand = 0;
+    let bandChecked = 0;
+    if (locked.rows.length > 0 && plantActualRows.length > 0) {
+      const lockedBySlot = new Map();
+      for (const lr of locked.rows) {
+        if (lr.p10_mw != null && lr.p90_mw != null) {
+          lockedBySlot.set(lr.slot, { p10: lr.p10_mw, p90: lr.p90_mw });
+        }
+      }
+      for (const ar of plantActualRows) {
+        const band = lockedBySlot.get(ar.slot);
+        if (band) {
+          bandChecked += 1;
+          if (ar.actual_mw >= band.p10 && ar.actual_mw <= band.p90) {
+            inBand += 1;
+          }
+        }
+      }
+    }
+    const actualWithinBandSoFarPct =
+      bandChecked > 0 ? (inBand / bandChecked) * 100 : null;
+
+    return res.json({
+      ok: true,
+      date,
+      locked,
+      intraday_solcast: { rows: intradaySolcastRows },
+      plant_actual: { rows: plantActualRows },
+      ml_final: { rows: mlFinalRows },
+      meta: {
+        plant_cap_mw: locked.plant_cap_mw,
+        actual_total_mwh_so_far: Number((actualTotalKwhSoFar / 1000).toFixed(4)),
+        p50_total_mwh: p50TotalKwh > 0 ? Number((p50TotalKwh / 1000).toFixed(4)) : null,
+        p10_total_mwh:
+          Number(locked.total_p10_kwh || 0) > 0
+            ? Number((Number(locked.total_p10_kwh) / 1000).toFixed(4))
+            : null,
+        p90_total_mwh:
+          Number(locked.total_p90_kwh || 0) > 0
+            ? Number((Number(locked.total_p90_kwh) / 1000).toFixed(4))
+            : null,
+        variance_vs_p50_pct:
+          varianceVsP50Pct != null ? Number(varianceVsP50Pct.toFixed(2)) : null,
+        actual_within_band_so_far_pct:
+          actualWithinBandSoFarPct != null
+            ? Number(actualWithinBandSoFarPct.toFixed(1))
+            : null,
+        band_checked_slots: bandChecked,
+      },
+    });
+  } catch (err) {
+    console.error("[dayahead-chart] failed:", err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || "unknown" });
+  }
+});
+
 app.get("/api/weather/weekly", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
@@ -16054,6 +16328,20 @@ app.post("/api/export/forecast-actual", async (req, res) => {
 cron.schedule("30 3 * * *", pruneOldData);
 // 03:30 — avoids overlap with 02:xx alert/report crons and 04:30 forecast cron
 
+// Prune solcast_snapshot_history rows older than 90 days (v2.8+).
+// Runs at 03:35, right after the main data prune, so any long-running
+// VACUUM from pruneOldData has released its write lock.
+cron.schedule("35 3 * * *", () => {
+  try {
+    const deleted = pruneSnapshotHistory(90);
+    if (deleted > 0) {
+      console.log(`[Cron:history-prune] Deleted ${deleted} solcast_snapshot_history rows older than 90 days`);
+    }
+  } catch (e) {
+    console.warn("[Cron:history-prune] failed:", e.message);
+  }
+});
+
 // ── Day-ahead forecast auto-generation fallback ──────────────────────────
 // The Python forecast service runs primary day-ahead passes at 06:00 and 18:00
 // plus a constant post-solar checker outside the solar window, but if it
@@ -16109,6 +16397,156 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
     }
   });
 }
+
+// ── Day-ahead locked snapshot (v2.8+) ─────────────────────────────────────
+// At or before 10 AM local, freeze Solcast's P10/P50/P90 forecast for
+// tomorrow into `solcast_dayahead_locked`. This is the "what we would
+// submit to WESM FAS" snapshot, used by the error memory system to learn
+// from what was actually submittable rather than from whatever Solcast
+// said most recently (which gets overwritten on every pull).
+//
+// Runs at 06:00 (primary) and 09:55 (fallback). First-write-wins semantics
+// in `solcast_dayahead_locked` make the 09:55 call a no-op on days when
+// 06:00 succeeded, so running both is free insurance against failures.
+const { captureDayAheadSnapshot } = require("./dayAheadLock");
+let _dayAheadLockRunning = false;
+async function runDayAheadLockCapture(cronExpr, captureReason) {
+  if (_dayAheadLockRunning) {
+    console.warn(`[Cron:dayahead-lock] skipping ${cronExpr} — previous run still active`);
+    return;
+  }
+  if (isRemoteMode()) return;
+  _dayAheadLockRunning = true;
+  try {
+    const tomorrow = addDaysIso(localDateStr(), 1);
+    // Step 1: ensure Solcast has fresh data for tomorrow before we freeze it
+    try {
+      await autoFetchSolcastSnapshots([tomorrow], {
+        toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
+      });
+    } catch (fetchErr) {
+      console.warn(
+        `[Cron:dayahead-lock] pre-capture Solcast fetch failed (${captureReason}): ${fetchErr.message}`,
+      );
+      // Continue anyway — if the live solcast_snapshots table has any data
+      // for tomorrow, we still want to lock it; a stale day-ahead is better
+      // than no locked snapshot at all.
+    }
+    // Step 2: compute plant capacity in MW (helper returns kW)
+    const plantCapKw = computePlantMaxKwFromConfig();
+    const plantCapMw = Number.isFinite(plantCapKw) ? plantCapKw / 1000 : null;
+    // Step 3: capture
+    const result = await captureDayAheadSnapshot(tomorrow, captureReason, {
+      plantCapMw,
+    });
+    if (result?.ok && result?.reason === "captured") {
+      console.log(
+        `[Cron:dayahead-lock] Locked day-ahead for ${tomorrow}: ` +
+          `${result.inserted} slots, spread avg=${(result.spread_pct_cap_avg || 0).toFixed(1)}% ` +
+          `max=${(result.spread_pct_cap_max || 0).toFixed(1)}% (${captureReason})`,
+      );
+    } else if (result?.ok && result?.reason === "already_locked") {
+      console.log(
+        `[Cron:dayahead-lock] ${tomorrow} already locked (${result.existing} slots); ${captureReason} no-op`,
+      );
+    } else {
+      console.warn(
+        `[Cron:dayahead-lock] ${tomorrow} capture failed (${captureReason}): ${JSON.stringify(result)}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[Cron:dayahead-lock] unexpected error in ${cronExpr} (${captureReason}):`,
+      err?.message || err,
+    );
+  } finally {
+    _dayAheadLockRunning = false;
+  }
+}
+// 06:00 local — primary lock attempt. Overnight NWP has landed by now and
+// Solcast has usually published the fresh day-ahead forecast.
+cron.schedule("0 6 * * *", () => runDayAheadLockCapture("0 6 * * *", "scheduled_0600"));
+// 09:55 local — fallback. Runs 5 minutes before the WESM FAS 10 AM deadline
+// so we always have a locked snapshot before submission even if 06:00 failed.
+cron.schedule("55 9 * * *", () => runDayAheadLockCapture("55 9 * * *", "scheduled_0955"));
+// 11:00 local — catch-up safety net (v2.8 audit R5).
+// Past the WESM FAS deadline but still useful for the learning loop.
+// Fires only if both 06:00 and 09:55 missed (e.g. dashboard down 05:00–10:00).
+// First-write-wins semantics make this a no-op when an earlier cron succeeded.
+cron.schedule("0 11 * * *", () => runDayAheadLockCapture("0 11 * * *", "scheduled_1100_catchup"));
+
+// ── Intraday Solcast fetch fillers (v2.8 audit R1) ────────────────────────
+// The existing cron schedule (04:30, 06:00, 09:30, 09:55, 18:30, 20:00, 22:00)
+// leaves an 8.5-hour gap between 09:55 and 18:30. With the 4-hour age threshold,
+// every Solcast snapshot from ~14:00 onward auto-downgrades to "stale_usable",
+// reducing trust in the operator-trusted primary source during the hottest part
+// of the solar day.
+//
+// Two extra lightweight fetches at 12:30 and 15:30 close that gap (max gap
+// becomes 3.5h from 15:30 to 18:30, comfortably under the 4h freshness window).
+// These do NOT trigger ML regeneration — they only refresh `solcast_snapshots`
+// so the next intraday-adjusted forecast picks up the latest Solcast state.
+let _intradaySolcastFetchRunning = false;
+async function runIntradaySolcastFetch(cronExpr) {
+  if (_intradaySolcastFetchRunning) {
+    console.warn(`[Cron:solcast-intraday] skipping ${cronExpr} — previous run still active`);
+    return;
+  }
+  if (isRemoteMode()) return;
+  _intradaySolcastFetchRunning = true;
+  try {
+    const today = localDateStr();
+    const tomorrow = addDaysIso(today, 1);
+    const result = await autoFetchSolcastSnapshots([today, tomorrow], {
+      toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
+    });
+    if (result?.pulled) {
+      console.log(
+        `[Cron:solcast-intraday ${cronExpr}] refreshed ${result.persisted} slots ` +
+          `(history rows appended: ${result.historyRowsAppended || 0})`,
+      );
+    } else {
+      console.warn(
+        `[Cron:solcast-intraday ${cronExpr}] fetch failed: ${result?.reason || "unknown"}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[Cron:solcast-intraday ${cronExpr}] unexpected error:`,
+      err?.message || err,
+    );
+  } finally {
+    _intradaySolcastFetchRunning = false;
+  }
+}
+cron.schedule("30 12 * * *", () => runIntradaySolcastFetch("30 12 * * *"));
+cron.schedule("30 15 * * *", () => runIntradaySolcastFetch("30 15 * * *"));
+
+// Startup hook (v2.8 audit R5): if it's already past 10:00 local at startup
+// AND tomorrow has zero locked rows, fire a delayed catch-up. Covers the
+// case where the dashboard was down all morning and missed all 3 cron fires.
+// Delayed by 60 seconds to let DB / config / Solcast settings finish loading.
+setTimeout(() => {
+  try {
+    if (isRemoteMode()) return;
+    const now = new Date();
+    if (now.getHours() < 10) return; // before 10 AM, regular crons will catch it
+    const tomorrow = addDaysIso(localDateStr(), 1);
+    const existing = countDayAheadLockedForDay(tomorrow);
+    if (existing > 0) {
+      console.log(`[Startup:dayahead-lock] tomorrow ${tomorrow} already locked (${existing} slots) — no catch-up needed`);
+      return;
+    }
+    console.log(
+      `[Startup:dayahead-lock] tomorrow ${tomorrow} not locked — firing catch-up capture`,
+    );
+    runDayAheadLockCapture("startup-catchup", "startup_catchup").catch((err) => {
+      console.warn("[Startup:dayahead-lock] catch-up failed:", err?.message || err);
+    });
+  } catch (err) {
+    console.warn("[Startup:dayahead-lock] hook error:", err?.message || err);
+  }
+}, 60 * 1000).unref();
 
 cron.schedule("15 18 * * *", () => {
   // 18:15 — shifted from 18:05 to avoid solar-close (17:55–18:00) archive+polling contention

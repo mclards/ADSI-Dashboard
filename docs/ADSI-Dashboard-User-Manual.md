@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.7.19`
+**Applies to:** ADSI Inverter Dashboard `v2.8.0`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -625,6 +625,17 @@ The `7-Day Weather Outlook` provides context for expected production behavior us
 - cloud percentage
 
 Use this view to support planning, performance interpretation, and forecast review.
+
+### Day-Ahead vs Reality — Locked @ Previous 10 AM
+
+The `Day-Ahead vs Reality` chart displays a multi-series comparison of the frozen 10 AM day-ahead forecast snapshot against actual output as the day unfolds. It shows:
+
+- **P10/P50/P90 confidence band** — locked forecast envelope from previous 10 AM
+- **Solcast intraday** — updated satellite forecast as weather refines
+- **Plant actual** — ground truth measured output
+- **ML final** — final ML model prediction
+
+Header metrics include spread % (cap-weighted), variance vs P50, and % of actual output within the band. Useful for validating forecast accuracy, detecting late-day weather shifts, and reviewing confidence band tightness.
 
 ---
 
