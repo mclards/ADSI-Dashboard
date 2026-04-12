@@ -60,11 +60,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkForUpdates: () => ipcRenderer.invoke("app-update-check"),
   downloadUpdate: () => ipcRenderer.invoke("app-update-download"),
   installUpdate: () => ipcRenderer.invoke("app-update-install"),
+  setAutoDownload: (enabled) => ipcRenderer.invoke("app-update-set-auto-download", enabled),
   restartApp: () => ipcRenderer.invoke("app-restart"),
   onUpdateStatus: (cb) => {
     const handler = (_, payload) => cb(payload);
     ipcRenderer.on("app-update-status", handler);
     return () => ipcRenderer.removeListener("app-update-status", handler);
+  },
+  onUpdateReady: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("app-update-ready", handler);
+    return () => ipcRenderer.removeListener("app-update-ready", handler);
   },
 
   // Startup readiness

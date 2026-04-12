@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.8.0</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.8.1</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -1719,6 +1719,12 @@
             <div class="sinfo">
               <div id="updStatusDetail">Use "Check for Updates" to confirm release availability.</div>
             </div>
+            <div class="srow" style="grid-column:1/-1">
+              <label class="chk-inline" style="white-space:nowrap" title="When enabled, updates are downloaded silently in the background. You will be prompted to restart when the download completes.">
+                <input type="checkbox" id="chkAutoDownload" />
+                <span>Auto-download updates in background</span>
+              </label>
+            </div>
             <div class="sgroup-actions">
               <button id="btnCheckAppUpdate" class="btn btn-outline" type="button" title="Query the GitHub release channel for a newer version of the application.">
                 Check for Updates
@@ -2409,6 +2415,24 @@
         <div class="confirm-dialog-actions">
           <button id="updateInstallConfirmCancel" class="btn btn-outline confirm-btn">Cancel</button>
           <button id="updateInstallConfirmProceed" class="btn btn-accent confirm-btn"><span class="mdi mdi-restart"></span> Restart &amp; Install</button>
+        </div>
+      </div>
+    </div>
+    <!-- Update Ready Modal (auto-downloaded, prompt restart) -->
+    <div id="updateReadyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="updateReadyTitle">
+      <div class="confirm-dialog update-modal">
+        <button id="updateReadyClose" class="update-modal-close" type="button" aria-label="Close">&times;</button>
+        <div class="update-modal-icon" aria-hidden="true"><span class="mdi mdi-check-circle-outline"></span></div>
+        <div class="confirm-dialog-header update-modal-header">
+          <span id="updateReadyTitle" class="confirm-dialog-title">Update Ready to Install</span>
+        </div>
+        <div class="confirm-dialog-body update-modal-body">
+          <p>Version <strong id="updateReadyVersion">—</strong> has been downloaded in the background.</p>
+          <p>The dashboard will restart briefly (~60 seconds) to apply the update. Monitoring will resume automatically.</p>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button id="updateReadyLater" class="btn btn-outline confirm-btn">Later</button>
+          <button id="updateReadyInstall" class="btn btn-accent confirm-btn"><span class="mdi mdi-restart"></span> Restart Now</button>
         </div>
       </div>
     </div>

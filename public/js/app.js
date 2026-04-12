@@ -1406,6 +1406,44 @@ function showInstallConfirmModal() {
   document.body.classList.add("modal-open");
 }
 
+// Update Ready modal — shown when auto-download completes in the background
+function initUpdateReadyModal() {
+  const modal = $("updateReadyModal");
+  if (!modal) return;
+  const close = () => { modal.classList.add("hidden"); document.body.classList.remove("modal-open"); };
+  $("updateReadyClose")?.addEventListener("click", close);
+  $("updateReadyLater")?.addEventListener("click", close);
+  $("updateReadyInstall")?.addEventListener("click", () => {
+    close();
+    _doInstallUpdateConfirmed();
+  });
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  modal.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+
+  // Listen for IPC push from main process
+  if (window.electronAPI?.onUpdateReady) {
+    window.electronAPI.onUpdateReady((payload) => {
+      const ver = payload?.version || "—";
+      const el = $("updateReadyVersion");
+      if (el) el.textContent = "v" + ver;
+      modal.classList.remove("hidden");
+      document.body.classList.add("modal-open");
+    });
+  }
+}
+
+// Auto-download toggle
+async function toggleAutoDownload(enabled) {
+  if (!window.electronAPI?.setAutoDownload) return;
+  try {
+    const res = await window.electronAPI.setAutoDownload(enabled);
+    const cb = $("chkAutoDownload");
+    if (cb) cb.checked = !!res.autoDownload;
+  } catch (err) {
+    console.warn("[updater] toggleAutoDownload failed:", err.message);
+  }
+}
+
 function renderAppUpdateSummary() {
   const update = State.appUpdate || {};
   const statusClass = getUpdateStatusClass(update);
@@ -1464,6 +1502,7 @@ function renderAppUpdateSummary() {
 
 async function initAppUpdateBridge() {
   if (!window.electronAPI) return;
+  initUpdateReadyModal();
   try {
     if (window.electronAPI.onUpdateStatus) {
       window.electronAPI.onUpdateStatus((payload) => {
@@ -1473,6 +1512,9 @@ async function initAppUpdateBridge() {
     if (window.electronAPI.getUpdateState) {
       const state = await window.electronAPI.getUpdateState();
       applyAppUpdateState(state || {});
+      // Sync auto-download toggle
+      const cb = $("chkAutoDownload");
+      if (cb) cb.checked = !!state.autoDownload;
     } else {
       renderAppUpdateSummary();
     }
@@ -1609,6 +1651,10 @@ function getChartPalette() {
     tooltipBg: cssVar("--forecast-preview-tooltip-bg", "rgba(24,28,36,.96)"),
     tooltipBorder: cssVar("--forecast-preview-tooltip-border", "rgba(36,52,79,.84)"),
     tooltipText: cssVar("--forecast-preview-tooltip-text", "#dce8fa"),
+    locked: cssVar("--chart-locked", "#60a5fa"),
+    lockedBand: cssVar("--chart-locked-band", "rgba(96,165,250,0.40)"),
+    lockedBandFill: cssVar("--chart-locked-band-fill", "rgba(96,165,250,0.08)"),
+    solcastEst: cssVar("--chart-solcast-est", "#c084fc"),
   };
 }
 
@@ -4461,62 +4507,66 @@ function mountForecastPerfPanel() {
     </div>
   </div>
   <div class="fperf-body" id="fperfBody">
-    <div class="fperf-health-bar" id="fperfHealthBar">
-      <div class="fperf-hchip" id="fperfChipTrain">
-        <span class="fperf-hchip-label">ML Training</span>
-        <span class="fperf-hchip-val" id="fperfTrainVal">—</span>
+    <div class="fperf-rows-wrap">
+      <div class="fperf-rows-left">
+        <div class="fperf-health-bar" id="fperfHealthBar">
+          <div class="fperf-hchip" id="fperfChipTrain">
+            <span class="fperf-hchip-label">ML Training</span>
+            <span class="fperf-hchip-val" id="fperfTrainVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipLastRun">
+            <span class="fperf-hchip-label">Last Run</span>
+            <span class="fperf-hchip-val" id="fperfLastRunVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipProvider">
+            <span class="fperf-hchip-label">Provider</span>
+            <span class="fperf-hchip-val" id="fperfProviderVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipQuality">
+            <span class="fperf-hchip-label">Recent Quality (14d)</span>
+            <span class="fperf-hchip-val" id="fperfQualityVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipAvgWape" title="Weighted Absolute Percentage Error — average across the selected window">
+            <span class="fperf-hchip-label">Avg WAPE (window)</span>
+            <span class="fperf-hchip-val" id="fperfAvgWapeVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipMlBackend">
+            <span class="fperf-hchip-label">ML Backend</span>
+            <span class="fperf-hchip-val" id="fperfChipMlBackendVal">—</span>
+          </div>
+        </div>
+        <div class="fperf-chip-row fperf-chip-row2">
+          <div class="fperf-hchip" id="fperfChipTrainData">
+            <span class="fperf-hchip-label">Training Data</span>
+            <span class="fperf-hchip-val" id="fperfChipTrainDataVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipDataQual">
+            <span class="fperf-hchip-label">Data Quality</span>
+            <span class="fperf-hchip-val" id="fperfChipDataQualVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipSolcastAge">
+            <span class="fperf-hchip-label">Solcast Age</span>
+            <span class="fperf-hchip-val" id="fperfChipSolcastAgeVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipWeatherSrc">
+            <span class="fperf-hchip-label">Weather Source</span>
+            <span class="fperf-hchip-val" id="fperfChipWeatherSrcVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipBias">
+            <span class="fperf-hchip-label">Recent Bias (7d)</span>
+            <span class="fperf-hchip-val" id="fperfChipBiasVal">—</span>
+          </div>
+          <div class="fperf-hchip" id="fperfChipSolcastBase">
+            <span class="fperf-hchip-label">Solcast Baseline</span>
+            <span class="fperf-hchip-val" id="fperfChipSolcastBaseVal">—</span>
+          </div>
+          <div class="fperf-hchip chip-disabled" id="fperfChipEstRecon">
+            <span class="fperf-hchip-label">Est. Actual Recovery</span>
+            <span class="fperf-hchip-val" id="fperfChipEstReconVal">—</span>
+          </div>
+        </div>
       </div>
-      <div class="fperf-hchip" id="fperfChipLastRun">
-        <span class="fperf-hchip-label">Last Run</span>
-        <span class="fperf-hchip-val" id="fperfLastRunVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipProvider">
-        <span class="fperf-hchip-label">Provider</span>
-        <span class="fperf-hchip-val" id="fperfProviderVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipQuality">
-        <span class="fperf-hchip-label">Recent Quality (14d)</span>
-        <span class="fperf-hchip-val" id="fperfQualityVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipAvgWape" title="Weighted Absolute Percentage Error — average across the selected window">
-        <span class="fperf-hchip-label">Avg WAPE (window)</span>
-        <span class="fperf-hchip-val" id="fperfAvgWapeVal">—</span>
-      </div>
-    </div>
-    <div class="fperf-chip-row fperf-chip-row2">
-      <div class="fperf-hchip" id="fperfChipMlBackend">
-        <span class="fperf-hchip-label">ML Backend</span>
-        <span class="fperf-hchip-val" id="fperfChipMlBackendVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipTrainData">
-        <span class="fperf-hchip-label">Training Data</span>
-        <span class="fperf-hchip-val" id="fperfChipTrainDataVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipDataQual">
-        <span class="fperf-hchip-label">Data Quality</span>
-        <span class="fperf-hchip-val" id="fperfChipDataQualVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipSolcastAge">
-        <span class="fperf-hchip-label">Solcast Age</span>
-        <span class="fperf-hchip-val" id="fperfChipSolcastAgeVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipWeatherSrc">
-        <span class="fperf-hchip-label">Weather Source</span>
-        <span class="fperf-hchip-val" id="fperfChipWeatherSrcVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipBias">
-        <span class="fperf-hchip-label">Recent Bias (7d)</span>
-        <span class="fperf-hchip-val" id="fperfChipBiasVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipSolcastBase">
-        <span class="fperf-hchip-label">Solcast Baseline</span>
-        <span class="fperf-hchip-val" id="fperfChipSolcastBaseVal">—</span>
-      </div>
-      <div class="fperf-hchip chip-disabled" id="fperfChipEstRecon">
-        <span class="fperf-hchip-label">Est. Actual Recovery</span>
-        <span class="fperf-hchip-val" id="fperfChipEstReconVal">—</span>
-      </div>
-      <div class="fperf-hchip" id="fperfChipErrorMemory">
+      <div class="fperf-hchip fperf-chip-error-memory" id="fperfChipErrorMemory">
         <span class="fperf-hchip-label">Error Memory</span>
         <span class="fperf-hchip-val" id="fperfChipErrorMemoryVal">—</span>
         <span class="fperf-hchip-subline" id="fperfChipErrorMemorySub1">—</span>
@@ -13143,6 +13193,7 @@ async function loadAnalytics(options = {}) {
   const force = options && options.force === true;
   if (State.analyticsFetchInFlight && !force) return;
   State.analyticsFetchInFlight = true;
+  State.dayAheadLockedPayload = null; // clear stale locked data on new fetch
   const reqId = (State.analyticsReqId || 0) + 1;
   State.analyticsReqId = reqId;
   let date = $("anaDate").value;
@@ -13586,23 +13637,18 @@ function slotToHHMM(slot) {
 }
 
 function renderDayAheadChart(payload) {
-  const wrap = $("anaDayAheadWrap");
-  const empty = $("anaDayAheadEmpty");
-  if (!wrap) return;
-
   const locked = payload?.locked;
-  const intraday = payload?.intraday_solcast;
-  const actual = payload?.plant_actual;
-  const ml = payload?.ml_final;
   const meta = payload?.meta;
 
   if (!locked || !Array.isArray(locked.rows) || locked.rows.length === 0) {
-    if (empty) { empty.style.display = ""; }
+    State.dayAheadLockedPayload = null;
     return;
   }
-  if (empty) { empty.style.display = "none"; }
 
-  // Update header fields
+  // Store payload for the merged chart
+  State.dayAheadLockedPayload = payload;
+
+  // Update header fields in the merged card
   const capturedEl = $("anaDayAheadCaptured");
   if (capturedEl) {
     const reason = locked.capture_reason || "unknown";
@@ -13629,224 +13675,8 @@ function renderDayAheadChart(payload) {
     varianceEl.textContent = `variance vs P50: ${sign}${variance.toFixed(1)}%`;
   }
 
-  // Build unified slot grid (union of all present slots)
-  const allSlots = new Set();
-  if (Array.isArray(locked.rows)) {
-    locked.rows.forEach(r => allSlots.add(Number(r.slot)));
-  }
-  if (Array.isArray(intraday?.rows)) {
-    intraday.rows.forEach(r => allSlots.add(Number(r.slot)));
-  }
-  if (Array.isArray(actual?.rows)) {
-    actual.rows.forEach(r => allSlots.add(Number(r.slot)));
-  }
-  if (Array.isArray(ml?.rows)) {
-    ml.rows.forEach(r => allSlots.add(Number(r.slot)));
-  }
-
-  const sortedSlots = Array.from(allSlots).sort((a, b) => a - b);
-  const labels = sortedSlots.map(slotToHHMM);
-
-  // Map data by slot for each series
-  const lockedBySlot = new Map(
-    (locked.rows || []).map(r => [Number(r.slot), r])
-  );
-  const intradayBySlot = new Map(
-    (intraday?.rows || []).map(r => [Number(r.slot), r])
-  );
-  const actualBySlot = new Map(
-    (actual?.rows || []).map(r => [Number(r.slot), r])
-  );
-  const mlBySlot = new Map(
-    (ml?.rows || []).map(r => [Number(r.slot), r])
-  );
-
-  // Build datasets aligned on slot grid
-  const p90Data = sortedSlots.map(slot => {
-    const row = lockedBySlot.get(slot);
-    return row ? Number(row.p90_mw) || null : null;
-  });
-
-  const p10Data = sortedSlots.map(slot => {
-    const row = lockedBySlot.get(slot);
-    return row ? Number(row.p10_mw) || null : null;
-  });
-
-  const p50Data = sortedSlots.map(slot => {
-    const row = lockedBySlot.get(slot);
-    return row ? Number(row.p50_mw) || null : null;
-  });
-
-  const intradayData = sortedSlots.map(slot => {
-    const row = intradayBySlot.get(slot);
-    return row ? Number(row.est_actual_mw) || null : null;
-  });
-
-  const actualData = sortedSlots.map(slot => {
-    const row = actualBySlot.get(slot);
-    return row ? Number(row.actual_mw) || null : null;
-  });
-
-  const mlData = sortedSlots.map(slot => {
-    const row = mlBySlot.get(slot);
-    return row ? Number(row.ml_mw) || null : null;
-  });
-
-  // Create or update chart
-  const canvas = $("chartDayAhead");
-  if (!canvas) return;
-
-  if (State.dayAheadChart) {
-    State.dayAheadChart.destroy();
-    State.dayAheadChart = null;
-  }
-
-  const pal = getChartPalette();
-  const uiFont = cssVar("--font-main", "Arial");
-  const chartFont = { family: uiFont, size: 9, weight: "500" };
-  const gridColor = pal.grid;
-  const tickColor = pal.tick;
-
-  State.dayAheadChart = new Chart(canvas, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "P90 (band top)",
-          data: p90Data,
-          borderColor: "rgba(80,130,220,0.65)",
-          backgroundColor: "transparent",
-          borderWidth: 1.2,
-          borderDash: [4, 3],
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "rgba(80,130,220,0.8)",
-          pointBorderWidth: 0,
-          fill: "+1",
-          tension: 0.2,
-        },
-        {
-          label: "P10 (band bottom)",
-          data: p10Data,
-          borderColor: "rgba(80,130,220,0.65)",
-          backgroundColor: "rgba(80,130,220,0.12)",
-          borderWidth: 1.2,
-          borderDash: [4, 3],
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "rgba(80,130,220,0.8)",
-          pointBorderWidth: 0,
-          fill: false,
-          tension: 0.2,
-        },
-        {
-          label: "P50 (day-ahead)",
-          data: p50Data,
-          borderColor: "#3b82f6",
-          backgroundColor: "transparent",
-          borderWidth: 2.2,
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "#3b82f6",
-          pointBorderWidth: 0,
-          fill: false,
-          tension: 0.2,
-        },
-        {
-          label: "Solcast intraday",
-          data: intradayData,
-          borderColor: "#f59e0b",
-          backgroundColor: "transparent",
-          borderWidth: 1.8,
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "#f59e0b",
-          pointBorderWidth: 0,
-          fill: false,
-          tension: 0.2,
-        },
-        {
-          label: "Plant actual",
-          data: actualData,
-          borderColor: "#10b981",
-          backgroundColor: "transparent",
-          borderWidth: 2.0,
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "#10b981",
-          pointBorderWidth: 0,
-          fill: false,
-          tension: 0.2,
-        },
-        {
-          label: "ML final",
-          data: mlData,
-          borderColor: "#a855f7",
-          backgroundColor: "transparent",
-          borderWidth: 1.4,
-          borderDash: [2, 2],
-          pointRadius: 0,
-          pointHoverRadius: 3,
-          pointBackgroundColor: "#a855f7",
-          pointBorderWidth: 0,
-          fill: false,
-          tension: 0.2,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      plugins: {
-        legend: {
-          display: true,
-          position: "top",
-          align: "start",
-          labels: {
-            font: chartFont,
-            color: tickColor,
-            boxWidth: 14,
-            boxHeight: 3,
-            padding: 8,
-            usePointStyle: true,
-            pointStyle: "line",
-          },
-        },
-        tooltip: {
-          backgroundColor: pal.tooltipBg,
-          borderColor: pal.tooltipBorder,
-          borderWidth: 1,
-          titleColor: pal.tooltipText,
-          bodyColor: pal.tooltipText,
-          titleFont: { family: uiFont, size: 10, weight: "700" },
-          bodyFont: { family: uiFont, size: 10, weight: "500" },
-          padding: { top: 8, bottom: 8, left: 12, right: 12 },
-          cornerRadius: 8,
-          displayColors: true,
-          boxPadding: 4,
-          mode: "index",
-          intersect: false,
-        },
-      },
-      scales: {
-        x: {
-          ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 12, padding: 4 },
-          grid: { color: gridColor, drawTicks: false },
-          border: { display: false },
-        },
-        y: {
-          beginAtZero: true,
-          ticks: { font: chartFont, color: tickColor, padding: 6 },
-          grid: { color: gridColor, drawTicks: false },
-          border: { display: false },
-        },
-      },
-      layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
-      interaction: { mode: "index", intersect: false },
-    },
-  });
+  // Re-render the merged total chart with locked overlays
+  renderAnalyticsFromState();
 }
 
 function isTodayAnalyticsDate() {
@@ -14161,7 +13991,14 @@ function ensureAnalyticsCards() {
   totalCard.className = "chart-card";
   totalCard.classList.add("chart-total-card");
   totalCard.innerHTML =
-    '<div class="chart-title">🏭 Total Plant Energy — MWh</div><canvas id="chart-total-pac" height="120"></canvas>';
+    '<div class="chart-title">🏭 Day-Ahead vs Actual — MWh</div>' +
+    '<div class="ana-dayahead-header" id="anaDayAheadHeaderMerged">' +
+      '<span id="anaDayAheadCaptured">captured: —</span>' +
+      '<span id="anaDayAheadSpread">spread: —</span>' +
+      '<span id="anaDayAheadWithinBand">—</span>' +
+      '<span id="anaDayAheadVariance">—</span>' +
+    '</div>' +
+    '<canvas id="chart-total-pac" height="120"></canvas>';
   host.appendChild(totalCard);
 
   const totalSideCard = document.createElement("div");
@@ -14257,20 +14094,11 @@ function ensureAnalyticsCards() {
         <div class="analytics-weather-empty">Loading weekly weather…</div>
       </div>
     </div>
-    <div class="analytics-dayahead-wrap" id="anaDayAheadWrap">
-      <div class="analytics-side-label">Day-Ahead vs Reality — Locked @ Previous 10 AM</div>
-      <div class="ana-dayahead-header">
-        <span id="anaDayAheadCaptured">captured: —</span>
-        <span id="anaDayAheadSpread">spread: —</span>
-        <span id="anaDayAheadWithinBand">—</span>
-        <span id="anaDayAheadVariance">—</span>
-      </div>
+    <div class="analytics-dayahead-wrap" id="anaDayAheadWrap" style="display:none">
       <div class="ana-dayahead-chart-box">
-        <canvas id="chartDayAhead" height="300"></canvas>
+        <canvas id="chartDayAhead" height="0"></canvas>
       </div>
-      <div class="ana-dayahead-empty" id="anaDayAheadEmpty" style="display:none">
-        No locked day-ahead snapshot for this date.
-      </div>
+      <div class="ana-dayahead-empty" id="anaDayAheadEmpty" style="display:none"></div>
     </div>
   `;
   host.appendChild(totalSideCard);
@@ -14509,60 +14337,192 @@ function upsertTotalCompareChart(
   dayAheadValues,
 ) {
   const pal = getChartPalette();
-  const chart = State.charts[key];
   const actual = Array.isArray(actualValues) ? actualValues : [];
   const ahead = Array.isArray(dayAheadValues) ? dayAheadValues : [];
 
+  // MW ↔ MWh conversion for 5-min slots: MW = MWh × 12
+  const MW_PER_MWH = 12;
+
+  // Theme-aware color palette for merged chart
+  const COL_ACTUAL  = pal.actual;       // ground truth
+  const COL_AHEAD   = pal.ahead;        // ML day-ahead prediction
+  const COL_P50     = pal.locked;       // locked Solcast P50
+  const COL_BAND    = pal.lockedBand;   // band border
+  const COL_BAND_BG = pal.lockedBandFill; // band fill
+  const COL_SOLCAST = pal.solcastEst;   // Solcast est. actual
+
   function buildDatasets(cvs) {
-    const actualGrad = cvs ? gradientPair(cvs, pal.actual, 0.26, 0.02) : pal.actualFill;
-    const aheadGrad = cvs ? gradientPair(cvs, pal.ahead, 0.16, 0.01) : pal.aheadFill;
-    return [
+    const actualGrad = cvs ? gradientPair(cvs, COL_ACTUAL, 0.32, 0.02) : pal.actualFill;
+
+    const datasets = [
       {
         label: "Actual (MWh)",
         data: actual,
-        borderColor: pal.actual,
+        borderColor: COL_ACTUAL,
         backgroundColor: actualGrad,
-        borderWidth: 2.2,
+        borderWidth: 3,
         pointRadius: actual.length <= 2 ? 3 : 0,
         pointHoverRadius: actual.length <= 2 ? 4.5 : 3,
-        pointBackgroundColor: pal.actual,
+        pointBackgroundColor: COL_ACTUAL,
         pointBorderWidth: 0,
         tension: 0.3,
         fill: true,
         cubicInterpolationMode: "monotone",
-        order: 2,
+        order: 0,
       },
       {
         label: "Day-ahead (MWh)",
         data: ahead,
-        borderColor: pal.ahead,
-        backgroundColor: aheadGrad,
-        borderWidth: 2,
+        borderColor: COL_AHEAD,
+        backgroundColor: "transparent",
+        borderWidth: 2.2,
         pointRadius: ahead.length <= 2 ? 3 : 0,
         pointHoverRadius: ahead.length <= 2 ? 4.5 : 3,
-        pointBackgroundColor: pal.ahead,
+        pointBackgroundColor: COL_AHEAD,
         pointBorderWidth: 0,
         tension: 0.3,
-        fill: true,
+        fill: false,
         cubicInterpolationMode: "monotone",
-        borderDash: [6, 3],
+        borderDash: [8, 5],
         order: 1,
       },
     ];
+
+    // Merge locked day-ahead P10/P50/P90 + Solcast intraday if available
+    const lp = State.dayAheadLockedPayload;
+    if (lp && lp.locked && Array.isArray(lp.locked.rows) && lp.locked.rows.length > 0) {
+      const lockedByLabel = new Map();
+      (lp.locked.rows || []).forEach(r => {
+        lockedByLabel.set(slotToHHMM(Number(r.slot)), r);
+      });
+      const intradayByLabel = new Map();
+      (lp.intraday_solcast?.rows || []).forEach(r => {
+        intradayByLabel.set(slotToHHMM(Number(r.slot)), r);
+      });
+
+      const p90Data = labels.map(lbl => {
+        const r = lockedByLabel.get(lbl);
+        return r && r.p90_mw != null ? Number((Number(r.p90_mw) / MW_PER_MWH).toFixed(6)) : null;
+      });
+      const p10Data = labels.map(lbl => {
+        const r = lockedByLabel.get(lbl);
+        return r && r.p10_mw != null ? Number((Number(r.p10_mw) / MW_PER_MWH).toFixed(6)) : null;
+      });
+      const p50Data = labels.map(lbl => {
+        const r = lockedByLabel.get(lbl);
+        return r && r.p50_mw != null ? Number((Number(r.p50_mw) / MW_PER_MWH).toFixed(6)) : null;
+      });
+      const intradayData = labels.map(lbl => {
+        const r = intradayByLabel.get(lbl);
+        return r && r.est_actual_mw != null ? Number((Number(r.est_actual_mw) / MW_PER_MWH).toFixed(6)) : null;
+      });
+
+      // Band fill: use a proper gradient for visibility
+      const bandGrad = cvs ? gradientPair(cvs, COL_P50, 0.18, 0.03) : COL_BAND_BG;
+
+      // Insert band + P50 — high order = drawn behind Actual/Day-ahead
+      datasets.unshift(
+        {
+          label: "P90 (band top)",
+          data: p90Data,
+          borderColor: COL_BAND,
+          backgroundColor: "transparent",
+          borderWidth: 1.2,
+          borderDash: [3, 3],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: COL_P50,
+          pointBorderWidth: 0,
+          fill: "+1",
+          tension: 0.3,
+          order: 10,
+        },
+        {
+          label: "P10 (band bottom)",
+          data: p10Data,
+          borderColor: COL_BAND,
+          backgroundColor: bandGrad,
+          borderWidth: 1.2,
+          borderDash: [3, 3],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: COL_P50,
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.3,
+          order: 11,
+        },
+        {
+          label: "P50 (locked)",
+          data: p50Data,
+          borderColor: COL_P50,
+          backgroundColor: "transparent",
+          borderWidth: 2.5,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: COL_P50,
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.3,
+          order: 2,
+        },
+      );
+
+      // Add Solcast intraday if data exists
+      const hasIntraday = intradayData.some(v => v != null);
+      if (hasIntraday) {
+        datasets.push({
+          label: "Solcast est. actual",
+          data: intradayData,
+          borderColor: COL_SOLCAST,
+          backgroundColor: "transparent",
+          borderWidth: 1.8,
+          borderDash: [5, 3],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: COL_SOLCAST,
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.3,
+          order: 3,
+        });
+      }
+    }
+
+    return datasets;
   }
 
-  if (chart) {
-    chart.data.labels = labels;
-    chart.data.datasets = buildDatasets(chart.canvas);
-    chart.update("none");
+  const existing = State.charts[key];
+  const canvas = $(canvasId);
+  if (!canvas) return;
+  const newDatasets = buildDatasets(canvas);
+
+  // Update in-place if dataset count matches; rebuild only when structure changes
+  if (existing && existing.data.datasets.length === newDatasets.length) {
+    existing.data.labels = labels;
+    existing.data.datasets = newDatasets;
+    existing.update("none");
     return;
   }
 
-  const canvas = $(canvasId);
-  if (!canvas) return;
+  // Dataset count changed (locked data arrived/cleared) — full rebuild
+  if (existing) {
+    existing.destroy();
+    State.charts[key] = null;
+  }
   const opts = chartOpts("MWh", true);
   opts.plugins.legend.labels.usePointStyle = true;
   opts.plugins.legend.labels.pointStyle = "line";
+  // Dual-unit tooltip: show both MWh and MW on hover
+  opts.plugins.tooltip = opts.plugins.tooltip || {};
+  opts.plugins.tooltip.callbacks = opts.plugins.tooltip.callbacks || {};
+  opts.plugins.tooltip.callbacks.label = function(ctx) {
+    const val = ctx.parsed?.y;
+    if (val == null || isNaN(val)) return `${ctx.dataset.label}: —`;
+    const mwh = Number(val).toFixed(4);
+    const mw = Number(val * MW_PER_MWH).toFixed(3);
+    return `${ctx.dataset.label}: ${mwh} MWh | ${mw} MW`;
+  };
   State.charts[key] = new Chart(canvas, {
     type: "line",
     data: { labels, datasets: buildDatasets(canvas) },
@@ -16808,6 +16768,7 @@ function bindEventHandlers() {
   $("btnCheckAppUpdate")?.addEventListener("click", checkForUpdatesNow);
   $("btnDownloadAppUpdate")?.addEventListener("click", downloadUpdateNow);
   $("btnInstallAppUpdate")?.addEventListener("click", installUpdateNow);
+  $("chkAutoDownload")?.addEventListener("change", (e) => toggleAutoDownload(e.target.checked));
   $("btnAboutCheckUpdate")?.addEventListener("click", checkForUpdatesNow);
   $("btnOpenGuide")?.addEventListener("click", openGuideModal);
   $("btnOpenCredentials")?.addEventListener("click", openCredentialsReference);

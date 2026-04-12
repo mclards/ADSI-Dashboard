@@ -64,12 +64,16 @@
   --chart-tick: #c4a6b4;
   --chart-grid: rgba(104, 58, 73, 0.35);
   --chart-legend: #c8adb8;
-  --chart-actual: #2ee8ff;
-  --chart-actual-fill: rgba(46, 232, 255, 0.16);
-  --chart-ahead: #ffad1f;
-  --chart-ahead-fill: rgba(255, 173, 31, 0.12);
-  --chart-band-border: rgba(255, 173, 31, 0.32);
-  --chart-band-fill: rgba(255, 173, 31, 0.12);
+  --chart-actual: #6ee7b7;
+  --chart-actual-fill: rgba(110, 231, 183, 0.14);
+  --chart-ahead: #fb923c;
+  --chart-ahead-fill: rgba(251, 146, 60, 0.10);
+  --chart-band-border: rgba(251, 146, 60, 0.32);
+  --chart-band-fill: rgba(251, 146, 60, 0.12);
+  --chart-locked: #60a5fa;
+  --chart-locked-band: rgba(96,165,250,0.50);
+  --chart-locked-band-fill: rgba(96,165,250,0.15);
+  --chart-solcast-est: #f472b6;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(34, 18, 26, 0.98) 0%,
@@ -201,12 +205,16 @@
   --chart-tick: #5e5240;
   --chart-grid: rgba(112, 98, 76, 0.18);
   --chart-legend: #524638;
-  --chart-actual: #14778e;
-  --chart-actual-fill: rgba(20, 119, 142, 0.14);
-  --chart-ahead: #a87000;
-  --chart-ahead-fill: rgba(168, 112, 0, 0.1);
-  --chart-band-border: rgba(168, 112, 0, 0.24);
-  --chart-band-fill: rgba(168, 112, 0, 0.1);
+  --chart-actual: #059669;
+  --chart-actual-fill: rgba(5, 150, 105, 0.12);
+  --chart-ahead: #c2410c;
+  --chart-ahead-fill: rgba(194, 65, 12, 0.08);
+  --chart-band-border: rgba(194, 65, 12, 0.24);
+  --chart-band-fill: rgba(194, 65, 12, 0.08);
+  --chart-locked: #2563eb;
+  --chart-locked-band: rgba(37,99,235,0.45);
+  --chart-locked-band-fill: rgba(37,99,235,0.12);
+  --chart-solcast-est: #db2777;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(244, 236, 222, 0.98) 0%,
@@ -6036,8 +6044,8 @@ select.cam-field-input { appearance: auto; }
   display: flex;
   flex-wrap: wrap;
   gap: 12px 16px;
-  margin-top: 6px;
-  margin-bottom: 8px;
+  margin-top: 2px;
+  margin-bottom: 4px;
   font-size: 9px;
   color: var(--text2);
   font-family: var(--font-mono);
@@ -9684,12 +9692,16 @@ body.mode-transition-active {
   --chart-tick: #7b96be;
   --chart-grid: rgba(30, 45, 71, 0.4);
   --chart-legend: #7b96be;
-  --chart-actual: #2ee8ff;
-  --chart-actual-fill: rgba(46, 232, 255, 0.16);
-  --chart-ahead: #ffad1f;
-  --chart-ahead-fill: rgba(255, 173, 31, 0.12);
-  --chart-band-border: rgba(255, 173, 31, 0.3);
-  --chart-band-fill: rgba(255, 173, 31, 0.12);
+  --chart-actual: #6ee7b7;
+  --chart-actual-fill: rgba(110, 231, 183, 0.14);
+  --chart-ahead: #fb923c;
+  --chart-ahead-fill: rgba(251, 146, 60, 0.10);
+  --chart-band-border: rgba(251, 146, 60, 0.30);
+  --chart-band-fill: rgba(251, 146, 60, 0.12);
+  --chart-locked: #60a5fa;
+  --chart-locked-band: rgba(96,165,250,0.50);
+  --chart-locked-band-fill: rgba(96,165,250,0.15);
+  --chart-solcast-est: #f472b6;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(16, 28, 46, 0.98) 0%,
@@ -9843,12 +9855,16 @@ body.mode-transition-active {
   --chart-tick: #78a89e;
   --chart-grid: rgba(26, 58, 52, 0.5);
   --chart-legend: #78a89e;
-  --chart-actual: #30e8c8;
-  --chart-actual-fill: rgba(48, 232, 200, 0.16);
-  --chart-ahead: #f0a830;
-  --chart-ahead-fill: rgba(240, 168, 48, 0.12);
-  --chart-band-border: rgba(240, 168, 48, 0.3);
-  --chart-band-fill: rgba(240, 168, 48, 0.12);
+  --chart-actual: #4ade80;
+  --chart-actual-fill: rgba(74, 222, 128, 0.14);
+  --chart-ahead: #fdba74;
+  --chart-ahead-fill: rgba(253, 186, 116, 0.10);
+  --chart-band-border: rgba(253, 186, 116, 0.30);
+  --chart-band-fill: rgba(253, 186, 116, 0.10);
+  --chart-locked: #38bdf8;
+  --chart-locked-band: rgba(56,189,248,0.50);
+  --chart-locked-band-fill: rgba(56,189,248,0.15);
+  --chart-solcast-est: #f9a8d4;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(14, 26, 24, 0.98) 0%,
@@ -13491,6 +13507,20 @@ body.mode-transition-active {
 }
 
 /* Health chips */
+.fperf-rows-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.fperf-rows-left {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .fperf-health-bar {
   display: flex;
   flex-wrap: wrap;
@@ -13504,7 +13534,12 @@ body.mode-transition-active {
 }
 
 .fperf-chip-row2 {
-  margin-top: 6px;
+  margin-top: 0;
+  flex-wrap: nowrap;
+}
+
+.fperf-chip-row2 .fperf-hchip {
+  min-width: 0;
 }
 
 .fperf-hchip {
@@ -13519,12 +13554,23 @@ body.mode-transition-active {
   flex: 1 1 120px;
 }
 
+#fperfChipErrorMemory {
+  flex: 0 0 150px;
+  width: 150px;
+  max-width: 150px;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .fperf-hchip-label {
   font-size: 9px;
   font-weight: var(--fw-medium);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fperf-hchip-val {
@@ -13733,6 +13779,24 @@ body.mode-transition-active {
 @media (max-width: 600px) {
   .fperf-card {
     padding: 12px 12px 12px;
+  }
+
+  .fperf-rows-wrap {
+    flex-direction: column;
+  }
+
+  #fperfChipErrorMemory {
+    flex: 1 1 100%;
+    width: auto;
+    max-width: none;
+  }
+
+  .fperf-chip-row2 {
+    flex-wrap: wrap;
+  }
+
+  .fperf-chip-row2 .fperf-hchip {
+    min-width: 120px;
   }
 
   .fperf-hchip {

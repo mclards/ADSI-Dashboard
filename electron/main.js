@@ -378,10 +378,28 @@ function getAppUpdateMode() {
   return "installer";
 }
 
+// Auto-download preference: persisted in a JSON file next to updater.log
+function _autoDownloadPrefPath() {
+  return path.join(app.getPath("userData"), "update-prefs.json");
+}
+function getAutoDownloadPref() {
+  try {
+    const data = JSON.parse(fs.readFileSync(_autoDownloadPrefPath(), "utf8"));
+    return !!data.autoDownload;
+  } catch (_) { return false; }
+}
+function setAutoDownloadPref(value) {
+  const enabled = !!value;
+  try { fs.writeFileSync(_autoDownloadPrefPath(), JSON.stringify({ autoDownload: enabled })); } catch (_) {}
+  autoUpdater.autoDownload = enabled;
+  return enabled;
+}
+
 function buildPublicAppUpdateState() {
   return {
     ...appUpdateState,
     appVersion: app.getVersion(),
+    autoDownload: getAutoDownloadPref(),
     channel: UPDATE_CHANNEL,
     channelRequested: UPDATE_CHANNEL_REQUESTED,
     channelFallbackNote: UPDATE_CHANNEL_FALLBACK_NOTE,
@@ -536,7 +554,10 @@ function bindAutoUpdaterEventsOnce() {
   if (appUpdateBridgeBound) return;
   appUpdateBridgeBound = true;
 
-  autoUpdater.autoDownload = false;
+  // Auto-download can be toggled by user from Settings; default off for
+  // bandwidth-conscious gateway deployments.
+  const autoDownloadPref = getAutoDownloadPref();
+  autoUpdater.autoDownload = autoDownloadPref;
   // SAFETY: This dashboard runs 24/7 on a gateway server. Auto-installing on
   // accidental window close would cause an unexpected monitoring outage.
   // Updates only install when the user explicitly clicks "Restart & Install".
@@ -667,6 +688,16 @@ function bindAutoUpdaterEventsOnce() {
       message: `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
       error: "",
     });
+    // Push update-ready prompt to renderer so a modal can appear
+    try {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && win.webContents) {
+        win.webContents.send("app-update-ready", {
+          version: latestVersion,
+          currentVersion: app.getVersion(),
+        });
+      }
+    } catch (_) { /* ignore */ }
   });
 
   autoUpdater.on("error", (err) => {
@@ -4034,6 +4065,12 @@ ipcMain.handle("app-update-download", async () => {
 
 ipcMain.handle("app-update-install", async () => {
   return installAppUpdateNow();
+});
+
+ipcMain.handle("app-update-set-auto-download", async (_, enabled) => {
+  const value = setAutoDownloadPref(enabled);
+  broadcastAppUpdateState();
+  return { ok: true, autoDownload: value };
 });
 
 ipcMain.handle("app-restart", async () => {

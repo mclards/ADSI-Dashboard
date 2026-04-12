@@ -14446,6 +14446,35 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
   }
 });
 
+// ── Manual day-ahead lock capture (v2.8+) ────────────────────────────────
+// POST /api/analytics/dayahead-lock-capture?date=YYYY-MM-DD
+// Allows manual capture for any date (defaults to tomorrow).
+app.post("/api/analytics/dayahead-lock-capture", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const targetDate = String(req.query?.date || addDaysIso(localDateStr(), 1)).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+    return res.status(400).json({ ok: false, error: "invalid date" });
+  }
+  try {
+    // Pre-fetch Solcast data
+    try {
+      await autoFetchSolcastSnapshots([targetDate], {
+        toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
+      });
+    } catch (fetchErr) {
+      console.warn(`[manual-dayahead-lock] Solcast fetch failed: ${fetchErr.message}`);
+    }
+    const plantCapKw = computePlantMaxKwFromConfig();
+    const plantCapMw = Number.isFinite(plantCapKw) ? plantCapKw / 1000 : null;
+    const result = await captureDayAheadSnapshot(targetDate, "manual", { plantCapMw });
+    console.log(`[manual-dayahead-lock] ${targetDate}: ${JSON.stringify(result)}`);
+    return res.json(result);
+  } catch (err) {
+    console.error("[manual-dayahead-lock] failed:", err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || "unknown" });
+  }
+});
+
 app.get("/api/weather/weekly", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
@@ -16525,16 +16554,36 @@ cron.schedule("30 15 * * *", () => runIntradaySolcastFetch("30 15 * * *"));
 // Startup hook (v2.8 audit R5): if it's already past 10:00 local at startup
 // AND tomorrow has zero locked rows, fire a delayed catch-up. Covers the
 // case where the dashboard was down all morning and missed all 3 cron fires.
+// Also catches up today if unlocked (so the Day-Ahead vs Reality chart works).
 // Delayed by 60 seconds to let DB / config / Solcast settings finish loading.
-setTimeout(() => {
+setTimeout(async () => {
   try {
     if (isRemoteMode()) return;
     const now = new Date();
     if (now.getHours() < 10) return; // before 10 AM, regular crons will catch it
-    const tomorrow = addDaysIso(localDateStr(), 1);
-    const existing = countDayAheadLockedForDay(tomorrow);
-    if (existing > 0) {
-      console.log(`[Startup:dayahead-lock] tomorrow ${tomorrow} already locked (${existing} slots) — no catch-up needed`);
+    const today = localDateStr();
+    const tomorrow = addDaysIso(today, 1);
+
+    // Catch up today if unlocked (chart needs today's locked data)
+    const existingToday = countDayAheadLockedForDay(today);
+    if (existingToday === 0) {
+      console.log(`[Startup:dayahead-lock] today ${today} not locked — firing catch-up capture`);
+      try {
+        const plantCapKw = computePlantMaxKwFromConfig();
+        const plantCapMw = Number.isFinite(plantCapKw) ? plantCapKw / 1000 : null;
+        const result = await captureDayAheadSnapshot(today, "startup_catchup_today", { plantCapMw });
+        console.log(`[Startup:dayahead-lock] today ${today}: ${JSON.stringify(result)}`);
+      } catch (err) {
+        console.warn("[Startup:dayahead-lock] today catch-up failed:", err?.message || err);
+      }
+    } else {
+      console.log(`[Startup:dayahead-lock] today ${today} already locked (${existingToday} slots)`);
+    }
+
+    // Catch up tomorrow
+    const existingTomorrow = countDayAheadLockedForDay(tomorrow);
+    if (existingTomorrow > 0) {
+      console.log(`[Startup:dayahead-lock] tomorrow ${tomorrow} already locked (${existingTomorrow} slots) — no catch-up needed`);
       return;
     }
     console.log(
