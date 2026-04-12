@@ -208,8 +208,21 @@ function toCsv(headers, rows) {
   return [headerRow, ...rows.map(r => keys.map(k => escape(r[k])).join(','))].join('\r\n');
 }
 
+/**
+ * Strip formula-injection triggers from cell values.
+ * Excel, LibreOffice, and Google Sheets interpret cells starting with
+ * =, +, -, @, \t, or \r as formulas/commands. Prefix with a single
+ * quote (') for XLSX or a tab for CSV to neutralise.
+ */
+const _FORMULA_TRIGGER_RE = /^[=+\-@\t\r]/;
+
+function _sanitizeCellFormula(s) {
+  return _FORMULA_TRIGGER_RE.test(s) ? `'${s}` : s;
+}
+
 function escapeCsvCell(v) {
-  const s = String(v ?? '');
+  let s = String(v ?? '');
+  if (_FORMULA_TRIGGER_RE.test(s)) s = `'${s}`;
   return (s.includes(',') || s.includes('"') || s.includes('\n'))
     ? `"${s.replace(/"/g, '""')}"`
     : s;
@@ -411,7 +424,8 @@ function inferXlsxNumericFormat(value) {
 function normalizeXlsxCellValue(value, header = null) {
   const forceText = String(header?.xlsxType || '').trim().toLowerCase() === 'string';
   if (forceText) {
-    return { value: value ?? '', numFmt: null };
+    const tv = String(value ?? '');
+    return { value: _FORMULA_TRIGGER_RE.test(tv) ? `'${tv}` : tv, numFmt: null };
   }
   if (typeof value === 'number') {
     return {
@@ -431,7 +445,7 @@ function normalizeXlsxCellValue(value, header = null) {
         };
       }
     }
-    return { value, numFmt: null };
+    return { value: _sanitizeCellFormula(raw), numFmt: null };
   }
   return { value: value ?? '', numFmt: null };
 }

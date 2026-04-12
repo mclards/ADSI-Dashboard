@@ -30,6 +30,7 @@ import math
 import os
 import sqlite3
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -187,6 +188,7 @@ logging.basicConfig(
 log = logging.getLogger("adsi.dayahead")
 
 # Module-level cache for last error_memory metadata (written by compute_error_memory, read by run_dayahead)
+_ERROR_MEMORY_LOCK = threading.Lock()
 _LAST_ERROR_MEMORY_META: dict = {}
 
 # ============================================================================
@@ -1685,6 +1687,9 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
 
     if day:
         idx5 = pd.date_range(f"{day} 00:00:00", periods=SLOTS_DAY, freq="5min")
+    elif df.empty:
+        log.warning("interpolate_5min called with empty DataFrame and no day — returning empty")
+        return pd.DataFrame()
     else:
         idx5 = pd.date_range(df.index[0], df.index[-1], freq="5min")
 
@@ -2294,7 +2299,11 @@ def _fit_error_classifier_temperature(
     w_train = np.asarray(sample_weight, dtype=float)[train_mask]
     w_holdout = np.asarray(sample_weight, dtype=float)[holdout_mask]
     model = _make_error_classifier()
-    model.fit(X_train, y_train, sample_weight=w_train)
+    # C4: Handle LightGBM early stopping (needs eval_set)
+    if hasattr(model, 'early_stopping_rounds') and model.early_stopping_rounds:
+        model.fit(X_train, y_train, sample_weight=w_train, eval_set=[(X_holdout, y_holdout)])
+    else:
+        model.fit(X_train, y_train, sample_weight=w_train)
 
     raw_probs = _classifier_probabilities_to_full_vector(
         np.asarray(model.predict_proba(X_holdout), dtype=float),
@@ -4380,8 +4389,8 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
             _prior_f = np.asarray(np.clip(np.asarray(snapshot["forecast_kwh"], dtype=float), 0.0, None), dtype=float) if snapshot else np.zeros(SLOTS_DAY, dtype=float)
             _curtailed = curtailed_mask(_actual_f, _prior_f)
             exclude_mask = exclude_mask | _curtailed
-        except Exception:
-            pass  # silently skip if curtailed_mask fails for this day
+        except Exception as _curt_err:
+            log.debug("curtailed_mask failed for %s (non-fatal): %s", day, _curt_err)
         solcast_metrics = None
         solcast_bucket_metrics: dict[str, dict] = {}
         if snapshot:
@@ -5538,6 +5547,9 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
                 except Exception:
                     pass  # missing table or column — capture_reason stays None
 
+        # FIX 1 H1: Compute clip bound once before loop, scaled to plant capacity
+        _clip_kwh = plant_capacity_kw(False) * (5.0 / 60.0) * 2.0
+
         for d in range(1, _regime_days + 1):
             day = (today - timedelta(days=d)).isoformat()
             day_history = history.get(day)
@@ -5571,7 +5583,7 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
                 if exclude_arr[slot] or slot not in day_history:
                     continue
                 _, slot_spread, slot_err = day_history[slot]
-                err[slot] = float(np.clip(slot_err, -200.0, 200.0))
+                err[slot] = float(np.clip(slot_err, -_clip_kwh, _clip_kwh))
                 # v2.8 M2: apply spread-weight multiplier when available.
                 spread_w = _spread_weight(slot_spread, _day_capture_reason)
                 weight_vec[slot] = base_w * regime_factor * spread_w
@@ -5658,9 +5670,12 @@ def _spread_weight(spread_pct_cap_locked: float | None, capture_reason: str | No
         # locked snapshots for every training day.
         base = 0.5
     else:
-        base = max(0.3, 1.0 - (spread_pct_cap_locked / 100.0))
+        base = min(1.0, max(0.3, 1.0 - (spread_pct_cap_locked / 100.0)))
     if capture_reason == "backfill_approx":
         base *= 0.3
+    elif capture_reason and capture_reason not in ("scheduled_0600", "scheduled_0955", "manual", None):
+        # FIX 4 M9: Log unknown capture_reason values for debugging
+        log.debug("_spread_weight: unexpected capture_reason '%s', using base weight %.2f", capture_reason, base)
     return base
 
 
@@ -5783,6 +5798,9 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                     except Exception as _sr_err:
                         log.debug("Batch slot-row fetch failed: %s", _sr_err)
 
+                # FIX 1 H1: Compute clip bound once before loop, scaled to plant capacity
+                _clip_kwh = plant_capacity_kw(False) * (5.0 / 60.0) * 2.0
+
                 for day_row in daily_rows:
                     day_s = str(day_row[0] or "")
                     if not day_s:
@@ -5815,8 +5833,8 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                         if notes_json_str:
                             notes_dict = json.loads(notes_json_str)
                             hist_regime = str(notes_dict.get("forecast_regime", ""))
-                    except Exception:
-                        pass
+                    except Exception as _notes_err:
+                        log.debug("Failed to parse notes_json for error memory regime lookup: %s", _notes_err)
 
                     # Graduated regime mismatch penalty: neighboring regimes (overcast<->rainy)
                     # share more error structure than distant regimes (clear<->rainy).
@@ -5855,7 +5873,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
                         spread_weight = _spread_weight(spread_pct_cap_locked, day_capture_reason)
                         base_w = ERR_MEMORY_DECAY ** (days_ago - 1)
                         weight_vec[slot] = base_w * source_weight * support_weight * regime_factor * spread_weight
-                        err[slot] = float(np.clip(float(signed_err), -200.0, 200.0))
+                        err[slot] = float(np.clip(float(signed_err), -_clip_kwh, _clip_kwh))
                         # Track spread-weight stats for telemetry
                         if spread_pct_cap_locked is not None:
                             sum_spread_weights += spread_weight
@@ -5920,34 +5938,38 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         # the meta under `applied_bias_total_kwh`. This split preserves
         # both signals: raw = learning-loop strength, applied = actual.
         raw_bias = float((ERROR_ALPHA * mem_err).sum())
-        _LAST_ERROR_MEMORY_META = {
-            "last_eligible_date": last_eligible_date,
-            "eligible_row_count": len(all_daily_rows),
-            "selected_days": 0,
-            "lookback_days_used": _regime_days,
-            "regime_used": target_regime or "",
-            "fallback_to_legacy": True,
-            "fallback_reason": fallback_reason,
-            "raw_bias_total_kwh": raw_bias,
-            "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
-        }
+        with _ERROR_MEMORY_LOCK:
+            _LAST_ERROR_MEMORY_META = {
+                "last_eligible_date": last_eligible_date,
+                "eligible_row_count": len(all_daily_rows),
+                "selected_days": 0,
+                "lookback_days_used": _regime_days,
+                "regime_used": target_regime or "",
+                "fallback_to_legacy": True,
+                "fallback_reason": fallback_reason,
+                "raw_bias_total_kwh": raw_bias,
+                "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
+                "success": False,
+            }
         return mem_err
 
     if not errors:
         # Should not reach here if fallback_to_legacy is set, but handle it
         mem_err = _compute_error_memory_legacy(today, target_regime)
         raw_bias = float((ERROR_ALPHA * mem_err).sum())
-        _LAST_ERROR_MEMORY_META = {
-            "last_eligible_date": last_eligible_date,
-            "eligible_row_count": len(all_daily_rows),
-            "selected_days": 0,
-            "lookback_days_used": _regime_days,
-            "regime_used": target_regime or "",
-            "fallback_to_legacy": True,
-            "fallback_reason": "no_eligible_rows" if not fallback_reason else fallback_reason,
-            "raw_bias_total_kwh": raw_bias,
-            "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
-        }
+        with _ERROR_MEMORY_LOCK:
+            _LAST_ERROR_MEMORY_META = {
+                "last_eligible_date": last_eligible_date,
+                "eligible_row_count": len(all_daily_rows),
+                "selected_days": 0,
+                "lookback_days_used": _regime_days,
+                "regime_used": target_regime or "",
+                "fallback_to_legacy": True,
+                "fallback_reason": "no_eligible_rows" if not fallback_reason else fallback_reason,
+                "raw_bias_total_kwh": raw_bias,
+                "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
+                "success": False,
+            }
         return mem_err
 
     if total_spread_weight_samples > 0:
@@ -6051,17 +6073,19 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     raw_bias = float((ERROR_ALPHA * mem_err).sum())
 
     # Store metadata for later retrieval
-    _LAST_ERROR_MEMORY_META = {
-        "last_eligible_date": last_eligible_date,
-        "eligible_row_count": len(all_daily_rows),
-        "selected_days": selected_days,
-        "lookback_days_used": _regime_days,
-        "regime_used": target_regime or "",
-        "fallback_to_legacy": False,
-        "fallback_reason": None,
-        "raw_bias_total_kwh": raw_bias,
-        "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
-    }
+    with _ERROR_MEMORY_LOCK:
+        _LAST_ERROR_MEMORY_META = {
+            "last_eligible_date": last_eligible_date,
+            "eligible_row_count": len(all_daily_rows),
+            "selected_days": selected_days,
+            "lookback_days_used": _regime_days,
+            "regime_used": target_regime or "",
+            "fallback_to_legacy": False,
+            "fallback_reason": None,
+            "raw_bias_total_kwh": raw_bias,
+            "applied_bias_total_kwh": raw_bias,  # placeholder; run_dayahead overwrites
+            "success": True,
+        }
     return mem_err
 
 
@@ -7254,7 +7278,7 @@ def _make_residual_regressor_lgbm():
         n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71,
         subsample=0.78, colsample_bytree=0.75, min_child_samples=22,
         reg_alpha=0.08, reg_lambda=0.12, n_jobs=-1, random_state=42,
-        verbose=-1,
+        verbose=-1, early_stopping_rounds=50,
     )
 
 
@@ -7264,7 +7288,7 @@ def _make_error_classifier_lgbm():
     return lgb.LGBMClassifier(
         n_estimators=400, learning_rate=0.05, max_depth=6, num_leaves=47,
         subsample=0.80, colsample_bytree=0.80, min_child_samples=20,
-        n_jobs=-1, random_state=42, verbose=-1,
+        n_jobs=-1, random_state=42, verbose=-1, early_stopping_rounds=30,
     )
 
 
@@ -7521,7 +7545,18 @@ def fit_residual_model(
 ) -> tuple[GradientBoostingRegressor, object | None, dict]:
     stage_meta = _select_residual_regressor_stage(X, y, sample_weight, day_keys)
     model = _make_residual_regressor(stage_meta.get("best_n_estimators"))
-    model.fit(X.reset_index(drop=True), y, sample_weight=sample_weight)
+    X_reset = X.reset_index(drop=True)
+    # FIX 3 C4: Add LightGBM early stopping eval set
+    if hasattr(model, 'early_stopping_rounds') and model.early_stopping_rounds:
+        from sklearn.model_selection import train_test_split
+        X_tr, X_val, y_tr, y_val = train_test_split(X_reset, y, test_size=0.15, random_state=42)
+        if sample_weight is not None:
+            sw_tr, sw_val = train_test_split(sample_weight, test_size=0.15, random_state=42)
+        else:
+            sw_tr, sw_val = None, None
+        model.fit(X_tr, y_tr, sample_weight=sw_tr, eval_set=[(X_val, y_val)])
+    else:
+        model.fit(X_reset, y, sample_weight=sample_weight)
     # FIX-15: Feature importance logging
     _feat_imp_top10 = []
     if hasattr(model, "feature_importances_"):
@@ -7556,7 +7591,18 @@ def fit_error_classifier(
 
     stage_meta = _select_error_classifier_stage(X, labels, sample_weight, day_keys)
     model = _make_error_classifier(stage_meta.get("best_n_estimators"))
-    model.fit(X.reset_index(drop=True), labels, sample_weight=sample_weight)
+    X_reset = X.reset_index(drop=True)
+    # C4: Add LightGBM early stopping eval set (same pattern as fit_residual_model)
+    if hasattr(model, 'early_stopping_rounds') and model.early_stopping_rounds:
+        from sklearn.model_selection import train_test_split
+        X_tr, X_val, y_tr, y_val = train_test_split(X_reset, labels, test_size=0.15, random_state=42)
+        if sample_weight is not None:
+            sw_tr, _ = train_test_split(sample_weight, test_size=0.15, random_state=42)
+        else:
+            sw_tr = None
+        model.fit(X_tr, y_tr, sample_weight=sw_tr, eval_set=[(X_val, y_val)])
+    else:
+        model.fit(X_reset, labels, sample_weight=sample_weight)
     centroids = {}
     raw_centroids = {}
     label_arr = np.asarray(labels, dtype=int)
@@ -7703,6 +7749,8 @@ def build_training_state(today: date) -> dict | None:
         opportunity_kwh=class_scale,
         day_keys=day_keys,
     )
+    if error_classifier_model is None:
+        log.warning("fit_error_classifier returned None — insufficient error classes for global classifier")
     # Aggregate outage summary from history days
     _outage_days = [h for h in history_days if h.get("outage_severity", "no_outage") != "no_outage"]
     _recon_days = [h for h in history_days if h.get("est_actual_reconstructed_count", 0) > 0]
@@ -7756,12 +7804,14 @@ def build_training_state(today: date) -> dict | None:
             "weather_profiles": build_weather_error_profiles(history_days),
         },
     }
-    if error_classifier_model is not None and error_classifier_scaler is not None and error_classifier_meta is not None:
+    if error_classifier_model is not None:
         bundle["error_classifier"]["global"] = {
             "model": error_classifier_model,
             "scaler": error_classifier_scaler,
-            "meta": dict(error_classifier_meta),
+            "meta": dict(error_classifier_meta) if error_classifier_meta else {},
         }
+    else:
+        log.info("Skipping global error classifier in bundle — model is None")
 
     for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
         regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
@@ -10509,7 +10559,8 @@ def run_dayahead(
     # 4. Error memory bias correction
     err_mem = compute_error_memory(today, w5, target_regime=target_regime)
     # Capture error_memory metadata from module-level cache
-    error_memory_meta = _LAST_ERROR_MEMORY_META.copy() if _LAST_ERROR_MEMORY_META else {}
+    with _ERROR_MEMORY_LOCK:
+        error_memory_meta = _LAST_ERROR_MEMORY_META.copy() if _LAST_ERROR_MEMORY_META else {}
     bias_correction = ERROR_ALPHA * err_mem
     bias_correction[:SOLAR_START_SLOT] = 0.0
     bias_correction[SOLAR_END_SLOT:]   = 0.0
@@ -10590,8 +10641,9 @@ def run_dayahead(
         error_memory_meta["applied_bias_total_kwh"] = _applied_total
         # Also mirror into the module-level cache so downstream readers
         # (engine-health endpoint) see the corrected value.
-        if _LAST_ERROR_MEMORY_META:
-            _LAST_ERROR_MEMORY_META["applied_bias_total_kwh"] = _applied_total
+        with _ERROR_MEMORY_LOCK:
+            if _LAST_ERROR_MEMORY_META:
+                _LAST_ERROR_MEMORY_META["applied_bias_total_kwh"] = _applied_total
     except Exception:
         pass
 
@@ -10652,12 +10704,13 @@ def run_dayahead(
 
     # Sanity check: total energy must be <= theoretical physical maximum.
     max_kwh_day = plant_capacity_kw(False) * (SOLAR_END_H - SOLAR_START_H)
-    if forecast.sum() > max_kwh_day:
+    _fsum = forecast.sum()
+    if _fsum > max_kwh_day and _fsum > 0:
         log.warning(
             "Forecast total %.0f kWh exceeds theoretical max %.0f kWh - scaling down",
-            forecast.sum(), max_kwh_day,
+            _fsum, max_kwh_day,
         )
-        forecast *= max_kwh_day / forecast.sum()
+        forecast *= max_kwh_day / _fsum
 
     # Solcast per-slot energy floor: for each 5-minute slot, enforce that the forecast
     # does not fall below floor_ratio  Solcast slot kWh when Solcast is fresh.

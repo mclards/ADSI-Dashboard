@@ -390,7 +390,11 @@ function getAutoDownloadPref() {
 }
 function setAutoDownloadPref(value) {
   const enabled = !!value;
-  try { fs.writeFileSync(_autoDownloadPrefPath(), JSON.stringify({ autoDownload: enabled })); } catch (_) {}
+  try {
+    fs.writeFileSync(_autoDownloadPrefPath(), JSON.stringify({ autoDownload: enabled }));
+  } catch (err) {
+    console.warn("[updater] failed to save auto-download preference:", err.message);
+  }
   autoUpdater.autoDownload = enabled;
   return enabled;
 }
@@ -926,16 +930,60 @@ async function installAppUpdateNow() {
   return { ok: true, state: buildPublicAppUpdateState() };
 }
 
+// Auto-update checks run outside the solar window (18:00–05:00) when
+// inverter polling, forecast generation, and energy archival are idle.
+// Checks at 19:00, 22:00, and 02:00 — three chances per night.
+const AUTO_UPDATE_CHECK_HOURS = [2, 4, 5, 16, 19, 22];
+
 function scheduleAutoUpdateCheck() {
   if (appUpdateAutoCheckStarted) return;
   appUpdateAutoCheckStarted = true;
   const mode = getAppUpdateMode();
   if (mode === "dev") return;
+  // Initial check 8s after startup
   appUpdateAutoCheckTimer = setTimeout(() => {
     checkForAppUpdates({ manual: false }).catch((err) => {
       console.warn("[updater] startup update check failed:", err.message);
     });
+    _scheduleNextNightlyCheck();
   }, 8000);
+  if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
+    appUpdateAutoCheckTimer.unref();
+  }
+}
+
+function _scheduleNextNightlyCheck() {
+  const now = new Date();
+  const nowH = now.getHours();
+  const nowMs = now.getTime();
+
+  // Find the next check hour
+  let nextMs = Infinity;
+  for (const h of AUTO_UPDATE_CHECK_HOURS) {
+    const candidate = new Date(now);
+    candidate.setHours(h, 0, 0, 0);
+    if (candidate.getTime() <= nowMs) {
+      // Already passed today — try tomorrow
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    if (candidate.getTime() < nextMs) {
+      nextMs = candidate.getTime();
+    }
+  }
+
+  const delayMs = Math.max(60000, nextMs - nowMs); // at least 1 min
+  const nextDate = new Date(nextMs);
+  console.log(
+    `[updater] next auto-check scheduled at ${nextDate.toLocaleTimeString()} (in ${Math.round(delayMs / 60000)} min)`,
+  );
+
+  appUpdateAutoCheckTimer = setTimeout(() => {
+    console.log("[updater] nightly auto-check firing");
+    checkForAppUpdates({ manual: false }).catch((err) => {
+      console.warn("[updater] nightly update check failed:", err.message);
+    });
+    _scheduleNextNightlyCheck();
+  }, delayMs);
   if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
     appUpdateAutoCheckTimer.unref();
   }

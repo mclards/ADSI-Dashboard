@@ -1202,6 +1202,15 @@ const stmts = {
   get5minRangeAll: db.prepare(
     `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter, ts ASC`,
   ),
+  countReadingsRange: db.prepare(
+    `SELECT COUNT(*) AS n FROM readings WHERE inverter=? AND ts BETWEEN ? AND ?`,
+  ),
+  countReadingsRangeAll: db.prepare(
+    `SELECT COUNT(*) AS n FROM readings WHERE ts BETWEEN ? AND ?`,
+  ),
+  countEnergy5minRangeAll: db.prepare(
+    `SELECT COUNT(*) AS n FROM energy_5min WHERE ts BETWEEN ? AND ?`,
+  ),
   sumEnergy5minRange: db.prepare(
     `SELECT inverter, SUM(kwh_inc) AS total_kwh
        FROM energy_5min
@@ -2513,6 +2522,14 @@ function queryReadingsRangeAll(startTs, endTs) {
   if (e - s > MAX_RANGE_MS) {
     console.warn(`[DB] queryReadingsRangeAll: range ${Math.round((e-s)/86400000)}d exceeds 2d cap — please use per-inverter path or batch with yields`);
   }
+  // E4: Row count pre-check to prevent OOM on large exports.
+  // Note: COUNT checks main DB only; archive DBs may add more rows.
+  // The 366-day route-level limit provides a secondary guard.
+  const MAX_EXPORT_ROWS = 500000;
+  const mainCount = stmts.countReadingsRangeAll.get(s, e)?.n || 0;
+  if (mainCount > MAX_EXPORT_ROWS) {
+    throw new Error(`Export would return ${mainCount.toLocaleString()} rows (limit: ${MAX_EXPORT_ROWS.toLocaleString()}). Please narrow the date range or select a single inverter.`);
+  }
   const out = new Map();
   for (const monthKey of iterateMonthKeys(s, e)) {
     const entry = getArchiveEntry(monthKey, false);
@@ -2543,6 +2560,14 @@ function queryEnergy5minRangeAll(startTs, endTs) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   if (!(e >= s)) return [];
+  // E4: Row count pre-check to prevent OOM on large exports.
+  // Note: COUNT checks main DB only; archive DBs may add more rows.
+  // The 366-day route-level limit provides a secondary guard.
+  const MAX_EXPORT_ROWS = 500000;
+  const mainCount = stmts.countEnergy5minRangeAll.get(s, e)?.n || 0;
+  if (mainCount > MAX_EXPORT_ROWS) {
+    throw new Error(`Export would return ${mainCount.toLocaleString()} rows (limit: ${MAX_EXPORT_ROWS.toLocaleString()}). Please narrow the date range or select a single inverter.`);
+  }
   const out = new Map();
   for (const monthKey of iterateMonthKeys(s, e)) {
     const entry = getArchiveEntry(monthKey, false);

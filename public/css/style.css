@@ -74,6 +74,7 @@
   --chart-locked-band: rgba(96,165,250,0.50);
   --chart-locked-band-fill: rgba(96,165,250,0.15);
   --chart-solcast-est: #f472b6;
+  --chart-metered: #e879f9;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(34, 18, 26, 0.98) 0%,
@@ -163,7 +164,7 @@
   --btn-topbar-2: rgba(67, 13, 29, 0.98);
   --btn-topbar-shadow:
     0 10px 24px rgba(22, 5, 11, 0.3), inset 0 1px 0 rgba(255, 227, 236, 0.12);
-  --app-footer-h: 32px;
+  --app-footer-h: 22px;
 }
 
 :root[data-theme="light"] {
@@ -215,6 +216,7 @@
   --chart-locked-band: rgba(37,99,235,0.45);
   --chart-locked-band-fill: rgba(37,99,235,0.12);
   --chart-solcast-est: #db2777;
+  --chart-metered: #a21caf;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(244, 236, 222, 0.98) 0%,
@@ -1829,7 +1831,7 @@ body.sidebar-open .side-nav {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px;
+  padding: 12px 12px 0 12px;
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
@@ -2294,13 +2296,6 @@ input:focus {
   background-color: currentColor;
   border-radius: 50%;
   animation: pulse 1.5s ease-in-out infinite;
-}
-
-/* Spinner Animation */
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 /* Pulse Animation */
@@ -5431,8 +5426,8 @@ select.cam-field-input { appearance: auto; }
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px;
   overflow: auto;
 }
 
@@ -5445,14 +5440,14 @@ select.cam-field-input { appearance: auto; }
 
 .analytics-grid .chart-total-card {
   grid-column: 1 / span 2;
-  min-height: 315px;
+  min-height: 364px;
 }
 
 .analytics-grid .chart-total-side-card {
   grid-column: 3 / span 1;
-  min-height: 285px;
-  max-height: 315px;
-  padding: 10px;
+  min-height: 350px;
+  max-height: 364px;
+  padding: 6px;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -6049,6 +6044,70 @@ select.cam-field-input { appearance: auto; }
   font-size: 9px;
   color: var(--text2);
   font-family: var(--font-mono);
+}
+
+/* Chart titlebar — title + stats in one row */
+.ana-chart-titlebar {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: nowrap;
+}
+
+.ana-chart-titlebar .chart-title {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+.ana-chart-titlebar .ana-dayahead-header {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+/* HTML chart legend */
+.ana-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  margin-bottom: 4px;
+  justify-content: center;
+}
+
+.ana-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface2);
+  cursor: pointer;
+  transition: opacity 0.15s, border-color 0.15s;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text2);
+  line-height: 1.3;
+}
+
+.ana-legend-item:hover {
+  border-color: var(--text3);
+}
+
+.ana-legend-item.ana-legend-off {
+  opacity: 0.35;
+}
+
+.ana-legend-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 3px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.ana-legend-text {
+  white-space: nowrap;
 }
 
 .ana-dayahead-header span {
@@ -7091,6 +7150,108 @@ select.cam-field-input { appearance: auto; }
   font-weight: 400;
 }
 
+/* Update progress toast */
+.upd-toast {
+  position: fixed;
+  bottom: calc(var(--app-footer-h, 32px) + 10px);
+  left: 14px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 240px;
+  max-width: 360px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4), 0 1px 4px rgba(0,0,0,0.2);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text2);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.upd-toast.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+}
+
+/* State colors */
+.upd-toast-ok {
+  border-color: rgba(52,211,153,0.4);
+}
+.upd-toast-ok .upd-toast-icon {
+  color: var(--green, #34d399);
+}
+.upd-toast-ok .upd-toast-bar {
+  background: var(--green, #34d399);
+}
+
+.upd-toast-err {
+  border-color: rgba(239,68,68,0.4);
+}
+.upd-toast-err .upd-toast-icon {
+  color: var(--red, #ef4444);
+}
+
+.upd-toast-info {
+  border-color: rgba(96,165,250,0.4);
+}
+.upd-toast-info .upd-toast-icon {
+  color: var(--accent, #60a5fa);
+}
+
+.upd-toast-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.upd-toast-msg {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upd-toast-progress {
+  position: absolute;
+  bottom: 0;
+  left: 8px;
+  right: 8px;
+  height: 3px;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.06);
+}
+
+.upd-toast-bar {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.upd-toast-close {
+  background: none;
+  border: none;
+  color: var(--text3);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.upd-toast-close:hover {
+  opacity: 1;
+  color: var(--text);
+}
+
 /* App footer */
 .app-footer {
   position: absolute;
@@ -7113,7 +7274,7 @@ select.cam-field-input { appearance: auto; }
       rgba(255, 255, 255, 0) 100%
     ),
     linear-gradient(180deg, var(--surface2) 0%, var(--surface) 100%);
-  font-size: 10px;
+  font-size: 8px;
   color: var(--text3);
   flex-shrink: 0;
   box-sizing: border-box;
@@ -9702,6 +9863,7 @@ body.mode-transition-active {
   --chart-locked-band: rgba(96,165,250,0.50);
   --chart-locked-band-fill: rgba(96,165,250,0.15);
   --chart-solcast-est: #f472b6;
+  --chart-metered: #e879f9;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(16, 28, 46, 0.98) 0%,
@@ -9865,6 +10027,7 @@ body.mode-transition-active {
   --chart-locked-band: rgba(56,189,248,0.50);
   --chart-locked-band-fill: rgba(56,189,248,0.15);
   --chart-solcast-est: #f9a8d4;
+  --chart-metered: #d946ef;
   --forecast-preview-panel-bg: linear-gradient(
     180deg,
     rgba(14, 26, 24, 0.98) 0%,
@@ -13505,6 +13668,41 @@ body.mode-transition-active {
   outline: 2px solid var(--chart-actual, #22d3ee);
   outline-offset: 1px;
 }
+.fperf-updated-ts {
+  font-size: 0.72em;
+  color: var(--text3);
+  opacity: 0.7;
+  white-space: nowrap;
+  align-self: center;
+}
+
+/* FPM retry link */
+.fperf-retry-link {
+  margin-left: 8px;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* FPM button loading spinner */
+.fperf-btn-loading .mdi-refresh {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* FPM paused badge */
+.fperf-paused-badge {
+  font-size: 0.68em;
+  color: var(--text3);
+  opacity: 0.6;
+  margin-left: 6px;
+  font-style: italic;
+}
 
 /* Health chips */
 .fperf-rows-wrap {
@@ -13749,8 +13947,8 @@ body.mode-transition-active {
   color: var(--chart-actual, #22d3ee);
 }
 .fperf-badge.q-review {
-  background: rgba(240, 144, 0, 0.14);
-  color: var(--orange);
+  background: rgba(240, 144, 0, 0.2);
+  color: #c47a00;
 }
 .fperf-badge.q-bad {
   background: rgba(224, 53, 96, 0.16);

@@ -9691,6 +9691,8 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // M5 fix: track this process for emergency kill in safety timer
+    _lastForecastPid = proc.pid;
 
     let stdout = "";
     let stderr = "";
@@ -9711,10 +9713,16 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
       if (settled) return;
       settled = true;
       try {
-        proc.kill();
+        // FIX-M7: On Windows, kill the process tree to avoid orphaned children
+        if (process.platform === "win32" && proc.pid) {
+          try { require("child_process").execSync(`taskkill /pid ${proc.pid} /T /F`, { stdio: "ignore" }); } catch {}
+        } else {
+          proc.kill("SIGTERM");
+        }
       } catch (killErr) {
         console.warn("[forecast] proc kill failed:", killErr.message);
       }
+      _lastForecastPid = null;
       reject(new Error(`Forecast generation timed out after ${timeoutMs} ms`));
     }, timeoutMs);
 
@@ -9729,6 +9737,8 @@ function runForecastGenerator(extraArgs, timeoutMs = 20 * 60 * 1000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // M5 fix: clear tracked PID on process close
+      _lastForecastPid = null;
       resolve({
         code: Number(code ?? -1),
         signal: signal || "",
@@ -9813,6 +9823,8 @@ async function runDayAheadGenerationPlan({
       });
       break;
     } catch (err) {
+      // FIX-H3: Log partial state warning on provider failure
+      console.warn(`[forecast] Provider ${provider} failed for dates [${normalizedDates.join(",")}]: ${err.message}. Partial writes may exist — next provider will overwrite.`);
       attempts.push({
         provider,
         ok: false,
@@ -9827,45 +9839,53 @@ async function runDayAheadGenerationPlan({
       ? attempts[attempts.length - 1].error
       : "Forecast generation failed.";
     for (const day of normalizedDates) {
+      const auditParams = {
+        target_date: day,
+        generated_ts: Date.now(),
+        generator_mode: trigger,
+        provider_used: attempts.length ? attempts[attempts.length - 1].provider : preferredProvider,
+        provider_expected: preferredProvider,
+        forecast_variant: "generation_failed",
+        weather_source: null,
+        solcast_snapshot_day: null,
+        solcast_snapshot_pulled_ts: null,
+        solcast_snapshot_age_sec: null,
+        solcast_snapshot_coverage_ratio: null,
+        solcast_snapshot_source: null,
+        solcast_mean_blend: null,
+        solcast_reliability: null,
+        solcast_primary_mode: 0,
+        solcast_raw_total_kwh: null,
+        solcast_applied_total_kwh: null,
+        physics_total_kwh: null,
+        hybrid_total_kwh: null,
+        final_forecast_total_kwh: null,
+        ml_residual_total_kwh: null,
+        error_class_total_kwh: null,
+        bias_total_kwh: null,
+        shape_skipped_for_solcast: 0,
+        run_status: "failed",
+        solcast_freshness_class: expectSolcastInput ? "missing" : "not_expected",
+        is_authoritative_runtime: 0,
+        is_authoritative_learning: 0,
+        superseded_by_run_audit_id: null,
+        replaces_run_audit_id: null,
+        solcast_lo_total_kwh: null,
+        solcast_hi_total_kwh: null,
+        baseline_is_solcast_mid: 0,
+        notes_json: JSON.stringify({ attempts, error: lastError }),
+      };
       try {
-        stmts.insertForecastRunAudit.run({
-          target_date: day,
-          generated_ts: Date.now(),
-          generator_mode: trigger,
-          provider_used: attempts.length ? attempts[attempts.length - 1].provider : preferredProvider,
-          provider_expected: preferredProvider,
-          forecast_variant: "generation_failed",
-          weather_source: null,
-          solcast_snapshot_day: null,
-          solcast_snapshot_pulled_ts: null,
-          solcast_snapshot_age_sec: null,
-          solcast_snapshot_coverage_ratio: null,
-          solcast_snapshot_source: null,
-          solcast_mean_blend: null,
-          solcast_reliability: null,
-          solcast_primary_mode: 0,
-          solcast_raw_total_kwh: null,
-          solcast_applied_total_kwh: null,
-          physics_total_kwh: null,
-          hybrid_total_kwh: null,
-          final_forecast_total_kwh: null,
-          ml_residual_total_kwh: null,
-          error_class_total_kwh: null,
-          bias_total_kwh: null,
-          shape_skipped_for_solcast: 0,
-          run_status: "failed",
-          solcast_freshness_class: expectSolcastInput ? "missing" : "not_expected",
-          is_authoritative_runtime: 0,
-          is_authoritative_learning: 0,
-          superseded_by_run_audit_id: null,
-          replaces_run_audit_id: null,
-          solcast_lo_total_kwh: null,
-          solcast_hi_total_kwh: null,
-          baseline_is_solcast_mid: 0,
-          notes_json: JSON.stringify({ attempts, error: lastError }),
-        });
+        stmts.insertForecastRunAudit.run(auditParams);
       } catch (auditErr) {
-        console.warn(`[forecast] Failed to write failed-run audit log for ${day}:`, auditErr.message);
+        console.warn(`[forecast] Audit write failed for ${day}, retrying: ${auditErr.message}`);
+        try {
+          // H4 fix: single retry with 500ms delay
+          await new Promise(r => setTimeout(r, 500));
+          stmts.insertForecastRunAudit.run(auditParams);
+        } catch (retryErr) {
+          console.error(`[forecast] Audit write retry failed for ${day}: ${retryErr.message}`);
+        }
       }
     }
     throw new Error(
@@ -14902,13 +14922,22 @@ app.post("/api/export/solcast-week-ahead", async (req, res) => {
 });
 
 let forecastGenerating = false;
+let _forecastCronRunning = false;
+let _lastForecastPid = null; // M5 fix: track Python forecast process PID for emergency kill
 const _forecastJobs = new Map(); // jobId → {status, startedAt, dates, result, error}
 
 function _gcForecastJobs() {
   const runningCutoff = Date.now() - 60 * 60 * 1000; // FIX-10: 60 min for multi-date generation (was 30)
   const doneCutoff = Date.now() - 5 * 60 * 1000; // FIX-10: completed jobs freed after 5 min (was 2)
   for (const [id, job] of _forecastJobs) {
-    if (job.startedAt < runningCutoff) { _forecastJobs.delete(id); continue; }
+    // FIX-M6: Only delete running jobs if they exceed timeout; mark as error instead
+    if (job.status === "running" && job.startedAt < runningCutoff) {
+      console.warn(`[forecast] GC: marking stale running job ${id} as error (started ${Math.round((Date.now() - job.startedAt) / 60000)}m ago)`);
+      job.status = "error";
+      job.error = "Job exceeded maximum runtime (60 min)";
+      job.completedAt = Date.now();
+      continue;
+    }
     if ((job.status === "done" || job.status === "error") && job.completedAt && job.completedAt < doneCutoff) {
       _forecastJobs.delete(id);
     }
@@ -14980,6 +15009,10 @@ app.post("/api/forecast/generate", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid mode. Use 'dayahead-days'." });
   }
 
+  // FIX-C1: Prevent concurrent manual + cron forecast generation
+  if (_forecastCronRunning) {
+    return res.status(409).json({ ok: false, error: "Cron-based forecast generation in progress. Please try again later." });
+  }
   forecastGenerating = true;
 
   // Safety timeout: auto-reset if generation hangs for 45 minutes
@@ -14987,6 +15020,18 @@ app.post("/api/forecast/generate", async (req, res) => {
     if (forecastGenerating) {
       console.warn("[forecast] Safety timeout: forecastGenerating flag auto-reset after 45 minutes");
       forecastGenerating = false;
+      // M5 fix: attempt to kill hanging forecast process
+      if (_lastForecastPid) {
+        try {
+          if (process.platform === "win32") {
+            require("child_process").execSync(`taskkill /pid ${_lastForecastPid} /T /F`, { stdio: "ignore" });
+          } else {
+            process.kill(_lastForecastPid, "SIGTERM");
+          }
+          console.warn(`[forecast] Killed hanging forecast process (PID ${_lastForecastPid})`);
+        } catch {}
+        _lastForecastPid = null;
+      }
     }
   }, 45 * 60 * 1000);
 
@@ -15001,6 +15046,8 @@ app.post("/api/forecast/generate", async (req, res) => {
         result._dates = dates;
         const job = _forecastJobs.get(jobId);
         if (job) { job.status = "done"; job.result = result; job.completedAt = Date.now(); }
+        // M12: notify connected clients that new forecast data is available
+        try { broadcastUpdate && broadcastUpdate({ type: "live" }); } catch {}
       })
       .catch((e) => {
         const job = _forecastJobs.get(jobId);
@@ -15014,6 +15061,8 @@ app.post("/api/forecast/generate", async (req, res) => {
   try {
     const result = await runDayAheadGenerationPlan({ dates, trigger: "manual_api" });
     result._dates = dates;
+    // M12: notify connected clients that new forecast data is available
+    try { broadcastUpdate && broadcastUpdate({ type: "live" }); } catch {}
     res.json({ mode, ...(_forecastResultToResponse(result)) });
   } catch (e) {
     const msg = String(e.message || "");
@@ -16005,6 +16054,22 @@ function normalizeAlarmExportMinDurationSecServer(value) {
   return Math.min(86400, Math.max(0, Math.trunc(raw)));
 }
 
+const MAX_EXPORT_RANGE_DAYS = 366;
+const MAX_EXPORT_RANGE_MS = MAX_EXPORT_RANGE_DAYS * 24 * 60 * 60 * 1000;
+
+function validateExportDateRange(payload) {
+  const s = Number(payload?.startTs || 0);
+  const e = Number(payload?.endTs || 0);
+  if (s > 0 && e > 0) {
+    if (s > e) {
+      throw new Error("Export start date is after end date. Please correct your selection.");
+    }
+    if ((e - s) > MAX_EXPORT_RANGE_MS) {
+      throw new Error(`Export date range exceeds maximum of ${MAX_EXPORT_RANGE_DAYS} days. Please narrow your selection.`);
+    }
+  }
+}
+
 function sendExportRouteError(res, err) {
   const status = isExportQueueBusyError(err) ? 429 : 500;
   if (status === 429) {
@@ -16185,6 +16250,7 @@ app.post("/api/export/alarms", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/alarms", payload));
     }
+    validateExportDateRange(payload);
     const outPath = await runGatewayExportJob("alarms", () =>
       exporter.exportAlarms(payload),
     );
@@ -16205,6 +16271,7 @@ app.post("/api/export/energy", async (req, res) => {
       return res.json(await downloadRemoteExportToLocal("/api/export/energy", req.body || {}));
     }
     const payload = req.body || {};
+    validateExportDateRange(payload);
     const currentDaySnapshot = exportTouchesCurrentDay(payload)
       ? buildCurrentDayEnergySnapshot()
       : null;
@@ -16230,8 +16297,10 @@ app.post("/api/export/inverter-data", async (req, res) => {
         await downloadRemoteExportToLocal("/api/export/inverter-data", req.body || {}),
       );
     }
+    const payload = req.body || {};
+    validateExportDateRange(payload);
     const outPath = await runGatewayExportJob("inverter-data", () =>
-      exporter.exportInverterData(req.body || {}),
+      exporter.exportInverterData(payload),
     );
     return res.json(buildExportResult(outPath));
   } catch (e) {
@@ -16243,8 +16312,10 @@ app.post("/api/export/5min", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/5min", req.body || {}));
     }
+    const payload = req.body || {};
+    validateExportDateRange(payload);
     const outPath = await runGatewayExportJob("energy-5min", () =>
-      exporter.export5min(req.body || {}),
+      exporter.export5min(payload),
     );
     return res.json(buildExportResult(outPath));
   } catch (e) {
@@ -16256,8 +16327,10 @@ app.post("/api/export/audit", async (req, res) => {
     if (isRemoteMode()) {
       return res.json(await downloadRemoteExportToLocal("/api/export/audit", req.body || {}));
     }
+    const payload = req.body || {};
+    validateExportDateRange(payload);
     const outPath = await runGatewayExportJob("audit", () =>
-      exporter.exportAudit(req.body || {}),
+      exporter.exportAudit(payload),
     );
     return res.json(buildExportResult(outPath));
   } catch (e) {
@@ -16272,6 +16345,7 @@ app.post("/api/export/daily-report", async (req, res) => {
       );
     }
     const payload = req.body || {};
+    validateExportDateRange(payload);
     const currentDaySnapshot = exportTouchesCurrentDay(payload)
       ? buildCurrentDayEnergySnapshot({ includeDailyReportRows: true })
       : null;
@@ -16325,6 +16399,7 @@ app.post("/api/export/daily-report", async (req, res) => {
 app.post("/api/export/forecast-actual", async (req, res) => {
   try {
     const payload = req.body || {};
+    validateExportDateRange(payload);
     const source = String(payload.source || "analytics").trim().toLowerCase();
     const isSolcast = source === "solcast";
     if (isRemoteMode()) {
@@ -16379,7 +16454,6 @@ cron.schedule("35 3 * * *", () => {
 // Runs at 04:30, 09:30, 18:30, 20:00, and 22:00 — each checks if tomorrow's forecast
 // is healthy (not only complete) and regenerates when provider/freshness policy fails.
 // Gateway mode only.
-let _forecastCronRunning = false;
 for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *", "0 22 * * *"]) {
   cron.schedule(cronExpr, async () => {
     if (_forecastCronRunning) {
@@ -16396,6 +16470,18 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
       if (_forecastCronRunning) {
         console.warn("[Cron:forecast] Safety timeout: cron running flag auto-reset after 45 minutes");
         _forecastCronRunning = false;
+        // M5 fix: attempt to kill hanging forecast process
+        if (_lastForecastPid) {
+          try {
+            if (process.platform === "win32") {
+              require("child_process").execSync(`taskkill /pid ${_lastForecastPid} /T /F`, { stdio: "ignore" });
+            } else {
+              process.kill(_lastForecastPid, "SIGTERM");
+            }
+            console.warn(`[Cron:forecast] Killed hanging forecast process (PID ${_lastForecastPid})`);
+          } catch {}
+          _lastForecastPid = null;
+        }
       }
     }, 45 * 60 * 1000);
     try {
@@ -16409,6 +16495,11 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
           return;
         }
         console.log(`[Cron:forecast] Day-ahead for ${tomorrow} triggers fallback. Quality: ${quality} (${existing}/${FORECAST_SOLAR_SLOT_COUNT} slots). Triggering Node fallback generator.`);
+        // M4 fix: re-check concurrency before generation to close race window
+        if (forecastGenerating) {
+          console.warn(`[Cron:forecast] skipping ${cronExpr} — manual generation started during quality assessment`);
+          return;
+        }
         const result = await runDayAheadGenerationPlan({
           dates: [tomorrow],
           trigger: "node_fallback",
@@ -16417,6 +16508,8 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
         console.log(
           `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.provider_used}, variant=${result?.forecast_variant}, ${result?.durationMs || 0}ms)`,
         );
+        // M12: notify connected clients that new forecast data is available
+        try { broadcastUpdate && broadcastUpdate({ type: "live" }); } catch {}
       } catch (err) {
         console.warn(`[Cron:forecast] Fallback generation for ${tomorrow} failed:`, err.message);
       }

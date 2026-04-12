@@ -1276,6 +1276,7 @@ function applyAppUpdateState(nextState) {
   if (!nextState || typeof nextState !== "object") return;
   State.appUpdate = { ...State.appUpdate, ...nextState };
   renderAppUpdateSummary();
+  _renderUpdateToast();
   if (State.appUpdate.updateAvailable && State.appUpdate.latestVersion) {
     maybeShowUpdatePopup();
   }
@@ -1404,6 +1405,108 @@ function showInstallConfirmModal() {
   }
   modal.classList.remove("hidden");
   document.body.classList.add("modal-open");
+}
+
+// Update progress toast — small bottom-left notification
+let _updateToastDismissTimer = null;
+function _ensureUpdateToast() {
+  let toast = $("updateProgressToast");
+  if (toast) return toast;
+  toast = document.createElement("div");
+  toast.id = "updateProgressToast";
+  toast.className = "upd-toast hidden";
+  toast.innerHTML =
+    '<span class="upd-toast-icon"></span>' +
+    '<span class="upd-toast-msg"></span>' +
+    '<div class="upd-toast-progress"><div class="upd-toast-bar"></div></div>' +
+    '<button class="upd-toast-close" type="button" aria-label="Dismiss">&times;</button>';
+  document.body.appendChild(toast);
+  toast.querySelector(".upd-toast-close").addEventListener("click", () => {
+    toast.classList.add("hidden");
+  });
+  return toast;
+}
+
+function _renderUpdateToast() {
+  const u = State.appUpdate || {};
+  const status = String(u.status || "").toLowerCase();
+
+  // States that don't need the toast visible
+  const silentStates = { idle: 1, disabled: 1 };
+  if (silentStates[status]) {
+    const t = $("updateProgressToast");
+    if (t) t.classList.add("hidden");
+    return;
+  }
+
+  // "up-to-date" — show briefly then auto-dismiss
+  if (status === "up-to-date") {
+    const t = $("updateProgressToast");
+    if (!t || t.classList.contains("hidden")) return; // only flash if already visible
+    if (_updateToastDismissTimer) clearTimeout(_updateToastDismissTimer);
+    const ico = t.querySelector(".upd-toast-icon");
+    const msg = t.querySelector(".upd-toast-msg");
+    const bar = t.querySelector(".upd-toast-bar");
+    if (ico) ico.textContent = "✔";
+    if (msg) msg.textContent = `Up to date (v${u.appVersion || "?"})`;
+    if (bar) bar.style.width = "0";
+    t.className = "upd-toast upd-toast-ok";
+    _updateToastDismissTimer = setTimeout(() => {
+      t.classList.add("hidden");
+    }, 4000);
+    return;
+  }
+
+  const toast = _ensureUpdateToast();
+  const ico = toast.querySelector(".upd-toast-icon");
+  const msg = toast.querySelector(".upd-toast-msg");
+  const bar = toast.querySelector(".upd-toast-bar");
+  let cls = "upd-toast";
+
+  if (status === "checking") {
+    if (ico) ico.textContent = "⟳";
+    if (msg) msg.textContent = "Checking for updates...";
+    if (bar) bar.style.width = "0";
+  } else if (status === "update-available") {
+    if (ico) ico.textContent = "⬆";
+    if (msg) msg.textContent = `v${u.latestVersion || "?"} available`;
+    if (bar) bar.style.width = "0";
+    cls += " upd-toast-info";
+  } else if (status === "downloading") {
+    const pct = Math.max(0, Math.min(100, Number(u.downloadPercent || 0)));
+    if (ico) ico.textContent = "⬇";
+    if (msg) msg.textContent = `Downloading v${u.latestVersion || "?"}... ${pct.toFixed(0)}%`;
+    if (bar) bar.style.width = `${pct}%`;
+  } else if (status === "downloaded") {
+    if (ico) ico.textContent = "✔";
+    if (msg) msg.textContent = `v${u.latestVersion || "?"} ready — restart to install`;
+    if (bar) bar.style.width = "100%";
+    cls += " upd-toast-ok";
+  } else if (status === "installing") {
+    if (ico) ico.textContent = "⟳";
+    if (msg) msg.textContent = "Restarting to install...";
+    if (bar) bar.style.width = "100%";
+  } else if (status === "error") {
+    const errMsg = String(u.error || u.message || "Update failed").substring(0, 80);
+    if (ico) ico.textContent = "✗";
+    if (msg) msg.textContent = errMsg;
+    if (bar) bar.style.width = "0";
+    cls += " upd-toast-err";
+  } else {
+    // Unknown state — hide
+    toast.classList.add("hidden");
+    return;
+  }
+
+  toast.className = cls;
+  if (_updateToastDismissTimer) clearTimeout(_updateToastDismissTimer);
+
+  // Auto-dismiss non-critical states after a delay
+  if (status === "error" || status === "update-available") {
+    _updateToastDismissTimer = setTimeout(() => {
+      toast.classList.add("hidden");
+    }, 8000);
+  }
 }
 
 // Update Ready modal — shown when auto-download completes in the background
@@ -1655,6 +1758,7 @@ function getChartPalette() {
     lockedBand: cssVar("--chart-locked-band", "rgba(96,165,250,0.40)"),
     lockedBandFill: cssVar("--chart-locked-band-fill", "rgba(96,165,250,0.08)"),
     solcastEst: cssVar("--chart-solcast-est", "#c084fc"),
+    metered: cssVar("--chart-metered", "#e879f9"),
   };
 }
 
@@ -4486,6 +4590,7 @@ function mountForecastPerfPanel() {
       </button>
       <span class="fperf-icon mdi mdi-chart-line" aria-hidden="true"></span>
       <span class="fperf-title">Forecast Performance Monitor</span>
+      <span id="fperfPausedBadge" class="fperf-paused-badge" style="display:none">paused</span>
     </div>
     <div class="fperf-head-right">
       <select id="fperfDaysSelect" class="sel fperf-days-sel" title="History window for charts and table">
@@ -4495,6 +4600,7 @@ function mountForecastPerfPanel() {
         <option value="60">Last 60 days</option>
         <option value="90">Last 90 days</option>
       </select>
+      <span id="fperfLastUpdated" class="fperf-updated-ts" title="Last data refresh time"></span>
       <button id="btnRefreshFperf" class="btn btn-outline fperf-refresh-btn" type="button"
               title="Refresh forecast performance data" aria-label="Refresh forecast performance">
         <span class="mdi mdi-refresh" aria-hidden="true"></span>
@@ -4690,6 +4796,8 @@ function clearFperfPollInterval() {
     clearInterval(State.fperf.pollInterval);
     State.fperf.pollInterval = null;
   }
+  const pauseBadge = $("fperfPausedBadge");
+  if (pauseBadge) pauseBadge.style.display = "";
 }
 
 function startFperfPollInterval() {
@@ -4703,6 +4811,8 @@ function startFperfPollInterval() {
       loadForecastPerfData().catch(() => {});
     }
   }, 60000); // 60 second interval
+  const pauseBadge = $("fperfPausedBadge");
+  if (pauseBadge) pauseBadge.style.display = "none";
 }
 
 function applyFperfCollapsedState() {
@@ -4730,11 +4840,14 @@ async function loadForecastPerfData() {
   const msg = $("fperfMsg");
   const btn = $("btnRefreshFperf");
   if (msg) msg.textContent = "";
-  if (btn) btn.disabled = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add("fperf-btn-loading");
+  }
   try {
     const [qaResult, healthResult] = await Promise.allSettled([
-      api(`/api/forecast/qa-history?days=${State.fperf.days}`),
-      api("/api/forecast/engine-health"),
+      apiWithTimeout(`/api/forecast/qa-history?days=${State.fperf.days}`, 15000, "QA history request timed out"),
+      apiWithTimeout("/api/forecast/engine-health", 15000, "Engine health request timed out"),
     ]);
     if (State.fperf.requestId !== rid) return; // stale response — newer request in flight
     const qaRes     = qaResult.status     === "fulfilled" ? qaResult.value     : null;
@@ -4757,6 +4870,14 @@ async function loadForecastPerfData() {
     renderForecastPerfCharts(State.fperf.qaRows);
     renderForecastPerfTable(State.fperf.qaRows);
 
+    // Update timestamp
+    const tsEl = $("fperfLastUpdated");
+    if (tsEl) {
+      const now = new Date();
+      tsEl.textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      tsEl.title = `Last refreshed: ${now.toLocaleString()}`;
+    }
+
     // Force expand panel if errorMemory degradation is detected (one-shot per session)
     if (healthRes && State.fperf.collapsed) {
       const em = healthRes.errorMemory;
@@ -4771,10 +4892,15 @@ async function loadForecastPerfData() {
       }
     }
   } catch (e) {
-    if (msg) msg.textContent = `Load failed: ${e.message}`;
+    if (msg) {
+      msg.innerHTML = `Load failed: ${escapeHtml(e.message)} <a href="#" class="fperf-retry-link" onclick="event.preventDefault();loadForecastPerfData()">Retry</a>`;
+    }
   } finally {
     State.fperf.loading = false;
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove("fperf-btn-loading");
+    }
   }
 }
 
@@ -4790,8 +4916,10 @@ function renderForecastPerfHealth(health) {
       const chip = $(id);
       if (!chip) return;
       chip.className = "fperf-hchip chip-disabled";
+      const label = chip.querySelector(".fperf-hchip-label");
       const val = chip.querySelector(".fperf-hchip-val");
       if (val) val.textContent = "No data";
+      if (label && val) chip.setAttribute("aria-label", `${label.textContent}: No data`);
     });
     return;
   }
@@ -4803,13 +4931,13 @@ function renderForecastPerfHealth(health) {
     const rej = Number(health.trainState?.consecutiveRejections || 0);
     if (rej === 0) {
       trainVal.textContent = "Healthy";
-      if (trainChip) { trainChip.className = "fperf-hchip chip-ok"; }
+      if (trainChip) { trainChip.className = "fperf-hchip chip-ok"; trainChip.setAttribute("aria-label", "ML Training: Healthy"); }
     } else if (rej < 3) {
       trainVal.textContent = `${rej} consecutive skip${rej > 1 ? "s" : ""}`;
-      if (trainChip) { trainChip.className = "fperf-hchip chip-warn"; }
+      if (trainChip) { trainChip.className = "fperf-hchip chip-warn"; trainChip.setAttribute("aria-label", `ML Training: ${trainVal.textContent}`); }
     } else {
       trainVal.textContent = `${rej} consecutive skips`;
-      if (trainChip) { trainChip.className = "fperf-hchip chip-error"; }
+      if (trainChip) { trainChip.className = "fperf-hchip chip-error"; trainChip.setAttribute("aria-label", `ML Training: ${trainVal.textContent}`); }
     }
   }
 
@@ -4827,10 +4955,14 @@ function renderForecastPerfHealth(health) {
       if (runChip) {
         runChip.className =
           a.run_status === "success" ? "fperf-hchip chip-ok" : "fperf-hchip chip-error";
+        runChip.setAttribute("aria-label", `Last Run: ${runVal.textContent}`);
       }
     } else {
       runVal.textContent = "No runs";
-      if (runChip) runChip.className = "fperf-hchip chip-disabled";
+      if (runChip) {
+        runChip.className = "fperf-hchip chip-disabled";
+        runChip.setAttribute("aria-label", "Last Run: No runs");
+      }
     }
   }
 
@@ -4842,10 +4974,16 @@ function renderForecastPerfHealth(health) {
       const prov = String(health.latestAudit.provider_used || "—").trim();
       const variant = String(health.latestAudit.forecast_variant || "").trim();
       provVal.textContent = variant ? `${prov} / ${variant}` : prov;
-      if (provChip) provChip.className = "fperf-hchip chip-cyan";
+      if (provChip) {
+        provChip.className = "fperf-hchip chip-cyan";
+        provChip.setAttribute("aria-label", `Provider: ${provVal.textContent}`);
+      }
     } else {
       provVal.textContent = "Unknown";
-      if (provChip) provChip.className = "fperf-hchip chip-disabled";
+      if (provChip) {
+        provChip.className = "fperf-hchip chip-disabled";
+        provChip.setAttribute("aria-label", "Provider: Unknown");
+      }
     }
   }
 
@@ -4861,7 +4999,10 @@ function renderForecastPerfHealth(health) {
       const total = Object.values(qmap).reduce((s, v) => s + (Number(v) || 0), 0);
       if (total === 0) {
         qualVal.textContent = "No data";
-        if (qualChip) qualChip.className = "fperf-hchip chip-disabled";
+        if (qualChip) {
+          qualChip.className = "fperf-hchip chip-disabled";
+          qualChip.setAttribute("aria-label", "Recent Quality (14d): No data");
+        }
       } else {
         qualVal.textContent = `${good}/${total} eligible`;
         if (qualChip) {
@@ -4869,11 +5010,15 @@ function renderForecastPerfHealth(health) {
           qualChip.className = ratio >= 0.7 ? "fperf-hchip chip-ok"
             : ratio >= 0.4 ? "fperf-hchip chip-warn"
             : "fperf-hchip chip-error";
+          qualChip.setAttribute("aria-label", `Recent Quality (14d): ${qualVal.textContent}`);
         }
       }
     } else {
       qualVal.textContent = "No data";
-      if (qualChip) qualChip.className = "fperf-hchip chip-disabled";
+      if (qualChip) {
+        qualChip.className = "fperf-hchip chip-disabled";
+        qualChip.setAttribute("aria-label", "Recent Quality (14d): No data");
+      }
     }
   }
 
@@ -4918,10 +5063,15 @@ function renderForecastPerfHealth(health) {
     if (mlChip) {
       mlChip.className = `fperf-hchip ${colorClass}`;
       mlChip.title = titleText;
+      mlChip.setAttribute("aria-label", `ML Backend: ${text}`);
     }
   } else if (mlVal) {
     mlVal.textContent = "No model";
-    if (mlChip) { mlChip.className = "fperf-hchip chip-disabled"; mlChip.title = ""; }
+    if (mlChip) {
+      mlChip.className = "fperf-hchip chip-disabled";
+      mlChip.title = "";
+      mlChip.setAttribute("aria-label", "ML Backend: No model");
+    }
   }
 
   // Training Data chip
@@ -4935,10 +5085,15 @@ function renderForecastPerfHealth(health) {
     if (trainDataChip) {
       trainDataChip.className = "fperf-hchip chip-info";
       trainDataChip.title = `Last trained: ${lastTrainingDate || "—"} | Regimes: ${regimesCount || "—"} | Result: ${trainingResult || "—"}`;
+      trainDataChip.setAttribute("aria-label", `Training Data: ${trainDataVal.textContent}`);
     }
   } else if (trainDataVal) {
     trainDataVal.textContent = "No training data";
-    if (trainDataChip) { trainDataChip.className = "fperf-hchip chip-disabled"; trainDataChip.title = ""; }
+    if (trainDataChip) {
+      trainDataChip.className = "fperf-hchip chip-disabled";
+      trainDataChip.title = "";
+      trainDataChip.setAttribute("aria-label", "Training Data: No training data");
+    }
   }
 
   // Data Quality chip
@@ -4976,6 +5131,7 @@ function renderForecastPerfHealth(health) {
     if (qualDataChip) {
       qualDataChip.className = `fperf-hchip ${colorClass}`;
       qualDataChip.title = flags.length > 0 ? flags.map((f) => _flagLabels[f] || f).join("\n") : "";
+      qualDataChip.setAttribute("aria-label", `Data Quality: ${text}`);
     }
   }
 
@@ -5008,6 +5164,7 @@ function renderForecastPerfHealth(health) {
       if (scAgeChip) {
         scAgeChip.className = "fperf-hchip chip-disabled";
         scAgeChip.title = scTitle || "No Solcast snapshot pulled yet for today/tomorrow";
+        scAgeChip.setAttribute("aria-label", "Solcast Age: No data");
       }
     } else {
       scAgeVal.textContent = `${h}h ago`;
@@ -5016,6 +5173,7 @@ function renderForecastPerfHealth(health) {
           : h <= 12 ? "fperf-hchip chip-warn"
           : "fperf-hchip chip-error";
         if (scTitle) scAgeChip.title = scTitle;
+        scAgeChip.setAttribute("aria-label", `Solcast Age: ${scAgeVal.textContent}`);
       }
     }
   }
@@ -5031,6 +5189,7 @@ function renderForecastPerfHealth(health) {
         : (src === "snapshot-fallback" || src === "archive-fallback") ? "fperf-hchip chip-warn"
         : src ? "fperf-hchip chip-info"
         : "fperf-hchip chip-disabled";
+      wSrcChip.setAttribute("aria-label", `Weather Source: ${wSrcVal.textContent}`);
     }
   }
 
@@ -5041,7 +5200,11 @@ function renderForecastPerfHealth(health) {
     const b = health.recentBias?.signedBiasPct;
     if (b == null || isNaN(b)) {
       biasVal.textContent = "No data";
-      if (biasChip) { biasChip.className = "fperf-hchip chip-disabled"; biasChip.title = ""; }
+      if (biasChip) {
+        biasChip.className = "fperf-hchip chip-disabled";
+        biasChip.title = "";
+        biasChip.setAttribute("aria-label", "Recent Bias (7d): No data");
+      }
     } else {
       const sign = b >= 0 ? "+" : "";
       biasVal.textContent = `${sign}${b.toFixed(1)}%`;
@@ -5050,6 +5213,7 @@ function renderForecastPerfHealth(health) {
           : Math.abs(b) <= 10 ? "fperf-hchip chip-warn"
           : "fperf-hchip chip-error";
         biasChip.title = `Mean signed bias from last ${health.recentBias.rowsUsed} eligible rows. +% = over-forecast.`;
+        biasChip.setAttribute("aria-label", `Recent Bias (7d): ${biasVal.textContent}`);
       }
     }
   }
@@ -5070,13 +5234,22 @@ function renderForecastPerfHealth(health) {
       if (scBaseChip) {
         scBaseChip.className = "fperf-hchip chip-cyan";
         scBaseChip.title = titleParts.join(" | ");
+        scBaseChip.setAttribute("aria-label", `Solcast Baseline: ${scBaseVal.textContent}`);
       }
     } else if (sb && !sb.isActive) {
       scBaseVal.textContent = "Physics mode";
-      if (scBaseChip) { scBaseChip.className = "fperf-hchip chip-warn"; scBaseChip.title = "Baseline: physics model (legacy)"; }
+      if (scBaseChip) {
+        scBaseChip.className = "fperf-hchip chip-warn";
+        scBaseChip.title = "Baseline: physics model (legacy)";
+        scBaseChip.setAttribute("aria-label", "Solcast Baseline: Physics mode");
+      }
     } else {
       scBaseVal.textContent = "No data";
-      if (scBaseChip) { scBaseChip.className = "fperf-hchip chip-disabled"; scBaseChip.title = ""; }
+      if (scBaseChip) {
+        scBaseChip.className = "fperf-hchip chip-disabled";
+        scBaseChip.title = "";
+        scBaseChip.setAttribute("aria-label", "Solcast Baseline: No data");
+      }
     }
   }
 
@@ -5090,10 +5263,15 @@ function renderForecastPerfHealth(health) {
       if (erChip) {
         erChip.className = "fperf-hchip chip-cyan";
         erChip.title = `${er.days_reconstructed} training day(s) had outage slots reconstructed with Solcast satellite est. actuals (${er.total_slots_reconstructed} total slots, weight discount: ${((er.weight_discount || 1) * 100).toFixed(0)}%)`;
+        erChip.setAttribute("aria-label", `Est. Actual Recovery: ${erVal.textContent}`);
       }
     } else {
       erVal.textContent = "None";
-      if (erChip) { erChip.className = "fperf-hchip chip-ok"; erChip.title = "No outage reconstruction needed in current training window"; }
+      if (erChip) {
+        erChip.className = "fperf-hchip chip-ok";
+        erChip.title = "No outage reconstruction needed in current training window";
+        erChip.setAttribute("aria-label", "Est. Actual Recovery: None");
+      }
     }
   }
 
@@ -5191,6 +5369,7 @@ function renderForecastPerfHealth(health) {
           }
         }
         emChip.title = tooltipLines.join("\n");
+        emChip.setAttribute("aria-label", `Error Memory: ${emVal.textContent}`);
       }
     } else {
       // No error memory data
@@ -5201,6 +5380,7 @@ function renderForecastPerfHealth(health) {
       if (emChip) {
         emChip.className = "fperf-hchip chip-disabled";
         emChip.title = "";
+        emChip.setAttribute("aria-label", "Error Memory: No data");
       }
     }
   }
@@ -5303,8 +5483,16 @@ function renderForecastPerfCharts(rows) {
     );
   }
   if (existingCompare) {
+    // Preserve legend toggle state across updates
+    const hiddenMap = {};
+    existingCompare.data.datasets.forEach((ds, i) => {
+      if (existingCompare.getDatasetMeta(i).hidden) hiddenMap[ds.label] = true;
+    });
     existingCompare.data.labels = labels;
     existingCompare.data.datasets = compareSets;
+    compareSets.forEach((ds, i) => {
+      if (hiddenMap[ds.label]) existingCompare.getDatasetMeta(i).hidden = true;
+    });
     existingCompare.update("none");
   } else if (compareCanvas) {
     const opts = chartOpts("MWh", true);
@@ -5336,6 +5524,9 @@ function renderForecastPerfCharts(rows) {
   const existingWape = State.charts.fperfWape;
   const wapeOpts = chartOpts("WAPE %", false);
   wapeOpts.scales.y.beginAtZero = true;
+  wapeOpts.plugins.tooltip.callbacks = {
+    label: (ctx) => `WAPE: ${Number(ctx.raw).toFixed(2)}%`,
+  };
   if (existingWape) {
     existingWape.data.labels = labels;
     if (!existingWape.data.datasets?.length) existingWape.data.datasets = [{}];
@@ -5373,7 +5564,10 @@ function renderForecastPerfCharts(rows) {
     const valid = wapeVals.filter((v) => v != null);
     if (valid.length === 0) {
       avgWapeEl.textContent = "No data";
-      if (avgWapeChip) avgWapeChip.className = "fperf-hchip chip-disabled";
+      if (avgWapeChip) {
+        avgWapeChip.className = "fperf-hchip chip-disabled";
+        avgWapeChip.setAttribute("aria-label", "Avg WAPE (window): No data");
+      }
     } else {
       const avg = valid.reduce((s, v) => s + v, 0) / valid.length;
       avgWapeEl.textContent = `${avg.toFixed(1)}%`;
@@ -5381,6 +5575,7 @@ function renderForecastPerfCharts(rows) {
         avgWapeChip.className = avg <= 10 ? "fperf-hchip chip-ok"
           : avg <= 20 ? "fperf-hchip chip-warn"
           : "fperf-hchip chip-error";
+        avgWapeChip.setAttribute("aria-label", `Avg WAPE (window): ${avgWapeEl.textContent}`);
       }
     }
   }
@@ -5389,6 +5584,8 @@ function renderForecastPerfCharts(rows) {
 function renderForecastPerfTable(rows) {
   const tbody = $("fperfTableBody");
   if (!tbody) return;
+  const scrollParent = tbody.closest(".fperf-table-wrap") || tbody.parentElement;
+  const savedScroll = scrollParent ? scrollParent.scrollTop : 0;
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:16px;color:var(--text3)">No QA data available for this window.</td></tr>`;
     return;
@@ -5466,6 +5663,7 @@ function renderForecastPerfTable(rows) {
       ${mlTotalsHtml}
     </tr>`;
   }).join("");
+  if (scrollParent && savedScroll > 0) scrollParent.scrollTop = savedScroll;
 }
 
 function updateForecastSidebarSummary() {
@@ -13194,6 +13392,7 @@ async function loadAnalytics(options = {}) {
   if (State.analyticsFetchInFlight && !force) return;
   State.analyticsFetchInFlight = true;
   State.dayAheadLockedPayload = null; // clear stale locked data on new fetch
+  State.substationMeteredReadings = null; // clear stale metered data on new fetch
   const reqId = (State.analyticsReqId || 0) + 1;
   State.analyticsReqId = reqId;
   let date = $("anaDate").value;
@@ -13991,13 +14190,16 @@ function ensureAnalyticsCards() {
   totalCard.className = "chart-card";
   totalCard.classList.add("chart-total-card");
   totalCard.innerHTML =
-    '<div class="chart-title">🏭 Day-Ahead vs Actual — MWh</div>' +
-    '<div class="ana-dayahead-header" id="anaDayAheadHeaderMerged">' +
-      '<span id="anaDayAheadCaptured">captured: —</span>' +
-      '<span id="anaDayAheadSpread">spread: —</span>' +
-      '<span id="anaDayAheadWithinBand">—</span>' +
-      '<span id="anaDayAheadVariance">—</span>' +
+    '<div class="ana-chart-titlebar">' +
+      '<div class="chart-title">🏭 Day-Ahead vs Actual — MWh</div>' +
+      '<div class="ana-dayahead-header" id="anaDayAheadHeaderMerged">' +
+        '<span id="anaDayAheadCaptured">captured: —</span>' +
+        '<span id="anaDayAheadSpread">spread: —</span>' +
+        '<span id="anaDayAheadWithinBand">—</span>' +
+        '<span id="anaDayAheadVariance">—</span>' +
+      '</div>' +
     '</div>' +
+    '<div class="ana-chart-legend" id="anaChartLegend"></div>' +
     '<canvas id="chart-total-pac" height="120"></canvas>';
   host.appendChild(totalCard);
 
@@ -14489,6 +14691,45 @@ function upsertTotalCompareChart(
       }
     }
 
+    // Add substation metered line if data exists
+    // Metered readings are 15-min intervals (MWh per 15 min).
+    // Chart Y-axis is MWh per 5-min slot, so divide by 3 and spread
+    // the value across all three 5-min slots within that interval.
+    const meteredReadings = State.substationMeteredReadings;
+    if (Array.isArray(meteredReadings) && meteredReadings.length > 0) {
+      const meteredByLabel = new Map();
+      meteredReadings.forEach(r => {
+        const ts = Number(r.ts);
+        const perSlot = Number(r.mwh || 0) / 3;
+        for (let offset = 0; offset < 3; offset++) {
+          const d = new Date(ts + offset * 5 * 60 * 1000);
+          const lbl = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+          meteredByLabel.set(lbl, perSlot);
+        }
+      });
+      const meteredData = labels.map(lbl => {
+        return meteredByLabel.has(lbl) ? meteredByLabel.get(lbl) : null;
+      });
+      const hasMetered = meteredData.some(v => v != null);
+      if (hasMetered) {
+        datasets.push({
+          label: "Subs. metered (MWh)",
+          data: meteredData,
+          borderColor: pal.metered,
+          backgroundColor: "transparent",
+          borderWidth: 2.5,
+          borderDash: [10, 4],
+          pointRadius: 2,
+          pointHoverRadius: 4,
+          pointBackgroundColor: pal.metered,
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.2,
+          order: 0,
+        });
+      }
+    }
+
     return datasets;
   }
 
@@ -14499,6 +14740,13 @@ function upsertTotalCompareChart(
 
   // Update in-place if dataset count matches; rebuild only when structure changes
   if (existing && existing.data.datasets.length === newDatasets.length) {
+    // Preserve user's legend toggle state — Chart.js stores visibility
+    // on the dataset meta, accessed via isDatasetVisible()
+    for (let i = 0; i < newDatasets.length; i++) {
+      if (!existing.isDatasetVisible(i)) {
+        newDatasets[i].hidden = true;
+      }
+    }
     existing.data.labels = labels;
     existing.data.datasets = newDatasets;
     existing.update("none");
@@ -14510,9 +14758,7 @@ function upsertTotalCompareChart(
     existing.destroy();
     State.charts[key] = null;
   }
-  const opts = chartOpts("MWh", true);
-  opts.plugins.legend.labels.usePointStyle = true;
-  opts.plugins.legend.labels.pointStyle = "line";
+  const opts = chartOpts("MWh", false);
   // Dual-unit tooltip: show both MWh and MW on hover
   opts.plugins.tooltip = opts.plugins.tooltip || {};
   opts.plugins.tooltip.callbacks = opts.plugins.tooltip.callbacks || {};
@@ -14523,10 +14769,45 @@ function upsertTotalCompareChart(
     const mw = Number(val * MW_PER_MWH).toFixed(3);
     return `${ctx.dataset.label}: ${mwh} MWh | ${mw} MW`;
   };
-  State.charts[key] = new Chart(canvas, {
+  const chartInstance = new Chart(canvas, {
     type: "line",
     data: { labels, datasets: buildDatasets(canvas) },
     options: opts,
+  });
+  State.charts[key] = chartInstance;
+  _renderHtmlLegend(chartInstance);
+}
+
+function _renderHtmlLegend(chart) {
+  const container = $("anaChartLegend");
+  if (!container) return;
+  container.innerHTML = "";
+  chart.data.datasets.forEach((ds, i) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "ana-legend-item" + (ds.hidden ? " ana-legend-off" : "");
+    const swatch = document.createElement("span");
+    swatch.className = "ana-legend-swatch";
+    swatch.style.background = ds.borderColor;
+    if (ds.borderDash && ds.borderDash.length) {
+      const d0 = ds.borderDash[0], d1 = ds.borderDash[1] || 2;
+      swatch.style.background = "none";
+      swatch.style.backgroundImage =
+        `repeating-linear-gradient(90deg, ${ds.borderColor} 0px, ${ds.borderColor} ${d0}px, transparent ${d0}px, transparent ${d0 + d1}px)`;
+      swatch.style.height = "3px";
+    }
+    const text = document.createElement("span");
+    text.className = "ana-legend-text";
+    text.textContent = ds.label;
+    item.appendChild(swatch);
+    item.appendChild(text);
+    item.addEventListener("click", () => {
+      const visible = chart.isDatasetVisible(i);
+      chart.setDatasetVisibility(i, !visible);
+      chart.update("none");
+      item.classList.toggle("ana-legend-off", visible);
+    });
+    container.appendChild(item);
   });
 }
 
@@ -14746,6 +15027,8 @@ function chartOpts(unit, showLegend) {
         border: { display: false },
       },
       y: {
+        beginAtZero: true,
+        grace: "15%",
         ticks: {
           color: pal.tick,
           font: { family: uiFont, size: chartType.tickY, weight: "500" },
@@ -15580,6 +15863,7 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVar
     const data = await res.json();
     if (!data.ok || !Array.isArray(data.readings) || data.readings.length === 0) {
       // No metered data — clear the card and keep estimated variance in toolbar
+      State.substationMeteredReadings = null;
       const scadaEl = $("anaSideScadaActual");
       if (scadaEl) scadaEl.textContent = "—";
       const st = $("anaSubstationStatus");
@@ -15588,7 +15872,9 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVar
       if (Number.isFinite(estimatedVarianceMwh)) _setToolbarVariance(estimatedVarianceMwh);
       return;
     }
-    // Metered data exists — show in Subs. Metered card (not the est. card)
+    // Metered data exists — store for chart overlay + show in Subs. Metered card
+    State.substationMeteredReadings = data.readings;
+    renderAnalyticsFromState(); // re-render chart with metered line
     const meteredMwh = data.readings.reduce((s, r) => s + Number(r.mwh || 0), 0);
     const scadaEl = $("anaSideScadaActual");
     const scadaSrcEl = $("anaSideScadaSource");
