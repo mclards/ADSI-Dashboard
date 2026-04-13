@@ -378,24 +378,51 @@ function getAppUpdateMode() {
   return "installer";
 }
 
-// Auto-download preference: persisted in a JSON file next to updater.log
-function _autoDownloadPrefPath() {
+// Update preferences: persisted in a JSON file next to updater.log.
+// - autoDownload: fetch new installers as soon as they are detected (bandwidth knob).
+// - autoInstallOvernight: once an update is downloaded, install it at ~02:00 local
+//   time so the gateway stays up through the solar window and updates land during
+//   off-hours with zero operator impact. Default ON because oneClick:true NSIS
+//   makes the install silent end-to-end.
+function _updatePrefsPath() {
   return path.join(app.getPath("userData"), "update-prefs.json");
 }
-function getAutoDownloadPref() {
+function _readUpdatePrefs() {
   try {
-    const data = JSON.parse(fs.readFileSync(_autoDownloadPrefPath(), "utf8"));
-    return !!data.autoDownload;
-  } catch (_) { return false; }
+    return JSON.parse(fs.readFileSync(_updatePrefsPath(), "utf8")) || {};
+  } catch (_) { return {}; }
+}
+function _writeUpdatePrefs(patch) {
+  const merged = { ..._readUpdatePrefs(), ...patch };
+  try {
+    fs.writeFileSync(_updatePrefsPath(), JSON.stringify(merged));
+  } catch (err) {
+    console.warn("[updater] failed to save update preferences:", err.message);
+  }
+  return merged;
+}
+function getAutoDownloadPref() {
+  return !!_readUpdatePrefs().autoDownload;
 }
 function setAutoDownloadPref(value) {
   const enabled = !!value;
-  try {
-    fs.writeFileSync(_autoDownloadPrefPath(), JSON.stringify({ autoDownload: enabled }));
-  } catch (err) {
-    console.warn("[updater] failed to save auto-download preference:", err.message);
-  }
+  _writeUpdatePrefs({ autoDownload: enabled });
   autoUpdater.autoDownload = enabled;
+  return enabled;
+}
+function getAutoInstallOvernightPref() {
+  const prefs = _readUpdatePrefs();
+  // Default ON if unset — gateway deployment benefits from unattended overnight install.
+  return prefs.autoInstallOvernight !== false;
+}
+function setAutoInstallOvernightPref(value) {
+  const enabled = !!value;
+  _writeUpdatePrefs({ autoInstallOvernight: enabled });
+  if (!enabled) {
+    cancelScheduledOvernightInstall();
+  } else if (appUpdateState.canInstall) {
+    scheduleOvernightInstallIfNeeded();
+  }
   return enabled;
 }
 
@@ -404,6 +431,7 @@ function buildPublicAppUpdateState() {
     ...appUpdateState,
     appVersion: app.getVersion(),
     autoDownload: getAutoDownloadPref(),
+    autoInstallOvernight: getAutoInstallOvernightPref(),
     channel: UPDATE_CHANNEL,
     channelRequested: UPDATE_CHANNEL_REQUESTED,
     channelFallbackNote: UPDATE_CHANNEL_FALLBACK_NOTE,
@@ -679,6 +707,7 @@ function bindAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || appUpdateState.latestVersion || "").trim();
+    const overnight = getAutoInstallOvernightPref();
     setAppUpdateState({
       mode: "installer",
       status: "downloaded",
@@ -689,9 +718,16 @@ function bindAutoUpdaterEventsOnce() {
       canDownload: false,
       canInstall: true,
       downloadPercent: 100,
-      message: `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
+      message: overnight
+        ? `Update ${latestVersion || ""} downloaded. Will auto-install at ~02:00 (off-hours).`
+        : `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
       error: "",
     });
+    // Schedule unattended overnight install if enabled. User can still trigger
+    // an immediate install via the Restart & Install button.
+    if (overnight) {
+      scheduleOvernightInstallIfNeeded();
+    }
     // Push update-ready prompt to renderer so a modal can appear
     try {
       const win = BrowserWindow.getAllWindows()[0];
@@ -699,6 +735,7 @@ function bindAutoUpdaterEventsOnce() {
         win.webContents.send("app-update-ready", {
           version: latestVersion,
           currentVersion: app.getVersion(),
+          autoInstallOvernight: overnight,
         });
       }
     } catch (_) { /* ignore */ }
@@ -934,6 +971,56 @@ async function installAppUpdateNow() {
 // inverter polling, forecast generation, and energy archival are idle.
 // Checks at 19:00, 22:00, and 02:00 — three chances per night.
 const AUTO_UPDATE_CHECK_HOURS = [2, 4, 5, 16, 19, 22];
+
+// Overnight install window — downloaded updates auto-install at 02:00 local so
+// the gateway is never restarted during the solar window (05:00–18:00).
+const AUTO_INSTALL_HOUR = 2;
+let appUpdateOvernightInstallTimer = null;
+
+function cancelScheduledOvernightInstall() {
+  if (appUpdateOvernightInstallTimer) {
+    clearTimeout(appUpdateOvernightInstallTimer);
+    appUpdateOvernightInstallTimer = null;
+    console.log("[updater] overnight auto-install cancelled");
+  }
+}
+
+function scheduleOvernightInstallIfNeeded() {
+  if (!getAutoInstallOvernightPref()) return;
+  if (!appUpdateState.canInstall) return;
+  cancelScheduledOvernightInstall();
+
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(AUTO_INSTALL_HOUR, 0, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    // 02:00 already passed today — schedule for tomorrow.
+    target.setDate(target.getDate() + 1);
+  }
+  const delayMs = Math.max(60000, target.getTime() - now.getTime());
+  console.log(
+    `[updater] overnight auto-install scheduled at ${target.toLocaleString()} (in ${Math.round(delayMs / 60000)} min)`,
+  );
+
+  appUpdateOvernightInstallTimer = setTimeout(() => {
+    appUpdateOvernightInstallTimer = null;
+    if (!getAutoInstallOvernightPref()) {
+      console.log("[updater] overnight auto-install skipped — preference disabled");
+      return;
+    }
+    if (!appUpdateState.canInstall) {
+      console.log("[updater] overnight auto-install skipped — nothing to install");
+      return;
+    }
+    console.log("[updater] overnight auto-install firing");
+    installAppUpdateNow().catch((err) => {
+      console.warn("[updater] overnight auto-install failed:", err?.message || err);
+    });
+  }, delayMs);
+  if (appUpdateOvernightInstallTimer && typeof appUpdateOvernightInstallTimer.unref === "function") {
+    appUpdateOvernightInstallTimer.unref();
+  }
+}
 
 function scheduleAutoUpdateCheck() {
   if (appUpdateAutoCheckStarted) return;
@@ -1329,8 +1416,10 @@ async function finalizeInstallShutdown() {
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
   try {
-    console.log("[main] Launching quitAndInstall now");
-    autoUpdater.quitAndInstall(false, true);
+    console.log("[main] Launching quitAndInstall now (silent, forceRunAfter)");
+    // isSilent=true → NSIS runs unattended (no wizard), matches oneClick:true config.
+    // isForceRunAfter=true → relaunch app automatically after install completes.
+    autoUpdater.quitAndInstall(true, true);
   } catch (err) {
     console.error("[main] quitAndInstall failed:", err.message);
     setAppUpdateState({
@@ -4119,6 +4208,12 @@ ipcMain.handle("app-update-set-auto-download", async (_, enabled) => {
   const value = setAutoDownloadPref(enabled);
   broadcastAppUpdateState();
   return { ok: true, autoDownload: value };
+});
+
+ipcMain.handle("app-update-set-auto-install-overnight", async (_, enabled) => {
+  const value = setAutoInstallOvernightPref(enabled);
+  broadcastAppUpdateState();
+  return { ok: true, autoInstallOvernight: value };
 });
 
 ipcMain.handle("app-restart", async () => {

@@ -61,6 +61,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   downloadUpdate: () => ipcRenderer.invoke("app-update-download"),
   installUpdate: () => ipcRenderer.invoke("app-update-install"),
   setAutoDownload: (enabled) => ipcRenderer.invoke("app-update-set-auto-download", enabled),
+  setAutoInstallOvernight: (enabled) => ipcRenderer.invoke("app-update-set-auto-install-overnight", enabled),
   restartApp: () => ipcRenderer.invoke("app-restart"),
   onUpdateStatus: (cb) => {
     const handler = (_, payload) => cb(payload);
