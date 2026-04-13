@@ -2,12 +2,23 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.8.1
+- **Repo/package version baseline:** 2.8.3
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.8.3 Changes - Silent Overnight Auto-Updates + NSIS oneClick (2026-04-13)
+- **Auto-updates now install silently at 02:00 local time:** No wizard prompts, no operator clicks needed; updates check, download, and install overnight.
+- **NSIS oneClick enabled:** Removed installation location and progress wizards from auto-update installations (oneClick:true, perMachine:true in package.json).
+- **Silent quitAndInstall mode:** Changed electron-updater quitAndInstall(false, true) → quitAndInstall(true, true) to match oneClick NSIS configuration.
+- **New autoInstallOvernight preference:** Default ON in update-prefs.json; when enabled, schedules silent installation for 02:00 local.
+- **Solar-window protection:** Gateway never restarts during active solar hours (05:00–18:00 UTC+8); installer only runs overnight.
+- **IPC and preload bindings:** New IPC `app-update-set-auto-install-overnight` with preload binding `setAutoInstallOvernight(false)` to let operators disable silent auto-install if manual-only upgrades are preferred.
+- **First upgrade UX:** 2.8.2 → 2.8.3 still shows the old NSIS wizard (baked into 2.8.2's oneClick:false); all subsequent 2.8.3+ updates are fully silent.
+- **Files changed:** electron/main.js, electron/preload.js, package.json (build.nsis config).
+- **Full release:** Python services rebuilt (InverterCoreService, ForecastCoreService); Electron native deps rebuilt; signed installer verified (509 MB).
 
 ## v2.7.17 Changes - Rainy/Overcast Error Memory Hardening (2026-04-09)
 - **Forecast engine regime-aware lookback:** Clear regime uses 7-day lookback, mixed 10 days, overcast 14 days, rainy 21 days for error memory aggregation.
