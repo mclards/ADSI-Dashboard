@@ -2,12 +2,21 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.8.3
+- **Repo/package version baseline:** 2.8.4
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.8.4 Changes - Control Logic State Tracking (2026-04-13)
+- **Status dot reflects Modbus `on_off` register alone:** Node button cmd class now strictly follows `Number(d?.on_off) === 1` (ON) vs 0 (OFF); no reachability/staleness masking.
+- **Idempotent control writes:** All three write paths filter out nodes whose fresh Modbus register already matches requested state — prevents re-issuing START to already-running nodes or STOP to already-stopped. Stale/offline/unknown readings fall through so operators aren't locked out.
+- **Applied to:** `toggleNode` (single node click), `sendAllNodesInv` (per-inverter START/STOP), `sendSelectedNodes` (bulk range START/STOP).
+- **Optimistic UI removed:** Button color flips removed from all write paths; dot now only changes when fresh Modbus poll confirms the register value.
+- **Performance improvements:** Cached `State.liveData` local refs in filter loops; added throttled `scheduleInverterCardsUpdate()` nudges after successful writes (220 ms non-forced slots, no new network calls or timers).
+- **Files changed:** public/js/app.js only.
+- **Frontend-only release:** Python services not rebuilt; reused existing v2.8.3 artifacts; signed installer verified.
 
 ## v2.8.3 Changes - Silent Overnight Auto-Updates + NSIS oneClick (2026-04-13)
 - **Auto-updates now install silently at 02:00 local time:** No wizard prompts, no operator clicks needed; updates check, download, and install overnight.

@@ -15,8 +15,8 @@ For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `servi
 - **Package**: `inverter-dashboard`
 - **Updater app ID**: `com.engr-m.inverter-dashboard` — do not rename
 - **Version source of truth**: `package.json` — not footer strings
-- **Repo version baseline**: `2.8.3`
-- **Latest published release**: `v2.8.3`
+- **Repo version baseline**: `2.8.4`
+- **Latest published release**: `v2.8.4`
 - **GitHub release channel**: `mclards/ADSI-Dashboard`
 
 ---

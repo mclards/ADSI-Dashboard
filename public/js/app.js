@@ -9647,10 +9647,11 @@ function updateInverterCards() {
       const nodeReachable =
         d && d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
       const rowStale = staleSnapshot && rowVisible && !nodeReachable;
-      const nodeOn =
-        (staleSnapshot ? rowVisible : nodeReachable) && Number(d?.on_off) === 1
-          ? 1
-          : 0;
+      // Status dot / button cmd class follow the Modbus on_off register
+      // literally — register 1 = ON, 0 = OFF — regardless of reachability
+      // or snapshot staleness. If the register reading is missing entirely
+      // (no row yet), default to 0.
+      const nodeOn = Number(d?.on_off) === 1 ? 1 : 0;
       const activeAlarm = State.activeAlarms[key] || null;
       const liveAlarmValue = rowVisible ? Number(d?.alarm || 0) : 0;
       const persistedAlarmValue = Number(activeAlarm?.alarm_value || 0);
@@ -10605,8 +10606,12 @@ async function toggleNode(inv, node, btnEl) {
       priority: "high",
       operator: currentOperator(),
     });
-    State.nodeStates[key] = newState;
-    setNodeButtonVisual(btnEl, node, !!newState, false);
+    // Do NOT optimistically flip button color. The visual state is driven
+    // by the next Modbus poll tick (updateInverterCards) using the real
+    // on_off register reading so the UI only ever reflects ground truth.
+    // Throttled nudge so the dot repaints at the soonest allowed slot
+    // once fresh WS data arrives; respects CARD_RENDER_MIN_INTERVAL_MS.
+    scheduleInverterCardsUpdate();
     const nodeLabel = getInverterNodeDisplayLabel(inv, node, { includeIp: true });
     showToast(
       `${action} sent: ${nodeLabel}`,
@@ -10625,13 +10630,37 @@ async function toggleNode(inv, node, btnEl) {
 
 async function sendAllNodesInv(inv, val) {
   const nodeCount = State.settings.nodeCount || 4;
-  const targetNodes = getConfiguredUnits(inv, nodeCount);
-  if (!targetNodes.length) {
+  const configuredNodes = getConfiguredUnits(inv, nodeCount);
+  if (!configuredNodes.length) {
     showToast(`${getInverterDisplayLabel(inv, { includeIp: true })} is fully isolated`, "info");
     return;
   }
   const action = val ? "START" : "STOP";
   const scopeLabel = getInverterDisplayLabel(inv, { includeIp: true });
+  // Only target nodes whose Modbus on_off register differs from the requested
+  // value. Register = 1 means ON, 0 means OFF. Skip matches so we don't
+  // re-issue START to already-running nodes (or STOP to already-stopped).
+  // A node is only skipped when its register reading is fresh (online +
+  // within DATA_FRESH_MS). Missing/offline/stale readings fall through as
+  // "unknown" so operators aren't locked out of recovery commands.
+  const desired = val ? 1 : 0;
+  const nowTs = Date.now();
+  const liveData = State.liveData;
+  const targetNodes = configuredNodes.filter((unit) => {
+    const d = liveData[`${inv}_${unit}`];
+    if (!d || d.on_off == null) return true;
+    const fresh = d.online && nowTs - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
+    if (!fresh) return true;
+    return Number(d.on_off) !== desired;
+  });
+  if (!targetNodes.length) {
+    showToast(
+      `${scopeLabel}: all nodes already ${val ? "running" : "stopped"}`,
+      "info",
+      3200,
+    );
+    return;
+  }
   try {
     const response = await api(
       "/api/write/batch",
@@ -10654,14 +10683,15 @@ async function sendAllNodesInv(inv, val) {
     unitResults.forEach(({ unit, ok: unitOk }) => {
       if (unitOk) {
         ok++;
-        const key = `${inv}_${unit}`;
-        State.nodeStates[key] = val;
-        const btn = $(`nbtn-${inv}-${unit}`);
-        if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+        // Button color is intentionally NOT flipped here — the next
+        // Modbus poll will reflect the real on_off register value.
       } else {
         fail++;
       }
     });
+    // Throttled repaint nudge (no force) — picks up fresh WS data as
+    // soon as the throttle allows without blocking other renders.
+    if (ok > 0) scheduleInverterCardsUpdate();
 
     if (fail === 0) {
       showToast(
@@ -10816,12 +10846,43 @@ async function sendSelectedNodes(val) {
   const input = $("bulkInvRangeInput");
   if (input && parsed.normalized) input.value = parsed.normalized;
   const nodeCount = State.settings.nodeCount || 4;
+  const desired = val ? 1 : 0;
+  // Per-inverter target lists filtered by the Modbus on_off register so we
+  // only command nodes whose live register value differs from the requested
+  // state (register 1 = ON, 0 = OFF). A node is only skipped when its
+  // register reading is fresh (online + within DATA_FRESH_MS). Missing /
+  // offline / stale readings fall through so operators aren't blocked from
+  // recovering stuck nodes.
+  const perInvTargets = new Map();
+  const nowTs = Date.now();
+  const liveData = State.liveData;
+  let totalConfigured = 0;
   let totalTargets = 0;
   selected.forEach((inv) => {
-    totalTargets += getConfiguredUnits(inv, nodeCount).length;
+    const configured = getConfiguredUnits(inv, nodeCount);
+    totalConfigured += configured.length;
+    const needs = configured.filter((unit) => {
+      const d = liveData[`${inv}_${unit}`];
+      if (!d || d.on_off == null) return true;
+      const fresh = d.online && nowTs - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
+      if (!fresh) return true;
+      return Number(d.on_off) !== desired;
+    });
+    if (needs.length) {
+      perInvTargets.set(inv, needs);
+      totalTargets += needs.length;
+    }
   });
-  if (!totalTargets) {
+  if (!totalConfigured) {
     showToast("Selected inverters are isolated. No nodes to control.", "info");
+    return;
+  }
+  if (!totalTargets) {
+    showToast(
+      `All selected nodes already ${val ? "running" : "stopped"}.`,
+      "info",
+      3200,
+    );
     return;
   }
   const action = val ? "START" : "STOP";
@@ -10843,8 +10904,8 @@ async function sendSelectedNodes(val) {
 
   const tasks = [];
   selected.forEach((inv) => {
-    const units = getConfiguredUnits(inv, nodeCount);
-    if (!units.length) return;
+    const units = perInvTargets.get(inv);
+    if (!units || !units.length) return;
     tasks.push({
       path: "/api/write/batch",
       inverter: inv,
@@ -10871,9 +10932,8 @@ async function sendSelectedNodes(val) {
       unitResults.forEach(({ unit, ok: unitOk }) => {
         if (unitOk) {
           ok++;
-          State.nodeStates[`${t.inverter}_${unit}`] = val;
-          const btn = $(`nbtn-${t.inverter}-${unit}`);
-          if (btn) setNodeButtonVisual(btn, unit, !!val, false);
+          // Button color is intentionally NOT flipped here — the next
+          // Modbus poll will reflect the real on_off register value.
         } else {
           fail++;
         }
@@ -10882,6 +10942,10 @@ async function sendSelectedNodes(val) {
       fail += Array.isArray(t.units) ? t.units.length : 0;
     }
   });
+  // Throttled repaint nudge (no force) — lets the status dots reflect
+  // register values as soon as fresh WS data arrives, without contending
+  // with other renders.
+  if (ok > 0) scheduleInverterCardsUpdate();
 
   if (fail === 0) {
     showToast(
