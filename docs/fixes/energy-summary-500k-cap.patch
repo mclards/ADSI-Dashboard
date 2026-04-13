@@ -1,0 +1,35 @@
+--- a/server/exporter.js
++++ b/server/exporter.js
+@@ -1227,16 +1227,23 @@
+   const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
+   const mapped = [];
+   const today = fmtDate(Date.now());
+-  const rangeRows = invNum
+-    ? queryReadingsRange(invNum, s, e)
+-    : queryReadingsRangeAll(s, e);
++  // Load raw readings per-inverter rather than via queryReadingsRangeAll.
++  // queryReadingsRangeAll enforces a 500K-row pre-check intended to guard
++  // OOM on large exports, but Energy Summary only emits per-(day, inverter,
++  // unit) aggregates -- a tiny output -- so that raw-row cap incorrectly
++  // blocks valid single-day all-inverter exports at normal poll rates.
++  // queryReadingsRange has no such cap because per-inverter fetches are
++  // naturally bounded; we accumulate rowsByDay across inverters here.
+   const rowsByDay = new Map();
+-  for (const row of rangeRows) {
+-    const ts = Number(row?.ts || 0);
+-    if (!(ts > 0)) continue;
+-    const day = fmtDate(ts);
+-    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+-    rowsByDay.get(day).push(row);
++  for (const inv of selectedInvs) {
++    const invRows = queryReadingsRange(inv, s, e);
++    for (const row of invRows) {
++      const ts = Number(row?.ts || 0);
++      if (!(ts > 0)) continue;
++      const day = fmtDate(ts);
++      if (!rowsByDay.has(day)) rowsByDay.set(day, []);
++      rowsByDay.get(day).push(row);
++    }
+   }
+ 
+   for (const day of iterateLocalDates(s, e)) {
