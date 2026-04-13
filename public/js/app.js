@@ -12062,14 +12062,193 @@ function handleAlarmPush(alarms) {
   if (State.currentPage === "alarms") fetchAlarms();
 }
 
+// ─── Alarm toast compact-collapse system ──────────────────────────────────
+// When ≥2 toast-items stack, the container collapses to a single pill
+// ("🔴2 🟠1 · 3 new alarms") to keep the inverter card grid visible.
+// Click the pill to expand; click the pill, click outside, or press Escape to
+// re-collapse. New alarms arriving while collapsed trigger a brief pulse so
+// the operator notices without having the cards blocked.
+const _TOAST_SEV_RANK = { critical: 5, fault: 4, warning: 3, info: 2, success: 1 };
+const _TOAST_SEV_ICON = { success: "🟢", critical: "🔴", fault: "🟠", warning: "🟡", info: "🔵" };
+let _toastOutsideHandler = null;
+let _toastKeyHandler = null;
+let _toastPulseTimer = null;
+
+function _countToastItems(toast) {
+  return toast.querySelectorAll(".toast-item").length;
+}
+
+function _attachToastDismissHandlers(toast) {
+  if (_toastOutsideHandler) return;
+  _toastOutsideHandler = (e) => {
+    if (toast.dataset.expanded !== "1") return;
+    if (toast.contains(e.target)) return;
+    toast.dataset.expanded = "";
+    _renderToastSummary();
+  };
+  _toastKeyHandler = (e) => {
+    if (e.key !== "Escape") return;
+    if (toast.dataset.expanded !== "1") return;
+    toast.dataset.expanded = "";
+    _renderToastSummary();
+  };
+  document.addEventListener("pointerdown", _toastOutsideHandler, true);
+  document.addEventListener("keydown", _toastKeyHandler, true);
+}
+
+function _detachToastDismissHandlers() {
+  if (_toastOutsideHandler) {
+    document.removeEventListener("pointerdown", _toastOutsideHandler, true);
+    _toastOutsideHandler = null;
+  }
+  if (_toastKeyHandler) {
+    document.removeEventListener("keydown", _toastKeyHandler, true);
+    _toastKeyHandler = null;
+  }
+}
+
+function _pulseCollapsedPill() {
+  const toast = $("alarmToast");
+  if (!toast) return;
+  const pill = toast.querySelector(".toast-summary-pill");
+  if (!pill || pill.hidden) return;
+  pill.classList.remove("pulse");
+  // Force reflow so the animation restarts cleanly on rapid arrivals.
+  void pill.offsetWidth;
+  pill.classList.add("pulse");
+  if (_toastPulseTimer) clearTimeout(_toastPulseTimer);
+  _toastPulseTimer = setTimeout(() => pill.classList.remove("pulse"), 1400);
+}
+
+function _dismissAllToastItems() {
+  const toast = $("alarmToast");
+  if (!toast) return;
+  toast.querySelectorAll(".toast-item").forEach((el) => el.remove());
+  toast.dataset.expanded = "";
+  _renderToastSummary();
+}
+
+function _renderToastSummary() {
+  const toast = $("alarmToast");
+  if (!toast) return;
+  const items = Array.from(toast.querySelectorAll(".toast-item"));
+  const count = items.length;
+  let pill = toast.querySelector(".toast-summary-pill");
+  let dismissAll = toast.querySelector(".toast-dismiss-all");
+
+  // Trivial case: 0–1 toasts behave as before; remove pill & outside handler.
+  if (count <= 1) {
+    toast.dataset.expanded = "";
+    toast.classList.remove("collapsed");
+    if (pill) pill.hidden = true;
+    if (dismissAll) dismissAll.hidden = true;
+    _detachToastDismissHandlers();
+    return;
+  }
+
+  // Build the summary pill on first need.
+  if (!pill) {
+    pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "toast-summary-pill";
+    pill.setAttribute("aria-expanded", "false");
+    pill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toast.dataset.expanded = toast.dataset.expanded === "1" ? "" : "1";
+      _renderToastSummary();
+    });
+    toast.insertBefore(pill, toast.firstChild);
+  }
+  pill.hidden = false;
+
+  // Build the "Dismiss All" chip on first need — shown only when expanded.
+  if (!dismissAll) {
+    dismissAll = document.createElement("button");
+    dismissAll.type = "button";
+    dismissAll.className = "toast-dismiss-all";
+    dismissAll.textContent = "Dismiss all";
+    dismissAll.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _dismissAllToastItems();
+    });
+    // Insert after the pill so it sits above the stack when expanded.
+    pill.after(dismissAll);
+  }
+
+  // Severity tally: show counts per severity, pill border tracks worst sev.
+  const sevCounts = {};
+  let worst = "fault", worstRank = 0;
+  for (const it of items) {
+    const m = it.className.match(/sev-(\w+)/);
+    if (!m) continue;
+    const s = m[1];
+    sevCounts[s] = (sevCounts[s] || 0) + 1;
+    const r = _TOAST_SEV_RANK[s] || 0;
+    if (r > worstRank) { worstRank = r; worst = s; }
+  }
+  pill.dataset.sev = worst;
+
+  // Render severity chips in rank order.
+  const sevChipsHtml = Object.entries(sevCounts)
+    .sort((a, b) => (_TOAST_SEV_RANK[b[0]] || 0) - (_TOAST_SEV_RANK[a[0]] || 0))
+    .map(([s, n]) => `<span class="toast-sev-chip" data-sev="${s}">${_TOAST_SEV_ICON[s] || "●"}<b>${n}</b></span>`)
+    .join("");
+
+  const expanded = toast.dataset.expanded === "1";
+  const chev = expanded ? "▲" : "▼";
+  const label = expanded
+    ? `${count} alarm${count === 1 ? "" : "s"} · hide`
+    : `${count} new alarm${count === 1 ? "" : "s"}`;
+
+  pill.innerHTML = `
+    <span class="toast-summary-chips" aria-hidden="true">${sevChipsHtml}</span>
+    <span class="toast-summary-text">${label}</span>
+    <span class="toast-summary-chev" aria-hidden="true">${chev}</span>`;
+  pill.setAttribute("aria-expanded", expanded ? "true" : "false");
+  pill.setAttribute("aria-label",
+    expanded
+      ? `Hide ${count} alarm notifications`
+      : `${count} alarm notifications — click to expand`);
+
+  dismissAll.hidden = !expanded;
+
+  toast.classList.toggle("collapsed", !expanded);
+  if (expanded) {
+    _attachToastDismissHandlers(toast);
+  } else {
+    _detachToastDismissHandlers();
+  }
+}
+
+// Called by showToast / showAlarmToast after appending a new item.
+// Triggers the pulse animation if the new arrival landed while collapsed.
+function _notifyToastAppended() {
+  const toast = $("alarmToast");
+  if (!toast) return;
+  const itemCount = _countToastItems(toast);
+  const wasAlreadyCollapsed = itemCount >= 2 && toast.classList.contains("collapsed");
+  const willBeCollapsed = itemCount >= 2 && toast.dataset.expanded !== "1";
+  _renderToastSummary();
+  if (wasAlreadyCollapsed || (willBeCollapsed && itemCount === 2)) {
+    _pulseCollapsedPill();
+  }
+}
+
+// Evict oldest toast-item when stack exceeds cap. Excludes the summary pill.
+function _evictOldestToastItem(toast, maxStack) {
+  while (true) {
+    const items = toast.querySelectorAll(".toast-item");
+    if (items.length < maxStack) break;
+    items[0].remove();
+  }
+}
+
 function showToast(html, severity = "fault", ttlMs = 8000) {
   const toast = $("alarmToast");
   if (!toast) return;
 
   const maxStack = 5;
-  while (toast.children.length >= maxStack) {
-    toast.firstElementChild?.remove();
-  }
+  _evictOldestToastItem(toast, maxStack);
 
   const item = el("div", `toast-item sev-${severity}`);
   const sevLabel =
@@ -12088,9 +12267,11 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
     <div class="toast-body">${html}</div>
     <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
   toast.appendChild(item);
+  _notifyToastAppended();
   setTimeout(
     () => {
       if (item.parentNode) item.remove();
+      _renderToastSummary();
     },
     Math.max(800, Number(ttlMs) || 8000),
   );
@@ -12102,9 +12283,7 @@ function showAlarmToast(alarm, invLabel, hex, desc) {
   if (!toast) return;
 
   const maxStack = 5;
-  while (toast.children.length >= maxStack) {
-    toast.firstElementChild?.remove();
-  }
+  _evictOldestToastItem(toast, maxStack);
 
   const sev = alarm.severity || "fault";
   const alarmId = Number(alarm.id || 0);
@@ -12129,8 +12308,12 @@ function showAlarmToast(alarm, invLabel, hex, desc) {
     <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
 
   toast.appendChild(item);
+  _notifyToastAppended();
   // Slightly longer TTL so operator has time to ACK before it disappears.
-  setTimeout(() => { if (item.parentNode) item.remove(); }, 12000);
+  setTimeout(() => {
+    if (item.parentNode) item.remove();
+    _renderToastSummary();
+  }, 12000);
 }
 
 async function refreshAlarmBadge() {
@@ -15694,8 +15877,10 @@ function renderSubstationMeterSummary(daily, rowCount, summaryEl) {
   if (daily.sync_time) html += ` | Sync: ${_escHtml(daily.sync_time)}`;
   if (daily.desync_time) html += ` | Desync: ${_escHtml(daily.desync_time)}`;
   if (daily.net_kwh != null) html += ` | Net: ${Number(daily.net_kwh).toLocaleString()} kWh`;
-  if (daily.deviation_pct != null && daily.deviation_pct > 1) {
-    html += ` | <span class="warn">Deviation: ${Number(daily.deviation_pct).toFixed(1)}%</span>`;
+  // Net meter is downstream of the 15-min sub-meter → Net must be ≤ Σ.
+  // Only a positive deviation_pct (Net > Σ) is a violation; negative is expected.
+  if (daily.deviation_pct != null && daily.deviation_pct > 0) {
+    html += ` | <span class="warn">Net &gt; &Sigma;: +${Number(daily.deviation_pct).toFixed(2)}%</span>`;
   }
   summaryEl.innerHTML = html;
   summaryEl.classList.remove("hidden");
@@ -17167,7 +17352,11 @@ function bindEventHandlers() {
   // Toast close + ACK (event delegation on toast container)
   $("alarmToast")?.addEventListener("click", (e) => {
     const closeBtn = e.target.closest(".toast-close");
-    if (closeBtn) { closeBtn.closest(".toast-item")?.remove(); return; }
+    if (closeBtn) {
+      closeBtn.closest(".toast-item")?.remove();
+      _renderToastSummary();
+      return;
+    }
     const ackBtn = e.target.closest(".toast-ack-btn:not([disabled])");
     if (ackBtn) {
       const id = Number(ackBtn.dataset.alarmId);
@@ -17175,7 +17364,10 @@ function bindEventHandlers() {
       ackBtn.textContent = "…";
       ackAlarm(id, ackBtn).then(() => {
         // Auto-dismiss this toast shortly after ACK
-        setTimeout(() => ackBtn.closest(".toast-item")?.remove(), 1200);
+        setTimeout(() => {
+          ackBtn.closest(".toast-item")?.remove();
+          _renderToastSummary();
+        }, 1200);
       });
     }
   });

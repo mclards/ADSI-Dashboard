@@ -13168,15 +13168,14 @@ app.post("/api/substation-meter/:date", async (req, res) => {
       }
     });
     tx();
-    // Cross-check: sum of MWh vs net_kwh
+    // Directional cross-check: Net meter (downstream) must be ≤ Σ 15-min
+    // sub-meter. A Net value greater than the sum is a topology violation.
     const totalMwh = readings.reduce((s, r) => s + r.mwh, 0);
+    const totalKwh = totalMwh * 1000;
     let deviationWarning = null;
-    if (daily?.net_kwh && daily.net_kwh > 0) {
-      const netMwh = daily.net_kwh / 1000;
-      const devPct = Math.abs(totalMwh - netMwh) / netMwh * 100;
-      if (devPct > 1) {
-        deviationWarning = `Sum of MW-hr (${totalMwh.toFixed(3)}) deviates ${devPct.toFixed(1)}% from Net kWh (${daily.net_kwh}).`;
-      }
+    if (daily?.net_kwh && daily.net_kwh > 0 && totalKwh > 0 && daily.net_kwh > totalKwh) {
+      const devPct = ((daily.net_kwh - totalKwh) / totalKwh) * 100;
+      deviationWarning = `Net meter (${daily.net_kwh.toLocaleString()} kWh) exceeds Σ 15-min sub-meter (${totalKwh.toFixed(0)} kWh) by ${devPct.toFixed(2)}% — Net should be ≤ Σ (downstream meter).`;
     }
     // Remote mode is short-circuited above to proxy straight to the gateway,
     // so this path only runs in local/gateway mode.
@@ -13216,6 +13215,13 @@ app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "applica
     if (!ws) return res.status(400).json({ ok: false, error: "No valid sheet found (expected '69kV')." });
 
     const readings = [];
+    // Net (kWh) is read from the file's summary row as a downstream-meter
+    // sanity value. Topology: Inverter → Substation Meter (15-min interval,
+    // column K — source of truth for readings) → Net Meter (daily total only,
+    // no interval data). Because the Net meter sits downstream, its daily
+    // total MUST be ≤ Σ of the 15-min sub-meter readings. A Net value that
+    // exceeds the computed sum is a directional violation (mis-typed Net,
+    // corrupted interval log, or meter fault) and raises a warning.
     let syncTime = null, desyncTime = null, netKwh = null, summaryMwhr = null;
     let fileDate = null; // date detected from file's datetime column
 
@@ -13309,10 +13315,15 @@ app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "applica
     readings.sort((a, b) => a.ts - b.ts);
 
     const totalMwh = readings.reduce((s, r) => s + r.mwh, 0);
+    const totalKwh = totalMwh * 1000;
+    // Directional check: Net meter is downstream of the 15-min sub-meter,
+    // so Net kWh must be ≤ Σ (15-min) kWh. Deviation is reported as a signed
+    // percentage (negative = Net < Σ, expected; positive = Net > Σ, violation).
     let deviationPct = null;
-    if (netKwh && netKwh > 0) {
-      const netMwh = netKwh / 1000;
-      deviationPct = Number((Math.abs(totalMwh - netMwh) / netMwh * 100).toFixed(2));
+    let directionalViolation = false;
+    if (netKwh && netKwh > 0 && totalKwh > 0) {
+      deviationPct = Number(((netKwh - totalKwh) / totalKwh * 100).toFixed(2));
+      directionalViolation = netKwh > totalKwh;
     }
 
     const dateMismatch = fileDate && fileDate !== dateStr;
@@ -13336,8 +13347,9 @@ app.post("/api/substation-meter/:date/upload-xlsx", express.raw({ type: "applica
         summaryMwhr: summaryMwhr ? Number(summaryMwhr.toFixed(6)) : null,
         netKwh,
         deviationPct,
-        deviationWarning: deviationPct !== null && deviationPct > 1
-          ? `Sum of MW-hr (${totalMwh.toFixed(3)}) deviates ${deviationPct.toFixed(1)}% from Net kWh (${netKwh}).`
+        directionalViolation,
+        deviationWarning: directionalViolation
+          ? `Net meter (${netKwh.toLocaleString()} kWh) exceeds Σ 15-min sub-meter (${totalKwh.toFixed(0)} kWh) by ${deviationPct.toFixed(2)}% — Net should be ≤ Σ (downstream meter). Check for mis-typed Net or incomplete interval log.`
           : null,
       },
     });
