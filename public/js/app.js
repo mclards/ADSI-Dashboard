@@ -1814,6 +1814,20 @@ function refreshChartsTheme() {
     if (opts.scales?.y?.grid) opts.scales.y.grid.color = pal.grid;
     if (opts.scales?.y?.title) opts.scales.y.title.color = pal.tick;
 
+    // T5.4 fix (Phase 2, 2026-04-14): Chart.js caches resolved y-axis bounds
+    // (min/max) from the previous render.  A theme-driven update("none") that
+    // follows a data update with a tighter range leaves the old wider bounds
+    // in place and clips / skews the plot.  Only reset bounds that were not
+    // explicitly configured by the chart owner — if the caller set a fixed
+    // min/max via `_configuredYMin` / `_configuredYMax` sentinels we respect
+    // that.  Otherwise let Chart.js re-derive from current data.
+    if (opts.scales?.y) {
+      if (chart._configuredYMin === undefined) delete opts.scales.y.min;
+      if (chart._configuredYMax === undefined) delete opts.scales.y.max;
+      if (chart._configuredYMin === undefined) delete opts.scales.y.suggestedMin;
+      if (chart._configuredYMax === undefined) delete opts.scales.y.suggestedMax;
+    }
+
     if (key === "totalPac" && Array.isArray(chart.data?.datasets)) {
       if (chart.data.datasets[0]) {
         chart.data.datasets[0].borderColor = pal.actual;
@@ -1891,9 +1905,26 @@ function getStoredTheme() {
   }
 }
 
+// T5.8 fix (Phase 3, 2026-04-14): gateway and remote modes previously
+// shared a single CARD_ORDER_STORAGE_KEY, so the user's preferred ordering
+// from one mode silently overwrote the other on mode switch.  Derive a
+// mode-scoped key; legacy unscoped key is read once as a fallback for
+// users upgrading from v2.8.8 so they don't lose their layout.
+function _cardOrderKeyForCurrentMode() {
+  const mode = (State && typeof State.operationMode === "string" && State.operationMode)
+    ? State.operationMode
+    : "gateway";
+  return `${CARD_ORDER_STORAGE_KEY}:${mode}`;
+}
+
 function getStoredInverterCardOrder() {
   try {
-    const raw = localStorage.getItem(CARD_ORDER_STORAGE_KEY);
+    let raw = localStorage.getItem(_cardOrderKeyForCurrentMode());
+    if (!raw) {
+      // One-shot legacy fallback — consume the unscoped key if the scoped
+      // one is empty so the user's v2.8.8 layout migrates into the current mode.
+      raw = localStorage.getItem(CARD_ORDER_STORAGE_KEY);
+    }
     if (!raw) return null;
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) return null;
@@ -1905,7 +1936,7 @@ function getStoredInverterCardOrder() {
 
 function persistInverterCardOrder(orderArr) {
   try {
-    localStorage.setItem(CARD_ORDER_STORAGE_KEY, JSON.stringify(orderArr));
+    localStorage.setItem(_cardOrderKeyForCurrentMode(), JSON.stringify(orderArr));
   } catch (err) {
     console.warn("[app] persistInverterCardOrder failed:", err.message);
   }
@@ -3703,6 +3734,23 @@ async function api(url, method = "GET", body, options = {}) {
   }
 }
 
+// T5.5 fix (Phase 3, 2026-04-14): mode-scoped abort controller.  Rotated
+// on every mode transition via refreshModeScopeAbort().  apiWithTimeout
+// auto-chains to this signal when the caller does not supply one, so an
+// in-flight remote fetch triggered pre-transition cannot resolve later
+// and overwrite post-transition state.  Callers that explicitly pass their
+// own signal keep their own lifetime (existing behaviour preserved).
+let _modeScopeAbortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
+function refreshModeScopeAbort(reason) {
+  try {
+    if (_modeScopeAbortCtl && typeof _modeScopeAbortCtl.abort === "function") {
+      _modeScopeAbortCtl.abort();
+    }
+  } catch (_) { /* ignore */ }
+  _modeScopeAbortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  if (reason) console.info(`[mode] mode-scope abort rotated: ${reason}`);
+}
+
 async function apiWithTimeout(
   url,
   timeoutMs,
@@ -3713,12 +3761,17 @@ async function apiWithTimeout(
 ) {
   const controller = new AbortController();
   const timeout = Math.max(1, Number(timeoutMs || 0));
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const parentSignal = options?.signal || null;
+  // T5.7 fix (Phase 3, 2026-04-14): defensively abort the controller when
+  // the wrapper exits, so a stray response read path cannot linger.
+  // clearTimeout is already correct but the controller was never explicitly
+  // aborted on non-timeout exits — harmless for fetch itself but caused
+  // confusing "still pending" reports in the devtools Network panel.
+  const timer = setTimeout(() => controller.abort("timeout"), timeout);
+  const parentSignal = options?.signal || _modeScopeAbortCtl?.signal || null;
   if (parentSignal) {
-    if (parentSignal.aborted) controller.abort();
+    if (parentSignal.aborted) controller.abort("parent-aborted");
     else {
-      parentSignal.addEventListener("abort", () => controller.abort(), {
+      parentSignal.addEventListener("abort", () => controller.abort("parent-aborted"), {
         once: true,
       });
     }
@@ -3731,6 +3784,9 @@ async function apiWithTimeout(
     });
   } finally {
     clearTimeout(timer);
+    // Abort after successful completion is a no-op; after error it guarantees
+    // any underlying Response body reads are cancelled.
+    try { controller.abort("wrapper-exit"); } catch (_) { /* ignore */ }
   }
 }
 
@@ -6846,6 +6902,11 @@ async function handleOperationModeTransition(
 
   setModeTransitionState(true, nextMode);
   try {
+    // T5.5 fix (Phase 3, 2026-04-14): abort every in-flight apiWithTimeout
+    // fetch that did not pass its own explicit signal.  This supplements the
+    // existing reqId-based response discard so the fetch itself cancels
+    // (frees sockets) rather than completing and being thrown away.
+    refreshModeScopeAbort(`mode ${prevMode} -> ${nextMode} (${reason || "unspecified"})`);
     // Invalidate in-flight analytics reads so older mode responses cannot win.
     State.analyticsReqId = (State.analyticsReqId || 0) + 1;
     State.alarmReqId = (State.alarmReqId || 0) + 1;
@@ -12203,6 +12264,32 @@ function handleWS(msg) {
 }
 
 // ─── Alarm push handling ──────────────────────────────────────────────────────
+// T5.6 fix (Phase 3, 2026-04-14): dedup pushes by (inv,unit,alarm_id) over a
+// short window so rapid raise→clear→raise cycles from the gateway WS don't
+// stack identical toasts.  Previous dedup used only (inv,unit) so a clear-
+// then-raise of the same fault produced two toasts in the same second; now
+// the alarm_id (monotonic per episode) participates in the key.
+const _ALARM_TOAST_DEDUP_WINDOW_MS = 1500;
+const _alarmToastDedup = new Map(); // key -> last-seen ts
+function _alarmToastDedupKey(a) {
+  return `${Number(a.inverter) || 0}_${Number(a.unit) || 0}_${Number(a.id) || 0}`;
+}
+function _shouldEmitAlarmToast(a) {
+  const key = _alarmToastDedupKey(a);
+  const now = Date.now();
+  const last = _alarmToastDedup.get(key);
+  if (last && now - last < _ALARM_TOAST_DEDUP_WINDOW_MS) return false;
+  _alarmToastDedup.set(key, now);
+  // Bound the map: drop entries older than 10x window.
+  if (_alarmToastDedup.size > 256) {
+    const cutoff = now - _ALARM_TOAST_DEDUP_WINDOW_MS * 10;
+    for (const [k, ts] of _alarmToastDedup) {
+      if (ts < cutoff) _alarmToastDedup.delete(k);
+    }
+  }
+  return true;
+}
+
 function handleAlarmPush(alarms) {
   if (!alarms.length) return;
 
@@ -12220,6 +12307,8 @@ function handleAlarmPush(alarms) {
       ts: Number(a.ts || Date.now()),
       alarm_hex: toAlarmHex(a.alarm_value),
     };
+
+    if (!_shouldEmitAlarmToast(a)) return;
 
     const invLabel = getInverterNodeDisplayLabel(a.inverter, a.unit, {
       includeIp: true,
