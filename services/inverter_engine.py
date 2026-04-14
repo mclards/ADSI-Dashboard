@@ -179,6 +179,16 @@ thread_locks    = {}   # ip -> threading.Lock
 write_queues    = {}   # ip -> Queue
 write_threads   = {}   # ip -> Thread
 write_pending   = {}   # ip -> threading.Event set while control write is queued/running
+# T3.3 fix: this lock makes (mark_write_pending + q.put) and (q.empty() + evt.clear())
+# atomic with respect to each other, closing a TOCTOU where a job enqueued between
+# the worker's empty-check and clear could have its pending signal silently dropped.
+write_pending_lock = threading.Lock()
+# T3.5 fix: tracks the monotonic timestamp of the last operator /write call per
+# (ip, unit).  handle_auto_reset suppresses the opposite-direction reset for
+# AUTO_RESET_WRITE_HOLD_SEC seconds after a manual write to avoid races where
+# the auto-reset loop immediately undoes an operator command.
+last_operator_write_ts = {}
+AUTO_RESET_WRITE_HOLD_SEC = 5.0
 intervals       = {}   # ip -> poll interval (float)
 static_units    = {}   # ip -> [unit list] or None
 
@@ -477,8 +487,12 @@ def write_worker_loop(ip, lock, q):
                     loop.call_soon_threadsafe(_resolve_future_threadsafe, loop, fut, False)
             except Exception:
                 pass
-            if pending_evt and q.empty():
-                pending_evt.clear()
+            # T3.3 fix: atomic empty-check + clear so a concurrent
+            # enqueue_write_atomically cannot race with the clear.
+            if pending_evt:
+                with write_pending_lock:
+                    if q.empty():
+                        pending_evt.clear()
             continue
 
         steps = job.get("steps")
@@ -499,6 +513,32 @@ def write_worker_loop(ip, lock, q):
                 "value":   int(job["value"]),
                 "unit":    int(job["unit"]),
             }]
+
+        # T3.4 fix: re-validate each step at dequeue time.  Defence in depth
+        # against direct queue injection (tests, future refactors) that
+        # bypasses the API-level bounds check.  Invalid steps are dropped
+        # and the write resolves as failure rather than hitting Modbus.
+        validated_steps = []
+        for step in normalized_steps:
+            if not (1 <= step["unit"] <= 4) or step["value"] not in (0, 1):
+                print(
+                    f"[write_worker] rejecting invalid step ip={ip} "
+                    f"unit={step.get('unit')} value={step.get('value')}"
+                )
+                continue
+            validated_steps.append(step)
+        if not validated_steps:
+            try:
+                if loop and not fut.done():
+                    loop.call_soon_threadsafe(_resolve_future_threadsafe, loop, fut, False)
+            except Exception:
+                pass
+            if pending_evt:
+                with write_pending_lock:
+                    if q.empty():
+                        pending_evt.clear()
+            continue
+        normalized_steps = validated_steps
 
         batch_mode = bool(job.get("batch")) or len(normalized_steps) > 1
         result_payload = [] if batch_mode else False
@@ -539,8 +579,13 @@ def write_worker_loop(ip, lock, q):
         except Exception:
             pass
         finally:
-            if pending_evt and q.empty():
-                pending_evt.clear()
+            # T3.3 fix: atomic empty-check + clear under write_pending_lock,
+            # so a concurrent enqueue_write_atomically cannot enqueue a job
+            # between the empty check and the clear.
+            if pending_evt:
+                with write_pending_lock:
+                    if q.empty():
+                        pending_evt.clear()
 
 
 # -------------------------------------------------
@@ -639,6 +684,39 @@ def mark_write_pending(ip):
     return evt
 
 
+def enqueue_write_atomically(ip, job):
+    """T3.3 fix: atomically mark pending and enqueue.
+
+    Prevents the worker from observing q.empty()==True between the API
+    thread's mark_write_pending() and its subsequent q.put(), which would
+    cause the pending event to be cleared immediately after the job is
+    enqueued (silently dropping the wake-up signal that callers rely on).
+    """
+    with write_pending_lock:
+        mark_write_pending(ip)
+        write_queues[ip].put(job)
+
+
+def note_operator_write(ip, unit):
+    """T3.5 fix: record the time of an operator-initiated write so
+    handle_auto_reset can suppress auto-reset actions on the same (ip, unit)
+    for a short hold window, avoiding operator/auto-reset collisions."""
+    try:
+        last_operator_write_ts[(ip, int(unit))] = time.monotonic()
+    except Exception:
+        pass
+
+
+def operator_write_hold_active(ip, unit):
+    try:
+        ts = last_operator_write_ts.get((ip, int(unit)))
+    except Exception:
+        return False
+    if ts is None:
+        return False
+    return (time.monotonic() - ts) < AUTO_RESET_WRITE_HOLD_SEC
+
+
 # -------------------------------------------------
 #   Auto-reset alarm handler
 # -------------------------------------------------
@@ -682,11 +760,16 @@ async def handle_auto_reset(ip, unit, alarm_val):
     try:
         # ── State: armed ──────────────────────────────────────
         if state == "armed" and alarm_val in alarm_dec_list:
+            # T3.5 fix: suppress auto-reset if an operator write just happened
+            # on this (ip, unit) — avoids racing with manual control.
+            if operator_write_hold_active(ip, unit):
+                return
+
             loop = asyncio.get_running_loop()
             fut  = loop.create_future()
-            mark_write_pending(ip)
 
-            write_queues[ip].put({
+            # T3.3 fix: atomic mark+enqueue.
+            enqueue_write_atomically(ip, {
                 "address": 16,
                 "value":   0,       # OFF
                 "unit":    unit,
@@ -715,11 +798,16 @@ async def handle_auto_reset(ip, unit, alarm_val):
             elapsed = now - entry["since"]
 
             if alarm_val == clear_dec:
+                # T3.5 fix: same operator-write hold applies to the ON re-arm.
+                if operator_write_hold_active(ip, unit):
+                    # Don't re-arm ON while operator is actively controlling.
+                    return
+
                 loop = asyncio.get_running_loop()
                 fut  = loop.create_future()
-                mark_write_pending(ip)
 
-                write_queues[ip].put({
+                # T3.3 fix: atomic mark+enqueue.
+                enqueue_write_atomically(ip, {
                     "address": 16,
                     "value":   1,   # ON
                     "unit":    unit,
@@ -1297,8 +1385,17 @@ def _sanitize_write_units(units_raw):
 async def write_command(cmd: WriteCommand):
     """Queue a single-register write (address 16) for the specified inverter/unit."""
 
+    # T3.1 fix: validate unit range at the API boundary.
+    # Ingeteam nodes are 1..4 (see SKILL.md §Current Metrics — 4 nodes per inverter).
+    if not isinstance(cmd.unit, int) or not (1 <= cmd.unit <= 4):
+        return JSONResponse({"status": "error", "msg": "invalid unit (must be 1..4)"}, 400)
+
+    # T3.2 fix: ON/OFF register only accepts 0 (off) or 1 (on);
+    # value == 2 is the historic "skip" sentinel retained below.
     if cmd.value == 2:
         return {"status": "skipped"}
+    if cmd.value not in (0, 1):
+        return JSONResponse({"status": "error", "msg": "invalid value (must be 0 or 1)"}, 400)
 
     ip = ip_map.get(str(cmd.inverter))
     if not ip:
@@ -1310,9 +1407,11 @@ async def write_command(cmd: WriteCommand):
 
     loop = asyncio.get_running_loop()
     fut  = loop.create_future()
-    mark_write_pending(ip)
 
-    write_queues[ip].put({
+    # T3.3 fix: atomic mark+enqueue.  T3.5: record operator write timestamp
+    # so handle_auto_reset can suppress the opposite-direction reset.
+    note_operator_write(ip, cmd.unit)
+    enqueue_write_atomically(ip, {
         "address": 16,
         "value":   cmd.value,
         "unit":    cmd.unit,
@@ -1340,11 +1439,14 @@ async def write_batch_command(cmd: WriteBatchCommand):
     if not units:
         return JSONResponse({"status": "error", "msg": "no valid units"}, 400)
 
+    # T3.2 fix: same ON/OFF bounds as /write.
     if cmd.value == 2:
         return {
             "status":  "skipped",
             "results": [{"unit": unit, "ok": True} for unit in units],
         }
+    if cmd.value not in (0, 1):
+        return JSONResponse({"status": "error", "msg": "invalid value (must be 0 or 1)"}, 400)
 
     ip = ip_map.get(str(cmd.inverter))
     if not ip:
@@ -1356,9 +1458,12 @@ async def write_batch_command(cmd: WriteBatchCommand):
 
     loop = asyncio.get_running_loop()
     fut  = loop.create_future()
-    mark_write_pending(ip)
 
-    write_queues[ip].put({
+    # T3.3 fix: atomic mark+enqueue.  T3.5: record operator write timestamp
+    # for each target unit so auto-reset is held off.
+    for unit in units:
+        note_operator_write(ip, unit)
+    enqueue_write_atomically(ip, {
         "steps": [
             {"address": 16, "value": cmd.value, "unit": unit}
             for unit in units
