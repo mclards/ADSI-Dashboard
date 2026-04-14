@@ -17,6 +17,7 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 | 9 | [PHASE5_FIXES.md](PHASE5_FIXES.md) | Phase 5 — Node subsystem hardening: T2.3 (token bind), T2.4 (token-store key), T2.5 (alarm dedup on restart), T2.6 (cap math clamp), T2.7 (go2rtc spawn cleanup), T2.8 (snapshot capture serialisation), T2.9 (streaming backoff cap). Smoke-verified zero regressions. |
 | 10 | [PHASE6_FIXES.md](PHASE6_FIXES.md) | Phase 6 — Python inverter engine: T3.6 (poll task isolation), T3.7 (Modbus FD leak), T3.8 (lock review, no change), T3.9 (atomic map swap), T3.10 (per-read timeout refresh), T3.11 (bounded write queue + 429), T3.12 (post-write read-back verify). Smoke-verified. |
 | 11 | [PHASE7_FIXES.md](PHASE7_FIXES.md) | Phase 7 — Python forecast engine: T4.6 (reliability dimension logs), T4.7 (clock robustness), T4.8 (legacy-model WARN), T4.9 (LightGBM reason exposure), T4.10 (reviewed, no change), T4.11 (deferred to v2.9.0), T4.12 (regime sample floor at prediction). 107/107 Python tests pass. |
+| 12 | [PHASE8_BACKLOG_SWEEP.md](PHASE8_BACKLOG_SWEEP.md) | Phase 8 — full MEDIUM/LOW backlog sweep closing remaining items from §1 KNOWN_GAPS. 9 actionable fixes, 22 verified already-correct, 31 deliberately deferred (with reasoning). After Phase 8, **all actionable audit findings are closed**. |
 
 ## When to use which file
 
@@ -54,8 +55,10 @@ a5fed94  Add T7.3 smoke harness + first baseline run (Phase 4)
 cacf31d  Document Phase 5 Node subsystem fixes
 e0eb77b  Fix Phase 6 Python inverter: T3.6-T3.12
 183a082  Document Phase 6 Python inverter engine fixes
-(next)   Fix Phase 7 Python forecast: T4.6-T4.12
-(next)   Document Phase 7 fixes
+1b96979  Fix Phase 7 Python forecast: T4.6-T4.12
+da9f025  Document Phase 7 Python forecast engine fixes
+(next)   Fix Phase 8 backlog sweep: 9 fixes across 5 files
+(next)   Document Phase 8 backlog sweep
 ```
 
 ---
