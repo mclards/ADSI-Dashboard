@@ -14,6 +14,7 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 | 6 | [PHASE2_FIXES.md](PHASE2_FIXES.md) | Post-v2.8.8 session that closed T4.4 (Node-side lock), verified T6.3 thumbprint, and fixed T2.10/T2.11/T2.12/T5.4. Read alongside KNOWN_GAPS.md — its "closed" table amends that doc until it is regenerated. |
 | 7 | [PHASE3_FIXES.md](PHASE3_FIXES.md) | Post-Phase-2 session that closed Electron hardening (T6.7/T6.9/T6.10/T6.11) and frontend tail (T5.5/T5.6/T5.7/T5.8). Same amend convention as Phase 2. |
 | 8 | [SMOKE_BASELINE.md](SMOKE_BASELINE.md) | First end-to-end run of the new T7.3 smoke harness (`scripts/smoke-all.js`). Records Phase-2/3 verification result (zero regressions) and catalogues 5 pre-existing Node-test failures for triage. |
+| 9 | [PHASE5_FIXES.md](PHASE5_FIXES.md) | Phase 5 — Node subsystem hardening: T2.3 (token bind), T2.4 (token-store key), T2.5 (alarm dedup on restart), T2.6 (cap math clamp), T2.7 (go2rtc spawn cleanup), T2.8 (snapshot capture serialisation), T2.9 (streaming backoff cap). Smoke-verified zero regressions. |
 
 ## When to use which file
 
@@ -39,13 +40,16 @@ d1c6081  Fix Phase 1B (v2.8.8): Inverter write-control safety
 1d88c8e  Document comprehensive v2.8.8 bug sweep: 123 findings across 8 tracks
 ```
 
-Phase 2 + Phase 3 (post-v2.8.8, pre-v2.8.9):
+Phase 2 + Phase 3 + Phase 4 + Phase 5 (post-v2.8.8, pre-v2.8.9):
 
 ```
 6ca5a66  Fix Phase 2 backend: T4.4 forecast lock + T2.10/T2.11/T2.12
 eb1057b  Fix Phase 3 Electron: T6.7/T6.9/T6.10/T6.11 hardening
 f83c131  Fix Phase 2+3 frontend: T5.4/T5.5/T5.6/T5.7/T5.8
-(next)   Document Phase 2 + Phase 3 fixes (this commit)
+fb36a19  Document Phase 2 + Phase 3 fixes
+a5fed94  Add T7.3 smoke harness + first baseline run (Phase 4)
+(next)   Fix Phase 5 Node subsystem: T2.3-T2.9
+(next)   Document Phase 5 fixes
 ```
 
 ---

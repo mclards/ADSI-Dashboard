@@ -7,6 +7,8 @@
 - [FIXES_PROGRESS.md](FIXES_PROGRESS.md) — the 23 CRITICAL fixes shipped
 - [PHASE2_FIXES.md](PHASE2_FIXES.md) — **post-v2.8.8 session (2026-04-14)** closing T4.4 Node-side lock, verifying T6.3 thumbprint, and fixing T2.10/T2.11/T2.12/T5.4. **This doc below still reflects pre-Phase-2 state; see PHASE2_FIXES.md "Update to status" table for what is now closed.**
 - [PHASE3_FIXES.md](PHASE3_FIXES.md) — **same-day Phase 3 session (2026-04-14)** closing T6.7/T6.9/T6.10/T6.11 (Electron) and T5.5/T5.6/T5.7/T5.8 (frontend). Same amend convention.
+- [SMOKE_BASELINE.md](SMOKE_BASELINE.md) — **same-day** first run of the new T7.3 smoke harness; catalogues 5 pre-existing Node-test failures.
+- [PHASE5_FIXES.md](PHASE5_FIXES.md) — **same-day Phase 5 session (2026-04-14)** closing T2.3–T2.9 (Node subsystem). Smoke-verified zero regressions.
 
 This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.8, organised so a future debugger can grep for a symptom and find the relevant known issue.
 
