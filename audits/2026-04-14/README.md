@@ -13,6 +13,7 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 | 5 | [KNOWN_GAPS.md](KNOWN_GAPS.md) | What was deliberately NOT fixed (100-item HIGH/MED/LOW backlog, partial fixes, audit coverage gaps, verification gaps, tooling gaps, symptom → known-gap grep table) |
 | 6 | [PHASE2_FIXES.md](PHASE2_FIXES.md) | Post-v2.8.8 session that closed T4.4 (Node-side lock), verified T6.3 thumbprint, and fixed T2.10/T2.11/T2.12/T5.4. Read alongside KNOWN_GAPS.md — its "closed" table amends that doc until it is regenerated. |
 | 7 | [PHASE3_FIXES.md](PHASE3_FIXES.md) | Post-Phase-2 session that closed Electron hardening (T6.7/T6.9/T6.10/T6.11) and frontend tail (T5.5/T5.6/T5.7/T5.8). Same amend convention as Phase 2. |
+| 8 | [SMOKE_BASELINE.md](SMOKE_BASELINE.md) | First end-to-end run of the new T7.3 smoke harness (`scripts/smoke-all.js`). Records Phase-2/3 verification result (zero regressions) and catalogues 5 pre-existing Node-test failures for triage. |
 
 ## When to use which file
 

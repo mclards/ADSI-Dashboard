@@ -29,6 +29,10 @@ services/__pycache__/
 # Throwaway test / stale files
 test-electron.js
 
+# Smoke harness output (T7.3)
+scripts/.smoke-summary.json
+scripts/.smoke-pytest-junit.xml
+
 # Temporary planning / implementation docs
 SOLCAST_TRI_BAND_*.md
 IMPLEMENTATION_*.md

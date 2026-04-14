@@ -15,7 +15,10 @@
     "build:installer": "node scripts/build-installer-signed.js",
     "build:installer:signed": "node scripts/build-installer-signed.js",
     "codesign:generate": "powershell -ExecutionPolicy Bypass -File scripts/generate-codesign-cert.ps1",
-    "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1"
+    "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1",
+    "smoke": "node scripts/smoke-all.js",
+    "smoke:node-only": "node scripts/smoke-all.js --skip-python",
+    "smoke:no-rebuild": "node scripts/smoke-all.js --no-rebuild"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1012.0",
