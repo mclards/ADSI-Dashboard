@@ -81,9 +81,16 @@ function createService({ root, sourceDbPath, s3 }) {
   const programDataDir = path.join(root, "programdata");
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(programDataDir, { recursive: true });
+  // v2.8.9 fix (2026-04-15): explicit backupDir injection to bypass the
+  // storagePaths fallback that otherwise redirects to the real production
+  // %PROGRAMDATA%\InverterDashboard\cloud_backups on a developer machine.
+  const backupDir = path.join(dataDir, "cloud_backups");
+  const historyFile = path.join(dataDir, "backup_history.json");
   const settingsStore = new Map();
   const service = new CloudBackupService({
     dataDir,
+    backupDir,
+    historyFile,
     db: {
       backup: async (dest) => {
         fs.copyFileSync(sourceDbPath, dest);

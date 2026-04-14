@@ -345,10 +345,15 @@ async function run() {
     });
     assert.equal(Boolean(started?.job?.running), true, "background pull should start");
 
+    // v2.8.9 fix (2026-04-15): the pull orchestrator now pulls archives FIRST
+    // (see `runManualPullSync` in server/index.js — "Step 1 — Pull archive DB
+    // files first").  When archive 2026-02 fails its SHA check the whole pull
+    // aborts before the main DB is ever downloaded, so the pending-main
+    // replacement file is never written on this path.  Only archive 2026-01
+    // should have staged, and the subsequent failure cleanup removes even
+    // that.  Assertion updated to match the archives-first behaviour.
     const stagedDuringFailure = await waitFor(() => {
-      if (!fs.existsSync(mainPendingPath) || !fs.existsSync(archivePendingPath)) {
-        return false;
-      }
+      if (!fs.existsSync(archivePendingPath)) return false;
       const archivePending = readJsonFile(archivePendingPath, []);
       return (
         Array.isArray(archivePending) &&
@@ -360,7 +365,7 @@ async function run() {
     assert.equal(
       stagedDuringFailure,
       true,
-      "pull should stage the main DB and first archive before the later archive fails",
+      "pull should stage the first archive while the later archive streams (archives-first ordering)",
     );
 
     let failedJob = null;

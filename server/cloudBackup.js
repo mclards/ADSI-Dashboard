@@ -128,8 +128,17 @@ class CloudBackupService {
     this.ipConfigPath = deps.ipConfigPath || null;
     this.programDataDir = deps.programDataDir || null;
 
-    this.backupDir = resolvedBackupDir(this.dataDir);
-    this.historyFile = resolvedBackupHistoryFile(this.dataDir);
+    // v2.8.9 fix (2026-04-15): honour an explicit `backupDir` / `historyFile`
+    // override if the caller supplies one.  Previously `resolvedBackupDir()`
+    // silently fell back to `%PROGRAMDATA%\InverterDashboard\cloud_backups`
+    // whenever that directory existed on the machine — correct for
+    // production, but for tests running on a developer machine with a real
+    // installation, the service wrote into the REAL backup dir while the
+    // test read from its tmpdir, producing ENOENT.  Tests now pass
+    // `backupDir: <tmpdir>/cloud_backups` and the override short-circuits
+    // the fallback logic.
+    this.backupDir = deps.backupDir || resolvedBackupDir(this.dataDir);
+    this.historyFile = deps.historyFile || resolvedBackupHistoryFile(this.dataDir);
 
     fs.mkdirSync(this.backupDir, { recursive: true });
 

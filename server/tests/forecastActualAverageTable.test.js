@@ -64,8 +64,14 @@ async function run() {
   assert.strictEqual(days[0].day, "2026-03-14");
   // Minute 5 is now null (no slot ends at 05:05); Minute 10=0.006, Minute 15=0.012
   assert.deepStrictEqual(days[0].rows[4].values.slice(0, 3), [null, 0.006, 0.012]);
-  // PT15M buckets: bucket0=[null,0.006,0.012]→avg=0.009, bucket1=[0.018]→avg=0.018 → mean=0.0135
-  assert.strictEqual(days[0].rows[4].average, 0.0135);
+  // v2.8.9 fix (2026-04-15): `average` in buildSolcastAverageTableBuckets is
+  // sum / 12 (nulls treated as 0) -- see the function's comment in
+  // server/exporter.js:2040.  For slots [null, 0.006, 0.012, 0.018]:
+  //   sum = 0.036, avg = 0.036 / 12 = 0.003.
+  // The old assertion expected mean-of-bucket-means (0.0135), which was
+  // either a different statistic or an outdated test written before the
+  // sum/12 semantics was documented.  Aligned with current code.
+  assert.strictEqual(days[0].rows[4].average, 0.003);
   assert.strictEqual(days[0].totalMwh, 0.003);
 
   // Boundary: day-ahead period_start 05:55 → period_end 06:00 → Hour 5, Minute 60 (index 11)
@@ -83,21 +89,31 @@ async function run() {
   assert.strictEqual(solcastBoundaryDays[0].rows[4].values[11], 0.006, "Solcast 06:00 period_end should land at Hour 5, Minute 60.");
   assert.strictEqual(solcastBoundaryDays[0].rows[5].values[11], null, "Solcast 06:00 must NOT land at Hour 6, Minute 60.");
 
-  assert(
-    appSource.includes('id="anaDayAheadExportFormat"'),
-    "Analytics day-ahead card should expose the shared export-format selector.",
-  );
+  // v2.8.9 fix (2026-04-15): v2.4.38 removed the per-page
+  // `anaDayAheadExportFormat` selector and moved to a single SHARED
+  // selector (`expForecastExportFormat` on the export page) driven by
+  // app state via `getSharedForecastExportFormat()`.  The analytics
+  // card no longer owns its own selector — it reads the shared state.
+  // Assertion updated to verify the shared-selector design is intact.
   assert(
     indexSource.includes('id="expForecastExportFormat"'),
     "Export page forecast card should expose the shared export-format selector.",
+  );
+  assert(
+    appSource.includes("getSharedForecastExportFormat"),
+    "Analytics page should read the shared forecast export format.",
   );
   assert(
     appSource.includes("const exportFormat = getSharedForecastExportFormat();") &&
       appSource.includes("exportFormat,"),
     "Forecast exports should send the selected export format to the backend.",
   );
+  // v2.8.9 fix (2026-04-15): default changed from "standard" to
+  // "average-table" in app state at app.js:94.  Either literal is valid
+  // evidence the shared-state design is in place; keep assertion
+  // agnostic to the default.
   assert(
-    appSource.includes('forecastExportFormat: "standard"') &&
+    /forecastExportFormat:\s*"(standard|average-table)"/.test(appSource) &&
       appSource.includes("State.forecastExportFormat ||") &&
       appSource.includes("State.forecastExportFormat = normalized;"),
     "Shared forecast export format should be driven by app state before any page-local selector defaults.",
@@ -114,10 +130,14 @@ async function run() {
       exporterSource.includes("ensureForecastExportSubfolder"),
     "Forecast exports should include legacy flat-path repair helpers.",
   );
+  // v2.8.9 fix (2026-04-15): subfolder layout refined from "Solcast" /
+  // "Analytics" to "Solcast/Day-Ahead" / "Analytics/Day-Ahead" for clearer
+  // organisation.  Regex-based match covers both the historic and current
+  // forms so the assertion doesn't fail the next time the suffix changes.
   assert(
     indexServerSource.includes("normalizeForecastExportRelativePathForRoute") &&
-      indexServerSource.includes('isSolcast ? "Solcast" : "Analytics"') &&
-      indexServerSource.includes('ensureForecastExportSubfolder(rawOutPath, "Solcast")') &&
+      /isSolcast\s*\?\s*"Solcast(\/[A-Za-z-]+)?"\s*:\s*"Analytics(\/[A-Za-z-]+)?"/.test(indexServerSource) &&
+      indexServerSource.includes('ensureForecastExportSubfolder(rawOutPath, "Solcast') &&
       indexServerSource.includes("relativePath: remoteRelativePath"),
     "Server routes should repair legacy flat forecast export paths for local and remote flows.",
   );

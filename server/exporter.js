@@ -1969,7 +1969,15 @@ function normalizeSolcastPreviewExportFormat(value) {
   return raw === 'average-table' ? 'average-table' : 'standard';
 }
 
-function roundSolcastExportNumber(value, digits = 1) {
+// v2.8.9 fix (2026-04-15): restore digits=6 default.  At v2.3.5 this helper
+// defaulted to `digits=6`; v2.4.38 silently changed it to `digits=1`, which
+// collapsed every Solcast preview cell in the 0.001–0.020 MW range to 0.0 —
+// a real export-precision regression that hid behind the test-suite failure
+// (forecastActualAverageTable.test.js: 0 !== 0.006).  The XLSX number
+// format at the call sites (`numFmt: "0.000000"`) always expected 6-decimal
+// data.  Restoring the historic default makes the exported Solcast preview
+// readable again AND closes the test failure.
+function roundSolcastExportNumber(value, digits = 6) {
   const num = Number(value);
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
 }

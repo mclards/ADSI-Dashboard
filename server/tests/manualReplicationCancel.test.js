@@ -315,10 +315,13 @@ async function run() {
     });
     assert.equal(Boolean(started?.job?.running), true, "manual pull should start in background");
 
+    // v2.8.9 fix (2026-04-15): archives-first ordering (see runManualPullSync
+    // Step 1 in server/index.js).  The main DB is pulled AFTER archives, so
+    // when we cancel mid-way through the second archive the main pending
+    // replacement file doesn't exist yet.  Assert only on the archive staging
+    // state that is actually reachable at this point in the pipeline.
     const stagingReached = await waitFor(() => {
-      if (!fs.existsSync(mainPendingPath) || !fs.existsSync(archivePendingPath)) {
-        return false;
-      }
+      if (!fs.existsSync(archivePendingPath)) return false;
       const archivePending = readJsonFile(archivePendingPath, []);
       return (
         Array.isArray(archivePending) &&
@@ -330,7 +333,7 @@ async function run() {
     assert.equal(
       stagingReached,
       true,
-      "main DB and first archive should be staged before cancellation",
+      "first archive should be staged while the second streams (archives-first ordering)",
     );
 
     const cancelResult = await fetchJson(`${APP_BASE_URL}/api/replication/cancel`, {
@@ -354,6 +357,9 @@ async function run() {
     );
 
     const cleaned = await waitFor(() => {
+      // main pending file is never written on this path (archives-first
+      // ordering means cancellation fires before the main DB step), so we
+      // just require it NOT to exist now.
       return (
         !fs.existsSync(mainPendingPath) &&
         !fs.existsSync(archivePendingPath) &&
