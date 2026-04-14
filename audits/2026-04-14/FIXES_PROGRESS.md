@@ -2,7 +2,7 @@
 
 **Started:** 2026-04-14
 **Completed:** 2026-04-14
-**Source report:** [BUG_SWEEP_2026-04-14.md](BUG_SWEEP_2026-04-14.md) (commit `1d88c8e`)
+**Source report:** [BUG_SWEEP.md](BUG_SWEEP.md) (commit `1d88c8e`)
 **Scope:** All 23 CRITICAL findings, Phase 1A → 1F.
 **Final version:** `2.8.8` (bumped from 2.8.7 in package.json + all project docs).
 

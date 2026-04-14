@@ -53,13 +53,13 @@ Security + reliability sweep across the entire stack (Node / Python / Electron /
 | T6.5 | electron/main.js | `8d9e949` | `shell.openExternal` URL scheme whitelist |
 | T6.6 | package.json + 4 docs | `8d9e949` | Version sync to 2.8.8 (SKILL.md was stale at 2.8.6) |
 
-Full per-fix file:line anchors, symptom-if-misbehaving, and rollback commands: [FIX_DEBUG_INDEX_2026-04-14.md](FIX_DEBUG_INDEX_2026-04-14.md).
+Full per-fix file:line anchors, symptom-if-misbehaving, and rollback commands: [FIX_DEBUG_INDEX.md](FIX_DEBUG_INDEX.md).
 
 ---
 
 ## Known gaps carried forward to v2.8.9+
 
-Full list: [KNOWN_GAPS_2026-04-14.md](KNOWN_GAPS_2026-04-14.md). Highest-impact:
+Full list: [KNOWN_GAPS.md](KNOWN_GAPS.md). Highest-impact:
 
 - **T4.4 Node-side coordination** — Python-side lock only; Node orchestrator can still write a late audit row.
 - **T6.3 thumbprint is hardcoded** — will break updates silently if cert rotates; move to config.

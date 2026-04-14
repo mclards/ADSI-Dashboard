@@ -3,9 +3,9 @@
 **Purpose:** everything a future debugger needs to (a) locate a fix, (b) judge whether it's misbehaving, and (c) roll it back safely.
 
 **Companion docs:**
-- [BUG_SWEEP_2026-04-14.md](BUG_SWEEP_2026-04-14.md) — the 123-finding audit
-- [FIXES_PROGRESS_2026-04-14.md](FIXES_PROGRESS_2026-04-14.md) — what shipped
-- [KNOWN_GAPS_2026-04-14.md](KNOWN_GAPS_2026-04-14.md) — what did NOT ship
+- [BUG_SWEEP.md](BUG_SWEEP.md) — the 123-finding audit
+- [FIXES_PROGRESS.md](FIXES_PROGRESS.md) — what shipped
+- [KNOWN_GAPS.md](KNOWN_GAPS.md) — what did NOT ship
 
 Each row below = one shipped CRITICAL.
 - **Locator** = grep string (works from repo root) that uniquely finds the change
@@ -137,7 +137,7 @@ Each row below = one shipped CRITICAL.
 | Log signature | `Day-ahead gen lock busy for <date> (owner=..., age=...s)` (warn) → skip. `Day-ahead gen lock for <date> is stale (...s old) — force-acquiring` (info). `Could not acquire day-ahead gen lock for <date>: ...` (warn — proceeds without lock). |
 | Symptom if misbehaving | Forecast generation **never runs** — check `APP_DB_FILE.parent/locks/dayahead_*.lock` for stuck files with recent mtime but no live PID. The 300 s max age should self-heal; if it doesn't, manually `rm` the lock. |
 | Runtime verification | Fire two `_delegate_run_dayahead` in parallel via Python REPL; second must return None with `"lock busy"` in logs. |
-| Known limitation | Node orchestrator does NOT respect this lock — see [KNOWN_GAPS §2 T4.4](KNOWN_GAPS_2026-04-14.md). |
+| Known limitation | Node orchestrator does NOT respect this lock — see [KNOWN_GAPS §2 T4.4](KNOWN_GAPS.md). |
 
 ### T4.5 — ML prediction error surfacing
 
@@ -175,7 +175,7 @@ Each row below = one shipped CRITICAL.
 | Symptom if misbehaving | Restore hanging forever — check that `_backupNowLocked` or the internal `createLocalBackup` (pre-restore safety snapshot) isn't reentering `_withBackupMutex`. **The internal createLocalBackup call during restoreBackup MUST NOT go through the mutex** — that would deadlock. Comment in the helper's JSDoc explains. |
 | Rollback | `git revert 9fcd6bf -- server/cloudBackup.js` |
 | Runtime verification | Script: fire `POST /api/backup/create` and `POST /api/backup/restore/<id>` simultaneously from two tabs; verify `_setProgress` calls are serialised (status field transitions sequentially, never mixed). |
-| Known limitation | `pullFromCloud`, `createPortableBackup`, `importPortableBackup` NOT yet wrapped — [KNOWN_GAPS §1 T2.10/T2.11](KNOWN_GAPS_2026-04-14.md). |
+| Known limitation | `pullFromCloud`, `createPortableBackup`, `importPortableBackup` NOT yet wrapped — [KNOWN_GAPS §1 T2.10/T2.11](KNOWN_GAPS.md). |
 
 ---
 
@@ -316,7 +316,7 @@ These are the log signatures that indicate a Phase-1 fix is actively catching so
 | `[write_worker] rejecting invalid step ip=...` | T3.4 active — a crafted or malformed write reached the worker. Check the API validator (T3.1/T3.2) for a gap. |
 | `Day-ahead gen lock busy for` | T4.4 active — two Python generators raced. Expected during manual + scheduler overlap; frequent occurrence indicates the scheduler is firing more than needed. |
 | `ML global prediction error surfaced to caller:` | T4.5 active — the residual ML model raised. Expected if the model file is corrupt / mismatched feature count; unexpected otherwise. |
-| `verifyUpdateCodeSignature: THUMBPRINT MISMATCH` | T6.3 active — **either an attack attempt OR the cert rotated and the constant is stale** (see [KNOWN_GAPS §2 T6.3](KNOWN_GAPS_2026-04-14.md)). |
+| `verifyUpdateCodeSignature: THUMBPRINT MISMATCH` | T6.3 active — **either an attack attempt OR the cert rotated and the constant is stale** (see [KNOWN_GAPS §2 T6.3](KNOWN_GAPS.md)). |
 | `blocked openExternal for non-whitelisted URL:` | T6.5 active — renderer tried to hand a non-http URL to the OS. |
 | `[main] Another instance is already running — quitting` | T6.1 active — double-launch suppressed. |
 | `[main] open-ip rejected invalid input:` | T6.2 active — renderer tried to open a non-IPv4 host. |
@@ -336,7 +336,7 @@ Only if you're planning a cherry-pick or partial rollback:
 
 ## Not a fix, but tracked here for future reference
 
-- `docs/BUG_SWEEP_2026-04-14.md` — commit `1d88c8e` — the full 123-finding audit report; **do not modify** (it's the frozen baseline against which Phase 2/3/4 will be measured).
-- `docs/FIXES_PROGRESS_2026-04-14.md` — commit `0d4f8b9` — the Phase-1 shipping log.
-- `docs/KNOWN_GAPS_2026-04-14.md` — this doc's companion.
-- `docs/FIX_DEBUG_INDEX_2026-04-14.md` — this doc.
+- `audits/2026-04-14/BUG_SWEEP.md` — commit `1d88c8e` — the full 123-finding audit report; **do not modify** (it's the frozen baseline against which Phase 2/3/4 will be measured).
+- `audits/2026-04-14/FIXES_PROGRESS.md` — commit `0d4f8b9` — the Phase-1 shipping log.
+- `audits/2026-04-14/KNOWN_GAPS.md` — this doc's companion.
+- `audits/2026-04-14/FIX_DEBUG_INDEX.md` — this doc.

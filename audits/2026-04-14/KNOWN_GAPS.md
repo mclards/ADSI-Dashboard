@@ -3,8 +3,8 @@
 **Date:** 2026-04-14
 **Baseline:** v2.8.8 (after commits `1d88c8e` → `0d4f8b9`)
 **Companion docs:**
-- [BUG_SWEEP_2026-04-14.md](BUG_SWEEP_2026-04-14.md) — the 123-finding audit
-- [FIXES_PROGRESS_2026-04-14.md](FIXES_PROGRESS_2026-04-14.md) — the 23 CRITICAL fixes shipped
+- [BUG_SWEEP.md](BUG_SWEEP.md) — the 123-finding audit
+- [FIXES_PROGRESS.md](FIXES_PROGRESS.md) — the 23 CRITICAL fixes shipped
 
 This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.8, organised so a future debugger can grep for a symptom and find the relevant known issue.
 
@@ -20,7 +20,7 @@ This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.
 | 9 | INFO | backlog | deferred |
 | **100** | **total** | | |
 
-All 100 items are in [BUG_SWEEP_2026-04-14.md](BUG_SWEEP_2026-04-14.md) with file:line anchors, symptoms, and proposed fixes. The Phase-2 subset called out in the original remediation plan:
+All 100 items are in [BUG_SWEEP.md](BUG_SWEEP.md) with file:line anchors, symptoms, and proposed fixes. The Phase-2 subset called out in the original remediation plan:
 
 - **T1.5 / T1.6** — AbortController cleanup in remote fetches, reconnect-timer race
 - **T2.3 – T2.12** — session token replay, token-store key derivation, alarms dedup, cap math clamp, go2rtc zombie, dayAheadLock UNIQUE index, streaming backoff cap, cloudBackup manifest race + poller null-check + health HTTP status
@@ -195,7 +195,7 @@ If a future debugger is tracking one of these, **re-grep for the described sympt
 
 ### 5.3 Agent-orchestration issues that hurt the sweep
 
-Documented in [BUG_SWEEP_2026-04-14.md](BUG_SWEEP_2026-04-14.md) §Audit conduct notes. Summary: one agent overwrote the findings doc (recovered from git reflog); one committed unprompted (reset); multiple returned summaries without writing.
+Documented in [BUG_SWEEP.md](BUG_SWEEP.md) §Audit conduct notes. Summary: one agent overwrote the findings doc (recovered from git reflog); one committed unprompted (reset); multiple returned summaries without writing.
 
 **Preventive measures for the next sweep:**
 - Mandate `bash heredoc` append in agent prompts; forbid `Write` / `Edit` on the findings doc from sub-agents.

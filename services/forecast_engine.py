@@ -149,7 +149,7 @@ SQLITE_RETRY_BACKOFF_SEC = 0.35
 # The lock lives under APP_DB_FILE.parent so it survives restarts but has a
 # max age guard (DAYAHEAD_GEN_LOCK_MAX_AGE_SEC) after which it's considered
 # stale and can be force-acquired.  Node-side coordination is deferred and
-# tracked as follow-up work (see docs/BUG_SWEEP_2026-04-14.md §T4.4).
+# tracked as follow-up work (see audits/2026-04-14/BUG_SWEEP.md §T4.4).
 DAYAHEAD_GEN_LOCK_DIR = APP_DB_FILE.parent / "locks"
 DAYAHEAD_GEN_LOCK_MAX_AGE_SEC = 300  # 5 min — covers Node's 180 s timeout + slack
 
