@@ -16004,11 +16004,11 @@ function getEnergySummarySupplementRowsForRange(
   return buildCurrentDayEnergySnapshot().rows;
 }
 
-function buildEnergySummarySourceRows(payload = {}) {
+async function buildEnergySummarySourceRows(payload = {}) {
   const s = Number(payload?.startTs || 0) || Date.now() - 86400000;
   const e = Number(payload?.endTs || 0) || Date.now();
   const currentDaySnapshot = buildCurrentDayEnergySnapshot();
-  return exporter.buildEnergySummaryExportRows(s, e, payload?.inverter, {
+  return await exporter.buildEnergySummaryExportRows(s, e, payload?.inverter, {
     supplementalTodayRows: getEnergySummarySupplementRowsForRange(
       s,
       e,
@@ -16255,7 +16255,7 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
 
 app.post("/api/energy/summary-source", async (req, res) => {
   try {
-    const rows = buildEnergySummarySourceRows(req.body || {});
+    const rows = await buildEnergySummarySourceRows(req.body || {});
     return res.json({ ok: true, rows });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });

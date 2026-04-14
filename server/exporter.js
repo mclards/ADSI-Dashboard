@@ -1219,7 +1219,7 @@ function buildAuthoritativeTodayRangeMap(startTs, rowsRaw) {
   return todayMap;
 }
 
-function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
+async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   const invNum = inverter && inverter !== 'all' ? Number(inverter) : null;
@@ -1231,19 +1231,35 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   // rows in ts order. Bucket by day then summarize. The v2.8.2 "E4" 500k row
   // guard was reverted because it blocked high-poll-rate exports; the
   // route-level 366-day cap bounds worst-case memory.
+  //
+  // Yield before and after the heavy read + around the per-day inner loop so
+  // the Node event loop can service the inverter poller's DB flush ticks
+  // (server/poller.js flushPersistBacklog). Without these yields, long
+  // exports block the event loop long enough for pendingReadingQueue to
+  // overflow DB_ENERGY_BACKLOG_MAX_ROWS, causing dropped poll data.
+  await yieldToEventLoop();
   const rangeRows = invNum
     ? queryReadingsRange(invNum, s, e)
     : queryReadingsRangeAll(s, e);
+  await yieldToEventLoop();
   const rowsByDay = new Map();
+  let bucketCounter = 0;
   for (const row of rangeRows) {
     const ts = Number(row?.ts || 0);
     if (!(ts > 0)) continue;
     const day = fmtDate(ts);
     if (!rowsByDay.has(day)) rowsByDay.set(day, []);
     rowsByDay.get(day).push(row);
+    if ((++bucketCounter % 50000) === 0) {
+      await yieldToEventLoop();
+    }
   }
 
+  let dayCounter = 0;
   for (const day of iterateLocalDates(s, e)) {
+    if ((dayCounter++ % 3) === 0) {
+      await yieldToEventLoop();
+    }
     const dayRows = rowsByDay.get(day) || [];
     const dayMap = summarizeReadingsForEnergy(dayRows);
     let dayTotalMwh = 0;
@@ -1430,7 +1446,7 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
 async function exportEnergy({ startTs, endTs, inverter, format, supplementalTodayRows }) {
   const s = startTs || Date.now() - 86400000;
   const e = endTs || Date.now();
-  const mapped = buildEnergySummaryExportRows(s, e, inverter, {
+  const mapped = await buildEnergySummaryExportRows(s, e, inverter, {
     supplementalTodayRows,
   });
   return await writeEnergySummaryExport({
@@ -1528,9 +1544,14 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
   const spec = normalizeEnergyResolution(resolution);
+  // Yield before + after the heavy range query so the inverter poller can
+  // flush its persist backlog during long exports (see
+  // buildEnergySummaryExportRows for rationale).
+  await yieldToEventLoop();
   const rows = !inverter || inverter === 'all'
     ? queryEnergy5minRangeAll(s, e)
     : queryEnergy5minRange(Number(inverter), s, e);
+  await yieldToEventLoop();
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
   // For "all inverters" daily-mode export, zero-fill inverters that had no data.
@@ -1759,6 +1780,9 @@ async function exportForecastActual({
     ? supplementalActualRows
     : [];
 
+  // Yield around the heavy range query so the inverter poller can flush its
+  // persist backlog during long forecast exports.
+  await yieldToEventLoop();
   const actualRaw = queryEnergy5minRangeAll(s, e)
     .map((r) => ({
       ts: Number(r?.ts || 0),
@@ -1771,6 +1795,7 @@ async function exportForecastActual({
       })),
     )
     .filter((r) => isWithinSolarWindowTs(r.ts));
+  await yieldToEventLoop();
   const dayAheadRaw = (isSolcast ? collectSolcastRowsForRange(s, e) : collectDayAheadRowsForRange(s, e))
     .filter((r) => isWithinSolarWindowTs(r.ts));
 
