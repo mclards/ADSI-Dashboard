@@ -9,6 +9,7 @@
 - [PHASE3_FIXES.md](PHASE3_FIXES.md) — **same-day Phase 3 session (2026-04-14)** closing T6.7/T6.9/T6.10/T6.11 (Electron) and T5.5/T5.6/T5.7/T5.8 (frontend). Same amend convention.
 - [SMOKE_BASELINE.md](SMOKE_BASELINE.md) — **same-day** first run of the new T7.3 smoke harness; catalogues 5 pre-existing Node-test failures.
 - [PHASE5_FIXES.md](PHASE5_FIXES.md) — **same-day Phase 5 session (2026-04-14)** closing T2.3–T2.9 (Node subsystem). Smoke-verified zero regressions.
+- [PHASE6_FIXES.md](PHASE6_FIXES.md) — **same-day Phase 6 session (2026-04-14)** closing T3.6/T3.7/T3.9/T3.10/T3.11/T3.12 (Python inverter engine). T3.8 reviewed and rejected as not-a-bug (GIL-safe). Smoke-verified.
 
 This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.8, organised so a future debugger can grep for a symptom and find the relevant known issue.
 

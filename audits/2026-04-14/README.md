@@ -15,6 +15,7 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 | 7 | [PHASE3_FIXES.md](PHASE3_FIXES.md) | Post-Phase-2 session that closed Electron hardening (T6.7/T6.9/T6.10/T6.11) and frontend tail (T5.5/T5.6/T5.7/T5.8). Same amend convention as Phase 2. |
 | 8 | [SMOKE_BASELINE.md](SMOKE_BASELINE.md) | First end-to-end run of the new T7.3 smoke harness (`scripts/smoke-all.js`). Records Phase-2/3 verification result (zero regressions) and catalogues 5 pre-existing Node-test failures for triage. |
 | 9 | [PHASE5_FIXES.md](PHASE5_FIXES.md) | Phase 5 — Node subsystem hardening: T2.3 (token bind), T2.4 (token-store key), T2.5 (alarm dedup on restart), T2.6 (cap math clamp), T2.7 (go2rtc spawn cleanup), T2.8 (snapshot capture serialisation), T2.9 (streaming backoff cap). Smoke-verified zero regressions. |
+| 10 | [PHASE6_FIXES.md](PHASE6_FIXES.md) | Phase 6 — Python inverter engine: T3.6 (poll task isolation), T3.7 (Modbus FD leak), T3.8 (lock review, no change), T3.9 (atomic map swap), T3.10 (per-read timeout refresh), T3.11 (bounded write queue + 429), T3.12 (post-write read-back verify). Smoke-verified. |
 
 ## When to use which file
 
@@ -48,8 +49,10 @@ eb1057b  Fix Phase 3 Electron: T6.7/T6.9/T6.10/T6.11 hardening
 f83c131  Fix Phase 2+3 frontend: T5.4/T5.5/T5.6/T5.7/T5.8
 fb36a19  Document Phase 2 + Phase 3 fixes
 a5fed94  Add T7.3 smoke harness + first baseline run (Phase 4)
-(next)   Fix Phase 5 Node subsystem: T2.3-T2.9
-(next)   Document Phase 5 fixes
+6d2abec  Fix Phase 5 Node subsystem: T2.3-T2.9
+cacf31d  Document Phase 5 Node subsystem fixes
+(next)   Fix Phase 6 Python inverter: T3.6-T3.12
+(next)   Document Phase 6 fixes
 ```
 
 ---
