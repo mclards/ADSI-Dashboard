@@ -187,10 +187,24 @@ async function _spawnProcess() {
 
   status = "starting";
 
-  const child = spawn(exePath, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  // T2.7 fix (Phase 5, 2026-04-14): wrap spawn in try/catch.  When spawn
+  // throws synchronously (EACCES on the binary, ENOENT race after
+  // resolveExePath checked), the previous code left status="starting" and
+  // the next start() call would short-circuit thinking we were already
+  // launching.  Now: status reset to "stopped", go2rtcProcess cleared,
+  // and the error surfaced to the caller.
+  let child;
+  try {
+    child = spawn(exePath, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (err) {
+    console.error(`[go2rtc] synchronous spawn failed: ${err.message}`);
+    status = "stopped";
+    go2rtcProcess = null;
+    return { ok: false, error: err.message };
+  }
 
   go2rtcProcess = child;
 

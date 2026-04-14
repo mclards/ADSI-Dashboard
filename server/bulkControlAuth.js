@@ -65,20 +65,57 @@ function isValidPlantWideAuthKey(value, nowMs = Date.now()) {
   return hasActivePlantWideAuthKeyLease(key, nowMs);
 }
 
-function issuePlantWideAuthSession(nowMs = Date.now()) {
+// T2.3 fix (Phase 5, 2026-04-14): derive a per-session client fingerprint
+// from the inbound request — IP plus a hash of the User-Agent.  The session
+// is bound to this fingerprint at issue time and validated on every
+// subsequent privileged call, so a token leaked via XSS / log inclusion /
+// MITM cannot be replayed from a different client until TTL expiry.
+//
+// Bindings are OPTIONAL for backward compatibility:
+//   - issuePlantWideAuthSession(nowMs)            -> unbound (legacy / tests)
+//   - issuePlantWideAuthSession(nowMs, req)       -> bound to req.ip + UA hash
+//   - isValidPlantWideAuthSession(token, nowMs)            -> accepts unbound only
+//   - isValidPlantWideAuthSession(token, nowMs, req)       -> requires match if bound
+//
+// If a session is stored WITH bindings and the validator is called WITHOUT
+// req, the call is rejected (fail-closed) — that path is reserved for
+// internal/test code that should never validate user-bound tokens.
+function _normIp(value) {
+  return String(value || "").replace(/^::ffff:/, "").trim().toLowerCase();
+}
+function _bindingsFromReq(req) {
+  if (!req) return null;
+  const ip = _normIp(req.ip || req.connection?.remoteAddress);
+  const ua = String(req.headers?.["user-agent"] || "").trim();
+  if (!ip && !ua) return null;
+  const uaHash = ua ? crypto.createHash("sha256").update(ua).digest("hex").slice(0, 16) : "";
+  return { ip, uaHash };
+}
+
+function issuePlantWideAuthSession(nowMs = Date.now(), req) {
   cleanupExpiredEntries(authSessions, nowMs);
   const issuedAt = Number(nowMs || Date.now());
   const expiresAt = issuedAt + BULK_AUTH_SESSION_TTL_MS;
   const token = crypto.randomBytes(24).toString("hex");
-  authSessions.set(token, { issuedAt, expiresAt });
+  const bindings = _bindingsFromReq(req);
+  authSessions.set(token, { issuedAt, expiresAt, bindings });
   return { token, issuedAt, expiresAt, ttlMs: BULK_AUTH_SESSION_TTL_MS };
 }
 
-function isValidPlantWideAuthSession(value, nowMs = Date.now()) {
+function isValidPlantWideAuthSession(value, nowMs = Date.now(), req) {
   const token = normalizeAuthValue(value);
   if (!token) return false;
   cleanupExpiredEntries(authSessions, nowMs);
-  return authSessions.has(token);
+  const entry = authSessions.get(token);
+  if (!entry) return false;
+  // Backward-compatible path: unbound session accepts any caller.
+  if (!entry.bindings) return true;
+  // Bound session: require a request and matching fingerprint (fail-closed).
+  const callerBindings = _bindingsFromReq(req);
+  if (!callerBindings) return false;
+  if (entry.bindings.ip && entry.bindings.ip !== callerBindings.ip) return false;
+  if (entry.bindings.uaHash && entry.bindings.uaHash !== callerBindings.uaHash) return false;
+  return true;
 }
 
 function __resetForTests() {

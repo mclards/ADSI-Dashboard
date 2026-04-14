@@ -5467,12 +5467,16 @@ async function performLocalWriteBatchRequest(url, upstreamPayload) {
   }
 }
 
-function isAuthorizedPlantWideControl({ authKey, authToken } = {}) {
+function isAuthorizedPlantWideControl({ authKey, authToken } = {}, req) {
   // T2.1 fix: share a single clock read across both checks so a clock step
   // between them can't cause inconsistent validation.
+  // T2.3 fix (Phase 5): pass req so a bound session token is rejected when
+  // replayed from a different IP/UA.  Callers that did not pass req
+  // (legacy paths, tests) keep the old behaviour — only unbound sessions
+  // pass that route, and the rotating sacupsMM key is unaffected.
   const nowMs = Date.now();
   return (
-    isValidPlantWideAuthSession(authToken, nowMs) || isValidPlantWideAuthKey(authKey, nowMs)
+    isValidPlantWideAuthSession(authToken, nowMs, req) || isValidPlantWideAuthKey(authKey, nowMs)
   );
 }
 
@@ -5551,7 +5555,7 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
   if (
     !skipBulkAuth &&
     isBulkScope &&
-    !isAuthorizedPlantWideControl({ authKey, authToken })
+    !isAuthorizedPlantWideControl({ authKey, authToken }, options.req)
   ) {
     const err = new Error("Unauthorized bulk command");
     err.status = 403;
@@ -5697,7 +5701,7 @@ async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) 
   if (
     !skipBulkAuth &&
     isBulkScope &&
-    !isAuthorizedPlantWideControl({ authKey, authToken })
+    !isAuthorizedPlantWideControl({ authKey, authToken }, options.req)
   ) {
     const err = new Error("Unauthorized bulk command");
     err.status = 403;
@@ -12647,7 +12651,9 @@ app.post("/api/write", async (req, res) => {
     return proxyWriteToRemote(req, res);
   }
   try {
-    const result = await executeLocalControlWriteRequest(req.body || {});
+    // T2.3 fix (Phase 5): pass req so a bound session token is rejected
+    // when replayed from a different client.
+    const result = await executeLocalControlWriteRequest(req.body || {}, { req });
     res.json(result);
   } catch (e) {
     res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
@@ -12659,7 +12665,7 @@ app.post("/api/write/batch", async (req, res) => {
     return proxyWriteToRemote(req, res, "/api/write/batch");
   }
   try {
-    const result = await executeLocalBatchControlWriteRequest(req.body || {});
+    const result = await executeLocalBatchControlWriteRequest(req.body || {}, { req });
     res.json(result);
   } catch (e) {
     res.status(Number(e?.status || 502)).json({ ok: false, error: e.message });
@@ -12679,7 +12685,9 @@ app.post("/api/write/auth/bulk", async (req, res) => {
   if (!isValidPlantWideAuthKey(authKey, nowMs)) {
     return res.status(403).json({ ok: false, error: "Authorization failed. Invalid auth key." });
   }
-  const session = issuePlantWideAuthSession(nowMs);
+  // T2.3 fix (Phase 5): bind the session to the requesting client so it
+  // cannot be replayed from elsewhere within the TTL window.
+  const session = issuePlantWideAuthSession(nowMs, req);
   return res.json({
     ok: true,
     token: session.token,
@@ -12724,7 +12732,7 @@ app.post("/api/plant-cap/enable", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res
       .status(403)
       .json({ ok: false, error: "Unauthorized plant cap command" });
@@ -12745,7 +12753,7 @@ app.post("/api/plant-cap/disable", (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res
       .status(403)
       .json({ ok: false, error: "Unauthorized plant cap command" });
@@ -12763,7 +12771,7 @@ app.post("/api/plant-cap/release", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res
       .status(403)
       .json({ ok: false, error: "Unauthorized plant cap command" });
@@ -12921,7 +12929,7 @@ app.get("/api/plant-cap/schedules", (req, res) => {
 
 app.post("/api/plant-cap/schedules", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
   }
   const input = normalizeScheduleInput(req.body || {});
@@ -12962,7 +12970,7 @@ app.get("/api/plant-cap/schedules/:id", (req, res) => {
 
 app.put("/api/plant-cap/schedules/:id", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
   }
   const id = Math.trunc(Number(req.params.id));
@@ -13003,7 +13011,7 @@ app.put("/api/plant-cap/schedules/:id", (req, res) => {
 app.delete("/api/plant-cap/schedules/:id", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   const authBody = req.body && typeof req.body === "object" ? req.body : {};
-  if (!isAuthorizedPlantWideControl(authBody)) {
+  if (!isAuthorizedPlantWideControl(authBody, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
   }
   const id = Math.trunc(Number(req.params.id));
@@ -13028,7 +13036,7 @@ app.delete("/api/plant-cap/schedules/:id", (req, res) => {
 
 app.post("/api/plant-cap/schedules/:id/toggle", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized plant cap schedule command" });
   }
   const id = Math.trunc(Number(req.params.id));
@@ -15939,7 +15947,7 @@ app.get("/api/maintenance", (req, res) => {
 
 app.post("/api/maintenance", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized" });
   }
   try {
@@ -15953,7 +15961,7 @@ app.post("/api/maintenance", (req, res) => {
 
 app.delete("/api/maintenance/:id", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {})) {
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized" });
   }
   try {

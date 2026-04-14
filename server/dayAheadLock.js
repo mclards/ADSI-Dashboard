@@ -24,6 +24,16 @@ const {
   getSolcastSnapshotForDay,
 } = require("./db");
 
+// T2.8 fix (Phase 5, 2026-04-14): in-process lock to serialise concurrent
+// captures of the same forecast_day.  The DB schema already enforces
+// uniqueness via PRIMARY KEY (forecast_day, slot) and bulkInsertDayAheadLocked
+// uses INSERT OR IGNORE, so duplicate ROWS are not possible — but two
+// concurrent callers could each pass the "already locked?" check and both
+// claim "I inserted N rows" when only the first actually did.  The lock
+// here ensures callers serialise per forecast_day so the counter and
+// return-value semantics match reality.
+const _captureLocks = new Map(); // forecast_day -> Promise resolving when in-flight capture done
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -116,6 +126,38 @@ async function captureDayAheadSnapshot(forecastDay, reason, options = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
     return { ok: false, error: "invalid_forecast_day" };
   }
+  // T2.8 fix (Phase 5): if another caller is mid-capture for this day,
+  // wait for it and report back the same result so we never report a
+  // false "inserted" count when DB-level INSERT OR IGNORE silently
+  // dropped our rows.
+  const inflight = _captureLocks.get(day);
+  if (inflight) {
+    try {
+      const prior = await inflight;
+      return {
+        ok: true,
+        reason: "already_in_progress",
+        inserted: 0,
+        existing: countDayAheadLockedForDay(day),
+        forecast_day: day,
+        capture_reason: String(reason || "manual").trim() || "manual",
+        joined_with: prior?.capture_reason || null,
+      };
+    } catch {
+      // prior capture failed — fall through and try ourselves.
+    }
+  }
+
+  const promise = _doCapture(day, reason, options);
+  _captureLocks.set(day, promise);
+  try {
+    return await promise;
+  } finally {
+    _captureLocks.delete(day);
+  }
+}
+
+async function _doCapture(day, reason, options) {
   const captureReason = String(reason || "manual").trim() || "manual";
   const plantCapMw = _toNumOrNull(options?.plantCapMw);
 

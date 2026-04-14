@@ -124,9 +124,16 @@ function normalizePlantCapSettings(raw, options = {}) {
     lowerMw,
     upperKw: Number.isFinite(upperMw) ? roundValue(upperMw * 1000, 3) : null,
     lowerKw: Number.isFinite(lowerMw) ? roundValue(lowerMw * 1000, 3) : null,
+    // T2.6 fix (Phase 5, 2026-04-14): clamp gapKw to >= 0 when bounds are
+    // invalid (lower >= upper).  Without the clamp downstream callers that
+    // multiply gapKw by a step factor would produce negative kW values
+    // even though config.errors already records the bound-violation.  The
+    // upstream UI/validator paths still surface the configuration error;
+    // the clamp here is a defence-in-depth so a stray downstream consumer
+    // cannot dispatch a negative setpoint.
     gapKw:
       Number.isFinite(upperMw) && Number.isFinite(lowerMw)
-        ? roundValue((upperMw - lowerMw) * 1000, 3)
+        ? Math.max(0, roundValue((upperMw - lowerMw) * 1000, 3))
         : null,
     sequenceMode,
     sequenceCustom,

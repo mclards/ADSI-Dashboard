@@ -298,7 +298,37 @@ function checkAlarms(batch) {
     const cur = row.alarm || 0;
 
     if (prev === undefined) {
-      // First time seeing this unit
+      // T2.5 fix (Phase 5, 2026-04-14): hydrate from any existing
+      // not-yet-cleared DB row before deciding whether to INSERT a new
+      // active alarm.  Without this, every server restart that finds a
+      // unit still alarming would insert a SECOND active row, inflating
+      // counts and breaking episode grouping.
+      const existing = stmts.getActiveAlarmForUnit
+        ? stmts.getActiveAlarmForUnit.get(row.inverter, row.unit)
+        : null;
+      if (existing && cur !== 0) {
+        // Re-attach to existing episode.  If the alarm value drifted while
+        // we were down (e.g. additional bits set), patch the stored row in
+        // place rather than spawning a duplicate.
+        if (Number(existing.alarm_value) !== cur) {
+          const severity = getTopSeverity(cur) || "fault";
+          stmts.updateActiveAlarm.run(
+            formatAlarmHex(cur),
+            cur,
+            severity,
+            row.inverter,
+            row.unit,
+          );
+        }
+        activeAlarmState[key] = cur;
+        continue;
+      }
+      if (existing && cur === 0) {
+        // We're down, the unit cleared; close the existing row.
+        stmts.clearAlarm.run(now, row.inverter, row.unit);
+        activeAlarmState[key] = 0;
+        continue;
+      }
       activeAlarmState[key] = cur;
       if (cur !== 0) {
         const severity = getTopSeverity(cur) || "fault";

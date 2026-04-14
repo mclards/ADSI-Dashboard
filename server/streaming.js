@@ -42,7 +42,12 @@ function handleProcessExit(code) {
   ffmpegProcess = null;
   if (code !== 0 && reconnectAttempt < 3 && clients.size > 0) {
     status = "error";
-    const delay = 3000 * Math.pow(2, reconnectAttempt);
+    // T2.9 fix (Phase 5, 2026-04-14): explicit 30 s upper bound on the
+    // exponential delay.  At reconnectAttempt < 3 the unclamped value is
+    // 3/6/12 s — already small — but the clamp is defence-in-depth so a
+    // future bump to the retry-count cap can't accidentally produce
+    // minute-long backoffs that look like "stream stuck offline".
+    const delay = Math.min(30000, 3000 * Math.pow(2, reconnectAttempt));
     reconnectAttempt++;
     console.log(`[camera] ffmpeg exited (code ${code}), reconnect #${reconnectAttempt} in ${delay}ms`);
     reconnectTimer = setTimeout(() => {

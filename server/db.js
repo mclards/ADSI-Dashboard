@@ -1187,6 +1187,15 @@ const stmts = {
   getActiveAlarms: db.prepare(
     `SELECT * FROM alarms WHERE cleared_ts IS NULL ORDER BY ts DESC`,
   ),
+  // T2.5 fix (Phase 5, 2026-04-14): fetch the still-active alarm row for a
+  // single (inverter, unit), if any.  Used on first batch after restart to
+  // avoid inserting a duplicate active row when the in-memory tracker has
+  // not yet been hydrated from DB state.
+  getActiveAlarmForUnit: db.prepare(
+    `SELECT id, alarm_code, alarm_value, severity, ts FROM alarms
+      WHERE cleared_ts IS NULL AND inverter = ? AND unit = ?
+      ORDER BY ts DESC LIMIT 1`,
+  ),
   getAlarmsRange: db.prepare(
     `SELECT * FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
   ),
