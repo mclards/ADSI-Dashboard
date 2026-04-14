@@ -2535,7 +2535,13 @@ function assertReplicationTableAllowed(tableName) {
 function stmtCached(key, sql) {
   if (!REPLICATION_STMT_CACHE.get(key)) {
     REPLICATION_STMT_CACHE.set(key, db.prepare(sql));
-    // Evict oldest (first inserted) entry if cache exceeds 200 entries
+    // Evict oldest (first inserted) entry if cache exceeds 200 entries.
+    // T1.7 note (Phase 8): better-sqlite3 Statement objects do NOT expose a
+    // .free() / .finalize() method — the N-API finaliser releases native
+    // resources on GC once the JS reference is dropped.  `Map.delete()` is
+    // sufficient; no explicit free call is available or needed.  The audit's
+    // suggestion to call .free() applied to node-sqlite3 (async) or
+    // better-sqlite3-with-pool forks, not the vanilla package used here.
     if (REPLICATION_STMT_CACHE.size > 200) {
       const oldest = REPLICATION_STMT_CACHE.keys().next().value;
       REPLICATION_STMT_CACHE.delete(oldest);
@@ -6346,6 +6352,13 @@ async function pollRemoteLiveOnce() {
     if (wasConnected || hadLiveData) {
       broadcastRemoteOfflineLiveState();
     }
+  }
+  // T1.5 fix (Phase 8, 2026-04-14): abort any prior in-flight live fetch
+  // before reassigning the module-level controller.  Without this, rapid
+  // reconnect cycles would leave orphaned fetches running to completion
+  // (and consuming socket/memory) whose results we would discard anyway.
+  if (remoteLiveFetchController) {
+    try { remoteLiveFetchController.abort(); } catch (_) { /* ignore */ }
   }
   const liveController = new AbortController();
   remoteLiveFetchController = liveController;

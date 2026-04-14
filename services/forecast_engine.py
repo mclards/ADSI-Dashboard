@@ -8240,6 +8240,16 @@ def predict_residual_with_bundle(
     # above 60% even when the classifier was uncertain; now uncertainty
     # below 0.30 effectively disables regime influence, and 0.30-1.0 scales
     # linearly into the blend factor.
+    # T4.18 fix (Phase 8, 2026-04-14): log when regime confidence is low so
+    # operators can see when a forecast is falling back toward the global
+    # model.  DEBUG level to avoid noise on healthy classifications.
+    if regime_confidence < 0.6:
+        log.debug(
+            "Low regime confidence for '%s': confidence=%.3f (< 0.6) — regime blend reduced "
+            "from %.3f to %.3f",
+            target_regime, float(regime_confidence), float(blend / max(float(np.clip(regime_confidence, 0.0, 1.0)), 1e-6)),
+            float(blend),
+        )
     blend *= float(np.clip(regime_confidence, 0.0, 1.0))
     return ((1.0 - blend) * global_pred + blend * regime_pred), {
         "target_regime": target_regime,

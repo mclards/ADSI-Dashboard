@@ -46,11 +46,21 @@ ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1")
 
 app = FastAPI()
 
+# T3.14 fix (Phase 8, 2026-04-14): restrict CORS to the loopback dashboard
+# origin so that if the service port is ever accidentally exposed beyond
+# 127.0.0.1 (e.g. firewall misconfiguration, future remote-access feature),
+# an untrusted browser origin cannot POST /write.  The service ALSO binds
+# to ENGINE_HOST (default 127.0.0.1) which is the primary defence — this
+# is belt-and-braces.  Override with INVERTER_ENGINE_CORS_ORIGINS env var
+# (comma-separated) if the operator needs to add a reverse-proxy origin.
+_cors_default = ["http://127.0.0.1:3500", "http://localhost:3500"]
+_cors_env = os.getenv("INVERTER_ENGINE_CORS_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else _cors_default
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # allow any origin (browser, file://, etc.)
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -1283,7 +1293,26 @@ def _update_metrics_from_frame(frame: dict):
     ms["pdcData"][nk] = {"lastPdcRaw": pdc_raw}
 
     pac_reg  = float(frame.get("pac") or 0)
-    pac_cand = pac_reg * 10 if pac_reg * 10 <= 260_000 else 0
+    # T3.17 fix (Phase 8, 2026-04-14): log when the clamp triggers so an
+    # Ingeteam firmware variant that uses a different word order surfaces
+    # as a loud warning instead of silently-zeroed PAC.  Previously a bad
+    # register layout produced 0 kW forever with no log signal.
+    _pac_scaled = pac_reg * 10
+    if _pac_scaled > 260_000:
+        global _pac_clamp_notified
+        try:
+            _pac_clamp_notified
+        except NameError:
+            _pac_clamp_notified = set()
+        _clamp_key = nk  # e.g. "3_2" for inverter 3 unit 2
+        if _clamp_key not in _pac_clamp_notified:
+            print(
+                f"[POLL] PAC sanity-clamp triggered for {_clamp_key}: raw={pac_reg} "
+                f"scaled={_pac_scaled:.0f}W > 260kW cap.  Possible word-swap/firmware "
+                f"variant mismatch; values reported as 0.  Verify register layout."
+            )
+            _pac_clamp_notified.add(_clamp_key)
+    pac_cand = _pac_scaled if _pac_scaled <= 260_000 else 0
     pac_raw  = 0.0 if (vdc == 0 or idc == 0) else pac_cand
 
     y  = frame.get("year")   or 0
@@ -1399,6 +1428,37 @@ def _build_metrics() -> list:
 # -------------------------------------------------
 #   REST endpoints  (registered on the app above)
 # -------------------------------------------------
+
+# T3.13 + T3.18 fix (Phase 8, 2026-04-14): Liveness/readiness endpoint for
+# Electron parent and external monitors.  Returns both coarse liveness
+# (process responding) and functional health (recent polls, connected
+# clients).  `stale=true` when the newest frame across all inverters is
+# older than 30 s — the "process alive but stuck" failure mode.
+@app.get("/health")
+def get_health():
+    now_ms = int(time.time() * 1000)
+    newest_ts = 0
+    connected = 0
+    for arr in shared.values():
+        if isinstance(arr, list):
+            for frame in arr:
+                ts = int(frame.get("ts") or 0)
+                if ts > newest_ts:
+                    newest_ts = ts
+        if arr:
+            connected += 1
+    age_ms = (now_ms - newest_ts) if newest_ts > 0 else -1
+    stale = age_ms < 0 or age_ms > 30_000
+    status = "ok" if not stale and connected > 0 else ("degraded" if connected > 0 else "unready")
+    return {
+        "status": status,
+        "stale": stale,
+        "newest_frame_age_ms": age_ms,
+        "connected_inverter_count": connected,
+        "configured_inverter_count": len(inverters),
+        "now_ms": now_ms,
+    }
+
 
 @app.get("/data")
 def get_data():
@@ -1644,6 +1704,16 @@ async def main():
     auto_reset_state.clear()
 
     await rebuild_global_maps()
+    # T3.20 fix (Phase 8, 2026-04-14): warn loudly if ipconfig is empty at
+    # startup.  The service stays up (so ipconfig hot-reload can add inverters
+    # later) but the operator gets a clear signal rather than silently-empty
+    # /data and /health responses.
+    if not inverters:
+        print(
+            "[ENGINE] WARNING: ipconfig lists zero inverters. Service will stay up "
+            "waiting for ipconfig hot-reload, but /data and /metrics will return empty "
+            "until an inverter IP is configured.  Check %PROGRAMDATA%\\InverterDashboard\\ipconfig.json."
+        )
     asyncio.create_task(ipconfig_watcher())
     asyncio.create_task(start_polling_manager())
 

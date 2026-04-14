@@ -151,6 +151,20 @@ function unregisterStreamClient(ws) {
 
 function setFfmpegPath(p) { ffmpegBinPath = p; }
 
+// T2.18 fix (Phase 8, 2026-04-14): on process SIGTERM (Electron parent
+// issues this during app shutdown), kill any running ffmpeg child so
+// it doesn't become a zombie holding the RTSP socket.  Idempotent —
+// stopCameraStream() already handles the null case.
+let _sigtermHandlerInstalled = false;
+function installShutdownHandler() {
+  if (_sigtermHandlerInstalled) return;
+  _sigtermHandlerInstalled = true;
+  process.on("SIGTERM", () => {
+    try { stopCameraStream(); } catch (_) { /* ignore */ }
+  });
+}
+installShutdownHandler();
+
 module.exports = {
   startCameraStream,
   stopCameraStream,

@@ -45,6 +45,11 @@ function isMigrationComplete() {
  * Returns the resolved DB directory if the app is on the new layout, or null
  * to signal that the caller should fall back to the legacy APPDATA path.
  */
+// T2.13 fix (Phase 8, 2026-04-14): one-time INFO log when the migration
+// sentinel is absent so the operator knows the caller is falling back to
+// the legacy path.  Previously this was silent, making "why is my data
+// under APPDATA" hard to debug after a partial migration.
+let _dbDirFallbackLogged = false;
 function resolvedDbDir() {
   const newDir = path.join(getNewRoot(), "db");
   if (isMigrationComplete()) return newDir;
@@ -53,8 +58,24 @@ function resolvedDbDir() {
   try {
     const dbPath = path.join(newDir, "adsi.db");
     const stat = fs.statSync(dbPath);
-    if (stat.isFile() && stat.size >= 100) return newDir;
+    if (stat.isFile() && stat.size >= 100) {
+      if (!_dbDirFallbackLogged) {
+        console.log(
+          "[storagePaths] Migration sentinel absent but DB file exists at new root — " +
+          "using new root (" + newDir + ").",
+        );
+        _dbDirFallbackLogged = true;
+      }
+      return newDir;
+    }
   } catch { /* file doesn't exist — fall through */ }
+  if (!_dbDirFallbackLogged) {
+    console.log(
+      "[storagePaths] Migration sentinel absent and no DB at new root — " +
+      "caller will fall back to legacy APPDATA path.",
+    );
+    _dbDirFallbackLogged = true;
+  }
   return null;
 }
 
