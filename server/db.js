@@ -2517,19 +2517,17 @@ function queryReadingsRangeAll(startTs, endTs) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   if (!(e >= s)) return [];
-  // Warn on ranges > 2 days
+  // Warn on ranges > 2 days (operator hint — not enforced).
   const MAX_RANGE_MS = 2 * 24 * 60 * 60 * 1000;
   if (e - s > MAX_RANGE_MS) {
     console.warn(`[DB] queryReadingsRangeAll: range ${Math.round((e-s)/86400000)}d exceeds 2d cap — please use per-inverter path or batch with yields`);
   }
-  // E4: Row count pre-check to prevent OOM on large exports.
-  // Note: COUNT checks main DB only; archive DBs may add more rows.
-  // The 366-day route-level limit provides a secondary guard.
-  const MAX_EXPORT_ROWS = 500000;
-  const mainCount = stmts.countReadingsRangeAll.get(s, e)?.n || 0;
-  if (mainCount > MAX_EXPORT_ROWS) {
-    throw new Error(`Export would return ${mainCount.toLocaleString()} rows (limit: ${MAX_EXPORT_ROWS.toLocaleString()}). Please narrow the date range or select a single inverter.`);
-  }
+  // Note: v2.8.2 added a 500k row throw here ("E4") which caused exports to
+  // fail on high-poll-rate deployments. Reverted to v2.7.x behaviour — the
+  // route-level 366-day cap (MAX_EXPORT_RANGE_DAYS in server/index.js) is
+  // the load bound. If a pathological range somehow slips through, the
+  // caller will OOM loudly, which is preferable to silently blocking a
+  // valid operator-requested export.
   const out = new Map();
   for (const monthKey of iterateMonthKeys(s, e)) {
     const entry = getArchiveEntry(monthKey, false);
@@ -2560,14 +2558,8 @@ function queryEnergy5minRangeAll(startTs, endTs) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
   if (!(e >= s)) return [];
-  // E4: Row count pre-check to prevent OOM on large exports.
-  // Note: COUNT checks main DB only; archive DBs may add more rows.
-  // The 366-day route-level limit provides a secondary guard.
-  const MAX_EXPORT_ROWS = 500000;
-  const mainCount = stmts.countEnergy5minRangeAll.get(s, e)?.n || 0;
-  if (mainCount > MAX_EXPORT_ROWS) {
-    throw new Error(`Export would return ${mainCount.toLocaleString()} rows (limit: ${MAX_EXPORT_ROWS.toLocaleString()}). Please narrow the date range or select a single inverter.`);
-  }
+  // Note: v2.8.2's 500k "E4" guard removed — see queryReadingsRangeAll for
+  // rationale. Route-level 366-day cap bounds the worst case.
   const out = new Map();
   for (const monthKey of iterateMonthKeys(s, e)) {
     const entry = getArchiveEntry(monthKey, false);

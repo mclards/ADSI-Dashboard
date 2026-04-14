@@ -10489,7 +10489,7 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 
   let rows = [];
   if (!inverter || inverter === "all") {
-    rows = queryReadingsRangeAllChunked(s, e).map((r) => ({
+    rows = queryReadingsRangeAll(s, e).map((r) => ({
       inverter: r.inverter,
       unit: r.unit,
       ts: r.ts,
@@ -10680,40 +10680,6 @@ function sumEnergyRowsKwh(rows) {
   );
 }
 
-// Per-inverter chunked scans that bypass the all-inverters 500k row guard in
-// queryReadingsRangeAll / queryEnergy5minRangeAll. Each per-inverter query is
-// unguarded and bounds memory to one inverter's rows at a time, so total
-// resident data stays ~1/invCount of the old all-at-once fetch. Returns the
-// same shape as the guarded functions. Use these on non-export code paths
-// where throwing on >500k rows would kill the UI / WS pings rather than
-// pointing the operator at a narrower date range.
-function _invCountForScan() {
-  return Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
-}
-function queryReadingsRangeAllChunked(startTs, endTs) {
-  const s = Number(startTs || 0);
-  const e = Number(endTs || 0);
-  if (!(e >= s)) return [];
-  const invCount = _invCountForScan();
-  const out = [];
-  for (let inv = 1; inv <= invCount; inv++) {
-    const invRows = queryReadingsRange(inv, s, e);
-    if (invRows && invRows.length) out.push(...invRows);
-  }
-  return out;
-}
-function queryEnergy5minRangeAllChunked(startTs, endTs) {
-  const s = Number(startTs || 0);
-  const e = Number(endTs || 0);
-  if (!(e >= s)) return [];
-  const invCount = _invCountForScan();
-  const out = [];
-  for (let inv = 1; inv <= invCount; inv++) {
-    const invRows = queryEnergy5minRange(inv, s, e);
-    if (invRows && invRows.length) out.push(...invRows);
-  }
-  return out;
-}
 
 function buildForecastActualSupplementRowsForRange(
   startTs,
@@ -10738,11 +10704,11 @@ function buildForecastActualSupplementRowsForRange(
   const persistedBeforeRangeKwh =
     overlapStartTs > dayStartTs
       ? sumEnergyRowsKwh(
-          queryEnergy5minRangeAllChunked(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
+          queryEnergy5minRangeAll(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
         )
       : 0;
   const persistedRangeKwh = sumEnergyRowsKwh(
-    queryEnergy5minRangeAllChunked(overlapStartTs, overlapEndTs),
+    queryEnergy5minRangeAll(overlapStartTs, overlapEndTs),
   );
 
   return buildCurrentDayActualSupplementRows({
@@ -14154,7 +14120,7 @@ app.get("/api/energy/5min", (req, res) => {
   try {
     const baseRows = scopedInv
       ? queryEnergy5minRange(scopedInv, s, e)
-      : queryEnergy5minRangeAllChunked(s, e);
+      : queryEnergy5minRangeAll(s, e);
 
     if (pagedMode) {
       const safeLimit = clampInt(limit, 100, 5000, 500);
@@ -14235,7 +14201,7 @@ app.get("/api/analytics/energy", (req, res) => {
   // Apply row cap to prevent wide date ranges from hanging the analytics chart.
   const baseRows =
     !inverter || inverter === "all"
-      ? queryEnergy5minRangeAllChunked(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
+      ? queryEnergy5minRangeAll(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
       : queryEnergy5minRange(Number(inverter), s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP);
 
   if (baseRows.length) {
@@ -14442,7 +14408,7 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
     try {
       const solarWindow = getForecastSolarWindowBounds(date);
       if (Number.isFinite(solarWindow.startTs) && Number.isFinite(solarWindow.endTs)) {
-        const energyRows = queryEnergy5minRangeAllChunked(solarWindow.startTs, solarWindow.endTs);
+        const energyRows = queryEnergy5minRangeAll(solarWindow.startTs, solarWindow.endTs);
         const bySlotTs = new Map();
         for (const r of energyRows) {
           const ts = Number(r?.ts || 0);
@@ -15615,7 +15581,7 @@ app.get("/api/energy/daily", (req, res) => {
     if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
       return res.status(400).json({ ok: false, error: "invalid range" });
     }
-    const rows = queryEnergy5minRangeAllChunked(start, end);
+    const rows = queryEnergy5minRangeAll(start, end);
     const byInvDate = {};
     for (const row of rows) {
       const inv = Number(row.inverter || 0);

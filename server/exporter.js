@@ -1227,35 +1227,25 @@ function buildEnergySummaryExportRows(startTs, endTs, inverter, options = {}) {
   const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
   const mapped = [];
   const today = fmtDate(Date.now());
-  // Build per-day summary maps by iterating per inverter so memory stays bounded
-  // and we avoid the all-inverters raw-row guard that fires on high-poll datasets.
-  const dayMapsByDay = new Map();
-  for (const inv of selectedInvs) {
-    const invRows = queryReadingsRange(inv, s, e);
-    if (!invRows || !invRows.length) continue;
-    const rowsByDayForInv = new Map();
-    for (const row of invRows) {
-      const ts = Number(row?.ts || 0);
-      if (!(ts > 0)) continue;
-      const day = fmtDate(ts);
-      if (!rowsByDayForInv.has(day)) rowsByDayForInv.set(day, []);
-      rowsByDayForInv.get(day).push(row);
-    }
-    for (const [day, dayRows] of rowsByDayForInv.entries()) {
-      const invDayMap = summarizeReadingsForEnergy(dayRows);
-      let dayMap = dayMapsByDay.get(day);
-      if (!dayMap) {
-        dayMap = new Map();
-        dayMapsByDay.set(day, dayMap);
-      }
-      for (const [key, summary] of invDayMap.entries()) {
-        dayMap.set(key, summary);
-      }
-    }
+  // Single-query fetch (v2.7.x behaviour): one indexed SQL scan returns all
+  // rows in ts order. Bucket by day then summarize. The v2.8.2 "E4" 500k row
+  // guard was reverted because it blocked high-poll-rate exports; the
+  // route-level 366-day cap bounds worst-case memory.
+  const rangeRows = invNum
+    ? queryReadingsRange(invNum, s, e)
+    : queryReadingsRangeAll(s, e);
+  const rowsByDay = new Map();
+  for (const row of rangeRows) {
+    const ts = Number(row?.ts || 0);
+    if (!(ts > 0)) continue;
+    const day = fmtDate(ts);
+    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+    rowsByDay.get(day).push(row);
   }
 
   for (const day of iterateLocalDates(s, e)) {
-    const dayMap = dayMapsByDay.get(day) || new Map();
+    const dayRows = rowsByDay.get(day) || [];
+    const dayMap = summarizeReadingsForEnergy(dayRows);
     let dayTotalMwh = 0;
     const dayStart = new Date(`${day}T00:00:00.000`).getTime();
     const dayEnd = new Date(`${day}T23:59:59.999`).getTime();
@@ -1538,18 +1528,9 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
   const spec = normalizeEnergyResolution(resolution);
-  let rows;
-  if (!inverter || inverter === 'all') {
-    // Iterate per inverter to bypass the all-inverters row guard on very wide ranges.
-    const { invCount } = readInverterConfig();
-    rows = [];
-    for (let inv = 1; inv <= invCount; inv++) {
-      const invRows = queryEnergy5minRange(inv, s, e);
-      if (invRows && invRows.length) rows.push(...invRows);
-    }
-  } else {
-    rows = queryEnergy5minRange(Number(inverter), s, e);
-  }
+  const rows = !inverter || inverter === 'all'
+    ? queryEnergy5minRangeAll(s, e)
+    : queryEnergy5minRange(Number(inverter), s, e);
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
   // For "all inverters" daily-mode export, zero-fill inverters that had no data.
@@ -1778,14 +1759,7 @@ async function exportForecastActual({
     ? supplementalActualRows
     : [];
 
-  // Iterate per inverter to bypass the all-inverters row guard on wide ranges.
-  const { invCount: forecastInvCount } = readInverterConfig();
-  const actualRawAll = [];
-  for (let inv = 1; inv <= forecastInvCount; inv++) {
-    const invRows = queryEnergy5minRange(inv, s, e);
-    if (invRows && invRows.length) actualRawAll.push(...invRows);
-  }
-  const actualRaw = actualRawAll
+  const actualRaw = queryEnergy5minRangeAll(s, e)
     .map((r) => ({
       ts: Number(r?.ts || 0),
       kwh_inc: Number(r?.kwh_inc || 0),
