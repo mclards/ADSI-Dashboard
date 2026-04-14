@@ -83,14 +83,18 @@ function isPortFree(port) {
 /* ── Health check ─────────────────────────────────────────────────── */
 
 function healthCheck() {
+  // T2.12 fix (Phase 2, 2026-04-14): previously treated "any response" as
+  // healthy, so a 5xx from a crashing go2rtc still reported alive.  Now a
+  // response is only healthy if statusCode < 500.  4xx is still considered
+  // alive (the server is responding, auth/path just doesn't match).
   return new Promise((resolve) => {
     const req = http.get(
       `http://127.0.0.1:${API_PORT}/api/`,
       { timeout: HEALTH_TIMEOUT_MS },
       (res) => {
-        // Any response = alive
         res.resume();
-        resolve(true);
+        const code = res.statusCode || 0;
+        resolve(code > 0 && code < 500);
       },
     );
     req.on("error", () => resolve(false));

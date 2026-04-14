@@ -19,6 +19,7 @@ const cron = require("node-cron");
 const { getPortableDataRoot } = require("./runtimeEnvPaths");
 const streaming = require("./streaming");
 const go2rtcManager = require("./go2rtcManager");
+const forecastGenLock = require("./forecastGenLock");
 
 const {
   getSetting,
@@ -15229,6 +15230,12 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
     }
   }, 45 * 60 * 1000);
 
+  // T4.4 fix (Phase 2): cross-process advisory lock shared with Python.  If
+  // a Python fallback is already running on the same date(s) we MUST NOT
+  // start a parallel run — that produces duplicate forecast_run_audit rows.
+  // Locks acquired here are released in finally; Python respects the same
+  // files via services/forecast_engine.py:_dayahead_gen_lock_*.
+  let _lockedDates = [];
   try {
     let dates = Array.isArray(body.dates)
       ? body.dates
@@ -15242,6 +15249,22 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
       const tomorrow = addDaysIso(localDateStr(), 1);
       dates = [tomorrow];
     }
+
+    // Acquire lock per date; if any is busy, back off atomically by
+    // releasing everything already taken and returning 409.
+    const lockOwner = `node-internal:${trigger}`;
+    for (const d of dates) {
+      if (!forecastGenLock.acquire(DATA_DIR, d, lockOwner)) {
+        for (const taken of _lockedDates) forecastGenLock.release(DATA_DIR, taken);
+        _lockedDates = [];
+        return res.status(409).json({
+          ok: false,
+          error: `Day-ahead generation for ${d} already in progress (Python or Node).`,
+        });
+      }
+      _lockedDates.push(d);
+    }
+
     console.log(
       `[forecast:internal] Auto-generation requested: trigger=${trigger} dates=${dates.join(",")}`,
     );
@@ -15266,6 +15289,8 @@ app.post("/api/internal/forecast/generate-auto", async (req, res) => {
   } finally {
     forecastGenerating = false;
     clearTimeout(_internalGuardTimer);
+    // T4.4: always release any locks we acquired, even on error.
+    for (const d of _lockedDates) forecastGenLock.release(DATA_DIR, d);
   }
 });
 

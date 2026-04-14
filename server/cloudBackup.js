@@ -636,11 +636,18 @@ class CloudBackupService {
       cloud: {},
     };
 
+    // T2.10 fix (Phase 2, 2026-04-14): write manifest atomically via a .tmp
+    // file + rename so two concurrent backup runs cannot produce a torn /
+    // partially-overwritten manifest.json that would later break restore.
     const manifestPath = path.join(dir, "manifest.json");
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    const manifestTmp = `${manifestPath}.tmp`;
+    fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2));
+    fs.renameSync(manifestTmp, manifestPath);
     checksums["manifest.json"] = sha256File(manifestPath);
     manifest.checksums = checksums;
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    // Second write embeds the manifest's own checksum — also atomic.
+    fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2));
+    fs.renameSync(manifestTmp, manifestPath);
 
     this._setProgress({ pct: 70, message: "Local backup package created." });
 
@@ -1156,7 +1163,17 @@ class CloudBackupService {
             console.log("[CloudBackup] Database restored from:", srcDb);
           } finally {
             if (pollerWasRunning) {
-              try { this.poller.start(); } catch {
+              // T2.11 fix (Phase 2, 2026-04-14): explicit null-check before
+              // calling .start().  If this.poller was torn down mid-restore
+              // (early-boot race) the implicit TypeError is still caught but
+              // leaves the error unclear in logs; be explicit.
+              try {
+                if (this.poller && typeof this.poller.start === "function") {
+                  this.poller.start();
+                } else {
+                  console.warn("[CloudBackup] poller unavailable after restore; server restart may be required.");
+                }
+              } catch {
                 // ignore restart errors; server restart may be needed
               }
             }

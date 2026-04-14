@@ -11640,12 +11640,19 @@ def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> 
     url = f"http://127.0.0.1:{port}/api/internal/forecast/generate-auto"
     target_s = target_date.isoformat()
     log.info("Delegating day-ahead generation for %s to Node.js orchestrator at %s (trigger=%s)", target_s, url, trigger)
-    # T4.4 fix: acquire advisory lock so a parallel Python caller (CLI, auto-
-    # scheduler) cannot initiate a concurrent generation that would produce
-    # duplicate audit rows.  If the lock is busy, return None (caller falls
-    # back to skipping or retries later).
-    if not _dayahead_gen_lock_acquire(target_date, owner=f"delegate:{trigger}"):
-        return None
+    # T4.4 fix (Phase 2, 2026-04-14): DO NOT acquire the advisory lock before
+    # delegating.  The Node orchestrator acquires the same file-lock itself
+    # (see server/forecastGenLock.js), so if Python held it here Node would
+    # see "busy" and refuse every delegation call — a self-deadlock.
+    #
+    # Correct ownership:
+    #   - Node owns the lock while it runs the orchestrator.
+    #   - If Python's HTTP call times out but Node is still working, Node
+    #     keeps holding the lock; any Python direct-fallback path
+    #     (_run_dayahead_direct_fallback, recovery fallback) will then see
+    #     the lock as BUSY and skip, preventing duplicate audit rows.
+    #   - If Node is unreachable at all, no lock is ever created by Node,
+    #     and the direct-fallback path acquires its own lock there.
     try:
         resp = requests.post(url, json={
             "dates": [target_s],
@@ -11668,8 +11675,6 @@ def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> 
     except Exception as e:
         log.error("Failed to delegate generation to Node.js: %s", e)
         return None
-    finally:
-        _dayahead_gen_lock_release(target_date)
 
 
 def main() -> None:
