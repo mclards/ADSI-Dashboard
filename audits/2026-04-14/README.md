@@ -11,6 +11,8 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 | 3 | [FIXES_PROGRESS.md](FIXES_PROGRESS.md) | What shipped, commit by commit |
 | 4 | [FIX_DEBUG_INDEX.md](FIX_DEBUG_INDEX.md) | Per-fix file:line anchors, log signatures, rollback commands, symptom-if-misbehaving table, post-release monitoring checklist |
 | 5 | [KNOWN_GAPS.md](KNOWN_GAPS.md) | What was deliberately NOT fixed (100-item HIGH/MED/LOW backlog, partial fixes, audit coverage gaps, verification gaps, tooling gaps, symptom → known-gap grep table) |
+| 6 | [PHASE2_FIXES.md](PHASE2_FIXES.md) | Post-v2.8.8 session that closed T4.4 (Node-side lock), verified T6.3 thumbprint, and fixed T2.10/T2.11/T2.12/T5.4. Read alongside KNOWN_GAPS.md — its "closed" table amends that doc until it is regenerated. |
+| 7 | [PHASE3_FIXES.md](PHASE3_FIXES.md) | Post-Phase-2 session that closed Electron hardening (T6.7/T6.9/T6.10/T6.11) and frontend tail (T5.5/T5.6/T5.7/T5.8). Same amend convention as Phase 2. |
 
 ## When to use which file
 
@@ -22,6 +24,8 @@ Self-contained record of the comprehensive bug sweep and Phase-1 remediation tha
 
 ## Commit index for this audit
 
+Phase 1 (v2.8.8 release):
+
 ```
 b153d69  Document v2.8.8 gaps + per-fix debug index + changelog + docs README
 0d4f8b9  Document v2.8.8 CRITICAL-fix progress log
@@ -32,6 +36,15 @@ b153d69  Document v2.8.8 gaps + per-fix debug index + changelog + docs README
 d1c6081  Fix Phase 1B (v2.8.8): Inverter write-control safety
 974be7f  Fix Phase 1A (v2.8.8): SQL injection, export yields, pressure-retry
 1d88c8e  Document comprehensive v2.8.8 bug sweep: 123 findings across 8 tracks
+```
+
+Phase 2 + Phase 3 (post-v2.8.8, pre-v2.8.9):
+
+```
+6ca5a66  Fix Phase 2 backend: T4.4 forecast lock + T2.10/T2.11/T2.12
+eb1057b  Fix Phase 3 Electron: T6.7/T6.9/T6.10/T6.11 hardening
+f83c131  Fix Phase 2+3 frontend: T5.4/T5.5/T5.6/T5.7/T5.8
+(next)   Document Phase 2 + Phase 3 fixes (this commit)
 ```
 
 ---
