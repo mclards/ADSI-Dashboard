@@ -56,6 +56,18 @@ except ImportError as _lgb_err:
     _LIGHTGBM_IMPORT_ERROR = str(_lgb_err)
 
 
+# Phase 8 code-review fix (2026-04-15): module-scope initializers for the
+# one-time-log guards used by T4.6 (Solcast reliability dimension fallback)
+# and T4.8 (legacy-model truncation).  Previously initialised lazily inside
+# each function via `global X; try: X except NameError: X = ...`, which has
+# a tiny race where two concurrent first-time calls both hit NameError,
+# both enter the init branch, and one STORE_GLOBAL overwrites the other's
+# just-added entry.  Pre-initialising here closes the window — subsequent
+# `add()` / assignment always lands in the already-existing container.
+_reliability_fallback_notified: set = set()
+_legacy_model_truncate_notified: bool = False
+
+
 class IdentityFeatureScaler:
     """Legacy-compatible no-op transformer for standalone scaler artifacts."""
 
@@ -4953,12 +4965,8 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
     if not artifact or not isinstance(artifact, dict):
         log.warning("Solcast reliability artifact unavailable - using hardcoded defaults (reliability=0.62, bias_ratio=1.0). Forecast quality may be degraded.")
         return fallback
-    # Detect missing dimensions once.
-    global _reliability_fallback_notified
-    try:
-        _reliability_fallback_notified
-    except NameError:
-        _reliability_fallback_notified = set()
+    # Detect missing dimensions once (guard `_reliability_fallback_notified`
+    # is initialised at module scope — Phase 8 code-review fix).
     for dim in ("regimes", "seasons", "season_regimes", "time_of_day"):
         if dim not in artifact and dim not in _reliability_fallback_notified:
             log.info(
@@ -8126,11 +8134,7 @@ def _align_bundle_features(
             # quality is measurably worse than a freshly-trained model.  The
             # fallback stays functional so the upgrade path is not broken,
             # but the WARN surfaces the "retrain needed" signal clearly.
-            global _legacy_model_truncate_notified
-            try:
-                _legacy_model_truncate_notified
-            except NameError:
-                _legacy_model_truncate_notified = False
+            global _legacy_model_truncate_notified  # guard init'd at module scope
             if not _legacy_model_truncate_notified:
                 log.warning(
                     "Legacy model detected: truncating features %d -> %d (dropping newest columns, "

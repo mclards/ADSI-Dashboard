@@ -205,6 +205,16 @@ static_units    = {}   # ip -> [unit list] or None
 auto_reset_state = {}  # (ip, unit) -> {"state": str, "since": float, "busy": bool}
 _last_unit_fail  = {}  # ip -> timestamp of last failed unit-detect
 
+# Phase 8 code-review fix (2026-04-15): module-scope initializers for the
+# one-time-log guards used by T3.17 (PAC clamp) so a race between concurrent
+# first-time writers cannot lose an entry.  Previously the guards used
+# `global X; try: X except NameError: X = set()` inside the function, which
+# has a small window where two threads both hit NameError and one
+# re-initialises away the other's just-added entry.  Pre-initialising at
+# module scope closes the window — the first `add()` always lands in the
+# already-existing set.
+_pac_clamp_notified: set = set()
+
 auto_reset_cfg = {
     "enabled":                 False,
     "wait_clear_hex":          "01000H",
@@ -1128,11 +1138,15 @@ async def rebuild_global_maps(cfg=None):
         new_static_units[ip] = unit_cfg.get(str(i))
 
     # Atomic swaps (single-statement rebinding under GIL).
+    # Phase 8 code-review fix (2026-04-15): use rebind for `static_units` too
+    # (was clear()+update() before).  Previously a concurrent reader of
+    # `detect_units_async` could observe static_units mid-rebuild as empty
+    # and fall through to Modbus auto-detect for the ~1 µs window.  Rebind
+    # avoids the window entirely, matching `intervals` and `ip_map`.
     ip_map = new_ip_map
     inverters[:] = new_inverters  # in-place because consumers hold the list ref
     intervals = new_intervals
-    static_units.clear()
-    static_units.update(new_static_units)
+    static_units = new_static_units
 
     # ── Bring up new inverters ──
     for ip in inverters:
@@ -1299,11 +1313,6 @@ def _update_metrics_from_frame(frame: dict):
     # register layout produced 0 kW forever with no log signal.
     _pac_scaled = pac_reg * 10
     if _pac_scaled > 260_000:
-        global _pac_clamp_notified
-        try:
-            _pac_clamp_notified
-        except NameError:
-            _pac_clamp_notified = set()
         _clamp_key = nk  # e.g. "3_2" for inverter 3 unit 2
         if _clamp_key not in _pac_clamp_notified:
             print(
