@@ -46,8 +46,14 @@ from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegress
 try:
     import lightgbm as lgb
     _LIGHTGBM_AVAILABLE = True
-except ImportError:
+    _LIGHTGBM_IMPORT_ERROR = None
+except ImportError as _lgb_err:
     _LIGHTGBM_AVAILABLE = False
+    # T4.9 fix (Phase 7, 2026-04-14): capture the ImportError message so the
+    # operator can see WHY LightGBM isn't active (missing DLL, ABI mismatch,
+    # wheel missing for platform, etc.) via /engine-health instead of the
+    # opaque "lgbm_unavailable_fallback" flag.
+    _LIGHTGBM_IMPORT_ERROR = str(_lgb_err)
 
 
 class IdentityFeatureScaler:
@@ -548,6 +554,8 @@ def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
     # Add training metadata if bundle is provided
     if isinstance(bundle, dict):
         state["ml_backend_type"] = _detect_ml_backend()
+        # T4.9 fix (Phase 7): surface WHY LightGBM isn't active to /engine-health.
+        state["ml_backend_detail"] = _detect_ml_backend_detail()
         state["model_file_path"] = str(MODEL_FILE)
         state["model_file_mtime_ms"] = int(MODEL_FILE.stat().st_mtime * 1000) if MODEL_FILE.exists() else None
         state["training_samples_count"] = bundle.get("model_bundle", {}).get("global", {}).get("meta", {}).get("sample_count")
@@ -4928,6 +4936,12 @@ def lookup_solcast_resolution_weight_vector(
 def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str | None = None) -> dict:
     _MIN_RELIABILITY_SAMPLES = 10  # FIX-18: Minimum day_count to trust regime-specific corrections
     _MIN_RELIABILITY_SAMPLES_ADVERSE = 5  # Rainy/overcast occur less frequently — lower threshold
+    # T4.6 fix (Phase 7, 2026-04-14): when the artifact is present but a
+    # specific dimension key (regimes / seasons / season_regimes) is absent,
+    # the function silently returned the overall fallback without any log
+    # signal — the operator could not tell whether the artifact was rich or
+    # structurally degraded.  We now emit a one-time INFO per missing
+    # dimension-per-process so repeated lookups don't spam the log.
     fallback = {
         "day_count": 0,
         "mean_mape": 0.24,
@@ -4939,6 +4953,20 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
     if not artifact or not isinstance(artifact, dict):
         log.warning("Solcast reliability artifact unavailable - using hardcoded defaults (reliability=0.62, bias_ratio=1.0). Forecast quality may be degraded.")
         return fallback
+    # Detect missing dimensions once.
+    global _reliability_fallback_notified
+    try:
+        _reliability_fallback_notified
+    except NameError:
+        _reliability_fallback_notified = set()
+    for dim in ("regimes", "seasons", "season_regimes", "time_of_day"):
+        if dim not in artifact and dim not in _reliability_fallback_notified:
+            log.info(
+                "Solcast reliability artifact missing dimension '%s' — lookups will fall through to overall/fallback. "
+                "This is expected for older artifacts pre-v2.4.33; regenerate via build_solcast_reliability_artifact().",
+                dim,
+            )
+            _reliability_fallback_notified.add(dim)
     # Season+regime cross-lookup (most specific)
     if season:
         key = f"{season}:{regime}"
@@ -7367,6 +7395,32 @@ def _detect_ml_backend() -> str:
     return "sklearn_gbr"
 
 
+def _detect_ml_backend_detail() -> dict:
+    """T4.9 fix (Phase 7, 2026-04-14): richer backend metadata for /engine-health.
+
+    Previous consumers saw only a backend string and an opaque boolean
+    "lgbm_unavailable_fallback" warning.  This returns the effective
+    backend plus a human-readable REASON (from the captured ImportError,
+    from the env-var override, etc.) so the operator can diagnose why
+    LightGBM isn't active without grepping PyInstaller logs.
+    """
+    lgbm_active = bool(FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE)
+    if lgbm_active:
+        reason = "active"
+    elif not FORECAST_USE_LIGHTGBM:
+        reason = "disabled_by_env_FORECAST_USE_LIGHTGBM"
+    elif _LIGHTGBM_IMPORT_ERROR:
+        reason = f"import_failed: {_LIGHTGBM_IMPORT_ERROR}"
+    else:
+        reason = "unknown_unavailable"
+    return {
+        "backend": "lightgbm" if lgbm_active else "sklearn_gbr",
+        "lightgbm_available": bool(_LIGHTGBM_AVAILABLE),
+        "lightgbm_enabled_by_env": bool(FORECAST_USE_LIGHTGBM),
+        "reason": reason,
+    }
+
+
 def _collect_data_quality_warnings(bundle: dict) -> list:
     """
     Check for known data quality issues and return a list of warning string codes.
@@ -7404,7 +7458,15 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
             if last_eligible_str:
                 try:
                     last_eligible_date = datetime.strptime(str(last_eligible_str), "%Y-%m-%d").date()
-                    days_old = (date.today() - last_eligible_date).days
+                    # T4.7 fix (Phase 7, 2026-04-14): clamp to >=0 so an NTP
+                    # step or DST flip that moves date.today() backward cannot
+                    # produce negative days_old, which silently skips the
+                    # stale-warning branch.  The audit's concern was clock-
+                    # drift false POSITIVES (triggering "stale" after a
+                    # forward jump that looked like a big gap); the real risk
+                    # is the opposite — backward jumps HIDE real staleness.
+                    # max(0, ...) keeps the comparison monotonic either way.
+                    days_old = max(0, (date.today() - last_eligible_date).days)
                     if days_old > 30:
                         warnings.append("error_memory_stale")
                 except Exception:
@@ -8056,10 +8118,33 @@ def _align_bundle_features(
     if expected_count is not None and expected_count != int(X_pred.shape[1]):
         if expected_count < int(X_pred.shape[1]):
             # Legacy model with fewer features — truncate to match (new cols are appended at end)
-            log.info(
-                "Legacy model alignment: truncating %d -> %d features (dropping newest columns)",
-                int(X_pred.shape[1]), expected_count,
-            )
+            # T4.8 fix (Phase 7, 2026-04-14): upgrade the log level from INFO
+            # to WARNING so operators notice when predictions are running on
+            # a pre-v2.5.0 (62-feature) model under v2.5.0+ (70-feature) code.
+            # Truncation preserves mathematical alignment but drops the tri-
+            # band features the legacy model was never trained on — output
+            # quality is measurably worse than a freshly-trained model.  The
+            # fallback stays functional so the upgrade path is not broken,
+            # but the WARN surfaces the "retrain needed" signal clearly.
+            global _legacy_model_truncate_notified
+            try:
+                _legacy_model_truncate_notified
+            except NameError:
+                _legacy_model_truncate_notified = False
+            if not _legacy_model_truncate_notified:
+                log.warning(
+                    "Legacy model detected: truncating features %d -> %d (dropping newest columns, "
+                    "including tri-band Solcast signals if v2.5.0+).  Forecast quality is degraded "
+                    "until the model is retrained on the current feature set.  "
+                    "Run a full training cycle to regenerate.",
+                    int(X_pred.shape[1]), expected_count,
+                )
+                _legacy_model_truncate_notified = True
+            else:
+                log.info(
+                    "Legacy model alignment: truncating %d -> %d features (dropping newest columns)",
+                    int(X_pred.shape[1]), expected_count,
+                )
             return X_pred.iloc[:, :expected_count]
         else:
             raise ValueError(
@@ -8124,6 +8209,30 @@ def predict_residual_with_bundle(
         }
     regime_meta = regime_block.get("meta") or {}
     regime_days = int(regime_meta.get("day_count", 0))
+    regime_samples = int(regime_meta.get("sample_count", 0))
+
+    # T4.12 fix (Phase 7, 2026-04-14): enforce a sample-count floor at
+    # prediction time, not just at training time.  A regime model can be
+    # stored in the bundle but have come from a minimal training run
+    # (e.g. a partially-rebuilt bundle, or a regime that barely cleared
+    # REGIME_MODEL_MIN_DAYS=6 before being blended at 0.52 weight).  If
+    # sample_count is missing or below REGIME_MODEL_MIN_SAMPLES, fall
+    # through to the global prediction rather than blending a thin model.
+    # sample_count==0 is treated as "metadata missing, trust training-time
+    # filter" so older bundles without the key keep working.
+    if regime_samples > 0 and regime_samples < REGIME_MODEL_MIN_SAMPLES:
+        log.info(
+            "Regime model '%s' has only %d samples (min %d) — falling through to global prediction.",
+            target_regime, regime_samples, REGIME_MODEL_MIN_SAMPLES,
+        )
+        return global_pred, {
+            "target_regime": target_regime,
+            "used_regime_model": False,
+            "blend": 0.0,
+            "regime_sample_count": regime_samples,
+            "regime_fallthrough_reason": "insufficient_samples",
+        }
+
     blend = REGIME_BLEND_BASE + 0.05 * max(0, regime_days - REGIME_MODEL_MIN_DAYS)
     blend = min(blend, REGIME_BLEND_MAX)
     # v2.8 ML audit L2: allow low-confidence regime classifications to fall
@@ -11714,6 +11823,7 @@ def main() -> None:
     try:
         _su_state = _load_json(ML_TRAIN_STATE_FILE)
         _su_state["ml_backend_type"] = _detect_ml_backend()
+        _su_state["ml_backend_detail"] = _detect_ml_backend_detail()
         _su_mf = MODEL_BUNDLE_FILE if MODEL_BUNDLE_FILE.exists() else (MODEL_FILE if MODEL_FILE.exists() else None)
         if _su_mf:
             _su_state["model_file_path"] = str(_su_mf)
