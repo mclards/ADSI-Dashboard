@@ -38,8 +38,8 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 - **Backfill day_regime fallback:** forecast_qa() now reconstructs missing day_regime from audit_trail with full-day regime inference.
 - **Legacy error memory regime awareness:** Historical error memory functions now respect active regime for bias correction.
 - **Test updates:** test_forecast_engine_constraints.py explicitly verifies target_regime handling.
-- **Blueprint and proof files:** Added plans/rainy-overcast-error-memory-hardening.md and tests/proof_error_memory_hardening.py for documentation.
-- **Files changed:** services/forecast_engine.py (main), services/tests/test_forecast_engine_constraints.py (test), plans/rainy-overcast-error-memory-hardening.md (new), tests/proof_error_memory_hardening.py (new).
+- **Blueprint and proof files:** Added plans/2026-04-10-rainy-overcast-error-memory-hardening.md and tests/proof_error_memory_hardening.py for documentation.
+- **Files changed:** services/forecast_engine.py (main), services/tests/test_forecast_engine_constraints.py (test), plans/2026-04-10-rainy-overcast-error-memory-hardening.md (new), tests/proof_error_memory_hardening.py (new).
 - **Python-only release:** No Electron or EXE rebuilds needed.
 
 ## v2.7.6 Changes - Substation Meter Gateway Proxy, Auth Gate Removal, Blueprint Completion (2026-04-05)

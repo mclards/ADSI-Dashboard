@@ -3,6 +3,7 @@
 **Objective:** Improve forecast accuracy during rainy and overcast regimes by fixing the systematic weaknesses in the error memory system that cause it to underperform exactly when generation impact is highest.
 
 **Status:** Draft  
+**Date:** 2026-04-10  
 **Created:** 2026-04-10  
 **Author:** Engr. M. + Claude  
 **Target file:** `services/forecast_engine.py`  

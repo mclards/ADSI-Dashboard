@@ -1,9 +1,10 @@
 # Day-Ahead Locked Snapshot + Analytics Chart + Active Learning
 
+**Date:** 2026-04-11
 **Status:** DRAFT — awaiting review
 **Author:** Claude (session 2026-04-11)
 **Target version:** v2.8.x
-**Related:** [rainy-overcast-error-memory-hardening.md](rainy-overcast-error-memory-hardening.md)
+**Related:** [rainy-overcast-error-memory-hardening.md](2026-04-10-rainy-overcast-error-memory-hardening.md)
 
 ---
 
@@ -33,7 +34,7 @@ the system from learning this pattern:
    lead-time, and cannot train on "what we knew at 10 AM" vs "what happened".
 
 The error memory system described in
-[rainy-overcast-error-memory-hardening.md](rainy-overcast-error-memory-hardening.md)
+[rainy-overcast-error-memory-hardening.md](2026-04-10-rainy-overcast-error-memory-hardening.md)
 is therefore learning from the **wrong signal**: "latest snapshot before
 forecast run" vs actual, rather than "10 AM locked day-ahead" vs actual. On
 high-volatility days these are materially different numbers.
@@ -576,7 +577,7 @@ The damping was conservative specifically because the legacy error signal
 couldn't distinguish "Solcast was wrong" from "day was uncertain". With
 spread weighting, the signal is cleaner and less damping is safe.
 
-See [rainy-overcast-error-memory-hardening.md](rainy-overcast-error-memory-hardening.md)
+See [rainy-overcast-error-memory-hardening.md](2026-04-10-rainy-overcast-error-memory-hardening.md)
 for the current damping logic.
 
 ### 9.4 WESM submission risk (optional, future)

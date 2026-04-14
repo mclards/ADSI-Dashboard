@@ -1,5 +1,6 @@
 # FEATURE_COLS Slim-Down Patch (v2.8)
 
+**Date:** 2026-04-11
 **Status:** PENDING — apply only with the next `train_dayahead` cycle.
 **Author:** v2.8 cleanup pass
 **Created against:** `services/forecast_engine.py` post Tier 1 + Tier 2 cleanup (line counts as of 11036 LOC)
@@ -201,7 +202,7 @@ FEATURE_COLS = [
     "slot_in_hour_sin", "slot_in_hour_cos", "sunrise_rel", "sunset_rel", "shoulder_flag",
     "doy_sin", "doy_cos",
     "day_cloud_mean", "day_vol_index", "wet_season_flag", "dry_season_flag",
-    # day_regime_* features removed in v2.8 slim-down — see plans/feature_cols_slim_v2.8.md
+    # day_regime_* features removed in v2.8 slim-down — see plans/2026-04-11-feature-cols-slim.md
     # (per-regime models already condition on regime by routing, making these constant-within-model)
     "solcast_prior_kwh", "solcast_prior_spread", "solcast_prior_available",
     "solcast_prior_vs_physics", "solcast_prior_vs_irradiance",
@@ -456,4 +457,4 @@ When this patch is applied successfully:
 - [ ] All 11 apply-checklist steps complete
 - [ ] WAPE comparison done over 3 forecast days post-apply
 - [ ] Decision recorded: **keep** / **revert** / **partial revert**
-- [ ] This file moved to `plans/_done/feature_cols_slim_v2.8.md` (or deleted)
+- [ ] This file's `Status:` header updated from PENDING to APPLIED / REVERTED / PARTIAL, with the deciding commit hash recorded

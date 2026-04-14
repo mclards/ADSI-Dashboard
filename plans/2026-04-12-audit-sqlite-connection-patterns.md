@@ -1,11 +1,12 @@
 # SQLite Connection Patterns Audit — v2.8
 
 **Date:** 2026-04-12
+**Status:** OPEN — findings logged; remediation pending v2.8.9
 **Scope:** Reliability and correctness of SQLite connection handling across the Python forecast engine and Node-side `server/db.js`.
 **Companion audits:**
-- `plans/audit_solcast_data_feed_reliability_v2.8.md`
-- `plans/audit_solcast_data_feed_efficiency_v2.8.md`
-- `plans/audit_ml_error_correction_reliability_v2.8.md`
+- `plans/2026-04-11-audit-solcast-data-feed-reliability.md`
+- `plans/2026-04-11-audit-solcast-data-feed-efficiency.md`
+- `plans/2026-04-12-audit-ml-error-correction-reliability.md`
 
 The dashboard runs a **two-process** SQLite setup:
 - **Node** (`server/db.js`) — the primary writer, owns a long-lived `better-sqlite3` handle, writes inverter readings / energy / forecast rows / compare tables.

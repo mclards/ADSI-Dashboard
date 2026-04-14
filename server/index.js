@@ -9283,7 +9283,7 @@ function buildSolcastSnapshotRows(day, records, estActuals, cfg) {
     if (hiMwRaw != null) recordsWithRealHi += 1;
     // Fallback to P50 when P10/P90 absent (preserves current downstream behavior).
     // The full semantic fix (storing NULL for absent bands) is documented in
-    // plans/audit_solcast_data_feed_reliability_v2.8.md as a follow-up.
+    // plans/2026-04-11-audit-solcast-data-feed-reliability.md as a follow-up.
     const loMw = loMwRaw ?? mw;
     const hiMw = hiMwRaw ?? mw;
     if (mw == null && loMw == null && hiMw == null) continue;

@@ -1,10 +1,11 @@
 # ML Error Correction Reliability Audit — v2.8
 
 **Date:** 2026-04-12
+**Status:** OPEN — findings logged; remediation pending v2.8.9
 **Scope:** Reliability and correctness of the ML error-correction learning loop — `compute_error_memory`, `_spread_weight`, legacy fallback, regime penalties, bias application, and eligibility gates.
 **Companion docs:**
-- `plans/audit_solcast_data_feed_reliability_v2.8.md`
-- `plans/audit_solcast_data_feed_efficiency_v2.8.md`
+- `plans/2026-04-11-audit-solcast-data-feed-reliability.md`
+- `plans/2026-04-11-audit-solcast-data-feed-efficiency.md`
 
 This audit focuses on **correctness and signal integrity**, not throughput.
 It assumes P1 → P3 efficiency batches are in place and looks for scenarios where

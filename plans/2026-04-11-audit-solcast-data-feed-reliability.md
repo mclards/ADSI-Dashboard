@@ -1,5 +1,7 @@
 # Solcast Data Feed Reliability Audit (v2.8)
 
+**Date:** 2026-04-11
+**Status:** OPEN — findings logged, fixes tracked per section (R1-R6)
 **Audit type:** Read-only — no code changed.
 **Scope:** Full Solcast data path from API ingestion → DB storage → Python read → ML/forecast consumption.
 **Goal:** Identify reliability gaps, silent-degradation paths, and inconsistencies.

@@ -1,8 +1,9 @@
 # Solcast Data Feed Efficiency Audit — v2.8
 
 **Date:** 2026-04-11
+**Status:** OPEN — efficiency findings logged; reliability fixes (R1-R6) presumed landed first
 **Scope:** Efficiency of data-feed utilization from Solcast → forecast engine → ML error correction
-**Companion doc:** `plans/audit_solcast_data_feed_reliability_v2.8.md`
+**Companion doc:** `plans/2026-04-11-audit-solcast-data-feed-reliability.md`
 
 Reliability fixes (R1-R6) landed first because correctness always beats speed.
 This audit assumes those are in place and focuses on **hot-path waste**:
