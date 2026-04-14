@@ -138,6 +138,14 @@ class CloudBackupService {
     this._retryQueue = [];
     this._retryTimer = null;
 
+    // T2.2 fix: single-writer mutex.  Serialises every public backup /
+    // restore entry point so a simultaneous backup-upload and restore can't
+    // race on `this.db.backup()` and corrupt the database or manifest.
+    // Internal helpers (e.g. the pre-restore safety backup inside
+    // restoreBackup) run *within* the already-held lock and must therefore
+    // call `createLocalBackup` directly — not go through _withBackupMutex.
+    this._backupOpChain = Promise.resolve();
+
     this.progress = {
       status: "idle", // idle | creating | uploading | restoring | pulling | error | done
       pct: 0,
@@ -148,6 +156,30 @@ class CloudBackupService {
       updatedAt: null,
       error: null,
     };
+  }
+
+  // ─── Concurrency ──────────────────────────────────────────────────────────
+
+  /**
+   * T2.2 fix: run `fn` with exclusive access to the backup subsystem.
+   * Public entry points (`backupNow`, `pullFromCloud`, `restoreBackup`,
+   * `restorePortableBackup`, `createPortableBackup`, `importPortableBackup`)
+   * should wrap their body in this helper.  The mutex is a promise-chain:
+   * each caller awaits the previous (success OR failure) before running.
+   * Internal helpers invoked from within an already-held section must NOT
+   * re-enter this helper — they would deadlock.
+   */
+  async _withBackupMutex(label, fn) {
+    const prev = this._backupOpChain;
+    let release;
+    const next = new Promise((resolve) => { release = resolve; });
+    this._backupOpChain = prev.then(() => next, () => next);
+    try {
+      await prev.catch(() => {});
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   // ─── Settings ─────────────────────────────────────────────────────────────
@@ -768,6 +800,11 @@ class CloudBackupService {
    * @param {string}   [opts.tag]
    */
   async backupNow(opts = {}) {
+    // T2.2 fix: serialise via mutex so concurrent backup+restore can't race.
+    return this._withBackupMutex("backupNow", () => this._backupNowLocked(opts));
+  }
+
+  async _backupNowLocked(opts = {}) {
     if (this.progress.status !== "idle" && this.progress.status !== "done" && this.progress.status !== "error") {
       throw new Error("A backup/restore operation is already in progress");
     }
@@ -1030,6 +1067,14 @@ class CloudBackupService {
    * @param {boolean} [opts.skipSafetyBackup=false]  Skip pre-restore safety backup
    */
   async restoreBackup(backupId, opts = {}) {
+    // T2.2 fix: serialise via mutex.  The inner body may call
+    // this.createLocalBackup() for the pre-restore safety snapshot — that
+    // call runs within the already-held lock (createLocalBackup does NOT
+    // re-enter _withBackupMutex) so there is no deadlock.
+    return this._withBackupMutex("restoreBackup", () => this._restoreBackupLocked(backupId, opts));
+  }
+
+  async _restoreBackupLocked(backupId, opts = {}) {
     if (
       this.progress.status !== "idle" &&
       this.progress.status !== "done" &&
@@ -1740,8 +1785,17 @@ class CloudBackupService {
    * @returns {Promise<{ok, manifest}>}
    */
   async restorePortableBackup(backupId) {
+    // T2.2 fix: serialise portable restore too.  We call the private
+    // `_restoreBackupLocked` directly (not the public `restoreBackup`
+    // wrapper) so we hold the mutex for the entire portable-restore
+    // workflow — standard restore PLUS forecast-scope fixups — rather
+    // than releasing and re-acquiring between phases.
+    return this._withBackupMutex("restorePortableBackup", () => this._restorePortableBackupLocked(backupId));
+  }
+
+  async _restorePortableBackupLocked(backupId) {
     // First run the standard restore (handles database, config, logs)
-    const result = await this.restoreBackup(backupId);
+    const result = await this._restoreBackupLocked(backupId);
     const dir =
       this.history.find((h) => h.id === backupId)?.dir ||
       path.join(this.backupDir, backupId);

@@ -5467,8 +5467,11 @@ async function performLocalWriteBatchRequest(url, upstreamPayload) {
 }
 
 function isAuthorizedPlantWideControl({ authKey, authToken } = {}) {
+  // T2.1 fix: share a single clock read across both checks so a clock step
+  // between them can't cause inconsistent validation.
+  const nowMs = Date.now();
   return (
-    isValidPlantWideAuthSession(authToken) || isValidPlantWideAuthKey(authKey)
+    isValidPlantWideAuthSession(authToken, nowMs) || isValidPlantWideAuthKey(authKey, nowMs)
   );
 }
 
@@ -12667,10 +12670,15 @@ app.post("/api/write/auth/bulk", async (req, res) => {
     return proxyToRemote(req, res);
   }
   const { authKey } = req.body || {};
-  if (!isValidPlantWideAuthKey(authKey)) {
+  // T2.1 fix: capture the clock ONCE and pass it to both auth functions so
+  // a clock step between the key check and the session mint cannot produce
+  // inconsistent (issuedAt, expiresAt) pairs or reject a valid key that
+  // crossed a minute boundary between reads.
+  const nowMs = Date.now();
+  if (!isValidPlantWideAuthKey(authKey, nowMs)) {
     return res.status(403).json({ ok: false, error: "Authorization failed. Invalid auth key." });
   }
-  const session = issuePlantWideAuthSession();
+  const session = issuePlantWideAuthSession(nowMs);
   return res.json({
     ok: true,
     token: session.token,
