@@ -21,6 +21,33 @@ const { resolvedDbDir } = require("../server/storagePaths");
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
+// T6.1 fix: single-instance lock.  Prevents two copies of the packaged app
+// from running simultaneously against the same adsi.db + ports 3500/9000,
+// which previously risked SQLite "database is locked" and Python FastAPI
+// "Address already in use" errors plus correlated data loss.  The second
+// instance will quit immediately after signalling the first to focus its
+// window.  Must run BEFORE app.whenReady() so the lock is in place before
+// any services initialise.
+const _gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!_gotSingleInstanceLock) {
+  console.warn("[main] Another instance is already running — quitting this one.");
+  app.exit(0);
+} else {
+  app.on("second-instance", (_event, _argv, _cwd) => {
+    try {
+      const wins = BrowserWindow.getAllWindows();
+      const primary = wins.find((w) => !w.isDestroyed());
+      if (primary) {
+        if (primary.isMinimized()) primary.restore();
+        if (!primary.isVisible()) primary.show();
+        primary.focus();
+      }
+    } catch (err) {
+      console.warn("[main] second-instance focus failed:", err?.message || err);
+    }
+  });
+}
+
 // Prevent packaged app crashes when stdout/stderr pipe is unavailable (EPIPE).
 function makeSafeConsoleWriter(method) {
   const original = console[method].bind(console);
@@ -625,20 +652,61 @@ function bindAutoUpdaterEventsOnce() {
   // which the built-in verifier treats as a hard failure and reports as
   // "Download failed: Command failed: ...". This breaks auto-update entirely.
   //
-  // We bypass the publisher-name check because the installer's integrity is already
-  // protected end-to-end by the SHA-512 digest published in latest.yml, which
-  // electron-updater verifies during download. The SHA comes from our own signed
-  // build pipeline (three-gate build-installer-signed.js), so any mismatch during
-  // transit or storage would already be caught before this function is even called.
-  autoUpdater.verifyUpdateCodeSignature = (publisherNames, tempUpdateFile) => {
+  // T6.3 fix (v2.8.8): add a defence-in-depth Authenticode thumbprint check.
+  // Primary integrity defence remains the SHA-512 digest published in
+  // latest.yml (validated automatically by electron-updater during download).
+  // This override extracts the signer thumbprint of the downloaded installer
+  // and compares it to EXPECTED_SIGNER_THUMBPRINT.  If a mismatch is detected,
+  // we log at ERROR and REJECT the update — a compromised latest.yml that
+  // swaps in a binary signed by a different key will no longer be installed.
+  // If the check can't be run (PowerShell missing, unexpected error), we fall
+  // back to the prior behaviour of logging and accepting (SHA-512 remains
+  // authoritative).
+  const EXPECTED_SIGNER_THUMBPRINT =
+    "44CD054E69D04011DAA8FB2B60127F1F6EB99C0E";
+  autoUpdater.verifyUpdateCodeSignature = async (publisherNames, tempUpdateFile) => {
     try {
-      if (autoUpdater.logger && autoUpdater.logger.info) {
-        autoUpdater.logger.info(
-          `verifyUpdateCodeSignature: bypassing (SHA-512 integrity check is authoritative) file=${tempUpdateFile}`
+      const psCmd =
+        `Get-AuthenticodeSignature -FilePath '${String(tempUpdateFile).replace(/'/g, "''")}' ` +
+        `| Select-Object -ExpandProperty SignerCertificate ` +
+        `| Select-Object -ExpandProperty Thumbprint`;
+      const stdout = await new Promise((resolve) => {
+        try {
+          execFile(
+            "powershell",
+            ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+            { windowsHide: true, timeout: 15000 },
+            (err, out) => resolve(err ? "" : String(out || "")),
+          );
+        } catch (_) {
+          resolve("");
+        }
+      });
+      const actual = stdout.trim().toUpperCase();
+      if (!actual) {
+        autoUpdater.logger?.warn?.(
+          `verifyUpdateCodeSignature: unable to read signer thumbprint — ` +
+          `accepting (SHA-512 remains authoritative). file=${tempUpdateFile}`,
         );
+        return null;
       }
-    } catch (_) { /* ignore */ }
-    return Promise.resolve(null);
+      if (actual === EXPECTED_SIGNER_THUMBPRINT.toUpperCase()) {
+        autoUpdater.logger?.info?.(
+          `verifyUpdateCodeSignature: thumbprint match (${actual}) file=${tempUpdateFile}`,
+        );
+        return null;
+      }
+      const msg =
+        `verifyUpdateCodeSignature: THUMBPRINT MISMATCH — refusing update.  ` +
+        `actual=${actual} expected=${EXPECTED_SIGNER_THUMBPRINT.toUpperCase()} file=${tempUpdateFile}`;
+      autoUpdater.logger?.error?.(msg);
+      return msg;
+    } catch (err) {
+      autoUpdater.logger?.warn?.(
+        `verifyUpdateCodeSignature: check errored — accepting (SHA-512 remains authoritative): ${err?.message || err}`,
+      );
+      return null;
+    }
   };
 
   autoUpdater.on("checking-for-update", () => {
@@ -884,6 +952,12 @@ async function downloadAppUpdate() {
     }
     if (!url) {
       return { ok: false, error: "No download URL found for latest portable release.", state: buildPublicAppUpdateState() };
+    }
+    // T6.5 fix: whitelist before handing off to the OS, even though the
+    // URL comes from appUpdateState (our own release feed).  Defence in
+    // depth against a compromised update feed or stale state entry.
+    if (!isSafeExternalUrl(url)) {
+      return { ok: false, error: "Refusing to open non-http update URL.", state: buildPublicAppUpdateState() };
     }
     try {
       await shell.openExternal(url);
@@ -3288,6 +3362,13 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
     shell: false,
   });
   attachServiceSoftStopMeta(backendProc, "backend", BACKEND_SOFT_STOP_WAIT_MS);
+  // T6.4 fix: observe 'spawn' so the app can detect successful backend
+  // launch vs silent failure.  Without this listener, if the target EXE
+  // is missing or unlaunchable the only signal is 'error' (async) — the
+  // app state meanwhile continues to believe the backend is running.
+  backendProc.on("spawn", () => {
+    console.log("[main] Backend spawned OK pid=" + (backendProc && backendProc.pid));
+  });
   backendProc.on("error", (err) => {
     console.error("[main] Backend spawn error:", err.message);
   });
@@ -3612,9 +3693,31 @@ function createMainWindow() {
   });
 
   mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // T6.5 fix: only allow http/https/mailto through shell.openExternal.
+    // Without this whitelist, a compromised renderer could request
+    // file:///c:/windows/system32, javascript:, or custom-protocol URLs
+    // that the OS hands off to potentially dangerous handlers.
+    if (isSafeExternalUrl(url)) {
+      shell.openExternal(url).catch((err) => {
+        console.warn("[main] openExternal error:", err?.message || err);
+      });
+    } else {
+      console.warn("[main] blocked openExternal for non-whitelisted URL:", String(url || "").slice(0, 200));
+    }
     return { action: "deny" };
   });
+}
+
+// T6.5 fix: scheme whitelist used anywhere we hand a URL off to the OS
+// via shell.openExternal.  Accepts http://, https://, mailto: only.
+function isSafeExternalUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "mailto:";
+  } catch (_) {
+    return false;
+  }
 }
 
 function loadMainUrlWithRetry() {
@@ -4563,11 +4666,45 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     return { success: false, error: err.message };
   }
 });
+// T6.2 fix: validate that an `open-ip` IPC input is a plain IPv4 address
+// (optionally with :port).  Rejects file://, javascript:, data:, and other
+// schemes that loadURL would otherwise honour, plus CR/LF/path/query
+// injection attempts.  Returns the sanitised "host[:port]" on success, or
+// null on rejection.
+function sanitizeInverterIpHost(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const stripped = raw.replace(/^https?:\/\//i, "").trim();
+  if (!stripped) return null;
+  // Reject any URL-ish characters — we expect pure IPv4 [:port].
+  if (/[^0-9a-fA-F.:]/.test(stripped)) return null;
+  const m = stripped.match(/^([0-9.]+)(?::(\d{1,5}))?$/);
+  if (!m) return null;
+  const octets = m[1].split(".");
+  if (octets.length !== 4) return null;
+  for (const o of octets) {
+    const n = Number(o);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+  }
+  if (m[2] !== undefined) {
+    const port = Number(m[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  }
+  return m[2] !== undefined ? `${m[1]}:${m[2]}` : m[1];
+}
+
 ipcMain.on("open-ip", async (event, ip) => {
-  if (!ip || typeof ip !== "string") return;
-  const cleanIp = ip.replace(/^https?:\/\//i, "");
-  const url = ip.startsWith("http://") || ip.startsWith("https://") ? ip : `http://${ip}`;
-  const reachable = await checkReachable(cleanIp, 80, 2000);
+  // T6.2 fix: reject non-IPv4 or scheme-injected inputs BEFORE using them
+  // in loadURL / reachable checks.  Previously, arbitrary strings were
+  // passed through, allowing file://, javascript:, or data: URLs to load.
+  const cleanIp = sanitizeInverterIpHost(ip);
+  if (!cleanIp) {
+    console.warn("[main] open-ip rejected invalid input:", typeof ip === "string" ? ip.slice(0, 80) : typeof ip);
+    return;
+  }
+  const url = `http://${cleanIp}`;
+  const hostOnly = cleanIp.split(":")[0];
+  const portOnly = cleanIp.includes(":") ? Number(cleanIp.split(":")[1]) : 80;
+  const reachable = await checkReachable(hostOnly, portOnly, 2000);
   if (!event.sender.isDestroyed()) {
     event.sender.send("ip-status", { ip: cleanIp, ok: reachable });
   }
@@ -4587,9 +4724,12 @@ ipcMain.on("open-ip", async (event, ip) => {
   });
 });
 ipcMain.on("open-ip-check", async (event, ip) => {
-  if (!ip || typeof ip !== "string") return;
-  const cleanIp = ip.replace(/^https?:\/\//i, "");
-  const ok = await checkReachable(cleanIp, 80, 1500);
+  // T6.2 fix: same sanitiser as open-ip.
+  const cleanIp = sanitizeInverterIpHost(ip);
+  if (!cleanIp) return;
+  const hostOnly = cleanIp.split(":")[0];
+  const portOnly = cleanIp.includes(":") ? Number(cleanIp.split(":")[1]) : 80;
+  const ok = await checkReachable(hostOnly, portOnly, 1500);
   if (!event.sender.isDestroyed()) {
     event.sender.send("ip-status", { ip: cleanIp, ok });
   }
