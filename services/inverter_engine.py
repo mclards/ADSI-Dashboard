@@ -25,7 +25,7 @@ import math
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from queue import Queue
+from queue import Queue, Full
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -542,6 +542,24 @@ def write_worker_loop(ip, lock, q):
 
         batch_mode = bool(job.get("batch")) or len(normalized_steps) > 1
         result_payload = [] if batch_mode else False
+
+        # T3.12 fix (Phase 6, 2026-04-14): post-write read-back verification.
+        # Modbus FC6 returns success on transport ACK, which does NOT prove
+        # the register actually changed (e.g. inverter rejects the write
+        # silently due to interlock).  Read back the same holding register
+        # under the same lock and compare; if mismatch, mark this step ok=False
+        # so the caller sees the real outcome.  Best-effort — verification
+        # failure (read returns None) does NOT downgrade a successful write,
+        # only a value MISMATCH does.
+        def _verify_step(step):
+            try:
+                regs = read_holding(client, step["address"], 1, step["unit"])
+                if regs and len(regs) >= 1:
+                    return int(regs[0]) == int(step["value"])
+            except Exception:
+                pass
+            return None  # could not verify; do not downgrade
+
         try:
             with lock:
                 if batch_mode:
@@ -553,6 +571,16 @@ def write_worker_loop(ip, lock, q):
                             step["value"],
                             step["unit"],
                         )
+                        if step_ok:
+                            verdict = _verify_step(step)
+                            if verdict is False:
+                                # Confirmed mismatch — surface as failure.
+                                step_ok = False
+                                print(
+                                    f"[write_worker] post-write verify MISMATCH "
+                                    f"ip={ip} unit={step['unit']} "
+                                    f"wrote={step['value']} addr={step['address']}"
+                                )
                         result_payload.append({
                             "unit": step["unit"],
                             "ok": bool(step_ok),
@@ -565,6 +593,15 @@ def write_worker_loop(ip, lock, q):
                         step["value"],
                         step["unit"],
                     )
+                    if result_payload:
+                        verdict = _verify_step(step)
+                        if verdict is False:
+                            result_payload = False
+                            print(
+                                f"[write_worker] post-write verify MISMATCH "
+                                f"ip={ip} unit={step['unit']} "
+                                f"wrote={step['value']} addr={step['address']}"
+                            )
         except Exception:
             result_payload = [] if batch_mode else False
 
@@ -693,8 +730,22 @@ def enqueue_write_atomically(ip, job):
     enqueued (silently dropping the wake-up signal that callers rely on).
     """
     with write_pending_lock:
+        # T3.11 fix (Phase 6): bounded queue rejects with Full when capacity
+        # exceeded.  Use put_nowait so the API thread never blocks.  Caller
+        # converts the WriteQueueFullError to HTTP 429 / WS error response.
+        try:
+            write_queues[ip].put_nowait(job)
+        except Full:
+            raise WriteQueueFullError(
+                f"Write queue for {ip} is full ({write_queues[ip].maxsize} pending). "
+                f"Retry shortly."
+            )
         mark_write_pending(ip)
-        write_queues[ip].put(job)
+
+
+class WriteQueueFullError(RuntimeError):
+    """T3.11 fix (Phase 6): raised when per-IP write queue is at capacity."""
+    pass
 
 
 def note_operator_write(ip, unit):
@@ -769,13 +820,19 @@ async def handle_auto_reset(ip, unit, alarm_val):
             fut  = loop.create_future()
 
             # T3.3 fix: atomic mark+enqueue.
-            enqueue_write_atomically(ip, {
-                "address": 16,
-                "value":   0,       # OFF
-                "unit":    unit,
-                "future":  fut,
-                "loop":    loop,
-            })
+            try:
+                enqueue_write_atomically(ip, {
+                    "address": 16,
+                    "value":   0,       # OFF
+                    "unit":    unit,
+                    "future":  fut,
+                    "loop":    loop,
+                })
+            except WriteQueueFullError as e:
+                # T3.11 fix (Phase 6): auto-reset is best-effort; on a full
+                # queue, log and skip this cycle — next alarm tick will retry.
+                print(f"[AUTORESET] queue full, skipping OFF for {ip} unit {unit}: {e}")
+                return
 
             try:
                 ok = await asyncio.wait_for(
@@ -807,13 +864,18 @@ async def handle_auto_reset(ip, unit, alarm_val):
                 fut  = loop.create_future()
 
                 # T3.3 fix: atomic mark+enqueue.
-                enqueue_write_atomically(ip, {
-                    "address": 16,
-                    "value":   1,   # ON
-                    "unit":    unit,
-                    "future":  fut,
-                    "loop":    loop,
-                })
+                try:
+                    enqueue_write_atomically(ip, {
+                        "address": 16,
+                        "value":   1,   # ON
+                        "unit":    unit,
+                        "future":  fut,
+                        "loop":    loop,
+                    })
+                except WriteQueueFullError as e:
+                    # T3.11 fix (Phase 6): same best-effort skip as the OFF path.
+                    print(f"[AUTORESET] queue full, skipping ON for {ip} unit {unit}: {e}")
+                    return
 
                 auto_reset_state[key] = {"state": "armed", "since": 0}
                 print(f"[AUTORESET] CLEAR → ON  {ip}  unit {unit}")
@@ -961,42 +1023,57 @@ async def poll_inverter(ip):
             continue
 
         # ── Continuous poll ──
+        # T3.6 fix (Phase 6, 2026-04-14): wrap inner cycle in try/except so a
+        # single bad read (KeyError from a mid-rebuild map flip, transient
+        # asyncio.CancelledError edge, decode error from a misbehaving
+        # inverter, etc.) does not kill the whole task and force the
+        # supervisor's ~1 s restart.  The supervisor restart path was the
+        # original "one bad inverter freezes everyone" symptom.
         while True:
-            client = clients.get(ip)
-            if not client:
-                break
-
-            out     = []
-            inv_num = inverter_number_from_ip(ip)
-            if inv_num is None:
-                print(f"[POLL] WARNING: no inverter number for IP {ip} — data will be dropped")
-                await asyncio.sleep(1)
-                break  # wait for ip_map to be rebuilt
-
-            for u in units:
-                if is_write_pending(ip):
-                    await asyncio.sleep(min(interval, 0.05))
+            try:
+                client = clients.get(ip)
+                if not client:
                     break
-                data = await read_fast_async(client, u, ip)
-                if not data:
-                    continue
 
-                data["source_ip"] = ip
-                data["inverter"] = inv_num if inv_num is not None else -1
-                data["unit"]     = u
-                data["node_number"] = u
-                out.append(data)
+                out     = []
+                inv_num = inverter_number_from_ip(ip)
+                if inv_num is None:
+                    print(f"[POLL] WARNING: no inverter number for IP {ip} — data will be dropped")
+                    await asyncio.sleep(1)
+                    break  # wait for ip_map to be rebuilt
 
-                # Trigger auto-reset check (non-blocking)
-                key   = (ip, u)
-                entry = auto_reset_state.get(key, {"busy": False})
-                if not entry.get("busy"):
-                    asyncio.create_task(handle_auto_reset(ip, u, data["alarm"]))
+                for u in units:
+                    if is_write_pending(ip):
+                        await asyncio.sleep(min(interval, 0.05))
+                        break
+                    data = await read_fast_async(client, u, ip)
+                    if not data:
+                        continue
 
-            # Do not wipe last good frame on transient all-unit read misses.
-            if out:
-                shared[ip] = list(out)
-            await asyncio.sleep(interval)
+                    data["source_ip"] = ip
+                    data["inverter"] = inv_num if inv_num is not None else -1
+                    data["unit"]     = u
+                    data["node_number"] = u
+                    out.append(data)
+
+                    # Trigger auto-reset check (non-blocking)
+                    key   = (ip, u)
+                    entry = auto_reset_state.get(key, {"busy": False})
+                    if not entry.get("busy"):
+                        asyncio.create_task(handle_auto_reset(ip, u, data["alarm"]))
+
+                # Do not wipe last good frame on transient all-unit read misses.
+                if out:
+                    shared[ip] = list(out)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                # Cooperative cancel from supervisor; propagate.
+                raise
+            except Exception as e:
+                # Log and keep looping; do not let a single bad cycle freeze
+                # this IP or trigger supervisor churn.
+                print(f"[POLL] {ip} cycle error (continuing): {type(e).__name__}: {e}")
+                await asyncio.sleep(min(interval, 1.0))
 
 
 # -------------------------------------------------
@@ -1012,35 +1089,40 @@ async def rebuild_global_maps(cfg=None):
 
     if cfg is None:
         cfg = await load_ipconfig()
-    ip_map   = cfg["inverters"]
-    poll_cfg = cfg["poll_interval"]
-    unit_cfg = cfg["units"]
 
-    inverters[:] = []
+    # T3.9 fix (Phase 6, 2026-04-14): build the new maps in LOCAL variables
+    # first, then atomically swap them into the module globals.  The previous
+    # code mutated `intervals = {}` and `static_units.clear()` mid-rebuild;
+    # any concurrent poll task iterating those dicts could see them empty
+    # (KeyError, "no inverter number") for a window of ~1 ms.  CPython
+    # single-statement rebinding of the module attribute is atomic under the
+    # GIL, so swap-after-build is race-free without an explicit lock.
+    new_ip_map = cfg["inverters"]
+    poll_cfg   = cfg["poll_interval"]
+    unit_cfg   = cfg["units"]
+
+    new_inverters = []
+    new_intervals = {}
+    new_static_units = {}
     for i in range(1, 28):
-        ip = str(ip_map.get(str(i), "")).strip()
+        ip = str(new_ip_map.get(str(i), "")).strip()
         if not ip:
             continue
-        inverters.append(ip)
-
-    intervals = {}
-    for i in range(1, 28):
-        ip = str(ip_map.get(str(i), "")).strip()
-        if not ip:
-            continue
+        new_inverters.append(ip)
         try:
             poll = float(poll_cfg.get(str(i), DEFAULT_INTERVAL))
         except Exception:
             poll = DEFAULT_INTERVAL
         poll = poll if poll >= 0.01 else DEFAULT_INTERVAL
-        intervals[ip] = max(MIN_POLL_INTERVAL, poll)
+        new_intervals[ip] = max(MIN_POLL_INTERVAL, poll)
+        new_static_units[ip] = unit_cfg.get(str(i))
 
+    # Atomic swaps (single-statement rebinding under GIL).
+    ip_map = new_ip_map
+    inverters[:] = new_inverters  # in-place because consumers hold the list ref
+    intervals = new_intervals
     static_units.clear()
-    for i in range(1, 28):
-        key = str(i)
-        ip = str(ip_map.get(key, "")).strip()
-        if ip:
-            static_units[ip] = unit_cfg.get(key)
+    static_units.update(new_static_units)
 
     # ── Bring up new inverters ──
     for ip in inverters:
@@ -1054,7 +1136,12 @@ async def rebuild_global_maps(cfg=None):
 
         thread_locks.setdefault(ip, threading.Lock())
         write_pending.setdefault(ip, threading.Event())
-        write_queues.setdefault(ip, Queue())
+        # T3.11 fix (Phase 6, 2026-04-14): bound the write queue per-IP so a
+        # burst of operator clicks (or a stuck UI retry loop) cannot grow
+        # RAM unbounded.  64 in-flight commands per inverter is well above
+        # any realistic operator workflow; producers see queue.Full and
+        # propagate as a 429 to the caller.
+        write_queues.setdefault(ip, Queue(maxsize=64))
 
         if ip not in write_threads or not write_threads[ip].is_alive():
             t = threading.Thread(
@@ -1411,13 +1498,18 @@ async def write_command(cmd: WriteCommand):
     # T3.3 fix: atomic mark+enqueue.  T3.5: record operator write timestamp
     # so handle_auto_reset can suppress the opposite-direction reset.
     note_operator_write(ip, cmd.unit)
-    enqueue_write_atomically(ip, {
-        "address": 16,
-        "value":   cmd.value,
-        "unit":    cmd.unit,
-        "future":  fut,
-        "loop":    loop,
-    })
+    try:
+        enqueue_write_atomically(ip, {
+            "address": 16,
+            "value":   cmd.value,
+            "unit":    cmd.unit,
+            "future":  fut,
+            "loop":    loop,
+        })
+    except WriteQueueFullError as e:
+        # T3.11 fix (Phase 6): map bounded-queue overflow to HTTP 429 so the
+        # operator UI can surface a clear "system busy, retry shortly" hint.
+        return JSONResponse({"status": "error", "msg": str(e)}, 429)
 
     wait_timeout = compute_write_wait_timeout(ip)
     try:
@@ -1463,15 +1555,18 @@ async def write_batch_command(cmd: WriteBatchCommand):
     # for each target unit so auto-reset is held off.
     for unit in units:
         note_operator_write(ip, unit)
-    enqueue_write_atomically(ip, {
-        "steps": [
-            {"address": 16, "value": cmd.value, "unit": unit}
-            for unit in units
-        ],
-        "future": fut,
-        "loop":   loop,
-        "batch":  True,
-    })
+    try:
+        enqueue_write_atomically(ip, {
+            "steps": [
+                {"address": 16, "value": cmd.value, "unit": unit}
+                for unit in units
+            ],
+            "future": fut,
+            "loop":   loop,
+            "batch":  True,
+        })
+    except WriteQueueFullError as e:
+        return JSONResponse({"status": "error", "msg": str(e)}, 429)
 
     wait_timeout = compute_write_wait_timeout(ip, len(units))
     try:
