@@ -143,7 +143,17 @@ SQLITE_WRITE_TIMEOUT_SEC = 20.0
 SQLITE_RETRY_ATTEMPTS = 3
 SQLITE_RETRY_BACKOFF_SEC = 0.35
 
-for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent]:
+# T4.4 fix: cross-process advisory lock for day-ahead generation.
+# Prevents Python-side double-runs (auto-scheduler + CLI + delegation-fallback)
+# from writing duplicate forecast_run_audit rows for the same target date.
+# The lock lives under APP_DB_FILE.parent so it survives restarts but has a
+# max age guard (DAYAHEAD_GEN_LOCK_MAX_AGE_SEC) after which it's considered
+# stale and can be force-acquired.  Node-side coordination is deferred and
+# tracked as follow-up work (see docs/BUG_SWEEP_2026-04-14.md §T4.4).
+DAYAHEAD_GEN_LOCK_DIR = APP_DB_FILE.parent / "locks"
+DAYAHEAD_GEN_LOCK_MAX_AGE_SEC = 300  # 5 min — covers Node's 180 s timeout + slack
+
+for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent, DAYAHEAD_GEN_LOCK_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -2614,8 +2624,19 @@ def build_features(
         solcast_resolution_weight = np.full(SLOTS_DAY, SOLCAST_RESOLUTION_WEIGHT_FALLBACK, dtype=float)
         solcast_resolution_support = np.zeros(SLOTS_DAY, dtype=float)
 
-    # TRI-BAND SOLCAST FEATURES (NEW)
-    if solcast_prior and solcast_prior.get("has_triband", False):
+    # TRI-BAND SOLCAST FEATURES
+    # T4.1 / T4.2 fix: prefer the stricter has_real_triband signal (past
+    # dates / estimated-actuals fall back to zero-spread) so the learned
+    # feature distribution isn't polluted.  Legacy "has_triband" kept for
+    # back-compat with callers that only need numerical presence.
+    _triband_ok = bool(
+        solcast_prior and (
+            solcast_prior.get("has_real_triband", False)
+            or solcast_prior.get("has_triband", False)
+            and not solcast_prior.get("is_past_date", False)
+        )
+    )
+    if _triband_ok:
         solcast_lo_kwh = np.clip(
             np.asarray(solcast_prior.get("prior_lo_kwh"), dtype=float),
             0.0,
@@ -2630,7 +2651,9 @@ def build_features(
         solcast_lo_kwh = np.minimum(solcast_lo_kwh, solcast_kwh)
         solcast_hi_kwh = np.maximum(solcast_hi_kwh, solcast_kwh)
     else:
-        # No tri-band data: fallback to forecast value (zero spread)
+        # No real tri-band data: fallback to forecast value (zero spread).
+        # Downstream training code should filter rows by
+        # solcast_prior["triband_data_quality_flag"] != "real" when present.
         solcast_lo_kwh = solcast_kwh.copy()
         solcast_hi_kwh = solcast_kwh.copy()
 
@@ -2653,17 +2676,28 @@ def build_features(
             200.0,  # Cap at 200% to avoid extreme outliers
         )
 
-    # Spread ratio: (Hi - Lo) / (Hi + Lo) — symmetric, robust to scale
+    # Spread ratio: (Hi - Lo) / (Hi + Lo) — symmetric, robust to scale.
+    # T4.3 fix: raise the denominator guard from 0.1 to 0.5 kWh so that
+    # early-morning slots (0.1–0.5 kWh forecasts) can't produce numerically
+    # huge ratios that saturate the clip, and apply a final nan_to_num to
+    # defend against any residual inf/nan leaking into training.
     solcast_spread_ratio = np.zeros(SLOTS_DAY, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         sum_bands = solcast_hi_kwh + solcast_lo_kwh
-        valid_ratio = sum_bands > 0.1
+        valid_ratio = sum_bands > 0.5
         solcast_spread_ratio[valid_ratio] = np.clip(
             (solcast_hi_kwh[valid_ratio] - solcast_lo_kwh[valid_ratio])
             / sum_bands[valid_ratio],
             -1.0,
             1.0,
         )
+    solcast_spread_ratio = np.nan_to_num(
+        solcast_spread_ratio, nan=0.0, posinf=0.0, neginf=0.0
+    )
+    # Also defensively sanitize spread_pct computed just above.
+    solcast_spread_pct = np.nan_to_num(
+        solcast_spread_pct, nan=0.0, posinf=0.0, neginf=0.0
+    )
     solcast_vs_physics = np.clip(solcast_kwh / slot_cap_arr, 0.0, 1.5)
     irr_proxy = np.maximum((np.clip(rad, 0.0, None) / 1000.0) * slot_cap_arr, 0.05)
     solcast_vs_irradiance = np.clip(solcast_kwh / irr_proxy, 0.0, 4.0)
@@ -5128,6 +5162,31 @@ def solcast_prior_from_snapshot(
         and np.any(prior_hi > prior_kwh + 0.01)
     )
 
+    # T4.1 / T4.2 fix: Solcast P10/P90 confidence bands are only meaningful
+    # for true day-ahead (future) slots.  Past-date snapshots often contain
+    # estimated-actuals where lo==forecast==hi (zero-spread) — feeding those
+    # into training as if they were real tri-band inputs distorts the learned
+    # distribution.  We expose:
+    #   * is_past_date           — day already completed
+    #   * has_real_triband       — stricter flag gating feature construction
+    #   * triband_data_quality_flag — audit label for training-time filtering
+    try:
+        from datetime import date as _date_cls
+        _today_iso = _date_cls.today().isoformat()
+    except Exception:
+        _today_iso = day
+    is_past_date = bool(day < _today_iso) if isinstance(day, str) else False
+    has_real_triband = bool(has_triband and not is_past_date)
+    if has_real_triband:
+        triband_data_quality_flag = "real"
+    elif is_past_date:
+        triband_data_quality_flag = "past_date"
+    elif has_triband:
+        # Live day but bands numerically present — treat as real.
+        triband_data_quality_flag = "real"
+    else:
+        triband_data_quality_flag = "zero_spread"
+
     # Step 12 (v2.8): Locked day-ahead snapshot enrichment. Read the frozen
     # 10 AM snapshot for this day (if any) and expose per-slot spread_pct_cap
     # plus captured_ts, so build_features can populate the two new ML features
@@ -5209,6 +5268,10 @@ def solcast_prior_from_snapshot(
         "trend_magnitude": _trend_mag,
         "spread_confidence": _sc_spread_conf,
         "has_triband": has_triband,
+        # T4.1 / T4.2: stricter tri-band validity signals for training & features.
+        "has_real_triband": has_real_triband,
+        "triband_data_quality_flag": triband_data_quality_flag,
+        "is_past_date": is_past_date,
         "source": str(snapshot.get("source") or "solcast"),
         "pulled_ts": int(snapshot.get("pulled_ts", 0) or 0),
         # Step 12 (v2.8): Locked snapshot features for build_features
@@ -10449,6 +10512,27 @@ def run_dayahead(
                 target_regime,
                 regime_confidence=float(bias_meta.get("regime_confidence", 1.0)),
             )
+
+            # T4.5 fix: surface prediction failures.  predict_residual_with_bundle
+            # returns `prediction_error` / `regime_prediction_error` keys in the
+            # metadata when model.predict() raises, but callers previously
+            # ignored them and silently treated the zero residual as a healthy
+            # prediction.  Now we log and mark _ml_failed so audit + QA layers
+            # can see that the model was not actually consulted.
+            _pred_err = model_meta.get("prediction_error")
+            _reg_err = model_meta.get("regime_prediction_error")
+            if _pred_err:
+                log.error(
+                    "ML global prediction error surfaced to caller: %s (target_regime=%s)",
+                    _pred_err, target_regime,
+                )
+                _ml_failed = True
+            if _reg_err:
+                log.warning(
+                    "ML regime prediction error surfaced to caller: %s (target_regime=%s)",
+                    _reg_err, target_regime,
+                )
+
             ml_residual           = np.zeros(SLOTS_DAY)
             ml_residual[:] = raw_residual
 
@@ -11084,7 +11168,21 @@ def run_manual_generation(dates: list[date]) -> bool:
                 )
 
         if not used_delegation:
-            ok = run_dayahead(d, today_ref, write_audit=True, audit_generator_mode="manual_cli_fallback")
+            # T4.4 fix: hold advisory lock across direct fallback so a concurrent
+            # Node completion can't also write an audit row for the same date.
+            _acquired = _dayahead_gen_lock_acquire(d, owner="manual_cli_fallback")
+            try:
+                if _acquired:
+                    ok = run_dayahead(d, today_ref, write_audit=True, audit_generator_mode="manual_cli_fallback")
+                else:
+                    log.warning(
+                        "Manual CLI fallback skipped for %s — generation lock held by another process.",
+                        d.isoformat(),
+                    )
+                    ok = False
+            finally:
+                if _acquired:
+                    _dayahead_gen_lock_release(d)
 
         if ok and d == today_ref:
             run_intraday_adjusted(d)
@@ -11484,6 +11582,54 @@ def _resolve_service_target_date(today: date, now_h: int, da_today_in_db: bool) 
     return today + timedelta(days=1)
 
 
+def _dayahead_gen_lock_path(target_date) -> "Path":
+    """Return the advisory lock path for a target date (see T4.4)."""
+    day_s = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+    return DAYAHEAD_GEN_LOCK_DIR / f"dayahead_{day_s}.lock"
+
+
+def _dayahead_gen_lock_acquire(target_date, owner: str) -> bool:
+    """T4.4 fix: acquire an advisory generation lock for target_date.
+
+    Returns True if acquired (no fresh lock, or prior lock is stale).
+    Returns False if a fresh lock by another owner is present — caller
+    should skip to avoid writing duplicate forecast_run_audit rows.
+    """
+    lock_path = _dayahead_gen_lock_path(target_date)
+    try:
+        if lock_path.exists():
+            age = time.time() - lock_path.stat().st_mtime
+            if age < DAYAHEAD_GEN_LOCK_MAX_AGE_SEC:
+                try:
+                    prior = lock_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    prior = "<unreadable>"
+                log.warning(
+                    "Day-ahead gen lock busy for %s (owner=%s, age=%.0fs) — caller=%s skipping.",
+                    target_date, prior, age, owner,
+                )
+                return False
+            log.info(
+                "Day-ahead gen lock for %s is stale (%.0fs old) — force-acquiring for %s.",
+                target_date, age, owner,
+            )
+        lock_path.write_text(
+            f"{owner} pid={os.getpid()} ts={int(time.time())}",
+            encoding="utf-8",
+        )
+        return True
+    except Exception as e:
+        log.warning("Could not acquire day-ahead gen lock for %s: %s (proceeding without lock)", target_date, e)
+        return True
+
+
+def _dayahead_gen_lock_release(target_date) -> None:
+    try:
+        _dayahead_gen_lock_path(target_date).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> dict | None:
     """Delegate day-ahead generation to the Node.js orchestrator.
 
@@ -11494,6 +11640,12 @@ def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> 
     url = f"http://127.0.0.1:{port}/api/internal/forecast/generate-auto"
     target_s = target_date.isoformat()
     log.info("Delegating day-ahead generation for %s to Node.js orchestrator at %s (trigger=%s)", target_s, url, trigger)
+    # T4.4 fix: acquire advisory lock so a parallel Python caller (CLI, auto-
+    # scheduler) cannot initiate a concurrent generation that would produce
+    # duplicate audit rows.  If the lock is busy, return None (caller falls
+    # back to skipping or retries later).
+    if not _dayahead_gen_lock_acquire(target_date, owner=f"delegate:{trigger}"):
+        return None
     try:
         resp = requests.post(url, json={
             "dates": [target_s],
@@ -11516,6 +11668,8 @@ def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> 
     except Exception as e:
         log.error("Failed to delegate generation to Node.js: %s", e)
         return None
+    finally:
+        _dayahead_gen_lock_release(target_date)
 
 
 def main() -> None:
@@ -11646,15 +11800,26 @@ def main() -> None:
                     ok = _delegate_run_dayahead(target)
                     if not ok:
                         log.warning("Node delegation failed in auto loop - attempting direct Python fallback for %s", target_s)
+                        # T4.4 fix: acquire advisory lock before direct fallback.
+                        _acquired = _dayahead_gen_lock_acquire(target, owner="auto_service_fallback")
                         try:
-                            _direct_result = run_dayahead(target, today, write_audit=True, audit_generator_mode="auto_service_fallback")
-                            if _direct_result:
-                                log.info("Auto loop Python fallback generation succeeded for %s", target_s)
-                                ok = True
+                            if not _acquired:
+                                log.warning(
+                                    "Auto loop fallback skipped for %s — generation lock held by another process.",
+                                    target_s,
+                                )
                             else:
-                                log.error("Auto loop Python fallback generation also failed for %s", target_s)
+                                _direct_result = run_dayahead(target, today, write_audit=True, audit_generator_mode="auto_service_fallback")
+                                if _direct_result:
+                                    log.info("Auto loop Python fallback generation succeeded for %s", target_s)
+                                    ok = True
+                                else:
+                                    log.error("Auto loop Python fallback generation also failed for %s", target_s)
                         except Exception as _fb_exc:
                             log.error("Auto loop Python fallback raised: %s", _fb_exc)
+                        finally:
+                            if _acquired:
+                                _dayahead_gen_lock_release(target)
                 except Exception:
                     _consecutive_failures, _fail_cooldown_until, backoff = _register_forecast_failure(
                         _consecutive_failures,
@@ -11692,15 +11857,26 @@ def main() -> None:
                     ok = _delegate_run_dayahead(today)
                     if not ok:
                         log.warning("Node delegation failed in recovery - attempting direct Python fallback for %s", today_s)
+                        # T4.4 fix: advisory lock on recovery fallback too.
+                        _acquired = _dayahead_gen_lock_acquire(today, owner="auto_recovery_fallback")
                         try:
-                            _direct_result = run_dayahead(today, today, write_audit=True, audit_generator_mode="auto_service_fallback")
-                            if _direct_result:
-                                log.info("Recovery Python fallback generation succeeded for %s", today_s)
-                                ok = True
+                            if not _acquired:
+                                log.warning(
+                                    "Recovery fallback skipped for %s — generation lock held by another process.",
+                                    today_s,
+                                )
                             else:
-                                log.error("Recovery Python fallback generation also failed for %s", today_s)
+                                _direct_result = run_dayahead(today, today, write_audit=True, audit_generator_mode="auto_service_fallback")
+                                if _direct_result:
+                                    log.info("Recovery Python fallback generation succeeded for %s", today_s)
+                                    ok = True
+                                else:
+                                    log.error("Recovery Python fallback generation also failed for %s", today_s)
                         except Exception as _fb_exc:
                             log.error("Recovery Python fallback raised: %s", _fb_exc)
+                        finally:
+                            if _acquired:
+                                _dayahead_gen_lock_release(today)
                 except Exception:
                     log.error("Recovery day-ahead for %s crashed", today_s, exc_info=True)
                 else:
