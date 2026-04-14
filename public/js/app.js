@@ -1999,6 +1999,13 @@ function buildThemePreviewGrid() {
 function openThemePreviewModal() {
   const modal = $("themePreviewModal");
   if (!modal) return;
+  // T5.3 fix: rapid re-opens used to stack backdrop handlers because the
+  // previous closure reference was overwritten before being detached.
+  // Detach any existing handler first, then attach a fresh one.
+  if (modal._backdropHandler) {
+    modal.removeEventListener("click", modal._backdropHandler);
+    modal._backdropHandler = null;
+  }
   buildThemePreviewGrid();
   modal.classList.remove("hidden");
   const closeBtn = $("themePreviewClose");
@@ -2021,17 +2028,30 @@ function closeThemePreviewModal() {
   modal.classList.add("hidden");
 }
 
+// T5.1 / T5.3 fix: theme-toggle listeners are now idempotent.  The button
+// click and document-level Escape handlers are captured once as named
+// functions and re-registered via removeEventListener before addEventListener
+// so repeated calls to initThemeToggle() (e.g. hot-reloads, page-revive) do
+// not accumulate stacked listeners on `document` or the button — which
+// previously leaked memory and could "trap" the modal by chaining handler
+// calls out of order on rapid re-opens.
+function _themeToggleEscapeHandler(e) {
+  if (e.key === "Escape") {
+    const modal = $("themePreviewModal");
+    if (modal && !modal.classList.contains("hidden")) closeThemePreviewModal();
+  }
+}
+function _themeToggleOpenHandler() {
+  openThemePreviewModal();
+}
 function initThemeToggle() {
   applyTheme(getStoredTheme(), false);
   const btn = $("themeToggleBtn");
   if (!btn) return;
-  btn.addEventListener("click", () => openThemePreviewModal());
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      const modal = $("themePreviewModal");
-      if (modal && !modal.classList.contains("hidden")) closeThemePreviewModal();
-    }
-  });
+  btn.removeEventListener("click", _themeToggleOpenHandler);
+  btn.addEventListener("click", _themeToggleOpenHandler);
+  document.removeEventListener("keydown", _themeToggleEscapeHandler);
+  document.addEventListener("keydown", _themeToggleEscapeHandler);
 }
 const EXPORT_DATE_FIELD_IDS = [
   "reportDate",
@@ -11416,7 +11436,19 @@ function connectWS() {
       const msg = JSON.parse(data);
       handleWS(msg);
     } catch (err) {
-      console.warn("[ws] message handling failed:", err.message);
+      // T5.2 fix: surface enough context to diagnose a stream-corruption
+      // incident.  Previously only err.message was logged — the stack trace
+      // AND the offending payload excerpt were lost, making upstream
+      // corruption invisible to operators.
+      let excerpt;
+      try {
+        excerpt = typeof data === "string"
+          ? data.slice(0, 500)
+          : `<binary ${data && data.byteLength ? data.byteLength + "B" : "?"}>`;
+      } catch (_) {
+        excerpt = "<unavailable>";
+      }
+      console.error("[ws] message handling failed:", err, "payload excerpt:", excerpt);
     }
   };
 
