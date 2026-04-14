@@ -96,6 +96,19 @@ process.on("uncaughtException", (err) => {
   }
 });
 
+// T6.7 fix (Phase 3, 2026-04-14): previously unhandled promise rejections
+// were silent — Node's default behaviour deprecation-warns once then swallows.
+// In Electron main this manifested as "app feels stuck" bugs with no log.
+// Log-and-continue here (do NOT rethrow — this process must stay up for the
+// renderer / tray).
+process.on("unhandledRejection", (reason, promise) => {
+  try {
+    console.error("[main] Unhandled promise rejection:", reason);
+  } catch (_) {
+    // Ignore secondary logging issues.
+  }
+});
+
 const PORTABLE_EXEC_DIR = String(process.env.PORTABLE_EXECUTABLE_DIR || "").trim();
 const PORTABLE_DATA_DIR = PORTABLE_EXEC_DIR
   ? path.join(PORTABLE_EXEC_DIR, "InverterDashboardData")
@@ -116,6 +129,10 @@ const INITIAL_LOAD_RETRY_MAX = 8;
 const MAIN_RENDERER_READY_TIMEOUT_MS = 120000;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
+// T6.9 fix (Phase 3, 2026-04-14): same backoff envelope as forecast
+// service, used by scheduleBackendRestart().
+const BACKEND_RESTART_BASE_MS = 1500;
+const BACKEND_RESTART_MAX_MS = 30000;
 const FORECAST_MODE_SYNC_MS = 10000;
 const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
 const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
@@ -209,6 +226,9 @@ let loadingWinLoadCount = 0;
 let mainRendererReadyTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
+// T6.9 fix (Phase 3): auto-restart state for the backend (Node server).
+let backendRestartTimer = null;
+let backendRestartAttempts = 0;
 let forecastRestartAttempts = 0;
 let forecastModeSyncTimer = null;
 let forecastModeSyncInFlight = false;
@@ -3372,6 +3392,10 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
   backendProc.on("error", (err) => {
     console.error("[main] Backend spawn error:", err.message);
   });
+  backendProc.on("spawn", () => {
+    // Successful spawn resets backoff so next unexpected exit retries fast.
+    backendRestartAttempts = 0;
+  });
   backendProc.on("exit", (code, signal) => {
     const expectedStop = backendStopExpected;
     backendStopExpected = false;
@@ -3381,7 +3405,41 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
       return;
     }
     console.warn("[main] Backend exited - code=" + code + " signal=" + signal);
+    // T6.9 fix (Phase 3, 2026-04-14): previously the handler only logged and
+    // the app hung with a blank renderer.  Schedule an auto-restart with
+    // exponential backoff, matching the forecast service pattern.
+    scheduleBackendRestart(`unexpected exit code=${code} signal=${signal}`);
   });
+}
+
+function clearBackendRestartTimer() {
+  if (!backendRestartTimer) return;
+  clearTimeout(backendRestartTimer);
+  backendRestartTimer = null;
+}
+
+function scheduleBackendRestart(reason) {
+  if (isAppShuttingDown) return;
+  if (backendRestartTimer) return;
+  if (backendProc && !backendProc.killed) return;
+
+  const delay = Math.min(
+    BACKEND_RESTART_MAX_MS,
+    BACKEND_RESTART_BASE_MS * Math.pow(2, Math.min(backendRestartAttempts, 5)),
+  );
+  backendRestartAttempts += 1;
+  console.warn(`[main] Backend restart scheduled in ${delay}ms (${reason})`);
+
+  backendRestartTimer = setTimeout(() => {
+    backendRestartTimer = null;
+    if (isAppShuttingDown) return;
+    const backendLaunch = resolveBackendLaunch();
+    if (!backendLaunch) {
+      console.error("[main] Backend auto-restart failed: launch target not found.");
+      return;
+    }
+    spawnBackendProcess(backendLaunch, "[main] Auto-restarting backend:");
+  }, delay);
 }
 
 function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forecast:") {
@@ -3522,6 +3580,10 @@ function scheduleForecastRestart(reason) {
 }
 
 function restartBackendProcess() {
+  // T6.9 fix: cancel any pending auto-restart timer before manual restart,
+  // otherwise the auto-restart could fire mid-flight and spawn a second.
+  clearBackendRestartTimer();
+  backendRestartAttempts = 0;
   // Kill by image name first so updated ipconfig is reloaded by a clean process.
   killImageNames(BACKEND_EXE_NAMES);
 
@@ -4378,9 +4440,20 @@ ipcMain.on("close-current-window", (event) => {
 });
 ipcMain.handle("pick-folder", async (_, startPath) => {
   try {
+    // T6.11 fix (Phase 3, 2026-04-14): if no caller-supplied start path is
+    // given, anchor the dialog at the user's Documents folder so the user
+    // doesn't land in a random cwd (e.g. system32 when launched from a
+    // shortcut).  The renderer cannot sandbox the dialog to a subtree — the
+    // OS dialog always allows navigation — but this prevents user confusion
+    // and accidental writes into unexpected system locations.
+    const trimmed = startPath && String(startPath).trim() ? String(startPath).trim() : "";
+    let defaultPath = trimmed;
+    if (!defaultPath) {
+      try { defaultPath = app.getPath("documents"); } catch { defaultPath = undefined; }
+    }
     const result = await dialog.showOpenDialog(mainWin || undefined, {
       title: "Select Export Folder",
-      defaultPath: startPath && String(startPath).trim() ? String(startPath).trim() : undefined,
+      defaultPath: defaultPath || undefined,
       properties: ["openDirectory", "createDirectory"],
     });
     if (result.canceled || !result.filePaths?.length) return null;
@@ -4740,6 +4813,21 @@ ipcMain.on("open-ip-check", async (event, ip) => {
 // callback URL before it loads, and returns the code to the renderer.
 ipcMain.handle("oauth-start", async (_, { authUrl }) => {
   return new Promise((resolve) => {
+    // T6.10 fix (Phase 3, 2026-04-14): whitelist http/https only.  Before
+    // this guard any scheme passed by a compromised renderer (file:,
+    // javascript:, data:, ms-word:, etc.) was loaded into a BrowserWindow
+    // with devtools/node disabled but still in the same session partition
+    // as the main app — a credential-harvesting foothold.  Reject early.
+    try {
+      const parsed = new URL(String(authUrl || ""));
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        resolve({ ok: false, error: `OAuth refused: unsupported scheme "${parsed.protocol}"` });
+        return;
+      }
+    } catch (err) {
+      resolve({ ok: false, error: `OAuth refused: invalid authUrl (${err.message})` });
+      return;
+    }
     const CALLBACK_ORIGIN = "http://localhost:3500/oauth/callback";
 
     const oauthWin = new BrowserWindow({
