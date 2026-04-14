@@ -10,6 +10,7 @@
 - [SMOKE_BASELINE.md](SMOKE_BASELINE.md) — **same-day** first run of the new T7.3 smoke harness; catalogues 5 pre-existing Node-test failures.
 - [PHASE5_FIXES.md](PHASE5_FIXES.md) — **same-day Phase 5 session (2026-04-14)** closing T2.3–T2.9 (Node subsystem). Smoke-verified zero regressions.
 - [PHASE6_FIXES.md](PHASE6_FIXES.md) — **same-day Phase 6 session (2026-04-14)** closing T3.6/T3.7/T3.9/T3.10/T3.11/T3.12 (Python inverter engine). T3.8 reviewed and rejected as not-a-bug (GIL-safe). Smoke-verified.
+- [PHASE7_FIXES.md](PHASE7_FIXES.md) — **same-day Phase 7 session (2026-04-14)** closing T4.6/T4.7/T4.8/T4.9/T4.12 (Python forecast engine). T4.10 reviewed as already-enforced; T4.11 deferred to v2.9.0. 107/107 Python tests pass. **After this session, the remaining HIGH backlog is T1.5/T1.6 (frontend) and T6.8 (optimisation only).**
 
 This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.8, organised so a future debugger can grep for a symptom and find the relevant known issue.
 
