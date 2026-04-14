@@ -121,7 +121,12 @@ if PORTABLE_ROOT is not None:
 else:
     IPCONFIG_FILE = APP_DB_FILE.parent / "ipconfig.json"
     LEGACY_IPCONFIG_FILES = []
-    for candidate in [BASE / "config" / "ipconfig.json", BASE / "ipconfig.json", Path(__file__).resolve().parent / "ipconfig.json", Path.cwd() / "ipconfig.json"]:
+    # Only include persistent user-data paths. Bundle-dir (__file__.parent)
+    # and Path.cwd() are intentionally excluded — in a PyInstaller bundle
+    # they resolve to the extracted _MEIxxxx dir or the installer's launch
+    # directory, both of which are replaced on every update and could let
+    # a stale shipped ipconfig silently shadow the user's real config.
+    for candidate in [BASE / "config" / "ipconfig.json", BASE / "ipconfig.json"]:
         if candidate != IPCONFIG_FILE and candidate not in LEGACY_IPCONFIG_FILES:
             LEGACY_IPCONFIG_FILES.append(candidate)
 

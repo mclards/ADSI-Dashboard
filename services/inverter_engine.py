@@ -143,8 +143,12 @@ LEGACY_IPCONFIG_PATHS = [
     DATA_DIR / "ipconfig.json",
     PROGRAMDATA_DIR / "config" / "ipconfig.json",
     PROGRAMDATA_DIR / "ipconfig.json",
-    Path(os.path.dirname(__file__)) / "ipconfig.json",
-    Path.cwd() / "ipconfig.json",
+    # NOTE: Intentionally excluding Path(__file__).parent / "ipconfig.json"
+    # and Path.cwd() / "ipconfig.json". In a PyInstaller bundle __file__'s
+    # directory is the extracted _MEIxxxx dir which may contain a stale
+    # build-time ipconfig, and CWD depends on how the installer launches
+    # the service — both would be replaced on every update and could
+    # silently shadow the user's real config.
 ]
 AUTORESET_PATH = PROGRAMDATA_DIR / "autoreset.json"
 SERVICE_STOP_FILE_RAW = str(
@@ -350,7 +354,9 @@ def _load_ipconfig_sync():
         _write_ipconfig_file(IPCONFIG_PATH, cfg)
         return cfg
 
-    # 2) Fallbacks: AppData ipconfig, then legacy paths.
+    # 2) Fallbacks: AppData ipconfig, then legacy paths. These paths live in
+    #    user-data locations that are preserved across updates. Bundle-dir and
+    #    CWD paths are intentionally excluded (see LEGACY_IPCONFIG_PATHS).
     candidate_paths = [IPCONFIG_PATH]
     candidate_paths.extend(LEGACY_IPCONFIG_PATHS)
 
@@ -360,9 +366,17 @@ def _load_ipconfig_sync():
             continue
         cfg = _sanitize_ipconfig(raw)
         _write_ipconfig_file(IPCONFIG_PATH, cfg)
+        # Do NOT write back to the DB from the fallback path. _read_ipconfig_from_db
+        # returns None on both "key missing" AND "transient SQLite lock" — writing
+        # back on the latter would silently overwrite a newer value Node just wrote.
+        # Node's loadIpConfigFromDb already seeds the DB from legacy files on
+        # startup when its own read returns empty, so this migration is already
+        # covered by the Node side without the race window.
         return cfg
 
-    # 3) Default if nothing exists.
+    # 3) Default if nothing exists. Do NOT promote the default into the DB —
+    #    a Node restart may still populate the real setting from a mirror
+    #    file that appeared after we checked.
     cfg = _default_ipconfig()
     _write_ipconfig_file(IPCONFIG_PATH, cfg)
     print("[IPCONFIG] Created default ipconfig.json at", IPCONFIG_PATH)

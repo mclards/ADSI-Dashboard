@@ -7672,6 +7672,44 @@ function sanitizePollConfig(raw) {
   };
 }
 
+// Camera streaming configuration — promoted from client localStorage to the
+// server DB so it survives reinstalls, Electron userData rewrites, and any
+// Local Storage LevelDB corruption. `go2rtcAutoStart` remains a top-level
+// key for backwards compatibility.
+const DEFAULT_CAMERA_CFG = Object.freeze({
+  mode: "hls",
+  go2rtcIp: "",
+  go2rtcPort: "",
+  streamKey: "",
+  ip: "",
+  rtspPort: "",
+  streamPath: "",
+  user: "",
+  pass: "",
+});
+
+function sanitizeCameraConfig(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const str = (v, max = 200) =>
+    String(v == null ? "" : v).trim().slice(0, max);
+  const modeRaw = str(src.mode, 16).toLowerCase();
+  const mode = ["hls", "webrtc", "ffmpeg"].includes(modeRaw) ? modeRaw : "hls";
+  return {
+    mode,
+    go2rtcIp:   str(src.go2rtcIp,   120),
+    go2rtcPort: str(src.go2rtcPort,  10),
+    streamKey:  str(src.streamKey,   80),
+    ip:         str(src.ip,         120),
+    rtspPort:   str(src.rtspPort,    10),
+    streamPath: str(src.streamPath,  80),
+    user:       str(src.user,        80),
+    // Password length is generous but capped; empty string is a valid choice
+    // (unauthenticated RTSP). Stored in plain text in settings — same risk
+    // surface as the existing plain-text Solcast/remote tokens.
+    pass:       str(src.pass,       256),
+  };
+}
+
 function readJsonSetting(key, fallback = {}) {
   const raw = String(getSetting(key, "") || "").trim();
   if (!raw) return fallback;
@@ -7808,6 +7846,7 @@ function buildDefaultSettingsSnapshot() {
     plantCapCooldownSec: 30,
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
+    cameraConfig: { ...DEFAULT_CAMERA_CFG },
     dataDir: DATA_DIR,
   };
 }
@@ -7916,6 +7955,9 @@ function buildSettingsSnapshot() {
     ),
     inverterPollConfig: sanitizePollConfig(
       readJsonSetting("inverterPollConfig", DEFAULT_POLL_CFG),
+    ),
+    cameraConfig: sanitizeCameraConfig(
+      readJsonSetting("cameraConfig", DEFAULT_CAMERA_CFG),
     ),
     go2rtcAutoStart: getSetting("go2rtcAutoStart", "0"),
     dataDir: DATA_DIR,
@@ -10447,7 +10489,7 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
 
   let rows = [];
   if (!inverter || inverter === "all") {
-    rows = queryReadingsRangeAll(s, e).map((r) => ({
+    rows = queryReadingsRangeAllChunked(s, e).map((r) => ({
       inverter: r.inverter,
       unit: r.unit,
       ts: r.ts,
@@ -10638,6 +10680,41 @@ function sumEnergyRowsKwh(rows) {
   );
 }
 
+// Per-inverter chunked scans that bypass the all-inverters 500k row guard in
+// queryReadingsRangeAll / queryEnergy5minRangeAll. Each per-inverter query is
+// unguarded and bounds memory to one inverter's rows at a time, so total
+// resident data stays ~1/invCount of the old all-at-once fetch. Returns the
+// same shape as the guarded functions. Use these on non-export code paths
+// where throwing on >500k rows would kill the UI / WS pings rather than
+// pointing the operator at a narrower date range.
+function _invCountForScan() {
+  return Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+}
+function queryReadingsRangeAllChunked(startTs, endTs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const invCount = _invCountForScan();
+  const out = [];
+  for (let inv = 1; inv <= invCount; inv++) {
+    const invRows = queryReadingsRange(inv, s, e);
+    if (invRows && invRows.length) out.push(...invRows);
+  }
+  return out;
+}
+function queryEnergy5minRangeAllChunked(startTs, endTs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const invCount = _invCountForScan();
+  const out = [];
+  for (let inv = 1; inv <= invCount; inv++) {
+    const invRows = queryEnergy5minRange(inv, s, e);
+    if (invRows && invRows.length) out.push(...invRows);
+  }
+  return out;
+}
+
 function buildForecastActualSupplementRowsForRange(
   startTs,
   endTs,
@@ -10661,11 +10738,11 @@ function buildForecastActualSupplementRowsForRange(
   const persistedBeforeRangeKwh =
     overlapStartTs > dayStartTs
       ? sumEnergyRowsKwh(
-          queryEnergy5minRangeAll(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
+          queryEnergy5minRangeAllChunked(dayStartTs, Math.max(dayStartTs, overlapStartTs - 1)),
         )
       : 0;
   const persistedRangeKwh = sumEnergyRowsKwh(
-    queryEnergy5minRangeAll(overlapStartTs, overlapEndTs),
+    queryEnergy5minRangeAllChunked(overlapStartTs, overlapEndTs),
   );
 
   return buildCurrentDayActualSupplementRows({
@@ -11490,18 +11567,19 @@ function sanitizeIpConfig(input) {
 }
 
 function legacyIpConfigPaths() {
+  // Only include paths under user-data / portable roots — these persist
+  // across updates. Paths under the installed app directory
+  // (path.join(__dirname, "../ipconfig.json")) or the current working
+  // directory are intentionally excluded: they are replaced by every
+  // installer run, so letting them feed the fallback chain allows a
+  // stale bundled ipconfig to silently overwrite user customizations
+  // on the first post-update boot.
   const preferred = [];
   if (PORTABLE_ROOT) {
     preferred.push(path.join(PORTABLE_ROOT, "config", "ipconfig.json"));
   }
   preferred.push(path.join(DATA_DIR, "ipconfig.json"));
-
-  const legacy = [
-    path.join(process.cwd(), "ipconfig.json"),
-    path.join(__dirname, "../ipconfig.json"),
-  ];
-
-  return [...new Set([...preferred, ...legacy])];
+  return [...new Set(preferred)];
 }
 
 function readLegacyIpConfigIfAny() {
@@ -13456,6 +13534,7 @@ app.post("/api/settings", (req, res) => {
     plantCapSequenceCustom,
     plantCapCooldownSec,
     go2rtcAutoStart,
+    cameraConfig,
   } =
     req.body || {};
 
@@ -13754,6 +13833,9 @@ app.post("/api/settings", (req, res) => {
 
   if (go2rtcAutoStart !== undefined) {
     updates.go2rtcAutoStart = go2rtcAutoStart === "1" || go2rtcAutoStart === true ? "1" : "0";
+  }
+  if (cameraConfig !== undefined) {
+    updates.cameraConfig = JSON.stringify(sanitizeCameraConfig(cameraConfig));
   }
 
   db.transaction(() => {
@@ -14072,7 +14154,7 @@ app.get("/api/energy/5min", (req, res) => {
   try {
     const baseRows = scopedInv
       ? queryEnergy5minRange(scopedInv, s, e)
-      : queryEnergy5minRangeAll(s, e);
+      : queryEnergy5minRangeAllChunked(s, e);
 
     if (pagedMode) {
       const safeLimit = clampInt(limit, 100, 5000, 500);
@@ -14153,7 +14235,7 @@ app.get("/api/analytics/energy", (req, res) => {
   // Apply row cap to prevent wide date ranges from hanging the analytics chart.
   const baseRows =
     !inverter || inverter === "all"
-      ? queryEnergy5minRangeAll(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
+      ? queryEnergy5minRangeAllChunked(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
       : queryEnergy5minRange(Number(inverter), s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP);
 
   if (baseRows.length) {
@@ -14360,7 +14442,7 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
     try {
       const solarWindow = getForecastSolarWindowBounds(date);
       if (Number.isFinite(solarWindow.startTs) && Number.isFinite(solarWindow.endTs)) {
-        const energyRows = queryEnergy5minRangeAll(solarWindow.startTs, solarWindow.endTs);
+        const energyRows = queryEnergy5minRangeAllChunked(solarWindow.startTs, solarWindow.endTs);
         const bySlotTs = new Map();
         for (const r of energyRows) {
           const ts = Number(r?.ts || 0);
@@ -15533,7 +15615,7 @@ app.get("/api/energy/daily", (req, res) => {
     if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
       return res.status(400).json({ ok: false, error: "invalid range" });
     }
-    const rows = queryEnergy5minRangeAll(start, end);
+    const rows = queryEnergy5minRangeAllChunked(start, end);
     const byInvDate = {};
     for (const row of rows) {
       const inv = Number(row.inverter || 0);

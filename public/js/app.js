@@ -5729,6 +5729,11 @@ async function loadSettings() {
   try {
     const s = await api("/api/settings");
     State.settings = { ...State.settings, ...s };
+    // Mark that the server snapshot has been fetched at least once so code
+    // paths gated on "do we know the real DB state?" (e.g. the camera
+    // localStorage→DB first-run migration) can distinguish "DB has no value"
+    // from "DB value not loaded yet" and avoid racing against loadSettings.
+    State.settingsLoaded = true;
     State.settings.invGridLayout = normalizeInvGridLayout(s.invGridLayout);
     State.settings.exportUiState = sanitizeExportUiStateClient(
       s.exportUiState || {},
@@ -11468,20 +11473,100 @@ const CAM_LS_KEYS = {
   pass: "cam_pass",
 };
 
+// Guards the one-shot localStorage → DB migration so it only POSTs once per page load.
+let _camDbMigrationPromise = null;
+
+function _camHasDbValues(fromDb) {
+  if (!fromDb || typeof fromDb !== "object") return false;
+  return Object.keys(CAM_LS_KEYS).some(
+    (k) => fromDb[k] != null && String(fromDb[k]) !== "",
+  );
+}
+
+function _camHasLocalStorageValues() {
+  return Object.values(CAM_LS_KEYS).some((lsKey) => {
+    const v = localStorage.getItem(lsKey);
+    return v != null && v !== "";
+  });
+}
+
+function _migrateCameraLocalStorageToDb() {
+  if (_camDbMigrationPromise) return _camDbMigrationPromise;
+  const payload = {};
+  for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
+    const v = localStorage.getItem(lsKey);
+    if (v != null && v !== "") payload[k] = String(v);
+  }
+  if (!Object.keys(payload).length) return null;
+  State.settings = State.settings || {};
+  State.settings.cameraConfig = { ...(State.settings.cameraConfig || {}), ...payload };
+  _camDbMigrationPromise = api("/api/settings", "POST", { cameraConfig: payload })
+    .catch((err) => {
+      console.warn("[camera] first-run localStorage→DB migration failed:", err?.message || err);
+      _camDbMigrationPromise = null; // allow retry on next access
+    });
+  return _camDbMigrationPromise;
+}
+
 function camLoadSettings() {
+  // DB-backed cameraConfig is authoritative (survives reinstalls and
+  // Electron Local Storage corruption). Fall back to localStorage for
+  // clients running against a server that hasn't yet added the key, and
+  // finally to CAM_DEFAULTS for missing fields.
+  const fromDb =
+    (State.settings && State.settings.cameraConfig && typeof State.settings.cameraConfig === "object")
+      ? State.settings.cameraConfig
+      : null;
+  // One-shot migration: if the DB has no camera values yet but localStorage
+  // does (pre-upgrade user), promote localStorage to DB immediately so the
+  // config survives future localStorage resets. Only fire AFTER loadSettings
+  // has completed at least once — otherwise a caller that opens the camera
+  // modal before the first /api/settings GET lands would race and overwrite
+  // newer DB values with stale localStorage.
+  if (
+    State.settingsLoaded === true &&
+    !_camHasDbValues(fromDb) &&
+    _camHasLocalStorageValues()
+  ) {
+    _migrateCameraLocalStorageToDb();
+  }
   const s = {};
   for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
-    s[k] = localStorage.getItem(lsKey) || CAM_DEFAULTS[k];
+    const dbVal = fromDb ? fromDb[k] : undefined;
+    if (dbVal != null && dbVal !== "") {
+      s[k] = String(dbVal);
+    } else {
+      s[k] = localStorage.getItem(lsKey) || CAM_DEFAULTS[k];
+    }
   }
   return s;
 }
 function camSaveSettings(s) {
+  // Mirror to localStorage first so the UI stays responsive if the /api/settings
+  // POST is slow or fails; the DB write below is the authoritative copy.
   for (const [k, lsKey] of Object.entries(CAM_LS_KEYS)) {
     if (s[k] != null) localStorage.setItem(lsKey, s[k]);
   }
+  const payload = {};
+  for (const k of Object.keys(CAM_LS_KEYS)) {
+    if (s[k] != null) payload[k] = String(s[k]);
+  }
+  // Keep State.settings in sync immediately so camLoadSettings() returns the
+  // new values before the /api/settings GET re-fetch lands.
+  State.settings = State.settings || {};
+  State.settings.cameraConfig = { ...(State.settings.cameraConfig || {}), ...payload };
+  api("/api/settings", "POST", { cameraConfig: payload }).catch((err) => {
+    console.warn("[camera] settings DB persist failed:", err?.message || err);
+  });
 }
 function camResetSettings() {
   for (const lsKey of Object.values(CAM_LS_KEYS)) localStorage.removeItem(lsKey);
+  // Also clear the DB-backed copy so a reset actually resets across reinstalls.
+  State.settings = State.settings || {};
+  State.settings.cameraConfig = {};
+  api("/api/settings", "POST", { cameraConfig: {} }).catch((err) => {
+    console.warn("[camera] settings DB reset failed:", err?.message || err);
+  });
 }
 
 class CameraPlayer {
