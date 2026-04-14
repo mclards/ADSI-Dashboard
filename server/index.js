@@ -2509,6 +2509,28 @@ function makeReplicationRowPayload(row, cols) {
 
 const REPLICATION_STMT_CACHE = new Map();
 
+// Whitelist of replication tables allowed in dynamic SQL construction.
+// Must exactly match `REPLICATION_TABLE_DEFS[].name`. Used as a
+// defence-in-depth SQL-injection guard at the two dynamic-`tableName`
+// interpolation sites in mergeAppendReplicationRow / mergeUpdatedReplicationRow.
+const REPLICATION_ALLOWED_TABLES = new Set([
+  "readings",
+  "energy_5min",
+  "alarms",
+  "audit_log",
+  "daily_report",
+  "daily_readings_summary",
+  "forecast_dayahead",
+  "forecast_intraday_adjusted",
+  "settings",
+]);
+
+function assertReplicationTableAllowed(tableName) {
+  if (!REPLICATION_ALLOWED_TABLES.has(String(tableName))) {
+    throw new Error(`replication: rejected non-whitelisted tableName=${JSON.stringify(tableName)}`);
+  }
+}
+
 function stmtCached(key, sql) {
   if (!REPLICATION_STMT_CACHE.get(key)) {
     REPLICATION_STMT_CACHE.set(key, db.prepare(sql));
@@ -2661,6 +2683,8 @@ function mergeAppendReplicationRow(tableName, payload, cols, authoritative = fal
     return true;
   }
 
+  // T1.1 fix: whitelist tableName before dynamic SQL construction.
+  assertReplicationTableAllowed(tableName);
   const sql = `INSERT OR REPLACE INTO ${tableName} (${cols.join(", ")}) VALUES (${cols
     .map((c) => `@${c}`)
     .join(", ")})`;
@@ -2760,6 +2784,8 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
     return true;
   }
 
+  // T1.1 fix: whitelist tableName before dynamic SQL construction.
+  assertReplicationTableAllowed(tableName);
   const sql = `INSERT OR REPLACE INTO ${tableName} (${cols.join(", ")}) VALUES (${cols
     .map((c) => `@${c}`)
     .join(", ")})`;

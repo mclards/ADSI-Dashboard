@@ -1359,9 +1359,17 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
   const nowTs = Date.now();
   const minDurationSec = normalizeAlarmExportMinDurationSec(minAlarmDurationSec);
 
+  // T1.2 fix: yield before the heavy .all() so flushPersistBacklog in poller.js
+  // can run between the range scan and the mapping phase on long windows.
+  await yieldToEventLoop();
+
   const raw = inverter && inverter !== 'all'
     ? db.prepare('SELECT * FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
     : db.prepare('SELECT * FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
+
+  // T1.2 fix: yield after the scan so the mapping loop below doesn't chain
+  // directly onto the .all() without an event-loop turn.
+  await yieldToEventLoop();
 
   const rows = raw.map(r => {
     const operator = getSetting('operatorName', 'OPERATOR');
@@ -1610,6 +1618,10 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
   const s = startTs || Date.now()-7*86400000;
   const e = endTs   || Date.now();
   const ipMap = readInverterIpMap();
+
+  // T1.2 fix: yield before .all() so poller.flushPersistBacklog can drain
+  // between setup and the long range scan on 366-day exports.
+  await yieldToEventLoop();
 
   const raw = inverter && inverter !== 'all'
     ? db.prepare('SELECT * FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)

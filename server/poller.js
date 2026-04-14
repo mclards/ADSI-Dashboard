@@ -827,7 +827,15 @@ function flushPersistBacklog(reason = "tick") {
         const backoffMs = 100 * Math.pow(2, _flushRetryCount); // 100, 200, 400
         _flushRetryCount++;
         pollStats.energyPriorityRetryCount = (pollStats.energyPriorityRetryCount || 0) + 1;
-        setTimeout(() => flushPersistBacklog("pressure-retry"), backoffMs);
+        // T1.4 fix: guard the async callback so a synchronous throw inside
+        // flushPersistBacklog cannot escape as an unhandled rejection / uncaught exception.
+        setTimeout(() => {
+          try {
+            flushPersistBacklog("pressure-retry");
+          } catch (err) {
+            console.error("[poller] pressure-retry callback threw:", err);
+          }
+        }, backoffMs);
         return false;
       }
     }
