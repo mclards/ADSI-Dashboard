@@ -35,6 +35,20 @@ Flags:
 | Wall time | | | 143 s (Node rebuild ~30 s, tests ~30 s, pytest ~63 s, Electron restore ~20 s) |
 | ABI restore | OK | | Repo left in Electron ABI as required |
 
+### Updated baseline (2026-04-15, commit `8f04883`)
+
+All five pre-existing Node failures were resolved as a follow-on to Phase 8.
+The smoke harness now runs **fully green** on a clean checkout:
+
+| Bucket | Pass | Total | Notes |
+|---|---|---|---|
+| Node tests | **29** | 29 | All green |
+| Python tests | **107** | 107 | All green, 4 deprecation warnings unchanged |
+| Wall time | | | ~95 s |
+| ABI restore | OK | | Electron ABI restored automatically |
+
+See **§ Resolution of pre-existing failures** below for the per-test breakdown.
+
 ### The 5 Node failures
 
 | Test | Failure mode | Verified pre-existing? |
@@ -64,6 +78,29 @@ If the failure reproduces, it's pre-existing. If it disappears, it's a Phase 2/3
 **Zero regressions introduced.** Phase 2 (T4.4 + T2.10/2.11/2.12 + T5.4) and Phase 3 (T6.7/9/10/11 + T5.5/6/7/8) ship with the same Node-test-suite pass rate as the pre-Phase-2 baseline.
 
 The 5 pre-existing failures are now formally tracked here; they should each get a HIGH backlog entry in [KNOWN_GAPS.md](KNOWN_GAPS.md) (or its v2.8.9-regenerated successor) so they get triaged before the next release.
+
+---
+
+## Resolution of pre-existing failures (2026-04-15, commit `8f04883`)
+
+All 5 failures resolved in a single follow-on commit after Phase 8 closed the audit. Most were stale-test issues caused by code evolution since v2.4.x; one was a genuine production regression caught only because we promoted these to a release blocker.
+
+| Test | Root cause | Fix |
+|---|---|---|
+| `cloudBackupS3Dedupe.test.js` | `resolvedBackupDir()` fallback redirected the test to the developer machine's real `%PROGRAMDATA%\InverterDashboard\cloud_backups` whenever the migration sentinel was present. | `server/cloudBackup.js` constructor now accepts optional `backupDir` / `historyFile` overrides. Test wires them via `createService()`. Production paths (no overrides) resolve via `storagePaths.js` exactly as before. |
+| `forecastActualAverageTable.test.js` | Three stale assertions: (a) `average` value reflected old mean-of-bucket-means semantics instead of the documented `sum / 12`; (b) `id="anaDayAheadExportFormat"` per-page selector was removed in v2.4.38 in favour of a shared selector; (c) `forecastExportFormat: "standard"` literal was changed to `"average-table"` in v2.4.38; (d) Solcast / Analytics subfolder layout refined to `Solcast/Day-Ahead` / `Analytics/Day-Ahead` in v2.8.9. | Test assertions aligned with current code: regex-based checks for the format default and subfolder layout, `getSharedForecastExportFormat` shared-selector landmark, and the `sum / 12` average value. |
+| `forecastCompletenessSource.test.js` | Asserted on the literal `if (hasCompleteDayAheadRowsForDate(tomorrow))` short-circuit in `server/index.js`, which was replaced by a broader `countDayAheadSolarWindowRows` + `assessTomorrowForecastQuality` quality-aware check at some point after v2.4.x. | Test now validates the equivalent quality-aware landmarks instead of the removed literal. |
+| `manualPullFailureCleanup.test.js` | Asserted that the main DB and first archive must both be staged before the second archive fails. The pull orchestrator was refactored to **archives-first** (see `runManualPullSync` Step 1 in `server/index.js`), so the main DB is never downloaded when an archive fails. | Test assertion narrowed to the archive-only staging window, with a comment explaining the architecture. |
+| `manualReplicationCancel.test.js` | Same archives-first issue — main DB is never reached when the operator cancels mid-archive. | Same fix. |
+
+**One genuine production regression caught:** [server/exporter.js:1972](../../server/exporter.js#L1972) — `roundSolcastExportNumber()` had its `digits=6` default silently changed to `digits=1` in v2.4.38, truncating Solcast XLSX export precision from 6 decimals to 1 (e.g. `0.006` MW exported as `0.0`). Restored the original `digits=6` default. The `forecastActualAverageTable` `0 !== 0.006` failure was the smoking gun.
+
+Smoke verdict after these fixes:
+```
+Node tests: 29/29 pass
+Python tests: PASS (107/107, status=0)
+Total wall time: 94931ms
+```
 
 ---
 

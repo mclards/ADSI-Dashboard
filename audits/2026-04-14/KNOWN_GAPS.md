@@ -7,11 +7,13 @@
 - [FIXES_PROGRESS.md](FIXES_PROGRESS.md) — the 23 CRITICAL fixes shipped
 - [PHASE2_FIXES.md](PHASE2_FIXES.md) — **post-v2.8.8 session (2026-04-14)** closing T4.4 Node-side lock, verifying T6.3 thumbprint, and fixing T2.10/T2.11/T2.12/T5.4. **This doc below still reflects pre-Phase-2 state; see PHASE2_FIXES.md "Update to status" table for what is now closed.**
 - [PHASE3_FIXES.md](PHASE3_FIXES.md) — **same-day Phase 3 session (2026-04-14)** closing T6.7/T6.9/T6.10/T6.11 (Electron) and T5.5/T5.6/T5.7/T5.8 (frontend). Same amend convention.
-- [SMOKE_BASELINE.md](SMOKE_BASELINE.md) — **same-day** first run of the new T7.3 smoke harness; catalogues 5 pre-existing Node-test failures.
+- [SMOKE_BASELINE.md](SMOKE_BASELINE.md) — **same-day** first run of the new T7.3 smoke harness; catalogues 5 pre-existing Node-test failures. **Updated 2026-04-15 (commit `8f04883`)**: all 5 failures resolved; baseline now 29/29 Node + 107/107 pytest green.
 - [PHASE5_FIXES.md](PHASE5_FIXES.md) — **same-day Phase 5 session (2026-04-14)** closing T2.3–T2.9 (Node subsystem). Smoke-verified zero regressions.
 - [PHASE6_FIXES.md](PHASE6_FIXES.md) — **same-day Phase 6 session (2026-04-14)** closing T3.6/T3.7/T3.9/T3.10/T3.11/T3.12 (Python inverter engine). T3.8 reviewed and rejected as not-a-bug (GIL-safe). Smoke-verified.
 - [PHASE7_FIXES.md](PHASE7_FIXES.md) — **same-day Phase 7 session (2026-04-14)** closing T4.6/T4.7/T4.8/T4.9/T4.12 (Python forecast engine). T4.10 reviewed as already-enforced; T4.11 deferred to v2.9.0. 107/107 Python tests pass.
 - [PHASE8_BACKLOG_SWEEP.md](PHASE8_BACKLOG_SWEEP.md) — **Phase 8 full backlog sweep (2026-04-14/15)** closing all remaining MEDIUM/LOW items. 9 point-fixes, 22 verified already-correct, 31 deferred or won't-fix (with per-item reasoning). **After Phase 8, all actionable v2.8.8 audit findings are closed.**
+
+**Post-Phase-8 follow-on (commit `8f04883`, 2026-04-15):** cleared the 5 pre-existing Node test failures catalogued in SMOKE_BASELINE.md. Surfaced and fixed one genuine production regression — [`server/exporter.js:1972`](../../server/exporter.js#L1972) `roundSolcastExportNumber(digits=6)` default was silently changed to `digits=1` in v2.4.38, truncating Solcast XLSX export precision. The other four failures were stale tests written against pre-v2.4.38 semantics and the pre-archives-first pull orchestrator; updated to match current architecture. Smoke baseline now **29/29 Node + 107/107 pytest** green.
 
 This doc is the **source of truth for what was deliberately NOT fixed** in v2.8.8, organised so a future debugger can grep for a symptom and find the relevant known issue.
 
