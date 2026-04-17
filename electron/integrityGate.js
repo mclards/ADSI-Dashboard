@@ -1,6 +1,6 @@
 "use strict";
 /**
- * integrityGate.js — v2.8.10 power-loss resilience (Phase A3)
+ * integrityGate.js — power-loss resilience (Phase A3)
  *
  * WHY: After a sudden Windows shutdown (power loss, hard reset, kernel panic),
  * NTFS can leave files under C:\Program Files in a torn state — metadata says
@@ -22,12 +22,37 @@
  * Authenticode signing + electron-updater's SHA-512 remain the primary
  * anti-tamper defences. This module only catches accidental corruption.
  *
- * DEPENDENCIES: Node core only (fs, path, crypto, child_process). MUST NOT
- * require any third-party module — those live inside app.asar and are exactly
- * what we're trying to validate.
+ * v2.8.11 FIX — Electron asar virtualization
+ * ------------------------------------------
+ * This module runs from INSIDE app.asar once the app is packaged. Electron
+ * intercepts all `fs` calls coming from code that lives inside an asar
+ * archive and makes the asar itself appear as a *directory*. When we do
+ * `fs.statSync("…/app.asar")`, Electron returns synthetic Stats where
+ * `isDirectory()` is true and `size` is 0 (Windows's usual "size of a
+ * directory" result). That false-0 tripped the `size < 64` branch below
+ * on EVERY launch of a packaged v2.8.10 install — even when app.asar was
+ * actually 475 MB on disk.
+ *
+ * FIX: use `original-fs` (shipped with Electron) which exposes the raw,
+ * un-shimmed filesystem. Fall back to the standard `fs` module for
+ * non-Electron environments (unit tests under plain Node) since there
+ * the shim doesn't exist anyway.
+ *
+ * DEPENDENCIES: Node core only (original-fs / fs, path, crypto,
+ * child_process). MUST NOT require any third-party module — those live
+ * inside app.asar and are exactly what we're trying to validate.
  */
 
-const fs = require("fs");
+// v2.8.11: original-fs bypasses Electron's asar shim so fs.statSync returns
+// the real on-disk size of app.asar instead of a synthetic directory Stats
+// object with size=0. In a non-Electron context (tests), require will throw
+// and we fall back to stock fs which doesn't have the shim to begin with.
+let fs;
+try {
+  fs = require("original-fs");
+} catch (_) {
+  fs = require("fs");
+}
 const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
@@ -110,6 +135,11 @@ function wasDirtyShutdown() {
  *   { ok: false, mode, asarPath, reason, details }
  *
  * The caller uses `ok` to decide whether to show the recovery dialog.
+ *
+ * Defensive: if we get any hint that the fs we're using is still the
+ * Electron-shimmed one (synthetic Stats on the asar), we degrade to
+ * `skipped` rather than falsely claim corruption. Crashing a healthy
+ * install is a worse failure mode than missing a rare torn-write event.
  */
 function verifyAsarIntegrity({ resourcesPath, forceFull = false } = {}) {
   const rp = String(resourcesPath || process.resourcesPath || "").trim();
@@ -124,6 +154,20 @@ function verifyAsarIntegrity({ resourcesPath, forceFull = false } = {}) {
       asarPath,
       reason: "app.asar missing",
       details: {},
+    };
+  }
+
+  // v2.8.11 defensive guard: if stat says the asar is a directory, we're
+  // reading through Electron's virtualized fs (original-fs fallback failed
+  // or some other layer is shimming). Skip the size/hash checks — we
+  // cannot trust them and must not show the recovery dialog.
+  if (typeof asarStat.isDirectory === "function" && asarStat.isDirectory()) {
+    return {
+      ok: true,
+      mode: "skipped",
+      asarPath,
+      reason: "fs layer reports asar as directory — skipping (original-fs unavailable?)",
+      details: { size: asarStat.size, viaShimmedFs: true },
     };
   }
 
@@ -153,7 +197,7 @@ function verifyAsarIntegrity({ resourcesPath, forceFull = false } = {}) {
       ok: true,
       mode: "skipped",
       asarPath,
-      reason: "no manifest (pre-2.8.10 install)",
+      reason: "no manifest (pre-2.8.11 install)",
       details: { size: asarStat.size },
     };
   }

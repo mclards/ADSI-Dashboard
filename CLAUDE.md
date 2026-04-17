@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.8.10` in `package.json` (source of truth) |
+| Repo version baseline | `2.8.11` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.8.9` (2.8.10 built, release pending) |
+| Latest published release | `v2.8.9` (v2.8.10 was pulled due to asar-virtualization bug; 2.8.11 is the fix) |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -105,11 +105,19 @@ See `references/forecast-engine.md` for full feature formulas, training details,
 
 ---
 
-## Power-Loss Resilience (v2.8.10+)
+## Power-Loss Resilience (v2.8.11+)
 
-See `audits/2026-04-17/README.md` and `plans/2026-04-17-power-loss-resilience.md`
-for full rationale. Short version:
+See `audits/2026-04-17/README.md`, `audits/2026-04-17/integrity-gate-asar-virtualization.md`,
+and `plans/2026-04-17-power-loss-resilience.md` for full rationale. Short version:
 
+- **v2.8.11 hotfix**: `electron/integrityGate.js` now uses `original-fs`
+  (Electron built-in) instead of stock `fs`. Required because Electron's
+  fs shim reports packaged `app.asar` as a directory with `size: 0`,
+  which falsely tripped the "suspiciously small" check on every launch
+  of v2.8.10. A defensive `isDirectory()` guard also degrades to
+  `mode=skipped` if a future change breaks the original-fs resolution.
+  Regression test: `testElectronAsarShimSimulation` in
+  `server/tests/crashRecovery.test.js`.
 - `electron/main.js` top-of-file block is the "survival boot" — Node+Electron
   core requires only, hoisted `uncaughtException` handler, `safeRequire()`
   wrapper for every third-party module, and an `app.asar` integrity gate

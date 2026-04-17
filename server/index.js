@@ -17440,30 +17440,65 @@ function _flushAndClose() {
   closeDb();                                      // WAL checkpoint + db.close
 }
 
-function _beginShutdown(mode, reason) {
-  if (_shutdownPromise) return _shutdownPromise;
-  _shutdownCalled = true;
+// Yield to libuv so handles entering UV_HANDLE_CLOSING can finish closing
+// before the next phase runs. setImmediate runs after I/O polling, which
+// is where libuv actually drains close callbacks. process.nextTick is
+// NOT equivalent — it fires before the close-processing pass.
+function _yieldToLibuv() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function _runShutdownPhases(mode, reason) {
   if (mode === "embedded") {
     console.log("[Server] Embedded shutdown: flushing DB...");
   } else {
     console.log(`[Server] Graceful shutdown (${reason || "signal"}): flushing DB...`);
   }
-  stopRemoteBridge();
-  stopRemoteChatBridge();
-  if (plantCapController) {
-    try {
-      plantCapController.stop();
-    } catch (_) {}
-  }
-  try { poller.stop(); } catch (_) {}
-  try { go2rtcManager.stop(); } catch (_) {}
 
-  _shutdownPromise = new Promise((resolve) => {
+  // Phase 1 (sync): stop new work. Abort in-flight fetches; stop interval-
+  // driven subsystems. These only flip flags / clear timers / fire
+  // AbortControllers — they do NOT await the handles to finish closing.
+  try { stopRemoteBridge(); } catch (_) {}
+  try { stopRemoteChatBridge(); } catch (_) {}
+  if (plantCapController) {
+    try { plantCapController.stop(); } catch (_) {}
+  }
+
+  // Yield: let the uv_async_t handles owned by the aborted fetch requests
+  // transition out of UV_HANDLE_CLOSING before the next close wave.
+  await _yieldToLibuv();
+
+  // Phase 2: poller (sync) + go2rtc (async — spawns taskkill child). The
+  // pre-refactor code called go2rtcManager.stop() without awaiting, so the
+  // child exit could still be in flight when _flushAndClose() ran. Await
+  // here closes that window too.
+  try { poller.stop(); } catch (_) {}
+  try {
+    const p = go2rtcManager.stop();
+    if (p && typeof p.then === "function") {
+      // go2rtc has its own internal SHUTDOWN_TIMEOUT_MS + SIGKILL fallback,
+      // so this await always settles. Guard with a hard ceiling anyway.
+      await Promise.race([
+        p,
+        new Promise((resolve) => {
+          const t = setTimeout(resolve, 3000);
+          if (typeof t.unref === "function") t.unref();
+        }),
+      ]);
+    }
+  } catch (_) {}
+
+  // Yield: let go2rtc's taskkill uv_async_t finish closing before we tear
+  // down the HTTP server.
+  await _yieldToLibuv();
+
+  // Phase 3: close HTTP server with a 2 s deadline. If keep-alive sockets
+  // linger, the timer short-circuits so shutdown stays bounded.
+  await new Promise((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      _flushAndClose();
       resolve();
     };
     let deadline = null;
@@ -17479,6 +17514,19 @@ function _beginShutdown(mode, reason) {
       finish();
     }
   });
+
+  // Phase 4: DB flush LAST, when no more event-loop traffic can touch it.
+  _flushAndClose();
+}
+
+function _beginShutdown(mode, reason) {
+  if (_shutdownPromise) return _shutdownPromise;
+  _shutdownCalled = true;
+  _shutdownPromise = _runShutdownPhases(mode, reason).catch((err) => {
+    // Never let a shutdown failure leave the DB half-open.
+    try { console.error("[Server] Shutdown error:", err); } catch (_) {}
+    try { _flushAndClose(); } catch (_) {}
+  });
   return _shutdownPromise;
 }
 
@@ -17486,8 +17534,10 @@ function _beginShutdown(mode, reason) {
 function gracefulShutdown(reason) {
   const shutdownPromise = _beginShutdown("child", reason);
   shutdownPromise.finally(() => process.exit(0));
-  // Safety: if httpServer doesn't drain within 2 s, force-close and exit.
-  setTimeout(() => { _flushAndClose(); process.exit(0); }, 2500).unref();
+  // Safety ceiling: the serialized shutdown has up to ~5 s of work in the
+  // worst case (3 s go2rtc SIGKILL fallback + 2 s httpServer close). Force
+  // exit at 6 s so a stuck handle cannot keep the process alive forever.
+  setTimeout(() => { _flushAndClose(); process.exit(0); }, 6000).unref();
 }
 
 // Called when running embedded in the Electron main process (packaged mode).

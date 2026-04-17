@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * crashRecovery.test.js — v2.8.10 Phase D verification
+ * crashRecovery.test.js — Phase D verification (v2.8.10 → v2.8.11)
  *
  * Covers:
  *   1. electron/integrityGate.js
@@ -10,6 +10,9 @@
  *      - valid asar + mismatching manifest → ok:false, "hash mismatch"
  *      - invalid header → ok:false, "header is invalid"
  *      - no manifest → ok:true, mode "skipped"
+ *      - [v2.8.11] Electron asar virtualization simulation — when fs.statSync
+ *        reports the asar as a directory with size=0, we must NOT fire the
+ *        recovery dialog; we must degrade to `mode=skipped`.
  *   2. server/db.js auto-restore path
  *      - corrupt main adsi.db + valid backup slot 0 → restored:true,
  *        restoredFromSlot: 0, live table readable after open
@@ -116,6 +119,41 @@ function testIntegrityGate() {
   console.log("  ✓ integrityGate: 5 cases (missing, valid, corrupt, bad-header, no-manifest)");
 }
 
+// v2.8.11 regression: simulate Electron's asar virtualization where
+// fs.statSync on the asar archive returns synthetic Stats with
+// isDirectory()=true and size=0. Before the fix, that made every packaged
+// launch trip the "suspiciously small" branch and display the recovery
+// dialog. After the fix, the gate must degrade to `mode=skipped` with a
+// diagnostic reason — never show a false-positive recovery dialog.
+function testElectronAsarShimSimulation() {
+  const tmp = mkTempDir("ig-shim");
+  try {
+    fs.mkdirSync(tmp, { recursive: true });
+    // Put a REAL directory named "app.asar" — that's what Electron's shim
+    // effectively reports when you stat the archive from inside itself.
+    const asarPath = path.join(tmp, "app.asar");
+    fs.mkdirSync(asarPath);
+    // Manifest on disk alongside it (what afterPack writes). Its presence
+    // does not matter here — the guard must trigger before we read it.
+    fs.writeFileSync(asarPath + ".sha512", "f".repeat(128) + "\n");
+
+    // Load integrity gate in a fresh require cache so the original-fs
+    // resolution runs fresh.
+    delete require.cache[require.resolve(INTEGRITY_GATE_PATH)];
+    const { verifyAsarIntegrity } = require(INTEGRITY_GATE_PATH);
+    const r = verifyAsarIntegrity({ resourcesPath: tmp, forceFull: true });
+
+    assert.strictEqual(r.ok, true,
+      `shim simulation must NOT fail integrity (got ok=${r.ok}, reason=${r.reason})`);
+    assert.strictEqual(r.mode, "skipped", `expected mode=skipped, got ${r.mode}`);
+    assert.ok(/directory|shim|original-fs/i.test(r.reason),
+      `reason must indicate shim/directory fallback, got: ${r.reason}`);
+    console.log(`  ✓ integrityGate: Electron asar shim simulation → skipped (reason="${r.reason}")`);
+  } finally {
+    rmTree(tmp);
+  }
+}
+
 function testDbAutoRestore() {
   const tmp = mkTempDir("db-restore");
   const backupsDir = path.join(tmp, "backups");
@@ -168,6 +206,7 @@ function testDbAutoRestore() {
 function main() {
   console.log("[crashRecovery] start");
   testIntegrityGate();
+  testElectronAsarShimSimulation();
   testDbAutoRestore();
   console.log("[crashRecovery] all assertions passed");
 }

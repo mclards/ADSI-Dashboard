@@ -1,16 +1,21 @@
-# Plan 2026-04-17 — Shutdown Serialization (v2.8.11)
+# Plan 2026-04-17 — Shutdown Serialization (v2.8.12)
 
 Date: 2026-04-17
-Status: SCHEDULED — to be executed AFTER v2.8.10 is stable in the field.
-Target release: v2.8.11.
+Status: SCHEDULED — to be executed AFTER v2.8.11 is stable in the field.
+Target release: v2.8.12.
 Audit: `audits/2026-04-17/shutdown-race.md`.
+
+History: originally scheduled for v2.8.11. v2.8.11 was reassigned to the
+hotfix for the packaged-build integrity gate bug
+(`audits/2026-04-17/integrity-gate-asar-virtualization.md`) after v2.8.10
+was pulled from GitHub. This plan now ships as v2.8.12.
 
 ## Goal
 
 Eliminate the Windows + Node 24 libuv `UV_HANDLE_CLOSING` assertion
 during dashboard shutdown. Outcome:
 
-- `npm run smoke` returns to 30/30 Node tests green (from 29/30).
+- `npm run smoke` returns to 32/32 Node tests green.
 - No `Application Error 0xC0000409` entries in the Windows Event Log
   after normal dashboard quit, Restart & Install, overnight auto-install,
   or system shutdown.
@@ -112,10 +117,10 @@ S5. Power-loss-resilience artifacts (v2.8.10):
      troubleshooting removing the "dashboard sometimes crashes on quit"
      line (once field verification confirms).
 7. **Version bump + release** (Day 4).
-   - `package.json` 2.8.10 → 2.8.11.
+   - `package.json` 2.8.11 → 2.8.12.
    - Rebuild Python EXEs is NOT required (no Python changes).
    - `npm run build:installer:signed`.
-   - Cut GitHub release v2.8.11.
+   - Cut GitHub release v2.8.12.
    - CLAUDE.md version line updated.
 
 ## Risk
@@ -142,7 +147,7 @@ S5. Power-loss-resilience artifacts (v2.8.10):
 
 ## Rollback plan
 
-- v2.8.11 is additive over v2.8.10 (shutdown path refactor + 1 new test).
+- v2.8.12 is additive over v2.8.11 (shutdown path refactor + 1 new test).
 - If field telemetry shows a regression, revert the single commit
   touching `server/index.js:17333-17373`. All other v2.8.10 behavior
   persists (power-loss resilience, integrity gate, auto-restore).

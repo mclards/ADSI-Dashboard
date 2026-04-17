@@ -1,8 +1,10 @@
-# Audit 2026-04-17 — Shutdown Serialization Race (scheduled for v2.8.11)
+# Audit 2026-04-17 — Shutdown Serialization Race (scheduled for v2.8.12)
 
 Date: 2026-04-17
-Status: SCHEDULED — v2.8.11. NOT shipping in v2.8.10 to keep that release
-scope-narrow to power-loss resilience.
+Status: SCHEDULED — v2.8.12. Originally scheduled for v2.8.11. v2.8.11 was
+reassigned to the hotfix for the integrity-gate asar-virtualization bug
+(`audits/2026-04-17/integrity-gate-asar-virtualization.md`) after v2.8.10
+was pulled from GitHub.
 Discovered during: v2.8.10 deep verification
   (see `audits/2026-04-17/README.md`).
 
@@ -148,7 +150,7 @@ shutdown-race fix would:
 - Delay the field fix for the PXE incident that triggered v2.8.10.
 
 Both fixes are additive — the shutdown-race fix does not depend on any
-v2.8.10 code. v2.8.11 can be cut as soon as v2.8.10 is stable in the
+v2.8.10 code. v2.8.12 can be cut as soon as v2.8.11 is stable in the
 field (target: 1-2 weeks after v2.8.10 release).
 
 ## Related files
