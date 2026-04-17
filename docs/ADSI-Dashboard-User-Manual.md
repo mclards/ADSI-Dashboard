@@ -973,6 +973,49 @@ The `Export` page provides dedicated export packages for common operational reco
 - format choices are typically `Excel (.xlsx)` and `CSV`
 - XLSX exports now apply fitted column widths, colored headers, bordered cells, and highlighted summary or total rows for easier review in Excel
 
+### Refresh Button (v2.8.10+)
+
+The Export page toolbar includes a **Refresh** button with a status line
+that reports when the last reload happened and the result per data
+source. Clicking Refresh drives every data pipeline that feeds the
+Export tab:
+
+1. **Settings reload** — inverter count and display labels.
+2. **Dropdowns rebuilt** — every inverter select, every Alarm / Energy /
+   Forecast / Operational Data / Audit / Daily Report selector.
+3. **Forecast date list** reloaded — the Day-Ahead Comparison card's
+   snapshot/forecast date dropdown.
+4. **Server pipeline refresh** (`POST /api/export/refresh-pipelines`)
+   in gateway mode:
+   - Pulls fresh Solcast snapshots for today and tomorrow (capped by a
+     12 s timeout so a slow upstream cannot stall the UI).
+   - Returns current row counts for forecast days, snapshot dates,
+     audit log, alarms, daily report, energy, and readings.
+   - Returns `skipped (remote-mode)` when running from a remote
+     workstation — Solcast only runs on the gateway.
+5. **Forecast date list reloaded again** — newly-arrived snapshot dates
+   appear in the dropdown without leaving the page.
+6. **Status line updated** with an inline summary. Example:
+   `Last refreshed 14:32:07 — Solcast 288 slots, 2 snap dates, 28 forecast days, 107 audit rows`.
+   Hover the status line for the full per-source diagnostic JSON.
+
+Use Refresh whenever:
+
+- the inverter count or labels were changed in **Settings** while the
+  Export page was already open
+- a plant-cap or topology change should be reflected in the dropdown
+  before running an export
+- the operator wants the Day-Ahead Comparison card to pull Solcast data
+  fresher than the last cron cycle
+- a cancelled or stale export card should be reset
+
+The Refresh button is safe to click at any time. In-flight exports
+continue to run to completion because they hold their own cancel tokens
+— refreshing only touches dropdowns, defaults, cached UI state, and the
+Solcast snapshot cache. If the Solcast fetch times out or any other
+pipeline fails, the button shows `Partial` and the status line lists
+the number of errors; hover it to see which source failed.
+
 ---
 
 ## 6.9 Settings Page
@@ -1491,6 +1534,84 @@ Important:
 5. Allow the app to create a safety backup.
 6. Restart when prompted to apply the restored state.
 
+## 8.11 Recovering from Sudden Power Loss
+
+*Introduced in v2.8.10 — 2026-04-17.*
+
+Sudden Windows shutdowns (power cuts, forced hard resets, brownouts) can leave
+NTFS files under `C:\Program Files\ADSI Inverter Dashboard\` in a torn state,
+and in rare cases can prevent the PC from finding its boot volume on the next
+start. Your plant data under `C:\ProgramData\InverterDashboard\` is protected
+by a separate 2-hour rotating backup (WAL + synchronous=NORMAL) and is almost
+always recoverable independently.
+
+### 8.11.1 If the PC boots to a black screen with "Intel UNDI PXE"
+
+The BIOS fell through every local boot option and is trying to network-boot.
+
+1. Power off the PC (hold the power button if needed). Wait 10 seconds.
+2. Power on. Immediately press the boot-menu key for your BIOS (commonly
+   `F12`, `F10`, `F9`, or `Esc`) and pick **Windows Boot Manager**.
+3. Once Windows is up, open Command Prompt as Administrator and run:
+
+   ```
+   chkdsk C: /f /r
+   sfc /scannow
+   ```
+
+   `chkdsk` will schedule a scan at next reboot. Reboot and let it finish
+   (can take 30–60 minutes on large drives).
+4. Once Windows is back up normally, launch the dashboard.
+
+### 8.11.2 If the dashboard shows "Dashboard files are damaged"
+
+This is the recovery dialog introduced in v2.8.10. It means `app.asar` or
+another packaged file is torn and the app cannot safely continue.
+
+1. Click **Reinstall Now**. The dashboard will silently run the local copy
+   of the installer at
+   `C:\ProgramData\InverterDashboard\updates\last-good-installer.exe` and
+   relaunch automatically when install completes (typically 30–60 seconds).
+2. If **Reinstall Now** is unavailable (first-ever install on this PC, or
+   the local installer was deleted), click **Open Updates Folder** and
+   place the latest signed installer there, or reinstall from the original
+   MSI.
+3. The recovery log is written to
+   `C:\ProgramData\InverterDashboard\logs\recovery.log` for diagnostic
+   forwarding.
+
+### 8.11.3 If the dashboard shows "Database auto-restored" banner
+
+The application detected that `adsi.db` was corrupt at startup and swapped
+in the newer of the two rotating backups under `backups/`. Your plant data
+is safe.
+
+1. Up to ~2 hours of the most recent readings may be missing. The poller
+   refills the gap on the next live sweep as inverters continue generating.
+2. An audit log entry is written at scope `startup-integrity`, action
+   `db-auto-restore`. Review it in the **Audit** page.
+3. The original corrupt DB is quarantined as `adsi.db.corrupt-<timestamp>`
+   for forensic inspection if needed.
+4. Dismiss the banner when satisfied.
+
+### 8.11.4 Preventive measures
+
+- **Install a UPS** on the dashboard PC. This is the single most effective
+  mitigation. A small consumer UPS (500-1000 VA) is enough for the few
+  seconds required for NTFS to flush and Windows to power down gracefully.
+- **Disable Windows Fast Startup**: Control Panel → Power Options →
+  *Choose what the power button does* → *Change settings currently
+  unavailable* → uncheck *Turn on fast startup*. This ensures a reboot
+  always fully flushes NTFS.
+- **Keep the local installer fresh**: after each successful auto-update
+  the dashboard stashes a signed copy at
+  `C:\ProgramData\InverterDashboard\updates\last-good-installer.exe`.
+  Periodically verify the file exists and its version matches the
+  currently installed version.
+- **Check integrity after any power event**: run `chkdsk` and `sfc` once
+  after Windows has recovered, before relying on the dashboard for
+  operational decisions.
+
 ## 8.10 Camera Setup Workflow
 
 1. Ensure the workstation is in `Gateway` mode (camera streaming is gateway-only).
@@ -1543,6 +1664,9 @@ Important:
 | IP Configuration or Topology cannot be opened | Current mode is `Remote` or access is restricted | Use the gateway workstation |
 | Alarm sound is silent | Sound is muted or system audio is unavailable | Re-enable alarm sound and check workstation audio |
 | Export fails | Path, date, format, or dataset issue | Verify export folder, input filters, and current mode |
+| Dashboard shows **"Dashboard files are damaged"** (v2.8.10+) | Packaged files torn by sudden shutdown (power loss, forced reboot) | Click **Reinstall Now** to run the locally stashed installer. See section 8.11 for full recovery procedure |
+| Red **"Database auto-restored"** banner at top of dashboard (v2.8.10+) | `adsi.db` was corrupt at startup; app swapped in a 2-hour backup | Normal. Up to ~2 h of readings re-fill automatically from live polling. Dismiss when ready |
+| PC boots to **"Intel UNDI PXE"** network-boot screen | BIOS could not find a local OS (boot sector / bootloader damage after hard shutdown) | Power off, wait 10 s, power on, F12 → **Windows Boot Manager**. Run `chkdsk C: /f /r` and `sfc /scannow` after Windows recovers. See section 8.11 |
 
 ---
 

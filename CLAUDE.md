@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.8.9` in `package.json` (source of truth) |
+| Repo version baseline | `2.8.10` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.8.9` |
+| Latest published release | `v2.8.9` (2.8.10 built, release pending) |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -102,6 +102,38 @@ FEATURE_COLS: 62 → 70. Legacy models auto-align with zero-spread fallback. P10
 LightGBM hyperparams tuned: n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71, subsample=0.78, colsample_bytree=0.75, min_child_samples=22, reg_alpha=0.08, reg_lambda=0.12.
 
 See `references/forecast-engine.md` for full feature formulas, training details, and backward-compatibility rules.
+
+---
+
+## Power-Loss Resilience (v2.8.10+)
+
+See `audits/2026-04-17/README.md` and `plans/2026-04-17-power-loss-resilience.md`
+for full rationale. Short version:
+
+- `electron/main.js` top-of-file block is the "survival boot" — Node+Electron
+  core requires only, hoisted `uncaughtException` handler, `safeRequire()`
+  wrapper for every third-party module, and an `app.asar` integrity gate
+  via `electron/integrityGate.js` (SHA-512 sidecar manifest).
+- `electron/recoveryDialog.js` shows a branded "Dashboard files are damaged"
+  modal with `Reinstall Now` that spawns
+  `C:\ProgramData\InverterDashboard\updates\last-good-installer.exe` silently.
+- The stash is seeded by NSIS `customInstall` (`scripts/installer.nsh`) at
+  first install, and refreshed after every signed auto-update by
+  `stashLastGoodInstaller()` in main.js.
+- `app.asar.sha512` is written by `scripts/afterPack.js` during
+  electron-builder's afterPack phase.
+- `server/db.js` runs a pre-open readonly probe; if `quick_check` fails, it
+  auto-restores from the newer of the two rotating backups under
+  `backups/adsi_backup_{0,1}.db`, quarantines the corrupt file, emits an
+  `audit_log` row, and sets `startupIntegrityResult.restored = true`.
+- `GET /api/health/db-integrity` exposes the snapshot. Renderer shows a red
+  banner via `checkBootIntegrityBanner()` in `public/js/app.js`.
+- Tests: `server/tests/crashRecovery.test.js` covers integrity gate + auto-
+  restore under the Node-ABI smoke harness.
+
+Do NOT remove the `app.asar.sha512` sidecar, the stash path, or the hoisted
+`uncaughtException` handler — they are the chain that converts a torn-write
+into a 60-second recovery.
 
 ---
 

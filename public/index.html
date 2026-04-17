@@ -515,6 +515,21 @@
 
       <!-- --- PAGE: EXPORT --------------------------------------------------------- -->
       <section id="page-export" class="page">
+        <div class="page-toolbar exp-toolbar">
+          <div class="tl-left">
+            <span class="exp-toolbar-title">Export Center</span>
+            <span id="expLastRefreshed" class="exp-toolbar-ts" title="Last time dropdowns, dates, and cached state were reloaded from the server"></span>
+          </div>
+          <div class="tl-right">
+            <button id="btnRefreshExportData"
+                    class="btn btn-outline exp-toolbar-refresh"
+                    type="button"
+                    title="Reload inverter list, default dates, and recent export state from the server"
+                    aria-label="Refresh export data">
+              <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
+            </button>
+          </div>
+        </div>
         <div class="export-grid">
           <div class="exp-card">
             <div class="exp-icon exp-icon-alarm"><span class="mdi mdi-bell-alert-outline" aria-hidden="true"></span></div>

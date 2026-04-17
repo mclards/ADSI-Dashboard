@@ -2,8 +2,15 @@
 /**
  * main.js - Electron entry point for ADSI Inverter Dashboard
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
+ *
+ * v2.8.10 (Phase A — power-loss resilience): the file begins with a tight
+ * "survival boot" block of Node core + electron core requires only. Any
+ * failure here must be caught and surfaced via the recovery dialog instead
+ * of letting Electron's default fatal handler show a cryptic SyntaxError.
+ * See audits/2026-04-17/power-loss-resilience-v2.8.10.md for rationale.
  */
 
+// ── A1. Survival boot — core only, zero third-party requires ──────────────────
 const { app, BrowserWindow, ipcMain, shell, globalShortcut, dialog, Menu } = require("electron");
 const path = require("path");
 const http = require("http");
@@ -13,10 +20,105 @@ const fs = require("fs");
 const os = require("os");
 const net = require("net");
 const crypto = require("crypto");
-const Database = require("better-sqlite3");
-const { autoUpdater } = require("electron-updater");
-const { getExplicitDataDir, getPortableDataRoot } = require("../server/runtimeEnvPaths");
-const { resolvedDbDir } = require("../server/storagePaths");
+
+// ── A1. Hoisted global fatal handlers ────────────────────────────────────────
+// Registered BEFORE any third-party require so a corrupt app.asar (torn
+// write from sudden power loss) cannot bypass our recovery path. If a
+// fatal error lands here during startup, we route to the recovery dialog.
+// If it lands later (after the app is up), we log-and-continue to keep
+// the renderer/tray alive (preserves the T6.7 fix behaviour).
+const _startupFailures = [];
+let _recoveryShown = false;
+function _routeStartupFatal(err, phase = "uncaught") {
+  const code = String(err?.code || "");
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") return;
+  try { console.error(`[main] Fatal ${phase}:`, err); } catch (_) { /* ignore */ }
+  if (_recoveryShown || app?.isReady?.()) return;
+  _recoveryShown = true;
+  try {
+    const { showRecoveryDialogAndExit } = require("./recoveryDialog");
+    const bootWhenReady = () => {
+      try {
+        showRecoveryDialogAndExit({
+          reason: `Startup ${phase}: ${err?.message || String(err)}`,
+          startupFailures: _startupFailures,
+        });
+      } catch (_) {
+        app.exit(1);
+      }
+    };
+    if (app.isReady()) bootWhenReady();
+    else app.once("ready", bootWhenReady);
+  } catch (_) {
+    app.exit(1);
+  }
+}
+process.on("uncaughtException", (err) => _routeStartupFatal(err, "uncaughtException"));
+process.on("unhandledRejection", (reason) => _routeStartupFatal(reason, "unhandledRejection"));
+
+// ── A2. safeRequire — wrap every third-party require ─────────────────────────
+// Any module loaded from app.asar can throw SyntaxError on torn writes.
+// Capture the failure, continue booting, and let the integrity gate decide
+// whether to show the recovery dialog.
+function safeRequire(modulePath, fallback = null) {
+  try {
+    return require(modulePath);
+  } catch (err) {
+    console.error(`[main] require("${modulePath}") failed:`, err?.message || err);
+    _startupFailures.push({ module: modulePath, error: String(err?.message || err) });
+    return fallback;
+  }
+}
+
+// ── A3. Integrity gate — verify app.asar before touching third-party code ────
+const _integrityGate = safeRequire("./integrityGate", {
+  verifyAsarIntegrity: () => ({ ok: true, mode: "skipped", reason: "gate-missing" }),
+});
+// In dev mode (`npm start`) the app runs from source — there is no
+// `resources/app.asar` to verify. `app.isPackaged` is false in that case.
+// Skip the gate entirely: dev-mode corruption is the developer's problem,
+// not something the recovery dialog should surface.
+const _integrityResult = (() => {
+  if (!app.isPackaged) {
+    return { ok: true, mode: "skipped", reason: "dev-mode (app not packaged)" };
+  }
+  try { return _integrityGate.verifyAsarIntegrity({ resourcesPath: process.resourcesPath }); }
+  catch (err) {
+    console.warn("[main] integrity gate threw:", err?.message || err);
+    return { ok: true, mode: "skipped", reason: `gate-error:${err?.message || "unknown"}` };
+  }
+})();
+console.log(
+  `[main] app.asar integrity: ok=${_integrityResult.ok} mode=${_integrityResult.mode} reason=${_integrityResult.reason || "-"}`,
+);
+if (!_integrityResult.ok && !_recoveryShown) {
+  _recoveryShown = true;
+  app.whenReady().then(() => {
+    try {
+      const { showRecoveryDialogAndExit } = require("./recoveryDialog");
+      showRecoveryDialogAndExit({
+        reason: "Integrity check failed",
+        integrityResult: _integrityResult,
+        startupFailures: _startupFailures,
+      });
+    } catch (err) {
+      console.error("[main] recovery dialog failed:", err?.message || err);
+      app.exit(1);
+    }
+  });
+}
+
+// ── Third-party requires (wrapped) ───────────────────────────────────────────
+const Database = safeRequire("better-sqlite3");
+const _electronUpdaterModule = safeRequire("electron-updater", { autoUpdater: null });
+const { autoUpdater } = _electronUpdaterModule || { autoUpdater: null };
+const _runtimeEnvPaths = safeRequire("../server/runtimeEnvPaths", {
+  getExplicitDataDir: () => "",
+  getPortableDataRoot: () => "",
+});
+const { getExplicitDataDir, getPortableDataRoot } = _runtimeEnvPaths;
+const _storagePaths = safeRequire("../server/storagePaths", { resolvedDbDir: () => "" });
+const { resolvedDbDir } = _storagePaths;
 
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -84,30 +186,10 @@ if (process.stderr && typeof process.stderr.on === "function") {
   });
 }
 
-process.on("uncaughtException", (err) => {
-  const code = String(err?.code || "");
-  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") {
-    return;
-  }
-  try {
-    console.error("[main] Uncaught exception:", err);
-  } catch (_) {
-    // Ignore secondary logging issues.
-  }
-});
-
-// T6.7 fix (Phase 3, 2026-04-14): previously unhandled promise rejections
-// were silent — Node's default behaviour deprecation-warns once then swallows.
-// In Electron main this manifested as "app feels stuck" bugs with no log.
-// Log-and-continue here (do NOT rethrow — this process must stay up for the
-// renderer / tray).
-process.on("unhandledRejection", (reason, promise) => {
-  try {
-    console.error("[main] Unhandled promise rejection:", reason);
-  } catch (_) {
-    // Ignore secondary logging issues.
-  }
-});
+// Note: uncaughtException + unhandledRejection handlers are now hoisted to
+// the top of the file (v2.8.10 Phase A1). The previous T6.7 log-and-continue
+// semantics remain intact — they're implemented inside _routeStartupFatal
+// (routes to recovery dialog during startup; swallows once app is ready).
 
 const PORTABLE_EXEC_DIR = String(process.env.PORTABLE_EXECUTABLE_DIR || "").trim();
 const PORTABLE_DATA_DIR = PORTABLE_EXEC_DIR
@@ -249,6 +331,11 @@ let backendStopExpected = false;
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
 let appUpdateBridgeBound = false;
+// v2.8.10 Phase B1: path of the most recently signature-verified installer
+// handed to autoUpdater. Captured in verifyUpdateCodeSignature and copied
+// to %PROGRAMDATA%\InverterDashboard\updates\last-good-installer.exe once
+// the download is complete so the recovery dialog can relaunch it offline.
+let lastVerifiedInstallerPath = "";
 let appUpdateState = {
   mode: "disabled",
   appVersion: "0.0.0",
@@ -454,7 +541,7 @@ function getAutoDownloadPref() {
 function setAutoDownloadPref(value) {
   const enabled = !!value;
   _writeUpdatePrefs({ autoDownload: enabled });
-  autoUpdater.autoDownload = enabled;
+  if (autoUpdater) autoUpdater.autoDownload = enabled;
   return enabled;
 }
 function getAutoInstallOvernightPref() {
@@ -631,6 +718,13 @@ async function checkPortableUpdates() {
 
 function bindAutoUpdaterEventsOnce() {
   if (appUpdateBridgeBound) return;
+  // v2.8.10 Phase A2: if electron-updater failed to load (corrupt app.asar),
+  // autoUpdater is null. Skip binding — the recovery dialog has already been
+  // scheduled; there's nothing to wire up here.
+  if (!autoUpdater) {
+    console.warn("[updater] autoUpdater is null (electron-updater failed to load) — skipping bind");
+    return;
+  }
   appUpdateBridgeBound = true;
 
   // Auto-download can be toggled by user from Settings; default off for
@@ -708,12 +802,17 @@ function bindAutoUpdaterEventsOnce() {
           `verifyUpdateCodeSignature: unable to read signer thumbprint — ` +
           `accepting (SHA-512 remains authoritative). file=${tempUpdateFile}`,
         );
+        // v2.8.10 Phase B1: remember the verified file path so update-downloaded
+        // can stash it under %PROGRAMDATA%\InverterDashboard\updates\ for
+        // offline recovery after a torn-write event.
+        lastVerifiedInstallerPath = tempUpdateFile;
         return null;
       }
       if (actual === EXPECTED_SIGNER_THUMBPRINT.toUpperCase()) {
         autoUpdater.logger?.info?.(
           `verifyUpdateCodeSignature: thumbprint match (${actual}) file=${tempUpdateFile}`,
         );
+        lastVerifiedInstallerPath = tempUpdateFile;
         return null;
       }
       const msg =
@@ -796,6 +895,14 @@ function bindAutoUpdaterEventsOnce() {
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || appUpdateState.latestVersion || "").trim();
     const overnight = getAutoInstallOvernightPref();
+    // v2.8.10 Phase B1: stash the verified installer under ProgramData so
+    // the recovery dialog can re-run it offline if a torn-write event
+    // damages the live install in Program Files.
+    try {
+      stashLastGoodInstaller(latestVersion);
+    } catch (err) {
+      console.warn("[main] stashLastGoodInstaller failed:", err?.message || err);
+    }
     setAppUpdateState({
       mode: "installer",
       status: "downloaded",
@@ -844,10 +951,58 @@ function bindAutoUpdaterEventsOnce() {
   });
 }
 
+// v2.8.10 Phase B1: copy the most recently signature-verified installer to
+// %PROGRAMDATA%\InverterDashboard\updates\last-good-installer.exe so the
+// Phase A4 recovery dialog can relaunch it without network access. Writes
+// atomically via temp + rename to survive an interrupted copy.
+function stashLastGoodInstaller(version = "") {
+  const src = String(lastVerifiedInstallerPath || "").trim();
+  if (!src || !fs.existsSync(src)) {
+    console.warn("[main] stashLastGoodInstaller: no verified installer path recorded");
+    return false;
+  }
+  const updatesDir = path.join(PROGRAMDATA_DIR, "updates");
+  try { fs.mkdirSync(updatesDir, { recursive: true }); } catch (_) { /* ignore */ }
+  const targetPath = path.join(updatesDir, "last-good-installer.exe");
+  const tempPath = path.join(updatesDir, `last-good-installer.exe.tmp-${process.pid}`);
+  try {
+    fs.copyFileSync(src, tempPath);
+    try { fs.unlinkSync(targetPath); } catch (_) { /* ignore missing */ }
+    fs.renameSync(tempPath, targetPath);
+    const metaPath = targetPath + ".meta.json";
+    const meta = {
+      version: String(version || "").trim(),
+      source: src,
+      copiedAt: new Date().toISOString(),
+      size: fs.statSync(targetPath).size,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+    console.log(`[main] Stashed last-good-installer (${meta.size} bytes) at ${targetPath}`);
+    return true;
+  } catch (err) {
+    console.warn("[main] stashLastGoodInstaller copy failed:", err?.message || err);
+    try { fs.unlinkSync(tempPath); } catch (_) { /* ignore */ }
+    return false;
+  }
+}
+
 function initAppUpdater() {
   const mode = getAppUpdateMode();
   if (mode === "installer") {
     bindAutoUpdaterEventsOnce();
+    // v2.8.10 Phase A2: bindAutoUpdaterEventsOnce silently no-ops when
+    // autoUpdater failed to load. Mirror that here so a null autoUpdater
+    // after a corrupt electron-updater load can't throw inside setFeedURL.
+    if (!autoUpdater) {
+      setAppUpdateState({
+        mode,
+        channel: UPDATE_CHANNEL,
+        status: "error",
+        message: "Updater unavailable — electron-updater failed to load.",
+        error: "updater-unavailable",
+      });
+      return;
+    }
     try {
       autoUpdater.setFeedURL({
         provider: "generic",
@@ -935,6 +1090,18 @@ async function checkForAppUpdates(options = {}) {
   }
 
   bindAutoUpdaterEventsOnce();
+  if (!autoUpdater) {
+    return setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      checking: false,
+      checkedAt: Date.now(),
+      message: "Updater unavailable — electron-updater failed to load.",
+      error: "updater-unavailable",
+      canDownload: false,
+      canInstall: false,
+    });
+  }
   try {
     if (manual) {
       setAppUpdateState({
@@ -1005,6 +1172,9 @@ async function downloadAppUpdate() {
   }
   if (appUpdateState.canInstall) {
     return { ok: true, state: buildPublicAppUpdateState() };
+  }
+  if (!autoUpdater) {
+    return { ok: false, error: "Updater unavailable — electron-updater failed to load.", state: buildPublicAppUpdateState() };
   }
   try {
     setAppUpdateState({
@@ -1509,6 +1679,11 @@ async function finalizeInstallShutdown() {
   // (NTFS handle release can lag a few hundred ms after process exit).
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
+  if (!autoUpdater) {
+    console.error("[main] autoUpdater null at quitAndInstall — aborting");
+    app.exit(1);
+    return;
+  }
   try {
     console.log("[main] Launching quitAndInstall now (silent, forceRunAfter)");
     // isSilent=true → NSIS runs unattended (no wizard), matches oneClick:true config.

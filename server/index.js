@@ -73,6 +73,10 @@ const {
   getScheduledMaintenance,
   insertScheduledMaintenance,
   deleteScheduledMaintenance,
+  // v2.8.10 Phase C: read-only snapshot of boot-time integrity + any
+  // auto-restore that happened when adsi.db was found corrupt. Surfaced
+  // to the renderer through GET /api/health/db-integrity.
+  startupIntegrityResult,
 } = require("./db");
 const {
   registerClient,
@@ -11842,6 +11846,32 @@ app.get("/api/system/contention", (req, res) => {
   });
 });
 
+// v2.8.10 Phase C: expose the boot-time DB integrity snapshot so the
+// renderer can show a banner when the main DB was auto-restored from a
+// backup slot after a torn-write event. Read-only; no side effects.
+app.get("/api/health/db-integrity", (req, res) => {
+  const snap = startupIntegrityResult || {};
+  res.json({
+    ok: true,
+    mainDb: snap.mainDb || "unknown",
+    restored: !!snap.restored,
+    restoredFromSlot: snap.restoredFromSlot,
+    restoredAt: Number(snap.restoredAt || 0),
+    unrescuable: !!snap.unrescuable,
+    unrescuableAt: Number(snap.unrescuableAt || 0),
+    quickCheck: String(snap.quickCheck || ""),
+    checkedAt: Number(snap.checkedAt || 0),
+    backupCandidates: Array.isArray(snap.backupCandidates)
+      ? snap.backupCandidates.map((c) => ({
+          slot: c.slot,
+          size: c.size,
+          mtimeMs: c.mtimeMs,
+          ok: c.ok,
+        }))
+      : [],
+  });
+});
+
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
   // Supports ETag for direct consumers that can tolerate cached heartbeat data.
@@ -14999,6 +15029,116 @@ app.get("/api/solcast/week-ahead", (req, res) => {
   }
 });
 
+// v2.8.10 Phase F: refresh every data pipeline that feeds the Export page.
+// Invoked by the Refresh button at the top of the Export tab. Best-effort
+// across sources — partial success is OK; the response lists which sources
+// refreshed and which failed so the UI can show per-source status.
+//
+// Pipelines touched:
+//   - Solcast snapshots: triggers autoFetchSolcastSnapshots for today+tomorrow
+//     (gateway-mode only; no-op in remote mode). Bounded by a per-request
+//     timeout so a slow upstream can't stall the UI.
+//   - Forecast dayahead: no explicit reload — reads are live queries.
+//     Returns current row counts so the UI can show "N days available".
+//   - Snapshot date list: returns current solcast_snapshots distinct dates.
+//   - Analytics forecast date list: returns current forecast_dayahead dates.
+//   - Audit log / energy / alarms / daily report: live queries at export
+//     time. Returns row counts for visibility.
+app.post("/api/export/refresh-pipelines", async (req, res) => {
+  const started = Date.now();
+  const report = {
+    ok: true,
+    remoteMode: isRemoteMode(),
+    startedAt: started,
+    durationMs: 0,
+    sources: {},
+  };
+
+  const mark = (key, payload) => { report.sources[key] = payload; };
+
+  // 1. Solcast — pull fresh snapshots if we are gateway-mode.
+  if (isRemoteMode()) {
+    mark("solcast", { status: "skipped", reason: "remote-mode" });
+  } else {
+    try {
+      const cfg = getSolcastConfig();
+      const tz = cfg?.timeZone || "Asia/Manila";
+      const today = localDateStrInTz(Date.now(), tz);
+      const tomorrow = addDaysIso(today, 1);
+      const solcastTimeoutMs = Math.max(3000, Math.min(20000, Number(req.body?.solcastTimeoutMs) || 10000));
+      const fetchPromise = autoFetchSolcastSnapshots([today, tomorrow], {
+        toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
+      });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("solcast-timeout")), solcastTimeoutMs),
+      );
+      const result = await Promise.race([fetchPromise, timeoutPromise]);
+      mark("solcast", {
+        status: result?.pulled ? "ok" : "degraded",
+        pulled: !!result?.pulled,
+        persisted: Number(result?.persisted || 0),
+        historyRowsAppended: Number(result?.historyRowsAppended || 0),
+        reason: result?.reason || "",
+        dates: [today, tomorrow],
+      });
+    } catch (err) {
+      const msg = String(err?.message || err);
+      mark("solcast", {
+        status: msg === "solcast-timeout" ? "timeout" : "error",
+        error: msg,
+      });
+    }
+  }
+
+  // 2. Solcast snapshot-date list (for the forecast export dropdown).
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT forecast_day FROM solcast_snapshots ORDER BY forecast_day DESC LIMIT 90`,
+    ).all();
+    mark("solcastSnapshotDates", {
+      status: "ok",
+      count: rows.length,
+      dates: rows.map((r) => r.forecast_day),
+    });
+  } catch (err) {
+    mark("solcastSnapshotDates", { status: "error", error: String(err?.message || err) });
+  }
+
+  // 3. Forecast day-ahead date list.
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT date FROM forecast_dayahead ORDER BY date DESC LIMIT 90`,
+    ).all();
+    mark("forecastDates", {
+      status: "ok",
+      count: rows.length,
+      dates: rows.map((r) => r.date),
+    });
+  } catch (err) {
+    mark("forecastDates", { status: "error", error: String(err?.message || err) });
+  }
+
+  // 4-7. Counts for the other export data sources (visibility only).
+  const countQueries = [
+    { key: "energy5min", sql: "SELECT COUNT(*) AS n FROM energy_5min" },
+    { key: "dailyReport", sql: "SELECT COUNT(*) AS n FROM daily_report" },
+    { key: "auditLog", sql: "SELECT COUNT(*) AS n FROM audit_log" },
+    { key: "alarms", sql: "SELECT COUNT(*) AS n FROM alarms" },
+    { key: "readings", sql: "SELECT COUNT(*) AS n FROM readings" },
+  ];
+  for (const q of countQueries) {
+    try {
+      const row = db.prepare(q.sql).get();
+      mark(q.key, { status: "ok", count: Number(row?.n || 0) });
+    } catch (err) {
+      mark(q.key, { status: "error", error: String(err?.message || err) });
+    }
+  }
+
+  report.durationMs = Date.now() - started;
+  return res.json(report);
+});
+
 app.post("/api/export/solcast-week-ahead", async (req, res) => {
   try {
     const cfg = getSolcastConfig();
@@ -16883,6 +17023,47 @@ const httpServer = app.listen(PORT, () => {
   httpServer.keepAliveTimeout = 30000;   // 30 s — well above client keepAlive
   httpServer.headersTimeout = 35000;     // must be > keepAliveTimeout per Node docs
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
+  // v2.8.10 Phase C: record an audit_log row for any abnormal boot-time
+  // integrity state. Two distinct events:
+  //   - restored  → corrupt main DB was auto-restored from a backup slot
+  //   - unrescuable → all candidates were corrupt; a fresh empty DB was opened
+  // Audit rows are the authoritative record; the renderer banner only lives
+  // in memory and comes from /api/health/db-integrity.
+  try {
+    if (startupIntegrityResult?.restored) {
+      const slot = Number(startupIntegrityResult.restoredFromSlot);
+      const qc = String(startupIntegrityResult.quickCheck || "unknown");
+      db
+        .prepare(
+          "INSERT INTO audit_log(ts, operator, action, scope, result, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          Date.now(),
+          "system",
+          "db-auto-restore",
+          "startup-integrity",
+          "ok",
+          `Restored adsi.db from backup slot ${slot} after corrupt quick_check (${qc})`,
+        );
+      console.log(`[DB] audit_log row written for auto-restore from slot ${slot}`);
+    } else if (startupIntegrityResult?.unrescuable) {
+      db
+        .prepare(
+          "INSERT INTO audit_log(ts, operator, action, scope, result, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          Date.now(),
+          "system",
+          "db-unrescuable",
+          "startup-integrity",
+          "warning",
+          "Main DB and all backup slots were corrupt — quarantined and opened a fresh empty DB. Cloud restore required for historical data.",
+        );
+      console.warn("[DB] audit_log row written for unrescuable-fresh-DB event");
+    }
+  } catch (err) {
+    console.warn("[DB] Could not write startup-integrity audit row:", err?.message || err);
+  }
   loadRemoteTodayEnergyShadowFromSettings();
   loadGatewayHandoffMetaFromSettings();
   try {

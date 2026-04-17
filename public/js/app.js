@@ -3751,6 +3751,52 @@ function refreshModeScopeAbort(reason) {
   if (reason) console.info(`[mode] mode-scope abort rotated: ${reason}`);
 }
 
+// v2.8.10 Phase C: one-shot advisory banner for DB auto-restore events.
+// Triggered from init(); non-blocking. Renders a dismissable red banner at
+// the top of <body> when the gateway auto-restored adsi.db from a backup
+// slot after a power-loss-induced torn write.
+async function checkBootIntegrityBanner() {
+  try {
+    const resp = await fetch("/api/health/db-integrity", { cache: "no-store" });
+    if (!resp || !resp.ok) return;
+    const payload = await resp.json();
+    if (!payload || (!payload.restored && !payload.unrescuable)) return;
+    if (document.getElementById("adsi-db-restore-banner")) return;
+    const banner = document.createElement("div");
+    banner.id = "adsi-db-restore-banner";
+    banner.setAttribute("role", "alert");
+    // Unrescuable is more severe → brighter red + bold. Restored is dark red.
+    const bg = payload.unrescuable ? "#a31717" : "#7a1f1f";
+    banner.style.cssText =
+      `position:sticky;top:0;z-index:2147483646;background:${bg};color:#fff;` +
+      "padding:10px 16px;font-size:13px;line-height:1.4;display:flex;gap:12px;" +
+      "align-items:center;justify-content:space-between;box-shadow:0 2px 6px rgba(0,0,0,.35)";
+    let msg;
+    if (payload.unrescuable) {
+      const when = payload.unrescuableAt ? new Date(payload.unrescuableAt).toLocaleString() : "";
+      msg =
+        `<strong>Database quarantined</strong> — the main DB and all backup slots were corrupt ` +
+        `${when ? `at ${when} ` : ""}and a fresh empty database was created. ` +
+        `Historical data is preserved under <code>adsi.db.unrescuable-*</code> for forensics. ` +
+        `Perform a Cloud Restore from Settings to recover historical readings.`;
+    } else {
+      const slot = Number(payload.restoredFromSlot);
+      const when = payload.restoredAt ? new Date(payload.restoredAt).toLocaleString() : "";
+      msg =
+        `<strong>Database auto-restored</strong> from backup slot ${Number.isFinite(slot) ? slot : "?"} ` +
+        `${when ? `at ${when} ` : ""}after corrupt quick_check (${payload.quickCheck || "n/a"}). ` +
+        `Recent readings (up to ~2 h) may show gaps and will re-fill automatically.`;
+    }
+    banner.innerHTML =
+      `<span style="flex:1">${msg}</span>` +
+      `<button id="adsi-db-restore-banner-dismiss" style="background:rgba(255,255,255,.18);` +
+      `border:0;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer">Dismiss</button>`;
+    document.body.insertBefore(banner, document.body.firstChild);
+    const btn = document.getElementById("adsi-db-restore-banner-dismiss");
+    if (btn) btn.addEventListener("click", () => { try { banner.remove(); } catch (_) {} });
+  } catch (_) { /* advisory; swallow */ }
+}
+
 async function apiWithTimeout(
   url,
   timeoutMs,
@@ -15522,6 +15568,129 @@ function initExportPage() {
     "btnCancelDailyReportExport",
   ].forEach((id) => setExportCancelButtonState(id, !!State.exportAbortControllers[id]));
   queuePersistExportUiState();
+  updateExportLastRefreshedLabel();
+}
+
+// v2.8.10 Phase F: Export page refresh button. Drives ALL pipelines that
+// feed the Export page, not just the UI form state. Sequence:
+//   1. Reload settings (inverter count + display labels).
+//   2. Rebuild all export dropdowns via buildSelects().
+//   3. Reload snapshot-date and forecast-date option lists used by the
+//      forecast export card.
+//   4. Trigger server-side pipeline refresh (POST /api/export/refresh-
+//      pipelines) which pulls fresh Solcast snapshots for today/tomorrow
+//      and returns counts for every Export data source.
+//   5. Re-run step 3 so the dropdown picks up any new snapshot dates.
+//   6. Update the toolbar timestamp + per-source status summary.
+// In-flight exports are unaffected (they hold their own AbortController).
+async function refreshExportPageData() {
+  const btn = $("btnRefreshExportData");
+  const statusEl = $("expLastRefreshed");
+  const originalHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="mdi mdi-refresh mdi-spin" aria-hidden="true"></span><span>Refreshing...</span>`;
+  }
+  if (statusEl) statusEl.textContent = "Refreshing pipelines...";
+
+  const errors = [];
+  let report = null;
+
+  // Step 1 + 2: settings + dropdowns.
+  try {
+    await loadSettings();
+    buildSelects();
+    applyExportUiStateToInputs(State.settings.exportUiState || {});
+    syncSharedForecastExportFormatControls(getSharedForecastExportFormat());
+    normalizeAllExportDateInputs({ forceDefault: false, preferred: "start" });
+    normalizeExportNumberInput("genDayCount");
+    normalizeExportNumberInput("expInvDataInterval");
+  } catch (err) {
+    errors.push("settings: " + (err?.message || err));
+  }
+
+  // Step 3: reload forecast-date dropdown pre-server-refresh so the operator
+  // sees the current list immediately, even if the server refresh is slow.
+  const forecastSource = $("expForecastSource")?.value || "analytics";
+  try {
+    await loadForecastDateOptions(forecastSource);
+  } catch (err) {
+    errors.push("forecast-dates: " + (err?.message || err));
+  }
+
+  // Step 4: trigger server-side pipeline refresh (Solcast + counts).
+  try {
+    const resp = await apiWithTimeout(
+      "/api/export/refresh-pipelines",
+      25000,
+      "Refresh pipelines request timed out",
+      "POST",
+      { solcastTimeoutMs: 12000 },
+    );
+    report = resp || null;
+  } catch (err) {
+    errors.push("pipelines: " + (err?.message || err));
+  }
+
+  // Step 5: reload forecast-date dropdown AFTER Solcast snapshot pull so
+  // newly-available dates show up immediately.
+  try {
+    await loadForecastDateOptions(forecastSource);
+  } catch (err) {
+    errors.push("forecast-dates-refresh: " + (err?.message || err));
+  }
+
+  // Step 6: render status.
+  updateExportLastRefreshedLabel(report, errors);
+  if (btn) {
+    if (errors.length === 0) {
+      btn.innerHTML = `<span class="mdi mdi-check" aria-hidden="true"></span><span>Refreshed</span>`;
+    } else if (report) {
+      btn.innerHTML = `<span class="mdi mdi-alert-outline" aria-hidden="true"></span><span>Partial</span>`;
+    } else {
+      btn.innerHTML = `<span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span><span>Retry</span>`;
+    }
+    setTimeout(() => {
+      btn.innerHTML = originalHtml;
+      btn.disabled = false;
+    }, errors.length ? 2400 : 1200);
+  }
+}
+
+// Build a short human-readable summary of the refresh result for the
+// toolbar timestamp slot. Example:
+//   "Last refreshed 14:32:07 — Solcast ok (2 snap), Forecast 28 days, 107 audit rows"
+function updateExportLastRefreshedLabel(report, errors = []) {
+  const el = $("expLastRefreshed");
+  if (!el) return;
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  let suffix = "";
+  if (report && report.sources) {
+    const parts = [];
+    const s = report.sources;
+    if (s.solcast) {
+      const label = s.solcast.status === "ok"
+        ? `Solcast ${s.solcast.persisted || 0} slots`
+        : s.solcast.status === "skipped"
+          ? "Solcast skipped (remote)"
+          : s.solcast.status === "timeout"
+            ? "Solcast timeout"
+            : `Solcast ${s.solcast.status}`;
+      parts.push(label);
+    }
+    if (s.solcastSnapshotDates?.count != null) parts.push(`${s.solcastSnapshotDates.count} snap dates`);
+    if (s.forecastDates?.count != null) parts.push(`${s.forecastDates.count} forecast days`);
+    if (s.auditLog?.count != null) parts.push(`${s.auditLog.count} audit rows`);
+    if (parts.length) suffix = " — " + parts.join(", ");
+  }
+  if (errors.length) suffix += ` (${errors.length} error${errors.length === 1 ? "" : "s"})`;
+  el.textContent = `Last refreshed ${hh}:${mm}:${ss}${suffix}`;
+  el.title = errors.length
+    ? "Refresh errors:\n" + errors.join("\n")
+    : (report ? JSON.stringify(report.sources, null, 2) : "");
 }
 
 function clearExportButtonTimer(btnId) {
@@ -17369,6 +17538,7 @@ function bindEventHandlers() {
   // Daily Report page
   $("btnFetchReport")?.addEventListener("click", fetchReport);
   // Export page
+  $("btnRefreshExportData")?.addEventListener("click", () => refreshExportPageData());
   $("btnExportAlarms")?.addEventListener("click", () =>
     runSingleDateExport(
       "alarms",
@@ -17905,6 +18075,12 @@ async function init() {
     initPromptModal();
     setupNav();
     initSettingsSectionNav();
+    // v2.8.10 Phase C: one-shot check of /api/health/db-integrity.
+    // If the boot-time probe restored adsi.db from a backup slot, show a
+    // persistent banner so the operator knows there may be a ~2 h gap in
+    // recent readings (the poller fills it in automatically as the plant
+    // continues generating). Failures are silent — this is advisory only.
+    checkBootIntegrityBanner().catch(() => { /* advisory; swallow */ });
     const resumeAlarmAudio = () => {
       try {
         const ctx = getOrCreateAlarmAudioCtx();

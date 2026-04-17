@@ -354,6 +354,166 @@ function applyPendingMainDbReplacementFileSync() {
 
 const pendingMainDbFileApplyResult = applyPendingMainDbReplacementFileSync();
 
+// v2.8.10 Phase C: pre-open integrity probe + auto-restore from rotating
+// backup slots. Before the live `new Database(DB_PATH)` call, we cheaply
+// inspect the main DB for corruption (sqlite header + quick_check in a
+// throwaway readonly handle). If it fails, we swap in the newer of the
+// two 2-hour backup slots written by server/index.js runPeriodicBackup.
+// This converts "app fails to boot after torn write" into "app boots,
+// shows banner, and loses at most ~2h of readings that the poller refills".
+const BACKUP_DIR_FOR_RESTORE = path.join(DATA_DIR, "backups");
+const startupIntegrityResult = {
+  mainDb: "unknown",          // "ok" | "corrupt" | "missing" | "error"
+  restored: false,             // true if we swapped in a backup slot
+  restoredFromSlot: null,      // 0 | 1 | null
+  restoredAt: 0,               // epoch ms
+  unrescuable: false,          // true if main + all backups were corrupt → fresh DB
+  unrescuableAt: 0,            // epoch ms when we gave up
+  quickCheck: "",              // raw PRAGMA quick_check(1) result
+  backupCandidates: [],        // [{slot, path, size, mtimeMs, ok}]
+  checkedAt: 0,
+};
+
+function _sqliteFileLooksValidSync(targetPath) {
+  try {
+    if (!fs.existsSync(targetPath)) return false;
+    const st = fs.statSync(targetPath);
+    if (!st.isFile() || st.size < 64) return false;
+    const fd = fs.openSync(targetPath, "r");
+    try {
+      const header = Buffer.alloc(16);
+      fs.readSync(fd, header, 0, 16, 0);
+      return header.toString("utf8", 0, 15) === "SQLite format 3";
+    } finally {
+      try { fs.closeSync(fd); } catch (_) { /* ignore */ }
+    }
+  } catch (_) {
+    return false;
+  }
+}
+
+function _probeDbIntegritySync(targetPath) {
+  let probe = null;
+  try {
+    probe = new Database(targetPath, { readonly: true, fileMustExist: true });
+    const qc = String(probe.prepare("PRAGMA quick_check(1)").pluck().get() || "").trim().toLowerCase();
+    return { ok: qc === "ok", quickCheck: qc };
+  } catch (err) {
+    return { ok: false, quickCheck: String(err?.message || err) };
+  } finally {
+    try { probe?.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+function _listBackupSlotsForRestore() {
+  const slots = [];
+  try {
+    if (!fs.existsSync(BACKUP_DIR_FOR_RESTORE)) return slots;
+    for (const slot of [0, 1]) {
+      const p = path.join(BACKUP_DIR_FOR_RESTORE, `adsi_backup_${slot}.db`);
+      if (!_sqliteFileLooksValidSync(p)) continue;
+      try {
+        const st = fs.statSync(p);
+        slots.push({ slot, path: p, size: st.size, mtimeMs: st.mtimeMs, ok: null });
+      } catch (_) { /* ignore */ }
+    }
+  } catch (_) { /* ignore */ }
+  // Newest first
+  slots.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return slots;
+}
+
+function _autoRestoreMainDbFromBackupSync() {
+  const mainExists = fs.existsSync(DB_PATH);
+  startupIntegrityResult.checkedAt = Date.now();
+  if (!mainExists) {
+    startupIntegrityResult.mainDb = "missing";
+    console.warn(`[DB] adsi.db missing at ${DB_PATH} — fresh DB will be created on open`);
+    return;
+  }
+  if (!_sqliteFileLooksValidSync(DB_PATH)) {
+    startupIntegrityResult.mainDb = "corrupt";
+    startupIntegrityResult.quickCheck = "header invalid";
+  } else {
+    const probe = _probeDbIntegritySync(DB_PATH);
+    startupIntegrityResult.quickCheck = probe.quickCheck;
+    startupIntegrityResult.mainDb = probe.ok ? "ok" : "corrupt";
+  }
+  if (startupIntegrityResult.mainDb === "ok") {
+    console.log("[DB] Startup quick_check: ok");
+    return;
+  }
+  console.error(
+    `[DB] Main DB corrupt at startup (${startupIntegrityResult.quickCheck}). ` +
+    `Attempting auto-restore from rotating backup slots.`,
+  );
+  const candidates = _listBackupSlotsForRestore();
+  startupIntegrityResult.backupCandidates = candidates.map((c) => ({ ...c }));
+  for (const cand of candidates) {
+    const probe = _probeDbIntegritySync(cand.path);
+    cand.ok = probe.ok;
+    if (!probe.ok) {
+      console.warn(`[DB] Backup slot ${cand.slot} also corrupt: ${probe.quickCheck}`);
+      continue;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const quarantinePath = `${DB_PATH}.corrupt-${stamp}`;
+    try {
+      for (const suffix of ["-wal", "-shm"]) {
+        try { fs.unlinkSync(`${DB_PATH}${suffix}`); } catch (_) { /* ignore */ }
+      }
+      try { fs.renameSync(DB_PATH, quarantinePath); }
+      catch (err) { console.warn(`[DB] Quarantine rename failed: ${err.message}`); }
+      fs.copyFileSync(cand.path, DB_PATH);
+      startupIntegrityResult.restored = true;
+      startupIntegrityResult.restoredFromSlot = cand.slot;
+      startupIntegrityResult.restoredAt = Date.now();
+      // The restored file is known-good — clear the corrupt flag so the
+      // post-open quick_check path can assert "ok". `restored` remains
+      // true so the renderer banner fires.
+      startupIntegrityResult.mainDb = "ok";
+      startupIntegrityResult.quickCheck = "restored-from-backup";
+      console.log(
+        `[DB] Auto-restored adsi.db from backup slot ${cand.slot} ` +
+        `(${cand.size} bytes, mtime=${new Date(cand.mtimeMs).toISOString()}). ` +
+        `Previous corrupt DB quarantined at ${quarantinePath}.`,
+      );
+      return;
+    } catch (err) {
+      console.error(`[DB] Auto-restore from slot ${cand.slot} failed: ${err.message}`);
+    }
+  }
+  // Last-resort fallback: the main DB is corrupt and no backup rescued us.
+  // Opening a file that isn't a valid SQLite DB throws SQLITE_NOTADB from
+  // better-sqlite3, crashing the server. For a 24/7 monitoring system it is
+  // better to quarantine the dead file and boot with a fresh empty DB —
+  // the poller will fill it with new readings and the operator can perform
+  // a cloud restore if they need the historical record back.
+  if (!_sqliteFileLooksValidSync(DB_PATH)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const quarantinePath = `${DB_PATH}.unrescuable-${stamp}`;
+    try {
+      fs.renameSync(DB_PATH, quarantinePath);
+      for (const suffix of ["-wal", "-shm"]) {
+        try { fs.unlinkSync(`${DB_PATH}${suffix}`); } catch (_) { /* ignore */ }
+      }
+      startupIntegrityResult.unrescuable = true;
+      startupIntegrityResult.unrescuableAt = Date.now();
+      startupIntegrityResult.quickCheck = "quarantined-fresh-db";
+      console.error(
+        `[DB] Unrescuable DB quarantined at ${quarantinePath}. ` +
+        `Booting with a fresh empty DB — live polling and cloud restore can recover data.`,
+      );
+    } catch (err) {
+      console.error(`[DB] Unrescuable-quarantine rename failed: ${err.message}`);
+    }
+  } else {
+    console.error("[DB] No usable backup slot found — opening corrupt DB as-is (live data may be inaccessible).");
+  }
+}
+
+_autoRestoreMainDbFromBackupSync();
+
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
@@ -363,16 +523,20 @@ db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
 
-// Startup integrity check — detect corruption from a prior bad exit early.
+// Post-open quick_check — covers the case where the file validated readonly
+// but became inconsistent after WAL playback on open.
 try {
   const qc = String(db.prepare("PRAGMA quick_check(1)").pluck().get() || "").trim().toLowerCase();
+  startupIntegrityResult.quickCheck = qc;
   if (qc !== "ok") {
-    console.error(`[DB] Startup quick_check FAILED: ${qc}`);
-  } else {
-    console.log("[DB] Startup quick_check: ok");
+    startupIntegrityResult.mainDb = "corrupt";
+    console.error(`[DB] Post-open quick_check FAILED: ${qc}`);
+  } else if (startupIntegrityResult.mainDb !== "corrupt") {
+    startupIntegrityResult.mainDb = "ok";
+    console.log("[DB] Post-open quick_check: ok");
   }
 } catch (qcErr) {
-  console.error("[DB] Startup quick_check error:", qcErr.message);
+  console.error("[DB] Post-open quick_check error:", qcErr.message);
 }
 
 db.exec(`
@@ -2954,6 +3118,9 @@ module.exports = {
   setSetting,
   pruneOldData,
   closeDb,
+  // v2.8.10 Phase C: startup integrity snapshot + auto-restore result.
+  // Consumed by server/index.js GET /api/health/db-integrity.
+  startupIntegrityResult,
   DATA_DIR,
   ARCHIVE_DIR,
   SUMMARY_SOLAR_START_H,
