@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.8.11` in `package.json` (source of truth) |
+| Repo version baseline | `2.8.12` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.8.9` (v2.8.10 was pulled due to asar-virtualization bug; 2.8.11 is the fix) |
+| Latest published release | `v2.8.11` (hotfix + shutdown serialization) |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
