@@ -214,6 +214,15 @@ const WEATHER_HOURLY_FIELDS = [
   "cloud_cover",
   "temperature_2m",
 ].join(",");
+// Multi-model cloud cover — queried via a second Open-Meteo call so each
+// model's values come back on separate keys (cloud_cover_jma_seamless, etc.).
+// JMA is Japan Meteorological Agency → best regional skill for SE Asia.
+const WEATHER_CLOUD_MODELS = [
+  { id: "jma_seamless", label: "JMA" },
+  { id: "ecmwf_ifs025", label: "ECMWF" },
+  { id: "gfs_seamless", label: "GFS" },
+  { id: "icon_seamless", label: "ICON" },
+];
 const SOLCAST_TIMEOUT_MS = 20000;
 const SOLCAST_SLOT_MIN = 5;
 const SOLCAST_SOLAR_START_H = 5;
@@ -9677,15 +9686,26 @@ async function fetchHourlyWeatherToday() {
 
   const _lat = Number(getSetting("plantLatitude", WEATHER_LAT));
   const _lon = Number(getSetting("plantLongitude", WEATHER_LON));
-  const url =
+  const baseUrl =
     `https://api.open-meteo.com/v1/forecast?latitude=${_lat}&longitude=${_lon}` +
     `&hourly=${encodeURIComponent(WEATHER_HOURLY_FIELDS)}` +
     `&start_date=${todayStr}&end_date=${todayStr}` +
     `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
+  const modelIds = WEATHER_CLOUD_MODELS.map((m) => m.id).join(",");
+  const multiModelUrl =
+    `https://api.open-meteo.com/v1/forecast?latitude=${_lat}&longitude=${_lon}` +
+    `&hourly=cloud_cover` +
+    `&models=${encodeURIComponent(modelIds)}` +
+    `&start_date=${todayStr}&end_date=${todayStr}` +
+    `&timezone=${encodeURIComponent(WEATHER_TZ)}`;
 
   try {
-    const r = await fetchWeatherWithRetry(url);
-    const payload = await r.json();
+    const [baseRes, multiRes] = await Promise.allSettled([
+      fetchWeatherWithRetry(baseUrl).then((r) => r.json()),
+      fetchWeatherWithRetry(multiModelUrl).then((r) => r.json()),
+    ]);
+    if (baseRes.status !== "fulfilled") throw baseRes.reason;
+    const payload = baseRes.value || {};
     const h = payload?.hourly || {};
     const time = Array.isArray(h.time) ? h.time : [];
     const ghi = Array.isArray(h.shortwave_radiation) ? h.shortwave_radiation : [];
@@ -9706,7 +9726,29 @@ async function fetchHourlyWeatherToday() {
       });
     }
 
-    const data = { date: todayStr, rows };
+    // Multi-model cloud cover — graceful: if the second call fails, cloudModels is []
+    // and the renderer falls back to the blended cloud series alone.
+    const cloudModels = [];
+    if (multiRes.status === "fulfilled" && multiRes.value?.hourly) {
+      const mh = multiRes.value.hourly;
+      for (const spec of WEATHER_CLOUD_MODELS) {
+        const arr = mh[`cloud_cover_${spec.id}`];
+        if (!Array.isArray(arr) || !arr.length) continue;
+        cloudModels.push({
+          id: spec.id,
+          label: spec.label,
+          values: arr.map((v) =>
+            Number.isFinite(Number(v)) ? Math.round(Number(v)) : null,
+          ),
+        });
+      }
+    } else if (multiRes.status === "rejected") {
+      console.warn(
+        `[weather] Multi-model cloud fetch failed (${multiRes.reason?.message || multiRes.reason}); using blended cloud only`,
+      );
+    }
+
+    const data = { date: todayStr, rows, cloudModels };
     weatherHourlyCache.set(todayStr, { ts: now, data });
 
     // Evict old entries

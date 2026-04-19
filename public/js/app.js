@@ -1510,23 +1510,65 @@ function _renderUpdateToast() {
 }
 
 // Update Ready modal — shown when auto-download completes in the background
+const UPDATE_READY_SNOOZE_STORAGE_KEY = "updateReadySnooze";
+const UPDATE_READY_SNOOZE_MS = 24 * 60 * 60 * 1000; // 24h reminder cooldown
+
+function _readUpdateReadySnooze() {
+  try {
+    const raw = localStorage.getItem(UPDATE_READY_SNOOZE_STORAGE_KEY) || "";
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return null;
+    return { version: String(obj.version || ""), at: Number(obj.at || 0) };
+  } catch (_) { return null; }
+}
+
+function _isUpdateReadySnoozed(version) {
+  const snooze = _readUpdateReadySnooze();
+  if (!snooze || !snooze.version) return false;
+  if (snooze.version !== String(version || "")) return false;
+  if (!Number.isFinite(snooze.at) || snooze.at <= 0) return false;
+  return Date.now() - snooze.at < UPDATE_READY_SNOOZE_MS;
+}
+
+function _snoozeUpdateReady(version) {
+  try {
+    localStorage.setItem(
+      UPDATE_READY_SNOOZE_STORAGE_KEY,
+      JSON.stringify({ version: String(version || ""), at: Date.now() }),
+    );
+  } catch (_) {}
+}
+
+function _clearUpdateReadySnooze() {
+  try { localStorage.removeItem(UPDATE_READY_SNOOZE_STORAGE_KEY); } catch (_) {}
+}
+
 function initUpdateReadyModal() {
   const modal = $("updateReadyModal");
   if (!modal) return;
+  let currentVersion = "";
   const close = () => { modal.classList.add("hidden"); document.body.classList.remove("modal-open"); };
-  $("updateReadyClose")?.addEventListener("click", close);
-  $("updateReadyLater")?.addEventListener("click", close);
+  const snoozeAndClose = () => {
+    if (currentVersion) _snoozeUpdateReady(currentVersion);
+    close();
+  };
+  $("updateReadyClose")?.addEventListener("click", snoozeAndClose);
+  $("updateReadyLater")?.addEventListener("click", snoozeAndClose);
   $("updateReadyInstall")?.addEventListener("click", () => {
+    _clearUpdateReadySnooze();
     close();
     _doInstallUpdateConfirmed();
   });
-  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
-  modal.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  modal.addEventListener("click", (e) => { if (e.target === modal) snoozeAndClose(); });
+  modal.addEventListener("keydown", (e) => { if (e.key === "Escape") snoozeAndClose(); });
 
   // Listen for IPC push from main process
   if (window.electronAPI?.onUpdateReady) {
     window.electronAPI.onUpdateReady((payload) => {
-      const ver = payload?.version || "—";
+      const ver = String(payload?.version || "").trim() || "—";
+      if (_isUpdateReadySnoozed(ver)) return;
+      currentVersion = ver;
       const el = $("updateReadyVersion");
       if (el) el.textContent = "v" + ver;
       modal.classList.remove("hidden");
@@ -4204,8 +4246,7 @@ function syncDayAheadGeneratorAvailability() {
   if (res) {
     if (isClient) {
       res.className = "exp-result";
-      res.textContent =
-        "Day-ahead generation is unavailable in Remote mode. Run it from the gateway workstation.";
+      res.textContent = "Unavailable in Remote mode — run from gateway.";
     } else if (
       res.textContent &&
       /unavailable in Remote mode/i.test(String(res.textContent))
@@ -14071,16 +14112,17 @@ function renderWeeklyWeather(rows, selectedDate = "") {
 }
 
 function renderHourlyWeatherCharts(data) {
-  const wrap = $("anaHourlyChartsWrap");
-  const empty = $("anaHourlyEmpty");
-  if (!wrap) return;
+  const irrWrap = $("anaIrradianceWrap");
+  const cloudWrap = $("anaCloudWrap");
+  if (!irrWrap && !cloudWrap) return;
 
   const rows = Array.isArray(data?.rows) ? data.rows : [];
+  const emptyNodes = document.querySelectorAll(".ana-hourly-empty");
   if (!rows.length) {
-    if (empty) { empty.style.display = ""; }
+    emptyNodes.forEach((el) => { el.style.display = ""; });
     return;
   }
-  if (empty) { empty.style.display = "none"; }
+  emptyNodes.forEach((el) => { el.style.display = "none"; });
 
   const labels = rows.map(r => {
     const t = String(r.time || "");
@@ -14091,9 +14133,69 @@ function renderHourlyWeatherCharts(data) {
   const dniData = rows.map(r => Number(r.dni_wm2) || 0);
   const cloudData = rows.map(r => Number(r.cloud_pct) || 0);
 
+  // ---- Info strip stats ----------------------------------------------------
+  // Index of the hour closest to wall-clock "now" (same day context).
+  const nowIdx = (() => {
+    const nowH = new Date().getHours();
+    let best = 0, diff = 999;
+    for (let i = 0; i < labels.length; i++) {
+      const h = parseInt(String(labels[i]).slice(0, 2), 10);
+      if (Number.isFinite(h)) {
+        const d = Math.abs(h - nowH);
+        if (d < diff) { diff = d; best = i; }
+      }
+    }
+    return best;
+  })();
+  // Irradiance stats
+  const irrNowEl = $("anaIrrNow");
+  const irrPeakEl = $("anaIrrPeak");
+  const irrSumEl = $("anaIrrSum");
+  if (irrNowEl) irrNowEl.textContent = `${ghiData[nowIdx] || 0} W/m²`;
+  if (irrPeakEl) {
+    const peak = Math.max(...ghiData);
+    const peakIdx = ghiData.indexOf(peak);
+    irrPeakEl.textContent = peak > 0 ? `${peak} @ ${labels[peakIdx]}` : "—";
+  }
+  if (irrSumEl) {
+    // Hourly W/m² summed → approximate daily Wh/m², convert to kWh/m².
+    const kwhPerM2 = ghiData.reduce((s, v) => s + v, 0) / 1000;
+    irrSumEl.textContent = `${kwhPerM2.toFixed(2)} kWh/m²`;
+  }
+  // Cloud stats
+  const cloudNowEl = $("anaCloudNow");
+  const cloudAvgEl = $("anaCloudAvg");
+  const cloudSpreadEl = $("anaCloudSpread");
+  if (cloudNowEl) cloudNowEl.textContent = `${cloudData[nowIdx] || 0}%`;
+  if (cloudAvgEl) {
+    const avg = cloudData.reduce((s, v) => s + v, 0) / Math.max(1, cloudData.length);
+    cloudAvgEl.textContent = `${Math.round(avg)}%`;
+  }
+  if (cloudSpreadEl) {
+    // Per-hour spread across models → max(model) - min(model), averaged over 24h.
+    const cm = Array.isArray(data?.cloudModels) ? data.cloudModels : [];
+    if (cm.length >= 2) {
+      let total = 0, count = 0;
+      for (let i = 0; i < labels.length; i++) {
+        const vals = cm.map(m => Number(m.values?.[i])).filter(Number.isFinite);
+        if (vals.length >= 2) {
+          total += (Math.max(...vals) - Math.min(...vals));
+          count++;
+        }
+      }
+      const avgSpread = count ? total / count : 0;
+      cloudSpreadEl.textContent = `±${Math.round(avgSpread / 2)}%`;
+      cloudSpreadEl.title = `Mean disagreement across ${cm.length} NWP models (peak-to-peak / 2)`;
+    } else {
+      cloudSpreadEl.textContent = "—";
+    }
+  }
+
   const pal = getChartPalette();
   const uiFont = cssVar("--font-main", "Arial");
-  const chartFont = { family: uiFont, size: 9, weight: "500" };
+  const chartFont = { family: uiFont, size: 10, weight: "500" };
+  const legendFont = { family: uiFont, size: 10, weight: "600" };
+  const titleFont = { family: uiFont, size: 10, weight: "700" };
   const gridColor = pal.grid;
   const tickColor = pal.tick;
 
@@ -14152,9 +14254,122 @@ function renderHourlyWeatherCharts(data) {
             position: "top",
             align: "start",
             labels: {
-              font: chartFont,
-              color: tickColor,
-              boxWidth: 14,
+              font: legendFont,
+              color: pal.tooltipText,
+              boxWidth: 16,
+              boxHeight: 3,
+              padding: 10,
+              usePointStyle: true,
+              pointStyle: "line",
+            },
+          },
+          tooltip: {
+            backgroundColor: pal.tooltipBg,
+            borderColor: pal.tooltipBorder,
+            borderWidth: 1,
+            titleColor: pal.tooltipText,
+            bodyColor: pal.tooltipText,
+            titleFont: { family: uiFont, size: 11, weight: "700" },
+            bodyFont: { family: uiFont, size: 10, weight: "500" },
+            padding: { top: 8, bottom: 8, left: 12, right: 12 },
+            cornerRadius: 8,
+            displayColors: true,
+            boxPadding: 4,
+            mode: "index",
+            intersect: false,
+            callbacks: {
+              label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y} W/m²`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            title: { display: true, text: "Hour (local)", font: titleFont, color: tickColor, padding: 2 },
+            ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, padding: 4 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
+          },
+          y: {
+            title: { display: true, text: "W/m²", font: titleFont, color: tickColor, padding: 2 },
+            beginAtZero: true,
+            ticks: { font: chartFont, color: tickColor, padding: 6 },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
+          },
+        },
+        layout: { padding: { top: 4, right: 8, bottom: 2, left: 4 } },
+        interaction: { mode: "index", intersect: false },
+      },
+    });
+  }
+
+  // Cloud cover chart — multi-source overlay (Open-Meteo blend + per-model lines).
+  // Color palette chosen to stay distinct in all 4 themes and for colorblind users.
+  const CLOUD_MODEL_STYLES = {
+    jma_seamless: { color: "#f5c542", dash: [], width: 2.2 },   // JMA (regional leader for SE Asia)
+    ecmwf_ifs025: { color: "#3ec2d7", dash: [5, 3], width: 1.6 },
+    gfs_seamless: { color: "#c97ee0", dash: [2, 3], width: 1.6 },
+    icon_seamless: { color: "#5dd48a", dash: [6, 2, 2, 2], width: 1.6 },
+  };
+  const cloudModels = Array.isArray(data?.cloudModels) ? data.cloudModels : [];
+  const cloudCanvas = $("chartHourlyCloud");
+  if (cloudCanvas) {
+    if (State.hourlyCloudChart) {
+      State.hourlyCloudChart.destroy();
+      State.hourlyCloudChart = null;
+    }
+    const blendGrad = gradientPair(cloudCanvas, "#b9c8d8", 0.22, 0.02);
+    const datasets = [];
+    // Blended cloud series (Open-Meteo default ensemble) — neutral reference fill
+    datasets.push({
+      label: "Blend",
+      data: cloudData,
+      borderColor: "#b9c8d8",
+      backgroundColor: blendGrad,
+      borderWidth: 1.2,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      pointBackgroundColor: "#b9c8d8",
+      pointBorderWidth: 0,
+      fill: true,
+      tension: 0.35,
+      cubicInterpolationMode: "monotone",
+    });
+    // Per-model lines on top
+    for (const m of cloudModels) {
+      const style = CLOUD_MODEL_STYLES[m.id] || { color: "#888", dash: [4, 2], width: 1.4 };
+      datasets.push({
+        label: m.label,
+        data: Array.isArray(m.values) ? m.values : [],
+        borderColor: style.color,
+        backgroundColor: style.color,
+        borderWidth: style.width,
+        borderDash: style.dash,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        pointBackgroundColor: style.color,
+        pointBorderWidth: 0,
+        fill: false,
+        tension: 0.3,
+        cubicInterpolationMode: "monotone",
+      });
+    }
+    State.hourlyCloudChart = new Chart(cloudCanvas, {
+      type: "line",
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: {
+            display: true,
+            position: "top",
+            align: "start",
+            labels: {
+              font: legendFont,
+              color: pal.tooltipText,
+              boxWidth: 16,
               boxHeight: 3,
               padding: 8,
               usePointStyle: true,
@@ -14167,7 +14382,7 @@ function renderHourlyWeatherCharts(data) {
             borderWidth: 1,
             titleColor: pal.tooltipText,
             bodyColor: pal.tooltipText,
-            titleFont: { family: uiFont, size: 10, weight: "700" },
+            titleFont: { family: uiFont, size: 11, weight: "700" },
             bodyFont: { family: uiFont, size: 10, weight: "500" },
             padding: { top: 8, bottom: 8, left: 12, right: 12 },
             cornerRadius: 8,
@@ -14175,99 +14390,28 @@ function renderHourlyWeatherCharts(data) {
             boxPadding: 4,
             mode: "index",
             intersect: false,
+            callbacks: {
+              label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y}%`,
+            },
           },
         },
         scales: {
           x: {
+            title: { display: true, text: "Hour (local)", font: titleFont, color: tickColor, padding: 2 },
             ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, padding: 4 },
             grid: { color: gridColor, drawTicks: false },
             border: { display: false },
           },
           y: {
-            beginAtZero: true,
-            ticks: { font: chartFont, color: tickColor, padding: 6 },
-            grid: { color: gridColor, drawTicks: false },
-            border: { display: false },
-          },
-        },
-        layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
-        interaction: { mode: "index", intersect: false },
-      },
-    });
-  }
-
-  // Cloud cover chart
-  const cloudCanvas = $("chartHourlyCloud");
-  if (cloudCanvas) {
-    if (State.hourlyCloudChart) {
-      State.hourlyCloudChart.destroy();
-      State.hourlyCloudChart = null;
-    }
-    State.hourlyCloudChart = new Chart(cloudCanvas, {
-      type: "bar",
-      data: {
-        labels,
-        datasets: [
-          {
-            label: "Cloud %",
-            data: cloudData,
-            backgroundColor: cloudData.map(v =>
-              v >= 80 ? "rgba(108,145,194,0.75)" :
-              v >= 50 ? "rgba(142,180,225,0.6)" :
-              v >= 25 ? "rgba(180,210,245,0.45)" :
-              "rgba(100,215,150,0.5)"
-            ),
-            borderColor: cloudData.map(v =>
-              v >= 80 ? "rgba(120,160,210,0.9)" :
-              v >= 50 ? "rgba(155,190,230,0.8)" :
-              v >= 25 ? "rgba(190,220,248,0.7)" :
-              "rgba(110,225,160,0.7)"
-            ),
-            borderWidth: 1,
-            borderRadius: 4,
-            borderSkipped: "bottom",
-            barPercentage: 0.75,
-            categoryPercentage: 0.85,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            backgroundColor: pal.tooltipBg,
-            borderColor: pal.tooltipBorder,
-            borderWidth: 1,
-            titleColor: pal.tooltipText,
-            bodyColor: pal.tooltipText,
-            titleFont: { family: uiFont, size: 10, weight: "700" },
-            bodyFont: { family: uiFont, size: 10, weight: "500" },
-            padding: { top: 8, bottom: 8, left: 12, right: 12 },
-            cornerRadius: 8,
-            displayColors: true,
-            boxPadding: 4,
-            mode: "index",
-            intersect: false,
-          },
-        },
-        scales: {
-          x: {
-            ticks: { font: chartFont, color: tickColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, padding: 4 },
-            grid: { color: gridColor, drawTicks: false },
-            border: { display: false },
-          },
-          y: {
+            title: { display: true, text: "Cloud Cover (%)", font: titleFont, color: tickColor, padding: 2 },
             beginAtZero: true,
             max: 100,
-            ticks: { font: chartFont, color: tickColor, stepSize: 25, padding: 6 },
+            ticks: { font: chartFont, color: tickColor, stepSize: 25, padding: 6, callback: (v) => `${v}%` },
             grid: { color: gridColor, drawTicks: false },
             border: { display: false },
           },
         },
-        layout: { padding: { top: 4, right: 6, bottom: 2, left: 4 } },
+        layout: { padding: { top: 4, right: 8, bottom: 2, left: 4 } },
         interaction: { mode: "index", intersect: false },
       },
     });
@@ -14309,6 +14453,13 @@ async function loadHourlyWeatherCharts() {
     const payload = await api("/api/weather/hourly-today");
     if (payload?.ok) {
       renderHourlyWeatherCharts(payload);
+      const freshEl = $("anaHourlyFreshness");
+      if (freshEl) {
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, "0");
+        const mm = String(now.getMinutes()).padStart(2, "0");
+        freshEl.textContent = `as of ${hh}:${mm}`;
+      }
     }
   } catch (e) {
     console.warn("[weather] Hourly chart load failed:", e.message);
@@ -14522,6 +14673,12 @@ function ensureAnalyticsAutoRefresh() {
     loadDayAheadChart(currentDate).catch((e) => {
       console.warn("dayahead chart auto-refresh failed:", e?.message || e);
     });
+    // Hourly weather charts: only refresh when viewing today (server caches 10min).
+    if (currentDate === today()) {
+      loadHourlyWeatherCharts().catch((e) => {
+        console.warn("hourly weather auto-refresh failed:", e?.message || e);
+      });
+    }
   }, 60000);
 }
 
@@ -14707,102 +14864,166 @@ function ensureAnalyticsCards() {
   totalSideCard.id = "analyticsTotalSideCard";
   totalSideCard.innerHTML = `
     <div class="chart-title">📊 Selected Date Summary</div>
+    <div class="ana-side-tabs" role="tablist">
+      <button class="ana-side-tab active" type="button" data-tab="summary" role="tab" aria-selected="true" title="Totals, variance, and actions for the selected date.">📊 Summary</button>
+      <button class="ana-side-tab" type="button" data-tab="irradiance" role="tab" aria-selected="false" title="Hourly GHI and DNI for today (Open-Meteo).">☀️ Irradiance</button>
+      <button class="ana-side-tab" type="button" data-tab="cloud" role="tab" aria-selected="false" title="Hourly cloud cover from multiple NWP models (JMA, ECMWF, GFS, ICON).">☁️ Cloud</button>
+      <button class="ana-side-tab" type="button" data-tab="outlook" role="tab" aria-selected="false" title="7-day weather outlook.">📅 7-Day</button>
+    </div>
+    <div class="ana-side-panel" data-panel="summary">
     <div class="analytics-side-grid analytics-side-grid-3">
       <div class="analytics-side-item" title="Total measured inverter energy generated for the selected date.">
-        <div class="analytics-side-label">Inverter MWh</div>
-        <div class="analytics-side-value" id="anaSideActual">—</div>
+        <div class="analytics-side-label">Inverter MWh<sub>T</sub></div>
+        <div class="analytics-side-value is-nan" id="anaSideActual">NaN</div>
       </div>
       <div class="analytics-side-item" title="Estimated energy delivered to substation after transmission losses.">
-        <div class="analytics-side-label" id="anaSideSubstationLabel">Substation (est.)</div>
-        <div class="analytics-side-value analytics-substation-val" id="anaSideSubstation">—</div>
+        <div class="analytics-side-label" id="anaSideSubstationLabel">Subs. Est. MWh<sub>T</sub></div>
+        <div class="analytics-side-value analytics-substation-val is-nan" id="anaSideSubstation">NaN</div>
       </div>
       <div class="analytics-side-item" title="Metered substation energy from uploaded data log.">
-        <div class="analytics-side-label">Subs. Metered MWh</div>
-        <div class="analytics-side-value" id="anaSideScadaActual">—</div>
+        <div class="analytics-side-label">Metered MWh<sub>T</sub></div>
+        <div class="analytics-side-value is-nan" id="anaSideScadaActual">NaN</div>
         <div class="analytics-side-sub-label" id="anaSideScadaSource"></div>
       </div>
       <div class="analytics-side-item" title="Solcast satellite-derived estimated actual energy for the selected date (plant-side, pre-loss).">
         <div class="analytics-side-label">Solcast Est. Actual</div>
-        <div class="analytics-side-value" id="anaSideSolcastEstActual">—</div>
+        <div class="analytics-side-value is-nan" id="anaSideSolcastEstActual">NaN</div>
       </div>
-      <div class="analytics-side-item" title="Forecasted day-ahead energy for the selected date.">
-        <div class="analytics-side-label">Day-ahead MWh</div>
-        <div class="analytics-side-value" id="anaSideDayAhead">—</div>
+      <div class="analytics-side-item" title="ML day-ahead forecast total for the selected date.">
+        <div class="analytics-side-label">Day-Ahead MWh<sub>T</sub></div>
+        <div class="analytics-side-value is-nan" id="anaSideDayAhead">NaN</div>
       </div>
-      <div class="analytics-side-item" title="Difference between metered actual and forecasted energy.">
-        <div class="analytics-side-label">Variance MWh</div>
-        <div class="analytics-side-value" id="anaSideVariance">—</div>
+      <div class="analytics-side-item" title="Solcast day-ahead P50 total captured at the WESM FAS submission window (0600H / 0955H lock).">
+        <div class="analytics-side-label">Solcast DA MWh<sub>T</sub></div>
+        <div class="analytics-side-value is-nan" id="anaSideSolcastDayAhead">NaN</div>
+        <div class="analytics-side-sub-label" id="anaSideSolcastDaSource"></div>
       </div>
-      <div class="analytics-side-item" title="Highest single interval energy reading and when it occurred.">
-        <div class="analytics-side-label">Peak Interval</div>
-        <div class="analytics-side-value analytics-side-peak" id="anaSidePeak">—</div>
+      <div class="analytics-side-item" title="Solcast day-ahead P50 total minus ML day-ahead total (provider disagreement at lock time). Percentage is relative to ML DA.">
+        <div class="analytics-side-label">Solcast vs ML DA (Var.)</div>
+        <div class="analytics-side-value is-nan" id="anaSideSolcastMlVariance">NaN</div>
       </div>
-      <div class="analytics-side-item span-2" id="anaSubstationMeterWrap" style="display:none;">
-        <div class="analytics-side-label">Substation Meter Input</div>
-        <div class="analytics-substation-meter-row">
+      <div class="analytics-side-item" title="Actual substation energy (metered if uploaded, else loss-adjusted inverter estimate) minus ML day-ahead total. Percentage is relative to ML DA.">
+        <div class="analytics-side-label">Actual vs ML DA (Var.)</div>
+        <div class="analytics-side-value is-nan" id="anaSideVariance">NaN</div>
+      </div>
+      <div class="analytics-side-item" title="Actual substation energy (metered if uploaded, else loss-adjusted estimate) minus Solcast day-ahead P50 total. Percentage is relative to ML DA (stable baseline).">
+        <div class="analytics-side-label">Actual vs Solcast (Var.)</div>
+        <div class="analytics-side-value is-nan" id="anaSideSolcastActualVariance">NaN</div>
+      </div>
+    </div>
+    <div class="analytics-gen-dls-grid">
+      <div class="analytics-gen-wrap">
+        <div class="analytics-side-label">Day-ahead Generator</div>
+        <div class="analytics-gen-row">
+          <label for="genDayCount" class="analytics-gen-field">
+            <span class="analytics-gen-label">Days</span>
+            <input
+              type="number"
+              id="genDayCount"
+              class="inp analytics-gen-input"
+              min="1"
+              max="31"
+              step="1"
+              value="1"
+              title="Number of consecutive days to generate day-ahead forecasts for (1-31)."
+            />
+          </label>
+          <div class="analytics-gen-actions">
+            <button
+              id="btnDayAheadGenerate"
+              class="btn btn-accent analytics-gen-btn"
+              type="button"
+              title="Generate day-ahead forecast from the selected date."
+            >
+              Generate
+            </button>
+          </div>
+        </div>
+        <div class="exp-result analytics-gen-result" id="genDayResult"></div>
+      </div>
+      <div class="analytics-dls-wrap" id="anaSubstationMeterWrap" style="display:none;">
+        <div class="analytics-side-label">DLS Upload</div>
+        <div class="analytics-dls-row">
           <button id="btnSubstationMeter" class="btn btn-sm analytics-substation-btn" type="button"
-            title="Upload or manually enter substation meter data for the selected date.">Upload Metered</button>
-          <span class="analytics-substation-status" id="anaSubstationStatus"></span>
+            title="Upload or manually enter Data Log Sheet (substation meter) for the selected date.">Upload DLS</button>
         </div>
+        <div class="analytics-dls-status" id="anaSubstationStatus"></div>
       </div>
     </div>
-    <div class="analytics-gen-wrap">
-      <div class="analytics-side-label">Day-ahead Generator</div>
-      <div class="analytics-gen-row">
-        <label for="genDayCount" class="analytics-gen-field">
-          <span class="analytics-gen-label">Days</span>
-          <input
-            type="number"
-            id="genDayCount"
-            class="inp analytics-gen-input"
-            min="1"
-            max="31"
-            step="1"
-            value="1"
-            title="Number of consecutive days to generate day-ahead forecasts for (1-31)."
-          />
-        </label>
-        <div class="analytics-gen-actions">
-          <button
-            id="btnDayAheadGenerate"
-            class="btn btn-accent analytics-gen-btn"
-            type="button"
-            title="Generate day-ahead forecast from the selected date."
-          >
-            Generate
-          </button>
-        </div>
-      </div>
-      <div class="exp-result analytics-gen-result" id="genDayResult"></div>
     </div>
-    <div class="analytics-weather-wrap" id="anaHourlyChartsWrap">
-      <div class="analytics-side-label">Today's Weather — Hourly</div>
-      <div class="ana-hourly-charts">
-        <div class="ana-hourly-chart-box">
-          <div class="ana-hourly-chart-label">Irradiance (W/m²)</div>
-          <canvas id="chartHourlyIrradiance" height="90"></canvas>
+    <div class="ana-side-panel hidden" data-panel="irradiance">
+      <div class="analytics-weather-wrap" id="anaIrradianceWrap">
+        <div class="ana-hourly-header">
+          <div class="analytics-side-label">Irradiance (W/m²)</div>
+          <div class="ana-hourly-freshness" id="anaHourlyFreshness" title="Data is refreshed every minute. Source: Open-Meteo."></div>
         </div>
-        <div class="ana-hourly-chart-box">
-          <div class="ana-hourly-chart-label">Cloud Cover (%)</div>
-          <canvas id="chartHourlyCloud" height="90"></canvas>
+        <div class="ana-hourly-stats" id="anaIrradianceStats">
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Now</span><span class="ana-hourly-stat-v" id="anaIrrNow">—</span></div>
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Peak</span><span class="ana-hourly-stat-v" id="anaIrrPeak">—</span></div>
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Sum</span><span class="ana-hourly-stat-v" id="anaIrrSum">—</span></div>
         </div>
-      </div>
-      <div class="ana-hourly-empty" id="anaHourlyEmpty" style="display:none">No hourly data available.</div>
-    </div>
-    <div class="analytics-weather-wrap">
-      <div class="analytics-side-label">7-Day Weather Outlook</div>
-      <div id="anaWeeklyWeather" class="analytics-weather-list">
-        <div class="analytics-weather-empty">Loading weekly weather…</div>
+        <div class="ana-hourly-chart-box ana-hourly-chart-box-full">
+          <canvas id="chartHourlyIrradiance" height="180"></canvas>
+        </div>
+        <div class="ana-hourly-empty ana-hourly-empty-irr" style="display:none">No irradiance data available.</div>
       </div>
     </div>
-    <div class="analytics-dayahead-wrap" id="anaDayAheadWrap" style="display:none">
-      <div class="ana-dayahead-chart-box">
-        <canvas id="chartDayAhead" height="0"></canvas>
+    <div class="ana-side-panel hidden" data-panel="cloud">
+      <div class="analytics-weather-wrap" id="anaCloudWrap">
+        <div class="ana-hourly-header">
+          <div class="analytics-side-label">Cloud Cover (%)</div>
+          <div class="ana-hourly-freshness" title="Multiple NWP models: JMA, ECMWF, GFS, ICON. Open-Meteo ensemble as blend reference."></div>
+        </div>
+        <div class="ana-hourly-stats" id="anaCloudStats">
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Now</span><span class="ana-hourly-stat-v" id="anaCloudNow">—</span></div>
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Avg</span><span class="ana-hourly-stat-v" id="anaCloudAvg">—</span></div>
+          <div class="ana-hourly-stat"><span class="ana-hourly-stat-k">Spread</span><span class="ana-hourly-stat-v" id="anaCloudSpread">—</span></div>
+        </div>
+        <div class="ana-hourly-chart-box ana-hourly-chart-box-full">
+          <canvas id="chartHourlyCloud" height="180"></canvas>
+        </div>
+        <div class="ana-hourly-empty ana-hourly-empty-cloud" id="anaHourlyEmpty" style="display:none">No cloud data available.</div>
       </div>
-      <div class="ana-dayahead-empty" id="anaDayAheadEmpty" style="display:none"></div>
+    </div>
+    <div class="ana-side-panel hidden" data-panel="outlook">
+      <div class="analytics-weather-wrap">
+        <div class="analytics-side-label">7-Day Weather Outlook</div>
+        <div id="anaWeeklyWeather" class="analytics-weather-list">
+          <div class="analytics-weather-empty">Loading weekly weather…</div>
+        </div>
+      </div>
     </div>
   `;
   host.appendChild(totalSideCard);
+
+  // Tab navigation for the side card (Summary / Weather / Forecast).
+  // Keeps the card compact — content for each tab is swapped via display:none.
+  const tabs = totalSideCard.querySelectorAll(".ana-side-tab");
+  const panels = totalSideCard.querySelectorAll(".ana-side-panel");
+  const activateSideTab = (key) => {
+    tabs.forEach((b) => {
+      const on = b.dataset.tab === key;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    panels.forEach((p) => {
+      p.classList.toggle("hidden", p.dataset.panel !== key);
+    });
+    // Chart.js renders at 0 dimensions if its canvas was hidden when created.
+    // Nudge any charts in the now-visible panel to recompute size.
+    setTimeout(() => {
+      try {
+        if (key === "irradiance") {
+          State.hourlyIrradianceChart?.resize?.();
+        } else if (key === "cloud") {
+          State.hourlyCloudChart?.resize?.();
+        }
+      } catch (_) { /* swallow resize errors */ }
+    }, 0);
+  };
+  tabs.forEach((btn) => {
+    btn.addEventListener("click", () => activateSideTab(btn.dataset.tab));
+  });
 
   const savedDayCount = Number(State.settings?.exportUiState?.genDayCount || 1);
   const genInput = totalSideCard.querySelector("#genDayCount");
@@ -15396,19 +15617,52 @@ function renderAnalyticsSummary(
     <span class="toolbar-info">Last: <b>${lastLabel}</b></span>
   `;
 
+  const _setNanTile = (el) => {
+    if (!el) return;
+    el.textContent = "NaN";
+    el.classList.add("is-nan");
+    el.classList.remove("pos", "neg");
+  };
+  const _setValueTile = (el, text) => {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove("is-nan");
+  };
+  const VARIANCE_GOOD_PCT = 20; // |%| <= 20 → green (WESM FAS MAPE compliance); > 20 → red
+  const _setVarianceTile = (el, mwh, baseMwh) => {
+    if (!el) return;
+    if (!Number.isFinite(mwh) || !Number.isFinite(baseMwh) || baseMwh <= 0) {
+      _setNanTile(el);
+      return;
+    }
+    const pct = (mwh / baseMwh) * 100;
+    const sign = mwh >= 0 ? "+" : "";
+    el.innerHTML =
+      `<span class="var-pct">${sign}${pct.toFixed(4)}%</span>` +
+      `<span class="var-mwh">${sign}${mwh.toFixed(4)} MWh</span>`;
+    el.classList.remove("is-nan");
+    const good = Math.abs(pct) <= VARIANCE_GOOD_PCT;
+    el.classList.toggle("pos", good);
+    el.classList.toggle("neg", !good);
+  };
+
   const sideActual = $("anaSideActual");
   const sideSubstation = $("anaSideSubstation");
   const sideDayAhead = $("anaSideDayAhead");
   const sideVariance = $("anaSideVariance");
   const sidePeak = $("anaSidePeak");
-  if (sideActual) sideActual.textContent = `${totalMwh.toFixed(4)} MWh`;
+  if (sideActual) {
+    if (totalMwh > 0) _setValueTile(sideActual, `${totalMwh.toFixed(4)} MWh`);
+    else _setNanTile(sideActual);
+  }
   if (sideSubstation) {
-    sideSubstation.textContent = `${substationTotalMwh.toFixed(4)} MWh`;
+    if (substationTotalMwh > 0) _setValueTile(sideSubstation, `${substationTotalMwh.toFixed(4)} MWh`);
+    else _setNanTile(sideSubstation);
     sideSubstation.title = `Estimated energy delivered to substation after transmission losses (${plantAvgLossPct.toFixed(1)}%).`;
   }
   // Reset Subs. Metered card immediately before async check (prevents stale value on date change)
   const sideScada = $("anaSideScadaActual");
-  if (sideScada) sideScada.textContent = "—";
+  _setNanTile(sideScada);
   const stBadge = $("anaSubstationStatus");
   if (stBadge) { stBadge.textContent = ""; stBadge.className = "analytics-substation-status"; }
   // Check for metered substation data — populates Subs. Metered card
@@ -15416,22 +15670,56 @@ function renderAnalyticsSummary(
   if (/^\d{4}-\d{2}-\d{2}$/.test(anaDateStr)) {
     _checkMeteredSubstation(anaDateStr, sideVariance, dayAheadTotalMwh, varianceMwh);
   }
-  if (sideDayAhead)
-    sideDayAhead.textContent = `${dayAheadTotalMwh.toFixed(4)} MWh`;
-  if (sideVariance) {
-    sideVariance.textContent = `${varianceMwh >= 0 ? "+" : ""}${varianceMwh.toFixed(4)} MWh`;
-    sideVariance.classList.toggle("pos", varianceMwh >= 0);
-    sideVariance.classList.toggle("neg", varianceMwh < 0);
+  if (sideDayAhead) {
+    if (dayAheadTotalMwh > 0) _setValueTile(sideDayAhead, `${dayAheadTotalMwh.toFixed(4)} MWh`);
+    else _setNanTile(sideDayAhead);
   }
-  if (sidePeak)
-    sidePeak.textContent = `${peakIntervalMwh.toFixed(4)} MWh @ ${peakAt}`;
+  _setVarianceTile(sideVariance, Number.isFinite(varianceMwh) ? varianceMwh : NaN, dayAheadTotalMwh);
+  if (sidePeak) {
+    if (peakIntervalMwh > 0) _setValueTile(sidePeak, `${peakIntervalMwh.toFixed(4)} MWh @ ${peakAt}`);
+    else _setNanTile(sidePeak);
+  }
   const sideSolcastEst = $("anaSideSolcastEstActual");
   if (sideSolcastEst) {
     const estMwh = Number(State.analyticsSolcastEstActualMwh);
-    sideSolcastEst.textContent = Number.isFinite(estMwh)
-      ? `${estMwh.toFixed(4)} MWh`
-      : "—";
+    if (Number.isFinite(estMwh) && estMwh > 0) _setValueTile(sideSolcastEst, `${estMwh.toFixed(4)} MWh`);
+    else _setNanTile(sideSolcastEst);
   }
+
+  // Solcast Day-Ahead locked P50 total (captured at 0600H / 0955H WESM FAS window).
+  const lockedMeta = State.dayAheadLockedPayload?.locked || null;
+  const solcastDaMwh = lockedMeta && Number.isFinite(Number(lockedMeta.total_p50_kwh))
+    ? Number(lockedMeta.total_p50_kwh) / 1000
+    : NaN;
+  const sideSolcastDa = $("anaSideSolcastDayAhead");
+  const sideSolcastDaSrc = $("anaSideSolcastDaSource");
+  if (sideSolcastDa) {
+    if (Number.isFinite(solcastDaMwh) && solcastDaMwh > 0) {
+      _setValueTile(sideSolcastDa, `${solcastDaMwh.toFixed(4)} MWh`);
+      if (sideSolcastDaSrc) {
+        sideSolcastDaSrc.textContent = lockedMeta.captured_local || "";
+      }
+    } else {
+      _setNanTile(sideSolcastDa);
+      if (sideSolcastDaSrc) sideSolcastDaSrc.textContent = "no lock";
+    }
+  }
+
+  // Solcast DA vs ML DA variance (provider disagreement at lock time).
+  const sideSolcastMlVar = $("anaSideSolcastMlVariance");
+  const solcastMlDiff = (Number.isFinite(solcastDaMwh) && solcastDaMwh > 0)
+    ? Number((solcastDaMwh - dayAheadTotalMwh).toFixed(4))
+    : NaN;
+  _setVarianceTile(sideSolcastMlVar, solcastMlDiff, dayAheadTotalMwh);
+
+  // Actual vs Solcast DA variance — default uses loss-adjusted substation
+  // estimate; _checkMeteredSubstation overrides with metered when upload exists.
+  // Normalize by Solcast DA (matches "vs Solcast" label; stable full-day forecast).
+  const sideSolcastActualVar = $("anaSideSolcastActualVariance");
+  const solcastActualDiff = (Number.isFinite(solcastDaMwh) && solcastDaMwh > 0 && substationTotalMwh > 0)
+    ? Number((substationTotalMwh - solcastDaMwh).toFixed(4))
+    : NaN;
+  _setVarianceTile(sideSolcastActualVar, solcastActualDiff, solcastDaMwh);
 
   // Show substation meter button (auth gated via modal)
   const meterWrap = $("anaSubstationMeterWrap");
@@ -16106,8 +16394,7 @@ async function runDayAheadGeneration() {
     const resBlocked = $("genDayResult");
     if (resBlocked) {
       resBlocked.className = "exp-result error";
-      resBlocked.textContent =
-        "✗ Unavailable in Remote mode. Run day-ahead generation from the gateway workstation.";
+      resBlocked.textContent = "✗ Unavailable in Remote mode — run from gateway.";
     }
     showToast(
       "Day-ahead generation is unavailable in Remote mode. Please generate it from the gateway workstation.",
@@ -16489,9 +16776,12 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVar
       // No metered data — clear the card and keep estimated variance in toolbar
       State.substationMeteredReadings = null;
       const scadaEl = $("anaSideScadaActual");
-      if (scadaEl) scadaEl.textContent = "—";
+      if (scadaEl) {
+        scadaEl.textContent = "NaN";
+        scadaEl.classList.add("is-nan");
+      }
       const st = $("anaSubstationStatus");
-      if (st) { st.textContent = ""; st.className = "analytics-substation-status"; }
+      if (st) { st.textContent = ""; st.className = "analytics-dls-status"; }
       _setToolbarVarianceBasis("est");
       if (Number.isFinite(estimatedVarianceMwh)) _setToolbarVariance(estimatedVarianceMwh);
       return;
@@ -16502,22 +16792,65 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVar
     const meteredMwh = data.readings.reduce((s, r) => s + Number(r.mwh || 0), 0);
     const scadaEl = $("anaSideScadaActual");
     const scadaSrcEl = $("anaSideScadaSource");
-    if (scadaEl) scadaEl.textContent = `${meteredMwh.toFixed(4)} MWh`;
+    if (scadaEl) {
+      if (meteredMwh > 0) {
+        scadaEl.textContent = `${meteredMwh.toFixed(4)} MWh`;
+        scadaEl.classList.remove("is-nan");
+      } else {
+        scadaEl.textContent = "NaN";
+        scadaEl.classList.add("is-nan");
+      }
+    }
     if (scadaSrcEl) scadaSrcEl.textContent = `${data.readings.length} readings`;
     // Recompute variance: metered vs day-ahead (side card + toolbar stay in sync)
     const meteredVariance = Number((meteredMwh - dayAheadMwh).toFixed(4));
     if (varEl) {
-      varEl.textContent = `${meteredVariance >= 0 ? "+" : ""}${meteredVariance.toFixed(4)} MWh`;
-      varEl.classList.toggle("pos", meteredVariance >= 0);
-      varEl.classList.toggle("neg", meteredVariance < 0);
+      if (Number.isFinite(meteredVariance) && Number.isFinite(dayAheadMwh) && dayAheadMwh > 0) {
+        const pct = (meteredVariance / dayAheadMwh) * 100;
+        const sign = meteredVariance >= 0 ? "+" : "";
+        varEl.innerHTML =
+          `<span class="var-pct">${sign}${pct.toFixed(4)}%</span>` +
+          `<span class="var-mwh">${sign}${meteredVariance.toFixed(4)} MWh</span>`;
+        varEl.classList.remove("is-nan");
+        const good = Math.abs(pct) <= 20;
+        varEl.classList.toggle("pos", good);
+        varEl.classList.toggle("neg", !good);
+      } else {
+        varEl.textContent = "NaN";
+        varEl.classList.add("is-nan");
+        varEl.classList.remove("pos", "neg");
+      }
     }
     _setToolbarVariance(meteredVariance);
     _setToolbarVarianceBasis("metered");
+    // Rebase Actual-vs-Solcast variance tile to metered (if a Solcast DA lock exists)
+    // Normalize by Solcast DA (matches "vs Solcast" label; stable full-day forecast).
+    const sideSolcastActualVar = $("anaSideSolcastActualVariance");
+    if (sideSolcastActualVar) {
+      const lockedP50Kwh = Number(State.dayAheadLockedPayload?.locked?.total_p50_kwh);
+      const solcastDaMwh = Number.isFinite(lockedP50Kwh) ? lockedP50Kwh / 1000 : NaN;
+      if (Number.isFinite(solcastDaMwh) && solcastDaMwh > 0 && meteredMwh > 0) {
+        const diff = Number((meteredMwh - solcastDaMwh).toFixed(4));
+        const pct = (diff / solcastDaMwh) * 100;
+        const sign = diff >= 0 ? "+" : "";
+        sideSolcastActualVar.innerHTML =
+          `<span class="var-pct">${sign}${pct.toFixed(4)}%</span>` +
+          `<span class="var-mwh">${sign}${diff.toFixed(4)} MWh</span>`;
+        sideSolcastActualVar.classList.remove("is-nan");
+        const good = Math.abs(pct) <= 20;
+        sideSolcastActualVar.classList.toggle("pos", good);
+        sideSolcastActualVar.classList.toggle("neg", !good);
+      } else {
+        sideSolcastActualVar.textContent = "NaN";
+        sideSolcastActualVar.classList.add("is-nan");
+        sideSolcastActualVar.classList.remove("pos", "neg");
+      }
+    }
     // Update status badge
     const st = $("anaSubstationStatus");
     if (st) {
       st.textContent = "Has data";
-      st.className = "analytics-substation-status has-data";
+      st.className = "analytics-dls-status has-data";
     }
   } catch (e) {
     if (e.name === "AbortError") return;
