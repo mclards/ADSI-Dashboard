@@ -161,7 +161,8 @@ const ALARM_BITS = [
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=13",
     trinPM: ["TrinPM10", "TrinPM03", "TrinPM04"],
     schematicPage: 14,
-    physicalDevices: ["QDC disconnect", "RVDC arresters", "XFDC DC fuses", "Grounding kit breaker"],
+    schematicPageExtra: 16,
+    physicalDevices: ["QDC disconnect (schematic p.14)", "RVDC arresters (schematic p.16)", "XFDC DC fuses", "Grounding-kit breaker"],
   },
   {
     bit: 10,
@@ -189,8 +190,8 @@ const ALARM_BITS = [
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=14",
     trinPM: ["TrinPM18"],
     schematicPage: 12,
-    physicalDevices: ["K1 AC contactor (per 2015 doc)", "Branches 1-3 (per 2011 docs)"],
-    note: "Fleet (920TL) per 2015 doc = contactor fault. 2011-era docs map 0x0800 to branch fault — divergence is variant-specific.",
+    physicalDevices: ["K1 AC contactor (per fleet doc)", "Branches 1-3 (per 2011 docs, variant-only)"],
+    variantWarning: "Bit 11 diverges between fleet and 2011 docs. Fleet (920TL, AAV2015IQE01_B) = contactor fault → inspect K1. AAV2011 Level 1/2 map 0x0800 to branch fault → download 15-day history via SUN Manager, escalate to SAT. Verify fleet doc FIRST; the L2 branch-fault flow does NOT apply to the 920TL.",
   },
   {
     bit: 12,

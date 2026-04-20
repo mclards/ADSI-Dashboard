@@ -12959,107 +12959,230 @@ async function openAlarmDetail(alarmValue, alarmHex) {
   const v = Number(alarmValue) || 0;
   const activeBits = decodeAlarmValueWithMeta(v);
   const hexStr = alarmHex || (v ? `0x${v.toString(16).toUpperCase().padStart(4, "0")}H` : "—");
-  const topSev = activeBits.reduce((best, b) => {
-    const order = { critical: 4, fault: 3, warning: 2, info: 1 };
-    return !best || order[b.severity] > order[best] ? b.severity : best;
-  }, null) || "info";
-
-  titleEl.innerHTML = `<span class="alarm-detail-hex">${hexStr}</span> Alarm Reference`;
-  if (sevEl) {
-    sevEl.className = `sev-pill sev-${topSev}`;
-    sevEl.textContent = topSev.toUpperCase();
-  }
+  const SEV_ORDER = { critical: 4, fault: 3, warning: 2, info: 1 };
+  const topSev = activeBits.reduce((best, b) =>
+    !best || SEV_ORDER[b.severity] > SEV_ORDER[best] ? b.severity : best,
+  null) || "info";
 
   const isFatal = v === ref.fatalValue;
   const esc = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-  // Build doc-download button bar (independent of which bits are set)
-  const docsHtml = `
-    <div class="alarm-detail-actions">
-      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.schematic)}">
-        <span class="mdi mdi-sitemap-outline"></span> Schematic
-      </button>
-      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.level1)}">
-        <span class="mdi mdi-file-document-outline"></span> Level 1
-      </button>
-      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.level2)}">
-        <span class="mdi mdi-file-document-multiple-outline"></span> Level 2
-      </button>
-      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.sunManager)}">
-        <span class="mdi mdi-monitor-dashboard"></span> SUN Manager Manual
-      </button>
-    </div>`;
+  // Header: hex badge + severity pill + copy button
+  titleEl.innerHTML = `
+    <span class="alarm-detail-hex" title="${esc(hexStr)}">${esc(hexStr)}</span>
+    <button type="button" class="alarm-detail-copy-btn" id="alarmDetailCopy"
+            title="Copy hex code" aria-label="Copy hex code to clipboard">
+      <span class="mdi mdi-content-copy"></span>
+    </button>
+    <span class="alarm-detail-title-label">Alarm Reference</span>`;
+  if (sevEl) {
+    sevEl.className = `sev-pill sev-${topSev}`;
+    sevEl.textContent = topSev.toUpperCase();
+  }
 
-  // Per-bit sections
+  // Sev-dot helper (small colored circle next to each per-bit card title)
+  const sevDot = (sev) => `<span class="alarm-sev-dot sev-${sev}" aria-hidden="true"></span>`;
+
+  // Fatal banner (top-most, sticky-feel)
+  const fatalBanner = isFatal
+    ? `<div class="alarm-detail-banner critical">
+         <span class="mdi mdi-alert-octagon-outline banner-icon"></span>
+         <div class="banner-body">
+           <div class="banner-title">FATAL ERROR (0x7FFF)</div>
+           <div class="banner-desc">
+             Remote reset is <strong>not supported</strong>. Unlock at the unit display
+             using the unlock code — see <code>Inverter-Incident-Workflow.pdf</code> p.14.
+             The auto-reset engine will not retry this alarm.
+           </div>
+         </div>
+       </div>`
+    : "";
+
+  // Variant-divergence warning (bit 11 specifically)
+  const variantBit = activeBits.find((b) => b.variantWarning);
+  const variantBanner = variantBit
+    ? `<div class="alarm-detail-banner warning">
+         <span class="mdi mdi-alert-outline banner-icon"></span>
+         <div class="banner-body">
+           <div class="banner-title">Variant divergence at 0x${esc(variantBit.hex)}</div>
+           <div class="banner-desc">${esc(variantBit.variantWarning)}</div>
+         </div>
+       </div>`
+    : "";
+
+  // Per-bit cards
   const bitSections = activeBits.length
     ? activeBits.map((b) => {
         const trinPMs = (b.trinPM || []).map((t) =>
           `<span class="alarm-detail-trinpm">${esc(t)}</span>`,
         ).join("");
         const devs = (b.physicalDevices || []).map((d) => `<li>${esc(d)}</li>`).join("");
-        const schPage = b.schematicPage
-          ? `<span class="alarm-detail-schpage">Schematic p.${b.schematicPage}</span>`
-          : "";
+        const pageChips = [];
+        if (b.schematicPage) {
+          pageChips.push(
+            `<button type="button" class="alarm-detail-pagechip" data-doc="${esc(ref.serviceDocs.schematic)}"
+                     title="Download schematic, then jump to p.${b.schematicPage}">
+               <span class="mdi mdi-sitemap-outline"></span> Schematic p.${b.schematicPage}
+             </button>`,
+          );
+        }
+        if (b.schematicPageExtra) {
+          pageChips.push(
+            `<button type="button" class="alarm-detail-pagechip" data-doc="${esc(ref.serviceDocs.schematic)}"
+                     title="Secondary schematic reference p.${b.schematicPageExtra}">
+               <span class="mdi mdi-sitemap-outline"></span> p.${b.schematicPageExtra}
+             </button>`,
+          );
+        }
         const debugRows = b.debugDesc
           ? Object.entries(b.debugDesc).map(([code, txt]) =>
-              `<div class="alarm-detail-debug-row"><span class="alarm-detail-debug-code">DebugDesc ${esc(code)}</span><span>${esc(txt)}</span></div>`,
+              `<div class="alarm-detail-debug-row">
+                 <span class="alarm-detail-debug-code">DebugDesc ${esc(code)}</span>
+                 <span>${esc(txt)}</span>
+               </div>`,
             ).join("")
           : "";
         const subcodes = (b.stopReasonSubcodes && ref.stopReasonSubcodes)
           ? b.stopReasonSubcodes.map((sc) =>
-              `<div class="alarm-detail-debug-row"><span class="alarm-detail-debug-code">Sub ${esc(sc)}</span><span>${esc(ref.stopReasonSubcodes[sc] || "")}</span></div>`,
+              `<div class="alarm-detail-debug-row">
+                 <span class="alarm-detail-debug-code">Sub ${esc(sc)}</span>
+                 <span>${esc(ref.stopReasonSubcodes[sc] || "")}</span>
+               </div>`,
             ).join("")
           : "";
-        const noteHtml = b.note
-          ? `<div class="alarm-detail-note">${esc(b.note)}</div>`
+        const noteHtml = (b.note && !b.variantWarning)
+          ? `<div class="alarm-detail-note">
+               <span class="mdi mdi-information-outline"></span> ${esc(b.note)}
+             </div>`
           : "";
+
         return `
-          <div class="alarm-detail-section">
-            <div class="alarm-detail-section-title">
-              <span class="alarm-detail-hex">0x${b.hex}</span>
-              ${esc(b.label)}
-              ${schPage ? " · " + schPage : ""}
+          <div class="alarm-detail-card">
+            <div class="alarm-detail-card-head">
+              <div class="alarm-detail-card-head-left">
+                ${sevDot(b.severity)}
+                <span class="alarm-detail-hex small">0x${esc(b.hex)}</span>
+                <span class="alarm-detail-card-title">${esc(b.label)}</span>
+              </div>
+              <div class="alarm-detail-card-head-right">${pageChips.join("")}</div>
             </div>
-            <div class="alarm-detail-altlabel">${esc(b.altLabel || "")}</div>
-            <p>${esc(b.description)}</p>
-            <p><strong>Recommended action:</strong> ${esc(b.action)}</p>
-            ${devs ? `<div><strong>Physical location:</strong><ul class="alarm-detail-list">${devs}</ul></div>` : ""}
-            ${trinPMs ? `<div><strong>Service modules:</strong> ${trinPMs}</div>` : ""}
-            ${debugRows ? `<div><strong>DebugDesc (Level 2):</strong>${debugRows}</div>` : ""}
-            ${subcodes ? `<div><strong>Stop-reason sub-codes:</strong>${subcodes}</div>` : ""}
+            ${b.altLabel ? `<div class="alarm-detail-altlabel">${esc(b.altLabel)}</div>` : ""}
+            <div class="alarm-detail-card-desc">${esc(b.description)}</div>
+            <div class="alarm-detail-row">
+              <span class="alarm-detail-row-icon mdi mdi-flash-outline" aria-hidden="true"></span>
+              <div class="alarm-detail-row-body">
+                <div class="alarm-detail-row-label">Action</div>
+                <div>${esc(b.action)}</div>
+              </div>
+            </div>
+            ${devs ? `
+              <div class="alarm-detail-row">
+                <span class="alarm-detail-row-icon mdi mdi-map-marker-outline" aria-hidden="true"></span>
+                <div class="alarm-detail-row-body">
+                  <div class="alarm-detail-row-label">Physical location</div>
+                  <ul class="alarm-detail-list">${devs}</ul>
+                </div>
+              </div>` : ""}
+            ${trinPMs ? `
+              <div class="alarm-detail-row">
+                <span class="alarm-detail-row-icon mdi mdi-book-open-variant" aria-hidden="true"></span>
+                <div class="alarm-detail-row-body">
+                  <div class="alarm-detail-row-label">Training modules</div>
+                  <div class="alarm-detail-chips">${trinPMs}</div>
+                </div>
+              </div>` : ""}
+            ${debugRows ? `
+              <div class="alarm-detail-row">
+                <span class="alarm-detail-row-icon mdi mdi-bug-outline" aria-hidden="true"></span>
+                <div class="alarm-detail-row-body">
+                  <div class="alarm-detail-row-label">DebugDesc (Level 2 / SCOPE)</div>
+                  ${debugRows}
+                </div>
+              </div>` : ""}
+            ${subcodes ? `
+              <div class="alarm-detail-row">
+                <span class="alarm-detail-row-icon mdi mdi-stop-circle-outline" aria-hidden="true"></span>
+                <div class="alarm-detail-row-body">
+                  <div class="alarm-detail-row-label">Stop-reason sub-codes</div>
+                  ${subcodes}
+                </div>
+              </div>` : ""}
             ${noteHtml}
           </div>`;
       }).join("")
-    : `<div class="alarm-detail-section"><p>No active bits decoded from value ${esc(hexStr)}.</p></div>`;
+    : `<div class="alarm-detail-card">
+         <div class="alarm-detail-card-desc">
+           No active bits decoded from value <code>${esc(hexStr)}</code>.
+           The alarm may already have cleared or the value maps to an undocumented bit.
+         </div>
+       </div>`;
 
-  const fatalBanner = isFatal
-    ? `<div class="alarm-detail-fatal-banner">
-         <span class="mdi mdi-alert-octagon"></span>
-         FATAL ERROR — unlock at unit display (Level 1 p.14). Remote reset is not supported.
-       </div>`
-    : "";
-
-  const footer = `
-    <div class="alarm-detail-note" style="margin-top:10px;">
-      Fleet labels per <code>${esc(ref.fleetDocId)}</code>; diagnostic flow per <code>AAV2011IFA01_</code>.
-      Docs download from GitHub <code>${esc(ref.githubBase)}</code> with local /docs fallback.
+  const provenance = `
+    <div class="alarm-detail-provenance">
+      Fleet labels per <code>${esc(ref.fleetDocId)}</code>. Diagnostic flow per
+      <code>AAV2011IFA01_</code>. Docs resolve from GitHub first, fall back to
+      the installer-local <code>/docs/</code>.
     </div>`;
 
-  bodyEl.innerHTML = fatalBanner + bitSections + footer;
+  bodyEl.innerHTML = fatalBanner + variantBanner + bitSections + provenance;
 
-  // Wire doc-download buttons (delegated)
+  // Sticky footer with four download buttons (rebuilt on every open)
   const dialog = modal.querySelector(".alarm-detail-dialog");
   if (dialog) {
-    const existing = dialog.querySelector(".alarm-detail-actions");
-    if (existing) existing.remove();
-    dialog.insertAdjacentHTML("beforeend", docsHtml);
-    dialog.querySelectorAll(".alarm-detail-doc-btn").forEach((btn) => {
+    const existingFooter = dialog.querySelector(".alarm-detail-footer");
+    if (existingFooter) existingFooter.remove();
+    const footerHtml = `
+      <div class="alarm-detail-footer">
+        <div class="alarm-detail-footer-docs">
+          <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.schematic)}"
+                  title="Download wiring schematic (AQM0027)">
+            <span class="mdi mdi-sitemap-outline"></span><span>Schematic</span>
+          </button>
+          <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.level1)}"
+                  title="Download Level 1 workflow (AAV2011IMC01_)">
+            <span class="mdi mdi-file-document-outline"></span><span>Level 1</span>
+          </button>
+          <button type="button" class="alarm-detail-doc-btn primary" data-doc="${esc(ref.serviceDocs.level2)}"
+                  title="Download Level 2 workflow (AAV2011IFA01_)">
+            <span class="mdi mdi-file-document-multiple-outline"></span><span>Level 2</span>
+          </button>
+          <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.sunManager)}"
+                  title="Download SUN Manager user manual (PTD138)">
+            <span class="mdi mdi-monitor-dashboard"></span><span>SUN Manager</span>
+          </button>
+        </div>
+        <button type="button" class="alarm-detail-doc-btn close-btn" id="alarmDetailCloseBottom"
+                title="Close">
+          <span class="mdi mdi-close"></span><span>Close</span>
+        </button>
+      </div>`;
+    dialog.insertAdjacentHTML("beforeend", footerHtml);
+
+    // Wire download + page-chip + bottom-close
+    dialog.querySelectorAll("[data-doc]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const fn = btn.getAttribute("data-doc");
         if (fn) downloadServiceDoc(fn, btn);
       });
+    });
+    const bottomClose = document.getElementById("alarmDetailCloseBottom");
+    if (bottomClose) bottomClose.addEventListener("click", closeAlarmDetail);
+  }
+
+  // Wire copy-hex button
+  const copyBtn = document.getElementById("alarmDetailCopy");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(hexStr);
+        copyBtn.classList.add("copied");
+        showToast(`${hexStr} copied to clipboard.`, "info", 1600);
+        setTimeout(() => copyBtn.classList.remove("copied"), 1200);
+      } catch (e) {
+        showToast("Copy failed — select and copy manually.", "fault", 2400);
+      }
     });
   }
 
