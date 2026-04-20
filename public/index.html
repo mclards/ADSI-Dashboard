@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.8.12</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.8.13</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -2672,6 +2672,18 @@
         <div id="modeTransitionBody" class="mode-transition-body">
           Waiting for the selected runtime to become ready.
         </div>
+      </div>
+    </div>
+
+    <!-- Alarm Drilldown Modal — per-bit service reference + GitHub-hosted PDF downloads -->
+    <div id="alarmDetailModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="alarmDetailTitle">
+      <div class="confirm-dialog alarm-detail-dialog">
+        <button id="alarmDetailClose" class="auth-modal-close" type="button" aria-label="Close">&times;</button>
+        <div class="confirm-dialog-header alarm-detail-header">
+          <span id="alarmDetailTitle" class="confirm-dialog-title">Alarm Reference</span>
+          <span id="alarmDetailSev" class="sev-pill sev-fault">FAULT</span>
+        </div>
+        <div id="alarmDetailBody" class="confirm-dialog-body alarm-detail-body"></div>
       </div>
     </div>
 </body>

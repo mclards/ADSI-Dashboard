@@ -1,8 +1,35 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.8.12`
+**Applies to:** ADSI Inverter Dashboard `v2.8.13`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
+
+---
+
+## Service documentation (v2.8.13+)
+
+Four Ingeteam reference PDFs ship with the installer under `docs/` and are
+also hosted on GitHub for in-app auto-download from the alarm drilldown:
+
+| File | Code | Purpose |
+|---|---|---|
+| `Inverter-Schematic-Diagram.pdf` | AQM0027 | 22-page wiring schematic (4-module EQUIPO X variant) |
+| `Inverter-Incident-Workflow.pdf` | AAV2011IMC01_ | Level 1 incident workflow (16 alarm codes) |
+| `Inverter-Incident-Workflow-Level2.pdf` | AAV2011IFA01_ | Level 2 — SCOPE tool, DebugDesc sub-codes, calibration |
+| `INGECON-SUN-Manager-User-Manual.pdf` | PTD138 | Windows SCADA tool user manual |
+
+**Alarm drilldown:** click any alarm hex code (e.g. `0x0020H`) in the Alarms
+page or Inverter Detail panel to open the service-reference drilldown. The
+drilldown surfaces per-bit recommended actions, TrinPM training modules,
+physical-device location on the schematic, and one-click PDF download for
+each of the four documents above. Downloads come from the GitHub raw URL
+first (always current) with a local `/docs/` fallback when offline.
+
+**7FFF fatal-error handling:** when an inverter reports `0x7FFF` fatal
+error, a red banner on the drilldown explains that the inverter can only be
+unlocked by entering a code through the physical display. The auto-reset
+engine will not retry fatal errors — it logs once and waits for the
+operator to act.
 
 ---
 

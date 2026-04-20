@@ -96,6 +96,11 @@ const {
   checkAlarms,
   logControlAction,
   getAuditLog,
+  ALARM_BITS,
+  STOP_REASON_SUBCODES,
+  SERVICE_DOCS,
+  SERVICE_DOCS_GITHUB_BASE,
+  FATAL_ALARM_VALUE,
 } = require("./alarms");
 const {
   isValidPlantWideAuthKey,
@@ -163,6 +168,10 @@ const staticNoCache = {
   },
 };
 app.use("/assets", express.static(path.join(__dirname, "../assets"), staticNoCache));
+// Ingeteam service reference PDFs (schematic, Level 1/2 workflows, SUN Manager
+// manual). Served locally as the offline fallback if the GitHub raw URL fetch
+// fails in the alarm drilldown.
+app.use("/docs", express.static(path.join(__dirname, "../docs"), staticNoCache));
 /* Block direct static access to credentials reference — must go through auth-gated endpoint */
 app.use((req, res, next) => {
   if (!req.path.startsWith("/api/") && req.path.toLowerCase().includes("credentials-reference")) return res.status(403).end();
@@ -14165,6 +14174,20 @@ app.get("/api/alarms/active", (req, res) => {
   const rows = getActiveAlarms();
   const nowTs = Date.now();
   res.json(rows.map((r) => enrichAlarmRow(r, nowTs)));
+});
+// Static reference metadata for the alarm-drilldown UI — per-bit service
+// references, TrinPM modules, schematic pages, and GitHub raw URLs for the
+// matching Ingeteam docs. Served once at UI load, cached client-side.
+app.get("/api/alarms/reference", (_req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.json({
+    bits: ALARM_BITS,
+    stopReasonSubcodes: STOP_REASON_SUBCODES,
+    fatalValue: FATAL_ALARM_VALUE,
+    serviceDocs: SERVICE_DOCS,
+    githubBase: SERVICE_DOCS_GITHUB_BASE,
+    fleetDocId: "AAV2015IQE01_B",
+  });
 });
 app.get("/api/alarms", (req, res) => {
   const _t0 = Date.now();

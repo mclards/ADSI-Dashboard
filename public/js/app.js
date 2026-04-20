@@ -114,6 +114,11 @@ const State = {
   // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
   analyticsLastPacSig: "",
   activeAlarms: {}, // key: `${inv}_${unit}` -> active alarm row
+  // Ingeteam service-doc reference, populated once on startup from
+  // /api/alarms/reference (cached for 1h by Express). Shape:
+  //   { bits: ALARM_BITS[], stopReasonSubcodes, fatalValue, serviceDocs, githubBase, fleetDocId }
+  alarmReference: null,
+  alarmReferencePromise: null,
   alarmSoundTimer: null,
   alarmSoundRecheckTimer: null,
   alarmAudioCtx: null,
@@ -11368,10 +11373,14 @@ function renderInverterDetailAlarms(alarmRows) {
     const ts = fmtDateTime(Number(r.ts || r.occurred_ts || 0));
     const node = r.unit ? `N${r.unit}` : "—";
     const code = r.alarm_code ? String(r.alarm_code).toUpperCase() : "—";
+    const alarmVal = Number(r.alarm_value || r.alarmValue || 0);
+    const codeCell = r.alarm_code
+      ? `<span class="cell-alarm clickable" data-alarm-value="${alarmVal}" data-alarm-hex="${code}" title="Click for Level 1/2 diagnostic and service docs">${code}</span>`
+      : "—";
     const status = r.cleared_ts
       ? `<span class="status-cleared">Closed</span>`
       : `<span class="status-active">Active</span>`;
-    return `<tr><td title="${ts}">${ts.slice(11, 19)}</td><td>${node}</td><td class="mono">${code}</td><td>${sevPill(r.severity)}</td><td>${status}</td></tr>`;
+    return `<tr><td title="${ts}">${ts.slice(11, 19)}</td><td>${node}</td><td class="mono">${codeCell}</td><td>${sevPill(r.severity)}</td><td>${status}</td></tr>`;
   }).join("");
 
   el.innerHTML = `
@@ -12861,6 +12870,238 @@ function applyAlarmTableView() {
   });
 }
 
+// ─── Alarm drilldown — service-doc reference (v2.8.13) ───────────────────────
+// Lazy-load /api/alarms/reference once per session. The payload is small (<3KB)
+// and stable; the server sets Cache-Control: max-age=3600 so reloads stay cheap.
+async function loadAlarmReference() {
+  if (State.alarmReference) return State.alarmReference;
+  if (State.alarmReferencePromise) return State.alarmReferencePromise;
+  State.alarmReferencePromise = (async () => {
+    try {
+      const data = await api("/api/alarms/reference");
+      if (data && Array.isArray(data.bits)) {
+        State.alarmReference = data;
+        return data;
+      }
+    } catch (err) {
+      console.warn("[alarms] loadAlarmReference failed:", err?.message || err);
+    } finally {
+      State.alarmReferencePromise = null;
+    }
+    return null;
+  })();
+  return State.alarmReferencePromise;
+}
+
+// Decode an alarm value into its active bit metadata, using the cached reference.
+function decodeAlarmValueWithMeta(alarmValue) {
+  const ref = State.alarmReference;
+  const v = Number(alarmValue) || 0;
+  if (!ref || !Array.isArray(ref.bits) || v === 0) return [];
+  return ref.bits.filter((b) => (v & (1 << b.bit)) !== 0);
+}
+
+// Auto-download a service reference PDF. Tries the canonical GitHub raw URL
+// first (so operators always get the authoritative copy), then falls back to
+// the installer-local /docs/ route when offline. Uses fetch+Blob because a
+// simple cross-origin <a download> is silently ignored by browsers.
+async function downloadServiceDoc(filename, btnEl) {
+  if (!filename) return;
+  const ref = State.alarmReference || {};
+  const base = ref.githubBase || "https://raw.githubusercontent.com/mclards/ADSI-Dashboard/main/docs";
+  const primary = `${base}/${filename}`;
+  const fallback = `/docs/${filename}`;
+  const attempt = async (url) => {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.blob();
+  };
+  if (btnEl) btnEl.classList.add("downloading");
+  try {
+    let blob;
+    try {
+      blob = await attempt(primary);
+    } catch (err) {
+      console.info("[alarms] GitHub fetch failed, using local /docs fallback:", err?.message);
+      blob = await attempt(fallback);
+    }
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+    showToast(`${filename} downloaded.`, "info", 2200);
+  } catch (err) {
+    showToast(`Download failed: ${err?.message || err}`, "fault", 5000);
+  } finally {
+    if (btnEl) btnEl.classList.remove("downloading");
+  }
+}
+
+// Render the alarm-detail modal for a given alarm value (from row click).
+async function openAlarmDetail(alarmValue, alarmHex) {
+  const modal = document.getElementById("alarmDetailModal");
+  const titleEl = document.getElementById("alarmDetailTitle");
+  const sevEl = document.getElementById("alarmDetailSev");
+  const bodyEl = document.getElementById("alarmDetailBody");
+  if (!modal || !titleEl || !bodyEl) return;
+
+  // Ensure reference data is loaded
+  const ref = await loadAlarmReference();
+  if (!ref) {
+    showToast("Alarm reference unavailable.", "fault", 3000);
+    return;
+  }
+
+  const v = Number(alarmValue) || 0;
+  const activeBits = decodeAlarmValueWithMeta(v);
+  const hexStr = alarmHex || (v ? `0x${v.toString(16).toUpperCase().padStart(4, "0")}H` : "—");
+  const topSev = activeBits.reduce((best, b) => {
+    const order = { critical: 4, fault: 3, warning: 2, info: 1 };
+    return !best || order[b.severity] > order[best] ? b.severity : best;
+  }, null) || "info";
+
+  titleEl.innerHTML = `<span class="alarm-detail-hex">${hexStr}</span> Alarm Reference`;
+  if (sevEl) {
+    sevEl.className = `sev-pill sev-${topSev}`;
+    sevEl.textContent = topSev.toUpperCase();
+  }
+
+  const isFatal = v === ref.fatalValue;
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+  // Build doc-download button bar (independent of which bits are set)
+  const docsHtml = `
+    <div class="alarm-detail-actions">
+      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.schematic)}">
+        <span class="mdi mdi-sitemap-outline"></span> Schematic
+      </button>
+      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.level1)}">
+        <span class="mdi mdi-file-document-outline"></span> Level 1
+      </button>
+      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.level2)}">
+        <span class="mdi mdi-file-document-multiple-outline"></span> Level 2
+      </button>
+      <button type="button" class="alarm-detail-doc-btn" data-doc="${esc(ref.serviceDocs.sunManager)}">
+        <span class="mdi mdi-monitor-dashboard"></span> SUN Manager Manual
+      </button>
+    </div>`;
+
+  // Per-bit sections
+  const bitSections = activeBits.length
+    ? activeBits.map((b) => {
+        const trinPMs = (b.trinPM || []).map((t) =>
+          `<span class="alarm-detail-trinpm">${esc(t)}</span>`,
+        ).join("");
+        const devs = (b.physicalDevices || []).map((d) => `<li>${esc(d)}</li>`).join("");
+        const schPage = b.schematicPage
+          ? `<span class="alarm-detail-schpage">Schematic p.${b.schematicPage}</span>`
+          : "";
+        const debugRows = b.debugDesc
+          ? Object.entries(b.debugDesc).map(([code, txt]) =>
+              `<div class="alarm-detail-debug-row"><span class="alarm-detail-debug-code">DebugDesc ${esc(code)}</span><span>${esc(txt)}</span></div>`,
+            ).join("")
+          : "";
+        const subcodes = (b.stopReasonSubcodes && ref.stopReasonSubcodes)
+          ? b.stopReasonSubcodes.map((sc) =>
+              `<div class="alarm-detail-debug-row"><span class="alarm-detail-debug-code">Sub ${esc(sc)}</span><span>${esc(ref.stopReasonSubcodes[sc] || "")}</span></div>`,
+            ).join("")
+          : "";
+        const noteHtml = b.note
+          ? `<div class="alarm-detail-note">${esc(b.note)}</div>`
+          : "";
+        return `
+          <div class="alarm-detail-section">
+            <div class="alarm-detail-section-title">
+              <span class="alarm-detail-hex">0x${b.hex}</span>
+              ${esc(b.label)}
+              ${schPage ? " · " + schPage : ""}
+            </div>
+            <div class="alarm-detail-altlabel">${esc(b.altLabel || "")}</div>
+            <p>${esc(b.description)}</p>
+            <p><strong>Recommended action:</strong> ${esc(b.action)}</p>
+            ${devs ? `<div><strong>Physical location:</strong><ul class="alarm-detail-list">${devs}</ul></div>` : ""}
+            ${trinPMs ? `<div><strong>Service modules:</strong> ${trinPMs}</div>` : ""}
+            ${debugRows ? `<div><strong>DebugDesc (Level 2):</strong>${debugRows}</div>` : ""}
+            ${subcodes ? `<div><strong>Stop-reason sub-codes:</strong>${subcodes}</div>` : ""}
+            ${noteHtml}
+          </div>`;
+      }).join("")
+    : `<div class="alarm-detail-section"><p>No active bits decoded from value ${esc(hexStr)}.</p></div>`;
+
+  const fatalBanner = isFatal
+    ? `<div class="alarm-detail-fatal-banner">
+         <span class="mdi mdi-alert-octagon"></span>
+         FATAL ERROR — unlock at unit display (Level 1 p.14). Remote reset is not supported.
+       </div>`
+    : "";
+
+  const footer = `
+    <div class="alarm-detail-note" style="margin-top:10px;">
+      Fleet labels per <code>${esc(ref.fleetDocId)}</code>; diagnostic flow per <code>AAV2011IFA01_</code>.
+      Docs download from GitHub <code>${esc(ref.githubBase)}</code> with local /docs fallback.
+    </div>`;
+
+  bodyEl.innerHTML = fatalBanner + bitSections + footer;
+
+  // Wire doc-download buttons (delegated)
+  const dialog = modal.querySelector(".alarm-detail-dialog");
+  if (dialog) {
+    const existing = dialog.querySelector(".alarm-detail-actions");
+    if (existing) existing.remove();
+    dialog.insertAdjacentHTML("beforeend", docsHtml);
+    dialog.querySelectorAll(".alarm-detail-doc-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const fn = btn.getAttribute("data-doc");
+        if (fn) downloadServiceDoc(fn, btn);
+      });
+    });
+  }
+
+  // Show modal
+  modal.classList.remove("hidden");
+  const closeBtn = document.getElementById("alarmDetailClose");
+  if (closeBtn) closeBtn.focus();
+}
+
+function closeAlarmDetail() {
+  const modal = document.getElementById("alarmDetailModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+// Global wiring (close button + ESC + backdrop click + delegated alarm-row click).
+(function wireAlarmDetailModal() {
+  if (typeof document === "undefined") return;
+  document.addEventListener("DOMContentLoaded", () => {
+    const modal = document.getElementById("alarmDetailModal");
+    if (!modal) return;
+    const closeBtn = document.getElementById("alarmDetailClose");
+    if (closeBtn) closeBtn.addEventListener("click", closeAlarmDetail);
+    modal.addEventListener("click", (ev) => {
+      if (ev.target === modal) closeAlarmDetail();
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && !modal.classList.contains("hidden")) {
+        closeAlarmDetail();
+      }
+    });
+    // Delegated click on any .cell-alarm.clickable (alarm table, inverter detail panel, etc.)
+    document.addEventListener("click", (ev) => {
+      const cell = ev.target?.closest?.(".cell-alarm.clickable");
+      if (!cell) return;
+      ev.preventDefault();
+      const v = Number(cell.getAttribute("data-alarm-value") || 0);
+      const hex = cell.getAttribute("data-alarm-hex") || "";
+      openAlarmDetail(v, hex);
+    });
+  });
+})();
+
 function renderAlarmTable(rows) {
   const tbody = $("alarmBody");
   if (!tbody) return;
@@ -12896,11 +13137,12 @@ function renderAlarmTable(rows) {
     tr.dataset.cleared = clearedTs || 0;
     tr.dataset.duration_ms = Number(r.duration_ms || 0);
     tr.dataset.status = statusRaw;
+    const alarmVal = Number(r.alarm_value || r.alarmValue || 0);
     tr.innerHTML = `
       <td>${fmtDateTime(occurredTs)}</td>
       <td>INV-${String(r.inverter).padStart(2, "0")}</td>
       <td>N${r.unit}</td>
-      <td><span class="cell-alarm sev-${r.severity || "fault"}">${r.alarm_hex || "—"}</span></td>
+      <td><span class="cell-alarm clickable sev-${r.severity || "fault"}" data-alarm-value="${alarmVal}" data-alarm-hex="${r.alarm_hex || ""}" title="Click for Level 1/2 diagnostic and service docs">${r.alarm_hex || "—"}</span></td>
       <td><span class="sev-pill sev-${r.severity || "fault"}">${(r.severity || "fault").toUpperCase()}</span></td>
       <td>${desc}</td>
       <td>${clearedTs ? fmtDateTime(clearedTs) : "—"}</td>
@@ -15282,7 +15524,7 @@ function upsertTotalCompareChart(
         data: actual,
         borderColor: COL_ACTUAL,
         backgroundColor: actualGrad,
-        borderWidth: 3,
+        borderWidth: 2.4,
         pointRadius: actual.length <= 2 ? 3 : 0,
         pointHoverRadius: actual.length <= 2 ? 4.5 : 3,
         pointBackgroundColor: COL_ACTUAL,
@@ -18463,6 +18705,9 @@ async function init() {
       text: "Loading plant configuration...",
     });
     await loadIpConfig();
+    // Prefetch alarm-reference metadata in the background — UI rows become
+    // clickable as soon as this resolves. Non-blocking by design.
+    loadAlarmReference().catch(() => {});
     await seedTodayEnergyFromDb();
     startTodayMwhSyncTimer();
     buildInverterGrid();

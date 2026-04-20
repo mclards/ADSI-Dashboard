@@ -15145,3 +15145,161 @@ body.mode-transition-active {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Alarm Drilldown Modal (v2.8.13) ─────────────────────────────────────── */
+.alarm-detail-dialog {
+  width: min(640px, 94vw);
+}
+.alarm-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.alarm-detail-body {
+  max-height: 60vh;
+  padding: 16px 20px 18px;
+}
+.alarm-detail-section {
+  margin: 0 0 14px;
+}
+.alarm-detail-section:last-child {
+  margin-bottom: 0;
+}
+.alarm-detail-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text1);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin: 0 0 6px;
+}
+.alarm-detail-hex {
+  display: inline-block;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text1);
+  background: var(--surface1);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  margin-right: 6px;
+}
+.alarm-detail-altlabel {
+  font-size: 11px;
+  color: var(--text3);
+  font-style: italic;
+}
+.alarm-detail-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text2);
+}
+.alarm-detail-list li {
+  margin-bottom: 2px;
+}
+.alarm-detail-note {
+  padding: 8px 12px;
+  background: rgba(255, 193, 7, 0.08);
+  border-left: 3px solid rgba(255, 193, 7, 0.6);
+  font-size: 11px;
+  color: var(--text2);
+  border-radius: 4px;
+  line-height: 1.5;
+}
+.alarm-detail-note.critical {
+  background: rgba(239, 68, 68, 0.08);
+  border-left-color: rgba(239, 68, 68, 0.7);
+}
+.alarm-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+.alarm-detail-doc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 8px;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border2);
+  background: var(--surface1);
+  color: var(--text1);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.alarm-detail-doc-btn:hover {
+  background: var(--surface2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.alarm-detail-doc-btn.downloading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.alarm-detail-doc-btn .mdi {
+  font-size: 14px;
+}
+.alarm-detail-trinpm {
+  display: inline-block;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 10px;
+  padding: 2px 7px;
+  margin: 2px 4px 2px 0;
+  background: var(--surface1);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text2);
+}
+.alarm-detail-schpage {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--accent);
+  padding: 2px 7px;
+  border: 1px dashed var(--accent);
+  border-radius: 5px;
+}
+.alarm-detail-debug-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 3px 0;
+}
+.alarm-detail-debug-code {
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-weight: 700;
+  color: var(--accent);
+  min-width: 72px;
+}
+.alarm-detail-fatal-banner {
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text1);
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.alarm-detail-fatal-banner .mdi {
+  color: #ef4444;
+  margin-right: 6px;
+}
+.cell-alarm.clickable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.cell-alarm.clickable:hover {
+  color: var(--accent);
+}

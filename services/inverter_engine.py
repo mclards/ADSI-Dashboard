@@ -170,7 +170,13 @@ SERVICE_STOP_FILE = Path(SERVICE_STOP_FILE_RAW) if SERVICE_STOP_FILE_RAW else No
 SERVICE_STOP_POLL_SEC = 0.25
 
 DEFAULT_INTERVAL  = 0.05   # default poll interval per inverter
-MIN_POLL_INTERVAL = 0.05   # keep poll cadence close to configured interval
+MIN_POLL_INTERVAL = 0.05   # hard floor — protects against runaway tight loops
+# Ingeteam Level 2 workflow (AAV2011IFA01_ p.8, 0008H alarm) recommends no
+# faster than 1 Hz per unit at the SCADA level: "reduce the frequency at which
+# the SCADA communicates with the inverter (1 communication per second
+# recommended)". Per-inverter intervals below this threshold are allowed but
+# emit a startup warning so operators know the upstream vendor guidance.
+RECOMMENDED_POLL_INTERVAL = 1.0
 
 # ── Tunable constants — overridden at runtime from DB 'inverterPollConfig' ──
 READ_SPACING    = 0.005  # seconds between input / holding reads
@@ -809,6 +815,23 @@ async def handle_auto_reset(ip, unit, alarm_val):
     if not auto_reset_cfg.get("enabled"):
         return
 
+    # Guard: fatal error (0x7FFF) cannot be cleared remotely. Per Ingeteam
+    # Level 1 workflow (AAV2011IMC01_ p.14) and Level 2 (AAV2011IFA01_ p.18):
+    #   "When a FATAL ERROR occurs, the inverter is unblocked by entering a
+    #    code through the display."
+    # Looping auto-reset on 7FFF just burns Modbus writes and obscures the
+    # real state. Skip and log once per state entry so operators see the note.
+    if alarm_val == 0x7FFF:
+        if not entry or entry.get("state") != "fatal_locked":
+            print(
+                f"[AUTORESET] {ip} unit {unit}: alarm 0x7FFF (fatal) — "
+                f"cannot be auto-reset. Requires display-code unlock at the unit. "
+                f"See docs/Inverter-Incident-Workflow.pdf p.14.",
+                flush=True,
+            )
+        auto_reset_state[key] = {"state": "fatal_locked", "since": time.time(), "busy": False}
+        return
+
     alarm_hex_list = auto_reset_cfg.get("auto_reset_alarms", [])
     if not alarm_hex_list:
         return
@@ -1124,6 +1147,7 @@ async def rebuild_global_maps(cfg=None):
     new_inverters = []
     new_intervals = {}
     new_static_units = {}
+    fast_poll_inverters = []
     for i in range(1, 28):
         ip = str(new_ip_map.get(str(i), "")).strip()
         if not ip:
@@ -1134,8 +1158,24 @@ async def rebuild_global_maps(cfg=None):
         except Exception:
             poll = DEFAULT_INTERVAL
         poll = poll if poll >= 0.01 else DEFAULT_INTERVAL
-        new_intervals[ip] = max(MIN_POLL_INTERVAL, poll)
+        effective = max(MIN_POLL_INTERVAL, poll)
+        new_intervals[ip] = effective
         new_static_units[ip] = unit_cfg.get(str(i))
+        if effective < RECOMMENDED_POLL_INTERVAL:
+            fast_poll_inverters.append((i, ip, effective))
+    if fast_poll_inverters:
+        sample = ", ".join(
+            f"inv{inv}@{iv:.2f}s" for inv, _ip, iv in fast_poll_inverters[:3]
+        )
+        more = f" (+{len(fast_poll_inverters) - 3} more)" if len(fast_poll_inverters) > 3 else ""
+        print(
+            f"[POLL WARN] {len(fast_poll_inverters)} inverter(s) polling faster than "
+            f"{RECOMMENDED_POLL_INTERVAL:.1f}s recommended by Ingeteam Level 2 "
+            f"(AAV2011IFA01_ p.8, 0x0008 alarm). Sample: {sample}{more}. "
+            f"Tight polling can trigger DSP watchdog resets if the inverter firmware "
+            f"enforces the 1 Hz recommendation.",
+            flush=True,
+        )
 
     # Atomic swaps (single-statement rebinding under GIL).
     # Phase 8 code-review fix (2026-04-15): use rebind for `static_units` too
