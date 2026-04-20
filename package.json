@@ -55,7 +55,21 @@
       "assets/**/*",
       "drivers/**/*",
       "services/**/*",
-      "package.json"
+      "package.json",
+      "!server/ffmpeg/**",
+      "!server/go2rtc/**",
+      "!services/dist/**",
+      "!services/tests/**",
+      "!services/__pycache__/**",
+      "!services/.pytest_cache/**",
+      "!**/*.pdb",
+      "!**/*.iobj",
+      "!**/*.ipdb",
+      "!**/*.exp",
+      "!**/obj/**"
+    ],
+    "electronLanguages": [
+      "en-US"
     ],
     "asarUnpack": [
       "node_modules/better-sqlite3/**"

@@ -38,9 +38,12 @@ const verifyScript = path.join(repoRoot, 'scripts', 'verify-signed-installer.ps1
 const releaseDir = path.join(repoRoot, 'release');
 
 const ALLOW_UNSIGNED = process.env.ADSI_ALLOW_UNSIGNED === '1';
-// 300 MB floor — historical builds are ~500-620 MB. A broken build
-// missing the Python services EXE would be well under 100 MB.
-const MIN_INSTALLER_BYTES = 300 * 1024 * 1024;
+// 150 MB floor — post-v2.8.13 slimmed builds land around 180-220 MB after
+// removing duplicate ffmpeg/go2rtc/service-dist payloads from the asar and
+// pinning locales to en-US (see package.json files globs). A broken build
+// missing the Python services EXE would still be well under 100 MB.
+// Historical pre-slim builds were ~500-620 MB.
+const MIN_INSTALLER_BYTES = 150 * 1024 * 1024;
 
 const env = { ...process.env };
 let signed = false;
@@ -192,7 +195,7 @@ if (stat.size < MIN_INSTALLER_BYTES) {
   console.error(
     '[build-installer-signed] FATAL: installer is only ' + sizeMB + ' MB, below ' + floorMB + ' MB floor.',
   );
-  console.error('  Historical releases are ~500-620 MB. This build is likely missing the');
+  console.error('  Post-slim healthy builds are ~180-220 MB. This build is likely missing the');
   console.error('  Python services EXE or other bundled assets. Do NOT upload.');
   process.exit(1);
 }
