@@ -13888,11 +13888,19 @@ body.mode-transition-active {
   flex-wrap: wrap;
 }
 
-/* Local Backup: all children full-width */
+/* Local Backup: all children full-width.
+   The parent #localBackupSection uses CSS Grid with 12 columns
+   (see #page-forecast .forecast-page-sections > .sgroup.settings-card,
+   shared by #page-settings via .settings-card), so any DIRECT grid
+   child needs an explicit `grid-column: 1 / -1` to span the full row.
+   Without this, the child gets one of the 12 columns (~83px wide),
+   which collapses every word onto its own line. */
 #page-settings #localBackupSection .cb-subsection,
 #page-settings #localBackupSection .cb-progress-wrap,
 #page-settings #localBackupSection > .sgroup-actions,
-#page-settings #localBackupSection > .sinfo {
+#page-settings #localBackupSection > .sinfo,
+#page-settings #localBackupSection > .cb-remote-notice,
+#page-settings #localBackupSection > #localBackupControls {
   grid-column: 1 / -1;
 }
 

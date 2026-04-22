@@ -119,14 +119,41 @@ if (result.status !== 0) {
 }
 
 // ─── Locate the built installer ─────────────────────────────────────────────
+//
+// CRITICAL: when prior installers are still present in release/ (the dev
+// hasn't pruned old versions), `readdirSync` returns them in NTFS-sorted
+// order and `Array.find` happily returns the FIRST match — which is
+// almost always the OLDER version. The post-build verification gates
+// (size floor, signature pin, SHA-512 log) would then run against the
+// wrong file, masking real problems with the actual freshly-built EXE.
+//
+// We avoid this by:
+//   1. Preferring the file whose version EXACTLY matches package.json
+//      (the version we just built).
+//   2. Falling back to the most-recently-modified Setup .exe so the gate
+//      still works for hotfix builds where someone bumped the version
+//      between invocations.
 function findInstaller() {
   if (!fs.existsSync(releaseDir)) return null;
   const files = fs.readdirSync(releaseDir);
-  const setup = files.find((f) => /^Inverter-Dashboard-Setup-.*\.exe$/i.test(f));
-  if (setup) return path.join(releaseDir, setup);
-  // Fallback: any "*Setup*.exe" in release/
-  const generic = files.find((f) => /setup.*\.exe$/i.test(f));
-  return generic ? path.join(releaseDir, generic) : null;
+  const setupFiles = files.filter((f) => /setup.*\.exe$/i.test(f));
+  if (setupFiles.length === 0) return null;
+
+  // 1. Prefer exact version match against package.json
+  let pkgVersion = null;
+  try { pkgVersion = require(path.join(repoRoot, 'package.json')).version; } catch (_) {}
+  if (pkgVersion) {
+    const exact = setupFiles.find((f) =>
+      f.toLowerCase().includes('-' + pkgVersion.toLowerCase() + '.')
+    );
+    if (exact) return path.join(releaseDir, exact);
+  }
+
+  // 2. Fallback: newest by mtime
+  const ranked = setupFiles
+    .map((f) => ({ f, mtimeMs: fs.statSync(path.join(releaseDir, f)).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return path.join(releaseDir, ranked[0].f);
 }
 
 const installerPath = findInstaller();
