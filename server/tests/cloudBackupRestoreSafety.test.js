@@ -384,6 +384,104 @@ async function testRestoreAbortsOnReadonlyDestination() {
   }
 }
 
+async function testScopeFilterSelectiveRestore() {
+  // v2.8.14 bootstrap-restore feature: opts.scopeFilter must let the wizard
+  // restore SOME scopes from a multi-scope backup while skipping others.
+  // Workflow: create a backup with [database, config, logs], then restore
+  // with scopeFilter=["database"] and prove config + logs were NOT touched.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "adsi-scopefilter-"));
+  try {
+    const { svc, dataDir, programDataDir } = buildService({
+      root,
+      dbBackupBytes: "fresh-db-via-filter",
+    });
+
+    // Plant source files for all three scopes.
+    writeFile(path.join(dataDir, "logs", "dashboard.log"), "BACKUP-LOG-CONTENT");
+    writeFile(path.join(programDataDir, "logs", "recovery.log"), "BACKUP-RECOVERY");
+
+    const created = await svc.createLocalBackup({
+      scope: ["database", "logs"],
+      tag: "scope-filter-test",
+    });
+
+    // Reset live state with DIFFERENT content so we can detect overwrite.
+    fs.writeFileSync(path.join(dataDir, "adsi.db"), "old-db-must-be-overwritten");
+    writeFile(path.join(dataDir, "logs", "dashboard.log"), "EXISTING-LOG-MUST-SURVIVE");
+    writeFile(path.join(programDataDir, "logs", "recovery.log"), "EXISTING-RECOVERY-MUST-SURVIVE");
+
+    svc._setProgress({ status: "done", pct: 100, message: "ready" });
+    await svc.restoreBackup(created.id, {
+      skipSafetyBackup: true,
+      scopeFilter: ["database"],
+    });
+
+    // Database scope: must be restored.
+    assert.equal(
+      fs.readFileSync(path.join(dataDir, "adsi.db"), "utf8"),
+      "fresh-db-via-filter",
+      "database scope (in filter) should be restored",
+    );
+    // Logs scope: must NOT be restored — existing files must survive.
+    assert.equal(
+      fs.readFileSync(path.join(dataDir, "logs", "dashboard.log"), "utf8"),
+      "EXISTING-LOG-MUST-SURVIVE",
+      "logs scope (NOT in filter) must be skipped — existing dashboard.log preserved",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(programDataDir, "logs", "recovery.log"), "utf8"),
+      "EXISTING-RECOVERY-MUST-SURVIVE",
+      "logs scope (NOT in filter) must be skipped — existing recovery.log preserved",
+    );
+
+    console.log("  • Scope filter selective restore: PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testScopeFilterEmptyArrayBlocksAll() {
+  // Defensive contract: an explicit empty scopeFilter blocks every scope.
+  // A null/undefined filter means "no filter — restore everything in manifest".
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "adsi-scopefilter-empty-"));
+  try {
+    const { svc, dataDir } = buildService({
+      root,
+      dbBackupBytes: "should-not-be-written",
+    });
+    writeFile(path.join(dataDir, "logs", "dashboard.log"), "BACKUP-LOG");
+
+    const created = await svc.createLocalBackup({
+      scope: ["database", "logs"],
+      tag: "empty-filter",
+    });
+
+    fs.writeFileSync(path.join(dataDir, "adsi.db"), "untouched-live-db");
+    writeFile(path.join(dataDir, "logs", "dashboard.log"), "untouched-log");
+
+    svc._setProgress({ status: "done", pct: 100, message: "ready" });
+    await svc.restoreBackup(created.id, {
+      skipSafetyBackup: true,
+      scopeFilter: [],
+    });
+
+    assert.equal(
+      fs.readFileSync(path.join(dataDir, "adsi.db"), "utf8"),
+      "untouched-live-db",
+      "empty scopeFilter must skip database scope",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(dataDir, "logs", "dashboard.log"), "utf8"),
+      "untouched-log",
+      "empty scopeFilter must skip logs scope",
+    );
+
+    console.log("  • Scope filter empty array blocks all scopes: PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   console.log("cloudBackupRestoreSafety.test.js:");
   await testWalShmCleanup();
@@ -392,6 +490,8 @@ async function run() {
   await testManifestRowCounts();
   await testRestorePathsRoundTrip();
   await testRestoreAbortsOnReadonlyDestination();
+  await testScopeFilterSelectiveRestore();
+  await testScopeFilterEmptyArrayBlocksAll();
   console.log("cloudBackupRestoreSafety.test.js: PASS");
 }
 

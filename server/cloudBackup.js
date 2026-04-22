@@ -20,7 +20,14 @@ const path = require("path");
 const crypto = require("crypto");
 const cron = require("node-cron");
 const fetch = require("node-fetch");
-const { execFileSync } = require("child_process");
+// v2.8.14 (post-1st-release): switched away from PowerShell Compress-Archive
+// because Windows PowerShell 5.1's implementation refuses any source >2 GiB
+// (`File size (...) is greater than 2 GiB`).  `archiver` writes Zip64 zips
+// natively (no 2 GiB / 4 GiB cap) and does NOT block the Node event loop
+// the way `execFileSync` did — fixes the export-fail AND the wizard freeze.
+// `extract-zip` (yauzl-based) reads Zip64 the same way.
+const archiver = require("archiver");
+const extractZip = require("extract-zip");
 
 const APP_VERSION = require("../package.json").version;
 const { resolvedBackupDir, resolvedBackupHistoryFile, resolvedLicenseDir, getNewRoot } = require("./storagePaths");
@@ -32,8 +39,26 @@ const S3_DEDUPE_LAYOUT = "chunked-v1";
 const S3_DEDUPE_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function sha256File(filePath) {
-  const data = fs.readFileSync(filePath);
-  return crypto.createHash("sha256").update(data).digest("hex");
+  // v2.8.14 hotfix: original implementation used fs.readFileSync, which
+  // caps at Node's ~2 GiB Buffer ceiling and threw
+  //   `RangeError [ERR_FS_FILE_TOO_LARGE]: File size (...) is greater than 2 GiB`
+  // for any plant DB or archive that grew past the limit. Use a streamed
+  // hash instead — works for arbitrarily large files in constant memory.
+  // Sync API kept so callers don't need to ripple async through the call
+  // chain (manifest checksum collection is already sync-batched).
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buf = Buffer.allocUnsafe(1024 * 1024); // 1 MiB chunks
+    let bytesRead;
+    do {
+      bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
+      if (bytesRead > 0) hash.update(buf.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 function sha256Buffer(buffer) {
@@ -214,11 +239,12 @@ class CloudBackupService {
     }
   }
 
-  _assertRestoreDestinationsWritable(manifest) {
+  _assertRestoreDestinationsWritable(manifest, scopeFilter) {
     const scope = Array.isArray(manifest?.scope) ? manifest.scope : [];
     const targets = [];
+    const allow = (s) => scope.includes(s) && this._scopeAllowed(s, scopeFilter);
 
-    if (scope.includes("database")) {
+    if (allow("database")) {
       targets.push({ label: "database directory", path: this.dataDir });
       if (this.programDataDir) {
         targets.push({ label: "forecast directory", path: path.join(this.programDataDir, "forecast") });
@@ -226,19 +252,19 @@ class CloudBackupService {
         targets.push({ label: "weather directory", path: path.join(this.programDataDir, "weather") });
       }
     }
-    if (scope.includes("config") && this.ipConfigPath) {
+    if (allow("config") && this.ipConfigPath) {
       targets.push({ label: "config directory", path: path.dirname(this.ipConfigPath) });
     }
-    if (scope.includes("logs")) {
+    if (allow("logs")) {
       targets.push({ label: "server logs directory", path: path.join(this.dataDir, "logs") });
       if (this.programDataDir) {
         targets.push({ label: "ProgramData logs directory", path: path.join(this.programDataDir, "logs") });
       }
     }
-    if (scope.includes("archive") && this.programDataDir) {
+    if (allow("archive") && this.programDataDir) {
       targets.push({ label: "archive directory", path: path.join(this.programDataDir, "archive") });
     }
-    if (scope.includes("license")) {
+    if (allow("license")) {
       try {
         // resolvedLicenseDir is already destructured at the top of this file.
         // The try/catch guards against the rare case where the function itself
@@ -248,7 +274,7 @@ class CloudBackupService {
         /* license scope skipped if path can't be resolved */
       }
     }
-    if (scope.includes("auth") && this.programDataDir) {
+    if (allow("auth") && this.programDataDir) {
       targets.push({ label: "auth directory", path: path.join(this.programDataDir, "auth") });
     }
 
@@ -281,6 +307,95 @@ class CloudBackupService {
     } catch {
       return false;
     }
+  }
+
+  // ─── Archive helpers (v2.8.14 hotfix) ─────────────────────────────────────
+  // PowerShell Compress-Archive on Windows PowerShell 5.1 refuses any source
+  // larger than ~2 GiB and the .NET shim on PS5.1 doesn't enable Zip64 for
+  // writes.  Real plant DBs hit that ceiling within months. archiver writes
+  // Zip64 natively (no 2 GiB / 4 GiB cap) and runs as a Node stream so we
+  // also stop blocking the event loop the way execFileSync did.
+  //
+  // For READING (`importPortableBackup`, `validatePortableBackup`) we use
+  // extract-zip (yauzl-based), which understands Zip64 archives transparently.
+
+  /**
+   * Stream-zip the contents of `srcDir` into `destZip`.  Returns the number
+   * of compressed bytes written. Internally enables Zip64 automatically when
+   * the archive grows past the 32-bit zip thresholds, so .adsibak files can
+   * scale to whatever the disk holds.
+   *
+   * `onProgress(processed, total)` is called periodically with bytes-so-far.
+   * `total` is best-effort — archiver only knows totals for entries already
+   * queued, so it grows over the run.
+   */
+  async _zipDirectory(srcDir, destZip, onProgress) {
+    return new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(destZip);
+      const archive = archiver("zip", {
+        zlib: { level: 6 },
+        // archiver auto-enables Zip64 when an archive or entry crosses the
+        // 32-bit thresholds.  We do NOT pass `forceZip64: true` so small
+        // backups stay max-compatible with stock unzip tools.
+      });
+
+      let settled = false;
+      const settleErr = (err) => {
+        if (settled) return;
+        settled = true;
+        try { archive.abort(); } catch (_) {}
+        try { output.destroy(); } catch (_) {}
+        try { fs.unlinkSync(destZip); } catch (_) {}
+        reject(err);
+      };
+
+      output.on("close", () => {
+        if (settled) return;
+        settled = true;
+        resolve(archive.pointer());
+      });
+      output.on("error", settleErr);
+      archive.on("error", settleErr);
+
+      // ENOENT for individual sub-files is non-fatal (e.g., a log file
+      // rotated mid-zip). Anything else is fatal.
+      archive.on("warning", (err) => {
+        if (err && err.code === "ENOENT") {
+          console.warn("[CloudBackup] zip warning (ignored):", err.message);
+        } else {
+          settleErr(err);
+        }
+      });
+
+      if (typeof onProgress === "function") {
+        archive.on("progress", (p) => {
+          try {
+            onProgress(
+              Number(p?.fs?.processedBytes || 0),
+              Number(p?.fs?.totalBytes || 0),
+            );
+          } catch (_) { /* ignore listener errors */ }
+        });
+      }
+
+      archive.pipe(output);
+      // false = don't include the source directory name in the archive
+      // (matches PowerShell `Compress-Archive -Path 'dir\*'` behaviour).
+      archive.directory(srcDir, false);
+      archive.finalize().catch(settleErr);
+    });
+  }
+
+  /**
+   * Extract `srcZip` into `destDir`, creating destDir if needed.  Honours
+   * Zip64 transparently. Async — does NOT block the event loop.
+   *
+   * extract-zip uses absolute path semantics for `dir`; we resolve to be
+   * defensive against callers passing relatives.
+   */
+  async _extractZip(srcZip, destDir) {
+    fs.mkdirSync(destDir, { recursive: true });
+    await extractZip(srcZip, { dir: path.resolve(destDir) });
   }
 
   // ─── Settings ─────────────────────────────────────────────────────────────
@@ -1233,6 +1348,11 @@ class CloudBackupService {
    * @param {string} backupId  ID of local backup package to restore
    * @param {object} opts
    * @param {boolean} [opts.skipSafetyBackup=false]  Skip pre-restore safety backup
+   * @param {string[]} [opts.scopeFilter]   v2.8.14: optional whitelist of scope names to actually
+   *                                         restore. When present, the restore intersects this
+   *                                         set with manifest.scope. Used by the bootstrap
+   *                                         restore wizard so the operator can opt OUT of
+   *                                         license/auth/logs etc. on a fresh install.
    */
   async restoreBackup(backupId, opts = {}) {
     // T2.2 fix: serialise via mutex.  The inner body may call
@@ -1240,6 +1360,17 @@ class CloudBackupService {
     // call runs within the already-held lock (createLocalBackup does NOT
     // re-enter _withBackupMutex) so there is no deadlock.
     return this._withBackupMutex("restoreBackup", () => this._restoreBackupLocked(backupId, opts));
+  }
+
+  /**
+   * Helper: returns true if `scope` is allowed by the operator's filter.
+   * No filter = allow everything that's in the manifest.
+   */
+  _scopeAllowed(scope, scopeFilter) {
+    if (!scopeFilter) return true;
+    if (!Array.isArray(scopeFilter)) return true;
+    if (scopeFilter.length === 0) return false; // explicit empty = nothing
+    return scopeFilter.includes(scope);
   }
 
   async _restoreBackupLocked(backupId, opts = {}) {
@@ -1289,7 +1420,9 @@ class CloudBackupService {
       // ProgramData not extended to Users:M, USB mounted read-only, etc.) we
       // want a single clear error up-front rather than a half-finished restore
       // that triggers auto-rollback into the same broken directory.
-      this._assertRestoreDestinationsWritable(manifest);
+      // The probe respects the scope filter (no point probing license dir if
+      // the operator unchecked the license scope).
+      this._assertRestoreDestinationsWritable(manifest, opts.scopeFilter);
 
       if (!opts.skipSafetyBackup) {
         this._setProgress({ pct: 15, message: "Creating safety backup before restore..." });
@@ -1309,7 +1442,7 @@ class CloudBackupService {
         }
       }
 
-      if (manifest.scope?.includes("database")) {
+      if (manifest.scope?.includes("database") && this._scopeAllowed("database", opts.scopeFilter)) {
         const srcDb = path.join(dir, "adsi.db");
         if (fs.existsSync(srcDb)) {
           this._setProgress({ pct: 40, message: "Restoring database..." });
@@ -1391,7 +1524,7 @@ class CloudBackupService {
         }
       }
 
-      if (manifest.scope?.includes("config")) {
+      if (manifest.scope?.includes("config") && this._scopeAllowed("config", opts.scopeFilter)) {
         this._setProgress({ pct: 70, message: "Restoring config files..." });
 
         const srcIp = path.join(dir, "ipconfig.json");
@@ -1419,7 +1552,7 @@ class CloudBackupService {
         }
       }
 
-      if (manifest.scope?.includes("logs")) {
+      if (manifest.scope?.includes("logs") && this._scopeAllowed("logs", opts.scopeFilter)) {
         this._setProgress({ pct: 82, message: "Restoring logs..." });
         const srcLogsDir = path.join(dir, "logs");
         if (fs.existsSync(srcLogsDir)) {
@@ -1693,8 +1826,14 @@ class CloudBackupService {
     }
     if (!enabled || schedule === "manual") return;
 
+    // v2.8.14 — moved daily cloud backup from 03:00 to 21:00. 03:00 sat
+    // inside the Windows Automatic Maintenance + Windows Update install
+    // window, competing with OS activity on the gateway PC and adding
+    // network I/O on top (cloud backup uploads the DB + manifest to
+    // Supabase/Neon). 21:00 is between the 20:00 and 22:00 forecast
+    // regen crons and leaves the 01:00–05:00 window clear for Windows.
     const cronExpr =
-      schedule === "daily" ? "0 3 * * *" : // 3:00 AM daily
+      schedule === "daily" ? "0 21 * * *" : // 21:00 local — off-hours, outside Windows Maintenance
       schedule === "every6h" ? "0 */6 * * *" : null;
 
     if (!cronExpr) return;
@@ -1786,8 +1925,16 @@ class CloudBackupService {
       console.log("[CloudBackup] Local schedule: off");
       return;
     }
-    // 02:30 to avoid the 03:00 cloud backup + 03:30 prune window.
-    const cronExpr = cfg.schedule === "daily" ? "30 2 * * *" : "30 2 * * 0";
+    // v2.8.14 — moved from 02:30 to 20:30. The original 02:30 slot sat
+    // inside the Windows Automatic Maintenance + Windows Update install
+    // window (roughly 01:00–05:00 local), so a full .adsibak compression
+    // + write was competing with Windows' own disk/update activity on
+    // the gateway PC. That collision is a credible contributor to the
+    // nightly "Error 1962 — no operating system found" failures the
+    // operator has been reporting. 20:30 is after the 20:00 forecast
+    // regen cron completes and well before the 22:00 forecast cron,
+    // giving the backup a clean window with no other heavy I/O.
+    const cronExpr = cfg.schedule === "daily" ? "30 20 * * *" : "30 20 * * 0";
     // Defense-in-depth: even though runScheduledPortableBackup serializes via
     // _withBackupMutex, also skip overlapping cron ticks explicitly so we don't
     // queue a runaway backlog if a single run takes longer than the interval.
@@ -1820,7 +1967,8 @@ class CloudBackupService {
   _refreshLocalNextScheduled(schedule) {
     const now = new Date();
     const next = new Date(now);
-    next.setHours(2, 30, 0, 0);
+    // v2.8.14 — keep in sync with the cron expression in _applyLocalSchedule.
+    next.setHours(20, 30, 0, 0);
     if (next <= now) next.setDate(next.getDate() + 1);
     if (schedule === "weekly") {
       // Advance to next Sunday.
@@ -2107,15 +2255,25 @@ class CloudBackupService {
       const manifestPath = path.join(dir, "manifest.json");
       fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-      // Step 3: Zip the package then rename to .adsibak
-      // PowerShell Compress-Archive only supports .zip extension
+      // Step 3: Zip the package then rename to .adsibak.
+      // v2.8.14 hotfix: switched from `powershell Compress-Archive` to
+      // Node's `archiver` (Zip64-capable). Rationale + 2 GiB cap incident
+      // documented in audits/2026-04-22/local-backup-export-2gib-fix.md.
       this._setProgress({ pct: 70, message: "Compressing backup…" });
       const zipTmp = destPath.replace(/\.adsibak$/i, ".zip");
 
-      execFileSync("powershell", [
-        "-NoProfile", "-Command",
-        `Compress-Archive -Path '${String(dir).replace(/'/g, "''")}\\*' -DestinationPath '${String(zipTmp).replace(/'/g, "''")}' -Force`,
-      ], { timeout: 300000, windowsHide: true });
+      await this._zipDirectory(dir, zipTmp, (processed, total) => {
+        // Map archiver bytes-progress onto the 70-90% slice of the export
+        // progress bar so the operator sees the long compression step move.
+        const ratio = total > 0 ? Math.min(processed / total, 1) : 0;
+        const pct = 70 + Math.round(ratio * 20);
+        this._setProgress({
+          pct,
+          message: total > 0
+            ? `Compressing backup… (${(processed / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB)`
+            : "Compressing backup…",
+        });
+      });
 
       if (!fs.existsSync(zipTmp)) {
         throw new Error("Failed to create backup archive");
@@ -2207,17 +2365,11 @@ class CloudBackupService {
 
       this._setProgress({ pct: 20, message: "Extracting backup archive…" });
 
-      // Expand-Archive only supports .zip — copy to a temp .zip, extract, then clean up
-      const zipTmp = path.join(this.backupDir, `_import-${Date.now()}.zip`);
-      try {
-        fs.copyFileSync(srcPath, zipTmp);
-        execFileSync("powershell", [
-          "-NoProfile", "-Command",
-          `Expand-Archive -Path '${String(zipTmp).replace(/'/g, "''")}' -DestinationPath '${String(dir).replace(/'/g, "''")}' -Force`,
-        ], { timeout: 300000, windowsHide: true });
-      } finally {
-        try { fs.unlinkSync(zipTmp); } catch (_) { /* best-effort cleanup */ }
-      }
+      // v2.8.14 hotfix: switched from `powershell Expand-Archive` to Node's
+      // extract-zip (yauzl-based, Zip64-capable). yauzl reads the zip
+      // directly so we no longer copy multi-gigabyte archives to a tmp
+      // location first — saves an entire archive's worth of disk I/O.
+      await this._extractZip(srcPath, dir);
 
       // Step 2: Read and validate manifest
       this._setProgress({ pct: 50, message: "Validating backup…" });
@@ -2288,15 +2440,10 @@ class CloudBackupService {
     const tempDir = path.join(this.backupDir, `_validate-${Date.now()}`);
     fs.mkdirSync(tempDir, { recursive: true });
 
-    // Expand-Archive only supports .zip — copy to a temp .zip, extract, then clean up
-    const zipTmp = path.join(this.backupDir, `_validate-${Date.now()}.zip`);
+    // v2.8.14 hotfix: extract-zip reads .adsibak directly (no tmp-zip copy
+    // step needed), supports Zip64, and is async (no event-loop block).
     try {
-      fs.copyFileSync(srcPath, zipTmp);
-      execFileSync("powershell", [
-        "-NoProfile", "-Command",
-        `Expand-Archive -Path '${String(zipTmp).replace(/'/g, "''")}' -DestinationPath '${String(tempDir).replace(/'/g, "''")}' -Force`,
-      ], { timeout: 300000, windowsHide: true });
-      try { fs.unlinkSync(zipTmp); } catch (_) { /* best-effort cleanup */ }
+      await this._extractZip(srcPath, tempDir);
 
       const manifest = safeReadJson(path.join(tempDir, "manifest.json"));
       if (!manifest) {
@@ -2325,7 +2472,8 @@ class CloudBackupService {
         rowCounts: manifest.rowCounts || null,
       };
     } finally {
-      try { fs.unlinkSync(zipTmp); } catch (_) { /* already cleaned or never created */ }
+      // No temp .zip to clean up since switching to extract-zip — only the
+      // extracted tempDir.
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
@@ -2334,20 +2482,25 @@ class CloudBackupService {
    * Restore a portable backup including archive, license, and auth directories.
    * Extends standard restoreBackup with extra scope handling.
    * @param {string} backupId  ID of the imported backup package
+   * @param {object} [opts]
+   * @param {boolean} [opts.skipSafetyBackup]  Skip pre-restore safety backup
+   * @param {string[]} [opts.scopeFilter]      v2.8.14: whitelist of scope names to restore.
+   *                                            When present, intersect with manifest.scope.
    * @returns {Promise<{ok, manifest}>}
    */
-  async restorePortableBackup(backupId) {
+  async restorePortableBackup(backupId, opts = {}) {
     // T2.2 fix: serialise portable restore too.  We call the private
     // `_restoreBackupLocked` directly (not the public `restoreBackup`
     // wrapper) so we hold the mutex for the entire portable-restore
     // workflow — standard restore PLUS forecast-scope fixups — rather
     // than releasing and re-acquiring between phases.
-    return this._withBackupMutex("restorePortableBackup", () => this._restorePortableBackupLocked(backupId));
+    return this._withBackupMutex("restorePortableBackup", () => this._restorePortableBackupLocked(backupId, opts));
   }
 
-  async _restorePortableBackupLocked(backupId) {
-    // First run the standard restore (handles database, config, logs)
-    const result = await this._restoreBackupLocked(backupId);
+  async _restorePortableBackupLocked(backupId, opts = {}) {
+    // First run the standard restore (handles database, config, logs).
+    // Pass opts through so the scope filter applies to those scopes too.
+    const result = await this._restoreBackupLocked(backupId, opts);
     const dir =
       this.history.find((h) => h.id === backupId)?.dir ||
       path.join(this.backupDir, backupId);
@@ -2357,9 +2510,10 @@ class CloudBackupService {
     const manifest = safeReadJson(path.join(dir, "manifest.json"));
     const scope = manifest?.scope || [];
     const root = getNewRoot();
+    const allow = (s) => scope.includes(s) && this._scopeAllowed(s, opts.scopeFilter);
 
     // Restore archive databases
-    if (scope.includes("archive")) {
+    if (allow("archive")) {
       const srcArchive = path.join(dir, "archive");
       if (fs.existsSync(srcArchive)) {
         const destArchive = path.join(root, "archive");
@@ -2370,7 +2524,7 @@ class CloudBackupService {
     }
 
     // Restore license files
-    if (scope.includes("license")) {
+    if (allow("license")) {
       const srcLicense = path.join(dir, "license");
       if (fs.existsSync(srcLicense)) {
         const destLicense = resolvedLicenseDir();
@@ -2381,7 +2535,7 @@ class CloudBackupService {
     }
 
     // Restore auth tokens
-    if (scope.includes("auth")) {
+    if (allow("auth")) {
       const srcAuth = path.join(dir, "auth");
       if (fs.existsSync(srcAuth)) {
         const destAuth = path.join(root, "auth");
