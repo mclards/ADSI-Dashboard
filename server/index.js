@@ -186,6 +186,44 @@ const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
   : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "InverterDashboard");
+
+// v2.8.14: ensure %PROGRAMDATA%\InverterDashboard is writable by Users.
+// db.js already does this for DATA_DIR (the db/ subfolder), but the restore
+// path also writes to programDataDir/{forecast,history,weather,logs,archive,
+// license,auth}/ — those are siblings of db/, not children, so the recursive
+// icacls grant on DATA_DIR doesn't reach them. Without this, a portable
+// .adsibak restore on a freshly-installed machine can fail mid-flight with
+// EPERM and trigger the auto-rollback chain (which itself needs the same
+// directories to be writable).
+(function ensureProgramDataRootWritable() {
+  if (process.platform !== "win32") return;
+  if (!PROGRAMDATA_ROOT.toLowerCase().includes("programdata")) return;
+  try {
+    fs.mkdirSync(PROGRAMDATA_ROOT, { recursive: true });
+    const probe = path.join(PROGRAMDATA_ROOT, ".write-probe");
+    fs.writeFileSync(probe, "", { flag: "w" });
+    fs.unlinkSync(probe);
+  } catch {
+    try {
+      const { spawnSync } = require("child_process");
+      const r = spawnSync(
+        "icacls",
+        [PROGRAMDATA_ROOT, "/grant", "Users:(OI)(CI)M", "/T", "/Q"],
+        { windowsHide: true, timeout: 15000 },
+      );
+      if (r.error) throw r.error;
+      console.log("[startup] Granted Users write access to", PROGRAMDATA_ROOT);
+    } catch (err) {
+      console.warn(
+        "[startup] Could not grant Users write access to",
+        PROGRAMDATA_ROOT,
+        ":",
+        err.message,
+        "— restore operations into this directory may fail with EPERM.",
+      );
+    }
+  }
+})();
 const FORECAST_CTX_PATH = path.join(
   PROGRAMDATA_ROOT,
   "forecast",

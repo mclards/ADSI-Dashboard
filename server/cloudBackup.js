@@ -198,6 +198,75 @@ class CloudBackupService {
     }
   }
 
+  // ─── Restore destination probe (v2.8.14) ─────────────────────────────────
+  // Probe every directory the restore is about to write to. Fail loud + early
+  // if any is read-only, rather than crashing partway through and triggering
+  // the auto-rollback chain into the same broken directories.
+  _probeWritable(dirPath) {
+    try {
+      fs.mkdirSync(dirPath, { recursive: true });
+      const probe = path.join(dirPath, `.restore-probe-${process.pid}`);
+      fs.writeFileSync(probe, "");
+      fs.unlinkSync(probe);
+      return null;
+    } catch (err) {
+      return err.message || String(err);
+    }
+  }
+
+  _assertRestoreDestinationsWritable(manifest) {
+    const scope = Array.isArray(manifest?.scope) ? manifest.scope : [];
+    const targets = [];
+
+    if (scope.includes("database")) {
+      targets.push({ label: "database directory", path: this.dataDir });
+      if (this.programDataDir) {
+        targets.push({ label: "forecast directory", path: path.join(this.programDataDir, "forecast") });
+        targets.push({ label: "history directory", path: path.join(this.programDataDir, "history") });
+        targets.push({ label: "weather directory", path: path.join(this.programDataDir, "weather") });
+      }
+    }
+    if (scope.includes("config") && this.ipConfigPath) {
+      targets.push({ label: "config directory", path: path.dirname(this.ipConfigPath) });
+    }
+    if (scope.includes("logs")) {
+      targets.push({ label: "server logs directory", path: path.join(this.dataDir, "logs") });
+      if (this.programDataDir) {
+        targets.push({ label: "ProgramData logs directory", path: path.join(this.programDataDir, "logs") });
+      }
+    }
+    if (scope.includes("archive") && this.programDataDir) {
+      targets.push({ label: "archive directory", path: path.join(this.programDataDir, "archive") });
+    }
+    if (scope.includes("license")) {
+      try {
+        const { resolvedLicenseDir } = require("./storagePaths");
+        targets.push({ label: "license directory", path: resolvedLicenseDir() });
+      } catch (_) {
+        /* license scope skipped if storagePaths can't resolve */
+      }
+    }
+    if (scope.includes("auth") && this.programDataDir) {
+      targets.push({ label: "auth directory", path: path.join(this.programDataDir, "auth") });
+    }
+
+    const failures = [];
+    for (const t of targets) {
+      if (!t.path) continue;
+      const err = this._probeWritable(t.path);
+      if (err) failures.push(`${t.label} (${t.path}): ${err}`);
+    }
+    if (failures.length) {
+      throw new Error(
+        "Restore aborted — one or more destination directories are not writable. " +
+        "On Windows this usually means %PROGRAMDATA%\\InverterDashboard requires " +
+        "an ACL grant; try running the dashboard once as administrator, or run " +
+        `'icacls "%PROGRAMDATA%\\InverterDashboard" /grant Users:(OI)(CI)M /T'. ` +
+        `Failures: ${failures.join("; ")}`,
+      );
+    }
+  }
+
   // ─── Mode gate (v2.8.14) ──────────────────────────────────────────────────
   // Local backups only make sense on the gateway. In remote mode the local DB
   // is an in-memory replica of the gateway's data, so any backup would silently
@@ -1212,6 +1281,13 @@ class CloudBackupService {
           "Backup integrity check failed (checksum mismatch). Refusing to restore.",
         );
       }
+
+      // v2.8.14: probe writability of every restore destination BEFORE we
+      // create the safety backup. If a target is read-only (Windows ACL on
+      // ProgramData not extended to Users:M, USB mounted read-only, etc.) we
+      // want a single clear error up-front rather than a half-finished restore
+      // that triggers auto-rollback into the same broken directory.
+      this._assertRestoreDestinationsWritable(manifest);
 
       if (!opts.skipSafetyBackup) {
         this._setProgress({ pct: 15, message: "Creating safety backup before restore..." });

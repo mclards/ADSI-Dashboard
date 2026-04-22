@@ -329,6 +329,61 @@ async function testManifestRowCounts() {
   }
 }
 
+async function testRestoreAbortsOnReadonlyDestination() {
+  // v2.8.14: pre-restore writability probe must catch a read-only destination
+  // BEFORE the safety backup is created. Simulate failure by monkey-patching
+  // fs.writeFileSync to refuse writes into the forecast directory.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "adsi-probe-"));
+  try {
+    const { svc, programDataDir } = buildService({ root, dbBackupBytes: "db-bytes" });
+    // Plant a forecast file so the manifest scope clearly includes the dir.
+    writeFile(path.join(programDataDir, "forecast", "model.bin"), "model");
+
+    const created = await svc.createLocalBackup({
+      scope: ["database", "logs"],
+      tag: "probe-test",
+    });
+    svc._setProgress({ status: "done", pct: 100, message: "ready" });
+
+    const realWrite = fs.writeFileSync;
+    const blockedDir = path.resolve(path.join(programDataDir, "forecast"));
+    fs.writeFileSync = function patchedWrite(target, ...rest) {
+      const tStr = String(target || "");
+      if (path.resolve(path.dirname(tStr)) === blockedDir) {
+        const err = new Error("EACCES: permission denied (simulated)");
+        err.code = "EACCES";
+        throw err;
+      }
+      return realWrite.call(fs, target, ...rest);
+    };
+
+    let thrown = null;
+    try {
+      await svc.restoreBackup(created.id, { skipSafetyBackup: true });
+    } catch (err) {
+      thrown = err;
+    } finally {
+      fs.writeFileSync = realWrite;
+    }
+
+    assert.ok(thrown, "restore should abort when a destination is read-only");
+    assert.match(
+      thrown.message,
+      /Restore aborted — one or more destination directories are not writable/i,
+      "error must explain why the restore aborted",
+    );
+    assert.match(
+      thrown.message,
+      /forecast directory/i,
+      "error must name the offending directory",
+    );
+
+    console.log("  • Pre-restore writability probe aborts cleanly: PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   console.log("cloudBackupRestoreSafety.test.js:");
   await testWalShmCleanup();
@@ -336,6 +391,7 @@ async function run() {
   await testRecoveryLogIncluded();
   await testManifestRowCounts();
   await testRestorePathsRoundTrip();
+  await testRestoreAbortsOnReadonlyDestination();
   console.log("cloudBackupRestoreSafety.test.js: PASS");
 }
 
