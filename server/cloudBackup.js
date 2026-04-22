@@ -240,10 +240,12 @@ class CloudBackupService {
     }
     if (scope.includes("license")) {
       try {
-        const { resolvedLicenseDir } = require("./storagePaths");
+        // resolvedLicenseDir is already destructured at the top of this file.
+        // The try/catch guards against the rare case where the function itself
+        // throws (e.g. legacy install pointing at a now-unmounted drive).
         targets.push({ label: "license directory", path: resolvedLicenseDir() });
       } catch (_) {
-        /* license scope skipped if storagePaths can't resolve */
+        /* license scope skipped if path can't be resolved */
       }
     }
     if (scope.includes("auth") && this.programDataDir) {

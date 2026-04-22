@@ -17786,6 +17786,22 @@ async function runPeriodicBackup() {
   if (isRemoteMode()) {
     return;
   }
+  // v2.8.14: defensive skip when a restore or another backup is in flight.
+  // runPeriodicBackup doesn't go through CloudBackupService's mutex, so
+  // without this check Tier 1's db.backup() could read a half-overwritten
+  // adsi.db while a manual restore's fs.copyFileSync is mid-flight, capturing
+  // a corrupt snapshot into the rotating slot. The state machine guarantees
+  // the next 2h tick will succeed once the in-flight op finishes. We log the
+  // skip but do NOT record it as a failure — a deliberate defer must not
+  // increment the consecutive-failures counter (which would trigger an alert).
+  try {
+    const progress = _cloudBackup?.getProgress?.();
+    const busyStatuses = new Set(["creating", "uploading", "restoring", "pulling"]);
+    if (progress && busyStatuses.has(progress.status)) {
+      console.log(`[DB] Tier 1 backup skipped: ${progress.status} in progress.`);
+      return;
+    }
+  } catch (_) { /* progress unavailable — proceed */ }
   try { fs.mkdirSync(BACKUP_DIR, { recursive: true }); } catch (_) {}
   const dest = path.join(BACKUP_DIR, `adsi_backup_${_backupSlot}.db`);
   _backupSlot = (_backupSlot + 1) % 2;
@@ -17812,8 +17828,14 @@ async function runPeriodicBackup() {
 setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
 // Tier 1 fires every 2h. Surface the next-scheduled time in the health snapshot
-// so the admin panel can show "Next at HH:mm".
+// so the admin panel can show "Next at HH:mm". In remote mode runPeriodicBackup
+// returns early, so clear the next-scheduled timestamp instead of advertising
+// a future backup that will never actually run.
 function _refreshTier1NextScheduled() {
+  if (isRemoteMode()) {
+    _backupHealth.setNextScheduled("tier1", null);
+    return;
+  }
   _backupHealth.setNextScheduled("tier1", Date.now() + 2 * 60 * 60 * 1000);
 }
 setTimeout(_refreshTier1NextScheduled, 60 * 1000 + 500).unref();
