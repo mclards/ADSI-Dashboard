@@ -53,7 +53,19 @@ function _routeStartupFatal(err, phase = "uncaught") {
     app.exit(1);
   }
 }
-process.on("uncaughtException", (err) => _routeStartupFatal(err, "uncaughtException"));
+process.on("uncaughtException", (err) => {
+  // Record reason synchronously BEFORE routing — _routeStartupFatal may
+  // trigger an app.exit path that races Windows shutdown. The shutdownReason
+  // module is safeRequired later so reference it lazily here.
+  try {
+    // eslint-disable-next-line global-require
+    require("./shutdownReason").recordShutdownReasonSync("uncaught-exception", {
+      initiator: "runtime",
+      extra: { errorMessage: String(err?.message || err), errorCode: String(err?.code || "") },
+    });
+  } catch (_) { /* module may not have loaded yet on torn-write boots */ }
+  _routeStartupFatal(err, "uncaughtException");
+});
 process.on("unhandledRejection", (reason) => _routeStartupFatal(reason, "unhandledRejection"));
 
 // ── A2. safeRequire — wrap every third-party require ─────────────────────────
@@ -119,6 +131,79 @@ const _runtimeEnvPaths = safeRequire("../server/runtimeEnvPaths", {
 const { getExplicitDataDir, getPortableDataRoot } = _runtimeEnvPaths;
 const _storagePaths = safeRequire("../server/storagePaths", { resolvedDbDir: () => "" });
 const { resolvedDbDir } = _storagePaths;
+
+// v2.8.14 — nightly reboot diagnostics. Shutdown reason markers let us
+// distinguish Windows OS-initiated reboots (Windows Update / Automatic
+// Maintenance) from BSODs / power loss / clean user quits. The module is
+// zero-dep and safe even on partially-corrupt installs, so it stays in the
+// survival-boot block above safeRequire of heavier modules would live.
+const _shutdownReason = safeRequire("./shutdownReason", {
+  PATHS: {},
+  REASONS: {
+    SESSION_END: "session-end",
+    POWER_SHUTDOWN: "power-shutdown",
+    POWER_SUSPEND: "power-suspend",
+    BEFORE_QUIT: "before-quit",
+    INSTALL_UPDATE: "install-update",
+    RELAUNCH: "relaunch",
+    LICENSE_EXPIRED: "license-expired",
+    UNCAUGHT_EXCEPTION: "uncaught-exception",
+  },
+  INITIATORS: {
+    WINDOWS_OS: "windows-os",
+    USER: "user",
+    AUTO_UPDATER: "auto-updater",
+    RUNTIME: "runtime",
+    UNKNOWN: "unknown",
+  },
+  recordShutdownReasonSync: () => null,
+  readLastShutdownSync: () => ({ classification: "first-boot", priorReason: null, sentinelWasPresent: false }),
+  readPrevShutdownSync: () => null,
+});
+const SHUTDOWN_REASONS = _shutdownReason.REASONS;
+const SHUTDOWN_INITIATORS = _shutdownReason.INITIATORS;
+
+// Track whether we've already written a marker for this shutdown pass so the
+// first recorded reason wins (e.g. if powerMonitor fires before session-end,
+// we keep the powerMonitor reason rather than overwriting it with a generic
+// before-quit from Electron's cascaded lifecycle events).
+let _shutdownReasonRecorded = false;
+function recordShutdownReasonOnce(reason, options) {
+  if (_shutdownReasonRecorded) return null;
+  try {
+    const rec = _shutdownReason.recordShutdownReasonSync(reason, options);
+    if (rec) {
+      _shutdownReasonRecorded = true;
+      try { console.log(`[main] Shutdown reason recorded: ${rec.reason} (${rec.initiator})`); } catch (_) {}
+    }
+    return rec;
+  } catch (err) {
+    try { console.warn("[main] Failed to record shutdown reason:", err?.message || err); } catch (_) {}
+    return null;
+  }
+}
+
+// Classify the PRIOR run's shutdown. This writes a fresh boot-sentinel for
+// THIS run as a side-effect, so it must happen exactly once at startup.
+// Expose via env so the embedded server can surface it through
+// /api/health/db-integrity without re-reading the filesystem.
+let _lastShutdownSnapshot = null;
+try {
+  _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
+  if (_lastShutdownSnapshot) {
+    process.env.ADSI_LAST_SHUTDOWN_JSON = JSON.stringify(_lastShutdownSnapshot);
+    try {
+      console.log(
+        `[main] Prior shutdown classification: ${_lastShutdownSnapshot.classification}` +
+        (_lastShutdownSnapshot.priorReason?.reason
+          ? ` (reason=${_lastShutdownSnapshot.priorReason.reason})`
+          : ""),
+      );
+    } catch (_) {}
+  }
+} catch (err) {
+  try { console.warn("[main] readLastShutdownSync failed:", err?.message || err); } catch (_) {}
+}
 
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -514,10 +599,12 @@ function getAppUpdateMode() {
 
 // Update preferences: persisted in a JSON file next to updater.log.
 // - autoDownload: fetch new installers as soon as they are detected (bandwidth knob).
-// - autoInstallOvernight: once an update is downloaded, install it at ~02:00 local
-//   time so the gateway stays up through the solar window and updates land during
-//   off-hours with zero operator impact. Default ON because oneClick:true NSIS
-//   makes the install silent end-to-end.
+// - autoInstallOvernight: once an update is downloaded, install it at the
+//   AUTO_INSTALL_HOUR local time (v2.8.14: 23:00; previously 02:00). The
+//   02:00 slot collided with the Windows Automatic Maintenance + Windows
+//   Update install window; 23:00 keeps the install in true off-hours while
+//   staying clear of OS-driven overnight reboots. Default ON because the
+//   oneClick:true NSIS installer makes the install silent end-to-end.
 function _updatePrefsPath() {
   return path.join(app.getPath("userData"), "update-prefs.json");
 }
@@ -914,7 +1001,7 @@ function bindAutoUpdaterEventsOnce() {
       canInstall: true,
       downloadPercent: 100,
       message: overnight
-        ? `Update ${latestVersion || ""} downloaded. Will auto-install at ~02:00 (off-hours).`
+        ? `Update ${latestVersion || ""} downloaded. Will auto-install at ~${String(AUTO_INSTALL_HOUR).padStart(2, "0")}:00 (off-hours).`
         : `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
       error: "",
     });
@@ -1233,12 +1320,23 @@ async function installAppUpdateNow() {
 
 // Auto-update checks run outside the solar window (18:00–05:00) when
 // inverter polling, forecast generation, and energy archival are idle.
-// Checks at 19:00, 22:00, and 02:00 — three chances per night.
-const AUTO_UPDATE_CHECK_HOURS = [2, 4, 5, 16, 19, 22];
+//
+// v2.8.14 — DO NOT check or install between 01:00 and 05:00 local. Windows
+// Automatic Maintenance + Windows Update install cycles run in that window
+// by default, and so does the server's 03:30 VACUUM / 03:35 snapshot prune
+// / 04:30 forecast regen crons. An update download or install colliding
+// with that activity competes for the same disk spindle / ACPI shutdown
+// path and is a credible contributor to the nightly boot failures the
+// operator has been reporting. Anchor checks well clear of the collision
+// zone: late afternoon + evening + just before midnight.
+const AUTO_UPDATE_CHECK_HOURS = [16, 19, 22, 23];
 
-// Overnight install window — downloaded updates auto-install at 02:00 local so
-// the gateway is never restarted during the solar window (05:00–18:00).
-const AUTO_INSTALL_HOUR = 2;
+// Overnight install window — downloaded updates auto-install at 23:00 local
+// (previously 02:00). 23:00 is after the 22:00 forecast regen completes
+// and well before the Windows maintenance window at 02:00, so the installer
+// + relaunch sequence has a clean hour of runtime to settle before any
+// OS-level reboot attempt.
+const AUTO_INSTALL_HOUR = 23;
 let appUpdateOvernightInstallTimer = null;
 
 function cancelScheduledOvernightInstall() {
@@ -1258,7 +1356,7 @@ function scheduleOvernightInstallIfNeeded() {
   const target = new Date(now);
   target.setHours(AUTO_INSTALL_HOUR, 0, 0, 0);
   if (target.getTime() <= now.getTime()) {
-    // 02:00 already passed today — schedule for tomorrow.
+    // AUTO_INSTALL_HOUR already passed today — schedule for tomorrow.
     target.setDate(target.getDate() + 1);
   }
   const delayMs = Math.max(60000, target.getTime() - now.getTime());
@@ -1701,9 +1799,42 @@ async function finalizeInstallShutdown() {
   }
 }
 
+// Best-effort classification of requestAppShutdown input into the shutdown-
+// reason taxonomy. Used only if the caller didn't already record a more
+// specific reason via recordShutdownReasonOnce().
+function _classifyShutdownForMarker(reasonString, action) {
+  const r = String(reasonString || "").toLowerCase();
+  const actionType = String(action?.type || "").toLowerCase();
+  if (actionType === "install") {
+    return { reason: SHUTDOWN_REASONS.INSTALL_UPDATE, initiator: SHUTDOWN_INITIATORS.AUTO_UPDATER };
+  }
+  if (actionType === "relaunch") {
+    return { reason: SHUTDOWN_REASONS.RELAUNCH, initiator: SHUTDOWN_INITIATORS.RUNTIME };
+  }
+  if (r.includes("session-end")) {
+    return { reason: SHUTDOWN_REASONS.SESSION_END, initiator: SHUTDOWN_INITIATORS.WINDOWS_OS };
+  }
+  if (r.includes("power") && r.includes("shutdown")) {
+    return { reason: SHUTDOWN_REASONS.POWER_SHUTDOWN, initiator: SHUTDOWN_INITIATORS.WINDOWS_OS };
+  }
+  if (r.includes("license")) {
+    return { reason: SHUTDOWN_REASONS.LICENSE_EXPIRED, initiator: SHUTDOWN_INITIATORS.RUNTIME };
+  }
+  return { reason: SHUTDOWN_REASONS.BEFORE_QUIT, initiator: SHUTDOWN_INITIATORS.USER };
+}
+
 function requestAppShutdown(options = {}) {
   const reason = String(options?.reason || "application shutdown").trim() || "application shutdown";
   mergeAppShutdownAction(options?.action);
+  // Record a shutdown-reason marker as early as possible. If Windows
+  // force-kills us mid-shutdown, the marker is still on disk for diagnostics.
+  // First-write-wins via recordShutdownReasonOnce; specific callers
+  // (session-end, powerMonitor) record their own reason before calling in.
+  const classified = _classifyShutdownForMarker(reason, options?.action);
+  recordShutdownReasonOnce(classified.reason, {
+    initiator: classified.initiator,
+    extra: { requestReason: reason, actionType: options?.action?.type || "quit" },
+  });
   if (appShutdownPromise) return appShutdownPromise;
   console.log(`[main] Shutdown requested (${reason})`);
   appShutdownPromise = stopRuntimeServices(reason)
@@ -1722,6 +1853,56 @@ app.whenReady().then(async () => {
     app.setAppUserModelId("com.inverter.dashboard");
   }
   app.setName("ADSI Inverter Dashboard");
+
+  // v2.8.14 — powerMonitor handlers for OS-level shutdown / suspend / resume.
+  // powerMonitor requires app-ready, so it's bound here rather than at top.
+  // `shutdown` is the ACPI signal fired when Windows is about to power off
+  // or reboot; it is complementary to session-end and fires a bit earlier
+  // on some Windows editions.
+  try {
+    const { powerMonitor } = require("electron");
+    if (powerMonitor && typeof powerMonitor.on === "function") {
+      powerMonitor.on("shutdown", () => {
+        try { console.warn("[main] powerMonitor.shutdown received"); } catch (_) {}
+        recordShutdownReasonOnce(SHUTDOWN_REASONS.POWER_SHUTDOWN, {
+          initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+          extra: { source: "powerMonitor" },
+        });
+        appShutdownBypassQuit = true;
+        try {
+          requestAppShutdown({
+            reason: "powerMonitor-shutdown",
+            action: { type: "quit" },
+          }).catch(() => { /* already logged */ });
+        } catch (_) {}
+      });
+      // Suspend is NOT a shutdown — but we record it so that if the machine
+      // is later power-cycled from sleep without resuming cleanly, the banner
+      // can surface "prior shutdown followed a suspend at 22:04" and the
+      // operator knows to check the UPS / power rail.
+      powerMonitor.on("suspend", () => {
+        try { console.log("[main] powerMonitor.suspend — recording advisory marker"); } catch (_) {}
+        // Use a lower-severity reason and DO NOT set _shutdownReasonRecorded
+        // so a later session-end can still overwrite with the authoritative
+        // shutdown reason. We reach around recordShutdownReasonOnce here.
+        try {
+          _shutdownReason.recordShutdownReasonSync(SHUTDOWN_REASONS.POWER_SUSPEND, {
+            initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+            extra: { advisory: true, source: "powerMonitor" },
+          });
+        } catch (_) {}
+      });
+      powerMonitor.on("resume", () => {
+        try { console.log("[main] powerMonitor.resume — machine woke from suspend"); } catch (_) {}
+      });
+      console.log("[main] powerMonitor shutdown/suspend/resume handlers registered");
+    } else {
+      console.warn("[main] powerMonitor not available — OS shutdown detection disabled");
+    }
+  } catch (err) {
+    console.warn("[main] powerMonitor wiring failed:", err?.message || err);
+  }
+
   migrateLegacyUserDataIfNeeded();
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
@@ -1772,6 +1953,44 @@ app.on("before-quit", (event) => {
 });
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+});
+
+// v2.8.14 — Windows OS shutdown / logoff detection.
+//
+// Windows sends WM_QUERYENDSESSION and WM_ENDSESSION when the user logs off,
+// the machine shuts down, or an update-triggered reboot fires. Electron
+// surfaces this through `app.on("session-end")`. Without this handler we
+// could only observe the OS-initiated shutdown indirectly as a forced
+// process kill, which is indistinguishable from a crash in the Windows
+// Event Log — the exact confusion responsible for the nightly "Error 1962"
+// reports being hard to root-cause.
+//
+// The handler is synchronous-best-effort: Windows gives roughly 5 seconds
+// before force-killing the process. We write the marker first (cheap, sync)
+// then kick off the graceful shutdown. If the shutdown completes inside the
+// budget, Windows proceeds normally. If not, Windows kills the process — but
+// the marker is already persisted, so next boot the banner can tell the
+// operator "Windows initiated a shutdown at 02:07" instead of "your app
+// crashed at 02:07".
+app.on("session-end", (details) => {
+  const ending = String(details?.reason || details || "session-end");
+  try { console.warn(`[main] Windows session-end received (${ending})`); } catch (_) {}
+  recordShutdownReasonOnce(SHUTDOWN_REASONS.SESSION_END, {
+    initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+    extra: { sessionEndReason: ending },
+  });
+  appShutdownBypassQuit = true;                // don't fight the OS
+  try {
+    // Fire shutdown but don't await — Windows' budget is short and we need
+    // to at least begin the DB flush chain. stopRuntimeServices has its own
+    // per-phase timers.
+    requestAppShutdown({
+      reason: `session-end:${ending}`,
+      action: { type: "quit" },
+    }).catch(() => { /* already logged */ });
+  } catch (err) {
+    try { console.error("[main] session-end shutdown request failed:", err?.message || err); } catch (_) {}
+  }
 });
 
 // ─── Loading Window ───────────────────────────────────────────────────────────
@@ -3117,13 +3336,13 @@ async function ensureLicenseAtStartup() {
     if (status.code === "trial_not_started") {
       const choice = await dialog.showMessageBox({
         type: "question",
-        buttons: ["Start 7-Day Trial", "Upload License", "Exit"],
+        buttons: ["Start 7-Day Trial", "Upload License", "Restore from Backup…", "Exit"],
         defaultId: 0,
-        cancelId: 2,
+        cancelId: 3,
         title: "License Required",
         message: "Welcome to ADSI Inverter Dashboard",
         detail:
-          "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
+          "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file\n• Restore from a portable .adsibak backup (DB + settings + license)",
       });
       if (choice.response === 0) {
         activateTrialNow();
@@ -3141,18 +3360,23 @@ async function ensureLicenseAtStartup() {
         }
         continue;
       }
+      if (choice.response === 2) {
+        const handled = await handleBootstrapRestoreFromLicensePrompt();
+        if (handled === "exit") return false;
+        continue;
+      }
       appendLicenseAudit("startup_blocked_exit", "User exited from initial license gate.", "warning");
       return false;
     }
 
     const choice = await dialog.showMessageBox({
       type: "warning",
-      buttons: ["Upload License", "Exit"],
+      buttons: ["Upload License", "Restore from Backup…", "Exit"],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
       title: "License Expired",
       message: "Your license/trial is not valid.",
-      detail: `${status.message}\n\nUpload a license to continue.`,
+      detail: `${status.message}\n\nUpload a license to continue, or restore from a saved .adsibak backup.`,
     });
     if (choice.response === 0) {
       const uploaded = await promptLicenseUpload(loginWin || undefined);
@@ -3165,8 +3389,88 @@ async function ensureLicenseAtStartup() {
       }
       continue;
     }
+    if (choice.response === 1) {
+      const handled = await handleBootstrapRestoreFromLicensePrompt();
+      if (handled === "exit") return false;
+      continue;
+    }
     appendLicenseAudit("startup_blocked_exit", `User exited on ${status.code || "invalid_license"}.`, "warning");
     return false;
+  }
+}
+
+/**
+ * Helper for ensureLicenseAtStartup: open the bootstrap-restore wizard,
+ * handle the outcome, and tell the caller what to do next.
+ *
+ * Returns:
+ *   "loop"     — loop back to the license prompt (cancel, error, or restore
+ *                that didn't yield a valid license)
+ *   "exit"    — caller should return false to terminate startup
+ *
+ * On a successful restore that includes the license scope, we relaunch the
+ * app so the integrity gate, storage migration, and license loader all run
+ * fresh against the newly populated %PROGRAMDATA%.  A relaunch effectively
+ * replaces this process, so we never return from the resolved promise.
+ */
+async function handleBootstrapRestoreFromLicensePrompt() {
+  let bootstrapRestore;
+  try {
+    // eslint-disable-next-line global-require
+    bootstrapRestore = require("./bootstrapRestore");
+  } catch (err) {
+    dialog.showErrorBox(
+      "Restore Unavailable",
+      `The bootstrap-restore module could not be loaded: ${err.message}`,
+    );
+    return "loop";
+  }
+  try {
+    appendLicenseAudit(
+      "bootstrap_restore_opened",
+      "Operator opened the bootstrap-restore wizard from the license prompt.",
+      "info",
+    );
+    const result = await bootstrapRestore.runBootstrapRestoreFlow(loginWin || undefined);
+    if (!result?.ok) {
+      dialog.showErrorBox("Restore Failed", result?.error || "Unknown error.");
+      appendLicenseAudit(
+        "bootstrap_restore_failed",
+        `Bootstrap restore failed: ${result?.error || "unknown error"}.`,
+        "error",
+      );
+      return "loop";
+    }
+    if (result.canceled) {
+      appendLicenseAudit("bootstrap_restore_canceled", "User canceled bootstrap restore.", "info");
+      return "loop";
+    }
+    if (result.restored) {
+      appendLicenseAudit(
+        "bootstrap_restore_completed",
+        `Bootstrap restore complete (scope=${(result.scope || []).join(",") || "all"}). Relaunching.`,
+        "info",
+      );
+      // Schedule the relaunch — `app.relaunch()` queues a fresh launch FOR
+      // when the current process exits.  The caller (ensureLicenseAtStartup)
+      // will see "exit" and return false, which triggers `app.exit(0)` in
+      // the lifecycle handler — that satisfies the queued relaunch.  No
+      // extra setTimeout is needed; doubling up just risks racing the outer
+      // app.exit and creating two relaunches.
+      try { app.relaunch(); } catch (err) {
+        console.error("[main] app.relaunch() failed:", err.message);
+      }
+      return "exit";
+    }
+    return "loop";
+  } catch (err) {
+    dialog.showErrorBox("Restore Failed", err.message || String(err));
+    appendLicenseAudit(
+      "bootstrap_restore_failed",
+      `Bootstrap restore threw: ${err.message || String(err)}`,
+      "error",
+    );
+    return "loop";
   }
 }
 

@@ -3813,32 +3813,70 @@ async function checkBootIntegrityBanner() {
     const resp = await fetch("/api/health/db-integrity", { cache: "no-store" });
     if (!resp || !resp.ok) return;
     const payload = await resp.json();
-    if (!payload || (!payload.restored && !payload.unrescuable)) return;
+    if (!payload) return;
+
+    // v2.8.14 — classify what (if anything) to show. Priority:
+    //   1. DB quarantine (unrescuable) — bright red
+    //   2. DB auto-restore (restored)  — dark red
+    //   3. Unexpected prior shutdown   — amber
+    //   4. Windows-initiated reboot    — slate-blue info banner
+    //   5. Nothing
+    const unrescuable = !!payload.unrescuable;
+    const restored = !!payload.restored;
+    const ls = payload.lastShutdown || null;
+    const unexpected = ls && ls.classification === "unexpected";
+    const windowsInitiated = ls
+      && ls.classification === "graceful"
+      && ["session-end", "power-shutdown"].includes(String(ls.reason || ""));
+
+    if (!unrescuable && !restored && !unexpected && !windowsInitiated) return;
     if (document.getElementById("adsi-db-restore-banner")) return;
+
     const banner = document.createElement("div");
     banner.id = "adsi-db-restore-banner";
     banner.setAttribute("role", "alert");
-    // Unrescuable is more severe → brighter red + bold. Restored is dark red.
-    const bg = payload.unrescuable ? "#a31717" : "#7a1f1f";
+    // Colour tier: integrity > shutdown class. Windows-initiated reboots
+    // are advisory (no data-loss risk), shown in slate-blue.
+    let bg;
+    if (unrescuable) bg = "#a31717";
+    else if (restored) bg = "#7a1f1f";
+    else if (unexpected) bg = "#a56a14";        // amber
+    else bg = "#2f4a66";                         // slate-blue
     banner.style.cssText =
       `position:sticky;top:0;z-index:2147483646;background:${bg};color:#fff;` +
       "padding:10px 16px;font-size:13px;line-height:1.4;display:flex;gap:12px;" +
       "align-items:center;justify-content:space-between;box-shadow:0 2px 6px rgba(0,0,0,.35)";
     let msg;
-    if (payload.unrescuable) {
+    if (unrescuable) {
       const when = payload.unrescuableAt ? new Date(payload.unrescuableAt).toLocaleString() : "";
       msg =
         `<strong>Database quarantined</strong> — the main DB and all backup slots were corrupt ` +
         `${when ? `at ${when} ` : ""}and a fresh empty database was created. ` +
         `Historical data is preserved under <code>adsi.db.unrescuable-*</code> for forensics. ` +
         `Perform a Cloud Restore from Settings to recover historical readings.`;
-    } else {
+    } else if (restored) {
       const slot = Number(payload.restoredFromSlot);
       const when = payload.restoredAt ? new Date(payload.restoredAt).toLocaleString() : "";
       msg =
         `<strong>Database auto-restored</strong> from backup slot ${Number.isFinite(slot) ? slot : "?"} ` +
         `${when ? `at ${when} ` : ""}after corrupt quick_check (${payload.quickCheck || "n/a"}). ` +
         `Recent readings (up to ~2 h) may show gaps and will re-fill automatically.`;
+    } else if (unexpected) {
+      const when = ls.checkedAt ? new Date(ls.checkedAt).toLocaleString() : "";
+      msg =
+        `<strong>Unexpected prior shutdown</strong> — the last run ended without any graceful ` +
+        `shutdown signal ${when ? `(detected at ${when})` : ""}. Common causes: BSOD, forced power loss, ` +
+        `or Windows killing the app past its shutdown budget. ` +
+        `Check <em>Event Viewer → System</em> for <code>Kernel-Power 41</code> and ` +
+        `<code>Application Error</code> around that time to narrow the cause.`;
+    } else {
+      // Windows-initiated reboot — informational only.
+      const when = ls.timestamp ? new Date(ls.timestamp).toLocaleString() : "";
+      const what = ls.reason === "session-end" ? "Windows session ended" : "Windows power-shutdown signal";
+      msg =
+        `<strong>Prior shutdown: ${what}</strong> ${when ? `at ${when}` : ""}. ` +
+        `This is usually Windows Update, Automatic Maintenance, or a user/scheduled reboot. ` +
+        `If it happens nightly, check Windows Update / Task Scheduler for overnight reboots.`;
     }
     banner.innerHTML =
       `<span style="flex:1">${msg}</span>` +

@@ -11951,6 +11951,11 @@ app.get("/api/system/contention", (req, res) => {
 // backup slot after a torn-write event. Read-only; no side effects.
 app.get("/api/health/db-integrity", (req, res) => {
   const snap = startupIntegrityResult || {};
+  // v2.8.14 — surface the prior-run shutdown classification so the renderer
+  // banner can distinguish Windows-initiated reboots (session-end /
+  // powerMonitor) from unexpected crashes (BSOD / power loss / hard kill).
+  const ls = snap.lastShutdown && typeof snap.lastShutdown === "object" ? snap.lastShutdown : null;
+  const prior = ls?.priorReason && typeof ls.priorReason === "object" ? ls.priorReason : null;
   res.json({
     ok: true,
     mainDb: snap.mainDb || "unknown",
@@ -11969,6 +11974,24 @@ app.get("/api/health/db-integrity", (req, res) => {
           ok: c.ok,
         }))
       : [],
+    lastShutdown: ls
+      ? {
+          classification: String(ls.classification || "unknown"),
+          sentinelWasPresent: !!ls.sentinelWasPresent,
+          checkedAt: Number(ls.checkedAt || 0),
+          reason: prior ? String(prior.reason || "") : "",
+          initiator: prior ? String(prior.initiator || "") : "",
+          timestamp: prior ? Number(prior.timestamp || 0) : 0,
+          isoTime: prior ? String(prior.isoTime || "") : "",
+          extra: prior && typeof prior === "object"
+            ? Object.fromEntries(
+                Object.entries(prior).filter(
+                  ([k]) => !["reason", "initiator", "timestamp", "isoTime", "pid", "platform", "nodeVersion", "electronVersion", "appVersion"].includes(k),
+                ),
+              )
+            : null,
+        }
+      : null,
   });
 });
 
@@ -16823,13 +16846,20 @@ app.post("/api/export/forecast-actual", async (req, res) => {
   }
 });
 
-cron.schedule("30 3 * * *", pruneOldData);
-// 03:30 — avoids overlap with 02:xx alert/report crons and 04:30 forecast cron
+// v2.8.14 — moved from 03:30 to 21:30. The 03:30 slot sat inside the
+// Windows Automatic Maintenance + Windows Update install window. VACUUM
+// is the heaviest disk I/O event of the night (full DB file rewrite +
+// exclusive lock), so running it alongside Windows' own disk/update
+// activity was the single largest overnight I/O collision on the gateway.
+// 21:30 runs after the 21:00 cloud backup (typically <30s) and well
+// before the 22:00 forecast cron, leaving a clean window for the VACUUM
+// to complete before other heavy tasks resume.
+cron.schedule("30 21 * * *", pruneOldData);
 
 // Prune solcast_snapshot_history rows older than 90 days (v2.8+).
-// Runs at 03:35, right after the main data prune, so any long-running
-// VACUUM from pruneOldData has released its write lock.
-cron.schedule("35 3 * * *", () => {
+// v2.8.14 — moved from 03:35 to 21:35, keeping the 5-minute offset from
+// pruneOldData so any long-running VACUUM has released its write lock.
+cron.schedule("35 21 * * *", () => {
   try {
     const deleted = pruneSnapshotHistory(90);
     if (deleted > 0) {

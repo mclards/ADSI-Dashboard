@@ -372,7 +372,40 @@ const startupIntegrityResult = {
   quickCheck: "",              // raw PRAGMA quick_check(1) result
   backupCandidates: [],        // [{slot, path, size, mtimeMs, ok}]
   checkedAt: 0,
+  // v2.8.14 nightly-reboot diagnostics. Populated from the ADSI_LAST_SHUTDOWN_JSON
+  // env var written by electron/main.js via electron/shutdownReason.js. When the
+  // env bridge isn't available (e.g. running the server standalone in tests)
+  // we fall back to reading the archived prev-marker file directly.
+  lastShutdown: null,          // { classification, priorReason, sentinelWasPresent, checkedAt }
 };
+
+(function _loadLastShutdownSnapshot() {
+  const raw = String(process.env.ADSI_LAST_SHUTDOWN_JSON || "").trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        startupIntegrityResult.lastShutdown = parsed;
+        return;
+      }
+    } catch (_) { /* fall through to file read */ }
+  }
+  // Fallback: read prev-marker file directly. Kept simple — if anything
+  // throws, we leave lastShutdown as null and the banner stays silent.
+  try {
+    const programData = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
+    const prevPath = path.join(programData, "InverterDashboard", "lifecycle", "shutdown-reason.prev.json");
+    if (fs.existsSync(prevPath)) {
+      const prev = JSON.parse(fs.readFileSync(prevPath, "utf8"));
+      startupIntegrityResult.lastShutdown = {
+        classification: prev?.reason === "unexpected-shutdown" ? "unexpected" : "graceful",
+        priorReason: prev,
+        sentinelWasPresent: true,
+        checkedAt: Number(prev?.timestamp || 0),
+      };
+    }
+  } catch (_) { /* leave lastShutdown null */ }
+})();
 
 function _sqliteFileLooksValidSync(targetPath) {
   try {
