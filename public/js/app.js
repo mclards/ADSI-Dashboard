@@ -4722,10 +4722,30 @@ function setActiveSettingsSection(sectionId, persist = true) {
 
   // v2.8.14 R1/R4: lazy-load backup health + schedule when the Local Backup
   // section becomes visible. Avoids fetching when the user is on another tab.
+  // Also enforce gateway-only gating: in remote mode, swap the controls for
+  // an explanatory notice instead of letting the operator interact with a
+  // feature that would silently produce a misleading backup.
   if (activeId === "localBackupSection") {
-    try { loadBackupHealth(); } catch (_) {}
-    try { loadLocalBackupSchedule(); } catch (_) {}
+    applyLocalBackupModeVisibility();
+    if (!isLocalBackupRemoteGated()) {
+      try { loadBackupHealth(); } catch (_) {}
+      try { loadLocalBackupSchedule(); } catch (_) {}
+    }
   }
+}
+
+// v2.8.14: returns true when local backup must be hidden (remote mode).
+function isLocalBackupRemoteGated() {
+  const mode = String(State?.settings?.operationMode || "gateway").trim().toLowerCase();
+  return mode === "remote";
+}
+
+function applyLocalBackupModeVisibility() {
+  const notice = $("localBackupRemoteModeNotice");
+  const controls = $("localBackupControls");
+  const remote = isLocalBackupRemoteGated();
+  if (notice) notice.hidden = !remote;
+  if (controls) controls.hidden = remote;
 }
 
 function initSettingsSectionNav() {
@@ -12344,6 +12364,10 @@ function handleWS(msg) {
           State.settings.operationMode,
           "configChanged",
         );
+        // v2.8.14: re-evaluate the Local Backup section's visibility whenever
+        // operation mode changes at runtime (e.g. operator flipped to remote
+        // viewer in Settings). Safe no-op if the section isn't currently open.
+        try { applyLocalBackupModeVisibility(); } catch (_) {}
         buildInverterGrid();
         scheduleInverterCardsUpdate(true);
       })

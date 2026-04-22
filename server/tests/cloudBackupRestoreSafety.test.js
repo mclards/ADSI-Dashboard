@@ -177,8 +177,10 @@ async function testAutoRollback() {
 async function testRecoveryLogIncluded() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "adsi-r6-"));
   try {
-    const { svc, dataDir } = buildService({ root, dbBackupBytes: "db-bytes" });
-    const recoveryLogPath = path.join(dataDir, "logs", "recovery.log");
+    const { svc, programDataDir } = buildService({ root, dbBackupBytes: "db-bytes" });
+    // recovery.log lives under programDataDir/logs (electron/recoveryDialog.js
+    // writes there). The backup must read from that canonical path.
+    const recoveryLogPath = path.join(programDataDir, "logs", "recovery.log");
     writeFile(recoveryLogPath, "boot integrity ok\nrestore probe ok\n");
 
     const created = await svc.createLocalBackup({
@@ -201,7 +203,78 @@ async function testRecoveryLogIncluded() {
       "R6: manifest should contain a checksum for logs/recovery.log",
     );
 
-    console.log("  • R6 recovery.log included in backup: PASS");
+    console.log("  • R6 recovery.log included in backup (from programDataDir): PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testRestorePathsRoundTrip() {
+  // v2.8.14 path-fix regression: when restoring, files must end up where the
+  // app actually reads from. recovery.log → programDataDir/logs (not dataDir).
+  // forecast_dayahead.log → programDataDir/logs. Other logs → dataDir/logs.
+  // Database → dataDir/adsi.db. Forecast/history/weather → programDataDir/...
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "adsi-paths-"));
+  try {
+    const { svc, dataDir, programDataDir } = buildService({ root, dbBackupBytes: "fresh-db" });
+
+    // Plant source files at their canonical pre-backup locations.
+    writeFile(path.join(programDataDir, "logs", "recovery.log"), "RECOVERY-ENTRY");
+    writeFile(path.join(programDataDir, "logs", "forecast_dayahead.log"), "FORECAST-LOG");
+    writeFile(path.join(dataDir, "logs", "dashboard.log"), "DASHBOARD-LOG");
+
+    // Create the backup (must capture all three files).
+    const created = await svc.createLocalBackup({
+      scope: ["database", "logs"],
+      tag: "paths-roundtrip",
+    });
+    assert.ok(created.manifest.checksums["logs/recovery.log"], "recovery.log captured");
+    assert.ok(created.manifest.checksums["logs/forecast_dayahead.log"], "forecast log captured");
+    assert.ok(created.manifest.checksums["logs/dashboard.log"], "dashboard log captured");
+
+    // Wipe destinations so we can prove the restore re-creates them.
+    fs.rmSync(path.join(programDataDir, "logs"), { recursive: true, force: true });
+    fs.rmSync(path.join(dataDir, "logs"), { recursive: true, force: true });
+    fs.unlinkSync(path.join(dataDir, "adsi.db"));
+
+    svc._setProgress({ status: "done", pct: 100, message: "ready" });
+    await svc.restoreBackup(created.id, { skipSafetyBackup: true });
+
+    // Database must land in dataDir/adsi.db.
+    assert.equal(
+      fs.readFileSync(path.join(dataDir, "adsi.db"), "utf8"),
+      "fresh-db",
+      "database must restore to dataDir/adsi.db",
+    );
+    // recovery.log must land under programDataDir/logs (NOT dataDir/logs).
+    assert.ok(
+      fs.existsSync(path.join(programDataDir, "logs", "recovery.log")),
+      "recovery.log must restore to programDataDir/logs (where electron/recoveryDialog reads it)",
+    );
+    assert.ok(
+      !fs.existsSync(path.join(dataDir, "logs", "recovery.log")),
+      "recovery.log must NOT be placed under dataDir/logs",
+    );
+    // forecast_dayahead.log similarly under programDataDir/logs.
+    assert.ok(
+      fs.existsSync(path.join(programDataDir, "logs", "forecast_dayahead.log")),
+      "forecast_dayahead.log must restore to programDataDir/logs",
+    );
+    assert.ok(
+      !fs.existsSync(path.join(dataDir, "logs", "forecast_dayahead.log")),
+      "forecast_dayahead.log must NOT be placed under dataDir/logs",
+    );
+    // Other logs (dashboard.log) stay under dataDir/logs.
+    assert.ok(
+      fs.existsSync(path.join(dataDir, "logs", "dashboard.log")),
+      "dashboard.log must restore to dataDir/logs",
+    );
+    assert.ok(
+      !fs.existsSync(path.join(programDataDir, "logs", "dashboard.log")),
+      "dashboard.log must NOT be placed under programDataDir/logs",
+    );
+
+    console.log("  • Restore destination paths round-trip correctly: PASS");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -262,6 +335,7 @@ async function run() {
   await testAutoRollback();
   await testRecoveryLogIncluded();
   await testManifestRowCounts();
+  await testRestorePathsRoundTrip();
   console.log("cloudBackupRestoreSafety.test.js: PASS");
 }
 

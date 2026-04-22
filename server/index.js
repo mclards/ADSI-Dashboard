@@ -17199,10 +17199,39 @@ const httpServer = app.listen(PORT, () => {
 
 // â"€â"€â"€ Cloud Backup API Routes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+/**
+ * v2.8.14: Local backup is gateway-only.
+ * In remote mode the dashboard is a viewer/replica — the local adsi.db is an
+ * in-memory shadow of the gateway's data, the archive folder is empty, and
+ * ipconfig/license/auth tokens belong to the upstream gateway. Backing up the
+ * remote install would silently produce a misleading .adsibak with stale or
+ * absent data. Refuse the operation up-front and tell the operator where
+ * backups DO need to run (on the gateway PC).
+ *
+ * /api/backup/health stays accessible because the renderer reads it on every
+ * page load to decide what to show; in remote mode it just reports the
+ * disabled-by-mode state instead.
+ */
+function _refuseBackupInRemoteMode(res) {
+  return res.status(409).json({
+    ok: false,
+    error: "Local backup is only available in Gateway operation mode. " +
+           "Run this from the gateway PC; the remote viewer is a replica and " +
+           "cannot produce a meaningful backup.",
+    code: "REMOTE_MODE_DISABLED",
+  });
+}
+
 /** GET /api/backup/health — unified health snapshot for all backup paths */
 app.get("/api/backup/health", (req, res) => {
   try {
-    res.json({ ok: true, checked: Date.now(), health: _backupHealth.getSnapshot() });
+    res.json({
+      ok: true,
+      checked: Date.now(),
+      mode: readOperationMode(),
+      gatewayOnly: true,
+      health: _backupHealth.getSnapshot(),
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -17364,6 +17393,7 @@ app.get("/api/backup/history", (req, res) => {
 
 /** POST /api/backup/now  â€" run backup immediately */
 app.post("/api/backup/now", async (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const { scope, provider, tag } = req.body || {};
   try {
     const q = enqueueCloudOp("backupNow", async () => {
@@ -17393,6 +17423,7 @@ app.get("/api/backup/cloud/:provider", async (req, res) => {
 
 /** POST /api/backup/pull  â€" pull backup from cloud */
 app.post("/api/backup/pull", async (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const { provider, remoteId, remoteName } = req.body || {};
   if (!provider || !remoteId || !remoteName) {
     return res.status(400).json({ ok: false, error: "Missing provider, remoteId, or remoteName" });
@@ -17414,6 +17445,7 @@ app.post("/api/backup/pull", async (req, res) => {
 
 /** POST /api/backup/restore/:id  â€" restore a local backup */
 app.post("/api/backup/restore/:id", async (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const backupId = decodeURIComponent(req.params.id);
   const { skipSafetyBackup } = req.body || {};
   try {
@@ -17464,6 +17496,7 @@ app.get("/api/backup/local-settings", (req, res) => {
 
 /** POST /api/backup/local-settings -- save scheduled .adsibak config (R1) */
 app.post("/api/backup/local-settings", (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   try {
     const saved = _cloudBackup.saveLocalBackupSettings(req.body || {});
     res.json({ ok: true, settings: saved });
@@ -17474,6 +17507,7 @@ app.post("/api/backup/local-settings", (req, res) => {
 
 /** POST /api/backup/run-scheduled-portable -- manually trigger scheduled .adsibak */
 app.post("/api/backup/run-scheduled-portable", (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   try {
     const cfg = _cloudBackup.getLocalBackupSettings();
     // Skip enqueueCloudOp here — runScheduledPortableBackup wraps its work in
@@ -17491,6 +17525,7 @@ app.post("/api/backup/run-scheduled-portable", (req, res) => {
 
 /** POST /api/backup/create-portable -- export full system backup to .adsibak */
 app.post("/api/backup/create-portable", (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const { destPath } = req.body || {};
   const err = _validateAdsibakPath(destPath, false);
   if (err) return res.status(400).json({ ok: false, error: err });
@@ -17519,6 +17554,7 @@ app.post("/api/backup/validate-portable", async (req, res) => {
 
 /** POST /api/backup/import-portable -- extract and register .adsibak */
 app.post("/api/backup/import-portable", (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const { srcPath } = req.body || {};
   const err = _validateAdsibakPath(srcPath, true);
   if (err) return res.status(400).json({ ok: false, error: err });
@@ -17534,6 +17570,7 @@ app.post("/api/backup/import-portable", (req, res) => {
 
 /** POST /api/backup/restore-portable/:id -- full restore including archive/license/auth */
 app.post("/api/backup/restore-portable/:id", (req, res) => {
+  if (isRemoteMode()) return _refuseBackupInRemoteMode(res);
   const backupId = decodeURIComponent(req.params.id);
   const { skipSafetyBackup } = req.body || {};
   try {
@@ -17704,6 +17741,13 @@ setInterval(() => {
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
 let _backupSlot = 0;
 async function runPeriodicBackup() {
+  // v2.8.14: skip Tier 1 in remote mode. The local DB is an in-memory shadow
+  // of the gateway's data (see "Viewer model" notes in this file); copying it
+  // to backups/adsi_backup_*.db would be misleading — operators might think
+  // they have a recoverable snapshot when they don't.
+  if (isRemoteMode()) {
+    return;
+  }
   try { fs.mkdirSync(BACKUP_DIR, { recursive: true }); } catch (_) {}
   const dest = path.join(BACKUP_DIR, `adsi_backup_${_backupSlot}.db`);
   _backupSlot = (_backupSlot + 1) % 2;

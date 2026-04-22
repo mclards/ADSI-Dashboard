@@ -198,6 +198,20 @@ class CloudBackupService {
     }
   }
 
+  // ─── Mode gate (v2.8.14) ──────────────────────────────────────────────────
+  // Local backups only make sense on the gateway. In remote mode the local DB
+  // is an in-memory replica of the gateway's data, so any backup would silently
+  // capture stale or absent state. Cron callbacks check this before doing work.
+  _isRemoteMode() {
+    try {
+      const v = String(this.getSetting("operationMode", "gateway") || "gateway")
+        .trim().toLowerCase();
+      return v === "remote";
+    } catch {
+      return false;
+    }
+  }
+
   // ─── Settings ─────────────────────────────────────────────────────────────
 
   getDefaultSettings() {
@@ -640,17 +654,30 @@ class CloudBackupService {
       // be dropped by the slice(-50) above. The recovery log is the primary
       // diagnostic trail when a power-loss event triggers the integrity gate;
       // losing it on a portable migration defeats post-mortem analysis.
-      const recoveryLogSrc = path.join(this.dataDir, "logs", "recovery.log");
-      if (fs.existsSync(recoveryLogSrc) && !checksums["logs/recovery.log"]) {
-        const logDest = path.join(dir, "logs");
-        fs.mkdirSync(logDest, { recursive: true });
-        const dst = path.join(logDest, "recovery.log");
-        try {
-          fs.copyFileSync(recoveryLogSrc, dst);
-          checksums["logs/recovery.log"] = sha256File(dst);
-          files.push({ name: "logs/recovery.log", size: fs.statSync(dst).size });
-        } catch (err) {
-          console.warn("[CloudBackup] recovery.log copy failed:", err.message);
+      //
+      // Path note: recovery.log is written by electron/recoveryDialog.js to
+      // <programDataDir>/logs/recovery.log (i.e. %PROGRAMDATA%\InverterDashboard
+      // \logs\recovery.log), NOT under dataDir/logs (which is …\InverterDashboard
+      // \db\logs). Check programDataDir first, fall back to dataDir for any
+      // legacy installs that placed it under the DB tree.
+      const recoveryLogCandidates = [];
+      if (this.programDataDir) {
+        recoveryLogCandidates.push(path.join(this.programDataDir, "logs", "recovery.log"));
+      }
+      recoveryLogCandidates.push(path.join(this.dataDir, "logs", "recovery.log"));
+      for (const recoveryLogSrc of recoveryLogCandidates) {
+        if (fs.existsSync(recoveryLogSrc) && !checksums["logs/recovery.log"]) {
+          const logDest = path.join(dir, "logs");
+          fs.mkdirSync(logDest, { recursive: true });
+          const dst = path.join(logDest, "recovery.log");
+          try {
+            fs.copyFileSync(recoveryLogSrc, dst);
+            checksums["logs/recovery.log"] = sha256File(dst);
+            files.push({ name: "logs/recovery.log", size: fs.statSync(dst).size });
+            break;
+          } catch (err) {
+            console.warn("[CloudBackup] recovery.log copy failed:", err.message);
+          }
         }
       }
     }
@@ -1320,22 +1347,26 @@ class CloudBackupService {
         if (fs.existsSync(srcLogsDir)) {
           const dataLogsDir = path.join(this.dataDir, "logs");
           fs.mkdirSync(dataLogsDir, { recursive: true });
+          // v2.8.14 path-fix: route logs to their canonical destinations.
+          // forecast_dayahead.log → programDataDir/logs (handled below).
+          // recovery.log         → programDataDir/logs (electron writes there).
+          // everything else      → dataDir/logs (server-side rolling logs).
+          const SPECIAL_PROGRAMDATA_LOGS = new Set(["forecast_dayahead.log", "recovery.log"]);
           for (const entry of fs.readdirSync(srcLogsDir, { withFileTypes: true })) {
             if (!entry.isFile()) continue;
-            if (entry.name === "forecast_dayahead.log") continue;
+            if (SPECIAL_PROGRAMDATA_LOGS.has(entry.name)) continue;
             const src = path.join(srcLogsDir, entry.name);
             const dst = path.join(dataLogsDir, entry.name);
             fs.copyFileSync(src, dst);
           }
           if (this.programDataDir) {
-            const srcForecastLog = path.join(srcLogsDir, "forecast_dayahead.log");
-            if (fs.existsSync(srcForecastLog)) {
-              const forecastLogsDir = path.join(this.programDataDir, "logs");
-              fs.mkdirSync(forecastLogsDir, { recursive: true });
-              fs.copyFileSync(
-                srcForecastLog,
-                path.join(forecastLogsDir, "forecast_dayahead.log"),
-              );
+            const programDataLogsDir = path.join(this.programDataDir, "logs");
+            fs.mkdirSync(programDataLogsDir, { recursive: true });
+            for (const fname of SPECIAL_PROGRAMDATA_LOGS) {
+              const src = path.join(srcLogsDir, fname);
+              if (fs.existsSync(src)) {
+                fs.copyFileSync(src, path.join(programDataLogsDir, fname));
+              }
             }
           }
         }
@@ -1591,6 +1622,10 @@ class CloudBackupService {
     if (!cronExpr) return;
 
     this._cronJob = cron.schedule(cronExpr, async () => {
+      if (this._isRemoteMode()) {
+        console.log("[CloudBackup] Scheduled cloud backup skipped (remote mode).");
+        return;
+      }
       console.log("[CloudBackup] Scheduled backup triggered:", schedule);
       try {
         await this.backupNow({ tag: `scheduled-${schedule}` });
@@ -1680,6 +1715,10 @@ class CloudBackupService {
     // queue a runaway backlog if a single run takes longer than the interval.
     let _running = false;
     this._localCronJob = cron.schedule(cronExpr, async () => {
+      if (this._isRemoteMode()) {
+        console.log("[CloudBackup] Scheduled .adsibak skipped (remote mode).");
+        return;
+      }
       if (_running) {
         console.warn("[CloudBackup] Scheduled .adsibak skipped: previous run still active.");
         return;
