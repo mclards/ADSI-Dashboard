@@ -18076,6 +18076,29 @@ async function runLocalBackupNow() {
   }
 }
 
+// v2.8.14: open the OS folder picker for the destination input. Falls back to
+// a manual prompt when running outside Electron (e.g. browser-only dev mode).
+async function pickLocalBackupDestination() {
+  const inp = $("lbsDestination");
+  if (!inp) return;
+  const current = (inp.value || "").trim();
+  try {
+    if (window.electronAPI?.pickFolder) {
+      const folder = await window.electronAPI.pickFolder(current);
+      if (folder && typeof folder === "string") {
+        inp.value = folder;
+        showToast("Destination updated. Click Save Schedule to apply.", "info", 1800);
+      }
+    } else {
+      const v = window.prompt("Destination folder for scheduled .adsibak:", current);
+      if (v && v.trim()) inp.value = v.trim();
+    }
+  } catch (err) {
+    console.warn("[LocalBackupSchedule] folder pick failed:", err.message);
+    showToast(`Folder picker failed: ${err.message}`, "error");
+  }
+}
+
 async function lbExport() {
   let destPath = null;
   if (window.electronAPI?.saveAdsibak) {
@@ -18627,6 +18650,7 @@ function bindEventHandlers() {
   });
   $("btnLbsSave")?.addEventListener("click", saveLocalBackupSchedule);
   $("btnLbsRunNow")?.addEventListener("click", runLocalBackupNow);
+  $("btnLbsBrowse")?.addEventListener("click", pickLocalBackupDestination);
 
   // Bulk command form (static-param buttons built in buildBulkCommandTpl)
   document.addEventListener("click", (e) => {

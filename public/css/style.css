@@ -12521,10 +12521,26 @@ body.mode-transition-active {
   height: 30px;
   padding: 0 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: inherit;
+  /* Use the theme-managed control background + text color so the inputs read
+     correctly in dark / light / classic / midnight. Falling back to a solid
+     surface (not translucent white) avoids the "invisible on light" bug. */
+  background: var(--input-bg, var(--surface));
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.4));
+  color: var(--text);
   font: inherit;
+}
+
+.cb-schedule-input:focus {
+  outline: none;
+  border-color: var(--accent, #4a90e2);
+}
+
+/* Native <select> popup options inherit the OS default color in Chromium when
+   the page sets a custom <select> color. Set the option foreground/background
+   explicitly so the popup matches the dashboard theme on all four themes. */
+.cb-schedule-input option {
+  background: var(--surface, #1a1a1a);
+  color: var(--text, #f0f0f0);
 }
 
 .cb-schedule-input-narrow {
@@ -12534,7 +12550,28 @@ body.mode-transition-active {
 
 .cb-schedule-suffix {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--text2, var(--text));
+  opacity: 0.75;
+}
+
+.cb-schedule-browse-btn {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: var(--surface2, var(--surface));
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.4));
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cb-schedule-browse-btn:hover {
+  border-color: var(--accent, #4a90e2);
+  background: var(--surface, var(--bg2));
 }
 
 /* Settings Rehab: focused section flow */

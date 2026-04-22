@@ -2042,7 +2042,10 @@
                 </label>
                 <label class="cb-schedule-row" for="lbsDestination">
                   <span class="cb-schedule-label">Destination folder</span>
-                  <input type="text" id="lbsDestination" class="cb-schedule-input" placeholder="C:\path\to\backup\folder" />
+                  <input type="text" id="lbsDestination" class="cb-schedule-input" placeholder="C:\path\to\backup\folder" readonly />
+                  <button id="btnLbsBrowse" class="cb-schedule-browse-btn" type="button" title="Browse for a folder to save scheduled .adsibak backups.">
+                    <span class="mdi mdi-folder-open-outline" aria-hidden="true"></span><span>Browse…</span>
+                  </button>
                 </label>
                 <label class="cb-schedule-row" for="lbsRetention">
                   <span class="cb-schedule-label">Keep last</span>
