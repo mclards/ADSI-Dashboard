@@ -85,6 +85,7 @@ const {
   startKeepAlive,
   getStats: getWsStats,
 } = require("./ws");
+const { BackupHealthRegistry } = require("./backupHealthRegistry");
 const poller = require("./poller");
 const { getEnergyBacklogPressure } = require("./poller");
 const exporter = require("./exporter");
@@ -641,6 +642,15 @@ const _onedrive    = new OneDriveProvider(_tokenStore);
 const _gdrive      = new GDriveProvider(_tokenStore);
 let _cloudBackup = null;
 const _s3          = new S3CompatibleProvider(_tokenStore, () => (_cloudBackup ? _cloudBackup.getCloudSettings() : {}));
+
+// v2.8.14: persistent health tracker for all backup paths (Tier 1 / Tier 3 /
+// scheduled .adsibak / manual portable). Persists to backupHealth.json under
+// DATA_DIR; broadcasts live updates over WS for the admin panel.
+const _backupHealth = new BackupHealthRegistry({
+  stateFilePath: path.join(DATA_DIR, "backupHealth.json"),
+  broadcast: broadcastUpdate,
+});
+
 _cloudBackup = new CloudBackupService({
   dataDir:     DATA_DIR,
   db,
@@ -653,6 +663,7 @@ _cloudBackup = new CloudBackupService({
   poller,
   ipConfigPath: path.join(DATA_DIR, "ipconfig.json"),
   programDataDir: PROGRAMDATA_ROOT,
+  healthRegistry: _backupHealth,
 });
 // Apply saved schedule on startup (after cron module is ready).
 setTimeout(() => {
@@ -17188,6 +17199,15 @@ const httpServer = app.listen(PORT, () => {
 
 // â"€â"€â"€ Cloud Backup API Routes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+/** GET /api/backup/health — unified health snapshot for all backup paths */
+app.get("/api/backup/health", (req, res) => {
+  try {
+    res.json({ ok: true, checked: Date.now(), health: _backupHealth.getSnapshot() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /** GET /api/backup/settings  â€" return cloud backup settings */
 app.get("/api/backup/settings", (req, res) => {
   try {
@@ -17433,6 +17453,42 @@ function _validateAdsibakPath(p, mustExist) {
   return null;
 }
 
+/** GET /api/backup/local-settings -- scheduled .adsibak config (R1) */
+app.get("/api/backup/local-settings", (req, res) => {
+  try {
+    res.json({ ok: true, settings: _cloudBackup.getLocalBackupSettings() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/local-settings -- save scheduled .adsibak config (R1) */
+app.post("/api/backup/local-settings", (req, res) => {
+  try {
+    const saved = _cloudBackup.saveLocalBackupSettings(req.body || {});
+    res.json({ ok: true, settings: saved });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** POST /api/backup/run-scheduled-portable -- manually trigger scheduled .adsibak */
+app.post("/api/backup/run-scheduled-portable", (req, res) => {
+  try {
+    const cfg = _cloudBackup.getLocalBackupSettings();
+    // Skip enqueueCloudOp here — runScheduledPortableBackup wraps its work in
+    // _withBackupMutex internally. Going through the queue too would
+    // double-serialize identically to how cron triggers it (which also
+    // bypass enqueueCloudOp). Stay consistent with the cron path.
+    _cloudBackup.runScheduledPortableBackup(cfg.destination, cfg.retention).catch((err) => {
+      console.error("[backup] manual scheduled-portable run failed:", err.message);
+    });
+    res.json({ ok: true, status: "started", destination: cfg.destination });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /** POST /api/backup/create-portable -- export full system backup to .adsibak */
 app.post("/api/backup/create-portable", (req, res) => {
   const { destPath } = req.body || {};
@@ -17651,15 +17707,35 @@ async function runPeriodicBackup() {
   try { fs.mkdirSync(BACKUP_DIR, { recursive: true }); } catch (_) {}
   const dest = path.join(BACKUP_DIR, `adsi_backup_${_backupSlot}.db`);
   _backupSlot = (_backupSlot + 1) % 2;
+  const startedAt = Date.now();
   try {
     await db.backup(dest);
+    let sizeBytes = null;
+    try { sizeBytes = fs.statSync(dest).size; } catch (_) {}
     console.log("[DB] Backup written:", dest);
+    _backupHealth.recordAttempt("tier1", true, {
+      destination: dest,
+      sizeBytes,
+      durationMs: Date.now() - startedAt,
+    });
   } catch (err) {
     console.error("[DB] Backup failed:", err.message);
+    _backupHealth.recordAttempt("tier1", false, {
+      destination: dest,
+      error: err.message,
+      durationMs: Date.now() - startedAt,
+    });
   }
 }
 setInterval(runPeriodicBackup, 2 * 60 * 60 * 1000).unref();
 setTimeout(runPeriodicBackup, 60 * 1000).unref(); // startup backup after 60 s
+// Tier 1 fires every 2h. Surface the next-scheduled time in the health snapshot
+// so the admin panel can show "Next at HH:mm".
+function _refreshTier1NextScheduled() {
+  _backupHealth.setNextScheduled("tier1", Date.now() + 2 * 60 * 60 * 1000);
+}
+setTimeout(_refreshTier1NextScheduled, 60 * 1000 + 500).unref();
+setInterval(_refreshTier1NextScheduled, 2 * 60 * 60 * 1000).unref();
 
 module.exports = { shutdownEmbedded };
 

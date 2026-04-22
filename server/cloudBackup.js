@@ -127,6 +127,10 @@ class CloudBackupService {
     this.poller = deps.poller || null;
     this.ipConfigPath = deps.ipConfigPath || null;
     this.programDataDir = deps.programDataDir || null;
+    // v2.8.14: optional persistent health tracker. When present, every backup
+    // attempt (Tier 3 cloud, manual/scheduled .adsibak, restore) records its
+    // outcome so the admin panel can render "Last success" + alert badges.
+    this.healthRegistry = deps.healthRegistry || null;
 
     // v2.8.9 fix (2026-04-15): honour an explicit `backupDir` / `historyFile`
     // override if the caller supplies one.  Previously `resolvedBackupDir()`
@@ -144,6 +148,9 @@ class CloudBackupService {
 
     this.history = this._loadHistory();
     this._cronJob = null;
+    // v2.8.14 R1: separate cron job for the scheduled portable .adsibak export
+    // so it can run independently of the cloud upload schedule.
+    this._localCronJob = null;
     this._retryQueue = [];
     this._retryTimer = null;
 
@@ -628,9 +635,40 @@ class CloudBackupService {
         checksums["logs/forecast_dayahead.log"] = sha256File(dst);
         files.push({ name: "logs/forecast_dayahead.log", size: fs.statSync(dst).size });
       }
+
+      // v2.8.14 R6: explicitly include recovery.log even if it would otherwise
+      // be dropped by the slice(-50) above. The recovery log is the primary
+      // diagnostic trail when a power-loss event triggers the integrity gate;
+      // losing it on a portable migration defeats post-mortem analysis.
+      const recoveryLogSrc = path.join(this.dataDir, "logs", "recovery.log");
+      if (fs.existsSync(recoveryLogSrc) && !checksums["logs/recovery.log"]) {
+        const logDest = path.join(dir, "logs");
+        fs.mkdirSync(logDest, { recursive: true });
+        const dst = path.join(logDest, "recovery.log");
+        try {
+          fs.copyFileSync(recoveryLogSrc, dst);
+          checksums["logs/recovery.log"] = sha256File(dst);
+          files.push({ name: "logs/recovery.log", size: fs.statSync(dst).size });
+        } catch (err) {
+          console.warn("[CloudBackup] recovery.log copy failed:", err.message);
+        }
+      }
     }
 
     const totalSize = files.reduce((s, f) => s + f.size, 0);
+
+    // v2.8.14 R3: capture row counts from key tables so the restore preview
+    // modal can show "N readings will be restored" before the destructive copy.
+    // Best-effort — never fails the backup; absence of `rowCounts` is handled
+    // gracefully by older clients reading newer backups (and vice versa).
+    let rowCounts = null;
+    if (scope.includes("database")) {
+      try {
+        rowCounts = this._collectRowCounts();
+      } catch (err) {
+        console.warn("[CloudBackup] row count collection failed:", err.message);
+      }
+    }
 
     const manifest = {
       id,
@@ -642,6 +680,7 @@ class CloudBackupService {
       checksums,
       files,
       totalSize,
+      rowCounts,
       cloud: {},
     };
 
@@ -834,6 +873,7 @@ class CloudBackupService {
       finishedAt: null,
     });
 
+    const startedAt = Date.now();
     try {
       const settings = this.getCloudSettings();
       const scope = opts.scope || settings.scope || ["database", "config"];
@@ -853,6 +893,11 @@ class CloudBackupService {
           message: `Backup complete. Uploaded to: ${uploadProviders.join(", ")}`,
           finishedAt: Date.now(),
         });
+        this.healthRegistry?.recordAttempt("tier3", true, {
+          destination: uploadProviders.join(","),
+          sizeBytes: manifest?.totalSize || null,
+          durationMs: Date.now() - startedAt,
+        });
         return { id, manifest, uploaded: result.uploaded, errors: result.errors };
       } else {
         this._setProgress({
@@ -860,6 +905,11 @@ class CloudBackupService {
           pct: 100,
           message: "Local backup created. No cloud providers connected.",
           finishedAt: Date.now(),
+        });
+        this.healthRegistry?.recordAttempt("tier3", true, {
+          destination: "local-only",
+          sizeBytes: manifest?.totalSize || null,
+          durationMs: Date.now() - startedAt,
         });
         return { id, manifest, uploaded: 0, errors: [] };
       }
@@ -870,6 +920,10 @@ class CloudBackupService {
         message: err.message,
         error: err.message,
         finishedAt: Date.now(),
+      });
+      this.healthRegistry?.recordAttempt("tier3", false, {
+        error: err.message,
+        durationMs: Date.now() - startedAt,
       });
       throw err;
     }
@@ -1118,6 +1172,10 @@ class CloudBackupService {
       finishedAt: null,
     });
 
+    // v2.8.14 R5: track the pre-restore safety backup id so we can roll back
+    // automatically if any later step throws.
+    let safetyBackupId = null;
+
     try {
       this._checkCompatibility(manifest);
 
@@ -1131,9 +1189,18 @@ class CloudBackupService {
       if (!opts.skipSafetyBackup) {
         this._setProgress({ pct: 15, message: "Creating safety backup before restore..." });
         try {
-          await this.createLocalBackup({ scope: ["database", "config"], tag: "pre-restore-safety" });
+          const safety = await this.createLocalBackup({
+            scope: ["database", "config"],
+            tag: "pre-restore-safety",
+          });
+          safetyBackupId = safety?.id || null;
         } catch (err) {
-          console.warn("[CloudBackup] Safety backup failed (continuing):", err.message);
+          // v2.8.14 R5: refuse to proceed without a safety backup. If the disk
+          // is too full to copy adsi.db, the partial-restore that follows
+          // would leave the operator with no rollback option.
+          throw new Error(
+            `Safety backup failed; refusing to restore without a rollback option (${err.message})`,
+          );
         }
       }
 
@@ -1155,6 +1222,14 @@ class CloudBackupService {
 
           try {
             try {
+              // v2.8.14 C-1 fix: SQLite leaves stale -wal / -shm files on disk
+              // when the previous DB was opened in WAL mode. fs.copyFileSync
+              // overwrites adsi.db only; on next open SQLite would replay the
+              // old WAL against the freshly-copied file and corrupt it. Mirror
+              // the cleanup that startup auto-restore already does in db.js.
+              for (const suffix of ["-wal", "-shm"]) {
+                try { fs.unlinkSync(`${destDb}${suffix}`); } catch (_) { /* not present */ }
+              }
               fs.copyFileSync(srcDb, destDb);
             } catch (copyErr) {
               if (!this.db?.exec || !this.db?.prepare || !this.db?.transaction) {
@@ -1286,16 +1361,107 @@ class CloudBackupService {
       });
 
       console.log("[CloudBackup] Restore complete from:", backupId);
+      this.healthRegistry?.recordAttempt("portableManual", true, {
+        destination: `restore:${backupId}`,
+      });
       return { ok: true, manifest };
     } catch (err) {
+      // v2.8.14 R5: auto-rollback on partial-restore failure.
+      // Three outcomes possible at this point:
+      //   1. No safety backup was taken (skipSafetyBackup=true, or restore
+      //      failed before line 15) — nothing to roll back to. Surface the
+      //      error and let the caller restart the app.
+      //   2. Safety backup exists — attempt a rollback restore against it.
+      //      If rollback succeeds, the operator sees an amber "rolled back"
+      //      message and the live DB is back to its pre-restore state.
+      //   3. Both restore AND rollback fail — emit a CRITICAL state so the
+      //      UI tells the operator to restart and verify data manually.
+      const restoreErrMsg = String(err?.message || err);
+
+      if (!safetyBackupId) {
+        this._setProgress({
+          status: "error",
+          pct: 0,
+          message: restoreErrMsg,
+          error: restoreErrMsg,
+          finishedAt: Date.now(),
+        });
+        this.healthRegistry?.recordAttempt("portableManual", false, {
+          error: `restore failed (no rollback): ${restoreErrMsg}`,
+        });
+        throw err;
+      }
+
+      console.error(
+        "[CloudBackup] Restore failed mid-flight; attempting auto-rollback to safety backup:",
+        safetyBackupId,
+      );
+      // Reset progress to "idle" first so the recursive _restoreBackupLocked
+      // entry guard doesn't reject the rollback as "already in progress".
+      // Mutex is still held by the outer _withBackupMutex caller, so no real
+      // concurrent operation can sneak in here.
       this._setProgress({
-        status: "error",
-        pct: 0,
-        message: err.message,
-        error: err.message,
-        finishedAt: Date.now(),
+        status: "idle",
+        pct: 92,
+        message: "Restore failed. Rolling back to pre-restore safety backup...",
       });
-      throw err;
+
+      try {
+        // Re-enter the locked restore body for the safety package. We pass
+        // skipSafetyBackup=true to prevent recursion (a rollback doesn't need
+        // its own pre-rollback safety net — that net IS the safety backup).
+        await this._restoreBackupLocked(safetyBackupId, { skipSafetyBackup: true });
+
+        const rolledBackMsg =
+          `Restore failed and was rolled back to the previous state. (${restoreErrMsg})`;
+        // Intentionally set status="done" with a non-null error: from the
+        // operation's standpoint the rollback completed cleanly (the system is
+        // back in a known-good state), but we preserve the original error so
+        // the UI can display "Restore failed → rolled back" with the cause.
+        // Frontends that treat status==="done" as plain success will still
+        // surface this correctly because the message text describes the
+        // rollback explicitly.
+        this._setProgress({
+          status: "done",
+          pct: 100,
+          message: rolledBackMsg,
+          finishedAt: Date.now(),
+          error: restoreErrMsg,
+        });
+        console.warn("[CloudBackup] Auto-rollback succeeded.");
+        this.healthRegistry?.recordAttempt("portableManual", false, {
+          error: `restore failed; rolled back to ${safetyBackupId}: ${restoreErrMsg}`,
+        });
+        const rollbackErr = new Error(rolledBackMsg);
+        rollbackErr.rolledBack = true;
+        rollbackErr.cause = err;
+        throw rollbackErr;
+      } catch (rollbackErr) {
+        if (rollbackErr?.rolledBack) {
+          // Re-throw the "rolled back" success-failure path unchanged.
+          throw rollbackErr;
+        }
+        const rollbackMsg = String(rollbackErr?.message || rollbackErr);
+        const catastrophicMsg =
+          `CRITICAL: Restore failed AND auto-rollback failed. ` +
+          `Database may be in an inconsistent state. Restart the app and verify data, ` +
+          `or contact support. (Restore: ${restoreErrMsg}; Rollback: ${rollbackMsg})`;
+        console.error("[CloudBackup]", catastrophicMsg);
+        this._setProgress({
+          status: "error",
+          pct: 0,
+          message: catastrophicMsg,
+          error: catastrophicMsg,
+          finishedAt: Date.now(),
+        });
+        this.healthRegistry?.recordAttempt("portableManual", false, {
+          error: catastrophicMsg,
+        });
+        const fatal = new Error(catastrophicMsg);
+        fatal.catastrophic = true;
+        fatal.requiresManualIntervention = true;
+        throw fatal;
+      }
     }
   }
 
@@ -1438,6 +1604,234 @@ class CloudBackupService {
   applyInitialSchedule() {
     const s = this.getCloudSettings();
     this._applySchedule(s.schedule, s.enabled);
+    // v2.8.14 R1: also start the scheduled .adsibak cron if configured.
+    try {
+      this._applyLocalBackupSchedule();
+    } catch (err) {
+      console.warn("[CloudBackup] local schedule init failed:", err.message);
+    }
+  }
+
+  // ─── Local Backup Settings (R1) ──────────────────────────────────────────
+
+  getLocalBackupDefaults() {
+    const defaultDest = this.programDataDir
+      ? path.join(this.programDataDir, "portable_backups")
+      : path.join(this.dataDir, "portable_backups");
+    return {
+      schedule: "off",                  // off | daily | weekly
+      destination: defaultDest,
+      retention: 5,                     // keep last N; 0 = unlimited
+    };
+  }
+
+  getLocalBackupSettings() {
+    const defaults = this.getLocalBackupDefaults();
+    const raw = this.getSetting("localBackupSettings", null);
+    if (!raw) return defaults;
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        schedule: parsed?.schedule === "daily" || parsed?.schedule === "weekly" ? parsed.schedule : "off",
+        destination: typeof parsed?.destination === "string" && parsed.destination.trim()
+          ? parsed.destination.trim()
+          : defaults.destination,
+        retention: Number.isFinite(Number(parsed?.retention)) && Number(parsed.retention) >= 0
+          ? Math.trunc(Number(parsed.retention))
+          : defaults.retention,
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  saveLocalBackupSettings(body) {
+    const defaults = this.getLocalBackupDefaults();
+    const next = {
+      schedule: body?.schedule === "daily" || body?.schedule === "weekly" ? body.schedule : "off",
+      destination: typeof body?.destination === "string" && body.destination.trim()
+        ? body.destination.trim()
+        : defaults.destination,
+      retention: Number.isFinite(Number(body?.retention)) && Number(body.retention) >= 0
+        ? Math.trunc(Number(body.retention))
+        : defaults.retention,
+    };
+    this.setSetting("localBackupSettings", JSON.stringify(next));
+    this._applyLocalBackupSchedule();
+    return next;
+  }
+
+  _applyLocalBackupSchedule() {
+    if (this._localCronJob) {
+      this._localCronJob.stop();
+      this._localCronJob = null;
+    }
+    const cfg = this.getLocalBackupSettings();
+    this.healthRegistry?.setDestination("portableScheduled", cfg.destination);
+    if (cfg.schedule === "off") {
+      this.healthRegistry?.setNextScheduled("portableScheduled", null);
+      console.log("[CloudBackup] Local schedule: off");
+      return;
+    }
+    // 02:30 to avoid the 03:00 cloud backup + 03:30 prune window.
+    const cronExpr = cfg.schedule === "daily" ? "30 2 * * *" : "30 2 * * 0";
+    // Defense-in-depth: even though runScheduledPortableBackup serializes via
+    // _withBackupMutex, also skip overlapping cron ticks explicitly so we don't
+    // queue a runaway backlog if a single run takes longer than the interval.
+    let _running = false;
+    this._localCronJob = cron.schedule(cronExpr, async () => {
+      if (_running) {
+        console.warn("[CloudBackup] Scheduled .adsibak skipped: previous run still active.");
+        return;
+      }
+      _running = true;
+      console.log("[CloudBackup] Scheduled .adsibak triggered:", cfg.schedule);
+      try {
+        await this.runScheduledPortableBackup(cfg.destination, cfg.retention);
+      } catch (err) {
+        console.error("[CloudBackup] Scheduled .adsibak failed:", err.message);
+      } finally {
+        _running = false;
+      }
+    });
+    // Best-effort estimate of next run (cron module's internal task isn't
+    // public API; compute coarsely).
+    this._refreshLocalNextScheduled(cfg.schedule);
+    console.log("[CloudBackup] Local schedule active:", cfg.schedule, cronExpr, "→", cfg.destination);
+  }
+
+  _refreshLocalNextScheduled(schedule) {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(2, 30, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    if (schedule === "weekly") {
+      // Advance to next Sunday.
+      const daysUntilSunday = (7 - next.getDay()) % 7;
+      if (daysUntilSunday > 0) next.setDate(next.getDate() + daysUntilSunday);
+    }
+    this.healthRegistry?.setNextScheduled("portableScheduled", next.getTime());
+  }
+
+  /**
+   * Run a scheduled portable backup to the configured destination directory.
+   * Records outcome in healthRegistry. Errors are logged but never re-thrown
+   * because this is invoked from cron and there's no caller to receive them.
+   */
+  async runScheduledPortableBackup(destDir, retention) {
+    const startedAt = Date.now();
+    if (!destDir || typeof destDir !== "string") {
+      const msg = "Scheduled .adsibak destination is not configured";
+      this.healthRegistry?.recordAttempt("portableScheduled", false, { error: msg });
+      throw new Error(msg);
+    }
+    try {
+      fs.mkdirSync(destDir, { recursive: true });
+    } catch (err) {
+      const msg = `Destination unwritable: ${err.message}`;
+      this.healthRegistry?.recordAttempt("portableScheduled", false, {
+        error: msg,
+        destination: destDir,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `inverter-backup-${stamp}.adsibak`;
+    const destPath = path.join(destDir, fileName);
+
+    try {
+      const result = await this._withBackupMutex("scheduledPortable", () =>
+        this.createPortableBackup(destPath));
+      const sizeBytes = result?.archiveSize || (fs.existsSync(destPath) ? fs.statSync(destPath).size : null);
+      this.healthRegistry?.recordAttempt("portableScheduled", true, {
+        destination: destPath,
+        sizeBytes,
+        durationMs: Date.now() - startedAt,
+      });
+
+      // Prune older backups beyond retention.
+      const keep = Number.isFinite(Number(retention)) && Number(retention) >= 0
+        ? Math.trunc(Number(retention))
+        : 5;
+      if (keep > 0) {
+        try {
+          this._prunePortableBackupDirectory(destDir, keep);
+        } catch (err) {
+          console.warn("[CloudBackup] Portable prune failed:", err.message);
+        }
+      }
+
+      // Recompute next-scheduled timestamp for the UI.
+      const cfg = this.getLocalBackupSettings();
+      if (cfg.schedule !== "off") this._refreshLocalNextScheduled(cfg.schedule);
+
+      return { ok: true, destPath, sizeBytes };
+    } catch (err) {
+      this.healthRegistry?.recordAttempt("portableScheduled", false, {
+        error: err.message,
+        destination: destDir,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
+  }
+
+  _prunePortableBackupDirectory(dir, keepCount) {
+    if (!fs.existsSync(dir)) return;
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".adsibak"))
+      .map((e) => {
+        const full = path.join(dir, e.name);
+        let mtime = 0;
+        try { mtime = fs.statSync(full).mtimeMs; } catch (_) {}
+        return { name: e.name, path: full, mtime };
+      })
+      .sort((a, b) => {
+        // Newest first by mtime; fall back to ISO-stamp filename when mtimes
+        // tie (rapid successive writes on fast SSDs can produce identical
+        // millisecond timestamps).
+        const dt = b.mtime - a.mtime;
+        if (dt !== 0) return dt;
+        return b.name.localeCompare(a.name);
+      });
+
+    if (entries.length <= keepCount) return;
+    for (const old of entries.slice(keepCount)) {
+      try {
+        fs.unlinkSync(old.path);
+        console.log("[CloudBackup] Pruned old portable backup:", old.name);
+      } catch (err) {
+        console.warn(`[CloudBackup] Failed to prune ${old.name}: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Best-effort row counts for restore-preview UX. Skipped on tables that
+   * don't exist (older schema). Returns null on total failure.
+   */
+  _collectRowCounts() {
+    if (!this.db?.prepare) return null;
+    const tables = [
+      "readings",
+      "energy_5min",
+      "alarms",
+      "audit_log",
+      "forecast_run_audit",
+      "solcast_snapshots",
+    ];
+    const out = {};
+    for (const t of tables) {
+      try {
+        const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get();
+        out[t] = Number(row?.n || 0);
+      } catch {
+        // Table missing — skip silently.
+      }
+    }
+    return out;
   }
 
   // ─── Retry Queue ──────────────────────────────────────────────────────────
@@ -1550,6 +1944,7 @@ class CloudBackupService {
       finishedAt: null,
     });
 
+    const _portableStartedAt = Date.now();
     try {
       // Step 1: Create standard backup with database + config + logs
       this._setProgress({ pct: 5, message: "Backing up database and config…" });
@@ -1636,6 +2031,11 @@ class CloudBackupService {
       });
 
       console.log(`[CloudBackup] Portable backup exported: ${destPath}`);
+      this.healthRegistry?.recordAttempt("portableManual", true, {
+        destination: destPath,
+        sizeBytes: archiveSize,
+        durationMs: Date.now() - _portableStartedAt,
+      });
       return { ok: true, path: destPath, manifest, archiveSize };
     } catch (err) {
       this._setProgress({
@@ -1644,6 +2044,11 @@ class CloudBackupService {
         message: err.message,
         error: err.message,
         finishedAt: Date.now(),
+      });
+      this.healthRegistry?.recordAttempt("portableManual", false, {
+        destination: destPath,
+        error: err.message,
+        durationMs: Date.now() - _portableStartedAt,
       });
       throw err;
     }
@@ -1797,6 +2202,10 @@ class CloudBackupService {
         totalSize: manifest.totalSize || 0,
         archiveSize: fs.statSync(srcPath).size,
         checksumOk,
+        // v2.8.14 R3: surface row counts so the restore-preview modal can
+        // tell the operator what's about to be overwritten. Optional —
+        // older backups (v2.8.13 and earlier) won't have this key.
+        rowCounts: manifest.rowCounts || null,
       };
     } finally {
       try { fs.unlinkSync(zipTmp); } catch (_) { /* already cleaned or never created */ }

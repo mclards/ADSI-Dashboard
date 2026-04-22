@@ -2013,6 +2013,53 @@
           <div class="sgroup settings-card" id="localBackupSection" hidden>
             <div class="sgroup-title"><span class="mdi mdi-archive-arrow-down-outline icon-inline" aria-hidden="true"></span> Local Backup &amp; Restore</div>
             <p class="settings-section-copy">Create a portable <code>.adsibak</code> backup of all dashboard data for OS reinstall or machine migration. Includes database, archive, license, auth tokens, forecast models, and configuration.</p>
+            <p class="settings-section-copy" style="font-size: 11px; opacity: 0.8;"><span class="mdi mdi-information-outline" aria-hidden="true"></span> <strong>Machine migration note:</strong> <code>ipconfig.json</code> stores the inverter IP addresses for the network this gateway PC is on. After restoring on a different network, open <em>IP Config</em> and update inverter addresses if they have changed.</p>
+
+            <!-- v2.8.14 R4: Backup Health -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title"><span class="mdi mdi-heart-pulse icon-inline" aria-hidden="true"></span> Backup Health</div>
+              <p class="settings-section-copy">Status of all automatic backup paths. Updates live as backups run; click refresh to re-fetch.</p>
+              <div id="backupHealthList" class="cb-health-list">Loading…</div>
+              <div class="sgroup-actions">
+                <button id="btnBackupHealthRefresh" class="btn btn-outline" type="button" title="Refresh backup health status from the server.">
+                  <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span><span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- v2.8.14 R1: Scheduled Auto-Export -->
+            <div class="cb-subsection">
+              <div class="cb-sub-title"><span class="mdi mdi-clock-outline icon-inline" aria-hidden="true"></span> Scheduled Auto-Export</div>
+              <p class="settings-section-copy">Automatically export a portable <code>.adsibak</code> to a folder of your choice (USB, network share, secondary drive). Default is off — opt in by selecting a schedule.</p>
+              <div class="cb-schedule-form">
+                <label class="cb-schedule-row" for="lbsSchedule">
+                  <span class="cb-schedule-label">Schedule</span>
+                  <select id="lbsSchedule" class="cb-schedule-input">
+                    <option value="off">Off (manual only)</option>
+                    <option value="daily">Daily at 02:30</option>
+                    <option value="weekly">Weekly on Sunday at 02:30</option>
+                  </select>
+                </label>
+                <label class="cb-schedule-row" for="lbsDestination">
+                  <span class="cb-schedule-label">Destination folder</span>
+                  <input type="text" id="lbsDestination" class="cb-schedule-input" placeholder="C:\path\to\backup\folder" />
+                </label>
+                <label class="cb-schedule-row" for="lbsRetention">
+                  <span class="cb-schedule-label">Keep last</span>
+                  <input type="number" id="lbsRetention" class="cb-schedule-input cb-schedule-input-narrow" min="0" step="1" value="5" />
+                  <span class="cb-schedule-suffix">backups (0 = unlimited)</span>
+                </label>
+              </div>
+              <div class="sgroup-actions">
+                <button id="btnLbsSave" class="btn btn-accent" type="button" title="Save schedule and apply immediately.">
+                  <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span><span>Save Schedule</span>
+                </button>
+                <button id="btnLbsRunNow" class="btn btn-outline" type="button" title="Run a portable .adsibak export immediately to the configured destination.">
+                  <span class="mdi mdi-play icon-inline" aria-hidden="true"></span><span>Run Now</span>
+                </button>
+                <span class="smsg" id="lbsMsg"></span>
+              </div>
+            </div>
 
             <!-- Export -->
             <div class="cb-subsection">

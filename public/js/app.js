@@ -113,6 +113,12 @@ const State = {
   analyticsDayAheadCache: null,  // { src, intervalMin, result }
   // Live-PAC signature used by the 2-s realtime timer to skip redundant re-renders.
   analyticsLastPacSig: "",
+  // Active Analytics side-card tab: "summary" (default) | "irradiance" | "cloud" | "outlook".
+  // Gates loadHourlyWeatherCharts in the 60-s auto-refresh so the weather fetch
+  // runs only when its tab is actually visible.
+  analyticsSideTab: "summary",
+  analyticsWeatherLastFetchAt: 0,
+  _weatherFetchInFlight: false,
   activeAlarms: {}, // key: `${inv}_${unit}` -> active alarm row
   // Ingeteam service-doc reference, populated once on startup from
   // /api/alarms/reference (cached for 1h by Express). Shape:
@@ -4712,6 +4718,13 @@ function setActiveSettingsSection(sectionId, persist = true) {
     } catch (err) {
       console.warn("[app] settings section persist failed:", err.message);
     }
+  }
+
+  // v2.8.14 R1/R4: lazy-load backup health + schedule when the Local Backup
+  // section becomes visible. Avoids fetching when the user is on another tab.
+  if (activeId === "localBackupSection") {
+    try { loadBackupHealth(); } catch (_) {}
+    try { loadLocalBackupSchedule(); } catch (_) {}
   }
 }
 
@@ -12205,6 +12218,12 @@ function initCameraPlayer() {
 }
 
 function handleWS(msg) {
+  // v2.8.14 R2/R4: backup health updates push live whenever any backup attempt
+  // (Tier 1, Tier 3, scheduled .adsibak, manual portable, restore) completes.
+  if (msg.type === "backup_health") {
+    if (msg.payload) renderBackupHealth(msg.payload);
+    return;
+  }
   if (msg.type === "init" || msg.type === "live") {
     noteStartupLiveReady();
     noteTodayMwhWsFrame(Date.now());
@@ -14814,10 +14833,13 @@ async function loadWeeklyWeather(date, force = false) {
 }
 
 async function loadHourlyWeatherCharts() {
+  if (State._weatherFetchInFlight) return;
+  State._weatherFetchInFlight = true;
   try {
     const payload = await api("/api/weather/hourly-today");
     if (payload?.ok) {
       renderHourlyWeatherCharts(payload);
+      State.analyticsWeatherLastFetchAt = Date.now();
       const freshEl = $("anaHourlyFreshness");
       if (freshEl) {
         const now = new Date();
@@ -14828,6 +14850,8 @@ async function loadHourlyWeatherCharts() {
     }
   } catch (e) {
     console.warn("[weather] Hourly chart load failed:", e.message);
+  } finally {
+    State._weatherFetchInFlight = false;
   }
 }
 
@@ -15026,24 +15050,40 @@ async function refreshAnalyticsEnergy() {
 function ensureAnalyticsAutoRefresh() {
   stopAnalyticsAutoRefresh();
   if (State.currentPage !== "analytics") return;
+  // Stagger the three fetches across the 60-s window so their response
+  // parsing + chart-update work does not land on the same event-loop tick.
+  // On the gateway PC the UI shares the CPU with the Node server + poller,
+  // so a single burst of three concurrent fetches can jank the renderer
+  // long enough to blow past the 15-s WS freshness window (see
+  // DATA_FRESH_MS) and zero the title-bar totalPac.
   State.analyticsFetchTimer = setInterval(() => {
     if (State.currentPage !== "analytics") {
       stopAnalyticsAutoRefresh();
       return;
     }
+    const currentDate = String($("anaDate")?.value || today()).trim();
     refreshAnalyticsEnergy().catch((e) => {
       console.warn("analytics auto-refresh failed:", e?.message || e);
     });
-    const currentDate = String($("anaDate")?.value || today()).trim();
-    loadDayAheadChart(currentDate).catch((e) => {
-      console.warn("dayahead chart auto-refresh failed:", e?.message || e);
-    });
-    // Hourly weather charts: only refresh when viewing today (server caches 10min).
-    if (currentDate === today()) {
-      loadHourlyWeatherCharts().catch((e) => {
-        console.warn("hourly weather auto-refresh failed:", e?.message || e);
+    setTimeout(() => {
+      if (State.currentPage !== "analytics") return;
+      loadDayAheadChart(currentDate).catch((e) => {
+        console.warn("dayahead chart auto-refresh failed:", e?.message || e);
       });
-    }
+    }, 6000);
+    setTimeout(() => {
+      if (State.currentPage !== "analytics") return;
+      // Only refresh hourly weather when viewing today AND the user is on
+      // the Irradiance/Cloud sub-tab. Other tabs (Summary, 7-Day) do not
+      // render these charts, so fetching is pure overhead.
+      const sideTab = String(State.analyticsSideTab || "summary");
+      const weatherTabVisible = sideTab === "irradiance" || sideTab === "cloud";
+      if (currentDate === today() && weatherTabVisible) {
+        loadHourlyWeatherCharts().catch((e) => {
+          console.warn("hourly weather auto-refresh failed:", e?.message || e);
+        });
+      }
+    }, 14000);
   }, 60000);
 }
 
@@ -15061,6 +15101,12 @@ function ensureAnalyticsRealtime() {
       stopAnalyticsRealtime();
       return;
     }
+    // Skip the tick when the window is hidden/minimised. On the gateway PC
+    // the Electron renderer shares CPU with the Node poller; re-rendering
+    // 27 inverter charts while nobody is looking just competes with the
+    // 200-ms WS broadcast and can starve handleWS long enough for the
+    // freshness gate (DATA_FRESH_MS = 15000) to zero totalPac.
+    if (typeof document !== "undefined" && document.hidden) return;
     // Build a cheap signature that also advances with the in-progress interval
     // so the live summary cards keep moving even when PAC is steady.
     const now = Date.now();
@@ -15374,6 +15420,7 @@ function ensureAnalyticsCards() {
     panels.forEach((p) => {
       p.classList.toggle("hidden", p.dataset.panel !== key);
     });
+    State.analyticsSideTab = key;
     // Chart.js renders at 0 dimensions if its canvas was hidden when created.
     // Nudge any charts in the now-visible panel to recompute size.
     setTimeout(() => {
@@ -15385,6 +15432,17 @@ function ensureAnalyticsCards() {
         }
       } catch (_) { /* swallow resize errors */ }
     }, 0);
+    // On-demand fetch when opening a weather sub-tab if the cached payload is
+    // stale (>60 s) — the auto-refresh tick is gated to this tab, so without
+    // an immediate pull the user could see old data until the next interval.
+    if ((key === "irradiance" || key === "cloud") &&
+        State.currentPage === "analytics" &&
+        isTodayAnalyticsDate() &&
+        Date.now() - Number(State.analyticsWeatherLastFetchAt || 0) > 60000) {
+      loadHourlyWeatherCharts().catch((err) => {
+        console.warn("hourly weather on-demand fetch failed:", err?.message || err);
+      });
+    }
   };
   tabs.forEach((btn) => {
     btn.addEventListener("click", () => activateSideTab(btn.dataset.tab));
@@ -17897,6 +17955,126 @@ async function cbDeleteBackup(backupId) {
 // ─── Local Portable Backup (.adsibak) ────────────────────────────────────────
 
 let _lbImportedId = null;
+let _lbLastPreviewInfo = null; // v2.8.14 R3: last validated manifest for confirm dialog
+
+// v2.8.14 R4: Backup health renderer (called on page load + WS push + refresh button)
+const _BACKUP_TYPE_LABELS = {
+  tier1: "Database snapshots (every 2h)",
+  tier3: "Cloud backup",
+  portableScheduled: "Scheduled .adsibak",
+  portableManual: "Manual .adsibak / restore",
+};
+
+function _formatBackupHealthDetail(entry) {
+  if (!entry) return "";
+  const parts = [];
+  if (entry.lastSuccessAt) {
+    parts.push(`Last success: ${new Date(entry.lastSuccessAt).toLocaleString()}`);
+  } else if (entry.lastAttemptAt) {
+    parts.push("No successful run yet");
+  } else {
+    parts.push("Never attempted");
+  }
+  if (entry.consecutiveFailures && entry.consecutiveFailures > 0) {
+    parts.push(`<span class="cb-health-detail-error">Recent failures: ${entry.consecutiveFailures}</span>`);
+  }
+  if (entry.nextScheduledAt) {
+    parts.push(`Next: ${new Date(entry.nextScheduledAt).toLocaleString()}`);
+  }
+  if (entry.destination) {
+    parts.push(`→ ${escapeHtml(String(entry.destination))}`);
+  }
+  if (entry.lastError && (entry.consecutiveFailures || 0) > 0) {
+    parts.push(`<span class="cb-health-detail-error">Error: ${escapeHtml(String(entry.lastError))}</span>`);
+  }
+  return parts.join(" · ");
+}
+
+function renderBackupHealth(snapshot) {
+  const root = $("backupHealthList");
+  if (!root) return;
+  if (!snapshot) {
+    root.innerHTML = '<div class="cb-health-row cb-health-unknown"><span class="cb-health-icon mdi mdi-help-circle-outline"></span><div class="cb-health-body"><div class="cb-health-name">Health data unavailable</div></div></div>';
+    return;
+  }
+  const types = ["tier1", "tier3", "portableScheduled", "portableManual"];
+  const html = types.map((t) => {
+    const entry = snapshot[t] || {};
+    const status = entry.status || (entry.consecutiveFailures >= 3 ? "alert" : entry.lastSuccessAt ? "ok" : "unknown");
+    const icon =
+      status === "alert" ? "mdi-alert-circle"
+      : status === "ok" ? "mdi-check-circle"
+      : "mdi-help-circle-outline";
+    return `<div class="cb-health-row cb-health-${status}">
+      <span class="cb-health-icon mdi ${icon}"></span>
+      <div class="cb-health-body">
+        <div class="cb-health-name">${escapeHtml(_BACKUP_TYPE_LABELS[t] || t)}</div>
+        <div class="cb-health-detail">${_formatBackupHealthDetail(entry)}</div>
+      </div>
+    </div>`;
+  }).join("");
+  root.innerHTML = html;
+}
+
+async function loadBackupHealth() {
+  try {
+    const data = await api("/api/backup/health");
+    if (data?.ok) renderBackupHealth(data.health);
+  } catch (err) {
+    console.warn("[BackupHealth] load failed:", err.message);
+  }
+}
+
+// v2.8.14 R1: Local backup schedule form
+async function loadLocalBackupSchedule() {
+  try {
+    const data = await api("/api/backup/local-settings");
+    if (!data?.ok) return;
+    const s = data.settings || {};
+    const sched = $("lbsSchedule");
+    const dest = $("lbsDestination");
+    const ret = $("lbsRetention");
+    if (sched) sched.value = s.schedule || "off";
+    if (dest) dest.value = s.destination || "";
+    if (ret) ret.value = String(s.retention != null ? s.retention : 5);
+  } catch (err) {
+    console.warn("[LocalBackupSchedule] load failed:", err.message);
+  }
+}
+
+async function saveLocalBackupSchedule() {
+  const msgEl = $("lbsMsg");
+  if (msgEl) { msgEl.textContent = "Saving…"; msgEl.className = "smsg"; }
+  try {
+    const body = {
+      schedule: $("lbsSchedule")?.value || "off",
+      destination: ($("lbsDestination")?.value || "").trim(),
+      retention: Number($("lbsRetention")?.value || 5),
+    };
+    const data = await api("/api/backup/local-settings", "POST", body);
+    if (!data?.ok) throw new Error(data?.error || "save failed");
+    if (msgEl) { msgEl.textContent = "Saved."; msgEl.className = "smsg text-success"; }
+    showToast("Backup schedule saved", "success");
+    loadBackupHealth();
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Failed: ${err.message}`; msgEl.className = "smsg text-error"; }
+    showToast(`Schedule save failed: ${err.message}`, "error");
+  }
+}
+
+async function runLocalBackupNow() {
+  const msgEl = $("lbsMsg");
+  if (msgEl) { msgEl.textContent = "Triggering scheduled backup…"; msgEl.className = "smsg"; }
+  try {
+    const data = await api("/api/backup/run-scheduled-portable", "POST", {});
+    if (!data?.ok) throw new Error(data?.error || "run failed");
+    showToast(`Scheduled backup queued → ${data.destination || "destination"}`, "info");
+    if (msgEl) { msgEl.textContent = "Queued. Watch progress on the export panel."; msgEl.className = "smsg"; }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Failed: ${err.message}`; msgEl.className = "smsg text-error"; }
+    showToast(`Run-now failed: ${err.message}`, "error");
+  }
+}
 
 async function lbExport() {
   let destPath = null;
@@ -17965,6 +18143,10 @@ async function lbImport() {
     const imported = (hist.history || []).find(h => h.status === "imported" || h.tag === "imported");
     _lbImportedId = imported?.id || null;
 
+    // v2.8.14 R3: capture validation info so the restore confirm dialog can
+    // show row counts and "what will be overwritten" detail.
+    _lbLastPreviewInfo = info;
+
     // Show preview
     if (bodyEl) {
       const m = info.manifest || {};
@@ -17977,6 +18159,18 @@ async function lbImport() {
         ["Size", cbFormatSize(info.totalSize || info.archiveSize)],
         ["Checksums", info.checksumOk ? "Verified" : "⚠ Mismatch"],
       ];
+      // v2.8.14 R3: row counts (only if manifest provides them — older
+      // .adsibak from v2.8.13 won't have rowCounts and we degrade silently).
+      if (info.rowCounts && typeof info.rowCounts === "object") {
+        const fmt = (n) => Number(n || 0).toLocaleString();
+        const order = ["readings", "energy_5min", "alarms", "audit_log", "forecast_run_audit", "solcast_snapshots"];
+        const rcParts = order
+          .filter((k) => info.rowCounts[k] != null)
+          .map((k) => `${escapeHtml(k)}: ${fmt(info.rowCounts[k])}`);
+        if (rcParts.length) {
+          rows.push(["Row counts", rcParts.join("<br>")]);
+        }
+      }
       bodyEl.innerHTML = rows.map(([k, v]) => `<tr><td><strong>${k}</strong></td><td>${v}</td></tr>`).join("");
     }
     if (previewEl) previewEl.hidden = false;
@@ -17988,7 +18182,29 @@ async function lbImport() {
 
 async function lbRestore() {
   if (!_lbImportedId) { showToast("No imported backup to restore", "error"); return; }
-  if (!await appConfirm("Restore Backup", "This will overwrite all current data with the backup contents.\n\nThe app will restart after restore completes.", { ok: "Restore & Restart" })) return;
+
+  // v2.8.14 R3: build a detailed confirm message that shows what's about to
+  // be overwritten so the operator can sanity-check before destructive copy.
+  const info = _lbLastPreviewInfo || {};
+  const m = info.manifest || {};
+  const lines = ["This will overwrite all current data with the backup contents.", ""];
+  if (m.createdAt) lines.push(`Backup created: ${new Date(m.createdAt).toLocaleString()}`);
+  if (m.appVersion) lines.push(`App version: ${m.appVersion}`);
+  if (info.archiveSize) lines.push(`Backup size: ${cbFormatSize(info.archiveSize)}`);
+  if (info.rowCounts) {
+    const r = info.rowCounts;
+    const summary = [];
+    if (r.readings != null) summary.push(`${Number(r.readings).toLocaleString()} readings`);
+    if (r.energy_5min != null) summary.push(`${Number(r.energy_5min).toLocaleString()} energy rows`);
+    if (r.alarms != null) summary.push(`${Number(r.alarms).toLocaleString()} alarms`);
+    if (summary.length) lines.push(`Will restore: ${summary.join(", ")}`);
+  }
+  lines.push("");
+  lines.push("A safety backup of your current data will be created automatically. If the restore fails, the app will roll back to it.");
+  lines.push("");
+  lines.push("The app will restart after restore completes.");
+
+  if (!await appConfirm("Restore Backup", lines.join("\n"), { ok: "Restore & Restart" })) return;
 
   const progEl = $("localBackupRestoreProgress");
   const labelEl = $("localBackupRestoreLabel");
@@ -18404,6 +18620,13 @@ function bindEventHandlers() {
   $("btnLocalBackupImport")?.addEventListener("click", lbImport);
   $("btnLocalBackupRestore")?.addEventListener("click", lbRestore);
   $("btnLocalBackupCancel")?.addEventListener("click", lbCancelImport);
+  // v2.8.14 R1/R4 wiring
+  $("btnBackupHealthRefresh")?.addEventListener("click", () => {
+    loadBackupHealth();
+    showToast("Refreshing backup health…", "info", 1200);
+  });
+  $("btnLbsSave")?.addEventListener("click", saveLocalBackupSchedule);
+  $("btnLbsRunNow")?.addEventListener("click", runLocalBackupNow);
 
   // Bulk command form (static-param buttons built in buildBulkCommandTpl)
   document.addEventListener("click", (e) => {
