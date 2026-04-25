@@ -946,6 +946,69 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ssh_day_captured ON solcast_snapshot_history(forecast_day, captured_ts);
   CREATE INDEX IF NOT EXISTS idx_ssh_day_slot ON solcast_snapshot_history(forecast_day, slot);
   CREATE INDEX IF NOT EXISTS idx_ssh_captured_ts ON solcast_snapshot_history(captured_ts);
+
+  -- v2.9.0 Slice B: hardware-counter state (upserted on every poll).
+  -- One row per (inverter, unit); constant-size table (~91 rows).
+  CREATE TABLE IF NOT EXISTS inverter_counter_state (
+    inverter      INTEGER NOT NULL,
+    unit          INTEGER NOT NULL,
+    ts_ms         INTEGER NOT NULL,
+    etotal_kwh    INTEGER DEFAULT 0,
+    parce_kwh     INTEGER DEFAULT 0,
+    rtc_ms        INTEGER,
+    rtc_valid     INTEGER NOT NULL DEFAULT 0,
+    rtc_drift_s   REAL,
+    pac_w         INTEGER DEFAULT 0,
+    fac_hz        REAL,
+    alarm_32      INTEGER DEFAULT 0,
+    counter_advancing INTEGER DEFAULT 1,
+    updated_ts    INTEGER NOT NULL
+                  DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    PRIMARY KEY (inverter, unit)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ics_updated ON inverter_counter_state(updated_ts);
+
+  -- v2.9.0 Slice B: per-day baselines (one row per unit per local date).
+  -- v2.9.1: extended with eod_clean_* columns capturing the day's
+  --         post-1800H rolling-last hardware-counter snapshot. Tomorrow's
+  --         baseline is derived from this row's eod_clean fields, not from
+  --         tomorrow's first-poll value (which may be a transient bad read).
+  CREATE TABLE IF NOT EXISTS inverter_counter_baseline (
+    inverter           INTEGER NOT NULL,
+    unit               INTEGER NOT NULL,
+    date_key           TEXT NOT NULL,
+    etotal_baseline    INTEGER NOT NULL,
+    parce_baseline     INTEGER NOT NULL,
+    baseline_ts_ms     INTEGER NOT NULL,
+    source             TEXT NOT NULL DEFAULT 'poll',
+    etotal_eod_clean   INTEGER,
+    parce_eod_clean    INTEGER,
+    eod_clean_ts_ms    INTEGER,
+    eod_clean_pac_w    INTEGER,
+    updated_ts         INTEGER NOT NULL
+                       DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    PRIMARY KEY (inverter, unit, date_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_icb_date    ON inverter_counter_baseline(date_key);
+  CREATE INDEX IF NOT EXISTS idx_icb_updated ON inverter_counter_baseline(updated_ts);
+
+  -- v2.9.0 Slice D: clock-sync attempt log.
+  CREATE TABLE IF NOT EXISTS inverter_clock_sync_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               INTEGER NOT NULL,
+    inverter         INTEGER NOT NULL,
+    unit             INTEGER NOT NULL,
+    trigger          TEXT NOT NULL,
+    target_iso       TEXT,
+    drift_before_s   REAL,
+    drift_after_s    REAL,
+    accepted         INTEGER DEFAULT 0,
+    error            TEXT,
+    updated_ts       INTEGER NOT NULL
+                     DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_icsl_ts  ON inverter_clock_sync_log(ts);
+  CREATE INDEX IF NOT EXISTS idx_icsl_inv ON inverter_clock_sync_log(inverter, ts);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -1115,6 +1178,21 @@ ensureColumn(
 );
 // Migration: store plant-cap decision reason in audit_log (added 2026-03).
 ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
+
+// v2.9.1 — EOD-clean rolling-last snapshot columns. Captured post-1800H local
+// from the last PAC>0 polls; tomorrow's etotal_baseline is derived from these
+// fields so a transient bad first-poll value cannot inflate today's recovered
+// kWh.
+ensureColumn("inverter_counter_baseline", "etotal_eod_clean", "etotal_eod_clean INTEGER");
+ensureColumn("inverter_counter_baseline", "parce_eod_clean",  "parce_eod_clean INTEGER");
+ensureColumn("inverter_counter_baseline", "eod_clean_ts_ms",  "eod_clean_ts_ms INTEGER");
+ensureColumn("inverter_counter_baseline", "eod_clean_pac_w",  "eod_clean_pac_w INTEGER");
+
+// v2.9.1 Phase 3 — daily totals per energy source. PAC remains in kwh_total
+// (back-compat). Hardware-counter totals are NULL until end-of-day rollup
+// computes them from the day's first/last counter_state ticks.
+ensureColumn("daily_report", "kwh_total_etotal", "kwh_total_etotal REAL");
+ensureColumn("daily_report", "kwh_total_parce",  "kwh_total_parce REAL");
 // Forecast compare persistence (detailed provenance/error-memory basis).
 ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");
@@ -1247,6 +1325,9 @@ ensureColumn("forecast_error_compare_daily", "locked_within_band_pct", "locked_w
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_a_updated_ts ON alarms(updated_ts);
+  -- Covers stmts.getActiveAlarmForUnit (WHERE cleared_ts IS NULL AND inverter=? AND unit=?).
+  -- Keeps per-unit active-row lookup O(log N) on large historical alarm tables.
+  CREATE INDEX IF NOT EXISTS idx_a_open_inv_unit ON alarms(inverter, unit, cleared_ts);
   CREATE INDEX IF NOT EXISTS idx_daily_report_updated_ts ON daily_report(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_settings_updated_ts ON settings(updated_ts);
   CREATE INDEX IF NOT EXISTS idx_summary_date_inv ON daily_readings_summary(date, inverter, unit);
@@ -1289,6 +1370,45 @@ db.exec(`
            ELSE '[]'
          END;
 `);
+
+// One-time consolidation of legacy duplicate open alarm rows (audit 2026-04-24,
+// finding F5).  Before the v2.8.x hydration fix landed, a server restart that
+// coincided with a still-active alarm could insert a second open row for the
+// same (inverter, unit).  The runtime dedup in getActiveAlarms hides the
+// symptom at the UI layer, but the duplicate rows still inflate per-inverter
+// alarm counts and distort episode-duration export.  This migration closes
+// all but the newest open row per (inverter, unit), marking the losers with
+// cleared_ts=now so they stop participating in active-alarm queries.
+try {
+  // updated_ts is set explicitly here (not via trigger) because this block runs
+  // BEFORE trg_alarms_touch_updated_ts is created below. Without the explicit
+  // stamp the cloud-backup replication cursor (updated_ts ASC) would never
+  // pull the consolidation to remote viewers, and they would keep the stale
+  // duplicate open rows forever.
+  const consolidateResult = db.prepare(`
+    UPDATE alarms
+       SET cleared_ts = ${NOW_MS_SQL},
+           updated_ts = ${NOW_MS_SQL}
+     WHERE cleared_ts IS NULL
+       AND id NOT IN (
+         SELECT id FROM (
+           SELECT id,
+                  ROW_NUMBER() OVER (PARTITION BY inverter, unit
+                                     ORDER BY ts DESC, id DESC) AS rn
+             FROM alarms
+            WHERE cleared_ts IS NULL
+         )
+         WHERE rn = 1
+       )
+  `).run();
+  if (consolidateResult?.changes > 0) {
+    console.log(
+      `[db] Consolidated ${consolidateResult.changes} legacy duplicate open alarm row(s) — kept newest per (inverter, unit)`,
+    );
+  }
+} catch (e) {
+  console.warn("[db] Alarm duplicate consolidation warning:", e.message);
+}
 
 db.exec(`
   CREATE TRIGGER IF NOT EXISTS trg_alarms_touch_updated_ts
@@ -1433,9 +1553,10 @@ const stmts = {
   upsertDailyReport: db.prepare(`
     INSERT INTO daily_report(
       date,inverter,kwh_total,pac_peak,pac_avg,uptime_s,alarm_count,control_count,
-      availability_pct,performance_pct,node_uptime_s,expected_node_uptime_s,expected_nodes,rated_kw,updated_ts
+      availability_pct,performance_pct,node_uptime_s,expected_node_uptime_s,expected_nodes,rated_kw,
+      kwh_total_etotal,kwh_total_parce,updated_ts
     )
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     ON CONFLICT(date,inverter) DO UPDATE SET
       kwh_total=excluded.kwh_total,
       pac_peak=excluded.pac_peak,
@@ -1449,6 +1570,8 @@ const stmts = {
       expected_node_uptime_s=excluded.expected_node_uptime_s,
       expected_nodes=excluded.expected_nodes,
       rated_kw=excluded.rated_kw,
+      kwh_total_etotal=excluded.kwh_total_etotal,
+      kwh_total_parce=excluded.kwh_total_parce,
       updated_ts=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   `),
   getDailyReport: db.prepare(
@@ -1865,6 +1988,97 @@ const stmts = {
          LIMIT 1 OFFSET ?
       ), 0)`,
   ),
+  // v2.9.0 Slice B — hardware counter persistence
+  upsertCounterState: db.prepare(
+    `INSERT INTO inverter_counter_state
+       (inverter, unit, ts_ms, etotal_kwh, parce_kwh,
+        rtc_ms, rtc_valid, rtc_drift_s, pac_w, fac_hz, alarm_32,
+        counter_advancing, updated_ts)
+     VALUES
+       (@inverter, @unit, @ts_ms, @etotal_kwh, @parce_kwh,
+        @rtc_ms, @rtc_valid, @rtc_drift_s, @pac_w, @fac_hz, @alarm_32,
+        @counter_advancing, @now)
+     ON CONFLICT(inverter, unit) DO UPDATE SET
+       ts_ms             = excluded.ts_ms,
+       etotal_kwh        = excluded.etotal_kwh,
+       parce_kwh         = excluded.parce_kwh,
+       rtc_ms            = excluded.rtc_ms,
+       rtc_valid         = excluded.rtc_valid,
+       rtc_drift_s       = excluded.rtc_drift_s,
+       pac_w             = excluded.pac_w,
+       fac_hz            = excluded.fac_hz,
+       alarm_32          = excluded.alarm_32,
+       counter_advancing = excluded.counter_advancing,
+       updated_ts        = excluded.updated_ts`,
+  ),
+  selectCounterStateOne: db.prepare(
+    `SELECT inverter, unit, ts_ms, etotal_kwh, parce_kwh,
+            rtc_ms, rtc_valid, rtc_drift_s, pac_w, fac_hz, alarm_32,
+            counter_advancing
+       FROM inverter_counter_state
+      WHERE inverter=? AND unit=?`,
+  ),
+  selectCounterStateAll: db.prepare(
+    `SELECT inverter, unit, ts_ms, etotal_kwh, parce_kwh,
+            rtc_ms, rtc_valid, rtc_drift_s, pac_w, fac_hz, alarm_32,
+            counter_advancing
+       FROM inverter_counter_state
+      ORDER BY inverter, unit`,
+  ),
+  insertBaseline: db.prepare(
+    `INSERT OR IGNORE INTO inverter_counter_baseline
+       (inverter, unit, date_key, etotal_baseline, parce_baseline,
+        baseline_ts_ms, source, updated_ts)
+     VALUES
+       (@inverter, @unit, @date_key, @etotal_baseline, @parce_baseline,
+        @baseline_ts_ms, @source, @now)`,
+  ),
+  selectBaselineOne: db.prepare(
+    `SELECT etotal_baseline, parce_baseline, baseline_ts_ms, source,
+            etotal_eod_clean, parce_eod_clean, eod_clean_ts_ms, eod_clean_pac_w
+       FROM inverter_counter_baseline
+      WHERE inverter=? AND unit=? AND date_key=?`,
+  ),
+  selectBaselinesForDate: db.prepare(
+    `SELECT inverter, unit, etotal_baseline, parce_baseline,
+            baseline_ts_ms, source,
+            etotal_eod_clean, parce_eod_clean, eod_clean_ts_ms, eod_clean_pac_w
+       FROM inverter_counter_baseline
+      WHERE date_key=?
+      ORDER BY inverter, unit`,
+  ),
+  // v2.9.1 — Roll the post-1800H clean snapshot. Etotal/parcE are monotonic
+  // so we always overwrite with the latest values; pac_w stamp helps audit.
+  upsertEodClean: db.prepare(
+    `UPDATE inverter_counter_baseline
+        SET etotal_eod_clean = @etotal_eod_clean,
+            parce_eod_clean  = @parce_eod_clean,
+            eod_clean_ts_ms  = @eod_clean_ts_ms,
+            eod_clean_pac_w  = @eod_clean_pac_w,
+            updated_ts       = @now
+      WHERE inverter=@inverter AND unit=@unit AND date_key=@date_key`,
+  ),
+  selectBaselineEodClean: db.prepare(
+    `SELECT inverter, unit, date_key, etotal_eod_clean, parce_eod_clean,
+            eod_clean_ts_ms, eod_clean_pac_w
+       FROM inverter_counter_baseline
+      WHERE date_key=?`,
+  ),
+  insertClockSyncLog: db.prepare(
+    `INSERT INTO inverter_clock_sync_log
+       (ts, inverter, unit, trigger, target_iso,
+        drift_before_s, drift_after_s, accepted, error)
+     VALUES
+       (@ts, @inverter, @unit, @trigger, @target_iso,
+        @drift_before_s, @drift_after_s, @accepted, @error)`,
+  ),
+  selectClockSyncLog: db.prepare(
+    `SELECT id, ts, inverter, unit, trigger, target_iso,
+            drift_before_s, drift_after_s, accepted, error
+       FROM inverter_clock_sync_log
+      ORDER BY ts DESC
+      LIMIT ?`,
+  ),
 };
 
 const bulkInsert = db.transaction((rows) => {
@@ -1912,6 +2126,529 @@ const bulkInsertWithSummary = db.transaction((rows) => {
     }
   }
 });
+
+// v2.9.0 Slice B/F — in-memory counter history for counter_advancing gate.
+// Keyed by `${inverter}_${unit}`; list of {ts_ms, etotal_kwh, parce_kwh, pac_w}.
+// Bounded by COUNTER_HISTORY_MAX_SAMPLES per key (default 30 ≈ 5 minutes @10s).
+const COUNTER_HISTORY_MAX_SAMPLES = 30;
+const counterHistory = new Map();
+
+function _pushCounterHistory(inverter, unit, sample) {
+  const key = `${inverter}_${unit}`;
+  const arr = counterHistory.get(key) || [];
+  arr.push(sample);
+  while (arr.length > COUNTER_HISTORY_MAX_SAMPLES) arr.shift();
+  counterHistory.set(key, arr);
+  return arr;
+}
+
+function getCounterHistory(inverter, unit) {
+  return counterHistory.get(`${inverter}_${unit}`) || [];
+}
+
+function evaluateCounterAdvancing(history, pacIdleW = 500, windowS = 300) {
+  if (!history || history.length < 2) return 1; // insufficient data → assume OK
+  const latestMs = history[history.length - 1].ts_ms || 0;
+  const cutoff = latestMs - windowS * 1000;
+  const recent = history.filter((r) => (r.ts_ms || 0) >= cutoff);
+  if (recent.length < 2) return 1;
+  const meanPac =
+    recent.reduce((s, r) => s + Number(r.pac_w || 0), 0) / recent.length;
+  if (meanPac < pacIdleW) return 1; // idle — no expected counter tick
+  for (let i = 1; i < recent.length; i++) {
+    if (Number(recent[i].etotal_kwh || 0) > Number(recent[i - 1].etotal_kwh || 0)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ── eod_clean hardening helpers ──────────────────────────────────────────
+//
+// Verifies that yesterday's eod_clean snapshot is populated for every unit
+// once we cross into the next solar window. Runs ONCE per local day (keyed
+// on `todayKey`) so the audit cost is bounded regardless of poll frequency.
+// Missing snapshots are surfaced in the console + an audit_log row so the
+// operator can correlate "unit X shows NaN today" with "unit X did not
+// capture last night" without grepping the live frames.
+const _eodVerifyState = { lastVerifiedKey: "" };
+
+// Per-(inverter, unit) "we already warned about a bad timestamp" cache so
+// the log doesn't get drowned every poll cycle when one unit has clock skew.
+// Cleared on local-day rollover via _eodVerifyOncePerDay.
+const _eodTsWarnedKeys = new Set();
+
+function _eodVerifyOncePerDay(todayKey, nowMs) {
+  if (!todayKey || _eodVerifyState.lastVerifiedKey === todayKey) return;
+  _eodVerifyState.lastVerifiedKey = todayKey;
+  // New local day — purge per-unit ts-warn cache so transient skew issues
+  // get re-surfaced instead of silently squelched forever.
+  _eodTsWarnedKeys.clear();
+
+  try {
+    const yesterdayKey = localDateStr((Number(nowMs) || Date.now()) - 86400000);
+    const rows = stmts.selectBaselinesForDate.all(yesterdayKey) || [];
+    if (!rows.length) return; // no baselines for yesterday at all (fresh install / downtime)
+
+    const missing = rows.filter((r) => {
+      const ts = Number(r?.eod_clean_ts_ms || 0);
+      const etot = Number(r?.etotal_eod_clean || 0);
+      return ts <= 0 || etot <= 0;
+    });
+    if (!missing.length) return;
+
+    const sample = missing
+      .slice(0, 8)
+      .map((r) => `inv${r.inverter}/u${r.unit}`)
+      .join(", ");
+    const more = missing.length > 8 ? `, +${missing.length - 8} more` : "";
+    console.warn(
+      `[counter] eod_clean MISSING on ${yesterdayKey} ` +
+      `(${missing.length}/${rows.length} units): ${sample}${more}. ` +
+      `Tomorrow's baseline for these units will fall back to first-frame value (source="poll"); ` +
+      `Etotal/parcE today displays will show NaN until next post-1800H snapshot lands.`,
+    );
+
+    try {
+      db.prepare(
+        `INSERT INTO audit_log
+           (ts, operator, inverter, node, action, scope, result, ip, reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        Number(nowMs) || Date.now(),
+        "SYSTEM",
+        0, // plant-wide
+        0,
+        "eod_clean_verify",
+        `production_day=${yesterdayKey}`,
+        "warn",
+        "",
+        `${missing.length}/${rows.length} units missing eod_clean snapshot: ` +
+          missing.map((r) => `${r.inverter}/${r.unit}`).join(","),
+      );
+    } catch (auditErr) {
+      console.warn("[counter] audit_log write failed:", auditErr.message);
+    }
+  } catch (err) {
+    console.warn("[counter] eod_clean verify failed:", err.message);
+  }
+}
+
+/**
+ * v2.9.0 Slice B — persist hardware counter + RTC state for one poll frame.
+ * Idempotent upsert; also records the first-of-day baseline for crash recovery.
+ *
+ * Frame MUST carry: inverter, unit, ts, etotal_kwh, parce_kwh,
+ *                   rtc_valid, rtc_ms, rtc_drift_s, pac, fac_hz, alarm_32.
+ * Fields default to zero/null when the underlying Python engine is pre-2.9.
+ */
+function persistCounterState(frame) {
+  try {
+    if (!frame) return;
+    const inverter = Number(frame.inverter || 0);
+    const unit = Number(frame.unit || 0);
+    if (!inverter || !unit) return;
+
+    const ts_ms = Number(frame.ts || Date.now());
+    const etotal_kwh = Math.max(0, Math.trunc(Number(frame.etotal_kwh || 0)));
+    const parce_kwh = Math.max(0, Math.trunc(Number(frame.parce_kwh || 0)));
+    const rtc_valid = frame.rtc_valid === true || frame.rtc_valid === 1 ? 1 : 0;
+    const rtc_ms_raw = Number(frame.rtc_ms);
+    const rtc_ms = rtc_valid && Number.isFinite(rtc_ms_raw) ? rtc_ms_raw : null;
+    const rtc_drift_s =
+      rtc_valid && Number.isFinite(Number(frame.rtc_drift_s))
+        ? Number(frame.rtc_drift_s)
+        : null;
+    // pac field in the poller row is already ×10 (W); keep as-is but clamp.
+    const pac_w = Math.max(0, Math.min(Math.round(Number(frame.pac || 0)), 260_000));
+    const fac_hz = Number.isFinite(Number(frame.fac_hz)) ? Number(frame.fac_hz) : null;
+    const alarm_32 = Math.max(0, Math.trunc(Number(frame.alarm_32 || 0)));
+
+    const history = _pushCounterHistory(inverter, unit, {
+      ts_ms,
+      etotal_kwh,
+      parce_kwh,
+      pac_w,
+    });
+    const counter_advancing = evaluateCounterAdvancing(history);
+
+    const now = Date.now();
+    stmts.upsertCounterState.run({
+      inverter,
+      unit,
+      ts_ms,
+      etotal_kwh,
+      parce_kwh,
+      rtc_ms,
+      rtc_valid,
+      rtc_drift_s,
+      pac_w,
+      fac_hz,
+      alarm_32,
+      counter_advancing,
+      now,
+    });
+
+    // Seed today's baseline only from a trustworthy frame (RTC valid + non-zero).
+    // v2.9.1 — preferred source for today's baseline is yesterday's
+    // etotal_eod_clean (captured post-1800H, so identical to value-at-midnight
+    // for a healthy unit). This avoids inflation when the dashboard's first
+    // poll of the day lands on a transient bad read. Fall back to the first
+    // frame's value only when yesterday has no clean EOD snapshot (e.g. fresh
+    // install or downtime > 24 h).
+    if (rtc_valid && etotal_kwh > 0) {
+      const date_key = localDateStr(ts_ms);
+      try {
+        const existing = stmts.selectBaselineOne.get(inverter, unit, date_key);
+        if (!existing) {
+          const yesterdayKey = localDateStr(ts_ms - 86400000);
+          const yPrev = stmts.selectBaselineOne.get(inverter, unit, yesterdayKey);
+          const yEtotal = Number(yPrev?.etotal_eod_clean || 0);
+          const yParce  = Number(yPrev?.parce_eod_clean  || 0);
+          const yTs     = Number(yPrev?.eod_clean_ts_ms  || 0);
+          const useEod  = yEtotal > 0 && yEtotal <= etotal_kwh && yTs > 0;
+          stmts.insertBaseline.run({
+            inverter,
+            unit,
+            date_key,
+            etotal_baseline: useEod ? yEtotal : etotal_kwh,
+            parce_baseline:  useEod ? yParce  : parce_kwh,
+            baseline_ts_ms:  useEod ? yTs     : ts_ms,
+            source: useEod ? "eod_clean" : "poll",
+            now,
+          });
+          // Refresh the live-frame compute cache so the next tick picks up
+          // the new baseline.source immediately (don't wait the 60 s TTL).
+          invalidateBaselineCache();
+        }
+
+        // v2.9.1 hardening — roll-last EOD-clean snapshot during the FULL
+        // dark window (18:00–04:59 local). Etotal/parcE are monotonic so
+        // always-overwrite-within-window is correct; when PAC drops below
+        // the clean-floor (sunset / cloud / alarm) we stop updating, freezing
+        // the last clean values. Captures past midnight (00:00–04:59) are
+        // attributed back to the PRODUCTION DAY that opened the window
+        // (yesterday's date_key), not the calendar day they fall on, so the
+        // snapshot always lives on the row of the day it represents.
+        const eodHour = Math.max(
+          0,
+          Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18),
+        );
+        const pacCleanThreshold = Math.max(
+          0,
+          Number(getSetting("eodPacCleanThresholdW", 50)) || 50,
+        );
+        const solarStart = Math.max(
+          0,
+          Math.min(23, Number(getSetting("solarWindowStartHour", 5)) || 5),
+        );
+        const localHour = new Date(ts_ms).getHours();
+        const inDarkWindow = localHour >= eodHour || localHour < solarStart;
+
+        // ── Timestamp accuracy guard ────────────────────────────────────
+        // Reject the capture if the frame's timestamp is corrupt, in the
+        // future (clock skew on the gateway), or stale beyond the polling
+        // budget. Without this, a bad ts_ms could anchor eod_clean_ts_ms
+        // to a value that misrepresents WHEN the snapshot was actually
+        // captured, and downstream "is yesterday's snapshot fresh?" checks
+        // would silently accept it.
+        const TS_FUTURE_TOL_MS = 5 * 1000;          // gateway is single-host; tiny tol is enough
+        const TS_STALE_TOL_MS = 5 * 60 * 1000;       // poll cycle ≪ 5 min; anything older = stale
+        const TS_SANE_FLOOR = 1700000000000;         // 2023-11-14 — sanity floor against ts=0/garbage
+        const tsValid =
+          Number.isFinite(ts_ms) &&
+          ts_ms >= TS_SANE_FLOOR &&
+          ts_ms - now <= TS_FUTURE_TOL_MS &&
+          now - ts_ms <= TS_STALE_TOL_MS;
+
+        if (inDarkWindow && pac_w >= pacCleanThreshold && tsValid) {
+          // Date-key normalization: a capture at 02:00 belongs to the
+          // production day that ENDED last evening, not the new calendar
+          // day we're sitting in. Map (00:00–solarStart) back one day.
+          const productionDayKey = localHour < solarStart
+            ? localDateStr(ts_ms - 86400000)
+            : date_key;
+
+          // Monotonicity guard: existing snapshot present? Only overwrite
+          // when the new value is greater-or-equal. A regression (new <
+          // existing) signals an inverter rollover, replacement, or bus
+          // glitch — don't poison the snapshot. Etotal is the authoritative
+          // counter; parcE follows.
+          let shouldUpdate = true;
+          let regressionReason = "";
+          try {
+            const existing = stmts.selectBaselineOne.get(
+              inverter, unit, productionDayKey,
+            );
+            const existingEtotal = Number(existing?.etotal_eod_clean || 0);
+            const existingTsMs = Number(existing?.eod_clean_ts_ms || 0);
+            if (existingEtotal > 0 && existingTsMs > 0) {
+              if (etotal_kwh < existingEtotal) {
+                shouldUpdate = false;
+                regressionReason = `etotal regressed ${existingEtotal}→${etotal_kwh}`;
+              } else if (ts_ms < existingTsMs) {
+                // Out-of-order frame (poller backlog catching up). The
+                // existing snapshot is more recent in wall-clock terms;
+                // don't replace newer data with older.
+                shouldUpdate = false;
+                regressionReason = `frame ts older than existing snapshot ts`;
+              }
+            }
+          } catch (_) { /* best-effort; fall through to write */ }
+
+          if (shouldUpdate) {
+            stmts.upsertEodClean.run({
+              inverter,
+              unit,
+              date_key: productionDayKey,
+              etotal_eod_clean: etotal_kwh,
+              parce_eod_clean:  parce_kwh,
+              eod_clean_ts_ms:  ts_ms,
+              eod_clean_pac_w:  pac_w,
+              now,
+            });
+          } else if (regressionReason) {
+            console.warn(
+              `[counter] eod_clean SKIPPED inv=${inverter} u=${unit} ` +
+              `day=${productionDayKey} (${regressionReason})`,
+            );
+          }
+        } else if (inDarkWindow && pac_w >= pacCleanThreshold && !tsValid) {
+          // Frame met the time/PAC gate but timestamp failed sanity. Surface
+          // it once-per-error so operators can chase the upstream cause.
+          if (!_eodTsWarnedKeys.has(`${inverter}_${unit}`)) {
+            _eodTsWarnedKeys.add(`${inverter}_${unit}`);
+            console.warn(
+              `[counter] eod_clean REJECTED for bad ts inv=${inverter} u=${unit} ` +
+              `frame_ts=${ts_ms} now=${now} delta=${now - ts_ms}ms`,
+            );
+          }
+        }
+
+        // Verify-before-solar-window: once per day, at the first frame past
+        // solar-window-start, audit yesterday's eod_clean coverage across
+        // every baseline row. Missing snapshots are logged + recorded in
+        // audit_log so an operator can correlate "unit X shows NaN today"
+        // with "unit X did not capture last night".
+        if (localHour >= solarStart && localHour < eodHour) {
+          _eodVerifyOncePerDay(date_key, ts_ms);
+        }
+      } catch (err) {
+        // Non-fatal: baseline seeding is best-effort.
+        console.warn(
+          `[counter] baseline seed failed inv=${inverter} u=${unit}: ${err.message}`,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[counter] persistCounterState error:", err.message);
+  }
+}
+
+function getCounterBaselinesForDate(dateKey) {
+  try {
+    return stmts.selectBaselinesForDate.all(String(dateKey || ""));
+  } catch {
+    return [];
+  }
+}
+
+// v2.9.1 — In-memory cache of today's baseline rows per (inverter, unit).
+// Refreshed on local-day rollover and on demand. Used by the poller hot path
+// to compute kwh_today_etotal / kwh_today_parce + validity flags without
+// querying SQLite on every frame.
+const _baselineCache = {
+  dateKey: "",
+  byKey: new Map(),     // `${inv}_${unit}` -> {etotal_baseline, parce_baseline, source}
+  loadedAtMs: 0,
+};
+const _BASELINE_CACHE_REFRESH_MS = 60_000;
+
+function _loadBaselineCache(dateKey) {
+  try {
+    const rows = stmts.selectBaselinesForDate.all(String(dateKey || "")) || [];
+    const byKey = new Map();
+    for (const r of rows) {
+      byKey.set(`${Number(r.inverter)}_${Number(r.unit)}`, {
+        etotal_baseline: Number(r.etotal_baseline || 0),
+        parce_baseline:  Number(r.parce_baseline  || 0),
+        source:          String(r.source || ""),
+      });
+    }
+    _baselineCache.dateKey = dateKey;
+    _baselineCache.byKey = byKey;
+    _baselineCache.loadedAtMs = Date.now();
+  } catch {
+    // Keep stale cache rather than blanking on transient DB error.
+  }
+}
+
+function getTodayBaselineCached(inverter, unit, ts = Date.now()) {
+  const dateKey = localDateStr(ts);
+  if (
+    dateKey !== _baselineCache.dateKey ||
+    Date.now() - _baselineCache.loadedAtMs > _BASELINE_CACHE_REFRESH_MS
+  ) {
+    _loadBaselineCache(dateKey);
+  }
+  return _baselineCache.byKey.get(`${Number(inverter)}_${Number(unit)}`) || null;
+}
+
+// Force a baseline-cache refresh — called when persistCounterState writes a
+// new baseline row, so the poller picks up the new "source" the very next tick
+// instead of waiting up to 60 s for the cache TTL.
+function invalidateBaselineCache() {
+  _baselineCache.loadedAtMs = 0;
+}
+
+// v2.9.1 — Per-inverter daily hardware-counter totals for daily_report writes.
+// Sums each unit's (current_etotal − etotal_baseline) across the inverter, but
+// only when EVERY contributing unit has a clean baseline (`source =
+// "eod_clean"`). If any unit lacks a clean anchor, the inverter total is
+// returned as NULL so the daily_report column stays NULL → renders as NaN in
+// the UI. Mirrors the per-unit validity rule in computeTodayHardwareEnergy.
+function computeInverterDailyHwTotals(inverter, dateKey, ts = Date.now()) {
+  const out = { kwh_total_etotal: null, kwh_total_parce: null };
+  try {
+    const inv = Number(inverter || 0);
+    if (!inv) return out;
+    const day = String(dateKey || localDateStr(ts));
+    // Pull baselines for this inverter on the requested day.
+    const baselines = stmts.selectBaselinesForDate
+      .all(day)
+      .filter((b) => Number(b.inverter || 0) === inv);
+    if (!baselines.length) return out;
+    // All baselines must be eod_clean to trust the inverter's HW total.
+    if (baselines.some((b) => String(b.source || "") !== "eod_clean")) return out;
+    // Pull current counter state per unit; bail on any missing.
+    let etotalSum = 0;
+    let parceSum = 0;
+    for (const b of baselines) {
+      const cur = stmts.selectCounterStateOne.get(inv, Number(b.unit || 0));
+      if (!cur) return { kwh_total_etotal: null, kwh_total_parce: null };
+      const dE = Number(cur.etotal_kwh || 0) - Number(b.etotal_baseline || 0);
+      const dP = Number(cur.parce_kwh  || 0) - Number(b.parce_baseline  || 0);
+      if (!Number.isFinite(dE) || dE < 0) return { kwh_total_etotal: null, kwh_total_parce: null };
+      if (!Number.isFinite(dP) || dP < 0) return { kwh_total_etotal: null, kwh_total_parce: null };
+      etotalSum += dE;
+      parceSum  += dP;
+    }
+    out.kwh_total_etotal = Number(etotalSum.toFixed(6));
+    out.kwh_total_parce  = Number(parceSum.toFixed(6));
+    return out;
+  } catch {
+    return out;
+  }
+}
+
+// v2.9.1 — Compute the per-unit today-energy fields for the live frame.
+// `etotal_today_valid` / `parce_today_valid` are gated on the baseline having
+// been derived from yesterday's clean post-1800H snapshot (source="eod_clean").
+// When invalid, the frontend renders the field literally as "NaN".
+function computeTodayHardwareEnergy(frame) {
+  if (!frame) return null;
+  const inv = Number(frame.inverter || 0);
+  const unit = Number(frame.unit || 0);
+  if (!inv || !unit) return null;
+  const ts = Number(frame.ts || Date.now());
+  const baseline = getTodayBaselineCached(inv, unit, ts);
+  const sourceClean = !!baseline && baseline.source === "eod_clean";
+  const cur_etotal = Math.max(0, Number(frame.etotal_kwh || 0));
+  const cur_parce  = Math.max(0, Number(frame.parce_kwh  || 0));
+  const etotal_delta = baseline ? cur_etotal - Number(baseline.etotal_baseline || 0) : NaN;
+  const parce_delta  = baseline ? cur_parce  - Number(baseline.parce_baseline  || 0) : NaN;
+  return {
+    kwh_today_etotal: sourceClean && etotal_delta >= 0 ? etotal_delta : null,
+    kwh_today_parce:  sourceClean && parce_delta  >= 0 ? parce_delta  : null,
+    etotal_today_valid: sourceClean && Number.isFinite(etotal_delta) && etotal_delta >= 0 ? 1 : 0,
+    parce_today_valid:  sourceClean && Number.isFinite(parce_delta)  && parce_delta  >= 0 ? 1 : 0,
+    baseline_source: baseline?.source || null,
+  };
+}
+
+// v2.9.1 — Yesterday's clean end-of-day snapshot per unit. Sourced from
+// inverter_counter_baseline.eod_clean_* which is rolled post-1800H local time
+// from PAC>0 frames — independent of when the dashboard last polled. This is
+// the canonical anchor for today's baseline + crash-recovery seed gate.
+//
+// Returned shape (for Python seed_pac_from_baseline compatibility):
+//   { inverter, unit, etotal_kwh, parce_kwh, ts_ms }
+//
+// Units with no clean EOD snapshot for yesterday are simply omitted; the
+// recovery path treats them as "no_yesterday_snapshot" and refuses to seed.
+function getYesterdaySnapshotForDate(todayDateKey) {
+  try {
+    const key = String(todayDateKey || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return [];
+    const todayStartMs = new Date(`${key}T00:00:00.000`).getTime();
+    if (!Number.isFinite(todayStartMs)) return [];
+    const yesterdayKey = localDateStr(todayStartMs - 86400000);
+    const rows = stmts.selectBaselineEodClean.all(yesterdayKey);
+    return (rows || [])
+      .filter((r) => Number(r?.etotal_eod_clean || 0) > 0)
+      .map((r) => ({
+        inverter:    Number(r.inverter || 0),
+        unit:        Number(r.unit || 0),
+        etotal_kwh:  Number(r.etotal_eod_clean || 0),
+        parce_kwh:   Number(r.parce_eod_clean  || 0),
+        ts_ms:       Number(r.eod_clean_ts_ms  || 0),
+        pac_w:       Number(r.eod_clean_pac_w  || 0),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function getCounterStateAll() {
+  try {
+    return stmts.selectCounterStateAll.all();
+  } catch {
+    return [];
+  }
+}
+
+function getCounterStateOne(inverter, unit) {
+  try {
+    return stmts.selectCounterStateOne.get(Number(inverter || 0), Number(unit || 0)) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Coerce a drift value to a finite number or null.
+// Number(null) is 0 and Number.isFinite(0) is true, so the naive check
+// silently turned "no readback" into "0 second drift" in the UI.
+function _coerceDrift(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function insertClockSyncLogRow(row) {
+  try {
+    stmts.insertClockSyncLog.run({
+      ts: Number(row?.ts || Date.now()),
+      inverter: Number(row?.inverter || 0),
+      unit: Number(row?.unit || 0),
+      trigger: String(row?.trigger || "operator"),
+      target_iso: row?.target_iso ? String(row.target_iso) : null,
+      drift_before_s: _coerceDrift(row?.drift_before_s),
+      drift_after_s: _coerceDrift(row?.drift_after_s),
+      accepted: row?.accepted ? 1 : 0,
+      error: row?.error ? String(row.error) : null,
+    });
+  } catch (err) {
+    console.warn("[clock-sync] log insert failed:", err.message);
+  }
+}
+
+function getClockSyncLog(limit = 50) {
+  try {
+    return stmts.selectClockSyncLog.all(Math.max(1, Math.min(500, Number(limit) || 50)));
+  } catch {
+    return [];
+  }
+}
 
 const bulkInsertPollerBatch = db.transaction((readingRows, energyRows = []) => {
   for (const row of readingRows || []) {
@@ -3000,6 +3737,26 @@ async function pruneOldData(options = {}) {
     await _yieldEventLoop();
     db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
     await _yieldEventLoop();
+    // v2.9.0 Slice B/D: retention for new counter + clock-sync tables.
+    try {
+      const baselineRetainDays = Math.max(30, Number(getSetting("counterBaselineRetainDays", 90)));
+      const baselineCutoffDate = (() => {
+        const d = new Date(Date.now() - baselineRetainDays * 24 * 60 * 60 * 1000);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      })();
+      db.prepare(
+        "DELETE FROM inverter_counter_baseline WHERE date_key < ?",
+      ).run(baselineCutoffDate);
+      const clockSyncRetainDays = Math.max(30, Number(getSetting("clockSyncLogRetainDays", 365)));
+      const clockSyncCutoff = Date.now() - clockSyncRetainDays * 24 * 60 * 60 * 1000;
+      db.prepare("DELETE FROM inverter_clock_sync_log WHERE ts < ?").run(clockSyncCutoff);
+    } catch (err) {
+      console.warn("[DB] counter/clock-sync retention skipped:", err.message);
+    }
+    await _yieldEventLoop();
     checkpointArchiveDbs("PASSIVE");
     const checkpointed = checkpointMainDb("PASSIVE");
     const vacuumRequested =
@@ -3195,4 +3952,18 @@ module.exports = {
     stmts.upsertAvailability5min.run(ts, onlineCount, expectedCount),
   getAvailability5minRange: (startTs, endTs) =>
     stmts.getAvailability5minRange.all(startTs, endTs),
+  // v2.9.0 Slice B/D — counter + clock-sync helpers
+  persistCounterState,
+  getCounterHistory,
+  evaluateCounterAdvancing,
+  getCounterBaselinesForDate,
+  getYesterdaySnapshotForDate,
+  getCounterStateAll,
+  getCounterStateOne,
+  getTodayBaselineCached,
+  invalidateBaselineCache,
+  computeTodayHardwareEnergy,
+  computeInverterDailyHwTotals,
+  insertClockSyncLogRow,
+  getClockSyncLog,
 };

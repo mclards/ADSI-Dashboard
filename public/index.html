@@ -915,6 +915,10 @@
                   <span class="settings-menu-label">Local Backup</span>
                   <span class="settings-menu-copy">Portable .adsibak export and restore for OS migration.</span>
                 </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="inverterClockSection">
+                  <span class="settings-menu-label">Inverter Clocks</span>
+                  <span class="settings-menu-copy">Scheduled time sync, drift triggers, and per-unit counter health.</span>
+                </button>
               </div>
             </div>
 
@@ -2144,6 +2148,164 @@
             </div><!-- /#localBackupControls -->
           </div>
 
+          <!-- v2.9.0 Slice G — Inverter Clock Sync + Counter Health -->
+          <div class="sgroup settings-card" id="inverterClockSection" hidden>
+            <!-- Tab navigation: 3 sub-views (schedule/source, per-unit health, recent log) -->
+            <div class="invclock-tabs" role="tablist" aria-label="Inverter clock sub-sections">
+              <button id="invClockTabSchedule" class="invclock-tab active" type="button" role="tab" aria-selected="true" aria-controls="invClockPanelSchedule" data-invclock-tab="schedule" title="Daily auto-sync schedule and which energy source drives today's display.">
+                <span class="mdi mdi-clock-check-outline icon-inline" aria-hidden="true"></span>
+                <span class="invclock-tab-label">Inverter Clock Sync &amp; Counter Health</span>
+              </button>
+              <button id="invClockTabHealth" class="invclock-tab" type="button" role="tab" aria-selected="false" aria-controls="invClockPanelHealth" data-invclock-tab="health" title="Per-unit counter and RTC drift state, with manual sync controls.">
+                <span class="mdi mdi-counter icon-inline" aria-hidden="true"></span>
+                <span class="invclock-tab-label">Per-Unit Counter Health</span>
+                <span class="invclock-counts invclock-tab-counts">
+                  <span class="invclock-chip-nodes js-invclock-count-nodes" title="Total configured nodes (units) per ip-config topology.">0 nodes</span>
+                  <span class="invclock-chip-ok    js-invclock-count-ok">0 OK</span>
+                  <span class="invclock-chip-warn  js-invclock-count-drifted">0 drifted</span>
+                  <span class="invclock-chip-error js-invclock-count-broken">0 broken</span>
+                </span>
+              </button>
+              <button id="invClockTabLog" class="invclock-tab" type="button" role="tab" aria-selected="false" aria-controls="invClockPanelLog" data-invclock-tab="log" title="Audit trail of every sync attempt, with drift-before / drift-after readback.">
+                <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
+                <span class="invclock-tab-label">Recent Sync Attempts</span>
+              </button>
+            </div>
+
+            <!-- Tab panel: Schedule + Energy Display Source -->
+            <div id="invClockPanelSchedule" class="invclock-tab-panel active" data-invclock-panel="schedule" role="tabpanel" aria-labelledby="invClockTabSchedule">
+            <!-- Schedule + Energy Display Source — side-by-side on wide screens -->
+            <div class="invclock-row-2col">
+              <div class="cb-subsection invclock-2col-cell">
+                <div class="cb-sub-title"><span class="mdi mdi-clock-outline icon-inline" aria-hidden="true"></span> Scheduled Auto-Sync</div>
+                <div class="invclock-form">
+                  <div class="invclock-form-row invclock-form-row-check">
+                    <label class="invclock-check" for="setInvClockAutoSyncEnabled" title="When off, the daily broadcast plus drift and year-invalid auto-triggers are all suppressed. Operator-initiated Sync Now still works.">
+                      <input type="checkbox" id="setInvClockAutoSyncEnabled" />
+                      <span class="invclock-check-label">Enable scheduled auto-sync</span>
+                    </label>
+                  </div>
+
+                  <div class="invclock-form-row">
+                    <label class="invclock-label" for="setInvClockAutoSyncAt">Daily sync time</label>
+                    <input type="time" id="setInvClockAutoSyncAt" class="inp invclock-input" value="04:25" title="Local 24-hour time (HH:MM, server timezone) for the daily broadcast. Stagger with the 04:30 forecast regen.">
+                  </div>
+
+                  <div class="invclock-form-row">
+                    <label class="invclock-label" for="setInvClockDriftThresholdS">Drift trigger threshold (s)</label>
+                    <input type="number" id="setInvClockDriftThresholdS" class="inp invclock-input" min="60" max="86400" step="60" value="3600" title="RTC drift in seconds that triggers an immediate per-unit sync (throttled 4 h per unit). Default 3600 (1 h) catches abnormal drift without firing on benign +30 to +73 min skew.">
+                  </div>
+                </div>
+                <div class="sgroup-actions">
+                  <button id="btnInvClockSaveSchedule" class="btn btn-accent" type="button">
+                    <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span><span>Save Schedule</span>
+                  </button>
+                  <span class="smsg" id="invClockScheduleMsg"></span>
+                </div>
+              </div>
+
+              <!-- v2.9.1 Phase 3 — Energy source selector (relocated to share the row with Scheduled Auto-Sync) -->
+              <div class="cb-subsection invclock-2col-cell">
+                <div class="cb-sub-title"><span class="mdi mdi-flash-outline icon-inline" aria-hidden="true"></span> Energy Display Source</div>
+                <div class="invclock-form">
+                  <div class="invclock-form-row">
+                    <label class="invclock-check" for="setEnergySourcePac" title="Software trapezoidal integration of pac_W. Default — smoothest live tick, restart-safe via crash-recovery seed. Always valid.">
+                      <input type="radio" id="setEnergySourcePac" name="energySourceMode" value="pac" checked />
+                      <span class="invclock-check-label">PAC integrated</span>
+                    </label>
+                  </div>
+                  <div class="invclock-form-row">
+                    <label class="invclock-check" for="setEnergySourceEtotal" title="Hardware lifetime kWh counter (Etotal) delta vs yesterday's eod_clean snapshot. Displays NaN per unit until the first post-1800H snapshot lands.">
+                      <input type="radio" id="setEnergySourceEtotal" name="energySourceMode" value="etotal" />
+                      <span class="invclock-check-label">Etotal</span>
+                    </label>
+                  </div>
+                  <div class="invclock-form-row">
+                    <label class="invclock-check" for="setEnergySourceParce" title="Hardware partial kWh counter (parcE) delta vs yesterday's eod_clean snapshot. Displays NaN per unit until the first post-1800H snapshot lands.">
+                      <input type="radio" id="setEnergySourceParce" name="energySourceMode" value="parce" />
+                      <span class="invclock-check-label">parcE</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="sgroup-actions">
+                  <button id="btnEnergySourceSave" class="btn btn-accent" type="button">
+                    <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span><span>Save Source</span>
+                  </button>
+                  <span class="smsg" id="energySourceMsg"></span>
+                </div>
+              </div>
+            </div>
+
+            </div><!-- /#invClockPanelSchedule -->
+
+            <!-- Tab panel: Per-Unit Counter Health (table + toolbar) -->
+            <div id="invClockPanelHealth" class="invclock-tab-panel" data-invclock-panel="health" role="tabpanel" aria-labelledby="invClockTabHealth" hidden>
+            <!-- Per-unit counter health (with inline operator-action toolbar) -->
+            <div class="cb-subsection">
+              <div class="invclock-toolbar">
+                <label class="invclock-toolbar-label" for="invClockSyncInverterSel">Per-inverter</label>
+                <select id="invClockSyncInverterSel" class="sel invclock-toolbar-select" title="Pick an inverter; the sync will hit every node on that inverter's daisy chain.">
+                  <option value="">Select inverter…</option>
+                </select>
+                <button id="btnInvClockSyncInverter" class="btn btn-accent btn-sm" type="button" disabled title="Send the server clock to every node of the selected inverter using one Modbus broadcast frame. No auth required.">
+                  <span class="mdi mdi-sync icon-inline" aria-hidden="true"></span><span>Sync This Inverter</span>
+                </button>
+                <span class="invclock-toolbar-sep" aria-hidden="true">|</span>
+                <button id="btnInvClockSyncPlant" class="btn btn-red btn-sm" type="button" title="Broadcast the gateway clock to every inverter at once. Requires the current-minute bulk auth key.">
+                  <span class="mdi mdi-broadcast icon-inline" aria-hidden="true"></span><span>Sync ALL Plant</span>
+                </button>
+                <button id="btnInvClockRefresh" class="btn btn-outline btn-sm" type="button" title="Refresh per-unit counter state, drift, and sync log tables.">
+                  <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span><span>Refresh</span>
+                </button>
+                <span class="smsg invclock-toolbar-msg" id="invClockActionMsg"></span>
+              </div>
+              <div class="invclock-scroll">
+                <table class="data-table invclock-unit-table">
+                  <thead>
+                    <tr>
+                      <th class="col-inv">Inv</th>
+                      <th class="col-unit">Unit</th>
+                      <th class="col-rtc">Inverter RTC</th>
+                      <th class="col-drift num">Drift</th>
+                      <th class="col-etotal num">Etotal (kWh)</th>
+                      <th class="col-parce num">parcE (kWh)</th>
+                      <th class="col-status">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody class="js-invclock-unit-body">
+                    <tr><td colspan="7" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            </div><!-- /#invClockPanelHealth -->
+
+            <!-- Tab panel: Recent Sync Attempts (audit log) -->
+            <div id="invClockPanelLog" class="invclock-tab-panel" data-invclock-panel="log" role="tabpanel" aria-labelledby="invClockTabLog" hidden>
+            <!-- Recent sync log -->
+            <div class="cb-subsection">
+              <div class="cb-history-table-wrap invclock-scroll">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Inverter</th>
+                      <th>Unit</th>
+                      <th>Trigger</th>
+                      <th class="num">Drift before</th>
+                      <th class="num">Drift after</th>
+                      <th>Result</th>
+                    </tr>
+                  </thead>
+                  <tbody id="invClockLogBody">
+                    <tr><td colspan="7" class="invclock-empty">No sync attempts logged yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            </div><!-- /#invClockPanelLog -->
+          </div>
 
             </div>
           </div>
@@ -2753,6 +2915,40 @@
           <span id="alarmDetailSev" class="sev-pill sev-fault">FAULT</span>
         </div>
         <div id="alarmDetailBody" class="confirm-dialog-body alarm-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- In-app PDF Viewer Modal — page-chip destination for per-bit schematic
+         pages. Uses an iframe against the local /docs mount so Chromium's
+         built-in PDF viewer renders inline jumped to `#page=N`. -->
+    <div id="pdfViewerModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="pdfViewerTitle">
+      <div class="pdf-viewer-dialog">
+        <div class="pdf-viewer-header">
+          <span class="mdi mdi-file-pdf-box pdf-viewer-header-icon" aria-hidden="true"></span>
+          <div class="pdf-viewer-title-wrap">
+            <div id="pdfViewerTitle" class="pdf-viewer-title">Document</div>
+            <div id="pdfViewerSubtitle" class="pdf-viewer-subtitle"></div>
+          </div>
+          <div class="pdf-viewer-actions">
+            <button type="button" class="pdf-viewer-btn" id="pdfViewerFullscreen" title="Toggle full screen (F)">
+              <span class="mdi mdi-fullscreen" id="pdfViewerFullscreenIcon"></span><span id="pdfViewerFullscreenLabel">Full screen</span>
+            </button>
+            <button type="button" class="pdf-viewer-btn" id="pdfViewerOpenTab" title="Open in system browser">
+              <span class="mdi mdi-open-in-new"></span><span>Open in browser</span>
+            </button>
+            <button type="button" class="pdf-viewer-btn" id="pdfViewerDownload" title="Download this PDF">
+              <span class="mdi mdi-download"></span><span>Download</span>
+            </button>
+            <button type="button" class="pdf-viewer-btn close-btn" id="pdfViewerClose" title="Close" aria-label="Close">
+              <span class="mdi mdi-close"></span>
+            </button>
+          </div>
+        </div>
+        <!-- PDF host: JS rebuilds an <object type="application/pdf"> element
+             inside this container on every open. <object> is the standard
+             Chromium path for embedding PDFs via the built-in viewer — more
+             reliable than <iframe> in Electron renderer contexts. -->
+        <div id="pdfViewerFrame" class="pdf-viewer-frame"></div>
       </div>
     </div>
 </body>

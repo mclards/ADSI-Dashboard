@@ -77,7 +77,19 @@ const {
   // auto-restore that happened when adsi.db was found corrupt. Surfaced
   // to the renderer through GET /api/health/db-integrity.
   startupIntegrityResult,
+  // v2.9.0 — hardware counter + clock-sync persistence helpers
+  persistCounterState: _dbPersistCounterState,
+  getCounterHistory,
+  evaluateCounterAdvancing: _dbEvalCounterAdvancing,
+  getCounterBaselinesForDate,
+  getYesterdaySnapshotForDate,
+  getCounterStateAll,
+  getCounterStateOne,
+  computeInverterDailyHwTotals,
+  insertClockSyncLogRow,
+  getClockSyncLog,
 } = require("./db");
+const counterHealth = require("./counterHealth");
 const {
   registerClient,
   broadcastUpdate,
@@ -102,6 +114,7 @@ const {
   SERVICE_DOCS,
   SERVICE_DOCS_GITHUB_BASE,
   FATAL_ALARM_VALUE,
+  classifyAlarmTransition,
 } = require("./alarms");
 const {
   isValidPlantWideAuthKey,
@@ -170,9 +183,24 @@ const staticNoCache = {
 };
 app.use("/assets", express.static(path.join(__dirname, "../assets"), staticNoCache));
 // Ingeteam service reference PDFs (schematic, Level 1/2 workflows, SUN Manager
-// manual). Served locally as the offline fallback if the GitHub raw URL fetch
-// fails in the alarm drilldown.
-app.use("/docs", express.static(path.join(__dirname, "../docs"), staticNoCache));
+// manual). Served locally as both the offline-download fallback AND the
+// canonical source for inline page-jump viewing from the alarm drilldown.
+// Content-Disposition: inline is the standard per-URL override that tells the
+// browser to render the PDF instead of saving, even when the user's global
+// default for PDFs is "always download". Downloads from the footer buttons
+// still work because the client bypasses this header via fetch+Blob+
+// <a download> (see downloadServiceDoc in public/js/app.js).
+const staticDocs = {
+  ...staticNoCache,
+  setHeaders(res, filePath) {
+    staticNoCache.setHeaders(res, filePath);
+    if (/\.pdf$/i.test(String(filePath || ""))) {
+      res.setHeader("Content-Disposition", "inline");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+    }
+  },
+};
+app.use("/docs", express.static(path.join(__dirname, "../docs"), staticDocs));
 /* Block direct static access to credentials reference — must go through auth-gated endpoint */
 app.use((req, res, next) => {
   if (!req.path.startsWith("/api/") && req.path.toLowerCase().includes("credentials-reference")) return res.status(403).end();
@@ -488,6 +516,8 @@ const REPLICATION_TABLE_DEFS = [
       "expected_node_uptime_s",
       "expected_nodes",
       "rated_kw",
+      "kwh_total_etotal",
+      "kwh_total_parce",
       "updated_ts",
     ],
   },
@@ -527,6 +557,60 @@ const REPLICATION_TABLE_DEFS = [
     orderBy: "key ASC",
     columns: ["key", "value", "updated_ts"],
   },
+  {
+    name: "inverter_counter_state",
+    orderBy: "inverter ASC, unit ASC",
+    columns: [
+      "inverter",
+      "unit",
+      "ts_ms",
+      "etotal_kwh",
+      "parce_kwh",
+      "rtc_ms",
+      "rtc_valid",
+      "rtc_drift_s",
+      "pac_w",
+      "fac_hz",
+      "alarm_32",
+      "counter_advancing",
+      "updated_ts",
+    ],
+  },
+  {
+    name: "inverter_counter_baseline",
+    orderBy: "date_key ASC, inverter ASC, unit ASC",
+    columns: [
+      "inverter",
+      "unit",
+      "date_key",
+      "etotal_baseline",
+      "parce_baseline",
+      "baseline_ts_ms",
+      "source",
+      "etotal_eod_clean",
+      "parce_eod_clean",
+      "eod_clean_ts_ms",
+      "eod_clean_pac_w",
+      "updated_ts",
+    ],
+  },
+  {
+    name: "inverter_clock_sync_log",
+    orderBy: "id ASC",
+    columns: [
+      "id",
+      "ts",
+      "inverter",
+      "unit",
+      "trigger",
+      "target_iso",
+      "drift_before_s",
+      "drift_after_s",
+      "accepted",
+      "error",
+      "updated_ts",
+    ],
+  },
 ];
 const REPLICATION_LOCAL_NEWER_IGNORE_TABLES = new Set([
   // Manual pull should protect newer replicated data, not standby-client config
@@ -562,6 +646,24 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
     limit: 0,
   },
   settings: { mode: "updated", cursorColumn: "updated_ts", orderBy: "updated_ts ASC, key ASC", limit: 0 },
+  inverter_counter_state: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, inverter ASC, unit ASC",
+    limit: 0,
+  },
+  inverter_counter_baseline: {
+    mode: "updated",
+    cursorColumn: "updated_ts",
+    orderBy: "updated_ts ASC, date_key ASC, inverter ASC, unit ASC",
+    limit: 0,
+  },
+  inverter_clock_sync_log: {
+    mode: "append",
+    cursorColumn: "id",
+    orderBy: "id ASC",
+    limit: REMOTE_INCREMENTAL_APPEND_LIMIT,
+  },
 };
 
 let remoteBridgeTimer = null;
@@ -1613,6 +1715,7 @@ function syncRemoteBridgeAlarmTransitions(nextLiveData) {
   const rows = nextLiveData && typeof nextLiveData === "object" ? nextLiveData : {};
   const nextState = Object.create(null);
   const raised = [];
+  const now = Date.now();
 
   for (const [key, row] of Object.entries(rows)) {
     const inverter = Number(row?.inverter || 0);
@@ -1623,7 +1726,11 @@ function syncRemoteBridgeAlarmTransitions(nextLiveData) {
     nextState[key] = alarmValue;
 
     const prevAlarmValue = Number(remoteBridgeAlarmState[key] || 0);
-    if (!alarmValue || alarmValue === prevAlarmValue) continue;
+    // Reuse the shared classifier so remote toasts mirror gateway semantics.
+    // Clears are intentionally silent — viewers re-fetch /api/alarms/active
+    // (proxied to gateway) to reconcile cleared rows; no WS toast needed.
+    const transition = classifyAlarmTransition(prevAlarmValue, alarmValue);
+    if (transition !== "raise" && transition !== "update_active") continue;
 
     raised.push({
       inverter,
@@ -1632,6 +1739,7 @@ function syncRemoteBridgeAlarmTransitions(nextLiveData) {
       severity: getTopSeverity(alarmValue) || "fault",
       decoded: decodeAlarm(alarmValue),
       alarm_hex: formatAlarmHex(alarmValue),
+      ts: now,
     });
   }
 
@@ -2595,6 +2703,9 @@ const REPLICATION_ALLOWED_TABLES = new Set([
   "forecast_dayahead",
   "forecast_intraday_adjusted",
   "settings",
+  "inverter_counter_state",
+  "inverter_counter_baseline",
+  "inverter_clock_sync_log",
 ]);
 
 function assertReplicationTableAllowed(tableName) {
@@ -2828,7 +2939,9 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
       " uptime_s=excluded.uptime_s, alarm_count=excluded.alarm_count, control_count=excluded.control_count," +
       " availability_pct=excluded.availability_pct, performance_pct=excluded.performance_pct," +
       " node_uptime_s=excluded.node_uptime_s, expected_node_uptime_s=excluded.expected_node_uptime_s," +
-      " expected_nodes=excluded.expected_nodes, rated_kw=excluded.rated_kw, updated_ts=excluded.updated_ts";
+      " expected_nodes=excluded.expected_nodes, rated_kw=excluded.rated_kw," +
+      " kwh_total_etotal=excluded.kwh_total_etotal, kwh_total_parce=excluded.kwh_total_parce," +
+      " updated_ts=excluded.updated_ts";
     const drSql = authoritative ? drBase : drBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(daily_report.updated_ts,0)";
     stmtCached(authoritative ? "merge:daily_report:auth" : "merge:daily_report:lww", drSql).run(drPayload);
     return true;
@@ -2859,6 +2972,35 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
       " cleared_ts=excluded.cleared_ts, acknowledged=excluded.acknowledged, updated_ts=excluded.updated_ts";
     const alSql = authoritative ? alBase : alBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(alarms.updated_ts,0)";
     stmtCached(authoritative ? "merge:alarms:auth" : "merge:alarms:lww", alSql).run(payload);
+    return true;
+  }
+
+  if (tableName === "inverter_counter_state") {
+    const icsColList = cols.join(", ");
+    const icsValList = cols.map((c) => "@" + c).join(", ");
+    const icsBase = "INSERT INTO inverter_counter_state (" + icsColList + ") VALUES (" + icsValList + ")" +
+      " ON CONFLICT(inverter, unit) DO UPDATE SET" +
+      " ts_ms=excluded.ts_ms, etotal_kwh=excluded.etotal_kwh, parce_kwh=excluded.parce_kwh," +
+      " rtc_ms=excluded.rtc_ms, rtc_valid=excluded.rtc_valid, rtc_drift_s=excluded.rtc_drift_s," +
+      " pac_w=excluded.pac_w, fac_hz=excluded.fac_hz, alarm_32=excluded.alarm_32," +
+      " counter_advancing=excluded.counter_advancing, updated_ts=excluded.updated_ts";
+    const icsSql = authoritative ? icsBase : icsBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(inverter_counter_state.updated_ts,0)";
+    stmtCached(authoritative ? "merge:inverter_counter_state:auth" : "merge:inverter_counter_state:lww", icsSql).run(payload);
+    return true;
+  }
+
+  if (tableName === "inverter_counter_baseline") {
+    const icbColList = cols.join(", ");
+    const icbValList = cols.map((c) => "@" + c).join(", ");
+    const icbBase = "INSERT INTO inverter_counter_baseline (" + icbColList + ") VALUES (" + icbValList + ")" +
+      " ON CONFLICT(inverter, unit, date_key) DO UPDATE SET" +
+      " etotal_baseline=excluded.etotal_baseline, parce_baseline=excluded.parce_baseline," +
+      " baseline_ts_ms=excluded.baseline_ts_ms, source=excluded.source," +
+      " etotal_eod_clean=excluded.etotal_eod_clean, parce_eod_clean=excluded.parce_eod_clean," +
+      " eod_clean_ts_ms=excluded.eod_clean_ts_ms, eod_clean_pac_w=excluded.eod_clean_pac_w," +
+      " updated_ts=excluded.updated_ts";
+    const icbSql = authoritative ? icbBase : icbBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(inverter_counter_baseline.updated_ts,0)";
+    stmtCached(authoritative ? "merge:inverter_counter_baseline:auth" : "merge:inverter_counter_baseline:lww", icbSql).run(payload);
     return true;
   }
 
@@ -7966,6 +8108,24 @@ function buildDefaultSettingsSnapshot() {
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     cameraConfig: { ...DEFAULT_CAMERA_CFG },
     dataDir: DATA_DIR,
+    // v2.9.0 Slice G — Inverter Clocks section
+    inverterClockAutoSyncEnabled: "1",
+    inverterClockAutoSyncAt: "04:25",
+    inverterClockDriftThresholdS: "3600",
+    // v2.9.1 — operator-selected energy source for "today's energy" displays.
+    //   "pac"    = software trapezoidal PAC integration (default; smoothest tick)
+    //   "etotal" = hardware lifetime counter delta vs yesterday's eod_clean
+    //   "parce"  = hardware partial counter delta vs yesterday's eod_clean
+    // When mode is "etotal"/"parce" but a unit lacks a clean baseline, the
+    // frontend renders that unit's energy field as the literal string "NaN".
+    energySourceMode: "pac",
+    eodSnapshotHourLocal: 18,
+    eodPacCleanThresholdW: 50,
+    // Hour at which the daily solar-production window opens. The eod_clean
+    // capture window is the COMPLEMENT of [solarWindowStartHour, eodSnapshotHourLocal):
+    //   default capture window = hours where (h >= 18) || (h < 5) — i.e., 18:00–04:59.
+    solarWindowStartHour: 5,
+    crashGapRatio: 0.5,
   };
 }
 
@@ -8079,6 +8239,34 @@ function buildSettingsSnapshot() {
     ),
     go2rtcAutoStart: getSetting("go2rtcAutoStart", "0"),
     dataDir: DATA_DIR,
+    // v2.9.0 Slice G — Inverter Clocks section
+    inverterClockAutoSyncEnabled: String(
+      getSetting("inverterClockAutoSyncEnabled", defaults.inverterClockAutoSyncEnabled),
+    ),
+    inverterClockAutoSyncAt: String(
+      getSetting("inverterClockAutoSyncAt", defaults.inverterClockAutoSyncAt),
+    ),
+    inverterClockDriftThresholdS: String(
+      getSetting("inverterClockDriftThresholdS", defaults.inverterClockDriftThresholdS),
+    ),
+    energySourceMode: (() => {
+      const raw = String(
+        getSetting("energySourceMode", defaults.energySourceMode) || "pac",
+      ).toLowerCase().trim();
+      return raw === "etotal" || raw === "parce" ? raw : "pac";
+    })(),
+    eodSnapshotHourLocal: Number(
+      getSetting("eodSnapshotHourLocal", defaults.eodSnapshotHourLocal),
+    ),
+    eodPacCleanThresholdW: Number(
+      getSetting("eodPacCleanThresholdW", defaults.eodPacCleanThresholdW),
+    ),
+    solarWindowStartHour: Number(
+      getSetting("solarWindowStartHour", defaults.solarWindowStartHour),
+    ),
+    crashGapRatio: Number(
+      getSetting("crashGapRatio", defaults.crashGapRatio),
+    ),
   };
 }
 
@@ -11432,6 +11620,11 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
     const performancePct =
       perfDenomKwh > 0 ? (kwhTotal / perfDenomKwh) * 100 : 0;
 
+    // v2.9.1 — derive per-source hardware totals from baseline + counter_state
+    // (NULL when ANY contributing unit lacks a clean eod_clean anchor for the
+    // requested day). Used by the export and the energy-source selector.
+    const hwTotals = computeInverterDailyHwTotals(inv, day);
+
     const row = {
       date: day,
       inverter: inv,
@@ -11447,6 +11640,8 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       expected_node_uptime_s: Math.max(0, Math.round(expectedNodeUptimeS)),
       expected_nodes: activeNodeCount,
       rated_kw: Number(ratedKw.toFixed(3)),
+      kwh_total_etotal: hwTotals.kwh_total_etotal,
+      kwh_total_parce:  hwTotals.kwh_total_parce,
     };
 
     if (persist) {
@@ -11465,6 +11660,8 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
         row.expected_node_uptime_s,
         row.expected_nodes,
         row.rated_kw,
+        row.kwh_total_etotal,
+        row.kwh_total_parce,
       );
     }
 
@@ -11994,6 +12191,480 @@ app.get("/api/health/db-integrity", (req, res) => {
       : null,
   });
 });
+
+// ─── v2.9.0 Slice C/D/E/F/G — Hardware counter + Inverter clock-sync API ───
+
+const INVERTER_ENGINE_SYNC_URL = `${INVERTER_ENGINE_BASE_URL}/sync-clock`;
+
+// Admin/topology auth gate (reuses the `adsiM`/`adsiMM` pattern established
+// for /api/substation/* and topology UI access).
+function requireTopologyAuth(req, res, next) {
+  const key = String(
+    req.headers["x-topology-key"] ||
+      req.headers["x-substation-key"] ||
+      req.query?.auth ||
+      "",
+  ).trim().toLowerCase();
+  if (!key) return res.status(401).json({ ok: false, error: "Authorization required." });
+  const m = new Date().getMinutes();
+  const valid = new Set([
+    `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
+  ]);
+  const mPrev = (m + 59) % 60;
+  valid.add(`adsi${mPrev}`);
+  valid.add(`adsi${String(mPrev).padStart(2, "0")}`);
+  if (!valid.has(key)) return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  next();
+}
+
+/**
+ * v2.9.1 — Solar-window gap detector. Counts how many distinct 5-minute
+ * buckets in today's expected solar window (05:00–min(18:00, now) local) have
+ * at least one row in the readings table. A clean restart from a healthy run
+ * has ratio ≈ 1; a true crash that knocked out the dashboard for hours has
+ * a low ratio. Used to gate PAC-integrator seeding on actual crash evidence
+ * rather than firing the seed on every boot.
+ *
+ * Returns { ratio, expected, actual, windowStartMs, windowEndMs }.
+ * `null` is returned if the date_key is invalid.
+ */
+function computeSolarWindowGapRatio(dateKey, nowMs = Date.now()) {
+  const key = String(dateKey || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
+  const dayStart = new Date(`${key}T00:00:00.000`).getTime();
+  if (!Number.isFinite(dayStart)) return null;
+
+  const SLOT_MS = 5 * 60 * 1000;
+  const windowStartMs = dayStart + SOLCAST_SOLAR_START_H * 3600 * 1000;
+  const windowEndMs = Math.min(
+    dayStart + SOLCAST_SOLAR_END_H * 3600 * 1000,
+    Number(nowMs) || Date.now(),
+  );
+  if (windowEndMs <= windowStartMs) {
+    return { ratio: 1, expected: 0, actual: 0, windowStartMs, windowEndMs };
+  }
+
+  const expected = Math.max(1, Math.floor((windowEndMs - windowStartMs) / SLOT_MS));
+  let actual = 0;
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT (ts / ${SLOT_MS}) AS bucket
+              FROM readings
+             WHERE ts >= ? AND ts < ?
+         )`,
+      )
+      .get(windowStartMs, windowEndMs);
+    actual = Number(row?.n || 0);
+  } catch (err) {
+    console.warn("[counter] gap-ratio query failed:", err.message);
+  }
+  const ratio = expected > 0 ? actual / expected : 1;
+  return { ratio, expected, actual, windowStartMs, windowEndMs };
+}
+
+/**
+ * GET /api/counter-baseline/:date_key
+ * Read-only internal endpoint consumed by the Python engine on startup.
+ * No auth gate — localhost only by bind.
+ *
+ * Response (v2.9.1):
+ *   {
+ *     date_key,
+ *     baselines: [...],         // today's baseline rows (may include
+ *                               //   eod_clean fields for diagnostics)
+ *     yesterday: [...],         // yesterday's eod_clean snapshot per unit
+ *     crash_detected: bool,     // true → solar-window readings sparse, seed PAC
+ *     gap_ratio,                // 0.0..1.0 — proportion of expected 5-min
+ *                               //   buckets in 05:00–min(now,18:00) covered
+ *     gap_threshold,            // configured crashGapRatio (default 0.5)
+ *     gap_window: {start_ms,end_ms,expected,actual}
+ *   }
+ */
+app.get("/api/counter-baseline/:date_key", (req, res) => {
+  const dateKey = String(req.params.date_key || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    return res.status(400).json({ ok: false, error: "date_key must be YYYY-MM-DD" });
+  }
+  const rows = getCounterBaselinesForDate(dateKey);
+  const yesterday = getYesterdaySnapshotForDate(dateKey);
+
+  // Gap-ratio crash detector: compare actual vs expected 5-min buckets in
+  // today's solar window so far. Threshold is operator-tunable.
+  const gap = computeSolarWindowGapRatio(dateKey) || {
+    ratio: 1, expected: 0, actual: 0, windowStartMs: 0, windowEndMs: 0,
+  };
+  const threshold = Math.max(
+    0, Math.min(1, Number(getSetting("crashGapRatio", 0.5)) || 0.5),
+  );
+  // Only declare crash AFTER the solar window has actually opened — otherwise
+  // an early-morning restart before sunrise would always look "crashed".
+  const inWindow = Date.now() >= gap.windowStartMs && gap.expected >= 6;
+  const crashDetected = inWindow && gap.ratio < threshold;
+
+  res.json({
+    date_key: dateKey,
+    baselines: rows,
+    yesterday,
+    crash_detected: crashDetected,
+    gap_ratio: gap.ratio,
+    gap_threshold: threshold,
+    gap_window: {
+      start_ms: gap.windowStartMs,
+      end_ms:   gap.windowEndMs,
+      expected: gap.expected,
+      actual:   gap.actual,
+    },
+  });
+});
+
+/**
+ * POST /api/audit/counter-recovery
+ * Called by the Python engine after each recovery decision.
+ * Body: { inverter, unit, source, recovered_kwh, reason }.
+ */
+app.post("/api/audit/counter-recovery", express.json(), (req, res) => {
+  try {
+    const b = req.body || {};
+    const inverter = Number(b.inverter || 0);
+    const node = Number(b.unit || 0);
+    const source = String(b.source || "zero");
+    const recoveredKwh = Number(b.recovered_kwh || 0);
+    const reason = String(b.reason || "");
+    db.prepare(
+      `INSERT INTO audit_log
+         (ts, operator, inverter, node, action, scope, result, ip, reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      Date.now(),
+      "SYSTEM",
+      inverter,
+      node,
+      "counter-recovery",
+      `source=${source}`,
+      source === "zero" ? "fallback" : "ok",
+      "",
+      `recovered=${Number.isFinite(recoveredKwh) ? recoveredKwh : 0} kWh; ${reason}`.trim(),
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/counter-state/all
+ * Settings-page feed: per-unit counter state + derived health flags.
+ * Read-only; no more sensitive than /api/live (which is already open).
+ */
+app.get("/api/counter-state/all", (req, res) => {
+  try {
+    const rows = getCounterStateAll();
+    const serverNow = new Date();
+    const augmented = rows.map((r) => {
+      const history = getCounterHistory(r.inverter, r.unit);
+      const rtcOk = counterHealth.rtcYearValid(r, serverNow);
+      const adv = counterHealth.counterAdvancing(history);
+      return {
+        ...r,
+        rtc_year_valid: rtcOk ? 1 : 0,
+        counter_advancing: adv ? 1 : 0,
+      };
+    });
+    res.json({ ok: true, now: Date.now(), rows: augmented });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/counter-state/summary
+ * Compact feed for the main-dashboard status chip (unauthenticated; same info
+ * as /api/counter-state/all collapsed). Read-only — do not add auth gate here
+ * because public/js/app.js polls this every 30 s from the main screen.
+ */
+app.get("/api/counter-state/summary", (req, res) => {
+  try {
+    const rows = getCounterStateAll();
+    const serverNow = new Date();
+    let rtcInvalid = 0;
+    let rtcDrifted = 0;
+    let counterFrozen = 0;
+    let total = rows.length;
+    for (const r of rows) {
+      const history = getCounterHistory(r.inverter, r.unit);
+      const rtcOk = counterHealth.rtcYearValid(r, serverNow);
+      const drift = Number(r.rtc_drift_s || 0);
+      const adv = counterHealth.counterAdvancing(history);
+      if (!rtcOk) rtcInvalid += 1;
+      else if (Math.abs(drift) > 60) rtcDrifted += 1;
+      if (!adv && Number(r.pac_w || 0) > 500) counterFrozen += 1;
+    }
+    res.json({
+      ok: true,
+      now: Date.now(),
+      total,
+      rtc_invalid: rtcInvalid,
+      rtc_drifted: rtcDrifted,
+      counter_frozen: counterFrozen,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/clock-sync-log
+ * Paginated view of recent clock-sync attempts for the settings page.
+ */
+app.get("/api/clock-sync-log", (req, res) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
+  res.json({ ok: true, rows: getClockSyncLog(limit) });
+});
+
+/**
+ * POST /api/sync-clock/:inverter/:unit   — operator-triggered single-unit sync.
+ * Bulk-auth gated via the `sacupsMM` rotating key (header `x-bulk-auth`
+ * or Authorization bearer). Proxies to Python FastAPI which executes the
+ * vendor-FC frame. Logs to inverter_clock_sync_log + audit_log on return.
+ */
+async function _proxySyncClock(url, req, res, trigger, scope) {
+  try {
+    const headers = { "content-type": "application/json" };
+    if (req.get("authorization")) headers["authorization"] = req.get("authorization");
+    if (req.get("x-bulk-auth")) headers["x-bulk-auth"] = req.get("x-bulk-auth");
+    // v2.9.1 — when no operator-supplied auth is present (per-inverter route
+    // no longer prompts the operator per the 2-type sync model), inject the
+    // current-minute sacupsMM key so Python's _check_bulk_auth still passes.
+    if (!headers["authorization"] && !headers["x-bulk-auth"]) {
+      headers["x-bulk-auth"] = _currentSacupsKey();
+    }
+    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}) });
+    const body = await r.json().catch(() => ({ ok: false, error: "bad upstream JSON" }));
+    // Normalize to array of results so logging works for single + broadcast.
+    const rows = Array.isArray(body.results) ? body.results : [body];
+    for (const row of rows) {
+      try {
+        insertClockSyncLogRow({
+          ts: Date.now(),
+          inverter: Number(row?.inverter || 0),
+          unit: Number(row?.unit || 0),
+          trigger: String(trigger || "operator"),
+          target_iso: body?.target_iso || row?.target_iso || null,
+          drift_before_s: row?.drift_before_s,
+          drift_after_s: row?.drift_after_s,
+          accepted: row?.accepted ? 1 : 0,
+          error: row?.error || null,
+        });
+        db.prepare(
+          `INSERT INTO audit_log
+             (ts, operator, inverter, node, action, scope, result, ip, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          Date.now(),
+          String(trigger === "operator" ? "OPERATOR" : "SYSTEM"),
+          Number(row?.inverter || 0),
+          Number(row?.unit || 0),
+          "clock-sync",
+          String(scope || "single"),
+          row?.accepted ? "ok" : "fail",
+          "",
+          `trigger=${trigger}; drift_before=${row?.drift_before_s ?? "-"}s; drift_after=${row?.drift_after_s ?? "-"}s; ${row?.error || ""}`.trim(),
+        );
+      } catch (_) { /* non-fatal */ }
+    }
+    res.status(r.status || 200).json(body);
+  } catch (err) {
+    res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
+  }
+}
+
+function _requireBulkAuth(req, res, next) {
+  // Accept either:
+  //   • the canonical plant-cap pattern — body.authToken / body.authKey
+  //     (issued by POST /api/write/auth/bulk), OR
+  //   • header-based fallback (x-bulk-auth / Authorization) for internal
+  //     callers (server scheduler, Python engine drift triggers).
+  const body = req.body || {};
+  const authToken = String(
+    body.authToken ||
+      req.headers["x-plantwide-session"] ||
+      req.headers["x-bulkauth-session"] ||
+      "",
+  ).trim();
+  const authKey = String(
+    body.authKey ||
+      req.headers["x-bulk-auth"] ||
+      req.headers["authorization"] ||
+      "",
+  ).trim();
+  const ok = isAuthorizedPlantWideControl({ authKey, authToken }, req);
+  if (!ok) return res.status(401).json({ ok: false, error: "Bulk auth required." });
+  next();
+}
+
+// v2.9.1 — per-inverter sync: NO auth gate per operator directive (the "2-type
+// model": per-inverter is the routine ops action; only fleet-wide broadcast
+// requires an auth prompt because it can interrupt the entire plant). The
+// proxy auto-injects sacupsMM upstream so Python's _check_bulk_auth still
+// accepts the call.
+// IMPORTANT: this route MUST be registered before /api/sync-clock/:inverter/:unit
+// because Express matches the generic two-segment pattern first — "inverter" in
+// the path would be captured as the :inverter param, routing through _requireBulkAuth.
+app.post("/api/sync-clock/inverter/:inverter", express.json(), (req, res) => {
+  const inv = Number(req.params.inverter);
+  if (!inv) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  const trigger = String(req.body?.trigger || "operator");
+  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/inverter/${inv}`, req, res, trigger, "inverter");
+});
+
+app.post("/api/sync-clock/:inverter/:unit", express.json(), _requireBulkAuth, (req, res) => {
+  const inv = Number(req.params.inverter);
+  const unit = Number(req.params.unit);
+  if (!inv || !unit) {
+    return res.status(400).json({ ok: false, error: "inverter/unit required" });
+  }
+  const trigger = String(req.body?.trigger || "operator");
+  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/${inv}/${unit}`, req, res, trigger, "single");
+});
+
+app.post("/api/sync-clock/broadcast", express.json(), _requireBulkAuth, (req, res) => {
+  const trigger = String(req.body?.trigger || "operator");
+  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/broadcast`, req, res, trigger, "broadcast");
+});
+
+// v2.9.0 — the inverter-clock admin surface now lives in Settings →
+// "Inverter Clocks" section. The /admin/inverter-clock route is kept as a
+// compatibility redirect so any bookmarked link lands on the right place.
+app.get("/admin/inverter-clock", (req, res) => {
+  res.redirect(302, "/#settings-inverter-clock");
+});
+
+/**
+ * POST /api/sync-clock-internal
+ * Internal, loopback-only endpoint. The Python engine calls this from the
+ * drift/year-invalid triggers; Node mints a current-minute `sacupsMM` key
+ * and forwards to the bulk-auth-gated engine endpoint.
+ */
+function _currentSacupsKey() {
+  const mm = String(new Date().getMinutes()).padStart(2, "0");
+  return `sacups${mm}`;
+}
+
+app.post("/api/sync-clock-internal", express.json(), async (req, res) => {
+  // Allow only loopback callers (Python engine on the same box).
+  const remoteIp = String(req.ip || "").replace(/^::ffff:/, "");
+  const isLoopback = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "localhost";
+  if (!isLoopback) {
+    return res.status(403).json({ ok: false, error: "loopback only" });
+  }
+  const inv = Number(req.body?.inverter || 0);
+  const unit = Number(req.body?.unit || 0);
+  const trigger = String(req.body?.trigger || "auto");
+  if (!inv || !unit) {
+    return res.status(400).json({ ok: false, error: "inverter/unit required" });
+  }
+  try {
+    const url = `${INVERTER_ENGINE_SYNC_URL}/${inv}/${unit}`;
+    const headers = {
+      "content-type": "application/json",
+      "x-bulk-auth": _currentSacupsKey(),
+    };
+    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}) });
+    const body = await r.json().catch(() => ({ ok: false }));
+    try {
+      insertClockSyncLogRow({
+        ts: Date.now(),
+        inverter: inv,
+        unit,
+        trigger,
+        target_iso: body?.target_iso || null,
+        drift_before_s: body?.drift_before_s,
+        drift_after_s: body?.drift_after_s,
+        accepted: body?.accepted ? 1 : 0,
+        error: body?.error || null,
+      });
+    } catch (_) { /* non-fatal */ }
+    res.status(r.status || 200).json(body);
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── v2.9.0 Slice E — scheduled daily clock-sync ────────────────────────
+// Defaults: enabled, fires at 04:25 local (before the 04:30 day-ahead regen).
+// Settings keys: inverterClockAutoSyncEnabled, inverterClockAutoSyncAt,
+//                 inverterClockDriftThresholdS.
+let _clockSyncCronTimer = null;
+function _nextClockSyncFireAt(hhmm) {
+  const [hS, mS] = String(hhmm || "04:25").split(":");
+  const hh = Math.min(23, Math.max(0, Number(hS) || 4));
+  const mm = Math.min(59, Math.max(0, Number(mS) || 25));
+  const now = new Date();
+  const next = new Date(now);
+  next.setSeconds(0);
+  next.setMilliseconds(0);
+  next.setHours(hh, mm, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+  return next;
+}
+
+function _scheduleNextClockSync() {
+  try {
+    const enabled = String(getSetting("inverterClockAutoSyncEnabled", "1")) !== "0";
+    if (!enabled) {
+      if (_clockSyncCronTimer) { clearTimeout(_clockSyncCronTimer); _clockSyncCronTimer = null; }
+      return;
+    }
+    const hhmm = String(getSetting("inverterClockAutoSyncAt", "04:25"));
+    const next = _nextClockSyncFireAt(hhmm);
+    const delay = Math.max(1000, next.getTime() - Date.now());
+    if (_clockSyncCronTimer) clearTimeout(_clockSyncCronTimer);
+    _clockSyncCronTimer = setTimeout(async () => {
+      try {
+        console.log(`[clock-sync] auto-sync firing (${hhmm})`);
+        const url = `${INVERTER_ENGINE_SYNC_URL}/broadcast`;
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-bulk-auth": _currentSacupsKey() },
+          body: JSON.stringify({}),
+        });
+        const body = await r.json().catch(() => ({ results: [] }));
+        const results = Array.isArray(body.results) ? body.results : [];
+        for (const row of results) {
+          try {
+            insertClockSyncLogRow({
+              ts: Date.now(),
+              inverter: Number(row?.inverter || 0),
+              unit: Number(row?.unit || 0),
+              trigger: "auto",
+              target_iso: body.target_iso || null,
+              drift_before_s: row?.drift_before_s,
+              drift_after_s: row?.drift_after_s,
+              accepted: row?.accepted ? 1 : 0,
+              error: row?.error || null,
+            });
+          } catch (_) { /* non-fatal */ }
+        }
+        const accepted = results.filter((r) => r?.accepted).length;
+        console.log(`[clock-sync] auto-sync done: ${accepted}/${results.length} accepted`);
+      } catch (err) {
+        console.error("[clock-sync] auto-sync failed:", err.message);
+      } finally {
+        _scheduleNextClockSync();
+      }
+    }, delay);
+    if (_clockSyncCronTimer.unref) _clockSyncCronTimer.unref();
+    console.log(`[clock-sync] next auto-sync at ${next.toISOString()}`);
+  } catch (err) {
+    console.warn("[clock-sync] scheduler init failed:", err.message);
+  }
+}
+
+try { _scheduleNextClockSync(); } catch (_) { /* boot-time safe */ }
 
 app.get("/api/live", (req, res) => {
   // Hot-path optimization for gateway mode: avoid per-request stringify cost.
@@ -13710,6 +14381,16 @@ app.post("/api/settings", (req, res) => {
     plantCapCooldownSec,
     go2rtcAutoStart,
     cameraConfig,
+    // v2.9.0 Slice G — Inverter Clocks
+    inverterClockAutoSyncEnabled,
+    inverterClockAutoSyncAt,
+    inverterClockDriftThresholdS,
+    // v2.9.1 Phase 3 — energy source selector + EOD/crash tunables
+    energySourceMode,
+    eodSnapshotHourLocal,
+    eodPacCleanThresholdW,
+    solarWindowStartHour,
+    crashGapRatio,
   } =
     req.body || {};
 
@@ -14013,9 +14694,95 @@ app.post("/api/settings", (req, res) => {
     updates.cameraConfig = JSON.stringify(sanitizeCameraConfig(cameraConfig));
   }
 
+  // v2.9.0 Slice G — Inverter Clocks
+  if (inverterClockAutoSyncEnabled !== undefined) {
+    updates.inverterClockAutoSyncEnabled =
+      inverterClockAutoSyncEnabled === "1" || inverterClockAutoSyncEnabled === true ? "1" : "0";
+  }
+  if (inverterClockAutoSyncAt !== undefined) {
+    const hhmm = String(inverterClockAutoSyncAt || "").trim();
+    if (hhmm && !/^\d{2}:\d{2}$/.test(hhmm)) {
+      return res.status(400).json({
+        ok: false,
+        error: "inverterClockAutoSyncAt must be HH:MM (24-hour).",
+      });
+    }
+    updates.inverterClockAutoSyncAt = hhmm || "04:25";
+  }
+  if (inverterClockDriftThresholdS !== undefined) {
+    const n = Number(inverterClockDriftThresholdS);
+    if (!Number.isFinite(n) || n < 60 || n > 86400) {
+      return res.status(400).json({
+        ok: false,
+        error: "inverterClockDriftThresholdS must be between 60 and 86400.",
+      });
+    }
+    updates.inverterClockDriftThresholdS = String(Math.round(n));
+  }
+
+  // v2.9.1 Phase 3 — energy source selector + EOD/crash tunables
+  if (energySourceMode !== undefined) {
+    const mode = String(energySourceMode || "").toLowerCase().trim();
+    if (!["pac", "etotal", "parce"].includes(mode)) {
+      return res.status(400).json({
+        ok: false,
+        error: "energySourceMode must be 'pac', 'etotal', or 'parce'.",
+      });
+    }
+    updates.energySourceMode = mode;
+  }
+  if (eodSnapshotHourLocal !== undefined) {
+    const h = Number(eodSnapshotHourLocal);
+    if (!Number.isFinite(h) || h < 0 || h > 23) {
+      return res.status(400).json({
+        ok: false,
+        error: "eodSnapshotHourLocal must be 0..23.",
+      });
+    }
+    updates.eodSnapshotHourLocal = String(Math.trunc(h));
+  }
+  if (eodPacCleanThresholdW !== undefined) {
+    const w = Number(eodPacCleanThresholdW);
+    if (!Number.isFinite(w) || w < 0 || w > 10000) {
+      return res.status(400).json({
+        ok: false,
+        error: "eodPacCleanThresholdW must be 0..10000.",
+      });
+    }
+    updates.eodPacCleanThresholdW = String(Math.trunc(w));
+  }
+  if (solarWindowStartHour !== undefined) {
+    const h = Number(solarWindowStartHour);
+    if (!Number.isFinite(h) || h < 0 || h > 23) {
+      return res.status(400).json({
+        ok: false,
+        error: "solarWindowStartHour must be 0..23.",
+      });
+    }
+    updates.solarWindowStartHour = String(Math.trunc(h));
+  }
+  if (crashGapRatio !== undefined) {
+    const r = Number(crashGapRatio);
+    if (!Number.isFinite(r) || r < 0 || r > 1) {
+      return res.status(400).json({
+        ok: false,
+        error: "crashGapRatio must be between 0 and 1.",
+      });
+    }
+    updates.crashGapRatio = String(r);
+  }
+
   db.transaction(() => {
     Object.entries(updates).forEach(([k, v]) => setSetting(k, v));
   })();
+
+  // Reschedule the clock-sync cron if the schedule changed.
+  if (
+    updates.inverterClockAutoSyncEnabled !== undefined ||
+    updates.inverterClockAutoSyncAt !== undefined
+  ) {
+    try { _scheduleNextClockSync(); } catch (_) { /* non-fatal */ }
+  }
   const modeAfter = readOperationMode();
   const remoteGatewayAfter = getRemoteGatewayBaseUrl();
   const remoteTokenAfter = getRemoteApiToken();

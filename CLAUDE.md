@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.8.13` in `package.json` (source of truth) |
+| Repo version baseline | `2.9.0` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.8.12` (Update Ready snooze + multi-model cloud forecast) |
+| Latest published release | `v2.9.0` (Hardware counter recovery, eod_clean hardening, inverter clock sync, energySourceMode selector) |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
@@ -142,6 +142,78 @@ and `plans/2026-04-17-power-loss-resilience.md` for full rationale. Short versio
 Do NOT remove the `app.asar.sha512` sidecar, the stash path, or the hoisted
 `uncaughtException` handler — they are the chain that converts a torn-write
 into a 60-second recovery.
+
+---
+
+## Hardware Counter Recovery + Clock Sync (v2.9.0)
+
+See `plans/2026-04-24-hardware-counter-recovery-and-clock-sync.md` for the
+full spec and `audits/2026-04-24/counter-integrity/` for scan evidence.
+
+- Python engine reads **60 input registers** (was 26) via `read_fast_async()`
+  in [services/inverter_engine.py](services/inverter_engine.py), capturing
+  Etotal@0-1, parcE@58-59, full 32-bit alarm@6-7, Fac@19.
+- On restart, `kwh_today` per unit is seeded via
+  `seed_pac_from_baseline()` from `(current_Etotal − midnight_baseline)`,
+  with health-gate hierarchy: `trust_etotal` → `trust_parce` → zero.
+  Controlled via `DISABLE_COUNTER_RECOVERY=1` env var.
+- Inverter clocks are broadcast-synced daily at the `inverterClockAutoSyncAt`
+  setting (default **04:25**, stagger before the 04:30 day-ahead regen).
+  Drift > 1 h and RTC year-out-of-band (2047 pattern) trigger immediate sync.
+- **Slice D clock-sync transport — template-gate retired in v2.9.0**:
+  Wireshark capture of ISM's `Isla::Sincronizar` (`docs/capture-file.pcapng`,
+  frame #8017) confirmed the on-wire protocol is plain Modbus FC16 (Write
+  Multiple Registers) broadcast to unit 0, address 0, six UINT16s
+  `[year, month, day, hour, minute, second]`. No vendor function code, no
+  19-byte template — `sync_clock()` uses pymodbus' built-in
+  `write_registers` directly (see `services/inverter_engine.py` ~line 1714
+  for the design note). The earlier template-gate from
+  `plans/2026-04-24-hardware-counter-recovery-and-clock-sync.md` §9.2 D1
+  is no longer required and the `isla-sincronizar-frame.bin` artifact does
+  not need to exist.
+- New tables in [server/db.js](server/db.js): `inverter_counter_state`,
+  `inverter_counter_baseline`, `inverter_clock_sync_log`. Counter helpers
+  live alongside in `persistCounterState`, `getCounterBaselinesForDate`,
+  `getCounterStateAll`, `insertClockSyncLogRow`. Retention: baseline 90 days,
+  clock-sync log 365 days (operator-tunable).
+- Health-gate pure functions: [server/counterHealth.js](server/counterHealth.js)
+  + matching Python helpers in `services/inverter_engine.py` (`rtc_year_valid`,
+  `counter_advancing`, `parce_precision_ok`, `trust_etotal`, `trust_parce`,
+  `classifyCounter`).
+- New endpoints in [server/index.js](server/index.js):
+  - `GET  /api/counter-baseline/:date_key`  (localhost-internal for Python engine)
+  - `POST /api/audit/counter-recovery`      (system audit writes)
+  - `GET  /api/counter-state/all`           (topology auth — admin UI feed)
+  - `GET  /api/counter-state/summary`       (unauthenticated — top-bar chip)
+  - `GET  /api/clock-sync-log`              (topology auth)
+  - `POST /api/sync-clock/:inv/:unit`       (bulk auth — operator)
+  - `POST /api/sync-clock/broadcast`        (bulk auth — operator)
+  - `POST /api/sync-clock-internal`         (loopback only — Python triggers)
+  - `POST /api/sync-clock/inverter/:inverter` (no operator auth — per-inverter daisy-chain broadcast; client auto-derives `sacupsMM` and Node injects upstream)
+  - `GET  /admin/inverter-clock`            (topology-gated admin page)
+- Export enhancement: [server/exporter.js](server/exporter.js)
+  `exportInverterData` accepts `includeEtotal` / `includeParce` / `showQuarantine`
+  payload flags. Adds columns `Etotal_kWh`, `parcE_kWh`, `Counter_Source`,
+  `Etotal_Quarantined`, `Quarantine_Reason`. PAC-integrated `Energy_kWh`
+  stays authoritative — hardware counters are reconciliation aids.
+- UI: top-bar chip in [public/index.html](public/index.html) + 30-s polling
+  in [public/js/app.js](public/js/app.js). The admin surface lives in
+  **Settings → Inverter Clocks** (`#inverterClockSection`) — themed with
+  the project's `--accent`/`--green`/`--orange`/`--red` token system.
+  The old `/admin/inverter-clock` URL redirects to the settings deep link.
+- Settings keys: `inverterClockAutoSyncEnabled` (default "1"),
+  `inverterClockAutoSyncAt` (default "04:25"),
+  `inverterClockDriftThresholdS` (default 3600),
+  `counterBaselineRetainDays` (default 90),
+  `clockSyncLogRetainDays` (default 365).
+- Tests: `services/tests/test_read_fast_async.py`,
+  `services/tests/test_counter_health.py`,
+  `services/tests/test_sync_clock.py`,
+  `server/tests/counterHealth.test.js`.
+
+INVARIANT: PAC integration stays authoritative while the dashboard is up.
+Hardware counters are used for crash-recovery seeding, export reconciliation,
+and quarantine detection only — they never overwrite a running PAC value.
 
 ---
 

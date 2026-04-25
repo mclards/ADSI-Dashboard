@@ -5506,11 +5506,6 @@ select.cam-field-input { appearance: auto; }
   display: none;
 }
 
-.ana-side-panel[data-panel="irradiance"],
-.ana-side-panel[data-panel="cloud"] {
-  /* Single-chart panels: chart fills the panel */
-}
-
 .ana-side-panel[data-panel="irradiance"] .analytics-weather-wrap,
 .ana-side-panel[data-panel="cloud"] .analytics-weather-wrap {
   flex: 1 1 auto;
@@ -12846,6 +12841,11 @@ body.mode-transition-active {
 #page-settings .settings-shell {
   display: grid;
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  /* Force the single row to fill container height so .settings-main gets a
+   * definite height that flex children inside can size against. Without
+   * this, the row uses content-based sizing and inner flex chains can't
+   * bottom out to a concrete pixel value. */
+  grid-template-rows: 1fr;
   gap: 16px;
   width: 100%;
   flex: 1;
@@ -13108,6 +13108,14 @@ body.mode-transition-active {
 }
 
 #page-settings .settings-sections {
+  /* Flex column so the active card can flex-grow to fill the available
+   * vertical space inside .settings-main. Non-active cards are display:none
+   * and contribute nothing to the flex layout. Other active cards default
+   * to flex: 0 1 auto and stay at content height (settings-main scrolls if
+   * they overflow). */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -15629,6 +15637,35 @@ body.mode-transition-active {
   flex: 0 0 auto;
 }
 
+/* Troubleshooting step list — numbered, compact, safety-aware */
+.alarm-detail-action-summary {
+  font-size: 12.5px;
+  color: var(--text, #e5ecf6);
+  margin-bottom: 6px;
+}
+.alarm-detail-steps {
+  margin: 4px 0 0 0;
+  padding-left: 22px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text2, #c7d0df);
+}
+.alarm-detail-steps li {
+  margin: 2px 0;
+  padding-left: 2px;
+}
+.alarm-detail-steps li::marker {
+  color: var(--accent, #3aa6ff);
+  font-weight: 600;
+}
+.alarm-detail-step-warn {
+  color: #ffb3b3;
+  font-weight: 500;
+}
+.alarm-detail-step-warn::marker {
+  color: #ff6b6b;
+}
+
 /* Info / caveat note (yellow tint) */
 .alarm-detail-note {
   display: flex;
@@ -15770,4 +15807,792 @@ body.mode-transition-active {
   .alarm-detail-footer { padding: 10px 12px; }
   .alarm-detail-footer-docs { flex-direction: column; width: 100%; }
   .alarm-detail-doc-btn { justify-content: center; }
+}
+
+/* ── In-app PDF Viewer Modal ─────────────────────────────────────────────
+   Destination for per-bit schematic page chips. Uses an iframe against the
+   local /docs/ Express mount so Chromium's built-in PDF viewer renders
+   inline, jumped to the requested #page=N. Stacks ABOVE .alarm-detail
+   via a higher z-index so the alarm drilldown stays underneath. */
+#pdfViewerModal {
+  z-index: 12200;
+}
+#pdfViewerModal.fullscreen-active {
+  padding: 0;
+}
+.pdf-viewer-dialog {
+  width: min(1680px, 97vw);
+  height: min(960px, 96vh);
+  background: var(--panel, #0f1520);
+  border: 1px solid var(--border2, #243049);
+  border-radius: 10px;
+  box-shadow:
+    0 28px 64px rgba(0, 0, 0, 0.62),
+    0 0 0 1px rgba(32, 44, 68, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 140ms ease, height 140ms ease, border-radius 140ms ease;
+}
+.pdf-viewer-dialog.fullscreen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  box-shadow: none;
+}
+.pdf-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border2, #243049);
+  background: linear-gradient(180deg, rgba(28,40,64,0.72) 0%, rgba(18,26,42,0.72) 100%);
+  flex: 0 0 auto;
+}
+.pdf-viewer-header-icon {
+  font-size: 22px;
+  color: #ff6b6b;
+  flex: 0 0 auto;
+}
+.pdf-viewer-title-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pdf-viewer-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text, #e5ecf6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdf-viewer-subtitle {
+  font-size: 11.5px;
+  color: var(--muted, #9aa8bf);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdf-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.pdf-viewer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border2, #243049);
+  background: rgba(18,26,42,0.7);
+  color: var(--text, #e5ecf6);
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pdf-viewer-btn:hover {
+  background: rgba(34,48,78,0.9);
+  border-color: var(--accent, #3aa6ff);
+}
+.pdf-viewer-btn.close-btn {
+  padding: 6px 8px;
+}
+.pdf-viewer-btn.close-btn:hover {
+  background: rgba(255,90,90,0.18);
+  border-color: rgba(255,90,90,0.6);
+}
+.pdf-viewer-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #1a1f2c;
+  position: relative;
+  overflow: hidden;
+}
+.pdf-viewer-object {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #1a1f2c;
+}
+.pdf-viewer-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted, #9aa8bf);
+  pointer-events: none;
+}
+.pdf-viewer-fallback-icon {
+  font-size: 48px;
+  color: #ff6b6b;
+  margin-bottom: 8px;
+}
+.pdf-viewer-fallback-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text, #e5ecf6);
+  margin-bottom: 4px;
+}
+.pdf-viewer-fallback-text {
+  font-size: 12.5px;
+  max-width: 420px;
+}
+@media (max-width: 720px) {
+  .pdf-viewer-dialog { width: 98vw; height: 96vh; }
+  .pdf-viewer-btn span:not(.mdi) { display: none; }
+  .pdf-viewer-btn { padding: 6px 8px; }
+}
+
+/* ─── v2.9.0 Slice G — Inverter Clocks (Settings + Energy card) ─────────── */
+/*
+ * Uses the project's --accent/--green/--red/--orange/--text/--border tokens
+ * so both parchment themes apply without extra overrides.
+ */
+
+/* Settings → Inverter Clocks form rows ─────────────────────────────────── */
+.invclock-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+/* v2.9.1 — 2-column layout for the Schedule + Energy Source subsections.
+   Uses flex (not grid) because the parent (#page-settings .settings-main)
+   is itself a flex column and a grid child there was reporting min-content
+   as its intrinsic cross-axis size, collapsing both columns to per-word
+   width. `flex: 1 1 0` on each cell makes them start at 0 width and grow
+   equally to share the row, which is what we want regardless of content. */
+.invclock-row-2col {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
+  align-items: stretch;
+}
+.invclock-row-2col > .invclock-2col-cell {
+  flex:  1 1 0;
+  min-width: 320px;
+  margin: 0;
+}
+@media (max-width: 900px) {
+  .invclock-row-2col > .invclock-2col-cell {
+    flex: 1 1 100%;
+  }
+}
+
+/* Inside the 2-col cells the form-row's 3-column grid (180/120/1fr) blows
+   past the cell's available width on a 50/50 split. Collapse to a stacked
+   layout (label above, control below, help text below) for these cells. */
+.invclock-2col-cell .invclock-form-row {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 4px;
+}
+.invclock-2col-cell .invclock-form-row-check {
+  grid-template-columns: max-content;
+}
+.invclock-2col-cell .invclock-input {
+  max-width: 100%;
+}
+
+/* v2.9.1 — compact toolbar above the per-unit counter-health table.
+   Replaces the old standalone "Operator Actions" subsection that wasted
+   vertical space on three small controls. */
+.invclock-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  margin: 6px 0 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+}
+.invclock-toolbar-label {
+  font-size: 12px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  white-space: nowrap;
+}
+.invclock-toolbar-select {
+  min-width: 160px;
+  max-width: 220px;
+}
+.invclock-toolbar-msg {
+  margin-left: auto;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.invclock-toolbar-sep {
+  color: var(--text-dim);
+  opacity: 0.45;
+  margin: 0 4px;
+  user-select: none;
+}
+.invclock-form-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(120px, 200px) 1fr;
+  gap: 6px 14px;
+  align-items: center;
+}
+.invclock-form-row-check {
+  grid-template-columns: max-content 1fr;
+}
+.invclock-label {
+  font-size: 12px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  white-space: nowrap;
+}
+.invclock-input {
+  width: 100%;
+  max-width: 200px;
+}
+.invclock-help {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text3, var(--text2));
+  opacity: 0.9;
+}
+.invclock-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+}
+.invclock-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.invclock-check-label { user-select: none; }
+
+@media (max-width: 880px) {
+  .invclock-form-row {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  .invclock-input { max-width: 100%; }
+}
+
+/* Energy → Per-Inverter Clock & Counter Status card ─────────────────────── */
+.invclock-card {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface2) 90%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 94%, transparent) 100%
+  );
+  box-shadow:
+    0 8px 20px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.invclock-card[open] {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.invclock-card-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: var(--fw-semibold, 600);
+  border-bottom: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.invclock-card-summary::-webkit-details-marker { display: none; }
+.invclock-card-summary:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.invclock-card[open] > .invclock-card-summary {
+  border-bottom-color: var(--border);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.invclock-card-chevron {
+  font-size: 18px;
+  color: var(--text3, var(--text2));
+  transition: transform 0.2s ease;
+}
+.invclock-card[open] > .invclock-card-summary .invclock-card-chevron {
+  transform: rotate(90deg);
+}
+.invclock-card-title {
+  flex: 0 0 auto;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+.invclock-card-counts {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+  align-items: center;
+  font-size: 11px;
+  font-weight: var(--fw-medium, 500);
+}
+.invclock-card-refresh {
+  padding: 2px 8px;
+  min-height: 0;
+  line-height: 1;
+}
+.invclock-card-refresh .mdi { font-size: 14px; }
+
+.invclock-card-body {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.invclock-card-copy {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text2);
+  max-width: 90ch;
+}
+.invclock-card-copy strong { color: var(--text); }
+
+/* Unit table (shared between Settings old-location and Energy new-location) */
+.invclock-unit-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.invclock-unit-table th.col-inv    { width: 56px; }
+.invclock-unit-table th.col-unit   { width: 64px; }
+.invclock-unit-table th.col-rtc    { min-width: 160px; }
+.invclock-unit-table th.col-drift  { width: 92px; }
+.invclock-unit-table th.col-etotal { width: 120px; }
+.invclock-unit-table th.col-parce  { width: 110px; }
+.invclock-unit-table th.col-status { width: 120px; }
+.invclock-unit-table th.col-action { width: 72px; text-align: right; }
+
+/*
+ * The parent #inverterClockSection uses the standard Settings 12-col grid.
+ * Every direct child in this panel should span the full width — otherwise
+ * subsections collapse into narrow columns side-by-side.
+ */
+#inverterClockSection > .cb-subsection,
+#inverterClockSection > .sgroup-actions,
+#inverterClockSection > p.settings-section-copy,
+#inverterClockSection > .invclock-row-2col,
+#inverterClockSection > .invclock-tabs,
+#inverterClockSection > .invclock-tab-panel {
+  grid-column: 1 / -1;
+}
+
+#inverterClockSection > .invclock-tab-panel {
+  display: block;
+  width: 100%;
+}
+#inverterClockSection > .invclock-tab-panel[hidden] {
+  display: none !important;
+}
+
+/* Stretch the entire card + active tab panel to fill the available vertical
+ * space. Tables inside scroll-wraps absorb the remainder so they grow with
+ * the section instead of capping at 360px. The settings card overrides its
+ * 12-col grid layout to flex-column so children can flex vertically; the
+ * tabs/panels already span full width so the grid was unused here anyway.
+ * `flex: 1 1 auto` (instead of `min-height: 100vh - X`) lets the section
+ * fit exactly inside .settings-main with no empty space below the wrapper
+ * and no page-level scrollbar. */
+#page-settings .settings-sections > #inverterClockSection.sgroup.settings-card.settings-section-active {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#inverterClockSection > .invclock-tab-panel:not([hidden]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#inverterClockSection .invclock-tab-panel > .cb-subsection {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The wrapper flex-grows to fill the remaining height inside cb-subsection
+ * (after the toolbar). With the parent flex chain now bottoming out to a
+ * definite height (.settings-sections → section → tab-panel → cb-subsection
+ * all have definite sizes), `min-height: 0` on each link lets `flex: 1 1 auto`
+ * here resolve to a concrete pixel height — and the wrapper becomes the
+ * scroll container. Sticky <thead> pins to its top. */
+#inverterClockSection .invclock-tab-panel .invclock-scroll,
+#inverterClockSection .invclock-tab-panel .cb-history-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+/* Tab 1 (schedule + energy source) is a 2-col row of forms; let it sit at
+ * the top without forcing form cells to stretch awkwardly. */
+#invClockPanelSchedule > .invclock-row-2col {
+  flex: 0 0 auto;
+}
+
+/* Tab bar shell — soft inset surface that visually anchors the row and
+ * separates it from the panel below. Uses theme tokens so it adapts to
+ * every theme. */
+.invclock-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 2px 0 14px 0;
+  padding: 5px;
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface2) 70%, transparent) 0%,
+      color-mix(in srgb, var(--surface) 80%, transparent) 100%
+    );
+  border: 1px solid var(--border);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.18),
+    0 1px 0 color-mix(in srgb, var(--surface2) 80%, transparent);
+}
+
+.invclock-tab {
+  flex: 1 1 200px;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  background: transparent;
+  color: var(--text2);
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.12s ease;
+}
+
+.invclock-tab .invclock-tab-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invclock-tab:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.invclock-tab:active {
+  transform: translateY(1px);
+}
+
+.invclock-tab.active {
+  background: linear-gradient(
+    160deg,
+    var(--accent) 0%,
+    var(--accent2) 100%
+  );
+  color: #fff;
+  border-color: color-mix(in srgb, var(--accent2) 70%, black);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 color-mix(in srgb, var(--accent2) 40%, black),
+    0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent),
+    0 1px 0 color-mix(in srgb, var(--accent2) 50%, transparent);
+}
+.invclock-tab.active:hover {
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--accent) 92%, white) 0%,
+    var(--accent2) 100%
+  );
+  color: #fff;
+  border-color: color-mix(in srgb, var(--accent2) 70%, black);
+}
+.invclock-tab.active:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 4px rgba(0, 0, 0, 0.30),
+    0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+}
+
+.invclock-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Subtle vertical divider between non-active tabs — only visible between
+ * adjacent inactive tabs (the active one disrupts the pattern via :not). */
+.invclock-tab:not(.active) + .invclock-tab:not(.active)::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 25%;
+  bottom: 25%;
+  width: 1px;
+  background: color-mix(in srgb, var(--border2, var(--border)) 60%, transparent);
+}
+
+.invclock-tab-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  margin-left: 4px;
+}
+.invclock-tab-counts > span {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+/* When the tab is ACTIVE, the bright accent gradient washes out the
+ * chips' translucent backgrounds. Force solid, high-contrast pills so
+ * the counts remain legible on top of the gradient. */
+.invclock-tab.active .invclock-tab-counts > .invclock-chip-ok {
+  background: var(--green);
+  color: #052016;
+  border-color: color-mix(in srgb, var(--green) 70%, black);
+}
+.invclock-tab.active .invclock-tab-counts > .invclock-chip-warn {
+  background: var(--orange);
+  color: #2a1606;
+  border-color: color-mix(in srgb, var(--orange) 70%, black);
+}
+.invclock-tab.active .invclock-tab-counts > .invclock-chip-error {
+  background: var(--red);
+  color: #2a0606;
+  border-color: color-mix(in srgb, var(--red) 70%, black);
+}
+/* Neutral "Nodes" chip — total configured units denominator. Distinct from
+ * the green/orange/red status chips so the operator can tell at a glance
+ * that this is the topology total, not a status bucket. */
+.invclock-chip-nodes {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  line-height: 1.4;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--text2) 18%, transparent);
+  color: var(--text2);
+  border: 1px solid color-mix(in srgb, var(--text2) 35%, var(--border));
+}
+.invclock-tab.active .invclock-tab-counts > .invclock-chip-nodes {
+  background: rgba(255, 255, 255, 0.92);
+  color: #1a1a1a;
+  border-color: rgba(0, 0, 0, 0.25);
+}
+
+/* Light-theme inactive tab text gets a touch more contrast since the bar
+ * background is brighter in light mode. */
+:root[data-theme="light"] .invclock-tab:not(.active) {
+  color: color-mix(in srgb, var(--text) 75%, var(--text2));
+}
+:root[data-theme="light"] .invclock-tab:not(.active):hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+#inverterClockSection .cb-sub-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.invclock-counts {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+  align-self: center;
+  font-size: 11px;
+  font-weight: var(--fw-medium, 500);
+}
+
+.invclock-badge,
+.invclock-chip-ok,
+.invclock-chip-warn,
+.invclock-chip-error {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  line-height: 1.4;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.invclock-badge-green,
+.invclock-chip-ok {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+.invclock-badge-amber,
+.invclock-chip-warn {
+  background: color-mix(in srgb, var(--orange) 18%, transparent);
+  color: var(--orange);
+  border-color: color-mix(in srgb, var(--orange) 45%, var(--border));
+}
+.invclock-badge-red,
+.invclock-chip-error {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+}
+.invclock-badge-purple {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.invclock-scroll {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+}
+.invclock-scroll .data-table {
+  width: 100%;
+  /* `border-collapse: separate` is required for `position: sticky` on
+   * <th> to work reliably across browsers — collapse breaks the sticky
+   * stacking context. Borders are then drawn on each cell explicitly. */
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0;
+}
+.invclock-scroll .data-table th,
+.invclock-scroll .data-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+  color: var(--text);
+  font-size: 12px;
+}
+.invclock-scroll .data-table thead th {
+  background: color-mix(in srgb, var(--surface2) 96%, transparent);
+  color: var(--text2);
+  font-weight: var(--fw-semibold, 600);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  letter-spacing: 0.4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  /* Stronger bottom border so the pinned header reads as a divider over
+   * scrolling rows. */
+  border-bottom: 1px solid var(--border2, var(--border));
+  box-shadow: 0 1px 0 0 var(--border);
+}
+.invclock-scroll .data-table td.num,
+.invclock-scroll .data-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.invclock-scroll .data-table .mono {
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-size: 11.5px;
+  color: var(--text2);
+}
+.invclock-scroll .invclock-empty {
+  text-align: center;
+  color: var(--text3, var(--text2));
+  padding: 22px 6px;
+  font-style: italic;
+}
+
+.btn.btn-xs,
+.invclock-card .btn-xs {
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  min-height: 0;
+}
+.invclock-sync-one { font-weight: var(--fw-semibold, 600); }
+
+/* Transport readiness: lean on existing .sinfo and tint the left rail */
+#invClockTransportCard.sinfo-ok {
+  border-left: 3px solid var(--green);
+}
+#invClockTransportCard.sinfo-warn {
+  border-left: 3px solid var(--orange);
+}
+.invclock-transport-detail {
+  font-size: 11.5px;
+  color: var(--text3, var(--text2));
+  margin-top: 4px;
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  word-break: break-word;
+}
+
+/* Per-card counter chip (main dashboard inverter cards) */
+.counter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text3, var(--text2));
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface2) 72%, transparent);
+}
+.counter-chip .counter-label { opacity: 0.75; }
+.counter-chip .counter-value { font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace); }
+.counter-chip.badge-frozen {
+  background: color-mix(in srgb, var(--red) 20%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border));
+  font-weight: var(--fw-semibold, 600);
 }

@@ -58,7 +58,9 @@
       "Bash(python -c \"import requests; print\\(requests.__version__\\)\")",
       "Bash(python scripts/probe_solcast_toolkit_weather.py)",
       "Bash(python scripts/inspect_toolkit_html.py \"C:/Users/User/AppData/Local/Temp/solcast_probe__l0tgnay/toolkit_Toolkit.html\")",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(cp \"C:/Users/User/.claude/projects/d--ADSI-Dashboard/tmp_level2.pdf\" \"d:/ADSI-Dashboard/docs/Inverter-Incident-Workflow-Level2.pdf\")",
+      "Bash(cp \"C:/Users/User/.claude/projects/d--ADSI-Dashboard/2c0d42b2-dc45-4755-9718-14b151d8834e/tool-results/webfetch-1776665860955-9zoeq5.pdf\" \"d:/ADSI-Dashboard/docs/INGECON-SUN-Manager-User-Manual.pdf\")"
     ],
     "deny": [
       "Read(./.env)",
@@ -70,7 +72,9 @@
       "C:\\Users\\User\\.claude\\sessions",
       "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard\\references",
       "d:\\ADSI-Dashboard\\.claude\\skills\\adsi-dashboard",
-      "C:\\Users\\User\\.claude\\skills\\learned"
+      "C:\\Users\\User\\.claude\\skills\\learned",
+      "C:\\Users\\User\\.claude",
+      "C:\\Users\\User\\.claude\\projects\\d--ADSI-Dashboard"
     ]
   },
   "exclude": [

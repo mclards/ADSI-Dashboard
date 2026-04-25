@@ -22,8 +22,14 @@ const ALARM_BITS = [
     hex: "0001",
     label: "Frequency Alarm",
     severity: "warning",
-    description: "Grid frequency out of range",
-    action: "Check grid frequency; verify FREC setpoints §16.5.2",
+    description: "Grid frequency out of range — inverter disconnects until the grid stabilizes.",
+    action: "Verify grid frequency. The inverter auto-reconnects once the grid is back within FREC setpoints.",
+    actionSteps: [
+      "Read grid frequency at the AC terminals (meter or SUN Manager live view).",
+      "Reading within ±0.5 Hz of nominal: no action — inverter auto-reconnects.",
+      "Reading out of range: grid-side issue — notify utility / plant operator.",
+      "Alarm persists on a stable grid: verify FREC high/low setpoints in SUN Manager (§16.5.2).",
+    ],
     altLabel: "Grid frequency out of range (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=6",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=6",
@@ -36,8 +42,14 @@ const ALARM_BITS = [
     hex: "0002",
     label: "Voltage Alarm",
     severity: "warning",
-    description: "Grid voltage out of range (over/under)",
-    action: "Check grid voltage at AC terminals; verify VAC setpoints",
+    description: "Grid voltage out of range (over/under) — inverter disconnects until the grid stabilizes.",
+    action: "Verify grid voltage. The inverter auto-reconnects once the grid is back within VAC setpoints.",
+    actionSteps: [
+      "Read line-to-line voltage at the AC terminals (meter or SUN Manager live view).",
+      "Reading within VAC min/max setpoints: no action — inverter auto-reconnects.",
+      "Reading out of range: grid-side issue — notify utility.",
+      "Alarm persists on a stable grid: verify VAC min/max setpoints in SUN Manager.",
+    ],
     altLabel: "Grid voltage out of range (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=6",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=6",
@@ -50,8 +62,15 @@ const ALARM_BITS = [
     hex: "0004",
     label: "Current Control Fault",
     severity: "fault",
-    description: "Internal current control loop saturation",
-    action: "Restart inverter; if persists contact service §8.4",
+    description: "Internal current control loop saturated — the inverter could not hold its AC current reference.",
+    action: "Attempt a remote restart; follow the DebugDesc value to narrow the cause; escalate if it repeats.",
+    actionSteps: [
+      "Remote-restart from the dashboard or INGECON SUN Manager.",
+      "DebugDesc 40: reseat the J4/J5/J21 measuring-board connectors and restart.",
+      "DebugDesc 92: reactive-power calibration required (TrinPM20).",
+      "DebugDesc 107/108/109: cross-check the DC Undervoltage (0x8000) workflow — Vdc source is suspect.",
+      "Fault repeats within 1 hour: pull a SCOPE log and escalate to Ingeteam SAT (§8.4).",
+    ],
     altLabel: "Control current saturation (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=7",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=7",
@@ -65,8 +84,14 @@ const ALARM_BITS = [
     hex: "0008",
     label: "DSP Watchdog Reset",
     severity: "fault",
-    description: "Inverter DSP watchdog reset — firmware fault",
-    action: "Restart inverter; update firmware if repeating §19.4",
+    description: "Inverter DSP watchdog fired — firmware or comms-induced reset.",
+    action: "One-off resets self-recover. Only intervene if the reset loops: verify poll rate, then comms, then firmware.",
+    actionSteps: [
+      "Single reset with clean reconnect: no action required.",
+      "Verify SCADA / poller interval is ≥ 1 s. Faster polling forces repeat resets (see Note).",
+      "Inspect CAN bus and fiber to the synchronism card — reseat any loose connectors.",
+      "Loop persists after poll-rate and comms checks: firmware update required (§19.4) — escalate to Ingeteam SAT.",
+    ],
     altLabel: "Reset (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=7",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=8",
@@ -80,8 +105,15 @@ const ALARM_BITS = [
     hex: "0010",
     label: "RMS Overcurrent",
     severity: "fault",
-    description: "RMS AC output current exceeds maximum",
-    action: "Check AC wiring and load; reduce connected load",
+    description: "RMS AC output current exceeded the inverter's rated maximum.",
+    action: "Do NOT reset first. Inspect the AC output for shorts and verify current sensors before re-energizing.",
+    actionSteps: [
+      "⚠ Do not attempt a remote reset until the AC output is physically inspected.",
+      "Open Q2n and verify AC cabling integrity; check for short-to-ground downstream of the inverter.",
+      "Inspect AC current sensors (schematic p.6) — reseat or clean contaminated connectors.",
+      "If 0x0090 / 0x0880 / 0x0890 co-occur on the same unit: replace the electronic block (TrinPM03/04).",
+      "Close Q2n and remote-restart only after the circuit is verified clean.",
+    ],
     altLabel: "Effective grid current (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=8",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=8",
@@ -95,8 +127,15 @@ const ALARM_BITS = [
     hex: "0020",
     label: "Overtemperature",
     severity: "fault",
-    description: "Power electronics temperature > 80°C",
-    action: "Check ventilation, ambient temp, and cooling fans §7.3",
+    description: "Power-electronics temperature exceeded 80 °C — the inverter de-rates then stops to protect the IGBTs.",
+    action: "Distinguish environment-driven from hardware-driven. Clean cooling path and allow cooldown before restart.",
+    actionSteps: [
+      "Check cabinet ambient. Above 45 °C → environment-driven (weather), not a defect.",
+      "Inspect cooling fans (rotation, bearing noise) and air filters — clean or replace if clogged.",
+      "Verify the 15 Vdc PSU is energizing the fans.",
+      "Check NTC sensors and thermal switches (schematic p.17) for open or out-of-tolerance readings.",
+      "Allow cooldown below 70 °C, then remote-restart (§7.3).",
+    ],
     altLabel: "Temperature (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=8",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=9",
@@ -110,8 +149,15 @@ const ALARM_BITS = [
     hex: "0040",
     label: "ADC / Sync Error",
     severity: "fault",
-    description: "ADC reading error or loss of grid sync",
-    action: "Check grid quality; verify CT/VT connections §9.2",
+    description: "ADC reading error or loss of grid synchronism — the inverter cannot trust its measurement path.",
+    action: "Check the measurement path (CT/VT, fiber, sync card) and follow the DebugDesc sub-code.",
+    actionSteps: [
+      "Verify CT / VT wiring at X8.4–X8.8 and the synchronism card (schematic p.21).",
+      "Check fiber-optic links between inverter and LVRT kit — reseat if dusty or misaligned.",
+      "DebugDesc 55 / 56: master-slave stop cascade — reconnect the master first; slaves recover automatically.",
+      "DebugDesc 119: DC contactor or LVRT kit state is abnormal — inspect before any reset.",
+      "Grid quality (harmonics, dips, flicker) suspected: escalate to utility (§9.2).",
+    ],
     altLabel: "Hardware fault (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=9",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=10",
@@ -125,8 +171,14 @@ const ALARM_BITS = [
     hex: "0080",
     label: "Instantaneous Overcurrent",
     severity: "fault",
-    description: "Instantaneous AC current out of range",
-    action: "Check for AC short; inspect cabling and breaker Q2n",
+    description: "Instantaneous AC current exceeded the peak protection threshold — a hard AC fault is likely.",
+    action: "De-energize before inspection. Look for AC short, then sensor/IGBT damage.",
+    actionSteps: [
+      "⚠ Open Q2n AND Qac before any physical inspection — the AC side may remain energized from the grid.",
+      "Visually inspect AC cabling for insulation damage, burn marks, or water ingress.",
+      "Check current-sensor connectors on the electronic block (schematic p.5); reseat if disturbed.",
+      "No external fault found: internal sensor or IGBT gate driver may be damaged — pull a SCOPE log and escalate to SAT.",
+    ],
     altLabel: "Instantaneous grid current (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=9",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=11",
@@ -139,8 +191,17 @@ const ALARM_BITS = [
     hex: "0100",
     label: "AC Protection Fault",
     severity: "critical",
-    description: "AC surge arresters (RVAC), fuses (FAC), or breaker (Q2n)",
-    action: "Inspect RVAC, FAC, and Q2n; replace if blown §10.3",
+    description: "AC protection device tripped — surge arresters (RVAC), fuses (FAC), or breakers (Qac/Q2n/Qaux/Q4n).",
+    action: "Lockout before inspection. Check every AC protection device; replace if tripped or degraded.",
+    actionSteps: [
+      "⚠ Lockout / tag-out Q2n AND Qac — the AC side stays live from the grid even with inverter stopped.",
+      "Inspect RVAC surge arresters (schematic p.12). Pilot flag or discoloration → replace.",
+      "Inspect FAC AC fuses. Replace with the same rating if any are blown.",
+      "Inspect Q2n / Qac / Qaux / Q4n magnetic breakers. Reset if tripped; replace if mechanically damaged.",
+      "Inspect K1 AC contactor for welded or burned contacts.",
+      "0x0102 co-occurrence (this bit + Voltage) = post-reconnect frequency follow-on — work the bit 1 (Voltage) flow first.",
+      "Close breakers and re-energize only after every protection device is verified. Escalate to SAT on repeat (§10.3).",
+    ],
     altLabel: "AC protection (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=10",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=12",
@@ -154,8 +215,16 @@ const ALARM_BITS = [
     hex: "0200",
     label: "DC Protection Fault",
     severity: "critical",
-    description: "DC fuses (FDC), surge arresters (RVDC), or PV grounding",
-    action: "Inspect FDC, RVDC, grounding kit; replace if blown §10.2",
+    description: "DC protection device tripped — fuses (XFDC), surge arresters (RVDC), or the grounding-kit breaker.",
+    action: "Lockout QDC before inspection. PV strings still feed DC side even at night.",
+    actionSteps: [
+      "⚠ Open QDC and lockout (schematic p.14). DC side remains energized by the PV strings.",
+      "Inspect XFDC DC fuses. Replace all fuses in a parallel bank as a set if any are blown.",
+      "Inspect RVDC surge arresters (schematic p.16). Replace if pilot flag is shown.",
+      "Verify the grounding-kit breaker state; reset if tripped.",
+      "Measure DC insulation resistance before reconnecting (follow the bit 10 workflow).",
+      "Close QDC only after every protection device is confirmed intact. Escalate to SAT on repeat (§10.2).",
+    ],
     altLabel: "DC protection (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=11",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=13",
@@ -169,8 +238,16 @@ const ALARM_BITS = [
     hex: "0400",
     label: "Insulation / Ground Fault",
     severity: "critical",
-    description: "DC insulation failure in PV array or inverter",
-    action: "Isolate strings; measure insulation resistance §11.4",
+    description: "DC insulation resistance fell below the safe threshold — the PV array or wiring is leaking to ground.",
+    action: "Lockout. Isolate strings and find the faulty one with an insulation tester.",
+    actionSteps: [
+      "⚠ Open QDC and place the inverter in SAFE state before any string work.",
+      "Disconnect all PV strings at the combiner or string inputs.",
+      "Measure insulation resistance (PV+ vs. GND, PV- vs. GND) at 1000 Vdc per string. IEC 62446 threshold: ≥ 1 MΩ per string.",
+      "Reconnect strings one at a time to identify the faulty string.",
+      "Inspect the faulty string for water ingress, damaged cable jackets, or degraded MC4 connectors.",
+      "All strings pass but alarm persists: DC contactor or the internal insulation monitor may be faulty — escalate to SAT (§11.4).",
+    ],
     altLabel: "DC insulation (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=12",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=13",
@@ -183,8 +260,16 @@ const ALARM_BITS = [
     hex: "0800",
     label: "Contactor Fault",
     severity: "fault",
-    description: "AC contactor state mismatch",
-    action: "Inspect AC contactor K1; verify control wiring §12.1",
+    description: "AC contactor K1 state does not match the commanded state (fleet-specific — see variant warning).",
+    action: "Use the fleet (920TL) K1 procedure. Do NOT follow the AAV2011 branch-fault flow.",
+    actionSteps: [
+      "⚠ Follow the 920TL fleet procedure below. AAV2011 Level 1/2 map this bit to branch-fault, which does NOT apply here.",
+      "Open Q2n to isolate the AC output.",
+      "Inspect K1 AC contactor (schematic p.12) for welded contacts, burned auxiliaries, or open-circuit coil.",
+      "Verify XK1 auxiliary feedback matches the actual contactor state — mismatched feedback is the usual trigger.",
+      "Measure coil resistance against the value stamped on the contactor body.",
+      "K1 mechanically good and wiring intact: replace the control board that drives K1 (§12.1). Escalate to SAT on repeat.",
+    ],
     altLabel: "Branch fault (AAV2011 L1/L2 — variant may differ)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=12",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=14",
@@ -198,8 +283,16 @@ const ALARM_BITS = [
     hex: "1000",
     label: "Manual Shutdown",
     severity: "info",
-    description: "Emergency stop, display STOP, or remote command",
-    action: "Check shutdown source; restart when safe §16.5.2",
+    description: "Inverter was stopped by emergency stop, door sensor, display STOP, or a remote command.",
+    action: "Identify the shutdown source before restart. Do NOT blind-restart.",
+    actionSteps: [
+      "Do NOT blind-restart — identify the shutdown source first.",
+      "Check SW2 emergency stop (schematic p.15). Release if engaged.",
+      "Check door sensors, limit switches, and XMON(n).7 wiring. Open-circuit (contacts released) reads as STOP.",
+      "Review the stop-reason sub-code (see table below): 1320 → replace PSU; 1360 / 1363 → auxiliaries fault, check +15 Vdc at U(n)J19.8↔U(n)J19.10 (TrinPM05).",
+      "Remote STOP sent via SUN Manager / SCADA: clear at the source before local restart.",
+      "Once safe and source is cleared: remote-restart (§16.5.2).",
+    ],
     altLabel: "Manual shutdown (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=13",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=15",
@@ -213,8 +306,14 @@ const ALARM_BITS = [
     hex: "2000",
     label: "Configuration Change",
     severity: "info",
-    description: "Firmware update or config parameter change",
-    action: "Verify parameters after update; restart if needed §16.4",
+    description: "Firmware update or parameter change was logged — informational, not a fault.",
+    action: "Verify the changed parameters match the commissioning record. No physical inspection needed.",
+    actionSteps: [
+      "Informational only — firmware or parameter change was logged.",
+      "Open SUN Manager and review the changed parameters (grid code, setpoints, curtailment curves).",
+      "Values match the commissioning record: acknowledge this alarm — no further action.",
+      "Values drifted or unexpected: revert from the commissioning backup (§16.4) before the inverter runs unattended.",
+    ],
     altLabel: "Configuration / Firmware (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=14",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=16",
@@ -227,8 +326,16 @@ const ALARM_BITS = [
     hex: "4000",
     label: "DC Overvoltage",
     severity: "critical",
-    description: "DC input voltage exceeds 1000 VDC",
-    action: "Disconnect PV strings immediately; inspect surge arresters §10.2",
+    description: "DC input voltage exceeded 1000 Vdc — above the IGBT block rating; continued exposure damages hardware.",
+    action: "IMMEDIATE: open QDC. Do NOT re-energize until the root cause (PV sizing / arrester) is resolved.",
+    actionSteps: [
+      "⚠ IMMEDIATE: open QDC. Vdc > 1000 V exceeds the IGBT rating; every additional minute risks cascading hardware damage.",
+      "Disconnect PV strings at the combiner.",
+      "Inspect RVDC surge arresters (schematic p.4) for trigger.",
+      "Verify PV array sizing against inverter spec. Recurring 0x4000 at Tmin means the Voc cold-morning clamp was exceeded — the string is oversized for this inverter.",
+      "Per AAV2011 L1 p.14: an oversized array voids the inverter guarantee. Contact the plant designer before re-energizing.",
+      "Do NOT re-close QDC until the root cause is resolved.",
+    ],
     altLabel: "High input voltage (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=14",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=16",
@@ -242,8 +349,16 @@ const ALARM_BITS = [
     hex: "8000",
     label: "DC Undervoltage / Low Power",
     severity: "warning",
-    description: "Vdc too low or insufficient PV power (normal at dawn/dusk)",
-    action: "Normal at low irradiance; check strings if midday §11.3",
+    description: "Vdc is below the MPPT operating range — usually irradiance-driven, not a fault.",
+    action: "Expected at dawn / dusk / heavy overcast. Only investigate if alarming 09:00–15:00 on a clear day.",
+    actionSteps: [
+      "Alarming at dawn, dusk, or under heavy overcast: expected — no action.",
+      "Alarming 09:00–15:00 on a clear day: investigate below.",
+      "Read per-string voltages at the combiner. Any string below peers = string-level fault.",
+      "Inspect the affected string for shading, soiling, or a disconnected MC4 connector.",
+      "Verify QDC is fully closed and seated.",
+      "All strings healthy but Vdc remains low: MPPT tracking may need recalibration (§11.3).",
+    ],
     altLabel: "Panel voltage / Low input voltage (AAV2011 L1/L2)",
     level1Ref: "Inverter-Incident-Workflow.pdf#page=14",
     level2Ref: "Inverter-Incident-Workflow-Level2.pdf#page=17",
@@ -334,6 +449,10 @@ function hydrateActiveAlarmStateFromDb() {
     for (const key of Object.keys(activeAlarmState)) {
       delete activeAlarmState[key];
     }
+    // getActiveAlarms returns rows ORDER BY ts DESC — keep first seen per
+    // (inv,unit) so legacy duplicate open rows don't leave us tracking an
+    // older alarm_value, which would then mis-classify the next batch as
+    // update_active and cascade updates across stale rows.
     const rows = stmts.getActiveAlarms.all();
     for (const r of rows || []) {
       const inv = Number(r?.inverter || 0);
@@ -341,7 +460,9 @@ function hydrateActiveAlarmStateFromDb() {
       const alarmVal = Number(r?.alarm_value || 0);
       if (!inv || !unit || !alarmVal) continue;
       if (!isConfiguredNode(inv, unit)) continue;
-      activeAlarmState[`${inv}_${unit}`] = alarmVal;
+      const key = `${inv}_${unit}`;
+      if (activeAlarmState[key] !== undefined) continue;
+      activeAlarmState[key] = alarmVal;
     }
   } catch (err) {
     // Best effort only; polling path will recover naturally.
@@ -355,16 +476,20 @@ function getConfiguredNodeSet() {
     return configuredNodeCache.set;
   }
 
+  const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+  const nodeMax = Math.max(1, Number(getSetting("nodeCount", 4)) || 4);
+  const defaultUnits = Array.from({ length: nodeMax }, (_, i) => i + 1);
+
   const set = new Set();
   try {
     const row = stmts.getSetting.get("ipConfigJson");
     const raw = row && row.value ? JSON.parse(row.value) : {};
     const unitsMap = raw && typeof raw === "object" ? raw.units || {} : {};
-    for (let inv = 1; inv <= 27; inv++) {
-      const unitsRaw = unitsMap[inv] ?? unitsMap[String(inv)] ?? [1, 2, 3, 4];
+    for (let inv = 1; inv <= invMax; inv++) {
+      const unitsRaw = unitsMap[inv] ?? unitsMap[String(inv)] ?? defaultUnits;
       const units = Array.isArray(unitsRaw)
-        ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
-        : [1, 2, 3, 4];
+        ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= nodeMax)
+        : defaultUnits;
       for (const unit of [...new Set(units)]) {
         set.add(`${inv}_${unit}`);
       }
@@ -372,8 +497,8 @@ function getConfiguredNodeSet() {
   } catch (err) {
     // Fail-open fallback: keep all possible nodes if config is temporarily unreadable.
     console.warn("[alarms] getConfiguredNodeSet failed, using all nodes as fallback:", err.message);
-    for (let inv = 1; inv <= 27; inv++) {
-      for (let unit = 1; unit <= 4; unit++) {
+    for (let inv = 1; inv <= invMax; inv++) {
+      for (let unit = 1; unit <= nodeMax; unit++) {
         set.add(`${inv}_${unit}`);
       }
     }
@@ -420,6 +545,38 @@ function getActiveAlarms() {
   );
 }
 
+function raiseActiveAlarm(row, cur, now, newAlarms) {
+  const severity = getTopSeverity(cur) || "fault";
+  const info = stmts.insertAlarm.run({
+    ts: now,
+    inverter: row.inverter,
+    unit: row.unit,
+    alarm_code: formatAlarmHex(cur),
+    alarm_value: cur,
+    severity,
+  });
+  newAlarms.push({
+    id: Number(info?.lastInsertRowid || 0),
+    inverter: row.inverter,
+    unit: row.unit,
+    alarm_value: cur,
+    severity,
+    decoded: decodeAlarm(cur),
+    ts: now,
+  });
+}
+
+function updateActiveAlarmValue(row, cur) {
+  const severity = getTopSeverity(cur) || "fault";
+  stmts.updateActiveAlarm.run(
+    formatAlarmHex(cur),
+    cur,
+    severity,
+    row.inverter,
+    row.unit,
+  );
+}
+
 function checkAlarms(batch) {
   const newAlarms = [];
   const now = Date.now();
@@ -446,18 +603,10 @@ function checkAlarms(batch) {
         ? stmts.getActiveAlarmForUnit.get(row.inverter, row.unit)
         : null;
       if (existing && cur !== 0) {
-        // Re-attach to existing episode.  If the alarm value drifted while
-        // we were down (e.g. additional bits set), patch the stored row in
-        // place rather than spawning a duplicate.
+        // Re-attach to existing episode. Patch in place on drift; do NOT
+        // re-broadcast — the operator has already seen this toast.
         if (Number(existing.alarm_value) !== cur) {
-          const severity = getTopSeverity(cur) || "fault";
-          stmts.updateActiveAlarm.run(
-            formatAlarmHex(cur),
-            cur,
-            severity,
-            row.inverter,
-            row.unit,
-          );
+          updateActiveAlarmValue(row, cur);
         }
         activeAlarmState[key] = cur;
         continue;
@@ -470,22 +619,7 @@ function checkAlarms(batch) {
       }
       activeAlarmState[key] = cur;
       if (cur !== 0) {
-        const severity = getTopSeverity(cur) || "fault";
-        stmts.insertAlarm.run({
-          ts: now,
-          inverter: row.inverter,
-          unit: row.unit,
-          alarm_code: formatAlarmHex(cur),
-          alarm_value: cur,
-          severity,
-        });
-        newAlarms.push({
-          inverter: row.inverter,
-          unit: row.unit,
-          alarm_value: cur,
-          severity,
-          decoded: decodeAlarm(cur),
-        });
+        raiseActiveAlarm(row, cur, now, newAlarms);
       }
       continue;
     }
@@ -500,37 +634,13 @@ function checkAlarms(batch) {
     }
 
     if (transition === "update_active") {
-      const severity = getTopSeverity(cur) || "fault";
-      stmts.updateActiveAlarm.run(
-        formatAlarmHex(cur),
-        cur,
-        severity,
-        row.inverter,
-        row.unit,
-      );
+      updateActiveAlarmValue(row, cur);
       activeAlarmState[key] = cur;
       continue;
     }
 
     if (transition === "raise") {
-      const severity = getTopSeverity(cur) || "fault";
-      const info = stmts.insertAlarm.run({
-        ts: now,
-        inverter: row.inverter,
-        unit: row.unit,
-        alarm_code: formatAlarmHex(cur),
-        alarm_value: cur,
-        severity,
-      });
-      newAlarms.push({
-        id: Number(info?.lastInsertRowid || 0),
-        inverter: row.inverter,
-        unit: row.unit,
-        alarm_value: cur,
-        severity,
-        decoded: decodeAlarm(cur),
-        ts: now,
-      });
+      raiseActiveAlarm(row, cur, now, newAlarms);
       activeAlarmState[key] = cur;
     }
   }

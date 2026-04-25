@@ -337,6 +337,7 @@ const SETTINGS_SECTION_IDS = [
   "appUpdateSection",
   "cloudBackupSection",
   "localBackupSection",
+  "inverterClockSection",
 ];
 const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const SETTINGS_SECTION_META = {
@@ -367,6 +368,10 @@ const SETTINGS_SECTION_META = {
   localBackupSection: {
     title: "Local Backup",
     copy: "Portable .adsibak export and restore for OS migration.",
+  },
+  inverterClockSection: {
+    title: "Inverter Clocks & Counter Health",
+    copy: "Schedule automatic time sync, review RTC drift, and track hardware energy counter (Etotal / parcE) health across the fleet.",
   },
 };
 const SETTINGS_CONFIG_KIND = "adsi-settings-config";
@@ -3264,20 +3269,49 @@ function resetPacTodayIfNeeded(ts = Date.now()) {
   resetTodayMwhAuthority();
 }
 
+// v2.9.1 — Operator-selected energy source. Returns the per-unit kWh-today
+// value for the active mode, or NaN when the chosen hardware-counter source
+// has no clean baseline (yesterday's eod_clean snapshot missing for this
+// unit). NaN propagates through Σ so plant totals visibly invalidate the
+// moment any contributing unit lacks a clean baseline — matching the
+// operator directive: "put NaN on all fields if invalid".
+function getEnergySourceMode() {
+  const raw = String(State?.settings?.energySourceMode || "pac").toLowerCase();
+  return raw === "etotal" || raw === "parce" ? raw : "pac";
+}
+
+function selectKwhForUnit(d, mode) {
+  if (!d) return 0;
+  const m = mode || getEnergySourceMode();
+  if (m === "etotal") {
+    return Number(d.etotal_today_valid)
+      ? Number(d.kwh_today_etotal || 0)
+      : NaN;
+  }
+  if (m === "parce") {
+    return Number(d.parce_today_valid)
+      ? Number(d.kwh_today_parce || 0)
+      : NaN;
+  }
+  return Number(d.kwh || 0);
+}
+
 function summarizeLiveRows(rowsRaw = []) {
   const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+  const mode = getEnergySourceMode();
   const out = { pac: 0, pdc: 0, kwh: 0 };
   rows.forEach((d) => {
     const pac = Number(d?.pac || 0);
     out.pac += pac;
     out.pdc += pac > 0 ? Number(d?.pdc || 0) : 0;
-    out.kwh += Number(d?.kwh || 0);
+    out.kwh += selectKwhForUnit(d, mode);
   });
   return out;
 }
 
 function buildFreshLiveTotalsByInverter(now = Date.now()) {
   const out = {};
+  const mode = getEnergySourceMode();
   Object.values(State.liveData || {}).forEach((d) => {
     const inv = Number(d?.inverter || 0);
     const isFresh = d?.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS;
@@ -3286,7 +3320,7 @@ function buildFreshLiveTotalsByInverter(now = Date.now()) {
     const pac = Number(d?.pac || 0);
     out[inv].pac += pac;
     out[inv].pdc += pac > 0 ? Number(d?.pdc || 0) : 0;
-    out[inv].kwh += Number(d?.kwh || 0);
+    out[inv].kwh += selectKwhForUnit(d, mode);
   });
   return out;
 }
@@ -4768,6 +4802,13 @@ function setActiveSettingsSection(sectionId, persist = true) {
     if (!isLocalBackupRemoteGated()) {
       try { loadBackupHealth(); } catch (_) {}
       try { loadLocalBackupSchedule(); } catch (_) {}
+    }
+  }
+
+  // v2.9.0 Slice G — lazy-init the Inverter Clocks page when first shown.
+  if (activeId === "inverterClockSection") {
+    try { initInverterClockSection(); } catch (err) {
+      console.warn("[invclock] init failed:", err?.message || err);
     }
   }
 }
@@ -11383,10 +11424,17 @@ function renderInverterDetailStats(inv) {
   const liveTotalsByInv = buildFreshLiveTotalsByInverter(now);
   const liveTotals = liveTotalsByInv[inv] || { pac: 0, pdc: 0, kwh: 0 };
 
-  // Today Energy — use server-authoritative per-inverter totals tracked from
-  // /api/energy/today or WS todayEnergy rows so restart-safe persisted totals
-  // are not replaced by the poller's volatile in-memory kWh counters.
-  const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);
+  // Today Energy — PAC mode uses server-authoritative per-inverter totals
+  // tracked from /api/energy/today + WS todayEnergy (restart-safe). Etotal /
+  // parcE modes derive from the live frame's hardware-counter delta (vs
+  // today's eod_clean baseline); the helper returns NaN when any contributing
+  // unit lacks a clean baseline so the chip displays "NaN" verbatim until the
+  // next post-1800H snapshot lands.
+  const energyMode = getEnergySourceMode();
+  const kwh =
+    energyMode === "pac"
+      ? Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0)
+      : Number(liveTotals.kwh);
 
   // DC Power — live from WS (not shown elsewhere; replaces redundant AC Output chip)
   const pdc = Number(liveTotals.pdc || 0);
@@ -13022,6 +13070,166 @@ async function downloadServiceDoc(filename, btnEl) {
   }
 }
 
+// Open a service-doc PDF inline inside the dashboard, jumped to the cited
+// page. Renders via an iframe against the local /docs/ Express mount
+// (same-origin, Content-Disposition: inline set server-side) so Chromium's
+// built-in PDF viewer takes over and honors the `#page=N` fragment.
+// Keeps the operator inside the app — no external browser handoff.
+const _PDF_VIEWER_STATE = { openFilename: "", openPage: 1 };
+let _pdfViewerWired = false;
+
+function _setPdfViewerFullscreen(active) {
+  const modal = document.getElementById("pdfViewerModal");
+  const dialog = modal?.querySelector(".pdf-viewer-dialog");
+  const iconEl = document.getElementById("pdfViewerFullscreenIcon");
+  const labelEl = document.getElementById("pdfViewerFullscreenLabel");
+  const btn = document.getElementById("pdfViewerFullscreen");
+  if (!modal || !dialog) return;
+  const on = !!active;
+  modal.classList.toggle("fullscreen-active", on);
+  dialog.classList.toggle("fullscreen", on);
+  if (iconEl) {
+    iconEl.classList.toggle("mdi-fullscreen", !on);
+    iconEl.classList.toggle("mdi-fullscreen-exit", on);
+  }
+  if (labelEl) labelEl.textContent = on ? "Exit full screen" : "Full screen";
+  if (btn) btn.setAttribute("title", on ? "Exit full screen (F)" : "Toggle full screen (F)");
+}
+
+function _ensurePdfViewerWired() {
+  if (_pdfViewerWired) return;
+  const modal = document.getElementById("pdfViewerModal");
+  if (!modal) return;
+  const closeBtn = document.getElementById("pdfViewerClose");
+  const downloadBtn = document.getElementById("pdfViewerDownload");
+  const openTabBtn = document.getElementById("pdfViewerOpenTab");
+  const fullscreenBtn = document.getElementById("pdfViewerFullscreen");
+  const host = document.getElementById("pdfViewerFrame");
+
+  const close = () => {
+    modal.classList.add("hidden");
+    // Remove the <object> so Chromium's PDF plugin releases the document.
+    // Re-created on the next open to force a fresh #page=N resolution.
+    if (host) host.innerHTML = "";
+    _setPdfViewerFullscreen(false);
+    _PDF_VIEWER_STATE.openFilename = "";
+    _PDF_VIEWER_STATE.openPage = 1;
+  };
+
+  if (closeBtn) closeBtn.addEventListener("click", close);
+  if (downloadBtn) {
+    downloadBtn.addEventListener("click", () => {
+      if (_PDF_VIEWER_STATE.openFilename) {
+        downloadServiceDoc(_PDF_VIEWER_STATE.openFilename, downloadBtn);
+      }
+    });
+  }
+  if (openTabBtn) {
+    openTabBtn.addEventListener("click", () => {
+      const fn = _PDF_VIEWER_STATE.openFilename;
+      const pg = Math.max(1, Math.trunc(Number(_PDF_VIEWER_STATE.openPage) || 1));
+      if (!fn) return;
+      const url = `/docs/${encodeURIComponent(fn)}#page=${pg}`;
+      try {
+        const w = window.open(url, "_blank", "noopener,noreferrer");
+        if (!w) {
+          const a = document.createElement("a");
+          a.href = url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      } catch (err) {
+        showToast(`Unable to open in browser: ${err?.message || err}`, "fault", 3500);
+      }
+    });
+  }
+  if (fullscreenBtn) {
+    fullscreenBtn.addEventListener("click", () => {
+      const dialog = modal.querySelector(".pdf-viewer-dialog");
+      const isOn = dialog?.classList.contains("fullscreen");
+      _setPdfViewerFullscreen(!isOn);
+    });
+  }
+  modal.addEventListener("click", (ev) => {
+    if (ev.target === modal) close();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (modal.classList.contains("hidden")) return;
+    if (ev.key === "Escape") {
+      const dialog = modal.querySelector(".pdf-viewer-dialog");
+      // First Escape exits fullscreen if active; second closes the modal.
+      if (dialog?.classList.contains("fullscreen")) {
+        _setPdfViewerFullscreen(false);
+        ev.preventDefault();
+        return;
+      }
+      close();
+      return;
+    }
+    if ((ev.key === "f" || ev.key === "F") && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      // Don't hijack typing inside the PDF's own search field (Chromium PDF
+      // plugin renders in a separate document; focus stays in our modal
+      // chrome so this guard is belt-and-suspenders).
+      const tag = (ev.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      const dialog = modal.querySelector(".pdf-viewer-dialog");
+      _setPdfViewerFullscreen(!dialog?.classList.contains("fullscreen"));
+      ev.preventDefault();
+    }
+  });
+  _pdfViewerWired = true;
+}
+
+function viewServiceDocPage(filename, page, btnEl) {
+  if (!filename) return;
+  _ensurePdfViewerWired();
+  const modal = document.getElementById("pdfViewerModal");
+  const host = document.getElementById("pdfViewerFrame");
+  const titleEl = document.getElementById("pdfViewerTitle");
+  const subEl = document.getElementById("pdfViewerSubtitle");
+  if (!modal || !host) {
+    showToast("PDF viewer unavailable.", "fault", 2800);
+    return;
+  }
+  const pageNum = Math.max(1, Math.trunc(Number(page) || 1));
+  const url = `/docs/${encodeURIComponent(filename)}#page=${pageNum}`;
+  if (btnEl) {
+    btnEl.classList.add("downloading");
+    setTimeout(() => btnEl.classList.remove("downloading"), 400);
+  }
+  _PDF_VIEWER_STATE.openFilename = filename;
+  _PDF_VIEWER_STATE.openPage = pageNum;
+  if (titleEl) titleEl.textContent = filename;
+  if (subEl) subEl.textContent = `Jumped to page ${pageNum}`;
+
+  // Rebuild the <object> on every open so Chromium's PDF plugin re-resolves
+  // the #page fragment and a fresh document instance is created. Setting
+  // .data on an existing <object> doesn't reliably re-trigger the plugin.
+  host.innerHTML = "";
+  const obj = document.createElement("object");
+  obj.setAttribute("type", "application/pdf");
+  obj.setAttribute("data", url);
+  obj.className = "pdf-viewer-object";
+  // Fallback shown only if the PDF plugin fails to take over the <object>.
+  // Kept intentionally lightweight — the header's Open/Download buttons are
+  // the real recourse; this is just an inline hint.
+  const fallback = document.createElement("div");
+  fallback.className = "pdf-viewer-fallback";
+  fallback.innerHTML = `
+    <div class="pdf-viewer-fallback-icon"><span class="mdi mdi-file-pdf-box"></span></div>
+    <div class="pdf-viewer-fallback-title">Inline viewer couldn't load this PDF</div>
+    <div class="pdf-viewer-fallback-text">
+      Use <strong>Open in browser</strong> or <strong>Download</strong> above.
+    </div>`;
+  obj.appendChild(fallback);
+  host.appendChild(obj);
+
+  modal.classList.remove("hidden");
+}
+
 // Render the alarm-detail modal for a given alarm value (from row click).
 async function openAlarmDetail(alarmValue, alarmHex) {
   const modal = document.getElementById("alarmDetailModal");
@@ -13104,7 +13312,8 @@ async function openAlarmDetail(alarmValue, alarmHex) {
         if (b.schematicPage) {
           pageChips.push(
             `<button type="button" class="alarm-detail-pagechip" data-doc="${esc(ref.serviceDocs.schematic)}"
-                     title="Download schematic, then jump to p.${b.schematicPage}">
+                     data-doc-page="${Number(b.schematicPage)}"
+                     title="View schematic in browser at p.${b.schematicPage}">
                <span class="mdi mdi-sitemap-outline"></span> Schematic p.${b.schematicPage}
              </button>`,
           );
@@ -13112,7 +13321,8 @@ async function openAlarmDetail(alarmValue, alarmHex) {
         if (b.schematicPageExtra) {
           pageChips.push(
             `<button type="button" class="alarm-detail-pagechip" data-doc="${esc(ref.serviceDocs.schematic)}"
-                     title="Secondary schematic reference p.${b.schematicPageExtra}">
+                     data-doc-page="${Number(b.schematicPageExtra)}"
+                     title="View secondary schematic reference at p.${b.schematicPageExtra}">
                <span class="mdi mdi-sitemap-outline"></span> p.${b.schematicPageExtra}
              </button>`,
           );
@@ -13155,7 +13365,15 @@ async function openAlarmDetail(alarmValue, alarmHex) {
               <span class="alarm-detail-row-icon mdi mdi-flash-outline" aria-hidden="true"></span>
               <div class="alarm-detail-row-body">
                 <div class="alarm-detail-row-label">Action</div>
-                <div>${esc(b.action)}</div>
+                <div class="alarm-detail-action-summary">${esc(b.action)}</div>
+                ${Array.isArray(b.actionSteps) && b.actionSteps.length ? `
+                  <ol class="alarm-detail-steps">
+                    ${b.actionSteps.map((s) => {
+                      const t = String(s || "");
+                      const isWarn = t.startsWith("⚠");
+                      return `<li class="${isWarn ? "alarm-detail-step-warn" : ""}">${esc(t)}</li>`;
+                    }).join("")}
+                  </ol>` : ""}
               </div>
             </div>
             ${devs ? `
@@ -13203,8 +13421,7 @@ async function openAlarmDetail(alarmValue, alarmHex) {
   const provenance = `
     <div class="alarm-detail-provenance">
       Fleet labels per <code>${esc(ref.fleetDocId)}</code>. Diagnostic flow per
-      <code>AAV2011IFA01_</code>. Docs resolve from GitHub first, fall back to
-      the installer-local <code>/docs/</code>.
+      <code>AAV2011IFA01_</code>.
     </div>`;
 
   bodyEl.innerHTML = fatalBanner + variantBanner + bitSections + provenance;
@@ -13241,11 +13458,21 @@ async function openAlarmDetail(alarmValue, alarmHex) {
       </div>`;
     dialog.insertAdjacentHTML("beforeend", footerHtml);
 
-    // Wire download + page-chip + bottom-close
+    // Wire download + page-chip + bottom-close.
+    // Chips with data-doc-page open the PDF in the default browser jumped to
+    // that page (view-only). Buttons without data-doc-page download the PDF
+    // (footer: Schematic / L1 / L2 / SUN Manager).
     dialog.querySelectorAll("[data-doc]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const fn = btn.getAttribute("data-doc");
-        if (fn) downloadServiceDoc(fn, btn);
+        if (!fn) return;
+        const pageAttr = btn.getAttribute("data-doc-page");
+        const page = pageAttr ? Math.trunc(Number(pageAttr)) : 0;
+        if (page > 0) {
+          viewServiceDocPage(fn, page, btn);
+        } else {
+          downloadServiceDoc(fn, btn);
+        }
       });
     });
     const bottomClose = document.getElementById("alarmDetailCloseBottom");
@@ -14388,6 +14615,15 @@ async function loadAnalytics(options = {}) {
   }
   const intervalMin = Number($("anaInterval")?.value || 5);
   const { startTs: sTs, endTs: eTs } = getAnalyticsSolarWindowBounds(date);
+  // When the user explicitly clicks "Load View" we treat the request as a
+  // forced refresh: clear client-side Solcast cache for this date and add a
+  // monotonic cache-buster to API URLs so any ETag/304-driven re-use of
+  // stale responses is bypassed. Without this, sub-5-minute repeat clicks
+  // returned identical data even after the user expected fresh values.
+  if (force) {
+    try { delete State[`_solcastEstCache_${date}`]; } catch (_) {}
+  }
+  const cacheBust = force ? `&_t=${Date.now()}` : "";
   try {
     const qs = new URLSearchParams({
       date,
@@ -14401,9 +14637,9 @@ async function loadAnalytics(options = {}) {
     let solcastEstActual = null;
     try {
       [rows, dayAheadRows, dailySummary, solcastEstActual] = await Promise.all([
-        api(`/api/analytics/energy?${qs}`),
-        api(`/api/analytics/dayahead?${qs}`).catch(() => []),
-        api(`/api/report/summary?date=${encodeURIComponent(date)}`).catch(
+        api(`/api/analytics/energy?${qs}${cacheBust}`),
+        api(`/api/analytics/dayahead?${qs}${cacheBust}`).catch(() => []),
+        api(`/api/report/summary?date=${encodeURIComponent(date)}${cacheBust}`).catch(
           () => null,
         ),
         (async () => {
@@ -14439,7 +14675,7 @@ async function loadAnalytics(options = {}) {
       if (isClientModeActive()) throw err;
       // Backward fallback for older backend versions.
       console.warn("[app] analytics v2 endpoint failed, using legacy:", err.message);
-      rows = await api(`/api/energy/5min?${qs}`);
+      rows = await api(`/api/energy/5min?${qs}${cacheBust}`);
       dayAheadRows = [];
       dailySummary = null;
     }
@@ -18087,6 +18323,461 @@ async function loadBackupHealth() {
   }
 }
 
+// ── v2.9.0 Slice G — Inverter Clocks settings section ─────────────────────
+const InvClock = {
+  inited: false,
+  unitTimer: null,
+  logTimer: null,
+  transportTimer: null,
+};
+
+function _invClockPad2(n) { return String(n).padStart(2, "0"); }
+function _invClockFmtDt(ms) {
+  if (!ms) return "—";
+  const d = new Date(Number(ms));
+  return `${d.getFullYear()}-${_invClockPad2(d.getMonth() + 1)}-${_invClockPad2(d.getDate())} ${_invClockPad2(d.getHours())}:${_invClockPad2(d.getMinutes())}:${_invClockPad2(d.getSeconds())}`;
+}
+function _invClockDriftBadge(state) {
+  if (!state.rtc_valid) return { cls: "invclock-badge invclock-badge-purple", label: "INVALID" };
+  const d = Math.abs(Number(state.rtc_drift_s || 0));
+  if (d < 60)  return { cls: "invclock-badge invclock-badge-green", label: "<1m" };
+  if (d < 300) return { cls: "invclock-badge invclock-badge-amber", label: `±${Math.round(d / 60)}m` };
+  return          { cls: "invclock-badge invclock-badge-red",   label: `±${Math.round(d / 60)}m` };
+}
+function _invClockStatusBadge(state) {
+  if (!state.rtc_valid) return { cls: "invclock-badge invclock-badge-red", label: "RTC broken" };
+  if (!state.counter_advancing && Number(state.pac_w || 0) > 500) {
+    return { cls: "invclock-badge invclock-badge-red", label: "counter frozen" };
+  }
+  if (Math.abs(Number(state.rtc_drift_s || 0)) > 300) {
+    return { cls: "invclock-badge invclock-badge-amber", label: "drifted" };
+  }
+  return { cls: "invclock-badge invclock-badge-green", label: "OK" };
+}
+
+async function invClockRefreshUnits() {
+  const bodies = document.querySelectorAll(".js-invclock-unit-body");
+  if (!bodies.length) return;
+  try {
+    const r = await fetch("/api/counter-state/all", { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json().catch(() => ({ rows: [] }));
+    const allRows = Array.isArray(data.rows) ? data.rows : [];
+
+    // Filter to currently-configured (inverter, unit) pairs from ip-config
+    // topology so that stale counter_state rows from removed units don't
+    // inflate the OK/drifted/broken chip totals. If topology is unavailable
+    // (early boot), fall back to all rows so we never hide everything.
+    const ipCfg = State.ipConfig && typeof State.ipConfig === "object"
+      ? State.ipConfig
+      : null;
+    const cfgUnits = ipCfg && ipCfg.units && typeof ipCfg.units === "object"
+      ? ipCfg.units
+      : null;
+    let configuredSet = null;
+    let totalConfigured = 0;
+    if (cfgUnits) {
+      configuredSet = new Set();
+      for (const invKey of Object.keys(cfgUnits)) {
+        const inv = Number(invKey);
+        if (!Number.isFinite(inv) || inv <= 0) continue;
+        const units = Array.isArray(cfgUnits[invKey]) ? cfgUnits[invKey] : [];
+        for (const u of units) {
+          const un = Number(u);
+          if (!Number.isFinite(un) || un <= 0) continue;
+          configuredSet.add(`${inv}|${un}`);
+          totalConfigured += 1;
+        }
+      }
+      if (totalConfigured === 0) configuredSet = null; // fallback: show all
+    }
+    const rows = configuredSet
+      ? allRows.filter((row) => configuredSet.has(`${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`))
+      : allRows.slice();
+    // If no topology, totalConfigured remains 0 — surface allRows.length as
+    // a best-effort "nodes" chip so the operator still has a denominator.
+    const nodesShown = configuredSet ? totalConfigured : allRows.length;
+
+    // v2.9.1 — sort by inverter ASC then unit ASC so the table is stable
+    // and operators can scan top-to-bottom in physical order.
+    rows.sort((a, b) => {
+      const ai = Number(a?.inverter || 0), bi = Number(b?.inverter || 0);
+      if (ai !== bi) return ai - bi;
+      return Number(a?.unit || 0) - Number(b?.unit || 0);
+    });
+    let okCount = 0, driftedCount = 0, brokenCount = 0;
+    const trs = rows.map((r) => {
+      const db = _invClockDriftBadge(r);
+      const sb = _invClockStatusBadge(r);
+      if (sb.label === "OK") okCount++;
+      else if (sb.label === "drifted") driftedCount++;
+      else brokenCount++;
+      const rtcStr = r.rtc_valid && r.rtc_ms ? _invClockFmtDt(r.rtc_ms) : "—";
+      return `
+        <tr data-inverter="${r.inverter}" data-unit="${r.unit}">
+          <td>${r.inverter}</td>
+          <td>${r.unit}</td>
+          <td class="mono">${rtcStr}</td>
+          <td class="num"><span class="${db.cls}">${db.label}</span></td>
+          <td class="num">${Number(r.etotal_kwh || 0).toLocaleString()}</td>
+          <td class="num">${Number(r.parce_kwh  || 0).toLocaleString()}</td>
+          <td><span class="${sb.cls}">${sb.label}</span></td>
+        </tr>
+      `;
+    }).join("");
+    const emptyHtml = `<tr><td colspan="7" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>`;
+    bodies.forEach((body) => { body.innerHTML = trs || emptyHtml; });
+    document.querySelectorAll(".js-invclock-count-nodes").forEach((el) => { el.textContent = `${nodesShown} nodes`; });
+    document.querySelectorAll(".js-invclock-count-ok").forEach((el) => { el.textContent = `${okCount} OK`; });
+    document.querySelectorAll(".js-invclock-count-drifted").forEach((el) => { el.textContent = `${driftedCount} drifted`; });
+    document.querySelectorAll(".js-invclock-count-broken").forEach((el) => { el.textContent = `${brokenCount} broken`; });
+    _invClockPopulateInverterSelect(rows);
+  } catch (err) {
+    console.warn("[invclock] units refresh failed:", err?.message || err);
+  }
+}
+
+async function invClockRefreshLog() {
+  const body = $("invClockLogBody");
+  if (!body) return;
+  try {
+    const r = await fetch("/api/clock-sync-log?limit=100", { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json().catch(() => ({ rows: [] }));
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const trs = rows.map((r) => {
+      const result = r.accepted
+        ? `<span class="invclock-badge invclock-badge-green">accepted</span>`
+        : `<span class="invclock-badge invclock-badge-red">${r.error || "failed"}</span>`;
+      return `
+        <tr>
+          <td class="mono">${_invClockFmtDt(r.ts)}</td>
+          <td>${r.inverter}</td>
+          <td>${r.unit}</td>
+          <td>${r.trigger}</td>
+          <td class="num">${r.drift_before_s != null ? Number(r.drift_before_s).toFixed(1) + "s" : "—"}</td>
+          <td class="num">${r.drift_after_s  != null ? Number(r.drift_after_s ).toFixed(1) + "s" : "—"}</td>
+          <td>${result}</td>
+        </tr>
+      `;
+    }).join("");
+    body.innerHTML = trs || `<tr><td colspan="7" class="invclock-empty">No sync attempts logged yet.</td></tr>`;
+  } catch (err) {
+    console.warn("[invclock] log refresh failed:", err?.message || err);
+  }
+}
+
+async function invClockLoadSettings() {
+  try {
+    const s = await api("/api/settings");
+    if (!s) return;
+    const enabled = String(s.inverterClockAutoSyncEnabled ?? "1") !== "0";
+    const at = /^\d{2}:\d{2}$/.test(String(s.inverterClockAutoSyncAt || ""))
+      ? String(s.inverterClockAutoSyncAt) : "04:25";
+    const drift = Number(s.inverterClockDriftThresholdS || 3600);
+    const enabledEl = $("setInvClockAutoSyncEnabled");
+    const atEl = $("setInvClockAutoSyncAt");
+    const driftEl = $("setInvClockDriftThresholdS");
+    if (enabledEl) enabledEl.checked = enabled;
+    if (atEl) atEl.value = at;
+    if (driftEl) driftEl.value = String(drift);
+
+    // v2.9.1 Phase 3 — energy source selector
+    const mode = (() => {
+      const raw = String(s.energySourceMode || "pac").toLowerCase();
+      return raw === "etotal" || raw === "parce" ? raw : "pac";
+    })();
+    const radio = document.querySelector(
+      `input[name="energySourceMode"][value="${mode}"]`,
+    );
+    if (radio) radio.checked = true;
+    State.settings.energySourceMode = mode;
+  } catch (err) {
+    console.warn("[invclock] settings load failed:", err?.message || err);
+  }
+}
+
+async function energySourceSaveSettings() {
+  const msgEl = $("energySourceMsg");
+  if (msgEl) { msgEl.textContent = "Saving…"; msgEl.className = "smsg"; }
+  const checked = document.querySelector(
+    'input[name="energySourceMode"]:checked',
+  );
+  const mode = String(checked?.value || "pac").toLowerCase();
+  if (!["pac", "etotal", "parce"].includes(mode)) {
+    if (msgEl) { msgEl.textContent = "Invalid source."; msgEl.className = "smsg smsg-err"; }
+    return;
+  }
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ energySourceMode: mode }),
+    });
+    if (!r.ok) {
+      const errBody = await r.json().catch(() => ({}));
+      throw new Error(errBody?.error || `HTTP ${r.status}`);
+    }
+    State.settings.energySourceMode = mode;
+    if (msgEl) { msgEl.textContent = `Saved (${mode}).`; msgEl.className = "smsg smsg-ok"; }
+    // Force eager repaint of the most visible consumer (Inverter detail
+    // chip) so the new mode shows immediately instead of waiting for the
+    // next live frame. Other surfaces (cards, plant totals) recompute on
+    // every WS frame (~1–2 s) and pick up the new mode automatically.
+    try { if (State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv); } catch (_) {}
+  } catch (err) {
+    if (msgEl) {
+      msgEl.textContent = `Save failed: ${err?.message || err}`;
+      msgEl.className = "smsg smsg-err";
+    }
+  }
+}
+
+async function invClockSaveSettings() {
+  const msgEl = $("invClockScheduleMsg");
+  if (msgEl) { msgEl.textContent = "Saving…"; msgEl.className = "smsg"; }
+  const enabled = !!$("setInvClockAutoSyncEnabled")?.checked;
+  const at = String($("setInvClockAutoSyncAt")?.value || "04:25").trim();
+  const drift = Number($("setInvClockDriftThresholdS")?.value || 3600);
+  if (!/^\d{2}:\d{2}$/.test(at)) {
+    if (msgEl) { msgEl.textContent = "Invalid time format (HH:MM)."; msgEl.className = "smsg smsg-err"; }
+    return;
+  }
+  if (!Number.isFinite(drift) || drift < 60 || drift > 86400) {
+    if (msgEl) { msgEl.textContent = "Drift threshold must be 60..86400 seconds."; msgEl.className = "smsg smsg-err"; }
+    return;
+  }
+  try {
+    await api("/api/settings", "POST", {
+      inverterClockAutoSyncEnabled: enabled ? "1" : "0",
+      inverterClockAutoSyncAt: at,
+      inverterClockDriftThresholdS: String(drift),
+    });
+    if (msgEl) { msgEl.textContent = "Saved."; msgEl.className = "smsg smsg-ok"; }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Save failed: ${err?.message || err}`; msgEl.className = "smsg smsg-err"; }
+  }
+}
+
+// v2.9.1 — single-unit operator sync was removed in favour of the 2-type
+// model (per-inverter / bulk-plant). The /api/sync-clock/:inv/:unit endpoint
+// remains server-side for the Python drift/year-invalid auto-trigger via
+// /api/sync-clock-internal; UI no longer surfaces a per-row Sync button.
+
+// v2.9.1 — bulk plant sync. Hits every inverter in one round. Requires the
+// operator-typed bulk auth key because a fleet-wide write can briefly affect
+// the entire plant output.
+async function invClockSyncBulkPlant() {
+  const msgEl = $("invClockActionMsg");
+  const btn = $("btnInvClockSyncPlant");
+  const ok = await appConfirm(
+    "Sync ALL Plant",
+    `This broadcasts the gateway clock to EVERY inverter at once. Use this only when the per-inverter flow isn't enough — a fleet-wide RTC write can briefly affect production. Continue?`,
+    { ok: "Sync ALL", danger: true },
+  );
+  if (!ok) return;
+  let auth = null;
+  try {
+    auth = await authorizeBulkCommand("SYNC CLOCK (PLANT)", "all inverters", 0);
+  } catch (err) {
+    showToast(`Sync authorization failed: ${err.message}`, "fault", 4000);
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Broadcasting clock to all inverters…"; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch("/api/sync-clock/broadcast", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trigger: "operator", authToken: auth.authToken }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) {
+      const total = Number(body.total || 0);
+      const accepted = Number(body.accepted || 0);
+      const cls = (total > 0 && accepted === total) ? "success" : (accepted > 0 ? "warn" : "fault");
+      showToast(`Plant sync: ${accepted}/${total} units accepted`, cls, 5000);
+      if (msgEl) {
+        msgEl.textContent = `Plant sync: ${accepted}/${total} units accepted`;
+        msgEl.className = "smsg " + (cls === "success" ? "smsg-ok" : cls === "warn" ? "smsg-warn" : "smsg-err");
+      }
+    } else {
+      const reason = body.error || `HTTP ${r.status}`;
+      showToast(`Plant sync failed: ${reason}`, "fault", 5000);
+      if (msgEl) { msgEl.textContent = `Failed: ${reason}`; msgEl.className = "smsg smsg-err"; }
+    }
+  } catch (err) {
+    showToast(`Plant sync error: ${err.message}`, "fault", 5000);
+    if (msgEl) { msgEl.textContent = `Error: ${err.message}`; msgEl.className = "smsg smsg-err"; }
+  } finally {
+    if (btn) btn.disabled = false;
+    invClockRefreshUnits();
+    invClockRefreshLog();
+  }
+}
+
+// v2.9.0 — sync ONE inverter (all daisy-chained nodes) with a single Modbus
+// broadcast frame. Replaces the old fleet-wide "Sync ALL Inverters" action;
+// the daily 04:25 cron is what handles the whole fleet on schedule.
+async function invClockSyncInverter() {
+  const sel = $("invClockSyncInverterSel");
+  const inv = Number(sel?.value || 0);
+  if (!inv) {
+    showToast("Pick an inverter first.", "warn", 3000);
+    return;
+  }
+  const msgEl = $("invClockActionMsg");
+  const btn = $("btnInvClockSyncInverter");
+  const ok = await appConfirm(
+    "Sync This Inverter",
+    `This sends one Modbus broadcast to inverter ${inv}. Every node on that inverter's daisy chain will receive the server clock. Continue?`,
+    { ok: "Sync" },
+  );
+  if (!ok) return;
+  // v2.9.1 — per-inverter sync is now auth-free per the 2-type sync model
+  // (only the fleet-wide bulk-plant broadcast prompts for an auth key).
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = `Syncing inverter ${inv}…`; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch(`/api/sync-clock/inverter/${inv}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trigger: "operator" }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) {
+      const total = Number(body.total || 0);
+      const accepted = Number(body.accepted || 0);
+      const cls = (total > 0 && accepted === total) ? "success" : (accepted > 0 ? "warn" : "fault");
+      showToast(`Inverter ${inv}: ${accepted}/${total} nodes accepted`, cls, 4500);
+      if (msgEl) {
+        msgEl.textContent = `Inverter ${inv}: ${accepted}/${total} nodes accepted`;
+        msgEl.className = "smsg " + (cls === "success" ? "smsg-ok" : cls === "warn" ? "smsg-warn" : "smsg-err");
+      }
+    } else {
+      const reason = body.error || `HTTP ${r.status}`;
+      showToast(`Sync failed: ${reason}`, "fault", 5000);
+      if (msgEl) { msgEl.textContent = `Failed: ${reason}`; msgEl.className = "smsg smsg-err"; }
+    }
+  } catch (err) {
+    showToast(`Sync error: ${err.message}`, "fault", 5000);
+    if (msgEl) { msgEl.textContent = `Error: ${err.message}`; msgEl.className = "smsg smsg-err"; }
+  } finally {
+    if (btn) btn.disabled = !Number(sel?.value || 0);
+    invClockRefreshUnits();
+    invClockRefreshLog();
+  }
+}
+
+// Populate the per-inverter sync dropdown from the same data feed the unit
+// table uses (deduplicated by inverter number, sorted).
+function _invClockPopulateInverterSelect(rows) {
+  const sel = $("invClockSyncInverterSel");
+  if (!sel) return;
+  const prev = sel.value;
+  const seen = new Set();
+  const opts = [];
+  for (const r of rows || []) {
+    const n = Number(r.inverter || 0);
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    opts.push(n);
+  }
+  opts.sort((a, b) => a - b);
+  const html = ['<option value="">Select inverter…</option>'];
+  for (const n of opts) {
+    html.push(`<option value="${n}">Inverter ${n}</option>`);
+  }
+  sel.innerHTML = html.join("");
+  if (prev && opts.includes(Number(prev))) sel.value = prev;
+  const btn = $("btnInvClockSyncInverter");
+  if (btn) btn.disabled = !Number(sel.value || 0);
+}
+
+// v2.9.1 — per-row Sync click delegation removed along with the per-unit
+// operator sync UI. Drift / year-invalid auto-syncs from the Python engine
+// still run via /api/sync-clock-internal — that path is independent of the
+// operator-facing 2-type sync model.
+
+function _invClockAnyHostVisible() {
+  const settings = $("inverterClockSection");
+  return Boolean(settings && !settings.hidden);
+}
+
+function _invClockSetActiveTab(tabKey) {
+  const valid = new Set(["schedule", "health", "log"]);
+  const key = valid.has(tabKey) ? tabKey : "schedule";
+  const tabs = document.querySelectorAll("#inverterClockSection .invclock-tab");
+  const panels = document.querySelectorAll("#inverterClockSection .invclock-tab-panel");
+  tabs.forEach((btn) => {
+    const isActive = btn.dataset.invclockTab === key;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  panels.forEach((p) => {
+    const isActive = p.dataset.invclockPanel === key;
+    p.classList.toggle("active", isActive);
+    if (isActive) p.removeAttribute("hidden");
+    else p.setAttribute("hidden", "");
+  });
+  try { localStorage.setItem("adsi_invclock_active_tab", key); } catch (_) {}
+}
+
+function initInverterClockSection() {
+  const panel = $("inverterClockSection");
+  if (!panel) return;
+
+  if (!InvClock.inited) {
+    InvClock.inited = true;
+    // Event wiring — only once.
+    const saveBtn = $("btnInvClockSaveSchedule");
+    if (saveBtn) saveBtn.addEventListener("click", invClockSaveSettings);
+    const energySrcSaveBtn = $("btnEnergySourceSave");
+    if (energySrcSaveBtn) energySrcSaveBtn.addEventListener("click", energySourceSaveSettings);
+    const plantBtn = $("btnInvClockSyncPlant");
+    if (plantBtn) plantBtn.addEventListener("click", invClockSyncBulkPlant);
+    const refreshBtn = $("btnInvClockRefresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", () => {
+      invClockRefreshUnits();
+      invClockRefreshLog();
+    });
+    const syncInvBtn = $("btnInvClockSyncInverter");
+    if (syncInvBtn) syncInvBtn.addEventListener("click", invClockSyncInverter);
+    const syncInvSel = $("invClockSyncInverterSel");
+    if (syncInvSel) syncInvSel.addEventListener("change", () => {
+      const btn = $("btnInvClockSyncInverter");
+      if (btn) btn.disabled = !Number(syncInvSel.value || 0);
+    });
+
+    document.querySelectorAll("#inverterClockSection .invclock-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        _invClockSetActiveTab(btn.dataset.invclockTab || "schedule");
+      });
+    });
+
+    let savedTab = "schedule";
+    try { savedTab = localStorage.getItem("adsi_invclock_active_tab") || "schedule"; } catch (_) {}
+    _invClockSetActiveTab(savedTab);
+  }
+
+  // Stop any stale timers before re-starting.
+  if (InvClock.unitTimer) clearInterval(InvClock.unitTimer);
+  if (InvClock.logTimer) clearInterval(InvClock.logTimer);
+
+  // Initial load + polling cadence.
+  invClockLoadSettings();
+  invClockRefreshUnits();
+  invClockRefreshLog();
+  InvClock.unitTimer = setInterval(() => {
+    if (_invClockAnyHostVisible()) invClockRefreshUnits();
+  }, 10_000);
+  InvClock.logTimer = setInterval(() => {
+    const settings = $("inverterClockSection");
+    if (settings && !settings.hidden) invClockRefreshLog();
+  }, 30_000);
+}
+
 // v2.8.14 R1: Local backup schedule form
 async function loadLocalBackupSchedule() {
   try {
@@ -18513,8 +19204,9 @@ function bindEventHandlers() {
   $("invFilter")?.addEventListener("change", filterInverters);
   $("invGridLayout")?.addEventListener("change", (e) => setInverterGridLayout(e.target.value));
 
-  // Analytics page
-  $("btnLoadAnalytics")?.addEventListener("click", () => loadAnalytics());
+  // Analytics page — explicit click forces fresh data (bypasses in-flight
+  // gate, client-side Solcast cache, and HTTP ETag/304 via cache-buster).
+  $("btnLoadAnalytics")?.addEventListener("click", () => loadAnalytics({ force: true }));
 
   // Alarms page
   $("btnFetchAlarms")?.addEventListener("click", fetchAlarms);
@@ -19196,3 +19888,21 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ── v2.9.0 Slice G — deep-link handler for /#settings-inverter-clock ──────
+// The /admin/inverter-clock URL redirects here; consume the hash on load.
+(function handleInverterClockDeepLink() {
+  setTimeout(() => {
+    try {
+      const hash = String(window.location.hash || "").toLowerCase();
+      if (hash !== "#settings-inverter-clock") return;
+      if (typeof switchPage === "function") switchPage("settings");
+      if (typeof setActiveSettingsSection === "function") {
+        setActiveSettingsSection("inverterClockSection", true);
+      }
+      try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {}
+    } catch (err) {
+      console.warn("[invclock] deep-link failed:", err?.message || err);
+    }
+  }, 2000);
+})();

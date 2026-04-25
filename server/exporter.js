@@ -1467,7 +1467,18 @@ async function exportEnergy({ startTs, endTs, inverter, format, supplementalToda
 }
 
 // Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€ Inverter Data (raw readings) Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
-async function exportInverterData({ startTs, endTs, inverter, format, intervalMin }) {
+async function exportInverterData({
+  startTs,
+  endTs,
+  inverter,
+  format,
+  intervalMin,
+  // v2.9.0 Slice H — opt-in/opt-out for hardware counter columns.
+  // Defaults keep the new columns ON; passing `false` yields legacy shape.
+  includeEtotal = true,
+  includeParce = true,
+  showQuarantine = true,
+}) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.inverterData);
 
   const s = startTs || Date.now() - 86400000;
@@ -1477,11 +1488,36 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
     ? [Number(inverter)]
     : [...Array(Number(getSetting('inverterCount', 27)))].map((_, i) => i + 1);
 
+  // Snapshot current counter state per unit once (cheap: ≤91 rows).
+  const counterSnap = new Map();   // key = `${inverter}_${unit}`
+  if (includeEtotal || includeParce || showQuarantine) {
+    try {
+      const { getCounterStateAll, getCounterHistory } = require('./db');
+      const counterHealth = require('./counterHealth');
+      const rows = getCounterStateAll();
+      const serverNow = new Date();
+      for (const r of rows) {
+        const history = getCounterHistory(r.inverter, r.unit);
+        const classification = counterHealth.classifyCounter(r, history, 0, serverNow);
+        counterSnap.set(`${r.inverter}_${r.unit}`, {
+          etotal_kwh: Number(r.etotal_kwh || 0),
+          parce_kwh:  Number(r.parce_kwh  || 0),
+          rtc_valid:  r.rtc_valid ? 1 : 0,
+          rtc_drift_s: r.rtc_drift_s,
+          classification,
+        });
+      }
+    } catch (ctrErr) {
+      // Non-fatal — counter snapshot failures just omit columns.
+      console.warn('[exporter] counter snapshot failed:', ctrErr.message);
+    }
+  }
+
   const rowsOut = [];
   for (const inv of invList) {
     for (const r of sampleReadingsByInterval(queryReadingsRange(inv, s, e), interval)) {
       const alarmValue = Number(r.alarm || 0);
-      rowsOut.push({
+      const row = {
         Date: fmtDate(r.ts),
         Time: fmtTime(r.ts),
         Interval: interval.label,
@@ -1494,7 +1530,20 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
         AlarmCode: formatAlarmHex(alarmValue),
         AlarmDescription: decodeAlarm(alarmValue).map((b) => b.label).join('; ') || 'No alarm',
         Online: r.online ? 'YES' : 'NO',
-      });
+      };
+      const snap = counterSnap.get(`${r.inverter}_${r.unit}`);
+      if (includeEtotal) {
+        row.Etotal_kWh = snap ? snap.etotal_kwh : '';
+      }
+      if (includeParce) {
+        row.parcE_kWh = snap ? snap.parce_kwh : '';
+      }
+      if (showQuarantine) {
+        row.Counter_Source = snap ? snap.classification.source : 'pac_integrated';
+        row.Etotal_Quarantined = snap ? snap.classification.quarantined : 0;
+        row.Quarantine_Reason = snap ? snap.classification.reason : '';
+      }
+      rowsOut.push(row);
     }
     await yieldToEventLoop();
   }
@@ -1513,6 +1562,13 @@ async function exportInverterData({ startTs, endTs, inverter, format, intervalMi
     { key: 'AlarmDescription', label: 'Alarm Description' },
     { key: 'Online', label: 'Online' },
   ];
+  if (includeEtotal)  headers.push({ key: 'Etotal_kWh', label: 'Etotal (kWh, HW)' });
+  if (includeParce)   headers.push({ key: 'parcE_kWh',  label: 'parcE (kWh, HW)' });
+  if (showQuarantine) {
+    headers.push({ key: 'Counter_Source',     label: 'Counter Source' });
+    headers.push({ key: 'Etotal_Quarantined', label: 'Etotal Quarantined' });
+    headers.push({ key: 'Quarantine_Reason',  label: 'Quarantine Reason' });
+  }
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = rowsOut
     .map((row, idx) => ({ row, idx }))

@@ -115,6 +115,16 @@ if (!_integrityResult.ok && !_recoveryShown) {
       });
     } catch (err) {
       console.error("[main] recovery dialog failed:", err?.message || err);
+      // Doomsday fallback — recovery dialog itself crashed. Mark this so
+      // the next boot doesn't double-flag with "unexpected" on top of the
+      // (already user-visible) integrity failure.
+      try {
+        recordEarlyExitMarker(
+          SHUTDOWN_REASONS.UNCAUGHT_EXCEPTION,
+          SHUTDOWN_INITIATORS.RUNTIME,
+          { earlyExitPath: "integrity-recovery-dialog-fail", error: String(err?.message || err) },
+        );
+      } catch (_) {}
       app.exit(1);
     }
   });
@@ -175,6 +185,17 @@ function recordShutdownReasonOnce(reason, options) {
     if (rec) {
       _shutdownReasonRecorded = true;
       try { console.log(`[main] Shutdown reason recorded: ${rec.reason} (${rec.initiator})`); } catch (_) {}
+    } else {
+      // Sync write returned falsy without throwing — likely an fs failure
+      // (lifecycle dir not writable, disk full, permission denied). Surface
+      // it so operators can correlate "next-boot unexpected" banners with
+      // the underlying file-system issue.
+      try {
+        console.warn(
+          `[main] Shutdown marker write returned no record for reason=${reason} ` +
+          `— sentinel without matching marker may misclassify next boot as "unexpected".`,
+        );
+      } catch (_) {}
     }
     return rec;
   } catch (err) {
@@ -183,26 +204,62 @@ function recordShutdownReasonOnce(reason, options) {
   }
 }
 
-// Classify the PRIOR run's shutdown. This writes a fresh boot-sentinel for
-// THIS run as a side-effect, so it must happen exactly once at startup.
-// Expose via env so the embedded server can surface it through
-// /api/health/db-integrity without re-reading the filesystem.
-let _lastShutdownSnapshot = null;
-try {
-  _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
-  if (_lastShutdownSnapshot) {
-    process.env.ADSI_LAST_SHUTDOWN_JSON = JSON.stringify(_lastShutdownSnapshot);
-    try {
-      console.log(
-        `[main] Prior shutdown classification: ${_lastShutdownSnapshot.classification}` +
-        (_lastShutdownSnapshot.priorReason?.reason
-          ? ` (reason=${_lastShutdownSnapshot.priorReason.reason})`
-          : ""),
-      );
-    } catch (_) {}
+// Record a shutdown marker for "early exit" paths that bypass the normal
+// requestAppShutdown chain (singleton lock deny, license-startup-fail,
+// login cancel, recovery-dialog failure). Without this, those exits leave
+// a sentinel on disk with no matching `shutdown-reason.current.json`, and
+// the NEXT boot misclassifies the prior run as "unexpected" — surfacing
+// the false-positive amber banner the user sees on every startup.
+//
+// The marker is written synchronously and tagged with a specific reason so
+// the audit trail can still tell apart "real graceful quit" from "user
+// closed login dialog before boot completed".
+function recordEarlyExitMarker(reason, initiator, extra) {
+  if (_shutdownReasonRecorded) return null;
+  try {
+    const rec = _shutdownReason.recordShutdownReasonSync(reason, { initiator, extra });
+    if (rec) {
+      _shutdownReasonRecorded = true;
+      try { console.log(`[main] Early-exit marker recorded: ${rec.reason} (${rec.initiator})`); } catch (_) {}
+    } else {
+      try {
+        console.warn(
+          `[main] Early-exit marker write returned no record for reason=${reason} ` +
+          `path=${extra?.earlyExitPath || "unknown"} — next boot may misclassify as "unexpected".`,
+        );
+      } catch (_) {}
+    }
+    return rec;
+  } catch (err) {
+    try { console.warn("[main] Failed to record early-exit marker:", err?.message || err); } catch (_) {}
+    return null;
   }
-} catch (err) {
-  try { console.warn("[main] readLastShutdownSync failed:", err?.message || err); } catch (_) {}
+}
+
+// Classify the PRIOR run's shutdown. This writes a fresh boot-sentinel for
+// THIS run as a side-effect, so it must happen exactly once at startup AND
+// only after we've confirmed this process is the singleton primary —
+// otherwise a second-instance launch attempt would overwrite the running
+// first-instance's sentinel and synthesize a bogus "unexpected-shutdown"
+// into prev. The actual call moves below the singleton lock check.
+let _lastShutdownSnapshot = null;
+function _initShutdownSnapshot() {
+  try {
+    _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
+    if (_lastShutdownSnapshot) {
+      process.env.ADSI_LAST_SHUTDOWN_JSON = JSON.stringify(_lastShutdownSnapshot);
+      try {
+        console.log(
+          `[main] Prior shutdown classification: ${_lastShutdownSnapshot.classification}` +
+          (_lastShutdownSnapshot.priorReason?.reason
+            ? ` (reason=${_lastShutdownSnapshot.priorReason.reason})`
+            : ""),
+        );
+      } catch (_) {}
+    }
+  } catch (err) {
+    try { console.warn("[main] readLastShutdownSync failed:", err?.message || err); } catch (_) {}
+  }
 }
 
 // Allow dashboard alarm audio to start immediately on packaged clients.
@@ -218,8 +275,14 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 const _gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!_gotSingleInstanceLock) {
   console.warn("[main] Another instance is already running — quitting this one.");
+  // Second instance — DO NOT touch lifecycle markers. The running first
+  // instance owns the current sentinel; we just exit cleanly so the user
+  // is signalled (focus first-instance window) without corrupting state.
   app.exit(0);
 } else {
+  // First instance — safe to read & rotate prior-shutdown markers and
+  // write a fresh boot sentinel for THIS run.
+  _initShutdownSnapshot();
   app.on("second-instance", (_event, _argv, _cwd) => {
     try {
       const wins = BrowserWindow.getAllWindows();
@@ -1909,6 +1972,14 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   const licensed = await ensureLicenseAtStartup();
   if (!licensed) {
+    // User cancelled the license dialog at startup — graceful exit. Without
+    // this marker, the next boot would see the sentinel from THIS run with
+    // no matching shutdown-reason and falsely flag "unexpected prior shutdown".
+    recordEarlyExitMarker(
+      SHUTDOWN_REASONS.BEFORE_QUIT,
+      SHUTDOWN_INITIATORS.USER,
+      { earlyExitPath: "license-startup-cancel" },
+    );
     app.exit(0);
     return;
   }
@@ -1926,6 +1997,11 @@ app.on("activate", async () => {
   if (!status.valid) {
     const ok = await ensureLicenseAtStartup();
     if (!ok) {
+      recordEarlyExitMarker(
+        SHUTDOWN_REASONS.BEFORE_QUIT,
+        SHUTDOWN_INITIATORS.USER,
+        { earlyExitPath: "license-activate-cancel" },
+      );
       app.exit(0);
       return;
     }
@@ -2301,7 +2377,7 @@ function readWindowsMachineGuid() {
     const out = execFileSync(
       "reg",
       ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
     );
     const line = String(out || "")
       .split(/\r?\n/)
@@ -2319,7 +2395,7 @@ function readRegistryValue(regPath, valueName) {
     const out = execFileSync(
       "reg",
       ["query", regPath, "/v", valueName],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
     );
     const line = String(out || "")
       .split(/\r?\n/)
@@ -2339,7 +2415,7 @@ function writeRegistryValue(regPath, valueName, value) {
     execFileSync(
       "reg",
       ["add", regPath, "/v", valueName, "/t", "REG_SZ", "/d", String(value || ""), "/f"],
-      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
     );
     return true;
   } catch (_) {
@@ -2352,7 +2428,7 @@ function deleteRegistryValue(regPath, valueName) {
     execFileSync(
       "reg",
       ["delete", regPath, "/v", valueName, "/f"],
-      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
     );
     return true;
   } catch (_) {
@@ -3712,7 +3788,7 @@ function killImageNames(imageNames = []) {
     if (!image || seen.has(image)) continue;
     seen.add(image);
     try {
-      execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore" });
+      execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore", windowsHide: true });
     } catch (_) {
       // Process image may not be running, ignore.
     }
@@ -4068,7 +4144,7 @@ function restartBackendProcess() {
 
   // Best effort for currently tracked process tree.
   if (backendProc && !backendProc.killed) {
-    execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
+    execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, (err) => {
       if (err) console.warn("[main] taskkill backend pid failed:", err.message);
     });
   }
@@ -4882,6 +4958,12 @@ ipcMain.on("login-success", async () => {
   if (!status.valid) {
     const ok = await ensureLicenseAtStartup();
     if (!ok) {
+      // Same false-positive avoidance as the startup license-cancel path.
+      recordEarlyExitMarker(
+        SHUTDOWN_REASONS.BEFORE_QUIT,
+        SHUTDOWN_INITIATORS.USER,
+        { earlyExitPath: "license-login-recheck-cancel" },
+      );
       app.exit(0);
       return;
     }
@@ -5195,7 +5277,6 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     const safe = sanitizeConfig(newConfig);
     let saved = safe;
     let dbSynced = false;
-    let backendRestarted = false;
     try {
       saved = sanitizeConfig(await requestServerJson("POST", "/api/ip-config", safe, 5000));
       dbSynced = true;
@@ -5204,13 +5285,16 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     }
 
     // Always mirror to legacy file for backend compatibility.
+    // Hot-reload: server already pushes the snapshot to its poller and
+    // broadcasts {type:"configChanged"} over WS; the Python service's
+    // ipconfig_watcher (1 s tick) reconciles clients via rebuild_global_maps.
+    // No backend kill needed — the synchronous taskkill in restartBackendProcess
+    // was the source of dashboard freezes during save.
     saveIpConfigFile(saved);
-    backendRestarted = restartBackendProcess();
 
     return {
       success: true,
       config: saved,
-      backendRestarted,
       ...(dbSynced ? {} : { warning: "Saved locally, DB sync unavailable." }),
     };
   } catch (err) {
@@ -5441,7 +5525,7 @@ ipcMain.on("switch-operation-mode", async (event, mode) => {
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 function forceKillProc(proc, label) {
   if (!proc || proc.killed) return;
-  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
+  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, (err) => {
     if (err) console.warn(`[main] taskkill ${label} failed:`, err.message);
   });
 }

@@ -4,6 +4,8 @@ const {
   getSetting,
   sumEnergy5minByInverterRange,
   upsertAvailability5min,
+  persistCounterState,
+  computeTodayHardwareEnergy,
 } = require('./db');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
@@ -17,6 +19,8 @@ const {
 const liveData = {};       // key: `${inv}_${unit}` → latest parsed row
 const unreachableState = {}; // per-key miss/suppression tracking
 const lastPersistState = {}; // per-key DB persist cadence state
+const lastCounterPersistAt = {}; // v2.9.0 — per-key hardware-counter persist timestamp
+const COUNTER_PERSIST_MS = 10_000; // counter_state row refreshed at most every 10s/unit
 
 const POLL_MS    = 200;    // poll interval — reduced from 500ms; Python updates at ~50ms/inverter
 const OFFLINE_MS = 20000;   // mark offline after 20s no data
@@ -539,6 +543,19 @@ function parseRow(row, identity = null) {
   const ts = Number.isFinite(sourceTs) && sourceTs > 0 ? sourceTs : Date.now();
   const day = resolveFrameDay(row, ts);
 
+  // v2.9.0 Slice A/B: hardware counter + RTC fields from Python /data.
+  // Safe defaults preserve behaviour when Python predates v2.9.0.
+  const etotal_kwh = Math.max(0, Math.trunc(Number(row.etotal_kwh || 0)));
+  const parce_kwh  = Math.max(0, Math.trunc(Number(row.parce_kwh  || 0)));
+  const fac_hz     = Number.isFinite(Number(row.fac_hz)) ? Number(row.fac_hz) : null;
+  const alarm_32   = Math.max(0, Math.trunc(Number(row.alarm_32 || 0)));
+  const rtc_valid  = row.rtc_valid === true || row.rtc_valid === 1 ? 1 : 0;
+  const rtc_ms_raw = Number(row.rtc_ms);
+  const rtc_ms     = rtc_valid && Number.isFinite(rtc_ms_raw) ? rtc_ms_raw : null;
+  const rtc_drift_s = rtc_valid && Number.isFinite(Number(row.rtc_drift_s))
+    ? Number(row.rtc_drift_s)
+    : null;
+
   return {
     ts,
     day,
@@ -554,6 +571,14 @@ function parseRow(row, identity = null) {
     on_off,
     online: 1,
     source_ip: String(resolved.sourceIp || ""),
+    // v2.9.0 — hardware counters / RTC passthrough (additive)
+    etotal_kwh,
+    parce_kwh,
+    fac_hz,
+    alarm_32,
+    rtc_valid,
+    rtc_ms,
+    rtc_drift_s,
   };
 }
 
@@ -1009,6 +1034,41 @@ async function poll() {
 
     integratePacToday(parsed);
 
+    // v2.9.0 Slice B — persist hardware counters + RTC state (throttled 10s/unit).
+    try {
+      const lastCtr = lastCounterPersistAt[key] || 0;
+      if (!lastCtr || (Date.now() - lastCtr) >= COUNTER_PERSIST_MS) {
+        persistCounterState(parsed);
+        lastCounterPersistAt[key] = Date.now();
+      }
+    } catch (ctrErr) {
+      // Non-fatal — counter persist failures should never break the main loop.
+      if (!pollStats.lastCounterError) {
+        pollStats.lastCounterError = String(ctrErr?.message || ctrErr || "err");
+      }
+    }
+
+    // v2.9.1 Phase 3 — derive per-unit today's-hardware-energy fields from
+    // the cached baseline. Frontend selectEnergyValue() applies the
+    // operator-chosen energySourceMode at display time. Validity flags are
+    // 0 unless today's baseline was derived from yesterday's eod_clean
+    // snapshot — so a transient bad first-poll baseline cannot inflate the
+    // displayed Etotal/parcE today figure.
+    try {
+      const hw = computeTodayHardwareEnergy(parsed);
+      if (hw) {
+        parsed.kwh_today_etotal   = hw.kwh_today_etotal;
+        parsed.kwh_today_parce    = hw.kwh_today_parce;
+        parsed.etotal_today_valid = hw.etotal_today_valid;
+        parsed.parce_today_valid  = hw.parce_today_valid;
+        parsed.baseline_source    = hw.baseline_source;
+      }
+    } catch (hwErr) {
+      if (!pollStats.lastHwEnergyError) {
+        pollStats.lastHwEnergyError = String(hwErr?.message || hwErr || "err");
+      }
+    }
+
     seen.add(key);
     markSeenKey(key);
 
@@ -1023,6 +1083,15 @@ async function poll() {
       prev.online = 1;
       prev.kwh = parsed.kwh;
       prev.day = parsed.day;
+      // v2.9.1 — refresh hardware-energy fields too so the operator-selected
+      // Etotal/parcE today display ticks even on heartbeat frames.
+      prev.kwh_today_etotal   = parsed.kwh_today_etotal;
+      prev.kwh_today_parce    = parsed.kwh_today_parce;
+      prev.etotal_today_valid = parsed.etotal_today_valid;
+      prev.parce_today_valid  = parsed.parce_today_valid;
+      prev.baseline_source    = parsed.baseline_source;
+      prev.etotal_kwh         = parsed.etotal_kwh;
+      prev.parce_kwh          = parsed.parce_kwh;
       noChangeThisTick += 1;
       continue;
     }

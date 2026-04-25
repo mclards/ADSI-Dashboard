@@ -1,0 +1,32 @@
+
+> inverter-dashboard@2.9.0 build:installer
+> node scripts/build-installer-signed.js
+
+[build-installer-signed] Code signing enabled
+[build-installer-signed]   PFX: D:\ADSI-Dashboard\build\private\codesign.pfx
+[build-installer-signed] Running: npx electron-builder --win nsis --x64
+  • electron-builder  version=24.13.3 os=10.0.26220
+  • loaded configuration  file=package.json ("build" field)
+  • rebuilding native dependencies  dependencies=better-sqlite3@11.10.0 platform=win32 arch=x64
+  • install prebuilt binary  name=better-sqlite3 version=11.10.0 platform=win32 arch=x64 napi=
+  • packaging       platform=win32 arch=x64 electron=29.4.6 appOutDir=release\win-unpacked
+  ⨯ remove D:\ADSI-Dashboard\release\win-unpacked\resources\app.asar: The process cannot access the file because it is being used by another process.
+github.com/develar/go-fs-util.EnsureEmptyDir
+	/Volumes/data/go/pkg/mod/github.com/develar/go-fs-util@v0.0.0-20190620175131-69a2d4542206/fs.go:98
+github.com/develar/app-builder/pkg/electron.UnpackElectron.func1.1
+	/Volumes/data/Documents/app-builder/pkg/electron/electronUnpack.go:38
+github.com/develar/app-builder/pkg/util.MapAsyncConcurrency.func2
+	/Volumes/data/Documents/app-builder/pkg/util/async.go:68
+runtime.goexit
+	/usr/local/Cellar/go/1.17/libexec/src/runtime/asm_amd64.s:1581  
+  ⨯ D:\ADSI-Dashboard\node_modules\app-builder-bin\win\x64\app-builder.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+Exit code:
+1  failedTask=build stackTrace=Error: D:\ADSI-Dashboard\node_modules\app-builder-bin\win\x64\app-builder.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+Exit code:
+1
+    at ChildProcess.<anonymous> (D:\ADSI-Dashboard\node_modules\builder-util\src\util.ts:252:14)
+    at Object.onceWrapper (node:events:639:26)
+    at ChildProcess.emit (node:events:524:28)
+    at ChildProcess.cp.emit (D:\ADSI-Dashboard\node_modules\cross-spawn\lib\enoent.js:34:29)
+    at maybeClose (node:internal/child_process:1104:16)
+    at Process.ChildProcess._handle.onexit (node:internal/child_process:304:5)

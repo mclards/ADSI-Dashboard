@@ -2086,6 +2086,9 @@ class CloudBackupService {
       "audit_log",
       "forecast_run_audit",
       "solcast_snapshots",
+      "inverter_counter_state",
+      "inverter_counter_baseline",
+      "inverter_clock_sync_log",
     ];
     const out = {};
     for (const t of tables) {
