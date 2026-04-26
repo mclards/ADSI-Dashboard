@@ -6,7 +6,14 @@ const {
   upsertAvailability5min,
   persistCounterState,
   computeTodayHardwareEnergy,
+  insertAuditLogRow,
 } = require('./db');
+const {
+  MAX_BUCKET_KWH_PER_INVERTER,
+  maxRecoveryDeltaKwhForDt,
+  classifyRecoveryDelta,
+  classifyBucketInc,
+} = require('./pollerClampCore');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
 const {
@@ -33,6 +40,11 @@ const SOLAR_HOUR_END   = 18;
 // This 30s cap is a hard ceiling for genuine long timestamp gaps (e.g. clock jumps).
 // A gap-clip warning is emitted whenever the cap fires so discards are visible in logs.
 const MAX_PAC_DT_S = 30;   // cap integration gap — hard ceiling (stale frame guard is primary)
+
+// v2.9.2 recovery-seed and bucket spike clamp logic lives in
+// ./pollerClampCore.js so it can be unit-tested without loading the
+// native better-sqlite3 binding. integratePacToday() and update5minBucket()
+// below call into the pure classifiers imported at the top of this file.
 const SUPPRESS_AFTER_MISS_MS = 120000; // suppress after prolonged misses
 const SUPPRESS_BACKOFF_MS = 30000;    // retry after backoff window
 const API_FETCH_TIMEOUT_MS = 5000;
@@ -92,6 +104,11 @@ const pollStats = {
   partialBucketFlushCount: 0, // 5-min partial buckets flushed on shutdown (recovered energy)
   solarWindowSkipCount: 0,    // readings dropped because outside solar persist window
   staleFrameSkipCount: 0,     // PAC integrations skipped because Python served a cached stale frame
+  // v2.9.2 recovery-seed spike clamps — protect ML training data integrity
+  recoverySeedClipCount: 0,    // pythonDelta exceeded the dt-aware per-frame ceiling and was re-anchored
+  recoverySeedClipTotalKwh: 0, // cumulative kWh quarantined by the per-frame recovery clamp
+  bucketSpikeClipCount: 0,     // 5-min bucket inc exceeded MAX_BUCKET_KWH_PER_INVERTER (defense-in-depth)
+  bucketSpikeClipTotalKwh: 0,  // cumulative kWh quarantined by the bucket-level clamp
   // ─── Frame latency (Python sweep lag vs Node poll interval) ─────────────────
   frameAgeAvgMs: 0,           // EMA of (Date.now() − frame.ts) across all parsed rows
   frameAgeMaxMs: 0,           // peak frame age seen in this session (ms)
@@ -473,13 +490,56 @@ function integratePacToday(parsed) {
   // Python integrates at 50ms granularity (vs Node's 200ms refetch), so its kWh
   // is more accurate. We take the delta from the last known Python value;
   // if Python restarted (kwh_python < prev), delta = 0 (safe — DB baseline covers it).
+  //
+  // v2.9.2 recovery-seed clamp: if the delta exceeds the per-frame physical
+  // ceiling, treat it as a counter-recovery seed jump (Python re-seeded
+  // kwh_today from Etotal − baseline after a restart) — drop the delta,
+  // re-anchor to the new value, log to audit_log. This prevents a single
+  // 5-min bucket from absorbing hours of accumulated energy and polluting
+  // ML day-ahead training data.
   const pythonKwh = Number(parsed.kwh_python || 0);
   if (pythonKwh > 0) {
     const prevPythonKwh = Number(prev.pythonKwh || 0);
-    const pythonDelta = Math.max(0, pythonKwh - prevPythonKwh);
-    totalKwh += pythonDelta;
+    const verdict = classifyRecoveryDelta(prevPythonKwh, pythonKwh, dtSec);
+    if (verdict.tripped) {
+      pollStats.recoverySeedClipCount += 1;
+      pollStats.recoverySeedClipTotalKwh = Number(
+        (Number(pollStats.recoverySeedClipTotalKwh || 0) + verdict.rawDelta).toFixed(6),
+      );
+      const inv = Number(parsed.inverter || 0);
+      const unit = Number(parsed.unit || 0);
+      console.warn(
+        `[energy] recovery-seed spike clipped: inv=${inv}/u${unit}` +
+        ` pythonDelta=${verdict.rawDelta.toFixed(3)}kWh` +
+        ` ceiling=${verdict.ceilingKwh.toFixed(3)}kWh dt=${dtSec.toFixed(2)}s` +
+        ` prev=${prevPythonKwh.toFixed(3)} new=${pythonKwh.toFixed(3)}` +
+        ` totalClips=${pollStats.recoverySeedClipCount}`,
+      );
+      try {
+        insertAuditLogRow({
+          ts: now,
+          operator: "SYSTEM",
+          inverter: inv,
+          node: unit,
+          action: "recovery_seed_clip",
+          scope: "single",
+          result: "warn",
+          reason:
+            `pythonDelta=${verdict.rawDelta.toFixed(3)}kWh exceeded dt-aware ceiling ` +
+            `${verdict.ceilingKwh.toFixed(3)}kWh (dt=${dtSec.toFixed(2)}s); ` +
+            `clamped to 0 and re-anchored ` +
+            `(prev=${prevPythonKwh.toFixed(3)} new=${pythonKwh.toFixed(3)})`,
+        });
+      } catch {}
+    }
+    // appliedDelta is the raw delta when within ceiling, 0 when tripped.
+    // Re-anchoring happens unconditionally via the pacIntegratorState update
+    // below — when tripped, prev.pythonKwh moves to current pythonKwh so the
+    // next frame's delta starts fresh from the post-recovery baseline.
+    const appliedDelta = verdict.appliedDelta;
+    totalKwh += appliedDelta;
     pacTodayByInverter[parsed.inverter] =
-      (pacTodayByInverter[parsed.inverter] || 0) + pythonDelta;
+      (pacTodayByInverter[parsed.inverter] || 0) + appliedDelta;
     parsed.kwh = roundKwh(totalKwh);
     pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh, pythonKwh };
     return;
@@ -719,6 +779,54 @@ function markMissingKey(key, now) {
 const energyBuckets = {}; // `${inv}` -> { bucketStart, kwhStart, day }
 let lastAvailabilityBucketTs = 0; // last written availability_5min boundary
 
+// Per-inverter ring buffer of the last 12 (= RECENT_SLOTS_WINDOW = 1 hour)
+// bucket inc values, oldest → newest. Powers the v2.9.2 contextual
+// gap-backfill check in classifyBucketInc: a slot whose preceding window
+// is mostly zeros (= real outage) is treated as catch-up backfill and
+// clamped, even if its raw value is below the physical ceiling.
+//
+// Warm-up: the contextual rule only activates once the buffer holds
+// WARM_UP_SLOTS (12) entries — i.e., the inverter has been observed for
+// 1 hour of poll cycles since boot. Until then, only the physical ceiling
+// protects (catastrophic spikes only). 12 floats × 27 inverters ≈ 2.6 KB.
+const RECENT_BUCKET_INC_CAP = 12;
+const recentBucketIncByInv = {}; // inverter -> number[]
+
+// Resolve an inverter's configured unit count (1–4) from the cached IP config.
+// Used to scale the per-bucket physical ceiling per inverter — a 2-unit
+// inverter has a 50 kWh ceiling instead of the default 4-unit 100 kWh.
+function getConfiguredUnitCountForInverter(inv) {
+  const cfg = ipConfigCache;
+  const unitsRaw =
+    cfg?.units?.[inv] ?? cfg?.units?.[String(inv)] ?? [1, 2, 3, 4];
+  const units = Array.isArray(unitsRaw)
+    ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
+    : [1, 2, 3, 4];
+  const count = new Set(units).size;
+  return count > 0 ? count : 4; // never zero — fallback to 4-unit ceiling
+}
+
+function pushRecentBucketInc(inv, kwhInc) {
+  const key = Number(inv);
+  if (!(key > 0)) return;
+  const arr = recentBucketIncByInv[key] || [];
+  arr.push(Number(kwhInc) || 0);
+  while (arr.length > RECENT_BUCKET_INC_CAP) arr.shift(); // keep last hour
+  recentBucketIncByInv[key] = arr;
+}
+
+function getRecentBucketInc(inv) {
+  const key = Number(inv);
+  return Array.isArray(recentBucketIncByInv[key])
+    ? recentBucketIncByInv[key].slice()
+    : [];
+}
+
+function resetRecentBucketIncForInverter(inv) {
+  const key = Number(inv);
+  delete recentBucketIncByInv[key];
+}
+
 function floorToFiveMinute(ts) {
   const FIVE = 5 * 60 * 1000;
   return Math.floor(ts / FIVE) * FIVE;
@@ -734,6 +842,10 @@ function update5minBucket(parsed, energyRows) {
 
   if (!state || state.day !== dKey) {
     energyBuckets[key] = { bucketStart, kwhStart: kwhNow, day: dKey };
+    // Day rollover: clear the contextual ring buffer so yesterday's history
+    // doesn't false-trigger a "gap" at midnight (where the natural transition
+    // is real production → zeros across the day boundary).
+    resetRecentBucketIncForInverter(parsed.inverter);
     return;
   }
 
@@ -741,12 +853,72 @@ function update5minBucket(parsed, energyRows) {
 
   // Persist exactly on wall-clock 5-minute boundaries (:00/:05/:10/...),
   // derived from PAC integration only (not register kWh).
-  const inc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
+  //
+  // v2.9.2 defense-in-depth clamp:
+  //   • Rule 1 (physical ceiling, 100 kWh): catastrophic spikes regardless of context.
+  //   • Rule 2 (contextual gap-backfill): slot value > 30 kWh after ≥ 4 consecutive
+  //     zero slots (= ≥ 20 min outage) is treated as catch-up and clamped.
+  // Both rules write 0 to energy_5min and emit an audit_log row so the
+  // quarantined energy is visible to operators (the HW counter columns in
+  // the export still show the true production for reconciliation).
+  const rawInc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
+  const precedingSlots = getRecentBucketInc(parsed.inverter);
+  const unitsCount = getConfiguredUnitCountForInverter(parsed.inverter);
+  const verdict = classifyBucketInc({
+    rawInc,
+    precedingSlots,
+    unitsCount,
+  });
+  if (verdict.tripped) {
+    pollStats.bucketSpikeClipCount += 1;
+    pollStats.bucketSpikeClipTotalKwh = Number(
+      (Number(pollStats.bucketSpikeClipTotalKwh || 0) + verdict.overage).toFixed(6),
+    );
+    console.warn(
+      `[energy] 5-min bucket spike clipped: inv=${parsed.inverter}` +
+      ` units=${verdict.unitsCount} ratedKw=${verdict.ratedKw}` +
+      ` slot=${new Date(bucketStart).toISOString()}` +
+      ` raw=${verdict.rawInc.toFixed(3)}kWh ceiling=${verdict.ceilingKwh.toFixed(3)}kWh` +
+      ` reason=${verdict.reason}` +
+      ` gap=${verdict.gapMinutes}min` +
+      ` overage=${verdict.overage.toFixed(3)}kWh` +
+      ` totalClips=${pollStats.bucketSpikeClipCount}`,
+    );
+    try {
+      const reasonText =
+        verdict.reason === "gap_backfill"
+          ? `5-min bucket inc=${verdict.rawInc.toFixed(3)}kWh after ${verdict.gapMinutes}-min ` +
+            `gap (${verdict.consecutiveZeros} consecutive zero slots) on ` +
+            `${verdict.unitsCount}-unit inverter (${verdict.ratedKw}kW rated); ` +
+            `treated as catch-up backfill, written as 0 to protect ML training`
+          : `5-min bucket inc=${verdict.rawInc.toFixed(3)}kWh exceeded physical ceiling ` +
+            `${verdict.ceilingKwh.toFixed(3)}kWh for ${verdict.unitsCount}-unit ` +
+            `inverter (${verdict.ratedKw}kW rated); written as 0 to protect ML training`;
+      insertAuditLogRow({
+        ts: bucketStart,
+        operator: "SYSTEM",
+        inverter: parsed.inverter,
+        node: 0,
+        action: "bucket_spike_clip",
+        scope: "single",
+        result: "warn",
+        reason: reasonText,
+      });
+    } catch {}
+  }
+
+  const appliedInc = Number(verdict.appliedInc.toFixed(6));
   energyRows.push({
     ts: bucketStart,
     inverter: parsed.inverter,
-    kwh_inc: Number(inc.toFixed(6)),
+    kwh_inc: appliedInc,
   });
+  // Update the contextual ring buffer with the value that was actually
+  // written to energy_5min. Using `appliedInc` (post-clamp) means a clamped
+  // bucket counts as a zero in the gap-detection window — a sustained
+  // catch-up scenario that produces multiple consecutive bucket clamps will
+  // naturally extend the detected gap rather than reset it.
+  pushRecentBucketInc(parsed.inverter, appliedInc);
   energyBuckets[key] = { bucketStart, kwhStart: kwhNow, day: dKey };
 }
 
@@ -1271,6 +1443,11 @@ function flushPending() {
   // ── Partial 5-min bucket flush (FIX: server restart was losing active bucket) ──
   // Write the energy accumulated in the current (incomplete) 5-min window so
   // a restart does not permanently lose up to 5 min of solar generation.
+  //
+  // v2.9.2: route through classifyBucketInc so the partial flush honours the
+  // same physical-ceiling and contextual gap-backfill rules as the regular
+  // bucket writer. Without this, a partial flush right after a Modbus
+  // reconnect could slip a catch-up dump into energy_5min unfiltered.
   const partialEnergyBatch = [];
   const dKey = dayKey(now);
   for (const [invKey, state] of Object.entries(energyBuckets)) {
@@ -1278,20 +1455,63 @@ function flushPending() {
     const inv = Number(invKey);
     if (!(inv > 0)) continue;
     const kwhNow = Number(pacTodayByInverter[inv] || 0);
-    const inc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
-    if (!(inc > 0)) continue;
-    // Use the current wall-clock bucket start as the timestamp
+    const rawInc = Math.max(0, kwhNow - Number(state.kwhStart || 0));
+    if (!(rawInc > 0)) continue;
     const bucketTs = floorToFiveMinute(now);
-    partialEnergyBatch.push({
-      ts: bucketTs,
-      inverter: inv,
-      kwh_inc: Number(inc.toFixed(6)),
-    });
-    pollStats.partialBucketFlushCount += 1;
-    console.log(
-      `[energy] partial bucket flushed on shutdown: inv=${inv}` +
-      ` inc=${inc.toFixed(4)}kWh bucket=${new Date(bucketTs).toISOString()}`,
-    );
+
+    const precedingSlots = getRecentBucketInc(inv);
+    const unitsCount = getConfiguredUnitCountForInverter(inv);
+    const verdict = classifyBucketInc({ rawInc, precedingSlots, unitsCount });
+
+    if (verdict.tripped) {
+      pollStats.bucketSpikeClipCount += 1;
+      pollStats.bucketSpikeClipTotalKwh = Number(
+        (Number(pollStats.bucketSpikeClipTotalKwh || 0) + verdict.overage).toFixed(6),
+      );
+      console.warn(
+        `[energy] partial-flush bucket spike clipped on shutdown: inv=${inv}` +
+        ` units=${verdict.unitsCount} ratedKw=${verdict.ratedKw}` +
+        ` raw=${verdict.rawInc.toFixed(3)}kWh ceiling=${verdict.ceilingKwh.toFixed(3)}kWh` +
+        ` reason=${verdict.reason} gap=${verdict.gapMinutes}min` +
+        ` overage=${verdict.overage.toFixed(3)}kWh`,
+      );
+      try {
+        const reasonText =
+          verdict.reason === "gap_backfill"
+            ? `partial-flush 5-min bucket inc=${verdict.rawInc.toFixed(3)}kWh after ` +
+              `${verdict.gapMinutes}-min gap (${verdict.consecutiveZeros} consecutive zero slots) on ` +
+              `${verdict.unitsCount}-unit inverter (${verdict.ratedKw}kW rated); ` +
+              `treated as catch-up backfill, written as 0 to protect ML training`
+            : `partial-flush 5-min bucket inc=${verdict.rawInc.toFixed(3)}kWh exceeded ` +
+              `physical ceiling ${verdict.ceilingKwh.toFixed(3)}kWh for ` +
+              `${verdict.unitsCount}-unit inverter (${verdict.ratedKw}kW rated); ` +
+              `written as 0 to protect ML training`;
+        insertAuditLogRow({
+          ts: bucketTs,
+          operator: "SYSTEM",
+          inverter: inv,
+          node: 0,
+          action: "bucket_spike_clip",
+          scope: "single",
+          result: "warn",
+          reason: reasonText,
+        });
+      } catch {}
+    }
+
+    const appliedInc = Number(verdict.appliedInc.toFixed(6));
+    if (appliedInc > 0) {
+      partialEnergyBatch.push({
+        ts: bucketTs,
+        inverter: inv,
+        kwh_inc: appliedInc,
+      });
+      pollStats.partialBucketFlushCount += 1;
+      console.log(
+        `[energy] partial bucket flushed on shutdown: inv=${inv}` +
+        ` inc=${appliedInc.toFixed(4)}kWh bucket=${new Date(bucketTs).toISOString()}`,
+      );
+    }
   }
 
   enqueuePendingPersist(batch, partialEnergyBatch);
@@ -1364,4 +1584,10 @@ module.exports = {
   buildIpConfigLookup,
   resolveConfiguredTelemetryIdentity,
   getEnergyBacklogPressure,
+  // v2.9.2 — re-exported for callers that pull the clamp pure functions
+  // through the poller surface (tests should import from ./pollerClampCore directly).
+  maxRecoveryDeltaKwhForDt,
+  classifyRecoveryDelta,
+  classifyBucketInc,
+  MAX_BUCKET_KWH_PER_INVERTER,
 };

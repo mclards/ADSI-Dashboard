@@ -2163,6 +2163,46 @@ function evaluateCounterAdvancing(history, pacIdleW = 500, windowS = 300) {
   return 0;
 }
 
+// ── Generic audit_log writer (v2.9.2) ────────────────────────────────────
+//
+// Used by the poller's recovery-seed/bucket spike clamps and any other
+// background subsystem that needs to record a one-off event without
+// duplicating the INSERT SQL. Failures are logged but never thrown — an
+// audit-write failure must not break the hot poll path.
+function insertAuditLogRow({
+  ts,
+  operator = "SYSTEM",
+  inverter = 0,
+  node = 0,
+  action = "",
+  scope = "single",
+  result = "ok",
+  ip = "",
+  reason = "",
+} = {}) {
+  try {
+    db.prepare(
+      `INSERT INTO audit_log
+         (ts, operator, inverter, node, action, scope, result, ip, reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      Number(ts) || Date.now(),
+      String(operator),
+      Math.trunc(Number(inverter) || 0),
+      Math.trunc(Number(node) || 0),
+      String(action),
+      String(scope),
+      String(result),
+      String(ip),
+      String(reason),
+    );
+    return true;
+  } catch (err) {
+    console.warn("[audit_log] insert failed:", err && err.message);
+    return false;
+  }
+}
+
 // ── eod_clean hardening helpers ──────────────────────────────────────────
 //
 // Verifies that yesterday's eod_clean snapshot is populated for every unit
@@ -3966,4 +4006,6 @@ module.exports = {
   computeInverterDailyHwTotals,
   insertClockSyncLogRow,
   getClockSyncLog,
+  // v2.9.2 — generic audit writer used by poller spike clamps
+  insertAuditLogRow,
 };

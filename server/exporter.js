@@ -22,6 +22,7 @@ const {
   getCounterStateAll,
 } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
+const { applyInverterScale } = require('./energySummaryScaleCore');
 
 const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
@@ -1373,18 +1374,14 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       const authoritativeKwh = Math.max(0, Number(authoritativeByInv.get(inv) || 0));
       if (!(authoritativeKwh > 0) && !detailRows.length) continue;
 
-      const scale =
-        authoritativeKwh > 0 && rawSubtotalKwh > 0
-          ? authoritativeKwh / rawSubtotalKwh
-          : 1;
-      let subtotalMwh = 0;
-      for (const row of detailRows) {
-        const energyMwh = (Number(row.rawEnergyKwh || 0) * scale) / 1000;
-        subtotalMwh += energyMwh;
-        const eValid = Number.isFinite(row.rawEtotalKwh);
-        const pValid = Number.isFinite(row.rawParceKwh);
-        if (eValid) dayEtotalKwh += row.rawEtotalKwh; else dayEtotalValid = false;
-        if (pValid) dayParceKwh  += row.rawParceKwh;  else dayParceValid  = false;
+      // Pure scaling math lives in energySummaryScaleCore.js so it can be
+      // unit-tested without loading the native better-sqlite3 binding.
+      const scaled = applyInverterScale({
+        detailRows,
+        authoritativeKwh,
+        rawSubtotalKwh,
+      });
+      for (const row of scaled.scaledRows) {
         mapped.push({
           Date: row.Date,
           Inverter_Number: row.Inverter_Number,
@@ -1392,15 +1389,16 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           First_Seen: row.First_Seen,
           Last_Seen: row.Last_Seen,
           Peak_Pac_kW: row.Peak_Pac_kW,
-          Total_MWh: Number(energyMwh.toFixed(6)),
-          Etotal_MWh: eValid ? Number((row.rawEtotalKwh / 1000).toFixed(6)) : NaN,
-          ParcE_MWh:  pValid ? Number((row.rawParceKwh  / 1000).toFixed(6)) : NaN,
+          Total_MWh: row.Total_MWh,
+          Etotal_MWh: row.Etotal_MWh,
+          ParcE_MWh:  row.ParcE_MWh,
         });
       }
-      if (authoritativeKwh > 0) {
-        subtotalMwh = authoritativeKwh / 1000;
-      }
-      dayTotalMwh += subtotalMwh;
+      if (!scaled.dayEtotalValid) dayEtotalValid = false;
+      if (!scaled.dayParceValid)  dayParceValid  = false;
+      dayEtotalKwh += scaled.dayEtotalKwh;
+      dayParceKwh  += scaled.dayParceKwh;
+      dayTotalMwh += scaled.subtotalMwh;
 
     }
 
