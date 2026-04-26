@@ -886,6 +886,16 @@ function bindAutoUpdaterEventsOnce() {
   // Updates only install when the user explicitly clicks "Restart & Install".
   autoUpdater.autoInstallOnAppQuit = false;
 
+  // v2.9.3+: surface GitHub pre-releases as opt-in update prompts. Pre-release
+  // tags (e.g. v2.9.4-beta.1) appear to the field as "update available — install?"
+  // prompts alongside Latest releases. autoDownload is OFF by default in
+  // production (see autoDownloadPref above), so the operator still chooses
+  // when to install — this flag only changes VISIBILITY, not auto-install.
+  // Required for the GitHub provider configured below to include pre-release
+  // tags when querying the releases API; has no effect on the legacy generic
+  // feed (which is server-side filtered by GitHub's /releases/latest alias).
+  autoUpdater.allowPrerelease = true;
+
   // Wire electron-updater's logger to a file under userData so we can diagnose
   // auto-update failures in production without needing a console attached.
   try {
@@ -1154,11 +1164,33 @@ function initAppUpdater() {
       return;
     }
     try {
-      autoUpdater.setFeedURL({
-        provider: "generic",
-        url: UPDATE_FEED_URL,
-      });
-      console.log(`[updater] Generic feed URL (${UPDATE_CHANNEL} channel):`, UPDATE_FEED_URL);
+      // v2.9.3+: prefer the GitHub provider so pre-release tags can surface
+      // (autoUpdater.allowPrerelease=true above). The legacy /releases/latest
+      // /download URL is server-side filtered by GitHub and would never
+      // expose pre-releases regardless of the flag, so the GitHub provider
+      // is the only path that honors allowPrerelease for our public repo.
+      //
+      // Backward-compat: if a deployment explicitly sets ADSI_UPDATE_FEED_URL
+      // (e.g. a beta channel pointing at a per-tag asset directory, or an
+      // air-gapped mirror), keep the generic provider with that URL.
+      const explicitFeed = String(process.env.ADSI_UPDATE_FEED_URL || "").trim();
+      if (explicitFeed) {
+        autoUpdater.setFeedURL({
+          provider: "generic",
+          url: UPDATE_FEED_URL,
+        });
+        console.log(`[updater] Generic feed URL (${UPDATE_CHANNEL} channel):`, UPDATE_FEED_URL);
+      } else {
+        autoUpdater.setFeedURL({
+          provider: "github",
+          owner: UPDATE_REPO_OWNER,
+          repo: UPDATE_REPO_NAME,
+        });
+        console.log(
+          `[updater] GitHub provider: ${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME} ` +
+          `(allowPrerelease=${autoUpdater.allowPrerelease})`,
+        );
+      }
     } catch (err) {
       console.warn("[updater] setFeedURL failed:", err.message);
     }
@@ -1175,7 +1207,7 @@ function initAppUpdater() {
       downloadUrl: "",
       message: UPDATE_CHANNEL === "beta"
         ? "Installer update channel ready (BETA)."
-        : "Installer update channel ready.",
+        : "Installer update channel ready (pre-releases visible as opt-in).",
       error: "",
     }, false);
     return;
