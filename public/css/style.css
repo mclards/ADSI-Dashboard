@@ -12724,6 +12724,21 @@ body.mode-transition-active {
   display: none;
 }
 
+/* Forecast page bypasses the tab UI — all subsections render at once with the
+ * existing `order:` rules below. The tab bar is hidden, every panel becomes
+ * visible regardless of the [hidden] attribute, and panels collapse to
+ * `display: contents` so the inner `forecast-*-panel` subsections inherit the
+ * forecastSection grid context (which is what the order rules below expect).
+ * The Settings copy of the same section keeps the tabs intact via the
+ * `#page-settings` selectors elsewhere in this file. */
+#page-forecast #forecastSection > .card-tabs {
+  display: none !important;
+}
+#page-forecast #forecastSection > .card-tab-panel,
+#page-forecast #forecastSection > .card-tab-panel[hidden] {
+  display: contents !important;
+}
+
 #page-forecast #forecastSection .forecast-preview-panel {
   order: 1;
   margin-top: 0;
@@ -12793,11 +12808,16 @@ body.mode-transition-active {
 }
 
 #page-forecast .forecast-page-sections > .sgroup.settings-card > .sinfo,
-#page-forecast
-  .forecast-page-sections
-  > .sgroup.settings-card
-  > .sgroup-actions {
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-actions,
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tabs,
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel {
   grid-column: 1 / -1;
+}
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .settings-subsection,
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .cb-subsection,
+#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .sgroup-actions {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 #page-forecast .forecast-page-sections .srow {
@@ -12888,29 +12908,30 @@ body.mode-transition-active {
 
 #page-settings .settings-kicker,
 #page-settings .settings-main-eyebrow {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.85px;
+  letter-spacing: 0.75px;
   text-transform: uppercase;
   color: var(--accent);
-  opacity: 0.88;
+  opacity: 0.85;
 }
 
 #page-settings .settings-current-title,
 #page-settings .settings-main-title {
-  margin-top: 6px;
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 1.1;
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.15;
   color: var(--text);
 }
 
 #page-settings .settings-current-copy,
 #page-settings .settings-main-copy {
-  margin-top: 6px;
-  font-size: 12px;
-  line-height: 1.55;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--text2);
+  opacity: 0.85;
 }
 
 #page-settings .settings-current-chip {
@@ -13092,9 +13113,9 @@ body.mode-transition-active {
   position: sticky;
   top: 0;
   z-index: 3;
-  padding: 16px 18px;
+  padding: 8px 14px;
   border: 1px solid var(--border2);
-  border-radius: 16px;
+  border-radius: 12px;
   background:
     linear-gradient(
       180deg,
@@ -13204,11 +13225,59 @@ body.mode-transition-active {
 #page-settings .settings-sections > .sgroup.settings-card > .license-grid,
 #page-settings .settings-sections > .sgroup.settings-card > .license-audit-wrap,
 #page-settings .settings-sections > .sgroup.settings-card > .cb-progress-wrap,
+#page-settings .settings-sections > .sgroup.settings-card > .card-tabs,
+#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel,
 #page-settings
   .settings-sections
   > .sgroup.settings-card
   > #cbCloudListSection {
   grid-column: 1 / -1;
+}
+
+/* Inside an active tab panel the former subsection wrapper is one level
+ * deeper than the card grid — it inherits the panel's block layout, so
+ * `grid-column` doesn't apply, but it still needs to fill the panel width.
+ * Without `width: 100%` the wrapper hugs its content and looks half-width
+ * on wide viewports. */
+#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .settings-subsection,
+#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .cb-subsection,
+#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .sgroup-actions {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Scroll containment — Inverter Clocks pattern, generalized to every
+ * tabbed settings card. Goal: no page-level scrollbar; if a tab panel's
+ * content overflows the viewport, the OVERFLOW scrolls inside the panel.
+ *
+ * Mechanism (the same flex chain Inverter Clocks uses):
+ *   1. When the section is active AND it has a tab bar, switch from the
+ *      default 12-col grid to flex-column with `flex: 1 1 auto; min-height: 0`
+ *      so it claims the remaining height of `.settings-sections`.
+ *   2. The visible (non-[hidden]) tab panel becomes the scroll container —
+ *      `flex: 1 1 auto; min-height: 0; overflow-y: auto`.
+ *   3. Tab bar + outside-tab elements (sgroup-title, sgroup-actions, the
+ *      shared cb-progress-wrap) stay non-flexing and pin to the top/bottom.
+ *
+ * `:has()` picks only cards that opted into the new tab UI; cards without
+ * a `.card-tabs` direct child keep the legacy 12-col grid.
+ *
+ * Inverter Clocks keeps its bespoke `#inverterClockSection`-scoped rules
+ * because its inner table needs sticky-thead + a dedicated scroll wrapper
+ * (`.invclock-scroll`) — that pattern is preserved untouched above.  */
+#page-settings .settings-sections > .sgroup.settings-card.settings-section-active:has(> .card-tabs) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel:not([hidden]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 #page-settings .settings-sections .srow {
@@ -16270,16 +16339,53 @@ body.mode-transition-active {
   flex: 0 0 auto;
 }
 
-/* Tab bar shell — soft inset surface that visually anchors the row and
- * separates it from the panel below. Uses theme tokens so it adapts to
- * every theme. */
-.invclock-tabs {
+/* Remote-mode banner — surfaces above the tab bar in remote mode, explaining
+ * that statuses are mirrored from the gateway and clock-sync actions are
+ * disabled here to keep the WS bridge light. Theme-token colors so it
+ * blends with every theme. */
+.invclock-remote-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--orange) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.invclock-remote-banner .icon-inline {
+  color: var(--orange);
+  font-size: 18px;
+  flex: 0 0 auto;
+}
+.invclock-remote-banner .invclock-remote-banner-text {
+  flex: 1 1 auto;
+}
+.invclock-remote-banner .mono {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Generic settings-card tab bar — same visual language as the Inverter
+ * Clocks tab strip but reusable from any settings section. The HTML uses
+ * `.card-tabs` / `.card-tab` / `.card-tab-panel` and the JS helper
+ * `setActiveCardTab(sectionId, key)` toggles them. The `.invclock-*`
+ * classes below stay as-is for the inverter-clock section so its bespoke
+ * count chips and sticky-thead scroll wrappers don't break.
+ *
+ * Selectors are grouped so a single rule paints both class families. */
+.invclock-tabs,
+.card-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 2px;
-  margin: 2px 0 14px 0;
-  padding: 5px;
-  border-radius: 12px;
+  margin: 0 0 8px 0;
+  padding: 3px;
+  border-radius: 9px;
   background:
     linear-gradient(
       180deg,
@@ -16292,24 +16398,26 @@ body.mode-transition-active {
     0 1px 0 color-mix(in srgb, var(--surface2) 80%, transparent);
 }
 
-.invclock-tab {
-  flex: 1 1 200px;
+.invclock-tab,
+.card-tab {
+  flex: 1 1 160px;
   min-width: 0;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   appearance: none;
   cursor: pointer;
   border: 1px solid transparent;
-  border-radius: 18px;
-  padding: 9px 14px;
-  font-size: 12.5px;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.2px;
   background: transparent;
   color: var(--text2);
+  line-height: 1.25;
   transition:
     background 0.18s ease,
     color 0.18s ease,
@@ -16318,23 +16426,43 @@ body.mode-transition-active {
     transform 0.12s ease;
 }
 
-.invclock-tab .invclock-tab-label {
+/* Tab icons get a slightly smaller footprint in the compact bar so the
+ * label still leads the visual weight. */
+.invclock-tab > .icon-inline,
+.card-tab > .icon-inline {
+  font-size: 14px;
+  flex: 0 0 auto;
+}
+
+/* Count chips inside tabs (Inverter Clocks Per-Unit Counter Health tab)
+ * scale down to match the tighter bar height. */
+.invclock-tab-counts > span,
+.card-tab .card-tab-counts > span {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.invclock-tab .invclock-tab-label,
+.card-tab .card-tab-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.invclock-tab:hover {
+.invclock-tab:hover,
+.card-tab:hover {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
-.invclock-tab:active {
+.invclock-tab:active,
+.card-tab:active {
   transform: translateY(1px);
 }
 
-.invclock-tab.active {
+.invclock-tab.active,
+.card-tab.active {
   background: linear-gradient(
     160deg,
     var(--accent) 0%,
@@ -16349,7 +16477,8 @@ body.mode-transition-active {
     0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent),
     0 1px 0 color-mix(in srgb, var(--accent2) 50%, transparent);
 }
-.invclock-tab.active:hover {
+.invclock-tab.active:hover,
+.card-tab.active:hover {
   background: linear-gradient(
     160deg,
     color-mix(in srgb, var(--accent) 92%, white) 0%,
@@ -16358,21 +16487,24 @@ body.mode-transition-active {
   color: #fff;
   border-color: color-mix(in srgb, var(--accent2) 70%, black);
 }
-.invclock-tab.active:active {
+.invclock-tab.active:active,
+.card-tab.active:active {
   transform: translateY(1px);
   box-shadow:
     inset 0 1px 4px rgba(0, 0, 0, 0.30),
     0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
 }
 
-.invclock-tab:focus-visible {
+.invclock-tab:focus-visible,
+.card-tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
 /* Subtle vertical divider between non-active tabs — only visible between
  * adjacent inactive tabs (the active one disrupts the pattern via :not). */
-.invclock-tab:not(.active) + .invclock-tab:not(.active)::before {
+.invclock-tab:not(.active) + .invclock-tab:not(.active)::before,
+.card-tab:not(.active) + .card-tab:not(.active)::before {
   content: "";
   position: absolute;
   left: -1px;
@@ -16382,16 +16514,46 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--border2, var(--border)) 60%, transparent);
 }
 
+/* Generic tab panels — the active panel is shown via removing [hidden].
+ * Settings cards that opt into tabs declare each former subsection wrapper
+ * as `.card-tab-panel data-card-tab-panel="key"`. */
+.card-tab-panel {
+  display: block;
+  width: 100%;
+}
+.card-tab-panel[hidden] {
+  display: none !important;
+}
+
+/* The project-wide rule for full-width children of settings cards lives in
+ * `#page-settings .settings-sections > .sgroup.settings-card > X` further
+ * down (search for `.cb-progress-wrap` to find it). `.card-tabs` and
+ * `.card-tab-panel` are added to that selector list, so they span the full
+ * 12-column grid row instead of collapsing to ~80px. This is the saved
+ * project rule — any new direct-child wrapper inside `.sgroup.settings-card`
+ * needs `grid-column: 1 / -1`. */
+
+/* Light-theme inactive tab text gets a touch more contrast in the generic
+ * tab bar too (mirrors the invclock-* rule below). */
+:root[data-theme="light"] .card-tab:not(.active) {
+  color: color-mix(in srgb, var(--text) 75%, var(--text2));
+}
+:root[data-theme="light"] .card-tab:not(.active):hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 .invclock-tab-counts {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   flex-wrap: nowrap;
-  margin-left: 4px;
+  margin-left: 3px;
 }
 .invclock-tab-counts > span {
-  font-size: 11px;
-  padding: 2px 6px;
+  font-size: 10px;
+  padding: 1px 6px;
 }
 
 /* When the tab is ACTIVE, the bright accent gradient washes out the

@@ -18,6 +18,8 @@ const {
   queryEnergy5minRange,
   queryEnergy5minRangeAll,
   sumEnergy5minByInverterRange,
+  getCounterBaselinesForDate,
+  getCounterStateAll,
 } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 
@@ -1255,6 +1257,52 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     }
   }
 
+  // v2.9.x — Hardware-counter delta sourcing for Etotal_MWh / ParcE_MWh:
+  //   • Past day  D: ΔkWh = baseline[D].etotal_eod_clean − baseline[D].etotal_baseline
+  //                  (only when baseline[D].source === "eod_clean" and the
+  //                   eod_clean snapshot was actually captured for that unit).
+  //   • Today      : ΔkWh = current_counter_state.etotal_kwh − today.etotal_baseline
+  //                  (gated identically on baseline.source === "eod_clean").
+  //   Invalid → NaN, which the XLSX writer collapses to an empty cell. DAY
+  //   TOTAL HW columns NaN-propagate when ANY contributing unit is invalid,
+  //   matching the v2.9.1 daily_report rule (kwh_total_etotal NULL when any
+  //   unit on the inverter lacks an eod_clean anchor).
+  const curCounterMap = new Map();
+  try {
+    for (const r of getCounterStateAll() || []) {
+      curCounterMap.set(`${Number(r.inverter)}_${Number(r.unit)}`, {
+        etotal_kwh: Number(r.etotal_kwh || 0),
+        parce_kwh:  Number(r.parce_kwh  || 0),
+      });
+    }
+  } catch (_) { /* HW columns just stay empty if snapshot unavailable */ }
+
+  function _hwDeltasForUnitDay(day, inv, unit, baselineMap) {
+    const out = { etotalKwh: NaN, parceKwh: NaN };
+    const b = baselineMap.get(`${inv}_${unit}`);
+    if (!b || String(b.source || '') !== 'eod_clean') return out;
+    if (day === today) {
+      const cur = curCounterMap.get(`${inv}_${unit}`);
+      if (!cur) return out;
+      const dE = Number(cur.etotal_kwh) - Number(b.etotal_baseline || 0);
+      const dP = Number(cur.parce_kwh)  - Number(b.parce_baseline  || 0);
+      if (Number.isFinite(dE) && dE >= 0) out.etotalKwh = dE;
+      if (Number.isFinite(dP) && dP >= 0) out.parceKwh  = dP;
+    } else {
+      const eClean = Number(b.etotal_eod_clean || 0);
+      const pClean = Number(b.parce_eod_clean  || 0);
+      if (eClean > 0) {
+        const dE = eClean - Number(b.etotal_baseline || 0);
+        if (Number.isFinite(dE) && dE >= 0) out.etotalKwh = dE;
+      }
+      if (pClean > 0) {
+        const dP = pClean - Number(b.parce_baseline || 0);
+        if (Number.isFinite(dP) && dP >= 0) out.parceKwh = dP;
+      }
+    }
+    return out;
+  }
+
   let dayCounter = 0;
   for (const day of iterateLocalDates(s, e)) {
     if ((dayCounter++ % 3) === 0) {
@@ -1263,6 +1311,10 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     const dayRows = rowsByDay.get(day) || [];
     const dayMap = summarizeReadingsForEnergy(dayRows);
     let dayTotalMwh = 0;
+    let dayEtotalKwh = 0;
+    let dayParceKwh = 0;
+    let dayEtotalValid = true;
+    let dayParceValid = true;
     const dayStart = new Date(`${day}T00:00:00.000`).getTime();
     const dayEnd = new Date(`${day}T23:59:59.999`).getTime();
     const dayRangeStart = Math.max(s, dayStart);
@@ -1278,6 +1330,19 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       }
     }
 
+    const baselineMap = new Map();
+    try {
+      for (const r of getCounterBaselinesForDate(day) || []) {
+        baselineMap.set(`${Number(r.inverter)}_${Number(r.unit)}`, {
+          etotal_baseline:  Number(r.etotal_baseline  || 0),
+          parce_baseline:   Number(r.parce_baseline   || 0),
+          etotal_eod_clean: r.etotal_eod_clean,
+          parce_eod_clean:  r.parce_eod_clean,
+          source:           String(r.source || ''),
+        });
+      }
+    } catch (_) { /* leave baselineMap empty → all HW cols invalid for the day */ }
+
     for (const inv of selectedInvs) {
       const units = (invUnits[inv] || []).slice().sort((a, b) => a - b);
       const detailRows = [];
@@ -1291,6 +1356,7 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
         const pacPeakW = Math.max(0, Number(summary?.pac_peak || 0));
         const energyKwh = Math.max(0, Number(summary?.energy_kwh || 0));
         rawSubtotalKwh += energyKwh;
+        const hw = _hwDeltasForUnitDay(day, inv, unit, baselineMap);
         detailRows.push({
           Date: day,
           Inverter_Number: inv,
@@ -1299,6 +1365,8 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           Last_Seen: lastTs ? fmtTime(lastTs) : '',
           Peak_Pac_kW: Number((pacPeakW / 1000).toFixed(3)),
           rawEnergyKwh: energyKwh,
+          rawEtotalKwh: hw.etotalKwh,
+          rawParceKwh:  hw.parceKwh,
         });
       }
 
@@ -1313,6 +1381,10 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       for (const row of detailRows) {
         const energyMwh = (Number(row.rawEnergyKwh || 0) * scale) / 1000;
         subtotalMwh += energyMwh;
+        const eValid = Number.isFinite(row.rawEtotalKwh);
+        const pValid = Number.isFinite(row.rawParceKwh);
+        if (eValid) dayEtotalKwh += row.rawEtotalKwh; else dayEtotalValid = false;
+        if (pValid) dayParceKwh  += row.rawParceKwh;  else dayParceValid  = false;
         mapped.push({
           Date: row.Date,
           Inverter_Number: row.Inverter_Number,
@@ -1321,6 +1393,8 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           Last_Seen: row.Last_Seen,
           Peak_Pac_kW: row.Peak_Pac_kW,
           Total_MWh: Number(energyMwh.toFixed(6)),
+          Etotal_MWh: eValid ? Number((row.rawEtotalKwh / 1000).toFixed(6)) : NaN,
+          ParcE_MWh:  pValid ? Number((row.rawParceKwh  / 1000).toFixed(6)) : NaN,
         });
       }
       if (authoritativeKwh > 0) {
@@ -1338,6 +1412,8 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       Last_Seen: '',
       Peak_Pac_kW: '',
       Total_MWh: Number(dayTotalMwh.toFixed(6)),
+      Etotal_MWh: dayEtotalValid ? Number((dayEtotalKwh / 1000).toFixed(6)) : NaN,
+      ParcE_MWh:  dayParceValid  ? Number((dayParceKwh  / 1000).toFixed(6)) : NaN,
     });
   }
 
@@ -1443,6 +1519,8 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
     { key: 'Last_Seen', label: 'Last Seen' },
     { key: 'Peak_Pac_kW', label: 'Peak Pac (kW)' },
     { key: 'Total_MWh', label: 'Total MWh' },
+    { key: 'Etotal_MWh', label: 'Etotal MWh (HW)' },
+    { key: 'ParcE_MWh',  label: 'ParcE MWh (HW)' },
   ];
 
   const fileBase = exportDateAwareFileBase(s, e, inverter, 'Energy Summary');

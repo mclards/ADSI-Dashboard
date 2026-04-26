@@ -5981,33 +5981,42 @@ async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) 
     const results = normalizeBatchWriteResults(unitList, data);
     let okCount = 0;
     let failCount = 0;
-    results.forEach(({ unit, ok }) => {
-      if (ok) okCount += 1;
-      else failCount += 1;
-      logControlAction({
-        operator: operatorName,
-        inverter: invNum,
-        node: unit || 0,
-        action,
-        scope: scopeNorm,
-        result: ok ? "ok" : "error",
-        ip,
-      });
-      if (
-        ok &&
-        plantCapController &&
-        scopeNorm !== "plant-cap" &&
-        typeof plantCapController.handleManualWrite === "function"
-      ) {
-        plantCapController.handleManualWrite({
-          scope: scopeNorm,
-          inverter: invNum,
-          unit,
-          value: valueNum,
+    // Bulk audit logging: wrap the per-unit inserts in a single SQLite
+    // transaction so a 91-unit broadcast lands as ONE fsync instead of 91
+    // sequential write barriers. Without this, the event loop briefly stalls
+    // on the audit-log writes in tight batches and the dashboard feels
+    // "frozen" during plant-wide START/STOP commands. The plant-cap manual-
+    // write hook stays inside the same transaction since its own internal
+    // state writes (if any) likewise benefit from the batched commit.
+    db.transaction(() => {
+      results.forEach(({ unit, ok }) => {
+        if (ok) okCount += 1;
+        else failCount += 1;
+        logControlAction({
           operator: operatorName,
+          inverter: invNum,
+          node: unit || 0,
+          action,
+          scope: scopeNorm,
+          result: ok ? "ok" : "error",
+          ip,
         });
-      }
-    });
+        if (
+          ok &&
+          plantCapController &&
+          scopeNorm !== "plant-cap" &&
+          typeof plantCapController.handleManualWrite === "function"
+        ) {
+          plantCapController.handleManualWrite({
+            scope: scopeNorm,
+            inverter: invNum,
+            unit,
+            value: valueNum,
+            operator: operatorName,
+          });
+        }
+      });
+    })();
 
     return {
       ok: failCount === 0 && okCount > 0,
@@ -6024,18 +6033,20 @@ async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) 
       failureCount: failCount,
     };
   } catch (e) {
-    unitList.forEach((unit) => {
-      logControlAction({
-        operator: operatorName,
-        inverter: invNum,
-        node: unit || 0,
-        action,
-        scope: scopeNorm,
-        result: "error",
-        ip,
-        details: String(e?.message || e || ""),
+    db.transaction(() => {
+      unitList.forEach((unit) => {
+        logControlAction({
+          operator: operatorName,
+          inverter: invNum,
+          node: unit || 0,
+          action,
+          scope: scopeNorm,
+          result: "error",
+          ip,
+          details: String(e?.message || e || ""),
+        });
       });
-    });
+    })();
     throw e;
   }
 }
@@ -12429,51 +12440,130 @@ app.get("/api/clock-sync-log", (req, res) => {
  * or Authorization bearer). Proxies to Python FastAPI which executes the
  * vendor-FC frame. Logs to inverter_clock_sync_log + audit_log on return.
  */
-async function _proxySyncClock(url, req, res, trigger, scope) {
+// Persist the clock-sync result rows + audit_log lines from one upstream call.
+// Wrapped in a single SQLite transaction so a 91-unit broadcast is one fsync,
+// not 182. Errors are non-fatal — the upstream already executed; missing log
+// rows are recoverable on the next sync, but a thrown exception here would
+// abort the broadcastUpdate and leave the UI confused.
+function _persistSyncClockResults(body, trigger, scope) {
+  const rows = Array.isArray(body?.results) ? body.results : [body || {}];
+  if (!rows.length) return { accepted: 0, total: 0 };
+  let accepted = 0;
+  let total = 0;
   try {
-    const headers = { "content-type": "application/json" };
-    if (req.get("authorization")) headers["authorization"] = req.get("authorization");
-    if (req.get("x-bulk-auth")) headers["x-bulk-auth"] = req.get("x-bulk-auth");
-    // v2.9.1 — when no operator-supplied auth is present (per-inverter route
-    // no longer prompts the operator per the 2-type sync model), inject the
-    // current-minute sacupsMM key so Python's _check_bulk_auth still passes.
-    if (!headers["authorization"] && !headers["x-bulk-auth"]) {
-      headers["x-bulk-auth"] = _currentSacupsKey();
-    }
+    db.transaction(() => {
+      const now = Date.now();
+      const operator = trigger === "operator" ? "OPERATOR" : "SYSTEM";
+      for (const row of rows) {
+        total += 1;
+        if (row?.accepted) accepted += 1;
+        try {
+          insertClockSyncLogRow({
+            ts: now,
+            inverter: Number(row?.inverter || 0),
+            unit: Number(row?.unit || 0),
+            trigger: String(trigger || "operator"),
+            target_iso: body?.target_iso || row?.target_iso || null,
+            drift_before_s: row?.drift_before_s,
+            drift_after_s: row?.drift_after_s,
+            accepted: row?.accepted ? 1 : 0,
+            error: row?.error || null,
+          });
+          db.prepare(
+            `INSERT INTO audit_log
+               (ts, operator, inverter, node, action, scope, result, ip, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            now,
+            operator,
+            Number(row?.inverter || 0),
+            Number(row?.unit || 0),
+            "clock-sync",
+            String(scope || "single"),
+            row?.accepted ? "ok" : "fail",
+            "",
+            `trigger=${trigger}; drift_before=${row?.drift_before_s ?? "-"}s; drift_after=${row?.drift_after_s ?? "-"}s; ${row?.error || ""}`.trim(),
+          );
+        } catch (_) { /* per-row failure stays non-fatal */ }
+      }
+    })();
+  } catch (err) {
+    console.warn("[clock-sync] persist transaction failed:", err.message);
+  }
+  return { accepted, total };
+}
+
+// Bulk scopes ("broadcast" + "inverter") fan out across every inverter on the
+// fleet. Python holds the per-IP Modbus lock for ~2 s per call AND the post-
+// response Node loop writes 2N audit rows in one tick, so the operator's
+// `/api/sync-clock/*` request used to stay open for the entire window — making
+// the whole dashboard feel frozen until it finished. Now we ack immediately
+// (HTTP 202) and finish the upstream call + log writes in the background.
+// Single-unit syncs stay synchronous so the operator gets the per-unit drift
+// readback inline.
+async function _runSyncClockUpstreamBg(url, headers, trigger, scope) {
+  try {
     const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}) });
     const body = await r.json().catch(() => ({ ok: false, error: "bad upstream JSON" }));
-    // Normalize to array of results so logging works for single + broadcast.
-    const rows = Array.isArray(body.results) ? body.results : [body];
-    for (const row of rows) {
-      try {
-        insertClockSyncLogRow({
-          ts: Date.now(),
-          inverter: Number(row?.inverter || 0),
-          unit: Number(row?.unit || 0),
-          trigger: String(trigger || "operator"),
-          target_iso: body?.target_iso || row?.target_iso || null,
-          drift_before_s: row?.drift_before_s,
-          drift_after_s: row?.drift_after_s,
-          accepted: row?.accepted ? 1 : 0,
-          error: row?.error || null,
-        });
-        db.prepare(
-          `INSERT INTO audit_log
-             (ts, operator, inverter, node, action, scope, result, ip, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          Date.now(),
-          String(trigger === "operator" ? "OPERATOR" : "SYSTEM"),
-          Number(row?.inverter || 0),
-          Number(row?.unit || 0),
-          "clock-sync",
-          String(scope || "single"),
-          row?.accepted ? "ok" : "fail",
-          "",
-          `trigger=${trigger}; drift_before=${row?.drift_before_s ?? "-"}s; drift_after=${row?.drift_after_s ?? "-"}s; ${row?.error || ""}`.trim(),
-        );
-      } catch (_) { /* non-fatal */ }
-    }
+    const summary = _persistSyncClockResults(body, trigger, scope);
+    try {
+      broadcastUpdate({
+        type: "clockSyncCompleted",
+        scope: String(scope || ""),
+        trigger: String(trigger || ""),
+        accepted: summary.accepted,
+        total: summary.total,
+        target_iso: body?.target_iso || null,
+        ts: Date.now(),
+      });
+    } catch (_) { /* WS broadcast failure non-fatal */ }
+  } catch (err) {
+    console.warn(`[clock-sync] background ${scope} upstream failed:`, err.message);
+    try {
+      broadcastUpdate({
+        type: "clockSyncCompleted",
+        scope: String(scope || ""),
+        trigger: String(trigger || ""),
+        accepted: 0,
+        total: 0,
+        error: String(err?.message || err || "engine unreachable"),
+        ts: Date.now(),
+      });
+    } catch (_) { /* WS broadcast failure non-fatal */ }
+  }
+}
+
+async function _proxySyncClock(url, req, res, trigger, scope) {
+  const headers = { "content-type": "application/json" };
+  if (req.get("authorization")) headers["authorization"] = req.get("authorization");
+  if (req.get("x-bulk-auth")) headers["x-bulk-auth"] = req.get("x-bulk-auth");
+  // v2.9.1 — when no operator-supplied auth is present (per-inverter route
+  // no longer prompts the operator per the 2-type sync model), inject the
+  // current-minute sacupsMM key so Python's _check_bulk_auth still passes.
+  if (!headers["authorization"] && !headers["x-bulk-auth"]) {
+    headers["x-bulk-auth"] = _currentSacupsKey();
+  }
+
+  // Fire-and-forget for fleet-fanout scopes — see _runSyncClockUpstreamBg.
+  if (scope === "broadcast" || scope === "inverter") {
+    res.status(202).json({
+      ok: true,
+      status: "started",
+      scope,
+      message: "Clock sync started. Recent Sync Attempts will populate as units complete.",
+    });
+    _runSyncClockUpstreamBg(url, headers, trigger, scope).catch((err) => {
+      console.warn(`[clock-sync] background ${scope} failed:`, err.message);
+    });
+    return;
+  }
+
+  // Single-unit path: keep synchronous so the operator sees the per-unit
+  // drift readback inline. Lock-hold here is ~1.5 s on one IP only.
+  try {
+    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}) });
+    const body = await r.json().catch(() => ({ ok: false, error: "bad upstream JSON" }));
+    _persistSyncClockResults(body, trigger, scope);
     res.status(r.status || 200).json(body);
   } catch (err) {
     res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
@@ -12512,29 +12602,63 @@ function _requireBulkAuth(req, res, next) {
 // IMPORTANT: this route MUST be registered before /api/sync-clock/:inverter/:unit
 // because Express matches the generic two-segment pattern first — "inverter" in
 // the path would be captured as the :inverter param, routing through _requireBulkAuth.
-app.post("/api/sync-clock/inverter/:inverter", express.json(), (req, res) => {
-  const inv = Number(req.params.inverter);
-  if (!inv) {
-    return res.status(400).json({ ok: false, error: "inverter required" });
+// In remote mode, clock-sync writes are intentionally disabled at the server.
+// A broadcast can produce 91 unit-level upstream writes plus replication-bound
+// log + counter-state row updates, which spikes the remote↔gateway WS bridge.
+// Operators perform manual sync from the gateway box; the remote viewer keeps
+// reading the gateway's results via the standard replicated tables
+// (inverter_counter_state + inverter_clock_sync_log).
+const _denyClockSyncInRemote = (req, res, next) => {
+  if (isRemoteMode()) {
+    return res.status(403).json({
+      ok: false,
+      error: "Clock sync is disabled in remote mode. Run from the gateway directly.",
+      remoteDisabled: true,
+    });
   }
-  const trigger = String(req.body?.trigger || "operator");
-  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/inverter/${inv}`, req, res, trigger, "inverter");
-});
+  return next();
+};
 
-app.post("/api/sync-clock/:inverter/:unit", express.json(), _requireBulkAuth, (req, res) => {
-  const inv = Number(req.params.inverter);
-  const unit = Number(req.params.unit);
-  if (!inv || !unit) {
-    return res.status(400).json({ ok: false, error: "inverter/unit required" });
-  }
-  const trigger = String(req.body?.trigger || "operator");
-  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/${inv}/${unit}`, req, res, trigger, "single");
-});
+app.post(
+  "/api/sync-clock/inverter/:inverter",
+  express.json(),
+  _denyClockSyncInRemote,
+  (req, res) => {
+    const inv = Number(req.params.inverter);
+    if (!inv) {
+      return res.status(400).json({ ok: false, error: "inverter required" });
+    }
+    const trigger = String(req.body?.trigger || "operator");
+    return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/inverter/${inv}`, req, res, trigger, "inverter");
+  },
+);
 
-app.post("/api/sync-clock/broadcast", express.json(), _requireBulkAuth, (req, res) => {
-  const trigger = String(req.body?.trigger || "operator");
-  return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/broadcast`, req, res, trigger, "broadcast");
-});
+app.post(
+  "/api/sync-clock/:inverter/:unit",
+  express.json(),
+  _denyClockSyncInRemote,
+  _requireBulkAuth,
+  (req, res) => {
+    const inv = Number(req.params.inverter);
+    const unit = Number(req.params.unit);
+    if (!inv || !unit) {
+      return res.status(400).json({ ok: false, error: "inverter/unit required" });
+    }
+    const trigger = String(req.body?.trigger || "operator");
+    return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/${inv}/${unit}`, req, res, trigger, "single");
+  },
+);
+
+app.post(
+  "/api/sync-clock/broadcast",
+  express.json(),
+  _denyClockSyncInRemote,
+  _requireBulkAuth,
+  (req, res) => {
+    const trigger = String(req.body?.trigger || "operator");
+    return _proxySyncClock(`${INVERTER_ENGINE_SYNC_URL}/broadcast`, req, res, trigger, "broadcast");
+  },
+);
 
 // v2.9.0 — the inverter-clock admin surface now lives in Settings →
 // "Inverter Clocks" section. The /admin/inverter-clock route is kept as a
@@ -12560,6 +12684,16 @@ app.post("/api/sync-clock-internal", express.json(), async (req, res) => {
   const isLoopback = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "localhost";
   if (!isLoopback) {
     return res.status(403).json({ ok: false, error: "loopback only" });
+  }
+  // Remote-mode defence: there's no local Python engine on a remote viewer,
+  // so even a (theoretically impossible) loopback caller has no Modbus path.
+  // Reject before we try to fetch 127.0.0.1:9100.
+  if (isRemoteMode()) {
+    return res.status(403).json({
+      ok: false,
+      error: "Clock sync is disabled in remote mode.",
+      remoteDisabled: true,
+    });
   }
   const inv = Number(req.body?.inverter || 0);
   const unit = Number(req.body?.unit || 0);
@@ -12614,6 +12748,14 @@ function _nextClockSyncFireAt(hhmm) {
 
 function _scheduleNextClockSync() {
   try {
+    // Remote mode owns no inverters and no Python engine — the gateway is the
+    // only place that should broadcast the RTC. Cancel any armed timer here
+    // (covers the gateway → remote mode flip) so we don't blast empty
+    // requests at 127.0.0.1:9100 every day on the remote viewer.
+    if (isRemoteMode()) {
+      if (_clockSyncCronTimer) { clearTimeout(_clockSyncCronTimer); _clockSyncCronTimer = null; }
+      return;
+    }
     const enabled = String(getSetting("inverterClockAutoSyncEnabled", "1")) !== "0";
     if (!enabled) {
       if (_clockSyncCronTimer) { clearTimeout(_clockSyncCronTimer); _clockSyncCronTimer = null; }
@@ -12625,6 +12767,14 @@ function _scheduleNextClockSync() {
     if (_clockSyncCronTimer) clearTimeout(_clockSyncCronTimer);
     _clockSyncCronTimer = setTimeout(async () => {
       try {
+        // Defence-in-depth: re-check mode at fire time. If the operator
+        // flipped to remote between scheduling and firing, suppress the
+        // broadcast and let the next _scheduleNextClockSync clean up the
+        // timer state.
+        if (isRemoteMode()) {
+          console.log("[clock-sync] auto-sync skipped — remote mode");
+          return;
+        }
         console.log(`[clock-sync] auto-sync firing (${hhmm})`);
         const url = `${INVERTER_ENGINE_SYNC_URL}/broadcast`;
         const r = await fetch(url, {
@@ -14794,6 +14944,9 @@ app.post("/api/settings", (req, res) => {
     applyRuntimeMode();
     todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
     broadcastUpdate({ type: "configChanged" }); // tell clients to reload settings + rebuild UI
+    // Re-evaluate the auto-sync cron — gateway→remote tears down the armed
+    // timer; remote→gateway re-arms it for the next configured fire time.
+    try { _scheduleNextClockSync(); } catch (_) { /* non-fatal */ }
     if (modeAfter === "remote") {
       setTimeout(() => {
         kickRemoteBridgeNow("settings-refresh").catch(() => {});

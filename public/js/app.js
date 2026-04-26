@@ -310,6 +310,12 @@ const INV_DEPENDABLE_KW = 917;
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
+// While a fan-out bulk write is in progress, back off the inverter-card
+// repaint cadence so WS-driven re-renders don't compete with the in-flight
+// fetches and the per-unit toast/result mutations queued behind them. The
+// dashboard would otherwise feel "frozen" because every poll frame triggers
+// a 27-card DOM walk on top of N concurrent /api/write/batch handlers.
+const CARD_RENDER_BULK_WRITE_INTERVAL_MS = 1500;
 const TABLE_FILTER_DEBOUNCE_MS = 140;
 const ANALYTICS_VIEW_START_HOUR = 5;
 const ANALYTICS_VIEW_END_HOUR = 18;
@@ -4839,6 +4845,32 @@ function initSettingsSectionNav() {
       setActiveSettingsSection(btn.dataset.settingsSection, true);
     });
   }
+
+  // Wire up the per-card tab bars. Settings cards opt in by declaring
+  // `.card-tabs` + `.card-tab-panel` markup; this binds clicks once and
+  // restores the last-viewed tab from localStorage. Inverter Clocks keeps
+  // its bespoke `_invClockSetActiveTab` because of count chips + remote
+  // banner — the generic helper is for cards without those extras.
+  initCardTabs("opsCompactSection", {
+    storageKey: "adsi_ops_active_tab",
+    defaultKey: "endpoints",
+  });
+  initCardTabs("connectivitySection", {
+    storageKey: "adsi_connectivity_active_tab",
+    defaultKey: "access",
+  });
+  initCardTabs("forecastSection", {
+    storageKey: "adsi_forecast_active_tab",
+    defaultKey: "provider",
+  });
+  initCardTabs("cloudBackupSection", {
+    storageKey: "adsi_cloud_backup_active_tab",
+    defaultKey: "providers",
+  });
+  initCardTabs("localBackupSection", {
+    storageKey: "adsi_local_backup_active_tab",
+    defaultKey: "health",
+  });
 
   let saved = "";
   try {
@@ -9671,6 +9703,20 @@ function buildNodeRows(inv, nodeCount) {
 }
 
 // ─── Inverter card updates ────────────────────────────────────────────────────
+// Bulk-write coordination — incremented at the start of every fan-out write
+// (sendAllNodesInv / sendSelectedNodes / plant-cap release) and decremented
+// when the operation finishes. Anything UI-side that wants to back off while
+// writes are in flight reads `isBulkWriteInFlight()`.
+function bulkWriteBegin() {
+  State._bulkWriteInFlight = (Number(State._bulkWriteInFlight) || 0) + 1;
+}
+function bulkWriteEnd() {
+  State._bulkWriteInFlight = Math.max(0, (Number(State._bulkWriteInFlight) || 0) - 1);
+}
+function isBulkWriteInFlight() {
+  return (Number(State._bulkWriteInFlight) || 0) > 0;
+}
+
 function scheduleInverterCardsUpdate(force = false) {
   if (force) {
     if (State.cardRenderTimer) {
@@ -9685,7 +9731,10 @@ function scheduleInverterCardsUpdate(force = false) {
 
   if (State.cardRenderScheduled) return;
   const elapsed = Date.now() - Number(State.lastCardRenderTs || 0);
-  const delay = Math.max(0, CARD_RENDER_MIN_INTERVAL_MS - elapsed);
+  const interval = isBulkWriteInFlight()
+    ? CARD_RENDER_BULK_WRITE_INTERVAL_MS
+    : CARD_RENDER_MIN_INTERVAL_MS;
+  const delay = Math.max(0, interval - elapsed);
   State.cardRenderScheduled = true;
   State.cardRenderTimer = setTimeout(() => {
     State.cardRenderTimer = null;
@@ -10500,6 +10549,7 @@ async function releasePlantCapControl() {
     showToast("Plant cap release cancelled.", "info", 3200);
     return;
   }
+  bulkWriteBegin();
   try {
     const response = await api(
       "/api/plant-cap/release",
@@ -10514,6 +10564,8 @@ async function releasePlantCapControl() {
     showToast("Controller-owned inverters released.", "success", 3600);
   } catch (err) {
     showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+  } finally {
+    bulkWriteEnd();
   }
 }
 
@@ -10951,6 +11003,7 @@ async function sendAllNodesInv(inv, val) {
     );
     return;
   }
+  bulkWriteBegin();
   try {
     const response = await api(
       "/api/write/batch",
@@ -11009,6 +11062,8 @@ async function sendAllNodesInv(inv, val) {
       "fault",
       6000,
     );
+  } finally {
+    bulkWriteEnd();
   }
 }
 
@@ -11212,7 +11267,13 @@ async function sendSelectedNodes(val) {
     });
   });
 
-  const results = await runControlTasksWithConcurrency(tasks, 4);
+  bulkWriteBegin();
+  let results;
+  try {
+    results = await runControlTasksWithConcurrency(tasks, 4);
+  } finally {
+    bulkWriteEnd();
+  }
   let ok = 0;
   let fail = 0;
   results.forEach((r, i) => {
@@ -12454,6 +12515,11 @@ function handleWS(msg) {
         // operation mode changes at runtime (e.g. operator flipped to remote
         // viewer in Settings). Safe no-op if the section isn't currently open.
         try { applyLocalBackupModeVisibility(); } catch (_) {}
+        // v2.9.x: same idea for Inverter Clocks — refresh the remote-mode
+        // banner + sync-button enabled state if the panel is currently open
+        // when the mode flip lands. Without this the banner would stay stale
+        // until the operator navigates away and back.
+        try { _invClockApplyRemoteUiState(); } catch (_) {}
         buildInverterGrid();
         scheduleInverterCardsUpdate(true);
       })
@@ -12486,6 +12552,51 @@ function handleWS(msg) {
   if (msg.type === "chat_clear") {
     handleChatCleared();
   }
+  if (msg.type === "clockSyncCompleted") {
+    handleClockSyncCompleted(msg);
+  }
+}
+
+// v2.9.x — broadcast / per-inverter clock-sync runs as a background task on
+// the gateway so the operator's HTTP request returns immediately. The gateway
+// emits this event when the upstream Python call + log writes finish; the UI
+// uses it to refresh the recent-sync log + per-unit table and surface the
+// accepted/total summary so the operator sees the outcome without manual
+// refresh.
+function handleClockSyncCompleted(msg) {
+  const scope = String(msg?.scope || "").toLowerCase();
+  const accepted = Number(msg?.accepted || 0);
+  const total = Number(msg?.total || 0);
+  const error = String(msg?.error || "").trim();
+  const cls = error
+    ? "fault"
+    : (total > 0 && accepted === total)
+      ? "success"
+      : (accepted > 0 ? "warn" : "fault");
+  const scopeLabel = scope === "broadcast" ? "Plant" : (scope === "inverter" ? "Inverter" : "Sync");
+  const summary = error
+    ? `${scopeLabel} sync failed: ${error}`
+    : `${scopeLabel} sync done: ${accepted}/${total} units accepted`;
+  try { showToast(summary, cls, 5000); } catch (_) {}
+  const msgEl = $("invClockActionMsg");
+  if (msgEl) {
+    msgEl.textContent = summary;
+    msgEl.className = "smsg " + (cls === "success" ? "smsg-ok" : cls === "warn" ? "smsg-warn" : "smsg-err");
+  }
+  // Re-enable the action buttons that were disabled while waiting.
+  const plantBtn = $("btnInvClockSyncPlant");
+  if (plantBtn && !_invClockIsRemote()) plantBtn.disabled = false;
+  const invBtn = $("btnInvClockSyncInverter");
+  const invSel = $("invClockSyncInverterSel");
+  if (invBtn) invBtn.disabled = _invClockIsRemote() || !Number(invSel?.value || 0);
+  // Refresh visible state if the inverter-clocks tab is open.
+  try {
+    const panel = $("inverterClockSection");
+    if (panel && !panel.hidden) {
+      invClockRefreshUnits();
+      invClockRefreshLog();
+    }
+  } catch (_) {}
 }
 
 // ─── Alarm push handling ──────────────────────────────────────────────────────
@@ -18471,6 +18582,11 @@ async function invClockLoadSettings() {
   try {
     const s = await api("/api/settings");
     if (!s) return;
+    // Mirror operation mode + remote URL so the remote-mode banner reacts to
+    // the most recent settings without waiting for the next full settings
+    // reload pass elsewhere in the app.
+    if (s.operationMode !== undefined) State.settings.operationMode = String(s.operationMode);
+    if (s.remoteGatewayUrl !== undefined) State.settings.remoteGatewayUrl = String(s.remoteGatewayUrl);
     const enabled = String(s.inverterClockAutoSyncEnabled ?? "1") !== "0";
     const at = /^\d{2}:\d{2}$/.test(String(s.inverterClockAutoSyncAt || ""))
       ? String(s.inverterClockAutoSyncAt) : "04:25";
@@ -18492,6 +18608,7 @@ async function invClockLoadSettings() {
     );
     if (radio) radio.checked = true;
     State.settings.energySourceMode = mode;
+    _invClockApplyRemoteUiState();
   } catch (err) {
     console.warn("[invclock] settings load failed:", err?.message || err);
   }
@@ -18593,28 +18710,40 @@ async function invClockSyncBulkPlant() {
       body: JSON.stringify({ trigger: "operator", authToken: auth.authToken }),
     });
     const body = await r.json().catch(() => ({}));
+    // The server now ACKs the broadcast immediately (HTTP 202) and runs the
+    // upstream Modbus write in the background. The completion summary lands
+    // via the WS `clockSyncCompleted` event handled in handleClockSyncCompleted
+    // — which also re-enables the buttons and refreshes the log/units. We just
+    // surface a "started" toast here so the operator gets immediate feedback.
     if (r.ok) {
-      const total = Number(body.total || 0);
-      const accepted = Number(body.accepted || 0);
-      const cls = (total > 0 && accepted === total) ? "success" : (accepted > 0 ? "warn" : "fault");
-      showToast(`Plant sync: ${accepted}/${total} units accepted`, cls, 5000);
+      showToast(
+        body?.status === "started"
+          ? "Plant sync started — results will populate as units complete."
+          : `Plant sync: ${Number(body.accepted || 0)}/${Number(body.total || 0)} units accepted`,
+        "info",
+        4000,
+      );
       if (msgEl) {
-        msgEl.textContent = `Plant sync: ${accepted}/${total} units accepted`;
-        msgEl.className = "smsg " + (cls === "success" ? "smsg-ok" : cls === "warn" ? "smsg-warn" : "smsg-err");
+        msgEl.textContent = body?.status === "started"
+          ? "Plant sync running in background…"
+          : `Plant sync: ${Number(body.accepted || 0)}/${Number(body.total || 0)} units accepted`;
+        msgEl.className = "smsg";
       }
     } else {
       const reason = body.error || `HTTP ${r.status}`;
       showToast(`Plant sync failed: ${reason}`, "fault", 5000);
       if (msgEl) { msgEl.textContent = `Failed: ${reason}`; msgEl.className = "smsg smsg-err"; }
+      if (btn) btn.disabled = false;
     }
   } catch (err) {
     showToast(`Plant sync error: ${err.message}`, "fault", 5000);
     if (msgEl) { msgEl.textContent = `Error: ${err.message}`; msgEl.className = "smsg smsg-err"; }
-  } finally {
     if (btn) btn.disabled = false;
-    invClockRefreshUnits();
-    invClockRefreshLog();
   }
+  // Note: success path leaves the button disabled until the WS
+  // `clockSyncCompleted` event re-enables it. That's intentional — clicking
+  // "Sync ALL Plant" again while one is still running would queue duplicate
+  // FC16 broadcasts on top of the in-flight one.
 }
 
 // v2.9.0 — sync ONE inverter (all daisy-chained nodes) with a single Modbus
@@ -18646,27 +18775,33 @@ async function invClockSyncInverter() {
       body: JSON.stringify({ trigger: "operator" }),
     });
     const body = await r.json().catch(() => ({}));
+    // Background-task contract: server ACKs immediately, completion lands on
+    // the WS `clockSyncCompleted` event (handleClockSyncCompleted re-enables
+    // the button + refreshes panels).
     if (r.ok) {
-      const total = Number(body.total || 0);
-      const accepted = Number(body.accepted || 0);
-      const cls = (total > 0 && accepted === total) ? "success" : (accepted > 0 ? "warn" : "fault");
-      showToast(`Inverter ${inv}: ${accepted}/${total} nodes accepted`, cls, 4500);
+      showToast(
+        body?.status === "started"
+          ? `Sync started for inverter ${inv} — readback will populate shortly.`
+          : `Inverter ${inv}: ${Number(body.accepted || 0)}/${Number(body.total || 0)} nodes accepted`,
+        "info",
+        4000,
+      );
       if (msgEl) {
-        msgEl.textContent = `Inverter ${inv}: ${accepted}/${total} nodes accepted`;
-        msgEl.className = "smsg " + (cls === "success" ? "smsg-ok" : cls === "warn" ? "smsg-warn" : "smsg-err");
+        msgEl.textContent = body?.status === "started"
+          ? `Inverter ${inv} sync running…`
+          : `Inverter ${inv}: ${Number(body.accepted || 0)}/${Number(body.total || 0)} nodes accepted`;
+        msgEl.className = "smsg";
       }
     } else {
       const reason = body.error || `HTTP ${r.status}`;
       showToast(`Sync failed: ${reason}`, "fault", 5000);
       if (msgEl) { msgEl.textContent = `Failed: ${reason}`; msgEl.className = "smsg smsg-err"; }
+      if (btn) btn.disabled = !Number(sel?.value || 0);
     }
   } catch (err) {
     showToast(`Sync error: ${err.message}`, "fault", 5000);
     if (msgEl) { msgEl.textContent = `Error: ${err.message}`; msgEl.className = "smsg smsg-err"; }
-  } finally {
     if (btn) btn.disabled = !Number(sel?.value || 0);
-    invClockRefreshUnits();
-    invClockRefreshLog();
   }
 }
 
@@ -18705,6 +18840,72 @@ function _invClockAnyHostVisible() {
   return Boolean(settings && !settings.hidden);
 }
 
+// Generic settings-card tab switcher. The HTML inside `#${sectionId}` is
+// expected to declare:
+//   <div class="card-tabs" role="tablist">
+//     <button class="card-tab" data-card-tab="<key>" role="tab" aria-controls="<panel-id>" aria-selected="…">…</button>…
+//   </div>
+//   <div class="card-tab-panel" data-card-tab-panel="<key>" role="tabpanel" hidden>…</div>…
+//
+// `defaultKey` is the panel key shown when localStorage is empty / unrecognised.
+// `storageKey` is optional; if provided we persist + restore the active tab so
+// reopening Settings lands on the last sub-section the operator viewed.
+function setActiveCardTab(sectionId, tabKey, options = {}) {
+  const root = document.getElementById(sectionId);
+  if (!root) return;
+  const tabs = root.querySelectorAll(".card-tab");
+  const panels = root.querySelectorAll(".card-tab-panel");
+  const validKeys = new Set();
+  panels.forEach((p) => {
+    const k = String(p.dataset.cardTabPanel || "").trim();
+    if (k) validKeys.add(k);
+  });
+  const defaultKey = String(options.defaultKey || "").trim() ||
+    (panels[0] ? String(panels[0].dataset.cardTabPanel || "") : "");
+  const key = validKeys.has(String(tabKey || "")) ? String(tabKey) : defaultKey;
+  tabs.forEach((btn) => {
+    const isActive = String(btn.dataset.cardTab || "") === key;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    btn.tabIndex = isActive ? 0 : -1;
+  });
+  panels.forEach((p) => {
+    const isActive = String(p.dataset.cardTabPanel || "") === key;
+    p.classList.toggle("active", isActive);
+    if (isActive) p.removeAttribute("hidden");
+    else p.setAttribute("hidden", "");
+  });
+  const storageKey = String(options.storageKey || "").trim();
+  if (storageKey) {
+    try { localStorage.setItem(storageKey, key); } catch (_) {}
+  }
+}
+
+// One-time wiring helper: attach click listeners to every `.card-tab` inside
+// the named section so clicking a tab swaps the active panel. Idempotent —
+// flagged on the section element so calling twice is a no-op. Restores the
+// last-viewed tab from localStorage when `storageKey` is provided.
+function initCardTabs(sectionId, options = {}) {
+  const root = document.getElementById(sectionId);
+  if (!root || root.dataset._cardTabsInited === "1") return;
+  root.dataset._cardTabsInited = "1";
+  const storageKey = String(options.storageKey || "").trim();
+  const defaultKey = String(options.defaultKey || "").trim();
+  root.querySelectorAll(".card-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setActiveCardTab(sectionId, btn.dataset.cardTab || defaultKey, {
+        defaultKey,
+        storageKey,
+      });
+    });
+  });
+  let saved = "";
+  if (storageKey) {
+    try { saved = String(localStorage.getItem(storageKey) || ""); } catch (_) {}
+  }
+  setActiveCardTab(sectionId, saved || defaultKey, { defaultKey, storageKey });
+}
+
 function _invClockSetActiveTab(tabKey) {
   const valid = new Set(["schedule", "health", "log"]);
   const key = valid.has(tabKey) ? tabKey : "schedule";
@@ -18722,6 +18923,65 @@ function _invClockSetActiveTab(tabKey) {
     else p.setAttribute("hidden", "");
   });
   try { localStorage.setItem("adsi_invclock_active_tab", key); } catch (_) {}
+}
+
+function _invClockIsRemote() {
+  try {
+    return String(State?.settings?.operationMode || "gateway") === "remote";
+  } catch (_) { return false; }
+}
+
+// Disable clock-sync action buttons in remote mode and surface the banner that
+// explains the mirrored-status / disabled-action contract. Read endpoints
+// (counter-state, clock-sync log) keep working from replicated tables, so the
+// status display stays accurate without proxying writes through the gateway WS
+// bridge.
+function _invClockApplyRemoteUiState() {
+  const remote = _invClockIsRemote();
+  const banner = $("invClockRemoteBanner");
+  if (banner) banner.hidden = !remote;
+  if (remote) {
+    const host = (() => {
+      try {
+        const url = String(State?.settings?.remoteGatewayUrl || "").trim();
+        if (!url) return "—";
+        return new URL(url).host || url;
+      } catch (_) { return String(State?.settings?.remoteGatewayUrl || "—"); }
+    })();
+    document.querySelectorAll(".js-invclock-gateway-host").forEach((el) => {
+      el.textContent = host;
+    });
+  }
+  const disable = remote;
+  const remoteTitle = "Disabled in remote mode — run from the gateway directly.";
+  const buttons = [
+    "btnInvClockSyncPlant",
+    "btnInvClockSyncInverter",
+    "btnInvClockSaveSchedule",
+    "btnEnergySourceSave",
+  ];
+  for (const id of buttons) {
+    const btn = $(id);
+    if (!btn) continue;
+    if (disable) {
+      btn.dataset._invclockOrigTitle = btn.dataset._invclockOrigTitle || (btn.title || "");
+      btn.disabled = true;
+      btn.title = remoteTitle;
+    } else {
+      btn.disabled = false;
+      if (btn.dataset._invclockOrigTitle !== undefined) {
+        btn.title = btn.dataset._invclockOrigTitle;
+      }
+    }
+  }
+  // The per-inverter Sync button has its own enable rule (selected inverter)
+  // — re-apply it after we lift the remote disable so a stale value doesn't
+  // light it up while no inverter is selected.
+  if (!disable) {
+    const sel = $("invClockSyncInverterSel");
+    const btn = $("btnInvClockSyncInverter");
+    if (sel && btn) btn.disabled = !Number(sel.value || 0);
+  }
 }
 
 function initInverterClockSection() {
@@ -18747,7 +19007,7 @@ function initInverterClockSection() {
     const syncInvSel = $("invClockSyncInverterSel");
     if (syncInvSel) syncInvSel.addEventListener("change", () => {
       const btn = $("btnInvClockSyncInverter");
-      if (btn) btn.disabled = !Number(syncInvSel.value || 0);
+      if (btn) btn.disabled = _invClockIsRemote() || !Number(syncInvSel.value || 0);
     });
 
     document.querySelectorAll("#inverterClockSection .invclock-tab").forEach((btn) => {
@@ -18769,6 +19029,7 @@ function initInverterClockSection() {
   invClockLoadSettings();
   invClockRefreshUnits();
   invClockRefreshLog();
+  _invClockApplyRemoteUiState();
   InvClock.unitTimer = setInterval(() => {
     if (_invClockAnyHostVisible()) invClockRefreshUnits();
   }, 10_000);

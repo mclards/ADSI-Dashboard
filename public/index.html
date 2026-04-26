@@ -969,8 +969,7 @@
 
             <div class="settings-sections">
           <div class="sgroup settings-card settings-section-active" id="plantConfigSection">
-            <div class="sgroup-title"><span class="mdi mdi-factory icon-inline" aria-hidden="true"></span> Plant Configuration</div>
-            <p class="settings-section-copy">Define the site identity and core sizing values used across dashboards, logs, and formal exports.</p>
+            <div class="sgroup-title" title="Site identity and core sizing values used across dashboards, logs, and formal exports."><span class="mdi mdi-factory icon-inline" aria-hidden="true"></span> Plant Configuration</div>
             <div class="srow">
               <label
                 >Plant Name<input
@@ -1053,150 +1052,97 @@
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
             <div class="sgroup-title"><span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span> Data &amp; Polling</div>
-            <p class="settings-section-copy">Review operational endpoints, export storage, and plant polling timing from one controlled section.</p>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Service Endpoints</div>
-              <div class="srow">
-                <label
-                  >Data API URL<input
-                    type="text"
-                    id="setApiUrl"
-                    class="inp inp-lg"
-                    placeholder="http://127.0.0.1:9100/data"
-                    title="Python inverter service data endpoint. Provides live Modbus register readings to the Express server."
-                /></label>
-                <label
-                  >Write API URL<input
-                    type="text"
-                    id="setWriteUrl"
-                    class="inp inp-lg"
-                    placeholder="http://127.0.0.1:9100/write"
-                    title="Python inverter service write endpoint. Sends START/STOP control commands to inverters via Modbus."
-                /></label>
+            <div class="card-tabs" role="tablist" aria-label="Data and polling sub-sections">
+              <button id="opsTabEndpoints" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="opsPanelEndpoints" data-card-tab="endpoints" title="Python inverter service endpoints (data + write).">
+                <span class="mdi mdi-api icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Service Endpoints</span>
+              </button>
+              <button id="opsTabStorage" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="opsPanelStorage" data-card-tab="storage" title="Local export folder and retention window for raw readings.">
+                <span class="mdi mdi-database-cog-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Storage</span>
+              </button>
+              <button id="opsTabPolling" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="opsPanelPolling" data-card-tab="polling" title="Modbus timeout, reconnect delay, and read spacing.">
+                <span class="mdi mdi-timer-cog-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Polling Timing</span>
+              </button>
+            </div>
+            <div id="opsPanelEndpoints" class="card-tab-panel active" data-card-tab-panel="endpoints" role="tabpanel" aria-labelledby="opsTabEndpoints">
+              <div class="settings-subsection">
+                <div class="srow">
+                  <label
+                    >Data API URL<input
+                      type="text"
+                      id="setApiUrl"
+                      class="inp inp-lg"
+                      placeholder="http://127.0.0.1:9100/data"
+                      title="Python inverter service data endpoint. Provides live Modbus register readings to the Express server."
+                  /></label>
+                  <label
+                    >Write API URL<input
+                      type="text"
+                      id="setWriteUrl"
+                      class="inp inp-lg"
+                      placeholder="http://127.0.0.1:9100/write"
+                      title="Python inverter service write endpoint. Sends START/STOP control commands to inverters via Modbus."
+                  /></label>
+                </div>
               </div>
             </div>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Storage</div>
-              <div class="srow">
-                <label
-                  >Export Folder<input
-                    type="text"
-                    id="setCsvPath"
-                    class="inp inp-lg"
-                    placeholder="C:\Logs\InverterDashboard"
-                    title="Local folder where CSV and Excel export files are saved. Subfolders are created per inverter and category."
-                /></label>
-                <label
-                  >Retention Window (days)<input
-                    type="number"
-                    id="setRetainDays"
-                    class="inp inp-sm"
-                    min="1"
-                    max="1095"
-                    title="Number of days to keep raw readings and 5-min energy data in the hot database before archiving (1-1095)."
-                /></label>
+            <div id="opsPanelStorage" class="card-tab-panel" data-card-tab-panel="storage" role="tabpanel" aria-labelledby="opsTabStorage" hidden>
+              <div class="settings-subsection">
+                <div class="srow">
+                  <label
+                    >Export Folder<input
+                      type="text"
+                      id="setCsvPath"
+                      class="inp inp-lg"
+                      placeholder="C:\Logs\InverterDashboard"
+                      title="Local folder where CSV and Excel export files are saved. Subfolders are created per inverter and category."
+                  /></label>
+                  <label
+                    >Retention Window (days)<input
+                      type="number"
+                      id="setRetainDays"
+                      class="inp inp-sm"
+                      min="1"
+                      max="1095"
+                      title="Number of days to keep raw readings and 5-min energy data in the hot database before archiving (1-1095)."
+                  /></label>
+                </div>
               </div>
             </div>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Polling Timing</div>
-              <div class="srow">
-                <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" title="Maximum seconds to wait for each Modbus register read before timing out. Increase for slow or high-latency links." /></label>
-                <small>Maximum wait time for a Modbus read. Increase only for slow or high-latency links.</small>
-              </div>
-              <div class="srow">
-                <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" title="Seconds to wait before retrying a read after the TCP connection to an inverter is re-established." /></label>
-                <small>Delay before retrying a read after reconnecting to a device.</small>
-              </div>
-              <div class="srow">
-                <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" title="Short pause in seconds between consecutive Modbus register group reads to reduce device communication pressure." /></label>
-                <small>Short pause between register groups to reduce device communication pressure.</small>
-              </div>
-            </div>
-            <div class="settings-subsection plant-cap-settings-subsection">
-              <div class="settings-subtitle">Plant Output Cap Defaults</div>
-              <div class="plant-cap-settings-intro">
-                <div class="plant-cap-settings-lead">
-                  <strong>Automatic whole-inverter control</strong>
-                  <p>
-                    Save the default band and selection behavior used by the live Plant Output Cap controller. These defaults are applied when operators preview, enable, and release controller-owned inverter steps.
-                  </p>
+            <div id="opsPanelPolling" class="card-tab-panel" data-card-tab-panel="polling" role="tabpanel" aria-labelledby="opsTabPolling" hidden>
+              <div class="settings-subsection">
+                <div class="srow">
+                  <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" title="Maximum seconds to wait for each Modbus register read before timing out. Increase for slow or high-latency links." /></label>
                 </div>
-                <div class="plant-cap-settings-metrics" id="setPlantCapSettingsSummary" aria-live="polite">
-                  <div class="plant-cap-settings-metric" title="Current default selection strategy for automatic stop decisions.">
-                    <span>Selection</span>
-                    <strong id="setPlantCapSummaryMode">Ascending</strong>
-                  </div>
-                  <div class="plant-cap-settings-metric" title="Gap between the saved upper and lower band edges.">
-                    <span>Band Gap</span>
-                    <strong id="setPlantCapSummaryGap">Not set</strong>
-                  </div>
-                  <div class="plant-cap-settings-metric" title="Configured inverters currently available for automatic plant-cap actions.">
-                    <span>Controllable</span>
-                    <strong id="setPlantCapSummaryControllable">-</strong>
-                  </div>
-                  <div class="plant-cap-settings-metric" title="Approximate smallest inverter step the controller can remove with the current configured fleet.">
-                    <span>Smallest Step</span>
-                    <strong id="setPlantCapSummaryStep">-</strong>
-                  </div>
+                <div class="srow">
+                  <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" title="Seconds to wait before retrying a read after the TCP connection to an inverter is re-established." /></label>
+                </div>
+                <div class="srow">
+                  <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" title="Short pause in seconds between consecutive Modbus register group reads to reduce device communication pressure." /></label>
                 </div>
               </div>
-              <div class="plant-cap-settings-grid">
-                <div class="plant-cap-settings-card">
-                  <div class="plant-cap-settings-card-title">MW Band</div>
-                  <div class="srow plant-cap-settings-input-row">
-                    <label class="plant-cap-settings-field" title="Default upper MW threshold. If total plant output stays above this limit long enough, the controller will plan a whole-inverter stop action.">
-                      <span class="plant-cap-settings-label">Upper Limit (MW)</span>
-                      <input type="number" id="setPlantCapUpperMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default upper MW threshold for plant output capping." />
-                      <small class="plant-cap-settings-help">Stops are planned only after plant MW holds above this edge.</small>
-                    </label>
-                    <label class="plant-cap-settings-field" title="Default lower MW threshold. If total plant output stays below this limit and the controller owns stopped inverters, it may restart one safely.">
-                      <span class="plant-cap-settings-label">Lower Limit (MW)</span>
-                      <input type="number" id="setPlantCapLowerMw" class="inp inp-sm" min="0" step="0.001" inputmode="decimal" title="Default lower MW threshold for safe restart decisions." />
-                      <small class="plant-cap-settings-help">Restarts are considered only after plant MW falls below this edge.</small>
-                    </label>
-                  </div>
-                  <div class="plant-cap-settings-card-copy">Keep enough separation between the two limits to avoid repeated stop/start hunting.</div>
-                </div>
-                <div class="plant-cap-settings-card">
-                  <div class="plant-cap-settings-card-title">Selection Behavior</div>
-                  <div class="srow plant-cap-settings-input-row">
-                    <label class="plant-cap-settings-field" title="Default candidate selection mode. Exemption skips the listed inverter numbers and uses ascending order for the remaining inverters.">
-                      <span class="plant-cap-settings-label">Sequence</span>
-                      <select id="setPlantCapSequenceMode" class="sel" title="Choose the default selection mode for automatic stop decisions.">
-                        <option value="ascending">Ascending</option>
-                        <option value="descending">Descending</option>
-                        <option value="exemption">Exemption</option>
-                      </select>
-                      <small class="plant-cap-settings-help">Choose whether the controller walks inverter numbers up, down, or skips a protected list.</small>
-                    </label>
-                    <label class="plant-cap-settings-field" title="Default cooldown or settling time in seconds after each stop or restart action.">
-                      <span class="plant-cap-settings-label">Cooldown (s)</span>
-                      <input type="number" id="setPlantCapCooldownSec" class="inp inp-sm" min="5" max="600" step="1" inputmode="numeric" title="Default settling time in seconds after each controller action." />
-                      <small class="plant-cap-settings-help">Wait time after each automatic action before the next controller decision.</small>
-                    </label>
-                  </div>
-                  <div class="plant-cap-settings-card-copy">These defaults shape how quickly the controller responds and which inverters it touches first.</div>
-                </div>
-                <div id="setPlantCapSequenceCustomWrap" class="plant-cap-settings-card plant-cap-settings-card-wide" hidden>
-                  <div class="plant-cap-settings-card-title">Exempted Inverters</div>
-                  <div class="srow plant-cap-settings-input-row plant-cap-settings-input-row-wide">
-                    <label class="plant-cap-settings-field" title="Default exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">
-                      <span class="plant-cap-settings-label">Exempted Inverter Numbers</span>
-                      <input type="text" id="setPlantCapSequenceCustom" class="inp inp-lg" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." />
-                      <small class="plant-cap-settings-help">Skipped only during automatic stop selection. Use a comma-separated list of inverter numbers.</small>
-                    </label>
-                  </div>
-                  <div class="plant-cap-settings-card-copy">Use exemptions when certain inverters must stay available or should never be chosen first by the automatic controller.</div>
-                </div>
-              </div>
-              <div id="setPlantCapClientWarnings" class="plant-cap-inline-warnings" title="Client-side guidance for the saved default cap band, node mix, and exemption list." aria-live="polite"></div>
             </div>
           </div>
           <div class="sgroup settings-card" id="connectivitySection">
             <div class="sgroup-title"><span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span> Connectivity &amp; Sync</div>
-            <p class="settings-section-copy">Define whether this workstation acts as the plant gateway or a supervised remote station, then review gateway link status and runtime health.</p>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Mode &amp; Remote Access</div>
+            <div class="card-tabs" role="tablist" aria-label="Connectivity sub-sections">
+              <button id="connTabAccess" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="connPanelAccess" data-card-tab="access" title="Operation mode (Gateway/Remote), gateway URL, API token, Tailscale hint.">
+                <span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Mode &amp; Remote Access</span>
+              </button>
+              <button id="connTabLink" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="connPanelLink" data-card-tab="link" title="Gateway link status, standby refresh counters, archive scope, transfer monitor.">
+                <span class="mdi mdi-vector-link icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Gateway Link</span>
+              </button>
+              <button id="connTabRuntime" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="connPanelRuntime" data-card-tab="runtime" title="Server CPU, memory, poll duration, persistence + WS delivery diagnostics.">
+                <span class="mdi mdi-speedometer icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Runtime Health</span>
+              </button>
+            </div>
+            <div id="connPanelAccess" class="card-tab-panel active" data-card-tab-panel="access" role="tabpanel" aria-labelledby="connTabAccess">
+              <div class="settings-subsection">
               <div class="srow">
                 <label
                   >Operation Mode
@@ -1231,11 +1177,6 @@
                     title="Optional Tailscale device name for the gateway. Used for connectivity checks and diagnostics."
                 /></label>
               </div>
-              <div class="sinfo">
-                <div>
-                   Use Gateway mode on the workstation connected to the plant network. Use Remote mode on monitoring workstations that connect through the approved secure path.
-                </div>
-              </div>
               <div class="sgroup-actions">
                 <button id="btnTestRemoteGateway" class="btn btn-outline" type="button" title="Check whether the configured remote gateway URL is reachable and responding." aria-label="Test remote gateway">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span><span>Test Remote Gateway</span>
@@ -1245,9 +1186,10 @@
                 </button>
                 <span class="smsg" id="networkMsg"></span>
               </div>
+              </div>
             </div>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Gateway Link</div>
+            <div id="connPanelLink" class="card-tab-panel" data-card-tab-panel="link" role="tabpanel" aria-labelledby="connTabLink" hidden>
+              <div class="settings-subsection">
               <div class="rep-health-grid">
                 <div class="license-item" title="Current operation mode: Gateway (plant-connected) or Remote (gateway-linked).">
                   <div class="license-label">Mode</div>
@@ -1295,18 +1237,6 @@
                 <div class="license-label">Last Errors</div>
                 <div id="repErrorsVal" class="license-value">—</div>
               </div>
-              <div class="rep-health-errors">
-                <div class="license-label">Standby DB Scope</div>
-                <div id="repScopeVal" class="license-value">
-                  Full gateway database snapshot. Manual standby refresh pauses the remote live stream temporarily so the download gets priority.
-                </div>
-              </div>
-              <div class="rep-health-errors">
-                <div class="license-label">Archive Scope</div>
-                <div id="repArchiveScopeVal" class="license-value">
-                  Archive transfer can be included in standby DB refresh runs when historical records are required. The remote live stream pauses temporarily while the transfer is running.
-                </div>
-              </div>
               <div class="replication-transfer-wrap">
                 <div class="license-label">Transfer Monitor</div>
                 <div id="netIoWidget" class="net-io-widget" title="Current transfer rates — Incoming &#8595; / Outgoing &#8593;" aria-label="Network transfer rates">
@@ -1344,11 +1274,10 @@
                 </div>
               </div>
               <div class="srow">
-                <label class="chk-inline" title="Optional: include archived monthly files in the next standby DB refresh. Archives download first for historical consistency, then the main database.">
+                <label class="chk-inline" title="Optional: include archived monthly files in the next standby DB refresh. Archives download first for historical consistency, then the main database. The remote live stream pauses during the transfer.">
                   <input type="checkbox" id="setReplicationIncludeArchive" />
                   <span>Include archived files in the next standby DB refresh</span>
                 </label>
-                <small id="replicationArchiveHint">Optional. Leave disabled for the fastest standby DB refresh. Enable when you want the gateway monthly archive DB files staged too. The remote live stream pauses during the transfer.</small>
               </div>
               <div class="sgroup-actions">
                 <button id="btnRefreshReplicationHealth" class="btn btn-outline" type="button" title="Refresh gateway link status, standby refresh counters, and transfer diagnostics." aria-label="Refresh gateway link status">
@@ -1362,9 +1291,10 @@
                 </button>
                 <span class="smsg" id="replicationMsg"></span>
               </div>
+              </div>
             </div>
-            <div class="settings-subsection">
-              <div class="settings-subtitle">Runtime Health</div>
+            <div id="connPanelRuntime" class="card-tab-panel" data-card-tab-panel="runtime" role="tabpanel" aria-labelledby="connTabRuntime" hidden>
+              <div class="settings-subsection">
               <div class="rep-health-grid">
                 <div class="license-item" title="Current server operation mode (gateway or remote).">
                   <div class="license-label">Mode</div>
@@ -1425,13 +1355,31 @@
                 </button>
                 <span class="smsg" id="perfMsg"></span>
               </div>
+              </div>
             </div>
           </div>
           <div class="sgroup settings-card" id="forecastSection">
             <div class="sgroup-title"><span class="mdi mdi-weather-partly-cloudy icon-inline" aria-hidden="true"></span> Forecast</div>
-            <p class="settings-section-copy">Manage the active forecast source and validate external provider settings from one place, including Solcast API access or authenticated toolkit login.</p>
+            <div class="card-tabs" role="tablist" aria-label="Forecast sub-sections">
+              <button id="fcTabProvider" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="fcPanelProvider" data-card-tab="provider" title="Active day-ahead forecast source — Local ML or Solcast.">
+                <span class="mdi mdi-source-branch icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Provider</span>
+              </button>
+              <button id="fcTabAccess" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelAccess" data-card-tab="access" title="Solcast access mode (Toolkit/API), base URL, and timezone alignment.">
+                <span class="mdi mdi-key-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast Access</span>
+              </button>
+              <button id="fcTabApi" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelApi" data-card-tab="api" title="Formal Solcast API credentials (key + resource ID).">
+                <span class="mdi mdi-api icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast API</span>
+              </button>
+              <button id="fcTabToolkit" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelToolkit" data-card-tab="toolkit" title="Toolkit account credentials, forecast horizon, resolution, and live preview.">
+                <span class="mdi mdi-toolbox-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast Toolkit</span>
+              </button>
+            </div>
+            <div id="fcPanelProvider" class="card-tab-panel active" data-card-tab-panel="provider" role="tabpanel" aria-labelledby="fcTabProvider">
             <div class="settings-subsection forecast-provider-panel">
-              <div class="settings-subtitle">Provider</div>
               <div class="srow">
                 <label
                   >Forecast Source
@@ -1441,14 +1389,10 @@
                   </select></label
                 >
               </div>
-              <div class="sinfo">
-                <div>
-                   Local forecasting remains the standard runtime source. Solcast can run either through the standard API or through the authenticated 5-minute toolkit chart feed.
-                </div>
-              </div>
             </div>
+            </div>
+            <div id="fcPanelAccess" class="card-tab-panel" data-card-tab-panel="access" role="tabpanel" aria-labelledby="fcTabAccess" hidden>
             <div class="settings-subsection forecast-access-panel">
-              <div class="settings-subtitle">Solcast Access</div>
               <div class="srow">
                 <label
                   >Access Mode
@@ -1476,14 +1420,10 @@
                     title="IANA timezone identifier for the plant location (e.g. Asia/Manila). Used to align Solcast slots to local time."
                 /></label>
               </div>
-              <div class="sinfo">
-                <div>
-                  Choose `Toolkit Login` when you want to use only the Solcast chart link with your toolkit account. Choose `API Key` only when you have the formal Solcast API credentials.
-                </div>
-              </div>
             </div>
+            </div>
+            <div id="fcPanelApi" class="card-tab-panel" data-card-tab-panel="api" role="tabpanel" aria-labelledby="fcTabApi" hidden>
             <div class="settings-subsection forecast-api-panel">
-              <div class="settings-subtitle">Solcast API</div>
               <div class="srow">
                 <label
                   >Solcast API Key<input
@@ -1504,14 +1444,10 @@
                     title="Solcast resource or site ID identifying your plant. Required only in API Key access mode."
                 /></label>
               </div>
-              <div class="sinfo">
-                <div>
-                  API mode reads the standard Solcast forecast endpoint. Use this only when a formal API key and resource ID are available.
-                </div>
-              </div>
             </div>
+            </div>
+            <div id="fcPanelToolkit" class="card-tab-panel" data-card-tab-panel="toolkit" role="tabpanel" aria-labelledby="fcTabToolkit" hidden>
             <div class="settings-subsection forecast-toolkit-panel">
-              <div class="settings-subtitle">Solcast Toolkit</div>
               <div class="srow srow-toolkit-5col">
                 <label style="grid-column:span 3"
                   >Plant Resource ID<input
@@ -1570,11 +1506,6 @@
                     placeholder="Stored toolkit account password"
                     title="Password for the Solcast toolkit account. Stored locally and never transmitted to external services."
                 /></label>
-              </div>
-              <div class="sinfo">
-                <div>
-                  Enter only the plant resource ID from the Solcast toolkit URL — the full URL is constructed automatically. Toolkit mode signs in with the stored account to read the forecast feed.
-                </div>
               </div>
             </div>
             <div class="settings-subsection forecast-preview-panel" id="solcastPreviewPanel" hidden>
@@ -1655,6 +1586,7 @@
               </div>
               <span class="smsg" id="solcastPreviewMsg"></span>
             </div>
+            </div><!-- /#fcPanelToolkit -->
             <div class="sgroup-actions">
               <button
                 id="btnSolcastSaveTest"
@@ -1669,8 +1601,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="licenseSection">
-            <div class="sgroup-title"><span class="mdi mdi-shield-key-outline icon-inline" aria-hidden="true"></span> License</div>
-            <p class="settings-section-copy">Review entitlement state, remaining term, and license activity, then replace the current file when required.</p>
+            <div class="sgroup-title" title="Entitlement state, remaining term, and license activity. Replace the current file when required."><span class="mdi mdi-shield-key-outline icon-inline" aria-hidden="true"></span> License</div>
             <div class="license-grid">
               <div class="license-item" title="Current license validation state (valid, expired, missing, or error).">
                 <div class="license-label">Status</div>
@@ -1715,8 +1646,7 @@
             </div>
           </div>
           <div class="sgroup settings-card" id="appUpdateSection">
-            <div class="sgroup-title"><span class="mdi mdi-update icon-inline" aria-hidden="true"></span> App Updates</div>
-            <p class="settings-section-copy">Review the installed build, compare it with the release channel, and run the appropriate update action for this workstation.</p>
+            <div class="sgroup-title" title="Installed build, comparison with the release channel, and update actions for this workstation."><span class="mdi mdi-update icon-inline" aria-hidden="true"></span> App Updates</div>
             <div class="license-grid">
               <div class="license-item" title="Currently installed application version from package.json.">
                 <div class="license-label">Current Version</div>
@@ -1760,11 +1690,24 @@
           <!-- -- Cloud Backup Panel ------------------------------------------- -->
           <div class="sgroup settings-card" id="cloudBackupSection">
             <div class="sgroup-title"><span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span> Cloud Backup &amp; Restore</div>
-            <p class="settings-section-copy">Configure approved providers, choose backup scope, and restore validated dashboard snapshots from backup history.</p>
+            <div class="card-tabs" role="tablist" aria-label="Cloud backup sub-sections">
+              <button id="cbTabProviders" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="cbPanelProviders" data-card-tab="providers" title="Provider OAuth + S3 credential setup (OneDrive / Google Drive / S3-compatible).">
+                <span class="mdi mdi-cloud-key-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Providers</span>
+              </button>
+              <button id="cbTabPolicy" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="cbPanelPolicy" data-card-tab="policy" title="Schedule, scope, and date tagging for automated backups.">
+                <span class="mdi mdi-shield-sync-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Policy</span>
+              </button>
+              <button id="cbTabActivity" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="cbPanelActivity" data-card-tab="activity" title="Backup history and cloud-side backup file listing.">
+                <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Activity</span>
+              </button>
+            </div>
+            <div id="cbPanelProviders" class="card-tab-panel active" data-card-tab-panel="providers" role="tabpanel" aria-labelledby="cbTabProviders">
 
             <!-- Provider Setup -->
             <div class="cb-subsection">
-              <div class="cb-sub-title">Provider Access</div>
               <div class="srow">
                 <label>Email (provider suggestion only)
                   <input type="email" id="cbEmail" class="inp" placeholder="you@example.com" title="Optional email hint. Used only for display — does not affect provider authentication." />
@@ -1906,9 +1849,11 @@
               </div>
             </div>
 
+            </div><!-- /#cbPanelProviders -->
+            <div id="cbPanelPolicy" class="card-tab-panel" data-card-tab-panel="policy" role="tabpanel" aria-labelledby="cbTabPolicy" hidden>
+
             <!-- Backup Configuration -->
             <div class="cb-subsection">
-              <div class="cb-sub-title">Backup Policy</div>
               <div class="srow">
                 <label class="chk-inline" title="When enabled, backups run automatically on the selected schedule using the connected provider.">
                   <input type="checkbox" id="cbEnabled" />
@@ -1962,6 +1907,8 @@
               <button id="btnListCloudBackups" class="btn btn-outline" type="button" title="Refresh the list of available cloud backup packages for restore or download." aria-label="List cloud backups"><span class="mdi mdi-format-list-bulleted-square" aria-hidden="true"></span><span>Refresh Cloud List</span></button>
               <span class="smsg" id="cbActionMsg"></span>
             </div>
+            </div><!-- /#cbPanelPolicy -->
+            <div id="cbPanelActivity" class="card-tab-panel" data-card-tab-panel="activity" role="tabpanel" aria-labelledby="cbTabActivity" hidden>
 
             <!-- Backup History Table -->
             <div class="cb-subsection">
@@ -2012,12 +1959,11 @@
                 </table>
               </div>
             </div>
+            </div><!-- /#cbPanelActivity -->
           </div>
 
           <div class="sgroup settings-card" id="localBackupSection" hidden>
-            <div class="sgroup-title"><span class="mdi mdi-archive-arrow-down-outline icon-inline" aria-hidden="true"></span> Local Backup &amp; Restore</div>
-            <p class="settings-section-copy">Create a portable <code>.adsibak</code> backup of all dashboard data for OS reinstall or machine migration. Includes database, archive, license, auth tokens, forecast models, and configuration.</p>
-            <p class="settings-section-copy" style="font-size: 11px; opacity: 0.8;"><span class="mdi mdi-information-outline" aria-hidden="true"></span> <strong>Machine migration note:</strong> <code>ipconfig.json</code> stores the inverter IP addresses for the network this gateway PC is on. After restoring on a different network, open <em>IP Config</em> and update inverter addresses if they have changed.</p>
+            <div class="sgroup-title" title="Portable .adsibak backup of all dashboard data (DB, archive, license, tokens, forecast models, config). Migration note: ipconfig.json stores inverter IPs for this gateway's network — after restoring on a different network, open IP Config and update addresses if they changed."><span class="mdi mdi-archive-arrow-down-outline icon-inline" aria-hidden="true"></span> Local Backup &amp; Restore</div>
 
             <!-- v2.8.14: shown when the dashboard is running in Remote operation mode.
                  Local backups are gateway-only because the remote viewer's local DB
@@ -2036,11 +1982,28 @@
             <!-- The actual controls live inside this wrapper so we can show/hide
                  them as a single block when mode flips. -->
             <div id="localBackupControls">
+            <div class="card-tabs" role="tablist" aria-label="Local backup sub-sections">
+              <button id="lbTabHealth" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="lbPanelHealth" data-card-tab="health" title="Live status of all automatic backup paths.">
+                <span class="mdi mdi-heart-pulse icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Health</span>
+              </button>
+              <button id="lbTabSchedule" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="lbPanelSchedule" data-card-tab="schedule" title="Automatically export a .adsibak to a chosen folder on a schedule.">
+                <span class="mdi mdi-clock-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Auto-Export</span>
+              </button>
+              <button id="lbTabExport" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="lbPanelExport" data-card-tab="export" title="Manually create a portable .adsibak snapshot now.">
+                <span class="mdi mdi-export icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Export</span>
+              </button>
+              <button id="lbTabRestore" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="lbPanelRestore" data-card-tab="restore" title="Import and restore from a .adsibak file. The app will restart.">
+                <span class="mdi mdi-backup-restore icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Restore</span>
+              </button>
+            </div>
 
+            <div id="lbPanelHealth" class="card-tab-panel active" data-card-tab-panel="health" role="tabpanel" aria-labelledby="lbTabHealth">
             <!-- v2.8.14 R4: Backup Health -->
             <div class="cb-subsection">
-              <div class="cb-sub-title"><span class="mdi mdi-heart-pulse icon-inline" aria-hidden="true"></span> Backup Health</div>
-              <p class="settings-section-copy">Status of all automatic backup paths. Updates live as backups run; click refresh to re-fetch.</p>
               <div id="backupHealthList" class="cb-health-list">Loading…</div>
               <div class="sgroup-actions">
                 <button id="btnBackupHealthRefresh" class="btn btn-outline" type="button" title="Refresh backup health status from the server.">
@@ -2048,11 +2011,11 @@
                 </button>
               </div>
             </div>
+            </div>
 
+            <div id="lbPanelSchedule" class="card-tab-panel" data-card-tab-panel="schedule" role="tabpanel" aria-labelledby="lbTabSchedule" hidden>
             <!-- v2.8.14 R1: Scheduled Auto-Export -->
             <div class="cb-subsection">
-              <div class="cb-sub-title"><span class="mdi mdi-clock-outline icon-inline" aria-hidden="true"></span> Scheduled Auto-Export</div>
-              <p class="settings-section-copy">Automatically export a portable <code>.adsibak</code> to a folder of your choice (USB, network share, secondary drive). Default is off — opt in by selecting a schedule.</p>
               <div class="cb-schedule-form">
                 <label class="cb-schedule-row" for="lbsSchedule">
                   <span class="cb-schedule-label">Schedule</span>
@@ -2086,12 +2049,13 @@
               </div>
             </div>
 
+            </div><!-- /#lbPanelSchedule -->
+
+            <div id="lbPanelExport" class="card-tab-panel" data-card-tab-panel="export" role="tabpanel" aria-labelledby="lbTabExport" hidden>
             <!-- Export -->
             <div class="cb-subsection">
-              <div class="cb-sub-title">Export Backup</div>
-              <p class="settings-section-copy">Creates a complete snapshot of all ProgramData and packs it into a single portable file.</p>
               <div class="sgroup-actions">
-                <button id="btnLocalBackupExport" class="btn btn-accent" type="button" title="Choose a save location and create a portable .adsibak backup file.">
+                <button id="btnLocalBackupExport" class="btn btn-accent" type="button" title="Creates a complete snapshot of all ProgramData and packs it into a single portable .adsibak file.">
                   <span class="mdi mdi-export icon-inline" aria-hidden="true"></span><span>Export .adsibak</span>
                 </button>
                 <span class="smsg" id="localBackupExportMsg"></span>
@@ -2109,12 +2073,13 @@
               <div id="localBackupExportResult" class="sinfo" hidden></div>
             </div>
 
+            </div><!-- /#lbPanelExport -->
+
+            <div id="lbPanelRestore" class="card-tab-panel" data-card-tab-panel="restore" role="tabpanel" aria-labelledby="lbTabRestore" hidden>
             <!-- Import & Restore -->
             <div class="cb-subsection">
-              <div class="cb-sub-title">Import &amp; Restore</div>
-              <p class="settings-section-copy">Import a <code>.adsibak</code> file, preview its contents, and restore all data. The app will restart after restore.</p>
               <div class="sgroup-actions">
-                <button id="btnLocalBackupImport" class="btn btn-outline" type="button" title="Browse for a .adsibak file to import and validate.">
+                <button id="btnLocalBackupImport" class="btn btn-outline" type="button" title="Browse for a .adsibak file to import and preview its contents. Restore replaces all dashboard data and restarts the app.">
                   <span class="mdi mdi-import icon-inline" aria-hidden="true"></span><span>Import .adsibak</span>
                 </button>
                 <span class="smsg" id="localBackupImportMsg"></span>
@@ -2145,16 +2110,27 @@
                 </div>
               </div>
             </div>
+            </div><!-- /#lbPanelRestore -->
             </div><!-- /#localBackupControls -->
           </div>
 
           <!-- v2.9.0 Slice G — Inverter Clock Sync + Counter Health -->
           <div class="sgroup settings-card" id="inverterClockSection" hidden>
+            <!-- Remote-mode indicator: hidden in gateway mode, shown when this dashboard
+                 is acting as a remote viewer. Tells the operator that data is mirrored
+                 from the gateway and actions are forwarded to it. -->
+            <div id="invClockRemoteBanner" class="invclock-remote-banner" hidden role="status" aria-live="polite" title="In remote mode, counter health, sync logs, and clock-sync actions are mirrored to and executed on the gateway.">
+              <span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span>
+              <span class="invclock-remote-banner-text">
+                Remote mode — status &amp; actions execute on gateway:
+                <span class="mono js-invclock-gateway-host">—</span>
+              </span>
+            </div>
             <!-- Tab navigation: 3 sub-views (schedule/source, per-unit health, recent log) -->
             <div class="invclock-tabs" role="tablist" aria-label="Inverter clock sub-sections">
               <button id="invClockTabSchedule" class="invclock-tab active" type="button" role="tab" aria-selected="true" aria-controls="invClockPanelSchedule" data-invclock-tab="schedule" title="Daily auto-sync schedule and which energy source drives today's display.">
                 <span class="mdi mdi-clock-check-outline icon-inline" aria-hidden="true"></span>
-                <span class="invclock-tab-label">Inverter Clock Sync &amp; Counter Health</span>
+                <span class="invclock-tab-label">Schedule &amp; Source</span>
               </button>
               <button id="invClockTabHealth" class="invclock-tab" type="button" role="tab" aria-selected="false" aria-controls="invClockPanelHealth" data-invclock-tab="health" title="Per-unit counter and RTC drift state, with manual sync controls.">
                 <span class="mdi mdi-counter icon-inline" aria-hidden="true"></span>
