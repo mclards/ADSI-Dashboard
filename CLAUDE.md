@@ -21,9 +21,9 @@ Detailed history and working notes live in `MEMORY.md`.
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.9.0` in `package.json` (source of truth) |
+| Repo version baseline | `2.9.3` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.9.0` (Hardware counter recovery, eod_clean hardening, inverter clock sync, energySourceMode selector) |
+| Latest published release | `v2.9.3` (Alarm drilldown novice-operator expansion, recovery-seed spike clamp) |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---

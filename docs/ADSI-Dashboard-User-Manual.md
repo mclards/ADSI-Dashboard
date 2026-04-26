@@ -19,11 +19,35 @@ also hosted on GitHub for in-app auto-download from the alarm drilldown:
 | `INGECON-SUN-Manager-User-Manual.pdf` | PTD138 | Windows SCADA tool user manual |
 
 **Alarm drilldown:** click any alarm hex code (e.g. `0x0020H`) in the Alarms
-page or Inverter Detail panel to open the service-reference drilldown. The
-drilldown surfaces per-bit recommended actions, TrinPM training modules,
-physical-device location on the schematic, and one-click PDF download for
-each of the four documents above. Downloads come from the GitHub raw URL
-first (always current) with a local `/docs/` fallback when offline.
+page or Inverter Detail panel to open the service-reference drilldown. Each
+active bit shows a full novice-friendly walkthrough sourced directly from the
+Ingeteam Level 1 / Level 2 PDFs and the AQM0027 schematic:
+
+- **Safety preparation** (amber border) — PPE, what stays energized after stop,
+  what tools and records to have on hand BEFORE you touch anything.
+- **Action** — one-line summary plus a numbered procedural walkthrough with
+  branching criteria; ⚠ steps render in red.
+- **Physical location** — every device with a "where on the cabinet" descriptor.
+- **Schematic reference** — one precise sentence about what the linked schematic
+  page actually shows, so you know whether to open p.4 (DC input), p.5 (K1 +
+  harmonic filter), p.6 (AC supply / RVAC / FAC fuses), p.12 (+15 Vdc rails),
+  p.15 (door limit switches), p.21 (sync card / RS-485) or p.22 (CAN bus).
+- **Expected normal readings** — what GOOD looks like (Vac ranges, continuity
+  pairs, +15 Vdc check points, insulation thresholds, fuse continuity).
+- **Training modules** — TrinPM chips link directly to the matching YouTube
+  video on `ingeconsuntraining.info` (each chip resolves to its specific video,
+  not the index page).
+- **DebugDesc (Level 2 / SCOPE)** — sub-code → action mapping (e.g. 0x0004 →
+  40/92/107-109; 0x0040 → 55,56/119).
+- **Stop-reason sub-codes** — surfaced under 0x1000 Manual Shutdown
+  (1320 / 1360 / 1363).
+- **Escalate to Ingeteam SAT when** (red border) — explicit stop-criteria so
+  you know when to stop poking and call SAT.
+- **Note** — short safety / context callout at the bottom.
+
+The footer carries one-click PDF download buttons for the schematic, Level 1,
+Level 2, and SUN Manager manual. Downloads come from the GitHub raw URL first
+(always current) with a local `/docs/` fallback when offline.
 
 **7FFF fatal-error handling:** when an inverter reports `0x7FFF` fatal
 error, a red banner on the drilldown explains that the inverter can only be

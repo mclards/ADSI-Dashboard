@@ -15597,6 +15597,22 @@ body.mode-transition-active {
   border-top: 1px dashed var(--border);
   align-items: flex-start;
 }
+.alarm-detail-row.alarm-detail-safety {
+  border-left: 3px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+  padding-left: 9px;
+  border-top-color: rgba(245, 158, 11, 0.4);
+}
+.alarm-detail-row.alarm-detail-safety .alarm-detail-row-icon { color: #f59e0b; }
+.alarm-detail-row.alarm-detail-safety .alarm-detail-row-label { color: #f59e0b; }
+.alarm-detail-row.alarm-detail-escalate {
+  border-left: 3px solid #ef4444;
+  background: rgba(239, 68, 68, 0.06);
+  padding-left: 9px;
+  border-top-color: rgba(239, 68, 68, 0.4);
+}
+.alarm-detail-row.alarm-detail-escalate .alarm-detail-row-icon { color: #ef4444; }
+.alarm-detail-row.alarm-detail-escalate .alarm-detail-row-label { color: #ef4444; }
 .alarm-detail-row-icon {
   flex: 0 0 auto;
   font-size: 16px;
@@ -15648,7 +15664,7 @@ body.mode-transition-active {
 .alarm-sev-dot.sev-warning  { background: #f59e0b; }
 .alarm-sev-dot.sev-info     { background: #60a5fa; }
 
-/* TrinPM chip — MUCH smaller, lighter, grouped */
+/* TrinPM chip — MUCH smaller, lighter, grouped; anchor links to ingeconsuntraining.info */
 .alarm-detail-trinpm {
   display: inline-flex;
   align-items: center;
@@ -15660,11 +15676,17 @@ body.mode-transition-active {
   border-radius: 999px;
   color: var(--text1);
   line-height: 1.2;
-  transition: border-color 0.15s, color 0.15s;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
-.alarm-detail-trinpm:hover {
+.alarm-detail-trinpm:hover,
+.alarm-detail-trinpm:focus-visible {
   border-color: var(--accent);
   color: var(--accent);
+  background: rgba(var(--accent-rgb, 59, 130, 246), 0.08);
+  text-decoration: none;
+  outline: none;
 }
 
 /* Schematic-page chip — in card head, links to schematic download */

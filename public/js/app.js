@@ -13111,6 +13111,49 @@ function applyAlarmTableView() {
 }
 
 // ─── Alarm drilldown — service-doc reference (v2.8.13) ───────────────────────
+// TrinPM training video index (Ingeteam SUN training portal,
+// https://www.ingeconsuntraining.info/?page_id=3749). Each entry is the
+// official YouTube video for the corresponding service module. Codes not
+// listed (e.g. TrinPM22) fall back to the index page.
+const TRINPM_VIDEOS = {
+  TrinPM01: { id: "0H17yjxal8k", title: "Service general concepts" },
+  TrinPM02: { id: "Yj7wGvhfItM", title: "Access to the inverter" },
+  TrinPM03: { id: "K17gpw1gYTo", title: "Electronic block replacement (hardware)" },
+  TrinPM04: { id: "50vSIhXO6GU", title: "Electronic block replacement (software)" },
+  TrinPM05: { id: "tQa0Sw0KAx0", title: "Auxiliary power verification" },
+  TrinPM06: { id: "bkZgicLBbrk", title: "Insulation failure checklist" },
+  TrinPM07: { id: "IBej6mYT9vU", title: "Display card verification and replacement" },
+  TrinPM08: { id: "bWMgxyG8KQI", title: "Synchronization between inverters" },
+  TrinPM09: { id: "lrER9bHmf3Y", title: "IGBT / Bus capacitor torque verification" },
+  TrinPM10: { id: "LfVOUYOGr5Q", title: "AC & DC surge arrestor replacement" },
+  TrinPM11: { id: "JyAhvw6lySg", title: "DC fuse replacement" },
+  TrinPM12: { id: "Q6LShYi_W7U", title: "AC fuse replacement" },
+  TrinPM13: { id: "S27T6hBF68w", title: "Ventilation test and fan replacement" },
+  TrinPM14: { id: "F7PwPeZx-9g", title: "NTC and SW verification" },
+  TrinPM15: { id: "Y8K2N5kjnpA", title: "Measuring board relays replacement" },
+  TrinPM16: { id: "CdGhNJFnzNk", title: "Varistor replacement" },
+  TrinPM17: { id: "AyFWtsm2OGA", title: "Communication with inverters through RS485" },
+  TrinPM18: { id: "ekU701T8Tm4", title: "Scope" },
+  TrinPM19: { id: "2xoyEetMj4w", title: "Firmware upgrade" },
+  TrinPM20: { id: "vpHvbrd4CEY", title: "Inverter calibration" },
+  TrinPM21: { id: "_sqHih88f_E", title: "Inverter reconnection" },
+  TrinPM23: { id: "QPHcvurcurM", title: "Wiring continuity regarding 0040 alarm" },
+  TrinPM24: { id: "6NoOxo9qq14", title: "Voltage measurements regarding 0040 alarm" },
+  TrinPM25: { id: "-RgbudpqqKM", title: "Wiring continuity regarding 0100 alarm" },
+  TrinPM26: { id: "DYKRZ_0P-Os", title: "Voltage measurements regarding 0100 alarm" },
+  TrinPM27: { id: "yEHMULx0dE0", title: "Impedance measurements of inverter DC side" },
+  TrinPM28: { id: "Mj0_7jVhOfI", title: "Impedance measurements of inverter auxiliaries" },
+  TrinPM29: { id: "ybBDiYYPr4A", title: "Impedance measurements of inverter AC side" },
+};
+const TRINPM_INDEX_URL = "https://www.ingeconsuntraining.info/?page_id=3749";
+function trinPMLink(code) {
+  const meta = TRINPM_VIDEOS[code];
+  if (meta && meta.id) {
+    return { url: `https://youtu.be/${meta.id}`, title: meta.title };
+  }
+  return { url: TRINPM_INDEX_URL, title: "training module index" };
+}
+
 // Lazy-load /api/alarms/reference once per session. The payload is small (<3KB)
 // and stable; the server sets Cache-Control: max-age=3600 so reloads stay cheap.
 async function loadAlarmReference() {
@@ -13415,9 +13458,10 @@ async function openAlarmDetail(alarmValue, alarmHex) {
   // Per-bit cards
   const bitSections = activeBits.length
     ? activeBits.map((b) => {
-        const trinPMs = (b.trinPM || []).map((t) =>
-          `<span class="alarm-detail-trinpm">${esc(t)}</span>`,
-        ).join("");
+        const trinPMs = (b.trinPM || []).map((t) => {
+          const link = trinPMLink(t);
+          return `<a class="alarm-detail-trinpm" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer" title="${esc(t)} — ${esc(link.title)} (YouTube)">${esc(t)}</a>`;
+        }).join("");
         const devs = (b.physicalDevices || []).map((d) => `<li>${esc(d)}</li>`).join("");
         const pageChips = [];
         if (b.schematicPage) {
@@ -13460,6 +13504,41 @@ async function openAlarmDetail(alarmValue, alarmHex) {
              </div>`
           : "";
 
+        const renderListRow = (cls, icon, label, items) =>
+          (Array.isArray(items) && items.length)
+            ? `<div class="alarm-detail-row ${cls}">
+                 <span class="alarm-detail-row-icon mdi ${icon}" aria-hidden="true"></span>
+                 <div class="alarm-detail-row-body">
+                   <div class="alarm-detail-row-label">${esc(label)}</div>
+                   <ul class="alarm-detail-list">
+                     ${items.map((s) => `<li>${esc(String(s || ""))}</li>`).join("")}
+                   </ul>
+                 </div>
+               </div>`
+            : "";
+
+        const safetyHtml = renderListRow(
+          "alarm-detail-safety", "mdi-shield-alert-outline",
+          "Safety preparation — do these BEFORE you touch anything", b.safetyPrep,
+        );
+        const expectedHtml = renderListRow(
+          "", "mdi-gauge",
+          "Expected normal readings — what good looks like", b.expectedReadings,
+        );
+        const escalateHtml = renderListRow(
+          "alarm-detail-escalate", "mdi-phone-alert-outline",
+          "Escalate to Ingeteam SAT when", b.escalateWhen,
+        );
+        const schematicNoteHtml = b.schematicNote
+          ? `<div class="alarm-detail-row">
+               <span class="alarm-detail-row-icon mdi mdi-sitemap-outline" aria-hidden="true"></span>
+               <div class="alarm-detail-row-body">
+                 <div class="alarm-detail-row-label">Schematic reference</div>
+                 <div class="alarm-detail-action-summary">${esc(b.schematicNote)}</div>
+               </div>
+             </div>`
+          : "";
+
         return `
           <div class="alarm-detail-card">
             <div class="alarm-detail-card-head">
@@ -13472,6 +13551,7 @@ async function openAlarmDetail(alarmValue, alarmHex) {
             </div>
             ${b.altLabel ? `<div class="alarm-detail-altlabel">${esc(b.altLabel)}</div>` : ""}
             <div class="alarm-detail-card-desc">${esc(b.description)}</div>
+            ${safetyHtml}
             <div class="alarm-detail-row">
               <span class="alarm-detail-row-icon mdi mdi-flash-outline" aria-hidden="true"></span>
               <div class="alarm-detail-row-body">
@@ -13495,6 +13575,8 @@ async function openAlarmDetail(alarmValue, alarmHex) {
                   <ul class="alarm-detail-list">${devs}</ul>
                 </div>
               </div>` : ""}
+            ${schematicNoteHtml}
+            ${expectedHtml}
             ${trinPMs ? `
               <div class="alarm-detail-row">
                 <span class="alarm-detail-row-icon mdi mdi-book-open-variant" aria-hidden="true"></span>
@@ -13519,6 +13601,7 @@ async function openAlarmDetail(alarmValue, alarmHex) {
                   ${subcodes}
                 </div>
               </div>` : ""}
+            ${escalateHtml}
             ${noteHtml}
           </div>`;
       }).join("")
