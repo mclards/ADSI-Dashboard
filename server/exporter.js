@@ -23,6 +23,10 @@ const {
 } = require('./db');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 const { applyInverterScale } = require('./energySummaryScaleCore');
+const {
+  DEFAULT_PER_UNIT_DAY_CEILING_KWH,
+  computeHwDeltasForUnitDay,
+} = require('./hwCounterDeltaCore');
 
 const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
@@ -1292,7 +1296,7 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
   //
   //   DAY TOTAL HW columns still NaN-propagate when ANY contributing unit is
   //   invalid (matches the v2.9.1 daily_report rule).
-  const PER_UNIT_DAY_KWH_CEILING = 9000;
+  const PER_UNIT_DAY_KWH_CEILING = DEFAULT_PER_UNIT_DAY_CEILING_KWH;
 
   const curCounterMap = new Map();
   try {
@@ -1339,88 +1343,38 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     const nxt = new Date(y, m - 1, d + 1);
     return `${nxt.getFullYear()}-${pad2(nxt.getMonth() + 1)}-${pad2(nxt.getDate())}`;
   }
-  function _acceptDelta(deltaKwh) {
-    if (!Number.isFinite(deltaKwh)) return false;
-    if (deltaKwh < 0) return false;
-    if (deltaKwh > PER_UNIT_DAY_KWH_CEILING) return false;
-    return true;
-  }
-
+  // _hwDeltasForUnitDay — thin shim around computeHwDeltasForUnitDay() in
+  // server/hwCounterDeltaCore.js. The pure function holds all the rules so
+  // server/tests/hwCounterDeltaCore.test.js can lock down the multi-path
+  // fallback behavior without spinning up SQLite or the poller. We just
+  // resolve the three baseline lookups (today/yesterday/tomorrow) and the
+  // current snapshot from the cached maps and hand them to the core.
   function _hwDeltasForUnitDay(day, inv, unit, baselineMap) {
-    const out = { etotalKwh: NaN, parceKwh: NaN };
     const key = `${inv}_${unit}`;
-    const b = baselineMap.get(key);
+    const baseline = baselineMap.get(key) || null;
     if (day === today) {
-      // ── Today path ────────────────────────────────────────────────────
-      const cur = curCounterMap.get(key);
-      if (!cur) return out;
-      // Path 1: today's baseline row exists — use it regardless of source.
-      // Even a 'poll' baseline captured at 11:52 anchors the delta to the
-      // window the dashboard actually polled, so the value lines up with
-      // the PAC-integrated Total_MWh on the same row.
-      if (b) {
-        const dE = Number(cur.etotal_kwh) - Number(b.etotal_baseline || 0);
-        const dP = Number(cur.parce_kwh)  - Number(b.parce_baseline  || 0);
-        if (_acceptDelta(dE)) out.etotalKwh = dE;
-        if (_acceptDelta(dP)) out.parceKwh  = dP;
-        if (Number.isFinite(out.etotalKwh) || Number.isFinite(out.parceKwh)) return out;
-        // fall through if baseline existed but produced no usable delta
-      }
-      // Path 2: yesterday's eod_clean as anchor (gateway booted today and
-      // never wrote a today-baseline row, but yesterday's snapshot is here).
       const yKey = _previousDayKey(day);
       const yMap = yKey ? _baselinesForDay(yKey) : null;
-      const yB = yMap ? yMap.get(key) : null;
-      if (yB) {
-        const yE = Number(yB.etotal_eod_clean || 0);
-        const yP = Number(yB.parce_eod_clean  || 0);
-        if (yE > 0) {
-          const dE = Number(cur.etotal_kwh) - yE;
-          if (_acceptDelta(dE)) out.etotalKwh = dE;
-        }
-        if (yP > 0) {
-          const dP = Number(cur.parce_kwh) - yP;
-          if (_acceptDelta(dP)) out.parceKwh = dP;
-        }
-      }
-      return out;
+      return computeHwDeltasForUnitDay({
+        day,
+        today,
+        baseline,
+        curCounter: curCounterMap.get(key) || null,
+        yesterdayBaseline: yMap ? (yMap.get(key) || null) : null,
+        perUnitDayCeilingKwh: PER_UNIT_DAY_KWH_CEILING,
+      });
     }
-
-    // ── Past day path ────────────────────────────────────────────────────
-    if (!b) return out;
-    // Path 1: same-day eod_clean delta (the v2.9.x rule).
-    const eClean = Number(b.etotal_eod_clean || 0);
-    const pClean = Number(b.parce_eod_clean  || 0);
-    let etotalDone = false;
-    let parceDone = false;
-    if (eClean > 0) {
-      const dE = eClean - Number(b.etotal_baseline || 0);
-      if (_acceptDelta(dE)) { out.etotalKwh = dE; etotalDone = true; }
-    }
-    if (pClean > 0) {
-      const dP = pClean - Number(b.parce_baseline || 0);
-      if (_acceptDelta(dP)) { out.parceKwh = dP; parceDone = true; }
-    }
-    if (etotalDone && parceDone) return out;
-
-    // Path 2: tomorrow's baseline as the close-out anchor for the missing
-    // halves. Counters don't run overnight, so tomorrow's open ≈ today's close.
+    // Past day: only fetch tomorrow's baseline when today's snapshot can't
+    // close the day (parcE may have been cleared, eod_clean may be absent).
     const nKey = _nextDayKey(day);
     const nMap = nKey ? _baselinesForDay(nKey) : null;
-    const nB = nMap ? nMap.get(key) : null;
-    if (nB) {
-      if (!etotalDone) {
-        const dE = Number(nB.etotal_baseline || 0) - Number(b.etotal_baseline || 0);
-        if (_acceptDelta(dE)) out.etotalKwh = dE;
-      }
-      if (!parceDone) {
-        // parcE may have been cleared between days — only accept when
-        // tomorrow's baseline ≥ today's. Negative falls back to NaN above.
-        const dP = Number(nB.parce_baseline || 0) - Number(b.parce_baseline || 0);
-        if (_acceptDelta(dP)) out.parceKwh = dP;
-      }
-    }
-    return out;
+    return computeHwDeltasForUnitDay({
+      day,
+      today,
+      baseline,
+      tomorrowBaseline: nMap ? (nMap.get(key) || null) : null,
+      perUnitDayCeilingKwh: PER_UNIT_DAY_KWH_CEILING,
+    });
   }
 
   let dayCounter = 0;
@@ -1433,8 +1387,15 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     let dayTotalMwh = 0;
     let dayEtotalKwh = 0;
     let dayParceKwh = 0;
-    let dayEtotalValid = true;
-    let dayParceValid = true;
+    // v2.10.x — track per-method coverage instead of all-or-nothing flags
+    // so the day total can show whatever sums we have, even when a single
+    // unit on a single inverter is missing its HW counter anchor. The
+    // operator still gets a sum to scan against the PAC-based Total_MWh
+    // and the parcE column, instead of three blank cells.
+    let dayEtotalValidUnits = 0;
+    let dayParceValidUnits = 0;
+    let dayEtotalTotalUnits = 0;
+    let dayParceTotalUnits = 0;
     const dayStart = new Date(`${day}T00:00:00.000`).getTime();
     const dayEnd = new Date(`${day}T23:59:59.999`).getTime();
     const dayRangeStart = Math.max(s, dayStart);
@@ -1505,14 +1466,21 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           ParcE_MWh:  row.ParcE_MWh,
         });
       }
-      if (!scaled.dayEtotalValid) dayEtotalValid = false;
-      if (!scaled.dayParceValid)  dayParceValid  = false;
       dayEtotalKwh += scaled.dayEtotalKwh;
       dayParceKwh  += scaled.dayParceKwh;
+      dayEtotalValidUnits += scaled.dayEtotalCoverage?.valid || 0;
+      dayParceValidUnits  += scaled.dayParceCoverage?.valid  || 0;
+      dayEtotalTotalUnits += scaled.dayEtotalCoverage?.total || 0;
+      dayParceTotalUnits  += scaled.dayParceCoverage?.total  || 0;
       dayTotalMwh += scaled.subtotalMwh;
 
     }
 
+    // Day total: emit all three MWh values whenever ANY unit contributed.
+    // NaN only when zero units had a valid anchor — that's a true
+    // unknown, not a partial-coverage day. This eliminates the prior
+    // failure mode where one bad unit blanked the entire fleet's HW
+    // columns for a whole day.
     mapped.push({
       Date: day,
       Inverter_Number: 'DAY TOTAL',
@@ -1521,8 +1489,12 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       Last_Seen: '',
       Peak_Pac_kW: '',
       Total_MWh: Number(dayTotalMwh.toFixed(6)),
-      Etotal_MWh: dayEtotalValid ? Number((dayEtotalKwh / 1000).toFixed(6)) : NaN,
-      ParcE_MWh:  dayParceValid  ? Number((dayParceKwh  / 1000).toFixed(6)) : NaN,
+      Etotal_MWh: dayEtotalValidUnits > 0
+        ? Number((dayEtotalKwh / 1000).toFixed(6))
+        : NaN,
+      ParcE_MWh: dayParceValidUnits > 0
+        ? Number((dayParceKwh / 1000).toFixed(6))
+        : NaN,
     });
   }
 
@@ -2910,7 +2882,14 @@ async function exportDailyData({ inverter, date }) {
   }
 
   const dir = resolveExportSubDir(inv, EXPORT_FOLDERS.energy, 'Daily Data');
-  const fileBase = `INV-${String(inv).padStart(2, '0')} daily-data ${dateLocal}`;
+  // Match the rest of the export suite (Energy Summary, Alarms, Audits,
+  // Operational Data) — `exportDateAwareFileBase` yields:
+  //   single day: "28-04-26 Inverter 1 Daily Data.xlsx"
+  //   range:      "26-04-26-28-04-26 Inverter 1 Daily Data.xlsx"
+  // Daily Data is always single-day, so the same-day branch is used here.
+  const dayStartTs = new Date(`${dateLocal}T00:00:00.000`).getTime();
+  const dayEndTs   = new Date(`${dateLocal}T23:59:59.999`).getTime();
+  const fileBase = exportDateAwareFileBase(dayStartTs, dayEndTs, inv, 'Daily Data');
   const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
 
   const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
@@ -2918,10 +2897,14 @@ async function exportDailyData({ inverter, date }) {
     useStyles: true,
     useSharedStrings: false,
   });
-  setWorkbookMetadata(wb, `ADSI Daily Data — INV-${String(inv).padStart(2, '0')} ${dateLocal}`);
+  setWorkbookMetadata(wb, `ADSI Daily Data — Inverter ${inv} ${dateLocal}`);
 
   // ISM-compatible column order. Partial Energy is computed from pac_w as
-  // (pac_w / 12 / 1000) kWh per 5-minute slot — Pdc-style derivation.
+  // ISM-compatible column order. Partial Energy uses the parcE counter
+  // delta vs. the previous slot when available (most accurate — direct
+  // hardware reading), falling back to PAC × 5 min / 1000 if the delta
+  // isn't computable. ParcE_kWh is the lifetime-monotonic snapshot at
+  // end-of-slot, useful for cross-checking against other tools.
   const headers = [
     { key: 'Time',         label: 'Time' },
     { key: 'Pdc_W',        label: 'Pdc (W)' },
@@ -2936,6 +2919,7 @@ async function exportDailyData({ inverter, date }) {
     { key: 'Temp_C',       label: 'Temp (°C)' },
     { key: 'Pac_W',        label: 'Pac (W)' },
     { key: 'PartialEnergy_kWh', label: 'Partial Energy (kWh)' },
+    { key: 'ParcE_kWh',    label: 'parcE (kWh)' },
     { key: 'CosPhi',       label: 'CosΦ' },
     { key: 'Freq_Hz',      label: 'Freq (Hz)' },
     { key: 'InvAlarms',    label: 'Inv Alarms' },
@@ -2949,6 +2933,7 @@ async function exportDailyData({ inverter, date }) {
            iac1_a, iac2_a, iac3_a,
            temp_c, pac_w, cosphi, freq_hz,
            inv_alarms, track_alarms,
+           parce_kwh,
            sample_count, is_complete, in_solar_window
       FROM inverter_5min_param
      WHERE inverter_ip = ? AND slave = ? AND date_local = ?
@@ -2971,9 +2956,22 @@ async function exportDailyData({ inverter, date }) {
 
   for (const slave of slaves) {
     const dbRows = select.all(String(ip), Number(slave), dateLocal);
+    // Per-slot rows. Partial Energy is the PAC-integrated estimate (= 5-min
+    // PAC average × duration). parcE_kWh is the lifetime monotonic counter
+    // snapshot at end-of-slot. Both are emitted; the day-level cross-check
+    // happens in the TOTALS row appended below.
+    let pacIntegratedKwh = 0;        // running sum for the day total
+    let firstParce = null;            // for parcE delta day total
+    let lastParce = null;
     const sheetRows = dbRows.map((r) => {
       const pacW = Number(r.pac_w || 0);
-      const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0; // 5-min slot → kWh
+      const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0;
+      pacIntegratedKwh += partialKwh;
+      const curParce = Number(r.parce_kwh);
+      if (Number.isFinite(curParce) && curParce >= 0) {
+        if (firstParce == null) firstParce = curParce;
+        lastParce = curParce;
+      }
       return {
         Time:         slotLabel(r.slot_index),
         Pdc_W:        fmtInt(r.pdc_w),
@@ -2988,11 +2986,87 @@ async function exportDailyData({ inverter, date }) {
         Temp_C:       fmtInt(r.temp_c),
         Pac_W:        fmtInt(r.pac_w),
         PartialEnergy_kWh: Number(partialKwh.toFixed(3)),
+        ParcE_kWh:    Number.isFinite(curParce) && curParce >= 0 ? Number(curParce.toFixed(3)) : '',
         CosPhi:       fmt(r.cosphi, 3),
         Freq_Hz:      fmt(r.freq_hz, 2),
         InvAlarms:    alarmHex(r.inv_alarms),
         TrackAlarms:  alarmHex(r.track_alarms),
       };
+    });
+
+    // Day-total cross-verification row — Pac-integrated MWh, Etotal MWh
+    // delta, parcE MWh delta — all three computed simultaneously so the
+    // operator can spot any divergence at a glance. Etotal MWh comes from
+    // _hwDeltasForUnitDay (anchored on baseline + eod_clean) for consistency
+    // with the Energy Summary export. parcE MWh delta uses the per-slot
+    // parcE captured in inverter_5min_param.
+    const totalsBaselineMap = (() => {
+      try {
+        const m = new Map();
+        for (const b of getCounterBaselinesForDate(dateLocal) || []) {
+          m.set(`${Number(b.inverter)}_${Number(b.unit)}`, b);
+        }
+        return m;
+      } catch (_) { return new Map(); }
+    })();
+    const todayKey = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    })();
+    const isToday = dateLocal === todayKey;
+    let etotalKwh = NaN;
+    let parceKwh = (firstParce != null && lastParce != null && lastParce >= firstParce)
+      ? (lastParce - firstParce)
+      : NaN;
+    const baselineRow = totalsBaselineMap.get(`${inv}_${slave}`);
+    if (baselineRow) {
+      if (isToday) {
+        try {
+          const cur = (function () {
+            for (const r of getCounterStateAll() || []) {
+              if (Number(r.inverter) === inv && Number(r.unit) === slave) return r;
+            }
+            return null;
+          })();
+          if (cur) {
+            const dE = Number(cur.etotal_kwh) - Number(baselineRow.etotal_baseline || 0);
+            if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
+          }
+        } catch (_) { /* leave as NaN */ }
+      } else {
+        const eClean = Number(baselineRow.etotal_eod_clean || 0);
+        if (eClean > 0) {
+          const dE = eClean - Number(baselineRow.etotal_baseline || 0);
+          if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
+        }
+      }
+    }
+    // Three dedicated totals rows, one per method. The Partial Energy
+    // column carries the value in kWh; the Time column carries the clear
+    // label. Operator can scan the three rows top-to-bottom to spot any
+    // divergence between the PAC-based estimate and the two HW counters.
+    const _emptyCols = {
+      Pdc_W: '', Vdc_V: '', Idc_A: '',
+      Vac1_V: '', Vac2_V: '', Vac3_V: '',
+      Iac1_A: '', Iac2_A: '', Iac3_A: '',
+      Temp_C: '', Pac_W: '',
+      ParcE_kWh: '', CosPhi: '', Freq_Hz: '',
+      InvAlarms: '', TrackAlarms: '',
+    };
+    sheetRows.push({
+      Time: 'DAY TOTAL — Pac-integrated (kWh)',
+      ..._emptyCols,
+      PartialEnergy_kWh: Number(pacIntegratedKwh.toFixed(3)),
+    });
+    sheetRows.push({
+      Time: 'DAY TOTAL — Etotal Δ (kWh)',
+      ..._emptyCols,
+      PartialEnergy_kWh: Number.isFinite(etotalKwh) ? Number(etotalKwh.toFixed(3)) : '',
+    });
+    sheetRows.push({
+      Time: 'DAY TOTAL — parcE Δ (kWh)',
+      ..._emptyCols,
+      PartialEnergy_kWh: Number.isFinite(parceKwh) ? Number(parceKwh.toFixed(3)) : '',
     });
     await writeXlsxWorksheet(
       wb,

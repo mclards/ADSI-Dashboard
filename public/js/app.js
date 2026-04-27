@@ -14465,6 +14465,7 @@ function _paramRenderTotalsStrip(slave) {
     const eod = Number(t.eod_clean_present || 0) === 1;
     if (eod) return { label: "CLEAN", cls: "param-anchor-clean" };
     if (src === "eod_clean") return { label: "EOD", cls: "param-anchor-eod" };
+    if (src === "eod_clean_only") return { label: "EOD-ONLY", cls: "param-anchor-eod-only" };
     if (src === "poll") return { label: "POLL", cls: "param-anchor-poll" };
     if (src === "pac_seed") return { label: "SEED", cls: "param-anchor-seed" };
     return { label: "—", cls: "param-anchor-none" };
@@ -14484,7 +14485,15 @@ function _paramRenderTotalsStrip(slave) {
         <div class="param-totals-label">parcE Δ</div>
         <div class="param-totals-value">${fmt(t.parce_kwh)}</div>
       </div>
-      <div class="param-totals-cell param-totals-anchor" title="Source of today's HW counter baseline anchor — drives Etotal Δ and parcE Δ trustworthiness. CLEAN > EOD > POLL > SEED.">
+      <div class="param-totals-cell param-totals-anchor" title="Source of today's HW counter baseline anchor — drives Etotal Δ and parcE Δ trustworthiness.
+
+Trust ladder, best to worst:
+  CLEAN     — yesterday's clean close anchored today AND today's EOD snapshot is captured. Δ is fleet-comparable.
+  EOD       — yesterday's clean close anchored today; today's EOD snapshot pending (after the configured EOD hour).
+  EOD-ONLY  — late-created row from a dark-window capture; the day's morning baseline was never recorded so this day's own Δ is unknown. Used only as next day's anchor.
+  POLL      — today's baseline came from the first poll of the day, NOT yesterday's clean close. Etotal Δ undercounts today's energy by whatever the inverter produced before the gateway's first poll. Self-heals tomorrow if the gateway runs continuously through tonight's dark window.
+  SEED      — reserved for a future PAC-seeded recovery baseline (not currently written by any code path).
+  —         — no baseline row recorded for today yet.">
         <div class="param-totals-label">Anchor</div>
         <div class="param-totals-value"><span class="invclock-anchor-pill ${anchor.cls.replace("param-anchor-", "invclock-anchor-")}">${anchor.label}</span></div>
       </div>
@@ -19116,24 +19125,50 @@ function _invClockStatusBadge(state, ctx = {}) {
 }
 
 // Render the Etotal/parcE source pill that sits in the dedicated Anchor
-// column. 'eod_clean' = post-1800 anchored (best); 'poll' = mid-day capture
-// (fine); 'pac_seed' = synthesized on fresh boot (weakest); '' = no row
-// yet (unknown). The pill applies to BOTH Etotal and parcE values to the
-// left because they share the same baseline row.
+// column. The pill applies to BOTH Etotal and parcE values to the left
+// because they share the same baseline row.
+//
+// Trust ladder (best → worst):
+//   CLEAN          — eod_clean_present=1 — yesterday's clean close anchors
+//                    today AND today's EOD snapshot is captured. Best.
+//   EOD            — source='eod_clean' — yesterday's close anchored today;
+//                    today's EOD snapshot will roll after the configured
+//                    EOD hour. Δ is fleet-comparable.
+//   EOD-ONLY (v2.10.x) — source='eod_clean_only' — row created late by a
+//                    dark-window capture; morning baseline was never
+//                    recorded. The day's own Δ is unknown but the row
+//                    serves as next day's anchor. Visible at most once per
+//                    boundary; self-heals to EOD/CLEAN tomorrow.
+//   POLL           — source='poll' — today's baseline came from the first
+//                    poll of the day, NOT yesterday's clean close. Etotal
+//                    Δ undercounts today's energy by whatever the inverter
+//                    produced before the gateway's first poll. Self-heals
+//                    tomorrow if the gateway runs through tonight's dark
+//                    window. The retroactive upgrade in db.js can promote
+//                    this to EOD same-day if yesterday's eod_clean lands
+//                    via the dark-window capture.
+//   SEED           — source='pac_seed' — RESERVED for future use. The
+//                    v2.9.0 design left this slot for a PAC-seeded
+//                    recovery baseline; no code path currently writes it.
+//   —              — no baseline row recorded for today yet (will populate
+//                    on next poll inside the solar window).
 function _invClockBaselineSourcePill(state) {
   const src = String(state?.baseline_source || "").toLowerCase();
   const eodClean = Number(state?.eod_clean_present || 0) === 1;
   if (eodClean) {
-    return `<span class="invclock-anchor-pill invclock-anchor-clean" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot, and today's EOD snapshot has been captured. Highest-trust anchor.">CLEAN</span>`;
+    return `<span class="invclock-anchor-pill invclock-anchor-clean" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot, AND today's EOD snapshot has been captured. Highest-trust anchor — Δ is fleet-comparable.">CLEAN</span>`;
   }
   if (src === "eod_clean") {
-    return `<span class="invclock-anchor-pill invclock-anchor-eod" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot. Today's snapshot will roll after the configured EOD hour.">EOD</span>`;
+    return `<span class="invclock-anchor-pill invclock-anchor-eod" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot. Today's snapshot will roll after the configured EOD hour. Δ is fleet-comparable.">EOD</span>`;
+  }
+  if (src === "eod_clean_only") {
+    return `<span class="invclock-anchor-pill invclock-anchor-eod-only" title="Late-created row — the dark-window capture filled in the eod_clean snapshot but the morning baseline was never recorded (gateway started post-midnight, fresh install, etc.). This row's own day Δ is unknown and exports blank for that day, but it can still anchor TOMORROW. Self-heals to EOD/CLEAN tomorrow.">EOD-ONLY</span>`;
   }
   if (src === "poll") {
-    return `<span class="invclock-anchor-pill invclock-anchor-poll" title="Today's baseline captured from the first poll after gateway boot — fine, but not anchored to yesterday's clean close.">POLL</span>`;
+    return `<span class="invclock-anchor-pill invclock-anchor-poll" title="Today's baseline came from the first poll of the day, NOT yesterday's clean close. Etotal Δ undercounts today's energy by whatever the inverter produced before the gateway's first poll. PAC-integrated Total stays authoritative. Self-heals tomorrow if the gateway runs through tonight's dark window — and same-day if today's dark-window capture supplies yesterday's eod_clean (retroactive upgrade).">POLL</span>`;
   }
   if (src === "pac_seed") {
-    return `<span class="invclock-anchor-pill invclock-anchor-seed" title="Today's baseline synthesized from PAC-integration on a fresh boot. Weakest anchor; recovers as soon as the next clean read lands.">SEED</span>`;
+    return `<span class="invclock-anchor-pill invclock-anchor-seed" title="RESERVED — the v2.9.0 design left this slot for a PAC-seeded recovery baseline. No code path currently writes source='pac_seed'; this branch is forward-compat only.">SEED</span>`;
   }
   return `<span class="invclock-anchor-pill invclock-anchor-none" title="No baseline row recorded for today yet. Will populate on next poll inside the solar window.">—</span>`;
 }

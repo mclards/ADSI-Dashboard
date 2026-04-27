@@ -38,7 +38,15 @@
  *
  * Track Alarms is not exposed by the standard FC04 register block; we
  * always store 0 to keep the column count matching ISM's grid + export.
+ *
+ * Temp_C is also blank by design — services/inverter_engine.py emits
+ * `temp_c: None` until the standard register carrying inverter heatsink
+ * temperature is identified. The column exists in inverter_5min_param so
+ * a future poll-side change will populate it without a schema migration.
+ * See the FIXME v2.11 block in inverter_engine.py read_fast_async().
  */
+
+const { computeSlotCoverage } = require("./dailyAggregatorCoverage");
 
 const FLUSH_GRACE_MS = 30_000;          // reap a bucket 30s after its slot ended
 const REAP_INTERVAL_MS = 30_000;        // run the reaper every 30s
@@ -520,6 +528,57 @@ function getStats() {
   };
 }
 
+// ─── Slot coverage report (gap detection for the operator) ────────────────
+//
+// Returns the same shape as `computeSlotCoverage()` plus identifying
+// (inverter_ip, slave, date_local) fields, so the Daily Data Export and
+// the GET /api/params/:inv/:slave/coverage/:date endpoint can show
+// "X of Y slots captured today" + a list of missing HH:MM ranges.
+//
+// Pure math lives in dailyAggregatorCoverage.js — this wrapper just
+// resolves the present-slot list from SQLite and the solar window from
+// settings.
+
+function getSlotCoverage(inverterIp, slave, dateLocal) {
+  if (!_db) throw new Error("dailyAggregator.getSlotCoverage: not initialized");
+  const ip = String(inverterIp || "").trim();
+  const sl = Number(slave);
+  const day = String(dateLocal || "").trim();
+  if (!ip)                        throw new Error("inverter_ip is required");
+  if (!Number.isFinite(sl) || sl <= 0) throw new Error("slave must be a positive integer");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("date_local must be YYYY-MM-DD");
+
+  let presentSlots = [];
+  try {
+    const rows = _db
+      .prepare(`
+        SELECT slot_index FROM inverter_5min_param
+         WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+           AND in_solar_window = 1
+      `)
+      .all(ip, sl, day);
+    presentSlots = rows.map((r) => Number(r.slot_index)).filter((n) => Number.isFinite(n));
+  } catch (err) {
+    console.warn("[dailyAgg] coverage query failed:", err?.message || err);
+  }
+
+  const report = computeSlotCoverage({
+    presentSlots,
+    solarWindowStartHour: _solarWindowStartHour(),
+    eodSnapshotHourLocal: _eodSnapshotHour(),
+    slotMinutes: SLOT_MIN,
+  });
+  return {
+    inverter_ip: ip,
+    slave: sl,
+    date_local: day,
+    solar_window_start_hour: _solarWindowStartHour(),
+    eod_snapshot_hour_local: _eodSnapshotHour(),
+    slot_minutes: SLOT_MIN,
+    ...report,
+  };
+}
+
 // ─── Retention pruner ──────────────────────────────────────────────────────
 
 function pruneRetention(retainDays) {
@@ -543,6 +602,7 @@ module.exports = {
   flushAndStop,
   getCurrentBucket,
   getStats,
+  getSlotCoverage,
   pruneRetention,
   // exposed for tests
   _internal: { buckets, reapedSlots, stats, _slotIndex, _formatDateLocal, _localParts, _isSolarWindow, _slotEndMs },

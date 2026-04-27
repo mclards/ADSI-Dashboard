@@ -1,12 +1,12 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.8.13`
+**Applies to:** ADSI Inverter Dashboard `v2.10.0-beta.2`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
 ---
 
-## Service documentation (v2.8.13+)
+## Service documentation (v2.10.0-beta.2+)
 
 Four Ingeteam reference PDFs ship with the installer under `docs/` and are
 also hosted on GitHub for in-app auto-download from the alarm drilldown:
@@ -223,7 +223,7 @@ The right-side navigation contains the main pages:
 - `Analytics`
 - `Forecast`
 - `Alarms`
-- `Energy`
+- `Parameters` (per-node 5-minute parameter log; renamed from `Energy` in v2.10.x)
 - `Audit`
 - `Report`
 - `Export`
@@ -868,44 +868,72 @@ Use this page for:
 
 ---
 
-## 6.5 Energy Page
+## 6.5 Parameters Page
 
-The `Energy` page focuses on interval production records.
+The `Parameters` page (renamed from `Energy` in v2.10.x) shows the per-node
+5-minute parameter log for a single inverter at a time. Each tab is one node
+on the picked inverter; rows are 5-minute snapshots of every electrical and
+operational reading the dashboard captures.
+
+This page replaces the legacy single-list Energy table. The underlying
+`energy_5min` and `inverter_5min` tables are untouched — Forecast, Analytics,
+Reports, and cloud replication continue to consume them as before — and a
+new `inverter_5min_param` table feeds this view via `dailyAggregator.js`.
 
 ### Controls
 
 | Control | Function |
 | --- | --- |
-| `Inverter` | Filter by inverter or all |
-| `Date` | Select day to review |
-| `Resolution` | Current implementation uses `5-Minute` resolution |
-| `Load Records` | Loads interval energy data |
+| `Inverter` | Pick which inverter (1..N) to view. The page is blank until an inverter is selected. |
+| `Date` | Day to load. **Today** streams live 5-minute samples; **past dates** load from history. |
+| Mode badge | Appears next to the date picker: shows `LIVE` while today's slots are still streaming, and `HISTORY` once a past date is loaded. |
+| Solar-window indicator | Right-side badge — `Solar window: HH:MM–HH:MM` — confirms which slots are clipped by the configured solar window. |
+| `Refresh` | Re-fetch the selected day's data without changing the date. |
+| Row count | Right-side counter — total slots loaded across all node tabs. |
 
-### Energy KPI Tiles
+### Tab Layout
 
-| Tile | Meaning |
-| --- | --- |
-| `Date Total` | Total daily energy |
-| `Average per Interval` | Mean energy per recorded interval |
-| `Peak Interval` | Highest recorded interval value |
-| `Reporting Inverters` | Count of inverters with records |
-| `Latest Interval End` | End time of the latest interval shown |
+- One tab per configured node on the picked inverter — tabs are built from
+  the IP Configuration `units[invId]` map, so disabled or de-configured
+  nodes never appear.
+- Each tab has its own scrolling table of 5-minute slots. Switching tabs
+  does not re-fetch — all data for the inverter is loaded once per refresh.
 
-Operational note:
+### Per-Node Parameter Columns
 
-- when **today's date** is selected, all KPI tiles update automatically on each server push alongside the header `TODAY MWh` — no manual reload is needed
-- for past dates, records are loaded on demand by pressing `Load Records`
-
-### Energy Table Columns
+Each tab shows ISM-compatible columns at 5-minute granularity:
 
 | Column | Meaning |
 | --- | --- |
-| `Date` | Calendar date |
-| `Interval End` | End of the recorded interval |
-| `Inverter` | Inverter identifier |
-| `Interval Energy (MWh)` | Energy produced during that interval |
+| `Slot End` | End of the 5-minute slot (HH:MM, plant-local) |
+| `Pdc / Vdc / Idc` | DC string power, voltage, current |
+| `Vac1 / Vac2 / Vac3` | AC line-to-neutral voltages, three phases |
+| `Iac1 / Iac2 / Iac3` | AC line currents, three phases |
+| `Pac` | AC active power output |
+| `CosΦ` | Power factor at the AC terminals |
+| `Freq` | AC line frequency |
+| `parcE` | Partial-energy hardware counter snapshot at slot end |
+| `Alarm` | Decoded alarm hex active during the slot (blank if none) |
+| `Temp` | Internal heatsink temperature. **Blank by design in v2.10.x** — see §6.8.2 for the road-to-resolution. The column is reserved so a future firmware register decode will populate it without a schema change. |
 
-Use this page for detailed production verification and interval-level validation.
+### Operational Notes
+
+- **Live behavior** — when **today's date** is selected, the active node's
+  table appends a new row at every 5-minute boundary; no manual reload is
+  needed. The mode badge shows `LIVE` and the row count ticks up.
+- **Past-date behavior** — past dates load on the first selection and stay
+  cached until you change the inverter, change the date, or press
+  `Refresh`. The mode badge shows `HISTORY`.
+- **Solar-window clipping** — slots outside the configured window are
+  automatically suppressed. To inspect overnight diagnostic rows, change
+  the solar window in `Settings → Plant Configuration`.
+- **Day rollover** — at local midnight the page resets the date to the new
+  day and clears the live buffer; an in-flight fetch from the previous day
+  is dropped via a request-id race guard.
+
+Use this page for per-node electrical verification, alarm correlation
+against parameter trends, and interval-level validation. For a workbook-
+style export of the same data see **§6.8.2 Daily Data Export**.
 
 ---
 
@@ -1010,11 +1038,165 @@ The `Export` page provides dedicated export packages for common operational reco
 | Package | Inputs | Output Use |
 | --- | --- | --- |
 | `Alarm History Export` | inverter, date, minimum alarm duration, format | Formal alarm records |
-| `Energy Summary Export` | inverter, date, format | Production summary and performance review |
+| `Energy Summary Export` | inverter, date, format, optional `Etotal` / `parcE` columns | Production summary, hardware-counter reconciliation |
+| `Daily Data Export` | inverter, date | ISM-compatible per-node 5-minute parameter workbook |
 | `Day-Ahead Comparison Export` | date, resolution, format | Forecast-versus-actual comparison |
 | `Operational Data Export` | inverter, date, interval, format | Detailed engineering or troubleshooting data |
 | `Operator Audit Export` | inverter, date, format | Command accountability records |
 | `Daily Performance Report` | from date, to date, format | Shift, management, or archival reporting |
+
+#### 6.8.1 Energy Summary — Hardware Counter Columns
+
+The `Energy Summary Export` adds two reconciliation columns when the operator
+enables them:
+
+| Column | Source | Notes |
+| --- | --- | --- |
+| `Etotal_kWh` | Lifetime hardware kWh counter (Modbus regs 0–1) at slot end | Daily delta = current snapshot − today's baseline |
+| `parcE_kWh` | Partial-energy hardware counter (Modbus regs 58–59) | Same delta rule |
+| `Counter_Source` | `eod_clean`, `poll`, `pac_seed`, or blank | Which baseline anchor was used |
+| `Etotal_Quarantined` / `Quarantine_Reason` | Set when the snapshot fell outside the sanity gate | Clamps protect against parser hiccups |
+
+Hardening rules (v2.10.x):
+
+- **Today** — delta is taken against today's baseline regardless of source
+  (`eod_clean`, `poll`, or `pac_seed`); for partial-day starts the delta
+  represents "energy since polling began", which lines up with the
+  PAC-integrated `Total_MWh` on the same row.
+- **Today — fallback** — if today's baseline row is missing, yesterday's
+  `eod_clean` snapshot is used as the anchor instead of leaving the column
+  blank.
+- **Past day** — same-day `eod_clean` − baseline is preferred; if missing,
+  the next day's open is used as the close-out anchor.
+- **Sanity ceiling** — every accepted delta must be `≥ 0` and bounded by
+  9 000 kWh per unit per day. Anything outside that range is dropped to a
+  blank cell and the day total NaN-propagates so the operator notices.
+- **PAC remains authoritative.** Hardware counters are reconciliation
+  aids only — they never overwrite the running PAC integration.
+
+#### 6.8.2 Daily Data Export
+
+The `Daily Data Export` produces a per-inverter Excel workbook with one
+sheet per configured node — the same layout the ISM vendor software uses
+so historical data can be cross-referenced.
+
+| Field | Function |
+| --- | --- |
+| `Inverter` | Pick the inverter to export. |
+| `Date` | Date to export. **Today is locked** until the dashboard reaches the End-of-Day snapshot hour (`Settings → Plant Configuration → Solar Window`). Until then only past dates may be exported (HTTP 423 returned otherwise). |
+| `Export Daily Data` | Streams the workbook directly to disk via `ExcelJS.WorkbookWriter`. |
+| `Cancel` | Cancels an in-flight build. |
+
+Workbook structure:
+
+- One workbook per inverter, filename in plant-standard format.
+- One sheet per configured node (sheets named `Node 1`, `Node 2`, …).
+- Each sheet uses the ISM-compatible column order (`Pdc`, `Vdc`, `Idc`,
+  `Vac1..3`, `Iac1..3`, `Pac`, `CosΦ`, `Freq`, `parcE`, `Alarm`, `Temp`).
+- Slots are clipped to the configured solar window so dawn/dusk noise is
+  excluded.
+
+Operational notes:
+
+- The export reads from the new `inverter_5min_param` table populated by
+  `dailyAggregator.js` — it does **not** disturb live polling.
+- The today-lock prevents partially-collected days from being exported as
+  if they were finalized; the unlock fires alongside the same EOD-clean
+  snapshot that anchors the next day's baseline.
+- Streaming output keeps memory bounded for plants with many nodes; the
+  cancel button safely stops the writer mid-stream.
+- Filename uses the standard project convention shared with every other
+  export: single-day pulls produce `DD-MM-YY Inverter N Daily Data.xlsx`,
+  date ranges produce `DD-MM-YY-DD-MM-YY Inverter N Daily Data.xlsx`.
+
+Column-level notes:
+
+- The `Temp (°C)` column is **blank by design in v2.10.x**. The schema
+  reserves the column so that a future firmware register decode will
+  populate it without a migration; today no Modbus FC04 register on
+  INGECON SUN exposes inverter heatsink temperature. See the FIXME v2.11
+  block in `services/inverter_engine.py` for the road-to-resolution.
+- The `Inv Alarms` column is rendered as the bitwise-OR of every alarm
+  bitmask seen during the slot, not the alarm at slot end — so a transient
+  fault that flickered for 30 seconds inside a 5-minute slot still appears
+  on the row. Use the Alarms page for episode-level resolution.
+
+#### Gap detection (v2.10.x)
+
+A partial day (one inverter offline for 30 min, gateway restart, etc.)
+will produce fewer rows than the configured solar window expects. To find
+out whether a date's export is complete BEFORE you ship the workbook,
+query the operator-facing slot-coverage endpoint:
+
+```
+GET /api/params/:inverter/:slave/coverage/:date
+```
+
+Response shape:
+
+```json
+{
+  "ok": true,
+  "inverter": 1,
+  "inverter_ip": "192.168.1.10",
+  "slave": 1,
+  "date_local": "2026-04-28",
+  "expected": 156,
+  "present": 150,
+  "missing": 6,
+  "coveragePct": 0.9615,
+  "missingSlots": [96, 97, 98, 99, 100, 101],
+  "missingRuns": [
+    { "startSlot": 96, "endSlot": 101, "startHHMM": "08:00", "endHHMM": "08:30" }
+  ],
+  "status": "partial",
+  "solar_window_start_hour": 5,
+  "eod_snapshot_hour_local": 18,
+  "slot_minutes": 5
+}
+```
+
+`status` is one of `complete` (all expected slots present), `partial`
+(some present, some missing), or `empty` (zero slots — gateway was down
+or the day is outside the configured solar window). Missing-slot ranges
+are rendered as plant-local `HH:MM` so operators can correlate against
+incident logs without converting slot indices by hand.
+
+The aggregator's drop-sample reasons are also surfaced on
+`GET /api/system/heartbeat` under `aggregator.samplesDropped*` and
+`aggregator.fieldClampCount` — useful to confirm whether missing slots
+were caused by inverter downtime, clock skew, or out-of-order frames.
+
+#### 6.8.3 Anchor source — HW counter trust ladder (v2.10.x)
+
+The `Counter_Source` column on the Energy Summary export and the `Anchor`
+pill on the Inverter Clocks → Per-Unit Counter Health table report which
+data source today's `etotal_baseline` and `parce_baseline` came from.
+This drives how trustworthy `Etotal Δ` / `parcE Δ` are for that day.
+
+| Pill | DB source | Meaning | Trust |
+| --- | --- | --- | --- |
+| `CLEAN` | `eod_clean` (and today's snapshot captured) | Yesterday's clean close anchored today **and** today's EOD snapshot has been captured (post-EOD hour). | ★★★★ Best — Δ is fleet-comparable |
+| `EOD` | `eod_clean` | Yesterday's clean close anchored today; today's EOD snapshot pending (will fire after the configured EOD hour). | ★★★ Δ is fleet-comparable |
+| `EOD-ONLY` | `eod_clean_only` | Late-created row from a dark-window capture: the day's morning baseline was never recorded (gateway started post-midnight, fresh install, etc.). The day's own Δ is unknown — the export blanks the HW columns for that day — but the row anchors **tomorrow's** baseline. Self-heals to EOD/CLEAN tomorrow. | ★ Same-day Δ unknown |
+| `POLL` | `poll` | Today's baseline came from the first poll of the day, **not** yesterday's clean close. Etotal Δ undercounts today's energy by whatever the inverter produced before the gateway's first poll. PAC-integrated `Total_MWh` stays authoritative. | ★★ Δ undercounts |
+| `SEED` | `pac_seed` | Reserved slot from the v2.9.0 design. No code path currently writes `pac_seed`; the renderer keeps the branch for forward compatibility. | n/a (unused) |
+| `—` | (empty) | No baseline row recorded for today yet — will populate on the next poll inside the solar window. | n/a |
+
+**Self-healing rules** (v2.10.x):
+
+- The dark-window snapshot capture now uses `INSERT-or-UPDATE` (was
+  `UPDATE-only`), so it can create yesterday's row when missing — fixes
+  the silent failure mode where a fresh-boot gateway lost yesterday's
+  close forever even though it had the data.
+- After every successful eod_clean capture, the system re-evaluates
+  today's row: if today is `POLL` and yesterday's eod_clean is now
+  available, today's baseline is rewritten in-place to `eod_clean` and
+  re-anchored to yesterday's true close. Operators see the pill flip
+  from `POLL` to `EOD` within seconds.
+- Day-total `Etotal_MWh` / `parcE_MWh` columns NaN-propagate (blank)
+  for `EOD-ONLY` days so partial-coverage exports don't silently report
+  0 kWh for a day that was unmeasured — the operator sees the gap.
 
 ### Common Export Behavior
 
@@ -1244,7 +1426,100 @@ Operational note:
 - Do not power off the workstation or relaunch the app manually while the restart/install handoff is in progress.
 - After restart, wait for the first local poll cycle before relying on fresh `TODAY MWh` or gateway-only forecast actions.
 
-### 6.9.7 Cloud Backup & Restore
+### 6.9.7 Stop Reasons (v2.10.x)
+
+The `Stop Reasons` settings card surfaces the per-node `StopReason`
+diagnostic each Ingeteam INGECON inverter records when it stops or trips.
+The dashboard reads this snapshot through a vendor-FC `0x71` SCOPE peek
+(transparent across both the comm-board and EKI-1222-BE gateway path) and
+persists it to the `inverter_stop_reasons` and `inverter_stop_histogram`
+tables.
+
+The card has two tabs:
+
+#### Captured Snapshots
+
+| Control | Function |
+| --- | --- |
+| `Inverter` | Pick which inverter to inspect. |
+| `Refresh now` | Reads the StopReason snapshot for every node on the picked inverter. Bulk-auth is **not** required for this read-only peek (v2.10.x). |
+| Snapshot table | One row per node with timestamp, decoded `DebugDesc`, raw fingerprint, and the originating alarm transition (when present). |
+
+Auto-capture (always on):
+
+- The dashboard automatically captures a snapshot whenever an alarm
+  transition is detected on a node.
+- A 500 ms delay separates the alarm event from the FC `0x71` read so the
+  inverter has time to stage its DebugDesc.
+- A 30-second cooldown per `(inverter, node)` prevents thrashing during
+  alarm storms.
+- Each captured row links back to its `alarm_id` via the
+  `alarms.stop_reason_id` foreign key, so the alarm drilldown panel can
+  pull the contextual stop reason without a second read.
+
+#### Lifetime Counters
+
+| Control | Function |
+| --- | --- |
+| `Reload histogram` | Reloads the cached `ARRAYHISTMOTPARO` lifetime motive counters (30 stop motives plus `TOTAL`). |
+| Histogram table | Sorted bar view of how many times each motive has been recorded against the picked inverter. |
+
+Remote-mode behavior:
+
+- Captured snapshots and histograms mirror from the gateway as part of
+  normal replication.
+- `Refresh now` is disabled when running from a remote workstation
+  because the FC `0x71` read must execute on the gateway-side network.
+
+### 6.9.8 Serial Number Setting (v2.10.x)
+
+The `Serial Number Setting` card mirrors ISM's `frmSetSerial` flow so the
+dashboard can read, edit, and write inverter serial numbers without
+plugging in the vendor laptop.
+
+The card has two tabs:
+
+#### Read / Edit / Send
+
+| Control | Function |
+| --- | --- |
+| `Inverter` | Pick the inverter (controller) to operate on. |
+| `Slave` | Modbus slave id (1..4) on the daisy chain. `All nodes` reads every configured slave at once and exposes a per-row `Send` action. |
+| `Format` | `Motorola (12)` for FreescaleDSP56F firmware (12 ASCII bytes) or `Texas TI (32)` for TexasTMS320F firmware (32 ASCII bytes). |
+| `Read` | Issues FC11 `Report Slave ID` and shows the current serial, model, and firmware version. The successful read **mints a 5-minute session token** required by `Send`. |
+| `New serial` | Candidate serial. Length is enforced per format and only ASCII printable characters are accepted. |
+| `Verify Serial Number to send` | Default-on. Before writing, scans every reachable `(inverter, slave)` pair via FC11 in parallel and rejects the candidate if it is already in use elsewhere on the fleet. The fleet scan honors a 5-minute cache so repeated reads do not stress the bus. |
+| `Send` | Two-frame write: UNLOCK (`0xFFFA = 0x0065, 0x07A7`) → WRITE (`0x9C74`) → readback verify. Bulk-auth is required, plus the active session token from a prior `Read`. |
+| Recent serial-number changes | Audit table of the last `serial_change_log` entries — operator, target, candidate, outcome, reason on failure. |
+
+Operational rules:
+
+- The unlock magic and the FC16 write target were decoded byte-for-byte
+  from the vendor IL bytecode and are **identical to ISM's writer** — the
+  dashboard write is indistinguishable on the wire.
+- A duplicate serial blocks the write before the unlock frame is sent;
+  the operator can either pick a different candidate or open the override
+  dialog (gated by `topology` auth) when the duplicate is intentional
+  (e.g. RMA replacement).
+
+#### Plant Serial Map
+
+| Control | Function |
+| --- | --- |
+| `Scan plant` | Reads every `(inverter, slave)` pair via FC11 in parallel. Bulk-auth required because this drives traffic on the shared bus. |
+| `Bypass 5-min cache` | When checked, ignores the cache and re-reads every inverter from the wire. |
+| `Show cached map` | Renders the last cached fleet map without triggering any new reads (works in remote mode). |
+| Fleet table | One row per `(inverter, slave)` with current serial, model, firmware, and a duplicate-detection badge. |
+
+Remote-mode behavior:
+
+- The audit log mirrors from the gateway so remote operators can review
+  past changes.
+- `Read` and `Send` are disabled when running from a remote workstation
+  because the FC11 / FC16 transactions must execute on the gateway-side
+  network.
+
+### 6.9.9 Cloud Backup & Restore
 
 #### Provider Access
 

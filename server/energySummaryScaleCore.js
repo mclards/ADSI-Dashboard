@@ -41,8 +41,10 @@ function applyInverterScale({
   let scaledSubtotalMwh = 0;
   let dayEtotalKwh = 0;
   let dayParceKwh = 0;
-  let dayEtotalValid = true;
-  let dayParceValid = true;
+  let dayEtotalUnitsValid = 0;   // count of units that contributed to the sum
+  let dayParceUnitsValid = 0;
+  let dayEtotalUnitsTotal = 0;
+  let dayParceUnitsTotal = 0;
 
   const scaledRows = (Array.isArray(detailRows) ? detailRows : []).map((row) => {
     const rawEnergyKwh = Math.max(0, Number(row?.rawEnergyKwh) || 0);
@@ -51,10 +53,16 @@ function applyInverterScale({
 
     const eValid = Number.isFinite(row?.rawEtotalKwh);
     const pValid = Number.isFinite(row?.rawParceKwh);
-    if (eValid) dayEtotalKwh += Number(row.rawEtotalKwh);
-    else dayEtotalValid = false;
-    if (pValid) dayParceKwh += Number(row.rawParceKwh);
-    else dayParceValid = false;
+    dayEtotalUnitsTotal += 1;
+    dayParceUnitsTotal += 1;
+    if (eValid) {
+      dayEtotalKwh += Number(row.rawEtotalKwh);
+      dayEtotalUnitsValid += 1;
+    }
+    if (pValid) {
+      dayParceKwh += Number(row.rawParceKwh);
+      dayParceUnitsValid += 1;
+    }
 
     return {
       ...row,
@@ -75,8 +83,16 @@ function applyInverterScale({
     subtotalMwh: Number(subtotalMwh.toFixed(6)),
     dayEtotalKwh,
     dayParceKwh,
-    dayEtotalValid,
-    dayParceValid,
+    // v2.10.x — graceful degradation. Day-total Etotal/parcE used to NaN-
+    // propagate when ANY single unit was invalid; that left an entire day's
+    // export with both HW columns blank because of one bad node. We now sum
+    // whatever IS valid and surface the partial-coverage status separately
+    // so the operator can spot incomplete days at a glance without losing
+    // the sum that DID compute.
+    dayEtotalValid: dayEtotalUnitsTotal > 0 && dayEtotalUnitsValid > 0,
+    dayParceValid:  dayParceUnitsTotal  > 0 && dayParceUnitsValid  > 0,
+    dayEtotalCoverage: { valid: dayEtotalUnitsValid, total: dayEtotalUnitsTotal },
+    dayParceCoverage:  { valid: dayParceUnitsValid,  total: dayParceUnitsTotal  },
   };
 }
 

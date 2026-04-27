@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.8.13</title>
+<title>ADSI Inverter Dashboard — User Guide v2.10.0-beta.2</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -1017,10 +1017,11 @@
     <a href="#s8"><span class="toc-num">8</span> Forecast Page</a>
     <a href="#s9"><span class="toc-num">9</span> Forecast Performance Monitor</a>
     <a href="#s10"><span class="toc-num">10</span> Alarms Page</a>
-    <a href="#s11"><span class="toc-num">11</span> Energy Page</a>
+    <a href="#s11"><span class="toc-num">11</span> Parameters Page</a>
     <a href="#s12"><span class="toc-num">12</span> Audit Page</a>
     <a href="#s13"><span class="toc-num">13</span> Report Page</a>
     <a href="#s14"><span class="toc-num">14</span> Export Page</a>
+    <a href="#sStopSerial"><span class="toc-num">14a</span> Stop Reasons &amp; Serial Number</a>
     <a href="#sCam"><span class="toc-num">15</span> Camera Viewer</a>
     <a href="#s15"><span class="toc-num">16</span> Settings</a>
     <a href="#s16"><span class="toc-num">17</span> Operating Modes</a>
@@ -1296,11 +1297,22 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 11. ENERGY -->
+<!-- 11. PARAMETERS -->
 <section id="s11">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Energy Page</h2></div>
-  <p>5-minute interval energy records by inverter. Auto-refreshes when today is selected.</p>
-  <table><thead><tr><th>Tile</th><th>Meaning</th></tr></thead><tbody><tr><td>Date Total</td><td>Total MWh across all inverters</td></tr><tr><td>Average/Interval</td><td>Mean MWh per 5-min bucket</td></tr><tr><td>Peak Interval</td><td>Highest value with timestamp</td></tr><tr><td>Reporting Inverters</td><td>Count with data</td></tr><tr><td>Latest Interval End</td><td>Most recent interval close</td></tr></tbody></table>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Parameters Page</h2></div>
+  <p>Per-node 5-minute parameter log for a single inverter at a time. Each tab on the page is one node; rows are 5-minute snapshots of every electrical and operational reading the dashboard captures. Renamed from <b>Energy</b> in v2.10.x &mdash; the underlying <code>energy_5min</code> / <code>inverter_5min</code> tables are untouched, while a new <code>inverter_5min_param</code> table feeds this view via <code>dailyAggregator.js</code>.</p>
+  <h3>Controls</h3>
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody>
+    <tr><td>Inverter</td><td>Pick which inverter to view. The page is blank until an inverter is selected.</td></tr>
+    <tr><td>Date</td><td>Today streams live 5-minute samples; past dates load from history.</td></tr>
+    <tr><td>Mode badge</td><td><code>LIVE</code> while today's slots are streaming; <code>HISTORY</code> once a past date is loaded.</td></tr>
+    <tr><td>Solar window</td><td>Right-side badge <code>Solar window: HH:MM&ndash;HH:MM</code> showing which slots are clipped.</td></tr>
+    <tr><td>Refresh</td><td>Re-fetch the selected day without changing the date.</td></tr>
+  </tbody></table>
+  <h3>Per-Node Columns (ISM-compatible)</h3>
+  <p><code>Pdc</code> &middot; <code>Vdc</code> &middot; <code>Idc</code> &middot; <code>Vac1..3</code> &middot; <code>Iac1..3</code> &middot; <code>Pac</code> &middot; <code>Cos&Phi;</code> &middot; <code>Freq</code> &middot; <code>parcE</code> (partial-energy hardware counter snapshot at slot end) &middot; <code>Alarm</code> (decoded hex active during the slot) &middot; <code>Temp</code> (when register mapping is published).</p>
+  <div class="info-card tip"><div class="info-card-label">Live behavior</div>For today's date the active node's table appends a new row at every 5-minute boundary; row count ticks up automatically. For past dates the page caches the data until you change the inverter, change the date, or press Refresh.</div>
+  <p>For a workbook-style export of the same data, see the Daily Data Export card on the Export page.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1327,13 +1339,71 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v12M7 11l4 4 4-4" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Export Page</h2></div>
   <div class="feat-grid">
     <div class="feat-item"><h4>Alarm History</h4><p>Records with code, severity, duration, ACK state.</p></div>
-    <div class="feat-item"><h4>Energy Summary</h4><p>Daily energy by inverter and reporting node.</p></div>
+    <div class="feat-item"><h4>Energy Summary</h4><p>Daily energy by inverter and reporting node, with optional <code>Etotal_kWh</code> / <code>parcE_kWh</code> hardware-counter columns.</p></div>
+    <div class="feat-item"><h4>Daily Data <span style="color:#fbbf24;">(v2.10.x)</span></h4><p>Per-inverter Excel workbook, one sheet per node, ISM-compatible column order. Today is locked until the End-of-Day snapshot hour.</p></div>
     <div class="feat-item"><h4>Day-Ahead Comparison</h4><p>Forecast vs actual, standard and average table.</p></div>
     <div class="feat-item"><h4>Operational Data</h4><p>Interval-sampled inverter operating data.</p></div>
     <div class="feat-item"><h4>Operator Audit</h4><p>Command history with scope and result.</p></div>
     <div class="feat-item"><h4>Daily Performance</h4><p>Multi-day summary with availability and alarm counts.</p></div>
   </div>
   <ul><li>Exports written to configured export folder</li><li>Formats: Excel (.xlsx with styled headers) and CSV</li><li>Cancel button available during active exports</li><li>Result shows filename, size, and timestamp</li></ul>
+  <h3>Energy Summary &mdash; Hardware Counter Columns (v2.10.x)</h3>
+  <p>When the operator enables them, the Energy Summary export adds <code>Etotal_kWh</code> (lifetime hardware kWh counter at slot end) and <code>parcE_kWh</code> (partial-energy counter), plus <code>Counter_Source</code> (<code>eod_clean</code> / <code>poll</code> / <code>pac_seed</code>) and quarantine flags. Hardening rules:</p>
+  <ul>
+    <li><b>Today</b> &mdash; delta = current snapshot &minus; today's baseline regardless of source. Partial-day starts line up with PAC-integrated <code>Total_MWh</code> on the same row.</li>
+    <li><b>Today fallback</b> &mdash; if today's baseline row is missing, yesterday's <code>eod_clean</code> snapshot is used as the anchor.</li>
+    <li><b>Past day</b> &mdash; same-day <code>eod_clean</code> &minus; baseline preferred; if missing, the next day's open is used as the close-out anchor.</li>
+    <li><b>Sanity ceiling</b> &mdash; every accepted delta must be &ge; 0 and bounded by 9 000 kWh per unit per day. Outliers blank out and the day total NaN-propagates so the operator notices.</li>
+  </ul>
+  <div class="info-card tip"><div class="info-card-label">PAC remains authoritative</div>Hardware counters are reconciliation aids only &mdash; they never overwrite the running PAC integration. See <code>server/hwCounterDeltaCore.js</code> + <code>server/tests/hwCounterDeltaCore.test.js</code> for the locked rules.</div>
+  <h3>Daily Data Export (v2.10.x)</h3>
+  <p>Per-inverter workbook with one sheet per configured node, in ISM-compatible column order so historical data can be cross-referenced with the vendor software.</p>
+  <ul>
+    <li><b>Today is locked</b> until the dashboard reaches the End-of-Day snapshot hour (HTTP 423 returned otherwise). Until then only past dates may be exported.</li>
+    <li>Sheets named <code>Node 1</code>, <code>Node 2</code>, &hellip; built from the IP Configuration <code>units[invId]</code> map.</li>
+    <li>Slots are clipped to the configured solar window so dawn/dusk noise is excluded.</li>
+    <li>Streaming output via <code>ExcelJS.WorkbookWriter</code> keeps memory bounded; cancel safely stops the writer mid-stream.</li>
+    <li>Filename format matches every other export: <code>DD-MM-YY Inverter N Daily Data.xlsx</code> (single day) or <code>DD-MM-YY-DD-MM-YY Inverter N Daily Data.xlsx</code> (range).</li>
+    <li>The <code>Temp (&deg;C)</code> column is <b>blank by design in v2.10.x</b> &mdash; INGECON SUN does not expose inverter heatsink temperature on the standard FC04 register block. Schema reserves the column so a future register decode populates it without a migration.</li>
+  </ul>
+  <h3>Gap Detection (v2.10.x)</h3>
+  <p>Operators can confirm a date's export is complete <i>before</i> shipping the workbook by querying:</p>
+  <pre><code>GET /api/params/:inverter/:slave/coverage/:date</code></pre>
+  <p>The response reports expected vs present slots, the missing-slot list as plant-local <code>HH:MM</code> ranges, and a <code>status</code> of <code>complete</code> / <code>partial</code> / <code>empty</code>. Aggregator drop-sample reasons (<code>samplesDroppedOffline</code>, <code>samplesDroppedStaleTs</code>, <code>fieldClampCount</code>, &hellip;) are also surfaced under <code>aggregator.*</code> on <code>GET /api/system/heartbeat</code>, so a partial day can be traced back to inverter downtime, clock skew, or out-of-order frames.</p>
+  <h3>Anchor source &mdash; HW counter trust ladder (v2.10.x)</h3>
+  <p>The <code>Counter_Source</code> column on the Energy Summary export and the <code>Anchor</code> pill on Inverter Clocks &rarr; Per-Unit Counter Health report which data source today's baseline came from.</p>
+  <table>
+    <thead><tr><th>Pill</th><th>DB source</th><th>Meaning</th><th>Trust</th></tr></thead>
+    <tbody>
+      <tr><td><b>CLEAN</b></td><td><code>eod_clean</code> + today's snapshot captured</td><td>Yesterday's clean close anchored today AND today's EOD snapshot has been captured.</td><td>&starf;&starf;&starf;&starf; Best</td></tr>
+      <tr><td><b>EOD</b></td><td><code>eod_clean</code></td><td>Yesterday's clean close anchored today; today's EOD snapshot pending after the configured EOD hour.</td><td>&starf;&starf;&starf; Comparable</td></tr>
+      <tr><td><b>EOD-ONLY</b></td><td><code>eod_clean_only</code></td><td>Late-created row from a dark-window capture &mdash; morning baseline unknown so this day's own &Delta; is unknown. Used as tomorrow's anchor only. Self-heals to EOD/CLEAN tomorrow.</td><td>&starf; Day &Delta; unknown</td></tr>
+      <tr><td><b>POLL</b></td><td><code>poll</code></td><td>Today's baseline came from the first poll of the day, NOT yesterday's clean close. Etotal &Delta; undercounts today's energy by whatever the inverter produced before the first poll. PAC-integrated Total stays authoritative.</td><td>&starf;&starf; &Delta; undercounts</td></tr>
+      <tr><td><b>SEED</b></td><td><code>pac_seed</code></td><td>Reserved slot from the v2.9.0 design; no code path currently writes it.</td><td>n/a (unused)</td></tr>
+    </tbody>
+  </table>
+  <div class="info-card tip"><div class="info-card-label">Self-healing (v2.10.x)</div>The dark-window snapshot capture now uses INSERT-or-UPDATE so a fresh-boot gateway no longer loses yesterday's close. Right after a successful eod_clean write, the system re-evaluates today's row: if today is <code>POLL</code> and yesterday's eod_clean is now available, today's baseline is rewritten in-place to <code>eod_clean</code> and re-anchored to yesterday's true close &mdash; the pill flips from POLL to EOD within seconds. Day-total HW columns NaN-propagate for <code>EOD-ONLY</code> days so partial-coverage exports never silently report 0 kWh.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
+</section>
+
+<!-- 14a. STOP REASONS + SERIAL NUMBER (v2.10.x Settings cards) -->
+<section id="sStopSerial">
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="3" stroke="#c084fc" stroke-width="1.8"/><path d="M8 11h6M11 8v6" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Stop Reasons &amp; Serial Number Setting (v2.10.x)</h2></div>
+  <p>Two new Settings cards expose vendor-FC diagnostics and writes that previously required the ISM laptop. Both surfaces auto-mirror in remote mode but execute their wire actions only on the gateway.</p>
+  <h3>Stop Reasons</h3>
+  <p>Per-node <code>StopReason</code> diagnostic captured via vendor FC <code>0x71</code> SCOPE peek. The card has two tabs:</p>
+  <ul>
+    <li><b>Captured Snapshots</b> &mdash; pick an inverter, hit <b>Refresh now</b> (read-only, no bulk-auth in v2.10.x). The dashboard also <b>auto-captures</b> a snapshot on every alarm transition (500 ms staging delay, 30-second per-node cooldown).</li>
+    <li><b>Lifetime Counters</b> &mdash; cached <code>ARRAYHISTMOTPARO</code> histogram of 30 stop motives plus <code>TOTAL</code>.</li>
+  </ul>
+  <p>Each captured row links back to its <code>alarm_id</code> via the <code>alarms.stop_reason_id</code> foreign key, so the alarm drilldown panel can pull the contextual stop reason without a second read.</p>
+  <h3>Serial Number Setting</h3>
+  <p>Mirrors ISM&apos;s <code>frmSetSerial</code> flow byte-for-byte. Two tabs:</p>
+  <ul>
+    <li><b>Read / Edit / Send</b> &mdash; FC11 <i>Report Slave ID</i> read mints a 5-minute session token. <i>Send</i> performs UNLOCK (<code>0xFFFA = 0x0065, 0x07A7</code>) &rarr; WRITE (<code>0x9C74</code>) &rarr; readback verify. Bulk-auth required, plus the active session token. <i>Verify Serial Number to send</i> (default-on) does a fleet-wide FC11 scan and rejects duplicates before the unlock frame.</li>
+    <li><b>Plant Serial Map</b> &mdash; parallel FC11 sweep across every <code>(inverter, slave)</code> with duplicate-detection badges. Honors a 5-minute cache; <i>Bypass cache</i> available.</li>
+  </ul>
+  <div class="info-card warn"><div class="info-card-label">Override gate</div>Duplicate serials block the write before unlock. The override dialog (gated by <i>topology</i> auth) exists for legitimate cases such as RMA replacements. Both Motorola (12 ASCII) and Texas TI (32 ASCII) firmware formats are supported.</div>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 

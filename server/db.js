@@ -10,6 +10,7 @@ const fs = require("fs");
 const os = require("os");
 const { getExplicitDataDir, getPortableDataRoot } = require("./runtimeEnvPaths");
 const { resolvedDbDir, getNewRoot, isMigrationComplete } = require("./storagePaths");
+const baselineUpgradeCore = require("./baselineUpgradeCore");
 
 const EXPLICIT_DATA_DIR = getExplicitDataDir();
 const PORTABLE_ROOT = getPortableDataRoot();
@@ -1330,6 +1331,11 @@ ensureColumn("inverter_counter_baseline", "eod_clean_pac_w",  "eod_clean_pac_w I
 // computes them from the day's first/last counter_state ticks.
 ensureColumn("daily_report", "kwh_total_etotal", "kwh_total_etotal REAL");
 ensureColumn("daily_report", "kwh_total_parce",  "kwh_total_parce REAL");
+// v2.10.x — parcE counter snapshot at the end of each 5-minute slot in the
+// PARAMETERS view. Lifetime-monotonic kWh; row-to-row delta is the slot's
+// actual energy (matches ISM "Partial Energy" semantics far more accurately
+// than a PAC-integrated estimate, which has ±2% averaging error).
+ensureColumn("inverter_5min_param", "parce_kwh", "parce_kwh REAL");
 // Forecast compare persistence (detailed provenance/error-memory basis).
 ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");
@@ -2184,16 +2190,54 @@ const stmts = {
       WHERE date_key=?
       ORDER BY inverter, unit`,
   ),
-  // v2.9.1 — Roll the post-1800H clean snapshot. Etotal/parcE are monotonic
-  // so we always overwrite with the latest values; pac_w stamp helps audit.
+  // v2.10.x — INSERT-or-UPDATE for the dark-window clean snapshot.
+  //
+  // Earlier versions used an UPDATE-only statement that silently affected
+  // 0 rows when the target day's row didn't exist. That left a hole in
+  // the trust ladder: a gateway that booted post-midnight (or had been
+  // off all of yesterday's dark window) never wrote yesterday's row, so
+  // today's first poll fell back to source='poll' with no path to
+  // recover. The new UPSERT creates the row when missing using `source =
+  // 'eod_clean_only'` to signal "morning baseline unknown — this row's
+  // own Δ is unrecoverable, but it can still anchor TOMORROW".
+  //
+  // The export path (server/hwCounterDeltaCore.js) explicitly NaN-
+  // propagates `eod_clean_only` rows so the day-total HW columns blank
+  // out instead of silently reporting 0 kWh.
   upsertEodClean: db.prepare(
+    `INSERT INTO inverter_counter_baseline
+       (inverter, unit, date_key,
+        etotal_baseline, parce_baseline, baseline_ts_ms, source,
+        etotal_eod_clean, parce_eod_clean,
+        eod_clean_ts_ms, eod_clean_pac_w,
+        updated_ts)
+     VALUES
+       (@inverter, @unit, @date_key,
+        @etotal_eod_clean, @parce_eod_clean, @eod_clean_ts_ms, 'eod_clean_only',
+        @etotal_eod_clean, @parce_eod_clean,
+        @eod_clean_ts_ms, @eod_clean_pac_w,
+        @now)
+     ON CONFLICT (inverter, unit, date_key) DO UPDATE SET
+        etotal_eod_clean = excluded.etotal_eod_clean,
+        parce_eod_clean  = excluded.parce_eod_clean,
+        eod_clean_ts_ms  = excluded.eod_clean_ts_ms,
+        eod_clean_pac_w  = excluded.eod_clean_pac_w,
+        updated_ts       = excluded.updated_ts`,
+  ),
+  // v2.10.x — Retroactive upgrade: rewrite today's `source='poll'` row to
+  // `source='eod_clean'` once yesterday's clean close becomes available.
+  // Anchors today's Etotal Δ to yesterday's actual close instead of the
+  // first-poll-of-the-day value (which under-reports today's energy by
+  // whatever the inverter produced before the gateway's first poll).
+  upgradeBaselineToEodClean: db.prepare(
     `UPDATE inverter_counter_baseline
-        SET etotal_eod_clean = @etotal_eod_clean,
-            parce_eod_clean  = @parce_eod_clean,
-            eod_clean_ts_ms  = @eod_clean_ts_ms,
-            eod_clean_pac_w  = @eod_clean_pac_w,
-            updated_ts       = @now
-      WHERE inverter=@inverter AND unit=@unit AND date_key=@date_key`,
+        SET etotal_baseline = @etotal_baseline,
+            parce_baseline  = @parce_baseline,
+            baseline_ts_ms  = @baseline_ts_ms,
+            source          = 'eod_clean',
+            updated_ts      = @now
+      WHERE inverter=@inverter AND unit=@unit AND date_key=@date_key
+        AND source = 'poll'`,
   ),
   selectBaselineEodClean: db.prepare(
     `SELECT inverter, unit, date_key, etotal_eod_clean, parce_eod_clean,
@@ -2499,19 +2543,38 @@ function persistCounterState(frame) {
           invalidateBaselineCache();
         }
 
-        // v2.9.1 hardening — roll-last EOD-clean snapshot during the FULL
-        // dark window (18:00–04:59 local). Etotal/parcE are monotonic so
-        // always-overwrite-within-window is correct; when PAC drops below
-        // the clean-floor (sunset / cloud / alarm) we stop updating, freezing
-        // the last clean values. Captures past midnight (00:00–04:59) are
-        // attributed back to the PRODUCTION DAY that opened the window
-        // (yesterday's date_key), not the calendar day they fall on, so the
-        // snapshot always lives on the row of the day it represents.
+        // v2.10.x — roll-last EOD-clean snapshot through the ENTIRE dark
+        // window (eodSnapshotHourLocal → solarWindowStartHour, e.g.
+        // 18:00–04:59 local). Etotal and parcE are MONOTONIC counters —
+        // they never decrease — so the latest reading we can take before
+        // the next production day starts is exactly the value we want
+        // to anchor tomorrow's baseline to.
+        //
+        // Gate change vs v2.9.1: we now capture while `pac_w < threshold`
+        // (the unit is idle, sun's down) instead of `pac_w >= threshold`.
+        // The old gate only fired during the brief sunset shoulder
+        // (~18:00–18:45) when the unit was still producing AND we were
+        // already past EOD; if the gateway booted after sunset (e.g.
+        // 21:20) every unit's snapshot was missed and the clean-anchor
+        // chain stayed broken until the next clean evening.
+        //
+        // The new gate keeps capturing every poll all night long until
+        // each unit's PAC re-emerges (sunrise). Per-unit, so units that
+        // wake up at slightly different times of morning each freeze
+        // their own snapshot at exactly the right moment.
+        //
+        // Captures past midnight (00:00–solarStart) are attributed back
+        // to the PRODUCTION DAY that opened the window (yesterday's
+        // date_key) so the snapshot always lives on the row of the day
+        // it represents.
         const eodHour = Math.max(
           0,
           Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18),
         );
-        const pacCleanThreshold = Math.max(
+        // Setting key is preserved for back-compat; semantically it is now
+        // the PAC wake threshold — capture stops once PAC climbs above it,
+        // because the unit has re-entered production for the next day.
+        const pacWakeThreshold = Math.max(
           0,
           Number(getSetting("eodPacCleanThresholdW", 50)) || 50,
         );
@@ -2521,6 +2584,7 @@ function persistCounterState(frame) {
         );
         const localHour = new Date(ts_ms).getHours();
         const inDarkWindow = localHour >= eodHour || localHour < solarStart;
+        const unitIsIdle = Number.isFinite(pac_w) && pac_w < pacWakeThreshold;
 
         // ── Timestamp accuracy guard ────────────────────────────────────
         // Reject the capture if the frame's timestamp is corrupt, in the
@@ -2538,7 +2602,7 @@ function persistCounterState(frame) {
           ts_ms - now <= TS_FUTURE_TOL_MS &&
           now - ts_ms <= TS_STALE_TOL_MS;
 
-        if (inDarkWindow && pac_w >= pacCleanThreshold && tsValid) {
+        if (inDarkWindow && unitIsIdle && tsValid) {
           // Date-key normalization: a capture at 02:00 belongs to the
           // production day that ENDED last evening, not the new calendar
           // day we're sitting in. Map (00:00–solarStart) back one day.
@@ -2546,32 +2610,67 @@ function persistCounterState(frame) {
             ? localDateStr(ts_ms - 86400000)
             : date_key;
 
-          // Monotonicity guard: existing snapshot present? Only overwrite
-          // when the new value is greater-or-equal. A regression (new <
-          // existing) signals an inverter rollover, replacement, or bus
-          // glitch — don't poison the snapshot. Etotal is the authoritative
-          // counter; parcE follows.
+          // Sanity / monotonicity / night-stability guards.
+          //
+          // Solar PV cannot increase Etotal at night — the unit is idle —
+          // so any large positive jump during the dark window is a false
+          // read (Modbus glitch, stale cached frame, register flip).
+          // We accept tiny growth (≤ NIGHT_GROWTH_TOL_KWH) to absorb the
+          // sunset shoulder when the gate first opens at eodSnapshotHour
+          // while the unit is still trickling 50–200 W; beyond that we
+          // refuse the update so the snapshot stays anchored to the most
+          // recent trustworthy poll.
+          //
+          // Sanity ceilings keep absolute garbage out — INGECON SUN
+          // counters wrap at well below 1e9 kWh in any plant we'll ever
+          // run, and a parcE > etotal pair is physically impossible.
+          const NIGHT_GROWTH_TOL_KWH = 5;
+          const COUNTER_ABSOLUTE_MAX_KWH = 1_000_000_000; // 1 PWh ceiling
+
           let shouldUpdate = true;
           let regressionReason = "";
-          try {
-            const existing = stmts.selectBaselineOne.get(
-              inverter, unit, productionDayKey,
-            );
-            const existingEtotal = Number(existing?.etotal_eod_clean || 0);
-            const existingTsMs = Number(existing?.eod_clean_ts_ms || 0);
-            if (existingEtotal > 0 && existingTsMs > 0) {
-              if (etotal_kwh < existingEtotal) {
-                shouldUpdate = false;
-                regressionReason = `etotal regressed ${existingEtotal}→${etotal_kwh}`;
-              } else if (ts_ms < existingTsMs) {
-                // Out-of-order frame (poller backlog catching up). The
-                // existing snapshot is more recent in wall-clock terms;
-                // don't replace newer data with older.
-                shouldUpdate = false;
-                regressionReason = `frame ts older than existing snapshot ts`;
+
+          if (!Number.isFinite(etotal_kwh) || !Number.isFinite(parce_kwh)) {
+            shouldUpdate = false;
+            regressionReason = `non-finite counter: etotal=${etotal_kwh} parce=${parce_kwh}`;
+          } else if (etotal_kwh <= 0) {
+            shouldUpdate = false;
+            regressionReason = `etotal must be > 0 at night, got ${etotal_kwh}`;
+          } else if (parce_kwh < 0) {
+            shouldUpdate = false;
+            regressionReason = `parcE negative: ${parce_kwh}`;
+          } else if (etotal_kwh > COUNTER_ABSOLUTE_MAX_KWH || parce_kwh > COUNTER_ABSOLUTE_MAX_KWH) {
+            shouldUpdate = false;
+            regressionReason = `counter exceeds sanity ceiling`;
+          } else {
+            try {
+              const existing = stmts.selectBaselineOne.get(
+                inverter, unit, productionDayKey,
+              );
+              const existingEtotal = Number(existing?.etotal_eod_clean || 0);
+              const existingTsMs = Number(existing?.eod_clean_ts_ms || 0);
+              if (existingEtotal > 0 && existingTsMs > 0) {
+                if (etotal_kwh < existingEtotal) {
+                  // Regression: new < existing. Inverter rollover, bus
+                  // glitch, or stale cached frame — don't poison.
+                  shouldUpdate = false;
+                  regressionReason = `etotal regressed ${existingEtotal}→${etotal_kwh}`;
+                } else if (etotal_kwh - existingEtotal > NIGHT_GROWTH_TOL_KWH) {
+                  // Night-time spike: at idle PAC the counter must not
+                  // jump by more than the sunset-shoulder tolerance. A
+                  // huge positive jump is a false reading.
+                  shouldUpdate = false;
+                  regressionReason = `night-time spike ${existingEtotal}→${etotal_kwh} (>${NIGHT_GROWTH_TOL_KWH} kWh)`;
+                } else if (ts_ms < existingTsMs) {
+                  // Out-of-order frame (poller backlog catching up). The
+                  // existing snapshot is more recent in wall-clock terms;
+                  // don't replace newer data with older.
+                  shouldUpdate = false;
+                  regressionReason = `frame ts older than existing snapshot ts`;
+                }
               }
-            }
-          } catch (_) { /* best-effort; fall through to write */ }
+            } catch (_) { /* best-effort; fall through to write */ }
+          }
 
           if (shouldUpdate) {
             stmts.upsertEodClean.run({
@@ -2584,13 +2683,66 @@ function persistCounterState(frame) {
               eod_clean_pac_w:  pac_w,
               now,
             });
+
+            // v2.10.x — Retroactive baseline upgrade.
+            //
+            // The eod_clean snapshot we just wrote may unblock today's
+            // baseline: if today's row exists with `source='poll'` (e.g.
+            // gateway booted post-midnight, first poll set today=poll
+            // because yesterday had no eod_clean), and the row we just
+            // wrote was YESTERDAY's eod_clean, rewrite today's baseline
+            // to anchor on the new yesterday close.
+            //
+            // Pure decision lives in server/baselineUpgradeCore.js so the
+            // logic can be regression-tested without spinning up SQLite.
+            try {
+              const todayKey = localDateStr(now);
+              if (productionDayKey !== todayKey) {
+                const todayRow = stmts.selectBaselineOne.get(
+                  inverter, unit, todayKey,
+                );
+                if (todayRow && String(todayRow.source || "").toLowerCase() === "poll") {
+                  const yesterdayKey = localDateStr(now - 86400000);
+                  if (productionDayKey === yesterdayKey) {
+                    const yPrev = stmts.selectBaselineOne.get(
+                      inverter, unit, yesterdayKey,
+                    );
+                    const decision = baselineUpgradeCore.shouldUpgradeBaselineToEodClean({
+                      todayRow,
+                      yesterdayRow: yPrev,
+                      currentEtotalKwh: etotal_kwh,
+                    });
+                    if (decision.upgrade) {
+                      stmts.upgradeBaselineToEodClean.run({
+                        inverter,
+                        unit,
+                        date_key: todayKey,
+                        etotal_baseline: decision.newBaseline.etotal,
+                        parce_baseline:  decision.newBaseline.parce,
+                        baseline_ts_ms:  decision.newBaseline.ts_ms,
+                        now,
+                      });
+                      invalidateBaselineCache();
+                      console.log(
+                        `[counter] baseline upgraded poll→eod_clean inv=${inverter} u=${unit} day=${todayKey}`,
+                      );
+                    }
+                  }
+                }
+              }
+            } catch (upgradeErr) {
+              console.warn(
+                `[counter] retroactive upgrade check failed inv=${inverter} u=${unit}: ` +
+                `${upgradeErr?.message || upgradeErr}`,
+              );
+            }
           } else if (regressionReason) {
             console.warn(
               `[counter] eod_clean SKIPPED inv=${inverter} u=${unit} ` +
               `day=${productionDayKey} (${regressionReason})`,
             );
           }
-        } else if (inDarkWindow && pac_w >= pacCleanThreshold && !tsValid) {
+        } else if (inDarkWindow && unitIsIdle && !tsValid) {
           // Frame met the time/PAC gate but timestamp failed sanity. Surface
           // it once-per-error so operators can chase the upstream cause.
           if (!_eodTsWarnedKeys.has(`${inverter}_${unit}`)) {

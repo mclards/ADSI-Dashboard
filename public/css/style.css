@@ -16954,6 +16954,67 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
+/* Etotal/parcE baseline anchor pill — reads at a glance whether the
+ * displayed counter values are anchored to a clean snapshot. The pill
+ * sits in its own column (Anchor) immediately right of parcE, so it
+ * doesn't need a left margin to clear an adjacent value. */
+.invclock-anchor-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.invclock-anchor-cell {
+  text-align: center;
+}
+/* Subtle right border at the END of each topical column group. The four
+ * groups are: identity (Inv/Unit) | clock (RTC/Drift) | counters
+ * (Etotal/parcE/Anchor) | overall status. This is what breaks the table
+ * into "scannable groups" instead of a wall of indistinguishable cells. */
+.invclock-scroll .data-table th.invclock-grp-end,
+.invclock-scroll .data-table td.invclock-grp-end {
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.invclock-anchor-clean {
+  background: color-mix(in srgb, var(--green) 22%, transparent);
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
+}
+.invclock-anchor-eod {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: color-mix(in srgb, var(--green) 90%, var(--text2));
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+}
+.invclock-anchor-poll {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 95%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+/* v2.10.x — EOD-ONLY: late-created row, weaker than EOD but better than
+ * POLL for tomorrow's anchor. Amber styling signals "transitional state". */
+.invclock-anchor-eod-only {
+  background: color-mix(in srgb, var(--orange) 12%, transparent);
+  color: color-mix(in srgb, var(--orange) 90%, var(--text));
+  border-color: color-mix(in srgb, var(--orange) 30%, var(--border));
+}
+.invclock-anchor-seed {
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+  color: var(--orange);
+  border-color: color-mix(in srgb, var(--orange) 40%, var(--border));
+}
+.invclock-anchor-none {
+  background: color-mix(in srgb, var(--surface2) 70%, transparent);
+  color: var(--text3);
+  border-color: var(--border);
+}
+
 .invclock-scroll {
   max-height: 360px;
   overflow: auto;
@@ -16962,22 +17023,30 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--surface) 92%, transparent);
 }
 .invclock-scroll .data-table {
-  width: 100%;
-  /* `border-collapse: separate` is required for `position: sticky` on
-   * <th> to work reliably across browsers — collapse breaks the sticky
-   * stacking context. Borders are then drawn on each cell explicitly. */
+  /* Size the table to its content so the columns sit tight together
+   * and the rightmost column hugs the data. `min-width: 100%` keeps the
+   * row backgrounds + borders extending across narrow scroll wrappers,
+   * while `width: max-content` prevents the browser from inflating any
+   * single column with leftover slack. The .invclock-scroll wrapper has
+   * `overflow: auto` so a wide table just gets a horizontal scrollbar.
+   * `border-collapse: separate` is required for `position: sticky` on
+   * <th> to work reliably across browsers. */
+  width: max-content;
+  min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   margin: 0;
+  table-layout: auto;
 }
 .invclock-scroll .data-table th,
 .invclock-scroll .data-table td {
-  padding: 7px 10px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
   color: var(--text);
   font-size: 12px;
+  white-space: nowrap;
 }
 .invclock-scroll .data-table thead th {
   background: color-mix(in srgb, var(--surface2) 96%, transparent);
@@ -17084,34 +17153,82 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
+/* Compact empty-state pill — single-row icon + title + hint. The big
+ * dashed card was wasting roughly half the viewport height when no
+ * inverter was picked. */
 .param-blank {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 36px 12px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 14px;
   border: 1px dashed var(--border);
   border-radius: 10px;
   background: color-mix(in srgb, var(--surface2) 50%, transparent);
   color: var(--text2);
-  text-align: center;
+  text-align: left;
 }
 .param-blank-icon {
-  font-size: 32px;
+  font-size: 18px;
   color: color-mix(in srgb, var(--accent) 70%, var(--text2));
   line-height: 1;
 }
 .param-blank-title {
-  font-size: 14px;
+  font-size: 12.5px;
   font-weight: var(--fw-semibold, 600);
   color: var(--text);
 }
 .param-blank-sub {
-  font-size: 12px;
-  max-width: 480px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.35;
   color: var(--text2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Day-totals strip — sits above the per-slot table on each Node tab and
+ * shows PAC-integrated, Etotal Δ, and parcE Δ side-by-side. Three energy
+ * reference points computed simultaneously so the operator can spot
+ * divergence at a glance. */
+.param-totals-strip {
+  margin: 8px 0;
+}
+.param-totals-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface2) 50%, transparent);
+}
+.param-totals-cell {
+  flex: 1 1 140px;
+  min-width: 130px;
+  padding: 6px 12px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.param-totals-cell:last-child {
+  border-right: none;
+}
+.param-totals-label {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text2);
+  font-weight: var(--fw-semibold, 600);
+}
+.param-totals-value {
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.param-totals-anchor .param-totals-value {
+  font-size: 12px;     /* the pill renders smaller than numeric values */
 }
 
 /* Param table: 16-column grid. Hard-cap height with sticky header so the

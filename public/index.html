@@ -109,7 +109,7 @@
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
         </button>
         <button class="nav-btn" data-page="energy" title="Per-node 5-minute parameter log (Pdc/Vdc/Idc, Vac1-3, Iac1-3, Pac, CosΦ, Freq, Alarms). Live for today, history for past dates.">
-          <span class="nav-icon"><span class="mdi mdi-table-large"></span></span><span>ALL PARAMETERS</span>
+          <span class="nav-icon"><span class="mdi mdi-table-large"></span></span><span>PARAMETERS</span>
         </button>
         <button class="nav-btn" data-page="audit" title="Operator command history with timestamps, scope, and results.">
           <span class="nav-icon"><span class="mdi mdi-clipboard-text-outline"></span></span><span>AUDIT</span>
@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.10.0-beta.1</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.10.0-beta.2</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -317,11 +317,11 @@
       </section>
 
       <!-- --- PAGE: ENERGY LOG ----------------------------------------------------- -->
-      <!-- v2.10.x All Parameters Data — replaces the old Energy page UI.
+      <!-- v2.10.x Parameters page — replaces the old Energy page UI.
            The underlying inverter_5min / energy_5min tables and every
            consumer of that data (Forecast, Analytics, Reports, cloud
            replication) are untouched. See plans/2026-04-27-all-parameters-data-page.md -->
-      <section id="page-energy" class="page" data-page-label="All Parameters Data">
+      <section id="page-energy" class="page" data-page-label="Parameters">
         <div class="page-toolbar">
           <div class="tl-left">
             <label>Inverter
@@ -2272,17 +2272,32 @@
                 <table class="data-table invclock-unit-table">
                   <thead>
                     <tr>
+                      <!-- v2.10.x — column order grouped left-to-right by topic:
+                           identity (Inv/Unit) → clock (RTC + Drift) → counters
+                           (Etotal + parcE + Anchor) → overall status. The
+                           Anchor column is its own cell now instead of being
+                           squeezed inside the Etotal value. -->
                       <th class="col-inv">Inv</th>
                       <th class="col-unit">Unit</th>
-                      <th class="col-rtc">Inverter RTC</th>
-                      <th class="col-drift num">Drift</th>
-                      <th class="col-etotal num">Etotal (kWh)</th>
-                      <th class="col-parce num">parcE (kWh)</th>
+                      <th class="col-rtc invclock-grp-end" title="Inverter RTC wall clock as last reported by the poller.">Inverter RTC</th>
+                      <th class="col-drift num invclock-grp-end" title="Difference between inverter RTC and gateway clock.">Drift</th>
+                      <th class="col-etotal num" title="Lifetime hardware Etotal counter (kWh).">Etotal (kWh)</th>
+                      <th class="col-parce num" title="Lifetime hardware parcE counter (kWh).">parcE (kWh)</th>
+                      <th class="col-anchor invclock-grp-end" title="Source of today's Etotal/parcE baseline anchor. Applies to both numeric columns to the left.
+
+Trust ladder (best → worst):
+  CLEAN     — yesterday's clean close anchored today AND today's EOD snapshot is captured.
+  EOD       — yesterday's clean close anchored today; today's EOD snapshot pending (after configured EOD hour).
+  EOD-ONLY  — late-created row from a dark-window capture; morning baseline unknown, so this day's own Δ is unknown. Used as tomorrow's anchor only.
+  POLL      — today's baseline came from the first poll of the day, NOT yesterday's clean close. Etotal Δ undercounts today's energy. PAC-integrated Total stays authoritative.
+  SEED      — RESERVED slot from the v2.9.0 design; no code path currently writes it.
+
+Hover any pill in the column for the row-specific explanation.">Anchor</th>
                       <th class="col-status">Status</th>
                     </tr>
                   </thead>
                   <tbody class="js-invclock-unit-body">
-                    <tr><td colspan="7" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>
+                    <tr><td colspan="8" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>
                   </tbody>
                 </table>
               </div>

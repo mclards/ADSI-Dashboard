@@ -1124,9 +1124,23 @@ async def read_fast_async(client, unit, ip):
         # ─── NEW fields (v2.10.x All Parameters Data) ───
         "cosphi":        cosphi_val,            # 0.000 .. 1.000
         "phi_sign":      phi_sign,              # 0=neg, 1=pos
-        # temp_c is NULL until we identify the standard FC04 register that
-        # carries it (the StopReason snapshot at 0xFEB5 has it, but reading
-        # that on every poll cycle would add vendor-FC traffic).
+        # FIXME v2.11 — temp_c remains NULL until the standard FC04 register
+        # carrying inverter heatsink/inverter-internal temperature is
+        # identified for INGECON SUN firmware. Candidates evaluated:
+        #   1. Standard FC04 register — not yet found in the public/vendor
+        #      register map; the existing 60-reg block (regs 0..59) does
+        #      not expose it.
+        #   2. StopReason snapshot @ 0xFEB5 via vendor FC 0x71 — confirmed
+        #      to contain it, but adding a vendor-FC read to every 50 ms
+        #      poll cycle would multiply bus traffic on the EKI-1222-BE
+        #      gateway; not worth it for a non-decision parameter.
+        #   3. Heatsink thermistor — separate hardware path, not exposed.
+        # When (1) is identified, decode it in read_fast_async() above,
+        # add the field to dailyAggregator.js _accum() / _RANGES.tempC,
+        # and the column will populate without any schema change (the
+        # `temp_c` column already exists in inverter_5min_param).
+        # Until then, the Daily Data Export's Temp (°C) column is blank
+        # by design — documented in the User Manual §6.5 and §6.8.2.
         "temp_c":        None,
     }
 

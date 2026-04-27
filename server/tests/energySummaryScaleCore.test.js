@@ -117,9 +117,18 @@ function run() {
     approxEqual(result.scaledRows[1].Total_MWh, 0.05, 1e-6);
   }
 
-  // ── 5. HW counter columns NaN-propagate when ANY unit invalid ────────
-  // Per the v2.9.1 invariant: if any unit's HW baseline isn't eod_clean,
-  // the day-total Etotal must be NaN (not silently treat invalid as 0).
+  // ── 5. HW counter columns — partial-coverage degradation (v2.10.x) ───
+  // Pre-v2.10.x rule was: any single NaN unit invalidates the entire day's
+  // HW total (NaN-propagation). That left a whole day's Etotal/ParcE
+  // columns blank because of one bad node — operators saw "no data" even
+  // though most units were healthy.
+  //
+  // v2.10.x rule: sum the units that ARE valid and report coverage as
+  // `{ valid, total }` so the export can flag partial days without losing
+  // the partial sum. The day-total flag stays `true` as long as at least
+  // one unit contributed; full failure (zero valid units) still flips it
+  // to `false`. Per-unit NaN cells are unchanged — they still NaN out so
+  // the bad unit's row reads as empty.
   {
     const detailRows = [
       makeRow({ unit: 1, energyKwh: 100, etotalKwh: 100, parceKwh: 100 }),
@@ -131,20 +140,54 @@ function run() {
       authoritativeKwh: 300,
       rawSubtotalKwh: 300,
     });
+    // Day-total flags: still TRUE because at least one unit contributed
     assert.equal(
       result.dayEtotalValid,
-      false,
-      "any NaN unit invalidates day total Etotal",
+      true,
+      "v2.10.x: 2-of-3 valid → day total still valid (graceful)",
     );
     assert.equal(
       result.dayParceValid,
-      false,
-      "any NaN unit invalidates day total ParcE",
+      true,
+      "v2.10.x: 2-of-3 valid → day total still valid (graceful)",
     );
-    // Per-unit cells: valid units show their value, invalid units show NaN
+    // Coverage struct exposes the partial nature so the export can label it
+    assert.deepStrictEqual(
+      result.dayEtotalCoverage,
+      { valid: 2, total: 3 },
+      "Etotal coverage reports 2-of-3",
+    );
+    assert.deepStrictEqual(
+      result.dayParceCoverage,
+      { valid: 2, total: 3 },
+      "ParcE coverage reports 2-of-3",
+    );
+    // Sums use only the valid contributors (200 kWh, not NaN-poisoned)
+    approxEqual(result.dayEtotalKwh, 200, 1e-6, "Etotal sums only valid units");
+    approxEqual(result.dayParceKwh,  200, 1e-6, "ParcE sums only valid units");
+    // Per-unit cells unchanged: invalid unit still NaN
     assert.equal(result.scaledRows[0].Etotal_MWh, 0.1);
     assert.ok(Number.isNaN(result.scaledRows[1].Etotal_MWh), "invalid unit → NaN");
     assert.equal(result.scaledRows[2].Etotal_MWh, 0.1);
+  }
+
+  // ── 5b. HW counter columns — full failure (every unit NaN) ────────────
+  // When ZERO units contributed, day-total flag must flip to false so the
+  // export can blank the columns instead of showing 0 kWh.
+  {
+    const detailRows = [
+      makeRow({ unit: 1, energyKwh: 100, etotalKwh: NaN, parceKwh: NaN }),
+      makeRow({ unit: 2, energyKwh: 100, etotalKwh: NaN, parceKwh: NaN }),
+    ];
+    const result = applyInverterScale({
+      detailRows,
+      authoritativeKwh: 200,
+      rawSubtotalKwh: 200,
+    });
+    assert.equal(result.dayEtotalValid, false, "zero valid units → day total invalid");
+    assert.equal(result.dayParceValid,  false, "zero valid units → day total invalid");
+    assert.deepStrictEqual(result.dayEtotalCoverage, { valid: 0, total: 2 });
+    assert.deepStrictEqual(result.dayParceCoverage,  { valid: 0, total: 2 });
   }
 
   // ── 6. All HW counters valid → day-total sum is finite ───────────────
@@ -191,6 +234,10 @@ function run() {
   }
 
   // ── 8. Empty input → safe defaults, no division-by-zero ──────────────
+  // v2.10.x semantics: empty input = no data = day-total flag is FALSE
+  // (so the export blanks the column instead of showing 0). Previous
+  // pre-v2.10.x semantics treated empty as "vacuously true"; the new
+  // valid-count gate matches the partial-coverage rule above.
   {
     const result = applyInverterScale({
       detailRows: [],
@@ -200,8 +247,10 @@ function run() {
     approxEqual(result.scale, 1, 1e-9);
     approxEqual(result.subtotalMwh, 0, 1e-9);
     assert.equal(result.scaledRows.length, 0);
-    assert.equal(result.dayEtotalValid, true,  "empty → still valid (vacuously)");
-    assert.equal(result.dayParceValid,  true);
+    assert.equal(result.dayEtotalValid, false, "empty → day total invalid (no contributors)");
+    assert.equal(result.dayParceValid,  false);
+    assert.deepStrictEqual(result.dayEtotalCoverage, { valid: 0, total: 0 });
+    assert.deepStrictEqual(result.dayParceCoverage,  { valid: 0, total: 0 });
   }
 
   // ── 9. Defensive: negative and NaN inputs produce safe outputs ───────

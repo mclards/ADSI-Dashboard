@@ -12224,6 +12224,20 @@ app.get("/api/system/heartbeat", (req, res) => {
           ? Math.max(0, now - Number(aggStats.last_flush_ts))
           : -1,
         inMemoryBuckets: Number(aggStats.in_memory_buckets || 0),
+        // v2.10.x — surface every drop-sample reason so the operator can
+        // diagnose "why is my row count low?" without spelunking through
+        // /api/params/diagnostics. Each counter is monotonic since boot.
+        samplesDroppedOffline: Number(aggStats.samples_dropped_offline || 0),
+        samplesDroppedStaleTs: Number(aggStats.samples_dropped_stale_ts || 0),
+        samplesDroppedFutureTs: Number(aggStats.samples_dropped_future_ts || 0),
+        samplesDroppedOoOrder: Number(aggStats.samples_dropped_oo_order || 0),
+        samplesDroppedReapedSlot: Number(aggStats.samples_dropped_reaped_slot || 0),
+        samplesDroppedNoUnit: Number(aggStats.samples_dropped_no_unit || 0),
+        fieldClampCount: Number(aggStats.field_clamp_count || 0),
+        bucketsOpened: Number(aggStats.buckets_opened || 0),
+        reaped: Number(aggStats.reaped || 0),
+        shutdownFlushes: Number(aggStats.shutdown_flushes || 0),
+        reapedSlotMemory: Number(aggStats.reaped_slot_memory || 0),
       },
       ws: {
         connectedClients: Number(wsStats.connectedClients || 0),
@@ -13060,6 +13074,42 @@ app.get("/api/params/diagnostics", (req, res) => {
   try {
     const stats = dailyAggregator.getStats();
     res.json({ ok: true, now: Date.now(), stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/params/:inverter/:slave/coverage/:date — slot coverage report.
+// Operator-facing gap detection for the Daily Data Export. Answers
+// "did we capture every expected 5-min slot inside the solar window for
+// this (inverter, slave, date)?" and lists any missing HH:MM ranges.
+//
+// Pure math is in server/dailyAggregatorCoverage.js (regression-locked
+// in server/tests/dailyAggregatorCoverage.test.js). This wrapper handles
+// the IP-from-inverter resolution + remote-mode proxy.
+app.get("/api/params/:inverter/:slave/coverage/:date", async (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+    const date = String(req.params.date || "").trim();
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter must be a positive integer" });
+    }
+    if (!Number.isFinite(slave) || slave <= 0) {
+      return res.status(400).json({ ok: false, error: "slave must be a positive integer" });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+    }
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+    const report = dailyAggregator.getSlotCoverage(ip, slave, date);
+    res.json({ ok: true, inverter: inv, ...report });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
