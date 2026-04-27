@@ -9735,14 +9735,120 @@ function scheduleInverterCardsUpdate(force = false) {
     : CARD_RENDER_MIN_INTERVAL_MS;
   const delay = Math.max(0, interval - elapsed);
   State.cardRenderScheduled = true;
+  // v2.10.0 — header-metrics freeze fix: removed the requestAnimationFrame
+  // wrap. On the gateway PC, when the user navigated to Analytics (which
+  // re-renders 27 charts every 2 s), the rAF queue would back up behind
+  // the chart work; the card-render rAF callback would be deferred for
+  // many seconds, leaving header metrics (totalPac, online/offline,
+  // today kWh) frozen even though the WS continued to deliver fresh
+  // frames and the server kept polling. Header DOM writes inside
+  // updateInverterCards are cheap (per-card writes are gated by the
+  // cardsVisible flag), so paint-alignment via rAF was an optimisation
+  // we no longer need. The 220 ms setTimeout throttle remains.
   State.cardRenderTimer = setTimeout(() => {
     State.cardRenderTimer = null;
-    requestAnimationFrame(() => {
-      State.cardRenderScheduled = false;
-      State.lastCardRenderTs = Date.now();
-      updateInverterCards();
-    });
+    State.cardRenderScheduled = false;
+    State.lastCardRenderTs = Date.now();
+    updateInverterCards();
   }, delay);
+}
+
+// v2.10.0 — page-independent header-totals refresh. Called synchronously on
+// every WS "live" frame from handleWS so header metrics never freeze even
+// when the user is on Analytics/Forecast/Settings (where chart rendering
+// or other CPU work could otherwise starve the throttled card-render
+// path). Computes the same totals as updateInverterCards but writes only
+// header DOM — no per-card paint, no per-row work.
+function updateHeaderTotalsFast() {
+  const data = State.liveData || {};
+  const now = Date.now();
+  const nodeCount = Number(State.settings.nodeCount || 4);
+  const invCount  = Number(State.settings.inverterCount || 27);
+  const remoteMode = getActiveOperationModeClient() === "remote";
+  const remoteHealth = normalizeRemoteHealthClient(State.remoteHealth);
+  const retainRemoteSnapshot = remoteMode && Boolean(remoteHealth.hasUsableSnapshot);
+  const remoteDisplayHoldMs = retainRemoteSnapshot
+    ? Math.max(CARD_OFFLINE_HOLD_MS, Number(remoteHealth.snapshotRetainMs || 0))
+    : CARD_OFFLINE_HOLD_MS;
+
+  const unitsByInv = Array.from({ length: invCount + 1 }, () => []);
+  for (const row of Object.values(data)) {
+    const inv = Number(row?.inverter || 0);
+    const unit = Number(row?.unit || 0);
+    if (!inv || inv > invCount || unit <= 0) continue;
+    unitsByInv[inv].push(row);
+  }
+  const activeAlarmsByInv = Array.from({ length: invCount + 1 }, () => []);
+  for (const alarm of Object.values(State.activeAlarms || {})) {
+    const inv = Number(alarm?.inverter || 0);
+    if (!inv || inv > invCount) continue;
+    activeAlarmsByInv[inv].push(alarm);
+  }
+
+  let totalPac = 0, online = 0, alarmed = 0, offline = 0, activeNodes = 0;
+  for (let inv = 1; inv <= invCount; inv++) {
+    const configuredUnits = getConfiguredUnits(inv, nodeCount);
+    const configuredSet = new Set(configuredUnits);
+    const units = (unitsByInv[inv] || []).filter(
+      (d) => d.inverter === inv && configuredSet.has(Number(d.unit || 0)),
+    );
+    const freshUnits = units.filter(
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
+    );
+    const visibleUnits = units.filter(
+      (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS + remoteDisplayHoldMs,
+    );
+    const activeAlarmEntries = (activeAlarmsByInv[inv] || []).filter(
+      (a) => Number(a.inverter) === inv && configuredSet.has(Number(a.unit || 0)),
+    );
+    const hasFreshData = freshUnits.length > 0;
+    if (hasFreshData) State.invLastFresh[inv] = now;
+    const staleSnapshot = retainRemoteSnapshot && !hasFreshData && visibleUnits.length > 0;
+    const inHold =
+      !hasFreshData && !staleSnapshot &&
+      now - Number(State.invLastFresh[inv] || 0) <= CARD_OFFLINE_HOLD_MS;
+    const anyOnline = hasFreshData || staleSnapshot || inHold;
+    const unitsForDisplay = staleSnapshot ? visibleUnits : freshUnits;
+    const displayTotals = summarizeLiveRows(unitsForDisplay);
+    totalPac += Number(displayTotals.pac || 0);
+    const anyAlarm =
+      unitsForDisplay.some((d) => d.alarm && d.alarm !== 0) ||
+      activeAlarmEntries.length > 0;
+    const topSev = higherSeverity(
+      getTopSev(unitsForDisplay),
+      activeAlarmEntries.reduce(
+        (best, a) => higherSeverity(best, a?.severity || "fault"),
+        null,
+      ),
+    );
+    if (!anyOnline) { offline++; }
+    else if (staleSnapshot) { online++; }
+    else if (topSev === "critical") { alarmed++; online++; }
+    else if (anyAlarm) { alarmed++; if (anyOnline) online++; }
+    else if (anyOnline) { online++; }
+
+    for (const row of (unitsByInv[inv] || [])) {
+      if (!configuredSet.has(Number(row?.unit || 0))) continue;
+      if (row.online && now - getLiveFreshTsClient(row) <= DATA_FRESH_MS) activeNodes++;
+    }
+  }
+
+  const pacKw = Number(totalPac / 1000).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const pacEl = $("totalPac");
+  if (pacEl && pacEl.firstChild) pacEl.firstChild.nodeValue = pacKw;
+  const so = $("statOnline");  if (so) so.textContent  = online;
+  const sa = $("statAlarmed"); if (sa) sa.textContent = alarmed;
+  const sf = $("statOffline"); if (sf) sf.textContent = offline;
+  const ackBtn = $("btnAckAllInv");
+  if (ackBtn) ackBtn.hidden = alarmed === 0;
+  const micEl = $("metricInvCount");  if (micEl) micEl.textContent = online;
+  const mitEl = $("metricInvTotal");  if (mitEl) mitEl.textContent = `/ ${invCount}`;
+  const mncEl = $("metricNodeCount"); if (mncEl) mncEl.textContent = activeNodes;
+  const mntEl = $("metricNodeTotal"); if (mntEl) mntEl.textContent = `/ ${invCount * nodeCount}`;
+  renderTodayKwhFromPac();
 }
 
 function updateInverterCards() {
@@ -12449,6 +12555,13 @@ function handleWS(msg) {
     if (msg.plantCap) {
       applyPlantCapStatusClient(msg.plantCap, { preservePreview: true });
     }
+    // v2.10.0 — page-independent header refresh. Runs synchronously on every
+    // WS "live" frame so header metrics (totalPac, online/offline counts,
+    // today kWh) keep updating regardless of which page the user is on, and
+    // independent of the 220 ms card-render throttle. The full
+    // scheduleInverterCardsUpdate path still runs throttled below for the
+    // heavy per-card DOM writes (only paint when cardsVisible).
+    try { updateHeaderTotalsFast(); } catch (_) {}
     scheduleInverterCardsUpdate();
     // Keep detail panel stat chips live on every WS tick (only when visible)
     if (State.currentPage === "inverters" && State.invDetailInv > 0) renderInverterDetailStats(State.invDetailInv);
@@ -14204,6 +14317,11 @@ function _paramRebuildTabs() {
     </button>`).join("");
   panelsHost.innerHTML = slaves.map((s, i) => `
     <div class="card-tab-panel param-panel" data-param-panel="${s}" ${i === 0 ? "" : "hidden"}>
+      <!-- v2.10.x — day totals strip: PAC-integrated, Etotal Δ, parcE Δ
+           computed simultaneously from the same baseline anchors used by
+           the Energy Summary export, so all three reference points stay
+           consistent across the dashboard. -->
+      <div class="param-totals-strip" data-param-totals="${s}" hidden></div>
       <div class="table-wrap param-table-wrap">
         <table class="data-table param-table" id="paramTable_${s}">
           <thead>
@@ -14220,6 +14338,7 @@ function _paramRebuildTabs() {
               <th>Iac3 (A)</th>
               <th>Temp (°C)</th>
               <th>Pac (W)</th>
+              <th title="Slot energy in kWh — derived from the parcE counter delta vs. the previous slot. Falls back to PAC × 5 min / 1000 when the delta is unavailable (first slot of the day, or counter glitch).">Partial Energy (kWh)</th>
               <th>CosΦ</th>
               <th>Freq (Hz)</th>
               <th title="Combined 32-bit alarm bitmap captured during the slot.">Inv Alarms</th>
@@ -14301,12 +14420,14 @@ async function _paramFetchAndRender(options = {}) {
     ParamPageUI.rowsBySlave = new Map();
     const bySlave = (data.by_slave && typeof data.by_slave === "object") ? data.by_slave : {};
     for (const s of slaves) {
-      const entry = bySlave[s] || bySlave[String(s)] || { rows: [], live_bucket: null };
+      const entry = bySlave[s] || bySlave[String(s)] || { rows: [], live_bucket: null, totals: null };
       ParamPageUI.rowsBySlave.set(Number(s), {
         rows: Array.isArray(entry.rows) ? entry.rows : [],
         live_bucket: entry.live_bucket || null,
+        totals: entry.totals || null,
       });
       _paramRenderTable(Number(s));
+      _paramRenderTotalsStrip(Number(s));
     }
     _paramUpdateBadges();
     _paramSyncLiveTimer();
@@ -14319,6 +14440,57 @@ async function _paramFetchAndRender(options = {}) {
   }
 }
 
+// Render the day-totals strip above each Node tab's table. Shows
+// PAC-integrated MWh, Etotal Δ MWh, and parcE Δ MWh side-by-side so the
+// operator can spot any divergence between the three energy reference
+// points. Anchored on the same baseline math as the Energy Summary export.
+function _paramRenderTotalsStrip(slave) {
+  const host = document.querySelector(`[data-param-totals="${slave}"]`);
+  if (!host) return;
+  const entry = ParamPageUI.rowsBySlave.get(Number(slave));
+  const t = entry?.totals;
+  if (!t) {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+  const fmt = (kwh) => {
+    if (!Number.isFinite(Number(kwh))) return "—";
+    const n = Number(kwh);
+    if (n >= 1000) return `${(n / 1000).toFixed(3)} MWh`;
+    return `${n.toFixed(2)} kWh`;
+  };
+  const anchor = (() => {
+    const src = String(t.anchor_source || "").toLowerCase();
+    const eod = Number(t.eod_clean_present || 0) === 1;
+    if (eod) return { label: "CLEAN", cls: "param-anchor-clean" };
+    if (src === "eod_clean") return { label: "EOD", cls: "param-anchor-eod" };
+    if (src === "poll") return { label: "POLL", cls: "param-anchor-poll" };
+    if (src === "pac_seed") return { label: "SEED", cls: "param-anchor-seed" };
+    return { label: "—", cls: "param-anchor-none" };
+  })();
+  host.hidden = false;
+  host.innerHTML = `
+    <div class="param-totals-row">
+      <div class="param-totals-cell" title="Pac × 5 min / 1000 summed across every slot in the solar window. The authoritative dashboard energy figure.">
+        <div class="param-totals-label">Pac-integrated</div>
+        <div class="param-totals-value">${fmt(t.pac_kwh)}</div>
+      </div>
+      <div class="param-totals-cell" title="Hardware Etotal counter delta vs. today's baseline anchor. Independent reference for cross-checking the PAC-integrated value.">
+        <div class="param-totals-label">Etotal Δ</div>
+        <div class="param-totals-value">${fmt(t.etotal_kwh)}</div>
+      </div>
+      <div class="param-totals-cell" title="Hardware parcE counter delta vs. today's baseline anchor. Second independent reference; should match Etotal Δ closely on healthy days.">
+        <div class="param-totals-label">parcE Δ</div>
+        <div class="param-totals-value">${fmt(t.parce_kwh)}</div>
+      </div>
+      <div class="param-totals-cell param-totals-anchor" title="Source of today's HW counter baseline anchor — drives Etotal Δ and parcE Δ trustworthiness. CLEAN > EOD > POLL > SEED.">
+        <div class="param-totals-label">Anchor</div>
+        <div class="param-totals-value"><span class="invclock-anchor-pill ${anchor.cls.replace("param-anchor-", "invclock-anchor-")}">${anchor.label}</span></div>
+      </div>
+    </div>`;
+}
+
 function _paramRenderTable(slave) {
   const tbody = document.querySelector(`tbody[data-param-tbody="${slave}"]`);
   if (!tbody) return;
@@ -14327,7 +14499,7 @@ function _paramRenderTable(slave) {
   const live = entry?.live_bucket || null;
   if (!rows.length && !live) {
     tbody.innerHTML = `
-      <tr><td colspan="16" class="param-empty">
+      <tr><td colspan="17" class="param-empty">
         <div class="param-empty-inner">
           <span class="mdi mdi-chart-box-outline"></span>
           No 5-minute parameter rows in the solar window for the selected day.
@@ -14365,6 +14537,14 @@ function _paramRowHtml(r, isLive) {
     return n ? `0x${n.toString(16).toUpperCase().padStart(8, "0")}` : "0";
   };
   const cosphi = (v) => (v == null || v === "" ? "—" : Number(v).toFixed(3));
+  // Partial Energy is the PAC-integrated estimate for the 5-min slot
+  // (5-min PAC average × duration). The day-level cross-check against
+  // Etotal Δ and parcE Δ lives in the totals strip above the table.
+  const pacW = Number(r?.pac_w);
+  const partialKwh = Number.isFinite(pacW) && pacW > 0 ? (pacW * 5 / 60) / 1000 : 0;
+  const partialHtml = partialKwh > 0
+    ? `<span title="Pac × 5 min / 1000 = slot energy estimate.">${partialKwh.toFixed(3)}</span>`
+    : "0.000";
   return `
     <td class="time">${t}${tag}</td>
     <td>${fmtInt(r.pdc_w)}</td>
@@ -14378,6 +14558,7 @@ function _paramRowHtml(r, isLive) {
     <td>${fmt(r.iac3_a, 2)}</td>
     <td>${fmtInt(r.temp_c)}</td>
     <td>${fmtInt(r.pac_w)}</td>
+    <td>${partialHtml}</td>
     <td>${cosphi(r.cosphi)}</td>
     <td>${fmt(r.freq_hz, 2)}</td>
     <td class="alarm-cell" title="32-bit Inv alarm bitmap.">${alarmHex(r.inv_alarms)}</td>
@@ -18909,15 +19090,52 @@ function _invClockDriftBadge(state) {
   if (d < 300) return { cls: "invclock-badge invclock-badge-amber", label: `±${Math.round(d / 60)}m` };
   return          { cls: "invclock-badge invclock-badge-red",   label: `±${Math.round(d / 60)}m` };
 }
-function _invClockStatusBadge(state) {
+function _invClockStatusBadge(state, ctx = {}) {
   if (!state.rtc_valid) return { cls: "invclock-badge invclock-badge-red", label: "RTC broken" };
-  if (!state.counter_advancing && Number(state.pac_w || 0) > 500) {
+  // "counter frozen" is only a real fault during the productive part of the
+  // solar window. Outside the window (night) or in the closing tail (last
+  // hour before eodSnapshotHourLocal — pac trickles below the 1 kWh tick
+  // rate), a non-advancing counter is normal end-of-day behaviour, not a
+  // diagnostic flag.
+  const FROZEN_PAC_THRESHOLD_W = 5000;
+  const sw = ctx.solar_window || {};
+  const inWindow = sw.in_window == null ? true : !!Number(sw.in_window);
+  const closingTail = !!Number(sw.closing_tail || 0);
+  const flagFrozen =
+    !state.counter_advancing &&
+    Number(state.pac_w || 0) > FROZEN_PAC_THRESHOLD_W &&
+    inWindow &&
+    !closingTail;
+  if (flagFrozen) {
     return { cls: "invclock-badge invclock-badge-red", label: "counter frozen" };
   }
   if (Math.abs(Number(state.rtc_drift_s || 0)) > 300) {
     return { cls: "invclock-badge invclock-badge-amber", label: "drifted" };
   }
   return { cls: "invclock-badge invclock-badge-green", label: "OK" };
+}
+
+// Render the Etotal/parcE source pill that sits in the dedicated Anchor
+// column. 'eod_clean' = post-1800 anchored (best); 'poll' = mid-day capture
+// (fine); 'pac_seed' = synthesized on fresh boot (weakest); '' = no row
+// yet (unknown). The pill applies to BOTH Etotal and parcE values to the
+// left because they share the same baseline row.
+function _invClockBaselineSourcePill(state) {
+  const src = String(state?.baseline_source || "").toLowerCase();
+  const eodClean = Number(state?.eod_clean_present || 0) === 1;
+  if (eodClean) {
+    return `<span class="invclock-anchor-pill invclock-anchor-clean" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot, and today's EOD snapshot has been captured. Highest-trust anchor.">CLEAN</span>`;
+  }
+  if (src === "eod_clean") {
+    return `<span class="invclock-anchor-pill invclock-anchor-eod" title="Today's baseline anchored from yesterday's End-of-Day clean snapshot. Today's snapshot will roll after the configured EOD hour.">EOD</span>`;
+  }
+  if (src === "poll") {
+    return `<span class="invclock-anchor-pill invclock-anchor-poll" title="Today's baseline captured from the first poll after gateway boot — fine, but not anchored to yesterday's clean close.">POLL</span>`;
+  }
+  if (src === "pac_seed") {
+    return `<span class="invclock-anchor-pill invclock-anchor-seed" title="Today's baseline synthesized from PAC-integration on a fresh boot. Weakest anchor; recovers as soon as the next clean read lands.">SEED</span>`;
+  }
+  return `<span class="invclock-anchor-pill invclock-anchor-none" title="No baseline row recorded for today yet. Will populate on next poll inside the solar window.">—</span>`;
 }
 
 async function invClockRefreshUnits() {
@@ -18970,22 +19188,28 @@ async function invClockRefreshUnits() {
       if (ai !== bi) return ai - bi;
       return Number(a?.unit || 0) - Number(b?.unit || 0);
     });
+    const solarCtx = data.solar_window || null;
     let okCount = 0, driftedCount = 0, brokenCount = 0;
     const trs = rows.map((r) => {
       const db = _invClockDriftBadge(r);
-      const sb = _invClockStatusBadge(r);
+      const sb = _invClockStatusBadge(r, { solar_window: solarCtx });
       if (sb.label === "OK") okCount++;
       else if (sb.label === "drifted") driftedCount++;
       else brokenCount++;
       const rtcStr = r.rtc_valid && r.rtc_ms ? _invClockFmtDt(r.rtc_ms) : "—";
+      const anchorPill = _invClockBaselineSourcePill(r);
+      // Group breaks (.invclock-grp-end class on td) match the <th> markup so
+      // every row gets the same vertical separators between identity →
+      // clock → counters → status.
       return `
         <tr data-inverter="${r.inverter}" data-unit="${r.unit}">
           <td>${r.inverter}</td>
           <td>${r.unit}</td>
-          <td class="mono">${rtcStr}</td>
-          <td class="num"><span class="${db.cls}">${db.label}</span></td>
+          <td class="mono invclock-grp-end">${rtcStr}</td>
+          <td class="num invclock-grp-end"><span class="${db.cls}">${db.label}</span></td>
           <td class="num">${Number(r.etotal_kwh || 0).toLocaleString()}</td>
           <td class="num">${Number(r.parce_kwh  || 0).toLocaleString()}</td>
+          <td class="invclock-anchor-cell invclock-grp-end">${anchorPill}</td>
           <td><span class="${sb.cls}">${sb.label}</span></td>
         </tr>
       `;
@@ -19379,10 +19603,15 @@ function _invClockSetActiveTab(tabKey) {
   try { localStorage.setItem("adsi_invclock_active_tab", key); } catch (_) {}
 }
 
+// v2.10.x — remote-mode operator actions for the inverter-clock section
+// (broadcast / per-inverter / per-unit sync, schedule save) are now
+// forwarded to the gateway by the server-side `_proxyClockSyncInRemote`
+// middleware in server/index.js. The UI no longer gates these actions on
+// the remote/gateway mode flag, so this helper returns false to keep
+// every legacy call site (button-enable rules, banner toggles) on the
+// gateway-equivalent path.
 function _invClockIsRemote() {
-  try {
-    return String(State?.settings?.operationMode || "gateway") === "remote";
-  } catch (_) { return false; }
+  return false;
 }
 
 // Disable clock-sync action buttons in remote mode and surface the banner that
@@ -19506,17 +19735,16 @@ const StopReasonsUI = {
   histogramLoadedFor: null,
 };
 
-// Shared helper — both Slice C and Slice D consult this.  Uses the
-// canonical normalizer so case/whitespace variants of "remote" are handled
-// consistently with the rest of the dashboard (and matches the server-side
-// sanitizeOperationMode() result).
+// v2.10.x — Stop Reasons (Slice D) and Serial Number (Slice C) actions are
+// now forwarded to the gateway by the server-side `_proxyStopReasonsInRemote`
+// and `_proxySerialInRemote` middleware (see server/index.js). The UI no
+// longer needs to disable Refresh / Read / Send / Fleet Scan in remote mode,
+// so this helper returns false to keep every legacy call site on the
+// gateway-equivalent path. Per-row Send tooltips, banner visibility, and
+// the format+session enable rule for #btnSnbSend all collapse to the
+// gateway behaviour.
 function _v210IsRemoteMode() {
-  try {
-    if (typeof normalizeOperationModeValue === "function") {
-      return normalizeOperationModeValue(State?.settings?.operationMode) === "remote";
-    }
-    return String(State?.settings?.operationMode || "gateway").trim().toLowerCase() === "remote";
-  } catch (_) { return false; }
+  return false;
 }
 
 function _v210GatewayHost() {
@@ -19783,21 +20011,15 @@ async function _srnHandleRefresh() {
     if (msgEl) { msgEl.textContent = "Pick an inverter first."; msgEl.className = "smsg error"; }
     return;
   }
-  let auth;
-  try {
-    auth = await authorizeBulkCommand("REFRESH STOP REASONS", `inverter ${inv}`, 1);
-  } catch (err) {
-    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
-    return;
-  }
-  if (!auth) return;
+  // v2.10.x — no operator auth prompt: vendor FC 0x71 SCOPE peek is read-only
+  // on the inverter side, so the per-inverter Refresh runs without sacupsMM.
   if (btn) btn.disabled = true;
   if (msgEl) { msgEl.textContent = "Reading SCOPE peek… ~3 s"; msgEl.className = "smsg"; }
   try {
     const r = await fetch(`/api/stop-reasons/${inv}/refresh`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ authToken: auth.authToken, include_histogram: true }),
+      body: JSON.stringify({ include_histogram: true }),
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body?.ok) {

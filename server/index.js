@@ -5507,7 +5507,31 @@ function resolveProxyTimeout(targetUrl) {
   return REMOTE_FETCH_TIMEOUT_MS;
 }
 
-async function proxyToRemote(req, res, tokenOverride = "") {
+// Headers an operator-driven action carries from the remote viewer through to
+// the gateway: bulk auth (sacupsMM), session tokens, topology auth, and the
+// operator identity used by audit_log writers. Forwarded transparently so
+// the gateway re-validates exactly as if the request came in locally.
+const _OPERATOR_AUTH_FORWARD_HEADERS = [
+  "x-bulk-auth",
+  "x-plantwide-session",
+  "x-bulkauth-session",
+  "x-topology-key",
+  "x-substation-key",
+  "x-acted-by",
+  "authorization",
+];
+
+function _collectOperatorAuthHeaders(req) {
+  const out = {};
+  if (!req || !req.headers) return out;
+  for (const name of _OPERATOR_AUTH_FORWARD_HEADERS) {
+    const v = req.headers[name];
+    if (typeof v === "string" && v.trim()) out[name] = v;
+  }
+  return out;
+}
+
+async function proxyToRemote(req, res, tokenOverride = "", options = {}) {
   const base = getRemoteGatewayBaseUrl();
   if (!base) {
     return res
@@ -5526,6 +5550,18 @@ async function proxyToRemote(req, res, tokenOverride = "") {
   const headers = {
     ...buildRemoteProxyHeaders(tokenOverride),
   };
+  // Forward operator-auth headers (bulk-auth / topology / session / acted-by)
+  // so gateway-side `_requireBulkAuth` and similar checks see the operator
+  // input that arrived on the remote viewer. The remote API token is set by
+  // buildRemoteProxyHeaders LAST so it takes precedence on `Authorization`.
+  if (options?.forwardOperatorAuth) {
+    const operatorHeaders = _collectOperatorAuthHeaders(req);
+    for (const [name, value] of Object.entries(operatorHeaders)) {
+      // Don't let inbound Authorization clobber the remote bridge token.
+      if (name === "authorization" && headers.Authorization) continue;
+      headers[name] = value;
+    }
+  }
   const hasBody = !["GET", "HEAD"].includes(method);
   if (hasBody) headers["Content-Type"] = "application/json";
   try {
@@ -12145,6 +12181,61 @@ app.post("/api/streaming/go2rtc/stop", (req, res) => {
     .catch((e) => res.status(500).json({ ok: false, error: e.message }));
 });
 
+// v2.10.0 — page-independence verification endpoint. The user reported a
+// suspicion that polling/aggregation stops when the dashboard is on a
+// non-Inverters page. The actual cause is rAF-throttled card render in
+// the renderer; the server-side poller, dailyAggregator, and Python
+// engine all run continuously regardless of UI state. This endpoint
+// returns a minimal "is everything alive?" snapshot so the operator
+// (or an external uptime check) can verify the engine is ticking
+// independent of which page is open.
+app.get("/api/system/heartbeat", (req, res) => {
+  try {
+    const perf = (typeof poller.getPerfStats === "function") ? poller.getPerfStats() : {};
+    const aggStats = (typeof dailyAggregator?.getStats === "function")
+      ? dailyAggregator.getStats()
+      : {};
+    const wsModule = require("./ws");
+    const wsStats = (typeof wsModule.getStats === "function") ? wsModule.getStats() : {};
+    const now = Date.now();
+    res.json({
+      ok: true,
+      now,
+      poller: {
+        running: Boolean(perf.running),
+        tickCount: Number(perf.tickCount || 0),
+        lastPollEndedTs: Number(perf.lastPollEndedTs || 0),
+        lastPollAgeMs: Number(perf.lastPollEndedTs ? (now - perf.lastPollEndedTs) : -1),
+        avgPollDurationMs: Number(perf.avgPollDurationMs || 0),
+        rowsPersisted: Number(perf.rowsPersisted || 0),
+        lastDbPersistOkTs: Number(perf.lastDbPersistOkTs || 0),
+        eventLoopLagMs: Number(perf.eventLoopLagMs || 0),
+      },
+      aggregator: {
+        samplesSeen: Number(aggStats.samples_seen || 0),
+        flushesOk: Number(aggStats.flushes_ok || 0),
+        flushesFailed: Number(aggStats.flushes_failed || 0),
+        lastSampleTs: Number(aggStats.last_sample_ts || 0),
+        lastSampleAgeMs: aggStats.last_sample_ts
+          ? Math.max(0, now - Number(aggStats.last_sample_ts))
+          : -1,
+        lastFlushTs: Number(aggStats.last_flush_ts || 0),
+        lastFlushAgeMs: aggStats.last_flush_ts
+          ? Math.max(0, now - Number(aggStats.last_flush_ts))
+          : -1,
+        inMemoryBuckets: Number(aggStats.in_memory_buckets || 0),
+      },
+      ws: {
+        connectedClients: Number(wsStats.connectedClients || 0),
+        sentFrames: Number(wsStats.sentFrames || 0),
+        lastSentTs: Number(wsStats.lastSentTs || 0),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/api/system/contention", (req, res) => {
   const bp = getEnergyBacklogPressure();
   const perf = poller.getPerfStats();
@@ -12392,17 +12483,56 @@ app.get("/api/counter-state/all", (req, res) => {
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
+    // Today's baseline lookup so the UI can mark each unit's Etotal/parcE
+    // with the *anchor source*: 'eod_clean' (best — captured by the post-1800
+    // EOD snapshot), 'poll' (mid-day capture, fine but unanchored), or
+    // 'pac_seed' (weakest — synthesized from PAC integration on a fresh
+    // boot before either of the above could fire).
+    const todayKey = (() => {
+      const d = serverNow;
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    })();
+    const baselineMap = new Map();
+    try {
+      for (const b of getCounterBaselinesForDate(todayKey) || []) {
+        baselineMap.set(`${Number(b.inverter)}_${Number(b.unit)}`, b);
+      }
+    } catch (_) { /* empty map → unknown source */ }
+    // Solar-window close detection — used by the frontend badge to suppress
+    // the "counter frozen" status during the slow-tick tail of the day.
+    const eodH = Math.max(0, Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18));
+    const swStartH = Math.max(0, Math.min(23, Number(getSetting("solarWindowStartHour", 5)) || 5));
+    const hourNow = serverNow.getHours();
+    // Closing tail = last hour of the solar window (inclusive). Outside the
+    // solar window entirely → also "closed" so the frontend shows OK on
+    // sleeping units.
+    const inSolarWindow = hourNow >= swStartH && hourNow < eodH;
+    const inClosingTail = inSolarWindow && hourNow >= (eodH - 1);
     const augmented = rows.map((r) => {
       const history = getCounterHistory(r.inverter, r.unit);
       const rtcOk = counterHealth.rtcYearValid(r, serverNow);
       const adv = counterHealth.counterAdvancing(history);
+      const b = baselineMap.get(`${Number(r.inverter)}_${Number(r.unit)}`) || null;
+      const baselineSource = b ? String(b.source || "") : "";
+      const eodCleanPresent = b
+        ? (b.etotal_eod_clean != null && b.parce_eod_clean != null) ? 1 : 0
+        : 0;
       return {
         ...r,
         rtc_year_valid: rtcOk ? 1 : 0,
         counter_advancing: adv ? 1 : 0,
+        baseline_source: baselineSource,
+        eod_clean_present: eodCleanPresent,
+        baseline_etotal: b ? Number(b.etotal_baseline || 0) : null,
+        baseline_parce:  b ? Number(b.parce_baseline  || 0) : null,
       };
     });
-    res.json({ ok: true, now: Date.now(), rows: augmented });
+    res.json({
+      ok: true,
+      now: Date.now(),
+      rows: augmented,
+      solar_window: { start_h: swStartH, eod_h: eodH, in_window: inSolarWindow ? 1 : 0, closing_tail: inClosingTail ? 1 : 0 },
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -12418,6 +12548,20 @@ app.get("/api/counter-state/summary", (req, res) => {
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
+    // Match /api/counter-state/all: don't flag "frozen" outside the productive
+    // solar window or in its closing-tail hour. A unit at end-of-day with
+    // pac_w 600-1000 W produces less than the 1 kWh resolution per 5 min, so
+    // "no advance" is normal — flagging it scared operators every sundown.
+    const eodH = Math.max(0, Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18));
+    const swStartH = Math.max(0, Math.min(23, Number(getSetting("solarWindowStartHour", 5)) || 5));
+    const hourNow = serverNow.getHours();
+    const inSolarWindow = hourNow >= swStartH && hourNow < eodH;
+    const inClosingTail = inSolarWindow && hourNow >= (eodH - 1);
+    // PAC threshold: 5 kW per unit. Below that, the 1 kWh integer counter
+    // tick rate is slower than the 5-min advancing-window check, so missing
+    // ticks are expected and not a fault.
+    const FROZEN_PAC_THRESHOLD_W = 5000;
+
     let rtcInvalid = 0;
     let rtcDrifted = 0;
     let counterFrozen = 0;
@@ -12429,7 +12573,15 @@ app.get("/api/counter-state/summary", (req, res) => {
       const adv = counterHealth.counterAdvancing(history);
       if (!rtcOk) rtcInvalid += 1;
       else if (Math.abs(drift) > 60) rtcDrifted += 1;
-      if (!adv && Number(r.pac_w || 0) > 500) counterFrozen += 1;
+      // Suppress frozen flag outside / closing the solar window.
+      if (
+        !adv &&
+        Number(r.pac_w || 0) > FROZEN_PAC_THRESHOLD_W &&
+        inSolarWindow &&
+        !inClosingTail
+      ) {
+        counterFrozen += 1;
+      }
     }
     res.json({
       ok: true,
@@ -12438,6 +12590,7 @@ app.get("/api/counter-state/summary", (req, res) => {
       rtc_invalid: rtcInvalid,
       rtc_drifted: rtcDrifted,
       counter_frozen: counterFrozen,
+      solar_window: { start_h: swStartH, eod_h: eodH, in_window: inSolarWindow ? 1 : 0, closing_tail: inClosingTail ? 1 : 0 },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -12621,19 +12774,16 @@ function _requireBulkAuth(req, res, next) {
 // IMPORTANT: this route MUST be registered before /api/sync-clock/:inverter/:unit
 // because Express matches the generic two-segment pattern first — "inverter" in
 // the path would be captured as the :inverter param, routing through _requireBulkAuth.
-// In remote mode, clock-sync writes are intentionally disabled at the server.
-// A broadcast can produce 91 unit-level upstream writes plus replication-bound
-// log + counter-state row updates, which spikes the remote↔gateway WS bridge.
-// Operators perform manual sync from the gateway box; the remote viewer keeps
-// reading the gateway's results via the standard replicated tables
-// (inverter_counter_state + inverter_clock_sync_log).
-const _denyClockSyncInRemote = (req, res, next) => {
+// In remote mode, clock-sync requests are forwarded to the gateway so the
+// operator can drive the same broadcast / per-inverter / per-unit actions
+// from the remote viewer. Bulk-auth + topology-auth headers are forwarded
+// via proxyToRemote(...{forwardOperatorAuth:true}) so the gateway-side
+// `_requireBulkAuth` re-validates with the same headers the operator typed.
+// Replicated tables (inverter_counter_state, inverter_clock_sync_log) keep
+// the remote viewer's status panel in sync with the gateway result.
+const _proxyClockSyncInRemote = (req, res, next) => {
   if (isRemoteMode()) {
-    return res.status(403).json({
-      ok: false,
-      error: "Clock sync is disabled in remote mode. Run from the gateway directly.",
-      remoteDisabled: true,
-    });
+    return proxyToRemote(req, res, "", { forwardOperatorAuth: true });
   }
   return next();
 };
@@ -12641,7 +12791,7 @@ const _denyClockSyncInRemote = (req, res, next) => {
 app.post(
   "/api/sync-clock/inverter/:inverter",
   express.json(),
-  _denyClockSyncInRemote,
+  _proxyClockSyncInRemote,
   (req, res) => {
     const inv = Number(req.params.inverter);
     if (!inv) {
@@ -12655,7 +12805,7 @@ app.post(
 app.post(
   "/api/sync-clock/:inverter/:unit",
   express.json(),
-  _denyClockSyncInRemote,
+  _proxyClockSyncInRemote,
   _requireBulkAuth,
   (req, res) => {
     const inv = Number(req.params.inverter);
@@ -12671,7 +12821,7 @@ app.post(
 app.post(
   "/api/sync-clock/broadcast",
   express.json(),
-  _denyClockSyncInRemote,
+  _proxyClockSyncInRemote,
   _requireBulkAuth,
   (req, res) => {
     const trigger = String(req.body?.trigger || "operator");
@@ -12770,6 +12920,118 @@ function _validDateStr(s) {
   return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
+// v2.10.x — compute the three energy totals (PAC-integrated, Etotal Δ,
+// parcE Δ) for one (inverter, slave) on one local date. Used by the
+// PARAMETERS UI totals strip and any future export that needs all three
+// methods side-by-side. All three are computed from the same authoritative
+// sources used by the Energy Summary export, so the numbers match.
+//
+// Returns:
+//   { pac_kwh, etotal_kwh, parce_kwh, anchor_source, eod_clean_present }
+// where any field may be NaN when the underlying anchor is unavailable.
+function _computeParamTotals(inv, ip, slave, dateLocal) {
+  const out = {
+    pac_kwh: NaN,
+    etotal_kwh: NaN,
+    parce_kwh: NaN,
+    anchor_source: "",
+    eod_clean_present: 0,
+  };
+  const isToday = dateLocal === _todayLocal();
+
+  // PAC-integrated: sum of (pac_w × 5/60 / 1000) across all rows in the
+  // solar window, plus the live bucket if today.
+  try {
+    const rows = db.prepare(`
+      SELECT pac_w FROM inverter_5min_param
+      WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+        AND in_solar_window = 1
+    `).all(String(ip), Number(slave), String(dateLocal));
+    let pacKwh = 0;
+    for (const r of rows) {
+      const w = Number(r?.pac_w);
+      if (Number.isFinite(w) && w > 0) pacKwh += w * 5 / 60 / 1000;
+    }
+    if (isToday) {
+      try {
+        const live = dailyAggregator.getCurrentBucket(ip, slave);
+        const w = Number(live?.pac_w);
+        if (live && live.in_solar_window && Number.isFinite(w) && w > 0) {
+          pacKwh += w * 5 / 60 / 1000;
+        }
+      } catch (_) { /* ignore */ }
+    }
+    out.pac_kwh = pacKwh;
+  } catch (_) { /* leave NaN */ }
+
+  // Etotal Δ + parcE Δ via the same path as the Energy Summary export.
+  // For today: cur - baseline. For past day: eod_clean - baseline (with
+  // tomorrow-baseline fallback).
+  const baseline = (() => {
+    try {
+      const rows = getCounterBaselinesForDate(dateLocal) || [];
+      return rows.find((b) => Number(b.inverter) === Number(inv) && Number(b.unit) === Number(slave)) || null;
+    } catch (_) { return null; }
+  })();
+  if (baseline) {
+    out.anchor_source = String(baseline.source || "");
+    out.eod_clean_present = (baseline.etotal_eod_clean != null && baseline.parce_eod_clean != null) ? 1 : 0;
+  }
+
+  if (isToday) {
+    let cur = null;
+    try {
+      const all = getCounterStateAll() || [];
+      cur = all.find((r) => Number(r.inverter) === Number(inv) && Number(r.unit) === Number(slave)) || null;
+    } catch (_) { cur = null; }
+    if (cur) {
+      // Path 1: today's baseline anchor.
+      if (baseline) {
+        const dE = Number(cur.etotal_kwh) - Number(baseline.etotal_baseline || 0);
+        const dP = Number(cur.parce_kwh)  - Number(baseline.parce_baseline  || 0);
+        if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) out.etotal_kwh = dE;
+        if (Number.isFinite(dP) && dP >= 0 && dP <= 9000) out.parce_kwh  = dP;
+      }
+      // Path 2: yesterday's eod_clean fallback.
+      if (!Number.isFinite(out.etotal_kwh) || !Number.isFinite(out.parce_kwh)) {
+        try {
+          const [y, m, d] = String(dateLocal || "").split("-").map(Number);
+          if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+            const prevDate = new Date(y, m - 1, d - 1);
+            const prevKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, "0")}-${String(prevDate.getDate()).padStart(2, "0")}`;
+            const yRows = getCounterBaselinesForDate(prevKey) || [];
+            const yB = yRows.find((b) => Number(b.inverter) === Number(inv) && Number(b.unit) === Number(slave));
+            if (yB) {
+              if (!Number.isFinite(out.etotal_kwh) && Number(yB.etotal_eod_clean) > 0) {
+                const dE = Number(cur.etotal_kwh) - Number(yB.etotal_eod_clean);
+                if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) out.etotal_kwh = dE;
+              }
+              if (!Number.isFinite(out.parce_kwh) && Number(yB.parce_eod_clean) > 0) {
+                const dP = Number(cur.parce_kwh) - Number(yB.parce_eod_clean);
+                if (Number.isFinite(dP) && dP >= 0 && dP <= 9000) out.parce_kwh = dP;
+              }
+            }
+          }
+        } catch (_) { /* ignore */ }
+      }
+    }
+  } else if (baseline) {
+    // Past day: same-day eod_clean delta.
+    const eClean = Number(baseline.etotal_eod_clean || 0);
+    const pClean = Number(baseline.parce_eod_clean  || 0);
+    if (eClean > 0) {
+      const dE = eClean - Number(baseline.etotal_baseline || 0);
+      if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) out.etotal_kwh = dE;
+    }
+    if (pClean > 0) {
+      const dP = pClean - Number(baseline.parce_baseline || 0);
+      if (Number.isFinite(dP) && dP >= 0 && dP <= 9000) out.parce_kwh = dP;
+    }
+  }
+
+  return out;
+}
+
 function _paramRowSelect(ip, slave, dateLocal) {
   // Returns rows in solar-window only.  Caller decides whether to also
   // append the live in-progress bucket (today-only).
@@ -12780,6 +13042,7 @@ function _paramRowSelect(ip, slave, dateLocal) {
            iac1_a, iac2_a, iac3_a,
            temp_c, pac_w, cosphi, freq_hz,
            inv_alarms, track_alarms,
+           parce_kwh,
            sample_count, is_complete, in_solar_window
       FROM inverter_5min_param
      WHERE inverter_ip = ? AND slave = ? AND date_local = ?
@@ -12787,6 +13050,20 @@ function _paramRowSelect(ip, slave, dateLocal) {
      ORDER BY slot_index ASC
   `).all(String(ip), Number(slave), String(dateLocal));
 }
+
+// GET /api/params/diagnostics
+// Read-only ingestion stats from the 5-min aggregator — useful for
+// debugging "why is my row count low?" scenarios. Counters are
+// monotonically increasing since process start. Registered BEFORE the
+// parametrized routes so /diagnostics doesn't get captured as :inverter.
+app.get("/api/params/diagnostics", (req, res) => {
+  try {
+    const stats = dailyAggregator.getStats();
+    res.json({ ok: true, now: Date.now(), stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // GET /api/params/:inverter/:slave?date=YYYY-MM-DD
 // Single slave/node, one-day view. Today returns persisted rows + the
@@ -12822,6 +13099,9 @@ app.get("/api/params/:inverter/:slave", (req, res) => {
         if (liveBucket && !liveBucket.in_solar_window) liveBucket = null;
       } catch (_) { liveBucket = null; }
     }
+    let totals = null;
+    try { totals = _computeParamTotals(inv, ip, slave, date); }
+    catch (_) { totals = null; }
     res.json({
       ok: true,
       inverter: inv, ip, slave,
@@ -12829,6 +13109,7 @@ app.get("/api/params/:inverter/:slave", (req, res) => {
       solar_window: sw,
       rows,
       live_bucket: liveBucket,
+      totals,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -12871,7 +13152,10 @@ app.get("/api/params/:inverter", (req, res) => {
           if (liveBucket && !liveBucket.in_solar_window) liveBucket = null;
         } catch (_) { liveBucket = null; }
       }
-      out[slave] = { rows, live_bucket: liveBucket };
+      let totals = null;
+      try { totals = _computeParamTotals(inv, ip, slave, date); }
+      catch (_) { totals = null; }
+      out[slave] = { rows, live_bucket: liveBucket, totals };
     }
     res.json({
       ok: true,
@@ -12888,13 +13172,12 @@ app.get("/api/params/:inverter", (req, res) => {
 
 // Refresh: proxies to Python's POST /stop-reasons/{inverter}/{slave}, then
 // persists each per-node record + optional histogram in one DB transaction.
-const _denyStopReasonsInRemote = (req, res, next) => {
+// Remote mode: forward to gateway with operator-auth headers — gateway runs
+// the Modbus FC 0x71 SCOPE peek and writes the persisted rows; the remote
+// viewer sees them via the standard inverter_stop_reasons replication.
+const _proxyStopReasonsInRemote = (req, res, next) => {
   if (isRemoteMode()) {
-    return res.status(403).json({
-      ok: false,
-      error: "Stop Reasons refresh is disabled in remote mode. Run from the gateway.",
-      remoteDisabled: true,
-    });
+    return proxyToRemote(req, res, "", { forwardOperatorAuth: true });
   }
   return next();
 };
@@ -12955,11 +13238,17 @@ app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
   }
 });
 
+// v2.10.x — bulk-auth removed from the per-inverter Refresh path. The
+// vendor FC 0x71 SCOPE peek is read-only on the inverter side (it pulls a
+// firmware diagnostic snapshot, doesn't issue any control writes), so the
+// `sacupsMM` operator gate that the broadcast / write actions need is not
+// required here. The Node→Python upstream still injects the gateway's
+// current sacups key at line ~13017 below, so the Python `_check_bulk_auth`
+// gate keeps passing without the operator having to type anything.
 app.post(
   "/api/stop-reasons/:inverter/refresh",
   express.json(),
-  _denyStopReasonsInRemote,
-  _requireBulkAuth,
+  _proxyStopReasonsInRemote,
   async (req, res) => {
     const inv = Number(req.params.inverter);
     if (!Number.isFinite(inv) || inv <= 0) {
@@ -13036,13 +13325,14 @@ app.post(
 
 // ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ───────────────────
 
-const _denySerialInRemote = (req, res, next) => {
+// Remote mode: forward Read / Edit / Send / fleet-scan to the gateway with
+// operator-auth headers. The gateway-side route validates bulk-auth + the
+// session-token / topology-auth gates, drives the FC11 / FC16 traffic, and
+// persists serial_change_log rows; the remote viewer sees those rows back
+// through the standard SQLite replication.
+const _proxySerialInRemote = (req, res, next) => {
   if (isRemoteMode()) {
-    return res.status(403).json({
-      ok: false,
-      error: "Serial number Read/Edit/Send is disabled in remote mode. Run from the gateway.",
-      remoteDisabled: true,
-    });
+    return proxyToRemote(req, res, "", { forwardOperatorAuth: true });
   }
   return next();
 };
@@ -13161,7 +13451,7 @@ function _buildTopologyForSerial() {
 app.post(
   "/api/serial/:inverter/read-all",
   express.json(),
-  _denySerialInRemote,
+  _proxySerialInRemote,
   _requireBulkAuth,
   async (req, res) => {
     const inv = Number(req.params.inverter);
@@ -13240,7 +13530,7 @@ app.post(
 app.post(
   "/api/serial/fleet/scan",
   express.json(),
-  _denySerialInRemote,
+  _proxySerialInRemote,
   _requireBulkAuth,
   async (req, res) => {
     const topology = _buildTopologyForSerial();
@@ -13265,7 +13555,7 @@ app.post(
 // Bulk-auth gated.  On success mints a session token.
 app.get(
   "/api/serial/:inverter/:slave",
-  _denySerialInRemote,
+  _proxySerialInRemote,
   async (req, res) => {
     const inv = Number(req.params.inverter);
     const slave = Number(req.params.slave);
@@ -13331,7 +13621,7 @@ app.get(
 app.post(
   "/api/serial/:inverter/:slave",
   express.json(),
-  _denySerialInRemote,
+  _proxySerialInRemote,
   _requireBulkAuth,
   async (req, res) => {
     const inv = Number(req.params.inverter);
@@ -19505,6 +19795,18 @@ function _flushAndClose() {
   if (_flushClosed) return;
   _flushClosed = true;
   try { poller.flushPending(); } catch (_) {}   // recover last ~1 s of readings
+  // v2.10.x — persist any in-progress 5-min Parameters bucket so a partial
+  // slot at the moment of shutdown isn't dropped. flushAndStop also clears
+  // the reaper interval so libuv has nothing left to drain after we close
+  // the DB.
+  try {
+    const r = dailyAggregator.flushAndStop();
+    if (r && Number(r.flushed) > 0) {
+      console.log(`[Server] Parameters aggregator flushed ${r.flushed} partial bucket(s) on shutdown.`);
+    }
+  } catch (err) {
+    console.warn("[Server] Parameters aggregator shutdown flush failed:", err?.message || err);
+  }
   cleanupGatewayMainDbSnapshotSync();
   closeDb();                                      // WAL checkpoint + db.close
 }

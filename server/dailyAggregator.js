@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * server/dailyAggregator.js — All Parameters Data 5-min aggregator.
+ * server/dailyAggregator.js — Parameters page 5-min aggregator.
  *
  * Bucketizes the live poll stream into one 5-minute row per (inverter_ip,
  * slave, date_local, slot_index) and persists to `inverter_5min_param`.
@@ -10,8 +10,25 @@
  *
  * Flow:
  *   poller.js parsed-row loop  →  ingestLiveSample(parsed)
+ *      └─ validate fields per electrical sanity ranges
  *      └─ accumulate into in-memory bucket
- *      └─ when slot rolls (or 30s grace after slot end), flushBucket()
+ *      └─ when slot rolls (or 30s grace after slot end), _flush()
+ *
+ * Hardening (v2.10.x):
+ *   • Per-field range clamps reject obvious garbage (negative voltages,
+ *     freq outside 40-65 Hz, etc.) without dropping the whole sample.
+ *   • Sample timestamp must be within ±5 min of server clock; clock-skew
+ *     and stale-cache reads can't poison the average.
+ *   • Out-of-order ts (sample older than the bucket's last accepted ts)
+ *     is rejected so a slow Modbus reply replaying through the queue
+ *     doesn't drag the slot label backwards.
+ *   • Reaped slots are remembered so a very late sample for the same
+ *     slot can't recreate a half-empty bucket and clobber the persisted
+ *     row via INSERT OR REPLACE.
+ *   • Stats counters (samples_seen / samples_dropped / flushes / errors)
+ *     so the operator can sanity-check ingestion via the diagnostic API.
+ *   • flushAndStop() is wired to the gateway shutdown sequence so
+ *     in-memory partial buckets are persisted before exit.
  *
  * Reads (REST/WS) come from the persisted table; the in-progress bucket
  * is exposed via `getCurrentBucket(ip, slave)` for the live UI tile.
@@ -27,12 +44,46 @@ const FLUSH_GRACE_MS = 30_000;          // reap a bucket 30s after its slot ende
 const REAP_INTERVAL_MS = 30_000;        // run the reaper every 30s
 const SLOT_MIN = 5;                     // bucket size (minutes)
 
+// Reject samples whose ts drifts more than this far from server clock.
+// Inverter RTC drift up to ~1 hr is normal — we still trust pymodbus's
+// `time.time()` stamp on the Python side, which uses the gateway's clock.
+const TS_PAST_TOLERANCE_MS = 5 * 60_000;
+const TS_FUTURE_TOLERANCE_MS = 5 * 60_000;
+
+// Remember the last 256 reaped (ip|unit|date|slot) keys so a stale sample
+// for an already-persisted slot can't sneak in and clobber it. Map keeps
+// insertion order so we can prune the oldest entry without a queue.
+const REAPED_REMEMBER_LIMIT = 256;
+const reapedSlots = new Map();   // key="ip|unit|date|slot" -> reapedAtMs
+
 // Per-(inverter_ip, slave) in-progress bucket.
 const buckets = new Map();              // key="ip|slave" -> Bucket
 
 // Captured config — set by init().
 let _db = null;
 let _getSetting = null;                 // (key, def) => string
+let _reaperHandle = null;
+
+// Diagnostic counters — exported via getStats() for the settings UI.
+const stats = {
+  samples_seen: 0,           // every ingestLiveSample call
+  samples_dropped_offline: 0,// online=0 + zero readings
+  samples_dropped_stale_ts: 0,
+  samples_dropped_future_ts: 0,
+  samples_dropped_oo_order: 0,
+  samples_dropped_reaped_slot: 0,
+  samples_dropped_no_unit: 0,
+  field_clamp_count: 0,      // # of individual fields rejected by range gate
+  buckets_opened: 0,
+  flushes_ok: 0,
+  flushes_failed: 0,
+  reaped: 0,
+  shutdown_flushes: 0,
+  // v2.10.0 — last-activity timestamps so /api/system/heartbeat can prove
+  // the aggregator is ticking independent of which page the UI is on.
+  last_sample_ts: 0,
+  last_flush_ts: 0,
+};
 
 function _solarWindowStartHour() {
   const v = Number(_getSetting?.("solarWindowStartHour", 5));
@@ -56,12 +107,16 @@ function init({ db, getSetting }) {
   // Reaper — every 30s force-flush any bucket whose slot has rolled past
   // its grace window. Catches the case where an inverter goes silent
   // mid-bucket and would otherwise sit unflushed forever.
-  const t = setInterval(() => {
+  if (_reaperHandle) {
+    clearInterval(_reaperHandle);
+    _reaperHandle = null;
+  }
+  _reaperHandle = setInterval(() => {
     try { reapStale(); } catch (err) {
       console.warn("[dailyAgg] reaper error:", err?.message || err);
     }
   }, REAP_INTERVAL_MS);
-  if (typeof t.unref === "function") t.unref();
+  if (typeof _reaperHandle.unref === "function") _reaperHandle.unref();
 
   return { ingestLiveSample, flushAll, getCurrentBucket };
 }
@@ -101,15 +156,44 @@ function _isSolarWindow(slotIndex) {
   return h >= _solarWindowStartHour() && h < _eodSnapshotHour();
 }
 
+// ─── Range gates ──────────────────────────────────────────────────────────
+// A returned `null` means "field rejected — don't include in the average."
+// Conservative bounds — they're meant to catch register-corruption (e.g.
+// 0xFFFF interpreted as 65535 V), not borderline-real-world readings.
+
+const _RANGES = {
+  vdc:    [0, 2000],          // INGECON SUN bus voltage tops ~1500 V
+  idc:    [0, 1500],
+  vac:    [0, 1000],          // any single-phase line voltage on this fleet
+  iac:    [0, 5000],
+  pac:    [0, 1_000_000],     // per-unit deca-watts; 1 GW ceiling well above 250 kW × 4 nodes
+  cosphi: [-1.05, 1.05],
+  fac:    [40, 65],           // 50 Hz / 60 Hz grids; outside this is a sensor fault
+  tempC:  [-40, 150],         // industrial inverter envelope
+  parce:  [0, 1_000_000_000], // lifetime monotonic counter — same ceiling as eod_clean sanity gate
+};
+
+function _vRange(row, key, range) {
+  const x = Number(row?.[key]);
+  if (!Number.isFinite(x)) return null;
+  if (x < range[0] || x > range[1]) {
+    stats.field_clamp_count += 1;
+    return null;
+  }
+  return x;
+}
+
 // ─── Bucket lifecycle ─────────────────────────────────────────────────────
 
 function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
+  stats.buckets_opened += 1;
   return {
     ip,
     slave: Number(slave) || 0,
     dateLocal,
     slotIndex,
     tsMs: Number(tsMs) || Date.now(),
+    lastAcceptedTsMs: 0,        // for out-of-order rejection within the slot
 
     // Sums for averaging
     sumVdc: 0, nVdc: 0,
@@ -130,47 +214,79 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
     invAlarms: 0,
     trackAlarms: 0,
 
-    sampleCount: 0,
+    // parcE is a lifetime-monotonic counter; we keep the LATEST value seen
+    // during the slot so the persisted row reflects the end-of-slot
+    // snapshot. Row-to-row delta gives the slot's actual energy.
+    parceLast: null,
+
+    sampleCount: 0,             // # of polls that contributed at least one field
   };
 }
 
 function _accum(b, row) {
   // row = the parsed object that the poller broadcasts. Field names mirror
   // services/inverter_engine.py read_fast_async output.
-  const v = (k) => {
-    const x = Number(row?.[k]);
-    return Number.isFinite(x) ? x : null;
-  };
-  const vdc = v("vdc"), idc = v("idc"), pac = v("pac"), fac = v("fac_hz");
-  const vac1 = v("vac1"), vac2 = v("vac2"), vac3 = v("vac3");
-  const iac1 = v("iac1"), iac2 = v("iac2"), iac3 = v("iac3");
-  const cosphi = v("cosphi");                     // added to read_fast_async (reg 16 / 1000)
-  const tempC = v("temp_c");                      // future: NULL until source identified
-  const alarm32 = v("alarm_32");
+  const vdc = _vRange(row, "vdc", _RANGES.vdc);
+  const idc = _vRange(row, "idc", _RANGES.idc);
+  const pac = _vRange(row, "pac", _RANGES.pac);
+  const fac = _vRange(row, "fac_hz", _RANGES.fac);
+  const vac1 = _vRange(row, "vac1", _RANGES.vac);
+  const vac2 = _vRange(row, "vac2", _RANGES.vac);
+  const vac3 = _vRange(row, "vac3", _RANGES.vac);
+  const iac1 = _vRange(row, "iac1", _RANGES.iac);
+  const iac2 = _vRange(row, "iac2", _RANGES.iac);
+  const iac3 = _vRange(row, "iac3", _RANGES.iac);
+  const cosphi = _vRange(row, "cosphi", _RANGES.cosphi);
+  const tempC = _vRange(row, "temp_c", _RANGES.tempC);
+  const parce = _vRange(row, "parce_kwh", _RANGES.parce);
+  const a32 = Number(row?.alarm_32);
+  const alarm32 = Number.isFinite(a32) && a32 >= 0 ? (a32 >>> 0) : null;
 
-  if (vdc != null)  { b.sumVdc += vdc;   b.nVdc++; }
-  if (idc != null)  { b.sumIdc += idc;   b.nIdc++; }
+  let touched = 0;
+  if (vdc != null)  { b.sumVdc += vdc;   b.nVdc++; touched++; }
+  if (idc != null)  { b.sumIdc += idc;   b.nIdc++; touched++; }
   if (vdc != null && idc != null) {
     // Pdc computed from Vdc × Idc (matches ISM display within ~2%; ISM derives
     // it from these same fields). Stored as integer W.
     b.sumPdc += vdc * idc;  b.nPdc++;
   }
-  if (vac1 != null) { b.sumVac1 += vac1; b.nVac1++; }
-  if (vac2 != null) { b.sumVac2 += vac2; b.nVac2++; }
-  if (vac3 != null) { b.sumVac3 += vac3; b.nVac3++; }
-  if (iac1 != null) { b.sumIac1 += iac1; b.nIac1++; }
-  if (iac2 != null) { b.sumIac2 += iac2; b.nIac2++; }
-  if (iac3 != null) { b.sumIac3 += iac3; b.nIac3++; }
-  if (pac != null)  { b.sumPac += pac * 10; b.nPac++; }   // reg 18 is deca-watts
-  if (cosphi != null) { b.sumCos += cosphi; b.nCos++; }
-  if (fac != null)  { b.sumFreq += fac; b.nFreq++; }
-  if (tempC != null){ b.sumTemp += tempC; b.nTemp++; }
+  if (vac1 != null) { b.sumVac1 += vac1; b.nVac1++; touched++; }
+  if (vac2 != null) { b.sumVac2 += vac2; b.nVac2++; touched++; }
+  if (vac3 != null) { b.sumVac3 += vac3; b.nVac3++; touched++; }
+  if (iac1 != null) { b.sumIac1 += iac1; b.nIac1++; touched++; }
+  if (iac2 != null) { b.sumIac2 += iac2; b.nIac2++; touched++; }
+  if (iac3 != null) { b.sumIac3 += iac3; b.nIac3++; touched++; }
+  if (pac != null)  { b.sumPac += pac * 10; b.nPac++; touched++; }   // reg 18 is deca-watts
+  if (cosphi != null) { b.sumCos += cosphi; b.nCos++; touched++; }
+  if (fac != null)  { b.sumFreq += fac; b.nFreq++; touched++; }
+  if (tempC != null){ b.sumTemp += tempC; b.nTemp++; touched++; }
+  // parcE is monotone-non-decreasing; only accept readings >= the last one
+  // we saw in this bucket so a glitchy regression can't poison the persisted
+  // end-of-slot value. The first valid reading sets the floor.
+  if (parce != null) {
+    if (b.parceLast == null || parce >= b.parceLast) {
+      b.parceLast = parce;
+      touched++;
+    }
+  }
   if (alarm32 != null) {
-    b.invAlarms = (Number(b.invAlarms) | (alarm32 >>> 0)) >>> 0;
+    b.invAlarms = (Number(b.invAlarms) | alarm32) >>> 0;
   }
 
-  b.sampleCount += 1;
-  b.tsMs = Number(row?.ts) || b.tsMs;
+  // sample_count now counts only polls that contributed at least one valid
+  // field, so a fully-corrupt frame doesn't inflate the persisted "samples"
+  // counter.
+  if (touched > 0) {
+    b.sampleCount += 1;
+    const tsCandidate = Number(row?.ts);
+    if (Number.isFinite(tsCandidate) && tsCandidate > 0) {
+      b.tsMs = tsCandidate;
+      b.lastAcceptedTsMs = tsCandidate;
+    } else if (b.tsMs <= 0) {
+      b.tsMs = Date.now();
+    }
+  }
+  return touched;
 }
 
 function _avg(sum, n, fixed = null) {
@@ -179,8 +295,22 @@ function _avg(sum, n, fixed = null) {
   return fixed == null ? x : Math.round(x * (10 ** fixed)) / (10 ** fixed);
 }
 
+function _rememberReaped(ip, unit, dateLocal, slotIndex) {
+  const key = `${ip}|${unit}|${dateLocal}|${slotIndex}`;
+  reapedSlots.set(key, Date.now());
+  // Trim to bound — drop oldest entry (Map iterates in insertion order).
+  while (reapedSlots.size > REAPED_REMEMBER_LIMIT) {
+    const oldestKey = reapedSlots.keys().next().value;
+    if (oldestKey === undefined) break;
+    reapedSlots.delete(oldestKey);
+  }
+}
+function _wasReaped(ip, unit, dateLocal, slotIndex) {
+  return reapedSlots.has(`${ip}|${unit}|${dateLocal}|${slotIndex}`);
+}
+
 function _flush(b) {
-  if (!_db || b.sampleCount === 0) return;
+  if (!_db || b.sampleCount === 0) return false;
   const inSolar = _isSolarWindow(b.slotIndex) ? 1 : 0;
   const row = {
     inverter_ip: b.ip,
@@ -206,6 +336,7 @@ function _flush(b) {
     sample_count: b.sampleCount,
     is_complete: 1,
     in_solar_window: inSolar,
+    parce_kwh: b.parceLast != null ? Number(b.parceLast) : null,
   };
   try {
     _db.prepare(`
@@ -216,6 +347,7 @@ function _flush(b) {
         iac1_a, iac2_a, iac3_a,
         temp_c, pac_w, cosphi, freq_hz,
         inv_alarms, track_alarms,
+        parce_kwh,
         sample_count, is_complete, in_solar_window,
         updated_ts
       ) VALUES (
@@ -225,52 +357,122 @@ function _flush(b) {
         @iac1_a, @iac2_a, @iac3_a,
         @temp_c, @pac_w, @cosphi, @freq_hz,
         @inv_alarms, @track_alarms,
+        @parce_kwh,
         @sample_count, @is_complete, @in_solar_window,
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
       )
     `).run(row);
+    stats.flushes_ok += 1;
+    stats.last_flush_ts = Date.now();
+    _rememberReaped(b.ip, b.slave, b.dateLocal, b.slotIndex);
+    return true;
   } catch (err) {
+    stats.flushes_failed += 1;
     console.warn(`[dailyAgg] flush failed for ${b.ip}|${b.slave} slot ${b.slotIndex}:`, err?.message || err);
+    return false;
   }
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
 function ingestLiveSample(row) {
-  if (!row || !row.source_ip || row.unit == null) return;
-  // Skip offline frames — they have pac=0 and online=0 but no real samples.
-  if (Number(row.online) === 0 && Number(row.pac || 0) === 0
-      && Number(row.vdc || 0) === 0 && Number(row.vac1 || 0) === 0) {
+  stats.samples_seen += 1;
+  stats.last_sample_ts = Date.now();
+  if (!row || !row.source_ip || row.unit == null) {
+    stats.samples_dropped_no_unit += 1;
     return;
   }
-  const tsMs = Number(row.ts) || Date.now();
+  // Skip offline frames — the inverter explicitly reported online=0 AND every
+  // primary reading is zero. A single non-zero field is enough to keep the
+  // sample (residual DC voltage, CT-based AC current) since one stale field
+  // shouldn't poison an otherwise-real frame.
+  if (Number(row.online) === 0
+      && Number(row.pac || 0) === 0
+      && Number(row.vdc || 0) === 0
+      && Number(row.vac1 || 0) === 0) {
+    stats.samples_dropped_offline += 1;
+    return;
+  }
+  const tsCandidate = Number(row.ts);
+  const tsMs = Number.isFinite(tsCandidate) && tsCandidate > 0 ? tsCandidate : Date.now();
+  const nowMs = Date.now();
+  // Reject obviously bad timestamps. Stale = wraparound / cached frame from
+  // hours ago; future = drift from a runaway RTC. Both would assign the
+  // sample to the wrong slot.
+  if (tsMs < nowMs - TS_PAST_TOLERANCE_MS) {
+    stats.samples_dropped_stale_ts += 1;
+    return;
+  }
+  if (tsMs > nowMs + TS_FUTURE_TOLERANCE_MS) {
+    stats.samples_dropped_future_ts += 1;
+    return;
+  }
+
   const parts = _localParts(tsMs);
   const dateLocal = _formatDateLocal(parts);
   const slot = _slotIndex(parts);
   const key = `${row.source_ip}|${row.unit}`;
 
+  // Reaped-slot guard — reject samples that target a slot we already flushed
+  // and reaped, because re-creating a bucket here would issue a fresh
+  // INSERT OR REPLACE and overwrite the persisted row with fewer samples.
+  if (_wasReaped(row.source_ip, row.unit, dateLocal, slot)) {
+    stats.samples_dropped_reaped_slot += 1;
+    return;
+  }
+
   let b = buckets.get(key);
   if (!b || b.dateLocal !== dateLocal || b.slotIndex !== slot) {
-    if (b) _flush(b);     // close out the previous slot before starting the new one
+    if (b) {
+      _flush(b);     // close out the previous slot before starting the new one
+    }
     b = _newBucket(row.source_ip, row.unit, dateLocal, slot, tsMs);
     buckets.set(key, b);
+  } else if (b.lastAcceptedTsMs > 0 && tsMs < b.lastAcceptedTsMs - 1000) {
+    // Out-of-order sample — older than the latest one we already accumulated
+    // by more than 1 s. Reject so a delayed Modbus reply doesn't drag the
+    // bucket's tsMs (and the persisted row's reported time-of-last-sample)
+    // backwards.
+    stats.samples_dropped_oo_order += 1;
+    return;
   }
   _accum(b, row);
 }
 
 function flushAll() {
-  for (const [, b] of buckets) _flush(b);
+  for (const [key, b] of buckets) {
+    _flush(b);
+    buckets.delete(key);
+  }
+}
+
+function flushAndStop() {
+  // Called by the gateway shutdown sequence so partial buckets persist.
+  if (_reaperHandle) {
+    clearInterval(_reaperHandle);
+    _reaperHandle = null;
+  }
+  let flushed = 0;
+  for (const [key, b] of buckets) {
+    if (_flush(b)) flushed += 1;
+    buckets.delete(key);
+  }
+  stats.shutdown_flushes += flushed;
+  return { flushed };
 }
 
 function reapStale() {
   const now = Date.now();
+  let count = 0;
   for (const [key, b] of buckets) {
     const slotEnd = _slotEndMs(b.dateLocal, b.slotIndex);
     if (now > slotEnd + FLUSH_GRACE_MS) {
       _flush(b);
       buckets.delete(key);
+      count += 1;
     }
   }
+  if (count > 0) stats.reaped += count;
 }
 
 // Expose the in-progress bucket for the live UI tile. Returns the
@@ -301,9 +503,20 @@ function getCurrentBucket(ip, slave) {
     freq_hz:  _avg(b.sumFreq, b.nFreq, 2),
     inv_alarms: Number(b.invAlarms) >>> 0,
     track_alarms: Number(b.trackAlarms) >>> 0,
+    parce_kwh: b.parceLast != null ? Number(b.parceLast) : null,
     sample_count: b.sampleCount,
     is_complete: 0,
     in_solar_window: _isSolarWindow(b.slotIndex) ? 1 : 0,
+  };
+}
+
+// Diagnostic snapshot for /api/params/diagnostics. All counters are
+// monotonically increasing since process start.
+function getStats() {
+  return {
+    ...stats,
+    in_memory_buckets: buckets.size,
+    reaped_slot_memory: reapedSlots.size,
   };
 }
 
@@ -327,8 +540,10 @@ module.exports = {
   init,
   ingestLiveSample,
   flushAll,
+  flushAndStop,
   getCurrentBucket,
+  getStats,
   pruneRetention,
   // exposed for tests
-  _internal: { buckets, _slotIndex, _formatDateLocal, _localParts, _isSolarWindow, _slotEndMs },
+  _internal: { buckets, reapedSlots, stats, _slotIndex, _formatDateLocal, _localParts, _isSolarWindow, _slotEndMs },
 };
