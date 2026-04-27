@@ -15542,6 +15542,92 @@ body.mode-transition-active {
   line-height: 1.55;
 }
 
+/* v2.10.0 Slice F — Captured StopReason snapshot panel */
+.alarm-detail-stop-reason {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--accent, #3b82f6);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--surface1, #1f2937);
+}
+.alarm-detail-stop-reason.muted {
+  border-color: var(--border, #374151);
+  border-left-width: 1px;
+  opacity: 0.85;
+}
+.alarm-detail-stop-reason-title {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text1, #e5e7eb);
+  margin-bottom: 8px;
+}
+.alarm-detail-stop-reason-title .mdi { font-size: 16px; color: var(--accent, #3b82f6); }
+.alarm-detail-stop-reason.muted .mdi { color: var(--text2, #9ca3af); }
+.alarm-detail-stop-reason-tag {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  border-radius: 4px;
+}
+.alarm-detail-stop-reason-tag.muted {
+  background: var(--surface2, #374151);
+  color: var(--text2, #9ca3af);
+}
+.alarm-detail-stop-reason-body {
+  font-size: 11.5px;
+  color: var(--text2, #9ca3af);
+  line-height: 1.55;
+}
+.alarm-detail-stop-reason-times {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--text2, #9ca3af);
+  margin-bottom: 10px;
+}
+.alarm-detail-stop-reason-time-poller {
+  color: var(--text1, #e5e7eb); font-variant-numeric: tabular-nums;
+}
+.alarm-detail-stop-reason-time-sep { opacity: 0.5; }
+.alarm-detail-stop-reason-drift {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 8px;
+  padding: 1px 8px;
+  background: var(--orange, #f59e0b); color: #1f2937;
+  border-radius: 4px;
+  font-size: 11px; font-weight: 600;
+}
+.alarm-detail-stop-reason-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 16px;
+  font-size: 12px;
+}
+.alarm-detail-stop-reason-grid > div {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border, #374151);
+}
+.alarm-detail-stop-reason-wide {
+  grid-column: span 3;
+}
+.alarm-detail-stop-reason-k {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text2, #9ca3af);
+}
+.alarm-detail-stop-reason-v {
+  font-variant-numeric: tabular-nums;
+  color: var(--text1, #e5e7eb);
+}
+.alarm-detail-stop-reason-v strong { color: var(--accent, #3b82f6); }
+
 /* Per-bit card */
 .alarm-detail-card {
   padding: 14px 16px;
@@ -16153,6 +16239,175 @@ body.mode-transition-active {
   color: var(--text2);
   white-space: nowrap;
 }
+
+/* v2.10.0 Slice D minimal — Stop Reasons settings card */
+.srn-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.srn-controls select {
+  min-width: 180px;
+}
+.srn-table-host { margin-top: 8px; }
+.srn-empty {
+  padding: 20px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 12px;
+}
+.srn-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;             /* honour <colgroup> widths so columns
+                                      align across stacked per-inverter
+                                      tables (Plant Serial Map). */
+}
+.srn-table th, .srn-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srn-table th {
+  background: var(--surface2, var(--surface1));
+  color: var(--text2);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Fleet-block wrapper — one card per inverter on the Plant Serial Map.
+ * Card header is a status banner with name, IP, and ok/fail pill so the
+ * stacked layout reads as a list of cards rather than naked tables. */
+.srn-fleet-summary {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 6px 10px; margin-bottom: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  font-size: 12px; color: var(--text2);
+}
+.srn-fleet-summary .took { margin-left: auto; font-variant-numeric: tabular-nums; }
+.srn-fleet-block {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.srn-fleet-block-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--surface1, var(--surface));
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.srn-fleet-block-head .name {
+  font-weight: 600; color: var(--text);
+}
+.srn-fleet-block-head .ip {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  color: var(--text2); font-size: 11.5px;
+}
+.srn-fleet-block-head .pill {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.srn-fleet-block-head .pill.ok {
+  background: color-mix(in srgb, var(--green) 18%, var(--surface));
+  color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 35%, var(--border));
+}
+.srn-fleet-block-head .pill.warn {
+  background: color-mix(in srgb, var(--orange) 18%, var(--surface));
+  color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border));
+}
+.srn-fleet-block-head .pill.bad {
+  background: color-mix(in srgb, var(--red) 18%, var(--surface));
+  color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
+}
+.srn-fleet-block .srn-table {
+  border-radius: 0;
+}
+/* Right-align the Scanned-at column for tabular-numeric tidiness. */
+.srn-table td.srn-cell-time, .srn-table th.srn-cell-time {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+}
+.srn-table td.srn-cell-slave, .srn-table th.srn-cell-slave {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.srn-table tr.clickable { cursor: pointer; }
+.srn-table tr.clickable:hover { background: var(--surface2, var(--surface1)); }
+.srn-table tr.expanded { background: var(--surface2, var(--surface1)); }
+.srn-row-detail {
+  background: var(--surface1);
+  border-bottom: 1px solid var(--border);
+}
+.srn-row-detail-inner {
+  padding: 10px 12px;
+  font-size: 11.5px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+.srn-row-detail-wide { grid-column: span 3; }
+.srn-row-detail-k {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text2);
+}
+.srn-row-detail-v {
+  font-variant-numeric: tabular-nums;
+  color: var(--text1);
+}
+.srn-active { color: var(--orange, #f59e0b); font-weight: 600; }
+.srn-quiet { color: var(--text2); }
+.srn-debug-hex { font-weight: 700; color: var(--accent, #3b82f6); }
+.srn-mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+.srn-trigger-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  background: var(--surface2);
+  color: var(--text2);
+}
+.srn-trigger-tag.alarm-transition { background: var(--accent, #3b82f6); color: #fff; }
+.srn-histogram-host { margin-top: 16px; }
+.srn-histogram-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.srn-histogram-table th, .srn-histogram-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.srn-histogram-table tr.is-total td {
+  font-weight: 700;
+  background: var(--surface2, var(--surface1));
+  border-top: 2px solid var(--accent, #3b82f6);
+}
+.srn-histogram-table td.srn-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .invclock-input {
   width: 100%;
   max-width: 200px;
@@ -16300,6 +16555,16 @@ body.mode-transition-active {
   grid-column: 1 / -1;
 }
 
+/* v2.10.0 Slice B/C — same 12-col rescue rule for the new sections so their
+ * direct children span the full width instead of collapsing to ~80 px.  Match
+ * the exact pattern used by #inverterClockSection above. */
+#stopReasonsSection > .cb-subsection,
+#stopReasonsSection > .sgroup-actions,
+#serialNumberSection > .cb-subsection,
+#serialNumberSection > .sgroup-actions {
+  grid-column: 1 / -1;
+}
+
 #inverterClockSection > .invclock-tab-panel {
   display: block;
   width: 100%;
@@ -16378,6 +16643,15 @@ body.mode-transition-active {
   color: var(--text);
   font-size: 13px;
   line-height: 1.35;
+}
+/* The class rule above sets `display: flex`, which has the same specificity
+ * as the UA `[hidden] { display: none }` rule but wins on source order.
+ * Result: the `hidden` HTML attribute would be visually ignored — the
+ * banner would stay on screen even when JS toggles `banner.hidden = true`
+ * (which is exactly the gateway-mode false-positive that operators saw on
+ * the Stop Reasons / Serial Number sections). Force `[hidden]` to win. */
+.invclock-remote-banner[hidden] {
+  display: none !important;
 }
 .invclock-remote-banner .icon-inline {
   color: var(--orange);
@@ -16779,4 +17053,141 @@ body.mode-transition-active {
   color: var(--red);
   border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border));
   font-weight: var(--fw-semibold, 600);
+}
+
+/* ─── v2.10.x All Parameters Data page ─────────────────────────────────────
+ * Replaces the legacy Energy table UI with a per-inverter 4-tab parameter
+ * log fed by `inverter_5min_param` + `dailyAggregator.js`. The chrome reuses
+ * the project-wide `.card-tabs` / `.card-tab-panel` framework. */
+.param-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface2) 72%, transparent);
+  color: var(--text2);
+  margin-left: 6px;
+}
+.param-mode-badge.param-mode-live {
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  color: color-mix(in srgb, var(--green) 92%, var(--text));
+  border-color: color-mix(in srgb, var(--green) 50%, var(--border));
+}
+.param-mode-badge.param-mode-history {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.param-blank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 36px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface2) 50%, transparent);
+  color: var(--text2);
+  text-align: center;
+}
+.param-blank-icon {
+  font-size: 32px;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text2));
+  line-height: 1;
+}
+.param-blank-title {
+  font-size: 14px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+}
+.param-blank-sub {
+  font-size: 12px;
+  max-width: 480px;
+  line-height: 1.45;
+  color: var(--text2);
+}
+
+/* Param table: 16-column grid. Hard-cap height with sticky header so the
+ * 288 slots of a full solar-window day never push the page off-screen. */
+.param-table-wrap {
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.param-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 11.5px;
+}
+.param-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: color-mix(in srgb, var(--surface2) 92%, var(--surface));
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: right;
+  font-weight: var(--fw-semibold, 600);
+  white-space: nowrap;
+}
+.param-table thead th:first-child { text-align: left; }
+.param-table tbody td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.param-table tbody td.time {
+  text-align: left;
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+}
+.param-table tbody td.alarm-cell {
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  color: var(--text2);
+}
+.param-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.param-table tbody tr.param-live td {
+  background: color-mix(in srgb, var(--green) 9%, transparent);
+}
+.param-table tbody tr.param-live:hover td {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+.param-live-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 35%, transparent);
+  color: color-mix(in srgb, var(--green) 95%, var(--text));
+}
+.param-table .param-empty {
+  text-align: center;
+  padding: 28px 12px;
+  color: var(--text2);
+  border-bottom: none;
+}
+.param-table .param-empty .param-empty-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.param-table .param-empty .mdi {
+  font-size: 18px;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text2));
 }

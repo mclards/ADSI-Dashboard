@@ -1083,6 +1083,15 @@ async def read_fast_async(client, unit, ip):
     parce_kwh  = _u32_hi_lo(regs, 58)
     fac_hz     = round((reg(19) or 0) / 100.0, 2)
 
+    # v2.10.x All Parameters Data — additional fields needed by the
+    # 5-min aggregator. Register map verified against capture-inverter1.pcapng
+    # (INV01 / Slave 1 @ 16:50:57 4/27/2026 — every screenshot value matched).
+    #   reg 16 = CosPhi × 1000  (0..1000)
+    #   reg 17 = Phi Sine Sign  (0=−, 1=+) — kept for ISM column parity
+    cosphi_x1000 = int(reg(16) or 0)
+    cosphi_val   = round(cosphi_x1000 / 1000.0, 3) if cosphi_x1000 else 0.0
+    phi_sign     = 1 if int(reg(17) or 0) else 0
+
     return {
         "ts":            now_ms,
         # ─── existing fields (preserve exactly for Node-RED / poller compatibility) ───
@@ -1112,6 +1121,13 @@ async def read_fast_async(client, unit, ip):
         "rtc_ms":        rtc_ms,
         "rtc_valid":     bool(rtc_valid),
         "rtc_drift_s":   rtc_drift_s,
+        # ─── NEW fields (v2.10.x All Parameters Data) ───
+        "cosphi":        cosphi_val,            # 0.000 .. 1.000
+        "phi_sign":      phi_sign,              # 0=neg, 1=pos
+        # temp_c is NULL until we identify the standard FC04 register that
+        # carries it (the StopReason snapshot at 0xFEB5 has it, but reading
+        # that on every poll cycle would add vendor-FC traffic).
+        "temp_c":        None,
     }
 
 
@@ -2568,6 +2584,236 @@ async def api_sync_clock_all(request: Request):
         "total":      len(flat_results),
         "accepted":   accepted,
         "results":    flat_results,
+    }
+
+
+# ─── v2.10.0 Slice B — Stop Reasons (vendor FC 0x71 SCOPE peek) ────────────
+
+@app.post("/stop-reasons/{inverter}/{slave}")
+async def api_stop_reasons_read(inverter: int, slave: int, request: Request):
+    """Read StopReason snapshots for one inverter+slave via vendor FC 0x71.
+
+    Returns JSON-ready dicts. No persistence side-effect — Node's route
+    handler decides whether to write rows into inverter_stop_reasons.
+
+    Query / body knobs:
+      • nodes:              CSV list "1,2,3"  (default: all 1..3)
+      • include_histogram:  bool (default false)
+    Bulk-auth gated — same key as clock-sync broadcast since this drives
+    Modbus traffic on the shared bus.
+    """
+    auth = _extract_auth_header(request)
+    if not _check_bulk_auth(auth):
+        raise HTTPException(401, "unauthorized")
+
+    inv_int = int(inverter)
+    ip = ip_map.get(str(inv_int))
+    if not ip:
+        raise HTTPException(400, f"no IP configured for inverter {inverter}")
+
+    client = clients.get(ip)
+    if client is None:
+        raise HTTPException(503, f"no Modbus client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None:
+        raise HTTPException(503, f"no per-IP lock for {ip}")
+
+    # Parse knobs from query OR body (so callers can use either form).
+    body = {}
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        body = {}
+    qp = request.query_params
+
+    def _parse_nodes(val):
+        if val is None or val == "":
+            return None
+        if isinstance(val, list):
+            raw = val
+        else:
+            raw = str(val).split(",")
+        out = []
+        for s in raw:
+            try:
+                n = int(str(s).strip())
+                if 1 <= n <= 3:  # NODE_MAX_SUPPORTED
+                    out.append(n)
+            except Exception:
+                continue
+        return out or None
+
+    nodes = _parse_nodes(body.get("nodes")) or _parse_nodes(qp.get("nodes"))
+    include_histogram = bool(
+        body.get("include_histogram")
+        or qp.get("include_histogram") in ("1", "true", "True", "yes")
+    )
+
+    from services.stop_reason import read_with_lock as _read_with_lock
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: _read_with_lock(
+                client, lock, int(slave),
+                nodes=nodes, include_histogram=include_histogram,
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+
+    return {
+        "ok": True,
+        "inverter": inv_int,
+        "ip": ip,
+        "slave": int(slave),
+        "read_at_ms": int(time.time() * 1000),
+        "nodes": result.get("nodes", []),
+        "histogram": result.get("histogram"),
+    }
+
+
+# ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ────────────────────
+
+@app.get("/serial/{inverter}/{slave}")
+async def api_serial_read(inverter: int, slave: int, request: Request):
+    """FC11 Report Slave ID read for one inverter+slave.
+
+    Returns:
+      {
+        ok, inverter, ip, slave, read_at_ms,
+        serial, serial_format, format_warning,
+        model_code, firmware_main, firmware_aux,
+        live_snapshot_hex, raw_payload_hex,
+      }
+
+    Bulk-auth gated.  Optional query: `?fmt=motorola|tx|auto` (default auto).
+    """
+    auth = _extract_auth_header(request)
+    if not _check_bulk_auth(auth):
+        raise HTTPException(401, "unauthorized")
+
+    inv_int = int(inverter)
+    ip = ip_map.get(str(inv_int))
+    if not ip:
+        raise HTTPException(400, f"no IP configured for inverter {inverter}")
+
+    client = clients.get(ip)
+    if client is None:
+        raise HTTPException(503, f"no Modbus client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None:
+        raise HTTPException(503, f"no per-IP lock for {ip}")
+
+    fmt = (request.query_params.get("fmt") or "auto").strip().lower()
+    if fmt not in ("auto", "motorola", "tx"):
+        raise HTTPException(400, f"unknown fmt '{fmt}'")
+
+    # Optional per-call timeout override (Node passes 5s for fleet scans
+    # because the comm board needs more headroom than the 3s default
+    # when the bus is warm with poller traffic).  Clamped to [1.0, 15.0]
+    # so a runaway value can't stall the executor pool.
+    raw_to = request.query_params.get("timeout_s")
+    try:
+        timeout_s = float(raw_to) if raw_to is not None else 0.0
+    except (TypeError, ValueError):
+        timeout_s = 0.0
+    if timeout_s <= 0:
+        timeout_s = 3.0
+    timeout_s = max(1.0, min(15.0, timeout_s))
+
+    from services.serial_io import read_serial_with_lock as _read_serial
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: _read_serial(
+                client, lock, int(slave),
+                expected_fmt=fmt, timeout_s=timeout_s,
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+
+    return {
+        "ok": bool(result.get("ok")),
+        "inverter": inv_int,
+        "ip": ip,
+        "slave": int(slave),
+        "read_at_ms": int(time.time() * 1000),
+        **{k: v for k, v in result.items() if k not in ("ok", "slave")},
+    }
+
+
+@app.post("/serial/{inverter}/{slave}")
+async def api_serial_write(inverter: int, slave: int, request: Request):
+    """UNLOCK + WRITE + readback-VERIFY pipeline for one inverter+slave.
+
+    Body:
+      {
+        new_serial: str,        # 12 (Motorola) or 32 (TX) ASCII chars
+        fmt:        str,        # 'motorola' | 'tx'
+        verify_delay_s: float,  # optional override (default 1.0)
+      }
+
+    Bulk-auth gated.  Returns the same shape as
+    services.serial_io.write_serial_with_lock plus identification fields.
+    """
+    auth = _extract_auth_header(request)
+    if not _check_bulk_auth(auth):
+        raise HTTPException(401, "unauthorized")
+
+    inv_int = int(inverter)
+    ip = ip_map.get(str(inv_int))
+    if not ip:
+        raise HTTPException(400, f"no IP configured for inverter {inverter}")
+
+    client = clients.get(ip)
+    if client is None:
+        raise HTTPException(503, f"no Modbus client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None:
+        raise HTTPException(503, f"no per-IP lock for {ip}")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be a JSON object")
+    new_serial = str(body.get("new_serial") or "").strip()
+    fmt = str(body.get("fmt") or "").strip().lower()
+    if not new_serial:
+        raise HTTPException(400, "new_serial required")
+    if fmt not in ("motorola", "tx"):
+        raise HTTPException(400, "fmt must be 'motorola' or 'tx'")
+    verify_delay_s = float(body.get("verify_delay_s") or 1.0)
+
+    from services.serial_io import write_serial_with_lock as _write_serial
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: _write_serial(
+                client, lock, int(slave),
+                new_serial=new_serial, fmt=fmt,
+                verify_delay_s=verify_delay_s,
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+
+    return {
+        "ok": result.get("status") == "success",
+        "inverter": inv_int,
+        "ip": ip,
+        "slave": int(slave),
+        "fmt": fmt,
+        "acted_at_ms": int(time.time() * 1000),
+        **result,
     }
 
 

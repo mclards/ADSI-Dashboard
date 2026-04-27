@@ -108,8 +108,8 @@
           <span class="nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span><span>ALARMS</span>
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
         </button>
-        <button class="nav-btn" data-page="energy" title="5-minute interval energy records by inverter for the selected date.">
-          <span class="nav-icon"><span class="mdi mdi-lightning-bolt"></span></span><span>ENERGY</span>
+        <button class="nav-btn" data-page="energy" title="Per-node 5-minute parameter log (Pdc/Vdc/Idc, Vac1-3, Iac1-3, Pac, CosΦ, Freq, Alarms). Live for today, history for past dates.">
+          <span class="nav-icon"><span class="mdi mdi-table-large"></span></span><span>ALL PARAMETERS</span>
         </button>
         <button class="nav-btn" data-page="audit" title="Operator command history with timestamps, scope, and results.">
           <span class="nav-icon"><span class="mdi mdi-clipboard-text-outline"></span></span><span>AUDIT</span>
@@ -129,7 +129,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.9.3</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.10.0-beta.1</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -317,66 +317,48 @@
       </section>
 
       <!-- --- PAGE: ENERGY LOG ----------------------------------------------------- -->
-      <section id="page-energy" class="page">
+      <!-- v2.10.x All Parameters Data — replaces the old Energy page UI.
+           The underlying inverter_5min / energy_5min tables and every
+           consumer of that data (Forecast, Analytics, Reports, cloud
+           replication) are untouched. See plans/2026-04-27-all-parameters-data-page.md -->
+      <section id="page-energy" class="page" data-page-label="All Parameters Data">
         <div class="page-toolbar">
           <div class="tl-left">
-            <label
-              >Inverter
-              <select id="energyInv" class="sel" title="Filter energy records by inverter number or view all.">
-                <option value="all">All</option>
-              </select></label
-            >
-            <label
-              >Date <input type="date" id="energyDate" class="inp" title="Select the date to load energy interval records for."
-            /></label>
-            <label
-              >Resolution
-              <select id="energyRes" class="sel" title="Interval resolution for energy data grouping.">
-                <option value="5min">5-Minute</option>
+            <label>Inverter
+              <select id="paramInv" class="sel" title="Pick an inverter to view its 5-minute parameter log.">
+                <option value="">— select —</option>
               </select>
             </label>
-            <button id="btnFetchEnergy" class="btn btn-accent" title="Fetch energy interval records for the selected date and inverter.">Load Records</button>
+            <label>Date
+              <input type="date" id="paramDate" class="inp"
+                     title="Today streams live 5-minute samples; past dates load from history." />
+            </label>
+            <span id="paramModeBadge" class="param-mode-badge" hidden></span>
+            <button id="btnParamRefresh" class="btn btn-outline" type="button"
+                    title="Re-fetch the selected day's data.">
+              <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+              <span>Refresh</span>
+            </button>
           </div>
           <div class="tl-right">
-            <span class="toolbar-info" id="energyCount" title="Total energy records loaded for the selected filters.">—</span>
+            <span class="toolbar-info" id="paramSolarBadge" title="Slots are clipped to the configured solar window.">Solar window: 05:00–18:00</span>
+            <span class="toolbar-info" id="paramRowCount">—</span>
           </div>
         </div>
-        <div id="energySummary" class="energy-summary">
-          <div class="energy-kpi" title="Total energy produced across all inverters for the selected date.">
-            <div class="energy-kpi-label">Date Total</div>
-            <div class="energy-kpi-value" id="energyTotalMwh">— MWh</div>
-          </div>
-          <div class="energy-kpi" title="Average energy per 5-minute interval across the day.">
-            <div class="energy-kpi-label">Average per Interval</div>
-            <div class="energy-kpi-value" id="energyAvgMwh">— MWh</div>
-          </div>
-          <div class="energy-kpi" title="Highest single interval energy reading and when it occurred.">
-            <div class="energy-kpi-label">Peak Interval</div>
-            <div class="energy-kpi-value" id="energyPeakMwh">— MWh</div>
-            <div class="energy-kpi-sub" id="energyPeakMeta">—</div>
-          </div>
-          <div class="energy-kpi" title="Number of distinct inverters that reported energy data for this date.">
-            <div class="energy-kpi-label">Reporting Inverters</div>
-            <div class="energy-kpi-value" id="energyInvCount">—</div>
-          </div>
-          <div class="energy-kpi" title="Timestamp of the most recent energy interval recorded.">
-            <div class="energy-kpi-label">Latest Interval End</div>
-            <div class="energy-kpi-value" id="energyLastTs">—</div>
+
+        <!-- Blank state -->
+        <div id="paramBlank" class="param-blank">
+          <div class="param-blank-icon"><span class="mdi mdi-table-large"></span></div>
+          <div class="param-blank-title">Pick an inverter to view its parameter log</div>
+          <div class="param-blank-sub">
+            Today's date streams live 5-minute samples. Past dates load from history.
+            Each tab is one node on the inverter.
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="data-table" id="energyTable">
-            <thead>
-              <tr>
-                <th class="sortable" data-sort-key="date" title="Calendar date of the energy interval.">Date</th>
-                <th class="sortable" data-sort-key="ts" title="End timestamp of the 5-minute interval.">Interval End</th>
-                <th class="sortable" data-sort-key="inverter" title="Inverter number that produced this energy.">Inverter</th>
-                <th class="sortable" data-sort-key="kwh_inc" title="Energy generated during this interval in megawatt-hours.">Interval Energy (MWh)</th>
-              </tr>
-            </thead>
-            <tbody id="energyBody"></tbody>
-          </table>
-        </div>
+
+        <!-- Tab strip + panels — populated dynamically based on ipconfig.units[invId] -->
+        <div id="paramTabs" class="card-tabs" role="tablist" aria-label="Inverter nodes" hidden></div>
+        <div id="paramPanels" hidden></div>
       </section>
 
       <!-- --- PAGE: AUDIT LOG ------------------------------------------------------ -->
@@ -765,6 +747,49 @@
             <div class="exp-result" id="expInvDataResult"></div>
           </div>
 
+          <!-- v2.10.x Daily Data export — per-inverter multi-sheet workbook
+               (one sheet per configured node), ISM-compatible column order,
+               solar-window clipped, today blocked until eodSnapshotHourLocal.
+               See plans/2026-04-27-all-parameters-data-page.md §3. -->
+          <div class="exp-card">
+            <div class="exp-icon exp-icon-energy"><span class="mdi mdi-table-large" aria-hidden="true"></span></div>
+            <div class="exp-title">Daily Data Export</div>
+            <div class="exp-desc">
+              Per-inverter 5-minute parameter log. One workbook per inverter,
+              one sheet per configured node, ISM-compatible columns clipped to
+              the configured solar window.
+            </div>
+            <div class="exp-note">
+              Today's export unlocks once the dashboard reaches the End-of-Day
+              snapshot hour (settings &rarr; Solar Window). Until then only
+              past dates may be exported.
+            </div>
+            <div class="exp-form">
+              <label
+                >Inverter<select id="expDailyDataInv" class="sel" title="Pick an inverter. Each export builds one workbook with one sheet per configured node.">
+                  <option value="">— select —</option>
+                </select></label
+              >
+              <label
+                >Date<input type="date" id="expDailyDataDate" class="inp" title="Date to export. Today is locked until the End-of-Day snapshot hour."
+              /></label>
+            </div>
+            <div class="exp-actions">
+              <button
+                id="btnRunDailyDataExport"
+                class="btn btn-accent btn-full"
+                type="button"
+                title="Export the per-node 5-minute parameter log as an Excel workbook."
+              >
+                <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export Daily Data</span>
+              </button>
+              <button id="btnCancelDailyDataExport" class="btn btn-outline exp-cancel-btn" type="button" disabled title="Cancel the daily data export in progress.">
+                <span class="mdi mdi-close-circle-outline" aria-hidden="true"></span><span>Cancel</span>
+              </button>
+            </div>
+            <div class="exp-result" id="expDailyDataResult"></div>
+          </div>
+
           <div class="exp-card">
             <div class="exp-icon exp-icon-audit"><span class="mdi mdi-clipboard-text-clock-outline" aria-hidden="true"></span></div>
             <div class="exp-title">Operator Audit Export</div>
@@ -918,6 +943,14 @@
                 <button class="settings-menu-btn" type="button" data-settings-section="inverterClockSection">
                   <span class="settings-menu-label">Inverter Clocks</span>
                   <span class="settings-menu-copy">Scheduled time sync, drift triggers, and per-unit counter health.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="stopReasonsSection">
+                  <span class="settings-menu-label">Stop Reasons</span>
+                  <span class="settings-menu-copy">DebugDesc snapshots and lifetime motive counters via vendor SCOPE peek.</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="serialNumberSection">
+                  <span class="settings-menu-label">Serial Number Setting</span>
+                  <span class="settings-menu-copy">Read, edit, and send the inverter serial via FC11 read + FC16 unlock+write+verify.</span>
                 </button>
               </div>
             </div>
@@ -2281,6 +2314,214 @@
               </div>
             </div>
             </div><!-- /#invClockPanelLog -->
+          </div>
+
+          <!-- v2.10.0 Slice C minimal — Serial Number Setting (Read / Edit / Send) -->
+          <div class="sgroup settings-card" id="serialNumberSection" hidden>
+            <div id="snbRemoteBanner" class="invclock-remote-banner" hidden role="status" aria-live="polite"
+                 title="In remote mode the audit log mirrors from the gateway, but Read and Send execute on the gateway only — they are disabled here.">
+              <span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span>
+              <span class="invclock-remote-banner-text">
+                Remote mode — Serial Number Read &amp; Send execute on gateway:
+                <span class="mono js-snb-gateway-host">—</span>
+              </span>
+            </div>
+
+            <!-- Tab navigation: Read/Edit/Send vs Plant Serial Map -->
+            <div class="card-tabs" role="tablist" aria-label="Serial Number sub-sections">
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="single" aria-controls="snbPanelSingle" aria-selected="true"
+                      title="Per-inverter Read / Edit / Send + audit log.">
+                <span class="mdi mdi-pencil-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Read / Edit / Send</span>
+              </button>
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="fleet" aria-controls="snbPanelFleet" aria-selected="false"
+                      title="Fleet-wide serial map with duplicate detection.">
+                <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Plant Serial Map</span>
+              </button>
+            </div>
+
+            <!-- Tab panel: per-inverter Read / Edit / Send + audit log -->
+            <div id="snbPanelSingle" class="card-tab-panel" data-card-tab-panel="single"
+                 role="tabpanel" aria-labelledby="snbPanelSingle">
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-barcode icon-inline" aria-hidden="true"></span>
+                  Serial Number Setting
+                </div>
+                <div class="srn-controls">
+                  <label class="invclock-label" for="snbInverterPicker">Inverter</label>
+                  <select id="snbInverterPicker" class="inp invclock-input"
+                          title="Pick the inverter (controller) to operate on."></select>
+                  <label class="invclock-label" for="snbSlavePicker">Slave</label>
+                  <select id="snbSlavePicker" class="inp invclock-input" style="max-width: 90px;"
+                          title="Modbus slave id (1..4) on the daisy chain. 'All nodes' reads every configured slave at once and exposes per-row Send."></select>
+                  <label class="invclock-label" for="snbFmtPicker">Format</label>
+                  <select id="snbFmtPicker" class="inp invclock-input" style="max-width: 130px;"
+                          title="Motorola firmware = 12 ASCII bytes (FreescaleDSP56F). TX firmware = 32 ASCII bytes (TexasTMS320F).">
+                    <option value="motorola" selected>Motorola (12)</option>
+                    <option value="tx">Texas TI (32)</option>
+                  </select>
+                  <button id="btnSnbRead" class="btn btn-accent" type="button"
+                          title="FC11 Report Slave ID — reads the current serial, model, and firmware. Mints a 5-minute session token required by Send.">
+                    <span class="mdi mdi-eye-outline icon-inline" aria-hidden="true"></span>
+                    <span>Read</span>
+                  </button>
+                  <span class="smsg" id="snbReadMsg"></span>
+                </div>
+
+                <div id="snbReadResult" class="srn-table-host" hidden></div>
+
+                <!-- Read-all-nodes view (rendered when Slave picker = "All") -->
+                <div id="snbReadAllResult" class="srn-table-host" hidden style="margin-top: 12px;"></div>
+
+                <div id="snbEditPanel" class="srn-table-host" hidden style="margin-top: 14px;">
+                  <div class="cb-sub-title" style="font-size: 12.5px;">
+                    <span class="mdi mdi-pencil-outline icon-inline" aria-hidden="true"></span>
+                    Send a new serial number
+                  </div>
+                  <div class="srn-controls">
+                    <label class="invclock-label" for="snbNewSerial">New serial</label>
+                    <input id="snbNewSerial" class="inp invclock-input" type="text"
+                           maxlength="32" autocomplete="off" spellcheck="false"
+                           placeholder="exact length per format"
+                           style="max-width: 320px; font-family: ui-monospace, Consolas, monospace;"
+                           title="Must be exactly 12 chars (Motorola) or 32 chars (TX). ASCII printable only." />
+                    <label class="invclock-check" for="snbCheckUniqueness"
+                           title="Before sending, scan every reachable (inverter, slave) pair via FC11 and reject if the candidate serial is already in use elsewhere on the fleet.">
+                      <input type="checkbox" id="snbCheckUniqueness" checked />
+                      <span class="invclock-check-label">Verify Serial Number to send</span>
+                    </label>
+                    <button id="btnSnbSend" class="btn btn-accent" type="button"
+                            title="UNLOCK (0xFFFA = 0x0065,0x07A7) → WRITE (0x9C74) → readback verify. Cannot be undone in one click — please double-check the candidate."
+                            disabled>
+                      <span class="mdi mdi-send-outline icon-inline" aria-hidden="true"></span>
+                      <span>Send</span>
+                    </button>
+                    <span class="smsg" id="snbSendMsg"></span>
+                  </div>
+                  <div id="snbConflictBox" hidden></div>
+                </div>
+
+                <div class="cb-sub-title" style="font-size: 12.5px; margin-top: 16px;">
+                  <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
+                  Recent serial-number changes
+                </div>
+                <div id="snbLogHost" class="srn-table-host"></div>
+              </div>
+            </div>
+
+            <!-- Tab panel: Plant Serial Map (all inverters, all slaves) -->
+            <div id="snbPanelFleet" class="card-tab-panel" data-card-tab-panel="fleet"
+                 role="tabpanel" aria-labelledby="snbPanelFleet" hidden>
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
+                  Plant Serial Map
+                </div>
+                <div class="srn-controls">
+                  <button id="btnSnbFleetScan" class="btn btn-accent" type="button"
+                          title="Read every (inverter, slave) in the fleet via FC11 in parallel. Bulk-auth required.">
+                    <span class="mdi mdi-radar icon-inline" aria-hidden="true"></span>
+                    <span>Scan plant</span>
+                  </button>
+                  <label class="invclock-check" for="snbFleetBypassCache"
+                         title="When checked, ignores the 5-minute cache and re-reads every inverter from the wire.">
+                    <input type="checkbox" id="snbFleetBypassCache" />
+                    <span class="invclock-check-label">Bypass 5-min cache</span>
+                  </label>
+                  <button id="btnSnbFleetLoadCache" class="btn btn-outline" type="button"
+                          title="Show the cached fleet map without triggering any new reads (works in remote mode).">
+                    <span class="mdi mdi-cached icon-inline" aria-hidden="true"></span>
+                    <span>Show cached map</span>
+                  </button>
+                  <span class="smsg" id="snbFleetMsg"></span>
+                </div>
+                <div id="snbFleetTableHost" class="srn-table-host">
+                  <div class="srn-empty">Click <strong>Scan plant</strong> to read every (inverter, slave), or <strong>Show cached map</strong> to display whatever the gateway last collected.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- v2.10.0 Slice D minimal — Stop Reasons (DebugDesc snapshots) -->
+          <div class="sgroup settings-card" id="stopReasonsSection" hidden>
+            <div id="srnRemoteBanner" class="invclock-remote-banner" hidden role="status" aria-live="polite"
+                 title="In remote mode captured snapshots mirror from the gateway, but Refresh executes on the gateway only — it is disabled here.">
+              <span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span>
+              <span class="invclock-remote-banner-text">
+                Remote mode — Refresh executes on gateway:
+                <span class="mono js-srn-gateway-host">—</span>
+              </span>
+            </div>
+
+            <!-- Tab navigation: Snapshots vs Lifetime Counters.  Mirrors
+                 the Inverter Clocks / Serial Number / Forecast tab pattern
+                 so each view gets its own scrollable panel and the page
+                 height stays bounded. -->
+            <div class="card-tabs" role="tablist" aria-label="Stop Reasons sub-sections">
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="snapshots" aria-controls="srnPanelSnapshots" aria-selected="true"
+                      title="Per-node StopReason snapshots captured via vendor FC 0x71 SCOPE peek.">
+                <span class="mdi mdi-clipboard-pulse-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Captured Snapshots</span>
+              </button>
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="histogram" aria-controls="srnPanelHistogram" aria-selected="false"
+                      title="Lifetime ARRAYHISTMOTPARO counters (30 stop motives + TOTAL).">
+                <span class="mdi mdi-chart-bar icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Lifetime Counters</span>
+              </button>
+            </div>
+
+            <!-- Tab panel: Captured snapshots -->
+            <div id="srnPanelSnapshots" class="card-tab-panel" data-card-tab-panel="snapshots"
+                 role="tabpanel" aria-labelledby="srnPanelSnapshots">
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-clipboard-pulse-outline icon-inline" aria-hidden="true"></span>
+                  Stop Reasons (DebugDesc snapshots)
+                </div>
+                <div class="srn-controls">
+                  <label class="invclock-label" for="srnInverterPicker">Inverter</label>
+                  <select id="srnInverterPicker" class="inp invclock-input"
+                          title="Pick an inverter to view its captured StopReason snapshots and lifetime motive counters."></select>
+                  <button id="btnSrnRefresh" class="btn btn-accent" type="button"
+                          title="Read the StopReason snapshot for every node on this inverter via vendor FC 0x71 SCOPE peek. Bulk-auth required because this drives traffic on the shared bus.">
+                    <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+                    <span>Refresh now</span>
+                  </button>
+                  <span class="smsg" id="srnRefreshMsg"></span>
+                </div>
+                <div id="srnTableHost" class="srn-table-host">
+                  <div class="srn-empty">Pick an inverter and click <strong>Refresh now</strong> to capture a fresh snapshot.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab panel: Lifetime motive counters histogram -->
+            <div id="srnPanelHistogram" class="card-tab-panel" data-card-tab-panel="histogram"
+                 role="tabpanel" aria-labelledby="srnPanelHistogram" hidden>
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-chart-bar icon-inline" aria-hidden="true"></span>
+                  Lifetime motive counters
+                </div>
+                <div class="srn-controls">
+                  <button id="btnSrnHistogram" class="btn btn-accent" type="button"
+                          title="Refresh the cached ARRAYHISTMOTPARO histogram for the picked inverter.">
+                    <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+                    <span>Reload histogram</span>
+                  </button>
+                  <span class="smsg" id="srnHistogramMsg"></span>
+                </div>
+                <div id="srnHistogramHost" class="srn-histogram-host">
+                  <div class="srn-empty">Click <strong>Reload histogram</strong> to load the lifetime counters.</div>
+                </div>
+              </div>
+            </div>
           </div>
 
             </div>

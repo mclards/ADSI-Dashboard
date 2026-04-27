@@ -1258,16 +1258,42 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     }
   }
 
-  // v2.9.x — Hardware-counter delta sourcing for Etotal_MWh / ParcE_MWh:
-  //   • Past day  D: ΔkWh = baseline[D].etotal_eod_clean − baseline[D].etotal_baseline
-  //                  (only when baseline[D].source === "eod_clean" and the
-  //                   eod_clean snapshot was actually captured for that unit).
-  //   • Today      : ΔkWh = current_counter_state.etotal_kwh − today.etotal_baseline
-  //                  (gated identically on baseline.source === "eod_clean").
-  //   Invalid → NaN, which the XLSX writer collapses to an empty cell. DAY
-  //   TOTAL HW columns NaN-propagate when ANY contributing unit is invalid,
-  //   matching the v2.9.1 daily_report rule (kwh_total_etotal NULL when any
-  //   unit on the inverter lacks an eod_clean anchor).
+  // v2.10.x — Hardware-counter delta sourcing for Etotal_MWh / ParcE_MWh.
+  // Hardening pass (replaces the v2.9.x eod_clean-only gate):
+  //
+  //   The v2.9.x rule blanked both columns whenever today's baseline
+  //   `source` was not exactly 'eod_clean' — which left a full export with
+  //   empty HW columns whenever yesterday's 18:00 EOD snapshot was missed
+  //   (fresh install, gateway downtime across midnight, EOD task didn't fire,
+  //   etc.). Operators saw "no data" even though the inverter counters had
+  //   been read continuously since boot.
+  //
+  //   New rule — emit any delta that is *consistent with the polled window*:
+  //
+  //   • TODAY:
+  //       1. If today's baseline row exists, ΔkWh = current_counter − baseline.
+  //          The baseline anchors at whichever of {eod_clean, poll, pac_seed}
+  //          captured first; for partial-day starts (gateway booted at 11:52)
+  //          the delta naturally represents "energy since polling began",
+  //          which lines up with the PAC-integrated Total_MWh column on the
+  //          same row (that one also starts at 1st_Seen).
+  //       2. If today's baseline row is missing, fall back to yesterday's
+  //          eod_clean snapshot as the anchor.
+  //   • PAST DAY D:
+  //       1. Prefer baseline[D].eod_clean − baseline[D].baseline (same as v2.9.x).
+  //       2. If eod_clean missing, fall back to baseline[D+1].baseline −
+  //          baseline[D].baseline. Tomorrow's open IS yesterday's close for
+  //          counters that don't run overnight, so this closes out a day
+  //          whose 18:00 snapshot was missed.
+  //
+  //   Sanity ceiling — every accepted delta must be `≥ 0` and bounded by
+  //   PER_UNIT_DAY_KWH_CEILING (250 kW × 24 h × 1.5 safety = 9000 kWh).
+  //   Anything outside that range falls back to NaN (rendered as empty).
+  //
+  //   DAY TOTAL HW columns still NaN-propagate when ANY contributing unit is
+  //   invalid (matches the v2.9.1 daily_report rule).
+  const PER_UNIT_DAY_KWH_CEILING = 9000;
+
   const curCounterMap = new Map();
   try {
     for (const r of getCounterStateAll() || []) {
@@ -1278,27 +1304,120 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     }
   } catch (_) { /* HW columns just stay empty if snapshot unavailable */ }
 
+  // Cache `getCounterBaselinesForDate(day)` results across the export so the
+  // next-day-anchor and yesterday-fallback lookups don't trigger N×duplicate
+  // queries. Keyed by date_key string, value is Map<`${inv}_${unit}`, baseline>.
+  const baselineDayCache = new Map();
+  function _baselinesForDay(dayKey) {
+    if (!dayKey || !/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) return null;
+    if (baselineDayCache.has(dayKey)) return baselineDayCache.get(dayKey);
+    const m = new Map();
+    try {
+      for (const r of getCounterBaselinesForDate(dayKey) || []) {
+        m.set(`${Number(r.inverter)}_${Number(r.unit)}`, {
+          etotal_baseline:  Number(r.etotal_baseline  || 0),
+          parce_baseline:   Number(r.parce_baseline   || 0),
+          etotal_eod_clean: r.etotal_eod_clean,
+          parce_eod_clean:  r.parce_eod_clean,
+          baseline_ts_ms:   Number(r.baseline_ts_ms   || 0),
+          source:           String(r.source || ''),
+        });
+      }
+    } catch (_) { /* leave map empty → HW cols stay invalid for this day */ }
+    baselineDayCache.set(dayKey, m);
+    return m;
+  }
+  function _previousDayKey(dayKey) {
+    const [y, m, d] = String(dayKey || '').split('-').map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    const prev = new Date(y, m - 1, d - 1);
+    return `${prev.getFullYear()}-${pad2(prev.getMonth() + 1)}-${pad2(prev.getDate())}`;
+  }
+  function _nextDayKey(dayKey) {
+    const [y, m, d] = String(dayKey || '').split('-').map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    const nxt = new Date(y, m - 1, d + 1);
+    return `${nxt.getFullYear()}-${pad2(nxt.getMonth() + 1)}-${pad2(nxt.getDate())}`;
+  }
+  function _acceptDelta(deltaKwh) {
+    if (!Number.isFinite(deltaKwh)) return false;
+    if (deltaKwh < 0) return false;
+    if (deltaKwh > PER_UNIT_DAY_KWH_CEILING) return false;
+    return true;
+  }
+
   function _hwDeltasForUnitDay(day, inv, unit, baselineMap) {
     const out = { etotalKwh: NaN, parceKwh: NaN };
-    const b = baselineMap.get(`${inv}_${unit}`);
-    if (!b || String(b.source || '') !== 'eod_clean') return out;
+    const key = `${inv}_${unit}`;
+    const b = baselineMap.get(key);
     if (day === today) {
-      const cur = curCounterMap.get(`${inv}_${unit}`);
+      // ── Today path ────────────────────────────────────────────────────
+      const cur = curCounterMap.get(key);
       if (!cur) return out;
-      const dE = Number(cur.etotal_kwh) - Number(b.etotal_baseline || 0);
-      const dP = Number(cur.parce_kwh)  - Number(b.parce_baseline  || 0);
-      if (Number.isFinite(dE) && dE >= 0) out.etotalKwh = dE;
-      if (Number.isFinite(dP) && dP >= 0) out.parceKwh  = dP;
-    } else {
-      const eClean = Number(b.etotal_eod_clean || 0);
-      const pClean = Number(b.parce_eod_clean  || 0);
-      if (eClean > 0) {
-        const dE = eClean - Number(b.etotal_baseline || 0);
-        if (Number.isFinite(dE) && dE >= 0) out.etotalKwh = dE;
+      // Path 1: today's baseline row exists — use it regardless of source.
+      // Even a 'poll' baseline captured at 11:52 anchors the delta to the
+      // window the dashboard actually polled, so the value lines up with
+      // the PAC-integrated Total_MWh on the same row.
+      if (b) {
+        const dE = Number(cur.etotal_kwh) - Number(b.etotal_baseline || 0);
+        const dP = Number(cur.parce_kwh)  - Number(b.parce_baseline  || 0);
+        if (_acceptDelta(dE)) out.etotalKwh = dE;
+        if (_acceptDelta(dP)) out.parceKwh  = dP;
+        if (Number.isFinite(out.etotalKwh) || Number.isFinite(out.parceKwh)) return out;
+        // fall through if baseline existed but produced no usable delta
       }
-      if (pClean > 0) {
-        const dP = pClean - Number(b.parce_baseline || 0);
-        if (Number.isFinite(dP) && dP >= 0) out.parceKwh = dP;
+      // Path 2: yesterday's eod_clean as anchor (gateway booted today and
+      // never wrote a today-baseline row, but yesterday's snapshot is here).
+      const yKey = _previousDayKey(day);
+      const yMap = yKey ? _baselinesForDay(yKey) : null;
+      const yB = yMap ? yMap.get(key) : null;
+      if (yB) {
+        const yE = Number(yB.etotal_eod_clean || 0);
+        const yP = Number(yB.parce_eod_clean  || 0);
+        if (yE > 0) {
+          const dE = Number(cur.etotal_kwh) - yE;
+          if (_acceptDelta(dE)) out.etotalKwh = dE;
+        }
+        if (yP > 0) {
+          const dP = Number(cur.parce_kwh) - yP;
+          if (_acceptDelta(dP)) out.parceKwh = dP;
+        }
+      }
+      return out;
+    }
+
+    // ── Past day path ────────────────────────────────────────────────────
+    if (!b) return out;
+    // Path 1: same-day eod_clean delta (the v2.9.x rule).
+    const eClean = Number(b.etotal_eod_clean || 0);
+    const pClean = Number(b.parce_eod_clean  || 0);
+    let etotalDone = false;
+    let parceDone = false;
+    if (eClean > 0) {
+      const dE = eClean - Number(b.etotal_baseline || 0);
+      if (_acceptDelta(dE)) { out.etotalKwh = dE; etotalDone = true; }
+    }
+    if (pClean > 0) {
+      const dP = pClean - Number(b.parce_baseline || 0);
+      if (_acceptDelta(dP)) { out.parceKwh = dP; parceDone = true; }
+    }
+    if (etotalDone && parceDone) return out;
+
+    // Path 2: tomorrow's baseline as the close-out anchor for the missing
+    // halves. Counters don't run overnight, so tomorrow's open ≈ today's close.
+    const nKey = _nextDayKey(day);
+    const nMap = nKey ? _baselinesForDay(nKey) : null;
+    const nB = nMap ? nMap.get(key) : null;
+    if (nB) {
+      if (!etotalDone) {
+        const dE = Number(nB.etotal_baseline || 0) - Number(b.etotal_baseline || 0);
+        if (_acceptDelta(dE)) out.etotalKwh = dE;
+      }
+      if (!parceDone) {
+        // parcE may have been cleared between days — only accept when
+        // tomorrow's baseline ≥ today's. Negative falls back to NaN above.
+        const dP = Number(nB.parce_baseline || 0) - Number(b.parce_baseline || 0);
+        if (_acceptDelta(dP)) out.parceKwh = dP;
       }
     }
     return out;
@@ -1331,18 +1450,10 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       }
     }
 
-    const baselineMap = new Map();
-    try {
-      for (const r of getCounterBaselinesForDate(day) || []) {
-        baselineMap.set(`${Number(r.inverter)}_${Number(r.unit)}`, {
-          etotal_baseline:  Number(r.etotal_baseline  || 0),
-          parce_baseline:   Number(r.parce_baseline   || 0),
-          etotal_eod_clean: r.etotal_eod_clean,
-          parce_eod_clean:  r.parce_eod_clean,
-          source:           String(r.source || ''),
-        });
-      }
-    } catch (_) { /* leave baselineMap empty → all HW cols invalid for the day */ }
+    // Per-day baseline lookup goes through the cache so today / yesterday /
+    // tomorrow are reused without re-querying. `_baselinesForDay` already
+    // swallows DB errors and returns an empty Map on failure.
+    const baselineMap = _baselinesForDay(day) || new Map();
 
     for (const inv of selectedInvs) {
       const units = (invUnits[inv] || []).slice().sort((a, b) => a - b);
@@ -2774,6 +2885,129 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
   return xlsxPath;
 }
 
+// ─── v2.10.x Daily Data export — multi-sheet workbook ─────────────────────
+// One workbook per inverter, one sheet per configured node, ISM column order,
+// solar-window-clipped rows from `inverter_5min_param`. Today's data is
+// blocked by the API layer until the End-of-Day snapshot hour — by the time
+// we get here, the date is already validated as exportable.
+async function exportDailyData({ inverter, date }) {
+  const inv = Number(inverter);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    throw new Error('exportDailyData: inverter is required');
+  }
+  const dateLocal = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateLocal)) {
+    throw new Error('exportDailyData: date must be YYYY-MM-DD');
+  }
+  const ip = readInverterIpMap()[inv];
+  if (!ip) {
+    throw new Error(`exportDailyData: inverter ${inv} has no IP configured`);
+  }
+  const cfg = readInverterConfig();
+  const slaves = (cfg.units?.[inv] || []).map(Number).filter((n) => n >= 1 && n <= 16);
+  if (!slaves.length) {
+    throw new Error(`exportDailyData: inverter ${inv} has no nodes configured`);
+  }
+
+  const dir = resolveExportSubDir(inv, EXPORT_FOLDERS.energy, 'Daily Data');
+  const fileBase = `INV-${String(inv).padStart(2, '0')} daily-data ${dateLocal}`;
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: xlsxPath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  setWorkbookMetadata(wb, `ADSI Daily Data — INV-${String(inv).padStart(2, '0')} ${dateLocal}`);
+
+  // ISM-compatible column order. Partial Energy is computed from pac_w as
+  // (pac_w / 12 / 1000) kWh per 5-minute slot — Pdc-style derivation.
+  const headers = [
+    { key: 'Time',         label: 'Time' },
+    { key: 'Pdc_W',        label: 'Pdc (W)' },
+    { key: 'Vdc_V',        label: 'Vdc (V)' },
+    { key: 'Idc_A',        label: 'Idc (A)' },
+    { key: 'Vac1_V',       label: 'Vac1 (V)' },
+    { key: 'Vac2_V',       label: 'Vac2 (V)' },
+    { key: 'Vac3_V',       label: 'Vac3 (V)' },
+    { key: 'Iac1_A',       label: 'Iac1 (A)' },
+    { key: 'Iac2_A',       label: 'Iac2 (A)' },
+    { key: 'Iac3_A',       label: 'Iac3 (A)' },
+    { key: 'Temp_C',       label: 'Temp (°C)' },
+    { key: 'Pac_W',        label: 'Pac (W)' },
+    { key: 'PartialEnergy_kWh', label: 'Partial Energy (kWh)' },
+    { key: 'CosPhi',       label: 'CosΦ' },
+    { key: 'Freq_Hz',      label: 'Freq (Hz)' },
+    { key: 'InvAlarms',    label: 'Inv Alarms' },
+    { key: 'TrackAlarms',  label: 'Track Alarms' },
+  ];
+
+  const select = db.prepare(`
+    SELECT slot_index, ts_ms,
+           vdc_v, idc_a, pdc_w,
+           vac1_v, vac2_v, vac3_v,
+           iac1_a, iac2_a, iac3_a,
+           temp_c, pac_w, cosphi, freq_hz,
+           inv_alarms, track_alarms,
+           sample_count, is_complete, in_solar_window
+      FROM inverter_5min_param
+     WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+       AND in_solar_window = 1
+     ORDER BY slot_index ASC
+  `);
+
+  const slotLabel = (slot) => {
+    const startMin = Number(slot) * 5;
+    const h = Math.floor(startMin / 60);
+    const m = startMin % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+  const fmt = (v, d) => (v == null || v === '' ? '' : Number(Number(v).toFixed(d)));
+  const fmtInt = (v) => (v == null || v === '' ? '' : Math.round(Number(v)));
+  const alarmHex = (v) => {
+    const n = Number(v) >>> 0;
+    return n ? `0x${n.toString(16).toUpperCase().padStart(8, '0')}` : '0';
+  };
+
+  for (const slave of slaves) {
+    const dbRows = select.all(String(ip), Number(slave), dateLocal);
+    const sheetRows = dbRows.map((r) => {
+      const pacW = Number(r.pac_w || 0);
+      const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0; // 5-min slot → kWh
+      return {
+        Time:         slotLabel(r.slot_index),
+        Pdc_W:        fmtInt(r.pdc_w),
+        Vdc_V:        fmt(r.vdc_v, 1),
+        Idc_A:        fmt(r.idc_a, 2),
+        Vac1_V:       fmt(r.vac1_v, 1),
+        Vac2_V:       fmt(r.vac2_v, 1),
+        Vac3_V:       fmt(r.vac3_v, 1),
+        Iac1_A:       fmt(r.iac1_a, 2),
+        Iac2_A:       fmt(r.iac2_a, 2),
+        Iac3_A:       fmt(r.iac3_a, 2),
+        Temp_C:       fmtInt(r.temp_c),
+        Pac_W:        fmtInt(r.pac_w),
+        PartialEnergy_kWh: Number(partialKwh.toFixed(3)),
+        CosPhi:       fmt(r.cosphi, 3),
+        Freq_Hz:      fmt(r.freq_hz, 2),
+        InvAlarms:    alarmHex(r.inv_alarms),
+        TrackAlarms:  alarmHex(r.track_alarms),
+      };
+    });
+    await writeXlsxWorksheet(
+      wb,
+      `Node ${slave}`,
+      headers,
+      sheetRows,
+      { freezeHeader: true, autoFilter: false, worksheetKind: 'data' },
+    );
+    await yieldToEventLoop();
+  }
+
+  await wb.commit();
+  return xlsxPath;
+}
+
 module.exports = {
   exportAlarms,
   exportEnergy,
@@ -2787,6 +3021,7 @@ module.exports = {
   export5min,
   exportAudit,
   exportDailyReport,
+  exportDailyData,
   exportForecastActual,
   exportSolcastPreview,
   exportSolcastWeekAhead,

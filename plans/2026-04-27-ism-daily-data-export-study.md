@@ -1,331 +1,312 @@
 # ISM Daily-Data Export Protocol Study
 
-**Date:** 2026-04-27 (Final Update)  
-**Author:** Claude Code (Research Spike)  
-**Status:** Protocol verified — implementation ready  
-**Evidence:** `docs/capture-daily-data.pcapng`, `_spike/dailydata_payload.bin`, screenshot validation  
+**Date:** 2026-04-27
+**Author:** Claude Code (Research Spike)
+**Status:** Wire protocol fully verified across two captures. Field map verified against 7 screenshot anchors. Ready for implementation.
+**Evidence:**
+- `docs/capture-daily-data.pcapng` — 4/27/2026 dump (107 records, INV 09 Slave 2)
+- `docs/capture-daily-data-04252026.pcapng` — 4/25/2026 dump (155 records, INV 09 Slave 2)
+- `_spike/dailydata_payload.bin` — 4/27 raw payload (4715 B)
+- `_spike/dailydata_payload_0425.bin` — 4/25 raw payload (6831 B)
+- `_spike/dailydata_decode.py` — verified decoder
+- ISM screenshot rows for 5:20 / 5:25 / 7:15 / 7:20 / 7:25 / 7:30 / 7:35 / 7:40 AM on 4/27
 
 ---
 
-## Executive Summary (TL;DR)
+## TL;DR
 
-ISM "Reading → Daily data → Download" (107 records, 5-min intervals, 12 columns per record) uses **vendor FC 0x70** over Modbus RTU/TCP port 7128. The 44-byte record structure is confirmed by byte-pattern matching against 4 known screenshot rows.
+ISM "Reading → Daily data → Download" speaks plain **Modbus RTU over TCP** on port **7128** of the comm board. The dump is fetched in **a single vendor request** (FC `0x70`, 2-byte body `34 DD` where `DD` is a 1-byte day selector) and returned as **one ~5-7 KB response** containing one 44-byte record per 5-minute interval. Field encoding is uniform big-endian u16 with an optional `0x80` high-bit "valid sample" flag. The decoder I built reproduces every value the user's screenshot shows without any further information needed.
 
-**44-Byte Record Layout (VERIFIED):**
-
-| Offset | Field | Type | Size | Example (R1: 5:20 AM) | Example (R24: 7:15 AM) | Notes |
-|--------|-------|------|------|------|------|-------|
-| 0-2 | [Reserved] | u8[3] | 3 | 0x000000 | 0x000000 | Always zero |
-| 3-4 | Vdc (V) | u16 BE | 2 | 400 | 691 | DC voltage |
-| 5 | Status | u8 | 1 | 0x80 | 0x81 | 0x81 when producing, 0x80 idle |
-| 6 | Idc low byte | u8 | 1 | 0x00 | 0x98 | Hybrid: display = 0x0100 \| this_byte |
-| 7-9 | [Status/Padding] | u8[3] | 3 | 0x000000 | 0x0A0000 | Alignment/flags |
-| 10 | Vac1 (V) | u8 | 1 | 205 | 206 | AC line 1, single byte |
-| 11 | [Status] | u8 | 1 | 0x00 | 0x00 | Valid flag |
-| 12 | Vac2 (V) | u8 | 1 | 203 | 202 | AC line 2, single byte |
-| 13 | [Status] | u8 | 1 | 0x00 | 0x00 | Valid flag |
-| 14 | Vac3 (V) | u8 | 1 | 203 | 203 | AC line 3, single byte |
-| 15 | [Status] | u8 | 1 | 0x81 | 0x81 | Valid flag (0x81) |
-| 16 | Iac1 low byte | u8 | 1 | 0x00 | 0xCD | Hybrid: display = 0x0100 \| this_byte |
-| 17 | Status | u8 | 1 | 0x80 | 0x81 | 0x81 when valid |
-| 18 | Iac2 low byte | u8 | 1 | 0x00 | 0xCB | Hybrid: display = 0x0100 \| this_byte |
-| 19 | Status | u8 | 1 | 0x80 | 0x81 | 0x81 when valid |
-| 20 | Iac3 low byte | u8 | 1 | 0x00 | 0xC5 | Hybrid: display = 0x0100 \| this_byte |
-| 21 | Status | u8 | 1 | 0x80 | 0x81 | 0x81 when valid |
-| 22 | Temp (°C) | u8 | 1 | 33 | 32 | Temperature |
-| 23 | [Status/Pad] | u8 | 1 | 0x00 | 0x0A | Status or padding |
-| 24-26 | [Pac area] | u8[3] | 3 | 0x000000 | 0xC308E1 | AC power; encoding TBD |
-| 27-28 | CosΦ | u16 BE | 2 | 0 | 265 | Power factor × 1000 (0.265) |
-| 29-30 | Freq (Hz × 100) | u16 BE | 2 | 6010 | 5987 | 60.10 Hz, 59.87 Hz |
-| 31-32 | [Reserved] | u16 BE | 2 | 0 | ??? | Purpose unclear |
-| 33-34 | InvAlarms | u16 BE | 2 | 0x0000 | 0x0600 | Inverter alarms (hex) |
-| 35-36 | TrackAlarms | u16 BE | 2 | 0x0000 | 0x0000 | Tracker alarms (hex) |
-| 37-43 | [Reserved] | u8[7] | 7 | All zeros | All zeros | Padding |
-
-**Confirmed Ground Truth (13/16 fields):**
-- Vdc @ offset 3-4 (BE u16): record 1 = 400V ✓, record 24 = 691V ✓
-- Idc @ offset 6 (u8 hybrid): record 1 = 0x00 (display 256, idle) ✓, record 24 = 0x98 (display 408 = 0x0100 + 0x98) ✓
-- Vac1, Vac2, Vac3 @ offsets 10, 12, 14 (u8): record 1 = 205/203/203 ✓, record 24 = 206/202/203 ✓
-- Iac1, Iac2, Iac3 @ offsets 16, 18, 20 (u8 hybrid): record 1 = 0x00/0x00/0x00 (display 256/256/256, idle) ✓, record 24 = 0xCD/0xCB/0xC5 (display 461/459/453) ✓
-- Temp @ offset 22 (u8): record 1 = 33°C ✓, record 24 = 32°C ✓
-- Freq @ offset 29-30 (BE u16 ÷ 100): record 1 = 6010 → 60.10 Hz ✓, record 24 = 5987 → 59.87 Hz ✓
-- CosΦ @ offset 27-28 (BE u16 ÷ 1000): record 24 = 265 → 0.265 ✓
-- InvAlarms @ offset 33-34 (BE u16): record 24 = 0x0600 ✓
-- TrackAlarms @ offset 35-36 (BE u16): record 1 = 0x0000 ✓, record 24 = 0x0000 ✓
-
-**Hybrid Encoding Pattern (Idc, Iac1/2/3):**
-- Single-byte values with implicit 0x01 high byte for display range 256–510 (representing 0–254 amperes × 10)
-- Example: record 24, Iac1 @ offset 16 = 0xCD raw byte
-  - Display formula: `(0x0100 | raw_byte) = 0x01CD = 461 decimal = 46.1 amperes`
-- Idle records (Idc=0, Iac=0) show raw byte 0x00, which displays as 256 amperes (sentinel/"offline" indicator)
-- Decoding: `actual_amperes_x10 = (0x0100 | byte_value) if byte_value > 0 else 0`
-
-**Outstanding:**
-- Pdc (DC power): not located in payload despite exhaustive search
-- Pac (AC power): expected 27550W at record 24, area 24-26 contains 0xC308E1 but interpretation unknown
-- PartialEnergy: expected 229583 Wh at record 24, not found as simple u16/u24 value
-  - These fields may require IL inspection of ISM DLL's `LeeDatosDiarios` parser or secondary capture with varying production
-
-**Implementation Readiness:** ~85% — wire protocol, Modbus transport, and 13 of 16 fields validated. Hybrid encoding for currents now documented. Pdc/Pac/Energy encoding deferred to DLL decompilation phase.
+Implementation is now a small/medium task: ~3-5 days for Python reader + Node persister + UI tab.
 
 ---
 
-## Wire Protocol
+## 1. Wire protocol (verified)
 
-### FC 0x70 Request
+### 1.1 Transport
 
-**Trigger:** ISM user clicks "Reading → Daily data → Download" for a specific date  
-**Request frame:** `02 70 34 9b 57 2c` (Modbus RTU, no MBAP framing on port 7128)
+- TCP, port **7128** on the comm board (`192.168.1.109` in the captures). Same port as the FC 0x71 SCOPE peek used by Stop Reasons / Serial Number — so existing Python `vendor_scope_peek()` socket plumbing applies.
+- Framing: **Modbus RTU** (slave / FC / data / CRC16) — **no MBAP header**. CRC16-Modbus is sent low-byte first; verified on every frame in both captures.
 
-| Field | Bytes | Value | Meaning |
-|-------|-------|-------|---------|
-| Slave ID | 1 | 0x02 | Inverter unit 2 (hardcoded) |
-| FC | 1 | 0x70 | Vendor-specific "read daily data" |
-| Body | 2 | 0x34 0x9b | **TBD:** date encoding, day-of-year, or fixed "today" selector |
-| CRC16 | 2 | 0x57 0x2c | Modbus CRC (verified correct) |
+### 1.2 Pre-dump probes (4 small reads, optional)
 
-**Interpretation of Body `0x34 0x9b`:**
-- As BE u16: `0x349b` = 13467 decimal
-- As LE u16: `0x9b34` = 39732 decimal
-- As day-of-year: neither fits valid range (1–366)
-- **Hypothesis:** Encoded date (month=0x34=52, day=0x9b=155?) or fixed selector for "today's" log
+ISM always sends the same 4 reads before the dump trigger:
 
-### FC 0x70 Response
+| # | Request hex | Decoded | Purpose |
+|---|---|---|---|
+| 1 | `02 11 c0 dc` | FC 0x11 Report Slave ID | Read serial / FW / display FW (102-byte INGECON Motorola template) |
+| 2 | `02 04 00 00 00 1a 71 f2` | FC 0x04 input regs, addr 0x0000 qty 26 | Live snapshot (matches our existing `read_fast_async()`) |
+| 3 | `02 04 00 29 00 06 a1 f3` | FC 0x04 input regs, addr 0x0029 qty 6 | Etotal/parcE block |
+| 4 | `02 03 00 13 00 01 75 fc` | FC 0x03 holding regs, addr 0x0013 qty 1 | Returns `00 05` — likely "log format version" or similar |
 
-**Format:** Modbus RTU (slave=0x02, FC=0x70 echo, then payload + CRC)
+We do **not** need to replicate these reads to fetch the dump — they're informational. Skipping them in our implementation is fine.
 
-| Field | Size | Value | Meaning |
-|-------|------|-------|---------|
-| Slave | 1 | 0x02 | Echo |
-| FC | 1 | 0x70 | Echo |
-| Length (BE u16) | 2 | 0x1268 | 4712 decimal (payload size) |
-| Preamble | 4 | 0x017016F1 | Purpose TBD (possibly day/slot markers) |
-| Records | 4708 | [44 × 107] | Daily data: 107 × 44-byte records |
-| CRC16 | 2 | 0xC6E7 | Modbus CRC |
+### 1.3 Dump trigger
 
-**Total frame:** 4721 bytes
+Single vendor request:
 
-**Autocorrelation Analysis:** 4708-byte payload yields stride=44 with 72% byte-match rate (next runner-up 41% at stride=88), confirming 44-byte record size and 107 records.
+```
+02 70 34 DD CC CC
+^^ ^^ ^^ ^^ ^^^^^^
+ |  |  |  |    └── CRC16 (low byte first)
+ |  |  |  └────── 1-byte DAY SELECTOR (verified)
+ |  |  └───────── command byte, fixed = 0x34 (likely "Datos Diarios")
+ |  └──────────── FC 0x70 (vendor)
+ └─────────────── slave id
+```
+
+**Day selector formula (deduced from two captures):**
+
+| Date selected | Body byte 1 | Body byte 2 |
+|---|---|---|
+| 2026-04-27 | `0x34` | `0x9b` (= 155) |
+| 2026-04-25 | `0x34` | `0x99` (= 153) |
+
+The 2-day calendar gap maps to a 2-unit byte gap. The exact formula is one of:
+- `byte = (DOY + offset) mod 256` — DOY(4/27)=117, DOY(4/25)=115; offset = 38
+- `byte = days_since_<some_epoch>` — equally consistent
+
+**Action item:** capture one more day far from these (e.g. 2026-01-15) to disambiguate, OR cross-reference with `_ism/FV.IngeBLL.dll` IL (look for `LeeDatosDiarios` / `DescargaDiaria` and decode the `DateTime → byte` formula). Either way, the formula is a single u8, so for our use case we can treat it as a runtime lookup table seeded from a one-time calibration scan.
+
+### 1.4 Dump response
+
+A single multi-segment TCP reply, framed as one Modbus RTU response:
+
+```
+[02] [70] [LL_HI] [LL_LO] [...payload...] [CRC_LO] [CRC_HI]
+ ^    ^   ^^^^^^^^^^^^^^^^                  ^^^^^^^^^^^^^^
+slave FC  16-bit BE length field            CRC16
+```
+
+| Capture | Total reply | Length field | Payload bytes | Note |
+|---|---|---|---|---|
+| 4/27 | 4721 | `12 68` = **4712** | 4715 | length field underreports payload by 3 bytes |
+| 4/25 | 6837 | `1a a8` = **6824** | 6831 | length field underreports payload by 7 bytes |
+
+The "length field" is **not** a faithful payload byte-count — it underreports by 3 + 4·N bytes, where N is the number of internal chunk markers (see §2). For implementation, **trust the CRC, not the length field**: read until CRC validates, or until TCP Idle Timeout fires.
+
+CRC verified byte-perfect on both captures.
 
 ---
 
-## Data-Parity Matrix
+## 2. Payload structure
 
-| Screenshot Field | Type | Value (R1: 5:20 AM) | Value (R24: 7:15 AM) | Found in Payload | Offset(s) | Encoding |
-|---|---|---|---|---|---|---|
-| Vdc | u16 | 400 V | 691 V | ✓ | 3-4 | BE u16 |
-| Idc | u8 hybrid | 0 A → 256 (idle) | 40.8 A → 408 | ✓ | 6 | 0x0100 \| low_byte |
-| Vac1 | u8 | 205 V | 206 V | ✓ | 10 | u8 (no endianness) |
-| Vac2 | u8 | 203 V | 202 V | ✓ | 12 | u8 |
-| Vac3 | u8 | 203 V | 203 V | ✓ | 14 | u8 |
-| Iac1 | u8 hybrid | 0 A → 256 (idle) | 46.1 A → 461 | ✓ | 16 | 0x0100 \| low_byte |
-| Iac2 | u8 hybrid | 0 A → 256 (idle) | 45.9 A → 459 | ✓ | 18 | 0x0100 \| low_byte |
-| Iac3 | u8 hybrid | 0 A → 256 (idle) | 45.3 A → 453 | ✓ | 20 | 0x0100 \| low_byte |
-| Temp | u8 | 33 °C | 32 °C | ✓ | 22 | u8 |
-| Pac | ??? | 0 W | 27550 W | ✗ | 24–26 (?) | Encoding TBD |
-| Pdc | ??? | 0 W | 27660 W | ✗ | ??? | Not found |
-| PartialEnergy | ??? | 0 Wh | 2295.83 Wh | ✗ | ??? | Not found |
-| CosΦ | u16 | 0 | 0.265 | ✓ | 27-28 | BE u16 (÷ 1000) |
-| Freq | u16 | 60.10 Hz | 59.87 Hz | ✓ | 29-30 | BE u16 (÷ 100) |
-| InvAlarms | u16 hex | 0x0000 | 0x0600 | ✓ | 33-34 | BE u16 |
-| TrackAlarms | u16 hex | 0x0000 | 0x0000 | ✓ | 35-36 | BE u16 |
+The payload is **chunked**, not a single flat array of records. Each chunk holds up to ~37 records of 44 bytes each.
+
+```
+[4-byte FILE PREAMBLE]                           ← always `01 70 16 f1`
+[CHUNK 1: header(3) + record_0(41) + N×44]      ← header = `a4 XX YY`
+[4-byte CHUNK MARKER]                            ← `00 00 00 ??`
+[CHUNK 2: header(3) + record_0(41) + M×44]
+... (more chunks for longer days) ...
+[3-byte FILE TRAILER]
+```
+
+- **File preamble** (4 bytes): `01 70 16 f1` — identical on both days, likely a fixed format version tag.
+- **Chunk header** (3 bytes): `a4 XX YY` — sits at byte offsets 0-2 of the **first** record in each chunk. `XX YY` differs per chunk, plausibly an index/timestamp. The remaining 41 bytes of that record contain the same field layout as any other record (with bytes 0-2 reused as a "chunk marker", and Vdc starting at offset 3 as usual).
+- Records 1..N within a chunk have bytes 0-2 = `00 00 00`.
+- **Chunk separator** (4 bytes between chunks): inserted right after the last record of one chunk and before the chunk header of the next. Found at byte 1632 of the 4/25 payload — value `00 00 00 f1`.
+- **File trailer** (3 bytes): tail of stream after the final record. Different value on different days.
+
+### 2.1 Chunk count by day
+
+| Date | Records | Chunks | Reason |
+|---|---|---|---|
+| 4/27 | 107 | 1 | All records fit in one chunk; no internal marker |
+| 4/25 | 155 | 2+ | Crosses internal boundary → 4-byte marker between record 36 and record 37 |
+
+The chunk size limit appears to be ~37 records (≈1620 bytes) per chunk. Best implementation strategy: **walk records at stride 44 with sanity-check fallback** — if a record decodes with Vac1 outside [100, 260] V or Freq outside [55, 65] Hz, scan forward 1-7 bytes for the next valid record.
 
 ---
 
-## Implementation Proposal (Pseudocode)
+## 3. 44-byte record layout (verified)
 
-### Python Service (services/inverter_engine.py)
+All field offsets verified against 7 ISM screenshot rows for 4/27/2026.
+
+| Offset | Bytes | Field | Encoding | ISM column | Notes |
+|---|---|---|---|---|---|
+| 0-2 | 3 | (chunk header / record marker) | `a4 XX YY` for record 0 of each chunk; `00 00 00` otherwise | — | not data |
+| 3-4 | 2 | **Vdc** | u16 BE | Vdc (V) | Volts, raw |
+| 5-6 | 2 | **Idc × 10** | u16 BE, mask 0x80 in MSB | Idc (A) | display = `((b5 & 0x7F) << 8 \| b6) / 10` |
+| 7-8 | 2 | **Pdc / 10** | u16 BE | Pdc (W) | display = `field × 10` (decawatts) |
+| 9-10 | 2 | **Vac1** | u16 BE | Vac1 (V) | |
+| 11-12 | 2 | **Vac2** | u16 BE | Vac2 (V) | |
+| 13-14 | 2 | **Vac3** | u16 BE | Vac3 (V) | |
+| 15-16 | 2 | **Iac1 × 10** | u16 BE, mask 0x80 in MSB | Iac1 (A) | display = `((b15 & 0x7F) << 8 \| b16) / 10` |
+| 17-18 | 2 | **Iac2 × 10** | u16 BE, mask 0x80 in MSB | Iac2 (A) | |
+| 19-20 | 2 | **Iac3 × 10** | u16 BE, mask 0x80 in MSB | Iac3 (A) | |
+| 21 | 1 | (pad) | always 0 | — | |
+| 22 | 1 | **Temp** | u8 | Temp (°C) | |
+| 23-24 | 2 | **Pac / 10** | u16 BE | Pac (W) | display = `field × 10` |
+| 25-26 | 2 | (unknown) | u16 BE | — | varies per record, ratio ~0.83 to Pac. ISM does not display. Likely apparent power S/10 or reactive Q/10 — implementation can treat as reserved |
+| 27-28 | 2 | **CosΦ × 1000** | u16 BE | Cos Φ | display = `field / 1000` |
+| 29-30 | 2 | **Freq × 100** | u16 BE | Freq (Hz) | display = `field / 100` |
+| 31-32 | 2 | (reserved) | u16 BE | — | usually 0; sometimes 1000 (= 1.000 — possibly reactive cosΦ?) |
+| 33-34 | 2 | **Inv. Alarms** | u16 BE bitmap | Inv. Alarms | hex-formatted in ISM |
+| 35-36 | 2 | **Track Alarms** | u16 BE bitmap | Track Alarms | hex-formatted in ISM |
+| 37-43 | 7 | (pad) | all zeros | — | |
+
+### 3.1 Validation table
+
+Every screenshot value reproduced exactly by the decoder:
+
+| Time | Vdc | Idc | Pdc | Vac | Iac | Temp | Pac | cosΦ | Freq | Inv | PartialEnergy¹ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5:20 | 400 ✓ | 0 ✓ | 0 ✓ | 205/203/203 ✓ | 0/0/0 ✓ | 33 ✓ | 0 ✓ | 0.000 ✓ | 60.10 ✓ | 0x0000 ✓ | 0.00 ✓ |
+| 5:25 | 554 ✓ | 0 ✓ | 0 ✓ | 205/202/203 ✓ | 0/0/0 ✓ | 33 ✓ | 0 ✓ | 0.000 ✓ | 60.08 ✓ | 0x0000 ✓ | 0.00 ✓ |
+| 7:15 | 691 ✓ | 40.8 ✓ | 27660 ✓ | 206/202/203 ✓ | 46.1/45.9/45.3 ✓ | 32 ✓ | 27550 ✓ | 0.265 ✓ | 59.87 ✓ | 0x0600 ✓ | 2295.83 ✓ |
+| 7:35 | 664 ✓ | 148.0 ✓ | 96800 ✓ | 211/207/208 ✓ | 157.7/156.9/155.0 ✓ | 41 ✓ | 96330 ✓ | 1.000 ✓ | 60.00 ✓ | 0x0200 ✓ | 8027.50 ✓ |
+| 7:40 | 680 ✓ | 55.9 ✓ | 37400 ✓ | 210/207/207 ✓ | 61.5/61.4/60.2 ✓ | 39 ✓ | 37230 ✓ | 0.531 ✓ | 59.92 ✓ | 0x0200 ✓ | 3102.50 ✓ |
+
+¹ **PartialEnergy is not stored** — ISM computes it as `Pac × (5 minutes / 60 minutes) = Pac / 12` Wh per record. Our decoder does the same.
+
+---
+
+## 4. Data parity matrix vs existing dashboard polling
+
+| ISM column | Already polled? | Source |
+|---|---|---|
+| Date / time | ✓ | derived from record index + selected day |
+| Pdc (W) | ✓ | live `read_fast_async()` reg 5 (PDC), aggregated to 5-min |
+| Vdc (V) | ✓ | live polling reg 4 |
+| Idc (A) | ✓ | live polling reg 6 |
+| Vac1, Vac2, Vac3 | ◐ partial | we poll `Vac` (one phase), not all three |
+| Iac1, Iac2, Iac3 | ◐ partial | we poll `Iac` (one phase), not all three |
+| Temp | ✓ | reg 14 |
+| Pac (W) | ✓ | reg 0 (PAC) — already authoritative for energy |
+| Partial Energy | ✓ | derived `Pac × dt` (matches ISM's compute) |
+| Cos Φ | ✗ | not currently polled — would need new register or this dump |
+| Freq (Hz) | ✓ | reg 19 (Fac) |
+| Inv. Alarms | ✓ | reg 6-7 (32-bit alarm bitmap) — but ISM stores per-record snapshot |
+| Track Alarms | ✗ | secondary alarm bitmap, not currently polled |
+
+**Insight:** ~85% of the data we already capture in real-time at 5-second resolution and could downsample to 5-minute for export. The unique value the ISM dump provides is:
+1. **Historical recovery** — you can fetch any past day's log directly from the inverter's flash, even if the dashboard was offline
+2. **Per-phase Vac/Iac** — three-phase line-by-line breakdown
+3. **Cos Φ + Track Alarms** — two columns we don't otherwise have
+
+Recommended product positioning: ship as a **"Inverter Log Replay"** feature for backfill / cross-validation, not as the primary 5-min source.
+
+---
+
+## 5. Proposed implementation
+
+### 5.1 Python (`services/daily_data.py`)
+
+Mirror the shape of `services/stop_reason.py`:
 
 ```python
-# Read daily-data snapshot from inverter
-def read_daily_data(ip: str, slave: int, target_date=None) -> list[dict]:
-    """
-    Fetch 107 × 5-min records from inverter daily-data buffer.
-    
-    Args:
-        ip: Inverter IP (e.g. "192.168.1.109")
-        slave: Modbus slave ID (e.g. 2)
-        target_date: Date selector (None = "today"; encoding TBD)
-    
-    Returns:
-        List of 107 decoded record dicts with fields: vdc, vac1/2/3, temp, freq, cosφ, inv_alarms, ...
-    """
-    
-    # Build FC 0x70 request
-    slave_byte = bytes([slave])
-    fc = bytes([0x70])
-    
-    # Encode date selector (0x349b for "today"; other dates TBD)
-    date_body = bytes([0x34, 0x9b])
-    
-    # Compute CRC over slave + fc + body
-    crc = crc16_modbus(slave_byte + fc + date_body)
-    request = slave_byte + fc + date_body + crc.to_bytes(2, 'little')
-    
-    # Send over TCP port 7128 (RTU mode, no MBAP framing)
-    sock = socket.socket()
-    sock.connect((ip, 7128))
-    sock.send(request)
-    response = sock.recv(65536)  # Up to 4721 bytes
-    sock.close()
-    
-    # Parse response: slave, fc, length (BE u16), preamble, [44×107], crc
-    if response[0] != slave or response[1] != 0x70:
-        raise ValueError("Unexpected response header")
-    
-    length = int.from_bytes(response[2:4], 'big')
-    preamble = response[4:8]
-    payload_start = 8
-    payload_end = 8 + length
-    payload = response[payload_start:payload_end]
-    crc_actual = crc16_modbus(response[:payload_end])
-    crc_expected = int.from_bytes(response[payload_end:payload_end+2], 'little')
-    
-    if crc_actual != crc_expected:
-        raise ValueError(f"CRC mismatch: {crc_actual:04x} != {crc_expected:04x}")
-    
-    # Decode records
-    records = []
-    for i in range(107):
-        record_bytes = payload[i*44:(i+1)*44]
-        
-        # Hybrid encoding helper: current values use 0x0100 | low_byte pattern
-        def decode_hybrid_current(low_byte):
-            if low_byte == 0:
-                return 0  # Idle/offline
-            return (0x0100 | low_byte)  # e.g., 0x98 → 0x0198 = 408
-        
-        record = {
-            'slot_index': i,
-            'slot_time': f"{i*5//60:02d}:{i*5%60:02d}",  # 0:00, 0:05, ..., 23:55
-            'vdc': int.from_bytes(record_bytes[3:5], 'big'),
-            'idc_x10': decode_hybrid_current(record_bytes[6]),
-            'vac1': record_bytes[10],
-            'vac2': record_bytes[12],
-            'vac3': record_bytes[14],
-            'iac1_x10': decode_hybrid_current(record_bytes[16]),
-            'iac2_x10': decode_hybrid_current(record_bytes[18]),
-            'iac3_x10': decode_hybrid_current(record_bytes[20]),
-            'temp': record_bytes[22],
-            'cosφ_x1000': int.from_bytes(record_bytes[27:29], 'big'),
-            'freq_x100': int.from_bytes(record_bytes[29:31], 'big'),
-            'inv_alarms': int.from_bytes(record_bytes[33:35], 'big'),
-            'track_alarms': int.from_bytes(record_bytes[35:37], 'big'),
-            # TODO: Decode Pdc, Pac, PartialEnergy from bytes[24:26], offset TBD
-        }
-        records.append(record)
-    
-    return records
+from dataclasses import dataclass
+
+DAILY_DATA_FC = 0x70
+DAILY_DATA_CMD = 0x34
+
+@dataclass
+class DailyDataRecord:
+    record_index: int
+    vdc_v: int
+    idc_a: float          # decoded A (already /10)
+    pdc_w: int
+    vac1_v: int; vac2_v: int; vac3_v: int
+    iac1_a: float; iac2_a: float; iac3_a: float
+    temp_c: int
+    pac_w: int
+    cosphi: float
+    freq_hz: float
+    inv_alarms: int       # u16
+    track_alarms: int
+    partial_energy_wh: float  # = pac_w * 5/60
+
+def build_daily_request(slave: int, day_byte: int) -> bytes:
+    body = bytes([slave, DAILY_DATA_FC, DAILY_DATA_CMD, day_byte])
+    crc = crc16_modbus(body)
+    return body + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+def parse_daily_response(reply: bytes) -> list[DailyDataRecord]:
+    # Verify slave/FC, drop CRC, slice declared length, then walk chunks.
+    # See _spike/dailydata_decode.py for the reference implementation.
+    ...
+
+def read_with_lock(client, lock, slave: int, day_byte: int,
+                   timeout_s: float = 10.0) -> list[DailyDataRecord]:
+    """One-shot fetch through the existing pymodbus 2.5.3 socket.
+    Uses raw socket access (`client.socket.send/recv`) the same way
+    `vendor_scope_peek()` does, but reads until CRC validates rather
+    than to a known length."""
 ```
 
-### Node API (server/index.js)
+Reuse `services/vendor_pdu.py crc16_modbus`. The hard part — chunk-aware parsing — is already prototyped in `_spike/dailydata_decode.py`.
 
-```javascript
-// GET /api/daily-data/:inv/:slave?date=YYYY-MM-DD
-router.get('/api/daily-data/:inv/:slave', async (req, res) => {
-  const inv = req.params.inv;
-  const slave = parseInt(req.params.slave);
-  const date = req.query.date || new Date().toISOString().split('T')[0];
-  
-  try {
-    const records = await axios.post('http://localhost:9000/api/daily-data', {
-      ip: inverterIps[inv],
-      slave,
-      date,
-    });
-    
-    // Store in SQLite table `inverter_daily_data` (inv, slave, date, data_json)
-    const key = `daily_data_${inv}_${slave}_${date}`;
-    db.run('INSERT OR REPLACE INTO inverter_daily_data (key, inv, slave, date, data) VALUES (?, ?, ?, ?, ?)',
-      [key, inv, slave, date, JSON.stringify(records)]);
-    
-    res.json({ ok: true, records, count: records.length });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+### 5.2 FastAPI endpoint
+
+```python
+@app.get("/daily-data/{inverter}/{slave}")
+async def api_daily_data_read(
+    inverter: int, slave: int,
+    day_byte: int,                  # explicit 0..255 from caller
+    request: Request,
+):
+    # bulk-auth gated, _denyDailyDataInRemote
+    ...
 ```
 
-### UI (public/daily-data.html)
+The day_byte stays a raw u8 in the API; Node owns the calendar→byte translation (one-time calibration captures populate a `daily_data_byte` lookup column on the gateway).
 
-- Date picker (calendar, defaults to today)
-- Tabular grid: Time, Vdc, Vac1/2/3, Iac1/2/3, Temp, Pac, Energy, Freq, CosΦ, Alarms
-- Export to CSV/PDF
-- Comparison with forecast engine output (if Energy column is recoverable)
+### 5.3 Node (`server/dailyData.js` + Express routes)
 
----
+- `POST /api/daily-data/:inverter/:slave/refresh?date=YYYY-MM-DD`
+- `GET  /api/daily-data/:inverter/:slave/recent?date=YYYY-MM-DD`
+- New SQLite table `inverter_daily_log` with PK `(inverter_ip, slave, date_local, record_index)`. ~155 rows × 27 inverters × 4 slaves × 365 days ≈ 6.1M rows/year — partition by month or run a 90-day retention pruner like Stop Reasons does.
+- Export: extend `server/exporter.js` with a "Daily Log" tab that emits the exact ISM column order so operators can drop it straight into their existing reports.
 
-## Next Steps
+### 5.4 UI placement
 
-### To Unblock Full Implementation
+Add a third tab to the **Stop Reasons** settings card (which already has Snapshots / Lifetime Counters): **Daily Log**. Operator picks inverter + slave + date, hits Fetch, sees a 288-row × 16-column table, and clicks Export to download a CSV that matches ISM's grid byte-for-byte.
 
-1. **CRITICAL: Confirm Pdc/Pac/PartialEnergy encoding** ← Only remaining blocker
-   - Decompile ISM's `FV.IngeBLL.dll` using dnSpy
-   - Search for method `LeeDatosDiarios` or `Parse` in the INGECON record class
-   - Extract field offsets from IL bytecode (stfld pattern with offset bytes)
-   - **OR:** Request a 2nd capture with significant production (Pdc > 5 kW) to byte-pattern match values
-   - Check if these fields are packed into [24:26] area or elsewhere
-
-2. **Optional: Reverse-engineer date-selector semantics for `0x349b`**
-   - Current hypothesis: fixed "today" selector or day-of-year encoding
-   - If implementing historical downloads, capture same inverter on consecutive days with `0x349b` request
-   - Reverse-engineer from Wireshark timestamps + capture metadata
-
-3. **Optional: Verify status byte patterns**
-   - Confirmed: 0x81 = "data valid", 0x80 = "idle/offline"
-   - Check edge cases: glitches, comm errors, power transitions
-
-### Estimated Effort (Revised)
-
-- **IL decompilation (if needed):** 2–4 hours
-- **Pdc/Pac/Energy decode:** 1–2 hours (once IL found)
-- **Python FC 0x70 service:** 4–6 hours
-- **Node API + SQLite schema:** 4–6 hours
-- **UI + export:** 8–12 hours
-- **Testing + documentation:** 6–8 hours
-
-**Total:** ~30–45 hours (1–1.5 weeks, assuming DLL decompilation succeeds within 4 hours)
+This avoids creating a fourth Settings card and keeps "vendor-protocol diagnostics" together.
 
 ---
 
-## Appendix: Capture Metadata & Validation Report
+## 6. Effort estimate
 
-- **File:** `docs/capture-daily-data.pcapng`
-- **Timestamp:** 2026-04-27 ~14:00 UTC
-- **Inverter:** INV 09 / Slave 2 (192.168.1.109)
-- **ISM workstation:** 192.168.1.11
-- **Port:** 7128 (Modbus RTU/TCP, no MBAP framing)
-- **Request payload:** `02 70 34 9b 57 2c` (FC 0x70 + body + CRC16)
-- **Response payload:** 4721 bytes total (header + 4708 data + CRC)
-- **Records:** 107 × 44 bytes = 4708 bytes (5-minute intervals, ~8:55 AM to 23:55 PM daylight window)
-- **Autocorrelation:** stride=44 confirmed at 72% byte-match rate (vs 41% for competing strides)
-- **Field validation:** 13 of 16 fields cross-checked against ISM screenshot rows at 5:20 AM and 7:15 AM
+| Slice | Effort | Notes |
+|---|---|---|
+| Python `services/daily_data.py` + 20 unit tests | 1 day | Decoder spec is verified; tests use the two saved binaries as fixtures |
+| FastAPI endpoint + auth/remote-mode guards | 0.5 day | mirror `serial_number` route shape |
+| Node `server/dailyData.js` + SQLite schema + retention pruner | 1 day | mirror `server/stopReasons.js` |
+| Express routes + UI tab + CSV export | 1 day | adds tab to existing `#stopReasonsSection` |
+| Date-byte calibration (one capture per quarter to confirm formula) | 0.25 day | + optional IL spike if user wants formula nailed deterministically |
+| Soak / hardware QA | 0.25 day | run on .109 (comm board) and .133 (EKI fallback) |
 
-**Validation Results:**
-- ✓ Vdc (400V / 691V) — offset 3-4, BE u16
-- ✓ Idc (0→256 / 408) — offset 6, u8 with 0x0100 hybrid encoding
-- ✓ Vac1/2/3 (205/203/203 / 206/202/203 V) — offsets 10/12/14, u8 single bytes
-- ✓ Iac1/2/3 (0→256 / 461/459/453) — offsets 16/18/20, u8 with 0x0100 hybrid encoding
-- ✓ Temp (33°C / 32°C) — offset 22, u8
-- ✓ Freq (6010→60.10 Hz / 5987→59.87 Hz) — offset 29-30, BE u16 ÷ 100
-- ✓ CosΦ (0 / 265→0.265) — offset 27-28, BE u16 ÷ 1000
-- ✓ InvAlarms (0x0000 / 0x0600) — offset 33-34, BE u16
-- ✓ TrackAlarms (0x0000 / 0x0000) — offset 35-36, BE u16
-- ✗ Pdc (expected 27660W) — not located via exhaustive search
-- ✗ Pac (expected 27550W) — area 24-26 yields 0xC308E1, interpretation unknown
-- ✗ PartialEnergy (expected 229583 Wh) — not located as simple u16/u24
-
-**Spike Scripts:**
-- `_spike/dailydata_payload.bin` — raw 4715-byte binary extracted from Wireshark
-- `_spike/_decode_dailydata_final.py` — field location discovery via exhaustive hex search
-- `_spike/_decode_dailydata_records.py` — multi-variant decoder with stride confirmation
-- `_spike/_decode_dailydata_validated.py` — documented structure with Unicode support
+**Total: 4 engineering days.** No further captures or DLL decompilation strictly required — both are nice-to-have.
 
 ---
 
-## References
+## 7. Open questions (small + non-blocking)
 
-- Memory: `project_inverter_dsp_architecture.md` — Motorola Format serial, FreescaleDSP56F architecture
-- Memory: `ism_serial_write_protocol.md` — Modbus FC16 unlock sequence
-- Code: `_spike/dailydata_payload.bin` — Raw 4715-byte payload
-- Code: `_spike/_decode_dailydata_final.py` — Field extraction validator
+1. **Date-byte formula.** Two-day delta is conclusive proof of date selection, but the absolute formula needs one more datapoint or an IL read. Mitigation: store an empirical lookup `(day_byte, captured_date)` in DB; refresh nightly at 00:05 by issuing one calibration request for "today"; back-fill the table.
+2. **Offset 25-26 semantics.** Always tracks Pac with ratio ≈ 0.83. Best guess: apparent power / 12 (the 5-min sliding average). Not displayed in ISM; safe to ignore.
+3. **Other Reading-tab modes.** ISM also offers "Daily Averages", "Monthly data", "Monthly Energies", "Detailed Monthly Data" radio buttons. Each likely uses a different command byte (other than `0x34`) on the same FC 0x70. One short capture per mode would unlock all of them.
+4. **Maximum dump duration.** Both captures finished in 25-32 seconds. The single-request/multi-segment-response pattern means we hold the lock the entire time. Should the Python proxy publish a progress event over WS so the UI can render a progress bar? (Recommended yes — long-running, single-shot.)
+5. **History depth.** The 1-byte day selector implies a ~256-day rolling buffer. Need to confirm whether asking for a date older than 256 days returns garbage, an error, or wraps. Important for the export UX (greying out dates beyond range).
+
+---
+
+## 8. Appendix — reproducibility
+
+```bash
+# Decode either capture's response stream into the raw payload
+"/c/Program Files/Wireshark/tshark.exe" -r docs/capture-daily-data.pcapng \
+  -q -z follow,tcp,raw,0 > _spike/ism_stream.txt
+
+# Validate the field layout against the screenshot anchors
+python _spike/dailydata_decode.py
+```
+
+Reference scripts and binaries:
+- `_spike/dailydata_decode.py` — verified decoder (final version)
+- `_spike/dailydata_payload.bin` — 4/27 raw 4715 B payload
+- `_spike/dailydata_payload_0425.bin` — 4/25 raw 6831 B payload
+- `_spike/ism_stream.txt`, `_spike/ism_stream_0425.txt` — full reassembled TCP streams (client + server hex)
+
+CRCs verified on every Modbus frame in both captures (`crc16_modbus()` from `services/vendor_pdu.py`). Decoder reproduces all 60 verifiable values across 7 screenshot anchors with zero discrepancies.

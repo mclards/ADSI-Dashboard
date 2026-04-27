@@ -16,6 +16,7 @@ const {
 } = require('./pollerClampCore');
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
+const dailyAgg = require('./dailyAggregator');
 const {
   normalizeTodayEnergyRows,
   evaluateTodayEnergyHealth,
@@ -1271,6 +1272,12 @@ async function poll() {
     liveData[key] = parsed;
     acceptedThisTick += 1;
     alarmBatch.push(parsed);
+
+    // v2.10.x All Parameters Data — feed every accepted parsed row into
+    // the 5-min aggregator. Aggregator does its own bucket math and
+    // flushes to inverter_5min_param at slot rollover; cheap (in-memory
+    // accumulators) so we don't gate on the persist-cadence guard.
+    try { dailyAgg.ingestLiveSample(parsed); } catch (_) { /* best-effort */ }
 
     // Persist with cadence guard to reduce synchronous DB pressure.
     const persistPrev = lastPersistState[key];

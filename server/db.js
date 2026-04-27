@@ -1009,6 +1009,137 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_icsl_ts  ON inverter_clock_sync_log(ts);
   CREATE INDEX IF NOT EXISTS idx_icsl_inv ON inverter_clock_sync_log(inverter, ts);
+
+  -- v2.10.0 Slice B: StopReason snapshots (DebugDesc + telemetry at fault).
+  -- Populated by Python via POST /api/stop-reasons/internal/capture either
+  -- on operator refresh (trigger_source='manual') or on poller-detected
+  -- alarm transition (trigger_source='alarm_transition'). De-dup via the
+  -- (inverter_ip, slave, node, fingerprint) UNIQUE so re-reads of the
+  -- same physical event don't duplicate rows.
+  CREATE TABLE IF NOT EXISTS inverter_stop_reasons (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter_id     INTEGER NOT NULL,
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    node            INTEGER NOT NULL,
+    read_at_ms      INTEGER NOT NULL,
+    event_at_ms     INTEGER,
+    trigger_source  TEXT NOT NULL DEFAULT 'manual',
+    alarm_id        INTEGER,
+    pot_ac          REAL,
+    vpv             REAL,
+    vac1            REAL, vac2 REAL, vac3 REAL,
+    iac1            REAL, iac2 REAL,
+    frec1           REAL, frec2 REAL, frec3 REAL,
+    cos             REAL,
+    temp            INTEGER,
+    alarma          INTEGER NOT NULL DEFAULT 0,
+    motparo         INTEGER NOT NULL DEFAULT 0,
+    motparo_label   TEXT,
+    alarmas1        INTEGER, alarmas2 INTEGER, flags INTEGER,
+    ref1            INTEGER, pos1 INTEGER,
+    ref2            INTEGER, pos2 INTEGER,
+    timeout_band    INTEGER,
+    debug_desc      INTEGER NOT NULL DEFAULT 0,
+    struct_month    INTEGER, struct_day INTEGER,
+    struct_hour     INTEGER, struct_min INTEGER,
+    raw_hex         TEXT NOT NULL,
+    fingerprint     TEXT NOT NULL,
+    updated_ts      INTEGER NOT NULL
+                    DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    UNIQUE(inverter_ip, slave, node, fingerprint)
+  );
+  CREATE INDEX IF NOT EXISTS idx_isr_lookup ON inverter_stop_reasons(inverter_ip, slave, node, read_at_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_isr_alarm  ON inverter_stop_reasons(alarm_id) WHERE alarm_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_isr_event  ON inverter_stop_reasons(event_at_ms DESC) WHERE event_at_ms IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_isr_inv_ts ON inverter_stop_reasons(inverter_id, read_at_ms DESC);
+
+  -- v2.10.0 Slice B: ARRAYHISTMOTPARO snapshots (lifetime stop-motive
+  -- counters; one row per refresh). Slot 30 of counters_json is the TOTAL
+  -- counter; slots 0..29 map to MOTIVO_PARO codes (server/motiveLabels.js).
+  CREATE TABLE IF NOT EXISTS inverter_stop_histogram (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter_id     INTEGER NOT NULL,
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    read_at_ms      INTEGER NOT NULL,
+    total_count     INTEGER NOT NULL,
+    counters_json   TEXT NOT NULL,
+    raw_hex         TEXT NOT NULL,
+    updated_ts      INTEGER NOT NULL
+                    DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_ish_inv_ts ON inverter_stop_histogram(inverter_ip, slave, read_at_ms DESC);
+
+  -- v2.10.0 Slice C: serial-number change audit (forever-retained service
+  -- record).  Every successful Read mints a session token; every Send
+  -- captures the prior serial via mandatory pre-Read so before+after are
+  -- always recorded, even on verify_failed.
+  CREATE TABLE IF NOT EXISTS serial_change_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter_id     INTEGER NOT NULL,
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    acted_at_ms     INTEGER NOT NULL,
+    acted_by        TEXT,
+    fmt             TEXT NOT NULL,
+    old_serial      TEXT NOT NULL,
+    new_serial      TEXT NOT NULL,
+    verify_passed   INTEGER NOT NULL DEFAULT 0,
+    outcome         TEXT NOT NULL,
+    error_detail    TEXT,
+    updated_ts      INTEGER NOT NULL
+                    DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_scl_inv_ts ON serial_change_log(inverter_ip, acted_at_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_scl_outcome ON serial_change_log(outcome, acted_at_ms DESC);
+
+  -- v2.10.x All Parameters Data — per-inverter, per-node, per-5-minute
+  -- aggregated parameter snapshot. Replaces the on-screen Energy table
+  -- (UI only — the existing inverter_5min table and energy_5min stay
+  -- untouched). One row per (inverter_ip, slave, date_local, slot_index).
+  -- slot_index = (hour*60 + minute) / 5  (0..287)
+  -- in_solar_window = 1 iff hour_of_slot in [solarWindowStartHour, eodSnapshotHourLocal)
+  CREATE TABLE IF NOT EXISTS inverter_5min_param (
+    inverter_ip       TEXT    NOT NULL,
+    slave             INTEGER NOT NULL,
+    date_local        TEXT    NOT NULL,
+    slot_index        INTEGER NOT NULL,
+    ts_ms             INTEGER NOT NULL,
+
+    vdc_v             REAL,
+    idc_a             REAL,
+    pdc_w             INTEGER,
+
+    vac1_v            REAL,
+    vac2_v            REAL,
+    vac3_v            REAL,
+
+    iac1_a            REAL,
+    iac2_a            REAL,
+    iac3_a            REAL,
+
+    temp_c            INTEGER,
+    pac_w             INTEGER,
+    cosphi            REAL,
+    freq_hz           REAL,
+
+    inv_alarms        INTEGER NOT NULL DEFAULT 0,
+    track_alarms      INTEGER NOT NULL DEFAULT 0,
+
+    sample_count      INTEGER NOT NULL DEFAULT 0,
+    is_complete       INTEGER NOT NULL DEFAULT 0,
+    in_solar_window   INTEGER NOT NULL DEFAULT 0,
+
+    updated_ts        INTEGER NOT NULL
+                      DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+
+    PRIMARY KEY (inverter_ip, slave, date_local, slot_index)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_p5m_date     ON inverter_5min_param (date_local, inverter_ip);
+  CREATE INDEX IF NOT EXISTS idx_p5m_inv_date ON inverter_5min_param (inverter_ip, slave, date_local);
+  CREATE INDEX IF NOT EXISTS idx_p5m_solar    ON inverter_5min_param (date_local, in_solar_window) WHERE in_solar_window = 1;
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -1178,6 +1309,12 @@ ensureColumn(
 );
 // Migration: store plant-cap decision reason in audit_log (added 2026-03).
 ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
+
+// v2.10.0 Slice F — link alarm rows to their captured StopReason snapshot.
+// Populated when raiseActiveAlarm() triggers an auto-fetch and Python's
+// /api/stop-reasons/internal/capture returns a row id. NULL for legacy alarms
+// raised before v2.10.0 or for alarms whose snapshot read failed.
+ensureColumn("alarms", "stop_reason_id", "stop_reason_id INTEGER");
 
 // v2.9.1 — EOD-clean rolling-last snapshot columns. Captured post-1800H local
 // from the last PAC>0 polls; tomorrow's etotal_baseline is derived from these

@@ -1009,6 +1009,14 @@ function getActiveAlarms() {
   );
 }
 
+// v2.10.0 Slice F — pluggable auto-capture hook. Wired up by index.js at
+// startup so this module stays free of fetch/http/python dependencies.
+// Signature: ({ alarmId, inverter, unit, alarmValue, eventAtMs }) => void
+let _stopReasonAutoCapture = null;
+function setStopReasonAutoCapture(fn) {
+  _stopReasonAutoCapture = typeof fn === "function" ? fn : null;
+}
+
 function raiseActiveAlarm(row, cur, now, newAlarms) {
   const severity = getTopSeverity(cur) || "fault";
   const info = stmts.insertAlarm.run({
@@ -1019,8 +1027,9 @@ function raiseActiveAlarm(row, cur, now, newAlarms) {
     alarm_value: cur,
     severity,
   });
+  const alarmId = Number(info?.lastInsertRowid || 0);
   newAlarms.push({
-    id: Number(info?.lastInsertRowid || 0),
+    id: alarmId,
     inverter: row.inverter,
     unit: row.unit,
     alarm_value: cur,
@@ -1028,6 +1037,23 @@ function raiseActiveAlarm(row, cur, now, newAlarms) {
     decoded: decodeAlarm(cur),
     ts: now,
   });
+
+  // Slice F: fire-and-forget StopReason auto-capture stamped with the
+  // poller-detected millisecond timestamp + alarm row id. Wrapped so any
+  // hook failure cannot break the poller batch.
+  if (alarmId && _stopReasonAutoCapture) {
+    try {
+      _stopReasonAutoCapture({
+        alarmId,
+        inverter: row.inverter,
+        unit: row.unit,
+        alarmValue: cur,
+        eventAtMs: now,
+      });
+    } catch (err) {
+      // Swallow — caller's hook should be defensive, but defend anyway.
+    }
+  }
 }
 
 function updateActiveAlarmValue(row, cur) {
@@ -1240,5 +1266,6 @@ module.exports = {
   SERVICE_DOCS_GITHUB_BASE,
   FATAL_ALARM_VALUE,
   classifyAlarmTransition,
+  setStopReasonAutoCapture,
 };
 

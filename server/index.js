@@ -90,6 +90,9 @@ const {
   getClockSyncLog,
 } = require("./db");
 const counterHealth = require("./counterHealth");
+const stopReasons = require("./stopReasons");
+const serialNumber = require("./serialNumber");
+const dailyAggregator = require("./dailyAggregator");
 const {
   registerClient,
   broadcastUpdate,
@@ -115,7 +118,9 @@ const {
   SERVICE_DOCS_GITHUB_BASE,
   FATAL_ALARM_VALUE,
   classifyAlarmTransition,
+  setStopReasonAutoCapture,
 } = require("./alarms");
+const { createStopReasonAutoCapture } = require("./alarmsDiagnostic");
 const {
   isValidPlantWideAuthKey,
   issuePlantWideAuthSession,
@@ -329,7 +334,10 @@ const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
 const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
 const AVAIL_OFFLINE_TOLERANCE_S = 60; // bridge offline gaps ≤ 60s (comms blips / Modbus timeouts)
-const ENERGY_5MIN_UNPAGED_ROW_CAP = 50000; // safety cap for the non-paged fallback path
+// Raised 50k → 500k so wide-range analytics queries (e.g. 1-month all-inverter
+// at 5-min granularity ≈ 233k rows) stop being silently truncated. Wider than
+// 500k now returns 400 — see /api/analytics/energy and /api/energy/5min.
+const ENERGY_5MIN_UNPAGED_ROW_CAP = 500000;
 const REMOTE_BRIDGE_INTERVAL_MS = 800;
 const REMOTE_BRIDGE_MAX_BACKOFF_MS = 30000; // max retry interval after consecutive live failures
 const REMOTE_BRIDGE_WARMUP_MS = 8000; // allow the live bridge to establish before local fallback kicks in
@@ -5473,8 +5481,13 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/replication/",    45000],  // 45 s  — replication sync
   ["/api/write",          60000],  // 60 s  — control writes, including batched inverter actions
   ["/api/plant-cap/",      60000],  // 60 s  — sequential plant cap release/control actions
-  ["/api/analytics/",      20000],  // 20 s  — analytics queries
-  ["/api/energy/5min",     20000],  // 20 s  — energy range queries
+  // Analytics + energy range queries can scan 1-month-wide blocks of
+  // energy_5min on a CPU-shared gateway PC. 20 s was too tight: any
+  // poller burst would push past it and the chart silently rendered
+  // partial data (which the operator perceived as "missing data on
+  // remote"). 60 s is the same ceiling we give /api/replication.
+  ["/api/analytics/",      60000],  // 60 s  — analytics queries
+  ["/api/energy/5min",     60000],  // 60 s  — energy range queries
   ["/api/alarms",          20000],  // 20 s  — alarm queries
   ["/api/audit",           20000],  // 20 s  — audit queries
   ["/api/chat/",           10000],  // 10 s  — chat messaging
@@ -12207,6 +12220,12 @@ app.get("/api/health/db-integrity", (req, res) => {
 
 const INVERTER_ENGINE_SYNC_URL = `${INVERTER_ENGINE_BASE_URL}/sync-clock`;
 
+// v2.10.0 Slice B — Stop Reasons (vendor FC 0x71 SCOPE peek through Python).
+const INVERTER_ENGINE_STOP_REASONS_URL = `${INVERTER_ENGINE_BASE_URL}/stop-reasons`;
+
+// v2.10.0 Slice C — Serial Number Read / Edit / Send through Python (FC11 + FC16).
+const INVERTER_ENGINE_SERIAL_URL = `${INVERTER_ENGINE_BASE_URL}/serial`;
+
 // Admin/topology auth gate (reuses the `adsiM`/`adsiMM` pattern established
 // for /api/substation/* and topology UI access).
 function requireTopologyAuth(req, res, next) {
@@ -12666,6 +12685,855 @@ app.post(
 app.get("/admin/inverter-clock", (req, res) => {
   res.redirect(302, "/#settings-inverter-clock");
 });
+
+// ─── v2.10.0 Slice B — Stop Reasons API ────────────────────────────────────
+//
+// Read endpoints (recent / event / histogram) are unauthenticated — they
+// hit replicated DB tables, no Modbus traffic.  Refresh hits the inverter
+// over the shared bus, so it is bulk-auth gated AND remote-mode blocked
+// (same envelope as /api/sync-clock/*).
+
+function _resolveInverterIp(inverterId) {
+  const cfg = loadIpConfigFromDb();
+  const ip = cfg?.inverters?.[inverterId] ?? cfg?.inverters?.[String(inverterId)];
+  return typeof ip === "string" && ip ? ip : null;
+}
+
+function _resolveSlaveForInverter(inverterId, fallback = 1) {
+  const cfg = loadIpConfigFromDb();
+  const units = cfg?.units?.[inverterId] ?? cfg?.units?.[String(inverterId)];
+  if (Array.isArray(units) && units.length > 0) {
+    const first = Number(units[0]);
+    if (Number.isFinite(first) && first >= 1 && first <= 247) return first;
+  }
+  return fallback;
+}
+
+app.get("/api/stop-reasons/:inverter/recent", (req, res) => {
+  const inv = Number(req.params.inverter);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
+  try {
+    const rows = stopReasons.getRecentForInverter(db, inv, limit);
+    res.json({ ok: true, inverter: inv, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/stop-reasons/:inverter/event/:event_id", (req, res) => {
+  const eventId = Number(req.params.event_id);
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    return res.status(400).json({ ok: false, error: "event_id required" });
+  }
+  try {
+    const row = stopReasons.getEventById(db, eventId);
+    if (!row) return res.status(404).json({ ok: false, error: "not found" });
+    res.json({ ok: true, event: row });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/stop-reasons/:inverter/histogram", (req, res) => {
+  const inv = Number(req.params.inverter);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  try {
+    const snap = stopReasons.getLatestHistogramForInverter(db, inv);
+    res.json({ ok: true, inverter: inv, snapshot: snap });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── v2.10.x All Parameters Data — read-only endpoints ───────────────────
+// Read paths work in BOTH gateway and remote modes (replicated SQLite).
+// Export path is gateway-only because the today-lock check depends on the
+// gateway's wall clock — see _denyParamExportInRemote below.
+
+function _solarWindowSpec() {
+  const startH = Math.max(0, Math.min(23, Number(getSetting("solarWindowStartHour", 5)) || 5));
+  const eodH   = Math.max(0, Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18));
+  return { startH, eodH };
+}
+
+function _todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function _validDateStr(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+function _paramRowSelect(ip, slave, dateLocal) {
+  // Returns rows in solar-window only.  Caller decides whether to also
+  // append the live in-progress bucket (today-only).
+  return db.prepare(`
+    SELECT slot_index, ts_ms,
+           vdc_v, idc_a, pdc_w,
+           vac1_v, vac2_v, vac3_v,
+           iac1_a, iac2_a, iac3_a,
+           temp_c, pac_w, cosphi, freq_hz,
+           inv_alarms, track_alarms,
+           sample_count, is_complete, in_solar_window
+      FROM inverter_5min_param
+     WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+       AND in_solar_window = 1
+     ORDER BY slot_index ASC
+  `).all(String(ip), Number(slave), String(dateLocal));
+}
+
+// GET /api/params/:inverter/:slave?date=YYYY-MM-DD
+// Single slave/node, one-day view. Today returns persisted rows + the
+// live in-progress bucket (sample_count > 0) at the tail.
+app.get("/api/params/:inverter/:slave", (req, res) => {
+  const inv = Number(req.params.inverter);
+  const slave = Number(req.params.slave);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  if (!Number.isFinite(slave) || slave < 1 || slave > 247) {
+    return res.status(400).json({ ok: false, error: "slave required (1..247)" });
+  }
+  const date = String(req.query.date || _todayLocal()).trim();
+  if (!_validDateStr(date)) {
+    return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+  }
+  const ip = _resolveInverterIp(inv);
+  if (!ip) {
+    return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+  }
+  const sw = _solarWindowSpec();
+  const isToday = date === _todayLocal();
+  try {
+    const rows = _paramRowSelect(ip, slave, date);
+    let liveBucket = null;
+    if (isToday) {
+      try {
+        liveBucket = dailyAggregator.getCurrentBucket(ip, slave);
+        // Only surface the live bucket if it's in the solar window AND its
+        // slot isn't already represented in `rows` (which it won't be —
+        // the in-progress slot hasn't been flushed yet).
+        if (liveBucket && !liveBucket.in_solar_window) liveBucket = null;
+      } catch (_) { liveBucket = null; }
+    }
+    res.json({
+      ok: true,
+      inverter: inv, ip, slave,
+      date, is_today: isToday,
+      solar_window: sw,
+      rows,
+      live_bucket: liveBucket,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/params/:inverter?date=YYYY-MM-DD
+// All configured slaves for one inverter — returns one rowset per slave.
+// Used by the page on first load to populate every Node tab in one round-trip.
+app.get("/api/params/:inverter", (req, res) => {
+  const inv = Number(req.params.inverter);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  const date = String(req.query.date || _todayLocal()).trim();
+  if (!_validDateStr(date)) {
+    return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+  }
+  const ip = _resolveInverterIp(inv);
+  if (!ip) {
+    return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+  }
+  const cfg = loadIpConfigFromDb();
+  const slaves = (cfg?.units?.[inv] || cfg?.units?.[String(inv)] || [])
+    .map((s) => Number(s))
+    .filter((s) => Number.isFinite(s) && s >= 1 && s <= 247);
+  if (slaves.length === 0) {
+    return res.json({ ok: true, inverter: inv, ip, date, slaves: [], by_slave: {} });
+  }
+  const sw = _solarWindowSpec();
+  const isToday = date === _todayLocal();
+  try {
+    const out = {};
+    for (const slave of slaves) {
+      const rows = _paramRowSelect(ip, slave, date);
+      let liveBucket = null;
+      if (isToday) {
+        try {
+          liveBucket = dailyAggregator.getCurrentBucket(ip, slave);
+          if (liveBucket && !liveBucket.in_solar_window) liveBucket = null;
+        } catch (_) { liveBucket = null; }
+      }
+      out[slave] = { rows, live_bucket: liveBucket };
+    }
+    res.json({
+      ok: true,
+      inverter: inv, ip,
+      date, is_today: isToday,
+      solar_window: sw,
+      slaves,
+      by_slave: out,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Refresh: proxies to Python's POST /stop-reasons/{inverter}/{slave}, then
+// persists each per-node record + optional histogram in one DB transaction.
+const _denyStopReasonsInRemote = (req, res, next) => {
+  if (isRemoteMode()) {
+    return res.status(403).json({
+      ok: false,
+      error: "Stop Reasons refresh is disabled in remote mode. Run from the gateway.",
+      remoteDisabled: true,
+    });
+  }
+  return next();
+};
+
+// ─── v2.10.0 Slice F — auto-capture wiring ────────────────────────────────
+// Hooked into alarms.js raiseActiveAlarm so every fresh alarm row triggers a
+// fire-and-forget StopReason capture stamped with the poller-detected ms
+// timestamp + alarm id.  All deps injected here so alarmsDiagnostic.js stays
+// independently testable.
+try {
+  setStopReasonAutoCapture(createStopReasonAutoCapture({
+    db,
+    stopReasons,
+    engineUrl: INVERTER_ENGINE_BASE_URL,
+    getSetting,
+    resolveInverterIp: _resolveInverterIp,
+    resolveSlave: _resolveSlaveForInverter,
+    currentBulkAuthKey: _currentSacupsKey,
+    logControlAction,
+    broadcastUpdate,
+    isRemoteMode: () => isRemoteMode(),
+  }));
+  console.log("[stop-reason-capture] auto-capture hook registered");
+} catch (err) {
+  console.warn("[stop-reason-capture] hook registration failed:", err.message);
+}
+
+// Slice F readback endpoints (drilldown integration).
+app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
+  const alarmId = Number(req.params.alarm_id);
+  if (!Number.isFinite(alarmId) || alarmId <= 0) {
+    return res.status(400).json({ ok: false, error: "alarm_id required" });
+  }
+  try {
+    const alarmRow = db.prepare(
+      `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, stop_reason_id
+       FROM alarms WHERE id = ?`,
+    ).get(alarmId);
+    if (!alarmRow) return res.status(404).json({ ok: false, error: "alarm not found" });
+
+    let stopReason = null;
+    if (alarmRow.stop_reason_id) {
+      stopReason = stopReasons.getEventById(db, alarmRow.stop_reason_id);
+    }
+    if (!stopReason) {
+      // Backfill: try the reverse FK in case the snapshot row exists but the
+      // alarm row's FK column wasn't populated (e.g. race during shutdown).
+      stopReason = stopReasons.getEventByAlarmId(db, alarmId);
+    }
+    res.json({
+      ok: true,
+      alarm: alarmRow,
+      stop_reason: stopReason,
+      captured: Boolean(stopReason),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post(
+  "/api/stop-reasons/:inverter/refresh",
+  express.json(),
+  _denyStopReasonsInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    const inv = Number(req.params.inverter);
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter required" });
+    }
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+    const slave = Math.max(
+      1,
+      Math.min(247, Number(req.body?.slave) || _resolveSlaveForInverter(inv)),
+    );
+    const includeHistogram = Boolean(
+      req.body?.include_histogram ?? req.query?.include_histogram ?? true,
+    );
+    const nodesParam = Array.isArray(req.body?.nodes) ? req.body.nodes : null;
+
+    const url = new URL(`${INVERTER_ENGINE_STOP_REASONS_URL}/${inv}/${slave}`);
+    if (nodesParam) url.searchParams.set("nodes", nodesParam.join(","));
+    if (includeHistogram) url.searchParams.set("include_histogram", "1");
+
+    const headers = { "content-type": "application/json" };
+    headers["x-bulk-auth"] = req.get("x-bulk-auth") || _currentSacupsKey();
+    if (req.get("authorization")) headers["authorization"] = req.get("authorization");
+
+    let upstream = null;
+    try {
+      const r = await fetch(url.toString(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({}),
+      });
+      upstream = await r.json().catch(() => null);
+      if (!r.ok || !upstream?.ok) {
+        return res.status(r.status || 502).json({
+          ok: false,
+          error: upstream?.detail || upstream?.error || `engine HTTP ${r.status}`,
+          upstream,
+        });
+      }
+    } catch (err) {
+      return res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
+    }
+
+    let persisted = { persisted: [], histogramId: null };
+    try {
+      persisted = stopReasons.persistEngineResponse(db, upstream, {
+        inverterId: inv,
+        inverterIp: ip,
+        slave,
+        triggerSource: "manual",
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: `persist failed: ${err.message}`,
+        upstream,
+      });
+    }
+
+    res.json({
+      ok: true,
+      inverter: inv,
+      ip,
+      slave,
+      read_at_ms: upstream.read_at_ms,
+      persisted: persisted.persisted,
+      histogram_id: persisted.histogramId,
+      upstream_nodes: upstream.nodes?.length || 0,
+    });
+  },
+);
+
+// ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ───────────────────
+
+const _denySerialInRemote = (req, res, next) => {
+  if (isRemoteMode()) {
+    return res.status(403).json({
+      ok: false,
+      error: "Serial number Read/Edit/Send is disabled in remote mode. Run from the gateway.",
+      remoteDisabled: true,
+    });
+  }
+  return next();
+};
+
+// Internal helper used by both the operator-facing route AND the fleet
+// uniqueness scan.  Performs one FC11 read against Python, with retry-once
+// on transient HTTP failures.
+async function _proxySerialRead(inverter, slave, { fmt = "auto" } = {}) {
+  const url = new URL(`${INVERTER_ENGINE_SERIAL_URL}/${inverter}/${slave}`);
+  if (fmt) url.searchParams.set("fmt", fmt);
+  // Ask the Python engine for a longer per-call Modbus timeout (5s vs the
+  // 3s default) — the comm board occasionally takes a beat to relay FC11
+  // when the bus is warm with poller traffic.  Conservative bound, never
+  // longer than the upstream HTTP timeout (15s in the engine).
+  url.searchParams.set("timeout_s", "5");
+  const headers = {
+    "content-type": "application/json",
+    "x-bulk-auth": _currentSacupsKey(),
+  };
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(url.toString(), { method: "GET", headers });
+      const body = await r.json().catch(() => null);
+      if (!r.ok) {
+        lastErr = body?.detail || body?.error || `engine HTTP ${r.status}`;
+      } else {
+        // Soft-error retry: if the engine reported a transient Modbus
+        // failure (gateway target failed to respond, timed out, etc.)
+        // give the bus a beat and try once more on the same call before
+        // surfacing it.  Permanent errors fall through immediately.
+        const softErr = String(body?.error || "").toLowerCase();
+        const isTransient = body && body.ok === false && (
+          softErr.includes("0x0b") ||
+          softErr.includes("gateway target") ||
+          softErr.includes("timed out") ||
+          softErr.includes("timeout") ||
+          softErr.includes("recv failed") ||
+          softErr.includes("connection reset")
+        );
+        if (!isTransient) {
+          return body || { ok: false, error: "empty response" };
+        }
+        lastErr = body?.error || `engine soft-fail`;
+      }
+    } catch (err) {
+      lastErr = err?.message || String(err);
+    }
+    // Backoff before the next attempt — keeps the bus quiet.
+    if (attempt === 0) await new Promise((r) => setTimeout(r, 700));
+  }
+  return { ok: false, error: lastErr || "engine unreachable" };
+}
+
+// IMPORTANT: register the literal-prefixed routes (/log/:inverter,
+// /fleet-cache) BEFORE the generic two-segment shape /:inverter/:slave so
+// Express doesn't capture "log" as :inverter and "1" as :slave.
+
+// GET /api/serial/log/:inverter — recent audit rows for that inverter.
+app.get("/api/serial/log/:inverter", (req, res) => {
+  const inv = Number(req.params.inverter);
+  if (!Number.isFinite(inv) || inv <= 0) {
+    return res.status(400).json({ ok: false, error: "inverter required" });
+  }
+  const ip = _resolveInverterIp(inv);
+  // Allow log to render even before any IP is configured for this inverter
+  // (we still keyed the table by IP, but a fresh inverter just has no rows).
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
+  try {
+    const rows = ip
+      ? serialNumber.getRecentChangesForInverter(db, ip, limit)
+      : [];
+    res.json({ ok: true, inverter: inv, ip: ip || null, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/serial/fleet-cache — diagnostic surface for the cached map.
+app.get("/api/serial/fleet-cache", (req, res) => {
+  res.json({ ok: true, entries: serialNumber.getFleetCacheSnapshot() });
+});
+
+// Internal — build the topology list (every (inverter, slave) with a
+// non-empty IP) from ipconfig.  Reused by read-all + fleet-scan + the
+// existing uniqueness check.
+function _buildTopologyForSerial() {
+  const cfg = loadIpConfigFromDb();
+  const inverters = cfg?.inverters || {};
+  const units = cfg?.units || {};
+  const out = [];
+  for (const [k, ipStr] of Object.entries(inverters)) {
+    const idNum = Number(k);
+    if (!Number.isFinite(idNum) || idNum <= 0 || !String(ipStr || "").trim()) continue;
+    const slaves = units?.[idNum] ?? units?.[k] ?? [1, 2, 3, 4];
+    if (!Array.isArray(slaves)) continue;
+    for (const s of slaves) {
+      const sNum = Number(s);
+      if (Number.isFinite(sNum) && sNum >= 1 && sNum <= 247) {
+        out.push({
+          inverterId: idNum,
+          inverterIp: String(ipStr).trim(),
+          slave: sNum,
+          inverterName: `Inverter ${idNum}`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// POST /api/serial/:inverter/read-all
+// Read every configured slave for one inverter via vendor FC11 in parallel
+// (Python serializes per-IP internally, so this is just sequential reads on
+// the same client).  Bulk-auth gated, gateway-only — drives Modbus traffic.
+app.post(
+  "/api/serial/:inverter/read-all",
+  express.json(),
+  _denySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    const inv = Number(req.params.inverter);
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter required" });
+    }
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+    const cfg = loadIpConfigFromDb();
+    const slaves = cfg?.units?.[inv] ?? cfg?.units?.[String(inv)] ?? [1, 2, 3, 4];
+    const targets = (Array.isArray(slaves) ? slaves : [1, 2, 3, 4])
+      .map((s) => Number(s))
+      .filter((s) => Number.isFinite(s) && s >= 1 && s <= 247);
+    if (!targets.length) {
+      return res.status(400).json({ ok: false, error: `no slaves configured for inverter ${inv}` });
+    }
+
+    const startedAt = Date.now();
+    const rows = [];
+    // Sequential — Python's per-IP lock would serialize them anyway, and a
+    // sequential loop keeps audit / log line attribution clean.  Each call
+    // is ~200 ms so a 4-slave inverter completes in well under a second.
+    // Each successful read also mints a per-slave session token so the UI
+    // can offer inline per-row Send without a second round-trip Read.
+    const actedBy = String(req.body?.acted_by || req.headers["x-acted-by"] || "OPERATOR").slice(0, 64);
+    for (const slave of targets) {
+      const upstream = await _proxySerialRead(inv, slave, { fmt: "auto" });
+      if (upstream?.ok) {
+        // Side-effect: keep the Plant Serial Map cache fresh.
+        serialNumber.setCachedSerial(ip, slave, upstream.serial);
+        const session = serialNumber.mintSession({
+          inverterIp: ip, slave,
+          oldSerial: upstream.serial,
+          fmt: upstream.serial_format || "motorola",
+          actedBy,
+        });
+        rows.push({
+          slave,
+          ok: true,
+          serial: upstream.serial,
+          serial_format: upstream.serial_format,
+          model_code: upstream.model_code,
+          firmware_main: upstream.firmware_main,
+          firmware_aux: upstream.firmware_aux,
+          session_token: session.token,
+          session_expires_at: session.expiresAt,
+        });
+      } else {
+        rows.push({ slave, ok: false, error: upstream?.error || "read failed" });
+      }
+    }
+    res.json({
+      ok: true,
+      inverter: inv,
+      ip,
+      started_at_ms: startedAt,
+      finished_at_ms: Date.now(),
+      total_targets: targets.length,
+      successful: rows.filter((r) => r.ok).length,
+      failed: rows.filter((r) => !r.ok).length,
+      rows,
+    });
+  },
+);
+
+// POST /api/serial/fleet/scan
+// Read every (inverter, slave) in the topology in parallel-with-cap.
+// Populates the fleet cache; returns the assembled map.
+// Bulk-auth gated, gateway-only.
+//
+// Body knobs:
+//   { bypass_cache: bool (default false) }
+// When false, fresh cache entries (<5 min) are reused so re-scans are cheap.
+app.post(
+  "/api/serial/fleet/scan",
+  express.json(),
+  _denySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    const topology = _buildTopologyForSerial();
+    if (!topology.length) {
+      return res.status(400).json({ ok: false, error: "no inverters configured" });
+    }
+    const bypassCache = Boolean(req.body?.bypass_cache);
+    try {
+      const result = await serialNumber.fleetScan({
+        topology,
+        readOne: (inv, slave, opts) => _proxySerialRead(inv, slave, opts),
+        bypassCache,
+      });
+      res.json({ ok: true, bypass_cache: bypassCache, ...result });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  },
+);
+
+// GET /api/serial/:inverter/:slave?fmt=auto|motorola|tx
+// Bulk-auth gated.  On success mints a session token.
+app.get(
+  "/api/serial/:inverter/:slave",
+  _denySerialInRemote,
+  async (req, res) => {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter required" });
+    }
+    if (!Number.isFinite(slave) || slave < 1 || slave > 247) {
+      return res.status(400).json({ ok: false, error: "slave must be 1..247" });
+    }
+    // Bulk auth — header-based for GET (no body to carry authToken).
+    const authKey = String(
+      req.headers["x-bulk-auth"] || req.headers["authorization"] || "",
+    ).trim();
+    const authToken = String(
+      req.headers["x-plantwide-session"] || req.headers["x-bulkauth-session"] || "",
+    ).trim();
+    if (!isAuthorizedPlantWideControl({ authKey, authToken }, req)) {
+      return res.status(401).json({ ok: false, error: "Bulk auth required." });
+    }
+
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+
+    const fmt = String(req.query.fmt || "auto").toLowerCase();
+    const upstream = await _proxySerialRead(inv, slave, { fmt });
+    if (!upstream?.ok) {
+      return res.status(502).json({ ok: false, error: upstream?.error || "read failed", upstream });
+    }
+
+    // Mint a session token bound to (ip, slave) — required for the Send route
+    serialNumber.setCachedSerial(ip, slave, upstream.serial);
+    const session = serialNumber.mintSession({
+      inverterIp: ip, slave,
+      oldSerial: upstream.serial,
+      fmt: upstream.serial_format || fmt,
+      actedBy: "OPERATOR",
+    });
+
+    res.json({
+      ok: true,
+      inverter: inv,
+      ip,
+      slave,
+      read_at_ms: upstream.read_at_ms,
+      serial: upstream.serial,
+      serial_format: upstream.serial_format,
+      format_warning: upstream.format_warning,
+      model_code: upstream.model_code,
+      firmware_main: upstream.firmware_main,
+      firmware_aux: upstream.firmware_aux,
+      session_token: session.token,
+      session_expires_at: session.expiresAt,
+    });
+  },
+);
+
+// POST /api/serial/:inverter/:slave
+// Body: { new_serial, fmt, session_token, check_uniqueness?, override_conflicts? }
+// Bulk auth required (body authToken or header). Optionally requires a
+// topology-auth override to bypass a uniqueness conflict.
+app.post(
+  "/api/serial/:inverter/:slave",
+  express.json(),
+  _denySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter required" });
+    }
+    if (!Number.isFinite(slave) || slave < 1 || slave > 247) {
+      return res.status(400).json({ ok: false, error: "slave must be 1..247" });
+    }
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+
+    const body = req.body || {};
+    const newSerial = String(body.new_serial || "").trim();
+    const fmt = String(body.fmt || "").toLowerCase();
+    const sessionToken = String(body.session_token || "").trim();
+    const checkUniqueness = body.check_uniqueness !== false; // default ON
+    const overrideConflicts = Boolean(body.override_conflicts);
+    const actedBy = String(body.acted_by || req.headers["x-acted-by"] || "OPERATOR").slice(0, 64);
+
+    if (!newSerial) {
+      return res.status(400).json({ ok: false, error: "new_serial required" });
+    }
+    if (fmt !== "motorola" && fmt !== "tx") {
+      return res.status(400).json({ ok: false, error: "fmt must be 'motorola' or 'tx'" });
+    }
+    const expectedLen = fmt === "motorola" ? 12 : 32;
+    if (newSerial.length !== expectedLen) {
+      return res.status(400).json({
+        ok: false, error: `${fmt} requires exactly ${expectedLen} chars, got ${newSerial.length}`,
+      });
+    }
+
+    // ── Session-token gate ─────────────────────────────────────────
+    const sess = serialNumber.consumeSession(sessionToken, { inverterIp: ip, slave });
+    if (!sess.ok) {
+      return res.status(403).json({
+        ok: false, error: `session check failed: ${sess.error}`,
+        hint: "Issue GET /api/serial/{inv}/{slave} first to mint a fresh token.",
+      });
+    }
+    const oldSerial = sess.session.oldSerial;
+
+    // ── Override gate ──────────────────────────────────────────────
+    // override_conflicts requires a topology-auth key on top of bulk auth.
+    if (overrideConflicts) {
+      const topKey = String(
+        req.headers["x-topology-key"] || req.headers["x-substation-key"] || "",
+      ).trim().toLowerCase();
+      const mm = String(new Date().getMinutes()).padStart(2, "0");
+      const prevMm = String((new Date().getMinutes() + 59) % 60).padStart(2, "0");
+      const ok = topKey === `adsim` || topKey === `adsi${mm}` || topKey === `adsi${prevMm}`;
+      if (!ok) {
+        return res.status(401).json({
+          ok: false, error: "Override requires topology auth (header x-topology-key).",
+        });
+      }
+    }
+
+    // ── Fleet uniqueness check (skippable via check_uniqueness=false) ──
+    let uniqueness = null;
+    if (checkUniqueness && newSerial !== oldSerial) {
+      const topology = _buildTopologyForSerial();
+      try {
+        uniqueness = await serialNumber.fleetUniquenessCheck({
+          candidateSerial: newSerial,
+          excludeSelf: { inverterIp: ip, slave },
+          topology,
+          readOne: (invId, slvId, opts) => _proxySerialRead(invId, slvId, opts),
+        });
+      } catch (err) {
+        console.warn("[serial] uniqueness scan crashed:", err.message);
+        uniqueness = {
+          unique: false, scanned: 0, total_targets: 0,
+          conflicts: [], unreachable: [],
+          error: err.message,
+        };
+      }
+      if (!uniqueness.unique && !overrideConflicts) {
+        return res.status(409).json({
+          ok: false,
+          error: "duplicate_serial",
+          uniqueness,
+        });
+      }
+    }
+
+    // ── Wire-level write via Python ─────────────────────────────────
+    const url = `${INVERTER_ENGINE_SERIAL_URL}/${inv}/${slave}`;
+    const headers = {
+      "content-type": "application/json",
+      "x-bulk-auth": _currentSacupsKey(),
+    };
+    let upstream = null;
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ new_serial: newSerial, fmt }),
+      });
+      upstream = await r.json().catch(() => null);
+      if (!r.ok || !upstream) {
+        // Persist the failure with the captured oldSerial so the operator
+        // can audit even when the wire-level write blew up.
+        const detail = upstream?.detail || upstream?.error || `engine HTTP ${r.status}`;
+        try {
+          serialNumber.logSerialChange(db, {
+            inverterId: inv, inverterIp: ip, slave,
+            actedAtMs: Date.now(), actedBy,
+            fmt, oldSerial, newSerial,
+            verifyPassed: false,
+            outcome: "engine_error",
+            errorDetail: detail,
+          });
+        } catch (_) { /* non-fatal */ }
+        return res.status(502).json({
+          ok: false, error: detail, upstream, uniqueness,
+        });
+      }
+    } catch (err) {
+      try {
+        serialNumber.logSerialChange(db, {
+          inverterId: inv, inverterIp: ip, slave,
+          actedAtMs: Date.now(), actedBy,
+          fmt, oldSerial, newSerial,
+          verifyPassed: false,
+          outcome: "engine_unreachable",
+          errorDetail: err.message,
+        });
+      } catch (_) { /* non-fatal */ }
+      return res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
+    }
+
+    // ── Persist audit row + invalidate cache ────────────────────────
+    const status = String(upstream.status || "");
+    const verifyPassed = Boolean(upstream.verify_passed);
+    let logId = null;
+    try {
+      logId = serialNumber.logSerialChange(db, {
+        inverterId: inv, inverterIp: ip, slave,
+        actedAtMs: Number(upstream.acted_at_ms) || Date.now(),
+        actedBy,
+        fmt, oldSerial, newSerial,
+        verifyPassed,
+        outcome: status,
+        errorDetail: upstream.error || null,
+      });
+    } catch (err) {
+      console.warn("[serial] audit log insert failed:", err.message);
+    }
+
+    if (status === "success") {
+      serialNumber.invalidateCachedSerial(ip, slave);
+      serialNumber.setCachedSerial(ip, slave, newSerial);
+    }
+
+    try {
+      logControlAction({
+        operator: actedBy, inverter: inv, node: slave,
+        action: "serial_change", scope: "single",
+        result: status === "success" ? "ok" : "fail",
+        ip, reason: `fmt=${fmt} old=${oldSerial} new=${newSerial} status=${status}`
+                  + (upstream.error ? ` err=${upstream.error}` : ""),
+      });
+    } catch (_) { /* non-fatal */ }
+
+    if (status === "success") {
+      return res.json({
+        ok: true,
+        log_id: logId,
+        inverter: inv, ip, slave, fmt,
+        old_serial: oldSerial,
+        new_serial: newSerial,
+        readback: upstream.readback,
+        verify_passed: true,
+        uniqueness,
+      });
+    }
+    if (status === "verify_failed") {
+      return res.status(502).json({
+        ok: false, error: "verify_failed",
+        log_id: logId,
+        old_serial: oldSerial,
+        new_serial: newSerial,
+        readback: upstream.readback,
+        upstream_error: upstream.error,
+        uniqueness,
+      });
+    }
+    return res.status(502).json({
+      ok: false, error: status || "unknown",
+      log_id: logId,
+      old_serial: oldSerial,
+      new_serial: newSerial,
+      upstream_error: upstream.error,
+      uniqueness,
+    });
+  },
+);
 
 /**
  * POST /api/sync-clock-internal
@@ -15341,11 +16209,26 @@ app.get("/api/analytics/energy", (req, res) => {
   const e = end ? Number(end) : Date.now();
   if (s >= e) return res.status(400).json({ ok: false, error: "start must be before end" });
   const bm = clampInt(bucketMin, 1, 60, 5);
-  // Apply row cap to prevent wide date ranges from hanging the analytics chart.
+  // Pull the full range first, then enforce the row cap with an explicit
+  // 400 instead of slicing. The previous slice silently truncated wide
+  // ranges, which the renderer rendered as "missing data" — operators on
+  // remote saw a chopped chart with no error to act on.
   const baseRows =
     !inverter || inverter === "all"
-      ? queryEnergy5minRangeAll(s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP)
-      : queryEnergy5minRange(Number(inverter), s, e).slice(0, ENERGY_5MIN_UNPAGED_ROW_CAP);
+      ? queryEnergy5minRangeAll(s, e)
+      : queryEnergy5minRange(Number(inverter), s, e);
+
+  if (baseRows.length > ENERGY_5MIN_UNPAGED_ROW_CAP) {
+    return res.status(400).json({
+      ok: false,
+      error:
+        `Date range too large for raw 5-min mode: ${baseRows.length} rows ` +
+        `(cap ${ENERGY_5MIN_UNPAGED_ROW_CAP}). Increase bucketMin or narrow ` +
+        `the range.`,
+      rowCount: baseRows.length,
+      rowCap: ENERGY_5MIN_UNPAGED_ROW_CAP,
+    });
+  }
 
   if (baseRows.length) {
     if (bm <= 5) return res.json(baseRows);
@@ -17659,6 +18542,46 @@ app.post("/api/export/5min", async (req, res) => {
     return sendExportRouteError(res, e);
   }
 });
+// v2.10.x — Daily Data export (per-inverter multi-sheet workbook).
+// Today-lock: when `date == today` we block the export until the gateway
+// wall clock has reached `eodSnapshotHourLocal` so the workbook always
+// contains a complete solar-window day.
+app.post("/api/export/daily-data", async (req, res) => {
+  try {
+    if (isRemoteMode()) {
+      return res.json(
+        await downloadRemoteExportToLocal("/api/export/daily-data", req.body || {}),
+      );
+    }
+    const payload = req.body || {};
+    const inv = Number(payload.inverter);
+    const date = String(payload.date || "").trim();
+    if (!Number.isFinite(inv) || inv <= 0) {
+      return res.status(400).json({ ok: false, error: "inverter is required" });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+    }
+    if (date === _todayLocal()) {
+      const eodH = Math.max(0, Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18));
+      const now = new Date();
+      if (now.getHours() < eodH) {
+        return res.status(423).json({
+          ok: false,
+          error: `Today's daily data unlocks at ${String(eodH).padStart(2, "0")}:00 — try a past date or wait for the End-of-Day snapshot.`,
+          lockedUntilHour: eodH,
+        });
+      }
+    }
+    const outPath = await runGatewayExportJob("daily-data", () =>
+      exporter.exportDailyData({ inverter: inv, date }),
+    );
+    return res.json(buildExportResult(outPath));
+  } catch (e) {
+    return sendExportRouteError(res, e);
+  }
+});
+
 app.post("/api/export/audit", async (req, res) => {
   try {
     if (isRemoteMode()) {
@@ -18790,6 +19713,47 @@ function _refreshTier1NextScheduled() {
 }
 setTimeout(_refreshTier1NextScheduled, 60 * 1000 + 500).unref();
 setInterval(_refreshTier1NextScheduled, 2 * 60 * 60 * 1000).unref();
+
+// v2.10.0 Slice B — periodic retention pruner for the Stop Reason tables.
+// Defaults: 365 d for inverter_stop_reasons, 90 d for inverter_stop_histogram.
+// Operator-tunable via the `stopReasonsRetainDays` / `stopHistogramRetainDays`
+// settings.  Runs every 6 h to keep growth bounded without a startup spike.
+function _prunStopReasonRetention() {
+  try {
+    const reasonsRetainDays = Math.max(7, Number(getSetting("stopReasonsRetainDays", 365)) || 365);
+    const histogramRetainDays = Math.max(7, Number(getSetting("stopHistogramRetainDays", 90)) || 90);
+    const r = stopReasons.pruneOldRows(db, { reasonsRetainDays, histogramRetainDays });
+    if (r.reasons || r.histogram) {
+      console.log(`[stop-reasons] retention pruned: reasons=${r.reasons} histogram=${r.histogram}`);
+    }
+  } catch (err) {
+    console.warn("[stop-reasons] retention prune failed:", err.message);
+  }
+}
+setTimeout(_prunStopReasonRetention, 5 * 60 * 1000).unref();           // first run after 5 min
+setInterval(_prunStopReasonRetention, 6 * 60 * 60 * 1000).unref();      // every 6 h thereafter
+
+// v2.10.x All Parameters Data — initialise the 5-min aggregator and its
+// retention pruner.  The aggregator module is `require`d at the top of
+// the file; init runs here once db is fully ready.
+try {
+  dailyAggregator.init({ db, getSetting });
+} catch (err) {
+  console.warn("[dailyAgg] init failed:", err?.message || err);
+}
+function _prunDailyParamRetention() {
+  try {
+    const days = Math.max(7, Number(getSetting("paramRetainDays", 365)) || 365);
+    const r = dailyAggregator.pruneRetention(days);
+    if (r?.deleted) {
+      console.log(`[dailyAgg] retention pruned: ${r.deleted} rows older than ${r.cutoff}`);
+    }
+  } catch (err) {
+    console.warn("[dailyAgg] retention prune failed:", err?.message || err);
+  }
+}
+setTimeout(_prunDailyParamRetention, 6 * 60 * 1000).unref();            // first run after 6 min (offset from stopReasons)
+setInterval(_prunDailyParamRetention, 6 * 60 * 60 * 1000).unref();      // every 6 h thereafter
 
 module.exports = { shutdownEmbedded };
 

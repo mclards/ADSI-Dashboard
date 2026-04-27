@@ -88,7 +88,6 @@ const State = {
   invLastFresh: {}, // key: inverter -> last fresh timestamp
   analyticsReqId: 0,
   alarmReqId: 0,
-  energyReqId: 0,
   auditReqId: 0,
   reportReqId: 0,
   forecastExportFormat: "average-table",
@@ -139,15 +138,6 @@ const State = {
     rows: [],
     page: 1,
     pageSize: 180,
-    queryKey: "",
-  },
-  energyView: {
-    page: 1,
-    pageSize: 500,
-    totalRows: 0,
-    rows: [],
-    summary: null,
-    serverPaged: true,
     queryKey: "",
   },
   auditView: {
@@ -344,6 +334,8 @@ const SETTINGS_SECTION_IDS = [
   "cloudBackupSection",
   "localBackupSection",
   "inverterClockSection",
+  "stopReasonsSection",
+  "serialNumberSection",
 ];
 const DEFAULT_SETTINGS_SECTION_ID = "plantConfigSection";
 const SETTINGS_SECTION_META = {
@@ -378,6 +370,14 @@ const SETTINGS_SECTION_META = {
   inverterClockSection: {
     title: "Inverter Clocks & Counter Health",
     copy: "Schedule automatic time sync, review RTC drift, and track hardware energy counter (Etotal / parcE) health across the fleet.",
+  },
+  stopReasonsSection: {
+    title: "Stop Reasons (DebugDesc)",
+    copy: "Inspect captured StopReason snapshots and lifetime motive counters via the vendor SCOPE peek (FC 0x71).",
+  },
+  serialNumberSection: {
+    title: "Serial Number Setting",
+    copy: "Read, edit, and send the inverter serial via FC11 read + FC16 unlock+write+verify. Mirrors ISM's frmSetSerial.",
   },
 };
 const SETTINGS_CONFIG_KIND = "adsi-settings-config";
@@ -3605,21 +3605,6 @@ function applyCurrentDaySummaryClient(summaryRaw, opts = {}) {
     renderReportKpis();
   }
 
-  // ── Energy page: live-update total MWh when today's date is selected ──
-  // energy_5min DB rows only include completed 5-min buckets so the computed
-  // total lags up to 5 min. When energyDate === today we override energyTotalMwh
-  // directly from the WS authoritative value so it matches the main header.
-  if (summary.day === today()) {
-    const energyDate = sanitizeDateInputValue($("energyDate")?.value) || today();
-    if (energyDate === today()) {
-      const totalNode = $("energyTotalMwh");
-      if (totalNode) totalNode.textContent = `${summary.totalMwh.toFixed(6)} MWh`;
-      if (State.energyView.summary && typeof State.energyView.summary === "object") {
-        State.energyView.summary.totalKwh = summary.totalKwh;
-      }
-    }
-  }
-
   // ── Analytics: full real-time update on every WS push ──
   // Charts and summary numbers all update immediately when the value changes.
   // The 2s realtime timer remains as a fallback for time-progression updates
@@ -4815,6 +4800,20 @@ function setActiveSettingsSection(sectionId, persist = true) {
   if (activeId === "inverterClockSection") {
     try { initInverterClockSection(); } catch (err) {
       console.warn("[invclock] init failed:", err?.message || err);
+    }
+  }
+
+  // v2.10.0 Slice D minimal — lazy-init the Stop Reasons page.
+  if (activeId === "stopReasonsSection") {
+    try { initStopReasonsSection(); } catch (err) {
+      console.warn("[stop-reasons] init failed:", err?.message || err);
+    }
+  }
+
+  // v2.10.0 Slice C minimal — lazy-init the Serial Number Setting page.
+  if (activeId === "serialNumberSection") {
+    try { initSerialNumberSection(); } catch (err) {
+      console.warn("[serial-number] init failed:", err?.message || err);
     }
   }
 }
@@ -6024,12 +6023,13 @@ function startClock() {
       State.tabFetchTs = {};
       State.alarmView.rows  = [];
       State.alarmView.queryKey = "";
-      State.energyView.rows = [];
-      State.energyView.queryKey = "";
-      State.energyView.summary = null;
       State.auditView.rows  = [];
       State.auditView.queryKey = "";
       State.reportView.rows = [];
+      // Reset All Parameters Data page state on day-rollover so the live
+      // tabs reload from the new day's persisted rows on next visit.
+      ParamPageUI.rowsBySlave = new Map();
+      ParamPageUI.date = null;
     }
   }
   tick();
@@ -7146,16 +7146,15 @@ async function handleOperationModeTransition(
     // Invalidate in-flight analytics reads so older mode responses cannot win.
     State.analyticsReqId = (State.analyticsReqId || 0) + 1;
     State.alarmReqId = (State.alarmReqId || 0) + 1;
-    State.energyReqId = (State.energyReqId || 0) + 1;
     State.auditReqId = (State.auditReqId || 0) + 1;
     State.reportReqId = (State.reportReqId || 0) + 1;
+    ParamPageUI.reqId = (ParamPageUI.reqId || 0) + 1;
 
     // Clear mode-specific runtime views immediately to avoid stale carry-over.
     State.liveData = {};
     State.totals = {};
     State.invLastFresh = {};
     State.alarmView.queryKey = "";
-    State.energyView.queryKey = "";
     State.auditView.queryKey = "";
     State.reportView.queryKey = "";
     if (!preserveAnalyticsView) {
@@ -7210,9 +7209,9 @@ async function handleOperationModeTransition(
         console.warn("[app] mode transition report refresh failed:", err?.message || err);
       });
     } else if (State.currentPage === "energy") {
-      await fetchEnergy({ force: true }).catch((err) => {
-        console.warn("[app] mode transition energy refresh failed:", err?.message || err);
-      });
+      try { initAllParamsPage(); } catch (err) {
+        console.warn("[app] mode transition All Parameters refresh failed:", err?.message || err);
+      }
     } else if (State.currentPage === "audit") {
       await fetchAudit({ force: true }).catch((err) => {
         console.warn("[app] mode transition audit refresh failed:", err?.message || err);
@@ -11554,8 +11553,9 @@ function renderInverterDetailAlarms(alarmRows) {
     const node = r.unit ? `N${r.unit}` : "—";
     const code = r.alarm_code ? String(r.alarm_code).toUpperCase() : "—";
     const alarmVal = Number(r.alarm_value || r.alarmValue || 0);
+    const alarmIdAttr = Number(r.id) > 0 ? ` data-alarm-id="${Number(r.id)}"` : "";
     const codeCell = r.alarm_code
-      ? `<span class="cell-alarm clickable" data-alarm-value="${alarmVal}" data-alarm-hex="${code}" title="Click for Level 1/2 diagnostic and service docs">${code}</span>`
+      ? `<span class="cell-alarm clickable" data-alarm-value="${alarmVal}" data-alarm-hex="${code}"${alarmIdAttr} title="Click for Level 1/2 diagnostic and service docs">${code}</span>`
       : "—";
     const status = r.cleared_ts
       ? `<span class="status-cleared">Closed</span>`
@@ -11618,7 +11618,6 @@ function buildSelects() {
   [
     "invFilter",
     "alarmInv",
-    "energyInv",
     "auditInv",
     "expAlarmInv",
     "expEnergyInv",
@@ -11636,6 +11635,11 @@ function buildSelects() {
   if (rangeInput && !String(rangeInput.value || "").trim()) {
     rangeInput.value = `1-${count}`;
   }
+
+  // All Parameters Data + Daily Data export pickers — only IP-configured
+  // inverters appear, so neither can reuse the generic 1..N option list above.
+  try { _paramPopulateInverters(); } catch (_) {}
+  try { _populateDailyDataInverterSelect(); } catch (_) {}
 }
 
 function reportStartupProgress(payload = {}) {
@@ -12520,6 +12524,11 @@ function handleWS(msg) {
         // when the mode flip lands. Without this the banner would stay stale
         // until the operator navigates away and back.
         try { _invClockApplyRemoteUiState(); } catch (_) {}
+        // v2.10.0 — same fan-out for the new Stop Reasons + Serial Number
+        // pages so a runtime mode flip pulls/restores the remote banner and
+        // disables/enables the Refresh / Read / Send buttons live.
+        try { if (typeof _srnApplyRemoteUiState === "function") _srnApplyRemoteUiState(); } catch (_) {}
+        try { if (typeof _snbApplyRemoteUiState === "function") _snbApplyRemoteUiState(); } catch (_) {}
         buildInverterGrid();
         scheduleInverterCardsUpdate(true);
       })
@@ -12999,13 +13008,6 @@ function buildAlarmViewQueryKey() {
   return buildModeAwareQueryKey([date, inv]);
 }
 
-function buildEnergyViewQueryKey() {
-  const date = sanitizeDateInputValue($("energyDate")?.value) || today();
-  const inv = String($("energyInv")?.value || "all").trim() || "all";
-  const resolution = String($("energyRes")?.value || "5min").trim() || "5min";
-  return buildModeAwareQueryKey([date, inv, resolution]);
-}
-
 function buildAuditViewQueryKey() {
   const date = sanitizeDateInputValue($("auditDate")?.value) || today();
   const inv = String($("auditInv")?.value || "all").trim() || "all";
@@ -13385,7 +13387,131 @@ function viewServiceDocPage(filename, page, btnEl) {
 }
 
 // Render the alarm-detail modal for a given alarm value (from row click).
-async function openAlarmDetail(alarmValue, alarmHex) {
+// v2.10.0 Slice F — fetch the captured StopReason snapshot for an alarm row.
+// Returns { captured, alarm, stop_reason } or null on transport failure.
+async function fetchStopReasonForAlarm(alarmId) {
+  if (!Number.isFinite(alarmId) || alarmId <= 0) return null;
+  try {
+    return await api(`/api/alarms/${alarmId}/stop-reason`);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Render the "Captured at the moment of the alarm" panel.  When no snapshot
+// is captured (alarm pre-dates v2.10.0 or capture failed), shows the
+// placeholder block from the plan.
+function renderStopReasonCapture(payload, alarmTs, esc) {
+  if (!payload || !payload.ok) {
+    return `<div class="alarm-detail-stop-reason muted">
+              <div class="alarm-detail-stop-reason-title">
+                <span class="mdi mdi-clock-outline"></span>
+                No StopReason snapshot was captured for this event
+              </div>
+              <div class="alarm-detail-stop-reason-body">
+                Reason: alarm fired before v2.10.0 auto-capture was enabled,
+                or the capture itself failed (see Audit Log).
+              </div>
+            </div>`;
+  }
+  if (!payload.captured || !payload.stop_reason) {
+    return `<div class="alarm-detail-stop-reason muted">
+              <div class="alarm-detail-stop-reason-title">
+                <span class="mdi mdi-clock-outline"></span>
+                No StopReason snapshot was captured for this event
+              </div>
+              <div class="alarm-detail-stop-reason-body">
+                Either the alarm fired before v2.10.0 auto-capture was active,
+                or the inverter did not respond to the SCOPE peek in time.
+              </div>
+            </div>`;
+  }
+  const sr = payload.stop_reason;
+  const eventAtMs = Number(sr.event_at_ms || alarmTs || 0);
+  const eventLabel = eventAtMs ? fmtDateTime(eventAtMs) : "—";
+  const ms = eventAtMs ? `.${String(eventAtMs % 1000).padStart(3, "0")}` : "";
+
+  const structDate = sr.struct_when_dd_mm || "—";
+  const structTime = sr.struct_when_hh_mm || "—";
+  const structLabel = structDate !== "—" ? `${structDate} ${structTime}` : "—";
+
+  // Drift detection: |event_at_ms - struct timestamp| > 24h
+  let driftWarning = "";
+  if (eventAtMs && sr.struct_month && sr.struct_day) {
+    const eventDate = new Date(eventAtMs);
+    const yr = eventDate.getFullYear();
+    const structDateObj = new Date(yr, sr.struct_month - 1, sr.struct_day,
+                                    sr.struct_hour || 0, sr.struct_min || 0);
+    const driftMs = Math.abs(eventAtMs - structDateObj.getTime());
+    if (driftMs > 24 * 60 * 60 * 1000) {
+      driftWarning = `
+        <span class="alarm-detail-stop-reason-drift">
+          <span class="mdi mdi-alert-outline"></span>
+          Inverter RTC drift detected — see Inverter Clocks
+        </span>`;
+    }
+  }
+
+  const motparoLabel = esc(sr.motparo_label || "—");
+  const fmt1 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(1) : "—";
+  const fmt2 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(2) : "—";
+  const fmt3 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(3) : "—";
+
+  const vac = Array.isArray(sr.vac) ? sr.vac : [];
+  const iac = Array.isArray(sr.iac) ? sr.iac : [];
+  const frec = Array.isArray(sr.frec) ? sr.frec : [];
+
+  return `
+    <div class="alarm-detail-stop-reason">
+      <div class="alarm-detail-stop-reason-title">
+        <span class="mdi mdi-clipboard-pulse-outline"></span>
+        Captured at the moment of the alarm
+        ${sr.trigger_source === "alarm_transition"
+          ? `<span class="alarm-detail-stop-reason-tag">auto-capture</span>`
+          : `<span class="alarm-detail-stop-reason-tag muted">${esc(sr.trigger_source || "manual")}</span>`}
+      </div>
+      <div class="alarm-detail-stop-reason-times">
+        <span class="mdi mdi-clock-outline"></span>
+        <span class="alarm-detail-stop-reason-time-poller">${esc(eventLabel)}${esc(ms)}</span>
+        <span class="alarm-detail-stop-reason-time-sep">·</span>
+        <span class="alarm-detail-stop-reason-time-rtc">
+          inverter RTC said: ${esc(structLabel)}
+        </span>
+        ${driftWarning}
+      </div>
+      <div class="alarm-detail-stop-reason-grid">
+        <div><span class="alarm-detail-stop-reason-k">MotParo</span>
+             <span class="alarm-detail-stop-reason-v">${esc(sr.motparo)} — ${motparoLabel}</span></div>
+        <div><span class="alarm-detail-stop-reason-k">DebugDesc</span>
+             <span class="alarm-detail-stop-reason-v">
+               <strong>${esc(sr.debug_desc_hex || "0x0000")}</strong>
+               (${esc(sr.debug_desc)})
+             </span></div>
+        <div><span class="alarm-detail-stop-reason-k">PotAC</span>
+             <span class="alarm-detail-stop-reason-v">${fmt1(sr.pot_ac)} kW</span></div>
+        <div><span class="alarm-detail-stop-reason-k">Vpv</span>
+             <span class="alarm-detail-stop-reason-v">${fmt1(sr.vpv)} V</span></div>
+        <div><span class="alarm-detail-stop-reason-k">Temp</span>
+             <span class="alarm-detail-stop-reason-v">${esc(sr.temp ?? "—")} °C</span></div>
+        <div><span class="alarm-detail-stop-reason-k">Cos</span>
+             <span class="alarm-detail-stop-reason-v">${fmt3(sr.cos)}</span></div>
+        <div class="alarm-detail-stop-reason-wide">
+          <span class="alarm-detail-stop-reason-k">Vac</span>
+          <span class="alarm-detail-stop-reason-v">${fmt1(vac[0])} / ${fmt1(vac[1])} / ${fmt1(vac[2])} V</span>
+        </div>
+        <div class="alarm-detail-stop-reason-wide">
+          <span class="alarm-detail-stop-reason-k">Iac</span>
+          <span class="alarm-detail-stop-reason-v">${fmt1(iac[0])} / ${fmt1(iac[1])} A</span>
+        </div>
+        <div class="alarm-detail-stop-reason-wide">
+          <span class="alarm-detail-stop-reason-k">Frec</span>
+          <span class="alarm-detail-stop-reason-v">${fmt2(frec[0])} / ${fmt2(frec[1])} / ${fmt2(frec[2])} Hz</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function openAlarmDetail(alarmValue, alarmHex, alarmId) {
   const modal = document.getElementById("alarmDetailModal");
   const titleEl = document.getElementById("alarmDetailTitle");
   const sevEl = document.getElementById("alarmDetailSev");
@@ -13618,7 +13744,27 @@ async function openAlarmDetail(alarmValue, alarmHex) {
       <code>AAV2011IFA01_</code>.
     </div>`;
 
-  bodyEl.innerHTML = fatalBanner + variantBanner + bitSections + provenance;
+  // Slice F snapshot panel — render placeholder synchronously, then patch
+  // in the captured StopReason once the fetch resolves so the modal opens
+  // immediately rather than blocking on an HTTP round-trip.
+  const stopReasonHtml = (Number(alarmId) > 0)
+    ? `<div id="alarmStopReasonHost" class="alarm-detail-stop-reason muted">
+         <div class="alarm-detail-stop-reason-title">
+           <span class="mdi mdi-loading mdi-spin"></span>
+           Loading captured snapshot…
+         </div>
+       </div>`
+    : "";
+  bodyEl.innerHTML = fatalBanner + variantBanner + stopReasonHtml + bitSections + provenance;
+  if (Number(alarmId) > 0) {
+    fetchStopReasonForAlarm(Number(alarmId)).then((payload) => {
+      const host = document.getElementById("alarmStopReasonHost");
+      if (host) {
+        const alarmTs = Number(payload?.alarm?.ts || 0);
+        host.outerHTML = renderStopReasonCapture(payload, alarmTs, esc);
+      }
+    });
+  }
 
   // Sticky footer with four download buttons (rebuilt on every open)
   const dialog = modal.querySelector(".alarm-detail-dialog");
@@ -13722,7 +13868,8 @@ function closeAlarmDetail() {
       ev.preventDefault();
       const v = Number(cell.getAttribute("data-alarm-value") || 0);
       const hex = cell.getAttribute("data-alarm-hex") || "";
-      openAlarmDetail(v, hex);
+      const alarmId = Number(cell.getAttribute("data-alarm-id") || 0);
+      openAlarmDetail(v, hex, alarmId);
     });
   });
 })();
@@ -13767,7 +13914,7 @@ function renderAlarmTable(rows) {
       <td>${fmtDateTime(occurredTs)}</td>
       <td>INV-${String(r.inverter).padStart(2, "0")}</td>
       <td>N${r.unit}</td>
-      <td><span class="cell-alarm clickable sev-${r.severity || "fault"}" data-alarm-value="${alarmVal}" data-alarm-hex="${r.alarm_hex || ""}" title="Click for Level 1/2 diagnostic and service docs">${r.alarm_hex || "—"}</span></td>
+      <td><span class="cell-alarm clickable sev-${r.severity || "fault"}" data-alarm-value="${alarmVal}" data-alarm-hex="${r.alarm_hex || ""}" data-alarm-id="${Number(r.id) || 0}" title="Click for Level 1/2 diagnostic and service docs">${r.alarm_hex || "—"}</span></td>
       <td><span class="sev-pill sev-${r.severity || "fault"}">${(r.severity || "fault").toUpperCase()}</span></td>
       <td>${desc}</td>
       <td>${clearedTs ? fmtDateTime(clearedTs) : "—"}</td>
@@ -13919,247 +14066,389 @@ async function ackAll() {
   }
 }
 
-// ─── Energy Page ──────────────────────────────────────────────────────────────
-function initEnergyPage() {
-  if (!$("energyDate").value) $("energyDate").value = today();
-  if (!Number.isFinite(Number(State.energyView.page)) || State.energyView.page < 1) {
-    State.energyView.page = 1;
+// ─── All Parameters Data Page (replaces the legacy Energy table UI) ──────────
+// The legacy Energy page was a single sortable list of `inverter_5min` rows
+// (5-minute kWh increments). It was replaced in v2.10.x by a per-inverter
+// 4-tab parameter log fed by `inverter_5min_param` + `dailyAggregator.js`.
+// The original `inverter_5min` / `energy_5min` data and every consumer of it
+// (Forecast, Analytics, Reports, cloud replication) are untouched.
+//
+// `initEnergyPage()` and `fetchEnergy()` are kept as the entry points so the
+// existing dispatch wiring (page nav, mode transition, prefetch) still calls
+// in here without changes — they just route to the new page now.
+const ParamPageUI = {
+  inited: false,
+  inverter: null,         // 1..N
+  date: null,             // YYYY-MM-DD
+  isToday: false,
+  activeSlave: null,
+  slaves: [],
+  liveTimer: null,
+  rowsBySlave: new Map(), // slave -> {rows:[], live_bucket:{}|null}
+  solarStartH: 5,
+  solarEndH: 18,
+  reqId: 0,
+};
+
+const PARAM_LIVE_POLL_MS = 30_000;        // refresh today's data every 30s
+
+function initEnergyPage() { initAllParamsPage(); }
+
+function initAllParamsPage() {
+  if (!ParamPageUI.inited) _paramWireOnce();
+  ParamPageUI.inited = true;
+
+  // Default the date picker to today on first load.
+  const dateInput = $("paramDate");
+  if (dateInput && !dateInput.value) dateInput.value = today();
+
+  // Repopulate the inverter picker from current ipconfig (only IP-configured
+  // inverters appear). Preserve a previously chosen value if still valid.
+  _paramPopulateInverters();
+
+  // If an inverter is already picked, refresh its data; otherwise show blank.
+  if (ParamPageUI.inverter) {
+    _paramFetchAndRender({ silent: false });
+  } else {
+    _paramShowBlank(true);
   }
-  const queryKey = buildEnergyViewQueryKey();
-  // Stale cache: skip fetch and re-render from State if data is fresh.
-  if (
-    State.energyView.rows.length > 0 &&
-    State.energyView.queryKey === queryKey &&
-    Date.now() - (State.tabFetchTs.energy || 0) < TAB_STALE_MS
-  ) {
-    renderEnergyTable(State.energyView.rows);
-    if (State.energyView.summary) {
-      renderEnergySummaryFromStats(State.energyView.summary);
-    } else {
-      renderEnergySummary(State.energyView.rows);
-    }
-    return;
-  }
-  fetchEnergy({ page: State.energyView.page });
+  _paramSyncLiveTimer();
 }
 
-async function fetchEnergy(options = {}) {
-  const force = options?.force === true;
-  const silent = options?.silent === true;
-  if (State.tabFetching.energy && !force) return;
-  State.tabFetching.energy = true;
-  const reqId = (State.energyReqId || 0) + 1;
-  State.energyReqId = reqId;
-  const inv = $("energyInv").value;
-  let date = sanitizeDateInputValue($("energyDate")?.value);
-  if (!date) {
-    date = today();
-    if ($("energyDate")) $("energyDate").value = date;
-  }
-  const sTs = localDateStartMs(date);
-  const eTs = localDateEndMs(date);
-  const requestedPage = Math.max(
-    1,
-    Math.trunc(Number(options?.page ?? State.energyView.page) || 1),
-  );
-  const pageSize = Math.max(
-    100,
-    Math.trunc(Number(State.energyView.pageSize || 500)),
-  );
-  const offset = (requestedPage - 1) * pageSize;
-  const qs = new URLSearchParams({
-    start: sTs,
-    end: eTs,
-    paged: "1",
-    limit: String(pageSize),
-    offset: String(offset),
-    ...(inv !== "all" ? { inverter: inv } : {}),
+function _paramWireOnce() {
+  $("paramInv")?.addEventListener("change", _paramOnInverterChange);
+  $("paramDate")?.addEventListener("change", _paramOnDateChange);
+  $("btnParamRefresh")?.addEventListener("click", () => {
+    _paramFetchAndRender({ silent: false, force: true });
   });
-  try {
-    const raw = await api(`/api/energy/5min?${qs}`);
-    if (reqId !== State.energyReqId) return;
-    const serverPaged = !Array.isArray(raw) && Array.isArray(raw?.rows);
-    const fullRows = Array.isArray(raw)
-      ? raw
-      : Array.isArray(raw?.rows)
-        ? raw.rows
-        : [];
-    const totalRowsRaw = Math.max(
-      fullRows.length,
-      Math.trunc(Number(raw?.total ?? fullRows.length) || fullRows.length),
-    );
-    let rows = fullRows;
-    let safePage = requestedPage;
-    if (!serverPaged) {
-      const sliced = paginateRows(fullRows, requestedPage, pageSize);
-      rows = sliced.rows;
-      safePage = sliced.page;
-    } else {
-      const totalPages = Math.max(1, Math.ceil(totalRowsRaw / pageSize));
-      safePage = Math.min(totalPages, requestedPage);
-    }
-    const totalRows = totalRowsRaw;
-    State.energyView.page = safePage;
-    State.energyView.totalRows = totalRows;
-    State.energyView.rows = rows;
-    State.energyView.summary =
-      raw?.summary && typeof raw.summary === "object" ? raw.summary : null;
-    State.energyView.serverPaged = serverPaged;
-    State.energyView.queryKey = buildEnergyViewQueryKey();
-    State.tabFetchTs.energy = Date.now();
-    renderEnergyTable(rows);
-    if (State.energyView.summary) {
-      renderEnergySummaryFromStats(State.energyView.summary);
-    } else {
-      renderEnergySummary(serverPaged ? rows : fullRows);
-    }
-    const countEl = $("energyCount");
-    if (countEl) {
-      const from = totalRows ? (safePage - 1) * pageSize + 1 : 0;
-      const to = totalRows ? Math.min(totalRows, safePage * pageSize) : 0;
-      countEl.textContent = `${from}-${to} / ${totalRows} interval records`;
-    }
-    renderTablePager({
-      hostId: "energyPager",
-      tbodyId: "energyBody",
-      page: safePage,
-      pageSize,
-      totalRows,
-      onPageChange(nextPage) {
-        fetchEnergy({ page: nextPage }).catch((err) => {
-          console.warn("energy page change failed:", err?.message || err);
-        });
-      },
+}
+
+function _paramPopulateInverters() {
+  const sel = $("paramInv");
+  if (!sel) return;
+  const cfg = State.ipConfig || {};
+  const invs = [];
+  const total = Number(State.settings?.inverterCount || 27);
+  for (let i = 1; i <= total; i += 1) {
+    const ip = String(cfg?.inverters?.[i] ?? cfg?.inverters?.[String(i)] ?? "").trim();
+    if (ip) invs.push({ inv: i, ip });
+  }
+  const prev = String(sel.value || "");
+  const opts = [`<option value="">— select —</option>`].concat(
+    invs.map((r) => `<option value="${r.inv}">${getInverterDisplayLabel(r.inv, { includeIp: true })}</option>`),
+  );
+  sel.innerHTML = opts.join("");
+  if (prev && sel.querySelector(`option[value="${prev}"]`)) {
+    sel.value = prev;
+  } else {
+    ParamPageUI.inverter = null;
+  }
+}
+
+function _paramOnInverterChange() {
+  const v = String($("paramInv")?.value || "").trim();
+  ParamPageUI.inverter = v ? Number(v) : null;
+  if (!ParamPageUI.inverter) {
+    _paramShowBlank(true);
+    _paramSyncLiveTimer();
+    return;
+  }
+  ParamPageUI.slaves = getConfiguredUnits(ParamPageUI.inverter);
+  ParamPageUI.activeSlave = ParamPageUI.slaves[0] || null;
+  _paramRebuildTabs();
+  _paramFetchAndRender({ silent: false });
+}
+
+function _paramOnDateChange() {
+  const v = sanitizeDateInputValue($("paramDate")?.value || "") || today();
+  ParamPageUI.date = v;
+  if (ParamPageUI.inverter) {
+    _paramFetchAndRender({ silent: false });
+  } else {
+    _paramSyncLiveTimer();
+  }
+}
+
+function _paramShowBlank(yes) {
+  const blank  = $("paramBlank");
+  const tabs   = $("paramTabs");
+  const panels = $("paramPanels");
+  if (blank)  blank.hidden  = !yes;
+  if (tabs)   tabs.hidden   = !!yes;
+  if (panels) panels.hidden = !!yes;
+  if (yes) {
+    const rc = $("paramRowCount"); if (rc) rc.textContent = "—";
+    const mb = $("paramModeBadge"); if (mb) mb.hidden = true;
+  }
+}
+
+function _paramRebuildTabs() {
+  const tabsHost = $("paramTabs");
+  const panelsHost = $("paramPanels");
+  if (!tabsHost || !panelsHost) return;
+  const slaves = ParamPageUI.slaves;
+  if (!slaves.length) {
+    tabsHost.innerHTML = "";
+    panelsHost.innerHTML = "";
+    _paramShowBlank(true);
+    return;
+  }
+  tabsHost.innerHTML = slaves.map((s, i) => `
+    <button type="button"
+            class="card-tab${i === 0 ? " active" : ""}"
+            role="tab"
+            data-param-slave="${s}"
+            aria-selected="${i === 0 ? "true" : "false"}"
+            tabindex="${i === 0 ? "0" : "-1"}">
+      <span class="card-tab-label">Node ${s}</span>
+    </button>`).join("");
+  panelsHost.innerHTML = slaves.map((s, i) => `
+    <div class="card-tab-panel param-panel" data-param-panel="${s}" ${i === 0 ? "" : "hidden"}>
+      <div class="table-wrap param-table-wrap">
+        <table class="data-table param-table" id="paramTable_${s}">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th title="DC power (computed Vdc × Idc).">Pdc (W)</th>
+              <th>Vdc (V)</th>
+              <th>Idc (A)</th>
+              <th>Vac1 (V)</th>
+              <th>Vac2 (V)</th>
+              <th>Vac3 (V)</th>
+              <th>Iac1 (A)</th>
+              <th>Iac2 (A)</th>
+              <th>Iac3 (A)</th>
+              <th>Temp (°C)</th>
+              <th>Pac (W)</th>
+              <th>CosΦ</th>
+              <th>Freq (Hz)</th>
+              <th title="Combined 32-bit alarm bitmap captured during the slot.">Inv Alarms</th>
+              <th title="Track alarms not exposed by the standard register block — always 0 in this view.">Track Alarms</th>
+            </tr>
+          </thead>
+          <tbody data-param-tbody="${s}"></tbody>
+        </table>
+      </div>
+    </div>`).join("");
+
+  tabsHost.hidden = false;
+  panelsHost.hidden = false;
+  _paramShowBlank(false);
+
+  tabsHost.querySelectorAll("[data-param-slave]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const s = Number(btn.dataset.paramSlave);
+      if (!Number.isFinite(s)) return;
+      _paramSetActiveSlave(s);
     });
-  } catch (e) {
-    if (!silent) console.error("fetchEnergy:", e);
-  } finally {
-    if (reqId === State.energyReqId) {
-      State.tabFetching.energy = false;
+  });
+}
+
+function _paramSetActiveSlave(slave) {
+  ParamPageUI.activeSlave = slave;
+  const tabsHost = $("paramTabs");
+  const panelsHost = $("paramPanels");
+  if (!tabsHost || !panelsHost) return;
+  tabsHost.querySelectorAll(".card-tab").forEach((btn) => {
+    const isActive = Number(btn.dataset.paramSlave) === slave;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    btn.tabIndex = isActive ? 0 : -1;
+  });
+  panelsHost.querySelectorAll(".param-panel").forEach((p) => {
+    const isActive = Number(p.dataset.paramPanel) === slave;
+    if (isActive) p.removeAttribute("hidden");
+    else p.setAttribute("hidden", "");
+  });
+  _paramUpdateRowCount();
+}
+
+async function _paramFetchAndRender(options = {}) {
+  const inv = ParamPageUI.inverter;
+  if (!inv) { _paramShowBlank(true); return; }
+  const date = sanitizeDateInputValue($("paramDate")?.value || "") || today();
+  ParamPageUI.date = date;
+  ParamPageUI.isToday = (date === today());
+  const reqId = (ParamPageUI.reqId = (ParamPageUI.reqId || 0) + 1);
+  const silent = options?.silent === true;
+  try {
+    const qs = new URLSearchParams({ date });
+    const data = await api(`/api/params/${inv}?${qs}`);
+    if (reqId !== ParamPageUI.reqId) return;
+    if (!data || data.ok === false) {
+      throw new Error(data?.error || "params fetch failed");
+    }
+    const sw = data.solar_window || {};
+    if (Number.isFinite(Number(sw.startH))) ParamPageUI.solarStartH = Number(sw.startH);
+    if (Number.isFinite(Number(sw.eodH)))   ParamPageUI.solarEndH   = Number(sw.eodH);
+    const slaves = Array.isArray(data.slaves) ? data.slaves.map(Number).filter((n) => n > 0) : [];
+    if (slaves.length === 0) {
+      _paramShowBlank(true);
+      return;
+    }
+    // If the configured slaves changed since the tabs were built, rebuild.
+    const sameTabs =
+      ParamPageUI.slaves.length === slaves.length &&
+      ParamPageUI.slaves.every((s, i) => s === slaves[i]);
+    ParamPageUI.slaves = slaves;
+    if (!sameTabs || !$("paramTabs")?.querySelector(".card-tab")) {
+      ParamPageUI.activeSlave = ParamPageUI.activeSlave && slaves.includes(ParamPageUI.activeSlave)
+        ? ParamPageUI.activeSlave
+        : slaves[0];
+      _paramRebuildTabs();
+      _paramSetActiveSlave(ParamPageUI.activeSlave);
+    }
+    ParamPageUI.rowsBySlave = new Map();
+    const bySlave = (data.by_slave && typeof data.by_slave === "object") ? data.by_slave : {};
+    for (const s of slaves) {
+      const entry = bySlave[s] || bySlave[String(s)] || { rows: [], live_bucket: null };
+      ParamPageUI.rowsBySlave.set(Number(s), {
+        rows: Array.isArray(entry.rows) ? entry.rows : [],
+        live_bucket: entry.live_bucket || null,
+      });
+      _paramRenderTable(Number(s));
+    }
+    _paramUpdateBadges();
+    _paramSyncLiveTimer();
+  } catch (err) {
+    if (reqId !== ParamPageUI.reqId) return;
+    if (!silent) {
+      console.warn("[params] fetch failed:", err?.message || err);
+      showToast?.("Could not load parameters: " + (err?.message || err), "fault", 4000);
     }
   }
 }
 
-function renderEnergyTable(rows) {
-  const tbody = $("energyBody");
+function _paramRenderTable(slave) {
+  const tbody = document.querySelector(`tbody[data-param-tbody="${slave}"]`);
   if (!tbody) return;
-  if (!rows.length) {
-    tbody.textContent = "";
-    renderEmptyRow(
-      tbody,
-      4,
-      "No 5-minute energy records for the selected date.",
-      "mdi-chart-box-outline",
-    );
+  const entry = ParamPageUI.rowsBySlave.get(Number(slave));
+  const rows = entry?.rows || [];
+  const live = entry?.live_bucket || null;
+  if (!rows.length && !live) {
+    tbody.innerHTML = `
+      <tr><td colspan="16" class="param-empty">
+        <div class="param-empty-inner">
+          <span class="mdi mdi-chart-box-outline"></span>
+          No 5-minute parameter rows in the solar window for the selected day.
+        </div>
+      </td></tr>`;
+    if (Number(slave) === Number(ParamPageUI.activeSlave)) _paramUpdateRowCount();
     return;
   }
-  const ordered = State.energyView.serverPaged
-    ? rows
-    : [...rows].sort(
-        (a, b) =>
-          Number(b.ts || 0) - Number(a.ts || 0) ||
-          Number(a.inverter || 0) - Number(b.inverter || 0),
-      );
+  // Render most-recent-first; live bucket goes on top with a "live" tag.
+  const ordered = [...rows].sort((a, b) => Number(b.slot_index || 0) - Number(a.slot_index || 0));
   const frag = document.createDocumentFragment();
-  ordered.forEach((r) => {
-    const dt = new Date(r.ts);
+  if (live) {
     const tr = el("tr");
-    tr.dataset.date = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
-    tr.dataset.ts = Number(r.ts || 0);
-    tr.dataset.inverter = Number(r.inverter || 0);
-    tr.dataset.kwh_inc = Number(r.kwh_inc || 0);
-    tr.innerHTML = `
-      <td>${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}</td>
-      <td>${pad2(dt.getHours())}:${pad2(dt.getMinutes())}</td>
-      <td>INV-${String(r.inverter).padStart(2, "0")}</td>
-      <td>${fmtMWh(Number(r.kwh_inc || 0), 6)}</td>`;
+    tr.className = "param-live";
+    tr.innerHTML = _paramRowHtml(live, /*isLive*/ true);
     frag.appendChild(tr);
-  });
+  }
+  for (const r of ordered) {
+    const tr = el("tr");
+    tr.innerHTML = _paramRowHtml(r, /*isLive*/ false);
+    frag.appendChild(tr);
+  }
   tbody.textContent = "";
   tbody.appendChild(frag);
-  reapplyTableSort("energyTable", tbody);
+  if (Number(slave) === Number(ParamPageUI.activeSlave)) _paramUpdateRowCount();
 }
 
-function renderEnergySummaryFromStats(summary) {
-  const setText = (id, v) => {
-    const node = $(id);
-    if (node) node.textContent = v;
+function _paramRowHtml(r, isLive) {
+  const t = _paramSlotTimeLabel(r);
+  const tag = isLive ? `<span class="param-live-tag" title="In-progress 5-minute bucket — flushed when the slot closes.">live</span>` : "";
+  const fmt = (v, digits = 1) => (v == null || v === "" ? "—" : Number(v).toFixed(digits));
+  const fmtInt = (v) => (v == null || v === "" ? "—" : String(Math.round(Number(v))));
+  const alarmHex = (v) => {
+    const n = Number(v) >>> 0;
+    return n ? `0x${n.toString(16).toUpperCase().padStart(8, "0")}` : "0";
   };
-  const stats = summary && typeof summary === "object" ? summary : null;
-  if (!stats) {
-    renderEnergySummary(State.energyView.rows);
-    return;
-  }
-  const totalKwh = Number(stats.totalKwh || 0);
-  const rowCount = Math.max(0, Number(stats.rowCount || 0));
-  const avgKwh = rowCount > 0 ? totalKwh / rowCount : 0;
-  const peak = stats.peak && typeof stats.peak === "object" ? stats.peak : {};
-  const peakKwh = Number(peak.kwhInc || 0);
-  const peakInv = Number(peak.inverter || 0);
-  const peakTs = Number(peak.ts || 0);
-  const invCount = Math.max(0, Number(stats.inverterCount || 0));
-  const latestTs = Number(stats.latestTs || 0);
-
-  setText("energyTotalMwh", `${fmtMWh(totalKwh, 6)} MWh`);
-  setText("energyAvgMwh", `${fmtMWh(avgKwh, 6)} MWh`);
-  setText("energyPeakMwh", `${fmtMWh(peakKwh, 6)} MWh`);
-  setText(
-    "energyPeakMeta",
-    peakTs && peakInv
-      ? `INV-${String(peakInv).padStart(2, "0")} @ ${fmtDateTime(peakTs)}`
-      : "—",
-  );
-  setText("energyInvCount", String(invCount));
-  setText("energyLastTs", latestTs ? fmtDateTime(latestTs) : "—");
+  const cosphi = (v) => (v == null || v === "" ? "—" : Number(v).toFixed(3));
+  return `
+    <td class="time">${t}${tag}</td>
+    <td>${fmtInt(r.pdc_w)}</td>
+    <td>${fmt(r.vdc_v, 1)}</td>
+    <td>${fmt(r.idc_a, 2)}</td>
+    <td>${fmt(r.vac1_v, 1)}</td>
+    <td>${fmt(r.vac2_v, 1)}</td>
+    <td>${fmt(r.vac3_v, 1)}</td>
+    <td>${fmt(r.iac1_a, 2)}</td>
+    <td>${fmt(r.iac2_a, 2)}</td>
+    <td>${fmt(r.iac3_a, 2)}</td>
+    <td>${fmtInt(r.temp_c)}</td>
+    <td>${fmtInt(r.pac_w)}</td>
+    <td>${cosphi(r.cosphi)}</td>
+    <td>${fmt(r.freq_hz, 2)}</td>
+    <td class="alarm-cell" title="32-bit Inv alarm bitmap.">${alarmHex(r.inv_alarms)}</td>
+    <td class="alarm-cell" title="Track Alarms not exposed by the standard register block.">${alarmHex(r.track_alarms)}</td>`;
 }
 
-function renderEnergySummary(rows) {
-  const setText = (id, v) => {
-    const node = $(id);
-    if (node) node.textContent = v;
-  };
-
-  if (!rows || !rows.length) {
-    setText("energyTotalMwh", "— MWh");
-    setText("energyAvgMwh", "— MWh");
-    setText("energyPeakMwh", "— MWh");
-    setText("energyPeakMeta", "—");
-    setText("energyInvCount", "—");
-    setText("energyLastTs", "—");
-    return;
+function _paramSlotTimeLabel(r) {
+  const slot = Number(r?.slot_index);
+  if (Number.isFinite(slot) && slot >= 0 && slot <= 287) {
+    const startMin = slot * 5;
+    const endMin = startMin + 5;
+    return `${pad2(Math.floor(startMin / 60))}:${pad2(startMin % 60)}–${pad2(Math.floor(endMin / 60) % 24)}:${pad2(endMin % 60)}`;
   }
-
-  const norm = rows.map((r) => ({
-    ts: Number(r?.ts || 0),
-    inverter: Number(r?.inverter || 0),
-    mwh: Number(r?.kwh_inc || 0) / 1000,
-  }));
-
-  const totalMwh = norm.reduce(
-    (s, r) => s + (Number.isFinite(r.mwh) ? r.mwh : 0),
-    0,
-  );
-  const avgMwh = totalMwh / Math.max(1, norm.length);
-  const peak = norm.reduce((best, r) => (r.mwh > best.mwh ? r : best), {
-    ts: 0,
-    inverter: 0,
-    mwh: 0,
-  });
-  const lastTs = norm.reduce((mx, r) => Math.max(mx, r.ts), 0);
-  const invCount = new Set(norm.map((r) => r.inverter).filter(Boolean)).size;
-
-  setText("energyTotalMwh", `${totalMwh.toFixed(6)} MWh`);
-  setText("energyAvgMwh", `${avgMwh.toFixed(6)} MWh`);
-  setText("energyPeakMwh", `${peak.mwh.toFixed(6)} MWh`);
-  setText(
-    "energyPeakMeta",
-    peak.ts
-      ? `INV-${String(peak.inverter).padStart(2, "0")} @ ${fmtDateTime(peak.ts)}`
-      : "—",
-  );
-  setText("energyInvCount", String(invCount));
-  setText("energyLastTs", lastTs ? fmtDateTime(lastTs) : "—");
+  const ts = Number(r?.ts_ms);
+  if (Number.isFinite(ts) && ts > 0) {
+    const d = new Date(ts);
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  return "—";
 }
+
+function _paramUpdateBadges() {
+  const sw = `Solar window: ${pad2(ParamPageUI.solarStartH)}:00–${pad2(ParamPageUI.solarEndH)}:00`;
+  const sb = $("paramSolarBadge"); if (sb) sb.textContent = sw;
+  const mb = $("paramModeBadge");
+  if (mb) {
+    if (ParamPageUI.isToday) {
+      mb.hidden = false;
+      mb.className = "param-mode-badge param-mode-live";
+      mb.textContent = "Live (today)";
+    } else {
+      mb.hidden = false;
+      mb.className = "param-mode-badge param-mode-history";
+      mb.textContent = "History";
+    }
+  }
+  _paramUpdateRowCount();
+}
+
+function _paramUpdateRowCount() {
+  const rc = $("paramRowCount");
+  if (!rc) return;
+  const slave = ParamPageUI.activeSlave;
+  const entry = ParamPageUI.rowsBySlave.get(Number(slave));
+  const n = (entry?.rows?.length || 0) + (entry?.live_bucket ? 1 : 0);
+  rc.textContent = n > 0 ? `${n} row${n === 1 ? "" : "s"} (Node ${slave})` : "—";
+}
+
+function _paramSyncLiveTimer() {
+  const wantTimer = !!ParamPageUI.inverter && ParamPageUI.isToday && State.currentPage === "energy";
+  if (wantTimer) {
+    if (ParamPageUI.liveTimer) return;
+    ParamPageUI.liveTimer = setInterval(() => {
+      if (State.currentPage !== "energy" || !ParamPageUI.isToday || !ParamPageUI.inverter) {
+        clearInterval(ParamPageUI.liveTimer);
+        ParamPageUI.liveTimer = null;
+        return;
+      }
+      _paramFetchAndRender({ silent: true });
+    }, PARAM_LIVE_POLL_MS);
+  } else if (ParamPageUI.liveTimer) {
+    clearInterval(ParamPageUI.liveTimer);
+    ParamPageUI.liveTimer = null;
+  }
+}
+
+// Legacy stub — kept so existing prefetch/mode-transition callers don't crash.
+// The Energy page UI was removed in v2.10.x; the underlying inverter_5min /
+// energy_5min data and every consumer of it (Forecast, Analytics, Reports,
+// cloud replication) are untouched.
+function fetchEnergy() { return Promise.resolve(); }
 
 // ─── Audit Log Page ───────────────────────────────────────────────────────────
 function initAuditPage() {
@@ -16767,9 +17056,18 @@ function initExportPage() {
     "btnCancelEnergyExport",
     "btnCancelForecastExport",
     "btnCancelInvDataExport",
+    "btnCancelDailyDataExport",
     "btnCancelAuditExport",
     "btnCancelDailyReportExport",
   ].forEach((id) => setExportCancelButtonState(id, !!State.exportAbortControllers[id]));
+  // Default the Daily Data export to yesterday — today's workbook is
+  // server-locked until the End-of-Day snapshot hour, so today is rarely
+  // useful here. Operator can still pick today manually.
+  if ($("expDailyDataDate") && !$("expDailyDataDate").value) {
+    const d = new Date(Date.now() - 86400000);
+    $("expDailyDataDate").value = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+  try { _populateDailyDataInverterSelect(); } catch (_) {}
   queuePersistExportUiState();
   updateExportLastRefreshedLabel();
 }
@@ -17821,6 +18119,79 @@ async function runInverterDataExport() {
     "btnRunInvDataExport",
     "btnCancelInvDataExport",
   );
+}
+
+// v2.10.x — Daily Data export. One workbook per inverter, one sheet per
+// configured node. Today is locked server-side until eodSnapshotHourLocal
+// (HTTP 423); the picker UI also pre-warns the operator.
+function _populateDailyDataInverterSelect() {
+  const sel = $("expDailyDataInv");
+  if (!sel) return;
+  const cfg = State.ipConfig || {};
+  const total = Number(State.settings?.inverterCount || 27);
+  const opts = [`<option value="">— select —</option>`];
+  for (let i = 1; i <= total; i += 1) {
+    const ip = String(cfg?.inverters?.[i] ?? cfg?.inverters?.[String(i)] ?? "").trim();
+    if (ip) {
+      opts.push(`<option value="${i}">${getInverterDisplayLabel(i, { includeIp: true })}</option>`);
+    }
+  }
+  const prev = String(sel.value || "");
+  sel.innerHTML = opts.join("");
+  if (prev && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+}
+
+async function runDailyDataExport() {
+  const inv = String($("expDailyDataInv")?.value || "").trim();
+  const date = sanitizeDateInputValue($("expDailyDataDate")?.value || "") || today();
+  const res = $("expDailyDataResult");
+  if (!inv) {
+    if (res) {
+      res.className = "exp-result error";
+      res.textContent = "Pick an inverter first.";
+    }
+    return;
+  }
+  if (res) {
+    res.className = "exp-result";
+    res.textContent = "Exporting…";
+  }
+  setExportButtonState("btnRunDailyDataExport", "loading");
+  const controller = new AbortController();
+  registerExportAbortController("btnCancelDailyDataExport", controller);
+  try {
+    const r = await api(
+      "/api/export/daily-data",
+      "POST",
+      { inverter: Number(inv), date },
+      { signal: controller.signal },
+    );
+    if (!r?.path) throw new Error("Export did not return output path.");
+    if (res) {
+      res.className = "exp-result";
+      res.textContent = "✔ Saved: " + r.path;
+    }
+    await openExportPathFolder(r.path);
+    setExportButtonState("btnRunDailyDataExport", "ok");
+  } catch (e) {
+    if (isExportCancelledError(e)) {
+      if (res) {
+        res.className = "exp-result";
+        res.textContent = "Cancelled.";
+      }
+      setExportButtonState("btnRunDailyDataExport", "idle");
+    } else {
+      // Surface the today-lock helpfully when the API returns 423.
+      const msg = e?.message || String(e);
+      if (res) {
+        res.className = "exp-result error";
+        res.textContent = "✗ " + msg;
+      }
+      setExportButtonState("btnRunDailyDataExport", "fail");
+    }
+  } finally {
+    releaseExportAbortController("btnCancelDailyDataExport");
+  }
 }
 
 async function runDailyReportExport() {
@@ -19122,6 +19493,1368 @@ function initInverterClockSection() {
   }, 30_000);
 }
 
+// ─── v2.10.0 Slice D minimal — Stop Reasons settings page ─────────────────
+
+const StopReasonsUI = {
+  inited: false,
+  selectedInverter: null,
+  rowsCache: [],
+  expanded: new Set(),
+  // Tracks which inverter's histogram is currently rendered so the
+  // Lifetime Counters tab auto-loads on first open / picker-change but
+  // doesn't re-fetch on every tab toggle.
+  histogramLoadedFor: null,
+};
+
+// Shared helper — both Slice C and Slice D consult this.  Uses the
+// canonical normalizer so case/whitespace variants of "remote" are handled
+// consistently with the rest of the dashboard (and matches the server-side
+// sanitizeOperationMode() result).
+function _v210IsRemoteMode() {
+  try {
+    if (typeof normalizeOperationModeValue === "function") {
+      return normalizeOperationModeValue(State?.settings?.operationMode) === "remote";
+    }
+    return String(State?.settings?.operationMode || "gateway").trim().toLowerCase() === "remote";
+  } catch (_) { return false; }
+}
+
+function _v210GatewayHost() {
+  try {
+    const url = String(State?.settings?.remoteGatewayUrl || "").trim();
+    if (!url) return "—";
+    return new URL(url).host || url;
+  } catch (_) { return String(State?.settings?.remoteGatewayUrl || "—"); }
+}
+
+function initStopReasonsSection() {
+  if (StopReasonsUI.inited) {
+    _srnApplyRemoteUiState();
+    _srnRefreshTable();
+    return;
+  }
+  StopReasonsUI.inited = true;
+
+  initCardTabs("stopReasonsSection", {
+    storageKey: "adsi_srn_active_tab",
+    defaultKey: "snapshots",
+  });
+
+  const picker = document.getElementById("srnInverterPicker");
+  const refreshBtn = document.getElementById("btnSrnRefresh");
+  const histBtn = document.getElementById("btnSrnHistogram");
+  if (!picker || !refreshBtn || !histBtn) return;
+
+  // Populate picker from ipconfig (1..N inverters with non-empty IP).
+  _srnPopulatePicker(picker);
+  _srnApplyRemoteUiState();
+
+  picker.addEventListener("change", () => {
+    StopReasonsUI.selectedInverter = Number(picker.value) || null;
+    StopReasonsUI.expanded.clear();
+    _srnRefreshTable();
+    _srnResetHistogramPanel();
+  });
+
+  refreshBtn.addEventListener("click", _srnHandleRefresh);
+  histBtn.addEventListener("click", _srnLoadHistogram);
+
+  // Lazy-load histogram the first time the operator opens the Lifetime
+  // Counters tab (so picking the section doesn't fire an extra Modbus
+  // call).  Idempotent: subsequent clicks just re-render the cached host.
+  document
+    .querySelector('#stopReasonsSection .card-tab[data-card-tab="histogram"]')
+    ?.addEventListener("click", () => {
+      if (!StopReasonsUI.histogramLoadedFor
+          || StopReasonsUI.histogramLoadedFor !== StopReasonsUI.selectedInverter) {
+        _srnLoadHistogram();
+      }
+    });
+
+  // Default to first inverter in the picker.
+  if (picker.options.length > 0 && !StopReasonsUI.selectedInverter) {
+    StopReasonsUI.selectedInverter = Number(picker.options[0].value) || null;
+    picker.value = picker.options[0].value;
+    _srnRefreshTable();
+  }
+}
+
+// Histogram panel reset — used when the picker changes so the next tab
+// open re-loads the data for the new inverter rather than showing a
+// stale snapshot from the previous one.
+function _srnResetHistogramPanel() {
+  StopReasonsUI.histogramLoadedFor = null;
+  const host = document.getElementById("srnHistogramHost");
+  if (host) {
+    host.innerHTML = `<div class="srn-empty">Click <strong>Reload histogram</strong> to load the lifetime counters.</div>`;
+  }
+}
+
+function _srnPopulatePicker(picker) {
+  picker.innerHTML = "";
+  // ipConfig.inverters keyed 1..27 → IP string. State.ipConfig may not be
+  // populated yet; fall back to numeric range.
+  const cfgInverters = (State?.ipConfig?.inverters) || (State?.settings?.ipconfig?.inverters) || {};
+  const seen = new Set();
+  Object.entries(cfgInverters).forEach(([k, ip]) => {
+    const inv = Number(k);
+    if (!Number.isFinite(inv) || inv <= 0 || !String(ip || "").trim()) return;
+    if (seen.has(inv)) return;
+    seen.add(inv);
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${inv}  (${ip})`;
+    picker.appendChild(opt);
+  });
+  if (picker.options.length === 0) {
+    // Defensive fallback so the select is never empty in dev.
+    for (let i = 1; i <= 27; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `Inverter ${i}`;
+      picker.appendChild(opt);
+    }
+  }
+}
+
+// Disable Refresh in remote mode and surface the gateway-host banner.
+// The recent-rows table + histogram view stay populated from replicated
+// DB rows — only the Modbus-driving Refresh action is gated.
+function _srnApplyRemoteUiState() {
+  const remote = _v210IsRemoteMode();
+  const banner = document.getElementById("srnRemoteBanner");
+  if (banner) banner.hidden = !remote;
+  if (remote) {
+    document.querySelectorAll(".js-srn-gateway-host").forEach((el) => {
+      el.textContent = _v210GatewayHost();
+    });
+  }
+  const refreshBtn = document.getElementById("btnSrnRefresh");
+  if (refreshBtn) {
+    if (remote) {
+      refreshBtn.dataset._srnOrigTitle = refreshBtn.dataset._srnOrigTitle || (refreshBtn.title || "");
+      refreshBtn.disabled = true;
+      refreshBtn.title = "Disabled in remote mode — run Refresh from the gateway directly.";
+    } else {
+      refreshBtn.disabled = false;
+      if (refreshBtn.dataset._srnOrigTitle !== undefined) {
+        refreshBtn.title = refreshBtn.dataset._srnOrigTitle;
+      }
+    }
+  }
+}
+
+async function _srnRefreshTable() {
+  const inv = StopReasonsUI.selectedInverter;
+  const host = document.getElementById("srnTableHost");
+  if (!host) return;
+  if (!inv) {
+    host.innerHTML = `<div class="srn-empty">Pick an inverter to view captured snapshots.</div>`;
+    return;
+  }
+  let payload;
+  try {
+    payload = await api(`/api/stop-reasons/${inv}/recent?limit=50`);
+  } catch (err) {
+    host.innerHTML = `<div class="srn-empty">Failed to load: ${String(err?.message || err)}</div>`;
+    return;
+  }
+  StopReasonsUI.rowsCache = Array.isArray(payload?.rows) ? payload.rows : [];
+  if (StopReasonsUI.rowsCache.length === 0) {
+    host.innerHTML = `<div class="srn-empty">
+      No StopReason snapshots captured yet for inverter ${inv}.
+      Click <strong>Refresh now</strong> above to read the live state, or wait
+      for an alarm transition to auto-capture one.
+    </div>`;
+    return;
+  }
+  host.innerHTML = _srnRenderTable(StopReasonsUI.rowsCache);
+  host.querySelectorAll(".srn-table tr.clickable").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const id = Number(tr.getAttribute("data-row-id"));
+      if (StopReasonsUI.expanded.has(id)) StopReasonsUI.expanded.delete(id);
+      else StopReasonsUI.expanded.add(id);
+      _srnRefreshTable();
+    });
+  });
+}
+
+function _srnEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function _srnRenderTable(rows) {
+  const head = `
+    <thead><tr>
+      <th>Captured</th>
+      <th>Node</th>
+      <th>Trigger</th>
+      <th>MotParo</th>
+      <th>DebugDesc</th>
+      <th>PotAC</th>
+      <th>Active?</th>
+    </tr></thead>`;
+  const body = rows.map((r) => {
+    const id = Number(r.id);
+    const expanded = StopReasonsUI.expanded.has(id);
+    const ts = Number(r.read_at_ms || 0);
+    const tsLabel = ts ? fmtDateTime(ts) : "—";
+    const evtLabel = Number(r.event_at_ms || 0)
+      ? `<span class="srn-mono" title="Poller-stamped (ms-precision)">${fmtDateTime(r.event_at_ms)}</span>`
+      : `<span class="srn-quiet">—</span>`;
+    const trigger = String(r.trigger_source || "manual");
+    const triggerCls = trigger === "alarm_transition" ? "alarm-transition" : "";
+    const debugHex = _srnEsc(r.debug_desc_hex || "0x0000");
+    const debugVal = Number(r.debug_desc) || 0;
+    const motparoLabel = _srnEsc(r.motparo_label || "—");
+    const motparo = Number(r.motparo) || 0;
+    const isActive = Boolean(
+      r.alarma || motparo || r.alarmas1 || r.alarmas2 || r.flags || debugVal,
+    );
+    const activeChip = isActive
+      ? `<span class="srn-active">⚠ active</span>`
+      : `<span class="srn-quiet">idle</span>`;
+    const potAc = Number.isFinite(Number(r.pot_ac)) ? Number(r.pot_ac).toFixed(1) : "—";
+    const fmt1 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(1) : "—";
+    const fmt2 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(2) : "—";
+    const fmt3 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(3) : "—";
+
+    const detailRow = expanded
+      ? `<tr class="srn-row-detail"><td colspan="7">
+           <div class="srn-row-detail-inner">
+             <div><span class="srn-row-detail-k">Slave / Node</span>
+                  <span class="srn-row-detail-v">${_srnEsc(r.slave)} / ${_srnEsc(r.node)}</span></div>
+             <div><span class="srn-row-detail-k">Inverter RTC</span>
+                  <span class="srn-row-detail-v">${_srnEsc(r.struct_when_dd_mm || "—")} ${_srnEsc(r.struct_when_hh_mm || "")}</span></div>
+             <div><span class="srn-row-detail-k">Alarm ID</span>
+                  <span class="srn-row-detail-v">${r.alarm_id ? `<a href="#" data-srn-alarm-id="${Number(r.alarm_id)}">#${Number(r.alarm_id)}</a>` : "—"}</span></div>
+             <div><span class="srn-row-detail-k">Vac (V)</span>
+                  <span class="srn-row-detail-v">${fmt1(r.vac?.[0])} / ${fmt1(r.vac?.[1])} / ${fmt1(r.vac?.[2])}</span></div>
+             <div><span class="srn-row-detail-k">Iac (A)</span>
+                  <span class="srn-row-detail-v">${fmt1(r.iac?.[0])} / ${fmt1(r.iac?.[1])}</span></div>
+             <div><span class="srn-row-detail-k">Frec (Hz)</span>
+                  <span class="srn-row-detail-v">${fmt2(r.frec?.[0])} / ${fmt2(r.frec?.[1])} / ${fmt2(r.frec?.[2])}</span></div>
+             <div><span class="srn-row-detail-k">Vpv</span>
+                  <span class="srn-row-detail-v">${fmt1(r.vpv)} V</span></div>
+             <div><span class="srn-row-detail-k">Cos / Temp</span>
+                  <span class="srn-row-detail-v">${fmt3(r.cos)} / ${_srnEsc(r.temp ?? "—")}°C</span></div>
+             <div><span class="srn-row-detail-k">Alarmas1 / Flags</span>
+                  <span class="srn-row-detail-v">${_srnEsc(r.alarmas1)} / ${_srnEsc(r.flags)}</span></div>
+             <div class="srn-row-detail-wide">
+               <span class="srn-row-detail-k">Raw (hex)</span>
+               <span class="srn-row-detail-v srn-mono" style="font-size:10.5px; word-break:break-all;">${_srnEsc(r.raw_hex || "")}</span>
+             </div>
+             <div class="srn-row-detail-wide">
+               <span class="srn-row-detail-k">Event timestamp source</span>
+               <span class="srn-row-detail-v">
+                 read_at_ms = ${ts} (${_srnEsc(tsLabel)})
+                 ${r.event_at_ms ? `· event_at_ms = ${Number(r.event_at_ms)} (poller-stamped)` : ""}
+               </span>
+             </div>
+           </div>
+         </td></tr>`
+      : "";
+
+    return `
+      <tr class="clickable ${expanded ? "expanded" : ""}" data-row-id="${id}">
+        <td>
+          <div>${_srnEsc(tsLabel)}</div>
+          <div style="font-size:10.5px;color:var(--text2);">poller: ${evtLabel}</div>
+        </td>
+        <td>N${_srnEsc(r.node)}</td>
+        <td><span class="srn-trigger-tag ${triggerCls}">${_srnEsc(trigger)}</span></td>
+        <td>${motparo} — ${motparoLabel}</td>
+        <td><span class="srn-debug-hex">${debugHex}</span> (${debugVal})</td>
+        <td class="srn-mono">${potAc} kW</td>
+        <td>${activeChip}</td>
+      </tr>
+      ${detailRow}`;
+  }).join("");
+  return `<table class="srn-table">${head}<tbody>${body}</tbody></table>`;
+}
+
+async function _srnHandleRefresh() {
+  const inv = StopReasonsUI.selectedInverter;
+  const msgEl = document.getElementById("srnRefreshMsg");
+  const btn = document.getElementById("btnSrnRefresh");
+  if (!inv) {
+    if (msgEl) { msgEl.textContent = "Pick an inverter first."; msgEl.className = "smsg error"; }
+    return;
+  }
+  let auth;
+  try {
+    auth = await authorizeBulkCommand("REFRESH STOP REASONS", `inverter ${inv}`, 1);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Reading SCOPE peek… ~3 s"; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch(`/api/stop-reasons/${inv}/refresh`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authToken: auth.authToken, include_histogram: true }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body?.ok) {
+      const msg = body?.error || `HTTP ${r.status}`;
+      if (msgEl) { msgEl.textContent = `Refresh failed: ${msg}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    const newRows = (body.persisted || []).filter((p) => p.eventId).length;
+    const dedup = (body.persisted || []).filter((p) => p.deduped).length;
+    if (msgEl) {
+      msgEl.textContent = `Captured ${newRows} new snapshot(s)`
+        + (dedup ? ` (${dedup} de-duplicated)` : "")
+        + (body.histogram_id ? `; histogram updated` : "");
+      msgEl.className = "smsg";
+    }
+    await _srnRefreshTable();
+    // Auto-refresh the histogram only if it had already been loaded for
+    // this inverter — keeps Refresh from triggering an unnecessary
+    // /histogram call when the operator has never opened that tab.
+    if (StopReasonsUI.histogramLoadedFor === StopReasonsUI.selectedInverter) {
+      await _srnLoadHistogram();
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Refresh error: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _srnLoadHistogram() {
+  const inv = StopReasonsUI.selectedInverter;
+  const host = document.getElementById("srnHistogramHost");
+  const msgEl = document.getElementById("srnHistogramMsg");
+  if (!host) return;
+  if (!inv) {
+    host.innerHTML = `<div class="srn-empty">Pick an inverter first.</div>`;
+    return;
+  }
+  if (msgEl) { msgEl.textContent = "Loading…"; msgEl.className = "smsg"; }
+  host.innerHTML = `<div class="srn-empty">Loading histogram…</div>`;
+  let payload;
+  try {
+    payload = await api(`/api/stop-reasons/${inv}/histogram`);
+  } catch (err) {
+    host.innerHTML = `<div class="srn-empty">Failed to load: ${String(err?.message || err)}</div>`;
+    if (msgEl) { msgEl.textContent = "Failed."; msgEl.className = "smsg error"; }
+    return;
+  }
+  const snap = payload?.snapshot;
+  if (!snap || !Array.isArray(snap.counters) || snap.counters.length === 0) {
+    host.innerHTML = `<div class="srn-empty">No histogram captured yet. Switch to <strong>Captured Snapshots</strong> and click <strong>Refresh now</strong> to fetch one.</div>`;
+    if (msgEl) { msgEl.textContent = ""; msgEl.className = "smsg"; }
+    return;
+  }
+  StopReasonsUI.histogramLoadedFor = inv;
+  // 30 motive labels + TOTAL at slot 30 — mirror server/motiveLabels.js.
+  const LABELS = [
+    "MOTIVO_PARO_VIN","MOTIVO_PARO_FRED","MOTIVO_PARO_VRED","MOTIVO_PARO_VARISTORES",
+    "MOTIVO_PARO_AISL_DC","MOTIVO_PARO_IAC_EFICAZ","MOTIVO_PARO_TEMPERATURA",
+    "MOTIVO_PARO_01","MOTIVO_PARO_CONFIGURACION","MOTIVO_PARO_MANUAL",
+    "MOTIVO_PARO_BAJA_VPV_MED","MOTIVO_PARO_HW_DESCX2","MOTIVO_PARO_FRAMA3",
+    "MOTIVO_PARO_MAX_IAC_INST","MOTIVO_PARO_CARGA_FIRMWARE","MOTIVO_PARO_03",
+    "MOTIVO_PARO_04","MOTIVO_PARO_ERROR_LEC_ADC","MOTIVO_PARO_CONSUMO_POTENCIA",
+    "MOTIVO_PARO_FUS_DC","MOTIVO_PARO_TEMP_AUX","MOTIVO_PARO_DES_AC",
+    "MOTIVO_PARO_MAGNETO","MOTIVO_PARO_CONTACTOR","MOTIVO_PARO_RESET_WD",
+    "MOTIVO_PARO_PI_ANA_SAT","MOTIVO_PARO_LATENCIA_ADC","MOTIVO_PARO_ERROR_FATAL",
+    "MOTIVO_PARO_FRAMA1","MOTIVO_PARO_FRAMA2","TOTAL",
+  ];
+  const head = `<thead><tr><th>#</th><th>Motive</th><th class="srn-count">Count</th></tr></thead>`;
+  const body = snap.counters.map((c, i) => `
+    <tr class="${i === 30 ? "is-total" : ""}">
+      <td>${i}</td>
+      <td>${_srnEsc(LABELS[i] || `<unknown_${i}>`)}</td>
+      <td class="srn-count">${Number(c).toLocaleString()}</td>
+    </tr>`).join("");
+  const captured = snap.read_at_ms ? fmtDateTime(snap.read_at_ms) : "—";
+  host.innerHTML = `
+    <div class="srn-fleet-summary">
+      <span><strong>Captured</strong> ${_srnEsc(captured)}</span>
+      <span class="took">${snap.counters.length} slot(s)</span>
+    </div>
+    <table class="srn-histogram-table">${head}<tbody>${body}</tbody></table>`;
+  if (msgEl) {
+    msgEl.textContent = `Captured ${captured}`;
+    msgEl.className = "smsg";
+  }
+}
+
+// ─── v2.10.0 Slice C minimal — Serial Number Setting page ─────────────────
+
+const SerialNumberUI = {
+  inited: false,
+  inverter: null,
+  slave: null,
+  fmt: "motorola",
+  sessionToken: null,
+  sessionExpiresAt: 0,
+  oldSerial: null,
+};
+
+function initSerialNumberSection() {
+  if (SerialNumberUI.inited) {
+    _snbApplyRemoteUiState();
+    _snbLoadLog();
+    return;
+  }
+  SerialNumberUI.inited = true;
+
+  initCardTabs("serialNumberSection", {
+    storageKey: "adsi_snb_active_tab",
+    defaultKey: "single",
+  });
+
+  const invPicker = document.getElementById("snbInverterPicker");
+  const slavePicker = document.getElementById("snbSlavePicker");
+  const fmtPicker = document.getElementById("snbFmtPicker");
+  const readBtn = document.getElementById("btnSnbRead");
+  const sendBtn = document.getElementById("btnSnbSend");
+  const newSerialEl = document.getElementById("snbNewSerial");
+  if (!invPicker || !slavePicker || !readBtn || !sendBtn || !newSerialEl) return;
+
+  _snbPopulateInverterPicker(invPicker);
+  _snbPopulateSlavePicker(slavePicker);
+
+  invPicker.addEventListener("change", () => {
+    SerialNumberUI.inverter = Number(invPicker.value) || null;
+    _snbResetSession();
+    _snbHideReadResult();
+    _snbHideEditPanel();
+    _snbLoadLog();
+  });
+  slavePicker.addEventListener("change", () => {
+    const v = String(slavePicker.value || "");
+    SerialNumberUI.slave = v === "all" ? "all" : (Number(v) || null);
+    SerialNumberUI.isAll = v === "all";
+    _snbResetSession();
+    _snbHideReadResult();
+    _snbHideEditPanel();
+    _snbHideReadAllResult();
+    _snbValidateNewSerialInput();   // disables Send when "All" is picked
+  });
+  fmtPicker.addEventListener("change", () => {
+    SerialNumberUI.fmt = String(fmtPicker.value || "motorola");
+    newSerialEl.maxLength = SerialNumberUI.fmt === "motorola" ? 12 : 32;
+    _snbValidateNewSerialInput();
+  });
+
+  readBtn.addEventListener("click", _snbHandleRead);
+  sendBtn.addEventListener("click", _snbHandleSend);
+  newSerialEl.addEventListener("input", _snbValidateNewSerialInput);
+
+  // Plant Serial Map handlers (Scan plant + Show cached map)
+  const fleetScanBtn = document.getElementById("btnSnbFleetScan");
+  const fleetCacheBtn = document.getElementById("btnSnbFleetLoadCache");
+  if (fleetScanBtn) fleetScanBtn.addEventListener("click", _snbHandleFleetScan);
+  if (fleetCacheBtn) fleetCacheBtn.addEventListener("click", _snbHandleFleetLoadCache);
+
+  if (invPicker.options.length > 0) {
+    SerialNumberUI.inverter = Number(invPicker.options[0].value) || null;
+    invPicker.value = invPicker.options[0].value;
+  }
+  // Default to slave "1" (the first numeric option) instead of the "All
+  // nodes" sentinel.  Most operator flows are single-slave; bulk read is
+  // opt-in.  Picking "1" also avoids the Number("all") = NaN trap that
+  // would leave SerialNumberUI.slave = null on first open.
+  if (slavePicker.options.length > 0) {
+    const firstNumeric = Array.from(slavePicker.options)
+      .find((o) => o.value && o.value !== "all");
+    const initVal = firstNumeric?.value || slavePicker.options[0].value;
+    slavePicker.value = initVal;
+    if (initVal === "all") {
+      SerialNumberUI.slave = "all";
+      SerialNumberUI.isAll = true;
+    } else {
+      SerialNumberUI.slave = Number(initVal) || null;
+      SerialNumberUI.isAll = false;
+    }
+  }
+  SerialNumberUI.fmt = String(fmtPicker.value || "motorola");
+  newSerialEl.maxLength = SerialNumberUI.fmt === "motorola" ? 12 : 32;
+  _snbApplyRemoteUiState();
+  _snbLoadLog();
+}
+
+function _snbEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function _snbPopulateInverterPicker(picker) {
+  picker.innerHTML = "";
+  const cfgInverters = (State?.ipConfig?.inverters)
+    || (State?.settings?.ipconfig?.inverters) || {};
+  Object.entries(cfgInverters).forEach(([k, ip]) => {
+    const inv = Number(k);
+    if (!Number.isFinite(inv) || inv <= 0 || !String(ip || "").trim()) return;
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${inv}  (${ip})`;
+    picker.appendChild(opt);
+  });
+  if (picker.options.length === 0) {
+    for (let i = 1; i <= 27; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `Inverter ${i}`;
+      picker.appendChild(opt);
+    }
+  }
+}
+
+function _snbPopulateSlavePicker(picker) {
+  picker.innerHTML = "";
+  // "All nodes" reads every configured slave for the inverter — useful for
+  // commissioning + audit sweeps where the operator wants the entire
+  // inverter's serial map at a glance.
+  const allOpt = document.createElement("option");
+  allOpt.value = "all";
+  allOpt.textContent = "All nodes";
+  picker.appendChild(allOpt);
+  for (let i = 1; i <= 4; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = String(i);
+    picker.appendChild(opt);
+  }
+}
+
+// Disable Read AND Send in remote mode and surface the gateway-host banner.
+// Audit log + read-result history stay visible — only the Modbus-driving
+// actions are gated.  When remote mode flips off, _snbValidateNewSerialInput
+// re-enables Send subject to the format/session checks.
+function _snbApplyRemoteUiState() {
+  const remote = _v210IsRemoteMode();
+  const banner = document.getElementById("snbRemoteBanner");
+  if (banner) banner.hidden = !remote;
+  if (remote) {
+    document.querySelectorAll(".js-snb-gateway-host").forEach((el) => {
+      el.textContent = _v210GatewayHost();
+    });
+  }
+  const remoteTitle = "Disabled in remote mode — Serial Read/Send execute on the gateway only.";
+  // btnSnbFleetLoadCache is intentionally NOT in this list — it just reads
+  // the cached map snapshot (no Modbus), so it stays enabled in remote
+  // mode. btnSnbFleetScan IS Modbus-driven so it's disabled.
+  const buttons = ["btnSnbRead", "btnSnbSend", "btnSnbFleetScan"];
+  for (const id of buttons) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    if (remote) {
+      btn.dataset._snbOrigTitle = btn.dataset._snbOrigTitle || (btn.title || "");
+      btn.disabled = true;
+      btn.title = remoteTitle;
+    } else {
+      if (btn.dataset._snbOrigTitle !== undefined) {
+        btn.title = btn.dataset._snbOrigTitle;
+      }
+      // Don't auto-enable Send — its enable rule is governed by
+      // _snbValidateNewSerialInput (needs format + session). Re-call it.
+      if (id !== "btnSnbSend") btn.disabled = false;
+    }
+  }
+  if (!remote) _snbValidateNewSerialInput();
+}
+
+function _snbResetSession() {
+  SerialNumberUI.sessionToken = null;
+  SerialNumberUI.sessionExpiresAt = 0;
+  SerialNumberUI.oldSerial = null;
+  const sendBtn = document.getElementById("btnSnbSend");
+  if (sendBtn) sendBtn.disabled = true;
+}
+
+function _snbHideReadResult() {
+  const el = document.getElementById("snbReadResult");
+  if (el) { el.hidden = true; el.innerHTML = ""; }
+}
+
+function _snbHideEditPanel() {
+  const el = document.getElementById("snbEditPanel");
+  if (el) el.hidden = true;
+  const conflict = document.getElementById("snbConflictBox");
+  if (conflict) { conflict.hidden = true; conflict.innerHTML = ""; }
+}
+
+function _snbValidateNewSerialInput() {
+  const newSerialEl = document.getElementById("snbNewSerial");
+  const sendBtn = document.getElementById("btnSnbSend");
+  if (!newSerialEl || !sendBtn) return;
+  // Remote mode short-circuits — Send is never enabled here regardless of
+  // input validity. This keeps the disabled-with-tooltip state intact and
+  // prevents typing-into-input from re-enabling a gateway-only action.
+  if (_v210IsRemoteMode()) {
+    sendBtn.disabled = true;
+    return;
+  }
+  // "All nodes" mode disables Send — each unit must have a unique serial,
+  // so bulk-write would just collide on the uniqueness check.  Operator
+  // must pick one slave at a time to Send.
+  if (SerialNumberUI.isAll || SerialNumberUI.slave === "all") {
+    sendBtn.disabled = true;
+    return;
+  }
+  const v = String(newSerialEl.value || "");
+  const expectedLen = SerialNumberUI.fmt === "motorola" ? 12 : 32;
+  const isAscii = /^[\x20-\x7E]*$/.test(v);
+  const lenOk = v.length === expectedLen;
+  const sessionFresh = SerialNumberUI.sessionToken
+    && Date.now() < SerialNumberUI.sessionExpiresAt;
+  sendBtn.disabled = !(lenOk && isAscii && sessionFresh);
+}
+
+function _snbHideReadAllResult() {
+  const el = document.getElementById("snbReadAllResult");
+  if (el) { el.hidden = true; el.innerHTML = ""; }
+}
+
+async function _snbHandleRead() {
+  const inv = SerialNumberUI.inverter;
+  let slave = SerialNumberUI.slave;
+  const fmt = SerialNumberUI.fmt;
+  const msgEl = document.getElementById("snbReadMsg");
+  const btn = document.getElementById("btnSnbRead");
+  // Defence-in-depth: re-read the picker DOM in case state got out of sync
+  // (e.g. external script flipped it without firing change). The "All nodes"
+  // sentinel is a string; numeric slaves are numbers.
+  if (slave == null) {
+    const picker = document.getElementById("snbSlavePicker");
+    const v = String(picker?.value || "").trim();
+    if (v === "all") {
+      slave = "all";
+      SerialNumberUI.slave = "all";
+      SerialNumberUI.isAll = true;
+    } else if (v) {
+      slave = Number(v) || null;
+      SerialNumberUI.slave = slave;
+      SerialNumberUI.isAll = false;
+    }
+  }
+  if (!inv) {
+    if (msgEl) { msgEl.textContent = "Pick an inverter first."; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (slave == null) {
+    if (msgEl) { msgEl.textContent = "Pick a slave (or All nodes)."; msgEl.className = "smsg error"; }
+    return;
+  }
+
+  // ── "All nodes" path — POST /api/serial/:inverter/read-all ─────────────
+  if (slave === "all" || SerialNumberUI.isAll) {
+    let auth;
+    try {
+      auth = await authorizeBulkCommand("READ ALL NODES", `inverter ${inv}`, 1);
+    } catch (err) {
+      if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    if (!auth) return;
+    if (btn) btn.disabled = true;
+    if (msgEl) { msgEl.textContent = "Reading every configured node…"; msgEl.className = "smsg"; }
+    try {
+      const r = await fetch(`/api/serial/${inv}/read-all`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ authToken: auth.authToken }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body?.ok) {
+        const m = body?.error || `HTTP ${r.status}`;
+        if (msgEl) { msgEl.textContent = `Read-all failed: ${m}`; msgEl.className = "smsg error"; }
+        return;
+      }
+      _snbRenderReadAllResult(body);
+      if (msgEl) {
+        msgEl.textContent = `Read ${body.successful}/${body.total_targets} node(s) on inverter ${inv}.`
+          + (body.failed ? ` ${body.failed} failed (see table).` : "");
+        msgEl.className = "smsg";
+      }
+    } catch (err) {
+      if (msgEl) { msgEl.textContent = `Read-all error: ${err.message}`; msgEl.className = "smsg error"; }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+    return;
+  }
+  let auth;
+  try {
+    auth = await authorizeBulkCommand("READ SERIAL", `inverter ${inv} slave ${slave}`, 1);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Reading FC11 Report Slave ID…"; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch(`/api/serial/${inv}/${slave}?fmt=${encodeURIComponent(fmt)}`, {
+      method: "GET",
+      headers: {
+        "x-bulk-auth": auth.authKey || "",
+        "x-plantwide-session": auth.authToken || "",
+      },
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body?.ok) {
+      const msg = body?.error || `HTTP ${r.status}`;
+      if (msgEl) { msgEl.textContent = `Read failed: ${msg}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    SerialNumberUI.sessionToken = body.session_token;
+    SerialNumberUI.sessionExpiresAt = Number(body.session_expires_at) || 0;
+    SerialNumberUI.oldSerial = body.serial;
+    _snbRenderReadResult(body);
+    _snbShowEditPanel(body.serial);
+    _snbValidateNewSerialInput();
+    if (msgEl) {
+      const ttlMin = Math.max(0, Math.round(
+        (SerialNumberUI.sessionExpiresAt - Date.now()) / 60_000,
+      ));
+      msgEl.textContent = `Read OK. Session valid for ~${ttlMin} min.`;
+      msgEl.className = "smsg";
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Read error: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Per-row session-token registry for the All-nodes table.  Keyed by
+// `${inverter}|${slave}` so per-row Send can fetch the right token without
+// inlining sensitive material into DOM attributes.
+const _snbReadAllSessions = new Map();
+
+function _snbReadAllKey(inv, slave) { return `${inv}|${slave}`; }
+
+function _snbRenderReadAllResult(payload) {
+  const host = document.getElementById("snbReadAllResult");
+  if (!host) return;
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const inv = Number(payload?.inverter);
+  const ip = String(payload?.ip || "");
+  if (!rows.length) {
+    host.hidden = false;
+    host.innerHTML = `<div class="srn-empty">No slaves configured for inverter ${_snbEsc(payload?.inverter)}.</div>`;
+    return;
+  }
+  // Stash per-row session tokens for later Send calls
+  for (const r of rows) {
+    if (r?.ok && r.session_token) {
+      _snbReadAllSessions.set(_snbReadAllKey(inv, r.slave), {
+        token: r.session_token,
+        expiresAt: Number(r.session_expires_at) || 0,
+        fmt: r.serial_format || "motorola",
+        oldSerial: r.serial || "",
+      });
+    }
+  }
+
+  const remote = _v210IsRemoteMode();
+  const sendDisabledTitle = remote
+    ? "Disabled in remote mode — Send executes on the gateway only."
+    : "Sends UNLOCK + WRITE + readback verify for THIS slave only. Each unit must have a unique serial.";
+
+  const body = rows.map((r) => {
+    if (!r.ok) {
+      return `
+        <tr>
+          <td>${_snbEsc(r.slave)}</td>
+          <td colspan="5" class="srn-active">${_snbEsc(String(r.error || "read failed").slice(0, 100))}</td>
+          <td><span class="srn-active">fail</span></td>
+        </tr>`;
+    }
+    const slave = Number(r.slave);
+    const fmtLen = (r.serial_format === "tx") ? 32 : 12;
+    const inputId = `snbAllRowInput-${inv}-${slave}`;
+    const btnId = `snbAllRowSend-${inv}-${slave}`;
+    const msgId = `snbAllRowMsg-${inv}-${slave}`;
+    return `
+      <tr data-snb-row-inv="${inv}" data-snb-row-slave="${slave}">
+        <td>${_snbEsc(slave)}</td>
+        <td>
+          <input id="${inputId}" type="text" class="inp"
+                 maxlength="${fmtLen}" autocomplete="off" spellcheck="false"
+                 value="${_snbEsc(r.serial || "")}"
+                 style="font-family: ui-monospace, Consolas, monospace; min-width: 160px;"
+                 title="Edit then click Send to push to slave ${slave}. Format = ${_snbEsc(r.serial_format || "motorola")} (${fmtLen} chars)." />
+        </td>
+        <td>${_snbEsc(r.serial_format || "—")}</td>
+        <td>${_snbEsc(r.model_code || "—")}</td>
+        <td>${_snbEsc(r.firmware_main || "—")}</td>
+        <td>
+          <button id="${btnId}" type="button" class="btn btn-accent btn-sm"
+                  data-snb-row-send="1"
+                  data-inv="${inv}" data-slave="${slave}"
+                  ${remote ? "disabled" : ""}
+                  title="${_snbEsc(sendDisabledTitle)}">
+            <span class="mdi mdi-send-outline icon-inline" aria-hidden="true"></span>
+            <span>Send</span>
+          </button>
+          <span id="${msgId}" class="smsg" style="display:block; margin-top:4px;"></span>
+        </td>
+      </tr>`;
+  }).join("");
+
+  host.hidden = false;
+  host.innerHTML = `
+    <div class="cb-sub-title" style="font-size: 12px;">
+      <span class="mdi mdi-format-list-bulleted icon-inline" aria-hidden="true"></span>
+      All nodes on inverter ${_snbEsc(inv)} (${_snbEsc(ip)})
+      <span style="font-weight:400;color:var(--text2);font-size:11px;margin-left:8px;">
+        ${rows.filter((r) => r.ok).length}/${rows.length} read; per-row Send uses a 5-min session token
+      </span>
+    </div>
+    <table class="srn-table">
+      <thead><tr>
+        <th>Slave</th><th>Serial (editable)</th><th>Format</th><th>Model</th><th>Firmware</th><th>Action</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+
+  // Wire the per-row Send buttons via delegated dataset reads
+  host.querySelectorAll('[data-snb-row-send="1"]').forEach((btn) => {
+    btn.addEventListener("click", _snbHandleRowSend);
+  });
+}
+
+async function _snbHandleRowSend(ev) {
+  const btn = ev.currentTarget;
+  if (!btn) return;
+  if (_v210IsRemoteMode()) return;
+  const inv = Number(btn.getAttribute("data-inv"));
+  const slave = Number(btn.getAttribute("data-slave"));
+  if (!Number.isFinite(inv) || !Number.isFinite(slave)) return;
+  const inputId = `snbAllRowInput-${inv}-${slave}`;
+  const msgId = `snbAllRowMsg-${inv}-${slave}`;
+  const inputEl = document.getElementById(inputId);
+  const msgEl = document.getElementById(msgId);
+  const newSerial = String(inputEl?.value || "").trim();
+  const sessionEntry = _snbReadAllSessions.get(_snbReadAllKey(inv, slave));
+  if (!sessionEntry) {
+    if (msgEl) { msgEl.textContent = "Session expired — Read again."; msgEl.className = "smsg error"; }
+    return;
+  }
+  const fmt = sessionEntry.fmt || "motorola";
+  const expectedLen = fmt === "motorola" ? 12 : 32;
+  if (newSerial.length !== expectedLen) {
+    if (msgEl) { msgEl.textContent = `Need ${expectedLen} chars (${fmt}).`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!/^[\x20-\x7E]+$/.test(newSerial)) {
+    if (msgEl) { msgEl.textContent = "ASCII printable only."; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (Date.now() > (sessionEntry.expiresAt || 0)) {
+    _snbReadAllSessions.delete(_snbReadAllKey(inv, slave));
+    if (msgEl) { msgEl.textContent = "Session expired (>5 min) — Read again."; msgEl.className = "smsg error"; }
+    return;
+  }
+
+  // No-op vs change confirmation
+  let okConfirm;
+  if (newSerial === sessionEntry.oldSerial) {
+    okConfirm = await appConfirm(
+      "Rewrite same serial?",
+      `Slave ${slave}: candidate matches the current serial (${newSerial}). This is a no-op write that still UNLOCKs and re-WRITEs at the wire level. Continue?`,
+      { ok: "Send anyway", danger: false },
+    );
+  } else {
+    okConfirm = await appConfirm(
+      `Send to slave ${slave}?`,
+      `Replace ${sessionEntry.oldSerial} → ${newSerial} on inverter ${inv} slave ${slave}? This is logged forever and cannot be undone in one click.`,
+      { ok: "UNLOCK + WRITE + VERIFY", danger: true },
+    );
+  }
+  if (!okConfirm) return;
+
+  let auth;
+  try {
+    auth = await authorizeBulkCommand("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+
+  btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Sending UNLOCK + WRITE + VERIFY…"; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch(`/api/serial/${inv}/${slave}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        authToken: auth.authToken,
+        session_token: sessionEntry.token,
+        new_serial: newSerial,
+        fmt,
+        check_uniqueness: true,
+        acted_by: (State?.session?.username || "OPERATOR"),
+      }),
+    });
+    const respBody = await r.json().catch(() => ({}));
+    // Token is one-shot — drop it regardless of outcome
+    _snbReadAllSessions.delete(_snbReadAllKey(inv, slave));
+
+    if (r.status === 409) {
+      if (msgEl) {
+        const conflicts = respBody?.uniqueness?.conflicts || [];
+        const first = conflicts[0];
+        msgEl.textContent = first
+          ? `Duplicate — ${first.inverter_name || ("inv " + first.inverter_id)} slave ${first.slave} already has '${first.existing_serial}'`
+          : "Duplicate serial detected.";
+        msgEl.className = "smsg error";
+      }
+      return;
+    }
+    if (!r.ok || !respBody?.ok) {
+      if (msgEl) {
+        msgEl.textContent = `Send failed: ${respBody?.error || "HTTP " + r.status}`
+          + (respBody?.readback ? ` (readback: ${respBody.readback})` : "");
+        msgEl.className = "smsg error";
+      }
+      _snbLoadLog();
+      return;
+    }
+    if (msgEl) { msgEl.textContent = `✓ Sent. New serial: ${respBody.new_serial}`; msgEl.className = "smsg"; }
+    // Update the displayed "current" serial in the input box
+    if (inputEl) inputEl.value = respBody.new_serial;
+    sessionEntry.oldSerial = respBody.new_serial;   // already deleted from map; harmless
+    _snbLoadLog();
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Send error: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    btn.disabled = _v210IsRemoteMode();
+  }
+}
+
+function _snbRenderReadResult(payload) {
+  const host = document.getElementById("snbReadResult");
+  if (!host) return;
+  const fmtWarn = payload.format_warning
+    ? `<div class="srn-active">⚠ ${_snbEsc(payload.format_warning)}</div>`
+    : "";
+  host.hidden = false;
+  host.innerHTML = `
+    <div class="srn-row-detail-inner">
+      <div><span class="srn-row-detail-k">Serial</span>
+           <span class="srn-row-detail-v srn-mono"><strong>${_snbEsc(payload.serial)}</strong></span></div>
+      <div><span class="srn-row-detail-k">Format</span>
+           <span class="srn-row-detail-v">${_snbEsc(payload.serial_format || "—")}</span></div>
+      <div><span class="srn-row-detail-k">Model</span>
+           <span class="srn-row-detail-v">${_snbEsc(payload.model_code || "—")}</span></div>
+      <div><span class="srn-row-detail-k">Firmware (main)</span>
+           <span class="srn-row-detail-v">${_snbEsc(payload.firmware_main || "—")}</span></div>
+      <div><span class="srn-row-detail-k">Firmware (aux)</span>
+           <span class="srn-row-detail-v">${_snbEsc(payload.firmware_aux || "—")}</span></div>
+      <div><span class="srn-row-detail-k">Read at</span>
+           <span class="srn-row-detail-v">${_snbEsc(fmtDateTime(Number(payload.read_at_ms)))}</span></div>
+      ${fmtWarn ? `<div class="srn-row-detail-wide">${fmtWarn}</div>` : ""}
+    </div>`;
+}
+
+function _snbShowEditPanel(currentSerial) {
+  const panel = document.getElementById("snbEditPanel");
+  const newSerialEl = document.getElementById("snbNewSerial");
+  if (panel) panel.hidden = false;
+  if (newSerialEl && (!newSerialEl.value || newSerialEl.value === SerialNumberUI.oldSerial)) {
+    newSerialEl.value = String(currentSerial || "");
+  }
+}
+
+async function _snbHandleSend() {
+  const inv = SerialNumberUI.inverter;
+  const slave = SerialNumberUI.slave;
+  const fmt = SerialNumberUI.fmt;
+  const newSerialEl = document.getElementById("snbNewSerial");
+  const checkBox = document.getElementById("snbCheckUniqueness");
+  const conflictBox = document.getElementById("snbConflictBox");
+  const msgEl = document.getElementById("snbSendMsg");
+  const btn = document.getElementById("btnSnbSend");
+  if (!inv || !slave || !SerialNumberUI.sessionToken) {
+    if (msgEl) { msgEl.textContent = "Read first to mint a session token."; msgEl.className = "smsg error"; }
+    return;
+  }
+  const newSerial = String(newSerialEl?.value || "").trim();
+  if (!newSerial) {
+    if (msgEl) { msgEl.textContent = "Enter a new serial."; msgEl.className = "smsg error"; }
+    return;
+  }
+  // No-op rewrite confirmation
+  if (newSerial === SerialNumberUI.oldSerial) {
+    const ok = await appConfirm(
+      "Rewrite same serial?",
+      `The candidate matches the current serial (${newSerial}). This is a no-op write that still UNLOCKs and re-WRITEs at the wire level. Continue?`,
+      { ok: "Send anyway", danger: false },
+    );
+    if (!ok) return;
+  } else {
+    const ok = await appConfirm(
+      "Send new serial?",
+      `Replace ${SerialNumberUI.oldSerial} → ${newSerial} on inverter ${inv} slave ${slave}? This will UNLOCK the inverter and WRITE the new serial to register 0x9C74. This action is logged forever and cannot be undone in one click.`,
+      { ok: "UNLOCK + WRITE + VERIFY", danger: true },
+    );
+    if (!ok) return;
+  }
+  let auth;
+  try {
+    auth = await authorizeBulkCommand("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) {
+    msgEl.textContent = checkBox?.checked
+      ? "Checking fleet uniqueness…"
+      : "Sending UNLOCK + WRITE + VERIFY…";
+    msgEl.className = "smsg";
+  }
+  if (conflictBox) { conflictBox.hidden = true; conflictBox.innerHTML = ""; }
+
+  try {
+    const body = {
+      authToken: auth.authToken,
+      session_token: SerialNumberUI.sessionToken,
+      new_serial: newSerial,
+      fmt,
+      check_uniqueness: Boolean(checkBox?.checked),
+      acted_by: (State?.session?.username || "OPERATOR"),
+    };
+    const r = await fetch(`/api/serial/${inv}/${slave}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const respBody = await r.json().catch(() => ({}));
+
+    if (r.status === 409) {
+      // Uniqueness conflict — render the conflict box, no audit row written
+      if (msgEl) { msgEl.textContent = "Duplicate serial detected. See conflicts below."; msgEl.className = "smsg error"; }
+      _snbRenderConflicts(respBody?.uniqueness);
+      _snbResetSession();
+      _snbValidateNewSerialInput();
+      return;
+    }
+
+    if (!r.ok || !respBody?.ok) {
+      const msg = respBody?.error || `HTTP ${r.status}`;
+      if (msgEl) {
+        msgEl.textContent = `Send failed: ${msg}`
+          + (respBody?.readback ? ` (readback: ${respBody.readback})` : "");
+        msgEl.className = "smsg error";
+      }
+      _snbResetSession();
+      _snbValidateNewSerialInput();
+      _snbLoadLog();
+      return;
+    }
+
+    if (msgEl) {
+      msgEl.textContent = `✓ Sent OK. New serial: ${respBody.new_serial}.`
+        + (respBody?.uniqueness?.unreachable?.length
+            ? ` (${respBody.uniqueness.unreachable.length} inverter(s) unreachable during the uniqueness scan.)`
+            : "");
+      msgEl.className = "smsg";
+    }
+    SerialNumberUI.oldSerial = respBody.new_serial;
+    _snbResetSession();
+    _snbHideReadResult();
+    _snbHideEditPanel();
+    _snbLoadLog();
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Send error: ${err.message}`; msgEl.className = "smsg error"; }
+    _snbResetSession();
+    _snbValidateNewSerialInput();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _snbRenderConflicts(uniqueness) {
+  const box = document.getElementById("snbConflictBox");
+  if (!box || !uniqueness) return;
+  const rows = (uniqueness.conflicts || []).map((c) => `
+    <tr>
+      <td>${_snbEsc(c.inverter_name || `Inverter ${c.inverter_id}`)}</td>
+      <td class="srn-mono">${_snbEsc(c.inverter_ip)}</td>
+      <td>${_snbEsc(c.slave)}</td>
+      <td class="srn-mono"><strong>${_snbEsc(c.existing_serial)}</strong></td>
+    </tr>`).join("");
+  const unreachable = (uniqueness.unreachable || []).length;
+  box.hidden = false;
+  box.innerHTML = `
+    <div style="margin-top: 10px;" class="srn-row-detail">
+      <div class="srn-row-detail-inner">
+        <div class="srn-row-detail-wide srn-active">
+          ⚠ Cannot send — the candidate serial already exists on
+          ${uniqueness.conflicts.length} other location(s)
+          (scanned ${uniqueness.scanned}/${uniqueness.total_targets}, ${unreachable} unreachable).
+        </div>
+        <div class="srn-row-detail-wide">
+          <table class="srn-table">
+            <thead><tr><th>Inverter</th><th>IP</th><th>Slave</th><th>Existing serial</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function _snbLoadLog() {
+  const inv = SerialNumberUI.inverter;
+  const host = document.getElementById("snbLogHost");
+  if (!host || !inv) return;
+  let payload;
+  try {
+    payload = await api(`/api/serial/log/${inv}?limit=50`);
+  } catch (err) {
+    host.innerHTML = `<div class="srn-empty">Failed to load log: ${String(err?.message || err)}</div>`;
+    return;
+  }
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  if (rows.length === 0) {
+    host.innerHTML = `<div class="srn-empty">No serial-number changes recorded for this inverter.</div>`;
+    return;
+  }
+  const body = rows.map((r) => {
+    const ts = Number(r.acted_at_ms || 0);
+    const tsLabel = ts ? fmtDateTime(ts) : "—";
+    const outcomeCls = r.outcome === "success"
+      ? "srn-quiet" : "srn-active";
+    return `
+      <tr>
+        <td>${_snbEsc(tsLabel)}</td>
+        <td>${_snbEsc(r.acted_by || "—")}</td>
+        <td>${_snbEsc(r.slave)}</td>
+        <td>${_snbEsc(r.fmt)}</td>
+        <td class="srn-mono">${_snbEsc(r.old_serial)}</td>
+        <td class="srn-mono"><strong>${_snbEsc(r.new_serial)}</strong></td>
+        <td class="${outcomeCls}">${_snbEsc(r.outcome)}${r.verify_passed ? " ✓" : ""}</td>
+        <td>${r.error_detail ? _snbEsc(String(r.error_detail).slice(0, 60)) : "—"}</td>
+      </tr>`;
+  }).join("");
+  host.innerHTML = `
+    <table class="srn-table">
+      <thead><tr>
+        <th>When</th><th>By</th><th>Slave</th><th>Fmt</th>
+        <th>Old serial</th><th>New serial</th><th>Outcome</th><th>Error</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+// ── Plant Serial Map ──────────────────────────────────────────────────────
+
+async function _snbHandleFleetScan() {
+  const msgEl = document.getElementById("snbFleetMsg");
+  const btn = document.getElementById("btnSnbFleetScan");
+  const bypassEl = document.getElementById("snbFleetBypassCache");
+  const bypassCache = Boolean(bypassEl?.checked);
+  let auth;
+  try {
+    auth = await authorizeBulkCommand("SCAN PLANT SERIALS", "all inverters", 0);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) {
+    msgEl.textContent = bypassCache
+      ? "Re-reading every inverter from the wire (bypassing cache)…"
+      : "Scanning fleet (cache hits served instantly)…";
+    msgEl.className = "smsg";
+  }
+  try {
+    const r = await fetch(`/api/serial/fleet/scan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authToken: auth.authToken, bypass_cache: bypassCache }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body?.ok) {
+      const m = body?.error || `HTTP ${r.status}`;
+      if (msgEl) { msgEl.textContent = `Scan failed: ${m}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    _snbRenderFleetTable(body.rows || [], {
+      label: bypassCache ? "Fresh scan" : "Scan (cached where possible)",
+      took: (body.finished_at_ms || 0) - (body.started_at_ms || 0),
+    });
+    if (msgEl) {
+      const cacheCount = (body.rows || []).filter((r) => r.from_cache).length;
+      msgEl.textContent = `Scanned ${body.successful}/${body.total_targets} (${body.failed} failed`
+        + (!bypassCache ? `, ${cacheCount} from cache` : "") + ")";
+      msgEl.className = "smsg";
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Scan error: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _snbHandleFleetLoadCache() {
+  const msgEl = document.getElementById("snbFleetMsg");
+  const btn = document.getElementById("btnSnbFleetLoadCache");
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Loading cached map…"; msgEl.className = "smsg"; }
+  try {
+    const body = await api(`/api/serial/fleet-cache`);
+    const entries = Array.isArray(body?.entries) ? body.entries : [];
+    if (entries.length === 0) {
+      const host = document.getElementById("snbFleetTableHost");
+      if (host) {
+        host.innerHTML = `<div class="srn-empty">Fleet cache is empty. Click <strong>Scan plant</strong> on the gateway to populate it.</div>`;
+      }
+      if (msgEl) { msgEl.textContent = "Cache is empty."; msgEl.className = "smsg"; }
+      return;
+    }
+    // Synthesize the same row shape that fleetScan returns so the renderer
+    // works for both code paths.
+    const rows = entries.map((e) => ({
+      inverter_id: null,    // cache snapshot doesn't keep inverter_id (lookup-keyed)
+      inverter_name: e.inverter_ip,
+      inverter_ip: e.inverter_ip,
+      slave: e.slave,
+      ok: !e.error,
+      serial: e.serial || null,
+      from_cache: true,
+      scanned_at_ms: e.scanned_at_ms,
+      error: e.error || null,
+    }));
+    _snbRenderFleetTable(rows, { label: "From cache", took: 0 });
+    if (msgEl) { msgEl.textContent = `Loaded ${entries.length} cached entries.`; msgEl.className = "smsg"; }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Load failed: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _snbRenderFleetTable(rows, opts = {}) {
+  const host = document.getElementById("snbFleetTableHost");
+  if (!host) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    host.innerHTML = `<div class="srn-empty">No rows.</div>`;
+    return;
+  }
+  // Group by inverter for readability — collapse N slaves into one block.
+  const groups = new Map();   // inverter_ip → [rows]
+  for (const r of rows) {
+    const key = r.inverter_ip || "unknown";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+
+  // Detect duplicate serials across the WHOLE fleet — surface red flag.
+  const serialCounts = new Map();
+  for (const r of rows) {
+    if (!r.ok || !r.serial) continue;
+    serialCounts.set(r.serial, (serialCounts.get(r.serial) || 0) + 1);
+  }
+  const dupes = [...serialCounts.entries()].filter(([, n]) => n > 1).map(([s]) => s);
+  const dupeBanner = dupes.length
+    ? `<div class="srn-active" style="margin-bottom: 8px;">
+         ⚠ ${dupes.length} duplicate serial${dupes.length > 1 ? "s" : ""}
+         detected across the fleet: ${dupes.map(_snbEsc).join(", ")}
+       </div>`
+    : "";
+
+  const dupSet = new Set(dupes);
+  // Sort inverter blocks by IP (numeric octets) so the fleet map renders
+  // in topology order rather than insertion order.
+  const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+    const ipA = String(a[0]).split(".").map(Number);
+    const ipB = String(b[0]).split(".").map(Number);
+    for (let i = 0; i < 4; i++) {
+      const x = ipA[i] || 0, y = ipB[i] || 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  });
+  // Shared <colgroup> emitted into every per-inverter table — guarantees
+  // identical column geometry across the stacked tables, which is the
+  // operator-visible alignment fix.
+  const colgroup = `<colgroup>
+    <col style="width: 70px;">
+    <col style="width: 220px;">
+    <col style="width: 90px;">
+    <col>
+  </colgroup>`;
+  const sections = [];
+  for (const [ip, list] of sortedGroups) {
+    const sortedList = list.slice().sort((a, b) => Number(a.slave) - Number(b.slave));
+    const okCount = sortedList.filter((r) => r.ok).length;
+    const failCount = sortedList.length - okCount;
+    const pillClass = failCount === 0 ? "ok" : (okCount === 0 ? "bad" : "warn");
+    const pillText = failCount === 0
+      ? `${okCount} ok`
+      : (okCount === 0
+          ? `${failCount} failed`
+          : `${okCount} ok · ${failCount} failed`);
+    const body = sortedList.map((r) => {
+      if (r.ok) {
+        const isDup = r.serial && dupSet.has(r.serial);
+        return `
+          <tr>
+            <td class="srn-cell-slave">${_snbEsc(r.slave)}</td>
+            <td class="srn-mono ${isDup ? "srn-active" : ""}" title="${_snbEsc(r.serial)}">
+              ${isDup ? "⚠ " : ""}<strong>${_snbEsc(r.serial)}</strong>
+            </td>
+            <td>${r.from_cache ? '<span class="srn-quiet">cache</span>' : '<span>fresh</span>'}</td>
+            <td class="srn-cell-time">${r.scanned_at_ms ? _snbEsc(fmtDateTime(r.scanned_at_ms)) : "—"}</td>
+          </tr>`;
+      }
+      const errText = String(r.error || "read failed");
+      return `
+        <tr>
+          <td class="srn-cell-slave">${_snbEsc(r.slave)}</td>
+          <td colspan="2" class="srn-active" title="${_snbEsc(errText)}">${_snbEsc(errText.slice(0, 80))}</td>
+          <td class="srn-cell-time">${r.scanned_at_ms ? _snbEsc(fmtDateTime(r.scanned_at_ms)) : "—"}</td>
+        </tr>`;
+    }).join("");
+    sections.push(`
+      <div class="srn-fleet-block">
+        <div class="srn-fleet-block-head">
+          <span class="name">${_snbEsc(list[0].inverter_name || ip)}</span>
+          <span class="ip">${_snbEsc(ip)}</span>
+          <span class="pill ${pillClass}">${_snbEsc(pillText)}</span>
+        </div>
+        <table class="srn-table">
+          ${colgroup}
+          <thead><tr>
+            <th class="srn-cell-slave">Slave</th>
+            <th>Serial</th>
+            <th>Source</th>
+            <th class="srn-cell-time">Scanned at</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>`);
+  }
+  const took = Number(opts.took || 0);
+  const tookLabel = took > 0 ? `${(took / 1000).toFixed(2)} s` : "";
+  host.innerHTML = `
+    <div class="srn-fleet-summary">
+      <span><strong>${_snbEsc(opts.label || "Fleet map")}</strong></span>
+      <span>${rows.length} (inverter, slave) pair(s)</span>
+      ${tookLabel ? `<span class="took">${tookLabel}</span>` : ""}
+    </div>
+    ${dupeBanner}
+    ${sections.join("")}`;
+}
+
 // v2.8.14 R1: Local backup schedule form
 async function loadLocalBackupSchedule() {
   try {
@@ -19561,11 +21294,9 @@ function bindEventHandlers() {
   $("btnAckAll")?.addEventListener("click", ackAll);
   $("btnAckAllInv")?.addEventListener("click", ackAll);
 
-  // Energy page
-  $("btnFetchEnergy")?.addEventListener("click", () => {
-    State.energyView.page = 1;
-    fetchEnergy({ page: 1 });
-  });
+  // All Parameters Data page — listeners are wired inside _paramWireOnce()
+  // on first navigation, since the controls (#paramInv, #paramDate,
+  // #btnParamRefresh) live inside the rebuilt section.
 
   // Audit page
   $("btnFetchAudit")?.addEventListener("click", fetchAudit);
@@ -19593,6 +21324,10 @@ function bindEventHandlers() {
   $("btnRunWeekAheadExport")?.addEventListener("click", runSolcastWeekAheadExport);
 
   $("btnRunInvDataExport")?.addEventListener("click", runInverterDataExport);
+  $("btnRunDailyDataExport")?.addEventListener("click", runDailyDataExport);
+  $("btnCancelDailyDataExport")?.addEventListener("click", () =>
+    requestExportCancellation("btnCancelDailyDataExport", "expDailyDataResult"),
+  );
   $("btnExportAudit")?.addEventListener("click", () =>
     runSingleDateExport(
       "audit",
@@ -19946,7 +21681,7 @@ function initAllTabDatesToToday() {
   if ($("anaDate"))     $("anaDate").value = d;
   if ($("reportDate"))  $("reportDate").value = d;
   if ($("alarmDate"))   $("alarmDate").value = d;
-  if ($("energyDate"))  $("energyDate").value = d;
+  if ($("paramDate"))   $("paramDate").value = d;
   if ($("auditDate"))   $("auditDate").value = d;
   State.lastDateInitDay = d;
 }
@@ -19974,15 +21709,9 @@ async function prefetchAllTabs(options = {}) {
     },
     {
       step: 4,
-      progress: 94,
+      progress: 98,
       text: "Loading audit trail...",
       run: () => fetchAudit({ force: true, silent }),
-    },
-    {
-      step: 4,
-      progress: 98,
-      text: "Loading energy history...",
-      run: () => fetchEnergy({ page: 1, force: true, silent }),
     },
   ];
 
@@ -20180,7 +21909,6 @@ async function init() {
     startTodayMwhSyncTimer();
     buildInverterGrid();
     makeTableSortable("alarmTable", "alarmBody", "alarm_time", "desc");
-    makeTableSortable("energyTable", "energyBody", "ts", "desc");
     buildSelects();
 
     reportStartupProgress({
