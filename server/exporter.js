@@ -21,6 +21,7 @@ const {
   getCounterBaselinesForDate,
   getCounterStateAll,
 } = require('./db');
+const dailyAggregator = require('./dailyAggregator');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
 const { applyInverterScale } = require('./energySummaryScaleCore');
 const {
@@ -2895,7 +2896,10 @@ const _DAILY_DATA_HEADERS = [
 // to the supplied WorkbookWriter under `sheetName`. Used by both the
 // single-inverter and All-Inverters Daily Data exports.
 async function _writeDailyDataSheet(wb, sheetName, ctx) {
-  const { inv, ip, slave, dateLocal, select, totalsBaselineMap, isToday } = ctx;
+  const {
+    inv, ip, slave, dateLocal, select, totalsBaselineMap, isToday,
+    counterStateSnapshot, liveBucketSnapshot,
+  } = ctx;
 
   const slotLabel = (slot) => {
     const startMin = Number(slot) * 5;
@@ -2910,14 +2914,15 @@ async function _writeDailyDataSheet(wb, sheetName, ctx) {
     return n ? `0x${n.toString(16).toUpperCase().padStart(8, '0')}` : '0';
   };
 
+  // MD-004: defensive ceiling. Poller already clamps pac_w to ≤ 260_000 W
+  // per inverter, but if a future change lets a corrupt value through,
+  // exporting an inflated kWh into XLSX is a hard-to-spot data error.
+  // Hoisted to function scope so the live-bucket fold-in below can reuse it.
+  const PAC_W_EXPORT_CEILING = 260_000;
   const dbRows = select.all(String(ip), Number(slave), dateLocal);
   let pacIntegratedKwh = 0;
   let firstParce = null;
   let lastParce = null;
-  // MD-004: defensive ceiling. Poller already clamps pac_w to ≤ 260_000 W
-  // per inverter, but if a future change lets a corrupt value through,
-  // exporting an inflated kWh into XLSX is a hard-to-spot data error.
-  const PAC_W_EXPORT_CEILING = 260_000;
   const sheetRows = dbRows.map((r) => {
     const pacWRaw = Number(r.pac_w || 0);
     const pacW = pacWRaw > PAC_W_EXPORT_CEILING ? PAC_W_EXPORT_CEILING : pacWRaw;
@@ -2950,7 +2955,32 @@ async function _writeDailyDataSheet(wb, sheetName, ctx) {
     };
   });
 
-  // Day-total cross-verification rows.
+  // Day-total cross-verification rows. All three values (Pac-integrated,
+  // Etotal Δ, parcE Δ) are computed against the SAME snapshot instant
+  // captured at the start of the export — see _buildDailyDataExportContext.
+  // For today, this also folds in the in-progress 5-min live bucket so
+  // PAC and parcE catch up to "now" instead of lagging by ~5 min.
+  const liveBucket = isToday && liveBucketSnapshot
+    ? liveBucketSnapshot.get(`${String(ip)}|${Number(slave)}`)
+    : null;
+  if (liveBucket && liveBucket.in_solar_window && Number.isFinite(Number(liveBucket.pac_w))) {
+    // Elapsed-within-slot fraction so we don't overstate the in-progress
+    // slot's PAC contribution (avg PAC × elapsed, not avg PAC × full 5 min).
+    const slotStartMs = Number(liveBucket.slot_start_ms || 0);
+    const elapsedMin = slotStartMs > 0
+      ? Math.max(0, Math.min(5, (Date.now() - slotStartMs) / 60_000))
+      : 0;
+    const livePacW = Math.min(Number(liveBucket.pac_w) || 0, PAC_W_EXPORT_CEILING);
+    const livePartialKwh = livePacW > 0 ? (livePacW * elapsedMin / 60) : 0;
+    pacIntegratedKwh += livePartialKwh;
+    // parcE: extend lastParce to the live bucket's latest reading if newer.
+    const liveParce = Number(liveBucket.parce_kwh);
+    if (Number.isFinite(liveParce) && liveParce >= 0) {
+      if (firstParce == null) firstParce = liveParce;
+      if (lastParce == null || liveParce >= lastParce) lastParce = liveParce;
+    }
+  }
+
   let etotalKwh = NaN;
   let parceKwh = (firstParce != null && lastParce != null && lastParce >= firstParce)
     ? (lastParce - firstParce)
@@ -2958,18 +2988,15 @@ async function _writeDailyDataSheet(wb, sheetName, ctx) {
   const baselineRow = totalsBaselineMap.get(`${inv}_${slave}`);
   if (baselineRow) {
     if (isToday) {
-      try {
-        const cur = (function () {
-          for (const r of getCounterStateAll() || []) {
-            if (Number(r.inverter) === inv && Number(r.unit) === slave) return r;
-          }
-          return null;
-        })();
-        if (cur) {
-          const dE = Number(cur.etotal_kwh) - Number(baselineRow.etotal_baseline || 0);
-          if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
-        }
-      } catch (_) { /* leave as NaN */ }
+      // Lookup goes against the snapshot so every sheet across an
+      // All-Inverters export sees the same Etotal instant.
+      const cur = counterStateSnapshot
+        ? counterStateSnapshot.get(`${inv}_${slave}`)
+        : null;
+      if (cur) {
+        const dE = Number(cur.etotal_kwh) - Number(baselineRow.etotal_baseline || 0);
+        if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
+      }
     } else {
       const eClean = Number(baselineRow.etotal_eod_clean || 0);
       if (eClean > 0) {
@@ -3013,7 +3040,18 @@ async function _writeDailyDataSheet(wb, sheetName, ctx) {
 
 // Build the prepared SELECT + per-date totals baseline + isToday flag once
 // per export run, so they can be reused across many (inv, slave) sheets.
-function _buildDailyDataExportContext(dateLocal) {
+//
+// Hardening: counter-state and live-bucket snapshots are captured ONCE per
+// export pass so every (inv, slave) sheet computes its three day-total rows
+// (Pac-integrated / Etotal Δ / parcE Δ) against the same instant. Without
+// this snapshot, a fleet-wide export that takes ~30 s would see Etotal
+// drift slot-by-slot across sheets — INV1-1 would see Etotal at T=0 and
+// INV27-4 would see it at T=30 s, making cross-sheet comparison unsafe.
+//
+// `pairs` is an optional iterable of { ip, slave } so the live-bucket
+// snapshot can be built up-front (single-inverter callers can omit it and
+// snapshot per-slave on demand).
+function _buildDailyDataExportContext(dateLocal, pairs = null) {
   const select = db.prepare(`
     SELECT slot_index, ts_ms,
            vdc_v, idc_a, pdc_w,
@@ -3041,7 +3079,37 @@ function _buildDailyDataExportContext(dateLocal) {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   })();
-  return { select, totalsBaselineMap, isToday: dateLocal === todayKey };
+  const isToday = dateLocal === todayKey;
+  // Snapshot the live counter state ONCE — keyed by `${inverter}_${unit}`.
+  // Replaces the per-sheet getCounterStateAll() call so every Etotal Δ
+  // across all sheets is anchored on the same instantaneous reading.
+  const counterStateSnapshot = (() => {
+    if (!isToday) return null;
+    try {
+      const m = new Map();
+      for (const r of getCounterStateAll() || []) {
+        m.set(`${Number(r.inverter)}_${Number(r.unit)}`, r);
+      }
+      return m;
+    } catch (_) { return new Map(); }
+  })();
+  // Snapshot the in-progress 5-min live bucket per (ip, slave) at the same
+  // instant. Used to extend the Pac-integrated and parcE Δ totals through
+  // the unflushed slot — without this, today's PAC sum lags Etotal Δ by up
+  // to 5 minutes (rows are only written every 5 min).
+  const liveBucketSnapshot = (() => {
+    if (!isToday) return null;
+    const m = new Map();
+    if (!Array.isArray(pairs)) return m;
+    for (const { ip, slave } of pairs) {
+      try {
+        const b = dailyAggregator.getCurrentBucket(ip, slave);
+        if (b) m.set(`${String(ip)}|${Number(slave)}`, b);
+      } catch (_) { /* ignore */ }
+    }
+    return m;
+  })();
+  return { select, totalsBaselineMap, isToday, counterStateSnapshot, liveBucketSnapshot };
 }
 
 async function exportDailyData({ inverter, date }) {
@@ -3076,7 +3144,13 @@ async function exportDailyData({ inverter, date }) {
   });
   setWorkbookMetadata(wb, `ADSI Daily Data — Inverter ${inv} ${dateLocal}`);
 
-  const sharedCtx = _buildDailyDataExportContext(dateLocal);
+  // Pass the (ip, slave) pairs so the context builder can snapshot the
+  // live in-progress 5-min buckets at the same instant — keeps PAC and
+  // parcE Δ aligned with Etotal Δ for today's exports.
+  const pairs = slaves.map((slave) => ({ ip, slave }));
+  const sharedCtx = _buildDailyDataExportContext(dateLocal, pairs);
+  // Sheet order follows the operator's ipconfig (`cfg.units[inv]`) — not
+  // sorted numerically — so node tabs match the physical wiring layout.
   for (const slave of slaves) {
     await _writeDailyDataSheet(wb, `Node ${slave}`, {
       inv, ip, slave, dateLocal, ...sharedCtx,
@@ -3102,10 +3176,16 @@ async function exportDailyDataAllInverters({ date }) {
   }
   const ipMap = readInverterIpMap();
   const cfg = readInverterConfig();
+  // Inverters in numeric ASC order (1, 2, 3, … 27); within each inverter,
+  // nodes preserve the operator's ipconfig order (`cfg.units[inv]`) so the
+  // sheet tabs match the wiring on the panel. Inverters without an IP or
+  // without configured nodes are skipped silently.
+  const invNums = Object.keys(cfg.units || {})
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
   const pairs = []; // { inv, ip, slave }
-  for (const invKey of Object.keys(cfg.units || {})) {
-    const inv = Number(invKey);
-    if (!Number.isFinite(inv) || inv <= 0) continue;
+  for (const inv of invNums) {
     const ip = ipMap[inv];
     if (!ip) continue;
     const slaves = (cfg.units?.[inv] || []).map(Number).filter((n) => n >= 1 && n <= 16);
@@ -3114,9 +3194,6 @@ async function exportDailyDataAllInverters({ date }) {
   if (!pairs.length) {
     throw new Error('exportDailyDataAllInverters: no inverters/nodes configured');
   }
-  // Stable order: inv ascending, slave ascending. Operators expect tabs to
-  // line up with their physical fleet layout.
-  pairs.sort((a, b) => a.inv - b.inv || a.slave - b.slave);
 
   const dir = resolveExportSubDir('all', EXPORT_FOLDERS.energy, 'Daily Data');
   const dayStartTs = new Date(`${dateLocal}T00:00:00.000`).getTime();
@@ -3134,7 +3211,12 @@ async function exportDailyDataAllInverters({ date }) {
   });
   setWorkbookMetadata(wb, `ADSI Daily Data — All Inverters ${dateLocal}`);
 
-  const sharedCtx = _buildDailyDataExportContext(dateLocal);
+  // Single context build = single instant for the counter-state and
+  // live-bucket snapshots. Every sheet's three day-total rows are then
+  // computed against that frozen "now", which keeps the Pac-integrated /
+  // Etotal Δ / parcE Δ comparison stable across the ~30-60 s it takes to
+  // write the full fleet workbook.
+  const sharedCtx = _buildDailyDataExportContext(dateLocal, pairs);
   for (const { inv, ip, slave } of pairs) {
     const sheetName = `INV${inv}-${slave}`; // ≤ 31 chars (max INV27-16 = 8)
     await _writeDailyDataSheet(wb, sheetName, {
