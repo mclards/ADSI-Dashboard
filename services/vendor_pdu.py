@@ -20,6 +20,7 @@ format reference; this module ports that pattern into production.
 from __future__ import annotations
 
 import struct
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -260,11 +261,17 @@ def read_slave_id(client, slave: int, timeout_s: float = 3.0) -> SlaveIdInfo:
 # ─── Internals ─────────────────────────────────────────────────────────────
 
 _TXN_ID_COUNTER = [0]
+_TXN_ID_LOCK = threading.Lock()
 
 
 def _next_txn_id() -> int:
-    _TXN_ID_COUNTER[0] = (_TXN_ID_COUNTER[0] + 1) & 0xFFFF
-    return _TXN_ID_COUNTER[0] or 1
+    # PY-C-001 — protect the increment so concurrent vendor_scope_peek /
+    # read_slave_id callers from different IP threads cannot race and emit
+    # the same transaction id (which would let MBAP responses cross-match).
+    with _TXN_ID_LOCK:
+        _TXN_ID_COUNTER[0] = (_TXN_ID_COUNTER[0] + 1) & 0xFFFF
+        val = _TXN_ID_COUNTER[0] or 1
+    return val
 
 
 def _recv_exact(sock, n: int, timeout_s: float) -> bytes:
