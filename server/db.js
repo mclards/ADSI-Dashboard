@@ -1482,6 +1482,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fecs_target_slot ON forecast_error_compare_slot(target_date, slot);
   CREATE INDEX IF NOT EXISTS idx_fecs_mem_target ON forecast_error_compare_slot(usable_for_error_memory, target_date DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_fecs_target_run_slot ON forecast_error_compare_slot(target_date, run_audit_id, slot);
+  CREATE INDEX IF NOT EXISTS idx_alarms_stop_reason_id ON alarms(stop_reason_id) WHERE stop_reason_id IS NOT NULL;
 `);
 
 const NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
@@ -1679,7 +1680,8 @@ const stmts = {
     `SELECT ts, online_count, expected_count FROM availability_5min WHERE ts BETWEEN ? AND ? ORDER BY ts ASC`,
   ),
   getActiveAlarms: db.prepare(
-    `SELECT * FROM alarms WHERE cleared_ts IS NULL ORDER BY ts DESC`,
+    `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+       FROM alarms WHERE cleared_ts IS NULL ORDER BY ts DESC LIMIT 5000`,
   ),
   // T2.5 fix (Phase 5, 2026-04-14): fetch the still-active alarm row for a
   // single (inverter, unit), if any.  Used on first batch after restart to
@@ -1691,7 +1693,8 @@ const stmts = {
       ORDER BY ts DESC LIMIT 1`,
   ),
   getAlarmsRange: db.prepare(
-    `SELECT * FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
+    `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+       FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
   ),
   getReadingsRange: db.prepare(
     `SELECT ${READING_SELECT_SQL} FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
