@@ -16388,25 +16388,89 @@ body.mode-transition-active {
   color: var(--text2);
 }
 .srn-trigger-tag.alarm-transition { background: var(--accent, #3b82f6); color: #fff; }
-.srn-histogram-host { margin-top: 16px; }
+/* Lifetime Motive Counters — host wraps the "Captured … N slot(s)" header
+ * strip and the histogram table together so they read as one card instead
+ * of three drifting elements. The strip's own border/radius is dropped
+ * because the host owns the chrome now. */
+.srn-histogram-host {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.srn-histogram-host .srn-fleet-summary {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2, var(--surface)));
+}
+/* Table fills the host width so the row backgrounds (zebra + hover)
+ * extend across the full card, but the # and Motive columns shrink to
+ * their content via the `width: 1%; white-space: nowrap` trick. That
+ * lets the Count column take all the remaining space — and we align its
+ * content LEFT so the number sits right next to the Motive label
+ * instead of being yanked to the far right edge. */
 .srn-histogram-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11.5px;
+  font-size: 12px;
 }
-.srn-histogram-table th, .srn-histogram-table td {
-  padding: 4px 8px;
-  text-align: left;
+.srn-histogram-table thead th {
+  padding: 8px 22px;
+  background: color-mix(in srgb, var(--surface2) 88%, var(--surface));
   border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  text-align: left;
+  white-space: nowrap;
+}
+.srn-histogram-table tbody td {
+  padding: 6px 22px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  color: var(--text);
+  white-space: nowrap;
+}
+.srn-histogram-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface2) 22%, transparent);
+}
+.srn-histogram-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 .srn-histogram-table tr.is-total td {
   font-weight: 700;
-  background: var(--surface2, var(--surface1));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface)) !important;
   border-top: 2px solid var(--accent, #3b82f6);
+  color: var(--text);
 }
+/* `width: 1%` + `nowrap` is the standard CSS trick to shrink a column
+ * to its content while letting another column flex. Applied to # and
+ * Motive so they hug the left, leaving the Count column to absorb the
+ * rest of the row width — content-left so the number is adjacent to
+ * the label, not stranded at the right edge. */
+.srn-histogram-table th:nth-child(1),
+.srn-histogram-table td:nth-child(1) {
+  width: 1%;
+  text-align: center;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.srn-histogram-table th:nth-child(2),
+.srn-histogram-table td:nth-child(2) {
+  width: 1%;
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-size: 11.5px;
+}
+.srn-histogram-table th:nth-child(3),
+.srn-histogram-table td:nth-child(3),
 .srn-histogram-table td.srn-count {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  padding-right: 64px;      /* whitespace gutter so count isn't glued to edge */
 }
 .invclock-input {
   width: 100%;
@@ -17080,6 +17144,37 @@ body.mode-transition-active {
   font-style: italic;
 }
 
+/* Polish for the Recent Sync Attempts log panel — the shared
+ * `.invclock-scroll .data-table` rule uses `width: max-content` so wide
+ * fleet-health tables can horizontally-scroll, but for this 7-column log the
+ * content is short and that leaves a chunk of empty space on the right of
+ * every row. Scope a fixed-layout 100%-width override here so the columns
+ * distribute across the full wrapper, with sane alignment per column. */
+#invClockPanelLog .data-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+#invClockPanelLog .data-table th,
+#invClockPanelLog .data-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#invClockPanelLog .data-table th:nth-child(1),
+#invClockPanelLog .data-table td:nth-child(1) { width: 19%; }                          /* When */
+#invClockPanelLog .data-table th:nth-child(2),
+#invClockPanelLog .data-table td:nth-child(2) { width: 10%; text-align: center; }      /* Inverter */
+#invClockPanelLog .data-table th:nth-child(3),
+#invClockPanelLog .data-table td:nth-child(3) { width:  8%; text-align: center; }      /* Unit */
+#invClockPanelLog .data-table th:nth-child(4),
+#invClockPanelLog .data-table td:nth-child(4) { width: 13%; text-transform: capitalize; } /* Trigger */
+#invClockPanelLog .data-table th:nth-child(5),
+#invClockPanelLog .data-table td:nth-child(5) { width: 14%; text-align: right; }       /* Drift before */
+#invClockPanelLog .data-table th:nth-child(6),
+#invClockPanelLog .data-table td:nth-child(6) { width: 14%; text-align: right; }       /* Drift after */
+#invClockPanelLog .data-table th:nth-child(7),
+#invClockPanelLog .data-table td:nth-child(7) { width: 22%; text-align: center; }      /* Result */
+
 .btn.btn-xs,
 .invclock-card .btn-xs {
   padding: 3px 10px;
@@ -17231,10 +17326,34 @@ body.mode-transition-active {
   font-size: 12px;     /* the pill renders smaller than numeric values */
 }
 
-/* Param table: 16-column grid. Hard-cap height with sticky header so the
- * 288 slots of a full solar-window day never push the page off-screen. */
+/* Param table: 16-column grid with a sticky header so the 288 slots of a
+ * full solar-window day never push the page off-screen.
+ *
+ * The Parameters page is a flex column (.page → #paramPanels → .param-panel
+ * → .param-table-wrap). Each ancestor MUST forward flex:1 + min-height:0,
+ * otherwise the wrap sizes to its own content and its scrollbar (and the
+ * bottom rows) get clipped by .page { overflow: hidden }. The earlier
+ * max-height: calc(100vh - 220px) hack worked at desktop heights but
+ * broke on shorter viewports — flex-fill is the correct fix. */
+#page-energy #paramPanels:not([hidden]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#page-energy #paramPanels > .param-panel:not([hidden]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#page-energy .param-totals-strip {
+  flex: 0 0 auto;
+}
 .param-table-wrap {
-  max-height: calc(100vh - 220px);
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 10px;

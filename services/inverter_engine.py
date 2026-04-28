@@ -1021,7 +1021,7 @@ def _rtc_from_regs(regs, server_year=None):
 
 async def read_fast_async(client, unit, ip):
     """
-    Read 60 input registers + ON/OFF holding register.
+    Read 72 input registers + ON/OFF holding register.
     Returns a dict keyed to the field names expected by Node-RED,
     plus the v2.9.0 hardware-counter / RTC / full-alarm fields,
     or None on failure.
@@ -1031,13 +1031,15 @@ async def read_fast_async(client, unit, ip):
       • Alarm bitfield (reg 6-7, UInt32 hi-lo) — was truncated to 16-bit
       • Fac grid frequency (reg 19)
       • parcE partial kWh (reg 58-59, UInt32 hi-lo)
+    Widened from 60→72 regs in v2.10.x to capture:
+      • temp_c heatsink temperature (reg 71, raw °C minus 1 for ISM parity)
     All legacy keys preserved; new keys are additive.
     """
     if is_write_pending(ip):
         await asyncio.sleep(min(READ_SPACING, 0.01))
         return None
 
-    regs = await safe_read(_threaded_read_input, client, 0, 60, unit, ip)
+    regs = await safe_read(_threaded_read_input, client, 0, 72, unit, ip)
     if not regs:
         return None
 
@@ -1088,9 +1090,49 @@ async def read_fast_async(client, unit, ip):
     # (INV01 / Slave 1 @ 16:50:57 4/27/2026 — every screenshot value matched).
     #   reg 16 = CosPhi × 1000  (0..1000)
     #   reg 17 = Phi Sine Sign  (0=−, 1=+) — kept for ISM column parity
+    #   reg 71 = TempCI (cooling-system / heatsink temperature, signed °C).
+    #
+    #            ── Two-source cross-validation ──
+    #            (a) ISM live display: 30-sample × 30-second monitor on
+    #                192.168.1.109 / s1 (2026-04-28 08:37–08:52). reg 71
+    #                tracked the ISM "Temp (°C)" column exactly with a
+    #                constant +1 °C offset (reg 71 reads 1 °C higher than
+    #                ISM displays). reg 70 stayed at 0 — confirmed not a
+    #                hi/lo pair.
+    #            (b) Stop Reason snapshot (services/stop_reason.py:50): the
+    #                vendor FC 0x71 SCOPE struct's idx-11 `temp` field is
+    #                signed int16, raw °C, no scaling — verified 2026-04-27
+    #                to match ISM display directly. Since reg 71 = ISM + 1
+    #                and StopReason.temp = ISM, we have:
+    #                    StopReason.temp == reg(71) - 1
+    #                Subtracting 1 here makes the continuous Parameters-page
+    #                Temp column align with both ISM AND the StopReason
+    #                snapshot captured at fault time.
+    #
+    #            Per the alarm reference (server/alarms.js:266 Overtemperature):
+    #              • TempCI alarm threshold = 78 °C
+    #              • TempCI = -14 °C is a SENSOR FAULT sentinel (open NTC),
+    #                NOT a real reading — return None so the dashboard's
+    #                Temp column shows "—" instead of a misleading number.
+    #              • reg 72 looks like TempINT (internal electronics, threshold
+    #                80 °C, slower response) — capture but don't surface yet.
     cosphi_x1000 = int(reg(16) or 0)
     cosphi_val   = round(cosphi_x1000 / 1000.0, 3) if cosphi_x1000 else 0.0
     phi_sign     = 1 if int(reg(17) or 0) else 0
+    # Signed int16 interpretation so the -14 sentinel and any cold-weather
+    # negatives decode correctly. Modbus regs are unsigned by default.
+    raw_temp_ci   = int(reg(71) or 0)
+    if raw_temp_ci & 0x8000:
+        raw_temp_ci -= 0x10000
+    if raw_temp_ci == -14:
+        # Sensor fault — open NTC. Don't average a fake number into the
+        # 5-min slot; let the column render "—" so the operator notices.
+        temp_c_val = None
+    elif raw_temp_ci == 0:
+        # Inverter offline / register not yet refreshed.
+        temp_c_val = None
+    else:
+        temp_c_val = raw_temp_ci - 1   # ISM-parity calibration
 
     return {
         "ts":            now_ms,
@@ -1124,24 +1166,11 @@ async def read_fast_async(client, unit, ip):
         # ─── NEW fields (v2.10.x All Parameters Data) ───
         "cosphi":        cosphi_val,            # 0.000 .. 1.000
         "phi_sign":      phi_sign,              # 0=neg, 1=pos
-        # FIXME v2.11 — temp_c remains NULL until the standard FC04 register
-        # carrying inverter heatsink/inverter-internal temperature is
-        # identified for INGECON SUN firmware. Candidates evaluated:
-        #   1. Standard FC04 register — not yet found in the public/vendor
-        #      register map; the existing 60-reg block (regs 0..59) does
-        #      not expose it.
-        #   2. StopReason snapshot @ 0xFEB5 via vendor FC 0x71 — confirmed
-        #      to contain it, but adding a vendor-FC read to every 50 ms
-        #      poll cycle would multiply bus traffic on the EKI-1222-BE
-        #      gateway; not worth it for a non-decision parameter.
-        #   3. Heatsink thermistor — separate hardware path, not exposed.
-        # When (1) is identified, decode it in read_fast_async() above,
-        # add the field to dailyAggregator.js _accum() / _RANGES.tempC,
-        # and the column will populate without any schema change (the
-        # `temp_c` column already exists in inverter_5min_param).
-        # Until then, the Daily Data Export's Temp (°C) column is blank
-        # by design — documented in the User Manual §6.5 and §6.8.2.
-        "temp_c":        None,
+        # Inverter heatsink temperature (°C) — sourced from input reg 71,
+        # widened block read above to 72 regs to include it. ISM-parity
+        # offset (-1) applied during decode; see the temp_raw block. None
+        # while the inverter is offline / sleeping (raw 0 sentinel).
+        "temp_c":        temp_c_val,
     }
 
 

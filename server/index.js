@@ -5493,6 +5493,13 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/chat/",           10000],  // 10 s  — chat messaging
   ["/api/backup/",         60000],  // 60 s  — cloud backup operations
   ["/api/substation-meter/", 20000],  // 20 s  — substation meter reads/writes
+  // Serial Number ops walk the whole topology over Modbus TCP (FC11).
+  // /api/serial/fleet/scan reads ~91 nodes at concurrency 3 with 2x retry,
+  // and POST /api/serial/:inv/:slave triggers a fleet-wide uniqueness scan
+  // before writing. Worst-case ~60-90 s on a healthy plant; 5 s default
+  // was killing the Plant Serial Map "Scan plant" button in remote mode.
+  ["/api/serial/fleet/",  180000],  // 3 min — full-fleet scan / uniqueness
+  ["/api/serial/",         60000],  // 60 s  — single read / read-all / send
 ];
 
 function resolveProxyTimeout(targetUrl) {
@@ -13071,6 +13078,9 @@ function _paramRowSelect(ip, slave, dateLocal) {
 // monotonically increasing since process start. Registered BEFORE the
 // parametrized routes so /diagnostics doesn't get captured as :inverter.
 app.get("/api/params/diagnostics", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   try {
     const stats = dailyAggregator.getStats();
     res.json({ ok: true, now: Date.now(), stats });
@@ -13119,6 +13129,9 @@ app.get("/api/params/:inverter/:slave/coverage/:date", async (req, res) => {
 // Single slave/node, one-day view. Today returns persisted rows + the
 // live in-progress bucket (sample_count > 0) at the tail.
 app.get("/api/params/:inverter/:slave", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const inv = Number(req.params.inverter);
   const slave = Number(req.params.slave);
   if (!Number.isFinite(inv) || inv <= 0) {
@@ -13170,6 +13183,9 @@ app.get("/api/params/:inverter/:slave", (req, res) => {
 // All configured slaves for one inverter — returns one rowset per slave.
 // Used by the page on first load to populate every Node tab in one round-trip.
 app.get("/api/params/:inverter", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const inv = Number(req.params.inverter);
   if (!Number.isFinite(inv) || inv <= 0) {
     return res.status(400).json({ ok: false, error: "inverter required" });

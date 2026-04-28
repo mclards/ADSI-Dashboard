@@ -610,6 +610,13 @@ function parseRow(row, identity = null) {
   const parce_kwh  = Math.max(0, Math.trunc(Number(row.parce_kwh  || 0)));
   const fac_hz     = Number.isFinite(Number(row.fac_hz)) ? Number(row.fac_hz) : null;
   const alarm_32   = Math.max(0, Math.trunc(Number(row.alarm_32 || 0)));
+  // v2.10.x — power factor from Python's reg 16 decode. Forwarded to the
+  // 5-min aggregator so the Parameters page CosΦ column isn't always "—".
+  const cosphi     = Number.isFinite(Number(row.cosphi)) ? Number(row.cosphi) : null;
+  // v2.10.x — heatsink temperature from Python's reg 71 decode (with the
+  // -1 °C ISM-parity offset already applied upstream). Forwarded so the
+  // Parameters page Temp column populates instead of showing "—".
+  const temp_c     = Number.isFinite(Number(row.temp_c)) ? Number(row.temp_c) : null;
   const rtc_valid  = row.rtc_valid === true || row.rtc_valid === 1 ? 1 : 0;
   const rtc_ms_raw = Number(row.rtc_ms);
   const rtc_ms     = rtc_valid && Number.isFinite(rtc_ms_raw) ? rtc_ms_raw : null;
@@ -640,6 +647,13 @@ function parseRow(row, identity = null) {
     rtc_valid,
     rtc_ms,
     rtc_drift_s,
+    // v2.10.x — power factor passthrough (additive); aggregator's _accum
+    // averages it into the 5-min row's `cosphi` column.
+    cosphi,
+    // v2.10.x — temperature passthrough (additive); aggregator's _accum
+    // averages it into the 5-min row's `temp_c` column. Already adjusted
+    // by -1 °C in services/inverter_engine.py for ISM-display parity.
+    temp_c,
   };
 }
 
