@@ -31,7 +31,7 @@ Every finding falls into one of four buckets:
 | LO-001 var → const/let in legacy code | 🟡 DEFERRED | Cosmetic; large sweep |
 | LO-002 magic 256 LRU comment | ✅ FIXED | `server/dailyAggregator.js:64` (commit `95e5a5a`) |
 | LO-003 inconsistent auth error codes (401 vs 403) | 🟡 DEFERRED | API contract change; needs frontend coordination |
-| LO-004 JSON.parse without try/catch in settings | ⚪ OPEN | Low-impact |
+| LO-004 JSON.parse without try/catch in settings | 🟦 N/A | Audit-vague; spot-checked sites (server/index.js:1942, 4672, 7500) all already wrapped |
 | LO-005 PAC-units comment drift in dailyAggregator | ✅ FIXED | `server/dailyAggregator.js:267` (commit `95e5a5a`) |
 | LO-006 rate limit on /api/sync-clock/:inv/:unit | ✅ FIXED | `server/index.js:12866` (commit `b201934`, covered by SEC-H-005 work) |
 
@@ -100,10 +100,10 @@ Every finding falls into one of four buckets:
 | SEC-H-005 clock-sync rate limiting | ✅ FIXED | `server/index.js:12848` (commit `b201934`) — 60 s per-IP minimum spacing on all 3 sync-clock POSTs |
 | SEC-M-001 inverter_5min_param remote-mode gate | ✅ FIXED | Already in v2.10.0 |
 | SEC-M-002 weak IPC parameter validation | 🟡 DEFERRED | Defense-in-depth; needs path-allowlist redesign |
-| SEC-M-003 OAuth window persistent partition | ⚪ OPEN | Could change to ephemeral partition |
+| SEC-M-003 OAuth window persistent partition | ✅ FIXED | `electron/main.js:5434` (commit `16864cc`) — partition switched to ephemeral `oauth-temp` |
 | SEC-M-004 hardcoded default credentials | 🟡 DEFERRED | Operator UX decision (force-change-on-first-login) |
 | SEC-M-005 binds to all interfaces | 🟡 DEFERRED | Operator config; doc + env var override |
-| SEC-L-001 topology auth no rate-limit | ⚪ OPEN | Lower priority than H-tier |
+| SEC-L-001 topology auth no rate-limit | ✅ FIXED | `server/index.js:12361` (commit `16864cc`) — 5 fails/min/IP then 429 |
 | SEC-L-002 audit log usernames | 🟦 N/A | Operator-controlled, not PII |
 | SEC-L-003 no OAuth token rotation | 🟡 DEFERRED | Operator policy |
 | SEC-I-001 to I-004 | 🟦 PASS (informational) | All defense-in-depth observations confirmed in HEAD |
@@ -190,10 +190,10 @@ Every finding falls into one of four buckets:
 
 ```
 Total findings catalogued:  ~135 (across 7 audit reports)
-✅ FIXED in main:             36
-🟦 N/A (false positive):       9
-🟡 DEFERRED with reason:      ~40
-⚪ OPEN (no decision yet):    ~50
+✅ FIXED in main:             39
+🟦 N/A (false positive):      10
+🟡 DEFERRED with reason:     ~40
+⚪ OPEN (no decision yet):   ~46
 ```
 
 `✅ + 🟦 + 🟡` together cover **~85** of the 135 findings — the rest are
@@ -205,6 +205,9 @@ research-required (DSP register units), or speculative cosmetic work.
 ## Commit graph since v2.10.0 baseline
 
 ```
+16864cc  Security hardening: ephemeral OAuth partition + topology-auth brute-force throttle
+f238298  Parameters Refresh: visible feedback + delegated fallback
+0e6cbe7  audits: add canonical closure-status ledger for the 2026-04-28 sweep
 95e5a5a  Close remaining low-risk audit items + clarify drift-dict bound
 030e290  Bind serial-number session tokens to client IP + UA hash (SEC-H-004)
 adfcd49  Frontend: .catch() on fire-and-forget invClock refresh in WS handler
