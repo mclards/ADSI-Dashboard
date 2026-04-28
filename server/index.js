@@ -12499,8 +12499,13 @@ app.post("/api/audit/counter-recovery", express.json(), (req, res) => {
  * GET /api/counter-state/all
  * Settings-page feed: per-unit counter state + derived health flags.
  * Read-only; no more sensitive than /api/live (which is already open).
+ * REMOTE MODE: Must proxy to gateway for inverter-local counter state table.
  */
 app.get("/api/counter-state/all", (req, res) => {
+  // Remote-mode proxy: counter state is gateway-local
+  if (isRemoteMode()) {
+    return proxyToRemoteGateway(req, res, "/api/counter-state/all");
+  }
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
@@ -12564,8 +12569,13 @@ app.get("/api/counter-state/all", (req, res) => {
  * Compact feed for the main-dashboard status chip (unauthenticated; same info
  * as /api/counter-state/all collapsed). Read-only — do not add auth gate here
  * because public/js/app.js polls this every 30 s from the main screen.
+ * REMOTE MODE: Must proxy to gateway for inverter-local counter state table.
  */
 app.get("/api/counter-state/summary", (req, res) => {
+  // Remote-mode proxy: counter state is gateway-local
+  if (isRemoteMode()) {
+    return proxyToRemoteGateway(req, res, "/api/counter-state/summary");
+  }
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
@@ -12621,8 +12631,13 @@ app.get("/api/counter-state/summary", (req, res) => {
 /**
  * GET /api/clock-sync-log
  * Paginated view of recent clock-sync attempts for the settings page.
+ * REMOTE MODE: Must proxy to gateway for inverter-local clock-sync log table.
  */
 app.get("/api/clock-sync-log", (req, res) => {
+  // Remote-mode proxy: clock-sync log is gateway-local
+  if (isRemoteMode()) {
+    return proxyToRemoteGateway(req, res, "/api/clock-sync-log");
+  }
   const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
   res.json({ ok: true, rows: getClockSyncLog(limit) });
 });
@@ -15377,8 +15392,11 @@ const SUBSTATION_15MIN_MS = 15 * 60 * 1000;
 
 function validateSubstationDate(dateStr) {
   if (!SUBSTATION_DATE_RE.test(dateStr)) return "Invalid date format (YYYY-MM-DD required).";
-  const d = new Date(dateStr + "T00:00:00+08:00");
-  if (isNaN(d.getTime())) return "Invalid date.";
+  // Use zonedDateTimeToUtcMs with WEATHER_TZ (Asia/Manila) for consistency.
+  // This ensures midnight is interpreted in the gateway's local timezone,
+  // not UTC or a hard-coded offset, and accounts for DST transitions correctly.
+  const midnightUtcMs = zonedDateTimeToUtcMs(dateStr, 0, 0, 0, WEATHER_TZ);
+  if (isNaN(midnightUtcMs)) return "Invalid date.";
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   if (dateStr > todayStr) return "Future dates not allowed.";
