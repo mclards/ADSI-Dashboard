@@ -1404,7 +1404,10 @@ async def rebuild_global_maps(cfg=None):
 NODE_API_BASE = os.environ.get("NODE_API_BASE", "http://127.0.0.1:3500")
 DISABLE_COUNTER_RECOVERY = os.environ.get("DISABLE_COUNTER_RECOVERY", "").strip() in ("1", "true", "yes")
 
-# Last-sync-attempt throttle for drift trigger: {(inv, unit) -> ts_ms}
+# Last-sync-attempt throttle for drift trigger: {(inv, unit) -> ts_ms}.
+# PY-C-004 audit flagged this as "unbounded growth" but keys are
+# (inverter_number, unit_number) integers — bounded by fleet size
+# (≤ 27 × 4 + 27 × 4 year-keys ≈ 216 entries max, not IPs). No TTL needed.
 _last_drift_sync_at = {}
 _DRIFT_SYNC_COOLDOWN_MS = 4 * 3600 * 1000    # 4 h
 _DRIFT_TRIGGER_THRESHOLD_S = 3600.0          # 1 h — overrideable by Node setting

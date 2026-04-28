@@ -531,7 +531,11 @@ function integratePacToday(parsed) {
             `clamped to 0 and re-anchored ` +
             `(prev=${prevPythonKwh.toFixed(3)} new=${pythonKwh.toFixed(3)})`,
         });
-      } catch {}
+      } catch (err) {
+        // MD-001: surface audit-log write failures so we don't silently lose
+        // the recovery_seed_clip event when the DB is busy or read-only.
+        console.warn("[poller] failed to write recovery_seed_clip audit:", err?.message || err);
+      }
     }
     // appliedDelta is the raw delta when within ceiling, 0 when tripped.
     // Re-anchoring happens unconditionally via the pacIntegratorState update

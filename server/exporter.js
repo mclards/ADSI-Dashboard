@@ -2965,8 +2965,14 @@ async function exportDailyData({ inverter, date }) {
     let pacIntegratedKwh = 0;        // running sum for the day total
     let firstParce = null;            // for parcE delta day total
     let lastParce = null;
+    // MD-004: defensive ceiling. Poller already clamps pac_w to ≤ 260_000 W
+    // per inverter, but if a future change lets a corrupt value through,
+    // exporting an inflated kWh into XLSX is a hard-to-spot data error.
+    // 260_000 W matches dailyAggregator's _RANGES.pac.hi.
+    const PAC_W_EXPORT_CEILING = 260_000;
     const sheetRows = dbRows.map((r) => {
-      const pacW = Number(r.pac_w || 0);
+      const pacWRaw = Number(r.pac_w || 0);
+      const pacW = pacWRaw > PAC_W_EXPORT_CEILING ? PAC_W_EXPORT_CEILING : pacWRaw;
       const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0;
       pacIntegratedKwh += partialKwh;
       const curParce = Number(r.parce_kwh);

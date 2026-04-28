@@ -61,6 +61,9 @@ const TS_FUTURE_TOLERANCE_MS = 5 * 60_000;
 // Remember the last 256 reaped (ip|unit|date|slot) keys so a stale sample
 // for an already-persisted slot can't sneak in and clobber it. Map keeps
 // insertion order so we can prune the oldest entry without a queue.
+// LO-002: 256 entries ≈ 4.7 hours of history at the worst-case fleet rate
+// (27 inverters × 4 nodes × 1 reap/5 min). Anything older than that has
+// already been written to the persistent store and is safe to forget.
 const REAPED_REMEMBER_LIMIT = 256;
 const reapedSlots = new Map();   // key="ip|unit|date|slot" -> reapedAtMs
 
@@ -264,7 +267,10 @@ function _accum(b, row) {
   if (iac1 != null) { b.sumIac1 += iac1; b.nIac1++; touched++; }
   if (iac2 != null) { b.sumIac2 += iac2; b.nIac2++; touched++; }
   if (iac3 != null) { b.sumIac3 += iac3; b.nIac3++; touched++; }
-  if (pac != null)  { b.sumPac += pac; b.nPac++; touched++; }   // poller.parseRow already scaled deca-watts → watts
+  // pac is already in WATTS here — poller.parseRow:596 multiplied raw
+  // deciWatts by 10. Do NOT multiply again. Re-scaling here was the
+  // 10× pac_w regression in v2.10.0-beta.1..4 (audits/2026-04-28/pac-w-decascale-fix.md).
+  if (pac != null)  { b.sumPac += pac; b.nPac++; touched++; }
   if (cosphi != null) { b.sumCos += cosphi; b.nCos++; touched++; }
   if (fac != null)  { b.sumFreq += fac; b.nFreq++; touched++; }
   if (tempC != null){ b.sumTemp += tempC; b.nTemp++; touched++; }
