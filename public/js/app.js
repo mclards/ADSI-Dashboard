@@ -14232,11 +14232,50 @@ function initAllParamsPage() {
   _paramSyncLiveTimer();
 }
 
+function _paramOnRefreshClick(ev) {
+  if (ev && ev._paramHandled) return;
+  if (ev) ev._paramHandled = true;
+  // Always log so DevTools can confirm the click reached us even when the
+  // payload happens to be identical to the previous fetch (in which case the
+  // table looks unchanged and the operator thinks "nothing happened").
+  console.info("[params] refresh click — inverter=%s date=%s",
+    ParamPageUI.inverter, $("paramDate")?.value);
+  if (ev?.target) {
+    // Visual signal so the operator can see SOMETHING happened on click,
+    // independent of whether the data actually changed since the last fetch.
+    const btn = ev.target.closest("#btnParamRefresh") || $("btnParamRefresh");
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      const icon = btn.querySelector(".mdi-refresh");
+      if (icon) icon.classList.add("mdi-spin");
+    }
+  }
+  _paramFetchAndRender({ silent: false, force: true, fromButton: true })
+    .finally(() => {
+      const btn = $("btnParamRefresh");
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove("is-loading");
+        const icon = btn.querySelector(".mdi-refresh");
+        if (icon) icon.classList.remove("mdi-spin");
+      }
+    });
+}
+
 function _paramWireOnce() {
   $("paramInv")?.addEventListener("change", _paramOnInverterChange);
   $("paramDate")?.addEventListener("change", _paramOnDateChange);
-  $("btnParamRefresh")?.addEventListener("click", () => {
-    _paramFetchAndRender({ silent: false, force: true });
+  $("btnParamRefresh")?.addEventListener("click", _paramOnRefreshClick);
+  // Defensive: also wire a delegated listener so if anything ever rebuilds
+  // the toolbar DOM the click still routes correctly (the static binding
+  // above would orphan onto the detached node otherwise).
+  document.addEventListener("click", (ev) => {
+    const btn = ev.target?.closest?.("#btnParamRefresh");
+    if (btn && !ev._paramHandled) {
+      ev._paramHandled = true;
+      _paramOnRefreshClick(ev);
+    }
   });
 }
 
@@ -14388,7 +14427,16 @@ function _paramSetActiveSlave(slave) {
 
 async function _paramFetchAndRender(options = {}) {
   const inv = ParamPageUI.inverter;
-  if (!inv) { _paramShowBlank(true); return; }
+  const fromButton = options?.fromButton === true;
+  if (!inv) {
+    _paramShowBlank(true);
+    if (fromButton) {
+      // Operator clicked Refresh without an inverter selected — explicit
+      // feedback so they know the click was received.
+      showToast?.("Pick an inverter first to view its parameter log.", "warning", 3000);
+    }
+    return;
+  }
   const date = sanitizeDateInputValue($("paramDate")?.value || "") || today();
   ParamPageUI.date = date;
   ParamPageUI.isToday = (date === today());
@@ -14438,6 +14486,17 @@ async function _paramFetchAndRender(options = {}) {
     }
     _paramUpdateBadges();
     _paramSyncLiveTimer();
+    if (fromButton) {
+      // Explicit success feedback for the manual Refresh click. Reports the
+      // total row count across slaves so the operator can see the click
+      // actually fetched fresh data (otherwise an unchanged table looks
+      // identical to the prior render and feels like "nothing happened").
+      let totalRows = 0;
+      for (const entry of ParamPageUI.rowsBySlave.values()) {
+        totalRows += entry?.rows?.length || 0;
+      }
+      showToast?.(`Refreshed (${totalRows} rows)`, "success", 1800);
+    }
   } catch (err) {
     if (reqId !== ParamPageUI.reqId) return;
     if (!silent) {
