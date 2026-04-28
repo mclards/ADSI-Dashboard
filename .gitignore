@@ -89,3 +89,10 @@ server/ffmpeg/*.zip
 # OS
 .DS_Store
 Thumbs.db
+
+# Research / reverse-engineering scratch (per dirty-code-audit 2026-04-28)
+/_*.py
+/_spike/
+/_ism/
+/ism_frames.txt
+/release-notes-v*.md

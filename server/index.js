@@ -176,6 +176,20 @@ app.use((err, req, res, next) => {
   }
   return next(err);
 });
+
+// Block external callers from -internal endpoints (Python loopback only).
+app.use((req, res, next) => {
+  const path = String(req.path || "");
+  if (path.endsWith("-internal") || path.includes("-internal/")) {
+    const ip = req.ip || req.connection?.remoteAddress || "";
+    const isLoopback = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    if (!isLoopback) {
+      return res.status(403).json({ ok: false, error: "internal endpoint" });
+    }
+  }
+  next();
+});
+
 const staticNoCache = {
   etag: false,
   lastModified: false,
@@ -12410,6 +12424,7 @@ function computeSolarWindowGapRatio(dateKey, nowMs = Date.now()) {
  * GET /api/counter-baseline/:date_key
  * Read-only internal endpoint consumed by the Python engine on startup.
  * No auth gate — localhost only by bind.
+ * REMOTE MODE: Must proxy to gateway for inverter-local counter baseline table.
  *
  * Response (v2.9.1):
  *   {
@@ -12425,6 +12440,10 @@ function computeSolarWindowGapRatio(dateKey, nowMs = Date.now()) {
  *   }
  */
 app.get("/api/counter-baseline/:date_key", (req, res) => {
+  // Remote-mode proxy: counter baseline is gateway-local
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
   const dateKey = String(req.params.date_key || "").slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
     return res.status(400).json({ ok: false, error: "date_key must be YYYY-MM-DD" });
@@ -12868,7 +12887,18 @@ app.post(
 // v2.9.0 — the inverter-clock admin surface now lives in Settings →
 // "Inverter Clocks" section. The /admin/inverter-clock route is kept as a
 // compatibility redirect so any bookmarked link lands on the right place.
+// REMOTE MODE: Must proxy to gateway for inverter-local clock state table.
 app.get("/admin/inverter-clock", (req, res) => {
+  // Remote-mode proxy: redirect to gateway origin
+  if (isRemoteMode()) {
+    const base = getRemoteGatewayBaseUrl();
+    if (!base) {
+      return res
+        .status(503)
+        .json({ ok: false, error: "Remote gateway URL is not configured." });
+    }
+    return res.redirect(302, `${base}/admin/inverter-clock`);
+  }
   res.redirect(302, "/#settings-inverter-clock");
 });
 
@@ -16441,7 +16471,8 @@ app.get("/api/alarms", (req, res) => {
     inverter && inverter !== "all"
       ? db
           .prepare(
-            "SELECT * FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000",
+            `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+               FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
           )
           .all(Number(inverter), s, e)
       : stmts.getAlarmsRange.all(s, e);

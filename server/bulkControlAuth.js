@@ -113,8 +113,17 @@ function isValidPlantWideAuthSession(value, nowMs = Date.now(), req) {
   // Bound session: require a request and matching fingerprint (fail-closed).
   const callerBindings = _bindingsFromReq(req);
   if (!callerBindings) return false;
-  if (entry.bindings.ip && entry.bindings.ip !== callerBindings.ip) return false;
-  if (entry.bindings.uaHash && entry.bindings.uaHash !== callerBindings.uaHash) return false;
+  // Use timing-safe comparison to prevent side-channel attacks on IP + UA hash.
+  if (entry.bindings.ip) {
+    const a = Buffer.from(entry.bindings.ip);
+    const b = Buffer.from(callerBindings.ip);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  }
+  if (entry.bindings.uaHash) {
+    const a = Buffer.from(entry.bindings.uaHash);
+    const b = Buffer.from(callerBindings.uaHash);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  }
   return true;
 }
 
