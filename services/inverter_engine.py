@@ -977,9 +977,14 @@ async def detect_units_async(ip):
 # -------------------------------------------------
 
 def _u32_hi_lo(regs, off):
-    """UInt32 decode for Ingeteam big-endian word-pair (high word first)."""
+    """UInt32 decode for Ingeteam big-endian word-pair (high word first).
+
+    Raises ValueError on a truncated frame so callers detect the gap instead of
+    silently consuming a zero — corrupted Etotal/parcE during crash-recovery
+    seed would reset kwh_today on restart.
+    """
     if off + 1 >= len(regs):
-        return 0
+        raise ValueError(f"truncated frame: need {off + 2} regs, got {len(regs)}")
     a = regs[off] or 0
     b = regs[off + 1] or 0
     return ((a & 0xFFFF) << 16) | (b & 0xFFFF)
@@ -1080,9 +1085,13 @@ async def read_fast_async(client, unit, ip):
     rtc_ms      = int(rtc_dt.timestamp() * 1000) if rtc_dt else None
     rtc_drift_s = round((rtc_ms - now_ms) / 1000.0, 2) if rtc_ms is not None else None
 
-    alarm_32   = _u32_hi_lo(regs, 6)
-    etotal_kwh = _u32_hi_lo(regs, 0)
-    parce_kwh  = _u32_hi_lo(regs, 58)
+    try:
+        alarm_32   = _u32_hi_lo(regs, 6)
+        etotal_kwh = _u32_hi_lo(regs, 0)
+        parce_kwh  = _u32_hi_lo(regs, 58)
+    except ValueError as ve:
+        print(f"[POLL] {ip} unit {unit} truncated frame, dropping: {ve}")
+        return None
     fac_hz     = round((reg(19) or 0) / 100.0, 2)
 
     # v2.10.x All Parameters Data — additional fields needed by the
@@ -1673,8 +1682,12 @@ async def seed_pac_from_baseline():
             if not regs:
                 continue
 
-            cur_etotal = _u32_hi_lo(regs, 0)
-            cur_parce  = _u32_hi_lo(regs, 58)
+            try:
+                cur_etotal = _u32_hi_lo(regs, 0)
+                cur_parce  = _u32_hi_lo(regs, 58)
+            except ValueError as ve:
+                print(f"[RECOVERY] {ip} unit {unit} truncated frame, skipping seed: {ve}")
+                continue
             _server_year = time.localtime().tm_year
             rtc_dt, rtc_valid = _rtc_from_regs(regs, server_year=_server_year)
 

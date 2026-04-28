@@ -67,8 +67,11 @@ class HardwareCounterDecodeTests(unittest.TestCase):
         self.assertEqual(self.ns["_u32_hi_lo"](regs, 0), 0)
 
     def test_u32_decode_out_of_range(self):
+        # PY-C-003: truncated frames now raise instead of returning a silent
+        # zero — crash-recovery seed must skip the unit, not corrupt kwh_today.
         regs = [0] * 10
-        self.assertEqual(self.ns["_u32_hi_lo"](regs, 58), 0)
+        with self.assertRaises(ValueError):
+            self.ns["_u32_hi_lo"](regs, 58)
 
     def test_alarm32_composite(self):
         """A-T3: reg(6)=0x1234, reg(7)=0x5678 → alarm_32 == 0x12345678."""
