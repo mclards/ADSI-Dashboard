@@ -13641,6 +13641,7 @@ app.post(
           oldSerial: upstream.serial,
           fmt: upstream.serial_format || "motorola",
           actedBy,
+          req,
         });
         rows.push({
           slave,
@@ -13746,6 +13747,7 @@ app.get(
       oldSerial: upstream.serial,
       fmt: upstream.serial_format || fmt,
       actedBy: "OPERATOR",
+      req,
     });
 
     res.json({
@@ -13811,7 +13813,7 @@ app.post(
     }
 
     // ── Session-token gate ─────────────────────────────────────────
-    const sess = serialNumber.consumeSession(sessionToken, { inverterIp: ip, slave });
+    const sess = serialNumber.consumeSession(sessionToken, { inverterIp: ip, slave, req });
     if (!sess.ok) {
       return res.status(403).json({
         ok: false, error: `session check failed: ${sess.error}`,

@@ -22,6 +22,7 @@
 
 const crypto = require("crypto");
 const { lookupMotiveLabel } = require("./motiveLabels");
+const { bindingsFromReq } = require("./bulkControlAuth");
 
 // Session token TTL — operator must issue Send within this window.
 const SESSION_TTL_MS = 5 * 60 * 1000;
@@ -73,9 +74,13 @@ function _purgeExpiredSessions() {
   }
 }
 
-function mintSession({ inverterIp, slave, oldSerial, fmt, actedBy }) {
+function mintSession({ inverterIp, slave, oldSerial, fmt, actedBy, req }) {
   _purgeExpiredSessions();
   const token = crypto.randomBytes(16).toString("hex");
+  // SEC-H-004 — bind the session to the requesting client (IP + UA hash) so
+  // captured tokens cannot be replayed from a different network segment.
+  // Mirrors the binding pattern used by issuePlantWideAuthSession.
+  const bindings = req ? bindingsFromReq(req) : null;
   _sessions.set(token, {
     inverterIp: String(inverterIp),
     slave: Number(slave),
@@ -83,11 +88,28 @@ function mintSession({ inverterIp, slave, oldSerial, fmt, actedBy }) {
     fmt: String(fmt || "auto"),
     actedBy: String(actedBy || ""),
     mintedAt: Date.now(),
+    bindings,
   });
-  return { token, expiresAt: Date.now() + SESSION_TTL_MS };
+  return { token, expiresAt: Date.now() + SESSION_TTL_MS, bound: !!bindings };
 }
 
-function consumeSession(token, { inverterIp, slave }) {
+function _bindingsMatch(a, b) {
+  if (!a) return true; // unbound session — backward compatible
+  if (!b) return false;
+  if (a.ip) {
+    const ba = Buffer.from(a.ip);
+    const bb = Buffer.from(b.ip);
+    if (ba.length !== bb.length || !crypto.timingSafeEqual(ba, bb)) return false;
+  }
+  if (a.uaHash) {
+    const ba = Buffer.from(a.uaHash);
+    const bb = Buffer.from(b.uaHash);
+    if (ba.length !== bb.length || !crypto.timingSafeEqual(ba, bb)) return false;
+  }
+  return true;
+}
+
+function consumeSession(token, { inverterIp, slave, req }) {
   _purgeExpiredSessions();
   const sess = _sessions.get(String(token || ""));
   if (!sess) return { ok: false, error: "session_not_found" };
@@ -97,6 +119,14 @@ function consumeSession(token, { inverterIp, slave }) {
   if (Date.now() - sess.mintedAt > SESSION_TTL_MS) {
     _sessions.delete(String(token));
     return { ok: false, error: "session_expired" };
+  }
+  // SEC-H-004 — verify the caller fingerprint matches what minted the token.
+  if (sess.bindings) {
+    const callerBindings = req ? bindingsFromReq(req) : null;
+    if (!_bindingsMatch(sess.bindings, callerBindings)) {
+      _sessions.delete(String(token));
+      return { ok: false, error: "session_binding_mismatch" };
+    }
   }
   // One-shot: token consumed on Send so it can't be replayed.
   _sessions.delete(String(token));

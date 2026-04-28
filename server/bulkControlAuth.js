@@ -138,5 +138,6 @@ module.exports = {
   isValidPlantWideAuthKey,
   issuePlantWideAuthSession,
   isValidPlantWideAuthSession,
+  bindingsFromReq: _bindingsFromReq,
   __resetForTests,
 };
