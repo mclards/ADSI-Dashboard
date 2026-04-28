@@ -1483,6 +1483,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fecs_mem_target ON forecast_error_compare_slot(usable_for_error_memory, target_date DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_fecs_target_run_slot ON forecast_error_compare_slot(target_date, run_audit_id, slot);
   CREATE INDEX IF NOT EXISTS idx_alarms_stop_reason_id ON alarms(stop_reason_id) WHERE stop_reason_id IS NOT NULL;
+  -- DB-H-003: per-(inverter, unit, date_key) lookups on counter baselines.
+  CREATE INDEX IF NOT EXISTS idx_icb_inv_unit_date
+    ON inverter_counter_baseline(inverter, unit, date_key);
+  -- DB-H-005: secondary index for bulk ops on inverter_5min_param (the table
+  -- is WITHOUT ROWID with composite PK, so cleanup by (ip, slave) needs help).
+  CREATE INDEX IF NOT EXISTS idx_p5m_inv_slave
+    ON inverter_5min_param(inverter_ip, slave);
+  -- DB-L-011: per-(inverter, unit) alarm history queries.
+  CREATE INDEX IF NOT EXISTS idx_a_inv_unit_ts
+    ON alarms(inverter, unit, ts DESC);
 `);
 
 const NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
