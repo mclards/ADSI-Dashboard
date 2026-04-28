@@ -12843,10 +12843,41 @@ const _proxyClockSyncInRemote = (req, res, next) => {
   return next();
 };
 
+// SEC-H-005 — per-IP rate limit on clock-sync POSTs.  Each clock sync sends
+// up to 108 Modbus FC16 frames (27 inverters × 4 nodes) over the shared bus,
+// so unbounded calls would saturate RS485 and starve normal polling.  60 s
+// minimum spacing per origin IP per sync-clock route.
+const _clockSyncLastTs = new Map(); // ip -> last ts (ms)
+const CLOCK_SYNC_MIN_SPACING_MS = 60_000;
+const _rateLimitClockSync = (req, res, next) => {
+  const ip = String(req.ip || req.connection?.remoteAddress || "").trim();
+  if (!ip) return next(); // can't bind a key — let it through
+  const now = Date.now();
+  const last = _clockSyncLastTs.get(ip) || 0;
+  if (now - last < CLOCK_SYNC_MIN_SPACING_MS) {
+    const retryAfterS = Math.ceil((CLOCK_SYNC_MIN_SPACING_MS - (now - last)) / 1000);
+    res.setHeader("Retry-After", String(retryAfterS));
+    return res.status(429).json({
+      ok: false,
+      error: `clock-sync rate-limited; retry in ${retryAfterS}s`,
+    });
+  }
+  _clockSyncLastTs.set(ip, now);
+  // best-effort cleanup so the map can't grow unbounded
+  if (_clockSyncLastTs.size > 256) {
+    const cutoff = now - 5 * 60_000;
+    for (const [k, v] of _clockSyncLastTs) {
+      if (v < cutoff) _clockSyncLastTs.delete(k);
+    }
+  }
+  return next();
+};
+
 app.post(
   "/api/sync-clock/inverter/:inverter",
   express.json(),
   _proxyClockSyncInRemote,
+  _rateLimitClockSync,
   (req, res) => {
     const inv = Number(req.params.inverter);
     if (!inv) {
@@ -12861,6 +12892,7 @@ app.post(
   "/api/sync-clock/:inverter/:unit",
   express.json(),
   _proxyClockSyncInRemote,
+  _rateLimitClockSync,
   _requireBulkAuth,
   (req, res) => {
     const inv = Number(req.params.inverter);
@@ -12877,6 +12909,7 @@ app.post(
   "/api/sync-clock/broadcast",
   express.json(),
   _proxyClockSyncInRemote,
+  _rateLimitClockSync,
   _requireBulkAuth,
   (req, res) => {
     const trigger = String(req.body?.trigger || "operator");
@@ -19423,6 +19456,20 @@ const httpServer = app.listen(PORT, () => {
   httpServer.keepAliveTimeout = 30000;   // 30 s — well above client keepAlive
   httpServer.headersTimeout = 35000;     // must be > keepAliveTimeout per Node docs
   console.log(`[Inverter] Server on http://localhost:${PORT}`);
+  // MD-007 — warn if the server's local timezone is not consistent with the
+  // plant's timezone (Asia/Manila → UTC+8 = -480 minutes).  Day-rollover,
+  // solar window, and 5-min slot binning all rely on local time matching the
+  // plant.  If TZ is set to UTC the dashboard silently mis-bins every slot.
+  try {
+    const tzOffset = -new Date().getTimezoneOffset();
+    if (tzOffset !== 480) {
+      console.warn(
+        `[Inverter] WARNING: server timezone offset is ${tzOffset} minutes; ` +
+          `expected 480 (Asia/Manila). Day-rollover and solar-window ` +
+          `boundaries may be wrong. Set the OS timezone to Asia/Manila.`,
+      );
+    }
+  } catch (_) { /* noop */ }
   // v2.8.10 Phase C: record an audit_log row for any abnormal boot-time
   // integrity state. Two distinct events:
   //   - restored  → corrupt main DB was auto-restored from a backup slot
