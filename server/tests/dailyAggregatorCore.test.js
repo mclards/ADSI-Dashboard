@@ -56,7 +56,7 @@ function makeFrame(overrides = {}) {
     unit: 1,
     online: 1,
     ts: Date.now(),
-    pac: 100,           // 100 deca-watts = 1000 W
+    pac: 1000,          // 1000 W (poller.parseRow has already scaled reg 18 deca-watts → watts)
     vdc: 800,
     idc: 5,
     vac1: 230, vac2: 231, vac3: 229,
@@ -226,12 +226,12 @@ function run() {
     const tsA = slotStart + 30_000;          // 30 s into slot N
     const tsB = slotStart + 5 * 60_000 + 30_000; // 30 s into slot N+1
     const slotA = _internal._slotIndex(_internal._localParts(tsA));
-    dailyAggregator.ingestLiveSample(makeFrame({ ts: tsA, pac: 100 }));
+    dailyAggregator.ingestLiveSample(makeFrame({ ts: tsA, pac: 1000 }));
     assert.strictEqual(insertedRows.length, 0, "first frame: no flush yet");
-    dailyAggregator.ingestLiveSample(makeFrame({ ts: tsB, pac: 200 }));
+    dailyAggregator.ingestLiveSample(makeFrame({ ts: tsB, pac: 2000 }));
     assert.strictEqual(insertedRows.length, 1, "previous slot flushed on rollover");
     assert.strictEqual(insertedRows[0].slot_index, slotA);
-    assert.strictEqual(insertedRows[0].pac_w, 1000, "100 deca-W * 10 = 1000 W");
+    assert.strictEqual(insertedRows[0].pac_w, 1000, "single-sample average = 1000 W (input is already watts)");
     assert.strictEqual(_internal.buckets.size, 1);
     const [b] = _internal.buckets.values();
     assert.strictEqual(b.slotIndex, slotA + 1, "now in slot N+1");
@@ -354,22 +354,47 @@ function run() {
     const tsB = slotStart + 30_000;
     const tsFlush = slotStart + 5 * 60_000 + 5_000; // next slot
     dailyAggregator.ingestLiveSample(makeFrame({
-      ts: tsA, vdc: 800, idc: 5, pac: 100, alarm_32: 0x0001, parce_kwh: 1000,
+      ts: tsA, vdc: 800, idc: 5, pac: 1000, alarm_32: 0x0001, parce_kwh: 1000,
     }));
     dailyAggregator.ingestLiveSample(makeFrame({
-      ts: tsB, vdc: 820, idc: 6, pac: 120, alarm_32: 0x0010, parce_kwh: 1010,
+      ts: tsB, vdc: 820, idc: 6, pac: 1200, alarm_32: 0x0010, parce_kwh: 1010,
     }));
     dailyAggregator.ingestLiveSample(makeFrame({ ts: tsFlush }));
     const flushed = insertedRows[0];
     assert.strictEqual(flushed.vdc_v, 810, "(800+820)/2 = 810");
     assert.strictEqual(flushed.idc_a, 5.5, "(5+6)/2 = 5.5");
-    assert.strictEqual(flushed.pac_w, 1100, "((100+120)/2) * 10 deca-W = 1100 W");
+    assert.strictEqual(flushed.pac_w, 1100, "(1000+1200)/2 = 1100 W (input already watts)");
     assert.strictEqual(flushed.parce_kwh, 1010, "parcE is LATEST, not average");
     assert.strictEqual(flushed.inv_alarms, 0x0011, "alarms bitwise-OR across slot");
     assert.strictEqual(flushed.sample_count, 2, "two contributing samples");
   }
 
-  console.log("dailyAggregatorCore.test.js — all 18 scenarios passed.");
+  // ── 19. getCurrentBucket exposes slot_start_ms for live time-fraction ────
+  // The Parameters totals strip uses live.slot_start_ms to scale the live
+  // bucket's contribution by elapsed-within-slot, eliminating the 5-min
+  // wobble where a slot rollover used to add a full slot's energy at once.
+  {
+    resetState();
+    const now = Date.now();
+    const parts = _internal._localParts(now);
+    const slotStartMin = Math.floor(parts.minute / 5) * 5;
+    const slotStartMs = new Date(parts.year, parts.month - 1, parts.day,
+                                 parts.hour, slotStartMin, 0, 0).getTime();
+    const tsMid = slotStartMs + 60_000;   // 1 min into the slot
+    dailyAggregator.ingestLiveSample(makeFrame({ ts: tsMid, pac: 50_000 }));
+    const live = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.ok(live, "getCurrentBucket returns the in-progress bucket");
+    assert.strictEqual(live.is_complete, 0, "in-progress, not complete");
+    assert.strictEqual(live.pac_w, 50_000, "pac_w averaged in watts (post-fix)");
+    assert.strictEqual(live.slot_start_ms, slotStartMs,
+      "slot_start_ms reconstructs the local-wall-clock slot boundary");
+    // Idempotent — calling twice returns the same slot_start_ms even though
+    // wall-clock time has advanced.
+    const live2 = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.strictEqual(live2.slot_start_ms, slotStartMs, "slot_start_ms is anchored to slot, not query time");
+  }
+
+  console.log("dailyAggregatorCore.test.js — all 19 scenarios passed.");
 }
 
 run();

@@ -1605,6 +1605,40 @@ if (Number(pendingMainDbFinalizeResult?.failed || 0) > 0) {
   );
 }
 
+// One-shot repair for the v2.10.0-beta.1..4 dailyAggregator double-scale bug.
+// Every row in inverter_5min_param written before the 2026-04-28 fix has
+// pac_w stored 10× too high (parseRow already converted deca-W → W, then the
+// aggregator re-multiplied by 10). The settings flag makes this idempotent —
+// once `pac_w_decascale_repaired` is set, subsequent boots skip the UPDATE
+// even if the operator restores from a partially-repaired backup. See
+// audits/2026-04-28/pac-w-decascale-fix.md for the full forensic trail.
+try {
+  const flagRow = db.prepare(`SELECT value FROM settings WHERE key = 'pac_w_decascale_repaired'`).get();
+  if (flagRow?.value !== "1") {
+    const result = db.prepare(`
+      UPDATE inverter_5min_param
+         SET pac_w = CAST(ROUND(pac_w / 10.0) AS INTEGER)
+       WHERE pac_w IS NOT NULL AND pac_w > 0
+    `).run();
+    db.prepare(`
+      INSERT INTO settings(key, value, updated_ts) VALUES('pac_w_decascale_repaired', '1', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts
+    `).run(Date.now());
+    try {
+      db.prepare(`
+        INSERT INTO audit_log(ts, operator, inverter, node, action, scope, result, reason)
+        VALUES (?, 'SYSTEM', 0, 0, 'pac_w_decascale_repair', 'global', 'ok', ?)
+      `).run(
+        Date.now(),
+        `Repaired ${result.changes} rows in inverter_5min_param: pac_w / 10 (post-v2.10.0-beta.4 dailyAggregator scale fix; bug was double ×10 from poller.parseRow + aggregator)`,
+      );
+    } catch (_) { /* audit_log may not be ready on first-ever boot */ }
+    console.log(`[pac_w_repair] repaired ${result.changes} rows in inverter_5min_param (one-shot)`);
+  }
+} catch (err) {
+  console.warn("[pac_w_repair] migration failed:", err?.message || err);
+}
+
 const stmts = {
   insertReading: db.prepare(`
     INSERT INTO readings (ts,inverter,unit,pac,kwh,alarm,online)

@@ -12978,7 +12978,15 @@ function _computeParamTotals(inv, ip, slave, dateLocal) {
         const live = dailyAggregator.getCurrentBucket(ip, slave);
         const w = Number(live?.pac_w);
         if (live && live.in_solar_window && Number.isFinite(w) && w > 0) {
-          pacKwh += w * 5 / 60 / 1000;
+          // Scale by elapsed-within-slot so the totals strip doesn't jump by a
+          // full slot's energy each rollover. Falls back to full-slot projection
+          // if slot_start_ms is missing (older bucket shape).
+          const slotStartMs = Number(live.slot_start_ms || 0);
+          const fullSlotMs = 5 * 60 * 1000;
+          const elapsedMs = slotStartMs > 0
+            ? Math.max(0, Math.min(fullSlotMs, Date.now() - slotStartMs))
+            : fullSlotMs;
+          pacKwh += w * elapsedMs / 3_600_000 / 1000;  // W × hours / 1000 = kWh
         }
       } catch (_) { /* ignore */ }
     }

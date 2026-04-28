@@ -174,7 +174,7 @@ const _RANGES = {
   idc:    [0, 1500],
   vac:    [0, 1000],          // any single-phase line voltage on this fleet
   iac:    [0, 5000],
-  pac:    [0, 1_000_000],     // per-unit deca-watts; 1 GW ceiling well above 250 kW × 4 nodes
+  pac:    [0, 260_000],       // per-unit watts; matches poller.parseRow safePac clamp (260 kW)
   cosphi: [-1.05, 1.05],
   fac:    [40, 65],           // 50 Hz / 60 Hz grids; outside this is a sensor fault
   tempC:  [-40, 150],         // industrial inverter envelope
@@ -264,7 +264,7 @@ function _accum(b, row) {
   if (iac1 != null) { b.sumIac1 += iac1; b.nIac1++; touched++; }
   if (iac2 != null) { b.sumIac2 += iac2; b.nIac2++; touched++; }
   if (iac3 != null) { b.sumIac3 += iac3; b.nIac3++; touched++; }
-  if (pac != null)  { b.sumPac += pac * 10; b.nPac++; touched++; }   // reg 18 is deca-watts
+  if (pac != null)  { b.sumPac += pac; b.nPac++; touched++; }   // poller.parseRow already scaled deca-watts → watts
   if (cosphi != null) { b.sumCos += cosphi; b.nCos++; touched++; }
   if (fac != null)  { b.sumFreq += fac; b.nFreq++; touched++; }
   if (tempC != null){ b.sumTemp += tempC; b.nTemp++; touched++; }
@@ -515,6 +515,11 @@ function getCurrentBucket(ip, slave) {
     sample_count: b.sampleCount,
     is_complete: 0,
     in_solar_window: _isSolarWindow(b.slotIndex) ? 1 : 0,
+    // Slot start in local-wall-clock ms — lets the totals strip scale the
+    // live bucket's contribution by elapsed-within-slot (avoids overstating
+    // PAC-INTEGRATED at slot start by projecting current avg through the
+    // entire 5-min window).
+    slot_start_ms: _slotEndMs(b.dateLocal, b.slotIndex) - SLOT_MIN * 60_000,
   };
 }
 
