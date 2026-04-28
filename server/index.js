@@ -12352,16 +12352,59 @@ const INVERTER_ENGINE_STOP_REASONS_URL = `${INVERTER_ENGINE_BASE_URL}/stop-reaso
 // v2.10.0 Slice C — Serial Number Read / Edit / Send through Python (FC11 + FC16).
 const INVERTER_ENGINE_SERIAL_URL = `${INVERTER_ENGINE_BASE_URL}/serial`;
 
+// SEC-L-001 — bounded brute-force throttle on topology auth.  Each origin
+// IP gets a small failure budget per minute; once exceeded we 429 with
+// Retry-After until the window rolls.  Successful auth resets the counter.
+// In-memory only; bounded cleanup keeps the map < 256 entries.
+const _topologyAuthFailures = new Map(); // ip -> { count, windowStart }
+const TOPOLOGY_AUTH_FAIL_LIMIT = 5;
+const TOPOLOGY_AUTH_WINDOW_MS = 60_000;
+
 // Admin/topology auth gate (reuses the `adsiM`/`adsiMM` pattern established
 // for /api/substation/* and topology UI access).
 function requireTopologyAuth(req, res, next) {
+  const ip = String(req.ip || req.connection?.remoteAddress || "").trim();
+  // Failure-budget check before we even look at the key.
+  if (ip) {
+    const entry = _topologyAuthFailures.get(ip);
+    const now = Date.now();
+    if (entry && now - entry.windowStart < TOPOLOGY_AUTH_WINDOW_MS &&
+        entry.count >= TOPOLOGY_AUTH_FAIL_LIMIT) {
+      const retryAfterS = Math.ceil(
+        (TOPOLOGY_AUTH_WINDOW_MS - (now - entry.windowStart)) / 1000,
+      );
+      res.setHeader("Retry-After", String(retryAfterS));
+      return res.status(429).json({
+        ok: false, error: `Too many failed attempts; retry in ${retryAfterS}s`,
+      });
+    }
+  }
   const key = String(
     req.headers["x-topology-key"] ||
       req.headers["x-substation-key"] ||
       req.query?.auth ||
       "",
   ).trim().toLowerCase();
-  if (!key) return res.status(401).json({ ok: false, error: "Authorization required." });
+  const recordFailure = () => {
+    if (!ip) return;
+    const now = Date.now();
+    const entry = _topologyAuthFailures.get(ip);
+    if (!entry || now - entry.windowStart >= TOPOLOGY_AUTH_WINDOW_MS) {
+      _topologyAuthFailures.set(ip, { count: 1, windowStart: now });
+    } else {
+      entry.count += 1;
+    }
+    if (_topologyAuthFailures.size > 256) {
+      const cutoff = now - TOPOLOGY_AUTH_WINDOW_MS;
+      for (const [k, v] of _topologyAuthFailures) {
+        if (v.windowStart < cutoff) _topologyAuthFailures.delete(k);
+      }
+    }
+  };
+  if (!key) {
+    recordFailure();
+    return res.status(401).json({ ok: false, error: "Authorization required." });
+  }
   const m = new Date().getMinutes();
   const valid = new Set([
     `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
@@ -12369,7 +12412,11 @@ function requireTopologyAuth(req, res, next) {
   const mPrev = (m + 59) % 60;
   valid.add(`adsi${mPrev}`);
   valid.add(`adsi${String(mPrev).padStart(2, "0")}`);
-  if (!valid.has(key)) return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  if (!valid.has(key)) {
+    recordFailure();
+    return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  }
+  if (ip) _topologyAuthFailures.delete(ip); // success clears the budget
   next();
 }
 

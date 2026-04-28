@@ -5431,7 +5431,12 @@ ipcMain.handle("oauth-start", async (_, { authUrl }) => {
       title: "Cloud Backup — Connect Account",
       autoHideMenuBar: true,
       webPreferences: {
-        partition: "persist:oauth-temp",  // isolated session
+        // SEC-M-003: ephemeral partition (no `persist:` prefix) so OAuth
+        // tokens are NOT cached on disk under %APPDATA%\Electron\…\oauth-temp.
+        // The OAuth flow only needs the session for the popup's lifetime;
+        // making it persistent gave a future-XSS attacker a free token-
+        // disclosure surface.
+        partition: "oauth-temp",
         nodeIntegration: false,
         contextIsolation: true,
         webSecurity: true,
