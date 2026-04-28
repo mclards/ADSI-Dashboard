@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Inverter Dashboard Login</title>
+    <title>ADSI Inverter Dashboard Sign In</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
@@ -75,6 +75,7 @@
         padding: 16px;
       }
 
+      /* ── Background texture ──────────────────────────────────────────────── */
       body::before {
         content: "";
         position: fixed;
@@ -108,126 +109,218 @@
           radial-gradient(ellipse 50% 35% at 90% -5%, rgba(138, 118, 87, 0.11) 0%, transparent 55%);
       }
 
+      /* ── Login card ──────────────────────────────────────────────────────── */
       .login-shell {
         position: relative;
         z-index: 1;
-        width: min(92vw, 440px);
+        width: min(92vw, 400px);
         border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 20px 60px 16px;
-        background: linear-gradient(160deg, var(--surface) 0%, #091523 100%);
+        border-radius: 18px;
+        padding: 28px 36px 22px;
+        background:
+          linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent) 0%, transparent 40%),
+          linear-gradient(160deg, var(--surface) 0%, var(--bg2) 100%);
         box-shadow:
-          0 14px 38px rgba(0, 0, 0, 0.42),
-          inset 0 1px 0 rgba(148, 179, 230, 0.08);
+          0 20px 48px rgba(0, 0, 0, 0.44),
+          0 2px 8px rgba(0, 0, 0, 0.2),
+          inset 0 1px 0 rgba(148, 179, 230, 0.1);
+        overflow: hidden;
+      }
+
+      .login-shell::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto 0;
+        height: 2px;
+        background: linear-gradient(90deg, transparent 5%, var(--accent) 50%, transparent 95%);
+        opacity: 0.5;
+        pointer-events: none;
       }
 
       :root[data-theme="light"] .login-shell {
-        background: linear-gradient(160deg, #f3ebdd 0%, #e8ddca 100%);
+        background:
+          linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, transparent) 0%, transparent 40%),
+          linear-gradient(160deg, #f3ebdd 0%, #e8ddca 100%);
         box-shadow:
-          0 10px 24px rgba(77, 64, 43, 0.18),
+          0 16px 36px rgba(77, 64, 43, 0.18),
+          0 2px 6px rgba(77, 64, 43, 0.1),
           inset 0 1px 0 rgba(255, 255, 255, 0.6);
       }
 
+      /* ── Brand ───────────────────────────────────────────────────────────── */
       .brand {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 2px;
+      }
+
+      .brand-logo {
+        position: relative;
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 10px;
-        margin-bottom: 12px;
+      }
+
+      .brand-logo::before {
+        content: "";
+        position: absolute;
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 70%);
+        pointer-events: none;
       }
 
       .brand img {
-        width: 48px;
-        height: 48px;
+        position: relative;
+        width: 52px;
+        height: 52px;
         object-fit: contain;
+        filter: drop-shadow(0 2px 8px rgba(45, 126, 247, 0.2));
+      }
+
+      .brand-text {
+        text-align: center;
       }
 
       .brand-text h1 {
-        font-size: 13px;
+        font-size: 14px;
         font-weight: 800;
-        letter-spacing: 0.7px;
+        letter-spacing: 1.2px;
         color: var(--text);
         text-transform: uppercase;
       }
 
       .brand-text p {
-        margin-top: 2px;
-        font-size: 10px;
-        color: var(--text2);
-        letter-spacing: 0.4px;
+        margin-top: 3px;
+        font-size: 10.5px;
+        font-weight: 500;
+        color: var(--accent);
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
       }
 
+      /* ── Divider ─────────────────────────────────────────────────────────── */
+      .login-divider {
+        width: 48px;
+        height: 1px;
+        margin: 14px auto;
+        background: linear-gradient(90deg, transparent, var(--border2), transparent);
+      }
+
+      /* ── Section title ───────────────────────────────────────────────────── */
       .section-title {
-        margin: 36px 0 0px;
-        font-size: 16px;
+        margin: 0 0 14px;
+        font-size: 18px;
         font-weight: 700;
-        letter-spacing: 0.35px;
+        letter-spacing: 0.2px;
         color: var(--text);
         text-align: center;
+      }
+
+      /* ── Inputs ──────────────────────────────────────────────────────────── */
+      .field {
+        position: relative;
+        margin-top: 12px;
+      }
+
+      .field:first-of-type {
+        margin-top: 0;
+      }
+
+      .field-label {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        color: var(--text2);
+        text-transform: uppercase;
       }
 
       .inp {
-        margin-top: 20px;
         width: 100%;
-        height: 38px;
-        border: 1px solid var(--border2);
-        border-radius: 8px;
-        background: rgba(11, 20, 37, 0.88);
+        height: 42px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--bg) 80%, var(--surface));
         color: var(--text);
         font-family: "Sora", "Segoe UI", sans-serif;
         font-size: 13px;
-        padding: 0 12px;
+        font-weight: 500;
+        padding: 0 14px;
         text-align: center;
         outline: none;
-        transition: border-color 0.14s, box-shadow 0.14s;
+        transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
       }
 
-      .inp + .inp {
-        margin-top: 8px;
+      .inp::placeholder {
+        color: var(--text3);
+        font-weight: 400;
+      }
+
+      .inp:hover {
+        border-color: var(--border2);
+        background: color-mix(in srgb, var(--bg) 60%, var(--surface));
       }
 
       .inp:focus {
         border-color: var(--accent);
-        box-shadow: 0 0 0 2px rgba(45, 126, 247, 0.2);
+        background: color-mix(in srgb, var(--bg) 60%, var(--surface));
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
       }
 
       :root[data-theme="light"] .inp {
         background: rgba(249, 242, 229, 0.98);
         color: #2e2418;
-        border-color: #af9b7d;
+        border-color: #c0ae94;
+      }
+
+      :root[data-theme="light"] .inp:hover {
+        border-color: #a89575;
+        background: rgba(255, 249, 238, 0.99);
       }
 
       :root[data-theme="light"] .inp:focus {
         border-color: #2b67ad;
-        box-shadow: 0 0 0 2px rgba(43, 103, 173, 0.18);
+        box-shadow: 0 0 0 3px rgba(43, 103, 173, 0.14);
       }
 
+      /* ── Remember checkbox ───────────────────────────────────────────────── */
       .remember {
         display: flex;
         align-items: center;
-        gap: 7px;
+        justify-content: center;
+        gap: 8px;
         margin-top: 10px;
-        font-size: 12px;
+        font-size: 11.5px;
+        font-weight: 500;
         color: var(--text2);
         user-select: none;
+        cursor: pointer;
       }
 
       .remember input {
-        width: 14px;
-        height: 14px;
+        width: 15px;
+        height: 15px;
         accent-color: var(--accent);
+        cursor: pointer;
       }
 
+      /* ── Buttons ─────────────────────────────────────────────────────────── */
       .btn {
         width: 100%;
-        height: 38px;
+        height: 42px;
         border: 1px solid transparent;
-        border-radius: 8px;
+        border-radius: 10px;
         font-family: "Sora", "Segoe UI", sans-serif;
-        font-size: 13px;
+        font-size: 13.5px;
         font-weight: 700;
+        letter-spacing: 0.3px;
         cursor: pointer;
-        transition: filter 0.14s, transform 0.1s;
+        transition: filter 0.14s, transform 0.1s, box-shadow 0.18s;
       }
 
       .btn:active {
@@ -237,6 +330,7 @@
       .btn-primary {
         color: #fff;
         background: linear-gradient(135deg, var(--accent2), var(--accent));
+        box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 30%, transparent);
       }
 
       #loginBtn {
@@ -244,40 +338,61 @@
       }
 
       .btn-primary:hover {
-        filter: brightness(1.08);
+        filter: brightness(1.1);
+        box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 36%, transparent);
       }
 
+      /* ── Links ───────────────────────────────────────────────────────────── */
       .links {
-        margin-top: 12px;
-        font-size: 12px;
-        color: var(--text2);
-        display: flex;
-        justify-content: center;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
-      .links a {
-        color: #6fb0ff;
-        text-decoration: none;
-        cursor: pointer;
-      }
-
-      .links a:hover {
-        text-decoration: underline;
-      }
-
-      :root[data-theme="light"] .links a {
-        color: #2b67ad;
-      }
-
-      .footer {
         margin-top: 14px;
         text-align: center;
-        font-size: 11px;
+        font-size: 11.5px;
+        line-height: 1.8;
         color: var(--text3);
       }
 
+      .links a {
+        color: var(--text2);
+        text-decoration: none;
+        cursor: pointer;
+        transition: color 0.14s;
+      }
+
+      .links a:hover {
+        color: var(--accent);
+      }
+
+      .links .sep {
+        display: inline-block;
+        width: 3px;
+        height: 3px;
+        margin: 0 6px;
+        border-radius: 50%;
+        background: var(--text3);
+        vertical-align: middle;
+        opacity: 0.6;
+      }
+
+      :root[data-theme="light"] .links a {
+        color: #5b4a35;
+      }
+
+      :root[data-theme="light"] .links a:hover {
+        color: #2b67ad;
+      }
+
+      /* ── Footer ──────────────────────────────────────────────────────────── */
+      .footer {
+        margin-top: 14px;
+        text-align: center;
+        font-size: 10px;
+        font-weight: 500;
+        color: var(--text3);
+        letter-spacing: 0.3px;
+        opacity: 0.7;
+      }
+
+      /* ── Modal overlay ───────────────────────────────────────────────────── */
       #modal-bg,
       #reset-bg {
         display: none;
@@ -286,47 +401,63 @@
         z-index: 50;
         padding: 14px;
         background: rgba(2, 8, 16, 0.82);
-        backdrop-filter: blur(4px);
+        backdrop-filter: blur(6px);
         justify-content: center;
         align-items: center;
       }
 
+      :root[data-theme="light"] #modal-bg,
+      :root[data-theme="light"] #reset-bg {
+        background: rgba(180, 168, 148, 0.6);
+      }
+
       .modal {
-        width: min(92vw, 420px);
+        width: min(92vw, 380px);
         border: 1px solid var(--border2);
-        border-radius: 12px;
-        padding: 18px 24px;
-        background: linear-gradient(160deg, var(--surface) 0%, #091523 100%);
+        border-radius: 16px;
+        padding: 24px 28px;
+        background:
+          linear-gradient(180deg, color-mix(in srgb, var(--accent) 4%, transparent) 0%, transparent 30%),
+          linear-gradient(160deg, var(--surface) 0%, var(--bg2) 100%);
         box-shadow:
-          0 16px 34px rgba(0, 0, 0, 0.45),
+          0 20px 44px rgba(0, 0, 0, 0.48),
           inset 0 1px 0 rgba(148, 179, 230, 0.09);
       }
 
       :root[data-theme="light"] .modal {
         background: linear-gradient(160deg, #f3ebdd 0%, #e8ddca 100%);
         border-color: #b09a7a;
+        box-shadow: 0 16px 36px rgba(77, 64, 43, 0.22);
       }
 
       .modal h3 {
-        font-size: 14px;
-        margin-bottom: 10px;
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 16px;
         color: var(--text);
-        letter-spacing: 0.3px;
+        letter-spacing: 0.2px;
+        text-align: center;
       }
 
-      .modal .inp {
-        margin-bottom: 8px;
+      .modal .field {
+        margin-top: 10px;
+      }
+
+      .modal .field:first-of-type {
+        margin-top: 0;
       }
 
       .modal-actions {
         display: flex;
-        gap: 8px;
-        margin-top: 2px;
+        gap: 10px;
+        margin-top: 18px;
       }
 
       .modal-actions .btn {
         flex: 1;
         margin-top: 0;
+        height: 38px;
+        font-size: 12.5px;
       }
 
       .btn-outline {
@@ -340,69 +471,92 @@
         color: var(--text);
       }
 
+      /* ── Toast message ───────────────────────────────────────────────────── */
       .msg {
         position: fixed;
         left: 50%;
-        bottom: 22px;
+        bottom: 24px;
         transform: translateX(-50%);
-        padding: 9px 14px;
-        border-radius: 8px;
+        padding: 10px 18px;
+        border-radius: 10px;
         font-size: 12px;
-        font-weight: 700;
-        z-index: 30;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        z-index: 100;
         display: none;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
       }
 
       .msg.success {
-        background: #10b370;
+        background: linear-gradient(135deg, #0c9e62, #10b370);
         color: #fff;
       }
 
       .msg.error {
-        background: #d73c60;
+        background: linear-gradient(135deg, #c32e52, #e03560);
         color: #fff;
       }
 
+      /* ── Modal open blur ─────────────────────────────────────────────────── */
       body.modal-open .login-shell {
-        filter: blur(1.2px) saturate(0.85);
-        transform: scale(0.992);
-        transition: filter 0.12s ease, transform 0.12s ease;
+        filter: blur(2px) saturate(0.8);
+        transform: scale(0.988);
+        transition: filter 0.18s ease, transform 0.18s ease;
       }
     </style>
   </head>
   <body>
     <main class="login-shell">
       <div class="brand">
-        <img src="../assets/logo.png" alt="Inverter Dashboard" />
+        <div class="brand-logo">
+          <img src="../assets/logo.png" alt="ADSI Inverter Dashboard" />
+        </div>
         <div class="brand-text">
-          <h1>Inverter Dashboard</h1>
-          <p>Secure Access</p>
+          <h1>ADSI Inverter Dashboard</h1>
+          <p>Authorized Access</p>
         </div>
       </div>
 
-      <div class="section-title">Login</div>
-      <input id="username" class="inp" type="text" placeholder="Username" autofocus />
-      <input id="password" class="inp" type="password" placeholder="Password" />
-      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember Username & Password</label>
-      <button id="loginBtn" class="btn btn-primary">Login</button>
+      <div class="login-divider"></div>
+
+      <div class="section-title">Sign In</div>
+      <div class="field">
+        <label class="field-label" for="username">Username</label>
+        <input id="username" class="inp" type="text" placeholder="Username" autocomplete="username" autofocus />
+      </div>
+      <div class="field">
+        <label class="field-label" for="password">Password</label>
+        <input id="password" class="inp" type="password" placeholder="Password" autocomplete="current-password" />
+      </div>
+      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember credentials on this workstation</label>
+      <button id="loginBtn" class="btn btn-primary">Sign In</button>
 
       <div class="links">
-        <a id="changeUserPass">Change Username & Password</a>
-        <span>|</span>
-        <a id="resetPass">Reset via Auth Key</a>
+        <a id="changeUserPass">Update Username and Password</a>
+        <span class="sep"></span>
+        <a id="resetPass">Recover with Authorization Key</a>
       </div>
 
-      <div class="footer">© 2026 Engr. Clard Systems</div>
+      <div class="footer">ADSI Inverter Dashboard &middot; Authorized Workstation Access</div>
     </main>
 
     <div id="modal-bg">
       <div class="modal">
-        <h3>Change Username & Password</h3>
-        <input id="authKey" class="inp" type="password" placeholder="Enter Auth Key" />
-        <input id="newUsername" class="inp" type="text" placeholder="Enter New Username" />
-        <input id="newPassword" class="inp" type="password" placeholder="Enter New Password" />
+        <h3>Update Username and Password</h3>
+        <div class="field">
+          <label class="field-label" for="authKey">Authorization Key</label>
+          <input id="authKey" class="inp" type="password" placeholder="Authorization Key" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="newUsername">New Username</label>
+          <input id="newUsername" class="inp" type="text" placeholder="New Username" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="newPassword">New Password</label>
+          <input id="newPassword" class="inp" type="password" placeholder="New Password" autocomplete="off" />
+        </div>
         <div class="modal-actions">
-          <button id="saveChange" class="btn btn-primary">Save</button>
+          <button id="saveChange" class="btn btn-primary">Save Changes</button>
           <button id="cancelChange" class="btn btn-outline">Cancel</button>
         </div>
       </div>
@@ -410,10 +564,13 @@
 
     <div id="reset-bg">
       <div class="modal">
-        <h3>Reset Credentials to Default</h3>
-        <input id="resetAuthKey" class="inp" type="password" placeholder="Auth Key" />
+        <h3>Restore Default Administrator Access</h3>
+        <div class="field">
+          <label class="field-label" for="resetAuthKey">Authorization Key</label>
+          <input id="resetAuthKey" class="inp" type="password" placeholder="Authorization Key" autocomplete="off" />
+        </div>
         <div class="modal-actions">
-          <button id="resetSave" class="btn btn-primary">Reset</button>
+          <button id="resetSave" class="btn btn-primary">Restore Access</button>
           <button id="resetCancel" class="btn btn-outline">Cancel</button>
         </div>
       </div>
@@ -472,10 +629,10 @@
         async function doLogin() {
           const user = usernameInput.value.trim();
           const pass = passwordInput.value.trim();
-          if (!user || !pass) return showMsg("Please enter username and password", "error");
+          if (!user || !pass) return showMsg("Enter your username and password.", "error");
 
           const ok = await api.checkLogin(user, pass);
-          if (!ok) return showMsg("Invalid username or password", "error");
+          if (!ok) return showMsg("The sign-in details are not valid.", "error");
 
           if (rememberCheck.checked) {
             await api.saveRemembered({ username: user, password: pass, remember: true });
@@ -489,32 +646,32 @@
           const key = document.getElementById("authKey").value.trim();
           const newUser = document.getElementById("newUsername").value.trim();
           const newPass = document.getElementById("newPassword").value.trim();
-          if (!key || !newUser || !newPass) return showMsg("All fields required", "error");
+          if (!key || !newUser || !newPass) return showMsg("Complete all required fields.", "error");
 
           const ok = await api.changeUsernamePassword(key, newUser, newPass);
           closeLayer(modalBg);
           if (ok) {
             await api.clearRemembered();
-            showMsg("Username & Password updated");
+            showMsg("Sign-in credentials were updated.");
             resetLoginForm();
           } else {
-            showMsg("Invalid authentication key", "error");
+            showMsg("The authorization key is not valid.", "error");
           }
         }
 
         async function handleResetSave() {
           const key = document.getElementById("resetAuthKey").value.trim();
-          if (!key) return showMsg("Auth key required", "error");
+          if (!key) return showMsg("Enter the authorization key.", "error");
 
           const ok = await api.resetPassword(key);
           closeLayer(resetBg);
           if (ok) {
             await api.clearRemembered();
-            showMsg("Credentials reset to default: admin / 1234");
+            showMsg("Default administrator access has been restored. Update the credentials after sign-in.");
             resetLoginForm();
             return;
           }
-          showMsg("Invalid authentication key", "error");
+          showMsg("The authorization key is not valid.", "error");
         }
 
         document.getElementById("loginBtn").addEventListener("click", doLogin);

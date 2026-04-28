@@ -1,33 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
-from PyInstaller.utils.hooks import collect_all
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-
-datas = []
-binaries = []
-hiddenimports = []
-
-for pkg in (
-    "numpy",
-    "pandas",
-    "scipy",
-    "sklearn",
-    "joblib",
-    "requests",
-):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
 
 a = Analysis(
-    [os.path.join(ROOT_DIR, "ForecastCoreService.py")],
-    pathex=[ROOT_DIR],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    ['forecast_engine.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -43,14 +22,14 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="ForecastCoreService",
+    name='ForecastCoreService',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -1,18 +1,302 @@
 ﻿"use strict";
 /**
- * main.js - Electron entry point for ADSI Inverter Dashboard v2.0
+ * main.js - Electron entry point for ADSI Inverter Dashboard
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
+ *
+ * v2.8.10 (Phase A — power-loss resilience): the file begins with a tight
+ * "survival boot" block of Node core + electron core requires only. Any
+ * failure here must be caught and surfaced via the recovery dialog instead
+ * of letting Electron's default fatal handler show a cryptic SyntaxError.
+ * See audits/2026-04-17/power-loss-resilience-v2.8.10.md for rationale.
  */
 
+// ── A1. Survival boot — core only, zero third-party requires ──────────────────
 const { app, BrowserWindow, ipcMain, shell, globalShortcut, dialog, Menu } = require("electron");
 const path = require("path");
 const http = require("http");
 const https = require("https");
 const { spawn, execFile, execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const net = require("net");
 const crypto = require("crypto");
-const { autoUpdater } = require("electron-updater");
+
+// ── A1. Hoisted global fatal handlers ────────────────────────────────────────
+// Registered BEFORE any third-party require so a corrupt app.asar (torn
+// write from sudden power loss) cannot bypass our recovery path. If a
+// fatal error lands here during startup, we route to the recovery dialog.
+// If it lands later (after the app is up), we log-and-continue to keep
+// the renderer/tray alive (preserves the T6.7 fix behaviour).
+const _startupFailures = [];
+let _recoveryShown = false;
+function _routeStartupFatal(err, phase = "uncaught") {
+  const code = String(err?.code || "");
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") return;
+  try { console.error(`[main] Fatal ${phase}:`, err); } catch (_) { /* ignore */ }
+  if (_recoveryShown || app?.isReady?.()) return;
+  _recoveryShown = true;
+  try {
+    const { showRecoveryDialogAndExit } = require("./recoveryDialog");
+    const bootWhenReady = () => {
+      try {
+        showRecoveryDialogAndExit({
+          reason: `Startup ${phase}: ${err?.message || String(err)}`,
+          startupFailures: _startupFailures,
+        });
+      } catch (_) {
+        app.exit(1);
+      }
+    };
+    if (app.isReady()) bootWhenReady();
+    else app.once("ready", bootWhenReady);
+  } catch (_) {
+    app.exit(1);
+  }
+}
+process.on("uncaughtException", (err) => {
+  // Record reason synchronously BEFORE routing — _routeStartupFatal may
+  // trigger an app.exit path that races Windows shutdown. The shutdownReason
+  // module is safeRequired later so reference it lazily here.
+  try {
+    // eslint-disable-next-line global-require
+    require("./shutdownReason").recordShutdownReasonSync("uncaught-exception", {
+      initiator: "runtime",
+      extra: { errorMessage: String(err?.message || err), errorCode: String(err?.code || "") },
+    });
+  } catch (_) { /* module may not have loaded yet on torn-write boots */ }
+  _routeStartupFatal(err, "uncaughtException");
+});
+process.on("unhandledRejection", (reason) => _routeStartupFatal(reason, "unhandledRejection"));
+
+// ── A2. safeRequire — wrap every third-party require ─────────────────────────
+// Any module loaded from app.asar can throw SyntaxError on torn writes.
+// Capture the failure, continue booting, and let the integrity gate decide
+// whether to show the recovery dialog.
+function safeRequire(modulePath, fallback = null) {
+  try {
+    return require(modulePath);
+  } catch (err) {
+    console.error(`[main] require("${modulePath}") failed:`, err?.message || err);
+    _startupFailures.push({ module: modulePath, error: String(err?.message || err) });
+    return fallback;
+  }
+}
+
+// ── A3. Integrity gate — verify app.asar before touching third-party code ────
+const _integrityGate = safeRequire("./integrityGate", {
+  verifyAsarIntegrity: () => ({ ok: true, mode: "skipped", reason: "gate-missing" }),
+});
+// In dev mode (`npm start`) the app runs from source — there is no
+// `resources/app.asar` to verify. `app.isPackaged` is false in that case.
+// Skip the gate entirely: dev-mode corruption is the developer's problem,
+// not something the recovery dialog should surface.
+const _integrityResult = (() => {
+  if (!app.isPackaged) {
+    return { ok: true, mode: "skipped", reason: "dev-mode (app not packaged)" };
+  }
+  try { return _integrityGate.verifyAsarIntegrity({ resourcesPath: process.resourcesPath }); }
+  catch (err) {
+    console.warn("[main] integrity gate threw:", err?.message || err);
+    return { ok: true, mode: "skipped", reason: `gate-error:${err?.message || "unknown"}` };
+  }
+})();
+console.log(
+  `[main] app.asar integrity: ok=${_integrityResult.ok} mode=${_integrityResult.mode} reason=${_integrityResult.reason || "-"}`,
+);
+if (!_integrityResult.ok && !_recoveryShown) {
+  _recoveryShown = true;
+  app.whenReady().then(() => {
+    try {
+      const { showRecoveryDialogAndExit } = require("./recoveryDialog");
+      showRecoveryDialogAndExit({
+        reason: "Integrity check failed",
+        integrityResult: _integrityResult,
+        startupFailures: _startupFailures,
+      });
+    } catch (err) {
+      console.error("[main] recovery dialog failed:", err?.message || err);
+      // Doomsday fallback — recovery dialog itself crashed. Mark this so
+      // the next boot doesn't double-flag with "unexpected" on top of the
+      // (already user-visible) integrity failure.
+      try {
+        recordEarlyExitMarker(
+          SHUTDOWN_REASONS.UNCAUGHT_EXCEPTION,
+          SHUTDOWN_INITIATORS.RUNTIME,
+          { earlyExitPath: "integrity-recovery-dialog-fail", error: String(err?.message || err) },
+        );
+      } catch (_) {}
+      app.exit(1);
+    }
+  });
+}
+
+// ── Third-party requires (wrapped) ───────────────────────────────────────────
+const Database = safeRequire("better-sqlite3");
+const _electronUpdaterModule = safeRequire("electron-updater", { autoUpdater: null });
+const { autoUpdater } = _electronUpdaterModule || { autoUpdater: null };
+const _runtimeEnvPaths = safeRequire("../server/runtimeEnvPaths", {
+  getExplicitDataDir: () => "",
+  getPortableDataRoot: () => "",
+});
+const { getExplicitDataDir, getPortableDataRoot } = _runtimeEnvPaths;
+const _storagePaths = safeRequire("../server/storagePaths", { resolvedDbDir: () => "" });
+const { resolvedDbDir } = _storagePaths;
+
+// v2.8.14 — nightly reboot diagnostics. Shutdown reason markers let us
+// distinguish Windows OS-initiated reboots (Windows Update / Automatic
+// Maintenance) from BSODs / power loss / clean user quits. The module is
+// zero-dep and safe even on partially-corrupt installs, so it stays in the
+// survival-boot block above safeRequire of heavier modules would live.
+const _shutdownReason = safeRequire("./shutdownReason", {
+  PATHS: {},
+  REASONS: {
+    SESSION_END: "session-end",
+    POWER_SHUTDOWN: "power-shutdown",
+    POWER_SUSPEND: "power-suspend",
+    BEFORE_QUIT: "before-quit",
+    INSTALL_UPDATE: "install-update",
+    RELAUNCH: "relaunch",
+    LICENSE_EXPIRED: "license-expired",
+    UNCAUGHT_EXCEPTION: "uncaught-exception",
+  },
+  INITIATORS: {
+    WINDOWS_OS: "windows-os",
+    USER: "user",
+    AUTO_UPDATER: "auto-updater",
+    RUNTIME: "runtime",
+    UNKNOWN: "unknown",
+  },
+  recordShutdownReasonSync: () => null,
+  readLastShutdownSync: () => ({ classification: "first-boot", priorReason: null, sentinelWasPresent: false }),
+  readPrevShutdownSync: () => null,
+});
+const SHUTDOWN_REASONS = _shutdownReason.REASONS;
+const SHUTDOWN_INITIATORS = _shutdownReason.INITIATORS;
+
+// Track whether we've already written a marker for this shutdown pass so the
+// first recorded reason wins (e.g. if powerMonitor fires before session-end,
+// we keep the powerMonitor reason rather than overwriting it with a generic
+// before-quit from Electron's cascaded lifecycle events).
+let _shutdownReasonRecorded = false;
+function recordShutdownReasonOnce(reason, options) {
+  if (_shutdownReasonRecorded) return null;
+  try {
+    const rec = _shutdownReason.recordShutdownReasonSync(reason, options);
+    if (rec) {
+      _shutdownReasonRecorded = true;
+      try { console.log(`[main] Shutdown reason recorded: ${rec.reason} (${rec.initiator})`); } catch (_) {}
+    } else {
+      // Sync write returned falsy without throwing — likely an fs failure
+      // (lifecycle dir not writable, disk full, permission denied). Surface
+      // it so operators can correlate "next-boot unexpected" banners with
+      // the underlying file-system issue.
+      try {
+        console.warn(
+          `[main] Shutdown marker write returned no record for reason=${reason} ` +
+          `— sentinel without matching marker may misclassify next boot as "unexpected".`,
+        );
+      } catch (_) {}
+    }
+    return rec;
+  } catch (err) {
+    try { console.warn("[main] Failed to record shutdown reason:", err?.message || err); } catch (_) {}
+    return null;
+  }
+}
+
+// Record a shutdown marker for "early exit" paths that bypass the normal
+// requestAppShutdown chain (singleton lock deny, license-startup-fail,
+// login cancel, recovery-dialog failure). Without this, those exits leave
+// a sentinel on disk with no matching `shutdown-reason.current.json`, and
+// the NEXT boot misclassifies the prior run as "unexpected" — surfacing
+// the false-positive amber banner the user sees on every startup.
+//
+// The marker is written synchronously and tagged with a specific reason so
+// the audit trail can still tell apart "real graceful quit" from "user
+// closed login dialog before boot completed".
+function recordEarlyExitMarker(reason, initiator, extra) {
+  if (_shutdownReasonRecorded) return null;
+  try {
+    const rec = _shutdownReason.recordShutdownReasonSync(reason, { initiator, extra });
+    if (rec) {
+      _shutdownReasonRecorded = true;
+      try { console.log(`[main] Early-exit marker recorded: ${rec.reason} (${rec.initiator})`); } catch (_) {}
+    } else {
+      try {
+        console.warn(
+          `[main] Early-exit marker write returned no record for reason=${reason} ` +
+          `path=${extra?.earlyExitPath || "unknown"} — next boot may misclassify as "unexpected".`,
+        );
+      } catch (_) {}
+    }
+    return rec;
+  } catch (err) {
+    try { console.warn("[main] Failed to record early-exit marker:", err?.message || err); } catch (_) {}
+    return null;
+  }
+}
+
+// Classify the PRIOR run's shutdown. This writes a fresh boot-sentinel for
+// THIS run as a side-effect, so it must happen exactly once at startup AND
+// only after we've confirmed this process is the singleton primary —
+// otherwise a second-instance launch attempt would overwrite the running
+// first-instance's sentinel and synthesize a bogus "unexpected-shutdown"
+// into prev. The actual call moves below the singleton lock check.
+let _lastShutdownSnapshot = null;
+function _initShutdownSnapshot() {
+  try {
+    _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
+    if (_lastShutdownSnapshot) {
+      process.env.ADSI_LAST_SHUTDOWN_JSON = JSON.stringify(_lastShutdownSnapshot);
+      try {
+        console.log(
+          `[main] Prior shutdown classification: ${_lastShutdownSnapshot.classification}` +
+          (_lastShutdownSnapshot.priorReason?.reason
+            ? ` (reason=${_lastShutdownSnapshot.priorReason.reason})`
+            : ""),
+        );
+      } catch (_) {}
+    }
+  } catch (err) {
+    try { console.warn("[main] readLastShutdownSync failed:", err?.message || err); } catch (_) {}
+  }
+}
+
+// Allow dashboard alarm audio to start immediately on packaged clients.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
+// T6.1 fix: single-instance lock.  Prevents two copies of the packaged app
+// from running simultaneously against the same adsi.db + ports 3500/9000,
+// which previously risked SQLite "database is locked" and Python FastAPI
+// "Address already in use" errors plus correlated data loss.  The second
+// instance will quit immediately after signalling the first to focus its
+// window.  Must run BEFORE app.whenReady() so the lock is in place before
+// any services initialise.
+const _gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!_gotSingleInstanceLock) {
+  console.warn("[main] Another instance is already running — quitting this one.");
+  // Second instance — DO NOT touch lifecycle markers. The running first
+  // instance owns the current sentinel; we just exit cleanly so the user
+  // is signalled (focus first-instance window) without corrupting state.
+  app.exit(0);
+} else {
+  // First instance — safe to read & rotate prior-shutdown markers and
+  // write a fresh boot sentinel for THIS run.
+  _initShutdownSnapshot();
+  app.on("second-instance", (_event, _argv, _cwd) => {
+    try {
+      const wins = BrowserWindow.getAllWindows();
+      const primary = wins.find((w) => !w.isDestroyed());
+      if (primary) {
+        if (primary.isMinimized()) primary.restore();
+        if (!primary.isVisible()) primary.show();
+        primary.focus();
+      }
+    } catch (err) {
+      console.warn("[main] second-instance focus failed:", err?.message || err);
+    }
+  });
+}
 
 // Prevent packaged app crashes when stdout/stderr pipe is unavailable (EPIPE).
 function makeSafeConsoleWriter(method) {
@@ -50,17 +334,10 @@ if (process.stderr && typeof process.stderr.on === "function") {
   });
 }
 
-process.on("uncaughtException", (err) => {
-  const code = String(err?.code || "");
-  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") {
-    return;
-  }
-  try {
-    console.error("[main] Uncaught exception:", err);
-  } catch (_) {
-    // Ignore secondary logging issues.
-  }
-});
+// Note: uncaughtException + unhandledRejection handlers are now hoisted to
+// the top of the file (v2.8.10 Phase A1). The previous T6.7 log-and-continue
+// semantics remain intact — they're implemented inside _routeStartupFatal
+// (routes to recovery dialog during startup; swallows once app is ready).
 
 const PORTABLE_EXEC_DIR = String(process.env.PORTABLE_EXECUTABLE_DIR || "").trim();
 const PORTABLE_DATA_DIR = PORTABLE_EXEC_DIR
@@ -76,11 +353,19 @@ const SERVER_PORT = Number(SERVER_HTTP.port || 80);
 const TOPOLOGY_URL = `${SERVER_URL}/topology.html`;
 const IP_CONFIG_URL = `${SERVER_URL}/ip-config.html`;
 const POLL_INTERVAL = 600;
-const POLL_TIMEOUT = 60000;
+const POLL_TIMEOUT = 120000;
 const INITIAL_LOAD_RETRY_DELAY = 1200;
 const INITIAL_LOAD_RETRY_MAX = 8;
+const MAIN_RENDERER_READY_TIMEOUT_MS = 120000;
 const FORECAST_RESTART_BASE_MS = 1500;
 const FORECAST_RESTART_MAX_MS = 30000;
+// T6.9 fix (Phase 3, 2026-04-14): same backoff envelope as forecast
+// service, used by scheduleBackendRestart().
+const BACKEND_RESTART_BASE_MS = 1500;
+const BACKEND_RESTART_MAX_MS = 30000;
+const FORECAST_MODE_SYNC_MS = 10000;
+const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
+const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
 const IS_DEV = process.env.NODE_ENV === "development";
 const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
@@ -93,13 +378,21 @@ const DEFAULT_LOGIN_USERNAME = "admin";
 const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
-const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard");
-const LICENSE_DIR = path.join(PROGRAMDATA_DIR, "license");
-const LICENSE_STATE_PATH = path.join(LICENSE_DIR, "license-state.json");
-const LICENSE_FILE_MIRROR = path.join(LICENSE_DIR, "license.dat");
+const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
+// Lazy license path resolution — must NOT be evaluated at module load because
+// storage migration runs later during the Electron loading screen.  Evaluating
+// eagerly would freeze the path to the old namespace for the entire session.
+function getLicenseDir() {
+  const newDir = path.join(PROGRAMDATA_DIR, "license");
+  const oldDir = path.join(PROGRAMDATA_ROOT, "ADSI-InverterDashboard", "license");
+  return (fs.existsSync(newDir) || !fs.existsSync(oldDir)) ? newDir : oldDir;
+}
+function getLicenseStatePath() { return path.join(getLicenseDir(), "license-state.json"); }
+function getLicenseFileMirror() { return path.join(getLicenseDir(), "license.dat"); }
 const LICENSE_REG_PATH = "HKCU\\Software\\ADSI\\InverterDashboard\\License";
+const DAY_MS = 24 * 60 * 60 * 1000;
 const TRIAL_DAYS = 7;
-const LICENSE_WARN_MS = 24 * 60 * 60 * 1000; // 1 day
+const LICENSE_WARN_MS = DAY_MS; // 1 day
 const LICENSE_CHECK_INTERVAL_MS = 5 * 1000;
 const LICENSE_PUBLIC_KEY_PATH = String(process.env.ADSI_LICENSE_PUBLIC_KEY_PATH || "").trim();
 const LICENSE_PUBLIC_KEY_PEM = String(process.env.ADSI_LICENSE_PUBLIC_KEY || "").trim();
@@ -107,12 +400,39 @@ const LICENSE_REQUIRE_SIGNATURE =
   String(process.env.ADSI_LICENSE_REQUIRE_SIGNATURE || "0").trim() === "1";
 const UPDATE_REPO_OWNER = String(process.env.ADSI_UPDATE_REPO_OWNER || "mclards").trim();
 const UPDATE_REPO_NAME = String(process.env.ADSI_UPDATE_REPO_NAME || "ADSI-Dashboard").trim();
+// Update channel: "stable" (default) or "beta". Beta channel requires an
+// explicit ADSI_UPDATE_FEED_URL override pointing at a beta-tagged release
+// asset directory (e.g. https://github.com/owner/repo/releases/download/v2.7.18-beta).
+// Without the override, beta falls back to stable to avoid silently broken updates.
+const UPDATE_CHANNEL_REQUESTED = String(process.env.ADSI_UPDATE_CHANNEL || "stable").trim().toLowerCase();
+let UPDATE_CHANNEL_FALLBACK_NOTE = "";
+const UPDATE_CHANNEL = (() => {
+  if (UPDATE_CHANNEL_REQUESTED === "beta") {
+    if (!String(process.env.ADSI_UPDATE_FEED_URL || "").trim()) {
+      UPDATE_CHANNEL_FALLBACK_NOTE = "Beta channel requested but ADSI_UPDATE_FEED_URL is not set; using stable.";
+      console.warn(
+        "[updater] ADSI_UPDATE_CHANNEL=beta requires ADSI_UPDATE_FEED_URL to be set " +
+        "to a beta release asset URL (e.g. .../releases/download/v2.x.y-beta). " +
+        "Falling back to stable channel.",
+      );
+      return "stable";
+    }
+    return "beta";
+  }
+  return "stable";
+})();
 const UPDATE_FEED_URL = String(
   process.env.ADSI_UPDATE_FEED_URL
   || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest/download`,
 ).trim();
 const UPDATE_GITHUB_TOKEN = String(process.env.ADSI_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim();
 const UPDATE_CHECK_TIMEOUT_MS = 10000;
+const LEGACY_USERDATA_DIR_NAMES = [
+  "adsi-dashboard",
+  "adsi-inverter-dashboard",
+  "inverter dashboard",
+  "dashboard v2",
+];
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let mainWin = null;
@@ -130,9 +450,19 @@ let serverReadyFired = false;
 let mainPageLoadedOnce = false;
 let initialLoadRetries = 0;
 let initialLoadRetryTimer = null;
+let mainRendererReady = false;
+let startupErrorShown = false;
+let loadingWinLoadCount = 0;
+let mainRendererReadyTimer = null;
 let isAppShuttingDown = false;
 let forecastRestartTimer = null;
+// T6.9 fix (Phase 3): auto-restart state for the backend (Node server).
+let backendRestartTimer = null;
+let backendRestartAttempts = 0;
 let forecastRestartAttempts = 0;
+let forecastModeSyncTimer = null;
+let forecastModeSyncInFlight = false;
+let forecastStopExpected = false;
 let lastForecastLaunch = null;
 let hasAuthenticated = false;
 let bootStarted = false;
@@ -142,12 +472,22 @@ let licenseCheckerTimer = null;
 let licenseShutdownTriggered = false;
 let lastBroadcastLicenseSignature = "";
 let allowMainWindowClose = false;
+let appShutdownPromise = null;
+let appShutdownBypassQuit = false;
+let appShutdownFinalAction = { type: "quit", exitCode: 0 };
+let backendStopExpected = false;
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
 let appUpdateBridgeBound = false;
+// v2.8.10 Phase B1: path of the most recently signature-verified installer
+// handed to autoUpdater. Captured in verifyUpdateCodeSignature and copied
+// to %PROGRAMDATA%\InverterDashboard\updates\last-good-installer.exe once
+// the download is complete so the recovery dialog can relaunch it offline.
+let lastVerifiedInstallerPath = "";
 let appUpdateState = {
   mode: "disabled",
   appVersion: "0.0.0",
+  channel: "stable",
   status: "idle",
   message: "Updater not initialized.",
   checking: false,
@@ -157,9 +497,17 @@ let appUpdateState = {
   canDownload: false,
   canInstall: false,
   downloadUrl: "",
+  releasesUrl: "",
   checkedAt: 0,
   error: "",
 };
+
+const SERVICE_SOFT_STOP_FILE_NAMES = Object.freeze({
+  backend: "backend.stop",
+  forecast: "forecast.stop",
+});
+const BACKEND_SOFT_STOP_WAIT_MS = 8000;
+const FORECAST_SOFT_STOP_WAIT_MS = 25000;
 
 function configurePortableDataPaths() {
   if (!PORTABLE_DATA_DIR) return;
@@ -172,6 +520,8 @@ function configurePortableDataPaths() {
     fs.mkdirSync(dbDir, { recursive: true });
     fs.mkdirSync(cfgDir, { recursive: true });
     app.setPath("userData", userDataDir);
+    process.env.IM_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
+    process.env.IM_DATA_DIR = dbDir;
     process.env.ADSI_PORTABLE_DATA_DIR = PORTABLE_DATA_DIR;
     process.env.ADSI_DATA_DIR = dbDir;
     console.log("[main] Portable data root:", PORTABLE_DATA_DIR);
@@ -181,6 +531,99 @@ function configurePortableDataPaths() {
 }
 
 configurePortableDataPaths();
+
+function copyFileIfMissing(src, dest) {
+  try {
+    if (!fs.existsSync(src) || fs.existsSync(dest)) return false;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    return true;
+  } catch (err) {
+    console.warn("[migrate] file copy failed:", src, "->", dest, err.message);
+    return false;
+  }
+}
+
+function copyDirIfMissing(srcDir, destDir) {
+  try {
+    if (!fs.existsSync(srcDir)) return 0;
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] dir init failed:", srcDir, "->", destDir, err.message);
+    return 0;
+  }
+  let copied = 0;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  } catch (err) {
+    console.warn("[migrate] dir read failed:", srcDir, err.message);
+    return 0;
+  }
+  for (const entry of entries) {
+    const src = path.join(srcDir, entry.name);
+    const dest = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copied += copyDirIfMissing(src, dest);
+    } else if (entry.isFile()) {
+      copied += copyFileIfMissing(src, dest) ? 1 : 0;
+    }
+  }
+  return copied;
+}
+
+function migrateLegacyUserDataIfNeeded() {
+  if (isPortableRuntime()) return { migrated: false, source: "", files: 0 };
+  let appDataDir = "";
+  let currentUserData = "";
+  try {
+    appDataDir = app.getPath("appData");
+    currentUserData = app.getPath("userData");
+  } catch (err) {
+    console.warn("[migrate] userData path resolve failed:", err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+  if (!appDataDir || !currentUserData) return { migrated: false, source: "", files: 0 };
+  try {
+    fs.mkdirSync(currentUserData, { recursive: true });
+  } catch (err) {
+    console.warn("[migrate] current userData init failed:", currentUserData, err.message);
+    return { migrated: false, source: "", files: 0 };
+  }
+
+  const currentNorm = path.resolve(currentUserData).toLowerCase();
+  const candidateDirs = [];
+  for (const name of LEGACY_USERDATA_DIR_NAMES) {
+    const abs = path.join(appDataDir, name);
+    const norm = path.resolve(abs).toLowerCase();
+    if (norm === currentNorm) continue;
+    candidateDirs.push(abs);
+  }
+
+  for (const legacyDir of candidateDirs) {
+    if (!fs.existsSync(legacyDir)) continue;
+    const authCopied = copyDirIfMissing(
+      path.join(legacyDir, "auth"),
+      path.join(currentUserData, "auth"),
+    );
+    const configCopied = copyDirIfMissing(
+      path.join(legacyDir, "config"),
+      path.join(currentUserData, "config"),
+    );
+    const rootConfigCopied = copyFileIfMissing(
+      path.join(legacyDir, "ipconfig.json"),
+      path.join(currentUserData, "config", "ipconfig.json"),
+    ) ? 1 : 0;
+    const totalCopied = authCopied + configCopied + rootConfigCopied;
+    if (totalCopied > 0) {
+      console.log(
+        `[migrate] userData migrated from ${legacyDir} -> ${currentUserData} (${totalCopied} file(s))`,
+      );
+      return { migrated: true, source: legacyDir, files: totalCopied };
+    }
+  }
+  return { migrated: false, source: "", files: 0 };
+}
 
 function parseVersionParts(input) {
   const normalized = String(input || "")
@@ -217,13 +660,70 @@ function getAppUpdateMode() {
   return "installer";
 }
 
+// Update preferences: persisted in a JSON file next to updater.log.
+// - autoDownload: fetch new installers as soon as they are detected (bandwidth knob).
+// - autoInstallOvernight: once an update is downloaded, install it at the
+//   AUTO_INSTALL_HOUR local time (v2.8.14: 23:00; previously 02:00). The
+//   02:00 slot collided with the Windows Automatic Maintenance + Windows
+//   Update install window; 23:00 keeps the install in true off-hours while
+//   staying clear of OS-driven overnight reboots. Default ON because the
+//   oneClick:true NSIS installer makes the install silent end-to-end.
+function _updatePrefsPath() {
+  return path.join(app.getPath("userData"), "update-prefs.json");
+}
+function _readUpdatePrefs() {
+  try {
+    return JSON.parse(fs.readFileSync(_updatePrefsPath(), "utf8")) || {};
+  } catch (_) { return {}; }
+}
+function _writeUpdatePrefs(patch) {
+  const merged = { ..._readUpdatePrefs(), ...patch };
+  try {
+    fs.writeFileSync(_updatePrefsPath(), JSON.stringify(merged));
+  } catch (err) {
+    console.warn("[updater] failed to save update preferences:", err.message);
+  }
+  return merged;
+}
+function getAutoDownloadPref() {
+  return !!_readUpdatePrefs().autoDownload;
+}
+function setAutoDownloadPref(value) {
+  const enabled = !!value;
+  _writeUpdatePrefs({ autoDownload: enabled });
+  if (autoUpdater) autoUpdater.autoDownload = enabled;
+  return enabled;
+}
+function getAutoInstallOvernightPref() {
+  const prefs = _readUpdatePrefs();
+  // Default ON if unset — gateway deployment benefits from unattended overnight install.
+  return prefs.autoInstallOvernight !== false;
+}
+function setAutoInstallOvernightPref(value) {
+  const enabled = !!value;
+  _writeUpdatePrefs({ autoInstallOvernight: enabled });
+  if (!enabled) {
+    cancelScheduledOvernightInstall();
+  } else if (appUpdateState.canInstall) {
+    scheduleOvernightInstallIfNeeded();
+  }
+  return enabled;
+}
+
 function buildPublicAppUpdateState() {
   return {
     ...appUpdateState,
     appVersion: app.getVersion(),
+    autoDownload: getAutoDownloadPref(),
+    autoInstallOvernight: getAutoInstallOvernightPref(),
+    channel: UPDATE_CHANNEL,
+    channelRequested: UPDATE_CHANNEL_REQUESTED,
+    channelFallbackNote: UPDATE_CHANNEL_FALLBACK_NOTE,
+    releasesUrl: appUpdateState.releasesUrl
+      || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases`,
     modeLabel:
       appUpdateState.mode === "installer"
-        ? "Installer (Auto)"
+        ? (UPDATE_CHANNEL === "beta" ? "Installer (Beta)" : "Installer (Auto)")
         : appUpdateState.mode === "portable"
           ? "Portable (Manual)"
           : appUpdateState.mode === "dev"
@@ -320,7 +820,7 @@ async function checkPortableUpdates() {
     mode: "portable",
     status: "checking",
     checking: true,
-    message: "Checking latest release from GitHub...",
+    message: "Checking for updates...",
     error: "",
   });
 
@@ -360,18 +860,133 @@ async function checkPortableUpdates() {
       canInstall: false,
       downloadPercent: 0,
       downloadUrl: "",
-      message: `Update check failed: ${err.message}`,
-      error: String(err.message || "Update check failed"),
+      message: "Update check failed. Please check your internet connection.",
+      error: "Update check failed",
     });
   }
 }
 
 function bindAutoUpdaterEventsOnce() {
   if (appUpdateBridgeBound) return;
+  // v2.8.10 Phase A2: if electron-updater failed to load (corrupt app.asar),
+  // autoUpdater is null. Skip binding — the recovery dialog has already been
+  // scheduled; there's nothing to wire up here.
+  if (!autoUpdater) {
+    console.warn("[updater] autoUpdater is null (electron-updater failed to load) — skipping bind");
+    return;
+  }
   appUpdateBridgeBound = true;
 
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Auto-download can be toggled by user from Settings; default off for
+  // bandwidth-conscious gateway deployments.
+  const autoDownloadPref = getAutoDownloadPref();
+  autoUpdater.autoDownload = autoDownloadPref;
+  // SAFETY: This dashboard runs 24/7 on a gateway server. Auto-installing on
+  // accidental window close would cause an unexpected monitoring outage.
+  // Updates only install when the user explicitly clicks "Restart & Install".
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  // v2.9.3+: surface GitHub pre-releases as opt-in update prompts. Pre-release
+  // tags (e.g. v2.9.4-beta.1) appear to the field as "update available — install?"
+  // prompts alongside Latest releases. autoDownload is OFF by default in
+  // production (see autoDownloadPref above), so the operator still chooses
+  // when to install — this flag only changes VISIBILITY, not auto-install.
+  // Required for the GitHub provider configured below to include pre-release
+  // tags when querying the releases API; has no effect on the legacy generic
+  // feed (which is server-side filtered by GitHub's /releases/latest alias).
+  autoUpdater.allowPrerelease = true;
+
+  // Wire electron-updater's logger to a file under userData so we can diagnose
+  // auto-update failures in production without needing a console attached.
+  try {
+    const updaterLogPath = path.join(app.getPath("userData"), "updater.log");
+    const updaterLogStream = fs.createWriteStream(updaterLogPath, { flags: "a" });
+    const logLine = (level, msg) => {
+      try {
+        updaterLogStream.write(`[${new Date().toISOString()}] [${level}] ${msg}\n`);
+      } catch (_) { /* ignore */ }
+      try { console.log(`[updater:${level}]`, msg); } catch (_) { /* ignore */ }
+    };
+    autoUpdater.logger = {
+      info: (m) => logLine("info", String(m)),
+      warn: (m) => logLine("warn", String(m)),
+      error: (m) => logLine("error", String(m)),
+      debug: (m) => logLine("debug", String(m)),
+    };
+    logLine("info", `autoUpdater logger initialized → ${updaterLogPath}`);
+  } catch (err) {
+    console.warn("[updater] failed to initialize file logger:", err.message);
+  }
+
+  // Override electron-updater's built-in signature verifier.
+  //
+  // The default verifier runs Get-AuthenticodeSignature via PowerShell and requires
+  // Status=Valid. With our self-signed certificate, machines where the root cert is
+  // not installed in Trusted Root Certification Authorities return Status=UnknownError,
+  // which the built-in verifier treats as a hard failure and reports as
+  // "Download failed: Command failed: ...". This breaks auto-update entirely.
+  //
+  // T6.3 fix (v2.8.8): add a defence-in-depth Authenticode thumbprint check.
+  // Primary integrity defence remains the SHA-512 digest published in
+  // latest.yml (validated automatically by electron-updater during download).
+  // This override extracts the signer thumbprint of the downloaded installer
+  // and compares it to EXPECTED_SIGNER_THUMBPRINT.  If a mismatch is detected,
+  // we log at ERROR and REJECT the update — a compromised latest.yml that
+  // swaps in a binary signed by a different key will no longer be installed.
+  // If the check can't be run (PowerShell missing, unexpected error), we fall
+  // back to the prior behaviour of logging and accepting (SHA-512 remains
+  // authoritative).
+  const EXPECTED_SIGNER_THUMBPRINT =
+    "44CD054E69D04011DAA8FB2B60127F1F6EB99C0E";
+  autoUpdater.verifyUpdateCodeSignature = async (publisherNames, tempUpdateFile) => {
+    try {
+      const psCmd =
+        `Get-AuthenticodeSignature -FilePath '${String(tempUpdateFile).replace(/'/g, "''")}' ` +
+        `| Select-Object -ExpandProperty SignerCertificate ` +
+        `| Select-Object -ExpandProperty Thumbprint`;
+      const stdout = await new Promise((resolve) => {
+        try {
+          execFile(
+            "powershell",
+            ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+            { windowsHide: true, timeout: 15000 },
+            (err, out) => resolve(err ? "" : String(out || "")),
+          );
+        } catch (_) {
+          resolve("");
+        }
+      });
+      const actual = stdout.trim().toUpperCase();
+      if (!actual) {
+        autoUpdater.logger?.warn?.(
+          `verifyUpdateCodeSignature: unable to read signer thumbprint — ` +
+          `accepting (SHA-512 remains authoritative). file=${tempUpdateFile}`,
+        );
+        // v2.8.10 Phase B1: remember the verified file path so update-downloaded
+        // can stash it under %PROGRAMDATA%\InverterDashboard\updates\ for
+        // offline recovery after a torn-write event.
+        lastVerifiedInstallerPath = tempUpdateFile;
+        return null;
+      }
+      if (actual === EXPECTED_SIGNER_THUMBPRINT.toUpperCase()) {
+        autoUpdater.logger?.info?.(
+          `verifyUpdateCodeSignature: thumbprint match (${actual}) file=${tempUpdateFile}`,
+        );
+        lastVerifiedInstallerPath = tempUpdateFile;
+        return null;
+      }
+      const msg =
+        `verifyUpdateCodeSignature: THUMBPRINT MISMATCH — refusing update.  ` +
+        `actual=${actual} expected=${EXPECTED_SIGNER_THUMBPRINT.toUpperCase()} file=${tempUpdateFile}`;
+      autoUpdater.logger?.error?.(msg);
+      return msg;
+    } catch (err) {
+      autoUpdater.logger?.warn?.(
+        `verifyUpdateCodeSignature: check errored — accepting (SHA-512 remains authoritative): ${err?.message || err}`,
+      );
+      return null;
+    }
+  };
 
   autoUpdater.on("checking-for-update", () => {
     setAppUpdateState({
@@ -439,6 +1054,15 @@ function bindAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || appUpdateState.latestVersion || "").trim();
+    const overnight = getAutoInstallOvernightPref();
+    // v2.8.10 Phase B1: stash the verified installer under ProgramData so
+    // the recovery dialog can re-run it offline if a torn-write event
+    // damages the live install in Program Files.
+    try {
+      stashLastGoodInstaller(latestVersion);
+    } catch (err) {
+      console.warn("[main] stashLastGoodInstaller failed:", err?.message || err);
+    }
     setAppUpdateState({
       mode: "installer",
       status: "downloaded",
@@ -449,9 +1073,27 @@ function bindAutoUpdaterEventsOnce() {
       canDownload: false,
       canInstall: true,
       downloadPercent: 100,
-      message: `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
+      message: overnight
+        ? `Update ${latestVersion || ""} downloaded. Will auto-install at ~${String(AUTO_INSTALL_HOUR).padStart(2, "0")}:00 (off-hours).`
+        : `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
       error: "",
     });
+    // Schedule unattended overnight install if enabled. User can still trigger
+    // an immediate install via the Restart & Install button.
+    if (overnight) {
+      scheduleOvernightInstallIfNeeded();
+    }
+    // Push update-ready prompt to renderer so a modal can appear
+    try {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && win.webContents) {
+        win.webContents.send("app-update-ready", {
+          version: latestVersion,
+          currentVersion: app.getVersion(),
+          autoInstallOvernight: overnight,
+        });
+      }
+    } catch (_) { /* ignore */ }
   });
 
   autoUpdater.on("error", (err) => {
@@ -469,21 +1111,92 @@ function bindAutoUpdaterEventsOnce() {
   });
 }
 
+// v2.8.10 Phase B1: copy the most recently signature-verified installer to
+// %PROGRAMDATA%\InverterDashboard\updates\last-good-installer.exe so the
+// Phase A4 recovery dialog can relaunch it without network access. Writes
+// atomically via temp + rename to survive an interrupted copy.
+function stashLastGoodInstaller(version = "") {
+  const src = String(lastVerifiedInstallerPath || "").trim();
+  if (!src || !fs.existsSync(src)) {
+    console.warn("[main] stashLastGoodInstaller: no verified installer path recorded");
+    return false;
+  }
+  const updatesDir = path.join(PROGRAMDATA_DIR, "updates");
+  try { fs.mkdirSync(updatesDir, { recursive: true }); } catch (_) { /* ignore */ }
+  const targetPath = path.join(updatesDir, "last-good-installer.exe");
+  const tempPath = path.join(updatesDir, `last-good-installer.exe.tmp-${process.pid}`);
+  try {
+    fs.copyFileSync(src, tempPath);
+    try { fs.unlinkSync(targetPath); } catch (_) { /* ignore missing */ }
+    fs.renameSync(tempPath, targetPath);
+    const metaPath = targetPath + ".meta.json";
+    const meta = {
+      version: String(version || "").trim(),
+      source: src,
+      copiedAt: new Date().toISOString(),
+      size: fs.statSync(targetPath).size,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+    console.log(`[main] Stashed last-good-installer (${meta.size} bytes) at ${targetPath}`);
+    return true;
+  } catch (err) {
+    console.warn("[main] stashLastGoodInstaller copy failed:", err?.message || err);
+    try { fs.unlinkSync(tempPath); } catch (_) { /* ignore */ }
+    return false;
+  }
+}
+
 function initAppUpdater() {
   const mode = getAppUpdateMode();
   if (mode === "installer") {
     bindAutoUpdaterEventsOnce();
-    try {
-      autoUpdater.setFeedURL({
-        provider: "generic",
-        url: UPDATE_FEED_URL,
+    // v2.8.10 Phase A2: bindAutoUpdaterEventsOnce silently no-ops when
+    // autoUpdater failed to load. Mirror that here so a null autoUpdater
+    // after a corrupt electron-updater load can't throw inside setFeedURL.
+    if (!autoUpdater) {
+      setAppUpdateState({
+        mode,
+        channel: UPDATE_CHANNEL,
+        status: "error",
+        message: "Updater unavailable — electron-updater failed to load.",
+        error: "updater-unavailable",
       });
-      console.log("[updater] Generic feed URL:", UPDATE_FEED_URL);
+      return;
+    }
+    try {
+      // v2.9.3+: prefer the GitHub provider so pre-release tags can surface
+      // (autoUpdater.allowPrerelease=true above). The legacy /releases/latest
+      // /download URL is server-side filtered by GitHub and would never
+      // expose pre-releases regardless of the flag, so the GitHub provider
+      // is the only path that honors allowPrerelease for our public repo.
+      //
+      // Backward-compat: if a deployment explicitly sets ADSI_UPDATE_FEED_URL
+      // (e.g. a beta channel pointing at a per-tag asset directory, or an
+      // air-gapped mirror), keep the generic provider with that URL.
+      const explicitFeed = String(process.env.ADSI_UPDATE_FEED_URL || "").trim();
+      if (explicitFeed) {
+        autoUpdater.setFeedURL({
+          provider: "generic",
+          url: UPDATE_FEED_URL,
+        });
+        console.log(`[updater] Generic feed URL (${UPDATE_CHANNEL} channel):`, UPDATE_FEED_URL);
+      } else {
+        autoUpdater.setFeedURL({
+          provider: "github",
+          owner: UPDATE_REPO_OWNER,
+          repo: UPDATE_REPO_NAME,
+        });
+        console.log(
+          `[updater] GitHub provider: ${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME} ` +
+          `(allowPrerelease=${autoUpdater.allowPrerelease})`,
+        );
+      }
     } catch (err) {
       console.warn("[updater] setFeedURL failed:", err.message);
     }
     setAppUpdateState({
       mode,
+      channel: UPDATE_CHANNEL,
       status: "idle",
       checking: false,
       updateAvailable: false,
@@ -492,7 +1205,9 @@ function initAppUpdater() {
       canDownload: false,
       canInstall: false,
       downloadUrl: "",
-      message: `Installer update channel ready (${UPDATE_FEED_URL}).`,
+      message: UPDATE_CHANNEL === "beta"
+        ? "Installer update channel ready (BETA)."
+        : "Installer update channel ready (pre-releases visible as opt-in).",
       error: "",
     }, false);
     return;
@@ -557,6 +1272,18 @@ async function checkForAppUpdates(options = {}) {
   }
 
   bindAutoUpdaterEventsOnce();
+  if (!autoUpdater) {
+    return setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      checking: false,
+      checkedAt: Date.now(),
+      message: "Updater unavailable — electron-updater failed to load.",
+      error: "updater-unavailable",
+      canDownload: false,
+      canInstall: false,
+    });
+  }
   try {
     if (manual) {
       setAppUpdateState({
@@ -595,6 +1322,12 @@ async function downloadAppUpdate() {
     if (!url) {
       return { ok: false, error: "No download URL found for latest portable release.", state: buildPublicAppUpdateState() };
     }
+    // T6.5 fix: whitelist before handing off to the OS, even though the
+    // URL comes from appUpdateState (our own release feed).  Defence in
+    // depth against a compromised update feed or stale state entry.
+    if (!isSafeExternalUrl(url)) {
+      return { ok: false, error: "Refusing to open non-http update URL.", state: buildPublicAppUpdateState() };
+    }
     try {
       await shell.openExternal(url);
       setAppUpdateState({
@@ -621,6 +1354,9 @@ async function downloadAppUpdate() {
   }
   if (appUpdateState.canInstall) {
     return { ok: true, state: buildPublicAppUpdateState() };
+  }
+  if (!autoUpdater) {
+    return { ok: false, error: "Updater unavailable — electron-updater failed to load.", state: buildPublicAppUpdateState() };
   }
   try {
     setAppUpdateState({
@@ -663,20 +1399,84 @@ async function installAppUpdateNow() {
     message: "Restarting app to install update...",
     checking: false,
   });
-  setTimeout(() => {
-    try {
-      allowMainWindowClose = true;
-      autoUpdater.quitAndInstall(false, true);
-    } catch (err) {
-      setAppUpdateState({
-        mode: "installer",
-        status: "error",
-        message: `Install failed: ${err.message}`,
-        error: String(err.message || "Install failed"),
-      });
-    }
-  }, 150);
+  requestAppShutdown({
+    reason: "install downloaded update",
+    action: { type: "install" },
+  }).catch((err) => {
+    setAppUpdateState({
+      mode: "installer",
+      status: "error",
+      message: `Install failed: ${err.message}`,
+      error: String(err.message || "Install failed"),
+    });
+  });
   return { ok: true, state: buildPublicAppUpdateState() };
+}
+
+// Auto-update checks run outside the solar window (18:00–05:00) when
+// inverter polling, forecast generation, and energy archival are idle.
+//
+// v2.8.14 — DO NOT check or install between 01:00 and 05:00 local. Windows
+// Automatic Maintenance + Windows Update install cycles run in that window
+// by default, and so does the server's 03:30 VACUUM / 03:35 snapshot prune
+// / 04:30 forecast regen crons. An update download or install colliding
+// with that activity competes for the same disk spindle / ACPI shutdown
+// path and is a credible contributor to the nightly boot failures the
+// operator has been reporting. Anchor checks well clear of the collision
+// zone: late afternoon + evening + just before midnight.
+const AUTO_UPDATE_CHECK_HOURS = [16, 19, 22, 23];
+
+// Overnight install window — downloaded updates auto-install at 23:00 local
+// (previously 02:00). 23:00 is after the 22:00 forecast regen completes
+// and well before the Windows maintenance window at 02:00, so the installer
+// + relaunch sequence has a clean hour of runtime to settle before any
+// OS-level reboot attempt.
+const AUTO_INSTALL_HOUR = 23;
+let appUpdateOvernightInstallTimer = null;
+
+function cancelScheduledOvernightInstall() {
+  if (appUpdateOvernightInstallTimer) {
+    clearTimeout(appUpdateOvernightInstallTimer);
+    appUpdateOvernightInstallTimer = null;
+    console.log("[updater] overnight auto-install cancelled");
+  }
+}
+
+function scheduleOvernightInstallIfNeeded() {
+  if (!getAutoInstallOvernightPref()) return;
+  if (!appUpdateState.canInstall) return;
+  cancelScheduledOvernightInstall();
+
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(AUTO_INSTALL_HOUR, 0, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    // AUTO_INSTALL_HOUR already passed today — schedule for tomorrow.
+    target.setDate(target.getDate() + 1);
+  }
+  const delayMs = Math.max(60000, target.getTime() - now.getTime());
+  console.log(
+    `[updater] overnight auto-install scheduled at ${target.toLocaleString()} (in ${Math.round(delayMs / 60000)} min)`,
+  );
+
+  appUpdateOvernightInstallTimer = setTimeout(() => {
+    appUpdateOvernightInstallTimer = null;
+    if (!getAutoInstallOvernightPref()) {
+      console.log("[updater] overnight auto-install skipped — preference disabled");
+      return;
+    }
+    if (!appUpdateState.canInstall) {
+      console.log("[updater] overnight auto-install skipped — nothing to install");
+      return;
+    }
+    console.log("[updater] overnight auto-install firing");
+    installAppUpdateNow().catch((err) => {
+      console.warn("[updater] overnight auto-install failed:", err?.message || err);
+    });
+  }, delayMs);
+  if (appUpdateOvernightInstallTimer && typeof appUpdateOvernightInstallTimer.unref === "function") {
+    appUpdateOvernightInstallTimer.unref();
+  }
 }
 
 function scheduleAutoUpdateCheck() {
@@ -684,11 +1484,50 @@ function scheduleAutoUpdateCheck() {
   appUpdateAutoCheckStarted = true;
   const mode = getAppUpdateMode();
   if (mode === "dev") return;
+  // Initial check 8s after startup
   appUpdateAutoCheckTimer = setTimeout(() => {
     checkForAppUpdates({ manual: false }).catch((err) => {
       console.warn("[updater] startup update check failed:", err.message);
     });
+    _scheduleNextNightlyCheck();
   }, 8000);
+  if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
+    appUpdateAutoCheckTimer.unref();
+  }
+}
+
+function _scheduleNextNightlyCheck() {
+  const now = new Date();
+  const nowH = now.getHours();
+  const nowMs = now.getTime();
+
+  // Find the next check hour
+  let nextMs = Infinity;
+  for (const h of AUTO_UPDATE_CHECK_HOURS) {
+    const candidate = new Date(now);
+    candidate.setHours(h, 0, 0, 0);
+    if (candidate.getTime() <= nowMs) {
+      // Already passed today — try tomorrow
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    if (candidate.getTime() < nextMs) {
+      nextMs = candidate.getTime();
+    }
+  }
+
+  const delayMs = Math.max(60000, nextMs - nowMs); // at least 1 min
+  const nextDate = new Date(nextMs);
+  console.log(
+    `[updater] next auto-check scheduled at ${nextDate.toLocaleTimeString()} (in ${Math.round(delayMs / 60000)} min)`,
+  );
+
+  appUpdateAutoCheckTimer = setTimeout(() => {
+    console.log("[updater] nightly auto-check firing");
+    checkForAppUpdates({ manual: false }).catch((err) => {
+      console.warn("[updater] nightly update check failed:", err.message);
+    });
+    _scheduleNextNightlyCheck();
+  }, delayMs);
   if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
     appUpdateAutoCheckTimer.unref();
   }
@@ -699,17 +1538,408 @@ function getUpdateErrorMessage(err) {
   const lower = raw.toLowerCase();
   const has404 = lower.includes(" 404") || lower.includes("http 404") || lower.includes("status code 404");
   const feedBlocked = lower.includes("releases.atom") || lower.includes("latest.yml") || lower.includes("/releases/latest/download");
+  // Signature / publisher mismatch — usually means the gateway is missing the
+  // root cert, or the publisher in the new build doesn't match the installed app's expectation.
+  if (lower.includes("err_updater_invalid_signature") || lower.includes("not signed by the application owner")) {
+    return "Code signature verification failed. The new build's publisher does not match the installed version. Check that the gateway has the codesign root certificate installed.";
+  }
+  if (lower.includes("certificate") && (lower.includes("invalid") || lower.includes("untrusted") || lower.includes("not trusted"))) {
+    return "Update certificate is not trusted on this machine. Install the codesign root certificate to Trusted Root Certification Authorities and try again.";
+  }
   if (has404 && feedBlocked) {
-    return [
-      "Update feed returned 404 (not publicly reachable).",
-      "Ensure this repo release feed is public and has latest.yml + setup artifacts.",
-      "If private, set ADSI_UPDATE_FEED_URL to a public generic feed URL.",
-    ].join(" ");
+    return "Update feed returned 404. Ensure the release channel is reachable and has published assets.";
   }
   if (has404) {
-    return "Update feed returned 404. Verify publish URL and release assets.";
+    return "Update feed returned 404. Verify release assets are published.";
   }
-  return raw;
+  /* Strip URLs / repo identifiers from raw error to avoid leaking internal paths */
+  return raw.replace(/https?:\/\/[^\s)]+/gi, "").replace(/\s{2,}/g, " ").trim() || "Update check failed";
+}
+
+function normalizeAppShutdownAction(action) {
+  const type = String(action?.type || "quit").trim().toLowerCase();
+  if (type === "install") return { type: "install", exitCode: 0 };
+  if (type === "relaunch") return { type: "relaunch", exitCode: 0 };
+  if (type === "exit") {
+    const exitCode = Number.isInteger(action?.exitCode) ? action.exitCode : 0;
+    return { type: "exit", exitCode };
+  }
+  return { type: "quit", exitCode: 0 };
+}
+
+function getAppShutdownActionRank(action) {
+  const type = String(action?.type || "quit");
+  if (type === "install") return 4;
+  if (type === "relaunch") return 3;
+  if (type === "exit") return 2;
+  return 1;
+}
+
+function mergeAppShutdownAction(nextAction) {
+  const next = normalizeAppShutdownAction(nextAction);
+  if (getAppShutdownActionRank(next) >= getAppShutdownActionRank(appShutdownFinalAction)) {
+    appShutdownFinalAction = next;
+  }
+  return appShutdownFinalAction;
+}
+
+function normalizeSoftStopServiceName(serviceName) {
+  return String(serviceName || "").trim().toLowerCase() === "forecast"
+    ? "forecast"
+    : "backend";
+}
+
+function getRuntimeControlDir() {
+  let baseDir = "";
+  try {
+    baseDir = app.getPath("userData");
+  } catch (_) {
+    baseDir = "";
+  }
+  if (!baseDir) {
+    baseDir = PORTABLE_DATA_DIR || process.cwd();
+  }
+  return path.join(baseDir, "runtime-control");
+}
+
+function getServiceSoftStopFile(serviceName) {
+  const normalized = normalizeSoftStopServiceName(serviceName);
+  return path.join(
+    getRuntimeControlDir(),
+    SERVICE_SOFT_STOP_FILE_NAMES[normalized],
+  );
+}
+
+function clearServiceSoftStopFile(stopFilePath) {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return;
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch (err) {
+    console.warn("[main] Failed to clear service stop file:", filePath, err.message);
+  }
+}
+
+function writeServiceSoftStopFile(stopFilePath, label, reason = "shutdown requested") {
+  const filePath = String(stopFilePath || "").trim();
+  if (!filePath) return false;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          label: String(label || "service"),
+          reason: String(reason || "shutdown requested"),
+          requestedAt: Date.now(),
+          pid: process.pid,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    return true;
+  } catch (err) {
+    console.warn("[main] Failed to write service stop file:", filePath, err.message);
+    return false;
+  }
+}
+
+function attachServiceSoftStopMeta(proc, serviceName, waitMs) {
+  if (!proc) return proc;
+  proc._softStopFile = getServiceSoftStopFile(serviceName);
+  proc._softStopWaitMs = Math.max(0, Number(waitMs || 0));
+  clearServiceSoftStopFile(proc._softStopFile);
+  return proc;
+}
+
+function waitForChildExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    if (
+      !proc ||
+      proc.killed ||
+      proc.exitCode !== null ||
+      proc.signalCode !== null
+    ) {
+      resolve(true);
+      return;
+    }
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      try {
+        proc.removeListener("exit", onExit);
+      } catch (_) {}
+      clearTimeout(timer);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    proc.once("exit", onExit);
+  });
+}
+
+async function stopTrackedProcess(proc, label) {
+  if (!proc || proc.killed) return;
+  const softStopFile = String(proc._softStopFile || "").trim();
+  const softStopWaitMs = Math.max(0, Number(proc._softStopWaitMs || 0));
+  if (softStopFile && writeServiceSoftStopFile(softStopFile, label, "app shutdown")) {
+    const exitedSoft = await waitForChildExit(proc, softStopWaitMs);
+    clearServiceSoftStopFile(softStopFile);
+    if (exitedSoft) return;
+    console.warn(
+      `[main] ${label} did not exit within ${softStopWaitMs}ms after soft-stop; forcing exit`,
+    );
+  }
+  forceKillProc(proc, label);
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+  clearServiceSoftStopFile(softStopFile);
+  if (!exited) {
+    console.warn(`[main] ${label} did not exit within ${APP_SHUTDOWN_FORCE_KILL_WAIT_MS}ms`);
+  }
+}
+
+async function shutdownEmbeddedServerGracefully(serverModule) {
+  if (!serverModule || typeof serverModule.shutdownEmbedded !== "function") return;
+  let shutdownPromise;
+  try {
+    shutdownPromise = Promise.resolve(serverModule.shutdownEmbedded());
+  } catch (err) {
+    console.warn("[main] embedded web server shutdown failed:", err.message);
+    return;
+  }
+  let timeoutId = null;
+  const outcome = await Promise.race([
+    shutdownPromise
+      .then(() => "done")
+      .catch((err) => {
+        console.warn("[main] embedded web server shutdown failed:", err.message);
+        return "done";
+      }),
+    new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve("timeout"), APP_SHUTDOWN_WEB_TIMEOUT_MS);
+      if (timeoutId && typeof timeoutId.unref === "function") timeoutId.unref();
+    }),
+  ]);
+  if (timeoutId) clearTimeout(timeoutId);
+  if (outcome === "timeout") {
+    console.warn(`[main] embedded web server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms`);
+  }
+}
+
+async function shutdownChildWebServerGracefully(proc) {
+  if (!proc || proc.killed) return;
+  try {
+    proc.send({ type: "shutdown" });
+  } catch (_) {}
+  const exited = await waitForChildExit(proc, APP_SHUTDOWN_WEB_TIMEOUT_MS);
+  if (exited) return;
+  console.warn(`[main] web-server shutdown timed out after ${APP_SHUTDOWN_WEB_TIMEOUT_MS}ms; forcing exit`);
+  forceKillProc(proc, "web-server");
+  await waitForChildExit(proc, APP_SHUTDOWN_FORCE_KILL_WAIT_MS);
+}
+
+async function stopRuntimeServices(reason = "application shutdown") {
+  isAppShuttingDown = true;
+  allowMainWindowClose = true;
+  stopForecastModeSync();
+  clearForecastRestartTimer();
+  if (appUpdateAutoCheckTimer) {
+    clearTimeout(appUpdateAutoCheckTimer);
+    appUpdateAutoCheckTimer = null;
+  }
+  if (licenseCheckerTimer) {
+    clearInterval(licenseCheckerTimer);
+    licenseCheckerTimer = null;
+  }
+
+  const embeddedModule = embeddedServerStarted ? embeddedServerModule : null;
+  const childWebProc = webProc;
+  const backend = backendProc;
+  const forecast = forecastProc;
+
+  embeddedServerStarted = false;
+  embeddedServerModule = null;
+  webProc = null;
+  backendProc = null;
+  forecastProc = null;
+  backendStopExpected = true;
+  forecastStopExpected = true;
+
+  const tasks = [];
+  if (backend && !backend.killed) tasks.push(stopTrackedProcess(backend, "backend"));
+  if (forecast && !forecast.killed) tasks.push(stopTrackedProcess(forecast, "forecast"));
+  if (embeddedModule && typeof embeddedModule.shutdownEmbedded === "function") {
+    tasks.push(shutdownEmbeddedServerGracefully(embeddedModule));
+  }
+  if (childWebProc && !childWebProc.killed) {
+    tasks.push(shutdownChildWebServerGracefully(childWebProc));
+  }
+
+  if (!tasks.length) return;
+  console.log(`[main] Stopping runtime services (${reason})...`);
+  await Promise.allSettled(tasks);
+}
+
+function finalizeAppShutdown() {
+  appShutdownBypassQuit = true;
+  allowMainWindowClose = true;
+  const action = normalizeAppShutdownAction(appShutdownFinalAction);
+  if (action.type === "install") {
+    // SAFETY GUARD: Confirm Python services are fully stopped before launching
+    // the installer. The installer will overwrite dist/ForecastCoreService.exe
+    // and dist/InverterCoreService.exe — if either subprocess still holds the
+    // file handle, the install will fail and leave the app in a broken state.
+    finalizeInstallShutdown().catch((err) => {
+      console.error("[main] Install shutdown sequence failed:", err?.message || err);
+      app.exit(1);
+    });
+    return;
+  }
+  if (action.type === "relaunch") {
+    app.relaunch();
+    app.quit();
+    return;
+  }
+  if (action.type === "exit") {
+    app.exit(action.exitCode || 0);
+    return;
+  }
+  app.quit();
+}
+
+// Polls for a process to actually exit. Returns true if the process is gone
+// within timeoutMs, false otherwise. Used during install shutdown to ensure
+// Python service file handles are released before the installer overwrites
+// dist/*.exe.
+function waitForProcessGone(proc, label, timeoutMs = 3000, pollMs = 200) {
+  return new Promise((resolve) => {
+    if (!proc || proc.killed || proc.exitCode !== null) {
+      resolve(true);
+      return;
+    }
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (!proc || proc.killed || proc.exitCode !== null) {
+        clearInterval(timer);
+        resolve(true);
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        clearInterval(timer);
+        console.warn(`[main] ${label} still running after ${timeoutMs}ms wait`);
+        resolve(false);
+      }
+    }, pollMs);
+  });
+}
+
+async function finalizeInstallShutdown() {
+  const lingering = [];
+  if (backendProc && !backendProc.killed) lingering.push("backend");
+  if (forecastProc && !forecastProc.killed) lingering.push("forecast");
+
+  if (lingering.length) {
+    console.warn(
+      "[main] Lingering Python services before install:",
+      lingering.join(", "),
+      "- forcing kill before quitAndInstall",
+    );
+    if (backendProc && !backendProc.killed) {
+      try { forceKillProc(backendProc, "backend"); } catch (_) {}
+    }
+    if (forecastProc && !forecastProc.killed) {
+      try { forceKillProc(forecastProc, "forecast"); } catch (_) {}
+    }
+
+    // Wait until the OS confirms the processes have actually exited.
+    // taskkill is async — its callback fires before the kernel finishes
+    // releasing handles. We poll until the child reports exitCode/killed.
+    const waits = [];
+    if (backendProc) waits.push(waitForProcessGone(backendProc, "backend", 4000));
+    if (forecastProc) waits.push(waitForProcessGone(forecastProc, "forecast", 4000));
+    const results = await Promise.all(waits);
+    const allGone = results.every(Boolean);
+    if (!allGone) {
+      console.warn("[main] Some Python services did not confirm exit; install may fail");
+    }
+  }
+
+  // Additional grace period for the OS to fully release file handles
+  // (NTFS handle release can lag a few hundred ms after process exit).
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  if (!autoUpdater) {
+    console.error("[main] autoUpdater null at quitAndInstall — aborting");
+    app.exit(1);
+    return;
+  }
+  try {
+    console.log("[main] Launching quitAndInstall now (silent, forceRunAfter)");
+    // isSilent=true → NSIS runs unattended (no wizard), matches oneClick:true config.
+    // isForceRunAfter=true → relaunch app automatically after install completes.
+    autoUpdater.quitAndInstall(true, true);
+  } catch (err) {
+    console.error("[main] quitAndInstall failed:", err.message);
+    setAppUpdateState({
+      status: "error",
+      message: `Install failed: ${err.message}`,
+      error: String(err.message || "Install failed"),
+      canInstall: false,
+    });
+    app.exit(1);
+  }
+}
+
+// Best-effort classification of requestAppShutdown input into the shutdown-
+// reason taxonomy. Used only if the caller didn't already record a more
+// specific reason via recordShutdownReasonOnce().
+function _classifyShutdownForMarker(reasonString, action) {
+  const r = String(reasonString || "").toLowerCase();
+  const actionType = String(action?.type || "").toLowerCase();
+  if (actionType === "install") {
+    return { reason: SHUTDOWN_REASONS.INSTALL_UPDATE, initiator: SHUTDOWN_INITIATORS.AUTO_UPDATER };
+  }
+  if (actionType === "relaunch") {
+    return { reason: SHUTDOWN_REASONS.RELAUNCH, initiator: SHUTDOWN_INITIATORS.RUNTIME };
+  }
+  if (r.includes("session-end")) {
+    return { reason: SHUTDOWN_REASONS.SESSION_END, initiator: SHUTDOWN_INITIATORS.WINDOWS_OS };
+  }
+  if (r.includes("power") && r.includes("shutdown")) {
+    return { reason: SHUTDOWN_REASONS.POWER_SHUTDOWN, initiator: SHUTDOWN_INITIATORS.WINDOWS_OS };
+  }
+  if (r.includes("license")) {
+    return { reason: SHUTDOWN_REASONS.LICENSE_EXPIRED, initiator: SHUTDOWN_INITIATORS.RUNTIME };
+  }
+  return { reason: SHUTDOWN_REASONS.BEFORE_QUIT, initiator: SHUTDOWN_INITIATORS.USER };
+}
+
+function requestAppShutdown(options = {}) {
+  const reason = String(options?.reason || "application shutdown").trim() || "application shutdown";
+  mergeAppShutdownAction(options?.action);
+  // Record a shutdown-reason marker as early as possible. If Windows
+  // force-kills us mid-shutdown, the marker is still on disk for diagnostics.
+  // First-write-wins via recordShutdownReasonOnce; specific callers
+  // (session-end, powerMonitor) record their own reason before calling in.
+  const classified = _classifyShutdownForMarker(reason, options?.action);
+  recordShutdownReasonOnce(classified.reason, {
+    initiator: classified.initiator,
+    extra: { requestReason: reason, actionType: options?.action?.type || "quit" },
+  });
+  if (appShutdownPromise) return appShutdownPromise;
+  console.log(`[main] Shutdown requested (${reason})`);
+  appShutdownPromise = stopRuntimeServices(reason)
+    .catch((err) => {
+      console.error("[main] Shutdown sequence failed:", err?.message || err);
+    })
+    .finally(() => {
+      finalizeAppShutdown();
+    });
+  return appShutdownPromise;
 }
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
@@ -717,12 +1947,71 @@ app.whenReady().then(async () => {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
-  app.setName("Inverter Dashboard");
+  app.setName("ADSI Inverter Dashboard");
+
+  // v2.8.14 — powerMonitor handlers for OS-level shutdown / suspend / resume.
+  // powerMonitor requires app-ready, so it's bound here rather than at top.
+  // `shutdown` is the ACPI signal fired when Windows is about to power off
+  // or reboot; it is complementary to session-end and fires a bit earlier
+  // on some Windows editions.
+  try {
+    const { powerMonitor } = require("electron");
+    if (powerMonitor && typeof powerMonitor.on === "function") {
+      powerMonitor.on("shutdown", () => {
+        try { console.warn("[main] powerMonitor.shutdown received"); } catch (_) {}
+        recordShutdownReasonOnce(SHUTDOWN_REASONS.POWER_SHUTDOWN, {
+          initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+          extra: { source: "powerMonitor" },
+        });
+        appShutdownBypassQuit = true;
+        try {
+          requestAppShutdown({
+            reason: "powerMonitor-shutdown",
+            action: { type: "quit" },
+          }).catch(() => { /* already logged */ });
+        } catch (_) {}
+      });
+      // Suspend is NOT a shutdown — but we record it so that if the machine
+      // is later power-cycled from sleep without resuming cleanly, the banner
+      // can surface "prior shutdown followed a suspend at 22:04" and the
+      // operator knows to check the UPS / power rail.
+      powerMonitor.on("suspend", () => {
+        try { console.log("[main] powerMonitor.suspend — recording advisory marker"); } catch (_) {}
+        // Use a lower-severity reason and DO NOT set _shutdownReasonRecorded
+        // so a later session-end can still overwrite with the authoritative
+        // shutdown reason. We reach around recordShutdownReasonOnce here.
+        try {
+          _shutdownReason.recordShutdownReasonSync(SHUTDOWN_REASONS.POWER_SUSPEND, {
+            initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+            extra: { advisory: true, source: "powerMonitor" },
+          });
+        } catch (_) {}
+      });
+      powerMonitor.on("resume", () => {
+        try { console.log("[main] powerMonitor.resume — machine woke from suspend"); } catch (_) {}
+      });
+      console.log("[main] powerMonitor shutdown/suspend/resume handlers registered");
+    } else {
+      console.warn("[main] powerMonitor not available — OS shutdown detection disabled");
+    }
+  } catch (err) {
+    console.warn("[main] powerMonitor wiring failed:", err?.message || err);
+  }
+
+  migrateLegacyUserDataIfNeeded();
   initAppUpdater();
   // Remove default app menu (File/Edit/View/Window/Help) while keeping native window chrome.
   Menu.setApplicationMenu(null);
   const licensed = await ensureLicenseAtStartup();
   if (!licensed) {
+    // User cancelled the license dialog at startup — graceful exit. Without
+    // this marker, the next boot would see the sentinel from THIS run with
+    // no matching shutdown-reason and falsely flag "unexpected prior shutdown".
+    recordEarlyExitMarker(
+      SHUTDOWN_REASONS.BEFORE_QUIT,
+      SHUTDOWN_INITIATORS.USER,
+      { earlyExitPath: "license-startup-cancel" },
+    );
     app.exit(0);
     return;
   }
@@ -740,6 +2029,11 @@ app.on("activate", async () => {
   if (!status.valid) {
     const ok = await ensureLicenseAtStartup();
     if (!ok) {
+      recordEarlyExitMarker(
+        SHUTDOWN_REASONS.BEFORE_QUIT,
+        SHUTDOWN_INITIATORS.USER,
+        { earlyExitPath: "license-activate-cancel" },
+      );
       app.exit(0);
       return;
     }
@@ -753,25 +2047,58 @@ app.on("activate", async () => {
   else if (bootStarted) showLoadingWindow();
 });
 
-app.on("before-quit", () => {
-  allowMainWindowClose = true;
-  isAppShuttingDown = true;
-  if (appUpdateAutoCheckTimer) {
-    clearTimeout(appUpdateAutoCheckTimer);
-    appUpdateAutoCheckTimer = null;
-  }
-  if (licenseCheckerTimer) {
-    clearInterval(licenseCheckerTimer);
-    licenseCheckerTimer = null;
-  }
-  // Embedded mode (packaged): server runs in-process — call its shutdown directly.
-  if (embeddedServerModule && typeof embeddedServerModule.shutdownEmbedded === "function") {
-    try { embeddedServerModule.shutdownEmbedded(); } catch (_) {}
-  }
-  killServer();
+app.on("before-quit", (event) => {
+  if (appShutdownBypassQuit) return;
+  event.preventDefault();
+  requestAppShutdown({
+    reason: "before-quit",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] before-quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 });
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+});
+
+// v2.8.14 — Windows OS shutdown / logoff detection.
+//
+// Windows sends WM_QUERYENDSESSION and WM_ENDSESSION when the user logs off,
+// the machine shuts down, or an update-triggered reboot fires. Electron
+// surfaces this through `app.on("session-end")`. Without this handler we
+// could only observe the OS-initiated shutdown indirectly as a forced
+// process kill, which is indistinguishable from a crash in the Windows
+// Event Log — the exact confusion responsible for the nightly "Error 1962"
+// reports being hard to root-cause.
+//
+// The handler is synchronous-best-effort: Windows gives roughly 5 seconds
+// before force-killing the process. We write the marker first (cheap, sync)
+// then kick off the graceful shutdown. If the shutdown completes inside the
+// budget, Windows proceeds normally. If not, Windows kills the process — but
+// the marker is already persisted, so next boot the banner can tell the
+// operator "Windows initiated a shutdown at 02:07" instead of "your app
+// crashed at 02:07".
+app.on("session-end", (details) => {
+  const ending = String(details?.reason || details || "session-end");
+  try { console.warn(`[main] Windows session-end received (${ending})`); } catch (_) {}
+  recordShutdownReasonOnce(SHUTDOWN_REASONS.SESSION_END, {
+    initiator: SHUTDOWN_INITIATORS.WINDOWS_OS,
+    extra: { sessionEndReason: ending },
+  });
+  appShutdownBypassQuit = true;                // don't fight the OS
+  try {
+    // Fire shutdown but don't await — Windows' budget is short and we need
+    // to at least begin the DB flush chain. stopRuntimeServices has its own
+    // per-phase timers.
+    requestAppShutdown({
+      reason: `session-end:${ending}`,
+      action: { type: "quit" },
+    }).catch(() => { /* already logged */ });
+  } catch (err) {
+    try { console.error("[main] session-end shutdown request failed:", err?.message || err); } catch (_) {}
+  }
 });
 
 // ─── Loading Window ───────────────────────────────────────────────────────────
@@ -781,22 +2108,37 @@ function showLoadingWindow() {
     return;
   }
   loadingWin = new BrowserWindow({
-    width: 500,
-    height: 420,
-    minWidth: 500,
-    minHeight: 420,
+    width: 600,
+    height: 720,
+    minWidth: 600,
+    minHeight: 500,
     useContentSize: true,
+    title: "ADSI Inverter Dashboard",
     icon: APP_ICON,
     frame: false,
     resizable: false,
+    autoHideMenuBar: true,
     // No alwaysOnTop: loading should be visible during startup but must not trap
     // clicks on other OS windows (e.g. the user's taskbar or other apps).
     center: true,
-    backgroundColor: "#0f1117",
+    backgroundColor: "#07111e",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
   });
   loadingWin.loadFile(path.join(PUBLIC_DIR, "loading.html"));
   loadingWin.show();
+
+  // Retry handler: when the loading page reloads (from the Retry button),
+  // detect it and re-attempt server startup instead of just reloading the UI.
+  loadingWinLoadCount = 0;
+  startupErrorShown = false;
+  loadingWin.webContents.removeAllListeners("did-finish-load");
+  loadingWin.webContents.on("did-finish-load", () => {
+    loadingWinLoadCount += 1;
+    if (loadingWinLoadCount > 1 && startupErrorShown) {
+      startupErrorShown = false;
+      retryServerStartup();
+    }
+  });
 }
 
 function registerShortcutsOnce() {
@@ -857,19 +2199,18 @@ function showLoginWindow() {
     return;
   }
   loginWin = new BrowserWindow({
-    width: 500,
-    height: 540,
-    minWidth: 500,
-    minHeight: 540,
+    width: 480,
+    height: 620,
+    minWidth: 480,
+    minHeight: 570,
     icon: APP_ICON,
     frame: true,
     autoHideMenuBar: true,
     resizable: false,
     maximizable: false,
     minimizable: false,
-    backgroundColor: "#102029",
+    backgroundColor: "#050c17",
     center: true,
-    alwaysOnTop: true,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload-login.js"),
@@ -892,10 +2233,26 @@ function showLoginWindow() {
   });
 }
 
-function startAfterLogin() {
+async function startAfterLogin() {
   if (bootStarted) return;
   bootStarted = true;
   showLoadingWindow();
+  updateLoadingStartupState({
+    step: 1,
+    progress: 8,
+    text: "Organizing storage...",
+  });
+  try {
+    const { runStorageMigration } = require("./storageConsolidationMigration");
+    await runStorageMigration();
+  } catch (err) {
+    console.warn("[main] Storage migration error (non-fatal):", err.message);
+  }
+  updateLoadingStartupState({
+    step: 1,
+    progress: 12,
+    text: "Starting local dashboard services...",
+  });
   startServer();
 }
 
@@ -1033,12 +2390,26 @@ function parseDateMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
+function parseLicenseExpiryMs(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+  const raw = String(v || "").trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const t = new Date(`${raw}T23:59:59.999`).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  const t = new Date(raw).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
 function readWindowsMachineGuid() {
   try {
     const out = execFileSync(
       "reg",
       ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
     );
     const line = String(out || "")
       .split(/\r?\n/)
@@ -1056,7 +2427,7 @@ function readRegistryValue(regPath, valueName) {
     const out = execFileSync(
       "reg",
       ["query", regPath, "/v", valueName],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
     );
     const line = String(out || "")
       .split(/\r?\n/)
@@ -1076,7 +2447,20 @@ function writeRegistryValue(regPath, valueName, value) {
     execFileSync(
       "reg",
       ["add", regPath, "/v", valueName, "/t", "REG_SZ", "/d", String(value || ""), "/f"],
-      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function deleteRegistryValue(regPath, valueName) {
+  try {
+    execFileSync(
+      "reg",
+      ["delete", regPath, "/v", valueName, "/f"],
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
     );
     return true;
   } catch (_) {
@@ -1098,6 +2482,11 @@ function loadLicenseRegistryMarker() {
     firstInstallAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "FirstInstallAt")),
     trialAcceptedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialAcceptedAt")),
     trialExpiresAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt")),
+    licenseFingerprint: String(readRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint") || "").trim(),
+    licenseActivatedAt: parseDateMs(readRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt")),
+    licenseExpiresAt: parseLicenseExpiryMs(readRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt")),
+    licenseType: String(readRegistryValue(LICENSE_REG_PATH, "LicenseType") || "").trim().toLowerCase(),
+    licenseLifetime: String(readRegistryValue(LICENSE_REG_PATH, "LicenseLifetime") || "").trim() === "1",
   };
 }
 
@@ -1119,6 +2508,109 @@ function saveLicenseRegistryMarker(state) {
   if (Number.isFinite(trialExpiresAt) && trialExpiresAt > 0) {
     writeRegistryValue(LICENSE_REG_PATH, "TrialExpiresAt", String(trialExpiresAt));
   }
+
+  const lic = normalizeStoredLicense(state?.license);
+  if (lic?.fingerprint) {
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint", lic.fingerprint);
+    writeRegistryValue(LICENSE_REG_PATH, "LicenseLifetime", lic.lifetime ? "1" : "0");
+    if (lic.type) writeRegistryValue(LICENSE_REG_PATH, "LicenseType", lic.type);
+    else deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+
+    const activatedAt = parseDateMs(lic.activatedAt);
+    if (Number.isFinite(activatedAt) && activatedAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt", String(activatedAt));
+      // Persist activation anchor for duration licenses (tamper-resistant)
+      if (!lic.lifetime) setActivationAnchor(lic.fingerprint, activatedAt);
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+    }
+
+    const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+    if (!lic.lifetime && Number.isFinite(expiresAt) && expiresAt > 0) {
+      writeRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt", String(expiresAt));
+    } else {
+      deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+    }
+    return;
+  }
+
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseFingerprint");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseActivatedAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseExpiresAt");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseType");
+  deleteRegistryValue(LICENSE_REG_PATH, "LicenseLifetime");
+}
+
+// ─── Activation Anchor Map ────────────────────────────────────────────────
+// Persists { fingerprint → activatedAt } in a separate registry key so that
+// even if license-state.json is deleted, we remember when a duration license
+// was first activated on this device.  This prevents re-use after expiry.
+// The map is HMAC-signed with a device-bound key to resist tampering.
+const LICENSE_ANCHOR_REG_NAME = "ActivationAnchorMap";
+const ANCHOR_MAP_MAX_ENTRIES = 100;
+
+function _anchorMapHmac(jsonStr) {
+  const key = `adsi-anchor-${getDeviceFingerprint()}-v1`;
+  return crypto.createHmac("sha256", key).update(jsonStr).digest("hex");
+}
+
+function loadActivationAnchorMap() {
+  try {
+    const raw = readRegistryValue(LICENSE_REG_PATH, LICENSE_ANCHOR_REG_NAME);
+    if (!raw) return { map: {}, tampered: false };
+    const envelope = JSON.parse(raw);
+    if (!envelope || typeof envelope !== "object") return { map: {}, tampered: false };
+    const data = String(envelope.d || "");
+    const hmac = String(envelope.h || "");
+    if (!data || !hmac) {
+      // Legacy unsigned format (pre-HMAC migration) — accept once, will be re-signed on next write
+      if (typeof envelope === "object" && !envelope.d && !envelope.h) return { map: envelope, tampered: false };
+      return { map: {}, tampered: false };
+    }
+    if (_anchorMapHmac(data) !== hmac) {
+      console.warn("[license] anchor map HMAC mismatch — possible tampering");
+      try { appendLicenseAudit("anchor_tamper_detected", "Activation anchor map HMAC verification failed.", "warning"); } catch (_) {}
+      return { map: {}, tampered: true };
+    }
+    const map = JSON.parse(data);
+    return { map: (map && typeof map === "object") ? map : {}, tampered: false };
+  } catch (_) {
+    return { map: {}, tampered: false };
+  }
+}
+
+function saveActivationAnchorMap(map) {
+  try {
+    // Prune to keep only the most recent N entries
+    const entries = Object.entries(map || {});
+    if (entries.length > ANCHOR_MAP_MAX_ENTRIES) {
+      entries.sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+      map = Object.fromEntries(entries.slice(entries.length - ANCHOR_MAP_MAX_ENTRIES));
+    }
+    const data = JSON.stringify(map);
+    const hmac = _anchorMapHmac(data);
+    writeRegistryValue(LICENSE_REG_PATH, LICENSE_ANCHOR_REG_NAME, JSON.stringify({ d: data, h: hmac }));
+  } catch (_) {}
+}
+
+function getActivationAnchor(fingerprint) {
+  if (!fingerprint) return { anchor: null, tampered: false };
+  const { map, tampered } = loadActivationAnchorMap();
+  const ts = parseDateMs(map[fingerprint]);
+  return { anchor: (Number.isFinite(ts) && ts > 0) ? ts : null, tampered };
+}
+
+function setActivationAnchor(fingerprint, activatedAt) {
+  if (!fingerprint) return;
+  const ts = parseDateMs(activatedAt);
+  if (!Number.isFinite(ts) || ts <= 0) return;
+  const { map } = loadActivationAnchorMap();
+  const existing = parseDateMs(map[fingerprint]);
+  // Keep the earliest activation — never overwrite with a later timestamp
+  if (Number.isFinite(existing) && existing > 0 && existing <= ts) return;
+  map[fingerprint] = ts;
+  saveActivationAnchorMap(map);
+  try { appendLicenseAudit("anchor_registered", `Activation anchor persisted for license ${fingerprint.slice(0, 8)}...`, "info"); } catch (_) {}
 }
 
 // ─── Credential Encryption ─────────────────────────────────────────────────
@@ -1193,6 +2685,11 @@ function stripLicenseSignature(payload) {
   return clone;
 }
 
+function buildLicensePayloadFingerprint(payload) {
+  const canonical = stableStringify(stripLicenseSignature(payload));
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
 function extractLicenseSignature(payload) {
   if (!payload || typeof payload !== "object") return null;
 
@@ -1237,7 +2734,7 @@ function loadLicensePublicKeys() {
       console.warn("[license] failed to read configured public key path:", err.message);
     }
   } else {
-    const defaultPath = path.join(LICENSE_DIR, "public-key.pem");
+    const defaultPath = path.join(getLicenseDir(), "public-key.pem");
     if (fs.existsSync(defaultPath)) {
       try {
         addKey(fs.readFileSync(defaultPath, "utf8"), defaultPath);
@@ -1305,6 +2802,108 @@ function verifyLicenseSignature(payload) {
   return { ok: false, error: "License signature verification failed." };
 }
 
+function normalizeStoredLicense(value) {
+  if (!value || typeof value !== "object") return null;
+  const fingerprint = String(value.fingerprint || value.identity || "").trim();
+  const activatedAt = parseDateMs(value.activatedAt);
+  const expiresAt = parseLicenseExpiryMs(value.expiresAt);
+  const rawType = String(value.type || "").trim().toLowerCase();
+  const lifetime = !!value.lifetime || rawType === "lifetime";
+  return {
+    ...value,
+    fingerprint,
+    activatedAt: Number.isFinite(activatedAt) && activatedAt > 0 ? Math.trunc(activatedAt) : null,
+    expiresAt: !lifetime && Number.isFinite(expiresAt) && expiresAt > 0 ? Math.trunc(expiresAt) : null,
+    type: lifetime ? "lifetime" : rawType,
+    lifetime,
+    metadata: value.metadata && typeof value.metadata === "object" ? { ...value.metadata } : {},
+  };
+}
+
+function buildRegistryLicenseSnapshot(regState) {
+  const fingerprint = String(regState?.licenseFingerprint || "").trim();
+  if (!fingerprint) return null;
+  return normalizeStoredLicense({
+    fingerprint,
+    activatedAt: regState?.licenseActivatedAt,
+    expiresAt: regState?.licenseExpiresAt,
+    type: regState?.licenseType || "",
+    lifetime: !!regState?.licenseLifetime,
+    metadata: {},
+  });
+}
+
+function mergeLicenseRecords(primary, secondary) {
+  const a = normalizeStoredLicense(primary);
+  const b = normalizeStoredLicense(secondary);
+  if (!a) return b;
+  if (!b) return a;
+  if (a.fingerprint && b.fingerprint && a.fingerprint !== b.fingerprint) return a;
+  return normalizeStoredLicense({
+    ...b,
+    ...a,
+    fingerprint: a.fingerprint || b.fingerprint || "",
+    activatedAt: pickEarliestTimestamp(a.activatedAt, b.activatedAt) || a.activatedAt || b.activatedAt || null,
+    expiresAt:
+      a.lifetime || b.lifetime
+        ? null
+        : pickEarliestTimestamp(a.expiresAt, b.expiresAt) || a.expiresAt || b.expiresAt || null,
+    type: a.type || b.type || "",
+    lifetime: !!(a.lifetime || b.lifetime),
+    metadata: {
+      ...(b.metadata && typeof b.metadata === "object" ? b.metadata : {}),
+      ...(a.metadata && typeof a.metadata === "object" ? a.metadata : {}),
+    },
+  });
+}
+
+function resolveLicenseActivationAnchor(priorLicense, nextFingerprint, durationMs) {
+  const prior = normalizeStoredLicense(priorLicense);
+  if (prior && Number.isFinite(durationMs) && durationMs > 0) {
+    if (prior.fingerprint && nextFingerprint && prior.fingerprint !== nextFingerprint) {
+      // Different key — fall through to anchor map check below
+    } else {
+      const activatedAt = parseDateMs(prior.activatedAt);
+      if (Number.isFinite(activatedAt) && activatedAt > 0) return { ts: Math.trunc(activatedAt), tampered: false };
+      const expiresAt = parseLicenseExpiryMs(prior.expiresAt);
+      if (Number.isFinite(expiresAt) && expiresAt > 0) {
+        return { ts: Math.trunc(expiresAt - durationMs), tampered: false };
+      }
+    }
+  }
+  // Fallback: check registry activation anchor map (survives state-file deletion)
+  const { anchor, tampered } = getActivationAnchor(nextFingerprint);
+  if (anchor) return { ts: Math.trunc(anchor), tampered: false };
+  // If anchor map was tampered with and no prior state exists, block the import
+  if (tampered && !prior) return { ts: null, tampered: true };
+  return { ts: null, tampered: false };
+}
+
+function tryRestoreMirroredLicense(priorLicense) {
+  try {
+    if (!fs.existsSync(getLicenseFileMirror())) return null;
+    const raw = fs.readFileSync(getLicenseFileMirror(), "utf8").replace(/^\uFEFF/, "");
+    const payload = JSON.parse(raw);
+    const normalized = normalizeLicensePayload(payload, getLicenseFileMirror(), priorLicense);
+    return normalized.ok ? normalized.license : null;
+  } catch (err) {
+    console.warn("[license] mirror restore failed:", err.message);
+    return null;
+  }
+}
+
+function resolvePersistedLicense(rawLicense, regState) {
+  const regLicense = buildRegistryLicenseSnapshot(regState);
+  const merged = mergeLicenseRecords(rawLicense, regLicense);
+  if (merged?.fingerprint) return { license: merged, restoredFromMirror: false };
+  const restored = tryRestoreMirroredLicense(merged || regLicense);
+  if (!restored) return { license: merged, restoredFromMirror: false };
+  return {
+    license: mergeLicenseRecords(restored, merged),
+    restoredFromMirror: true,
+  };
+}
+
 function defaultLicenseState() {
   return {
     schema: 1,
@@ -1337,10 +2936,11 @@ function normalizeLicenseAudit(entries) {
 }
 
 function loadLicenseState() {
-  ensureDir(LICENSE_DIR);
+  ensureDir(getLicenseDir());
   const regState = loadLicenseRegistryMarker();
   try {
-    if (!fs.existsSync(LICENSE_STATE_PATH)) {
+    if (!fs.existsSync(getLicenseStatePath())) {
+      const resolved = resolvePersistedLicense(null, regState);
       const def = defaultLicenseState();
       const state = {
         ...def,
@@ -1348,6 +2948,7 @@ function loadLicenseState() {
         firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
         trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
         trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+        license: resolved.license,
       };
       state.audit = normalizeLicenseAudit([
         {
@@ -1356,13 +2957,24 @@ function loadLicenseState() {
           level: "info",
           details: "License state created on this device.",
         },
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
       ]);
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
       licenseStateCache = state;
       return state;
     }
-    const raw = JSON.parse(fs.readFileSync(LICENSE_STATE_PATH, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(getLicenseStatePath(), "utf8"));
+    const resolved = resolvePersistedLicense(raw?.license, regState);
     const def = defaultLicenseState();
     const state = {
       schema: Number(raw?.schema || 1),
@@ -1370,15 +2982,28 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(raw?.firstInstallAt, regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(raw?.trialAcceptedAt, regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(raw?.trialExpiresAt, regState.trialExpiresAt),
-      license: raw?.license && typeof raw.license === "object" ? raw.license : null,
-      audit: normalizeLicenseAudit(raw?.audit),
+      license: resolved.license,
+      audit: normalizeLicenseAudit([
+        ...(resolved.restoredFromMirror
+          ? [
+              {
+                ts: Date.now(),
+                action: "license_restored",
+                level: "success",
+                details: "Recovered current license from the mirrored license file.",
+              },
+            ]
+          : []),
+        ...(Array.isArray(raw?.audit) ? raw.audit : []),
+      ]),
     };
-    fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
     saveLicenseRegistryMarker(state);
     licenseStateCache = state;
     return state;
   } catch (err) {
     console.error("[license] state load failed:", err.message);
+    const resolved = resolvePersistedLicense(null, regState);
     const def = defaultLicenseState();
     const state = {
       ...def,
@@ -1386,9 +3011,30 @@ function loadLicenseState() {
       firstInstallAt: pickEarliestTimestamp(regState.firstInstallAt, def.firstInstallAt) || def.firstInstallAt,
       trialAcceptedAt: pickEarliestTimestamp(regState.trialAcceptedAt),
       trialExpiresAt: pickEarliestTimestamp(regState.trialExpiresAt),
+      license: resolved.license,
+      audit: normalizeLicenseAudit(
+        [
+          {
+            ts: Date.now(),
+            action: "state_reinitialized",
+            level: "warning",
+            details: `License state was reinitialized after a read error: ${err.message}`,
+          },
+          ...(resolved.restoredFromMirror
+            ? [
+                {
+                  ts: Date.now(),
+                  action: "license_restored",
+                  level: "success",
+                  details: "Recovered current license from the mirrored license file.",
+                },
+              ]
+            : []),
+        ],
+      ),
     };
     try {
-      fs.writeFileSync(LICENSE_STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+      fs.writeFileSync(getLicenseStatePath(), JSON.stringify(state, null, 2), "utf8");
       saveLicenseRegistryMarker(state);
     } catch (writeErr) {
       console.error("[license] fallback state write failed:", writeErr.message);
@@ -1399,12 +3045,12 @@ function loadLicenseState() {
 }
 
 function saveLicenseState(state) {
-  ensureDir(LICENSE_DIR);
+  ensureDir(getLicenseDir());
   state.audit = normalizeLicenseAudit(state.audit);
   // Write to a temp file then atomically rename to avoid corruption on crash.
-  const tmpPath = LICENSE_STATE_PATH + ".tmp";
+  const tmpPath = getLicenseStatePath() + ".tmp";
   fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf8");
-  fs.renameSync(tmpPath, LICENSE_STATE_PATH);
+  fs.renameSync(tmpPath, getLicenseStatePath());
   saveLicenseRegistryMarker(state);
   licenseStateCache = state;
 }
@@ -1431,7 +3077,7 @@ function getLicenseAuditRows() {
   return normalizeLicenseAudit(state.audit);
 }
 
-function normalizeLicensePayload(payload, sourcePath) {
+function normalizeLicensePayload(payload, sourcePath, priorLicense = null) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "License file must contain a JSON object." };
   }
@@ -1442,6 +3088,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   }
 
   const now = Date.now();
+  const prior = normalizeStoredLicense(priorLicense);
   const fp = getDeviceFingerprint();
   const boundDevice = String(
     payload.deviceFingerprint ||
@@ -1466,6 +3113,7 @@ function normalizeLicensePayload(payload, sourcePath) {
   );
   const durationHours = Number(payload.duration_hours ?? payload.durationHours ?? NaN);
   const durationMsField = Number(payload.duration_ms ?? payload.durationMs ?? NaN);
+  const fingerprint = buildLicensePayloadFingerprint(payload);
   let durationMs = null;
   if (Number.isFinite(durationMsField) && durationMsField > 0) {
     durationMs = Math.trunc(durationMsField);
@@ -1475,7 +3123,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     durationMs = Math.trunc(durationDays * 24 * 60 * 60 * 1000);
   }
 
-  const explicitExpiry = parseDateMs(
+  const explicitExpiry = parseLicenseExpiryMs(
     payload.expiresAt ||
       payload.expires_at ||
       payload.validUntil ||
@@ -1485,7 +3133,11 @@ function normalizeLicensePayload(payload, sourcePath) {
       payload.endAt ||
       payload.end_at,
   );
-  const activatedAt = now;
+  const anchorResult = resolveLicenseActivationAnchor(prior, fingerprint, durationMs);
+  if (anchorResult.tampered) {
+    return { ok: false, error: "License activation records have been tampered with. Contact your administrator." };
+  }
+  const activatedAt = anchorResult.ts || now;
   const expiresAt = lifetime
     ? null
     : Number.isFinite(explicitExpiry)
@@ -1505,6 +3157,7 @@ function normalizeLicensePayload(payload, sourcePath) {
     sourcePath: String(sourcePath || ""),
     importedAt: now,
     activatedAt,
+    fingerprint,
     type: lifetime ? "lifetime" : Number.isFinite(durationMs) && !Number.isFinite(explicitExpiry) ? "duration" : "datetime",
     lifetime: !!lifetime,
     expiresAt: Number.isFinite(expiresAt) ? Math.trunc(expiresAt) : null,
@@ -1528,20 +3181,20 @@ function installLicenseFromFile(filePath) {
     if (!fullPath) return { ok: false, error: "No license file selected." };
     const raw = fs.readFileSync(fullPath, "utf8").replace(/^\uFEFF/, "");
     const payload = JSON.parse(raw);
-    const normalized = normalizeLicensePayload(payload, fullPath);
+    const state = loadLicenseState();
+    const normalized = normalizeLicensePayload(payload, fullPath, state.license);
     if (!normalized.ok) {
       appendLicenseAudit("license_import_failed", normalized.error || "Invalid license payload.", "error");
       return normalized;
     }
 
-    const state = loadLicenseState();
     state.deviceFingerprint = getDeviceFingerprint();
     state.license = normalized.license;
     if (!state.firstInstallAt) state.firstInstallAt = Date.now();
     saveLicenseState(state);
 
     try {
-      fs.copyFileSync(fullPath, LICENSE_FILE_MIRROR);
+      fs.copyFileSync(fullPath, getLicenseFileMirror());
     } catch (err) {
       console.warn("[license] mirror copy failed:", err.message);
     }
@@ -1576,7 +3229,7 @@ function activateTrialNow() {
   state.deviceFingerprint = getDeviceFingerprint();
   state.firstInstallAt = state.firstInstallAt || now;
   state.trialAcceptedAt = now;
-  state.trialExpiresAt = now + TRIAL_DAYS * 24 * 60 * 60 * 1000;
+  state.trialExpiresAt = now + TRIAL_DAYS * DAY_MS;
   saveLicenseState(state);
   appendLicenseAudit(
     "trial_started",
@@ -1597,62 +3250,53 @@ function humanRemaining(msLeft) {
   return `${Math.max(1, mins)}m`;
 }
 
-function evaluateLicense(now = Date.now()) {
-  const state = licenseStateCache || loadLicenseState();
-  const fp = getDeviceFingerprint();
-  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
-  if (mismatch) {
-    return {
-      valid: false,
-      source: "device",
-      code: "device_mismatch",
-      expiresAt: null,
-      msLeft: 0,
-      nearExpiry: false,
-      message: "License storage belongs to another device fingerprint.",
-    };
-  }
+function calcRemainingDays(msLeft) {
+  if (!Number.isFinite(msLeft) || msLeft <= 0) return 0;
+  return Math.max(1, Math.ceil(msLeft / DAY_MS));
+}
 
-  const lic = state.license && typeof state.license === "object" ? state.license : null;
-  if (lic) {
-    const expiresAt = parseDateMs(lic.expiresAt);
-    if (lic.lifetime || lic.type === "lifetime") {
-      return {
-        valid: true,
-        source: "license",
-        code: "lifetime",
-        lifetime: true,
-        expiresAt: null,
-        msLeft: Number.POSITIVE_INFINITY,
-        nearExpiry: false,
-        message: "Lifetime license active.",
-      };
-    }
-    if (Number.isFinite(expiresAt) && expiresAt > now) {
-      const msLeft = expiresAt - now;
-      return {
-        valid: true,
-        source: "license",
-        code: "licensed",
-        lifetime: false,
-        expiresAt,
-        msLeft,
-        nearExpiry: msLeft <= LICENSE_WARN_MS,
-        message: `License expires in ${humanRemaining(msLeft)}.`,
-      };
-    }
+function evaluateStoredLicenseEntitlement(license, now) {
+  const lic = normalizeStoredLicense(license);
+  if (!lic) return null;
+  const expiresAt = parseLicenseExpiryMs(lic.expiresAt);
+  if (lic.lifetime || lic.type === "lifetime") {
     return {
-      valid: false,
+      valid: true,
       source: "license",
-      code: "license_expired",
-      lifetime: false,
-      expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
-      msLeft: 0,
+      code: "lifetime",
+      lifetime: true,
+      expiresAt: null,
+      msLeft: Number.POSITIVE_INFINITY,
       nearExpiry: false,
-      message: "License expired.",
+      message: "Lifetime license active.",
     };
   }
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    const msLeft = expiresAt - now;
+    return {
+      valid: true,
+      source: "license",
+      code: "licensed",
+      lifetime: false,
+      expiresAt,
+      msLeft,
+      nearExpiry: msLeft <= LICENSE_WARN_MS,
+      message: `License expires in ${humanRemaining(msLeft)}.`,
+    };
+  }
+  return {
+    valid: false,
+    source: "license",
+    code: "license_expired",
+    lifetime: false,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
+    msLeft: 0,
+    nearExpiry: false,
+    message: "License expired.",
+  };
+}
 
+function evaluateTrialEntitlement(state, now) {
   const trialAcceptedAt = parseDateMs(state.trialAcceptedAt);
   const trialExpiresAt = parseDateMs(state.trialExpiresAt);
   if (trialAcceptedAt && trialExpiresAt && trialExpiresAt > now) {
@@ -1692,16 +3336,44 @@ function evaluateLicense(now = Date.now()) {
   };
 }
 
+function evaluateLicense(now = Date.now()) {
+  const state = licenseStateCache || loadLicenseState();
+  const fp = getDeviceFingerprint();
+  const mismatch = String(state.deviceFingerprint || "") !== String(fp || "");
+  if (mismatch) {
+    return {
+      valid: false,
+      source: "device",
+      code: "device_mismatch",
+      expiresAt: null,
+      msLeft: 0,
+      nearExpiry: false,
+      message: "License storage belongs to another device fingerprint.",
+    };
+  }
+
+  const licenseStatus = evaluateStoredLicenseEntitlement(state.license, now);
+  if (licenseStatus?.valid) return licenseStatus;
+  const trialStatus = evaluateTrialEntitlement(state, now);
+  if (trialStatus?.valid) return trialStatus;
+  return licenseStatus || trialStatus;
+}
+
 function buildLicensePublicStatus() {
   const v = evaluateLicense();
+  const expiresAt = Number.isFinite(v.expiresAt) ? v.expiresAt : null;
+  const msLeft = Number.isFinite(v.msLeft) ? v.msLeft : null;
+  const daysLeft = expiresAt == null ? null : calcRemainingDays(msLeft || 0);
   return {
     valid: !!v.valid,
     source: v.source || "trial",
     code: v.code || "",
     lifetime: !!v.lifetime,
-    expiresAt: Number.isFinite(v.expiresAt) ? v.expiresAt : null,
-    expiresAtIso: Number.isFinite(v.expiresAt) ? new Date(v.expiresAt).toISOString() : null,
-    msLeft: Number.isFinite(v.msLeft) ? v.msLeft : null,
+    expiresAt,
+    expiresAtIso: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+    msLeft,
+    daysLeft,
+    remainingText: v.lifetime ? "lifetime" : msLeft && msLeft > 0 ? humanRemaining(msLeft) : "",
     nearExpiry: !!v.nearExpiry,
     message: String(v.message || ""),
   };
@@ -1724,6 +3396,8 @@ function broadcastLicenseStatus(force = false) {
     status.code,
     status.lifetime,
     status.expiresAtIso,
+    status.daysLeft,
+    status.remainingText,
     status.nearExpiry,
   ]);
   if (!force && signature === lastBroadcastLicenseSignature) return status;
@@ -1747,8 +3421,22 @@ async function promptLicenseUpload(parentWin) {
   return installLicenseFromFile(result.filePaths[0]);
 }
 
+function migrateActivationAnchors() {
+  try {
+    const state = licenseStateCache;
+    if (!state?.license) return;
+    const lic = normalizeStoredLicense(state.license);
+    if (!lic?.fingerprint || lic.lifetime) return;
+    const activatedAt = parseDateMs(lic.activatedAt);
+    if (!Number.isFinite(activatedAt) || activatedAt <= 0) return;
+    // Register in anchor map if not already present
+    setActivationAnchor(lic.fingerprint, activatedAt);
+  } catch (_) {}
+}
+
 async function ensureLicenseAtStartup() {
   loadLicenseState();
+  migrateActivationAnchors();
   while (true) {
     const status = buildLicensePublicStatus();
     if (status.valid) return true;
@@ -1756,13 +3444,13 @@ async function ensureLicenseAtStartup() {
     if (status.code === "trial_not_started") {
       const choice = await dialog.showMessageBox({
         type: "question",
-        buttons: ["Start 7-Day Trial", "Upload License", "Exit"],
+        buttons: ["Start 7-Day Trial", "Upload License", "Restore from Backup…", "Exit"],
         defaultId: 0,
-        cancelId: 2,
+        cancelId: 3,
         title: "License Required",
-        message: "Welcome to Inverter Dashboard",
+        message: "Welcome to ADSI Inverter Dashboard",
         detail:
-          "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file",
+          "This device has not started its one-time 7-day trial yet.\n\nChoose an option to continue:\n• Start 7-day trial on this device\n• Upload a valid license file\n• Restore from a portable .adsibak backup (DB + settings + license)",
       });
       if (choice.response === 0) {
         activateTrialNow();
@@ -1780,18 +3468,23 @@ async function ensureLicenseAtStartup() {
         }
         continue;
       }
+      if (choice.response === 2) {
+        const handled = await handleBootstrapRestoreFromLicensePrompt();
+        if (handled === "exit") return false;
+        continue;
+      }
       appendLicenseAudit("startup_blocked_exit", "User exited from initial license gate.", "warning");
       return false;
     }
 
     const choice = await dialog.showMessageBox({
       type: "warning",
-      buttons: ["Upload License", "Exit"],
+      buttons: ["Upload License", "Restore from Backup…", "Exit"],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
       title: "License Expired",
       message: "Your license/trial is not valid.",
-      detail: `${status.message}\n\nUpload a license to continue.`,
+      detail: `${status.message}\n\nUpload a license to continue, or restore from a saved .adsibak backup.`,
     });
     if (choice.response === 0) {
       const uploaded = await promptLicenseUpload(loginWin || undefined);
@@ -1804,8 +3497,88 @@ async function ensureLicenseAtStartup() {
       }
       continue;
     }
+    if (choice.response === 1) {
+      const handled = await handleBootstrapRestoreFromLicensePrompt();
+      if (handled === "exit") return false;
+      continue;
+    }
     appendLicenseAudit("startup_blocked_exit", `User exited on ${status.code || "invalid_license"}.`, "warning");
     return false;
+  }
+}
+
+/**
+ * Helper for ensureLicenseAtStartup: open the bootstrap-restore wizard,
+ * handle the outcome, and tell the caller what to do next.
+ *
+ * Returns:
+ *   "loop"     — loop back to the license prompt (cancel, error, or restore
+ *                that didn't yield a valid license)
+ *   "exit"    — caller should return false to terminate startup
+ *
+ * On a successful restore that includes the license scope, we relaunch the
+ * app so the integrity gate, storage migration, and license loader all run
+ * fresh against the newly populated %PROGRAMDATA%.  A relaunch effectively
+ * replaces this process, so we never return from the resolved promise.
+ */
+async function handleBootstrapRestoreFromLicensePrompt() {
+  let bootstrapRestore;
+  try {
+    // eslint-disable-next-line global-require
+    bootstrapRestore = require("./bootstrapRestore");
+  } catch (err) {
+    dialog.showErrorBox(
+      "Restore Unavailable",
+      `The bootstrap-restore module could not be loaded: ${err.message}`,
+    );
+    return "loop";
+  }
+  try {
+    appendLicenseAudit(
+      "bootstrap_restore_opened",
+      "Operator opened the bootstrap-restore wizard from the license prompt.",
+      "info",
+    );
+    const result = await bootstrapRestore.runBootstrapRestoreFlow(loginWin || undefined);
+    if (!result?.ok) {
+      dialog.showErrorBox("Restore Failed", result?.error || "Unknown error.");
+      appendLicenseAudit(
+        "bootstrap_restore_failed",
+        `Bootstrap restore failed: ${result?.error || "unknown error"}.`,
+        "error",
+      );
+      return "loop";
+    }
+    if (result.canceled) {
+      appendLicenseAudit("bootstrap_restore_canceled", "User canceled bootstrap restore.", "info");
+      return "loop";
+    }
+    if (result.restored) {
+      appendLicenseAudit(
+        "bootstrap_restore_completed",
+        `Bootstrap restore complete (scope=${(result.scope || []).join(",") || "all"}). Relaunching.`,
+        "info",
+      );
+      // Schedule the relaunch — `app.relaunch()` queues a fresh launch FOR
+      // when the current process exits.  The caller (ensureLicenseAtStartup)
+      // will see "exit" and return false, which triggers `app.exit(0)` in
+      // the lifecycle handler — that satisfies the queued relaunch.  No
+      // extra setTimeout is needed; doubling up just risks racing the outer
+      // app.exit and creating two relaunches.
+      try { app.relaunch(); } catch (err) {
+        console.error("[main] app.relaunch() failed:", err.message);
+      }
+      return "exit";
+    }
+    return "loop";
+  } catch (err) {
+    dialog.showErrorBox("Restore Failed", err.message || String(err));
+    appendLicenseAudit(
+      "bootstrap_restore_failed",
+      `Bootstrap restore threw: ${err.message || String(err)}`,
+      "error",
+    );
+    return "loop";
   }
 }
 
@@ -1822,8 +3595,14 @@ function enforceLicenseShutdown(status) {
       ? "Trial/license expired while dashboard is running. Services will stop now."
       : "License expired while dashboard is running. Services will stop now.";
   dialog.showErrorBox("License Expired", `${detail}\n\nPlease upload a valid license and restart the dashboard.`);
-  killServer();
-  app.exit(0);
+  requestAppShutdown({
+    reason: "runtime license expired",
+    action: { type: "exit", exitCode: 0 },
+  }).catch((err) => {
+    console.error("[main] license shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }
 
 function handleLicenseRuntimeTick() {
@@ -1867,23 +3646,171 @@ function startEmbeddedServer(serverEntry) {
     serverBootError = "";
     return true;
   } catch (err) {
-    serverBootError = String(err?.message || err || "unknown error");
+    const code = String(err?.code || "").trim().toUpperCase();
+    const baseMsg = String(err?.message || err || "unknown error");
+    serverBootError =
+      code === "EADDRINUSE"
+        ? `Port ${SERVER_PORT} is already in use. Close any previous dashboard or local server process that is still bound to localhost:${SERVER_PORT}, then retry.`
+        : baseMsg;
     console.error("[main] Embedded web server start failed:", serverBootError);
     return false;
   }
 }
 
+// ─── Startup Error Helpers ───────────────────────────────────────────────────
+
+function humanizeServerError(rawMsg) {
+  const msg = String(rawMsg || "").toLowerCase();
+  if (msg.includes("readonly database") || msg.includes("read-only database")) {
+    return (
+      "The database could not be opened for writing.\n" +
+      "This can happen if another dashboard instance is still running, " +
+      "if antivirus software is temporarily locking the file, or if " +
+      "the database folder has restricted permissions.\n\n" +
+      "Close any other dashboard windows, then retry."
+    );
+  }
+  if (msg.includes("database is locked") || msg.includes("busy")) {
+    return (
+      "The database is locked by another process.\n" +
+      "Close any other dashboard instances or tools accessing the database, then retry."
+    );
+  }
+  if (msg.includes("malformed") || msg.includes("corrupt") || msg.includes("not a database")) {
+    return (
+      "The database file appears to be damaged.\n" +
+      "The dashboard will attempt to recover on the next successful start. " +
+      "If the problem persists, contact support."
+    );
+  }
+  if (msg.includes("disk i/o error") || msg.includes("disk full")) {
+    return (
+      "A disk error occurred while accessing the database.\n" +
+      "Check that the drive has enough free space and is working correctly, then retry."
+    );
+  }
+  return rawMsg || "Unknown startup error.";
+}
+
+function isRetryableStartupError(errMsg) {
+  const msg = String(errMsg || "").toLowerCase();
+  return (
+    msg.includes("readonly database") ||
+    msg.includes("read-only database") ||
+    msg.includes("database is locked") ||
+    msg.includes("busy")
+  );
+}
+
+function clearServerModuleCache() {
+  try {
+    const serverDir = path.resolve(__dirname, "..", "server");
+    Object.keys(require.cache).forEach((key) => {
+      // Normalise for Windows backslashes
+      const normalised = key.replace(/\\/g, "/");
+      const normDir = serverDir.replace(/\\/g, "/");
+      if (normalised.startsWith(normDir)) delete require.cache[key];
+    });
+  } catch (_) {}
+  embeddedServerStarted = false;
+}
+
+function retryServerStartup() {
+  clearServerModuleCache();
+  serverBootError = "";
+  serverReadyFired = false;
+
+  updateLoadingStartupState({
+    step: 2,
+    progress: 18,
+    text: "Retrying dashboard services\u2026",
+  });
+  startServer(0, true);
+}
+
 function showLoadingErrorMessage(message) {
   if (!loadingWin || loadingWin.isDestroyed()) return;
-  const safe = String(message || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/\r?\n/g, "<br/>");
+  startupErrorShown = true;
+  const safeMessage = String(message || "").replace(/<br\s*\/?>/gi, "\n");
+  const fallbackHtml = `<div style="font-family:Segoe UI,sans-serif;color:#ffd8df;padding:20px;text-align:center;line-height:1.6;background:#09121f">${safeMessage
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\r?\n/g, "<br/>")}</div>`;
   loadingWin.webContents
     .executeJavaScript(
-      `document.body.innerHTML='<div style="font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45">${safe}</div>';`,
+      `if (typeof window.showStartupError === "function") {
+         window.showStartupError(${JSON.stringify(safeMessage)});
+       } else {
+         document.body.innerHTML = ${JSON.stringify(fallbackHtml)};
+       }`,
     )
     .catch(() => {});
+}
+
+function updateLoadingStartupState(payload = {}) {
+  if (!loadingWin || loadingWin.isDestroyed()) return;
+  const progress = Number(payload?.progress);
+  const step = Number(payload?.step);
+  const safePayload = {
+    ...(Number.isFinite(progress)
+      ? { progress: Math.max(0, Math.min(100, Math.trunc(progress))) }
+      : {}),
+    ...(Number.isFinite(step)
+      ? { step: Math.max(1, Math.min(4, Math.trunc(step))) }
+      : {}),
+    ...(String(payload?.text || "").trim()
+      ? { text: String(payload.text).trim() }
+      : {}),
+  };
+  loadingWin.webContents
+    .executeJavaScript(
+      `if (typeof window.updateStartupState === "function") {
+         window.updateStartupState(${JSON.stringify(safePayload)});
+       }`,
+    )
+    .catch(() => {});
+}
+
+function clearMainRendererReadyTimer() {
+  if (!mainRendererReadyTimer) return;
+  clearTimeout(mainRendererReadyTimer);
+  mainRendererReadyTimer = null;
+}
+
+function armMainRendererReadyTimer() {
+  clearMainRendererReadyTimer();
+  mainRendererReadyTimer = setTimeout(() => {
+    if (mainRendererReady || !mainWin || mainWin.isDestroyed()) return;
+    console.error("[main] Renderer startup timed out.");
+    showLoadingErrorMessage(
+      "Dashboard startup timed out while loading the initial data set. Please retry.",
+    );
+  }, MAIN_RENDERER_READY_TIMEOUT_MS);
+  if (typeof mainRendererReadyTimer.unref === "function") {
+    mainRendererReadyTimer.unref();
+  }
+}
+
+function revealMainWindowIfReady() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (!mainPageLoadedOnce || !mainRendererReady) return;
+  clearMainRendererReadyTimer();
+  updateLoadingStartupState({
+    step: 4,
+    progress: 100,
+    text: "Dashboard ready.",
+  });
+  mainWin.show();
+  mainWin.maximize();
+  mainWin.focus();
+  if (loadingWin && !loadingWin.isDestroyed()) {
+    loadingWin.close();
+    loadingWin = null;
+  }
+  broadcastLicenseStatus(true);
+  broadcastAppUpdateState();
+  scheduleAutoUpdateCheck();
 }
 
 function killImageNames(imageNames = []) {
@@ -1893,62 +3820,56 @@ function killImageNames(imageNames = []) {
     if (!image || seen.has(image)) continue;
     seen.add(image);
     try {
-      execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore" });
+      execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore", windowsHide: true });
     } catch (_) {
       // Process image may not be running, ignore.
     }
   }
 }
 
-function startServer() {
-  // Ensure no stale backend instances accumulate across repeated starts.
-  killImageNames(LEGACY_SERVICE_IMAGE_NAMES);
-  killImageNames(BACKEND_EXE_NAMES);
-  killImageNames(FORECAST_EXE_NAMES);
+const SERVER_START_MAX_RETRIES = 2;
+const SERVER_START_RETRY_DELAY_MS = 2000;
 
-  startBackendProcess();
-  startForecastProcess();
+function startServer(retryCount = 0, skipProcessSetup = false) {
+  if (!skipProcessSetup) {
+    // Ensure no stale backend instances accumulate across repeated starts.
+    killImageNames(LEGACY_SERVICE_IMAGE_NAMES);
+    killImageNames(BACKEND_EXE_NAMES);
+    killImageNames(FORECAST_EXE_NAMES);
+
+    startBackendProcess();
+  }
 
   const serverEntry = resolveServerEntry();
   if (!serverEntry) {
     console.error("[main] Web server entry not found.");
-    showLoadingErrorMessage("Web server entry not found.<br/>Please reinstall the dashboard.");
+    showLoadingErrorMessage("Web server entry not found.\nPlease reinstall the dashboard.");
     return;
   }
 
-  // Packaged app: run the Express server in-process for startup reliability.
-  if (app.isPackaged) {
-    const ok = startEmbeddedServer(serverEntry);
-    if (!ok) {
-      showLoadingErrorMessage(
-        `Web server failed to start.<br/>${serverBootError || "Unknown startup error."}`,
+  // Run the Express server in-process for both packaged and workspace runs.
+  // This avoids stale detached dev server processes serving old backend code.
+  const ok = startEmbeddedServer(serverEntry);
+  if (!ok) {
+    // Auto-retry for transient database errors (locked, readonly from AV scan, etc.)
+    if (retryCount < SERVER_START_MAX_RETRIES && isRetryableStartupError(serverBootError)) {
+      const attempt = retryCount + 1;
+      console.log(
+        `[main] Auto-retrying server start (${attempt}/${SERVER_START_MAX_RETRIES}) in ${SERVER_START_RETRY_DELAY_MS}ms\u2026`,
       );
+      updateLoadingStartupState({
+        step: 2,
+        progress: 14 + attempt * 3,
+        text: `Database temporarily unavailable \u2014 retrying (${attempt}/${SERVER_START_MAX_RETRIES})\u2026`,
+      });
+      clearServerModuleCache();
+      setTimeout(() => startServer(attempt, true), SERVER_START_RETRY_DELAY_MS);
       return;
     }
-    pollUntilReady();
+    showLoadingErrorMessage(humanizeServerError(serverBootError));
     return;
   }
-
-  const runtimeBin = process.execPath;
-  console.log("[main] Spawning web server:", runtimeBin, serverEntry);
-  webProc = spawn(runtimeBin, [serverEntry], {
-    cwd: path.dirname(serverEntry),
-    stdio: ["inherit", "inherit", "inherit", "ipc"],
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      ELECTRON_RUN_AS_NODE: "1",
-    },
-    shell: false,
-  });
-  webProc.on("error", (err) => {
-    console.error("[main] Web server spawn error:", err.message);
-  });
-  webProc.on("exit", (code, signal) => {
-    console.warn("[main] Web server exited - code=" + code + " signal=" + signal);
-  });
-
-  // Poll HTTP until server is ready
+  startForecastModeSync();
   pollUntilReady();
 }
 
@@ -2032,22 +3953,80 @@ function buildLaunch(targetPath) {
 }
 
 function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend:") {
+  const stopFile = getServiceSoftStopFile("backend");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, backendLaunch.cmd, ...backendLaunch.args);
   backendProc = spawn(backendLaunch.cmd, backendLaunch.args, {
     cwd: backendLaunch.cwd,
-    stdio: "inherit",
+    stdio: "ignore",
+    windowsHide: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
+  });
+  attachServiceSoftStopMeta(backendProc, "backend", BACKEND_SOFT_STOP_WAIT_MS);
+  // T6.4 fix: observe 'spawn' so the app can detect successful backend
+  // launch vs silent failure.  Without this listener, if the target EXE
+  // is missing or unlaunchable the only signal is 'error' (async) — the
+  // app state meanwhile continues to believe the backend is running.
+  backendProc.on("spawn", () => {
+    console.log("[main] Backend spawned OK pid=" + (backendProc && backendProc.pid));
   });
   backendProc.on("error", (err) => {
     console.error("[main] Backend spawn error:", err.message);
   });
-  backendProc.on("exit", (code, signal) => {
-    console.warn("[main] Backend exited - code=" + code + " signal=" + signal);
+  backendProc.on("spawn", () => {
+    // Successful spawn resets backoff so next unexpected exit retries fast.
+    backendRestartAttempts = 0;
   });
+  backendProc.on("exit", (code, signal) => {
+    const expectedStop = backendStopExpected;
+    backendStopExpected = false;
+    backendProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Backend stopped - code=" + code + " signal=" + signal);
+      return;
+    }
+    console.warn("[main] Backend exited - code=" + code + " signal=" + signal);
+    // T6.9 fix (Phase 3, 2026-04-14): previously the handler only logged and
+    // the app hung with a blank renderer.  Schedule an auto-restart with
+    // exponential backoff, matching the forecast service pattern.
+    scheduleBackendRestart(`unexpected exit code=${code} signal=${signal}`);
+  });
+}
+
+function clearBackendRestartTimer() {
+  if (!backendRestartTimer) return;
+  clearTimeout(backendRestartTimer);
+  backendRestartTimer = null;
+}
+
+function scheduleBackendRestart(reason) {
+  if (isAppShuttingDown) return;
+  if (backendRestartTimer) return;
+  if (backendProc && !backendProc.killed) return;
+
+  const delay = Math.min(
+    BACKEND_RESTART_MAX_MS,
+    BACKEND_RESTART_BASE_MS * Math.pow(2, Math.min(backendRestartAttempts, 5)),
+  );
+  backendRestartAttempts += 1;
+  console.warn(`[main] Backend restart scheduled in ${delay}ms (${reason})`);
+
+  backendRestartTimer = setTimeout(() => {
+    backendRestartTimer = null;
+    if (isAppShuttingDown) return;
+    const backendLaunch = resolveBackendLaunch();
+    if (!backendLaunch) {
+      console.error("[main] Backend auto-restart failed: launch target not found.");
+      return;
+    }
+    spawnBackendProcess(backendLaunch, "[main] Auto-restarting backend:");
+  }, delay);
 }
 
 function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forecast:") {
@@ -2057,16 +4036,23 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     cwd: forecastLaunch.cwd,
   };
   clearForecastRestartTimer();
+  forecastStopExpected = false;
+  const stopFile = getServiceSoftStopFile("forecast");
+  clearServiceSoftStopFile(stopFile);
   console.log(logPrefix, forecastLaunch.cmd, ...forecastLaunch.args);
   forecastProc = spawn(forecastLaunch.cmd, forecastLaunch.args, {
     cwd: forecastLaunch.cwd,
-    stdio: "inherit",
+    stdio: "ignore",
+    windowsHide: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
+      IM_SERVICE_STOP_FILE: stopFile,
+      ADSI_SERVICE_STOP_FILE: stopFile,
     },
     shell: false,
   });
+  attachServiceSoftStopMeta(forecastProc, "forecast", FORECAST_SOFT_STOP_WAIT_MS);
   forecastProc.on("error", (err) => {
     console.error("[main] Forecast spawn error:", err.message);
     scheduleForecastRestart("spawn error");
@@ -2075,13 +4061,49 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     forecastRestartAttempts = 0;
   });
   forecastProc.on("exit", (code, signal) => {
+    const expectedStop = forecastStopExpected;
+    forecastStopExpected = false;
     forecastProc = null;
+    if (expectedStop || isAppShuttingDown) {
+      console.log("[main] Forecast stopped - code=" + code + " signal=" + signal);
+      return;
+    }
     console.warn("[main] Forecast exited - code=" + code + " signal=" + signal);
     scheduleForecastRestart(`exit code=${code} signal=${signal}`);
   });
 }
 
+/**
+ * Purge stale PyInstaller _MEI* temp directories left by force-killed processes.
+ * Each --onefile EXE extracts to %TEMP%\_MEI<pid>; if the process is killed
+ * before cleanup the directory persists indefinitely. We attempt removal of
+ * every _MEI* entry — directories still locked by a running process will
+ * simply fail with EBUSY/EPERM and be skipped.
+ */
+function cleanStalePyInstallerTempDirs() {
+  try {
+    const tmpDir = os.tmpdir();
+    const entries = fs.readdirSync(tmpDir).filter((n) => /^_MEI\d+$/i.test(n));
+    if (entries.length === 0) return;
+    let removed = 0;
+    for (const name of entries) {
+      try {
+        fs.rmSync(path.join(tmpDir, name), { recursive: true, force: true });
+        removed++;
+      } catch (_) {
+        // locked by running process — skip
+      }
+    }
+    if (removed > 0) {
+      console.log(`[main] Cleaned ${removed}/${entries.length} stale _MEI temp dirs`);
+    }
+  } catch (err) {
+    console.warn("[main] _MEI cleanup skipped:", err.message);
+  }
+}
+
 function startBackendProcess() {
+  cleanStalePyInstallerTempDirs();
   const backendLaunch = resolveBackendLaunch();
   if (!backendLaunch) {
     console.error("[main] Backend not found. Set ADSI_BACKEND_PATH or place backend executable.");
@@ -2092,6 +4114,7 @@ function startBackendProcess() {
 }
 
 function startForecastProcess() {
+  if (forecastProc && !forecastProc.killed) return true;
   const launch = resolveForecastLaunch();
   if (!launch) {
     console.warn("[main] Forecast service not found. Skipping day-ahead background process.");
@@ -2099,6 +4122,21 @@ function startForecastProcess() {
   }
   spawnForecastProcess(launch);
   return true;
+}
+
+function stopForecastProcess(reason = "") {
+  clearForecastRestartTimer();
+  forecastRestartAttempts = 0;
+  if (!forecastProc || forecastProc.killed) {
+    forecastProc = null;
+    return;
+  }
+  forecastStopExpected = true;
+  if (reason) {
+    console.log(`[main] Stopping forecast service (${reason})`);
+  }
+  forceKillProc(forecastProc, "forecast");
+  forecastProc = null;
 }
 
 function clearForecastRestartTimer() {
@@ -2122,22 +4160,23 @@ function scheduleForecastRestart(reason) {
   forecastRestartTimer = setTimeout(() => {
     forecastRestartTimer = null;
     if (isAppShuttingDown) return;
-    const launch = resolveForecastLaunch() || lastForecastLaunch;
-    if (!launch) {
-      console.error("[main] Forecast restart failed: launch target not found.");
-      return;
-    }
-    spawnForecastProcess(launch, "[main] Restarting forecast:");
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast restart sync failed:", err?.message || err);
+    });
   }, delay);
 }
 
 function restartBackendProcess() {
+  // T6.9 fix: cancel any pending auto-restart timer before manual restart,
+  // otherwise the auto-restart could fire mid-flight and spawn a second.
+  clearBackendRestartTimer();
+  backendRestartAttempts = 0;
   // Kill by image name first so updated ipconfig is reloaded by a clean process.
   killImageNames(BACKEND_EXE_NAMES);
 
   // Best effort for currently tracked process tree.
   if (backendProc && !backendProc.killed) {
-    execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
+    execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, (err) => {
       if (err) console.warn("[main] taskkill backend pid failed:", err.message);
     });
   }
@@ -2169,13 +4208,9 @@ function pollUntilReady() {
       if (Date.now() < deadline) setTimeout(attempt, POLL_INTERVAL);
       else {
         console.error("[main] Poll timed out - backend did not become ready.");
-        if (loadingWin && !loadingWin.isDestroyed()) {
-          loadingWin.webContents
-            .executeJavaScript(
-              "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Backend startup timed out.<br/>Please close the app and retry.</div>';",
-            )
-            .catch(() => {});
-        }
+        showLoadingErrorMessage(
+          "Backend startup timed out. If this is the first run after an update, database maintenance may still be finishing. Please retry.",
+        );
       }
     });
 
@@ -2193,17 +4228,24 @@ function onServerReady() {
   if (serverReadyFired) return;
   serverReadyFired = true;
   registerShortcutsOnce();
-  console.log("[main] Server ready - opening main window");
+  console.log("[main] Server ready - opening hidden main window");
+  updateLoadingStartupState({
+    step: 3,
+    progress: 68,
+    text: "Server ready. Loading dashboard shell...",
+  });
   createMainWindow();
 }
 
 function createMainWindow() {
   mainPageLoadedOnce = false;
+  mainRendererReady = false;
   initialLoadRetries = 0;
   if (initialLoadRetryTimer) {
     clearTimeout(initialLoadRetryTimer);
     initialLoadRetryTimer = null;
   }
+  clearMainRendererReadyTimer();
 
   mainWin = new BrowserWindow({
     width: 1600,
@@ -2236,24 +4278,20 @@ function createMainWindow() {
       console.warn("[main] Ignoring non-app load:", loadedUrl || "(empty)");
       return;
     }
-    if (!mainPageLoadedOnce) console.log("[main] Page loaded OK");
+    if (!mainPageLoadedOnce) console.log("[main] Page loaded OK - waiting for renderer startup");
     mainPageLoadedOnce = true;
     initialLoadRetries = 0;
     if (initialLoadRetryTimer) {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
     }
-    // Bring the dashboard to front BEFORE closing the loading window so there
-    // is no focus vacuum that lets it slip behind other OS windows.
-    mainWin.show();
-    mainWin.focus();
-    if (loadingWin && !loadingWin.isDestroyed()) {
-      loadingWin.close();
-      loadingWin = null;
-    }
-    broadcastLicenseStatus(true);
-    broadcastAppUpdateState();
-    scheduleAutoUpdateCheck();
+    updateLoadingStartupState({
+      step: 4,
+      progress: 78,
+      text: "Loading dashboard data...",
+    });
+    armMainRendererReadyTimer();
+    revealMainWindowIfReady();
   });
 
   mainWin.webContents.on("did-fail-load", (e, code, desc) => {
@@ -2262,13 +4300,9 @@ function createMainWindow() {
     if (mainPageLoadedOnce) return;
     if (initialLoadRetries >= INITIAL_LOAD_RETRY_MAX) {
       console.error("[main] Initial load retries exhausted.");
-      if (loadingWin && !loadingWin.isDestroyed()) {
-        loadingWin.webContents
-          .executeJavaScript(
-            "document.body.innerHTML='<div style=\"font-family:Arial,sans-serif;color:#ff7b7b;padding:18px;text-align:center;line-height:1.45\">Unable to connect to backend on localhost:3500.<br/>Please check InverterCoreService.exe and retry.</div>';",
-          )
-          .catch(() => {});
-      }
+      showLoadingErrorMessage(
+        "Unable to connect to the local dashboard backend on localhost:3500.\nPlease verify InverterCoreService.exe and retry.",
+      );
       return;
     }
     initialLoadRetries += 1;
@@ -2279,6 +4313,7 @@ function createMainWindow() {
   });
 
   mainWin.on("closed", () => {
+    clearMainRendererReadyTimer();
     if (initialLoadRetryTimer) {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
@@ -2296,7 +4331,7 @@ function createMainWindow() {
       defaultId: 0,
       cancelId: 0,
       title: "Confirm Exit",
-      message: "Exit Inverter Dashboard?",
+      message: "Exit ADSI Inverter Dashboard?",
       detail: "This will stop local services and close the dashboard.",
     });
     if (choice !== 1) {
@@ -2307,16 +4342,58 @@ function createMainWindow() {
   });
 
   mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // T6.5 fix: only allow http/https/mailto through shell.openExternal.
+    // Without this whitelist, a compromised renderer could request
+    // file:///c:/windows/system32, javascript:, or custom-protocol URLs
+    // that the OS hands off to potentially dangerous handlers.
+    if (isSafeExternalUrl(url)) {
+      shell.openExternal(url).catch((err) => {
+        console.warn("[main] openExternal error:", err?.message || err);
+      });
+    } else {
+      console.warn("[main] blocked openExternal for non-whitelisted URL:", String(url || "").slice(0, 200));
+    }
     return { action: "deny" };
   });
 }
 
+// T6.5 fix: scheme whitelist used anywhere we hand a URL off to the OS
+// via shell.openExternal.  Accepts http://, https://, mailto: only.
+function isSafeExternalUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "mailto:";
+  } catch (_) {
+    return false;
+  }
+}
+
 function loadMainUrlWithRetry() {
   if (!mainWin || mainWin.isDestroyed()) return;
-  mainWin.loadURL(SERVER_URL).catch((err) => {
-    console.error("[main] loadURL error:", err.message);
-  });
+  const doLoad = () => {
+    if (!mainWin || mainWin.isDestroyed()) return;
+    mainWin.loadURL(SERVER_URL).catch((err) => {
+      console.error("[main] loadURL error:", err.message);
+    });
+  };
+  if (mainWin.__cacheClearedOnce) {
+    doLoad();
+    return;
+  }
+  mainWin.__cacheClearedOnce = true;
+  const ses = mainWin.webContents?.session || null;
+  if (!ses) {
+    doLoad();
+    return;
+  }
+  Promise.resolve()
+    .then(() => ses.clearCache())
+    .then(() => ses.clearStorageData({ storages: ["cache"] }))
+    .catch((err) => {
+      console.warn("[main] cache clear before load failed:", err.message);
+    })
+    .finally(doLoad);
 }
 
 function focusWindow(win) {
@@ -2449,7 +4526,9 @@ function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
   });
 }
 
-async function getCurrentOperationMode(timeoutMs = 1500) {
+async function tryGetCurrentOperationMode(timeoutMs = 1500) {
+  const localMode = readOperationModeFromLocalDb();
+  if (localMode) return localMode;
   try {
     const settings = await requestServerJson(
       "GET",
@@ -2457,13 +4536,50 @@ async function getCurrentOperationMode(timeoutMs = 1500) {
       undefined,
       timeoutMs,
     );
-    const mode = String(settings?.operationMode || "gateway")
-      .trim()
-      .toLowerCase();
-    return mode === "remote" ? "remote" : "gateway";
+    return sanitizeOperationModeValue(settings?.operationMode, "gateway");
   } catch {
-    return "gateway";
+    return null;
   }
+}
+
+async function getCurrentOperationMode(timeoutMs = 1500) {
+  return (await tryGetCurrentOperationMode(timeoutMs)) || "gateway";
+}
+
+async function syncForecastProcessForCurrentMode(timeoutMs = 1500) {
+  if (isAppShuttingDown || forecastModeSyncInFlight) {
+    return false;
+  }
+  forecastModeSyncInFlight = true;
+  try {
+    const mode = (await tryGetCurrentOperationMode(timeoutMs)) || "gateway";
+    if (mode === "remote") {
+      stopForecastProcess("remote mode active");
+      return false;
+    }
+    return startForecastProcess();
+  } finally {
+    forecastModeSyncInFlight = false;
+  }
+}
+
+function startForecastModeSync() {
+  if (forecastModeSyncTimer) return;
+  syncForecastProcessForCurrentMode().catch((err) => {
+    console.warn("[main] Initial forecast mode sync failed:", err?.message || err);
+  });
+  forecastModeSyncTimer = setInterval(() => {
+    syncForecastProcessForCurrentMode().catch((err) => {
+      console.warn("[main] Forecast mode sync failed:", err?.message || err);
+    });
+  }, FORECAST_MODE_SYNC_MS);
+}
+
+function stopForecastModeSync() {
+  if (!forecastModeSyncTimer) return;
+  clearInterval(forecastModeSyncTimer);
+  forecastModeSyncTimer = null;
+  forecastModeSyncInFlight = false;
 }
 
 async function ensureGatewayModeForWindow(featureLabel, ownerWin) {
@@ -2516,12 +4632,98 @@ function getConfigPath() {
   return path.join(cfgDir, "ipconfig.json");
 }
 
+function getLocalSettingsDbPath() {
+  const explicitDataDir = String(getExplicitDataDir(process.env) || "").trim();
+  if (explicitDataDir) {
+    return path.join(explicitDataDir, "adsi.db");
+  }
+
+  const portableRoot = String(getPortableDataRoot(process.env) || "").trim();
+  if (portableRoot) {
+    return path.join(portableRoot, "db", "adsi.db");
+  }
+
+  // v2.5.0+ consolidated layout: %PROGRAMDATA%\InverterDashboard\db\adsi.db
+  // resolvedDbDir() returns the new dir once migration is complete (or the DB
+  // file already exists there). Without this check the old APPDATA DB (never
+  // deleted by the zero-deletion migration) would be found first and could
+  // return a stale operationMode — causing ip-config / topology to appear
+  // locked even after the user switched back to gateway mode.
+  try {
+    const dir = resolvedDbDir();
+    if (dir) return path.join(dir, "adsi.db");
+  } catch (_) {}
+
+  if (process.env.APPDATA) {
+    const preferred = path.join(process.env.APPDATA, "Inverter-Dashboard", "adsi.db");
+    const legacy = path.join(process.env.APPDATA, "ADSI-Dashboard", "adsi.db");
+    if (fs.existsSync(preferred)) return preferred;
+    if (fs.existsSync(legacy)) return legacy;
+    return preferred;
+  }
+
+  try {
+    return path.join(app.getPath("userData"), "..", "adsi.db");
+  } catch (_) {
+    return path.join(process.cwd(), "adsi.db");
+  }
+}
+
+function sanitizeOperationModeValue(value, fallback = null) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "remote") return "remote";
+  if (mode === "gateway") return "gateway";
+  return fallback;
+}
+
+function readOperationModeFromLocalDb() {
+  const dbPath = getLocalSettingsDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+  let db = null;
+  try {
+    db = new Database(dbPath, {
+      readonly: true,
+      fileMustExist: true,
+      timeout: 500,
+    });
+    db.pragma("query_only = ON");
+    const row = db
+      .prepare("SELECT value FROM settings WHERE key = ? LIMIT 1")
+      .get("operationMode");
+    return sanitizeOperationModeValue(row?.value, null);
+  } catch (_) {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
+}
+
+function writeOperationModeToLocalDb(mode) {
+  const normalized = String(mode || "").toLowerCase() === "remote" ? "remote" : "gateway";
+  const dbPath = getLocalSettingsDbPath();
+  if (!dbPath) throw new Error("No settings DB path resolved");
+  let db = null;
+  try {
+    db = new Database(dbPath, { timeout: 2000 });
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run("operationMode", normalized);
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
+}
+
 function defaultConfig() {
-  const cfg = { inverters: {}, poll_interval: {}, units: {} };
+  const cfg = { inverters: {}, poll_interval: {}, units: {}, losses: {} };
   for (let i = 1; i <= 27; i++) {
     cfg.inverters[i] = `192.168.1.${100 + i}`;
     cfg.poll_interval[i] = 0.05;
     cfg.units[i] = [1, 2, 3, 4];
+    cfg.losses[i] = 0;
   }
   return cfg;
 }
@@ -2536,10 +4738,12 @@ function sanitizeConfig(input) {
     const units = Array.isArray(unitsRaw)
       ? unitsRaw.map((n) => Number(n)).filter((n) => n >= 1 && n <= 4)
       : [1, 2, 3, 4];
+    const lossRaw = Number(src?.losses?.[i] ?? src?.losses?.[String(i)] ?? 0);
     out.inverters[i] = ip;
     out.poll_interval[i] = Number.isFinite(poll) && poll >= 0.01 ? poll : 0.05;
     // Preserve explicit "all nodes disabled" as an empty array.
     out.units[i] = units.length ? [...new Set(units)] : [];
+    out.losses[i] = Number.isFinite(lossRaw) && lossRaw >= 0 && lossRaw <= 100 ? lossRaw : 0;
   }
   return out;
 }
@@ -2679,6 +4883,8 @@ ipcMain.handle("license-get-status", async () => {
       expiresAt: null,
       expiresAtIso: null,
       msLeft: null,
+      daysLeft: null,
+      remainingText: "",
       nearExpiry: false,
       message: "Unable to read license status.",
     };
@@ -2716,6 +4922,14 @@ ipcMain.handle("license-get-audit", async () => {
   }
 });
 
+ipcMain.handle("license-get-fingerprint", () => {
+  try {
+    return { ok: true, fingerprint: getDeviceFingerprint() };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.handle("app-update-get-state", async () => {
   try {
     return buildPublicAppUpdateState();
@@ -2742,12 +4956,46 @@ ipcMain.handle("app-update-install", async () => {
   return installAppUpdateNow();
 });
 
+ipcMain.handle("app-update-set-auto-download", async (_, enabled) => {
+  const value = setAutoDownloadPref(enabled);
+  broadcastAppUpdateState();
+  return { ok: true, autoDownload: value };
+});
+
+ipcMain.handle("app-update-set-auto-install-overnight", async (_, enabled) => {
+  const value = setAutoInstallOvernightPref(enabled);
+  broadcastAppUpdateState();
+  return { ok: true, autoInstallOvernight: value };
+});
+
+ipcMain.handle("app-restart", async () => {
+  try {
+    requestAppShutdown({
+      reason: "manual app restart",
+      action: { type: "relaunch" },
+    }).catch((err) => {
+      console.error("[main] restart shutdown failed:", err?.message || err);
+      appShutdownBypassQuit = true;
+      app.exit(1);
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.on("login-success", async () => {
   if (hasAuthenticated) return;
   const status = buildLicensePublicStatus();
   if (!status.valid) {
     const ok = await ensureLicenseAtStartup();
     if (!ok) {
+      // Same false-positive avoidance as the startup license-cancel path.
+      recordEarlyExitMarker(
+        SHUTDOWN_REASONS.BEFORE_QUIT,
+        SHUTDOWN_INITIATORS.USER,
+        { earlyExitPath: "license-login-recheck-cancel" },
+      );
       app.exit(0);
       return;
     }
@@ -2758,7 +5006,7 @@ ipcMain.on("login-success", async () => {
     loginWin = null;
   }
   broadcastLicenseStatus(true);
-  startAfterLogin();
+  await startAfterLogin();
 });
 
 ipcMain.on("window-minimize", () => mainWin?.minimize());
@@ -2785,9 +5033,20 @@ ipcMain.on("close-current-window", (event) => {
 });
 ipcMain.handle("pick-folder", async (_, startPath) => {
   try {
+    // T6.11 fix (Phase 3, 2026-04-14): if no caller-supplied start path is
+    // given, anchor the dialog at the user's Documents folder so the user
+    // doesn't land in a random cwd (e.g. system32 when launched from a
+    // shortcut).  The renderer cannot sandbox the dialog to a subtree — the
+    // OS dialog always allows navigation — but this prevents user confusion
+    // and accidental writes into unexpected system locations.
+    const trimmed = startPath && String(startPath).trim() ? String(startPath).trim() : "";
+    let defaultPath = trimmed;
+    if (!defaultPath) {
+      try { defaultPath = app.getPath("documents"); } catch { defaultPath = undefined; }
+    }
     const result = await dialog.showOpenDialog(mainWin || undefined, {
       title: "Select Export Folder",
-      defaultPath: startPath && String(startPath).trim() ? String(startPath).trim() : undefined,
+      defaultPath: defaultPath || undefined,
       properties: ["openDirectory", "createDirectory"],
     });
     if (result.canceled || !result.filePaths?.length) return null;
@@ -2841,6 +5100,181 @@ ipcMain.handle("open-text-file", async (_, options = {}) => {
     return null;
   }
 });
+ipcMain.handle("download-user-guide-pdf", async (event) => {
+  try {
+    const ownerWin = BrowserWindow.fromWebContents(event.sender) || mainWin || undefined;
+    const result = await dialog.showSaveDialog(ownerWin, {
+      title: "Save User Guide as PDF",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        "ADSI-Inverter-Dashboard-User-Guide.pdf"
+      ),
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false };
+    const hidden = new BrowserWindow({
+      width: 1200,
+      height: 900,
+      show: false,
+      webPreferences: { offscreen: true },
+    });
+    await hidden.loadURL(`${SERVER_URL}/user-guide.html`);
+    // inject light-mode overrides so PDF renders with readable contrast
+    await hidden.webContents.insertCSS(`
+      :root {
+        --bg: #ffffff !important; --surface: #f8f9fa !important; --card: #f4f5f6 !important;
+        --border: #d0d5dd !important; --accent: #1a6ad4 !important; --accent2: #6f42c1 !important;
+        --green: #1a7f37 !important; --yellow: #8a6914 !important; --orange: #9a4e00 !important;
+        --red: #cf222e !important; --text: #1a1a1a !important; --text2: #4a4a4a !important;
+        --text3: #666 !important; --link: #1a6ad4 !important;
+        --tbl-head: #eaecef !important; --tbl-alt: #f6f8fa !important;
+      }
+      body { background: #fff !important; color: #1a1a1a !important; }
+      .cover { background: linear-gradient(160deg, #f0f4ff 0%, #fff 100%) !important; min-height: auto !important; padding: 60px 24px !important; }
+      .cover::before { display: none !important; }
+      .cover h1 { background: none !important; -webkit-text-fill-color: #1a1a1a !important; }
+      .cover-badge { background: #e8f0fe !important; border-color: #1a6ad4 !important; color: #1a6ad4 !important; }
+      .cover-sub { color: #444 !important; }
+      .cover-meta { color: #555 !important; }
+      .cover-meta b { color: #222 !important; }
+      .section-head { border-bottom-color: #d0d5dd !important; }
+      .section-num { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .section-head h2 { color: #1a1a1a !important; }
+      h3 { color: #6f42c1 !important; }
+      h4 { color: #1a1a1a !important; }
+      p, li { color: #2a2a2a !important; }
+      table { border: 1px solid #ccc !important; }
+      thead th { background: #eaecef !important; color: #333 !important; border: 1px solid #ccc !important; }
+      tbody td { border: 1px solid #ddd !important; color: #2a2a2a !important; }
+      tbody tr:nth-child(even) { background: #f6f8fa !important; }
+      tbody tr:hover { background: transparent !important; }
+      td code, th code { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .info-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; color: #2a2a2a !important; }
+      .info-card.warn { background: #fef9e7 !important; border-color: #d29922 !important; }
+      .info-card.tip { background: #eafbf0 !important; border-color: #1a7f37 !important; }
+      .info-card.warn .info-card-label { color: #8a6914 !important; }
+      .info-card.tip .info-card-label { color: #1a7f37 !important; }
+      .info-card-label { color: #333 !important; }
+      .feat-item { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+      .feat-item h4 { color: #1a1a1a !important; }
+      .feat-item p { color: #4a4a4a !important; }
+      .feat-item-icon { filter: grayscale(0) !important; }
+      .wf-card { background: #f8f9fa !important; border: 1px solid #d0d5dd !important; }
+      .wf-card h4 { color: #1a6ad4 !important; }
+      .legend-chip { color: #2a2a2a !important; }
+      .steps li::before { background: #e8f0fe !important; color: #1a6ad4 !important; }
+      .steps li { color: #2a2a2a !important; }
+      kbd { background: #eee !important; border-color: #bbb !important; color: #1a1a1a !important; }
+      a { color: #1a6ad4 !important; }
+      .back-top { display: none !important; }
+      .guide-footer { background: #fff !important; border-top-color: #d0d5dd !important; color: #666 !important; }
+      .guide-footer b { color: #333 !important; }
+      .ml-highlight { background: #f0f4ff !important; border-color: #1a6ad4 !important; }
+      .ml-highlight h4 { color: #1a6ad4 !important; }
+      .toc h2 { color: #1a6ad4 !important; border-bottom-color: #d0d5dd !important; }
+      .toc-grid a { color: #1a1a1a !important; }
+      .toc-grid a .toc-num { color: #1a6ad4 !important; }
+      .toc-grid a:hover { background: transparent !important; }
+      h3 { font-weight: 800 !important; }
+      h4 { font-weight: 700 !important; }
+      .info-card-label { font-weight: 800 !important; }
+      .wf-card h4 { font-weight: 800 !important; }
+      table { page-break-inside: avoid !important; }
+      thead { display: table-header-group !important; }
+      tr { page-break-inside: avoid !important; }
+      .info-card { page-break-inside: avoid !important; }
+      .ml-highlight { page-break-inside: avoid !important; }
+      .feat-grid { page-break-inside: avoid !important; }
+      .wf-card { page-break-inside: avoid !important; }
+      section { page-break-inside: avoid !important; }
+      .section-head { page-break-after: avoid !important; }
+      h3, h4 { page-break-after: avoid !important; }
+    `);
+    // allow styles and layout to settle
+    await new Promise((r) => setTimeout(r, 1200));
+    const pdfBuf = await hidden.webContents.printToPDF({
+      printBackground: true,
+      landscape: false,
+      margins: { top: 0.25, bottom: 0.25, left: 0.3, right: 0.3 },
+      pageSize: { width: 8.5, height: 13 },
+      preferCSSPageSize: false,
+    });
+    hidden.close();
+    fs.writeFileSync(result.filePath, pdfBuf);
+    shell.showItemInFolder(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    console.error("[main] download-user-guide-pdf failed:", err.message);
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle("download-credentials-pdf", async (event) => {
+  try {
+    const ownerWin = BrowserWindow.fromWebContents(event.sender) || mainWin || undefined;
+    const result = await dialog.showSaveDialog(ownerWin, {
+      title: "Save Credentials Reference as PDF",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        "ADSI-Credentials-Reference.pdf"
+      ),
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false };
+    const hidden = new BrowserWindow({
+      width: 800,
+      height: 900,
+      show: false,
+      webPreferences: { offscreen: true },
+    });
+    await hidden.loadURL(`${SERVER_URL}/api/credentials-reference?authKey=admin`);
+    await new Promise((r) => setTimeout(r, 800));
+    const pdfBuf = await hidden.webContents.printToPDF({
+      printBackground: true,
+      landscape: false,
+      margins: { top: 0.4, bottom: 0.4, left: 0.5, right: 0.5 },
+      pageSize: "Letter",
+      preferCSSPageSize: false,
+    });
+    hidden.close();
+    fs.writeFileSync(result.filePath, pdfBuf);
+    shell.showItemInFolder(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    console.error("[main] download-credentials-pdf failed:", err.message);
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle("save-adsibak", async () => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const ts = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(targetWin, {
+      title: "Save Portable Backup",
+      defaultPath: path.join(app.getPath("documents"), `InverterDashboard-${ts}.adsibak`),
+      filters: [{ name: "ADSI Backup", extensions: ["adsibak"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    return result.filePath;
+  } catch (err) {
+    console.error("[main] save-adsibak failed:", err.message);
+    return null;
+  }
+});
+ipcMain.handle("open-adsibak", async () => {
+  try {
+    const targetWin = BrowserWindow.getFocusedWindow() || mainWin || undefined;
+    const result = await dialog.showOpenDialog(targetWin, {
+      title: "Open Portable Backup",
+      properties: ["openFile"],
+      filters: [{ name: "ADSI Backup", extensions: ["adsibak"] }],
+    });
+    if (result.canceled || !result.filePaths?.length) return null;
+    return result.filePaths[0];
+  } catch (err) {
+    console.error("[main] open-adsibak failed:", err.message);
+    return null;
+  }
+});
 ipcMain.handle("open-folder", async (_, folder) => {
   try {
     const target = String(folder || "").trim();
@@ -2875,7 +5309,6 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     const safe = sanitizeConfig(newConfig);
     let saved = safe;
     let dbSynced = false;
-    let backendRestarted = false;
     try {
       saved = sanitizeConfig(await requestServerJson("POST", "/api/ip-config", safe, 5000));
       dbSynced = true;
@@ -2884,13 +5317,16 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     }
 
     // Always mirror to legacy file for backend compatibility.
+    // Hot-reload: server already pushes the snapshot to its poller and
+    // broadcasts {type:"configChanged"} over WS; the Python service's
+    // ipconfig_watcher (1 s tick) reconciles clients via rebuild_global_maps.
+    // No backend kill needed — the synchronous taskkill in restartBackendProcess
+    // was the source of dashboard freezes during save.
     saveIpConfigFile(saved);
-    backendRestarted = restartBackendProcess();
 
     return {
       success: true,
       config: saved,
-      backendRestarted,
       ...(dbSynced ? {} : { warning: "Saved locally, DB sync unavailable." }),
     };
   } catch (err) {
@@ -2898,11 +5334,45 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     return { success: false, error: err.message };
   }
 });
+// T6.2 fix: validate that an `open-ip` IPC input is a plain IPv4 address
+// (optionally with :port).  Rejects file://, javascript:, data:, and other
+// schemes that loadURL would otherwise honour, plus CR/LF/path/query
+// injection attempts.  Returns the sanitised "host[:port]" on success, or
+// null on rejection.
+function sanitizeInverterIpHost(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const stripped = raw.replace(/^https?:\/\//i, "").trim();
+  if (!stripped) return null;
+  // Reject any URL-ish characters — we expect pure IPv4 [:port].
+  if (/[^0-9a-fA-F.:]/.test(stripped)) return null;
+  const m = stripped.match(/^([0-9.]+)(?::(\d{1,5}))?$/);
+  if (!m) return null;
+  const octets = m[1].split(".");
+  if (octets.length !== 4) return null;
+  for (const o of octets) {
+    const n = Number(o);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+  }
+  if (m[2] !== undefined) {
+    const port = Number(m[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  }
+  return m[2] !== undefined ? `${m[1]}:${m[2]}` : m[1];
+}
+
 ipcMain.on("open-ip", async (event, ip) => {
-  if (!ip || typeof ip !== "string") return;
-  const cleanIp = ip.replace(/^https?:\/\//i, "");
-  const url = ip.startsWith("http://") || ip.startsWith("https://") ? ip : `http://${ip}`;
-  const reachable = await checkReachable(cleanIp, 80, 2000);
+  // T6.2 fix: reject non-IPv4 or scheme-injected inputs BEFORE using them
+  // in loadURL / reachable checks.  Previously, arbitrary strings were
+  // passed through, allowing file://, javascript:, or data: URLs to load.
+  const cleanIp = sanitizeInverterIpHost(ip);
+  if (!cleanIp) {
+    console.warn("[main] open-ip rejected invalid input:", typeof ip === "string" ? ip.slice(0, 80) : typeof ip);
+    return;
+  }
+  const url = `http://${cleanIp}`;
+  const hostOnly = cleanIp.split(":")[0];
+  const portOnly = cleanIp.includes(":") ? Number(cleanIp.split(":")[1]) : 80;
+  const reachable = await checkReachable(hostOnly, portOnly, 2000);
   if (!event.sender.isDestroyed()) {
     event.sender.send("ip-status", { ip: cleanIp, ok: reachable });
   }
@@ -2922,9 +5392,12 @@ ipcMain.on("open-ip", async (event, ip) => {
   });
 });
 ipcMain.on("open-ip-check", async (event, ip) => {
-  if (!ip || typeof ip !== "string") return;
-  const cleanIp = ip.replace(/^https?:\/\//i, "");
-  const ok = await checkReachable(cleanIp, 80, 1500);
+  // T6.2 fix: same sanitiser as open-ip.
+  const cleanIp = sanitizeInverterIpHost(ip);
+  if (!cleanIp) return;
+  const hostOnly = cleanIp.split(":")[0];
+  const portOnly = cleanIp.includes(":") ? Number(cleanIp.split(":")[1]) : 80;
+  const ok = await checkReachable(hostOnly, portOnly, 1500);
   if (!event.sender.isDestroyed()) {
     event.sender.send("ip-status", { ip: cleanIp, ok });
   }
@@ -2935,6 +5408,21 @@ ipcMain.on("open-ip-check", async (event, ip) => {
 // callback URL before it loads, and returns the code to the renderer.
 ipcMain.handle("oauth-start", async (_, { authUrl }) => {
   return new Promise((resolve) => {
+    // T6.10 fix (Phase 3, 2026-04-14): whitelist http/https only.  Before
+    // this guard any scheme passed by a compromised renderer (file:,
+    // javascript:, data:, ms-word:, etc.) was loaded into a BrowserWindow
+    // with devtools/node disabled but still in the same session partition
+    // as the main app — a credential-harvesting foothold.  Reject early.
+    try {
+      const parsed = new URL(String(authUrl || ""));
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        resolve({ ok: false, error: `OAuth refused: unsupported scheme "${parsed.protocol}"` });
+        return;
+      }
+    } catch (err) {
+      resolve({ ok: false, error: `OAuth refused: invalid authUrl (${err.message})` });
+      return;
+    }
     const CALLBACK_ORIGIN = "http://localhost:3500/oauth/callback";
 
     const oauthWin = new BrowserWindow({
@@ -2943,7 +5431,12 @@ ipcMain.handle("oauth-start", async (_, { authUrl }) => {
       title: "Cloud Backup — Connect Account",
       autoHideMenuBar: true,
       webPreferences: {
-        partition: "persist:oauth-temp",  // isolated session
+        // SEC-M-003: ephemeral partition (no `persist:` prefix) so OAuth
+        // tokens are NOT cached on disk under %APPDATA%\Electron\…\oauth-temp.
+        // The OAuth flow only needs the session for the popup's lifetime;
+        // making it persistent gave a future-XSS attacker a free token-
+        // disclosure surface.
+        partition: "oauth-temp",
         nodeIntegration: false,
         contextIsolation: true,
         webSecurity: true,
@@ -2987,37 +5480,104 @@ ipcMain.handle("oauth-start", async (_, { authUrl }) => {
   });
 });
 
+ipcMain.on("dashboard-startup-progress", (event, payload) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  updateLoadingStartupState(payload);
+});
+
+ipcMain.on("dashboard-startup-ready", (event, payload) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  mainRendererReady = true;
+  updateLoadingStartupState({
+    step: 4,
+    progress: 100,
+    text: String(payload?.text || "Dashboard ready."),
+  });
+  revealMainWindowIfReady();
+});
+
+ipcMain.on("dashboard-startup-failed", (event, message) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  clearMainRendererReadyTimer();
+  const safeMessage = String(message || "").trim() || "Dashboard startup failed.";
+  console.error("[main] Renderer startup failed:", safeMessage);
+  showLoadingErrorMessage(safeMessage);
+});
+
+// Remote connectivity failure — show mode picker instead of generic error
+ipcMain.on("dashboard-remote-connectivity-failed", (event, message) => {
+  if (!mainWin || event.sender !== mainWin.webContents) return;
+  clearMainRendererReadyTimer();
+  const safeMessage = String(message || "").trim() || "The remote gateway did not respond.";
+  console.warn("[main] Remote connectivity failed:", safeMessage);
+  startupErrorShown = true;
+  if (!loadingWin || loadingWin.isDestroyed()) return;
+  loadingWin.webContents
+    .executeJavaScript(
+      `if (typeof window.showModePicker === "function") {
+         window.showModePicker(${JSON.stringify(safeMessage)});
+       } else {
+         window.showStartupError?.(${JSON.stringify(safeMessage)});
+       }`,
+    )
+    .catch(() => {});
+});
+
+// Mode switch from loading screen — save settings and retry startup
+ipcMain.on("switch-operation-mode", async (event, mode) => {
+  if (!loadingWin || event.sender !== loadingWin.webContents) return;
+  const targetMode = String(mode || "").toLowerCase() === "remote" ? "remote" : "gateway";
+  console.log(`[main] User requested mode switch to: ${targetMode}`);
+  try {
+    const http = require("http");
+    const postData = JSON.stringify({ operationMode: targetMode });
+    await new Promise((resolve, reject) => {
+      const req = http.request(
+        { hostname: "127.0.0.1", port: SERVER_PORT, path: "/api/settings", method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+          timeout: 3000,
+        },
+        (res) => {
+          res.resume();
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+          else reject(new Error(`HTTP ${res.statusCode}`));
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      req.end(postData);
+    });
+    console.log(`[main] Settings saved: operationMode=${targetMode}`);
+  } catch (err) {
+    console.warn("[main] Failed to save operation mode via API, attempting direct DB write:", err.message);
+    try {
+      writeOperationModeToLocalDb(targetMode);
+    } catch (dbErr) {
+      console.error("[main] Direct DB write also failed:", dbErr.message);
+    }
+  }
+  retryServerStartup();
+});
+
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 function forceKillProc(proc, label) {
   if (!proc || proc.killed) return;
-  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore" }, (err) => {
+  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, (err) => {
     if (err) console.warn(`[main] taskkill ${label} failed:`, err.message);
   });
 }
 
-function killServer() {
-  isAppShuttingDown = true;
-  clearForecastRestartTimer();
-
-  // Always force-kill Python processes (no graceful shutdown path)
-  forceKillProc(backendProc, "backend");
-  forceKillProc(forecastProc, "forecast");
-  backendProc = null;
-  forecastProc = null;
-
-  // Ask the web server (Node.js child) to flush the DB and exit cleanly,
-  // then force-kill it if it hasn't gone away within 1.5 s.
-  const wp = webProc;
-  webProc = null;
-  if (!wp || wp.killed) return;
-  try { wp.send({ type: "shutdown" }); } catch (_) {}
-  const deadline = setTimeout(() => forceKillProc(wp, "web-server"), 1500);
-  if (deadline.unref) deadline.unref();
-  wp.once("exit", () => clearTimeout(deadline));
+function killServer(reason = "application shutdown") {
+  return stopRuntimeServices(reason);
 }
 
 function quit() {
-  allowMainWindowClose = true;
-  killServer();
-  app.quit();
+  requestAppShutdown({
+    reason: "quit requested",
+    action: { type: "quit" },
+  }).catch((err) => {
+    console.error("[main] quit shutdown failed:", err?.message || err);
+    appShutdownBypassQuit = true;
+    app.exit(1);
+  });
 }

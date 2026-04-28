@@ -2,13 +2,20 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+SPEC_PATH = os.path.abspath(
+    globals().get("__file__", os.path.join(os.getcwd(), "services", "InverterCoreService.spec"))
+)
+BASE_DIR = os.path.abspath(os.path.dirname(SPEC_PATH))
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 
 datas = [
     (os.path.join(ROOT_DIR, 'drivers'), 'drivers'),
     (os.path.join(BASE_DIR, 'shared_data.py'), '.'),
-    (os.path.join(ROOT_DIR, 'ipconfig.json'), '.'),
+    # ipconfig.json is intentionally NOT bundled — it would leak a stale
+    # dev default into the EXE and every update would ship that stale copy
+    # on the fallback path, silently overwriting user customizations.
+    # Runtime config comes from the DB (authoritative) with a mirror file
+    # under DATA_DIR preserved across updates.
 ]
 binaries = []
 hiddenimports = ['drivers.modbus_tcp', 'uvicorn.loops.asyncio', 'uvicorn.lifespan.off', 'uvicorn.protocols.http.h11_impl', 'anyio._backends._asyncio', 'pydantic.v1.datetime_parse']
