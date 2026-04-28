@@ -2864,6 +2864,186 @@ async function exportSolcastWeekAhead({ days, slotRows, format, resolution, star
 // solar-window-clipped rows from `inverter_5min_param`. Today's data is
 // blocked by the API layer until the End-of-Day snapshot hour — by the time
 // we get here, the date is already validated as exportable.
+
+// Shared column schema for both single-inverter and All-Inverters variants.
+// Partial Energy uses the parcE counter delta vs. the previous slot when
+// available (most accurate — direct hardware reading), falling back to
+// PAC × 5 min / 1000 if the delta isn't computable. ParcE_kWh is the
+// lifetime-monotonic snapshot at end-of-slot.
+const _DAILY_DATA_HEADERS = [
+  { key: 'Time',         label: 'Time' },
+  { key: 'Pdc_W',        label: 'Pdc (W)' },
+  { key: 'Vdc_V',        label: 'Vdc (V)' },
+  { key: 'Idc_A',        label: 'Idc (A)' },
+  { key: 'Vac1_V',       label: 'Vac1 (V)' },
+  { key: 'Vac2_V',       label: 'Vac2 (V)' },
+  { key: 'Vac3_V',       label: 'Vac3 (V)' },
+  { key: 'Iac1_A',       label: 'Iac1 (A)' },
+  { key: 'Iac2_A',       label: 'Iac2 (A)' },
+  { key: 'Iac3_A',       label: 'Iac3 (A)' },
+  { key: 'Temp_C',       label: 'Temp (°C)' },
+  { key: 'Pac_W',        label: 'Pac (W)' },
+  { key: 'PartialEnergy_kWh', label: 'Partial Energy (kWh)' },
+  { key: 'ParcE_kWh',    label: 'parcE (kWh)' },
+  { key: 'CosPhi',       label: 'CosΦ' },
+  { key: 'Freq_Hz',      label: 'Freq (Hz)' },
+  { key: 'InvAlarms',    label: 'Inv Alarms' },
+  { key: 'TrackAlarms',  label: 'Track Alarms' },
+];
+
+// Shared sheet builder for one (inverter, slave, date). Writes one worksheet
+// to the supplied WorkbookWriter under `sheetName`. Used by both the
+// single-inverter and All-Inverters Daily Data exports.
+async function _writeDailyDataSheet(wb, sheetName, ctx) {
+  const { inv, ip, slave, dateLocal, select, totalsBaselineMap, isToday } = ctx;
+
+  const slotLabel = (slot) => {
+    const startMin = Number(slot) * 5;
+    const h = Math.floor(startMin / 60);
+    const m = startMin % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+  const fmt = (v, d) => (v == null || v === '' ? '' : Number(Number(v).toFixed(d)));
+  const fmtInt = (v) => (v == null || v === '' ? '' : Math.round(Number(v)));
+  const alarmHex = (v) => {
+    const n = Number(v) >>> 0;
+    return n ? `0x${n.toString(16).toUpperCase().padStart(8, '0')}` : '0';
+  };
+
+  const dbRows = select.all(String(ip), Number(slave), dateLocal);
+  let pacIntegratedKwh = 0;
+  let firstParce = null;
+  let lastParce = null;
+  // MD-004: defensive ceiling. Poller already clamps pac_w to ≤ 260_000 W
+  // per inverter, but if a future change lets a corrupt value through,
+  // exporting an inflated kWh into XLSX is a hard-to-spot data error.
+  const PAC_W_EXPORT_CEILING = 260_000;
+  const sheetRows = dbRows.map((r) => {
+    const pacWRaw = Number(r.pac_w || 0);
+    const pacW = pacWRaw > PAC_W_EXPORT_CEILING ? PAC_W_EXPORT_CEILING : pacWRaw;
+    const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0;
+    pacIntegratedKwh += partialKwh;
+    const curParce = Number(r.parce_kwh);
+    if (Number.isFinite(curParce) && curParce >= 0) {
+      if (firstParce == null) firstParce = curParce;
+      lastParce = curParce;
+    }
+    return {
+      Time:         slotLabel(r.slot_index),
+      Pdc_W:        fmtInt(r.pdc_w),
+      Vdc_V:        fmt(r.vdc_v, 1),
+      Idc_A:        fmt(r.idc_a, 2),
+      Vac1_V:       fmt(r.vac1_v, 1),
+      Vac2_V:       fmt(r.vac2_v, 1),
+      Vac3_V:       fmt(r.vac3_v, 1),
+      Iac1_A:       fmt(r.iac1_a, 2),
+      Iac2_A:       fmt(r.iac2_a, 2),
+      Iac3_A:       fmt(r.iac3_a, 2),
+      Temp_C:       fmtInt(r.temp_c),
+      Pac_W:        fmtInt(r.pac_w),
+      PartialEnergy_kWh: Number(partialKwh.toFixed(3)),
+      ParcE_kWh:    Number.isFinite(curParce) && curParce >= 0 ? Number(curParce.toFixed(3)) : '',
+      CosPhi:       fmt(r.cosphi, 3),
+      Freq_Hz:      fmt(r.freq_hz, 2),
+      InvAlarms:    alarmHex(r.inv_alarms),
+      TrackAlarms:  alarmHex(r.track_alarms),
+    };
+  });
+
+  // Day-total cross-verification rows.
+  let etotalKwh = NaN;
+  let parceKwh = (firstParce != null && lastParce != null && lastParce >= firstParce)
+    ? (lastParce - firstParce)
+    : NaN;
+  const baselineRow = totalsBaselineMap.get(`${inv}_${slave}`);
+  if (baselineRow) {
+    if (isToday) {
+      try {
+        const cur = (function () {
+          for (const r of getCounterStateAll() || []) {
+            if (Number(r.inverter) === inv && Number(r.unit) === slave) return r;
+          }
+          return null;
+        })();
+        if (cur) {
+          const dE = Number(cur.etotal_kwh) - Number(baselineRow.etotal_baseline || 0);
+          if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
+        }
+      } catch (_) { /* leave as NaN */ }
+    } else {
+      const eClean = Number(baselineRow.etotal_eod_clean || 0);
+      if (eClean > 0) {
+        const dE = eClean - Number(baselineRow.etotal_baseline || 0);
+        if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
+      }
+    }
+  }
+  const _emptyCols = {
+    Pdc_W: '', Vdc_V: '', Idc_A: '',
+    Vac1_V: '', Vac2_V: '', Vac3_V: '',
+    Iac1_A: '', Iac2_A: '', Iac3_A: '',
+    Temp_C: '', Pac_W: '',
+    ParcE_kWh: '', CosPhi: '', Freq_Hz: '',
+    InvAlarms: '', TrackAlarms: '',
+  };
+  sheetRows.push({
+    Time: 'DAY TOTAL — Pac-integrated (kWh)',
+    ..._emptyCols,
+    PartialEnergy_kWh: Number(pacIntegratedKwh.toFixed(3)),
+  });
+  sheetRows.push({
+    Time: 'DAY TOTAL — Etotal Δ (kWh)',
+    ..._emptyCols,
+    PartialEnergy_kWh: Number.isFinite(etotalKwh) ? Number(etotalKwh.toFixed(3)) : '',
+  });
+  sheetRows.push({
+    Time: 'DAY TOTAL — parcE Δ (kWh)',
+    ..._emptyCols,
+    PartialEnergy_kWh: Number.isFinite(parceKwh) ? Number(parceKwh.toFixed(3)) : '',
+  });
+  await writeXlsxWorksheet(
+    wb,
+    sheetName,
+    _DAILY_DATA_HEADERS,
+    sheetRows,
+    { freezeHeader: true, autoFilter: false, worksheetKind: 'data' },
+  );
+  return { rows: dbRows.length };
+}
+
+// Build the prepared SELECT + per-date totals baseline + isToday flag once
+// per export run, so they can be reused across many (inv, slave) sheets.
+function _buildDailyDataExportContext(dateLocal) {
+  const select = db.prepare(`
+    SELECT slot_index, ts_ms,
+           vdc_v, idc_a, pdc_w,
+           vac1_v, vac2_v, vac3_v,
+           iac1_a, iac2_a, iac3_a,
+           temp_c, pac_w, cosphi, freq_hz,
+           inv_alarms, track_alarms,
+           parce_kwh,
+           sample_count, is_complete, in_solar_window
+      FROM inverter_5min_param
+     WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+       AND in_solar_window = 1
+     ORDER BY slot_index ASC
+  `);
+  const totalsBaselineMap = (() => {
+    try {
+      const m = new Map();
+      for (const b of getCounterBaselinesForDate(dateLocal) || []) {
+        m.set(`${Number(b.inverter)}_${Number(b.unit)}`, b);
+      }
+      return m;
+    } catch (_) { return new Map(); }
+  })();
+  const todayKey = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  return { select, totalsBaselineMap, isToday: dateLocal === todayKey };
+}
+
 async function exportDailyData({ inverter, date }) {
   const inv = Number(inverter);
   if (!Number.isFinite(inv) || inv <= 0) {
@@ -2884,11 +3064,6 @@ async function exportDailyData({ inverter, date }) {
   }
 
   const dir = resolveExportSubDir(inv, EXPORT_FOLDERS.energy, 'Daily Data');
-  // Match the rest of the export suite (Energy Summary, Alarms, Audits,
-  // Operational Data) — `exportDateAwareFileBase` yields:
-  //   single day: "28-04-26 Inverter 1 Daily Data.xlsx"
-  //   range:      "26-04-26-28-04-26 Inverter 1 Daily Data.xlsx"
-  // Daily Data is always single-day, so the same-day branch is used here.
   const dayStartTs = new Date(`${dateLocal}T00:00:00.000`).getTime();
   const dayEndTs   = new Date(`${dateLocal}T23:59:59.999`).getTime();
   const fileBase = exportDateAwareFileBase(dayStartTs, dayEndTs, inv, 'Daily Data');
@@ -2901,188 +3076,70 @@ async function exportDailyData({ inverter, date }) {
   });
   setWorkbookMetadata(wb, `ADSI Daily Data — Inverter ${inv} ${dateLocal}`);
 
-  // ISM-compatible column order. Partial Energy is computed from pac_w as
-  // ISM-compatible column order. Partial Energy uses the parcE counter
-  // delta vs. the previous slot when available (most accurate — direct
-  // hardware reading), falling back to PAC × 5 min / 1000 if the delta
-  // isn't computable. ParcE_kWh is the lifetime-monotonic snapshot at
-  // end-of-slot, useful for cross-checking against other tools.
-  const headers = [
-    { key: 'Time',         label: 'Time' },
-    { key: 'Pdc_W',        label: 'Pdc (W)' },
-    { key: 'Vdc_V',        label: 'Vdc (V)' },
-    { key: 'Idc_A',        label: 'Idc (A)' },
-    { key: 'Vac1_V',       label: 'Vac1 (V)' },
-    { key: 'Vac2_V',       label: 'Vac2 (V)' },
-    { key: 'Vac3_V',       label: 'Vac3 (V)' },
-    { key: 'Iac1_A',       label: 'Iac1 (A)' },
-    { key: 'Iac2_A',       label: 'Iac2 (A)' },
-    { key: 'Iac3_A',       label: 'Iac3 (A)' },
-    { key: 'Temp_C',       label: 'Temp (°C)' },
-    { key: 'Pac_W',        label: 'Pac (W)' },
-    { key: 'PartialEnergy_kWh', label: 'Partial Energy (kWh)' },
-    { key: 'ParcE_kWh',    label: 'parcE (kWh)' },
-    { key: 'CosPhi',       label: 'CosΦ' },
-    { key: 'Freq_Hz',      label: 'Freq (Hz)' },
-    { key: 'InvAlarms',    label: 'Inv Alarms' },
-    { key: 'TrackAlarms',  label: 'Track Alarms' },
-  ];
-
-  const select = db.prepare(`
-    SELECT slot_index, ts_ms,
-           vdc_v, idc_a, pdc_w,
-           vac1_v, vac2_v, vac3_v,
-           iac1_a, iac2_a, iac3_a,
-           temp_c, pac_w, cosphi, freq_hz,
-           inv_alarms, track_alarms,
-           parce_kwh,
-           sample_count, is_complete, in_solar_window
-      FROM inverter_5min_param
-     WHERE inverter_ip = ? AND slave = ? AND date_local = ?
-       AND in_solar_window = 1
-     ORDER BY slot_index ASC
-  `);
-
-  const slotLabel = (slot) => {
-    const startMin = Number(slot) * 5;
-    const h = Math.floor(startMin / 60);
-    const m = startMin % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  };
-  const fmt = (v, d) => (v == null || v === '' ? '' : Number(Number(v).toFixed(d)));
-  const fmtInt = (v) => (v == null || v === '' ? '' : Math.round(Number(v)));
-  const alarmHex = (v) => {
-    const n = Number(v) >>> 0;
-    return n ? `0x${n.toString(16).toUpperCase().padStart(8, '0')}` : '0';
-  };
-
+  const sharedCtx = _buildDailyDataExportContext(dateLocal);
   for (const slave of slaves) {
-    const dbRows = select.all(String(ip), Number(slave), dateLocal);
-    // Per-slot rows. Partial Energy is the PAC-integrated estimate (= 5-min
-    // PAC average × duration). parcE_kWh is the lifetime monotonic counter
-    // snapshot at end-of-slot. Both are emitted; the day-level cross-check
-    // happens in the TOTALS row appended below.
-    let pacIntegratedKwh = 0;        // running sum for the day total
-    let firstParce = null;            // for parcE delta day total
-    let lastParce = null;
-    // MD-004: defensive ceiling. Poller already clamps pac_w to ≤ 260_000 W
-    // per inverter, but if a future change lets a corrupt value through,
-    // exporting an inflated kWh into XLSX is a hard-to-spot data error.
-    // 260_000 W matches dailyAggregator's _RANGES.pac.hi.
-    const PAC_W_EXPORT_CEILING = 260_000;
-    const sheetRows = dbRows.map((r) => {
-      const pacWRaw = Number(r.pac_w || 0);
-      const pacW = pacWRaw > PAC_W_EXPORT_CEILING ? PAC_W_EXPORT_CEILING : pacWRaw;
-      const partialKwh = pacW > 0 ? pacW * 5 / 60 / 1000 : 0;
-      pacIntegratedKwh += partialKwh;
-      const curParce = Number(r.parce_kwh);
-      if (Number.isFinite(curParce) && curParce >= 0) {
-        if (firstParce == null) firstParce = curParce;
-        lastParce = curParce;
-      }
-      return {
-        Time:         slotLabel(r.slot_index),
-        Pdc_W:        fmtInt(r.pdc_w),
-        Vdc_V:        fmt(r.vdc_v, 1),
-        Idc_A:        fmt(r.idc_a, 2),
-        Vac1_V:       fmt(r.vac1_v, 1),
-        Vac2_V:       fmt(r.vac2_v, 1),
-        Vac3_V:       fmt(r.vac3_v, 1),
-        Iac1_A:       fmt(r.iac1_a, 2),
-        Iac2_A:       fmt(r.iac2_a, 2),
-        Iac3_A:       fmt(r.iac3_a, 2),
-        Temp_C:       fmtInt(r.temp_c),
-        Pac_W:        fmtInt(r.pac_w),
-        PartialEnergy_kWh: Number(partialKwh.toFixed(3)),
-        ParcE_kWh:    Number.isFinite(curParce) && curParce >= 0 ? Number(curParce.toFixed(3)) : '',
-        CosPhi:       fmt(r.cosphi, 3),
-        Freq_Hz:      fmt(r.freq_hz, 2),
-        InvAlarms:    alarmHex(r.inv_alarms),
-        TrackAlarms:  alarmHex(r.track_alarms),
-      };
+    await _writeDailyDataSheet(wb, `Node ${slave}`, {
+      inv, ip, slave, dateLocal, ...sharedCtx,
     });
+    await yieldToEventLoop();
+  }
 
-    // Day-total cross-verification row — Pac-integrated MWh, Etotal MWh
-    // delta, parcE MWh delta — all three computed simultaneously so the
-    // operator can spot any divergence at a glance. Etotal MWh comes from
-    // _hwDeltasForUnitDay (anchored on baseline + eod_clean) for consistency
-    // with the Energy Summary export. parcE MWh delta uses the per-slot
-    // parcE captured in inverter_5min_param.
-    const totalsBaselineMap = (() => {
-      try {
-        const m = new Map();
-        for (const b of getCounterBaselinesForDate(dateLocal) || []) {
-          m.set(`${Number(b.inverter)}_${Number(b.unit)}`, b);
-        }
-        return m;
-      } catch (_) { return new Map(); }
-    })();
-    const todayKey = (() => {
-      const d = new Date();
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    })();
-    const isToday = dateLocal === todayKey;
-    let etotalKwh = NaN;
-    let parceKwh = (firstParce != null && lastParce != null && lastParce >= firstParce)
-      ? (lastParce - firstParce)
-      : NaN;
-    const baselineRow = totalsBaselineMap.get(`${inv}_${slave}`);
-    if (baselineRow) {
-      if (isToday) {
-        try {
-          const cur = (function () {
-            for (const r of getCounterStateAll() || []) {
-              if (Number(r.inverter) === inv && Number(r.unit) === slave) return r;
-            }
-            return null;
-          })();
-          if (cur) {
-            const dE = Number(cur.etotal_kwh) - Number(baselineRow.etotal_baseline || 0);
-            if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
-          }
-        } catch (_) { /* leave as NaN */ }
-      } else {
-        const eClean = Number(baselineRow.etotal_eod_clean || 0);
-        if (eClean > 0) {
-          const dE = eClean - Number(baselineRow.etotal_baseline || 0);
-          if (Number.isFinite(dE) && dE >= 0 && dE <= 9000) etotalKwh = dE;
-        }
-      }
-    }
-    // Three dedicated totals rows, one per method. The Partial Energy
-    // column carries the value in kWh; the Time column carries the clear
-    // label. Operator can scan the three rows top-to-bottom to spot any
-    // divergence between the PAC-based estimate and the two HW counters.
-    const _emptyCols = {
-      Pdc_W: '', Vdc_V: '', Idc_A: '',
-      Vac1_V: '', Vac2_V: '', Vac3_V: '',
-      Iac1_A: '', Iac2_A: '', Iac3_A: '',
-      Temp_C: '', Pac_W: '',
-      ParcE_kWh: '', CosPhi: '', Freq_Hz: '',
-      InvAlarms: '', TrackAlarms: '',
-    };
-    sheetRows.push({
-      Time: 'DAY TOTAL — Pac-integrated (kWh)',
-      ..._emptyCols,
-      PartialEnergy_kWh: Number(pacIntegratedKwh.toFixed(3)),
+  await wb.commit();
+  return xlsxPath;
+}
+
+// ─── All-Inverters Daily Data export ────────────────────────────────────
+// Single workbook with one sheet per (inverter, node) pair across the entire
+// fleet. Sheet naming: `INV<inv>-<slave>` (e.g. INV1-1, INV1-2, INV2-1, …).
+// Inverters without an IP or without configured nodes are skipped silently.
+// Inverters with no rows for the date still get a sheet (empty + 3 totals
+// rows showing "" for Etotal Δ / parcE Δ) so the operator can see at a
+// glance that the unit reported nothing.
+async function exportDailyDataAllInverters({ date }) {
+  const dateLocal = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateLocal)) {
+    throw new Error('exportDailyDataAllInverters: date must be YYYY-MM-DD');
+  }
+  const ipMap = readInverterIpMap();
+  const cfg = readInverterConfig();
+  const pairs = []; // { inv, ip, slave }
+  for (const invKey of Object.keys(cfg.units || {})) {
+    const inv = Number(invKey);
+    if (!Number.isFinite(inv) || inv <= 0) continue;
+    const ip = ipMap[inv];
+    if (!ip) continue;
+    const slaves = (cfg.units?.[inv] || []).map(Number).filter((n) => n >= 1 && n <= 16);
+    for (const slave of slaves) pairs.push({ inv, ip, slave });
+  }
+  if (!pairs.length) {
+    throw new Error('exportDailyDataAllInverters: no inverters/nodes configured');
+  }
+  // Stable order: inv ascending, slave ascending. Operators expect tabs to
+  // line up with their physical fleet layout.
+  pairs.sort((a, b) => a.inv - b.inv || a.slave - b.slave);
+
+  const dir = resolveExportSubDir('all', EXPORT_FOLDERS.energy, 'Daily Data');
+  const dayStartTs = new Date(`${dateLocal}T00:00:00.000`).getTime();
+  const dayEndTs   = new Date(`${dateLocal}T23:59:59.999`).getTime();
+  // plantWideFileBase yields "28-04-26 All Inverters Daily Data" — no
+  // inverter label, matching the convention used by forecast / Solcast
+  // plant-wide exports.
+  const fileBase = plantWideFileBase(dayStartTs, dayEndTs, 'All Inverters Daily Data');
+  const xlsxPath = path.join(dir, `${fileBase}.xlsx`);
+
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: xlsxPath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  setWorkbookMetadata(wb, `ADSI Daily Data — All Inverters ${dateLocal}`);
+
+  const sharedCtx = _buildDailyDataExportContext(dateLocal);
+  for (const { inv, ip, slave } of pairs) {
+    const sheetName = `INV${inv}-${slave}`; // ≤ 31 chars (max INV27-16 = 8)
+    await _writeDailyDataSheet(wb, sheetName, {
+      inv, ip, slave, dateLocal, ...sharedCtx,
     });
-    sheetRows.push({
-      Time: 'DAY TOTAL — Etotal Δ (kWh)',
-      ..._emptyCols,
-      PartialEnergy_kWh: Number.isFinite(etotalKwh) ? Number(etotalKwh.toFixed(3)) : '',
-    });
-    sheetRows.push({
-      Time: 'DAY TOTAL — parcE Δ (kWh)',
-      ..._emptyCols,
-      PartialEnergy_kWh: Number.isFinite(parceKwh) ? Number(parceKwh.toFixed(3)) : '',
-    });
-    await writeXlsxWorksheet(
-      wb,
-      `Node ${slave}`,
-      headers,
-      sheetRows,
-      { freezeHeader: true, autoFilter: false, worksheetKind: 'data' },
-    );
     await yieldToEventLoop();
   }
 
@@ -3104,6 +3161,7 @@ module.exports = {
   exportAudit,
   exportDailyReport,
   exportDailyData,
+  exportDailyDataAllInverters,
   exportForecastActual,
   exportSolcastPreview,
   exportSolcastWeekAhead,

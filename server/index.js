@@ -19049,13 +19049,22 @@ app.post("/api/export/daily-data", async (req, res) => {
       );
     }
     const payload = req.body || {};
-    const inv = Number(payload.inverter);
     const date = String(payload.date || "").trim();
-    if (!Number.isFinite(inv) || inv <= 0) {
-      return res.status(400).json({ ok: false, error: "inverter is required" });
-    }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ ok: false, error: "date must be YYYY-MM-DD" });
+    }
+    // Two-mode dispatch: "all" → fleet-wide workbook (one sheet per
+    // (inv, node) pair, named INV<inv>-<node>); numeric → single-inverter
+    // workbook (one sheet per node, named "Node N") preserving the legacy
+    // shape so existing operator workflows keep working.
+    const invRaw = payload.inverter;
+    const isAllInverters = String(invRaw || "").trim().toLowerCase() === "all";
+    let inv = null;
+    if (!isAllInverters) {
+      inv = Number(invRaw);
+      if (!Number.isFinite(inv) || inv <= 0) {
+        return res.status(400).json({ ok: false, error: "inverter is required" });
+      }
     }
     if (date === _todayLocal()) {
       const eodH = Math.max(0, Math.min(23, Number(getSetting("eodSnapshotHourLocal", 18)) || 18));
@@ -19069,7 +19078,9 @@ app.post("/api/export/daily-data", async (req, res) => {
       }
     }
     const outPath = await runGatewayExportJob("daily-data", () =>
-      exporter.exportDailyData({ inverter: inv, date }),
+      isAllInverters
+        ? exporter.exportDailyDataAllInverters({ date })
+        : exporter.exportDailyData({ inverter: inv, date }),
     );
     return res.json(buildExportResult(outPath));
   } catch (e) {

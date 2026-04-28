@@ -766,8 +766,9 @@
             </div>
             <div class="exp-form">
               <label
-                >Inverter<select id="expDailyDataInv" class="sel" title="Pick an inverter. Each export builds one workbook with one sheet per configured node.">
+                >Inverter<select id="expDailyDataInv" class="sel" title="Pick a single inverter (one workbook with one sheet per node, named &quot;Node N&quot;) or All Inverters (one workbook covering every configured (inverter, node) pair, sheets named INV1-1, INV1-2, INV2-1, …).">
                   <option value="">— select —</option>
+                  <option value="all">All Inverters</option>
                 </select></label
               >
               <label

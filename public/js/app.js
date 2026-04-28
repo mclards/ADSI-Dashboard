@@ -18385,7 +18385,12 @@ function _populateDailyDataInverterSelect() {
   if (!sel) return;
   const cfg = State.ipConfig || {};
   const total = Number(State.settings?.inverterCount || 27);
-  const opts = [`<option value="">— select —</option>`];
+  // "all" goes first so it's easy to find without scrolling past 27 entries.
+  // Sheets in the All-Inverters workbook are named INV<inv>-<node>.
+  const opts = [
+    `<option value="">— select —</option>`,
+    `<option value="all">All Inverters</option>`,
+  ];
   for (let i = 1; i <= total; i += 1) {
     const ip = String(cfg?.inverters?.[i] ?? cfg?.inverters?.[String(i)] ?? "").trim();
     if (ip) {
@@ -18408,9 +18413,12 @@ async function runDailyDataExport() {
     }
     return;
   }
+  const isAll = inv === "all";
   if (res) {
     res.className = "exp-result";
-    res.textContent = "Exporting…";
+    res.textContent = isAll
+      ? "Exporting all inverters… this may take ~30–60 s for the full fleet."
+      : "Exporting…";
   }
   setExportButtonState("btnRunDailyDataExport", "loading");
   const controller = new AbortController();
@@ -18419,7 +18427,10 @@ async function runDailyDataExport() {
     const r = await api(
       "/api/export/daily-data",
       "POST",
-      { inverter: Number(inv), date },
+      // Server accepts inverter: "all" or a numeric ID; route dispatches
+      // to exportDailyData (single workbook, sheets "Node N") vs.
+      // exportDailyDataAllInverters (single workbook, sheets INV<inv>-<n>).
+      { inverter: isAll ? "all" : Number(inv), date },
       { signal: controller.signal },
     );
     if (!r?.path) throw new Error("Export did not return output path.");
