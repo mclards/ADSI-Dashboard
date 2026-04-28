@@ -1520,9 +1520,10 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
   // can run between the range scan and the mapping phase on long windows.
   await yieldToEventLoop();
 
+  const _alarmCols = `id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id`;
   const raw = inverter && inverter !== 'all'
-    ? db.prepare('SELECT * FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
-    : db.prepare('SELECT * FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
+    ? db.prepare(`SELECT ${_alarmCols} FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`).all(Number(inverter),s,e)
+    : db.prepare(`SELECT ${_alarmCols} FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts ASC`).all(s,e);
 
   // T1.2 fix: yield after the scan so the mapping loop below doesn't chain
   // directly onto the .all() without an event-loop turn.
@@ -1838,9 +1839,10 @@ async function exportAudit({ startTs, endTs, inverter, format }) {
   // between setup and the long range scan on 366-day exports.
   await yieldToEventLoop();
 
+  const _auditCols = `id, ts, operator, inverter, node, action, scope, result, ip, reason`;
   const raw = inverter && inverter !== 'all'
-    ? db.prepare('SELECT * FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC').all(Number(inverter),s,e)
-    : db.prepare('SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts ASC').all(s,e);
+    ? db.prepare(`SELECT ${_auditCols} FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`).all(Number(inverter),s,e)
+    : db.prepare(`SELECT ${_auditCols} FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts ASC`).all(s,e);
   await yieldToEventLoop();
 
   const mapped = raw.map(r => ({
