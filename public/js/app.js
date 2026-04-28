@@ -14390,9 +14390,12 @@ async function _paramFetchAndRender(options = {}) {
   ParamPageUI.isToday = (date === today());
   const reqId = (ParamPageUI.reqId = (ParamPageUI.reqId || 0) + 1);
   const silent = options?.silent === true;
+  const force = options?.force === true;
   try {
     const qs = new URLSearchParams({ date });
-    const data = await api(`/api/params/${inv}?${qs}`);
+    // force: true bypasses ETag/304 via cache-buster — matches loadAnalytics pattern
+    const cacheBust = force ? `&_t=${Date.now()}` : "";
+    const data = await api(`/api/params/${inv}?${qs}${cacheBust}`);
     if (reqId !== ParamPageUI.reqId) return;
     if (!data || data.ok === false) {
       throw new Error(data?.error || "params fetch failed");
@@ -19743,10 +19746,15 @@ function initInverterClockSection() {
   if (InvClock.unitTimer) clearInterval(InvClock.unitTimer);
   if (InvClock.logTimer) clearInterval(InvClock.logTimer);
 
-  // Initial load + polling cadence.
-  invClockLoadSettings();
-  invClockRefreshUnits();
-  invClockRefreshLog();
+  // Initial load + polling cadence — fire-and-forget so the UI isn't blocked
+  // while waiting for /api/settings and other async fetches.
+  Promise.all([
+    invClockLoadSettings(),
+    invClockRefreshUnits(),
+    invClockRefreshLog(),
+  ]).catch((err) => {
+    console.warn("[invclock] init load failed:", err?.message || err);
+  });
   _invClockApplyRemoteUiState();
   InvClock.unitTimer = setInterval(() => {
     if (_invClockAnyHostVisible()) invClockRefreshUnits();
@@ -19838,7 +19846,9 @@ function initStopReasonsSection() {
   if (picker.options.length > 0 && !StopReasonsUI.selectedInverter) {
     StopReasonsUI.selectedInverter = Number(picker.options[0].value) || null;
     picker.value = picker.options[0].value;
-    _srnRefreshTable();
+    _srnRefreshTable().catch((err) => {
+      console.warn("[srn] refresh failed:", err?.message || err);
+    });
   }
 }
 
@@ -19919,7 +19929,7 @@ async function _srnRefreshTable() {
   try {
     payload = await api(`/api/stop-reasons/${inv}/recent?limit=50`);
   } catch (err) {
-    host.innerHTML = `<div class="srn-empty">Failed to load: ${String(err?.message || err)}</div>`;
+    host.innerHTML = `<div class="srn-empty">Failed to load: ${escapeHtml(String(err?.message || err))}</div>`;
     return;
   }
   StopReasonsUI.rowsCache = Array.isArray(payload?.rows) ? payload.rows : [];
@@ -20099,7 +20109,7 @@ async function _srnLoadHistogram() {
   try {
     payload = await api(`/api/stop-reasons/${inv}/histogram`);
   } catch (err) {
-    host.innerHTML = `<div class="srn-empty">Failed to load: ${String(err?.message || err)}</div>`;
+    host.innerHTML = `<div class="srn-empty">Failed to load: ${escapeHtml(String(err?.message || err))}</div>`;
     if (msgEl) { msgEl.textContent = "Failed."; msgEl.className = "smsg error"; }
     return;
   }
@@ -20875,7 +20885,7 @@ async function _snbLoadLog() {
   try {
     payload = await api(`/api/serial/log/${inv}?limit=50`);
   } catch (err) {
-    host.innerHTML = `<div class="srn-empty">Failed to load log: ${String(err?.message || err)}</div>`;
+    host.innerHTML = `<div class="srn-empty">Failed to load log: ${escapeHtml(String(err?.message || err))}</div>`;
     return;
   }
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
