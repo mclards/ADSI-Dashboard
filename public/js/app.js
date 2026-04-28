@@ -12715,8 +12715,12 @@ function handleClockSyncCompleted(msg) {
   try {
     const panel = $("inverterClockSection");
     if (panel && !panel.hidden) {
-      invClockRefreshUnits();
-      invClockRefreshLog();
+      invClockRefreshUnits().catch((err) => {
+        console.warn("[invclock] refresh failed:", err?.message || err);
+      });
+      invClockRefreshLog().catch((err) => {
+        console.warn("[invclock] log refresh failed:", err?.message || err);
+      });
     }
   } catch (_) {}
 }
