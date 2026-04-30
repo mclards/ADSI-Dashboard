@@ -16354,12 +16354,12 @@ body.mode-transition-active {
  * so the Stop Reason column has enough room for "12 — MOTIVO_PARO_FRAMA3"
  * stacked over its English description, instead of being truncated with
  * an ellipsis. The Stop Reason cell wraps; every other cell stays nowrap. */
-.srn-table col.srn-col-captured { width: 13rem; }
-.srn-table col.srn-col-node     { width: 4rem;  }
-.srn-table col.srn-col-trigger  { width: 9rem;  }
+.srn-table col.srn-col-captured { width: 16rem; }
+.srn-table col.srn-col-node     { width: 6rem;  }
+.srn-table col.srn-col-trigger  { width: 12rem;  }
 .srn-table col.srn-col-reason   { width: auto;  }   /* greedy — takes leftover */
-.srn-table col.srn-col-debug    { width: 8rem;  }
-.srn-table col.srn-col-power    { width: 7rem;  }
+.srn-table col.srn-col-debug    { width: 10rem;  }
+.srn-table col.srn-col-power    { width: 10rem;  }
 .srn-table col.srn-col-active   { width: 6rem;  }
 .srn-table td.srn-cell-reason {
   white-space: normal;       /* allow wrap for the stacked vendor + EN lines */
@@ -16491,16 +16491,21 @@ body.mode-transition-active {
 }
 .srn-histogram-table th:nth-child(2),
 .srn-histogram-table td:nth-child(2) {
-  width: 1%;
+  width: 26%;
+  padding-right: 24px;
   font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
   font-size: 11.5px;
 }
 .srn-histogram-table th:nth-child(3),
-.srn-histogram-table td:nth-child(3),
+.srn-histogram-table td:nth-child(3) {
+  width: 38%;
+  text-align: left;
+}
+.srn-histogram-table th.srn-count,
 .srn-histogram-table td.srn-count {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  padding-right: 64px;      /* whitespace gutter so count isn't glued to edge */
+  padding-right: 36px;
 }
 .invclock-input {
   width: 100%;
@@ -17429,6 +17434,14 @@ body.mode-transition-active {
 }
 .param-table tbody tr.param-live:hover td {
   background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+.param-table tbody tr.param-gap td {
+  color: var(--text2);
+  opacity: 0.35;
+}
+.param-table tbody tr.param-gap:hover td {
+  opacity: 0.55;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 .param-live-tag {
   display: inline-block;

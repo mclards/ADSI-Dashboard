@@ -14581,34 +14581,55 @@ function _paramRenderTable(slave) {
   const entry = ParamPageUI.rowsBySlave.get(Number(slave));
   const rows = entry?.rows || [];
   const live = entry?.live_bucket || null;
-  if (!rows.length && !live) {
-    tbody.innerHTML = `
-      <tr><td colspan="17" class="param-empty">
-        <div class="param-empty-inner">
-          <span class="mdi mdi-chart-box-outline"></span>
-          No 5-minute parameter rows in the solar window for the selected day.
-        </div>
-      </td></tr>`;
-    if (Number(slave) === Number(ParamPageUI.activeSlave)) _paramUpdateRowCount();
-    return;
+
+  const startH   = Number.isFinite(ParamPageUI.solarStartH) ? ParamPageUI.solarStartH : 5;
+  const endH     = Number.isFinite(ParamPageUI.solarEndH)   ? ParamPageUI.solarEndH   : 18;
+  const startSlot = startH * 12;       // 05:00 → slot 60
+  const endSlot   = endH  * 12 - 1;   // 18:00 → last slot is 215 (17:55–18:00)
+
+  // Index real rows by slot so gap-fill can O(1) look them up.
+  const rowMap = new Map();
+  for (const r of rows) {
+    const s = Number(r.slot_index);
+    if (Number.isFinite(s)) rowMap.set(s, r);
   }
-  // Render most-recent-first; live bucket goes on top with a "live" tag.
-  const ordered = [...rows].sort((a, b) => Number(b.slot_index || 0) - Number(a.slot_index || 0));
+
   const frag = document.createDocumentFragment();
+
+  // Live in-progress bucket always goes on top.
   if (live) {
     const tr = el("tr");
     tr.className = "param-live";
-    tr.innerHTML = _paramRowHtml(live, /*isLive*/ true);
+    tr.innerHTML = _paramRowHtml(live, true);
     frag.appendChild(tr);
   }
-  for (const r of ordered) {
-    const tr = el("tr");
-    tr.innerHTML = _paramRowHtml(r, /*isLive*/ false);
+
+  // Walk newest → oldest across the full solar window.
+  // Missing slots get a zero-filled placeholder row (dimmed).
+  for (let slot = endSlot; slot >= startSlot; slot--) {
+    const real = rowMap.has(slot);
+    const r    = real ? rowMap.get(slot) : _paramZeroRow(slot);
+    const tr   = el("tr");
+    if (!real) tr.className = "param-gap";
+    tr.innerHTML = _paramRowHtml(r, false);
     frag.appendChild(tr);
   }
+
   tbody.textContent = "";
   tbody.appendChild(frag);
   if (Number(slave) === Number(ParamPageUI.activeSlave)) _paramUpdateRowCount();
+}
+
+function _paramZeroRow(slot) {
+  return {
+    slot_index: slot,
+    pdc_w: 0, vdc_v: 0, idc_a: 0,
+    vac1_v: 0, vac2_v: 0, vac3_v: 0,
+    iac1_a: 0, iac2_a: 0, iac3_a: 0,
+    temp_c: 0, pac_w: 0,
+    cosphi: 0, freq_hz: 0,
+    inv_alarms: 0, track_alarms: 0,
+  };
 }
 
 function _paramRowHtml(r, isLive) {
