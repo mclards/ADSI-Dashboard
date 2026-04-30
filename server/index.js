@@ -5514,6 +5514,11 @@ const PROXY_TIMEOUT_RULES = [
   // was killing the Plant Serial Map "Scan plant" button in remote mode.
   ["/api/serial/fleet/",  180000],  // 3 min — full-fleet scan / uniqueness
   ["/api/serial/",         60000],  // 60 s  — single read / read-all / send
+  // /api/sync-clock returns HTTP 202 in <100 ms (the actual Modbus broadcast
+  // runs in the background on the gateway), but a CPU-loaded gateway can
+  // take longer to ACK. 30 s gives plenty of head-room while still failing
+  // fast if the gateway is unreachable.
+  ["/api/sync-clock",      30000],
 ];
 
 function resolveProxyTimeout(targetUrl) {
@@ -12568,10 +12573,11 @@ app.post("/api/audit/counter-recovery", express.json(), (req, res) => {
  * REMOTE MODE: Must proxy to gateway for inverter-local counter state table.
  */
 app.get("/api/counter-state/all", (req, res) => {
-  // Remote-mode proxy: counter state is gateway-local
-  if (isRemoteMode()) {
-    return proxyToRemoteGateway(req, res, "/api/counter-state/all");
-  }
+  // Remote-mode proxy: counter state is gateway-local. v2.10.4 — was
+  // calling phantom `proxyToRemoteGateway` which is never defined and
+  // threw ReferenceError, making the Inverter Clocks → Per-Unit Counter
+  // Health tab render "No unit state yet" in remote mode.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
@@ -12638,10 +12644,10 @@ app.get("/api/counter-state/all", (req, res) => {
  * REMOTE MODE: Must proxy to gateway for inverter-local counter state table.
  */
 app.get("/api/counter-state/summary", (req, res) => {
-  // Remote-mode proxy: counter state is gateway-local
-  if (isRemoteMode()) {
-    return proxyToRemoteGateway(req, res, "/api/counter-state/summary");
-  }
+  // Remote-mode proxy: counter state is gateway-local. v2.10.4 — was
+  // calling phantom `proxyToRemoteGateway`; threw ReferenceError → 500
+  // → top-bar counter chip stuck on "loading…" in remote mode.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   try {
     const rows = getCounterStateAll();
     const serverNow = new Date();
@@ -12700,10 +12706,10 @@ app.get("/api/counter-state/summary", (req, res) => {
  * REMOTE MODE: Must proxy to gateway for inverter-local clock-sync log table.
  */
 app.get("/api/clock-sync-log", (req, res) => {
-  // Remote-mode proxy: clock-sync log is gateway-local
-  if (isRemoteMode()) {
-    return proxyToRemoteGateway(req, res, "/api/clock-sync-log");
-  }
+  // Remote-mode proxy: clock-sync log is gateway-local. v2.10.4 — was
+  // calling phantom `proxyToRemoteGateway`; threw ReferenceError → 500
+  // → "Recent Sync Attempts" tab empty in remote mode.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
   res.json({ ok: true, rows: getClockSyncLog(limit) });
 });
@@ -13005,7 +13011,13 @@ function _resolveSlaveForInverter(inverterId, fallback = 1) {
   return fallback;
 }
 
+// v2.10.4 — `inverter_stop_reasons` and `inverter_stop_histogram` are NOT
+// in REPLICATION_TABLE_DEFS, so the remote viewer's local SQLite never sees
+// these rows. The earlier comment about "standard replication" was
+// incorrect. Read paths must proxy to the gateway in remote mode or the
+// drilldown panel renders blank.
 app.get("/api/stop-reasons/:inverter/recent", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const inv = Number(req.params.inverter);
   if (!Number.isFinite(inv) || inv <= 0) {
     return res.status(400).json({ ok: false, error: "inverter required" });
@@ -13020,6 +13032,7 @@ app.get("/api/stop-reasons/:inverter/recent", (req, res) => {
 });
 
 app.get("/api/stop-reasons/:inverter/event/:event_id", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const eventId = Number(req.params.event_id);
   if (!Number.isFinite(eventId) || eventId <= 0) {
     return res.status(400).json({ ok: false, error: "event_id required" });
@@ -13034,6 +13047,7 @@ app.get("/api/stop-reasons/:inverter/event/:event_id", (req, res) => {
 });
 
 app.get("/api/stop-reasons/:inverter/histogram", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const inv = Number(req.params.inverter);
   if (!Number.isFinite(inv) || inv <= 0) {
     return res.status(400).json({ ok: false, error: "inverter required" });
@@ -13405,7 +13419,11 @@ try {
 }
 
 // Slice F readback endpoints (drilldown integration).
+// v2.10.4 — joins `alarms` (replicated) with `inverter_stop_reasons` (NOT
+// replicated), so the remote viewer must proxy to the gateway or the
+// drilldown's "Captured at the moment of the alarm" panel stays empty.
 app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const alarmId = Number(req.params.alarm_id);
   if (!Number.isFinite(alarmId) || alarmId <= 0) {
     return res.status(400).json({ ok: false, error: "alarm_id required" });
@@ -14066,7 +14084,18 @@ app.post("/api/sync-clock-internal", express.json(), async (req, res) => {
       "content-type": "application/json",
       "x-bulk-auth": _currentSacupsKey(),
     };
-    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}) });
+    // v2.10.4 — bound the loopback fetch to 30 s so a hung Python engine
+    // can't pin this request handler indefinitely (the inverter Modbus
+    // round-trip is ~1-2 s; 30 s is generous).
+    const _abort = new AbortController();
+    const _to = setTimeout(() => { try { _abort.abort(); } catch (_) {} }, 30_000);
+    if (_to && typeof _to.unref === "function") _to.unref();
+    let r;
+    try {
+      r = await fetch(url, { method: "POST", headers, body: JSON.stringify({}), signal: _abort.signal });
+    } finally {
+      clearTimeout(_to);
+    }
     const body = await r.json().catch(() => ({ ok: false }));
     try {
       insertClockSyncLogRow({
@@ -14136,11 +14165,36 @@ function _scheduleNextClockSync() {
         }
         console.log(`[clock-sync] auto-sync firing (${hhmm})`);
         const url = `${INVERTER_ENGINE_SYNC_URL}/broadcast`;
-        const r = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-bulk-auth": _currentSacupsKey() },
-          body: JSON.stringify({}),
-        });
+        // v2.10.4 — bound the fetch to 60 s. The fleet-wide broadcast hits
+        // every inverter once via Modbus FC16; even with all 27 inverters
+        // and per-IP locks held by the poller, the round trip is well under
+        // 30 s in practice. Without this AbortController, a hung Python
+        // engine at 04:25 would leave the timer's promise pending forever,
+        // pinning the closure (and its captured DB handle) on the heap and
+        // never re-arming the next-day timer. Over weeks of overnight runs
+        // this becomes a cumulative socket / handle leak. The 04:25 cron
+        // sits inside the same Windows update / sleep window the gateway
+        // PC has historically been sensitive to, so a stuck broadcast is
+        // exactly the kind of slow-leak that would show up as an apparent
+        // overnight crash.
+        const _clockSyncAbort = new AbortController();
+        const _clockSyncTimeoutHandle = setTimeout(() => {
+          try { _clockSyncAbort.abort(); } catch (_) { /* noop */ }
+        }, 60_000);
+        if (_clockSyncTimeoutHandle && typeof _clockSyncTimeoutHandle.unref === "function") {
+          _clockSyncTimeoutHandle.unref();
+        }
+        let r;
+        try {
+          r = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-bulk-auth": _currentSacupsKey() },
+            body: JSON.stringify({}),
+            signal: _clockSyncAbort.signal,
+          });
+        } finally {
+          clearTimeout(_clockSyncTimeoutHandle);
+        }
         const body = await r.json().catch(() => ({ results: [] }));
         const results = Array.isArray(body.results) ? body.results : [];
         for (const row of results) {

@@ -12686,6 +12686,11 @@ function handleWS(msg) {
 // accepted/total summary so the operator sees the outcome without manual
 // refresh.
 function handleClockSyncCompleted(msg) {
+  // v2.10.4 — WS event arrived, cancel the remote-mode fallback timer so it
+  // can't redundantly refresh the panel a few seconds later.
+  try {
+    if (typeof _invClockClearSyncFallback === "function") _invClockClearSyncFallback();
+  } catch (_) { /* timer state is best-effort */ }
   const scope = String(msg?.scope || "").toLowerCase();
   const accepted = Number(msg?.accepted || 0);
   const total = Number(msg?.total || 0);
@@ -13597,31 +13602,35 @@ function renderStopReasonCapture(payload, alarmTs, esc) {
         ${driftWarning}
       </div>
       <div class="alarm-detail-stop-reason-grid">
-        <div><span class="alarm-detail-stop-reason-k">MotParo</span>
-             <span class="alarm-detail-stop-reason-v">${esc(sr.motparo)} — ${motparoLabel}</span></div>
-        <div><span class="alarm-detail-stop-reason-k">DebugDesc</span>
+        <div title="Stop Reason — vendor MotParo code with plain-English meaning."><span class="alarm-detail-stop-reason-k">Stop Reason</span>
+             <span class="alarm-detail-stop-reason-v">${esc(sr.motparo)} — ${motparoLabel}${
+               sr.motparo_english
+                 ? ` <span class="alarm-detail-stop-reason-en">(${esc(sr.motparo_english)})</span>`
+                 : ""
+             }</span></div>
+        <div title="Vendor Debug code — diagnostic sub-cause (DebugDesc)."><span class="alarm-detail-stop-reason-k">Debug Code</span>
              <span class="alarm-detail-stop-reason-v">
                <strong>${esc(sr.debug_desc_hex || "0x0000")}</strong>
                (${esc(sr.debug_desc)})
              </span></div>
-        <div><span class="alarm-detail-stop-reason-k">PotAC</span>
+        <div title="AC active power at the moment of fault."><span class="alarm-detail-stop-reason-k">AC Power</span>
              <span class="alarm-detail-stop-reason-v">${fmt1(sr.pot_ac)} kW</span></div>
-        <div><span class="alarm-detail-stop-reason-k">Vpv</span>
+        <div title="DC bus voltage from the PV input."><span class="alarm-detail-stop-reason-k">PV Voltage (DC)</span>
              <span class="alarm-detail-stop-reason-v">${fmt1(sr.vpv)} V</span></div>
-        <div><span class="alarm-detail-stop-reason-k">Temp</span>
+        <div title="Heatsink / cooling-system temperature."><span class="alarm-detail-stop-reason-k">Temperature</span>
              <span class="alarm-detail-stop-reason-v">${esc(sr.temp ?? "—")} °C</span></div>
-        <div><span class="alarm-detail-stop-reason-k">Cos</span>
+        <div title="Power factor (cosΦ)."><span class="alarm-detail-stop-reason-k">Power Factor</span>
              <span class="alarm-detail-stop-reason-v">${fmt3(sr.cos)}</span></div>
-        <div class="alarm-detail-stop-reason-wide">
-          <span class="alarm-detail-stop-reason-k">Vac</span>
+        <div class="alarm-detail-stop-reason-wide" title="AC phase voltages V1 / V2 / V3.">
+          <span class="alarm-detail-stop-reason-k">AC Voltage</span>
           <span class="alarm-detail-stop-reason-v">${fmt1(vac[0])} / ${fmt1(vac[1])} / ${fmt1(vac[2])} V</span>
         </div>
-        <div class="alarm-detail-stop-reason-wide">
-          <span class="alarm-detail-stop-reason-k">Iac</span>
+        <div class="alarm-detail-stop-reason-wide" title="AC line currents I1 / I2.">
+          <span class="alarm-detail-stop-reason-k">AC Current</span>
           <span class="alarm-detail-stop-reason-v">${fmt1(iac[0])} / ${fmt1(iac[1])} A</span>
         </div>
-        <div class="alarm-detail-stop-reason-wide">
-          <span class="alarm-detail-stop-reason-k">Frec</span>
+        <div class="alarm-detail-stop-reason-wide" title="Grid frequency per phase.">
+          <span class="alarm-detail-stop-reason-k">Frequency</span>
           <span class="alarm-detail-stop-reason-v">${fmt2(frec[0])} / ${fmt2(frec[1])} / ${fmt2(frec[2])} Hz</span>
         </div>
       </div>
@@ -17687,8 +17696,26 @@ async function runEnergyExport() {
   const res = $("expEnergyResult");
   if (res) {
     res.className = "exp-result";
-    res.textContent = "Exporting…";
+    res.textContent = inv === "all"
+      ? "Exporting all inverters… dashboard may slow briefly while large datasets are read."
+      : "Exporting…";
   }
+  // v2.10.4 — operator notice. Energy export reads weeks/months of poll data
+  // across all inverters. The dashboard runs on the same gateway PC as the
+  // Node export job and the WebSocket, so during the heavy SQL read live
+  // PAC/parameter ticks may stall for a few seconds even with the new
+  // chunked-source yields. The toast tells the operator this is normal.
+  try {
+    if (typeof showToast === "function") {
+      showToast(
+        inv === "all"
+          ? "Energy export running fleet-wide — dashboard may slow briefly while large datasets are read."
+          : "Energy export running — dashboard may slow briefly while data is read.",
+        "info",
+        6000,
+      );
+    }
+  } catch (_) { /* toast is decorative */ }
   setExportButtonState("btnRunEnergyExport", "loading");
   const controller = new AbortController();
   registerExportAbortController("btnCancelEnergyExport", controller);
@@ -18366,6 +18393,21 @@ function initSubstationMeterModal() {
 
 async function runInverterDataExport() {
   normalizeExportNumberInput("expInvDataInterval");
+  // v2.10.4 — operator notice. Inverter Data over "All inverters" can scan
+  // tens of millions of poll rows across 27 inverters; the toast warns the
+  // operator that live updates may pause briefly during the heavy read.
+  try {
+    if (typeof showToast === "function") {
+      const inv = String($("expInvDataInv")?.value || "");
+      showToast(
+        inv === "all"
+          ? "Inverter Data export running fleet-wide — dashboard may slow briefly while large datasets are read."
+          : "Inverter Data export running — dashboard may slow briefly while data is read.",
+        "info",
+        6000,
+      );
+    }
+  } catch (_) { /* toast is decorative */ }
   await runSingleDateExport(
     "inverter-data",
     "expInvDataInv",
@@ -19471,6 +19513,54 @@ async function invClockSaveSettings() {
 // remains server-side for the Python drift/year-invalid auto-trigger via
 // /api/sync-clock-internal; UI no longer surfaces a per-row Sync button.
 
+// v2.10.4 — remote-mode WS fallback timer.
+//
+// `clockSyncCompleted` is broadcast on the GATEWAY's WS clients only. When
+// the operator triggers Sync from the remote viewer, the request proxies to
+// the gateway, the gateway runs the FC16 broadcast in the background and
+// emits the WS event to its own WS clients. The remote viewer's browser is
+// connected to the remote viewer process's WS, NOT the gateway's, so the
+// completion event never arrives — the action button stays disabled and
+// the action message stays at "…running" forever.
+//
+// This fallback sets a wall-clock timer that re-enables the buttons and
+// refreshes the per-unit table + sync log if the WS event never lands. In
+// gateway mode the WS event normally lands first and clears the timer.
+let _invClockSyncFallbackTimer = null;
+const INV_CLOCK_SYNC_FALLBACK_MS = 75_000;
+function _invClockArmSyncFallback(scopeLabel) {
+  _invClockClearSyncFallback();
+  _invClockSyncFallbackTimer = setTimeout(() => {
+    _invClockSyncFallbackTimer = null;
+    try {
+      const msgEl = $("invClockActionMsg");
+      if (msgEl && /running|broadcast|started/i.test(String(msgEl.textContent || ""))) {
+        msgEl.textContent = `${scopeLabel}: result not received over live link — refreshing now.`;
+        msgEl.className = "smsg smsg-warn";
+      }
+      const plantBtn = $("btnInvClockSyncPlant");
+      if (plantBtn) plantBtn.disabled = false;
+      const invBtn = $("btnInvClockSyncInverter");
+      const invSel = $("invClockSyncInverterSel");
+      if (invBtn) invBtn.disabled = !Number(invSel?.value || 0);
+      const panel = $("inverterClockSection");
+      if (panel && !panel.hidden) {
+        try { invClockRefreshUnits().catch(() => {}); } catch (_) {}
+        try { invClockRefreshLog().catch(() => {}); } catch (_) {}
+      }
+    } catch (_) { /* fallback path is best-effort */ }
+  }, INV_CLOCK_SYNC_FALLBACK_MS);
+  if (_invClockSyncFallbackTimer && typeof _invClockSyncFallbackTimer.unref === "function") {
+    _invClockSyncFallbackTimer.unref();
+  }
+}
+function _invClockClearSyncFallback() {
+  if (_invClockSyncFallbackTimer) {
+    clearTimeout(_invClockSyncFallbackTimer);
+    _invClockSyncFallbackTimer = null;
+  }
+}
+
 // v2.9.1 — bulk plant sync. Hits every inverter in one round. Requires the
 // operator-typed bulk auth key because a fleet-wide write can briefly affect
 // the entire plant output.
@@ -19493,6 +19583,7 @@ async function invClockSyncBulkPlant() {
   if (!auth) return;
   if (btn) btn.disabled = true;
   if (msgEl) { msgEl.textContent = "Broadcasting clock to all inverters…"; msgEl.className = "smsg"; }
+  _invClockArmSyncFallback("Plant sync");
   try {
     const r = await fetch("/api/sync-clock/broadcast", {
       method: "POST",
@@ -19558,6 +19649,7 @@ async function invClockSyncInverter() {
   // (only the fleet-wide bulk-plant broadcast prompts for an auth key).
   if (btn) btn.disabled = true;
   if (msgEl) { msgEl.textContent = `Syncing inverter ${inv}…`; msgEl.className = "smsg"; }
+  _invClockArmSyncFallback(`Inverter ${inv} sync`);
   try {
     const r = await fetch(`/api/sync-clock/inverter/${inv}`, {
       method: "POST",
@@ -20033,14 +20125,28 @@ function _srnEsc(s) {
 }
 
 function _srnRenderTable(rows) {
+  // v2.10.4 — explicit column widths so the Stop Reason cell has enough
+  // room to render the vendor code stacked over its English description
+  // (table-layout:fixed truncates with ellipsis when widths are equal).
+  const colgroup = `
+    <colgroup>
+      <col class="srn-col-captured" />
+      <col class="srn-col-node" />
+      <col class="srn-col-trigger" />
+      <col class="srn-col-reason" />
+      <col class="srn-col-debug" />
+      <col class="srn-col-power" />
+      <col class="srn-col-active" />
+    </colgroup>`;
   const head = `
+    ${colgroup}
     <thead><tr>
       <th>Captured</th>
       <th>Node</th>
       <th>Trigger</th>
-      <th>MotParo</th>
-      <th>DebugDesc</th>
-      <th>PotAC</th>
+      <th title="Stop Reason — vendor MotParo code with plain-English meaning.">Stop Reason</th>
+      <th title="Vendor Debug code — diagnostic sub-cause (DebugDesc).">Debug Code</th>
+      <th title="AC active power at the moment of fault.">AC Power</th>
       <th>Active?</th>
     </tr></thead>`;
   const body = rows.map((r) => {
@@ -20077,17 +20183,17 @@ function _srnRenderTable(rows) {
                   <span class="srn-row-detail-v">${_srnEsc(r.struct_when_dd_mm || "—")} ${_srnEsc(r.struct_when_hh_mm || "")}</span></div>
              <div><span class="srn-row-detail-k">Alarm ID</span>
                   <span class="srn-row-detail-v">${r.alarm_id ? `<a href="#" data-srn-alarm-id="${Number(r.alarm_id)}">#${Number(r.alarm_id)}</a>` : "—"}</span></div>
-             <div><span class="srn-row-detail-k">Vac (V)</span>
+             <div title="AC phase voltages V1 / V2 / V3."><span class="srn-row-detail-k">AC Voltage (V)</span>
                   <span class="srn-row-detail-v">${fmt1(r.vac?.[0])} / ${fmt1(r.vac?.[1])} / ${fmt1(r.vac?.[2])}</span></div>
-             <div><span class="srn-row-detail-k">Iac (A)</span>
+             <div title="AC line currents I1 / I2."><span class="srn-row-detail-k">AC Current (A)</span>
                   <span class="srn-row-detail-v">${fmt1(r.iac?.[0])} / ${fmt1(r.iac?.[1])}</span></div>
-             <div><span class="srn-row-detail-k">Frec (Hz)</span>
+             <div title="Grid frequency per phase."><span class="srn-row-detail-k">Frequency (Hz)</span>
                   <span class="srn-row-detail-v">${fmt2(r.frec?.[0])} / ${fmt2(r.frec?.[1])} / ${fmt2(r.frec?.[2])}</span></div>
-             <div><span class="srn-row-detail-k">Vpv</span>
+             <div title="DC bus voltage from the PV input."><span class="srn-row-detail-k">PV Voltage (DC)</span>
                   <span class="srn-row-detail-v">${fmt1(r.vpv)} V</span></div>
-             <div><span class="srn-row-detail-k">Cos / Temp</span>
+             <div title="Power factor (cosΦ) and heatsink temperature."><span class="srn-row-detail-k">Power Factor / Temperature</span>
                   <span class="srn-row-detail-v">${fmt3(r.cos)} / ${_srnEsc(r.temp ?? "—")}°C</span></div>
-             <div><span class="srn-row-detail-k">Alarmas1 / Flags</span>
+             <div title="Auxiliary alarm bitmaps (vendor 'Alarmas1' and 'Flags' fields)."><span class="srn-row-detail-k">Aux Alarms / Flags</span>
                   <span class="srn-row-detail-v">${_srnEsc(r.alarmas1)} / ${_srnEsc(r.flags)}</span></div>
              <div class="srn-row-detail-wide">
                <span class="srn-row-detail-k">Raw (hex)</span>
@@ -20104,6 +20210,16 @@ function _srnRenderTable(rows) {
          </td></tr>`
       : "";
 
+    // v2.10.4 — stacked cell: vendor MotParo code on the first line, plain
+    // English description on a muted second line. The .srn-cell-reason CSS
+    // class allows wrapping (`white-space: normal`) since the rest of the
+    // table is `nowrap`. Operator can scan the English description without
+    // having to translate the Spanish constant in their head.
+    const motparoEnglish = _srnEsc(r.motparo_english || "");
+    const motparoCell = motparoEnglish
+      ? `<div class="srn-reason-code">${motparo} — ${motparoLabel}</div>
+         <div class="srn-reason-en">${motparoEnglish}</div>`
+      : `<div class="srn-reason-code">${motparo} — ${motparoLabel}</div>`;
     return `
       <tr class="clickable ${expanded ? "expanded" : ""}" data-row-id="${id}">
         <td>
@@ -20112,7 +20228,7 @@ function _srnRenderTable(rows) {
         </td>
         <td>N${_srnEsc(r.node)}</td>
         <td><span class="srn-trigger-tag ${triggerCls}">${_srnEsc(trigger)}</span></td>
-        <td>${motparo} — ${motparoLabel}</td>
+        <td class="srn-cell-reason">${motparoCell}</td>
         <td><span class="srn-debug-hex">${debugHex}</span> (${debugVal})</td>
         <td class="srn-mono">${potAc} kW</td>
         <td>${activeChip}</td>
@@ -20195,6 +20311,8 @@ async function _srnLoadHistogram() {
   }
   StopReasonsUI.histogramLoadedFor = inv;
   // 30 motive labels + TOTAL at slot 30 — mirror server/motiveLabels.js.
+  // Each Spanish vendor code is paired with its plain-English description
+  // so the histogram is readable without knowing Ingeteam's terminology.
   const LABELS = [
     "MOTIVO_PARO_VIN","MOTIVO_PARO_FRED","MOTIVO_PARO_VRED","MOTIVO_PARO_VARISTORES",
     "MOTIVO_PARO_AISL_DC","MOTIVO_PARO_IAC_EFICAZ","MOTIVO_PARO_TEMPERATURA",
@@ -20207,11 +20325,24 @@ async function _srnLoadHistogram() {
     "MOTIVO_PARO_PI_ANA_SAT","MOTIVO_PARO_LATENCIA_ADC","MOTIVO_PARO_ERROR_FATAL",
     "MOTIVO_PARO_FRAMA1","MOTIVO_PARO_FRAMA2","TOTAL",
   ];
-  const head = `<thead><tr><th>#</th><th>Motive</th><th class="srn-count">Count</th></tr></thead>`;
+  const ENGLISH = [
+    "Input voltage (DC)","Grid frequency out of band","Grid voltage out of band","Surge protector (varistors)",
+    "DC insulation fault","AC current RMS exceeded","Temperature trip",
+    "Reserved (vendor)","Configuration error","Manual stop (operator)",
+    "Low PV voltage (averaged)","Hardware discharge ×2","Frame error 3 (vendor protocol)",
+    "Max AC current (instantaneous)","Firmware load fault","Reserved (vendor)",
+    "Reserved (vendor)","ADC read error","Power consumption fault",
+    "DC fuse blown","Auxiliary temperature trip","AC disconnect",
+    "Magnetothermal breaker tripped","Contactor fault","Watchdog reset",
+    "PI controller analog saturation","ADC latency fault","Fatal error",
+    "Frame error 1 (vendor protocol)","Frame error 2 (vendor protocol)","TOTAL",
+  ];
+  const head = `<thead><tr><th>#</th><th>Stop Reason</th><th>Description</th><th class="srn-count">Count</th></tr></thead>`;
   const body = snap.counters.map((c, i) => `
     <tr class="${i === 30 ? "is-total" : ""}">
       <td>${i}</td>
       <td>${_srnEsc(LABELS[i] || `<unknown_${i}>`)}</td>
+      <td class="srn-quiet">${_srnEsc(ENGLISH[i] || "")}</td>
       <td class="srn-count">${Number(c).toLocaleString()}</td>
     </tr>`).join("");
   const captured = snap.read_at_ms ? fmtDateTime(snap.read_at_ms) : "—";

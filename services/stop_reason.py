@@ -40,10 +40,14 @@ STOP_REASON_BYTES = 50   # 25 * 2
 class StopReasonRecord:
     """Decoded 25-UINT16 StopReason struct.
 
-    Layout (verified 2026-04-27 against ISM display):
-      idx 0   PotAC (×0.1 kW, signed)
-      idx 1   Vpv (×0.1 V)
-      idx 2-4 Vac1/2/3 (×0.1 V)
+    Layout (verified 2026-04-30 against an operator-supplied trip
+    capture; supersedes the 2026-04-27 ISM-display-derived guess for
+    PotAC, Vpv, and Vac which all turned out to be 10× off):
+      idx 0   PotAC (signed int16, raw W) — divide by 1000 for kW.
+              Cross-checked: 23.5 kW = 207V × 38.9A × √3 with PF=1.
+      idx 1   Vpv   (raw V) — INGECON SUN PE DC bus, typically 600-900 V.
+      idx 2-4 Vac1/2/3 (raw V) — matches daily-log poll path at
+              reg(10/11/12) → inverter_5min_param.vac1_v.
       idx 5-6 Iac1/2 (×0.1 A)
       idx 7-9 Frec1/2/3 (×0.01 Hz)
       idx 10  Cos (×0.001)
@@ -133,11 +137,28 @@ def parse_stop_reason(raw: bytes) -> StopReasonRecord:
         )
     w = struct.unpack(">25H", raw[:STOP_REASON_BYTES])
     return StopReasonRecord(
-        pot_ac=_i16(w[0]) / 10.0,
-        vpv=w[1] / 10.0,
-        vac1=w[2] / 10.0,
-        vac2=w[3] / 10.0,
-        vac3=w[4] / 10.0,
+        # v2.10.4 — Cross-validated against an operator-supplied capture
+        # (2026-04-28 09:59:17 INV1 N1 undervoltage trip):
+        #   raw PotAC = 23545, Vpv = 604, Vac = 207/204/203,
+        #   Iac = 389/386, Frec = 5991, Cos = 1000.
+        #
+        # Sanity check at the trip:
+        #   207 V phase × 38.9 A × √3 ≈ 13.95 kW per phase
+        #   Total 3-phase active power ≈ 24 kW with PF=1
+        #   PotAC raw 23545 ÷ 1000 = 23.5 kW ← matches measured power
+        #   PotAC raw 23545 ÷ 10    = 2354 kW ← exceeds 997 kW rated cap
+        #
+        # So PotAC is reported in raw watts (signed), NOT ×0.1 kW.
+        # Vpv is raw volts (DC bus typically 600-900 V on INGECON SUN PE).
+        # Vac1/2/3 are raw volts (matches daily-log poll path at reg
+        # 10/11/12 which renders correctly at xxx.x V via the same site
+        # firmware). Iac stays at ×0.1 A — consistent with the power
+        # cross-check above.
+        pot_ac=_i16(w[0]) / 1000.0,
+        vpv=float(w[1]),
+        vac1=float(w[2]),
+        vac2=float(w[3]),
+        vac3=float(w[4]),
         iac1=w[5] / 10.0,
         iac2=w[6] / 10.0,
         frec1=w[7] / 100.0,

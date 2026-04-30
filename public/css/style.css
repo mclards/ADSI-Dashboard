@@ -16348,6 +16348,36 @@ body.mode-transition-active {
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+
+/* v2.10.4 — Stop Reasons snapshots table column widths.
+ * `table-layout: fixed` (set on .srn-table above) honours these <col> widths
+ * so the Stop Reason column has enough room for "12 — MOTIVO_PARO_FRAMA3"
+ * stacked over its English description, instead of being truncated with
+ * an ellipsis. The Stop Reason cell wraps; every other cell stays nowrap. */
+.srn-table col.srn-col-captured { width: 13rem; }
+.srn-table col.srn-col-node     { width: 4rem;  }
+.srn-table col.srn-col-trigger  { width: 9rem;  }
+.srn-table col.srn-col-reason   { width: auto;  }   /* greedy — takes leftover */
+.srn-table col.srn-col-debug    { width: 8rem;  }
+.srn-table col.srn-col-power    { width: 7rem;  }
+.srn-table col.srn-col-active   { width: 6rem;  }
+.srn-table td.srn-cell-reason {
+  white-space: normal;       /* allow wrap for the stacked vendor + EN lines */
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.35;
+}
+.srn-cell-reason .srn-reason-code {
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+.srn-cell-reason .srn-reason-en {
+  font-size: 10.5px;
+  color: var(--text2);
+  margin-top: 2px;
+  word-break: break-word;
+}
 .srn-table tr.clickable { cursor: pointer; }
 .srn-table tr.clickable:hover { background: var(--surface2, var(--surface1)); }
 .srn-table tr.expanded { background: var(--surface2, var(--surface1)); }

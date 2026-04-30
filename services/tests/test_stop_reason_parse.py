@@ -86,17 +86,26 @@ class ParseStopReasonTests(unittest.TestCase):
 
     def test_decodes_pot_ac_with_signed_scaling(self):
         rec = parse_stop_reason(HEALTHY_RAW)
-        self.assertAlmostEqual(rec.pot_ac, 1073.3, places=2)
+        # v2.10.4: PotAC is raw watts (signed). Fixture pot_ac_raw=10733
+        # → 10.733 kW after /1000.
+        self.assertAlmostEqual(rec.pot_ac, 10.733, places=3)
 
     def test_negative_pot_ac_decodes_signed(self):
-        # 0xFCDB = -805 → -80.5 kW (overnight aux load case)
+        # 0xFCDB = -805 raw watts → -0.805 kW after /1000 (small overnight
+        # aux load, e.g. fans / electronics drawing from the grid).
         raw = _make_stopreason_bytes(pot_ac_raw=0xFCDB)
         rec = parse_stop_reason(raw)
-        self.assertAlmostEqual(rec.pot_ac, -80.5, places=2)
+        self.assertAlmostEqual(rec.pot_ac, -0.805, places=3)
 
     def test_decodes_voltage_and_frequency_scaling(self):
         rec = parse_stop_reason(HEALTHY_RAW)
-        self.assertAlmostEqual(rec.vac1, 400.0, places=2)
+        # v2.10.4: Vpv and Vac are raw volts (no /10 scaling). Fixture
+        # vpv=7820 → 7820.0 V (synthetic; real site readings are ~600-900 V
+        # for the DC bus). Fixture vac=4000 → 4000.0 V (synthetic; real
+        # site phase voltage is ~207-230 V).
+        # Frec stays at /100, Cos stays at /1000.
+        self.assertAlmostEqual(rec.vpv, 7820.0, places=2)
+        self.assertAlmostEqual(rec.vac1, 4000.0, places=2)
         self.assertAlmostEqual(rec.frec1, 6.00, places=2)
         self.assertAlmostEqual(rec.cos, 1.000, places=3)
 

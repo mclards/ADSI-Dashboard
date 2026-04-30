@@ -12,7 +12,7 @@
  * owns all SQLite writes. Mirrors the v2.9.0 counter-recovery pattern.
  */
 
-const { lookupMotiveLabel } = require("./motiveLabels");
+const { lookupMotiveLabel, lookupMotiveDescription } = require("./motiveLabels");
 
 const NODE_MAX_SUPPORTED = 3; // v2.10.0 cap
 
@@ -297,6 +297,10 @@ function _decorateRow(row) {
     alarma: row.alarma,
     motparo: row.motparo,
     motparo_label: row.motparo_label,
+    // v2.10.4 — plain-English description so the drilldown can render
+    // "12 — MOTIVO_PARO_FRAMA3 (Frame error 3)" instead of just the
+    // Spanish vendor code.
+    motparo_english: lookupMotiveDescription(Number(row.motparo)),
     alarmas1: row.alarmas1,
     alarmas2: row.alarmas2,
     flags: row.flags,

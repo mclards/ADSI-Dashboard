@@ -3873,6 +3873,75 @@ function queryReadingsRange(inverter, startTs, endTs) {
   return Array.from(out.values()).sort(sortReadingsAsc);
 }
 
+// v2.10.4 — chunked source enumeration for export paths.
+// Returns an ordered list of "sources" so callers can iterate one storage
+// shard at a time and yield to the event loop between shards. Each source
+// exposes a `.run()` thunk that performs a single synchronous `.all()` for
+// just that shard. Splitting the read this way keeps each blocking SQL
+// burst bounded to one archive (or the live DB), which lets the poller
+// flush its persist backlog and the WebSocket loop service ticks during
+// long Energy / 5-minute / Inverter Data exports.
+//
+// Caller pattern (see server/exporter.js buildEnergySummaryExportRows):
+//   for (const src of listReadingsRangeSources(s, e, inverter)) {
+//     await yieldToEventLoop();
+//     const rows = src.run();
+//     // bucket / process rows, yielding inside the loop
+//   }
+function listReadingsRangeSources(startTs, endTs, inverter = null) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const inv = inverter == null || inverter === '' ? null : Number(inverter);
+  const sources = [];
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    sources.push({
+      kind: 'archive',
+      monthKey,
+      run: () => (inv && inv > 0
+        ? entry.selectReadingsRangeByInv.all(inv, s, e)
+        : entry.selectReadingsRangeAll.all(s, e)),
+    });
+  }
+  sources.push({
+    kind: 'main',
+    monthKey: null,
+    run: () => (inv && inv > 0
+      ? stmts.getReadingsRange.all(inv, s, e)
+      : stmts.getReadingsRangeAll.all(s, e)),
+  });
+  return sources;
+}
+
+function listEnergy5minRangeSources(startTs, endTs, inverter = null) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const inv = inverter == null || inverter === '' ? null : Number(inverter);
+  const sources = [];
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    sources.push({
+      kind: 'archive',
+      monthKey,
+      run: () => (inv && inv > 0
+        ? entry.selectEnergyRangeByInv.all(inv, s, e)
+        : entry.selectEnergyRangeAll.all(s, e)),
+    });
+  }
+  sources.push({
+    kind: 'main',
+    monthKey: null,
+    run: () => (inv && inv > 0
+      ? stmts.get5minRange.all(inv, s, e)
+      : stmts.get5minRangeAll.all(s, e)),
+  });
+  return sources;
+}
+
 function queryEnergy5minRangeAll(startTs, endTs) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
@@ -4298,6 +4367,11 @@ module.exports = {
   queryReadingsRange,
   queryEnergy5minRangeAll,
   queryEnergy5minRange,
+  // v2.10.4 — chunked-source helpers for yield-friendly export reads.
+  listReadingsRangeSources,
+  listEnergy5minRangeSources,
+  readingsNaturalKey,
+  energyNaturalKey,
   sumEnergy5minByInverterRange,
   archiveReadingsRows,
   archiveEnergyRows,

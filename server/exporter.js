@@ -20,6 +20,11 @@ const {
   sumEnergy5minByInverterRange,
   getCounterBaselinesForDate,
   getCounterStateAll,
+  // v2.10.4 — yield-friendly chunked source helpers used by exports.
+  listReadingsRangeSources,
+  listEnergy5minRangeSources,
+  readingsNaturalKey,
+  energyNaturalKey,
 } = require('./db');
 const dailyAggregator = require('./dailyAggregator');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
@@ -1235,31 +1240,72 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
   const selectedInvs = invNum ? [invNum] : Array.from({ length: invCount }, (_, idx) => idx + 1);
   const mapped = [];
   const today = fmtDate(Date.now());
-  // Single-query fetch (v2.7.x behaviour): one indexed SQL scan returns all
-  // rows in ts order. Bucket by day then summarize. The v2.8.2 "E4" 500k row
-  // guard was reverted because it blocked high-poll-rate exports; the
-  // route-level 366-day cap bounds worst-case memory.
+  // v2.10.4 anti-freeze refactor: read storage shards (one archive month at a
+  // time, then live DB) one at a time and yield between shards. This bounds
+  // each blocking SQL `.all()` burst to the rows in a single shard, instead
+  // of a single fleet-wide multi-month scan that could block the Node event
+  // loop for tens of seconds. Dashboard runs on the gateway PC alongside
+  // the WebSocket loop and inverter poller, so a long blocking burst froze
+  // live PAC ticks and caused pendingReadingQueue overflow on long exports.
   //
-  // Yield before and after the heavy read + around the per-day inner loop so
-  // the Node event loop can service the inverter poller's DB flush ticks
-  // (server/poller.js flushPersistBacklog). Without these yields, long
-  // exports block the event loop long enough for pendingReadingQueue to
-  // overflow DB_ENERGY_BACKLOG_MAX_ROWS, causing dropped poll data.
-  await yieldToEventLoop();
-  const rangeRows = invNum
-    ? queryReadingsRange(invNum, s, e)
-    : queryReadingsRangeAll(s, e);
-  await yieldToEventLoop();
+  // We dedup across shards via natural-key Set (rows can briefly overlap
+  // archive ↔ main DB during a rotation cutover). The bucketing loop also
+  // yields every 2_500 rows — small overhead, but keeps the inner JS hot
+  // path interruptible for the WS heartbeat and Express keep-alive ticks.
+  // The route-level 366-day cap (MAX_EXPORT_RANGE_DAYS) is still the load
+  // bound; this just spreads it across more event-loop turns.
   const rowsByDay = new Map();
+  const seenRowKeys = new Set();
   let bucketCounter = 0;
-  for (const row of rangeRows) {
-    const ts = Number(row?.ts || 0);
-    if (!(ts > 0)) continue;
-    const day = fmtDate(ts);
-    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
-    rowsByDay.get(day).push(row);
-    if ((++bucketCounter % 50000) === 0) {
+  const sources = invNum
+    ? (typeof listReadingsRangeSources === 'function'
+        ? listReadingsRangeSources(s, e, invNum)
+        : null)
+    : (typeof listReadingsRangeSources === 'function'
+        ? listReadingsRangeSources(s, e, null)
+        : null);
+  if (sources && sources.length) {
+    for (const src of sources) {
       await yieldToEventLoop();
+      let shardRows;
+      try {
+        shardRows = src.run() || [];
+      } catch (err) {
+        console.warn(`[exporter] readings shard ${src.kind}/${src.monthKey || 'main'} failed: ${err && err.message}`);
+        continue;
+      }
+      for (const row of shardRows) {
+        const ts = Number(row?.ts || 0);
+        if (!(ts > 0)) continue;
+        const key = readingsNaturalKey(row);
+        if (seenRowKeys.has(key)) continue;
+        seenRowKeys.add(key);
+        const day = fmtDate(ts);
+        if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+        rowsByDay.get(day).push(row);
+        if ((++bucketCounter % 2500) === 0) {
+          await yieldToEventLoop();
+        }
+      }
+      await yieldToEventLoop();
+    }
+  } else {
+    // Fallback (e.g. unit-test stub of db.js without listReadingsRangeSources):
+    // legacy single-query path with the v2.10.4 tighter yield interval.
+    await yieldToEventLoop();
+    const rangeRows = invNum
+      ? queryReadingsRange(invNum, s, e)
+      : queryReadingsRangeAll(s, e);
+    await yieldToEventLoop();
+    for (const row of rangeRows) {
+      const ts = Number(row?.ts || 0);
+      if (!(ts > 0)) continue;
+      const day = fmtDate(ts);
+      if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+      rowsByDay.get(day).push(row);
+      if ((++bucketCounter % 2500) === 0) {
+        await yieldToEventLoop();
+      }
     }
   }
 
@@ -1383,7 +1429,16 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     if ((dayCounter++ % 3) === 0) {
       await yieldToEventLoop();
     }
-    const dayRows = rowsByDay.get(day) || [];
+    // v2.10.4 — sort per-day rows by (inverter, unit, ts) before energy
+    // integration. The chunked-source reader (one archive month at a time +
+    // live DB) can interleave rows from different shards within a day, and
+    // annotateReadingsWithComputedEnergy needs ascending-ts sequences per
+    // unit for the trapezoidal step to compute correctly.
+    const dayRows = (rowsByDay.get(day) || []).slice().sort((a, b) => (
+      Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
+      Number(a?.unit || 0)     - Number(b?.unit || 0) ||
+      Number(a?.ts || 0)       - Number(b?.ts || 0)
+    ));
     const dayMap = summarizeReadingsForEnergy(dayRows);
     let dayTotalMwh = 0;
     let dayEtotalKwh = 0;
@@ -1676,7 +1731,36 @@ async function exportInverterData({
 
   const rowsOut = [];
   for (const inv of invList) {
-    for (const r of sampleReadingsByInterval(queryReadingsRange(inv, s, e), interval)) {
+    // v2.10.4 — chunked read so a single fleet-wide Inverter Data export
+    // doesn't run 27 multi-month .all() scans back-to-back. We dedup
+    // across shards, sort by ts ASC, then sample. Yields between shards.
+    let invRows = [];
+    if (typeof listReadingsRangeSources === 'function') {
+      const seen = new Set();
+      for (const src of listReadingsRangeSources(s, e, inv)) {
+        await yieldToEventLoop();
+        let shard;
+        try { shard = src.run() || []; }
+        catch (err) {
+          console.warn(`[exporter] inverter-data shard ${src.kind}/${src.monthKey || 'main'} inv${inv} failed: ${err && err.message}`);
+          continue;
+        }
+        for (const row of shard) {
+          const k = readingsNaturalKey(row);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          invRows.push(row);
+        }
+      }
+      invRows.sort((a, b) => (
+        Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
+        Number(a?.unit || 0)     - Number(b?.unit || 0) ||
+        Number(a?.ts || 0)       - Number(b?.ts || 0)
+      ));
+    } else {
+      invRows = queryReadingsRange(inv, s, e);
+    }
+    for (const r of sampleReadingsByInterval(invRows, interval)) {
       const alarmValue = Number(r.alarm || 0);
       const row = {
         Date: fmtDate(r.ts),
@@ -1769,14 +1853,40 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
   const s = startTs || Date.now()-86400000;
   const e = endTs   || Date.now();
   const spec = normalizeEnergyResolution(resolution);
-  // Yield before + after the heavy range query so the inverter poller can
-  // flush its persist backlog during long exports (see
-  // buildEnergySummaryExportRows for rationale).
-  await yieldToEventLoop();
-  const rows = !inverter || inverter === 'all'
-    ? queryEnergy5minRangeAll(s, e)
-    : queryEnergy5minRange(Number(inverter), s, e);
-  await yieldToEventLoop();
+  // v2.10.4 — chunked-source read: one archive month at a time + live DB,
+  // with a yield between every shard so the WS heartbeat and inverter
+  // poller flushPersistBacklog can run between blocking SQL bursts.
+  // Falls back to the legacy single-query path if listEnergy5minRangeSources
+  // is unavailable (e.g. unit-test stub of db.js).
+  const invFilter = !inverter || inverter === 'all' ? null : Number(inverter);
+  let rows = [];
+  if (typeof listEnergy5minRangeSources === 'function') {
+    const seen = new Set();
+    const sources = listEnergy5minRangeSources(s, e, invFilter);
+    for (const src of sources) {
+      await yieldToEventLoop();
+      let shardRows;
+      try {
+        shardRows = src.run() || [];
+      } catch (err) {
+        console.warn(`[exporter] energy_5min shard ${src.kind}/${src.monthKey || 'main'} failed: ${err && err.message}`);
+        continue;
+      }
+      for (const r of shardRows) {
+        const k = energyNaturalKey(r);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        rows.push(r);
+      }
+    }
+    await yieldToEventLoop();
+  } else {
+    await yieldToEventLoop();
+    rows = invFilter
+      ? queryEnergy5minRange(invFilter, s, e)
+      : queryEnergy5minRangeAll(s, e);
+    await yieldToEventLoop();
+  }
   const aggregated = aggregateEnergyRows(rows, spec, s);
 
   // For "all inverters" daily-mode export, zero-fill inverters that had no data.
