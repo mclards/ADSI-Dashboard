@@ -2153,7 +2153,48 @@ def _update_metrics_from_frame(frame: dict):
             )
             _pac_clamp_notified.add(_clamp_key)
     pac_cand = _pac_scaled if _pac_scaled <= 260_000 else 0
-    pac_raw  = 0.0 if (vdc == 0 or idc == 0) else pac_cand
+
+    # Zero-coherence guard — per-leg, noise-tolerant. Mirrors the Node-side
+    # guard in server/poller.js parseRow. The inverter exposes Vdc, Idc, and
+    # the three AC phase currents as independent registers; analog scaling
+    # and quantization noise can leave a leg sitting just above zero even
+    # when the real value is zero. Compare each leg against a small noise
+    # floor instead of strict ==0, and evaluate each leg INDEPENDENTLY
+    # rather than relying on the multiplied Vdc*Idc product.
+    #
+    # Register units (raw, before scaling):
+    #   vdc  — 1 V/LSB
+    #   idc  — 0.1 A/LSB
+    #   iac* — 0.1 A/LSB
+    #
+    # Force pac_raw to 0 if ANY leg is at/below its noise floor:
+    #   • Vdc at noise floor       → no real DC bus voltage
+    #   • Idc at noise floor       → no real DC current
+    #   • iac1/iac2/iac3 at noise  → that phase carries no current,
+    #                                 3-phase output incomplete
+    # Voltages on the AC side are intentionally ignored per operator
+    # guidance (grid voltage can be present without the inverter exporting).
+    #
+    # Without this guard, the 50ms PAC integrator below would accumulate
+    # phantom Wh into pacEnergy.totalWh whenever a leg drops to noise floor
+    # while pac_reg still reports a small residual — that totalWh becomes
+    # kwh_today, which Node prefers over its own trapezoid integrator.
+    NOISE_VDC = 1.0   # ≤1 V on the DC bus is noise floor
+    NOISE_IDC = 1.0   # ≤0.1 A DC is noise floor
+    NOISE_IAC = 1.0   # ≤0.1 A on a phase is noise floor
+    iac1_raw = float(frame.get("iac1") or 0)
+    iac2_raw = float(frame.get("iac2") or 0)
+    iac3_raw = float(frame.get("iac3") or 0)
+    if (
+        vdc      <= NOISE_VDC or
+        idc      <= NOISE_IDC or
+        iac1_raw <= NOISE_IAC or
+        iac2_raw <= NOISE_IAC or
+        iac3_raw <= NOISE_IAC
+    ):
+        pac_raw = 0.0
+    else:
+        pac_raw = pac_cand
 
     y  = frame.get("year")   or 0
     mo = frame.get("month")  or 0

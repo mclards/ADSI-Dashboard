@@ -597,8 +597,49 @@ function parseRow(row, identity = null) {
   const on_off = onOffRaw === 1 ? 1 : 0;
 
   // Sanity clamp
-  const safePac = pac * 10 <= 260000 ? pac * 10 : 0;
+  let safePac = pac * 10 <= 260000 ? pac * 10 : 0;
   const safePdc = vdc * idc <= 265000 ? vdc * idc : 0;
+
+  // Zero-coherence guard — per-leg, noise-tolerant.
+  //
+  // The inverter exposes Vdc, Idc, and the three AC phase currents as
+  // independent registers; analog scaling and quantization noise can leave
+  // a leg sitting just above zero even when the real value is zero. So we
+  // compare each leg against a small noise floor instead of strict ===0,
+  // and we evaluate each leg INDEPENDENTLY rather than relying on the
+  // multiplied safePdc — Vdc * Idc can collapse to a small but non-zero
+  // product even when one factor is real and the other is at its noise
+  // floor (or vice versa).
+  //
+  // Register units (matches services/inverter_engine.py read_fast_async +
+  // server/dailyAggregator.js _RANGES):
+  //   vdc  — 1 V/LSB,    real bus voltage hundreds of V
+  //   idc  — 0.1 A/LSB,  real DC current 0..150 A (raw 0..1500)
+  //   iac* — 0.1 A/LSB,  real AC current 0..500 A (raw 0..5000)
+  //
+  // Force PAC to 0 if ANY leg is at/below its noise floor:
+  //   • Vdc at noise floor  → no DC bus voltage      → no real input
+  //   • Idc at noise floor  → no DC current flowing  → no real input
+  //   • iac1/iac2/iac3 at noise floor → that phase carries no current,
+  //                                     so 3-phase output is incomplete
+  // Voltages on the AC side are intentionally ignored per operator guidance
+  // (grid voltage can be present without the inverter actually exporting).
+  //
+  // This prevents phantom PAC from contaminating the live tile, the PAC
+  // trapezoid integrator (~line 568), and the 5-min aggregator.
+  const NOISE_VDC = 1;   // ≤1 V on the DC bus is noise floor
+  const NOISE_IDC = 1;   // ≤0.1 A DC is noise floor
+  const NOISE_IAC = 1;   // ≤0.1 A on a phase is noise floor
+  if (
+    safePac > 0 &&
+    (vdc  <= NOISE_VDC ||
+     idc  <= NOISE_IDC ||
+     iac1 <= NOISE_IAC ||
+     iac2 <= NOISE_IAC ||
+     iac3 <= NOISE_IAC)
+  ) {
+    safePac = 0;
+  }
 
   // Python's pre-accumulated kWh for this node (50ms integrator, 30s cap applied).
   // When > 0, Node uses the delta of this value instead of its own PAC trapezoid.

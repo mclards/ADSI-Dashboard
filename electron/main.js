@@ -662,12 +662,9 @@ function getAppUpdateMode() {
 
 // Update preferences: persisted in a JSON file next to updater.log.
 // - autoDownload: fetch new installers as soon as they are detected (bandwidth knob).
-// - autoInstallOvernight: once an update is downloaded, install it at the
-//   AUTO_INSTALL_HOUR local time (v2.8.14: 23:00; previously 02:00). The
-//   02:00 slot collided with the Windows Automatic Maintenance + Windows
-//   Update install window; 23:00 keeps the install in true off-hours while
-//   staying clear of OS-driven overnight reboots. Default ON because the
-//   oneClick:true NSIS installer makes the install silent end-to-end.
+// Auto-install (overnight) and timed update polling were removed in v2.10.5 —
+// the only auto-update activity is the single startup check; install always
+// requires an explicit operator click on "Restart & Install".
 function _updatePrefsPath() {
   return path.join(app.getPath("userData"), "update-prefs.json");
 }
@@ -694,20 +691,13 @@ function setAutoDownloadPref(value) {
   if (autoUpdater) autoUpdater.autoDownload = enabled;
   return enabled;
 }
+// Overnight auto-install removed in v2.10.5 — install requires explicit
+// operator action. These shims keep the preload IPC contract stable.
 function getAutoInstallOvernightPref() {
-  const prefs = _readUpdatePrefs();
-  // Default ON if unset — gateway deployment benefits from unattended overnight install.
-  return prefs.autoInstallOvernight !== false;
+  return false;
 }
-function setAutoInstallOvernightPref(value) {
-  const enabled = !!value;
-  _writeUpdatePrefs({ autoInstallOvernight: enabled });
-  if (!enabled) {
-    cancelScheduledOvernightInstall();
-  } else if (appUpdateState.canInstall) {
-    scheduleOvernightInstallIfNeeded();
-  }
-  return enabled;
+function setAutoInstallOvernightPref() {
+  return false;
 }
 
 function buildPublicAppUpdateState() {
@@ -1054,7 +1044,6 @@ function bindAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || appUpdateState.latestVersion || "").trim();
-    const overnight = getAutoInstallOvernightPref();
     // v2.8.10 Phase B1: stash the verified installer under ProgramData so
     // the recovery dialog can re-run it offline if a torn-write event
     // damages the live install in Program Files.
@@ -1073,16 +1062,9 @@ function bindAutoUpdaterEventsOnce() {
       canDownload: false,
       canInstall: true,
       downloadPercent: 100,
-      message: overnight
-        ? `Update ${latestVersion || ""} downloaded. Will auto-install at ~${String(AUTO_INSTALL_HOUR).padStart(2, "0")}:00 (off-hours).`
-        : `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
+      message: `Update ${latestVersion || ""} is ready. Click Restart & Install.`,
       error: "",
     });
-    // Schedule unattended overnight install if enabled. User can still trigger
-    // an immediate install via the Restart & Install button.
-    if (overnight) {
-      scheduleOvernightInstallIfNeeded();
-    }
     // Push update-ready prompt to renderer so a modal can appear
     try {
       const win = BrowserWindow.getAllWindows()[0];
@@ -1090,7 +1072,7 @@ function bindAutoUpdaterEventsOnce() {
         win.webContents.send("app-update-ready", {
           version: latestVersion,
           currentVersion: app.getVersion(),
-          autoInstallOvernight: overnight,
+          autoInstallOvernight: false,
         });
       }
     } catch (_) { /* ignore */ }
@@ -1413,121 +1395,23 @@ async function installAppUpdateNow() {
   return { ok: true, state: buildPublicAppUpdateState() };
 }
 
-// Auto-update checks run outside the solar window (18:00–05:00) when
-// inverter polling, forecast generation, and energy archival are idle.
-//
-// v2.8.14 — DO NOT check or install between 01:00 and 05:00 local. Windows
-// Automatic Maintenance + Windows Update install cycles run in that window
-// by default, and so does the server's 03:30 VACUUM / 03:35 snapshot prune
-// / 04:30 forecast regen crons. An update download or install colliding
-// with that activity competes for the same disk spindle / ACPI shutdown
-// path and is a credible contributor to the nightly boot failures the
-// operator has been reporting. Anchor checks well clear of the collision
-// zone: late afternoon + evening + just before midnight.
-const AUTO_UPDATE_CHECK_HOURS = [16, 19, 22, 23];
-
-// Overnight install window — downloaded updates auto-install at 23:00 local
-// (previously 02:00). 23:00 is after the 22:00 forecast regen completes
-// and well before the Windows maintenance window at 02:00, so the installer
-// + relaunch sequence has a clean hour of runtime to settle before any
-// OS-level reboot attempt.
-const AUTO_INSTALL_HOUR = 23;
-let appUpdateOvernightInstallTimer = null;
-
-function cancelScheduledOvernightInstall() {
-  if (appUpdateOvernightInstallTimer) {
-    clearTimeout(appUpdateOvernightInstallTimer);
-    appUpdateOvernightInstallTimer = null;
-    console.log("[updater] overnight auto-install cancelled");
-  }
-}
-
-function scheduleOvernightInstallIfNeeded() {
-  if (!getAutoInstallOvernightPref()) return;
-  if (!appUpdateState.canInstall) return;
-  cancelScheduledOvernightInstall();
-
-  const now = new Date();
-  const target = new Date(now);
-  target.setHours(AUTO_INSTALL_HOUR, 0, 0, 0);
-  if (target.getTime() <= now.getTime()) {
-    // AUTO_INSTALL_HOUR already passed today — schedule for tomorrow.
-    target.setDate(target.getDate() + 1);
-  }
-  const delayMs = Math.max(60000, target.getTime() - now.getTime());
-  console.log(
-    `[updater] overnight auto-install scheduled at ${target.toLocaleString()} (in ${Math.round(delayMs / 60000)} min)`,
-  );
-
-  appUpdateOvernightInstallTimer = setTimeout(() => {
-    appUpdateOvernightInstallTimer = null;
-    if (!getAutoInstallOvernightPref()) {
-      console.log("[updater] overnight auto-install skipped — preference disabled");
-      return;
-    }
-    if (!appUpdateState.canInstall) {
-      console.log("[updater] overnight auto-install skipped — nothing to install");
-      return;
-    }
-    console.log("[updater] overnight auto-install firing");
-    installAppUpdateNow().catch((err) => {
-      console.warn("[updater] overnight auto-install failed:", err?.message || err);
-    });
-  }, delayMs);
-  if (appUpdateOvernightInstallTimer && typeof appUpdateOvernightInstallTimer.unref === "function") {
-    appUpdateOvernightInstallTimer.unref();
-  }
-}
-
+// v2.10.5 — auto-update polling and overnight auto-install were removed.
+// The only auto-update activity is the single startup check below; download
+// is gated by the autoDownload pref and install always requires an explicit
+// operator click on "Restart & Install". This eliminates the late-evening
+// download/install timer as a possible contributor to overnight crashes.
 function scheduleAutoUpdateCheck() {
   if (appUpdateAutoCheckStarted) return;
   appUpdateAutoCheckStarted = true;
   const mode = getAppUpdateMode();
   if (mode === "dev") return;
-  // Initial check 8s after startup
+  // One-shot check 8 s after startup. No re-arm.
   appUpdateAutoCheckTimer = setTimeout(() => {
+    appUpdateAutoCheckTimer = null;
     checkForAppUpdates({ manual: false }).catch((err) => {
       console.warn("[updater] startup update check failed:", err.message);
     });
-    _scheduleNextNightlyCheck();
   }, 8000);
-  if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
-    appUpdateAutoCheckTimer.unref();
-  }
-}
-
-function _scheduleNextNightlyCheck() {
-  const now = new Date();
-  const nowH = now.getHours();
-  const nowMs = now.getTime();
-
-  // Find the next check hour
-  let nextMs = Infinity;
-  for (const h of AUTO_UPDATE_CHECK_HOURS) {
-    const candidate = new Date(now);
-    candidate.setHours(h, 0, 0, 0);
-    if (candidate.getTime() <= nowMs) {
-      // Already passed today — try tomorrow
-      candidate.setDate(candidate.getDate() + 1);
-    }
-    if (candidate.getTime() < nextMs) {
-      nextMs = candidate.getTime();
-    }
-  }
-
-  const delayMs = Math.max(60000, nextMs - nowMs); // at least 1 min
-  const nextDate = new Date(nextMs);
-  console.log(
-    `[updater] next auto-check scheduled at ${nextDate.toLocaleTimeString()} (in ${Math.round(delayMs / 60000)} min)`,
-  );
-
-  appUpdateAutoCheckTimer = setTimeout(() => {
-    console.log("[updater] nightly auto-check firing");
-    checkForAppUpdates({ manual: false }).catch((err) => {
-      console.warn("[updater] nightly update check failed:", err.message);
-    });
-    _scheduleNextNightlyCheck();
-  }, delayMs);
   if (appUpdateAutoCheckTimer && typeof appUpdateAutoCheckTimer.unref === "function") {
     appUpdateAutoCheckTimer.unref();
   }
