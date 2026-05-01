@@ -1580,6 +1580,9 @@ function shouldProxyApiPath(pathname) {
   if (p === "/live" || p.startsWith("/live/")) return false;
   if (p === "/write" || p.startsWith("/write/")) return false;
   if (p === "/export" || p.startsWith("/export/")) return false;
+  // Alarms: reads are served from the local replicated DB (fast, offline-capable).
+  // Only /active and write endpoints (ack, ack-all) proxy to the gateway.
+  if (p === "/alarms" || p.startsWith("/alarms/")) return false;
   return true;
 }
 
@@ -16580,6 +16583,7 @@ app.use("/api", async (req, res, next) => {
 });
 
 app.get("/api/alarms/active", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const rows = getActiveAlarms();
   const nowTs = Date.now();
   res.json(rows.map((r) => enrichAlarmRow(r, nowTs)));
@@ -16623,6 +16627,7 @@ app.get("/api/alarms", (req, res) => {
   res.json(out);
 });
 app.post("/api/alarms/:id/ack", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ ok: false, error: "Invalid alarm id" });
@@ -16631,6 +16636,7 @@ app.post("/api/alarms/:id/ack", (req, res) => {
   res.json({ ok: true, count: Number(info?.changes || 0) });
 });
 app.post("/api/alarms/ack-all", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const info = stmts.ackAllAlarms.run();
   res.json({ ok: true, count: Number(info?.changes || 0) });
 });

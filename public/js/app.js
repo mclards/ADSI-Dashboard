@@ -13194,6 +13194,10 @@ async function fetchAlarms(options = {}) {
     refreshAlarmBadge();
   } catch (e) {
     if (!silent) console.error("fetchAlarms:", e);
+    if (reqId === State.alarmReqId) {
+      State.alarmView.rows = [];
+      applyAlarmTableView();
+    }
   } finally {
     if (reqId === State.alarmReqId) {
       State.tabFetching.alarms = false;
@@ -18275,6 +18279,7 @@ async function saveSubstationMeterReadings() {
 
 // E6: Async check for metered substation data — updates display if available
 let _checkMeteredAbortCtl = null;
+let _checkMeteredInFlight = false;
 function _setToolbarVarianceBasis(basis) {
   const basisEl = $("anaToolbarVarianceBasis");
   if (basisEl) basisEl.textContent = basis;
@@ -18286,9 +18291,11 @@ function _setToolbarVariance(mwh) {
   }
 }
 async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVarianceMwh) {
+  if (_checkMeteredInFlight) return;
   if (_checkMeteredAbortCtl) _checkMeteredAbortCtl.abort();
   const ctrl = new AbortController();
   _checkMeteredAbortCtl = ctrl;
+  _checkMeteredInFlight = true;
   try {
     const res = await fetch(`/api/substation-meter/${encodeURIComponent(dateStr)}`, { signal: ctrl.signal });
     if (ctrl.signal.aborted) return;
@@ -18377,6 +18384,8 @@ async function _checkMeteredSubstation(dateStr, varEl, dayAheadMwh, estimatedVar
   } catch (e) {
     if (e.name === "AbortError") return;
     // Silently fail — display remains as estimated fallback
+  } finally {
+    _checkMeteredInFlight = false;
   }
 }
 
