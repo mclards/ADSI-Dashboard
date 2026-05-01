@@ -14587,6 +14587,11 @@ function _paramRenderTable(slave) {
   const startSlot = startH * 12;       // 05:00 → slot 60
   const endSlot   = endH  * 12 - 1;   // 18:00 → last slot is 215 (17:55–18:00)
 
+  // Cap gap-fill at the last completed slot — don't show future placeholders.
+  const now = new Date();
+  const nowSlot = now.getHours() * 12 + Math.floor(now.getMinutes() / 5);
+  const gapCeiling = Math.min(endSlot, nowSlot - 1);
+
   // Index real rows by slot so gap-fill can O(1) look them up.
   const rowMap = new Map();
   for (const r of rows) {
@@ -14604,9 +14609,9 @@ function _paramRenderTable(slave) {
     frag.appendChild(tr);
   }
 
-  // Walk newest → oldest across the full solar window.
-  // Missing slots get a zero-filled placeholder row (dimmed).
-  for (let slot = endSlot; slot >= startSlot; slot--) {
+  // Walk newest → oldest across completed slots only (no future placeholders).
+  // Missing past slots get a zero-filled placeholder row (dimmed).
+  for (let slot = gapCeiling; slot >= startSlot; slot--) {
     const real = rowMap.has(slot);
     const r    = real ? rowMap.get(slot) : _paramZeroRow(slot);
     const tr   = el("tr");
