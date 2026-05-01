@@ -25,6 +25,8 @@ const {
   listEnergy5minRangeSources,
   readingsNaturalKey,
   energyNaturalKey,
+  // v2.10.x — fast-path: read pre-computed per-unit daily energy for finalized days.
+  getFinalizedDailySummaryRange,
 } = require('./db');
 const dailyAggregator = require('./dailyAggregator');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
@@ -1254,6 +1256,39 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
   // path interruptible for the WS heartbeat and Express keep-alive ticks.
   // The route-level 366-day cap (MAX_EXPORT_RANGE_DAYS) is still the load
   // bound; this just spreads it across more event-loop turns.
+  // --- Fast-path: days whose daily_readings_summary rows are finalized (is_final=1) ---
+  // For these days we skip the expensive raw-readings shard scan entirely and use the
+  // pre-computed pac_kwh_raw (incremental trapezoidal integral) from the summary table.
+  // Today is always slow-path — it's not finalized until EOD.
+  const startDate = fmtDate(s);
+  const endDate   = fmtDate(e);
+  const fastPathDayMap = new Map(); // Map<day, Map<'inv|unit', summaryShape>>
+  try {
+    for (const row of (getFinalizedDailySummaryRange(startDate, endDate) || [])) {
+      const rowDay = String(row.date || '');
+      const inv    = Number(row.inverter || 0);
+      const unit   = Number(row.unit || 0);
+      if (!rowDay || !(inv > 0) || !(unit > 0)) continue;
+      if (!fastPathDayMap.has(rowDay)) fastPathDayMap.set(rowDay, new Map());
+      fastPathDayMap.get(rowDay).set(`${inv}|${unit}`, {
+        inverter:    inv,
+        unit,
+        first_ts:   Number(row.first_ts   || 0),
+        last_ts:    Number(row.last_ts    || 0),
+        pac_peak:   Number(row.pac_peak   || 0),
+        energy_kwh: Number(row.pac_kwh_raw || 0),
+      });
+    }
+  } catch (fpErr) {
+    console.warn('[exporter] fast-path summary read failed, falling back to full scan:', fpErr?.message || fpErr);
+    fastPathDayMap.clear();
+  }
+  // Determine which days still need the raw-readings shard scan.
+  const slowPathDays = new Set();
+  for (const day of iterateLocalDates(s, e)) {
+    if (day === today || !fastPathDayMap.has(day)) slowPathDays.add(day);
+  }
+
   const rowsByDay = new Map();
   const seenRowKeys = new Set();
   let bucketCounter = 0;
@@ -1264,47 +1299,51 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     : (typeof listReadingsRangeSources === 'function'
         ? listReadingsRangeSources(s, e, null)
         : null);
-  if (sources && sources.length) {
-    for (const src of sources) {
-      await yieldToEventLoop();
-      let shardRows;
-      try {
-        shardRows = src.run() || [];
-      } catch (err) {
-        console.warn(`[exporter] readings shard ${src.kind}/${src.monthKey || 'main'} failed: ${err && err.message}`);
-        continue;
+  if (slowPathDays.size > 0) {
+    if (sources && sources.length) {
+      for (const src of sources) {
+        await yieldToEventLoop();
+        let shardRows;
+        try {
+          shardRows = src.run() || [];
+        } catch (err) {
+          console.warn(`[exporter] readings shard ${src.kind}/${src.monthKey || 'main'} failed: ${err && err.message}`);
+          continue;
+        }
+        for (const row of shardRows) {
+          const ts = Number(row?.ts || 0);
+          if (!(ts > 0)) continue;
+          const day = fmtDate(ts);
+          if (!slowPathDays.has(day)) continue;  // skip fast-path days
+          const key = readingsNaturalKey(row);
+          if (seenRowKeys.has(key)) continue;
+          seenRowKeys.add(key);
+          if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+          rowsByDay.get(day).push(row);
+          if ((++bucketCounter % 2500) === 0) {
+            await yieldToEventLoop();
+          }
+        }
+        await yieldToEventLoop();
       }
-      for (const row of shardRows) {
+    } else {
+      // Fallback (e.g. unit-test stub of db.js without listReadingsRangeSources):
+      // legacy single-query path with the v2.10.4 tighter yield interval.
+      await yieldToEventLoop();
+      const rangeRows = invNum
+        ? queryReadingsRange(invNum, s, e)
+        : queryReadingsRangeAll(s, e);
+      await yieldToEventLoop();
+      for (const row of rangeRows) {
         const ts = Number(row?.ts || 0);
         if (!(ts > 0)) continue;
-        const key = readingsNaturalKey(row);
-        if (seenRowKeys.has(key)) continue;
-        seenRowKeys.add(key);
         const day = fmtDate(ts);
+        if (!slowPathDays.has(day)) continue;  // skip fast-path days
         if (!rowsByDay.has(day)) rowsByDay.set(day, []);
         rowsByDay.get(day).push(row);
         if ((++bucketCounter % 2500) === 0) {
           await yieldToEventLoop();
         }
-      }
-      await yieldToEventLoop();
-    }
-  } else {
-    // Fallback (e.g. unit-test stub of db.js without listReadingsRangeSources):
-    // legacy single-query path with the v2.10.4 tighter yield interval.
-    await yieldToEventLoop();
-    const rangeRows = invNum
-      ? queryReadingsRange(invNum, s, e)
-      : queryReadingsRangeAll(s, e);
-    await yieldToEventLoop();
-    for (const row of rangeRows) {
-      const ts = Number(row?.ts || 0);
-      if (!(ts > 0)) continue;
-      const day = fmtDate(ts);
-      if (!rowsByDay.has(day)) rowsByDay.set(day, []);
-      rowsByDay.get(day).push(row);
-      if ((++bucketCounter % 2500) === 0) {
-        await yieldToEventLoop();
       }
     }
   }
@@ -1429,17 +1468,24 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     if ((dayCounter++ % 3) === 0) {
       await yieldToEventLoop();
     }
-    // v2.10.4 — sort per-day rows by (inverter, unit, ts) before energy
-    // integration. The chunked-source reader (one archive month at a time +
-    // live DB) can interleave rows from different shards within a day, and
-    // annotateReadingsWithComputedEnergy needs ascending-ts sequences per
-    // unit for the trapezoidal step to compute correctly.
-    const dayRows = (rowsByDay.get(day) || []).slice().sort((a, b) => (
-      Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
-      Number(a?.unit || 0)     - Number(b?.unit || 0) ||
-      Number(a?.ts || 0)       - Number(b?.ts || 0)
-    ));
-    const dayMap = summarizeReadingsForEnergy(dayRows);
+    // Fast-path: finalized days use the pre-computed pac_kwh_raw from
+    // daily_readings_summary, bypassing the raw-readings scan entirely.
+    let dayMap;
+    if (!slowPathDays.has(day)) {
+      dayMap = fastPathDayMap.get(day) || new Map();
+    } else {
+      // v2.10.4 — sort per-day rows by (inverter, unit, ts) before energy
+      // integration. The chunked-source reader (one archive month at a time +
+      // live DB) can interleave rows from different shards within a day, and
+      // annotateReadingsWithComputedEnergy needs ascending-ts sequences per
+      // unit for the trapezoidal step to compute correctly.
+      const dayRows = (rowsByDay.get(day) || []).slice().sort((a, b) => (
+        Number(a?.inverter || 0) - Number(b?.inverter || 0) ||
+        Number(a?.unit || 0)     - Number(b?.unit || 0) ||
+        Number(a?.ts || 0)       - Number(b?.ts || 0)
+      ));
+      dayMap = summarizeReadingsForEnergy(dayRows);
+    }
     let dayTotalMwh = 0;
     let dayEtotalKwh = 0;
     let dayParceKwh = 0;

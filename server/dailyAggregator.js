@@ -74,6 +74,7 @@ const buckets = new Map();              // key="ip|slave" -> Bucket
 let _db = null;
 let _getSetting = null;                 // (key, def) => string
 let _reaperHandle = null;
+let _markDailyUnitsFinal = null;        // injected by init() — called when a past-day bucket is reaped
 
 // Diagnostic counters — exported via getStats() for the settings UI.
 const stats = {
@@ -105,7 +106,7 @@ function _eodSnapshotHour() {
   return Number.isFinite(v) && v >= 0 && v <= 23 ? Math.trunc(v) : 18;
 }
 
-function init({ db, getSetting }) {
+function init({ db, getSetting, markDailyUnitsFinal }) {
   if (!db || typeof db.prepare !== "function") {
     throw new Error("dailyAggregator.init: db is required");
   }
@@ -114,6 +115,9 @@ function init({ db, getSetting }) {
   }
   _db = db;
   _getSetting = getSetting;
+  if (typeof markDailyUnitsFinal === "function") {
+    _markDailyUnitsFinal = markDailyUnitsFinal;
+  }
 
   // Reaper — every 30s force-flush any bucket whose slot has rolled past
   // its grace window. Catches the case where an inverter goes silent
@@ -478,15 +482,23 @@ function flushAndStop() {
 function reapStale() {
   const now = Date.now();
   let count = 0;
+  const todayLocal = _formatDateLocal(now);
+  const pastDaysToFinalize = new Set();
   for (const [key, b] of buckets) {
     const slotEnd = _slotEndMs(b.dateLocal, b.slotIndex);
     if (now > slotEnd + FLUSH_GRACE_MS) {
+      if (b.dateLocal < todayLocal) pastDaysToFinalize.add(b.dateLocal);
       _flush(b);
       buckets.delete(key);
       count += 1;
     }
   }
   if (count > 0) stats.reaped += count;
+  if (_markDailyUnitsFinal && pastDaysToFinalize.size > 0) {
+    for (const day of pastDaysToFinalize) {
+      try { _markDailyUnitsFinal(day); } catch (_) { /* non-fatal */ }
+    }
+  }
 }
 
 // Expose the in-progress bucket for the live UI tile. Returns the

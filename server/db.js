@@ -108,6 +108,7 @@ const ARCHIVE_DIR = (() => {
 const SUMMARY_SOLAR_START_H = 5;
 const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;
+const SUMMARY_PAC_KWH_MAX_DT_MS = 30000; // 30 s cap — mirrors COMPUTED_ENERGY_MAX_DT_MS in exporter.js
 const ARCHIVE_BATCH_SIZE = 2000; // reduced from 5000 — smaller batches keep event-loop pauses under ~80ms
 const ARCHIVE_DB_CACHE = new Map();
 const ARCHIVE_DB_REPLACE_LOCKS = new Set();
@@ -1308,6 +1309,10 @@ ensureColumn(
   "intervals_json",
   "intervals_json TEXT DEFAULT '[]'",
 );
+// v2.10.x — energy fast-path: incremental PAC trapezoidal integral + EOD finalization flag.
+ensureColumn("daily_readings_summary", "pac_kwh_raw", "pac_kwh_raw REAL DEFAULT 0");
+ensureColumn("daily_readings_summary", "last_pac_w",  "last_pac_w REAL DEFAULT 0");
+ensureColumn("daily_readings_summary", "is_final",    "is_final INTEGER DEFAULT 0");
 // Migration: store plant-cap decision reason in audit_log (added 2026-03).
 ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
 
@@ -1779,14 +1784,18 @@ const stmts = {
   deleteDailyReadingsSummaryDay: db.prepare(
     `DELETE FROM daily_readings_summary WHERE date=?`,
   ),
+  // v2.10.x — fetch finalized rows for the export fast-path.
+  getFinalizedDailySummaryRange: db.prepare(
+    `SELECT * FROM daily_readings_summary WHERE date BETWEEN ? AND ? AND is_final=1 ORDER BY date, inverter ASC, unit ASC`,
+  ),
   upsertDailyReadingsSummary: db.prepare(`
     INSERT INTO daily_readings_summary(
       date,inverter,unit,sample_count,online_samples,pac_online_sum,pac_online_count,pac_peak,
-      first_ts,last_ts,first_kwh,last_kwh,last_online,intervals_json,updated_ts
+      first_ts,last_ts,first_kwh,last_kwh,last_online,intervals_json,pac_kwh_raw,last_pac_w,is_final,updated_ts
     )
     VALUES(
       @date,@inverter,@unit,@sample_count,@online_samples,@pac_online_sum,@pac_online_count,@pac_peak,
-      @first_ts,@last_ts,@first_kwh,@last_kwh,@last_online,@intervals_json,@updated_ts
+      @first_ts,@last_ts,@first_kwh,@last_kwh,@last_online,@intervals_json,@pac_kwh_raw,@last_pac_w,@is_final,@updated_ts
     )
     ON CONFLICT(date,inverter,unit) DO UPDATE SET
       sample_count=excluded.sample_count,
@@ -1800,6 +1809,9 @@ const stmts = {
       last_kwh=excluded.last_kwh,
       last_online=excluded.last_online,
       intervals_json=excluded.intervals_json,
+      pac_kwh_raw=excluded.pac_kwh_raw,
+      last_pac_w=excluded.last_pac_w,
+      is_final=MAX(excluded.is_final, daily_readings_summary.is_final),
       updated_ts=excluded.updated_ts
   `),
   upsertForecastDayAhead: db.prepare(`
@@ -3673,6 +3685,10 @@ function createSummaryState(day, inverter, unit, row = null) {
     last_kwh: Number(row?.last_kwh || 0),
     last_online: Number(row?.last_online || 0) === 1 ? 1 : 0,
     intervals: parseIntervalsJson(row?.intervals_json),
+    pac_kwh_raw: Number(row?.pac_kwh_raw || 0),
+    is_final: 0,
+    _kwhTs: Number(row?.last_ts || 0),   // resume trapezoid from persisted last_ts
+    _kwhPac: Number(row?.last_pac_w || 0),
   };
 }
 
@@ -3714,6 +3730,16 @@ function applyReadingToSummaryState(state, row) {
     state.last_kwh = Number.isFinite(kwh) ? kwh : state.last_kwh;
     state.last_online = isOnline ? 1 : 0;
   }
+
+  // Trapezoidal PAC integration — same 30 s cap as exporter.js COMPUTED_ENERGY_MAX_DT_MS.
+  if (ts > state._kwhTs) {
+    if (state._kwhTs > 0) {
+      const dt = Math.min(ts - state._kwhTs, SUMMARY_PAC_KWH_MAX_DT_MS);
+      state.pac_kwh_raw += (state._kwhPac + pac) * 0.5 * dt / 3_600_000_000;
+    }
+    state._kwhTs = ts;
+    state._kwhPac = pac;
+  }
 }
 
 function summaryStateToPayload(state, updatedTs = Date.now()) {
@@ -3732,6 +3758,9 @@ function summaryStateToPayload(state, updatedTs = Date.now()) {
     last_kwh: Number(Number(state.last_kwh || 0).toFixed(6)),
     last_online: Number(state.last_online || 0) === 1 ? 1 : 0,
     intervals_json: JSON.stringify(Array.isArray(state.intervals) ? state.intervals : []),
+    pac_kwh_raw: Number(Number(state.pac_kwh_raw || 0).toFixed(6)),
+    last_pac_w: Number(Number(state._kwhPac || 0).toFixed(3)),
+    is_final: Number(state.is_final || 0) === 1 ? 1 : 0,
     updated_ts: Number(updatedTs || Date.now()),
   };
 }
@@ -3772,6 +3801,24 @@ function ingestDailyReadingsSummary(rows) {
   const now = Date.now();
   const payloads = Array.from(states.values()).map((state) => summaryStateToPayload(state, now));
   writeSummaryPayloadsTx(payloads);
+}
+
+const _stmtMarkDayFinal = db.prepare(
+  `UPDATE daily_readings_summary SET is_final=1, updated_ts=? WHERE date=? AND is_final=0`,
+);
+
+function markDailyUnitsFinal(dayInput) {
+  const day = String(dayInput || "").trim();
+  if (!day) return 0;
+  const result = _stmtMarkDayFinal.run(Date.now(), day);
+  return result.changes || 0;
+}
+
+function getFinalizedDailySummaryRange(startDate, endDate) {
+  const s = String(startDate || "").trim();
+  const e = String(endDate || "").trim();
+  if (!s || !e) return [];
+  return stmts.getFinalizedDailySummaryRange.all(s, e);
 }
 
 function readingsNaturalKey(row) {
@@ -4378,6 +4425,8 @@ module.exports = {
   getDailyReadingsSummaryRows,
   ingestDailyReadingsSummary,
   rebuildDailyReadingsSummaryForDate,
+  markDailyUnitsFinal,
+  getFinalizedDailySummaryRange,
   closeArchiveDbForMonth,
   prepareArchiveDbForTransfer,
   createSqliteTransferSnapshot,

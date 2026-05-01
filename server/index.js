@@ -88,6 +88,7 @@ const {
   computeInverterDailyHwTotals,
   insertClockSyncLogRow,
   getClockSyncLog,
+  markDailyUnitsFinal,
 } = require("./db");
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
@@ -20323,7 +20324,7 @@ setInterval(_prunStopReasonRetention, 6 * 60 * 60 * 1000).unref();      // every
 // retention pruner.  The aggregator module is `require`d at the top of
 // the file; init runs here once db is fully ready.
 try {
-  dailyAggregator.init({ db, getSetting });
+  dailyAggregator.init({ db, getSetting, markDailyUnitsFinal });
 } catch (err) {
   console.warn("[dailyAgg] init failed:", err?.message || err);
 }
