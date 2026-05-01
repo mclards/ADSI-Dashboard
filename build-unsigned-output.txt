@@ -1,0 +1,5 @@
+[build-installer-signed] Running: npx electron-builder --win nsis --x64
+  • electron-builder  version=24.13.3 os=10.0.26220
+  ⨯ D:\ADSI-Dashboard\node_modules\app-builder-bin\win\x64\app-builder.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+1  failedTask=build stackTrace=Error: D:\ADSI-Dashboard\node_modules\app-builder-bin\win\x64\app-builder.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+[build-installer-signed] electron-builder exited with status 1

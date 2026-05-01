@@ -2,6 +2,40 @@ from pymodbus.client.sync import ModbusTcpClient
 import time
 
 
+# T3.7 + T3.10 fix (Phase 6, 2026-04-14):
+#   T3.7 — On a TRUE exception during read (not just an isError() result),
+#          the underlying socket may be in a corrupted state.  Close the
+#          client so the next read forces a clean reconnect; pymodbus
+#          handles reconnect transparently on the next call.  Without
+#          this, FD pressure can accumulate over weeks of uptime.
+#   T3.10 — pymodbus sets the timeout at construct/connect time, but
+#           Windows TCP can reset SO_RCVTIMEO on long-idle sockets.
+#           Re-apply socket.settimeout() before every read so a hang
+#           cannot exceed the advertised timeout.  Best-effort: only
+#           applies when the underlying socket attribute exists.
+#
+# Both are wrapped in try/except so a missing attribute on a future
+# pymodbus version cannot break reads — the read still proceeds with
+# whatever timeout is currently set.
+
+def _refresh_timeout(client):
+    """Best-effort re-apply socket timeout before a read."""
+    try:
+        sock = getattr(client, "socket", None)
+        timeout = getattr(client, "timeout", None)
+        if sock is not None and timeout is not None:
+            sock.settimeout(float(timeout))
+    except Exception:
+        pass
+
+
+def _close_quietly(client):
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
 def create_client(ip, port=502, timeout=1.0):
     """
     Create a persistent Modbus TCP client.
@@ -16,22 +50,25 @@ def create_client(ip, port=502, timeout=1.0):
 
 
 def read_input(client, address, count, unit):
+    _refresh_timeout(client)
     try:
         r = client.read_input_registers(address=address, count=count, unit=unit)
         if r and not r.isError():
             return r.registers
     except Exception:
-        pass
+        # Force clean reconnect on next read; do NOT swallow the FD.
+        _close_quietly(client)
     return None
 
 
 def read_holding(client, address, count, unit):
+    _refresh_timeout(client)
     try:
         r = client.read_holding_registers(address=address, count=count, unit=unit)
         if r and not r.isError():
             return r.registers
     except Exception:
-        pass
+        _close_quietly(client)
     return None
 
 

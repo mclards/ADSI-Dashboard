@@ -1,40 +1,51 @@
 {
   "name": "inverter-dashboard",
-  "version": "2.2.10",
-  "description": "Dashboard V2 for industrial inverter monitoring, analytics, forecasting, and remote replication.",
+  "version": "2.10.8",
+  "description": "ADSI Inverter Dashboard for industrial inverter monitoring, analytics, forecasting, and remote operations.",
   "author": "Engr. Clariden D. Montano, REE",
   "main": "electron/main.js",
   "scripts": {
     "start": "node start-electron.js",
     "dev": "set NODE_ENV=development && node start-electron.js",
     "server": "node server/index.js",
+    "rebuild:native:node": "npm rebuild better-sqlite3",
+    "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-builder --win nsis portable --x64",
-    "build:installer": "electron-builder --win nsis --x64",
-    "build:portable": "electron-builder --win portable --x64",
-    "build:license-tools": "npx --yes pkg tools/license-generator.js --targets node18-win-x64 --output release/license-tools/LicenseGenerator.exe && npx --yes pkg tools/license-fingerprint.js --targets node18-win-x64 --output release/license-tools/LicenseFingerprint.exe && npx --yes pkg tools/license-keygen.js --targets node18-win-x64 --output release/license-tools/LicenseKeygen.exe",
-    "license:keygen": "node tools/license-keygen.js",
-    "license:generate": "node tools/license-generator.js",
-    "license:fingerprint": "node tools/license-fingerprint.js"
+    "build:win": "node scripts/build-installer-signed.js",
+    "build:installer": "node scripts/build-installer-signed.js",
+    "build:installer:signed": "node scripts/build-installer-signed.js",
+    "codesign:generate": "powershell -ExecutionPolicy Bypass -File scripts/generate-codesign-cert.ps1",
+    "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1",
+    "smoke": "node scripts/smoke-all.js",
+    "smoke:node-only": "node scripts/smoke-all.js --skip-python",
+    "smoke:no-rebuild": "node scripts/smoke-all.js --no-rebuild"
   },
   "dependencies": {
-    "better-sqlite3": "^9.6.0",
+    "@aws-sdk/client-s3": "^3.1012.0",
+    "@aws-sdk/lib-storage": "^3.1012.0",
+    "archiver": "^5.3.2",
+    "better-sqlite3": "^11.10.0",
     "chart.js": "^4.5.1",
     "cors": "^2.8.6",
     "electron-updater": "^6.3.9",
     "exceljs": "^4.4.0",
     "express": "^4.22.1",
     "express-ws": "^5.0.2",
+    "extract-zip": "^2.0.1",
     "node-cron": "^3.0.3",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "ws": "^7.5.10"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "electron": "^29.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "puppeteer": "^24.40.0"
   },
   "build": {
     "appId": "com.engr-m.inverter-dashboard",
-    "productName": "Dashboard V2",
+    "productName": "ADSI Inverter Dashboard",
+    "afterPack": "scripts/afterPack.js",
     "directories": {
       "output": "release",
       "buildResources": "assets"
@@ -46,7 +57,22 @@
       "assets/**/*",
       "drivers/**/*",
       "services/**/*",
-      "package.json"
+      "docs/**/*.pdf",
+      "package.json",
+      "!server/ffmpeg/**",
+      "!server/go2rtc/**",
+      "!services/dist/**",
+      "!services/tests/**",
+      "!services/__pycache__/**",
+      "!services/.pytest_cache/**",
+      "!**/*.pdb",
+      "!**/*.iobj",
+      "!**/*.ipdb",
+      "!**/*.exp",
+      "!**/obj/**"
+    ],
+    "electronLanguages": [
+      "en-US"
     ],
     "asarUnpack": [
       "node_modules/better-sqlite3/**"
@@ -59,19 +85,30 @@
       {
         "from": "dist/ForecastCoreService.exe",
         "to": "backend/ForecastCoreService.exe"
+      },
+      {
+        "from": "server/go2rtc",
+        "to": "backend/go2rtc"
+      },
+      {
+        "from": "server/ffmpeg",
+        "to": "backend/ffmpeg",
+        "filter": ["**/*.exe"]
       }
     ],
     "win": {
       "icon": "icon-256.png",
+      "requestedExecutionLevel": "requireAdministrator",
+      "signingHashAlgorithms": ["sha256"],
+      "signAndEditExecutable": true,
+      "rfc3161TimeStampServer": "http://timestamp.sectigo.com",
+      "timeStampServer": "http://timestamp.sectigo.com",
+      "publisherName": [
+        "Engr. Clariden D. Montaño REE"
+      ],
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -80,12 +117,11 @@
     },
     "nsis": {
       "artifactName": "Inverter-Dashboard-Setup-${version}.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
-    },
-    "portable": {
-      "artifactName": "Inverter-Dashboard-Portable-${version}.${ext}"
+      "oneClick": true,
+      "perMachine": true,
+      "allowElevation": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "scripts/installer.nsh"
     },
     "publish": [
       {
