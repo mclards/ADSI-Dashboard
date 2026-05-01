@@ -5615,7 +5615,7 @@ select.cam-field-input { appearance: auto; }
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
 }
 .analytics-side-grid.analytics-side-grid-3 {
   flex: 0 0 auto;
@@ -5623,7 +5623,7 @@ select.cam-field-input { appearance: auto; }
 }
 .analytics-side-grid.analytics-side-grid-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 6px;
+  margin-top: 1px;
 }
 
 .analytics-side-item {
@@ -5680,10 +5680,10 @@ select.cam-field-input { appearance: auto; }
   white-space: nowrap;
 }
 .analytics-side-value .var-mwh {
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 700;
   opacity: 0.9;
-  margin-top: 1px;
+  margin-top: 4px;
 }
 
 .analytics-side-peak {
@@ -5997,7 +5997,7 @@ select.cam-field-input { appearance: auto; }
 }
 .analytics-gen-dls-grid > .analytics-gen-wrap,
 .analytics-gen-dls-grid > .analytics-dls-wrap {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 .analytics-dls-wrap {
   display: flex;
