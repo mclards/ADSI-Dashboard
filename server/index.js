@@ -1580,8 +1580,8 @@ function shouldProxyApiPath(pathname) {
   if (p === "/live" || p.startsWith("/live/")) return false;
   if (p === "/write" || p.startsWith("/write/")) return false;
   if (p === "/export" || p.startsWith("/export/")) return false;
-  // Alarms: reads are served from the local replicated DB (fast, offline-capable).
-  // Only /active and write endpoints (ack, ack-all) proxy to the gateway.
+  // Alarms: explicit handlers below proxy to gateway in remote mode
+  // (GET /api/alarms, /active, ack, ack-all). Skip catch-all so those run.
   if (p === "/alarms" || p.startsWith("/alarms/")) return false;
   return true;
 }
@@ -16603,6 +16603,7 @@ app.get("/api/alarms/reference", (_req, res) => {
   });
 });
 app.get("/api/alarms", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const _t0 = Date.now();
   const { start, end, inverter } = req.query;
   const s = parseDateMs(start, Date.now() - 7 * 86400000, false);
