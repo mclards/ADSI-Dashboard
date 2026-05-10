@@ -88,12 +88,15 @@ def _signed_int16(raw):
 
     Per Ingeteam INGECON SUN Modbus RTU spec
     (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 4-5):
-      - Reg 30010 (addr 9) `Idc`  — signed, 0.1 A/LSB
-      - Reg 30019 (addr 18) `PAC` — signed, tens of W
-    Future use (Slice β):
-      - Reg 30069 (addr 68) `QAC` — signed, reactive W ÷10
-      - Reg 30072-73 (addr 71-72) — signed °C temperatures (Slice α only addresses Idc/PAC; temps already signed-handled in read_fast_async)
+      - Reg 30010 (addr 9) `Idc`  — signed, 1 A/LSB (PDF: "In Amps")
+      - Reg 30019 (addr 18) `PAC` — signed, raw × 10 = W ("in tens of Watt")
+    Slow-poll signed fields:
+      - Reg 30069 (addr 68) `QAC` — signed, raw × 10 = VAr ("Reactive power
+        DIV 10", same convention as Nominal power DIV 10 → raw × 10 = real)
+      - Reg 30072-73 (addr 71-72) — signed °C temperatures (Slice α only
+        addresses Idc/PAC; temps already signed-handled in read_fast_async)
 
+    Audit: audits/2026-05-11/register-decode-traceback.md.
     Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice α
     """
     u16 = int(raw) & 0xFFFF
@@ -1240,14 +1243,14 @@ async def read_slow_async(client, unit, ip):
     Field decode (per PDF + plan §2 register map):
       addr 64-65  30065-30066  Instantaneous alarms        UInt32 hi-lo
       addr 66-67  30067-30068  Maintained alarms            UInt32 hi-lo
-      addr 68     30069        QAC reactive power (signed)  Int16, ÷10 → W
-      addr 69     30070        Zpos (impedance POS-EARTH)   UInt16 kΩ
-      addr 70     30071        Zneg (impedance NEG-EARTH)   UInt16 kΩ
+      addr 68     30069        QAC reactive power (signed)  Int16, raw × 10 = VAr
+      addr 69     30070        Zpos (impedance POS-EARTH)   UInt16 (assumed kΩ — verify vs ISM)
+      addr 70     30071        Zneg (impedance NEG-EARTH)   UInt16 (assumed kΩ — verify vs ISM)
       addr 71     30072        (reserved)
       addr 72     30073        TempINT control electronics  Int16 signed, °C
       addr 73     30074        Estado inverter state        UInt16 bitfield
       addr 74-75  30075-30076  VpvN / VpvP solar voltages   UInt16 each, V
-      addr 76     30077        Nominal power ÷10            UInt16 tens of W
+      addr 76     30077        Nominal power ÷10            UInt16, raw × 10 = W
       addr 77-107 30078-30108  (skip: standard stop-reason history, Slice ε)
       addr 108    30109        Time-to-connect remaining    UInt16 seconds
       addr 109    30110        Time-to-connect total        UInt16 seconds
@@ -1283,12 +1286,16 @@ async def read_slow_async(client, unit, ip):
     except ValueError:
         alarms_maint_32 = 0
 
-    # QAC reactive power (addr 68, reg index 4 in this read) — Int16 signed
-    # Per PDF: signed, units ÷10 → reactive W
+    # QAC reactive power (addr 68, reg index 4 in this read) — Int16 signed.
+    # PDF page 7: "30069 QAC (Reactive power DIV 10)" — same convention as
+    # 30019 PAC ("in tens of Watt") and 30077 Nominal power ("DIV 10"), both
+    # confirmed as raw × 10 = real (W). By symmetry: raw × 10 = VAr here.
+    # Earlier code used raw / 10 which under-reported reactive power by 100×.
+    # See audits/2026-05-11/register-decode-traceback.md Finding 1.
     qac_raw = int(reg(4) or 0)
     if qac_raw & 0x8000:
         qac_raw -= 0x10000
-    qac_var = qac_raw / 10.0 if qac_raw != 0 else None  # None = offline/silent
+    qac_var = qac_raw * 10 if qac_raw != 0 else None  # None = offline/silent
 
     # Impedances
     zpos_kohm = int(reg(5) or 0)   # addr 69, unsigned
@@ -3506,15 +3513,20 @@ async def set_phi_tangent(ip: str, slave: int, phi_raw: int) -> dict:
 
 
 async def set_reactive_kvar(ip: str, slave: int, kvar_div10: int) -> dict:
-    """Cmd 9 — set reactive power reference. `kvar_div10` is the raw Int16 the
-    PDF specifies (kVAr ÷ 10). Caller-side limits per device nominal kVA.
+    """Cmd 9 — set reactive power reference.
+    `kvar_div10` is the raw Int16 written to the inverter. Wire convention
+    per PDF §3 cmd 9 (cross-checked with reg 30069 + 30077): raw × 10 = VAr,
+    therefore kVAr = raw / 100. Caller (UI) computes raw = round(kVAr × 100).
+    Earlier code+UI used the /10 convention which under-wrote by 10×.
+    See audits/2026-05-11/register-decode-traceback.md Finding 2.
     Returns {ok, raw, error?}."""
     raw = _signed16_to_raw(kvar_div10)
+    kvar_disp = kvar_div10 / 100.0
     result = await write_command_register(ip, slave, _GC_OPCODE_REACTIVE_KVAR, raw)
     if result.get("ok"):
-        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive-kVAr) OK raw={raw} (~{kvar_div10/10:.1f}kVAr)")
+        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive) OK raw={raw} (~{kvar_disp:.2f}kVAr)")
     else:
-        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive-kVAr) FAIL raw={raw}: {result.get('error')}")
+        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive) FAIL raw={raw}: {result.get('error')}")
     return {**result, "raw": raw}
 
 

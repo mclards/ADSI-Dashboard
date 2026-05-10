@@ -11,6 +11,8 @@ const os = require("os");
 const { getExplicitDataDir, getPortableDataRoot } = require("./runtimeEnvPaths");
 const { resolvedDbDir, getNewRoot, isMigrationComplete } = require("./storagePaths");
 const baselineUpgradeCore = require("./baselineUpgradeCore");
+const { decideBaselineAnchor, DEFAULT_PAC_WAKE_THRESHOLD_W } = require("./baselineAnchorDecisionCore");
+const { decideCounterHealthAudits } = require("./counterHealthAuditCore");
 
 const EXPLICIT_DATA_DIR = getExplicitDataDir();
 const PORTABLE_ROOT = getPortableDataRoot();
@@ -2610,6 +2612,49 @@ function evaluateCounterAdvancing(history, pacIdleW = 500, windowS = 300) {
   return 0;
 }
 
+// v2.11.x — Counter-health audit emitter (1-hr per-unit dedup).
+// Run from persistCounterState. Produces audit_log rows for two operator-
+// facing failure modes: counter regression and stuck counter. Dedup is
+// per (inverter, unit, action) so each anomaly logs at most once per hour
+// even under a sustained issue. Implementation lives in the same file as
+// persistCounterState so it shares the in-memory `counterHistory` Map and
+// doesn't need a fresh DB query per frame.
+const _COUNTER_HEALTH_DEDUP_MS = 60 * 60 * 1000;
+const _counterHealthLastAuditAt = new Map();   // `${inv}_${unit}_${action}` → ts ms
+const _counterAdvancingPrev = new Map();        // `${inv}_${unit}` → 0|1
+
+function _maybeAuditCounterHealth(inverter, unit, history, counterAdvancing) {
+  if (!history || history.length < 2) return;
+  const key = `${inverter}_${unit}`;
+  const decision = decideCounterHealthAudits({
+    inverter,
+    unit,
+    history,
+    counterAdvancing,
+    prevCounterAdvancing: _counterAdvancingPrev.get(key),
+    lastAuditAtByKey: _counterHealthLastAuditAt,
+    nowMs: Date.now(),
+    dedupMs: _COUNTER_HEALTH_DEDUP_MS,
+  });
+  for (const a of decision.audits || []) {
+    console.warn(a.consoleMessage);
+    try {
+      insertAuditLogRow({
+        ts: Date.now(),
+        operator: "SYSTEM",
+        inverter, node: unit,
+        action: a.action,
+        scope: "single",
+        result: "warn",
+        reason: a.reason,
+      });
+    } catch (_) { /* audit log already swallows internal errors */ }
+  }
+  if (decision.nextCounterAdvancing !== undefined) {
+    _counterAdvancingPrev.set(key, decision.nextCounterAdvancing);
+  }
+}
+
 // ── Generic audit_log writer (v2.9.2) ────────────────────────────────────
 //
 // Used by the poller's recovery-seed/bucket spike clamps and any other
@@ -2759,6 +2804,23 @@ function persistCounterState(frame) {
     });
     const counter_advancing = evaluateCounterAdvancing(history);
 
+    // ── Counter health audit (v2.11.x) ──
+    // Two failure modes worth catching even though the operator chose to keep
+    // the aggressive 50 ms poll cadence. Both checks compare against the
+    // previous in-memory sample and dedup at most once per (inv,unit) per
+    // hour so the audit log doesn't flood under sustained anomalies.
+    //   1. Etotal monotonicity: lifetime kWh should never decrease. A drop
+    //      means firmware swap, counter wrap (4.29 GWh — never in practice),
+    //      hardware fault, or partial frame decode. Surface to operator.
+    //   2. Stuck counter: counter_advancing flipped 1→0 means the unit is
+    //      producing PAC but Etotal hasn't ticked over a 5-min window —
+    //      a real loss of HW counter trust until cleared.
+    try {
+      _maybeAuditCounterHealth(inverter, unit, history, counter_advancing);
+    } catch (chErr) {
+      console.warn(`[counter-health] audit failed inv=${inverter}/${unit}: ${chErr?.message || chErr}`);
+    }
+
     const now = Date.now();
     stmts.upsertCounterState.run({
       inverter,
@@ -2780,9 +2842,15 @@ function persistCounterState(frame) {
     // v2.9.1 — preferred source for today's baseline is yesterday's
     // etotal_eod_clean (captured post-1800H, so identical to value-at-midnight
     // for a healthy unit). This avoids inflation when the dashboard's first
-    // poll of the day lands on a transient bad read. Fall back to the first
-    // frame's value only when yesterday has no clean EOD snapshot (e.g. fresh
-    // install or downtime > 24 h).
+    // poll of the day lands on a transient bad read.
+    //
+    // v2.11.x (2026-05-11) — when no yesterday eod_clean exists AND the
+    // inverter is already producing power at first observation, refuse to
+    // anchor on the late poll (it would under-count today's HW Δ by the
+    // morning kWh missed before boot). Decision lives in
+    // baselineAnchorDecisionCore so it can be unit-tested without SQLite.
+    // See audits/2026-05-11/register-decode-traceback.md for the original
+    // BASELINE_LATE diagnosis.
     if (rtc_valid && etotal_kwh > 0) {
       const date_key = localDateStr(ts_ms);
       try {
@@ -2790,18 +2858,33 @@ function persistCounterState(frame) {
         if (!existing) {
           const yesterdayKey = localDateStr(ts_ms - 86400000);
           const yPrev = stmts.selectBaselineOne.get(inverter, unit, yesterdayKey);
-          const yEtotal = Number(yPrev?.etotal_eod_clean || 0);
-          const yParce  = Number(yPrev?.parce_eod_clean  || 0);
-          const yTs     = Number(yPrev?.eod_clean_ts_ms  || 0);
-          const useEod  = yEtotal > 0 && yEtotal <= etotal_kwh && yTs > 0;
+          const wakeW = Math.max(
+            0,
+            Number(getSetting("eodPacCleanThresholdW", DEFAULT_PAC_WAKE_THRESHOLD_W))
+              || DEFAULT_PAC_WAKE_THRESHOLD_W,
+          );
+          const decision = decideBaselineAnchor({
+            curEtotalKwh: etotal_kwh,
+            curParceKwh:  parce_kwh,
+            curTsMs:      ts_ms,
+            curPacW:      pac_w,
+            yesterdayEodClean: yPrev || null,
+            pacWakeThresholdW: wakeW,
+          });
+          if (decision.source === "poll_late") {
+            console.warn(
+              `[counter-baseline] inv=${inverter}/${unit} day=${date_key} ` +
+              `marked poll_late (${decision.reason}); HW Δ will blank for today`,
+            );
+          }
           stmts.insertBaseline.run({
             inverter,
             unit,
             date_key,
-            etotal_baseline: useEod ? yEtotal : etotal_kwh,
-            parce_baseline:  useEod ? yParce  : parce_kwh,
-            baseline_ts_ms:  useEod ? yTs     : ts_ms,
-            source: useEod ? "eod_clean" : "poll",
+            etotal_baseline: decision.etotalBaseline,
+            parce_baseline:  decision.parceBaseline,
+            baseline_ts_ms:  decision.baselineTsMs,
+            source:          decision.source,
             now,
           });
           // Refresh the live-frame compute cache so the next tick picks up

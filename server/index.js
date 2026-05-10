@@ -122,6 +122,7 @@ const dailyAggregator = require("./dailyAggregator");
 const igbtHealth = require("./igbtHealth");
 const igbtThermal = require("./igbtThermal");
 const { ApcVerifier } = require("./apcVerify");
+const { rawToKVar } = require("./reactivePowerScalingCore");
 const compliance = {
   Orchestrator: require("./compliance/orchestrator"),
   testT5: require("./compliance/testT5"),
@@ -14257,7 +14258,10 @@ app.post("/api/grid-control/phi", express.json(), async (req, res) => {
   }
 });
 
-// POST /api/grid-control/reactive  — Cmd 9: set reactive kVAr ÷ 10
+// POST /api/grid-control/reactive  — Cmd 9: set reactive power.
+// Wire convention (PDF §3 cmd 9 + §2 reg 30069 by symmetry): raw × 10 = VAr.
+// Body field `kvar_div10` is the raw Int16 written to the inverter; UI computes
+// it as `Math.round(kVAr × 100)` so raw 100 ⇒ 1 kVAr.
 app.post("/api/grid-control/reactive", express.json(), async (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   if (!_gridControlEnabled()) {
@@ -14281,7 +14285,7 @@ app.post("/api/grid-control/reactive", express.json(), async (req, res) => {
       target_ip: tv.ip,
       slave: tv.slave,
       result,
-      reason: `kvar_div10=${Math.round(kvar_div10)} (≈ ${(kvar_div10 / 10).toFixed(1)} kVAr)`,
+      reason: `kvar_div10=${Math.round(kvar_div10)} (≈ ${(kvar_div10 / 100).toFixed(2)} kVAr; raw × 10 = VAr)`,
       operator: b.operator,
     });
     return res.json(result);
@@ -14340,7 +14344,10 @@ app.get("/api/grid-control/state/:ip/:slave", async (req, res) => {
       result.phi_tangent_value = phi;
       // tan(φ) → PF: PF = 1 / sqrt(1 + tan²(φ))
       result.power_factor_estimate = 1 / Math.sqrt(1 + phi * phi);
-      result.reactive_kvar = result.reactive_signed / 10;
+      // raw × 10 = VAr → kVAr = raw / 100. Earlier code used /10 (10× too big).
+      // See audits/2026-05-11/register-decode-traceback.md Finding 2.
+      // Single source of truth: server/reactivePowerScalingCore.js.
+      result.reactive_kvar = rawToKVar(result.reactive_signed);
       result.power_pct_readback = (Number(result.power_q15) / 32767) * 100;
     }
     return res.json(result);
@@ -18249,6 +18256,14 @@ app.get("/api/runtime/data-health", (req, res) => {
     typeof poller.getPerfStats === "function"
       ? poller.getPerfStats()
       : {};
+  // Polling-pressure summary so the operator can see (in remote mode) whether
+  // the gateway is hammering the inverter comm boards faster than vendor
+  // guidance recommends. Lets the dashboard surface a banner without each
+  // operator having to RDP into the gateway to inspect ipconfig.json.
+  const pollCadence =
+    typeof poller.getPollCadenceSummary === "function"
+      ? poller.getPollCadenceSummary()
+      : null;
   res.json({
     ok: true,
     operationMode: isRemoteMode() ? "remote" : "gateway",
@@ -18262,6 +18277,7 @@ app.get("/api/runtime/data-health", (req, res) => {
       fetchErrorCount: Number(pollerStats?.fetchErrorCount || 0),
       lastFetchError: String(pollerStats?.lastFetchError || ""),
     },
+    pollCadence,
   });
 });
 

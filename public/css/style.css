@@ -2471,6 +2471,21 @@ label[data-required]::after {
   background: rgba(126, 84, 99, 0.15);
 }
 
+/* Poll-cadence chip — informational by default; amber if any inverter is
+ * polling faster than vendor-recommended 1 Hz (Ingeteam Level 2 AAV2011IFA01_
+ * p.8, alarm 0x0008 RESET_WD risk). Only visible when the API reports the
+ * `pollCadence` block, so gateway-only deploys don't see a stale chip. */
+.stat-chip.poll-cadence {
+  color: var(--text2);
+  border: 1px solid var(--border);
+  background: rgba(126, 84, 99, 0.10);
+}
+.stat-chip.poll-cadence.over-poll {
+  color: var(--orange);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.10);
+}
+
 .btn-ack-toolbar {
   display: inline-flex;
   align-items: center;

@@ -218,6 +218,10 @@
             <div class="stat-chip online" title="Inverters currently producing power.">Online: <b id="statOnline">0</b></div>
             <div class="stat-chip alarm" title="Inverters with an active unacknowledged alarm.">Alarmed: <b id="statAlarmed">0</b></div>
             <div class="stat-chip offline" title="Inverters not responding or not producing.">Offline: <b id="statOffline">0</b></div>
+            <div id="pollCadenceChip" class="stat-chip poll-cadence" hidden
+                 title="Modbus polling interval per inverter. Vendor (Ingeteam Level 2) recommends ≤ 1 Hz; faster polling stresses the comm board.">
+              Poll: <b id="pollCadenceValue">—</b>/inv
+            </div>
             <button id="btnAckAllInv" class="btn-ack-toolbar" type="button" title="Acknowledge all active alarms" hidden><span class="mdi mdi-check-all" aria-hidden="true"></span>Ack All</button>
           </div>
         </div>

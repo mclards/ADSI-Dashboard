@@ -35,6 +35,7 @@ const {
   DEFAULT_PER_UNIT_DAY_CEILING_KWH,
   computeHwDeltasForUnitDay,
 } = require('./hwCounterDeltaCore');
+const { classifyEnergySummaryNode } = require('./energySummaryNodeStatusCore');
 
 const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
@@ -1429,13 +1430,24 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
     const nxt = new Date(y, m - 1, d + 1);
     return `${nxt.getFullYear()}-${pad2(nxt.getMonth() + 1)}-${pad2(nxt.getDate())}`;
   }
+  // PAC-fallback gate (operator-tunable). When ON, units whose HW counter
+  // baseline is unreliable (source='poll_late' or 'eod_clean_only', or no
+  // baseline at all) get their Etotal/parcE Δ filled from the same PAC
+  // integration that drives Total_MWh. PAC-based MWh is independent of HW
+  // counters (verified 2026-05-11), so this is a safe one-way safety net.
+  // The Status column surfaces it as ESTIMATED_FROM_PAC so operators see
+  // when this happened. Default ON; set to "0" to revert to NaN-propagation.
+  const HW_BASELINE_USE_PAC_FALLBACK =
+    String(getSetting('hwBaselineUsePacFallback', '1')) !== '0';
+
   // _hwDeltasForUnitDay — thin shim around computeHwDeltasForUnitDay() in
   // server/hwCounterDeltaCore.js. The pure function holds all the rules so
   // server/tests/hwCounterDeltaCore.test.js can lock down the multi-path
   // fallback behavior without spinning up SQLite or the poller. We just
-  // resolve the three baseline lookups (today/yesterday/tomorrow) and the
-  // current snapshot from the cached maps and hand them to the core.
-  function _hwDeltasForUnitDay(day, inv, unit, baselineMap) {
+  // resolve the three baseline lookups (today/yesterday/tomorrow), the
+  // current snapshot, and the per-unit PAC fallback from the cached maps
+  // and hand them to the core.
+  function _hwDeltasForUnitDay(day, inv, unit, baselineMap, pacFallbackKwh = NaN) {
     const key = `${inv}_${unit}`;
     const baseline = baselineMap.get(key) || null;
     if (day === today) {
@@ -1448,6 +1460,8 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
         curCounter: curCounterMap.get(key) || null,
         yesterdayBaseline: yMap ? (yMap.get(key) || null) : null,
         perUnitDayCeilingKwh: PER_UNIT_DAY_KWH_CEILING,
+        pacFallbackKwh,
+        pacFallbackEnabled: HW_BASELINE_USE_PAC_FALLBACK,
       });
     }
     // Past day: only fetch tomorrow's baseline when today's snapshot can't
@@ -1460,6 +1474,8 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       baseline,
       tomorrowBaseline: nMap ? (nMap.get(key) || null) : null,
       perUnitDayCeilingKwh: PER_UNIT_DAY_KWH_CEILING,
+      pacFallbackKwh,
+      pacFallbackEnabled: HW_BASELINE_USE_PAC_FALLBACK,
     });
   }
 
@@ -1531,7 +1547,21 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
         const pacPeakW = Math.max(0, Number(summary?.pac_peak || 0));
         const energyKwh = Math.max(0, Number(summary?.energy_kwh || 0));
         rawSubtotalKwh += energyKwh;
-        const hw = _hwDeltasForUnitDay(day, inv, unit, baselineMap);
+        const hw = _hwDeltasForUnitDay(day, inv, unit, baselineMap, energyKwh);
+        // Classify the row using PAC-side energy (pre-scale) and HW deltas.
+        // Operators see the row's literal status: ACTIVE / BRIEF_RESPONSE /
+        // ZERO_PRODUCTION / BASELINE_LATE / HW_OVER / NO_DATA /
+        // ESTIMATED_FROM_PAC (when HW Δ was filled from the PAC integral).
+        const cls = classifyEnergySummaryNode({
+          sampleCount:     Number(summary?.sample_count) || null,
+          firstTsMs:       firstTs,
+          lastTsMs:        lastTs,
+          pacPeakW:        pacPeakW,
+          pacKwh:          energyKwh,
+          etotalDeltaKwh:  hw.etotalKwh,
+          parceDeltaKwh:   hw.parceKwh,
+          hwProvenance:    hw.provenance,
+        });
         detailRows.push({
           Date: day,
           Inverter_Number: inv,
@@ -1542,6 +1572,9 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           rawEnergyKwh: energyKwh,
           rawEtotalKwh: hw.etotalKwh,
           rawParceKwh:  hw.parceKwh,
+          HW_PAC_Delta_pct: Number.isFinite(cls.deltaPct) ? Number(cls.deltaPct.toFixed(1)) : '',
+          Status:           cls.status,
+          Status_Note:      cls.reason,
         });
       }
 
@@ -1566,6 +1599,9 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
           Total_MWh: row.Total_MWh,
           Etotal_MWh: row.Etotal_MWh,
           ParcE_MWh:  row.ParcE_MWh,
+          HW_PAC_Delta_pct: row.HW_PAC_Delta_pct ?? '',
+          Status:           row.Status ?? '',
+          Status_Note:      row.Status_Note ?? '',
         });
       }
       dayEtotalKwh += scaled.dayEtotalKwh;
@@ -1597,6 +1633,9 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       ParcE_MWh: dayParceValidUnits > 0
         ? Number((dayParceKwh / 1000).toFixed(6))
         : NaN,
+      HW_PAC_Delta_pct: '',
+      Status: '',
+      Status_Note: '',
     });
   }
 
@@ -1705,6 +1744,9 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
     { key: 'Total_MWh', label: 'Total MWh' },
     { key: 'Etotal_MWh', label: 'Etotal MWh (HW)' },
     { key: 'ParcE_MWh',  label: 'ParcE MWh (HW)' },
+    { key: 'HW_PAC_Delta_pct', label: 'Δ HW vs PAC (%)' },
+    { key: 'Status',     label: 'Status' },
+    { key: 'Status_Note', label: 'Notes' },
   ];
 
   const fileBase = exportDateAwareFileBase(s, e, inverter, 'Energy Summary');

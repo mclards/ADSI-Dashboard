@@ -720,11 +720,13 @@ function parseRow(row, identity = null) {
   // product even when one factor is real and the other is at its noise
   // floor (or vice versa).
   //
-  // Register units (matches services/inverter_engine.py read_fast_async +
-  // server/dailyAggregator.js _RANGES):
-  //   vdc  — 1 V/LSB,    real bus voltage hundreds of V
-  //   idc  — 0.1 A/LSB,  real DC current 0..150 A (raw 0..1500)
-  //   iac* — 0.1 A/LSB,  real AC current 0..500 A (raw 0..5000)
+  // Register units (per docs/IngeconSunPMax-Modbus-pg05.txt + safePdc clamp):
+  //   vdc  — 1 V/LSB, real bus voltage hundreds of V
+  //   idc  — 1 A/LSB, signed (Slice α). Real DC current 0..500 A typical.
+  //   iac* — 1 A/LSB, RMS per phase. Real AC current 0..500 A typical.
+  // Idc and Iac scaling confirmed via the safePdc 265 kW clamp landing ~6%
+  // above a 250 kW inverter's nameplate (vdc·idc ≈ 250 000 W). See
+  // audits/2026-05-11/register-decode-traceback.md Finding 3.
   //
   // Force PAC to 0 if ANY leg is at/below its noise floor:
   //   • Vdc at noise floor  → no DC bus voltage      → no real input
@@ -737,8 +739,8 @@ function parseRow(row, identity = null) {
   // This prevents phantom PAC from contaminating the live tile, the PAC
   // trapezoid integrator (~line 568), and the 5-min aggregator.
   const NOISE_VDC = 1;   // ≤1 V on the DC bus is noise floor
-  const NOISE_IDC = 1;   // ≤0.1 A DC is noise floor
-  const NOISE_IAC = 1;   // ≤0.1 A on a phase is noise floor
+  const NOISE_IDC = 1;   // ≤1 A DC is noise floor
+  const NOISE_IAC = 1;   // ≤1 A on a phase is noise floor
   if (
     safePac > 0 &&
     (vdc  <= NOISE_VDC ||
@@ -1790,6 +1792,39 @@ function getPerfStats() {
   };
 }
 
+// Polling-pressure summary surfaced to /api/runtime/data-health so operators
+// in remote mode can see whether the gateway-side cadence respects vendor
+// guidance (Ingeteam Level 2 AAV2011IFA01_ p.8 — recommended ≤ 1 Hz per unit).
+// Pure read of the cached ipconfig — no IO, no DB.
+function getPollCadenceSummary() {
+  const cfg = loadIpConfigSnapshot();
+  const intervals = cfg?.poll_interval || {};
+  const values = [];
+  for (let i = 1; i <= 27; i++) {
+    const ip = String(cfg?.inverters?.[i] || cfg?.inverters?.[String(i)] || "").trim();
+    if (!ip) continue;
+    const v = Number(intervals[i] ?? intervals[String(i)] ?? 0);
+    if (Number.isFinite(v) && v > 0) values.push({ inverter: i, ip, intervalSec: v });
+  }
+  if (!values.length) {
+    return { configuredInverters: 0, recommendedSec: 1.0, fasterThanRecommended: 0 };
+  }
+  const min = Math.min(...values.map((v) => v.intervalSec));
+  const max = Math.max(...values.map((v) => v.intervalSec));
+  const fasterThanRecommended = values.filter((v) => v.intervalSec < 1.0).length;
+  return {
+    configuredInverters: values.length,
+    recommendedSec: 1.0,
+    minIntervalSec: Number(min.toFixed(3)),
+    maxIntervalSec: Number(max.toFixed(3)),
+    fasterThanRecommended,
+    vendorGuidance:
+      "Ingeteam Level 2 AAV2011IFA01_ p.8 (0x0008 RESET_WD alarm) — " +
+      "≤ 1 Hz per unit recommended. Faster polling stresses the comm-board CPU " +
+      "and may produce brief comm windows that look like missing data.",
+  };
+}
+
 module.exports = {
   start,
   stop,
@@ -1802,6 +1837,7 @@ module.exports = {
   getTodayEnergyHealth,
   setIpConfigSnapshot,
   getPerfStats,
+  getPollCadenceSummary,
   buildTodayEnergyRowsFromSeed,
   buildIpConfigLookup,
   resolveConfiguredTelemetryIdentity,

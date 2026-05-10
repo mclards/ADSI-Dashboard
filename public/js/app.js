@@ -3835,6 +3835,49 @@ function refreshModeScopeAbort(reason) {
 // Triggered from init(); non-blocking. Renders a dismissable red banner at
 // the top of <body> when the gateway auto-restored adsi.db from a backup
 // slot after a power-loss-induced torn write.
+// Polling-cadence chip refresh — pure GET against /api/runtime/data-health.
+// Hides the chip when the API doesn't surface pollCadence (e.g. older gateway
+// build) so the UI never shows a stale figure. When any inverter polls faster
+// than 1 Hz, paints the chip amber and adds a tooltip listing the count.
+async function refreshPollCadenceChip() {
+  const chip = document.getElementById("pollCadenceChip");
+  const valueEl = document.getElementById("pollCadenceValue");
+  if (!chip || !valueEl) return;
+  try {
+    const resp = await fetch("/api/runtime/data-health", { cache: "no-store" });
+    if (!resp || !resp.ok) { chip.hidden = true; return; }
+    const payload = await resp.json();
+    const pc = payload?.pollCadence;
+    if (!pc || !Number.isFinite(Number(pc.minIntervalSec))) {
+      chip.hidden = true;
+      return;
+    }
+    const min = Number(pc.minIntervalSec);
+    const max = Number(pc.maxIntervalSec || min);
+    const overCount = Math.max(0, Number(pc.fasterThanRecommended) || 0);
+    const total = Math.max(0, Number(pc.configuredInverters) || 0);
+    const recSec = Number(pc.recommendedSec) || 1.0;
+    const display = min === max ? `${min}s` : `${min}–${max}s`;
+    valueEl.textContent = display;
+    if (overCount > 0) {
+      chip.classList.add("over-poll");
+      chip.title =
+        `${overCount}/${total} inverter(s) polling faster than vendor-recommended ` +
+        `${recSec}s (Ingeteam Level 2 AAV2011IFA01_ p.8). Faster polling stresses ` +
+        `the comm board; brief comm windows in the Energy Summary may follow. ` +
+        `Edit C:\\ProgramData\\InverterDashboard\\ipconfig.json poll_interval to tune.`;
+    } else {
+      chip.classList.remove("over-poll");
+      chip.title =
+        `Modbus polling at ${display} per inverter — within vendor recommendation ` +
+        `(≤ ${recSec}s).`;
+    }
+    chip.hidden = false;
+  } catch (_) {
+    chip.hidden = true;
+  }
+}
+
 async function checkBootIntegrityBanner() {
   try {
     const resp = await fetch("/api/health/db-integrity", { cache: "no-store" });
@@ -9007,7 +9050,7 @@ async function _onT3ReadbackClick() {
     wrap.innerHTML = `
       <div><b>41006 Power-reduction Q15:</b> ${data.power_q15} → ${Number(data.power_pct_readback || 0).toFixed(1)} %</div>
       <div><b>41007 Phi tangent (raw Int16):</b> ${data.phi_tangent_signed} → tan(φ) ${Number(data.phi_tangent_value || 0).toFixed(4)} → PF ≈ ${Number(data.power_factor_estimate || 0).toFixed(3)}</div>
-      <div><b>41008 Reactive setpoint:</b> ${data.reactive_signed} (kVAr ÷ 10) → ${Number(data.reactive_kvar || 0).toFixed(1)} kVAr</div>
+      <div><b>41008 Reactive setpoint:</b> ${data.reactive_signed} (raw, ×10 = VAr) → ${Number(data.reactive_kvar || 0).toFixed(2)} kVAr</div>
       <div><b>41010 Restrictive freq limits:</b> ${data.freq_limits_on ? "ON (49.5/50.5 Hz CEI 0-21 — DO NOT issue cmd 12 on this site)" : "OFF (firmware Country Code 42 envelope active)"}</div>`;
   } catch (err) {
     wrap.innerHTML = `<em style="color:var(--red);">Network error: ${escapeHtml(err.message)}</em>`;
@@ -9867,7 +9910,7 @@ function buildGridControlPane() {
           <span class="mdi mdi-sine-wave" aria-hidden="true"></span><span>Set PF</span>
         </button>
         <button id="gcSetReactiveBtn" class="btn btn-accent" type="button" disabled
-                title="Cmd 9 — write reactive power setpoint in kVAr × 10.">
+                title="Cmd 9 — write reactive power setpoint. Wire raw = kVAr × 100 (raw × 10 = VAr per PDF).">
           <span class="mdi mdi-flash-triangle" aria-hidden="true"></span><span>Set kVAr</span>
         </button>
         <span class="apc-actions-divider" aria-hidden="true"></span>
@@ -10003,7 +10046,7 @@ async function refreshGridControlReadback() {
     wrap.innerHTML = `
       <div><b>Power-reduction Q15:</b> ${data.power_q15} → ${Number(data.power_pct_readback || 0).toFixed(1)} %</div>
       <div><b>Phi tangent (raw Int16):</b> ${data.phi_tangent_signed} → tan(φ) ${Number(data.phi_tangent_value || 0).toFixed(4)} → PF ≈ ${Number(data.power_factor_estimate || 0).toFixed(3)}</div>
-      <div><b>Reactive setpoint:</b> ${data.reactive_signed} (kVAr ÷ 10) → ${Number(data.reactive_kvar || 0).toFixed(1)} kVAr</div>
+      <div><b>Reactive setpoint:</b> ${data.reactive_signed} (raw, ×10 = VAr) → ${Number(data.reactive_kvar || 0).toFixed(2)} kVAr</div>
       <div><b>Restrictive freq limits flag:</b> ${data.freq_limits_on ? "ON (49.5/50.5 Hz CEI 0-21 — DO NOT issue cmd 12 on this site)" : "OFF (firmware Country Code 42 envelope active)"}</div>
       <div style="opacity:.6;margin-top:6px;">Raw regs 41006-41010: [${(data.regs || []).join(", ")}]</div>`;
   } catch (err) {
@@ -10058,7 +10101,11 @@ async function submitGridControlReactive() {
   if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
   const kvar = Number($("gcKvarInp")?.value);
   if (!Number.isFinite(kvar)) { showToast("kVAr value invalid.", "warn"); return; }
-  const kvar_div10 = Math.round(kvar * 10);
+  // Wire convention (PDF §3 cmd 9): raw × 10 = VAr → raw = kVAr × 100.
+  // The variable name `kvar_div10` is preserved for legacy callers but the
+  // value is now correctly scaled. See audits/2026-05-11/register-decode-traceback.md
+  // Finding 2 — earlier code used kvar*10 which under-wrote by 10×.
+  const kvar_div10 = Math.round(kvar * 100);
   const btn = $("gcSetReactiveBtn"); if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/grid-control/reactive", {
@@ -24306,6 +24353,12 @@ async function init() {
     // recent readings (the poller fills it in automatically as the plant
     // continues generating). Failures are silent — this is advisory only.
     checkBootIntegrityBanner().catch(() => { /* advisory; swallow */ });
+    // Polling-cadence chip: one-shot now and every 60 s. The /api/runtime/data-health
+    // endpoint exposes pollCadence (configured per-inverter Modbus interval); when any
+    // inverter polls faster than vendor-recommended 1 Hz the chip turns amber so the
+    // operator notices even from remote mode. Pure GET — no side effects, never throws.
+    refreshPollCadenceChip().catch(() => { /* advisory; swallow */ });
+    setInterval(() => { refreshPollCadenceChip().catch(() => {}); }, 60_000);
     const resumeAlarmAudio = () => {
       try {
         const ctx = getOrCreateAlarmAudioCtx();
