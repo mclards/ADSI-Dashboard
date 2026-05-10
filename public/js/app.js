@@ -17382,6 +17382,8 @@ function chartOpts(unit, showLegend) {
 function initExportPage() {
   applyExportUiStateToInputs(State.settings.exportUiState || {});
   syncSharedForecastExportFormatControls(getSharedForecastExportFormat());
+  // v2.11.0 — Asset Health snapshot export lives in the Export grid.
+  try { attachExportListeners(); } catch (_) {}
   bindExportDateValidators();
   bindExportNumberValidators();
   normalizeAllExportDateInputs({ forceDefault: true, preferred: "start" });
@@ -22748,6 +22750,9 @@ async function loadAndRenderIgbtHealthPage() {
       computedAtEl.textContent = dt.toLocaleString();
     }
 
+    // Render summary tier chips above the table
+    renderIgbtSummary(data.summary, data.nodes || []);
+
     // Render fleet table
     renderIgbtFleetTable(data.nodes || []);
 
@@ -22769,9 +22774,18 @@ function renderIgbtFleetTable(nodes) {
 
   if (!nodes || nodes.length === 0) {
     const tr = document.createElement("tr");
+    tr.className = "igbt-empty-row";
     tr.innerHTML = `
-      <td colspan="12" style="text-align: center; padding: 20px; color: var(--text2);">
-        No nodes found
+      <td colspan="12">
+        <div class="igbt-empty-state">
+          <span class="mdi mdi-clipboard-pulse-outline" aria-hidden="true"></span>
+          <div class="igbt-empty-title">No fleet data yet</div>
+          <div class="igbt-empty-copy">
+            Health scores will appear once stop-reason history accumulates. Trigger a manual capture in
+            <strong>Settings → Stop Reasons → Refresh now</strong> for any inverter, or wait for the next
+            FRAMA / thermal / PI&nbsp;ANA event to be recorded.
+          </div>
+        </div>
       </td>
     `;
     tbody.appendChild(tr);
@@ -22780,28 +22794,28 @@ function renderIgbtFleetTable(nodes) {
 
   nodes.forEach((node) => {
     const tr = document.createElement("tr");
-    const tierClass = `tier-${node.tier || "offline"}`;
-    tr.className = tierClass;
+    const tier = node.tier || "offline";
+    tr.className = `tier-${tier}`;
     tr.dataset.inverter = node.inverter;
     tr.dataset.slave = node.slave;
-    tr.dataset.tier = node.tier;
+    tr.dataset.tier = tier;
 
     // Format values
     const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
     const tempDisplay = node.temp_pe_now_c != null ? node.temp_pe_now_c.toFixed(1) : "—";
     const imbalanceDisplay = node.imbalance_pct != null ? node.imbalance_pct.toFixed(2) : "—";
     const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
+    const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+    const branchSummary = `${node.frama_branch1 || 0}/${node.frama_branch2 || 0}/${node.frama_branch3 || 0}`;
 
     tr.innerHTML = `
       <td>${node.inverter}</td>
-      <td>${node.ip || "—"}</td>
+      <td class="text-mono">${node.ip || "—"}</td>
       <td>${node.slave}</td>
-      <td class="score-cell ${node.tier}">${scoreDisplay}</td>
-      <td class="tier-cell ${node.tier}">${node.tier || "Offline"}</td>
+      <td class="score-cell tier-${tier}">${scoreDisplay}</td>
+      <td><span class="tier-pill tier-${tier}">${tierLabel}</span></td>
       <td>${node.frama_total || 0}</td>
-      <td>${node.frama_branch1 || 0}</td>
-      <td>${node.frama_branch2 || 0}</td>
-      <td>${node.frama_branch3 || 0}</td>
+      <td class="text-mono">${branchSummary}</td>
       <td>${node.thermal_trips || 0}</td>
       <td>${node.pi_ana_trips || 0}</td>
       <td>${tempDisplay}</td>
@@ -22814,6 +22828,33 @@ function renderIgbtFleetTable(nodes) {
 
   // Apply tier filter after rendering
   applyTierFilter();
+}
+
+function renderIgbtSummary(summary, nodes) {
+  // Prefer server-provided summary; fall back to client-side aggregation.
+  let counts;
+  if (summary && typeof summary === "object") {
+    counts = {
+      healthy: Number(summary.healthy_count) || 0,
+      watch:   Number(summary.watch_count)   || 0,
+      aging:   Number(summary.aging_count)   || 0,
+      eol:     Number(summary.eol_count)     || 0,
+      offline: Number(summary.offline_count) || 0,
+    };
+  } else {
+    counts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
+    (nodes || []).forEach((n) => {
+      const t = (n.tier || "offline");
+      if (counts[t] != null) counts[t] += 1;
+      else counts.offline += 1;
+    });
+  }
+  const setCount = (id, n) => { const el = $(id); if (el) el.textContent = String(n); };
+  setCount("igbtSummaryHealthy", counts.healthy);
+  setCount("igbtSummaryWatch",   counts.watch);
+  setCount("igbtSummaryAging",   counts.aging);
+  setCount("igbtSummaryEol",     counts.eol);
+  setCount("igbtSummaryOffline", counts.offline);
 }
 
 function attachFleetTableClickListeners() {
@@ -22855,7 +22896,33 @@ async function renderDrilldownPanel(inverter, slave) {
     const components = data.components || {};
     const currentState = data.current_state || {};
 
-    // Update header
+    // Update header (id + inverter/slave label) and reveal the close button
+    const headerLabel = $("igbtDetailNodeId");
+    if (headerLabel) {
+      headerLabel.textContent = `Inverter ${node.inverter} · Slave ${node.slave}`;
+    }
+    const closeBtn = panel.querySelector(".igbt-detail-close");
+    if (closeBtn) {
+      closeBtn.hidden = false;
+      if (!closeBtn.dataset.bound) {
+        closeBtn.dataset.bound = "1";
+        closeBtn.addEventListener("click", () => {
+          if (headerLabel) headerLabel.textContent = "No node selected";
+          const body = $("igbtDetailBody");
+          if (body) {
+            body.innerHTML = `
+              <div class="igbt-detail-empty">
+                <span class="mdi mdi-information-outline" aria-hidden="true"></span>
+                <div>Select a row in the fleet table to see the per-node score breakdown, recent FRAMA / thermal / PI events, and current readings.</div>
+              </div>`;
+          }
+          closeBtn.hidden = true;
+          const tbl = $("igbtFleetTable");
+          if (tbl) tbl.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
+        });
+      }
+    }
+    // Legacy header element (kept for back-compat with older HTML class)
     const headerId = panel.querySelector(".node-id");
     if (headerId) {
       headerId.textContent = `${node.inverter} / Slave ${node.slave}`;
@@ -23051,41 +23118,52 @@ function attachRefreshListeners() {
 }
 
 function attachExportListeners() {
-  const btn = $("btnExportIgbtCsv");
+  // Export-page button (canonical home for exports)
+  const exportBtn = $("btnExportIgbtFleetCsv");
+  if (exportBtn && !exportBtn.dataset.igbtBound) {
+    exportBtn.dataset.igbtBound = "1";
+    exportBtn.addEventListener("click", () => triggerIgbtFleetCsvExport(exportBtn));
+  }
+  // Legacy in-page button (no longer in HTML; kept for back-compat if a stray
+  // element still exists in a packaged build).
+  const legacyBtn = $("btnExportIgbtCsv");
+  if (legacyBtn && !legacyBtn.dataset.igbtBound) {
+    legacyBtn.dataset.igbtBound = "1";
+    legacyBtn.addEventListener("click", () => triggerIgbtFleetCsvExport(legacyBtn));
+  }
+}
+
+async function triggerIgbtFleetCsvExport(btn) {
   if (!btn) return;
+  const resultEl = $("expIgbtFleetResult");
+  try {
+    btn.disabled = true;
+    if (resultEl) { resultEl.textContent = "Exporting…"; resultEl.className = "exp-result"; }
+    else showToast("Exporting CSV...", 0);
 
-  btn.addEventListener("click", async () => {
-    try {
-      btn.disabled = true;
-      showToast("Exporting CSV...", 0);
+    const response = await fetch("/api/igbt/fleet.csv");
+    if (!response.ok) throw new Error(`Export failed (HTTP ${response.status})`);
 
-      const response = await fetch("/api/igbt/fleet.csv");
-      if (!response.ok) {
-        throw new Error("Export failed");
-      }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const today = new Date().toISOString().split("T")[0];
+    a.download = `adsi-igbt-fleet-${today}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-
-      // Generate filename with today's date
-      const today = new Date().toISOString().split("T")[0];
-      a.download = `adsi-igbt-fleet-${today}.csv`;
-
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      hideToast();
-    } catch (err) {
-      console.error("[igbt] CSV export failed:", err);
-      showToast("Error: " + (err?.message || "Export failed"), 5000);
-    } finally {
-      btn.disabled = false;
-    }
-  });
+    if (resultEl) { resultEl.textContent = `✓ Saved adsi-igbt-fleet-${today}.csv`; resultEl.className = "exp-result success"; }
+    else hideToast();
+  } catch (err) {
+    console.error("[igbt] CSV export failed:", err);
+    if (resultEl) { resultEl.textContent = `✗ ${err?.message || "Export failed"}`; resultEl.className = "exp-result error"; }
+    else showToast("Error: " + (err?.message || "Export failed"), 5000);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

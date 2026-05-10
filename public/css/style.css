@@ -18048,3 +18048,258 @@ body.mode-transition-active {
     width: 100%;
   }
 }
+
+/* ── IGBT Health Page — v2.11.0 polish (banner + summary chips + empty states) ── */
+#page-igbt-health .igbt-banner {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 4%, var(--surface2)) 0%,
+    var(--surface) 100%);
+}
+#page-igbt-health .igbt-banner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+#page-igbt-health .igbt-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+}
+#page-igbt-health .igbt-banner-title .mdi {
+  color: var(--accent);
+  font-size: 22px;
+  line-height: 1;
+}
+#page-igbt-health .igbt-banner-title h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+#page-igbt-health .igbt-banner-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+#page-igbt-health .igbt-banner-meta .toolbar-info {
+  font-size: 12px;
+  color: var(--text2);
+}
+#page-igbt-health .igbt-banner-meta .toolbar-info b {
+  color: var(--text);
+  font-weight: 600;
+}
+#page-igbt-health .igbt-banner-sub {
+  margin-top: 8px;
+  color: var(--text2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-width: 1100px;
+}
+#page-igbt-health .igbt-banner-sub strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Summary tier chips */
+#page-igbt-health .igbt-summary-chips {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+#page-igbt-health .igbt-summary-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+  cursor: default;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+#page-igbt-health .igbt-summary-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--text) 12%, transparent);
+}
+#page-igbt-health .igbt-summary-count {
+  font-weight: 700;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+#page-igbt-health .igbt-summary-label {
+  color: var(--text2);
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+#page-igbt-health .igbt-summary-chip.tier-healthy {
+  border-color: color-mix(in srgb, var(--green) 50%, var(--border));
+  background: color-mix(in srgb, var(--green) 8%, var(--surface));
+}
+#page-igbt-health .igbt-summary-chip.tier-healthy .igbt-summary-count { color: var(--green); }
+#page-igbt-health .igbt-summary-chip.tier-watch {
+  border-color: color-mix(in srgb, var(--orange) 45%, var(--border));
+  background: color-mix(in srgb, var(--orange) 8%, var(--surface));
+}
+#page-igbt-health .igbt-summary-chip.tier-watch .igbt-summary-count { color: var(--orange); }
+#page-igbt-health .igbt-summary-chip.tier-aging {
+  border-color: color-mix(in srgb, var(--orange) 70%, var(--red));
+  background: color-mix(in srgb, var(--orange) 12%, var(--surface));
+}
+#page-igbt-health .igbt-summary-chip.tier-aging .igbt-summary-count {
+  color: color-mix(in srgb, var(--orange) 60%, var(--red));
+}
+#page-igbt-health .igbt-summary-chip.tier-eol {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  background: color-mix(in srgb, var(--red) 10%, var(--surface));
+}
+#page-igbt-health .igbt-summary-chip.tier-eol .igbt-summary-count { color: var(--red); }
+#page-igbt-health .igbt-summary-chip.tier-offline {
+  opacity: 0.85;
+  border-style: dashed;
+}
+
+/* Tier filter chips — color-coded outlines */
+#page-igbt-health .tier-filter-group .tier-chip.tier-healthy:not([data-selected="true"]) {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+#page-igbt-health .tier-filter-group .tier-chip.tier-watch:not([data-selected="true"]) {
+  color: var(--orange);
+  border-color: color-mix(in srgb, var(--orange) 45%, var(--border));
+}
+#page-igbt-health .tier-filter-group .tier-chip.tier-aging:not([data-selected="true"]) {
+  color: color-mix(in srgb, var(--orange) 60%, var(--red));
+  border-color: color-mix(in srgb, var(--orange) 70%, var(--red));
+}
+#page-igbt-health .tier-filter-group .tier-chip.tier-eol:not([data-selected="true"]) {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+}
+
+/* Tier pill (in-row badge) */
+#page-igbt-health .tier-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  background: var(--surface2);
+  color: var(--text2);
+}
+#page-igbt-health .tier-pill.tier-healthy {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+}
+#page-igbt-health .tier-pill.tier-watch {
+  color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 10%, transparent);
+  border-color: color-mix(in srgb, var(--orange) 40%, transparent);
+}
+#page-igbt-health .tier-pill.tier-aging {
+  color: color-mix(in srgb, var(--orange) 60%, var(--red));
+  background: color-mix(in srgb, var(--orange) 14%, transparent);
+  border-color: color-mix(in srgb, var(--orange) 60%, var(--red));
+}
+#page-igbt-health .tier-pill.tier-eol {
+  color: #fff;
+  background: var(--red);
+  border-color: var(--red);
+}
+#page-igbt-health .tier-pill.tier-offline {
+  font-style: italic;
+}
+
+/* Score cell tinting */
+#page-igbt-health .igbt-fleet-table td.score-cell {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+#page-igbt-health .igbt-fleet-table td.score-cell.tier-healthy { color: var(--green); }
+#page-igbt-health .igbt-fleet-table td.score-cell.tier-watch   { color: var(--orange); }
+#page-igbt-health .igbt-fleet-table td.score-cell.tier-aging   { color: color-mix(in srgb, var(--orange) 60%, var(--red)); }
+#page-igbt-health .igbt-fleet-table td.score-cell.tier-eol     { color: var(--red); }
+
+/* Mono helper */
+#page-igbt-health .igbt-fleet-table td.text-mono {
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-size: 11.5px;
+}
+
+/* Empty-state inside fleet table */
+#page-igbt-health .igbt-empty-row td {
+  padding: 0 !important;
+  background: transparent !important;
+}
+#page-igbt-health .igbt-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 48px 28px;
+  color: var(--text2);
+}
+#page-igbt-health .igbt-empty-state .mdi {
+  font-size: 36px;
+  color: color-mix(in srgb, var(--accent) 60%, var(--text2));
+}
+#page-igbt-health .igbt-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+#page-igbt-health .igbt-empty-copy {
+  max-width: 520px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+#page-igbt-health .igbt-empty-copy strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Drilldown empty placeholder */
+#page-igbt-health .igbt-detail-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  padding: 36px 16px;
+  color: var(--text2);
+}
+#page-igbt-health .igbt-detail-empty .mdi {
+  font-size: 28px;
+  color: color-mix(in srgb, var(--accent) 50%, var(--text2));
+}
+
+/* Selected row highlight */
+#page-igbt-health .igbt-fleet-table tbody tr.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Tighten the secondary toolbar (now only holds the tier filter) */
+#page-igbt-health .igbt-toolbar {
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
