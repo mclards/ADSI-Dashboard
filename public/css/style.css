@@ -17426,6 +17426,14 @@ body.mode-transition-active {
   font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
   color: var(--text2);
 }
+/* v2.10.x Slice γ — Parameters page state column */
+.param-table tbody td.state-cell {
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-size: 0.9em;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--text2);
+}
 .param-table tbody tr:hover td {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }

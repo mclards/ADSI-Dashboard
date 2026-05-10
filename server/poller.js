@@ -592,6 +592,47 @@ function _signedInt16(raw) {
 }
 
 /**
+ * Decode authoritative inverter state register (reg 30074) into structured form.
+ *
+ * Per Ingeteam INGECON SUN Modbus RTU spec
+ * (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 7):
+ *   Low byte (bits 0-7) — phase: 0=initial, 1=magnetizing, 2=connected, 3=error
+ *   High byte bit 0 — stop (1 = stopped, 0 = running)
+ *   High byte bit 1 — blocked
+ *   High byte bit 2 — grid fault detected
+ *
+ * Returns null-safe shape; inputs that aren't numeric decode as `unknown`.
+ * Rejects string inputs (strict numeric only).
+ *
+ * Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice γ
+ */
+function decodeInverterState(raw_u16) {
+  // Strict numeric check: reject null, strings, and non-finite numbers.
+  // null coerces to 0, so we gate on typeof before Number() conversion.
+  if (typeof raw_u16 === "string" || raw_u16 === null || raw_u16 === undefined) {
+    return { phase: "unknown", phaseCode: -1, stop: false, blocked: false, gridFault: false, raw: null };
+  }
+  const n = Number(raw_u16);
+  if (!Number.isFinite(n)) {
+    return { phase: "unknown", phaseCode: -1, stop: false, blocked: false, gridFault: false, raw: null };
+  }
+  const u16 = n & 0xFFFF;
+  const lo = u16 & 0xFF;
+  const hi = (u16 >> 8) & 0xFF;
+  const phaseMap = { 0: "initial", 1: "magnetizing", 2: "connected", 3: "error" };
+  const phase = phaseMap[lo] || "unknown";
+  const phaseCode = lo <= 3 ? lo : -1;
+  return {
+    phase,
+    phaseCode,
+    stop:      (hi & 0x01) !== 0,
+    blocked:   (hi & 0x02) !== 0,
+    gridFault: (hi & 0x04) !== 0,
+    raw: u16,
+  };
+}
+
+/**
  * Parse a raw Modbus frame into a normalized dashboard telemetry row.
  *
  * Applies Int16 sign extension to `idc` and `pac` registers per the
@@ -739,6 +780,14 @@ function parseRow(row, identity = null) {
     zneg_kohm:            Number.isFinite(Number(row.zneg_kohm)) ? Number(row.zneg_kohm) : 0,
     tempint_c:            (() => { const v = Number.isFinite(Number(row.tempint_c)) ? Number(row.tempint_c) : null; return v === 0 ? null : v; })(),
     inverter_state_raw:   Number.isFinite(Number(row.inverter_state_raw)) ? Number(row.inverter_state_raw) : 0,
+    // v2.10.x Slice γ — decoded authoritative state (additive). Always computed
+    // when a row carries inverter_state_raw, and rendered unconditionally in the
+    // Parameters page "State" column. The `useAuthoritativeInverterState` setting
+    // (default "0") is reserved for the future Inverter Card status-chip UI pass,
+    // where the chip will replace the legacy on/off badge only when enabled.
+    inverter_state:       (Number.isFinite(Number(row.inverter_state_raw)) && Number(row.inverter_state_raw) !== 0)
+      ? decodeInverterState(Number(row.inverter_state_raw))
+      : null,
     vpv_n_v:              Number.isFinite(Number(row.vpv_n_v)) ? Number(row.vpv_n_v) : 0,
     vpv_p_v:              Number.isFinite(Number(row.vpv_p_v)) ? Number(row.vpv_p_v) : 0,
     nominal_power_w:      Number.isFinite(Number(row.nominal_power_w)) ? Number(row.nominal_power_w) : 0,
@@ -1713,4 +1762,6 @@ module.exports = {
   // Slice α — Int16 sign extension + parseRow for test/diagnostic access
   _signedInt16,
   parseRow,
+  // Slice γ — Inverter state decoder for test/diagnostic access
+  decodeInverterState,
 };

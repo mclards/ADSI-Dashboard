@@ -14397,6 +14397,7 @@ function _paramRebuildTabs() {
               <th title="Slot energy in kWh — derived from the parcE counter delta vs. the previous slot. Falls back to PAC × 5 min / 1000 when the delta is unavailable (first slot of the day, or counter glitch).">Partial Energy (kWh)</th>
               <th>CosΦ</th>
               <th>Freq (Hz)</th>
+              <th title="Inverter operating state from Modbus reg 30074: phase (init/magnetizing/connected/error) + flags (stop/blocked/grid-fault).">State</th>
               <th title="Combined 32-bit alarm bitmap captured during the slot.">Inv Alarms</th>
               <th title="Track alarms not exposed by the standard register block — always 0 in this view.">Track Alarms</th>
             </tr>
@@ -14651,6 +14652,40 @@ function _paramRowHtml(r, isLive) {
     return n ? `0x${n.toString(16).toUpperCase().padStart(8, "0")}` : "0";
   };
   const cosphi = (v) => (v == null || v === "" ? "—" : Number(v).toFixed(3));
+
+  // Slice γ — inverter state decoding from raw register 30074
+  const _decodeInverterStateClient = (raw) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n === 0) return null;
+    const u16 = n & 0xFFFF;
+    const lo = u16 & 0xFF;
+    const hi = (u16 >> 8) & 0xFF;
+    const phaseMap = { 0: "initial", 1: "magnetizing", 2: "connected", 3: "error" };
+    const phase = phaseMap[lo] || "unknown";
+    return {
+      phase,
+      stop:      (hi & 0x01) !== 0,
+      blocked:   (hi & 0x02) !== 0,
+      gridFault: (hi & 0x04) !== 0,
+    };
+  };
+
+  const _stateChip = (stateRaw) => {
+    const s = _decodeInverterStateClient(stateRaw);
+    if (!s) return "—";
+    const label = s.phase === "connected" ? "RUN"
+      : s.phase === "magnetizing" ? "MAG"
+      : s.phase === "initial" ? "INIT"
+      : s.phase === "error" ? "ERR"
+      : "?";
+    const flags = [
+      s.stop ? "STOP" : null,
+      s.blocked ? "BLK" : null,
+      s.gridFault ? "GFAULT" : null,
+    ].filter(Boolean).join(" ");
+    return flags ? `${label} (${flags})` : label;
+  };
+
   // Partial Energy is the PAC-integrated estimate for the 5-min slot
   // (5-min PAC average × duration). The day-level cross-check against
   // Etotal Δ and parcE Δ lives in the totals strip above the table.
@@ -14675,6 +14710,7 @@ function _paramRowHtml(r, isLive) {
     <td>${partialHtml}</td>
     <td>${cosphi(r.cosphi)}</td>
     <td>${fmt(r.freq_hz, 2)}</td>
+    <td class="state-cell" title="Inverter state (reg 30074).">${_stateChip(r.inverter_state_raw_last ?? r.inverter_state_raw)}</td>
     <td class="alarm-cell" title="32-bit Inv alarm bitmap.">${alarmHex(r.inv_alarms)}</td>
     <td class="alarm-cell" title="Track Alarms not exposed by the standard register block.">${alarmHex(r.track_alarms)}</td>`;
 }

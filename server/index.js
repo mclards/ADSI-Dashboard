@@ -8216,6 +8216,11 @@ function buildDefaultSettingsSnapshot() {
     //   default capture window = hours where (h >= 18) || (h < 5) — i.e., 18:00–04:59.
     solarWindowStartHour: 5,
     crashGapRatio: 0.5,
+    // v2.10.x Slice γ — feature flag reserved for the Inverter Card status-chip
+    // UI pass (future). The Parameters page "State" column always renders the
+    // decoded state regardless of this flag; only the Inverter Card chip will gate
+    // on it once that UI lands.
+    useAuthoritativeInverterState: "0",
   };
 }
 
