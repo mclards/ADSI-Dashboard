@@ -123,6 +123,9 @@
         <button class="nav-btn" data-page="plant-cap" title="Plant output capping controller, schedules, and action history.">
           <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>PLANT CAP</span>
         </button>
+        <button class="nav-btn" data-page="igbt-health" title="Asset health monitoring: IGBT module aging risk across the 27-inverter fleet. Health scores, tiers, and capital-planning export.">
+          <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
+        </button>
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
           <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
@@ -899,6 +902,73 @@
           </div>
         </div>
         <div id="plantCapPageContainer" class="plant-cap-page-container"></div>
+      </section>
+
+      <!-- --- PAGE: IGBT HEALTH ---------------------------------------------------- -->
+      <section id="page-igbt-health" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <!-- Tier filter chips -->
+            <div class="tier-filter-group" id="igbtTierFilters">
+              <button class="tier-chip" data-tier="all" data-selected="true">All Nodes</button>
+              <button class="tier-chip" data-tier="healthy">Healthy</button>
+              <button class="tier-chip" data-tier="watch">Watch</button>
+              <button class="tier-chip" data-tier="aging">Aging</button>
+              <button class="tier-chip" data-tier="eol">EOL</button>
+            </div>
+          </div>
+          <div class="tl-right">
+            <!-- Metadata -->
+            <span class="toolbar-info" title="Timestamp of last fleet computation.">Computed: <b id="igbtComputedAt">—</b></span>
+            <span class="toolbar-info" title="Rolling window for stop-reason counts.">Window: <b>90 days</b></span>
+            <!-- Refresh button -->
+            <button id="btnRefreshIgbt" class="btn btn-accent" title="Refresh health scores from latest stop-reason and telemetry data.">
+              <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
+            </button>
+            <!-- CSV export -->
+            <button id="btnExportIgbtCsv" class="btn btn-outline" title="Export fleet health data to CSV for capital planning.">
+              <span class="mdi mdi-download-outline" aria-hidden="true"></span><span>Export CSV</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="igbt-page-body">
+          <!-- Fleet table (left, dominant) -->
+          <div class="igbt-fleet-table-wrapper">
+            <table class="data-table igbt-fleet-table" id="igbtFleetTable">
+              <thead>
+                <tr>
+                  <th class="report-sort" data-key="inverter">Inverter</th>
+                  <th class="report-sort" data-key="ip">IP Address</th>
+                  <th class="report-sort" data-key="slave">Slave</th>
+                  <th class="report-sort" data-key="score" title="Composite health score (0–100). Higher = more aged.">Health Score</th>
+                  <th class="report-sort" data-key="tier">Tier</th>
+                  <th class="report-sort" data-key="frama_total" title="Total FRAMA events in 90-day window.">FRAMA Total</th>
+                  <th data-key="frama_branches" title="FRAMA branch distribution">Branch 1/2/3</th>
+                  <th class="report-sort" data-key="thermal_trips" title="Thermal trips in 90-day window.">Thermal Trips</th>
+                  <th class="report-sort" data-key="pi_ana_trips">PI Ana Trips</th>
+                  <th class="report-sort" data-key="temp_pe_now" title="Current power-electronics temperature.">Temp (°C)</th>
+                  <th class="report-sort" data-key="imbalance_pct" title="Phase current imbalance percentage.">Imbalance (%)</th>
+                  <th data-key="last_event" title="Most recent stop event.">Last Event</th>
+                </tr>
+              </thead>
+              <tbody id="igbtFleetTableBody">
+                <!-- Rows injected by renderFleetTable() -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Drilldown side panel (right, on row select) -->
+          <div id="igbtDetailPanel" class="igbt-detail-panel" style="display:none">
+            <div class="igbt-detail-header">
+              <div class="igbt-detail-node-id" id="igbtDetailNodeId"></div>
+              <button class="igbt-detail-close" title="Close detail panel">✕</button>
+            </div>
+            <div class="igbt-detail-body" id="igbtDetailBody">
+              <!-- Injected by renderDrilldownPanel() -->
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->

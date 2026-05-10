@@ -94,6 +94,7 @@ const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
 const serialNumber = require("./serialNumber");
 const dailyAggregator = require("./dailyAggregator");
+const igbtHealth = require("./igbtHealth");
 const {
   registerClient,
   broadcastUpdate,
@@ -13066,6 +13067,465 @@ app.get("/api/stop-reasons/:inverter/histogram", (req, res) => {
     const snap = stopReasons.getLatestHistogramForInverter(db, inv);
     res.json({ ok: true, inverter: inv, snapshot: snap });
   } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── v2.11.0 IGBT Health Monitoring — Fleet & Node Endpoints ───────────────
+// Phase 1 MVP: health score computation for the 27-unit fleet
+// Endpoint specs: plans/igbt-health-phase1.md §9
+// Remote-mode proxy aware
+
+// Motive code definitions for health scoring
+const IGBT_THERMAL_CODES = [7, 21];      // TEMPERATURA, TEMP_AUX (per Slice ε motiveLabelsStd.js)
+const IGBT_FRAMA_CODES = [13, 29, 30];   // FRAMA3, FRAMA1, FRAMA2 (per Slice ε motiveLabelsStd.js)
+const IGBT_PI_ANA_CODES = [26];          // PI_ANA_SAT (per Slice ε motiveLabelsStd.js)
+const IGBT_ROLLING_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;  // 90 days
+
+// Import motive labels for API response
+const { MOTIVE_LABELS_STD } = require("./motiveLabelsStd");
+
+function getMotiveLabel(code) {
+  return MOTIVE_LABELS_STD[code] || `unknown(${code})`;
+}
+
+// CSV escaping helper (matches exporter.js pattern)
+function escapeCsvCell(v) {
+  let s = String(v ?? '');
+  return (s.includes(',') || s.includes('"') || s.includes('\n'))
+    ? `"${s.replace(/"/g, '""')}"`
+    : s;
+}
+
+// GET /api/igbt/fleet — Fetch fleet-wide health summary for 108 nodes
+app.get("/api/igbt/fleet", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const now = Date.now();
+    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const ipConfig = loadIpConfigFromDb();
+    const configuredNodes = getConfiguredNodeSet(ipConfig);
+
+    const nodes = [];
+    const tierCounts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
+    let totalImbalance = 0;
+    let imbalanceCount = 0;
+
+    // Enumerate all configured nodes
+    for (let inv = 1; inv <= 27; inv++) {
+      const invRecords = (ipConfig?.inverters || []).filter(r => r?.inverter === inv);
+
+      for (const invRecord of invRecords) {
+        const ip = invRecord?.ip;
+        if (!ip) continue;
+
+        const units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
+        if (units.length === 0) {
+          // Default to units 1-4 if not configured
+          units.push(1, 2, 3, 4);
+        }
+
+        for (const slave of units) {
+          // Query stop-reason counts (90-day window)
+          const thermalCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const framaCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const piAnaCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          // Query last hour 5-min parameters for imbalance
+          const oneHourAgo = now - 60 * 60 * 1000;
+          const paramRows = db.prepare(`
+            SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+              WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+              ORDER BY ts_ms DESC
+          `).all(ip, slave, oneHourAgo);
+
+          const imbalancePct = igbtHealth.medianImbalance(paramRows);
+          const tempC = paramRows?.[0]?.temp_c || null;
+
+          // Compute health score
+          const scoreResult = igbtHealth.computeHealthScore({
+            thermal_count: thermalCount,
+            frama_count: framaCount,
+            pi_ana_count: piAnaCount,
+            imbalance_pct: imbalancePct,
+          });
+
+          // Query last event
+          const lastEvent = db.prepare(`
+            SELECT motive_code, read_at_ms FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ?
+              ORDER BY read_at_ms DESC LIMIT 1
+          `).get(ip, slave);
+
+          const node = {
+            inverter: inv,
+            ip,
+            slave,
+            health_score: scoreResult.score,
+            tier: scoreResult.tier,
+            frama_total: framaCount,
+            frama_branch1: db.prepare(`
+              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
+            `).get(ip, slave, cutoffMs)?.cnt || 0,
+            frama_branch2: db.prepare(`
+              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
+            `).get(ip, slave, cutoffMs)?.cnt || 0,
+            frama_branch3: db.prepare(`
+              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
+            `).get(ip, slave, cutoffMs)?.cnt || 0,
+            thermal_trips: thermalCount,
+            pi_ana_trips: piAnaCount,
+            temp_pe_now_c: tempC,
+            imbalance_pct: imbalancePct,
+            last_event_ms: lastEvent?.read_at_ms || null,
+            last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
+          };
+
+          nodes.push(node);
+
+          // Count tiers
+          if (scoreResult.tier) {
+            tierCounts[scoreResult.tier]++;
+          } else {
+            tierCounts.offline++;
+          }
+
+          // Track average imbalance
+          if (typeof imbalancePct === "number") {
+            totalImbalance += imbalancePct;
+            imbalanceCount++;
+          }
+        }
+      }
+    }
+
+    res.json({
+      ok: true,
+      generated_at_ms: now,
+      rolling_window_days: 90,
+      nodes,
+      summary: {
+        total_nodes: nodes.length,
+        healthy_count: tierCounts.healthy,
+        watch_count: tierCounts.watch,
+        aging_count: tierCounts.aging,
+        eol_count: tierCounts.eol,
+        offline_count: tierCounts.offline,
+        avg_imbalance_pct: imbalanceCount > 0 ? totalImbalance / imbalanceCount : 0,
+      },
+    });
+  } catch (err) {
+    console.error("[IGBT] /api/igbt/fleet error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/igbt/node/:inverter/:slave — Drilldown detail panel
+app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+
+    if (!Number.isFinite(inv) || !Number.isFinite(slave) || inv < 1 || inv > 27 || slave < 1 || slave > 4) {
+      return res.status(400).json({ ok: false, error: "Invalid inverter or slave" });
+    }
+
+    // Look up IP from ipconfig
+    const ipConfig = loadIpConfigFromDb();
+    const invRecord = (ipConfig?.inverters || []).find(r => r?.inverter === inv);
+    if (!invRecord || !invRecord.ip) {
+      return res.status(404).json({ ok: false, error: "Node not found" });
+    }
+
+    const ip = invRecord.ip;
+    const now = Date.now();
+    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const oneHourAgo = now - 60 * 60 * 1000;
+
+    // Query counts
+    const thermalCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+    const framaCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+    const piAnaCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+    // Query param data for imbalance
+    const paramRows = db.prepare(`
+      SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+        WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+        ORDER BY ts_ms DESC
+    `).all(ip, slave, oneHourAgo);
+
+    const imbalancePct = igbtHealth.medianImbalance(paramRows);
+    const currentTemp = paramRows?.[0]?.temp_c || null;
+    const lastParamTs = paramRows?.[0]?.ts_ms || null;
+
+    // Compute health score
+    const scoreResult = igbtHealth.computeHealthScore({
+      thermal_count: thermalCount,
+      frama_count: framaCount,
+      pi_ana_count: piAnaCount,
+      imbalance_pct: imbalancePct,
+    });
+
+    // Query recent events (last 10 per category)
+    const thermalEvents = db.prepare(`
+      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+        ORDER BY read_at_ms DESC LIMIT 10
+    `).all(ip, slave, cutoffMs);
+
+    const framaEvents = db.prepare(`
+      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+        ORDER BY read_at_ms DESC LIMIT 10
+    `).all(ip, slave, cutoffMs);
+
+    const piAnaEvents = db.prepare(`
+      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+        ORDER BY read_at_ms DESC LIMIT 10
+    `).all(ip, slave, cutoffMs);
+
+    // Query current state from latest param
+    let currentIac1 = null, currentIac2 = null, currentIac3 = null;
+    if (paramRows && paramRows.length > 0) {
+      currentIac1 = paramRows[0].iac1_a;
+      currentIac2 = paramRows[0].iac2_a;
+      currentIac3 = paramRows[0].iac3_a;
+    }
+
+    res.json({
+      ok: true,
+      node: {
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score,
+        tier: scoreResult.tier,
+        computed_at_ms: now,
+      },
+      components: {
+        thermal_trip_score: scoreResult.breakdown.thermal_score,
+        thermal_trip_count: thermalCount,
+        thermal_trip_events: thermalEvents.map(e => ({
+          timestamp_iso: e.timestamp_iso,
+          motive_name: getMotiveLabel(e.motive_code),
+        })),
+        frama_score: scoreResult.breakdown.frama_score,
+        frama_total_count: framaCount,
+        frama_events: framaEvents.map(e => ({
+          timestamp_iso: e.timestamp_iso,
+          motive_name: getMotiveLabel(e.motive_code),
+        })),
+        pi_ana_score: scoreResult.breakdown.pi_ana_score,
+        pi_ana_count: piAnaCount,
+        pi_ana_events: piAnaEvents.map(e => ({
+          timestamp_iso: e.timestamp_iso,
+          motive_name: getMotiveLabel(e.motive_code),
+        })),
+        imbalance_score: scoreResult.breakdown.imbal_score,
+        imbalance_pct: imbalancePct,
+        imbalance_sample_count: paramRows.length,
+      },
+      current_state: {
+        temp_pe_c: currentTemp,
+        iac1_a: currentIac1,
+        iac2_a: currentIac2,
+        iac3_a: currentIac3,
+        last_5min_ts_ms: lastParamTs,
+        is_online_now: lastParamTs !== null && (now - lastParamTs) < 10 * 60 * 1000,
+      },
+    });
+  } catch (err) {
+    console.error("[IGBT] /api/igbt/node error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/igbt/fleet.csv — CSV export for capital planning
+app.get("/api/igbt/fleet.csv", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const now = Date.now();
+    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const ipConfig = loadIpConfigFromDb();
+
+    const rows = [];
+
+    // Enumerate all configured nodes
+    for (let inv = 1; inv <= 27; inv++) {
+      const invRecords = (ipConfig?.inverters || []).filter(r => r?.inverter === inv);
+
+      for (const invRecord of invRecords) {
+        const ip = invRecord?.ip;
+        if (!ip) continue;
+
+        const units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
+        if (units.length === 0) {
+          units.push(1, 2, 3, 4);
+        }
+
+        for (const slave of units) {
+          // Query data
+          const thermalCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const framaCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const bramaBranch1 = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const bramaBranch2 = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const bramaBranch3 = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const piAnaCount = db.prepare(`
+            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+          `).get(ip, slave, cutoffMs)?.cnt || 0;
+
+          const oneHourAgo = now - 60 * 60 * 1000;
+          const paramRows = db.prepare(`
+            SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+              WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+              ORDER BY ts_ms DESC
+          `).all(ip, slave, oneHourAgo);
+
+          const imbalancePct = igbtHealth.medianImbalance(paramRows);
+          const tempC = paramRows?.[0]?.temp_c || null;
+
+          const scoreResult = igbtHealth.computeHealthScore({
+            thermal_count: thermalCount,
+            frama_count: framaCount,
+            pi_ana_count: piAnaCount,
+            imbalance_pct: imbalancePct,
+          });
+
+          // Last event
+          const lastEvent = db.prepare(`
+            SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
+              WHERE inverter_ip = ? AND slave = ?
+              ORDER BY read_at_ms DESC LIMIT 1
+          `).get(ip, slave);
+
+          rows.push({
+            inverter: inv,
+            ip,
+            slave,
+            health_score: scoreResult.score !== null ? scoreResult.score.toFixed(1) : "",
+            tier: scoreResult.tier || "offline",
+            thermal_trips: thermalCount || "",
+            frama_total: framaCount || "",
+            frama_branch1: bramaBranch1 || "",
+            frama_branch2: bramaBranch2 || "",
+            frama_branch3: bramaBranch3 || "",
+            pi_ana_trips: piAnaCount || "",
+            temp_pe_c: tempC !== null ? tempC.toFixed(1) : "",
+            imbalance_pct: imbalancePct !== null ? imbalancePct.toFixed(1) : "",
+            last_event_iso: lastEvent?.timestamp_iso || "",
+            last_event_motive: lastEvent ? getMotiveLabel(lastEvent.motive_code) : "",
+            computed_at_iso: new Date(now).toISOString(),
+          });
+        }
+      }
+    }
+
+    // Generate CSV
+    const headers = [
+      "Inverter",
+      "IP",
+      "Slave",
+      "Health Score",
+      "Tier",
+      "Thermal Trips",
+      "FRAMA Total",
+      "FRAMA Branch 1",
+      "FRAMA Branch 2",
+      "FRAMA Branch 3",
+      "PI Ana Trips",
+      "Current Temp (°C)",
+      "Phase Imbalance (%)",
+      "Last Event (ISO)",
+      "Last Event Motive",
+      "Computed At (ISO)",
+    ];
+
+    const keys = [
+      "inverter",
+      "ip",
+      "slave",
+      "health_score",
+      "tier",
+      "thermal_trips",
+      "frama_total",
+      "frama_branch1",
+      "frama_branch2",
+      "frama_branch3",
+      "pi_ana_trips",
+      "temp_pe_c",
+      "imbalance_pct",
+      "last_event_iso",
+      "last_event_motive",
+      "computed_at_iso",
+    ];
+
+    // Build CSV with BOM
+    let csv = "﻿" + headers.join(",") + "\r\n";
+    for (const row of rows) {
+      const cells = keys.map(k => escapeCsvCell(row[k]));
+      csv += cells.join(",") + "\r\n";
+    }
+
+    // Send response
+    const dateStr = new Date(now).toISOString().split("T")[0];
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="adsi-igbt-fleet-${dateStr}.csv"`,
+    });
+    res.send(csv);
+  } catch (err) {
+    console.error("[IGBT] /api/igbt/fleet.csv error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });

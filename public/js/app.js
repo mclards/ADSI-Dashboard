@@ -4543,6 +4543,7 @@ function switchPage(page) {
   if (page === "export") initExportPage();
   if (page === "forecast") initForecastPage();
   if (page === "plant-cap") initPlantCapPage();
+  if (page === "igbt-health") initIgbtHealthPage();
   if (page === "settings") {
     initSettingsSectionNav();
     unlockSettingsInputs();
@@ -22712,6 +22713,379 @@ async function init() {
     console.error("[startup] init failed:", err);
     reportStartupFailure(err?.message || err || "Dashboard startup failed.");
   }
+}
+
+/* ── IGBT Health Page (v2.11.0 Phase 1) ────────────────────────────────────── */
+
+function initIgbtHealthPage() {
+  // Initialize tier filter chips
+  attachTierFilterListeners();
+  // Initialize action buttons
+  attachRefreshListeners();
+  attachExportListeners();
+  // Load and render the fleet data
+  loadAndRenderIgbtHealthPage().catch((err) => {
+    console.error("[igbt] Failed to load health page:", err);
+    showToast("Failed to load IGBT health data", 3000);
+  });
+}
+
+async function loadAndRenderIgbtHealthPage() {
+  try {
+    showToast("Loading IGBT health data...", 0);
+
+    const response = await fetch("/api/igbt/fleet");
+    const data = await response.json();
+
+    if (!data.ok) {
+      throw new Error(data.error || "Failed to fetch fleet data");
+    }
+
+    // Update metadata
+    const computedAtEl = $("igbtComputedAt");
+    if (computedAtEl && data.generated_at_ms) {
+      const dt = new Date(data.generated_at_ms);
+      computedAtEl.textContent = dt.toLocaleString();
+    }
+
+    // Render fleet table
+    renderIgbtFleetTable(data.nodes || []);
+
+    // Attach row click listeners
+    attachFleetTableClickListeners();
+
+    hideToast();
+  } catch (err) {
+    console.error("[igbt] loadAndRenderIgbtHealthPage failed:", err);
+    showToast("Error: " + (err?.message || "Unknown error"), 5000);
+  }
+}
+
+function renderIgbtFleetTable(nodes) {
+  const tbody = $("igbtFleetTableBody");
+  if (!tbody) return;
+
+  tbody.innerHTML = "";
+
+  if (!nodes || nodes.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td colspan="12" style="text-align: center; padding: 20px; color: var(--text2);">
+        No nodes found
+      </td>
+    `;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  nodes.forEach((node) => {
+    const tr = document.createElement("tr");
+    const tierClass = `tier-${node.tier || "offline"}`;
+    tr.className = tierClass;
+    tr.dataset.inverter = node.inverter;
+    tr.dataset.slave = node.slave;
+    tr.dataset.tier = node.tier;
+
+    // Format values
+    const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
+    const tempDisplay = node.temp_pe_now_c != null ? node.temp_pe_now_c.toFixed(1) : "—";
+    const imbalanceDisplay = node.imbalance_pct != null ? node.imbalance_pct.toFixed(2) : "—";
+    const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
+
+    tr.innerHTML = `
+      <td>${node.inverter}</td>
+      <td>${node.ip || "—"}</td>
+      <td>${node.slave}</td>
+      <td class="score-cell ${node.tier}">${scoreDisplay}</td>
+      <td class="tier-cell ${node.tier}">${node.tier || "Offline"}</td>
+      <td>${node.frama_total || 0}</td>
+      <td>${node.frama_branch1 || 0}</td>
+      <td>${node.frama_branch2 || 0}</td>
+      <td>${node.frama_branch3 || 0}</td>
+      <td>${node.thermal_trips || 0}</td>
+      <td>${node.pi_ana_trips || 0}</td>
+      <td>${tempDisplay}</td>
+      <td>${imbalanceDisplay}</td>
+      <td class="text-muted">${lastEventDisplay}</td>
+    `;
+
+    tbody.appendChild(tr);
+  });
+
+  // Apply tier filter after rendering
+  applyTierFilter();
+}
+
+function attachFleetTableClickListeners() {
+  const table = $("igbtFleetTable");
+  if (!table) return;
+
+  table.querySelectorAll("tbody tr").forEach((tr) => {
+    tr.addEventListener("click", async () => {
+      const inverter = tr.dataset.inverter;
+      const slave = tr.dataset.slave;
+
+      if (!inverter || !slave) return;
+
+      // Mark as selected
+      table.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
+      tr.classList.add("selected");
+
+      // Fetch and render drilldown
+      await renderDrilldownPanel(inverter, slave);
+    });
+  });
+}
+
+async function renderDrilldownPanel(inverter, slave) {
+  const panel = $("igbtDetailPanel");
+  if (!panel) return;
+
+  try {
+    showToast("Loading node details...", 0);
+
+    const response = await fetch(`/api/igbt/node/${inverter}/${slave}`);
+    const data = await response.json();
+
+    if (!data.ok) {
+      throw new Error(data.error || "Failed to fetch node data");
+    }
+
+    const node = data.node;
+    const components = data.components || {};
+    const currentState = data.current_state || {};
+
+    // Update header
+    const headerId = panel.querySelector(".node-id");
+    if (headerId) {
+      headerId.textContent = `${node.inverter} / Slave ${node.slave}`;
+    }
+
+    // Update body
+    const bodyEl = $("igbtDetailBody");
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <!-- Score Section -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-row score-row">
+            <div class="igbt-detail-value score-value">
+              ${(node.health_score || 0).toFixed(1)}
+              <span class="tier-badge ${node.tier}">${node.tier || "Offline"}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Thermal Component -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Thermal Component</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(components.thermal_trip_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Trips (90d)</div>
+            <div class="igbt-detail-value">${components.thermal_trip_count || 0}</div>
+          </div>
+          ${(components.thermal_trip_events || []).length > 0 ? `
+            <div class="event-list">
+              ${(components.thermal_trip_events || []).slice(0, 5).map((evt) => `
+                <div class="event-item">
+                  <div class="event-item-time">${new Date(evt.timestamp_iso).toLocaleString()}</div>
+                  <div class="event-item-name">${evt.motive_name || "Unknown"}</div>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+        </div>
+
+        <!-- FRAMA Component -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">FRAMA Component</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(components.frama_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Events (90d)</div>
+            <div class="igbt-detail-value">${components.frama_total_count || 0}</div>
+          </div>
+          ${(components.frama_events || []).length > 0 ? `
+            <div class="event-list">
+              ${(components.frama_events || []).slice(0, 5).map((evt) => `
+                <div class="event-item">
+                  <div class="event-item-time">${new Date(evt.timestamp_iso).toLocaleString()}</div>
+                  <div class="event-item-name">${evt.motive_name || "Unknown"}</div>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+        </div>
+
+        <!-- PI Ana Component -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">PI Controller Component</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(components.pi_ana_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Saturation (90d)</div>
+            <div class="igbt-detail-value">${components.pi_ana_count || 0}</div>
+          </div>
+          ${(components.pi_ana_events || []).length > 0 ? `
+            <div class="event-list">
+              ${(components.pi_ana_events || []).slice(0, 5).map((evt) => `
+                <div class="event-item">
+                  <div class="event-item-time">${new Date(evt.timestamp_iso).toLocaleString()}</div>
+                  <div class="event-item-name">${evt.motive_name || "Unknown"}</div>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+        </div>
+
+        <!-- Imbalance Component -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Phase Imbalance</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(components.imbalance_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Imbalance %</div>
+            <div class="igbt-detail-value">${components.imbalance_pct != null ? components.imbalance_pct.toFixed(2) : "—"} %</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Samples (60m)</div>
+            <div class="igbt-detail-value">${components.imbalance_sample_count || 0}</div>
+          </div>
+        </div>
+
+        <!-- Current State -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Current State</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Status</div>
+            <div class="igbt-detail-value">${currentState.is_online_now ? "Online" : "Offline"}</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Temperature</div>
+            <div class="igbt-detail-value">${currentState.temp_pe_c != null ? currentState.temp_pe_c.toFixed(1) : "—"} °C</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Iac1 / Iac2 / Iac3</div>
+            <div class="igbt-detail-value">
+              ${currentState.iac1_a != null ? currentState.iac1_a.toFixed(1) : "—"} / ${currentState.iac2_a != null ? currentState.iac2_a.toFixed(1) : "—"} / ${currentState.iac3_a != null ? currentState.iac3_a.toFixed(1) : "—"} A
+            </div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Last Update</div>
+            <div class="igbt-detail-value">${currentState.last_5min_ts_ms ? new Date(currentState.last_5min_ts_ms).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Show panel
+    panel.style.display = "";
+    panel.removeAttribute("hidden");
+
+    hideToast();
+  } catch (err) {
+    console.error("[igbt] renderDrilldownPanel failed:", err);
+    showToast("Error: " + (err?.message || "Unknown error"), 5000);
+  }
+}
+
+function attachTierFilterListeners() {
+  const group = document.querySelector("#page-igbt-health .tier-filter-group");
+  if (!group) return;
+
+  group.querySelectorAll(".tier-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const tier = chip.dataset.tier;
+      const isSelected = chip.getAttribute("data-selected") === "true";
+      chip.setAttribute("data-selected", (!isSelected).toString());
+      applyTierFilter();
+    });
+  });
+}
+
+function applyTierFilter() {
+  const group = document.querySelector("#page-igbt-health .tier-filter-group");
+  if (!group) return;
+
+  const selectedTiers = new Set();
+  let selectAll = false;
+
+  group.querySelectorAll(".tier-chip").forEach((chip) => {
+    if (chip.dataset.tier === "all" && chip.getAttribute("data-selected") === "true") {
+      selectAll = true;
+    } else if (chip.getAttribute("data-selected") === "true") {
+      selectedTiers.add(chip.dataset.tier);
+    }
+  });
+
+  const tbody = $("igbtFleetTableBody");
+  if (!tbody) return;
+
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    const tier = tr.dataset.tier || "offline";
+    const shouldShow = selectAll || selectedTiers.size === 0 || selectedTiers.has(tier);
+    tr.classList.toggle("hidden", !shouldShow);
+  });
+}
+
+function attachRefreshListeners() {
+  const btn = $("btnRefreshIgbt");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    try {
+      btn.disabled = true;
+      await loadAndRenderIgbtHealthPage();
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function attachExportListeners() {
+  const btn = $("btnExportIgbtCsv");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    try {
+      btn.disabled = true;
+      showToast("Exporting CSV...", 0);
+
+      const response = await fetch("/api/igbt/fleet.csv");
+      if (!response.ok) {
+        throw new Error("Export failed");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+
+      // Generate filename with today's date
+      const today = new Date().toISOString().split("T")[0];
+      a.download = `adsi-igbt-fleet-${today}.csv`;
+
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      hideToast();
+    } catch (err) {
+      console.error("[igbt] CSV export failed:", err);
+      showToast("Error: " + (err?.message || "Export failed"), 5000);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);
