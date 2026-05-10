@@ -1164,6 +1164,146 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_p5m_date     ON inverter_5min_param (date_local, inverter_ip);
   CREATE INDEX IF NOT EXISTS idx_p5m_inv_date ON inverter_5min_param (inverter_ip, slave, date_local);
   CREATE INDEX IF NOT EXISTS idx_p5m_solar    ON inverter_5min_param (date_local, in_solar_window) WHERE in_solar_window = 1;
+
+  -- v2.11.0 Active Power Control: last successfully written %P setpoint per slave.
+  -- Durable (no TTL) — state table reflects the inverter's current commanded setpoint.
+  -- Replicated to remote viewers (add to replication whitelist when gateway push lands).
+  CREATE TABLE IF NOT EXISTS inverter_curtailment_state (
+    inverter_ip   TEXT    NOT NULL,
+    slave         INTEGER NOT NULL,
+    active_pct    REAL    NOT NULL DEFAULT 100,
+    opcode        INTEGER NOT NULL DEFAULT 6,
+    applied_ts    INTEGER NOT NULL,
+    job_id        TEXT,
+    source        TEXT,
+    PRIMARY KEY (inverter_ip, slave)
+  );
+
+  -- v2.11.0 Active Power Control: per-write detail log for every ramp job.
+  -- Retained for curtailmentRampLogRetainDays (default 90). Local-only (not replicated).
+  CREATE TABLE IF NOT EXISTS inverter_curtailment_ramp_log (
+    job_id        TEXT    NOT NULL,
+    ts            INTEGER NOT NULL,
+    inverter_ip   TEXT,
+    slave         INTEGER,
+    sub_step      INTEGER,
+    batch_idx     INTEGER,
+    setpoint_pct  REAL,
+    result        TEXT,
+    error         TEXT,
+    PRIMARY KEY (job_id, ts, inverter_ip, slave)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ramp_job_ts ON inverter_curtailment_ramp_log(job_id, ts);
+
+  -- v2.11.0 IGBT Health Phase 2.1 — per-day matched-conditions thermal baseline.
+  -- One row per (inverter_ip, slave, date_local). Computed by the daily capture
+  -- job (23:55 local) and the startup backfill from inverter_5min_param.
+  -- Pure-function math lives in server/igbtThermal.js.
+  --
+  -- mean_temp_c is NULL unless reason='computed'. Other reasons:
+  --   'insufficient_samples' — fewer than MIN_SAMPLES (6) midday in-band rows
+  --   'no_data'              — no 5-min rows for the bucket
+  --   'no_rated_kw'          — ipconfig had no rated kW for the slave
+  --   'excluded_stop_event'  — day contained an aging-relevant stop event
+  CREATE TABLE IF NOT EXISTS igbt_thermal_baseline (
+    inverter_ip    TEXT    NOT NULL,
+    slave          INTEGER NOT NULL,
+    date_local     TEXT    NOT NULL,
+    sample_count   INTEGER NOT NULL DEFAULT 0,
+    mean_temp_c    REAL,
+    reason         TEXT    NOT NULL,
+    computed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (inverter_ip, slave, date_local)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_igbt_thermal_date    ON igbt_thermal_baseline (date_local);
+  CREATE INDEX IF NOT EXISTS idx_igbt_thermal_inv_date ON igbt_thermal_baseline (inverter_ip, slave, date_local);
+
+  -- v2.11.0 Plant Controller — NGCP PGC 2016 compliance test storage.
+  -- One row per test run (started → completed/aborted/failed).
+  -- Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice θ.1
+  CREATE TABLE IF NOT EXISTS compliance_run (
+    run_id          TEXT    PRIMARY KEY,
+    test_kind       TEXT    NOT NULL,             -- 't2_freq_withstand' | 't5_apc_sweep' | …
+    started_at_ms   INTEGER NOT NULL,
+    ended_at_ms     INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'running', -- running|completed|aborted|failed
+    operator_actor  TEXT,                          -- bulk-auth key fingerprint or 'system'
+    target_inverters TEXT,                         -- JSON array of {inverter, ip, slave}
+    params_json     TEXT,                          -- JSON test parameters (sweep ramp, hold time, etc.)
+    summary_json    TEXT,                          -- JSON post-run summary
+    error_message   TEXT
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_compliance_run_kind_started
+    ON compliance_run(test_kind, started_at_ms DESC);
+
+  -- Per-step record (e.g. each setpoint plateau in a T5 sweep).
+  CREATE TABLE IF NOT EXISTS compliance_run_step (
+    run_id        TEXT    NOT NULL,
+    step_idx      INTEGER NOT NULL,
+    step_name     TEXT    NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    ended_at_ms   INTEGER,
+    target_value  REAL,
+    achieved_value REAL,
+    deviation_pct REAL,
+    pass          INTEGER,                          -- 1=pass, 0=fail, NULL=indeterminate
+    notes         TEXT,
+    PRIMARY KEY (run_id, step_idx)
+  ) WITHOUT ROWID;
+
+  -- Time-series sample buffer (one row per capture tick per inverter).
+  CREATE TABLE IF NOT EXISTS compliance_run_sample (
+    run_id      TEXT    NOT NULL,
+    ts_ms       INTEGER NOT NULL,
+    inverter_ip TEXT    NOT NULL,
+    slave       INTEGER NOT NULL,
+    pac_w       INTEGER,
+    qac_var     INTEGER,
+    vac_avg_v   REAL,
+    iac_avg_a   REAL,
+    freq_hz     REAL,
+    cosphi      REAL,
+    temp_c      INTEGER,
+    state_raw   INTEGER,
+    alarm_32    INTEGER,
+    pwr_red_bits INTEGER,
+    PRIMARY KEY (run_id, ts_ms, inverter_ip, slave)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_compliance_sample_run_ts
+    ON compliance_run_sample(run_id, ts_ms);
+
+  -- Artifact catalog (PDF, CSV, optional witness sign-off images).
+  CREATE TABLE IF NOT EXISTS compliance_run_artifact (
+    run_id        TEXT    NOT NULL,
+    artifact_kind TEXT    NOT NULL,                -- 'pdf' | 'csv' | 'witness'
+    file_path     TEXT    NOT NULL,
+    sha256        TEXT,
+    bytes         INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (run_id, artifact_kind, file_path)
+  ) WITHOUT ROWID;
+
+  -- v2.11.0 Slice δ — APC write verification log. Every cmd-3 write enqueues
+  -- a verify cycle that reads holding 41006 + input 30117 bit 1; result rows
+  -- live here for the APC card "Verified ✓ / Mismatch ✗" UI + audit trail.
+  CREATE TABLE IF NOT EXISTS apc_verify_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    write_ts_ms     INTEGER NOT NULL,
+    verify_ts_ms    INTEGER,
+    inverter_ip     TEXT    NOT NULL,
+    slave           INTEGER NOT NULL,
+    requested_pct   REAL    NOT NULL,
+    observed_q15    INTEGER,
+    observed_pct    REAL,
+    bit1_active     INTEGER,                       -- 1 = Modbus reduction active, 0 = not, NULL = unknown
+    result          TEXT    NOT NULL,              -- 'ok' | 'mismatch' | 'no_response' | 'timeout' | 'pending'
+    job_id          TEXT,
+    error_message   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_apc_verify_inv_slave_ts
+    ON apc_verify_log(inverter_ip, slave, write_ts_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_apc_verify_result
+    ON apc_verify_log(result, write_ts_ms DESC);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -1408,7 +1548,6 @@ ensureColumn("inverter_5min_param", "analog_in_4_avg",              "analog_in_4
 ensureColumn("inverter_5min_param", "pt100_1_last",                 "pt100_1_last INTEGER");
 ensureColumn("inverter_5min_param", "pt100_2_last",                 "pt100_2_last INTEGER");
 ensureColumn("inverter_5min_param", "inverter_state_raw_last",      "inverter_state_raw_last INTEGER");
-
 // Forecast compare persistence (detailed provenance/error-memory basis).
 ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");
@@ -4444,6 +4583,379 @@ function deleteScheduledMaintenance(id) {
   return result.changes;
 }
 
+// ── v2.11.0 Active Power Control helpers ─────────────────────────────────────
+
+function upsertCurtailmentState(inverterIp, slave, activePct, opcode, jobId, source) {
+  db.prepare(
+    `INSERT INTO inverter_curtailment_state
+       (inverter_ip, slave, active_pct, opcode, applied_ts, job_id, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(inverter_ip, slave) DO UPDATE SET
+       active_pct = excluded.active_pct,
+       opcode     = excluded.opcode,
+       applied_ts = excluded.applied_ts,
+       job_id     = excluded.job_id,
+       source     = excluded.source`,
+  ).run(
+    String(inverterIp),
+    Number(slave),
+    Number(activePct),
+    Number(opcode),
+    Date.now(),
+    jobId ? String(jobId) : null,
+    source ? String(source) : "operator",
+  );
+}
+
+function insertRampLog({ job_id, ts, inverter_ip, slave, sub_step, batch_idx, setpoint_pct, result, error }) {
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO inverter_curtailment_ramp_log
+         (job_id, ts, inverter_ip, slave, sub_step, batch_idx, setpoint_pct, result, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      String(job_id),
+      Number(ts) || Date.now(),
+      inverter_ip ? String(inverter_ip) : null,
+      slave != null ? Number(slave) : null,
+      sub_step != null ? Number(sub_step) : null,
+      batch_idx != null ? Number(batch_idx) : null,
+      setpoint_pct != null ? Number(setpoint_pct) : null,
+      result ? String(result) : null,
+      error ? String(error) : null,
+    );
+  } catch (err) {
+    console.warn("[ramp_log] insert failed:", err && err.message);
+  }
+}
+
+function getApcState() {
+  return db.prepare("SELECT * FROM inverter_curtailment_state ORDER BY inverter_ip, slave").all();
+}
+
+function markStaleRampsAborted() {
+  // On dashboard start, any log rows without a terminal result are from a mid-ramp restart.
+  const rows = db.prepare(
+    "SELECT DISTINCT job_id FROM inverter_curtailment_ramp_log WHERE result IS NULL",
+  ).all();
+  if (!rows.length) return 0;
+  const stmt = db.prepare(
+    "UPDATE inverter_curtailment_ramp_log SET result = 'aborted', error = 'dashboard_restart' WHERE job_id = ? AND result IS NULL",
+  );
+  const tx = db.transaction(() => {
+    for (const r of rows) stmt.run(r.job_id);
+  });
+  tx();
+  return rows.length;
+}
+
+function pruneRampLog(retainDays = 90) {
+  const cutoff = Date.now() - retainDays * 86400000;
+  return db.prepare("DELETE FROM inverter_curtailment_ramp_log WHERE ts < ?").run(cutoff).changes;
+}
+
+/* ── IGBT Health Phase 2.1 — thermal baseline helpers ────────────────────── */
+
+const stmtUpsertThermalBaseline = db.prepare(`
+  INSERT INTO igbt_thermal_baseline
+    (inverter_ip, slave, date_local, sample_count, mean_temp_c, reason, computed_at_ms)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(inverter_ip, slave, date_local) DO UPDATE SET
+    sample_count   = excluded.sample_count,
+    mean_temp_c    = excluded.mean_temp_c,
+    reason         = excluded.reason,
+    computed_at_ms = excluded.computed_at_ms
+`);
+
+function upsertIgbtThermalBaseline({ inverter_ip, slave, date_local, sample_count, mean_temp_c, reason, computed_at_ms }) {
+  return stmtUpsertThermalBaseline.run(
+    String(inverter_ip || ""),
+    Number(slave),
+    String(date_local || ""),
+    Number(sample_count) || 0,
+    mean_temp_c == null ? null : Number(mean_temp_c),
+    String(reason || "no_data"),
+    Number(computed_at_ms) || Date.now(),
+  );
+}
+
+const stmtGetThermalBaselineRange = db.prepare(`
+  SELECT date_local, sample_count, mean_temp_c, reason
+    FROM igbt_thermal_baseline
+   WHERE inverter_ip = ? AND slave = ?
+     AND date_local BETWEEN ? AND ?
+   ORDER BY date_local ASC
+`);
+
+function getIgbtThermalBaselineRange(inverter_ip, slave, fromDateInclusive, toDateInclusive) {
+  return stmtGetThermalBaselineRange.all(
+    String(inverter_ip || ""),
+    Number(slave),
+    String(fromDateInclusive || ""),
+    String(toDateInclusive || ""),
+  );
+}
+
+const stmtGetThermalBaselineDates = db.prepare(`
+  SELECT DISTINCT date_local FROM igbt_thermal_baseline
+   WHERE inverter_ip = ? AND slave = ?
+     AND date_local BETWEEN ? AND ?
+`);
+
+function getIgbtThermalBaselineDateSet(inverter_ip, slave, fromDateInclusive, toDateInclusive) {
+  const rows = stmtGetThermalBaselineDates.all(
+    String(inverter_ip || ""),
+    Number(slave),
+    String(fromDateInclusive || ""),
+    String(toDateInclusive || ""),
+  );
+  const set = new Set();
+  for (const r of rows) set.add(String(r?.date_local || ""));
+  return set;
+}
+
+const stmt5minParamForDay = db.prepare(`
+  SELECT slot_index, pac_w, temp_c
+    FROM inverter_5min_param
+   WHERE inverter_ip = ? AND slave = ? AND date_local = ?
+`);
+
+function get5minParamRowsForDay(inverter_ip, slave, date_local) {
+  return stmt5minParamForDay.all(
+    String(inverter_ip || ""),
+    Number(slave),
+    String(date_local || ""),
+  );
+}
+
+// Aging-relevant motive codes (kept here so the capture job can stay generic).
+// Source: server/motiveLabelsStd.js + plans/igbt-health-phase1.md §5.
+const IGBT_AGING_MOTIVE_CODES = [7, 13, 21, 26, 29, 30];
+
+const stmtAgingStopForDay = db.prepare(`
+  SELECT 1 FROM inverter_stop_reasons_std
+   WHERE inverter_ip = ? AND slave = ?
+     AND read_at_ms BETWEEN ? AND ?
+     AND motive_code IN (${IGBT_AGING_MOTIVE_CODES.join(",")})
+   LIMIT 1
+`);
+
+function dayHadAgingStopEvent(inverter_ip, slave, date_local) {
+  // Local-day window expressed in ms via UTC midnight. The 5-min table stores
+  // date_local as YYYY-MM-DD; the stop_reasons table only has read_at_ms.
+  // We bound by [day 00:00, day+1 00:00) in local time.
+  const ts = Date.parse(String(date_local) + "T00:00:00");
+  if (!Number.isFinite(ts)) return false;
+  const start = ts;
+  const end = ts + 86400_000 - 1;
+  const row = stmtAgingStopForDay.get(
+    String(inverter_ip || ""),
+    Number(slave),
+    start,
+    end,
+  );
+  return !!row;
+}
+
+/* ── Plant Controller — NGCP compliance run helpers (v2.11.0) ───────────── */
+
+const stmtInsertComplianceRun = db.prepare(`
+  INSERT INTO compliance_run
+    (run_id, test_kind, started_at_ms, status, operator_actor, target_inverters, params_json)
+  VALUES (?, ?, ?, 'running', ?, ?, ?)
+`);
+const stmtUpdateComplianceRunFinal = db.prepare(`
+  UPDATE compliance_run
+     SET ended_at_ms = ?, status = ?, summary_json = ?, error_message = ?
+   WHERE run_id = ?
+`);
+const stmtListComplianceRuns = db.prepare(`
+  SELECT * FROM compliance_run ORDER BY started_at_ms DESC LIMIT ?
+`);
+const stmtGetComplianceRun = db.prepare(`SELECT * FROM compliance_run WHERE run_id = ?`);
+const stmtListComplianceRunsByKind = db.prepare(`
+  SELECT * FROM compliance_run WHERE test_kind = ? ORDER BY started_at_ms DESC LIMIT ?
+`);
+
+const stmtInsertComplianceStep = db.prepare(`
+  INSERT INTO compliance_run_step
+    (run_id, step_idx, step_name, started_at_ms, ended_at_ms, target_value, achieved_value, deviation_pct, pass, notes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(run_id, step_idx) DO UPDATE SET
+    step_name=excluded.step_name, started_at_ms=excluded.started_at_ms,
+    ended_at_ms=excluded.ended_at_ms, target_value=excluded.target_value,
+    achieved_value=excluded.achieved_value, deviation_pct=excluded.deviation_pct,
+    pass=excluded.pass, notes=excluded.notes
+`);
+const stmtListComplianceSteps = db.prepare(`
+  SELECT * FROM compliance_run_step WHERE run_id = ? ORDER BY step_idx ASC
+`);
+
+const stmtInsertComplianceSample = db.prepare(`
+  INSERT INTO compliance_run_sample
+    (run_id, ts_ms, inverter_ip, slave, pac_w, qac_var, vac_avg_v, iac_avg_a, freq_hz, cosphi, temp_c, state_raw, alarm_32, pwr_red_bits)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(run_id, ts_ms, inverter_ip, slave) DO UPDATE SET
+    pac_w=excluded.pac_w, qac_var=excluded.qac_var,
+    vac_avg_v=excluded.vac_avg_v, iac_avg_a=excluded.iac_avg_a,
+    freq_hz=excluded.freq_hz, cosphi=excluded.cosphi, temp_c=excluded.temp_c,
+    state_raw=excluded.state_raw, alarm_32=excluded.alarm_32, pwr_red_bits=excluded.pwr_red_bits
+`);
+const stmtListComplianceSamples = db.prepare(`
+  SELECT * FROM compliance_run_sample WHERE run_id = ? ORDER BY ts_ms ASC, inverter_ip ASC, slave ASC
+`);
+
+const stmtInsertComplianceArtifact = db.prepare(`
+  INSERT INTO compliance_run_artifact
+    (run_id, artifact_kind, file_path, sha256, bytes, created_at_ms)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(run_id, artifact_kind, file_path) DO UPDATE SET
+    sha256=excluded.sha256, bytes=excluded.bytes, created_at_ms=excluded.created_at_ms
+`);
+const stmtListComplianceArtifacts = db.prepare(`
+  SELECT * FROM compliance_run_artifact WHERE run_id = ? ORDER BY created_at_ms ASC
+`);
+
+function insertComplianceRun({ run_id, test_kind, started_at_ms, operator_actor, target_inverters, params_json }) {
+  return stmtInsertComplianceRun.run(
+    String(run_id), String(test_kind), Number(started_at_ms),
+    operator_actor == null ? "system" : String(operator_actor),
+    target_inverters == null ? "[]" : JSON.stringify(target_inverters),
+    params_json == null ? "{}" : (typeof params_json === "string" ? params_json : JSON.stringify(params_json)),
+  );
+}
+
+function finalizeComplianceRun({ run_id, ended_at_ms, status, summary_json, error_message }) {
+  return stmtUpdateComplianceRunFinal.run(
+    Number(ended_at_ms) || Date.now(),
+    String(status || "completed"),
+    summary_json == null ? null : (typeof summary_json === "string" ? summary_json : JSON.stringify(summary_json)),
+    error_message ? String(error_message) : null,
+    String(run_id),
+  );
+}
+
+function listComplianceRuns(limit = 50, kind) {
+  if (kind) return stmtListComplianceRunsByKind.all(String(kind), Math.max(1, Math.min(500, Number(limit) || 50)));
+  return stmtListComplianceRuns.all(Math.max(1, Math.min(500, Number(limit) || 50)));
+}
+
+function getComplianceRun(run_id) {
+  return stmtGetComplianceRun.get(String(run_id));
+}
+
+function appendComplianceStep(step) {
+  return stmtInsertComplianceStep.run(
+    String(step.run_id), Number(step.step_idx), String(step.step_name || ""),
+    Number(step.started_at_ms) || Date.now(),
+    step.ended_at_ms == null ? null : Number(step.ended_at_ms),
+    step.target_value == null ? null : Number(step.target_value),
+    step.achieved_value == null ? null : Number(step.achieved_value),
+    step.deviation_pct == null ? null : Number(step.deviation_pct),
+    step.pass == null ? null : (step.pass ? 1 : 0),
+    step.notes ? String(step.notes) : null,
+  );
+}
+
+function listComplianceSteps(run_id) {
+  return stmtListComplianceSteps.all(String(run_id));
+}
+
+function appendComplianceSample(s) {
+  return stmtInsertComplianceSample.run(
+    String(s.run_id), Number(s.ts_ms), String(s.inverter_ip), Number(s.slave),
+    s.pac_w == null ? null : Number(s.pac_w),
+    s.qac_var == null ? null : Number(s.qac_var),
+    s.vac_avg_v == null ? null : Number(s.vac_avg_v),
+    s.iac_avg_a == null ? null : Number(s.iac_avg_a),
+    s.freq_hz == null ? null : Number(s.freq_hz),
+    s.cosphi == null ? null : Number(s.cosphi),
+    s.temp_c == null ? null : Number(s.temp_c),
+    s.state_raw == null ? null : Number(s.state_raw),
+    s.alarm_32 == null ? null : Number(s.alarm_32),
+    s.pwr_red_bits == null ? null : Number(s.pwr_red_bits),
+  );
+}
+
+function listComplianceSamples(run_id) {
+  return stmtListComplianceSamples.all(String(run_id));
+}
+
+function appendComplianceArtifact({ run_id, artifact_kind, file_path, sha256, bytes }) {
+  return stmtInsertComplianceArtifact.run(
+    String(run_id), String(artifact_kind), String(file_path),
+    sha256 == null ? null : String(sha256),
+    bytes == null ? null : Number(bytes),
+    Date.now(),
+  );
+}
+
+function listComplianceArtifacts(run_id) {
+  return stmtListComplianceArtifacts.all(String(run_id));
+}
+
+/* ── Plant Controller — APC verification log helpers (Slice δ) ───────────── */
+
+const stmtInsertApcVerify = db.prepare(`
+  INSERT INTO apc_verify_log
+    (write_ts_ms, verify_ts_ms, inverter_ip, slave, requested_pct, observed_q15, observed_pct, bit1_active, result, job_id, error_message)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const stmtLatestApcVerifyByNode = db.prepare(`
+  SELECT * FROM apc_verify_log
+   WHERE inverter_ip = ? AND slave = ?
+   ORDER BY write_ts_ms DESC LIMIT 1
+`);
+const stmtLatestApcVerifyAll = db.prepare(`
+  SELECT v.* FROM apc_verify_log v
+   INNER JOIN (
+     SELECT inverter_ip, slave, MAX(write_ts_ms) AS mx
+       FROM apc_verify_log GROUP BY inverter_ip, slave
+   ) m ON m.inverter_ip = v.inverter_ip AND m.slave = v.slave AND m.mx = v.write_ts_ms
+   ORDER BY v.write_ts_ms DESC
+`);
+const stmtPruneApcVerify = db.prepare(`
+  DELETE FROM apc_verify_log WHERE write_ts_ms < ?
+`);
+
+function insertApcVerifyLog(row) {
+  return stmtInsertApcVerify.run(
+    Number(row.write_ts_ms) || Date.now(),
+    row.verify_ts_ms == null ? null : Number(row.verify_ts_ms),
+    String(row.inverter_ip || ""), Number(row.slave),
+    Number(row.requested_pct),
+    row.observed_q15 == null ? null : Number(row.observed_q15),
+    row.observed_pct == null ? null : Number(row.observed_pct),
+    row.bit1_active == null ? null : (row.bit1_active ? 1 : 0),
+    String(row.result || "pending"),
+    row.job_id ? String(row.job_id) : null,
+    row.error_message ? String(row.error_message) : null,
+  );
+}
+
+function getLatestApcVerify(inverter_ip, slave) {
+  return stmtLatestApcVerifyByNode.get(String(inverter_ip || ""), Number(slave));
+}
+
+function getLatestApcVerifyAll() {
+  return stmtLatestApcVerifyAll.all();
+}
+
+function pruneApcVerifyLog(retainDays = 90) {
+  const cutoff = Date.now() - Math.max(7, Number(retainDays) || 90) * 86400_000;
+  return stmtPruneApcVerify.run(cutoff).changes;
+}
+
+function pruneIgbtThermalBaseline(retainDays = 800) {
+  // Keep ≥ 2 years so YoY comparisons still work after a long uptime.
+  const cutoffDays = Math.max(400, Math.floor(Number(retainDays) || 800));
+  const cutoffDate = new Date(Date.now() - cutoffDays * 86400_000)
+    .toISOString().slice(0, 10);
+  return db.prepare(
+    "DELETE FROM igbt_thermal_baseline WHERE date_local < ?"
+  ).run(cutoffDate).changes;
+}
+
 module.exports = {
   db,
   stmts,
@@ -4535,4 +5047,34 @@ module.exports = {
   getClockSyncLog,
   // v2.9.2 — generic audit writer used by poller spike clamps
   insertAuditLogRow,
+  // v2.11.0 Active Power Control
+  upsertCurtailmentState,
+  insertRampLog,
+  getApcState,
+  markStaleRampsAborted,
+  pruneRampLog,
+  // v2.11.0 IGBT Health Phase 2.1 — thermal baseline
+  upsertIgbtThermalBaseline,
+  getIgbtThermalBaselineRange,
+  getIgbtThermalBaselineDateSet,
+  get5minParamRowsForDay,
+  dayHadAgingStopEvent,
+  pruneIgbtThermalBaseline,
+  IGBT_AGING_MOTIVE_CODES,
+  // v2.11.0 Plant Controller — NGCP compliance run helpers
+  insertComplianceRun,
+  finalizeComplianceRun,
+  listComplianceRuns,
+  getComplianceRun,
+  appendComplianceStep,
+  listComplianceSteps,
+  appendComplianceSample,
+  listComplianceSamples,
+  appendComplianceArtifact,
+  listComplianceArtifacts,
+  // v2.11.0 Plant Controller — APC verification (Slice δ)
+  insertApcVerifyLog,
+  getLatestApcVerify,
+  getLatestApcVerifyAll,
+  pruneApcVerifyLog,
 };

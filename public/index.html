@@ -120,8 +120,8 @@
         <button class="nav-btn" data-page="export" title="Export operational data, alarms, reports, and forecasts to Excel or CSV.">
           <span class="nav-icon"><span class="mdi mdi-export-variant"></span></span><span>EXPORT</span>
         </button>
-        <button class="nav-btn" data-page="plant-cap" title="Plant output capping controller, schedules, and action history.">
-          <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>PLANT CAP</span>
+        <button class="nav-btn" data-page="plant-cap" title="Plant Controller — Active Power Control + grid test runners (T2 Frequency Withstand, T3 Q-V, T5 APC Sweep) + report archive.">
+          <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>PLANT CONTROLLER</span>
         </button>
         <button class="nav-btn" data-page="igbt-health" title="Asset health monitoring: IGBT module aging risk across the 27-inverter fleet. Health scores, tiers, and capital-planning export.">
           <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
@@ -344,6 +344,10 @@
             </button>
           </div>
           <div class="tl-right">
+            <label class="param-adv-toggle" title="Show diagnostic columns from the slow-poll register block (reactive power, control-electronics temp, insulation impedance, time-to-connect, power-reduction bits, etc.). Off by default to keep the table scannable.">
+              <input type="checkbox" id="paramAdvancedToggle" />
+              <span>Show advanced columns</span>
+            </label>
             <span class="toolbar-info" id="paramSolarBadge" title="Slots are clipped to the configured solar window.">Solar window: 05:00–18:00</span>
             <span class="toolbar-info" id="paramRowCount">—</span>
           </div>
@@ -912,7 +916,7 @@
         </div>
       </section>
 
-      <!-- --- PAGE: PLANT CAP ------------------------------------------------------ -->
+      <!-- --- PAGE: PLANT CONTROLLER (umbrella: APC + NGCP compliance tests) ------- -->
       <section id="page-plant-cap" class="page">
         <div class="page-toolbar">
           <div class="tl-left">
@@ -931,52 +935,8 @@
 
       <!-- --- PAGE: IGBT HEALTH ---------------------------------------------------- -->
       <section id="page-igbt-health" class="page">
-        <!-- Page banner: title, subtitle, fleet summary chips -->
-        <div class="igbt-banner">
-          <div class="igbt-banner-head">
-            <div class="igbt-banner-title">
-              <span class="mdi mdi-heart-pulse" aria-hidden="true"></span>
-              <h2>Asset Health</h2>
-            </div>
-            <div class="igbt-banner-meta">
-              <span class="toolbar-info" title="Timestamp of last fleet computation.">Computed: <b id="igbtComputedAt">—</b></span>
-              <span class="toolbar-info" title="Rolling window for stop-reason counts.">Window: <b>90 days</b></span>
-              <button id="btnRefreshIgbt" class="btn btn-accent btn-xs" title="Refresh health scores from latest stop-reason and telemetry data.">
-                <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
-              </button>
-            </div>
-          </div>
-          <div class="igbt-banner-sub">
-            IGBT module aging risk across the fleet — composite score 0&nbsp;(healthy) – 100&nbsp;(end of life), weighted across thermal trips, FRAMA events, current PI saturation, and phase imbalance over a 90&#8209;day rolling window. Click any row for the per&#8209;node breakdown. Export the full fleet snapshot from the <strong>Export</strong> page.
-          </div>
-          <!-- Tier summary chips -->
-          <div class="igbt-summary-chips" role="status" aria-live="polite">
-            <div class="igbt-summary-chip tier-healthy" title="Score below 25 — no action required.">
-              <span class="igbt-summary-count" id="igbtSummaryHealthy">—</span>
-              <span class="igbt-summary-label">Healthy</span>
-            </div>
-            <div class="igbt-summary-chip tier-watch" title="Score 25 – 50 — early aging signals; monitor.">
-              <span class="igbt-summary-count" id="igbtSummaryWatch">—</span>
-              <span class="igbt-summary-label">Watch</span>
-            </div>
-            <div class="igbt-summary-chip tier-aging" title="Score 50 – 75 — mid-stage aging; plan replacement.">
-              <span class="igbt-summary-count" id="igbtSummaryAging">—</span>
-              <span class="igbt-summary-label">Aging</span>
-            </div>
-            <div class="igbt-summary-chip tier-eol" title="Score 75 or higher — end-of-life; replace.">
-              <span class="igbt-summary-count" id="igbtSummaryEol">—</span>
-              <span class="igbt-summary-label">EOL</span>
-            </div>
-            <div class="igbt-summary-chip tier-offline" title="No 5-min telemetry in the last hour.">
-              <span class="igbt-summary-count" id="igbtSummaryOffline">—</span>
-              <span class="igbt-summary-label">Offline</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="page-toolbar igbt-toolbar">
+        <div class="page-toolbar">
           <div class="tl-left">
-            <!-- Tier filter chips -->
             <div class="tier-filter-group" id="igbtTierFilters">
               <button class="tier-chip tier-all" data-tier="all" data-selected="true">All Nodes</button>
               <button class="tier-chip tier-healthy" data-tier="healthy">Healthy</button>
@@ -984,6 +944,19 @@
               <button class="tier-chip tier-aging" data-tier="aging">Aging</button>
               <button class="tier-chip tier-eol" data-tier="eol">EOL</button>
             </div>
+          </div>
+          <div class="tl-right">
+            <span class="toolbar-info" title="Timestamp of last fleet computation.">Computed: <b id="igbtComputedAt">—</b></span>
+            <label class="toolbar-info" for="igbtWindowDaysInput" title="Rolling window for stop-reason counts. Range 7–365 days.">
+              Window:
+              <input type="number" id="igbtWindowDaysInput" class="toolbar-num-input"
+                     min="7" max="365" step="1" value="90" inputmode="numeric"
+                     title="Adjust the rolling window for stop-reason counts (7–365 days). Press Enter or click Refresh to apply." />
+              days
+            </label>
+            <button id="btnRefreshIgbt" class="btn btn-accent btn-xs" title="Refresh health scores from latest stop-reason and telemetry data.">
+              <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
+            </button>
           </div>
         </div>
 
@@ -1014,16 +987,12 @@
           </div>
 
           <!-- Drilldown side panel (right, on row select) -->
-          <div id="igbtDetailPanel" class="igbt-detail-panel">
+          <div id="igbtDetailPanel" class="igbt-detail-panel" hidden>
             <div class="igbt-detail-header">
               <div class="igbt-detail-node-id" id="igbtDetailNodeId">No node selected</div>
-              <button class="igbt-detail-close" title="Close detail panel" hidden>✕</button>
+              <button class="igbt-detail-close" title="Close detail panel">✕</button>
             </div>
             <div class="igbt-detail-body" id="igbtDetailBody">
-              <div class="igbt-detail-empty">
-                <span class="mdi mdi-information-outline" aria-hidden="true"></span>
-                <div>Select a row in the fleet table to see the per-node score breakdown, recent FRAMA / thermal / PI events, and current readings.</div>
-              </div>
             </div>
           </div>
         </div>
@@ -1210,6 +1179,12 @@
                   title="Geographic longitude of the plant site, used for weather lookups and solar forecast alignment."
               /></label>
               <small id="plantLonHelp">Used for weather alignment and forecast context (-180 to 180).</small>
+            </div>
+            <div class="srow">
+              <label class="lbl-check" title="Show the %P Setpoint tab on the Active Power Control page, enabling per-node / per-inverter / plant-wide active power setpoint commands via Modbus FC16 register 0x03E8.">
+                <input type="checkbox" id="setPlantCapSetpointEnabled" />
+                Enable %P Setpoint tab
+              </label>
             </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">

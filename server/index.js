@@ -89,12 +89,46 @@ const {
   insertClockSyncLogRow,
   getClockSyncLog,
   markDailyUnitsFinal,
+  markStaleRampsAborted,
+  getApcState,
+  insertAuditLogRow,
+  // v2.11.0 IGBT Health Phase 2.1 — thermal baseline persistence
+  upsertIgbtThermalBaseline,
+  getIgbtThermalBaselineRange,
+  getIgbtThermalBaselineDateSet,
+  get5minParamRowsForDay,
+  dayHadAgingStopEvent,
+  pruneIgbtThermalBaseline,
+  // v2.11.0 Plant Controller — compliance + APC verify
+  insertComplianceRun,
+  finalizeComplianceRun,
+  listComplianceRuns,
+  getComplianceRun,
+  appendComplianceStep,
+  listComplianceSteps,
+  appendComplianceSample,
+  listComplianceSamples,
+  appendComplianceArtifact,
+  listComplianceArtifacts,
+  insertApcVerifyLog,
+  getLatestApcVerify,
+  getLatestApcVerifyAll,
+  pruneApcVerifyLog,
 } = require("./db");
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
 const serialNumber = require("./serialNumber");
 const dailyAggregator = require("./dailyAggregator");
 const igbtHealth = require("./igbtHealth");
+const igbtThermal = require("./igbtThermal");
+const { ApcVerifier } = require("./apcVerify");
+const compliance = {
+  Orchestrator: require("./compliance/orchestrator"),
+  testT5: require("./compliance/testT5"),
+  testT2: require("./compliance/testT2"),
+  testT3: require("./compliance/testT3"),
+  reportGen: require("./compliance/reportGenerator"),
+};
 const {
   registerClient,
   broadcastUpdate,
@@ -635,12 +669,27 @@ const REPLICATION_TABLE_DEFS = [
       "updated_ts",
     ],
   },
+  {
+    name: "inverter_curtailment_state",
+    orderBy: "inverter_ip ASC, slave ASC",
+    columns: ["inverter_ip", "slave", "active_pct", "opcode", "applied_ts", "job_id", "source"],
+  },
 ];
 const REPLICATION_LOCAL_NEWER_IGNORE_TABLES = new Set([
   // Manual pull should protect newer replicated data, not standby-client config
   // drift. Settings differ by design in remote mode and should not block a
   // source-of-truth gateway refresh.
   "settings",
+  // Operator/system audit trails legitimately differ on a remote viewer (the
+  // viewer writes its own audit rows from local settings changes, login
+  // attempts, manual UI actions, etc.). Without this, a fresh remote viewer
+  // with one stale audit_log row blocks the startup auto-sync forever — see
+  // audits/2026-05-11/modbus-revamp-implementation-status.md cross-cutting note
+  // #4 and the manualPullGuard.test.js regression that surfaced this.
+  "audit_log",
+  // Per-viewer clock-sync attempts also accumulate locally and should not
+  // gate a gateway refresh.
+  "inverter_clock_sync_log",
 ]);
 const REPLICATION_DEF_MAP = Object.fromEntries(
   REPLICATION_TABLE_DEFS.map((x) => [x.name, x]),
@@ -687,6 +736,12 @@ const REPLICATION_INCREMENTAL_STRATEGY = {
     cursorColumn: "id",
     orderBy: "id ASC",
     limit: REMOTE_INCREMENTAL_APPEND_LIMIT,
+  },
+  inverter_curtailment_state: {
+    mode: "updated",
+    cursorColumn: "applied_ts",
+    orderBy: "applied_ts ASC, inverter_ip ASC, slave ASC",
+    limit: 0,
   },
 };
 
@@ -2733,6 +2788,7 @@ const REPLICATION_ALLOWED_TABLES = new Set([
   "inverter_counter_state",
   "inverter_counter_baseline",
   "inverter_clock_sync_log",
+  "inverter_curtailment_state",
 ]);
 
 function assertReplicationTableAllowed(tableName) {
@@ -8195,6 +8251,7 @@ function buildDefaultSettingsSnapshot() {
     plantCapSequenceMode: "ascending",
     plantCapSequenceCustom: [],
     plantCapCooldownSec: 30,
+    plantCapSetpointEnabled: "1",
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     cameraConfig: { ...DEFAULT_CAMERA_CFG },
@@ -8222,6 +8279,14 @@ function buildDefaultSettingsSnapshot() {
     // decoded state regardless of this flag; only the Inverter Card chip will gate
     // on it once that UI lands.
     useAuthoritativeInverterState: "0",
+    // v2.11.x Slice ζ — Reactive power + grid-code controls hard feature flag.
+    // DEFAULT OFF for all installations. Enabling requires:
+    //   1. security-reviewer agent pass on the diff
+    //   2. 2-week single-inverter soak with operator sign-off
+    //   3. Operator sets to "1" via Settings → Plant Controller (UI pending)
+    // Read-back endpoints work regardless of this flag (visibility is safe);
+    // ALL writes are blocked unless this flag === "1" AND sacupsMM auth holds.
+    gridControlEnabled: "0",
   };
 }
 
@@ -8323,6 +8388,9 @@ function buildSettingsSnapshot() {
       5,
       600,
       defaults.plantCapCooldownSec,
+    ),
+    plantCapSetpointEnabled: String(
+      getSetting("plantCapSetpointEnabled", defaults.plantCapSetpointEnabled) === "0" ? "0" : "1",
     ),
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", defaults.exportUiState),
@@ -12070,6 +12138,65 @@ plantCapController = new PlantCapController({
   getDb: () => db,
   liveFreshMs: LIVE_FRESH_MS,
   operatorName: "PLANT CAP",
+  callPython: async (path, method = "GET", body = null) => {
+    const url = `${INVERTER_ENGINE_BASE_URL}${path}`;
+    const opts = { method, headers: { "content-type": "application/json" } };
+    if (body !== null) opts.body = JSON.stringify(body);
+    const _abort = new AbortController();
+    const _to = setTimeout(() => { try { _abort.abort(); } catch (_) {} }, 15_000);
+    if (_to?.unref) _to.unref();
+    try {
+      const r = await fetch(url, { ...opts, signal: _abort.signal });
+      return r.json().catch(() => ({ ok: false, error: "invalid JSON from Python service" }));
+    } finally {
+      clearTimeout(_to);
+    }
+  },
+});
+
+// ─── v2.11.0 Plant Controller — Slice δ verifier + Slice θ orchestrator ───
+// The verifier consumes plantCapController write events; the orchestrator is
+// driven by /api/compliance/* endpoints below.
+const apcVerifier = new ApcVerifier({
+  db,
+  insertApcVerifyLog,
+  getLatestApcVerify,
+  broadcast: (event, payload) => broadcastUpdate({ type: event, ...payload }),
+});
+
+const complianceOrchestrator = new compliance.Orchestrator.OrchestratorRegistry({
+  dbHelpers: {
+    insertComplianceRun,
+    finalizeComplianceRun,
+    appendComplianceStep,
+    appendComplianceSample,
+    appendComplianceArtifact,
+  },
+  onEvent: (ev) => {
+    // WS to clients (live UI updates).
+    broadcastUpdate({ type: `compliance:${ev.kind}`, ...ev });
+    // Server console line for ops/syslog forensics — kind events only,
+    // not per-step (the runners log those at their own level of detail).
+    if (ev.kind === "run_begin") {
+      console.log(`[compliance] run_begin run_id=${ev.run_id} kind=${ev.test_kind} targets=${(ev.target_inverters || []).length}`);
+    } else if (ev.kind === "run_end") {
+      console.log(`[compliance] run_end   run_id=${ev.run_id} status=${ev.status}`);
+    } else if (ev.kind === "abort_requested") {
+      console.warn(`[compliance] abort    run_id=${ev.run_id} reason="${ev.reason || "?"}"`);
+    }
+  },
+});
+
+// Reap stale in-memory orchestrator handles every 30 min (rows persist in DB).
+setInterval(() => complianceOrchestrator.reapStaleRuns(3600), 30 * 60_000).unref?.();
+// Prune APC verify log older than 90 days, weekly Sunday 04:30.
+cron.schedule("30 4 * * 0", () => {
+  try {
+    const removed = pruneApcVerifyLog(90);
+    if (removed > 0) console.log(`[apc-verify] pruned ${removed} old rows`);
+  } catch (err) {
+    console.error("[apc-verify] prune failed:", err.message);
+  }
 });
 
 function isHttpUrl(v) {
@@ -12367,6 +12494,9 @@ const INVERTER_ENGINE_STOP_REASONS_STD_URL = `${INVERTER_ENGINE_BASE_URL}/stop-r
 
 // v2.10.0 Slice C — Serial Number Read / Edit / Send through Python (FC11 + FC16).
 const INVERTER_ENGINE_SERIAL_URL = `${INVERTER_ENGINE_BASE_URL}/serial`;
+
+// APC — Active Power Control (%P setpoint, Q15) via Python FastAPI.
+const INVERTER_ENGINE_CURTAIL_URL = `${INVERTER_ENGINE_BASE_URL}/curtail`;
 
 // SEC-L-001 — bounded brute-force throttle on topology auth.  Each origin
 // IP gets a small failure budget per minute; once exceeded we 429 with
@@ -13077,10 +13207,62 @@ app.get("/api/stop-reasons/:inverter/histogram", (req, res) => {
 // Remote-mode proxy aware
 
 // Motive code definitions for health scoring
-const IGBT_THERMAL_CODES = [7, 21];      // TEMPERATURA, TEMP_AUX (per Slice ε motiveLabelsStd.js)
-const IGBT_FRAMA_CODES = [13, 29, 30];   // FRAMA3, FRAMA1, FRAMA2 (per Slice ε motiveLabelsStd.js)
-const IGBT_PI_ANA_CODES = [26];          // PI_ANA_SAT (per Slice ε motiveLabelsStd.js)
-const IGBT_ROLLING_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;  // 90 days
+const IGBT_THERMAL_CODES = [7, 20];      // TEMPERATURA, TEMP_AUX (plan §5)
+const IGBT_FRAMA_CODES = [12, 28, 29];   // FRAMA3, FRAMA1, FRAMA2
+const IGBT_PI_ANA_CODES = [25];          // PI_ANA_SAT
+const IGBT_ROLLING_WINDOW_DAYS_DEFAULT = 90;
+const IGBT_ROLLING_WINDOW_DAYS_MIN = 7;
+const IGBT_ROLLING_WINDOW_DAYS_MAX = 365;
+
+// Parse + clamp ?days= query param. Returns days as integer.
+function parseWindowDays(req) {
+  const raw = Number(req?.query?.days);
+  if (!Number.isFinite(raw)) return IGBT_ROLLING_WINDOW_DAYS_DEFAULT;
+  const clamped = Math.min(IGBT_ROLLING_WINDOW_DAYS_MAX,
+                           Math.max(IGBT_ROLLING_WINDOW_DAYS_MIN, Math.floor(raw)));
+  return clamped;
+}
+
+/**
+ * computeYoyThermalBlock(ip, slave) — Phase 2.1
+ * Reads the rolling 90-day matched-conditions baseline mean and the same
+ * window one year ago, returns { current_mean_c, prior_mean_c, yoy_drift_c,
+ * progress: { ready, ratio, computed_days, target_days } }.
+ *
+ * yoy_drift_c is null until both halves have at least one 'computed' row.
+ */
+function computeYoyThermalBlock(ip, slave) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const ymd = (d) => d.toISOString().slice(0, 10);
+
+  // Current 90-day window: yesterday ← 90 days back
+  const curEnd   = new Date(today.getTime() - 86400_000);
+  const curStart = new Date(curEnd.getTime() - 89 * 86400_000);
+  const curRows  = getIgbtThermalBaselineRange(ip, slave, ymd(curStart), ymd(curEnd));
+  const currentMean = igbtThermal.aggregateMeanTemp(curRows);
+
+  // Year-ago 90-day window
+  const priorEnd   = new Date(curEnd.getTime() - 365 * 86400_000);
+  const priorStart = new Date(priorEnd.getTime() - 89 * 86400_000);
+  const priorRows  = getIgbtThermalBaselineRange(ip, slave, ymd(priorStart), ymd(priorEnd));
+  const priorMean  = igbtThermal.aggregateMeanTemp(priorRows);
+
+  const yoyDriftC = igbtThermal.computeYoYDrift(currentMean, priorMean);
+
+  // Progress is the count of 'computed' baseline days we have overall, vs 365.
+  // Use the earliest reasonable horizon: same priorStart..yesterday range.
+  const allRows = getIgbtThermalBaselineRange(ip, slave, ymd(priorStart), ymd(curEnd));
+  const computedDays = allRows.filter(r => r?.reason === "computed").length;
+  const progress = igbtThermal.baselineProgress(computedDays);
+
+  return {
+    current_mean_c: currentMean,
+    prior_mean_c:   priorMean,
+    yoy_drift_c:    yoyDriftC,
+    progress,
+  };
+}
 
 // Import motive labels for API response
 const { MOTIVE_LABELS_STD } = require("./motiveLabelsStd");
@@ -13103,7 +13285,8 @@ app.get("/api/igbt/fleet", (req, res) => {
 
   try {
     const now = Date.now();
-    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
     const ipConfig = loadIpConfigFromDb();
     const configuredNodes = getConfiguredNodeSet(ipConfig);
 
@@ -13154,12 +13337,18 @@ app.get("/api/igbt/fleet", (req, res) => {
           const imbalancePct = igbtHealth.medianImbalance(paramRows);
           const tempC = paramRows?.[0]?.temp_c || null;
 
-          // Compute health score
+          // Phase 2.1 — fetch YoY thermal drift block (drift is null until
+          // we have ≥1 'computed' row in both 90-day windows).
+          const yoyBlock = computeYoyThermalBlock(ip, slave);
+
+          // Compute health score (Phase 1 weights when yoy_drift_c null,
+          // Phase 2 weights when present — see igbtHealth.computeHealthScore).
           const scoreResult = igbtHealth.computeHealthScore({
             thermal_count: thermalCount,
             frama_count: framaCount,
             pi_ana_count: piAnaCount,
             imbalance_pct: imbalancePct,
+            yoy_drift_c: yoyBlock.yoy_drift_c,
           });
 
           // Query last event
@@ -13194,6 +13383,12 @@ app.get("/api/igbt/fleet", (req, res) => {
             imbalance_pct: imbalancePct,
             last_event_ms: lastEvent?.read_at_ms || null,
             last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
+            // v2.11.0 Phase 2.1 — YoY thermal drift (null until baseline ready)
+            yoy_drift_c: yoyBlock.yoy_drift_c,
+            baseline_ready: !!yoyBlock.progress?.ready,
+            baseline_progress_ratio: Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
+            baseline_computed_days: yoyBlock.progress?.computed_days || 0,
+            scoring_phase: scoreResult.weights_used?.phase || "phase1",
           };
 
           nodes.push(node);
@@ -13217,7 +13412,7 @@ app.get("/api/igbt/fleet", (req, res) => {
     res.json({
       ok: true,
       generated_at_ms: now,
-      rolling_window_days: 90,
+      rolling_window_days: windowDays,
       nodes,
       summary: {
         total_nodes: nodes.length,
@@ -13256,7 +13451,8 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
 
     const ip = invRecord.ip;
     const now = Date.now();
-    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
     const oneHourAgo = now - 60 * 60 * 1000;
 
     // Query counts
@@ -13286,12 +13482,16 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
     const currentTemp = paramRows?.[0]?.temp_c || null;
     const lastParamTs = paramRows?.[0]?.ts_ms || null;
 
+    // Phase 2.1 — YoY thermal block (drives optional thermal_drift component)
+    const yoyBlock = computeYoyThermalBlock(ip, slave);
+
     // Compute health score
     const scoreResult = igbtHealth.computeHealthScore({
       thermal_count: thermalCount,
       frama_count: framaCount,
       pi_ana_count: piAnaCount,
       imbalance_pct: imbalancePct,
+      yoy_drift_c: yoyBlock.yoy_drift_c,
     });
 
     // Query recent events (last 10 per category)
@@ -13362,6 +13562,17 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
         last_5min_ts_ms: lastParamTs,
         is_online_now: lastParamTs !== null && (now - lastParamTs) < 10 * 60 * 1000,
       },
+      thermal_baseline: {
+        current_mean_c:  yoyBlock.current_mean_c,
+        prior_year_mean_c: yoyBlock.prior_mean_c,
+        yoy_drift_c:     yoyBlock.yoy_drift_c,
+        yoy_score:       scoreResult.breakdown?.yoy_score ?? null,
+        ready:           !!yoyBlock.progress?.ready,
+        progress_ratio:  Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
+        computed_days:   yoyBlock.progress?.computed_days || 0,
+        target_days:     yoyBlock.progress?.target_days || 365,
+        scoring_phase:   scoreResult.weights_used?.phase || "phase1",
+      },
     });
   } catch (err) {
     console.error("[IGBT] /api/igbt/node error:", err.message);
@@ -13375,7 +13586,8 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
 
   try {
     const now = Date.now();
-    const cutoffMs = now - IGBT_ROLLING_WINDOW_MS;
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
     const ipConfig = loadIpConfigFromDb();
 
     const rows = [];
@@ -13528,6 +13740,625 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
     console.error("[IGBT] /api/igbt/fleet.csv error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── v2.11.0 IGBT Health Phase 2.1 — thermal baseline capture ──────────────
+// Per (inverter_ip, slave, date_local), compute the matched-conditions midday
+// mean PE temperature using the pure-function core in server/igbtThermal.js.
+// Backfills run on startup (last N days), then a daily cron at 23:55 captures
+// today before the day rolls over.
+//
+// Plan: plans/igbt-health-phase1.md §6.5 + manual §5.2.
+
+const IGBT_THERMAL_BACKFILL_DAYS = 365;     // align with YoY target
+const IGBT_THERMAL_RATED_KW_PER_NODE = NODE_KW_MAX;  // 244.25 kW (per existing convention)
+
+function _enumerateConfiguredNodePairs(ipConfig) {
+  // Returns [{ inverter, ip, slave }, ...]
+  const out = [];
+  if (!ipConfig?.inverters) return out;
+  for (let inv = 1; inv <= 27; inv++) {
+    const invRecords = (ipConfig.inverters || []).filter(r => r?.inverter === inv);
+    for (const invRecord of invRecords) {
+      const ip = invRecord?.ip;
+      if (!ip) continue;
+      let units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
+      if (units.length === 0) units = [1, 2, 3, 4];
+      for (const slave of units) out.push({ inverter: inv, ip, slave });
+    }
+  }
+  return out;
+}
+
+function _captureThermalBaselineOneDay(ip, slave, dateStr) {
+  // Pure helpers do all the math; this wrapper does the I/O and upsert.
+  const rows = get5minParamRowsForDay(ip, slave, dateStr);
+  const excludeDay = dayHadAgingStopEvent(ip, slave, dateStr);
+  const result = igbtThermal.computeDailyBaseline(
+    rows,
+    IGBT_THERMAL_RATED_KW_PER_NODE,
+    { excludeDay },
+  );
+  upsertIgbtThermalBaseline({
+    inverter_ip:   ip,
+    slave:         slave,
+    date_local:    dateStr,
+    sample_count:  result.sample_count,
+    mean_temp_c:   result.mean_temp_c,
+    reason:        result.reason,
+    computed_at_ms: Date.now(),
+  });
+  return result;
+}
+
+function captureThermalBaselineForDate(dateStr) {
+  // Capture all configured nodes for ONE date.
+  const ipConfig = loadIpConfigFromDb();
+  const nodes = _enumerateConfiguredNodePairs(ipConfig);
+  let computed = 0, insufficient = 0, excluded = 0, skipped = 0;
+  for (const n of nodes) {
+    try {
+      const r = _captureThermalBaselineOneDay(n.ip, n.slave, dateStr);
+      if (r.reason === "computed") computed++;
+      else if (r.reason === "insufficient_samples") insufficient++;
+      else if (r.reason === "excluded_stop_event") excluded++;
+      else skipped++;
+    } catch (err) {
+      console.error(`[IGBT thermal] capture failed for ${n.ip}/${n.slave} ${dateStr}:`, err.message);
+    }
+  }
+  return { date: dateStr, nodes: nodes.length, computed, insufficient, excluded, skipped };
+}
+
+function backfillThermalBaselineOnStartup() {
+  // On startup, ensure the last N days are populated. Skip dates already present.
+  try {
+    const ipConfig = loadIpConfigFromDb();
+    const nodes = _enumerateConfiguredNodePairs(ipConfig);
+    if (nodes.length === 0) {
+      console.log("[IGBT thermal] backfill skipped: no configured nodes");
+      return;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    // Backfill yesterday and earlier — today is incomplete and gets captured at 23:55.
+    const earliest = new Date(today.getTime() - IGBT_THERMAL_BACKFILL_DAYS * 86400_000);
+    const earliestStr = earliest.toISOString().slice(0, 10);
+    const yesterdayStr = new Date(today.getTime() - 86400_000).toISOString().slice(0, 10);
+
+    let totalScanned = 0, totalNew = 0;
+    for (const n of nodes) {
+      const haveDates = getIgbtThermalBaselineDateSet(n.ip, n.slave, earliestStr, yesterdayStr);
+      // Walk day-by-day; only fill gaps.
+      for (let t = earliest.getTime(); t <= today.getTime() - 86400_000; t += 86400_000) {
+        const dStr = new Date(t).toISOString().slice(0, 10);
+        totalScanned++;
+        if (haveDates.has(dStr)) continue;
+        try {
+          _captureThermalBaselineOneDay(n.ip, n.slave, dStr);
+          totalNew++;
+        } catch (err) {
+          // Soft-fail per day so backfill keeps going.
+          console.error(`[IGBT thermal] backfill skip ${n.ip}/${n.slave} ${dStr}: ${err.message}`);
+        }
+      }
+    }
+    console.log(`[IGBT thermal] backfill: scanned ${totalScanned} (node, day) pairs, wrote ${totalNew} new rows`);
+  } catch (err) {
+    console.error("[IGBT thermal] backfill failed:", err.message);
+  }
+}
+
+// Daily cron — 23:55 local. Runs after the solar window has long ended; the
+// day's 5-min rows are settled and the day-roll handlers won't disturb them.
+cron.schedule("55 23 * * *", () => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const summary = captureThermalBaselineForDate(today);
+    console.log(`[IGBT thermal] cron capture ${today}:`, summary);
+  } catch (err) {
+    console.error("[IGBT thermal] cron capture failed:", err.message);
+  }
+});
+
+// Weekly prune of stale rows (keep ≥ 2 years).
+cron.schedule("0 4 * * 0", () => {
+  try {
+    const removed = pruneIgbtThermalBaseline(800);
+    if (removed > 0) console.log(`[IGBT thermal] pruned ${removed} old rows`);
+  } catch (err) {
+    console.error("[IGBT thermal] prune failed:", err.message);
+  }
+});
+
+// Trigger backfill once at boot, deferred so the rest of startup finishes first.
+setTimeout(() => {
+  if (!isRemoteMode()) backfillThermalBaselineOnStartup();
+}, 30 * 1000).unref?.();
+
+// ─── v2.11.0 Plant Controller — Slice δ + NGCP Compliance endpoints ──────
+// Slice δ: GET /api/apc/verify-status — latest verify rows for the APC card.
+// Compliance: POST /api/compliance/run/start, /abort, /list, /:id/report.
+
+app.get("/api/apc/verify-status", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const all = getLatestApcVerifyAll();
+    res.json({ ok: true, rows: all || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/apc/verify-status/:inverter_ip/:slave", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const row = getLatestApcVerify(req.params.inverter_ip, Number(req.params.slave));
+    res.json({ ok: true, row: row || null });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Compliance test orchestration ──────────────────────────────────────
+const REPORT_OUT_DIR = path.join(DATA_DIR, "compliance");
+
+// Per-inverter live sample fetch from latest 5-min row. Used by T2/T5.
+function _fetchLiveSampleForCompliance(ip, slave) {
+  try {
+    const row = db.prepare(
+      `SELECT ts_ms, pac_w, vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
+              freq_hz, cosphi, temp_c, pwr_red_bits, inv_alarms,
+              inverter_state_raw
+         FROM inverter_5min_param
+        WHERE inverter_ip = ? AND slave = ?
+        ORDER BY ts_ms DESC LIMIT 1`
+    ).get(String(ip), Number(slave));
+    if (!row) return null;
+    const vacAvg = ((Number(row.vac1_v) || 0) + (Number(row.vac2_v) || 0) + (Number(row.vac3_v) || 0)) / 3;
+    const iacAvg = ((Number(row.iac1_a) || 0) + (Number(row.iac2_a) || 0) + (Number(row.iac3_a) || 0)) / 3;
+    return {
+      ts_ms: Number(row.ts_ms) || Date.now(),
+      pac_w: row.pac_w == null ? null : Number(row.pac_w),
+      vac_avg_v: vacAvg,
+      iac_avg_a: iacAvg,
+      freq_hz: row.freq_hz == null ? null : Number(row.freq_hz),
+      cosphi: row.cosphi == null ? null : Number(row.cosphi),
+      temp_c: row.temp_c == null ? null : Number(row.temp_c),
+      state_raw: row.inverter_state_raw == null ? null : Number(row.inverter_state_raw),
+      alarm_32: row.inv_alarms == null ? null : Number(row.inv_alarms),
+      pwr_red_bits: row.pwr_red_bits == null ? null : Number(row.pwr_red_bits),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Send setpoint via the existing applySetpoint path (Python-backed).
+async function _sendSetpointForCompliance(ip, slave, pct) {
+  if (!plantCapController) return false;
+  try {
+    const r = await plantCapController.applySetpoint({
+      scope: "node",
+      targets: [{ ip, slave }],
+      target_pct: Number(pct),
+      opcode: "set",
+      force: true,
+      operator: "compliance:t5",
+    });
+    return !!(r && r.ok);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Slice θ.4 — T3 helpers. Reuse the Slice ζ Python endpoints directly so the
+// compliance run honours the same audit + flag-gate path as a manual operator
+// invocation. Note: the run-start handler enforces `gridControlEnabled` BEFORE
+// scheduling these, so they should never fire when the plant is not opted-in.
+async function _sendPhiTangentForCompliance(ip, slave, phi_raw) {
+  try {
+    const r = await _callPythonGridControl("/grid-control/phi", "POST",
+      { ip, slave: Number(slave), phi_raw: Number(phi_raw) });
+    if (r && r.ok) {
+      _gridControlAuditRow({
+        action: "grid_control.phi_set",
+        target_ip: ip,
+        slave,
+        result: r,
+        reason: `compliance:t3 phi_raw=${phi_raw}`,
+        operator: "compliance:t3",
+      });
+      return true;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function _disableReactiveForCompliance(ip, slave) {
+  try {
+    const r = await _callPythonGridControl("/grid-control/disable", "POST",
+      { ip, slave: Number(slave) });
+    if (r && r.ok) {
+      _gridControlAuditRow({
+        action: "grid_control.reactive_disable",
+        target_ip: ip,
+        slave,
+        result: r,
+        reason: "compliance:t3 restoration",
+        operator: "compliance:t3",
+      });
+      return true;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+app.post("/api/compliance/run/start", express.json(), async (req, res) => {
+  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Compliance runs must be started on the gateway." });
+  const b = req.body || {};
+  // Bulk-control auth required (sacupsMM) — same gate as APC operations.
+  if (!isAuthorizedPlantWideControl(b, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized." });
+  }
+  const test_kind = String(b.test_kind || "").toLowerCase();
+  if (!compliance.Orchestrator.VALID_KINDS.has(test_kind)) {
+    return res.status(400).json({ ok: false, error: `Unknown test_kind: ${test_kind}` });
+  }
+  if (test_kind === "t3_qv_sweep" && !_gridControlEnabled()) {
+    // Slice θ.4 inherits Slice ζ's hard gate. Once `gridControlEnabled = "1"`
+    // (after security review + 2-week soak + operator sign-off), T3 sweeps
+    // are allowed — the runner reuses the same Python endpoints with the same
+    // sacupsMM auth + audit-log trail.
+    return res.status(503).json({
+      ok: false,
+      error: "Test T3 (Q-V Sweep) writes require gridControlEnabled = \"1\" (Slice ζ hardware soak gate). Read-back is always available via the Grid Code tab.",
+    });
+  }
+  const targets = Array.isArray(b.targets) ? b.targets : [];
+  if (targets.length === 0) {
+    return res.status(400).json({ ok: false, error: "At least one target inverter required." });
+  }
+
+  try {
+    const orch = complianceOrchestrator.start({
+      test_kind,
+      params: b.params || {},
+      target_inverters: targets,
+      operator_actor: String(b.operator || "operator").slice(0, 64),
+    });
+    // Fire-and-forget the test runner. Caller polls /run/:id/status.
+    const ratedKwPerNode = NODE_KW_MAX;
+    const fns = {
+      sendSetpointPct: _sendSetpointForCompliance,
+      sampleNode: async (ip, slave) => _fetchLiveSampleForCompliance(ip, slave),
+      sleepMs: (ms) => new Promise(r => setTimeout(r, ms)),
+    };
+    if (test_kind === "t5_apc_sweep") {
+      compliance.testT5.runApcSweep(orch, ratedKwPerNode, fns).catch(err => {
+        console.error("[compliance][T5]", err.message);
+      });
+    } else if (test_kind === "t2_freq_withstand") {
+      compliance.testT2.runFrequencyObservation(orch, fns).catch(err => {
+        console.error("[compliance][T2]", err.message);
+      });
+    } else if (test_kind === "t3_qv_sweep") {
+      const t3Fns = {
+        sendPhiTangent: _sendPhiTangentForCompliance,
+        disableReactive: _disableReactiveForCompliance,
+        sampleNode: async (ip, slave) => _fetchLiveSampleForCompliance(ip, slave),
+        sleepMs: (ms) => new Promise(r => setTimeout(r, ms)),
+      };
+      compliance.testT3.runQvSweep(orch, t3Fns).catch(err => {
+        console.error("[compliance][T3]", err.message);
+      });
+    }
+    res.json({ ok: true, run_id: orch.run_id, test_kind, started_at_ms: orch.started_at_ms });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/compliance/run/:run_id/abort", express.json(), (req, res) => {
+  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized." });
+  }
+  const ok = complianceOrchestrator.abort(req.params.run_id, "operator abort");
+  res.json({ ok });
+});
+
+app.get("/api/compliance/run/:run_id/status", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const live = complianceOrchestrator.get(req.params.run_id);
+    const persisted = getComplianceRun(req.params.run_id);
+    if (!live && !persisted) return res.status(404).json({ ok: false, error: "Not found." });
+    const steps = listComplianceSteps(req.params.run_id);
+    const sampleCount = (live && live.captureBuffer) ? live.captureBuffer.size() : 0;
+    res.json({
+      ok: true,
+      run: persisted,
+      live_status: live ? live.status : null,
+      sample_count_pending_flush: sampleCount,
+      steps,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/compliance/runs", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
+    const kind = req.query.kind ? String(req.query.kind) : undefined;
+    const rows = listComplianceRuns(limit, kind);
+    res.json({ ok: true, runs: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) => {
+  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  try {
+    const run = getComplianceRun(req.params.run_id);
+    if (!run) return res.status(404).json({ ok: false, error: "Not found." });
+    const steps = listComplianceSteps(run.run_id);
+    const samples = listComplianceSamples(run.run_id);
+    const out = [];
+    // CSV is always cheap.
+    const csv = compliance.reportGen.generateCsvBundle(run, steps, samples, REPORT_OUT_DIR);
+    appendComplianceArtifact({
+      run_id: run.run_id, artifact_kind: "csv",
+      file_path: csv.path, sha256: csv.sha256, bytes: csv.bytes,
+    });
+    out.push({ kind: "csv", ...csv });
+    // PDF only when explicitly requested (puppeteer launch is heavy).
+    if (req.body && req.body.format === "both") {
+      try {
+        const pdf = await compliance.reportGen.generatePdfBundle(run, steps, samples, REPORT_OUT_DIR);
+        appendComplianceArtifact({
+          run_id: run.run_id, artifact_kind: "pdf",
+          file_path: pdf.path, sha256: pdf.sha256, bytes: pdf.bytes,
+        });
+        out.push({ kind: "pdf", ...pdf });
+      } catch (err) {
+        // Don't fail the whole call — CSV already succeeded.
+        out.push({ kind: "pdf", error: err.message });
+      }
+    }
+    res.json({ ok: true, run_id: run.run_id, artifacts: out });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/compliance/run/:run_id/artifact", (req, res) => {
+  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  try {
+    const arts = listComplianceArtifacts(req.params.run_id);
+    const kind = String(req.query.kind || "csv");
+    const found = arts.find(a => a.artifact_kind === kind);
+    if (!found) return res.status(404).json({ ok: false, error: `No ${kind} artifact.` });
+    if (!fs.existsSync(found.file_path)) {
+      return res.status(410).json({ ok: false, error: "Artifact file no longer present on disk." });
+    }
+    res.setHeader("Content-Type", kind === "pdf" ? "application/pdf" : "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="${path.basename(found.file_path)}"`);
+    fs.createReadStream(found.file_path).pipe(res);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── v2.11.x Slice ζ — Reactive + grid-code endpoints ───────────────────
+// Implementation reference: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice ζ
+// User-facing reference: docs/Inverter-Modbus-Reference.md §6 (cmd 1, 9, 11).
+//
+// SAFETY GATING (in this order, all required for writes):
+//   1. Remote mode → proxy to gateway (Slice ζ writes touch hardware; no remote-mode write)
+//   2. `gridControlEnabled` setting === "1" (default "0", hard feature flag)
+//   3. sacupsMM bulk auth key (same as APC)
+//   4. Validated request shape (ip, slave 1..4, raw value bounds)
+// Read-back endpoint (`/api/grid-control/state/:ip/:slave`) is gated only by
+// remote-mode proxy + bulk auth — visibility never causes harm.
+
+function _gridControlEnabled() {
+  return String(getSetting("gridControlEnabled", "0") || "0").trim() === "1";
+}
+
+function _validateGridControlTarget(b) {
+  const ip = String(b?.ip || "").trim();
+  const slave = Number(b?.slave);
+  if (!ip || !/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(ip)) {
+    return { ok: false, error: "ip is required and must be a valid IPv4 address" };
+  }
+  if (!Number.isFinite(slave) || slave < 1 || slave > 4) {
+    return { ok: false, error: `slave must be 1..4, got ${b?.slave}` };
+  }
+  return { ok: true, ip, slave };
+}
+
+async function _callPythonGridControl(path, method = "GET", body = null) {
+  const url = `${INVERTER_ENGINE_BASE_URL}${path}`;
+  const opts = { method, headers: { "content-type": "application/json" } };
+  if (body !== null) opts.body = JSON.stringify(body);
+  const _abort = new AbortController();
+  const _to = setTimeout(() => { try { _abort.abort(); } catch (_) {} }, 15_000);
+  if (_to?.unref) _to.unref();
+  try {
+    const r = await fetch(url, { ...opts, signal: _abort.signal });
+    return r.json().catch(() => ({ ok: false, error: "invalid JSON from Python service" }));
+  } finally {
+    clearTimeout(_to);
+  }
+}
+
+function _gridControlAuditRow({ action, target_ip, slave, result, reason, operator }) {
+  try {
+    insertAuditLogRow({
+      ts: Date.now(),
+      operator: String(operator || "operator").slice(0, 64),
+      inverter: 0,
+      node: Number(slave) || 0,
+      action,
+      scope: "grid-control",
+      result: result?.ok ? "ok" : "failed",
+      ip: String(target_ip || ""),
+      reason: String(reason || ""),
+    });
+  } catch (_) { /* audit failure must never break the call */ }
+  // Console mirror for ops/syslog forensics. The audit_log table is the
+  // durable record; this line makes the same data tail-able in real time.
+  const ok = !!result?.ok;
+  console[ok ? "log" : "warn"](
+    `[grid-control] ${action} target=${target_ip || "?"}/${slave ?? "?"} ` +
+    `result=${ok ? "OK" : "FAIL"} operator=${operator || "?"} reason="${reason || ""}"`,
+  );
+}
+
+// POST /api/grid-control/phi  — Cmd 1: set tan(φ) target
+app.post("/api/grid-control/phi", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!_gridControlEnabled()) {
+    return res.status(503).json({ ok: false, error: "Grid-control writes are disabled. Operator must enable `gridControlEnabled` after sign-off." });
+  }
+  const b = req.body || {};
+  if (!isAuthorizedPlantWideControl(b, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized grid-control command." });
+  }
+  const tv = _validateGridControlTarget(b);
+  if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  const phi_raw = Number(b.phi_raw);
+  if (!Number.isFinite(phi_raw) || Math.abs(phi_raw) > 15870) {
+    return res.status(400).json({ ok: false, error: "phi_raw must be Int16 within ±15870 (PDF cmd 1 limit)" });
+  }
+  try {
+    const result = await _callPythonGridControl("/grid-control/phi", "POST",
+      { ip: tv.ip, slave: tv.slave, phi_raw: Math.round(phi_raw) });
+    _gridControlAuditRow({
+      action: "grid_control.phi_set",
+      target_ip: tv.ip,
+      slave: tv.slave,
+      result,
+      reason: `phi_raw=${Math.round(phi_raw)} (≈ tan(φ) ${(phi_raw / 32767).toFixed(4)})`,
+      operator: b.operator,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/grid-control/reactive  — Cmd 9: set reactive kVAr ÷ 10
+app.post("/api/grid-control/reactive", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!_gridControlEnabled()) {
+    return res.status(503).json({ ok: false, error: "Grid-control writes are disabled. Operator must enable `gridControlEnabled` after sign-off." });
+  }
+  const b = req.body || {};
+  if (!isAuthorizedPlantWideControl(b, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized grid-control command." });
+  }
+  const tv = _validateGridControlTarget(b);
+  if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  const kvar_div10 = Number(b.kvar_div10);
+  if (!Number.isFinite(kvar_div10) || Math.abs(kvar_div10) > 32767) {
+    return res.status(400).json({ ok: false, error: "kvar_div10 must be Int16 (±32767)" });
+  }
+  try {
+    const result = await _callPythonGridControl("/grid-control/reactive", "POST",
+      { ip: tv.ip, slave: tv.slave, kvar_div10: Math.round(kvar_div10) });
+    _gridControlAuditRow({
+      action: "grid_control.reactive_set",
+      target_ip: tv.ip,
+      slave: tv.slave,
+      result,
+      reason: `kvar_div10=${Math.round(kvar_div10)} (≈ ${(kvar_div10 / 10).toFixed(1)} kVAr)`,
+      operator: b.operator,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/grid-control/disable  — Cmd 11: disable reactive ref
+app.post("/api/grid-control/disable", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!_gridControlEnabled()) {
+    return res.status(503).json({ ok: false, error: "Grid-control writes are disabled. Operator must enable `gridControlEnabled` after sign-off." });
+  }
+  const b = req.body || {};
+  if (!isAuthorizedPlantWideControl(b, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized grid-control command." });
+  }
+  const tv = _validateGridControlTarget(b);
+  if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  try {
+    const result = await _callPythonGridControl("/grid-control/disable", "POST",
+      { ip: tv.ip, slave: tv.slave });
+    _gridControlAuditRow({
+      action: "grid_control.reactive_disable",
+      target_ip: tv.ip,
+      slave: tv.slave,
+      result,
+      reason: "cmd 11 — restore inverter default",
+      operator: b.operator,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/grid-control/state/:ip/:slave  — Read holding 41006-41010 (always-safe)
+app.get("/api/grid-control/state/:ip/:slave", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  // Read-back is always allowed; visibility doesn't cause hardware harm.
+  const tv = _validateGridControlTarget({ ip: req.params.ip, slave: Number(req.params.slave) });
+  if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  try {
+    const result = await _callPythonGridControl(`/grid-control/state/${encodeURIComponent(tv.ip)}/${tv.slave}`, "GET");
+    // Sign-cast the raw fields the PDF marks as Int16 (phi_tangent_raw + reactive_raw).
+    if (result?.ok) {
+      const toSigned = (u) => {
+        const v = Number(u) & 0xFFFF;
+        return v > 0x7FFF ? v - 0x10000 : v;
+      };
+      result.phi_tangent_signed = toSigned(result.phi_tangent_raw);
+      result.reactive_signed = toSigned(result.reactive_raw);
+      // Convenience derivations
+      const phi = result.phi_tangent_signed / 32767;
+      result.phi_tangent_value = phi;
+      // tan(φ) → PF: PF = 1 / sqrt(1 + tan²(φ))
+      result.power_factor_estimate = 1 / Math.sqrt(1 + phi * phi);
+      result.reactive_kvar = result.reactive_signed / 10;
+      result.power_pct_readback = (Number(result.power_q15) / 32767) * 100;
+    }
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/grid-control/feature-status  — UI helper to know if writes are enabled
+app.get("/api/grid-control/feature-status", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  res.json({
+    ok: true,
+    enabled: _gridControlEnabled(),
+    note: _gridControlEnabled()
+      ? "Grid-control writes are enabled. Use sacupsMM key per request."
+      : "Grid-control writes are DISABLED by default. Enable `gridControlEnabled` after security review + 2-week single-inverter soak + operator sign-off.",
+  });
 });
 
 // ─── v2.10.x All Parameters Data — read-only endpoints ───────────────────
@@ -14187,6 +15018,10 @@ app.get(
     }
   },
 );
+
+// Extend refresh handler to also fetch standard-Modbus slots (on-demand, non-blocking).
+// This is done by adding best-effort standard-Modbus read to the refresh logic.
+// We'll need to wrap the existing endpoint — let me handle this via the refresh logic itself.
 
 // ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ───────────────────
 
@@ -15846,7 +16681,7 @@ app.get("/api/plant-cap/history", (req, res) => {
       .prepare(
         `SELECT ts, operator, inverter, node, action, scope, result, ip, reason
          FROM audit_log
-         WHERE scope = 'plant-cap'
+         WHERE scope = 'plant-cap' OR scope LIKE 'apc:%'
          ORDER BY ts DESC
          LIMIT ? OFFSET ?`,
       )
@@ -16115,6 +16950,267 @@ app.post("/api/plant-cap/schedules/:id/toggle", (req, res) => {
     return res.json({ ok: true, schedule: row });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Active Power Control (APC / %P Setpoint) ─────────────────────────────────
+// Phase B: per-node scope only; feature-flag gated in the UI.
+// Auth: GET/preview = unauthenticated; apply/abort = isAuthorizedPlantWideControl.
+
+app.get("/api/plant-cap/setpoint/state", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!plantCapController) {
+    return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
+  }
+  try {
+    const result = await plantCapController.getSetpointState();
+    return res.json(result || { ok: true, state: [] });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/setpoint/preview", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const b = req.body || {};
+  const scope = String(b.scope || "node");
+  const targets = Array.isArray(b.targets) ? b.targets : [];
+  const target_pct = Number(b.target_pct);
+  if (!["node", "inverter", "plant"].includes(scope)) {
+    return res.status(400).json({ ok: false, error: "scope must be node|inverter|plant" });
+  }
+  if (!Number.isFinite(target_pct) || target_pct < 0 || target_pct > 100) {
+    return res.status(400).json({ ok: false, error: "target_pct must be 0–100" });
+  }
+  if (!plantCapController) {
+    return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
+  }
+  try {
+    const result = await plantCapController.previewSetpoint({ scope, targets, target_pct });
+    return res.json(result || { ok: false, error: "No response from engine." });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// Hardened %P Setpoint apply path (v2.11.0):
+//   - validates targets shape early (rejects empty/malformed/out-of-range)
+//   - enforces opcode whitelist (set|stop|start|abort)
+//   - dedupes concurrent submits on the same node within 1500 ms (anti-double-click)
+//   - schedules per-target Slice δ verify + broadcasts WS state refresh
+//   - logs one audit row per target instead of just the first
+const _apcInflight = new Map(); // key = `${ip}:${slave}:${opcode}` → ts
+const APC_INFLIGHT_DEDUP_MS = 1500;
+
+function _validateApcTargets(targets, scope) {
+  if (scope === "plant") {
+    // For plant scope the engine derives targets from ipconfig; an empty
+    // input array is acceptable and the engine will fan out.
+    return { ok: true, normalized: [] };
+  }
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return { ok: false, error: "targets array is required for scope=node|inverter" };
+  }
+  const normalized = [];
+  const seen = new Set();
+  for (const t of targets) {
+    const ip = String(t?.ip || "").trim();
+    const slave = Number(t?.slave);
+    if (!ip) return { ok: false, error: `target missing ip: ${JSON.stringify(t)}` };
+    // IPv4 sanity check (lenient — supports private + link-local)
+    if (!/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(ip)) {
+      return { ok: false, error: `target ip is not a valid IPv4 address: ${ip}` };
+    }
+    if (!Number.isFinite(slave) || slave < 1 || slave > 4) {
+      return { ok: false, error: `target slave must be 1–4, got: ${t?.slave}` };
+    }
+    const key = `${ip}:${slave}`;
+    if (seen.has(key)) continue; // silently dedupe target list
+    seen.add(key);
+    normalized.push({ ip, slave });
+  }
+  if (normalized.length === 0) {
+    return { ok: false, error: "no valid targets after normalization" };
+  }
+  return { ok: true, normalized };
+}
+
+app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const b = req.body || {};
+  const scope = String(b.scope || "node");
+  const opcode = String(b.opcode || "set").toLowerCase();
+  if (!["node", "inverter", "plant"].includes(scope)) {
+    return res.status(400).json({ ok: false, error: "scope must be node|inverter|plant" });
+  }
+  if (!["set", "stop", "start", "abort"].includes(opcode)) {
+    return res.status(400).json({ ok: false, error: "opcode must be set|stop|start|abort" });
+  }
+  // Plant-wide scope and any STOP require a fresh sacupsMM key (not a cached session token).
+  const needsFreshKey = scope === "plant" || opcode === "stop";
+  const authOk = needsFreshKey
+    ? isValidPlantWideAuthKey(b.authKey, Date.now())
+    : isAuthorizedPlantWideControl(b, req);
+  if (!authOk) {
+    return res.status(403).json({ ok: false, error: "Unauthorized active power control command." });
+  }
+  // Validate + normalize targets early. Reject malformed input before
+  // touching Modbus so the operator gets a clear error, not a Python timeout.
+  const tv = _validateApcTargets(b.targets, scope);
+  if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  const targets = tv.normalized;
+  const target_pct = Number(b.target_pct);
+  const force = Boolean(b.force);
+  const operator = String(b.operator || "operator").slice(0, 64);
+  const isSetpointOp = opcode === "set";
+  if (isSetpointOp && (!Number.isFinite(target_pct) || target_pct < 0 || target_pct > 100)) {
+    return res.status(400).json({ ok: false, error: "target_pct must be 0–100" });
+  }
+  // Anti-double-click guard: reject rapid identical submits on the same node.
+  // Plant-scope op-codes are intentionally exempt (operator can re-issue).
+  if (scope !== "plant") {
+    const now = Date.now();
+    for (const t of targets) {
+      const key = `${t.ip}:${t.slave}:${opcode}`;
+      const last = _apcInflight.get(key);
+      if (last && (now - last) < APC_INFLIGHT_DEDUP_MS) {
+        return res.status(429).json({
+          ok: false,
+          error: `Duplicate ${opcode} for ${t.ip}/${t.slave} within ${APC_INFLIGHT_DEDUP_MS} ms — wait for the previous request to settle.`,
+        });
+      }
+      _apcInflight.set(key, now);
+    }
+    // Best-effort cleanup of stale entries to keep the map small.
+    if (_apcInflight.size > 256) {
+      const cutoff = now - 60_000;
+      for (const [k, ts] of _apcInflight) if (ts < cutoff) _apcInflight.delete(k);
+    }
+  }
+  // START requires a prior %P setpoint on each target — without one, the inverter
+  // has nothing to resume to. Block the operation rather than issue a no-op write.
+  if (opcode === "start") {
+    let stateRows = [];
+    try { stateRows = getApcState() || []; } catch (_) { stateRows = []; }
+    const stateMap = new Map();
+    stateRows.forEach((s) => {
+      stateMap.set(`${s.inverter_ip}:${s.slave}`, s);
+    });
+    const missing = [];
+    for (const t of targets) {
+      const ip = String(t?.ip || "").trim();
+      const slave = Number(t?.slave);
+      if (!ip || !Number.isFinite(slave)) continue;
+      const rec = stateMap.get(`${ip}:${slave}`);
+      if (!rec || rec.active_pct == null) missing.push({ ip, slave });
+    }
+    if (missing.length > 0) {
+      const preview = missing.slice(0, 5).map((m) => `${m.ip}/${m.slave}`).join(", ");
+      const more = missing.length > 5 ? ` (+${missing.length - 5} more)` : "";
+      return res.status(409).json({
+        ok: false,
+        rejected: true,
+        reason: "no_prior_setpoint",
+        missing,
+        error:
+          `Cannot START: ${missing.length} target(s) have no prior %P setpoint recorded. ` +
+          `Apply Setpoint first to establish the active power level — ${preview}${more}.`,
+      });
+    }
+  }
+  if (!plantCapController) {
+    return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
+  }
+  try {
+    const result = await plantCapController.applySetpoint({ scope, targets, target_pct, opcode, force, operator });
+    if (result?.rejected) return res.status(409).json(result);
+    // Broadcast a "setpoint started" event so connected clients (including
+    // remote viewers via the WS bridge) update their %P state and history
+    // without waiting for the next polling tick.
+    try {
+      broadcastUpdate({
+        type: "apc.setpoint.start",
+        scope,
+        opcode,
+        target_pct: opcode === "set" ? target_pct : null,
+        job_id: result?.job_id || null,
+        targets_count: targets.length,
+        targets: scope === "plant" ? null : targets.map(t => ({ ip: t.ip, slave: t.slave })),
+        operator,
+      });
+    } catch (_) {}
+    // Slice δ — schedule a closed-loop verify for every target on a 'set' op.
+    if (isSetpointOp && result?.ok && Array.isArray(targets)) {
+      try {
+        for (const t of targets) {
+          if (!t?.ip || t?.slave == null) continue;
+          apcVerifier.scheduleVerify({
+            inverter_ip: t.ip,
+            slave: Number(t.slave),
+            requested_pct: target_pct,
+            rated_kw: NODE_KW_MAX,
+            job_id: result?.job_id || null,
+          });
+        }
+      } catch (err) {
+        console.warn("[apc-verify] schedule failed:", err.message);
+      }
+    }
+    // State refresh: schedule a single state pull ~3 s after the write so
+    // the UI reflects the engine's authoritative active_pct without waiting
+    // for the operator's next refresh click.
+    if (result?.ok) {
+      const _t = setTimeout(() => {
+        plantCapController.getSetpointState()
+          .then((s) => {
+            if (s?.ok && Array.isArray(s.states)) {
+              try { broadcastUpdate({ type: "apc.setpoint.state", states: s.states }); } catch (_) {}
+            }
+          })
+          .catch(() => {});
+      }, 3000);
+      if (_t?.unref) _t.unref();
+    }
+    return res.json(result || { ok: false, error: "No response from engine." });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/plant-cap/setpoint/abort/:job_id", express.json(), async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized active power control command." });
+  }
+  const job_id = String(req.params.job_id || "").trim();
+  const operator = String((req.body || {}).operator || "operator").slice(0, 64);
+  if (!job_id) return res.status(400).json({ ok: false, error: "job_id required" });
+  if (!plantCapController) {
+    return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
+  }
+  try {
+    const result = await plantCapController.abortSetpoint(job_id, operator);
+    try {
+      broadcastUpdate({ type: "apc.setpoint.abort", job_id, operator });
+    } catch (_) {}
+    return res.json(result || { ok: false, error: "No response from engine." });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/plant-cap/setpoint/jobs/:job_id", async (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  const job_id = String(req.params.job_id || "").trim();
+  if (!job_id) return res.status(400).json({ ok: false, error: "job_id required" });
+  if (!plantCapController) {
+    return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
+  }
+  try {
+    const result = await plantCapController.getJobState(job_id);
+    return res.json(result || { ok: false, error: "Job not found." });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: err.message });
   }
 });
 
@@ -16593,6 +17689,7 @@ app.post("/api/settings", (req, res) => {
     plantCapSequenceMode,
     plantCapSequenceCustom,
     plantCapCooldownSec,
+    plantCapSetpointEnabled,
     go2rtcAutoStart,
     cameraConfig,
     // v2.9.0 Slice G — Inverter Clocks
@@ -16843,6 +17940,10 @@ app.post("/api/settings", (req, res) => {
       clampInt(plantCapCooldownSec, 5, 600, 30),
     );
   }
+  if (plantCapSetpointEnabled !== undefined) {
+    const v = plantCapSetpointEnabled === true || plantCapSetpointEnabled === "1" || plantCapSetpointEnabled === 1;
+    updates.plantCapSetpointEnabled = v ? "1" : "0";
+  }
   if (
     updates.plantCapUpperMw !== undefined ||
     updates.plantCapLowerMw !== undefined
@@ -16989,6 +18090,45 @@ app.post("/api/settings", (req, res) => {
   db.transaction(() => {
     Object.entries(updates).forEach(([k, v]) => setSetting(k, v));
   })();
+
+  // Audit log every applied settings change so gateway and remote viewers
+  // share a unified history. Sensitive keys are redacted to avoid leaking
+  // secrets into audit_log (which replicates to remote viewers).
+  if (Object.keys(updates).length > 0) {
+    const SENSITIVE_SETTING_KEYS = new Set([
+      "remoteApiToken",
+      "solcastApiKey",
+      "solcastToolkitPassword",
+    ]);
+    const operatorName = String(
+      (req.body && req.body.operator) ||
+      req.headers["x-operator"] ||
+      getSetting("operatorName", "OPERATOR"),
+    ).slice(0, 64);
+    const auditTs = Date.now();
+    const reqIp = String(req.ip || req.connection?.remoteAddress || "").slice(0, 64);
+    Object.entries(updates).forEach(([k, v]) => {
+      const display = SENSITIVE_SETTING_KEYS.has(k)
+        ? (v ? "<redacted>" : "<cleared>")
+        : (typeof v === "string" && v.length > 200 ? v.slice(0, 200) + "…" : String(v));
+      try {
+        insertAuditLogRow({
+          ts: auditTs,
+          operator: operatorName,
+          action: "settings.change",
+          scope: "settings",
+          result: "ok",
+          ip: reqIp,
+          reason: `${k}=${display}`,
+        });
+      } catch (_) { /* non-fatal */ }
+    });
+    // Broadcast a generic settings-changed event so remote viewers refetch
+    // /api/settings instead of waiting on the next replication tick. Mode/
+    // gateway/token changes are still handled separately below with the
+    // heavier `configChanged` event that triggers UI rebuild.
+    try { broadcastUpdate({ type: "settingsChanged", keys: Object.keys(updates) }); } catch (_) {}
+  }
 
   // Reschedule the clock-sync cron if the schedule changed.
   if (
@@ -20276,6 +21416,12 @@ const httpServer = app.listen(PORT, () => {
     }
   } catch (err) {
     console.warn("[DB] Could not write startup-integrity audit row:", err?.message || err);
+  }
+  try {
+    const aborted = markStaleRampsAborted();
+    if (aborted > 0) console.log(`[APC] Marked ${aborted} stale ramp job(s) aborted at startup`);
+  } catch (err) {
+    console.warn("[APC] markStaleRampsAborted failed at startup:", err?.message || err);
   }
   loadRemoteTodayEnergyShadowFromSettings();
   loadGatewayHandoffMetaFromSettings();

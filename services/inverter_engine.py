@@ -22,6 +22,9 @@ import json
 import time
 import sqlite3
 import math
+import uuid as _uuid_mod
+import random as _random_mod
+from typing import Optional, List
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -3371,6 +3374,566 @@ async def api_serial_write(inverter: int, slave: int, request: Request):
         **result,
     }
 
+
+# ─── Active Power Control (APC) — Continuous %P Setpoint ────────────────────
+# Verified protocol 2026-05-04: FC16 → reg 0x03E8 (1000)
+#   opcode 0x0005 = STOP  |  0x0006 = START  |  0x0003 = SET-ACTIVE-PCT
+#   reg[1001] = Q15 setpoint = (pct/100) × 0x7FFF  (only when opcode=0x0003)
+# Wire test: PAC 143 kW → 125 kW within 8 s at 50 % on inverter .126 slave 1.
+# See plans/2026-05-04-curtailment-control.md §1 for full verification record.
+
+_APC_REG          = 0x03E8   # 1000 — command register
+_APC_OPCODE_SET_P = 0x0003
+_APC_OPCODE_STOP  = 0x0005
+_APC_OPCODE_START = 0x0006
+_APC_Q15_MAX      = 0x7FFF
+
+# Per-slave setpoint state — updated on each confirmed write.
+# Key: (ip, slave)  Value: {active_pct, opcode, applied_ts, job_id, source}
+curtailment_state: dict = {}
+
+# In-flight and completed ramp job snapshots — keyed by job_id (UUID str).
+ramp_jobs: dict = {}
+
+# Serializes job creation; ramp execution itself is per-job async.
+ramp_lock = threading.Lock()
+
+
+def _q15_from_pct(pct: float) -> int:
+    """Convert 0..100 % to Q15 integer (0x0000..0x7FFF). Clamps at bounds."""
+    v = int(round((max(0.0, min(100.0, float(pct))) / 100.0) * _APC_Q15_MAX))
+    return max(0, min(_APC_Q15_MAX, v))
+
+
+def _write_command_register_sync(client, lock, slave: int, opcode: int,
+                                  setpoint: Optional[int] = None) -> dict:
+    """Blocking — run inside executor. Holds lock only for the FC16 frame (~50 ms)."""
+    values = [opcode] if setpoint is None else [opcode, setpoint]
+    try:
+        with lock:
+            r = client.write_registers(address=_APC_REG, values=values, unit=slave)
+        if r is None:
+            return {"ok": False, "error": "null_response"}
+        if r.isError():
+            return {"ok": False, "error": f"modbus_error: {r}"}
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": f"exception: {exc}"}
+
+
+async def write_command_register(ip: str, slave: int, opcode: int,
+                                  setpoint: Optional[int] = None) -> dict:
+    """Async wrapper for _write_command_register_sync. Returns {ok, error?}."""
+    client = clients.get(ip)
+    if not client:
+        return {"ok": False, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"ok": False, "error": "no_lock"}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        _write_command_register_sync,
+        client, lock, slave, opcode, setpoint,
+    )
+
+
+async def set_active_power_pct(ip: str, slave: int, pct: float) -> dict:
+    """Write SET-ACTIVE-PCT (opcode 0x0003) with Q15 setpoint. Returns {ok, pct, q15, error?}."""
+    q15 = _q15_from_pct(pct)
+    result = await write_command_register(ip, slave, _APC_OPCODE_SET_P, q15)
+    return {**result, "pct": pct, "q15": q15}
+
+
+async def stop_inverter_apc(ip: str, slave: int) -> dict:
+    """Write STOP opcode (0x0005). Independent of the binary-sequencer path."""
+    return await write_command_register(ip, slave, _APC_OPCODE_STOP)
+
+
+async def start_inverter_apc(ip: str, slave: int) -> dict:
+    """Write START opcode (0x0006)."""
+    return await write_command_register(ip, slave, _APC_OPCODE_START)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Slice ζ — Reactive power + grid-code controls (PDF §3 cmd 1, 9, 11 + read-back).
+# Implementation reference: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice ζ
+# Reference card: docs/Inverter-Modbus-Reference.md §6.
+#
+# Risk gating: ALL writes here REQUIRE
+#   1. operator-typed sacupsMM bulk auth key (server-side gate)
+#   2. featureFlag `gridControlEnabled` = "1" in settings (default "0")
+#   3. security-reviewer agent pass on the diff
+#   4. 2-week single-inverter soak before fleet-wide enable
+# Read-back endpoint is auth-gated but flag-free — visibility is always safe.
+# ───────────────────────────────────────────────────────────────────────────
+
+# Command codes per PDF §3 pg 15-17:
+_GC_OPCODE_PHI_TANGENT  = 0x0001  # Change phi tangent target (PF control)
+_GC_OPCODE_REACTIVE_KVAR = 0x0009  # Change reactive power ref (kVAr)
+_GC_OPCODE_DISABLE_REACTIVE = 0x000B  # Disable reactive ref (restore default)
+
+# Limits per PDF §3 pg 15-17:
+_GC_PHI_TANGENT_MAX = 15870  # ±0.484 tan(φ) ≈ PF 0.90 lag/lead.
+                              # NGCP PGC GCR 4.4.4.1 requires PF 0.95 → ±10780.
+
+# Read-back of all five grid-control holding registers (41006-41010):
+_GC_READ_BASE_ADDR = 0x03ED   # 1005 = 41006
+_GC_READ_COUNT     = 5         # 41006, 41007, 41008, 41009 (reserved), 41010
+
+
+def _signed16_to_raw(value: int) -> int:
+    """Encode a signed Int16 as the raw UInt16 the Modbus wire expects.
+    Mirror of `_signed_int16` (decode side) at module top. Clamps to ±0x7FFF."""
+    v = max(-0x8000, min(0x7FFF, int(value)))
+    return v & 0xFFFF
+
+
+async def set_phi_tangent(ip: str, slave: int, phi_raw: int) -> dict:
+    """Cmd 1 — set tan(φ) target. `phi_raw` is the Int16 wire value (NOT a PF
+    or tan(φ) float — caller must convert). Returns {ok, raw, error?}.
+    NGCP PF 0.95 lag/lead → tan(φ) = ±0.329 → raw ±10780."""
+    raw = _signed16_to_raw(phi_raw)
+    if abs(int(phi_raw)) > _GC_PHI_TANGENT_MAX:
+        print(f"[grid-control] {ip}/{slave} cmd 1 REJECTED: phi_raw {phi_raw} exceeds ±{_GC_PHI_TANGENT_MAX}")
+        return {"ok": False, "error": f"phi_raw {phi_raw} exceeds ±{_GC_PHI_TANGENT_MAX}"}
+    result = await write_command_register(ip, slave, _GC_OPCODE_PHI_TANGENT, raw)
+    if result.get("ok"):
+        print(f"[grid-control] {ip}/{slave} cmd 1 (phi-tangent) OK raw={raw}")
+    else:
+        print(f"[grid-control] {ip}/{slave} cmd 1 (phi-tangent) FAIL raw={raw}: {result.get('error')}")
+    return {**result, "raw": raw}
+
+
+async def set_reactive_kvar(ip: str, slave: int, kvar_div10: int) -> dict:
+    """Cmd 9 — set reactive power reference. `kvar_div10` is the raw Int16 the
+    PDF specifies (kVAr ÷ 10). Caller-side limits per device nominal kVA.
+    Returns {ok, raw, error?}."""
+    raw = _signed16_to_raw(kvar_div10)
+    result = await write_command_register(ip, slave, _GC_OPCODE_REACTIVE_KVAR, raw)
+    if result.get("ok"):
+        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive-kVAr) OK raw={raw} (~{kvar_div10/10:.1f}kVAr)")
+    else:
+        print(f"[grid-control] {ip}/{slave} cmd 9 (reactive-kVAr) FAIL raw={raw}: {result.get('error')}")
+    return {**result, "raw": raw}
+
+
+async def disable_reactive(ip: str, slave: int) -> dict:
+    """Cmd 11 — disable reactive reference, restore device default."""
+    result = await write_command_register(ip, slave, _GC_OPCODE_DISABLE_REACTIVE)
+    if result.get("ok"):
+        print(f"[grid-control] {ip}/{slave} cmd 11 (disable-reactive) OK — restored default")
+    else:
+        print(f"[grid-control] {ip}/{slave} cmd 11 (disable-reactive) FAIL: {result.get('error')}")
+    return result
+
+
+def _read_grid_control_state_sync(client, lock, slave: int) -> dict:
+    """Blocking holding-register read for 41006-41010. Returns the raw decoded
+    UInt16 list under `regs` plus per-field convenience names. ±sign handling
+    for phi_tangent and reactive_target is left to the caller (Node side)."""
+    try:
+        with lock:
+            r = client.read_holding_registers(address=_GC_READ_BASE_ADDR,
+                                              count=_GC_READ_COUNT, unit=slave)
+        if r is None:
+            return {"ok": False, "error": "null_response"}
+        if r.isError():
+            return {"ok": False, "error": f"modbus_error: {r}"}
+        regs = list(r.registers) if hasattr(r, "registers") else []
+        if len(regs) < _GC_READ_COUNT:
+            return {"ok": False, "error": f"short_frame: got {len(regs)}/{_GC_READ_COUNT}"}
+        # 41006 = power-reduction Q15 (UInt16, 0..32767)
+        # 41007 = phi-tangent target  (Int16 — caller must cast)
+        # 41008 = reactive target     (Int16 — caller must cast)
+        # 41009 = reserved
+        # 41010 = restrictive freq limits flag (UInt16, 0/1)
+        return {
+            "ok":              True,
+            "regs":            regs,
+            "power_q15":       regs[0],
+            "phi_tangent_raw": regs[1],
+            "reactive_raw":    regs[2],
+            "freq_limits_on":  regs[4] & 0x0001,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"exception: {exc}"}
+
+
+async def read_grid_control_state(ip: str, slave: int) -> dict:
+    """Single-transaction read of holding 41006-41010 (5 regs). Used by the
+    Slice ζ read-back UI chip and by Slice θ Test T3 step capture."""
+    client = clients.get(ip)
+    if not client:
+        return {"ok": False, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"ok": False, "error": "no_lock"}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        _read_grid_control_state_sync,
+        client, lock, slave,
+    )
+
+
+def _compute_ramp_plan(current_pct: float, target_pct: float, targets: list,
+                       mag_step: float = 25.0, batch_count: int = 4) -> dict:
+    """Compute ramp sub-steps and fleet batches (no I/O)."""
+    delta = abs(target_pct - current_pct)
+    sub_n = max(1, math.ceil(delta / mag_step) if mag_step > 0 else 1)
+    if delta == 0:
+        sub_setpoints = [target_pct]
+    else:
+        step = (target_pct - current_pct) / sub_n
+        sub_setpoints = [current_pct + step * (i + 1) for i in range(sub_n)]
+        sub_setpoints[-1] = target_pct   # exact target, no float drift
+
+    bc = max(1, min(batch_count, len(targets)))
+    batches: List[list] = [[] for _ in range(bc)]
+    for i, t in enumerate(targets):
+        batches[i % bc].append(t)
+
+    return {
+        "sub_setpoints": sub_setpoints,
+        "sub_count":     len(sub_setpoints),
+        "batches":       batches,
+        "batch_count":   bc,
+        "target_count":  len(targets),
+    }
+
+
+async def _execute_ramp(job_id: str, targets: list, sub_setpoints: list,
+                        batches: list, opcode_str: str,
+                        substep_hold_s: float, batch_spacing_ms: float,
+                        jitter_ms: float) -> None:
+    """Background coroutine — drives the two-axis ramp, updates curtailment_state."""
+    job = ramp_jobs.get(job_id)
+    if job is None:
+        return
+
+    ts_start    = time.time()
+    total_writes = len(sub_setpoints) * sum(len(b) for b in batches)
+    completed   = 0
+    errors: list = []
+
+    job["status"]       = "running"
+    job["ts_start"]     = ts_start
+    job["total_writes"] = total_writes
+
+    try:
+        for sub_idx, sub_pct in enumerate(sub_setpoints):
+            if job.get("abort"):
+                break
+
+            job["current_sub"] = sub_idx
+
+            for batch_idx, batch in enumerate(batches):
+                if job.get("abort"):
+                    break
+
+                job["current_batch"] = batch_idx
+
+                async def _write_one(tgt=None, _sub=sub_pct, _si=sub_idx, _bi=batch_idx):
+                    ip_    = tgt.get("ip") or tgt.get("inverter_ip") or ""
+                    slave_ = int(tgt.get("slave", 1))
+                    if jitter_ms > 0:
+                        await asyncio.sleep(_random_mod.uniform(0, jitter_ms) / 1000.0)
+                    if opcode_str == "stop":
+                        r = await stop_inverter_apc(ip_, slave_)
+                        st_pct = 0.0
+                        st_op  = _APC_OPCODE_STOP
+                    elif opcode_str == "start":
+                        r = await start_inverter_apc(ip_, slave_)
+                        st_pct = 100.0
+                        st_op  = _APC_OPCODE_START
+                    else:
+                        r = await set_active_power_pct(ip_, slave_, _sub)
+                        st_pct = _sub
+                        st_op  = _APC_OPCODE_SET_P
+                    if r.get("ok"):
+                        curtailment_state[(ip_, slave_)] = {
+                            "active_pct": st_pct,
+                            "opcode":     st_op,
+                            "applied_ts": int(time.time() * 1000),
+                            "job_id":     job_id,
+                            "source":     "operator",
+                        }
+                    return {
+                        "ip": ip_, "slave": slave_,
+                        "ok": r.get("ok"), "error": r.get("error"),
+                        "sub_step": _si, "batch_idx": _bi,
+                        "setpoint_pct": _sub,
+                    }
+
+                write_tasks = [_write_one(tgt=t) for t in batch]
+                batch_results = await asyncio.gather(*write_tasks, return_exceptions=True)
+
+                for res in batch_results:
+                    if isinstance(res, Exception):
+                        errors.append({"error": str(res)})
+                    else:
+                        completed += 1
+                        if not res.get("ok"):
+                            errors.append(res)
+
+                job["completed_writes"] = completed
+                job["errors"]           = errors
+
+                if batch_idx < len(batches) - 1 and not job.get("abort"):
+                    await asyncio.sleep(batch_spacing_ms / 1000.0)
+
+            if sub_idx < len(sub_setpoints) - 1 and not job.get("abort"):
+                await asyncio.sleep(substep_hold_s)
+
+    except asyncio.CancelledError:
+        job["status"] = "aborted"
+        raise
+    except Exception as exc:
+        job["status"] = "error"
+        job["error"]  = str(exc)
+        return
+
+    if job.get("abort"):
+        job["status"] = "aborted"
+    elif completed == 0 and errors:
+        job["status"] = "failed"
+    elif errors:
+        job["status"] = "partial"
+    else:
+        job["status"] = "completed"
+
+    job["ts_end"]           = time.time()
+    job["elapsed_s"]        = round(job["ts_end"] - ts_start, 2)
+    job["completed_writes"] = completed
+    job["errors"]           = errors
+
+
+class ApcPreviewRequest(BaseModel):
+    targets:     list
+    target_pct:  float
+    current_pct: Optional[float] = 100.0
+
+
+class ApcRunRequest(BaseModel):
+    targets:    list
+    target_pct: Optional[float] = None
+    opcode:     Optional[str]   = "set"   # "set" | "stop" | "start"
+    mode:       str             = "ramp"
+    force:      bool            = False
+
+
+@app.post("/curtail/preview")
+async def curtail_preview(req: ApcPreviewRequest):
+    """Return ramp plan (sub-steps, batches, estimated time) without writing."""
+    targets = [dict(t) if not isinstance(t, dict) else t for t in req.targets]
+    if not targets:
+        raise HTTPException(400, "targets is empty")
+    pct = float(req.target_pct)
+    if not (0.0 <= pct <= 100.0):
+        raise HTTPException(400, "target_pct must be 0..100")
+
+    plan = _compute_ramp_plan(
+        current_pct=float(req.current_pct or 100.0),
+        target_pct=pct,
+        targets=targets,
+        mag_step=25.0,
+        batch_count=4,
+    )
+    sub_n = plan["sub_count"]
+    bc    = plan["batch_count"]
+    # holds between sub-steps + batch spacings within each sub-step
+    est_ms = int(
+        (sub_n - 1) * 6000 +          # 6 s hold per sub-step gap
+        sub_n * (bc - 1) * 1500        # 1.5 s spacing per batch gap
+    )
+    return {
+        "ok":            True,
+        "sub_count":     sub_n,
+        "batch_count":   bc,
+        "target_count":  len(targets),
+        "sub_setpoints": plan["sub_setpoints"],
+        "est_total_ms":  est_ms,
+        "est_total_s":   round(est_ms / 1000, 1),
+    }
+
+
+@app.post("/curtail/run")
+async def curtail_run(req: ApcRunRequest):
+    """Start a ramp job. Returns {job_id}. 409 if a ramp is already running (force=true aborts it)."""
+    opcode_str = (req.opcode or "set").lower()
+    if opcode_str not in ("set", "stop", "start"):
+        raise HTTPException(400, "opcode must be 'set', 'stop', or 'start'")
+
+    if opcode_str == "set":
+        if req.target_pct is None:
+            raise HTTPException(400, "target_pct required when opcode=set")
+        pct = float(req.target_pct)
+        if not (0.0 <= pct <= 100.0):
+            raise HTTPException(400, "target_pct must be 0..100")
+    else:
+        pct = 0.0 if opcode_str == "stop" else 100.0
+
+    targets = [dict(t) if not isinstance(t, dict) else t for t in req.targets]
+    if not targets:
+        raise HTTPException(400, "targets is empty")
+
+    with ramp_lock:
+        active_job = next(
+            (j for j in ramp_jobs.values() if j.get("status") == "running"),
+            None,
+        )
+        if active_job and not req.force:
+            raise HTTPException(409, f"ramp job {active_job['job_id']} is running; pass force=true to abort it")
+        if active_job:
+            active_job["abort"] = True
+
+        job_id = str(_uuid_mod.uuid4())
+
+        if opcode_str in ("stop", "start"):
+            sub_setpoints = [pct]
+        else:
+            current_pct = 100.0
+            st = curtailment_state.get(
+                (targets[0].get("ip", ""), int(targets[0].get("slave", 1)))
+            )
+            if st:
+                current_pct = float(st.get("active_pct", 100.0))
+            plan = _compute_ramp_plan(current_pct, pct, targets, mag_step=25.0, batch_count=4)
+            sub_setpoints = plan["sub_setpoints"]
+
+        bc      = max(1, min(4, len(targets)))
+        batches = [[] for _ in range(bc)]
+        for i, t in enumerate(targets):
+            batches[i % bc].append(t)
+
+        job: dict = {
+            "job_id":           job_id,
+            "status":           "queued",
+            "opcode":           opcode_str,
+            "target_pct":       pct,
+            "targets":          targets,
+            "sub_setpoints":    sub_setpoints,
+            "sub_count":        len(sub_setpoints),
+            "batch_count":      bc,
+            "total_writes":     len(sub_setpoints) * sum(len(b) for b in batches),
+            "completed_writes": 0,
+            "current_sub":      0,
+            "current_batch":    0,
+            "errors":           [],
+            "abort":            False,
+            "ts_start":         None,
+            "ts_end":           None,
+            "elapsed_s":        None,
+        }
+        ramp_jobs[job_id] = job
+
+    asyncio.create_task(_execute_ramp(
+        job_id=job_id,
+        targets=targets,
+        sub_setpoints=sub_setpoints,
+        batches=batches,
+        opcode_str=opcode_str,
+        substep_hold_s=6.0,
+        batch_spacing_ms=1500.0,
+        jitter_ms=80.0,
+    ))
+
+    return {"ok": True, "job_id": job_id}
+
+
+@app.post("/curtail/abort/{job_id}")
+async def curtail_abort(job_id: str):
+    """Signal an in-flight ramp to stop after its current write. Returns job snapshot."""
+    job = ramp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    if job.get("status") not in ("running", "queued"):
+        raise HTTPException(409, f"job {job_id} is already {job.get('status')}")
+    job["abort"] = True
+    return {"ok": True, "job_id": job_id, "status": "abort_requested"}
+
+
+@app.get("/curtail/state")
+async def curtail_state_view():
+    """Return all known per-slave setpoint states."""
+    rows = []
+    for (ip, slave), st in curtailment_state.items():
+        rows.append({"ip": ip, "slave": slave, **st})
+    return {"ok": True, "states": rows}
+
+
+@app.get("/curtail/jobs/{job_id}")
+async def curtail_job_view(job_id: str):
+    """Return snapshot of one ramp job."""
+    job = ramp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    return {"ok": True, "job": dict(job)}
+
+
+# ── Slice ζ — Grid-control endpoints (reactive + PF + read-back) ─────────
+# All write paths are auth-gated by Node-side `gridControlEnabled` flag +
+# sacupsMM key. Python service trusts upstream auth (loopback-only call site)
+# but enforces argument validation. Read-back (`/grid-control/state`) is safe
+# and unconditional.
+
+class GridControlPhiReq(BaseModel):
+    ip:    str
+    slave: int
+    phi_raw: int   # Int16 wire value; NGCP PF 0.95 → ±10780
+
+class GridControlReactiveReq(BaseModel):
+    ip:    str
+    slave: int
+    kvar_div10: int  # Int16, raw kVAr / 10 per PDF cmd 9
+
+class GridControlDisableReq(BaseModel):
+    ip:    str
+    slave: int
+
+
+@app.post("/grid-control/phi")
+async def api_grid_control_phi(req: GridControlPhiReq):
+    """Cmd 1 — set tan(φ) target. Caller passes raw Int16 (already scaled)."""
+    return await set_phi_tangent(req.ip, int(req.slave), int(req.phi_raw))
+
+
+@app.post("/grid-control/reactive")
+async def api_grid_control_reactive(req: GridControlReactiveReq):
+    """Cmd 9 — set reactive power reference. Caller passes raw Int16 (kVAr ÷ 10)."""
+    return await set_reactive_kvar(req.ip, int(req.slave), int(req.kvar_div10))
+
+
+@app.post("/grid-control/disable")
+async def api_grid_control_disable(req: GridControlDisableReq):
+    """Cmd 11 — disable reactive reference, restore default."""
+    return await disable_reactive(req.ip, int(req.slave))
+
+
+@app.get("/grid-control/state/{ip}/{slave}")
+async def api_grid_control_state(ip: str, slave: int):
+    """Read holding 41006-41010 in one transaction. Returns raw regs +
+    convenience-decoded fields. Sign-cast for phi/reactive is left to Node."""
+    return await read_grid_control_state(ip, int(slave))
+
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+@app.websocket("/ws")
+async def websocket_metrics(ws: WebSocket):
+    await ws.accept()
+    print("[WS] Client connected")
+
+    try:
+        while True:
+            data = _build_metrics()   # use your existing metrics builder
+            await ws.send_text(json.dumps(data))
+            await asyncio.sleep(0.5)  # 500ms push
+    except WebSocketDisconnect:
+        print("[WS] Client disconnected")
+    except Exception as e:
+        print("[WS] Error:", e)
 
 # -------------------------------------------------
 #   Entry point

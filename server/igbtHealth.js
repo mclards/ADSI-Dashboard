@@ -13,34 +13,45 @@
  */
 
 /**
- * computeHealthScore(inputs) → {score, tier, breakdown}
+ * computeHealthScore(inputs) → {score, tier, breakdown, weights_used}
  *
- * Composite health score from four aging components, weighted and clamped to [0, 100].
+ * Composite health score from up to five aging components, weighted and clamped to [0, 100].
  *
  * @param {Object} inputs
- *   @param {number} [inputs.thermal_count=0] — # of thermal stops (codes 6, 20) in rolling window
- *   @param {number} [inputs.frama_count=0] — # of FRAMA stops (codes 12, 28, 29) in rolling window
- *   @param {number} [inputs.pi_ana_count=0] — # of PI saturation stops (code 25) in rolling window
- *   @param {number|null} [inputs.imbalance_pct=null] — phase current imbalance percentage (null if offline)
- *   @param {number} [inputs.rolling_window_days=90] — (optional, for audit only)
+ *   @param {number} [inputs.thermal_count=0] — # of thermal stops in rolling window
+ *   @param {number} [inputs.frama_count=0]   — # of FRAMA stops in rolling window
+ *   @param {number} [inputs.pi_ana_count=0]  — # of PI saturation stops in rolling window
+ *   @param {number|null} [inputs.imbalance_pct=null] — phase current imbalance percentage
+ *   @param {number|null} [inputs.yoy_drift_c=null]   — year-over-year midday-baseline drift (°C).
+ *      When non-null and finite, the score blends a thermal-drift component
+ *      using Phase 2 weights. When null (baseline not yet ready), the
+ *      Phase 1 weights are used unchanged so scores stay comparable.
  *
  * @returns {Object}
  *   @returns {number} score — composite health score [0, 100], 1 decimal place
  *   @returns {string|null} tier — 'healthy' | 'watch' | 'aging' | 'eol' | null
  *   @returns {Object} breakdown — component scores for audit
- *     @returns {number} breakdown.thermal_score
- *     @returns {number} breakdown.frama_score
- *     @returns {number} breakdown.pi_ana_score
- *     @returns {number} breakdown.imbal_score
+ *     @returns {number}      breakdown.thermal_score
+ *     @returns {number}      breakdown.frama_score
+ *     @returns {number}      breakdown.pi_ana_score
+ *     @returns {number}      breakdown.imbal_score
+ *     @returns {number|null} breakdown.yoy_score   — null when yoy_drift_c was null
+ *   @returns {Object} weights_used — phase indicator + actual weights used
+ *     @returns {string}  weights_used.phase  — 'phase1' or 'phase2'
+ *     @returns {Object}  weights_used.weights
  *
- * Formula:
- *   - thermal_score = min(100, thermal_count × 25)        [4+ trips → max]
- *   - frama_score   = min(100, frama_count × 30)          [3+ FRAMAs → max]
- *   - pi_ana_score  = min(100, pi_ana_count × 35)         [3+ events → max]
+ * Phase 1 weights (no YoY signal yet — manual §6.5 baseline period):
+ *   thermal=0.30, frama=0.30, pi_ana=0.20, imbal=0.20
+ *
+ * Phase 2 weights (YoY drift available — manual §6.5 mature period):
+ *   yoy=0.30, frama=0.25, thermal_trips=0.15, pi_ana=0.15, imbal=0.15
+ *
+ * Component formulas (unchanged):
+ *   - thermal_score = min(100, thermal_count × 25)
+ *   - frama_score   = min(100, frama_count × 30)
+ *   - pi_ana_score  = min(100, pi_ana_count × 35)
  *   - imbal_score   = min(100, max(0, (imbalance_pct - 1.0) × 20))
- *
- *   - score = 0.30 × thermal_score + 0.30 × frama_score + 0.20 × pi_ana_score + 0.20 × imbal_score
- *   - tier  = tierForScore(score)
+ *   - yoy_score     = thermalDriftScore(yoy_drift_c)  // see igbtThermal.js, manual §6.5
  */
 function computeHealthScore(inputs = {}) {
   const {
@@ -48,7 +59,7 @@ function computeHealthScore(inputs = {}) {
     frama_count = 0,
     pi_ana_count = 0,
     imbalance_pct = null,
-    rolling_window_days = 90,
+    yoy_drift_c = null,
   } = inputs;
 
   // Component scores, each clamped to [0, 100]
@@ -61,24 +72,50 @@ function computeHealthScore(inputs = {}) {
     imbal_score = Math.min(100, (imbalance_pct - 1.0) * 20);
   }
 
-  // Weighted composite: 30% thermal, 30% FRAMA, 20% PI, 20% imbalance
-  const score =
-    0.30 * thermal_score +
-    0.30 * frama_score +
-    0.20 * pi_ana_score +
-    0.20 * imbal_score;
+  // YoY drift component: only contributes when caller supplied a finite drift.
+  // Uses the manual §6.5 formula: clamp(drift × 12, 0, 100); negative drift → 0.
+  const yoyAvailable = typeof yoy_drift_c === "number" && Number.isFinite(yoy_drift_c);
+  let yoy_score = null;
+  if (yoyAvailable) {
+    const d = yoy_drift_c;
+    yoy_score = d <= 0 ? 0 : Math.min(100, d * 12);
+  }
+
+  let score;
+  let weights;
+  let phase;
+  if (yoyAvailable) {
+    weights = { yoy: 0.30, frama: 0.25, thermal_trips: 0.15, pi_ana: 0.15, imbal: 0.15 };
+    phase = "phase2";
+    score =
+      weights.yoy           * yoy_score +
+      weights.frama         * frama_score +
+      weights.thermal_trips * thermal_score +
+      weights.pi_ana        * pi_ana_score +
+      weights.imbal         * imbal_score;
+  } else {
+    weights = { thermal: 0.30, frama: 0.30, pi_ana: 0.20, imbal: 0.20 };
+    phase = "phase1";
+    score =
+      weights.thermal * thermal_score +
+      weights.frama   * frama_score +
+      weights.pi_ana  * pi_ana_score +
+      weights.imbal   * imbal_score;
+  }
 
   const tier = tierForScore(score);
 
   return {
-    score: Math.round(score * 10) / 10,  // 1 decimal place
+    score: Math.round(score * 10) / 10,
     tier,
     breakdown: {
       thermal_score: Math.round(thermal_score * 10) / 10,
-      frama_score: Math.round(frama_score * 10) / 10,
-      pi_ana_score: Math.round(pi_ana_score * 10) / 10,
-      imbal_score: Math.round(imbal_score * 10) / 10,
+      frama_score:   Math.round(frama_score * 10) / 10,
+      pi_ana_score:  Math.round(pi_ana_score * 10) / 10,
+      imbal_score:   Math.round(imbal_score * 10) / 10,
+      yoy_score:     yoy_score == null ? null : Math.round(yoy_score * 10) / 10,
     },
+    weights_used: { phase, weights },
   };
 }
 

@@ -591,6 +591,45 @@ function _signedInt16(raw) {
   return u16 > 0x7FFF ? u16 - 0x10000 : u16;
 }
 
+/* ── β-4 — Nominal-power mismatch detector ───────────────────────────────
+ * Compares the inverter's self-reported rated power (Modbus reg 30077, decoded
+ * to watts) against the operator-configured NODE_KW_MAX. Emits an audit row
+ * the first time a > 5 % drift is observed per (inverter,unit) per hour.
+ * Source: plans/2026-05-10-modbus-registers-official-revamp.md §9 β-4. */
+const _NOMINAL_POWER_EXPECTED_W = 244250;       // NODE_KW_MAX (244.25 kW) × 1000
+const _NOMINAL_POWER_TOLERANCE  = 0.05;          // ±5 % per acceptance criterion β-4
+const _NOMINAL_POWER_WARN_DEDUP_MS = 60 * 60 * 1000; // 1 h
+const _nominalPowerLastWarnAt = new Map();      // key `${inv}_${unit}` → ts ms
+
+function _maybeEmitNominalPowerMismatch(parsed) {
+  const reported = Number(parsed?.nominal_power_w || 0);
+  if (!reported || reported <= 0) return; // slow-poll hasn't filled this yet
+  const expected = _NOMINAL_POWER_EXPECTED_W;
+  const drift = Math.abs(reported - expected) / expected;
+  if (drift <= _NOMINAL_POWER_TOLERANCE) return;
+  const key = `${parsed.inverter}_${parsed.unit}`;
+  const now = Date.now();
+  const last = _nominalPowerLastWarnAt.get(key) || 0;
+  if (last && (now - last) < _NOMINAL_POWER_WARN_DEDUP_MS) return;
+  _nominalPowerLastWarnAt.set(key, now);
+  const reasonText =
+    `reg30077 reported ${reported}W vs configured ${expected}W ` +
+    `(drift ${(drift * 100).toFixed(1)}% > ${(_NOMINAL_POWER_TOLERANCE * 100).toFixed(0)}%)`;
+  console.warn(
+    `[poller] nominal_power_mismatch INV ${parsed.inverter} node ${parsed.unit}: ${reasonText}`,
+  );
+  insertAuditLogRow({
+    ts: now,
+    operator: "SYSTEM",
+    inverter: parsed.inverter,
+    node: parsed.unit,
+    action: "nominal_power_mismatch",
+    scope: "single",
+    result: "warn",
+    reason: reasonText,
+  });
+}
+
 /**
  * Decode authoritative inverter state register (reg 30074) into structured form.
  *
@@ -1368,6 +1407,20 @@ async function poll() {
       : frameAge;
 
     integratePacToday(parsed);
+
+    // β-4 — Nominal-power cross-check (Modbus reg 30077 vs configured ratedKw).
+    // The slow-poll captures the inverter's self-reported rated power. Compare
+    // against the operator-configured NODE_KW_MAX × 1000 W; if the relative
+    // error exceeds 5 %, emit ONE audit row per (inverter,unit) per hour so
+    // the operator can investigate a config drift or a hardware/firmware
+    // re-provisioning event without spamming the audit log.
+    try {
+      _maybeEmitNominalPowerMismatch(parsed);
+    } catch (npErr) {
+      if (!pollStats.lastNominalPowerWarn) {
+        pollStats.lastNominalPowerWarn = String(npErr?.message || npErr || "err");
+      }
+    }
 
     // v2.9.0 Slice B — persist hardware counters + RTC state (throttled 10s/unit).
     try {

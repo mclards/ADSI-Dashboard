@@ -217,6 +217,17 @@ and quarantine detection only — they never overwrite a running PAC value.
 
 ---
 
+## Modbus Register Reference (v2.11.x — Slice η)
+
+The full INGECON SUN PMax register map (input + holding), command codes,
+alarm bits, and power-reduction status bits live in
+**[docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md)** —
+the source-of-truth for inverter integration work. Implementing plan:
+[plans/2026-05-10-modbus-registers-official-revamp.md](plans/2026-05-10-modbus-registers-official-revamp.md).
+Implementation status: [audits/2026-05-11/modbus-revamp-implementation-status.md](audits/2026-05-11/modbus-revamp-implementation-status.md).
+
+---
+
 All other reference knowledge — architecture, data model, replication, forecast engine,
 UI patterns, storage paths, build commands, smoke sequences — is in `SKILL.md`.
 Do not duplicate it here.

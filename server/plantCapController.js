@@ -1144,6 +1144,10 @@ class PlantCapController {
       typeof options.broadcast === "function" ? options.broadcast : () => {};
     this.now    = typeof options.now    === "function" ? options.now    : () => Date.now();
     this.getDb  = typeof options.getDb  === "function" ? options.getDb  : () => null;
+    this.callPython =
+      typeof options.callPython === "function"
+        ? options.callPython
+        : async () => { throw new Error("callPython dependency not configured."); };
     this.tickMs = clampInt(options.tickMs, 250, 60000, DEFAULT_TICK_MS);
     this.breachHoldMs = clampInt(
       options.breachHoldMs,
@@ -1724,6 +1728,110 @@ class PlantCapController {
       });
     }
     return this.getStatus({ refresh: true, includePreview: false });
+  }
+
+  // ─── Active Power Control (APC / %P Setpoint) ──────────────────────────────
+
+  _isMwSequencerActive() {
+    // Returns true if the binary MW-cap sequencer is actively running and could
+    // conflict with a simultaneous %P setpoint. Fault and idle are safe.
+    return (
+      this.state.enabled &&
+      this.state.status !== "idle" &&
+      this.state.status !== "fault"
+    );
+  }
+
+  async previewSetpoint({ scope, targets, target_pct }) {
+    return this.callPython("/curtail/preview", "POST", { scope, targets, target_pct });
+  }
+
+  async applySetpoint({ scope, targets, target_pct, opcode = "set", force = false, operator = "operator" }) {
+    if (this._isMwSequencerActive()) {
+      return {
+        ok: false,
+        rejected: true,
+        reason: "mw_sequencer_active",
+        message:
+          "MW Cap sequencer is active. Release it on the MW Cap tab to enable %P controls.",
+      };
+    }
+    const result = await this.callPython("/curtail/run", "POST", {
+      scope,
+      targets,
+      target_pct,
+      opcode,
+      force,
+    });
+    // Per-target audit: when the operator targets multiple nodes we want one
+    // audit row per (ip, slave). Plant-scope still produces a single summary
+    // row with ip="" so existing audit-history queries keep working.
+    try {
+      const db = this.getDb();
+      if (db) {
+        const ts = this.now();
+        const actionLabel = opcode === "stop" ? "plantCap.setpoint.stop"
+          : opcode === "start" ? "plantCap.setpoint.start"
+          : opcode === "abort" ? "plantCap.setpoint.abort"
+          : "plantCap.setpoint.set";
+        const baseScope = `apc:${scope}`;
+        const resultLabel = result?.ok ? "queued" : "failed";
+        const reasonBase = opcode === "set"
+          ? `to=${target_pct} job=${result?.job_id || ""}`
+          : `op=${opcode} job=${result?.job_id || ""}`;
+        const stmt = db.prepare(
+          `INSERT INTO audit_log(ts, operator, inverter, node, action, scope, result, ip, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const txn = db.transaction(() => {
+          if (scope === "plant" || !Array.isArray(targets) || targets.length === 0) {
+            stmt.run(ts, operator, 0, 0, actionLabel, baseScope, resultLabel, "", reasonBase);
+          } else {
+            for (const t of targets) {
+              const ip = String(t?.ip || "");
+              const slave = Number(t?.slave ?? 0);
+              stmt.run(ts, operator, 0, slave, actionLabel, baseScope, resultLabel, ip, reasonBase);
+            }
+          }
+        });
+        txn();
+      }
+    } catch (_) { /* audit failure must never break the apply call */ }
+    return result;
+  }
+
+  async abortSetpoint(job_id, operator = "operator") {
+    const safeId = String(job_id || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const result = await this.callPython(`/curtail/abort/${safeId}`, "POST", {});
+    try {
+      const db = this.getDb();
+      if (db) {
+        db.prepare(
+          `INSERT INTO audit_log(ts, operator, inverter, node, action, scope, result, ip, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          this.now(),
+          operator,
+          0,
+          0,
+          "plantCap.setpoint.abort",
+          "apc:job",
+          result?.ok ? "aborted" : "failed",
+          "",
+          `job=${job_id}`
+        );
+      }
+    } catch (_) {}
+    return result;
+  }
+
+  async getSetpointState() {
+    return this.callPython("/curtail/state", "GET", null);
+  }
+
+  async getJobState(job_id) {
+    const safeId = String(job_id || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    return this.callPython(`/curtail/jobs/${safeId}`, "GET", null);
   }
 }
 

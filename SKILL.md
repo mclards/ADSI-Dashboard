@@ -70,6 +70,7 @@ No built-in defaults for: remote gateway API token, Solcast credentials, cloud-b
 | Forecast service | Python ML engine — `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.1+ |
 | Camera streaming | Bundled go2rtc (HLS/WebRTC) + FFmpeg fallback — `server/go2rtcManager.js`, `server/go2rtc/` |
 | Modbus driver | `drivers/modbus_tcp.py` |
+| Modbus register reference | [docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md) — full input + holding register map, command codes, alarm bits, power-reduction status. Source-of-truth for all inverter integration work. |
 
 Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebSocket → Browser`
 

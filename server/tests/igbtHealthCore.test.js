@@ -366,6 +366,99 @@ function run() {
     const result = medianImbalance(rows);
     assert.strictEqual(result, null);
   });
+
+  /* ── Phase 2.1 — yoy_drift_c branch ──────────────────────────────────── */
+
+  test("computeHealthScore(yoy_drift_c=null) → uses Phase 1 weights", () => {
+    const r = computeHealthScore({
+      thermal_count: 1, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: null,
+    });
+    // Phase 1: 0.30 × 25 = 7.5
+    assert.strictEqual(r.weights_used.phase, "phase1");
+    assert.ok(Math.abs(r.score - 7.5) < 0.01, `expected ≈7.5, got ${r.score}`);
+    assert.strictEqual(r.breakdown.yoy_score, null);
+  });
+
+  test("computeHealthScore(yoy_drift_c=undefined) → falls back to phase1", () => {
+    const r = computeHealthScore({ thermal_count: 0, frama_count: 0, pi_ana_count: 0 });
+    assert.strictEqual(r.weights_used.phase, "phase1");
+    assert.strictEqual(r.breakdown.yoy_score, null);
+  });
+
+  test("computeHealthScore(yoy_drift_c=0) → Phase 2 weights, yoy_score=0", () => {
+    const r = computeHealthScore({
+      thermal_count: 0, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: 0,
+    });
+    assert.strictEqual(r.weights_used.phase, "phase2");
+    assert.strictEqual(r.breakdown.yoy_score, 0);
+    assert.strictEqual(r.score, 0);
+  });
+
+  test("computeHealthScore(yoy_drift_c=-2) → negative drift contributes 0", () => {
+    const r = computeHealthScore({
+      thermal_count: 0, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: -2,
+    });
+    assert.strictEqual(r.weights_used.phase, "phase2");
+    assert.strictEqual(r.breakdown.yoy_score, 0);
+    assert.strictEqual(r.score, 0);
+  });
+
+  test("computeHealthScore(yoy_drift_c=3) → yoy_score=36, contributes 0.30×36=10.8", () => {
+    const r = computeHealthScore({
+      thermal_count: 0, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: 3,
+    });
+    assert.strictEqual(r.weights_used.phase, "phase2");
+    assert.ok(Math.abs(r.breakdown.yoy_score - 36) < 0.01);
+    assert.ok(Math.abs(r.score - 10.8) < 0.01, `expected ≈10.8, got ${r.score}`);
+  });
+
+  test("computeHealthScore(yoy_drift_c=10) → yoy_score clamps at 100", () => {
+    const r = computeHealthScore({
+      thermal_count: 0, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: 10,
+    });
+    assert.strictEqual(r.breakdown.yoy_score, 100);
+    // Phase 2: 0.30 × 100 = 30
+    assert.ok(Math.abs(r.score - 30) < 0.01, `expected ≈30, got ${r.score}`);
+  });
+
+  test("computeHealthScore(yoy_drift_c=NaN) → treated as null, falls back to phase1", () => {
+    const r = computeHealthScore({
+      thermal_count: 1, frama_count: 0, pi_ana_count: 0, imbalance_pct: null,
+      yoy_drift_c: NaN,
+    });
+    assert.strictEqual(r.weights_used.phase, "phase1");
+    assert.strictEqual(r.breakdown.yoy_score, null);
+  });
+
+  test("computeHealthScore(phase2 max all components) → score = 100, tier='eol'", () => {
+    const r = computeHealthScore({
+      thermal_count: 4, frama_count: 4, pi_ana_count: 3, imbalance_pct: 6,
+      yoy_drift_c: 10,
+    });
+    // 0.30×100 + 0.25×100 + 0.15×100 + 0.15×100 + 0.15×100 = 100
+    assert.strictEqual(r.weights_used.phase, "phase2");
+    assert.ok(Math.abs(r.score - 100) < 0.01);
+    assert.strictEqual(r.tier, "eol");
+  });
+
+  test("computeHealthScore(phase2 weights sum to 1.0)", () => {
+    const r = computeHealthScore({ yoy_drift_c: 1 });
+    const w = r.weights_used.weights;
+    const sum = w.yoy + w.frama + w.thermal_trips + w.pi_ana + w.imbal;
+    assert.ok(Math.abs(sum - 1.0) < 1e-9, `phase2 weights should sum to 1.0, got ${sum}`);
+  });
+
+  test("computeHealthScore(phase1 weights sum to 1.0)", () => {
+    const r = computeHealthScore({});
+    const w = r.weights_used.weights;
+    const sum = w.thermal + w.frama + w.pi_ana + w.imbal;
+    assert.ok(Math.abs(sum - 1.0) < 1e-9, `phase1 weights should sum to 1.0, got ${sum}`);
+  });
 }
 
 run();

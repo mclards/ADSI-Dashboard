@@ -73,6 +73,8 @@ const State = {
     status: null,
     preview: null,
   },
+  plantCapActiveTab: "mw-cap",
+  apc: { state: {}, activeJob: null, jobPollTimer: null },
   plantCapPanelCollapsed: true,
   capSchedules: { schedules: [], remarks: [] },
   todayKwh: {}, // key: inverter → kWh today
@@ -930,7 +932,7 @@ function renderPlantCapClientWarningsForContext(context = "live") {
       guidanceParts.join(" "),
     );
     els.warnings.title =
-      "Planner guidance for the current plant cap settings. Exemption mode keeps the listed inverter numbers out of automatic stop selection.";
+      "Planner guidance for the current MW Cap settings. Exemption mode keeps the listed inverter numbers out of automatic stop selection.";
     return;
   }
   const critical = warnings.some((message) =>
@@ -4557,9 +4559,47 @@ function switchPage(page) {
 function initPlantCapPage() {
   const container = $("plantCapPageContainer");
   if (!container) return;
-  if (!$("plantCapPanel")) {
+  if (!$("plantCapTabStrip")) {
     container.innerHTML = "";
-    container.appendChild(buildPlantCapPanel());
+    const tabEnabled = _apcFeatureEnabled();
+    const strip = document.createElement("div");
+    strip.className = "plant-cap-tab-strip";
+    strip.id = "plantCapTabStrip";
+    // Plant Controller umbrella — tab order:
+    //   APC: MW Cap, %P Setpoint, Grid Code (Slice ζ — feature-flag gated)
+    //   GRID TESTS: T2 Freq, T3 Q-V (stub), T5 APC Sweep, Reports
+    //   (formal NGCP PGC 2016 citation lives in the witness report PDFs)
+    strip.innerHTML = `
+      <span class="plant-cap-tab-group" title="Active Power Control">APC</span>
+      <button class="plant-cap-tab-btn active" data-tab="mw-cap" type="button">MW Cap</button>
+      <button class="plant-cap-tab-btn" id="plantCapTabApc" data-tab="apc" type="button"${!tabEnabled ? " hidden" : ""}>%P Setpoint</button>
+      <button class="plant-cap-tab-btn" id="plantCapTabGridControl" data-tab="grid-control" type="button" title="Reactive power + power-factor control (Slice ζ). Read-back is always available; writes require the gridControlEnabled flag + sacupsMM auth + 2-week soak.">Grid Code</button>
+      <span class="plant-cap-tab-divider" aria-hidden="true"></span>
+      <span class="plant-cap-tab-group" title="Grid-code compliance test runners (formal regulation reference: NGCP PGC 2016)">GRID TESTS</span>
+      <button class="plant-cap-tab-btn" data-tab="t2" type="button" title="Test T2: Frequency Withstand (observation-only)">T2 Freq</button>
+      <button class="plant-cap-tab-btn" data-tab="t3" type="button" title="Test T3: Reactive Power / Q-V Capability (read-only stub — writes pending Slice ζ hardware soak)">T3 Q-V</button>
+      <button class="plant-cap-tab-btn" data-tab="t5" type="button" title="Test T5: Active Power Control sweep">T5 Sweep</button>
+      <button class="plant-cap-tab-btn" data-tab="reports" type="button" title="Compliance run history + report download">Reports</button>`;
+    container.appendChild(strip);
+    const mwPane = document.createElement("div");
+    mwPane.className = "plant-cap-tab-pane active";
+    mwPane.dataset.tab = "mw-cap";
+    mwPane.id = "plantCapTabPaneMwCap";
+    mwPane.appendChild(buildPlantCapPanel());
+    container.appendChild(mwPane);
+    container.appendChild(buildApcPane());
+    container.appendChild(buildGridControlPane());
+    container.appendChild(buildComplianceT2Pane());
+    container.appendChild(buildComplianceT3Pane());
+    container.appendChild(buildComplianceT5Pane());
+    container.appendChild(buildComplianceReportsPane());
+    strip.querySelectorAll(".plant-cap-tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => switchPlantCapTab(btn.dataset.tab));
+    });
+    populateApcIpSelector();
+  } else {
+    const apcBtn = $("plantCapTabApc");
+    if (apcBtn) apcBtn.hidden = !_apcFeatureEnabled();
   }
   const panel = $("plantCapPanel");
   if (panel) {
@@ -6108,6 +6148,9 @@ async function loadSettings() {
     if ($("setPlantCapCooldownSec")) {
       $("setPlantCapCooldownSec").value = String(s.plantCapCooldownSec ?? 30);
     }
+    if ($("setPlantCapSetpointEnabled")) {
+      $("setPlantCapSetpointEnabled").checked = String(s.plantCapSetpointEnabled ?? "1") === "1";
+    }
     $("setDataDir").textContent = s.dataDir || "—";
     const pc = s.inverterPollConfig || {};
     if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
@@ -7357,6 +7400,7 @@ async function saveSettings() {
     ),
     plantCapSequenceCustom: plantCapSequence.values,
     plantCapCooldownSec: Number(plantCapRaw.cooldown || 30),
+    plantCapSetpointEnabled: $("setPlantCapSetpointEnabled")?.checked ? "1" : "0",
     inverterPollConfig: {
       modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
       reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
@@ -8339,8 +8383,8 @@ function buildPlantCapPanel() {
   wrap.innerHTML = `
     <div class="plant-cap-head">
       <div class="plant-cap-head-main" title="Plant-wide MW capping settings and live controller summary.">
-        <div class="bulk-control-title">Plant Output Cap <span id="plantCapRemoteBadge" class="plant-cap-remote-badge" hidden title="Controls are proxied to the gateway workstation.">via Gateway</span></div>
-        <div class="plant-cap-title-line">Gateway-directed whole-inverter MW capping</div>
+        <div class="bulk-control-title">MW Cap <span id="plantCapRemoteBadge" class="plant-cap-remote-badge" hidden title="Controls are proxied to the gateway workstation.">via Gateway</span></div>
+        <div class="plant-cap-title-line">Whole-inverter STOP/START sequencer for MW upper-band protection</div>
       </div>
       <div class="plant-cap-head-actions">
         <div class="plant-cap-metrics">
@@ -8535,6 +8579,1535 @@ function buildPlantCapPanel() {
     </div>`;
   return wrap;
 }
+
+// ─── APC (Active Power Control) ─────────────────────────────────────────────
+
+function _apcFeatureEnabled() {
+  return (State.settings.plantCapSetpointEnabled ?? "1") === "1";
+}
+
+function populateApcIpSelector() {
+  const sel = $("apcIpSel");
+  if (!sel) return;
+  const invMap = State.ipConfig?.inverters || {};
+  const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+  // Preserve the current selection across re-populates so the operator
+  // doesn't lose their place when ipConfig refreshes.
+  const prevVal = sel.value;
+  sel.innerHTML = "";
+  if (!invNums.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    // If ipConfig hasn't been fetched yet, distinguish "loading" from
+    // "truly empty" — saves a confused operator filing a bug report.
+    opt.textContent = State.ipConfig
+      ? "(no inverters configured)"
+      : "(loading inverters…)";
+    sel.appendChild(opt);
+    updateApcNodeSlaveOptions();
+    return;
+  }
+  invNums.forEach((inv) => {
+    const ip = invMap[inv] || invMap[String(inv)] || "";
+    if (!ip) return;
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    // Use "Inverter NN" to match the clarification text below the row.
+    opt.textContent = `Inverter ${String(inv).padStart(2, "0")} — ${ip}`;
+    sel.appendChild(opt);
+  });
+  if (prevVal && Array.from(sel.options).some((o) => o.value === prevVal)) {
+    sel.value = prevVal;
+  }
+  updateApcNodeSlaveOptions();
+}
+
+function updateApcNodeSlaveOptions() {
+  const ipSel = $("apcIpSel");
+  const nodeSel = $("apcNodeSel");
+  if (!ipSel || !nodeSel) return;
+  const inv = Number(ipSel.value);
+  const units = inv > 0 ? getConfiguredUnits(inv, 4) : [1, 2, 3, 4];
+  const prevVal = nodeSel.value;
+  nodeSel.innerHTML = "";
+  units.forEach((u) => {
+    const opt = document.createElement("option");
+    opt.value = String(u);
+    // "Internal node" matches the help-text terminology; (slave N) keeps
+    // the Modbus address visible for protocol-aware operators.
+    opt.textContent = `Internal node ${u} (slave ${u})`;
+    nodeSel.appendChild(opt);
+  });
+  if (units.map(String).includes(prevVal)) nodeSel.value = prevVal;
+  updateApcNodeCurrentPct();
+}
+
+function updateApcNodeCurrentPct() {
+  const ipSel = $("apcIpSel");
+  const nodeSel = $("apcNodeSel");
+  const disp = $("apcNodeCurrent");
+  if (!disp) return;
+  if (!ipSel || !nodeSel) { disp.textContent = "—"; return; }
+  const inv = Number(ipSel.value);
+  const slave = Number(nodeSel.value);
+  const ip = getConfiguredInverterIp(inv);
+  if (!ip || !slave) { disp.textContent = "—"; return; }
+  const entry = State.apc.state[`${ip}:${slave}`];
+  const pct = entry?.active_pct;
+  disp.textContent = pct != null ? `${Number(pct).toFixed(1)}%` : "—";
+  // Slice δ — show write verification chip next to the current %P display.
+  _renderApcVerifyChip(ip, slave);
+}
+
+// Slice δ — render a "Verified ✓ / Mismatch ✗ / Pending… / Timeout" chip
+// next to the current %P display, sourced from the most recent
+// apc_verify_log row for the selected (ip, slave).
+function _renderApcVerifyChip(ip, slave) {
+  let chip = document.getElementById("apcVerifyChip");
+  const disp = $("apcNodeCurrent");
+  if (!chip && disp && disp.parentNode) {
+    chip = document.createElement("span");
+    chip.id = "apcVerifyChip";
+    chip.className = "apc-verify-chip";
+    chip.title = "Slice δ closed-loop verify: compares observed PAC after a setpoint write against the requested %P (within ±5 %).";
+    disp.parentNode.insertBefore(chip, disp.nextSibling);
+  }
+  if (!chip) return;
+  const entry = State.apc.verify?.[`${ip}:${slave}`];
+  if (!entry) {
+    chip.textContent = "—";
+    chip.dataset.status = "none";
+    return;
+  }
+  const status = entry.result || entry.status || "—";
+  const labels = {
+    ok: "✓ Verified", mismatch: "✗ Mismatch", pending: "… Verifying",
+    timeout: "⏱ Timeout", no_response: "? No response", failed: "! Failed",
+  };
+  chip.textContent = labels[status] || status;
+  chip.dataset.status = status;
+}
+
+async function fetchApcVerifyStatus() {
+  try {
+    const r = await fetch("/api/apc/verify-status");
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.ok || !Array.isArray(data.rows)) return;
+    State.apc = State.apc || {};
+    State.apc.verify = State.apc.verify || {};
+    for (const row of data.rows) {
+      State.apc.verify[`${row.inverter_ip}:${row.slave}`] = row;
+    }
+    updateApcNodeCurrentPct();
+  } catch (_) {}
+}
+
+function switchPlantCapTab(tabKey) {
+  State.plantCapActiveTab = tabKey;
+  document.querySelectorAll(".plant-cap-tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tabKey);
+  });
+  document.querySelectorAll(".plant-cap-tab-pane").forEach((pane) => {
+    pane.classList.toggle("active", pane.dataset.tab === tabKey);
+  });
+  if (tabKey === "apc") {
+    // Re-populate inverter/node dropdowns from current ipConfig — the initial
+    // populate ran during pane build, before ipConfig may have loaded.
+    populateApcIpSelector();
+    renderApcPane();
+    fetchApcState();
+    fetchApcHistory();
+    _startApcStatePoll();
+  } else {
+    _stopApcStatePoll();
+  }
+  if (tabKey === "grid-control") {
+    populateGridControlSelectors();
+    refreshGridControlFeatureStatus();
+  }
+  if (tabKey === "t2") {
+    refreshComplianceT2Status();
+  } else if (tabKey === "t3") {
+    refreshComplianceT3Readback();
+  } else if (tabKey === "t5") {
+    refreshComplianceT5Status();
+  } else if (tabKey === "reports") {
+    refreshComplianceReports();
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Compliance test panels (NGCP PGC 2016) — Plant Controller v2.11.0
+ * Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice θ
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const _compliancePollers = {}; // run_id → setInterval handle
+
+function _complianceTargetSelectorMarkup(idPrefix) {
+  return `
+    <div class="cmp-target-row">
+      <label class="cmp-label" for="${idPrefix}Inv" title="Inverter number (1–27). Each is one INGECON SUN unit.">Inverter #</label>
+      <input id="${idPrefix}Inv" type="number" min="1" max="27" step="1" value="1" class="cmp-num"
+             title="Inverter number (1–27)." />
+      <label class="cmp-label" for="${idPrefix}Slave" title="Internal node — Modbus slave ID (1–4) of the converter inside the inverter. There is no fixed master; converters rotate the master role per cycle, so each must be tested individually.">Internal node</label>
+      <input id="${idPrefix}Slave" type="number" min="1" max="4" step="1" value="1" class="cmp-num"
+             title="Internal converter address inside the inverter (1–4). Each internal node is an independent IGBT bridge. The inverter has no fixed master — the leader role rotates dynamically per cycle, so per-node compliance evidence is required." />
+      <label class="cmp-label" for="${idPrefix}Ip">IP</label>
+      <input id="${idPrefix}Ip" type="text" placeholder="auto from inverter # if blank" class="cmp-text"
+             title="Inverter IPv4 address. Leave blank to derive from the inverter # via the configured inverter map." />
+    </div>
+    <div class="cmp-target-help">
+      <b>Inverter</b> = the physical INGECON SUN unit (one per IP). <b>Internal node</b> = the Modbus slave (1–4) of an independent power converter inside the inverter — each has its own DC string and IGBT bridge. The inverter has no fixed master; the leader role rotates per cycle, which is why every test targets one specific (inverter, internal node) pair so the witness can attribute results unambiguously.
+    </div>`;
+}
+
+function _resolveTargetIpFromInv(invNum) {
+  try {
+    const cfg = State?.ipConfig?.inverters || [];
+    const rec = cfg.find(r => Number(r?.inverter) === Number(invNum));
+    return rec?.ip || "";
+  } catch (_) { return ""; }
+}
+
+function _readComplianceTarget(idPrefix) {
+  const inv   = Number($(idPrefix + "Inv")?.value);
+  const slave = Number($(idPrefix + "Slave")?.value);
+  let ip = String($(idPrefix + "Ip")?.value || "").trim();
+  if (!ip) ip = _resolveTargetIpFromInv(inv);
+  if (!ip || !Number.isFinite(slave)) return null;
+  return { inverter: inv, ip, slave };
+}
+
+function _bulkAuthForCompliance() {
+  // Reuse the bulk-control auth flow already used by APC. The user has
+  // entered sacupsMM in a session token store via the existing helper.
+  let cached = "";
+  try {
+    if (typeof getCachedBulkAuthKey === "function") cached = getCachedBulkAuthKey();
+  } catch (_) {}
+  return cached || prompt("Enter bulk-control authorization key (sacupsMM):") || "";
+}
+
+function buildComplianceT2Pane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "t2";
+  pane.id = "plantCapTabPaneT2";
+  pane.innerHTML = `
+    <div class="cmp-panel">
+      <div class="cmp-panel-head">
+        <div>
+          <div class="cmp-panel-title">Test T2 — Frequency Withstand</div>
+          <div class="cmp-panel-sub">Observation-only test. The dashboard records inverter frequency, state, and alarms while a witness drives the grid simulator (or during a natural grid event). Pass = entire run inside NGCP continuous-stable band 59.7–60.3 Hz with no alarms.</div>
+        </div>
+      </div>
+      ${_complianceTargetSelectorMarkup("t2")}
+      <div class="cmp-target-row">
+        <label class="cmp-label" for="t2Duration">Duration (s)</label>
+        <input id="t2Duration" type="number" min="60" max="7200" step="60" value="1800" class="cmp-num" />
+        <label class="cmp-label" for="t2Period">Sample period (s)</label>
+        <input id="t2Period" type="number" min="1" max="10" step="1" value="2" class="cmp-num" />
+      </div>
+      <div class="cmp-actions">
+        <button id="t2Start" class="btn btn-accent btn-xs" type="button">Start observation</button>
+        <button id="t2Abort" class="btn btn-xs" type="button" disabled>Abort</button>
+        <span class="cmp-status" id="t2Status">Idle.</span>
+      </div>
+      <div class="cmp-results">
+        <div class="cmp-result-row"><span>Run ID</span><b id="t2RunId">—</b></div>
+        <div class="cmp-result-row"><span>Samples</span><b id="t2Samples">0</b></div>
+        <div class="cmp-result-row"><span>Mean Hz</span><b id="t2MeanHz">—</b></div>
+        <div class="cmp-result-row"><span>Min / Max Hz</span><b id="t2MinMaxHz">—</b></div>
+        <div class="cmp-result-row"><span>Longest excursion</span><b id="t2Excursion">0 ms</b></div>
+        <div class="cmp-result-row"><span>Alarm events</span><b id="t2Alarms">0</b></div>
+      </div>
+    </div>`;
+  // Wire up after insertion in initPlantCapPage via DOM lookup at click time.
+  setTimeout(() => {
+    $("t2Start")?.addEventListener("click", _onT2Start);
+    $("t2Abort")?.addEventListener("click", _onT2Abort);
+  }, 0);
+  return pane;
+}
+
+async function _onT2Start() {
+  const target = _readComplianceTarget("t2");
+  if (!target) { showToast("Pick a valid inverter # / slave (and IP if not auto-resolved).", 3000); return; }
+  const authKey = _bulkAuthForCompliance();
+  if (!authKey) { showToast("Cancelled.", 1500); return; }
+  const body = {
+    test_kind: "t2_freq_withstand",
+    targets: [target],
+    operator: "operator",
+    authKey,
+    params: {
+      duration_sec:    Number($("t2Duration")?.value) || 1800,
+      sample_period_s: Number($("t2Period")?.value)   || 2,
+    },
+  };
+  const r = await fetch("/api/compliance/run/start", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+  if (!r.ok) { showToast(r.error || "Start failed.", 4000); return; }
+  $("t2RunId").textContent = r.run_id;
+  $("t2Status").textContent = "Running…";
+  $("t2Start").disabled = true;
+  $("t2Abort").disabled = false;
+  _watchComplianceRun(r.run_id, (status, summary) => {
+    $("t2Status").textContent = status;
+    if (summary) {
+      $("t2Samples").textContent  = summary.samples ?? 0;
+      $("t2MeanHz").textContent   = summary.mean_hz ? Number(summary.mean_hz).toFixed(3) : "—";
+      $("t2MinMaxHz").textContent = summary.min_hz != null
+        ? `${Number(summary.min_hz).toFixed(2)} / ${Number(summary.max_hz).toFixed(2)} Hz` : "—";
+      $("t2Excursion").textContent = `${summary.longest_excursion_ms ?? 0} ms`;
+      $("t2Alarms").textContent    = summary.alarm_events ?? 0;
+    }
+    if (status === "completed" || status === "failed" || status === "aborted") {
+      $("t2Start").disabled = false;
+      $("t2Abort").disabled = true;
+    }
+  });
+}
+
+async function _onT2Abort() {
+  const id = $("t2RunId")?.textContent;
+  if (!id || id === "—") return;
+  await _abortComplianceRun(id);
+}
+
+function refreshComplianceT2Status() { /* reserved — runs are watched via interval */ }
+
+function buildComplianceT3Pane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "t3";
+  pane.id = "plantCapTabPaneT3";
+  // Default sweep mirrors server/compliance/testT3.js DEFAULT_PF_SWEEP — short
+  // operator-readable form is encoded as comma-sep PF entries with sign suffix.
+  // Format: "1.00,0.99lag,0.98lag,...,1.00,0.99lead,...,1.00".
+  pane.innerHTML = `
+    <div class="cmp-panel">
+      <div class="cmp-panel-head">
+        <div>
+          <div class="cmp-panel-title">Test T3 — Reactive Power / Q-V Capability <span class="cmp-badge" id="t3FlagBadge">Read-only</span></div>
+          <div class="cmp-panel-sub">Automated PF sweep (cmd 1 — tan φ) per PGC 2016 GCR 4.4.4.1: 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00. Per-step capture of P/Q/V and PF deviation. Reactive control is restored (cmd 11) on completion or abort. Writes require <code>gridControlEnabled = "1"</code>.</div>
+        </div>
+      </div>
+      ${_complianceTargetSelectorMarkup("t3")}
+      <div class="cmp-target-row">
+        <label class="cmp-label" for="t3Sweep" title="Comma-separated PF list with sign. Defaults to the full 21-step NGCP sweep 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00.">Sweep</label>
+        <input id="t3Sweep" type="text" value="1.00,0.99,0.98,0.97,0.96,0.95,0.96,0.97,0.98,0.99,1.00,-0.99,-0.98,-0.97,-0.96,-0.95,-0.96,-0.97,-0.98,-0.99,1.00" class="cmp-text cmp-text-wide" />
+        <label class="cmp-label" for="t3Hold">Hold (s/step)</label>
+        <input id="t3Hold" type="number" min="20" max="900" step="10" value="60" class="cmp-num" />
+        <label class="cmp-label" for="t3Settle">Settle (s)</label>
+        <input id="t3Settle" type="number" min="5" max="120" step="5" value="15" class="cmp-num" />
+        <label class="cmp-label" for="t3Tol" title="Allowed deviation between observed PF and target PF, in percentage points. Default 5 % per θ-3 acceptance criterion.">Tol (±%)</label>
+        <input id="t3Tol" type="number" min="1" max="20" step="0.5" value="5" class="cmp-num" />
+      </div>
+      <div class="cmp-target-help">
+        <b>PF sign convention:</b>
+        <span style="color:var(--green);">0.95 = lag</span> (inductive, Q&nbsp;&gt;&nbsp;0 — inverter <i>injects</i> reactive power),
+        <span style="color:var(--orange);">-0.95 = lead</span> (capacitive, Q&nbsp;&lt;&nbsp;0 — inverter <i>absorbs</i> reactive power),
+        <b>1.00</b> = unity (Q&nbsp;=&nbsp;0). Use a leading <b>minus sign</b> only for lead; positive is implied otherwise.
+        PDF cmd 1 absolute limit is ±0.90; NGCP PGC 4.4.4.1 envelope is ±0.95. Range allowed per step: 0.90–1.00.
+      </div>
+      <div class="cmp-actions">
+        <button id="t3Start" class="btn btn-accent btn-xs" type="button" disabled title="Disabled until gridControlEnabled = &quot;1&quot; (Slice ζ hardware-soak gate).">Run sweep</button>
+        <button id="t3Abort" class="btn btn-xs" type="button" disabled>Abort</button>
+        <button id="t3Readback" class="btn btn-xs" type="button" title="Read holding 41006-41010 (always safe).">Read-back state</button>
+        <span class="cmp-status" id="t3Status">Idle.</span>
+      </div>
+      <div class="cmp-results">
+        <div class="cmp-result-row"><span>Run ID</span><b id="t3RunId">—</b></div>
+        <div class="cmp-result-row"><span>Steps pass / fail</span><b id="t3StepResult">—</b></div>
+        <div class="cmp-result-row"><span>Last observed PF</span><b id="t3LastObserved">—</b></div>
+      </div>
+      <div class="cmp-step-log" id="t3StepLog"></div>
+
+      <div class="apc-history-section">
+        <div class="apc-history-head" tabindex="0">
+          <span class="apc-history-title">Live read-back (holding 41006-41010)</span>
+        </div>
+        <div id="t3ReadbackWrap" class="apc-history-wrap" style="padding:10px 14px;font-family:var(--font-mono);font-size:11px;color:var(--text2);">
+          <em>Click <b>Read-back state</b> to query the inverter's current grid-control registers.</em>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(() => {
+    $("t3Start")?.addEventListener("click", _onT3Start);
+    $("t3Abort")?.addEventListener("click", _onT3Abort);
+    $("t3Readback")?.addEventListener("click", _onT3ReadbackClick);
+    refreshComplianceT3Readback(); // sync feature-flag badge + button-disabled state on first build
+  }, 0);
+  return pane;
+}
+
+// Updates the T3 panel's feature-flag badge + Run button state.
+async function refreshComplianceT3Readback() {
+  try {
+    const r = await fetch("/api/grid-control/feature-status");
+    const data = await r.json();
+    const enabled = !!data?.enabled;
+    const badge = $("t3FlagBadge");
+    const startBtn = $("t3Start");
+    if (badge) {
+      badge.textContent = enabled ? "Writes enabled" : "Read-only";
+      badge.className = "cmp-badge " + (enabled ? "cmp-badge-green" : "cmp-badge-amber");
+    }
+    if (startBtn) startBtn.disabled = !enabled;
+  } catch (_) { /* soft */ }
+}
+
+function _parseT3Sweep(str) {
+  // Accepts signed-PF tokens. Convention: "+0.95"/"0.95" = lag, "-0.95" = lead,
+  // "1.00" = unity (sign ignored). PF magnitude must be 0.90 ≤ |pf| ≤ 1.00.
+  // Legacy "0.99lag"/"0.99lead" suffix form still parses for backward compat.
+  return String(str || "")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map(token => {
+      // Legacy suffix form first.
+      if (token.endsWith("lag") || token.endsWith("lead")) {
+        const sign = token.endsWith("lag") ? "lag" : "lead";
+        const pf = Number(token.replace(/(lag|lead)$/, ""));
+        if (!Number.isFinite(pf) || pf < 0.90 || pf > 1.00) return null;
+        return { pf, sign };
+      }
+      // Signed form. Note `Number("+0.95")` and `Number("-0.95")` both work.
+      const num = Number(token);
+      if (!Number.isFinite(num)) return null;
+      const mag = Math.abs(num);
+      if (mag < 0.90 || mag > 1.00) return null;
+      // Unity: sign carries no meaning.
+      if (mag >= 0.9999) return { pf: 1.00, sign: "0" };
+      const sign = num < 0 ? "lead" : "lag";
+      return { pf: mag, sign };
+    })
+    .filter(Boolean);
+}
+
+async function _onT3ReadbackClick() {
+  const target = _readComplianceTarget("t3");
+  const wrap = $("t3ReadbackWrap");
+  if (!target || !wrap) {
+    if (wrap) wrap.innerHTML = '<em style="color:var(--orange);">Pick an inverter # / slave first.</em>';
+    return;
+  }
+  wrap.innerHTML = '<em>Reading…</em>';
+  try {
+    const r = await fetch(`/api/grid-control/state/${encodeURIComponent(target.ip)}/${target.slave}`);
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      wrap.innerHTML = `<em style="color:var(--red);">Read failed: ${escapeHtml(data?.error || `HTTP ${r.status}`)}</em>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <div><b>41006 Power-reduction Q15:</b> ${data.power_q15} → ${Number(data.power_pct_readback || 0).toFixed(1)} %</div>
+      <div><b>41007 Phi tangent (raw Int16):</b> ${data.phi_tangent_signed} → tan(φ) ${Number(data.phi_tangent_value || 0).toFixed(4)} → PF ≈ ${Number(data.power_factor_estimate || 0).toFixed(3)}</div>
+      <div><b>41008 Reactive setpoint:</b> ${data.reactive_signed} (kVAr ÷ 10) → ${Number(data.reactive_kvar || 0).toFixed(1)} kVAr</div>
+      <div><b>41010 Restrictive freq limits:</b> ${data.freq_limits_on ? "ON (49.5/50.5 Hz CEI 0-21 — DO NOT issue cmd 12 on this site)" : "OFF (firmware Country Code 42 envelope active)"}</div>`;
+  } catch (err) {
+    wrap.innerHTML = `<em style="color:var(--red);">Network error: ${escapeHtml(err.message)}</em>`;
+  }
+}
+
+async function _onT3Start() {
+  const target = _readComplianceTarget("t3");
+  if (!target) { showToast("Pick a valid inverter # / slave.", "warn", 3000); return; }
+  const sweep = _parseT3Sweep($("t3Sweep")?.value);
+  if (sweep.length < 2) { showToast("Sweep must contain at least 2 PF steps (e.g. \"1.00,0.95lag,1.00\").", "warn", 4000); return; }
+  if (!window.confirm(
+    `Start T3 Q-V sweep on inverter ${target.inverter} slave ${target.slave}?\n\n` +
+    `${sweep.length} PF steps × ${$("t3Hold")?.value || 60}s/step ≈ ${Math.round(sweep.length * (Number($("t3Hold")?.value) || 60) / 60)} min.\n` +
+    `Reactive control will be restored (cmd 11) on completion or abort.`
+  )) return;
+  const authKey = _bulkAuthForCompliance();
+  if (!authKey) { showToast("Cancelled.", "warn", 1500); return; }
+  const body = {
+    test_kind: "t3_qv_sweep",
+    targets: [target], operator: "operator", authKey,
+    params: {
+      pf_steps: sweep,
+      hold_sec:      Number($("t3Hold")?.value)   || 60,
+      settle_sec:    Number($("t3Settle")?.value) || 15,
+      tolerance_pct: Number($("t3Tol")?.value)    || 5,
+      sample_period_s: 2,
+    },
+  };
+  const r = await fetch("/api/compliance/run/start", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+  if (!r.ok) { showToast(r.error || "Start failed.", "err", 5000); return; }
+  $("t3RunId").textContent = r.run_id;
+  $("t3Status").textContent = "Running…";
+  $("t3Start").disabled = true;
+  $("t3Abort").disabled = false;
+  $("t3StepLog").innerHTML = "";
+  _watchComplianceRun(r.run_id, (status, summary, steps) => {
+    $("t3Status").textContent = status;
+    if (summary) {
+      $("t3StepResult").textContent = `${summary.passes ?? 0} / ${(summary.passes ?? 0) + (summary.fails ?? 0)}`;
+    }
+    if (steps && steps.length) {
+      const last = steps[steps.length - 1];
+      if (last?.achieved_value != null) {
+        $("t3LastObserved").textContent = "PF ≈ " + Number(last.achieved_value).toFixed(3);
+      }
+      const log = $("t3StepLog");
+      if (log) {
+        log.innerHTML = steps.map(s => `
+          <div class="cmp-step-row ${s.pass === 1 ? "ok" : (s.pass === 0 ? "fail" : "")}">
+            <span>${s.step_idx}. ${s.step_name}</span>
+            <span>target PF ${s.target_value != null ? Number(s.target_value).toFixed(2) : "—"}</span>
+            <span>observed ${s.achieved_value != null ? Number(s.achieved_value).toFixed(3) : "—"}</span>
+            <span>dev ${s.deviation_pct != null ? Number(s.deviation_pct).toFixed(2) + " pp" : "—"}</span>
+            <span>${s.pass == null ? "…" : (s.pass ? "PASS" : "FAIL")}</span>
+          </div>`).join("");
+      }
+    }
+    if (status === "completed" || status === "failed" || status === "aborted") {
+      $("t3Start").disabled = !GridControlUI?.enabled;
+      $("t3Abort").disabled = true;
+    }
+  });
+}
+
+async function _onT3Abort() {
+  const id = $("t3RunId")?.textContent;
+  if (!id || id === "—") return;
+  await _abortComplianceRun(id);
+}
+
+function buildComplianceT5Pane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "t5";
+  pane.id = "plantCapTabPaneT5";
+  pane.innerHTML = `
+    <div class="cmp-panel">
+      <div class="cmp-panel-head">
+        <div>
+          <div class="cmp-panel-title">Test T5 — Active Power Control Sweep</div>
+          <div class="cmp-panel-sub">Drives the configured ramp via cmd-3 setpoint writes, holds each plateau, and records observed PAC vs target. Pass per node = steady-state error ≤ ±2 % of target. Inverter is restored to 100 % on completion or abort.</div>
+        </div>
+      </div>
+      ${_complianceTargetSelectorMarkup("t5")}
+      <div class="cmp-target-row">
+        <label class="cmp-label" for="t5Ramp">Ramp (% comma-sep)</label>
+        <input id="t5Ramp" type="text" value="100,75,50,25,75,100" class="cmp-text cmp-text-wide" />
+        <label class="cmp-label" for="t5Hold">Hold (s/step)</label>
+        <input id="t5Hold" type="number" min="30" max="900" step="10" value="120" class="cmp-num" />
+        <label class="cmp-label" for="t5Settle">Settle (s)</label>
+        <input id="t5Settle" type="number" min="5" max="120" step="5" value="30" class="cmp-num" />
+        <label class="cmp-label" for="t5Tol">Tol (±%)</label>
+        <input id="t5Tol" type="number" min="0.5" max="10" step="0.1" value="2" class="cmp-num" />
+      </div>
+      <div class="cmp-actions">
+        <button id="t5Start" class="btn btn-accent btn-xs" type="button">Run sweep</button>
+        <button id="t5Abort" class="btn btn-xs" type="button" disabled>Abort</button>
+        <span class="cmp-status" id="t5Status">Idle.</span>
+      </div>
+      <div class="cmp-results">
+        <div class="cmp-result-row"><span>Run ID</span><b id="t5RunId">—</b></div>
+        <div class="cmp-result-row"><span>Steps pass / fail</span><b id="t5StepResult">—</b></div>
+        <div class="cmp-result-row"><span>Last achieved %</span><b id="t5LastAchieved">—</b></div>
+      </div>
+      <div class="cmp-step-log" id="t5StepLog"></div>
+    </div>`;
+  setTimeout(() => {
+    $("t5Start")?.addEventListener("click", _onT5Start);
+    $("t5Abort")?.addEventListener("click", _onT5Abort);
+  }, 0);
+  return pane;
+}
+
+async function _onT5Start() {
+  const target = _readComplianceTarget("t5");
+  if (!target) { showToast("Pick a valid inverter # / slave.", 3000); return; }
+  const rampStr = String($("t5Ramp")?.value || "");
+  const ramp = rampStr.split(",").map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n >= 0 && n <= 100);
+  if (ramp.length < 2) { showToast("Ramp must contain at least 2 setpoints.", 3000); return; }
+  const authKey = _bulkAuthForCompliance();
+  if (!authKey) { showToast("Cancelled.", 1500); return; }
+  const body = {
+    test_kind: "t5_apc_sweep",
+    targets: [target], operator: "operator", authKey,
+    params: {
+      ramp_pct: ramp,
+      hold_sec:      Number($("t5Hold")?.value)   || 120,
+      settle_sec:    Number($("t5Settle")?.value) || 30,
+      tolerance_pct: Number($("t5Tol")?.value)    || 2,
+      sample_period_s: 2,
+    },
+  };
+  const r = await fetch("/api/compliance/run/start", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+  if (!r.ok) { showToast(r.error || "Start failed.", 4000); return; }
+  $("t5RunId").textContent = r.run_id;
+  $("t5Status").textContent = "Running…";
+  $("t5Start").disabled = true;
+  $("t5Abort").disabled = false;
+  $("t5StepLog").innerHTML = "";
+  _watchComplianceRun(r.run_id, (status, summary, steps) => {
+    $("t5Status").textContent = status;
+    if (summary) {
+      $("t5StepResult").textContent = `${summary.passes ?? 0} / ${(summary.passes ?? 0) + (summary.fails ?? 0)}`;
+    }
+    if (steps && steps.length) {
+      const last = steps[steps.length - 1];
+      if (last?.achieved_value != null) $("t5LastAchieved").textContent = Number(last.achieved_value).toFixed(2) + " %";
+      const log = $("t5StepLog");
+      if (log) {
+        log.innerHTML = steps.map(s => `
+          <div class="cmp-step-row ${s.pass === 1 ? "ok" : (s.pass === 0 ? "fail" : "")}">
+            <span>${s.step_idx}. ${s.step_name}</span>
+            <span>target ${s.target_value ?? "—"} %</span>
+            <span>achieved ${s.achieved_value != null ? Number(s.achieved_value).toFixed(2) + " %" : "—"}</span>
+            <span>dev ${s.deviation_pct != null ? Number(s.deviation_pct).toFixed(2) + " %" : "—"}</span>
+            <span>${s.pass == null ? "…" : (s.pass ? "PASS" : "FAIL")}</span>
+          </div>`).join("");
+      }
+    }
+    if (status === "completed" || status === "failed" || status === "aborted") {
+      $("t5Start").disabled = false;
+      $("t5Abort").disabled = true;
+    }
+  });
+}
+
+async function _onT5Abort() {
+  const id = $("t5RunId")?.textContent;
+  if (!id || id === "—") return;
+  await _abortComplianceRun(id);
+}
+
+function refreshComplianceT5Status() { /* reserved */ }
+
+function buildComplianceReportsPane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "reports";
+  pane.id = "plantCapTabPaneReports";
+  pane.innerHTML = `
+    <div class="cmp-panel">
+      <div class="cmp-panel-head">
+        <div>
+          <div class="cmp-panel-title">Compliance Reports</div>
+          <div class="cmp-panel-sub">Past test runs are persisted to <code>compliance_run</code>. Generate the CSV evidence bundle on demand; PDF is available for completed runs (uses puppeteer; takes a few seconds).</div>
+        </div>
+        <button id="cmpReportsRefresh" class="btn btn-xs" type="button">Refresh</button>
+      </div>
+      <table class="cmp-runs-table">
+        <thead>
+          <tr><th>Started</th><th>Test</th><th>Status</th><th>Operator</th><th>Run ID</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="cmpRunsBody"><tr><td colspan="6" class="cmp-empty">Loading…</td></tr></tbody>
+      </table>
+    </div>`;
+  setTimeout(() => {
+    $("cmpReportsRefresh")?.addEventListener("click", refreshComplianceReports);
+  }, 0);
+  return pane;
+}
+
+async function refreshComplianceReports() {
+  const r = await fetch("/api/compliance/runs?limit=50").then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+  const body = $("cmpRunsBody");
+  if (!body) return;
+  if (!r.ok) { body.innerHTML = `<tr><td colspan="6" class="cmp-empty">${r.error || "Load failed."}</td></tr>`; return; }
+  if (!r.runs || r.runs.length === 0) {
+    body.innerHTML = `<tr><td colspan="6" class="cmp-empty">No runs yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = r.runs.map(run => `
+    <tr data-run-id="${run.run_id}">
+      <td>${new Date(run.started_at_ms).toLocaleString()}</td>
+      <td>${run.test_kind}</td>
+      <td class="cmp-status-cell cmp-status-${run.status}">${run.status}</td>
+      <td>${run.operator_actor || "—"}</td>
+      <td><code>${run.run_id}</code></td>
+      <td>
+        <button class="btn btn-xs cmp-csv" data-run-id="${run.run_id}">CSV</button>
+        <button class="btn btn-xs cmp-pdf" data-run-id="${run.run_id}">PDF</button>
+      </td>
+    </tr>
+  `).join("");
+  body.querySelectorAll(".cmp-csv").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "csv")));
+  body.querySelectorAll(".cmp-pdf").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "both")));
+}
+
+async function _onComplianceReportClick(runId, format) {
+  const r = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/report`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ format }),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+  if (!r.ok) { showToast(r.error || "Report failed.", 4000); return; }
+  // Auto-download the artifact(s).
+  for (const a of (r.artifacts || [])) {
+    if (a.error) { showToast(`${a.kind}: ${a.error}`, 4000); continue; }
+    const url = `/api/compliance/run/${encodeURIComponent(runId)}/artifact?kind=${a.kind}`;
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+}
+
+function _watchComplianceRun(runId, onUpdate) {
+  if (_compliancePollers[runId]) clearInterval(_compliancePollers[runId]);
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/status`).then(r => r.json());
+      if (!r.ok) return;
+      const status = r.run?.status || r.live_status || "running";
+      let summary = null;
+      try { summary = r.run?.summary_json ? JSON.parse(r.run.summary_json) : null; } catch (_) {}
+      onUpdate(status, summary, r.steps || []);
+      if (status === "completed" || status === "failed" || status === "aborted") {
+        clearInterval(_compliancePollers[runId]);
+        delete _compliancePollers[runId];
+      }
+    } catch (_) { /* soft */ }
+  };
+  _compliancePollers[runId] = setInterval(tick, 3000);
+  tick();
+}
+
+async function _abortComplianceRun(runId) {
+  const authKey = _bulkAuthForCompliance();
+  if (!authKey) return;
+  await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/abort`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ authKey, operator: "operator" }),
+  }).catch(() => {});
+}
+
+function renderApcPane() {
+  const status = State.plantCap.status || {};
+  const mwActive = status.enabled && status.status !== "idle" && status.status !== "fault";
+  const banner = $("apcLockoutBanner");
+  if (banner) banner.hidden = !mwActive;
+  const applyBtn = $("apcApplyBtn");
+  const stopBtn = $("apcStopBtn");
+  const startBtn = $("apcStartBtn");
+  if (applyBtn) applyBtn.disabled = mwActive;
+  if (stopBtn) stopBtn.disabled = mwActive;
+  if (startBtn) startBtn.disabled = mwActive;
+  const job = State.apc.activeJob;
+  const progressWrap = $("apcProgressWrap");
+  const fill = $("apcProgressFill");
+  const label = $("apcProgressLabel");
+  const abortBtn = $("apcAbortBtn");
+  if (progressWrap) {
+    const running = job && job.status === "running";
+    progressWrap.hidden = !running;
+    if (abortBtn) abortBtn.hidden = !running;
+    if (running) {
+      const pct = Math.round((job.steps_done || 0) / Math.max(job.steps_total || 1, 1) * 100);
+      if (fill) fill.style.width = pct + "%";
+      if (label) label.textContent = `${pct}% — step ${job.steps_done || 0}/${job.steps_total || 0}`;
+    }
+  }
+  updateApcNodeCurrentPct();
+}
+
+async function fetchApcState() {
+  try {
+    const r = await fetch("/api/plant-cap/setpoint/state");
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.ok && Array.isArray(data.states)) {
+      const map = {};
+      data.states.forEach((s) => { map[`${s.ip}:${s.slave}`] = s; });
+      State.apc.state = map;
+    }
+  } catch (_) {}
+  // Slice δ — pull the per-node verify history alongside the setpoint state.
+  fetchApcVerifyStatus();
+  updateApcNodeCurrentPct();
+}
+
+// Lightweight 30 s poll while the %P Setpoint tab is visible. Without it, the
+// Current pill goes stale whenever a setpoint changes from another operator,
+// a scheduler tick, or the auto-curtailment loop.
+let _apcStatePollTimer = null;
+function _startApcStatePoll() {
+  if (_apcStatePollTimer) return;
+  _apcStatePollTimer = setInterval(() => {
+    if (State.plantCapActiveTab === "apc") fetchApcState();
+  }, 30_000);
+}
+function _stopApcStatePoll() {
+  if (_apcStatePollTimer) {
+    clearInterval(_apcStatePollTimer);
+    _apcStatePollTimer = null;
+  }
+}
+
+async function fetchApcHistory() {
+  const tbody = $("apcHistoryBody");
+  if (!tbody) return;
+  try {
+    const r = await fetch("/api/plant-cap/history?limit=20");
+    if (!r.ok) return;
+    const data = await r.json();
+    const rows = (data.history || []).filter((row) => row.scope && row.scope.startsWith("apc:"));
+    renderApcHistory(rows);
+  } catch (_) {}
+}
+
+function renderApcHistory(rows) {
+  const tbody = $("apcHistoryBody");
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text2);padding:10px;">No history yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((row) => {
+    const ts = row.ts ? new Date(row.ts).toLocaleString() : "—";
+    const scope = row.scope || "—";
+    const action = row.action || "—";
+    const detail = [row.ip, row.node != null ? `node ${row.node}` : "", row.reason].filter(Boolean).join(" · ");
+    const badgeCls = action === "apc_set" ? "apc-badge apc-badge-set"
+      : action === "apc_stop" ? "apc-badge apc-badge-stop"
+      : action === "apc_start" ? "apc-badge apc-badge-start"
+      : action === "apc_abort" ? "apc-badge apc-badge-err"
+      : row.result === "ok" ? "apc-badge apc-badge-ok"
+      : "apc-badge apc-badge-err";
+    return `<tr>
+      <td>${ts}</td>
+      <td>${scope}</td>
+      <td><span class="${badgeCls}">${action}</span></td>
+      <td style="font-size:0.78rem;color:var(--text2)">${detail}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function submitApcApply() {
+  const scopeEl = document.querySelector('input[name="apcScope"]:checked');
+  const scope = scopeEl ? scopeEl.value : "node";
+  const ipSel = $("apcIpSel");
+  const nodeSel = $("apcNodeSel");
+  const pctInp = $("apcPctInp");
+  const auth = ($("apcAuthInp") || {}).value || "";
+  let target_pct = pctInp ? Number(pctInp.value) : 100;
+  if (!Number.isFinite(target_pct)) target_pct = 100;
+  target_pct = Math.max(0, Math.min(100, Math.round(target_pct)));
+  let targets = [];
+  if (scope === "node") {
+    const inv = Number(ipSel?.value);
+    const slave = Number(nodeSel?.value);
+    const ip = getConfiguredInverterIp(inv);
+    if (!ip || !slave) { showToast("Select a valid inverter and node first.", "warn"); return; }
+    targets = [{ ip, slave }];
+  } else if (scope === "inverter") {
+    const inv = Number(ipSel?.value);
+    const ip = getConfiguredInverterIp(inv);
+    if (!ip) { showToast("Select a valid inverter first.", "warn"); return; }
+    const units = getConfiguredUnits(inv, 4);
+    targets = units.map((u) => ({ ip, slave: u }));
+  } else if (scope === "plant") {
+    const invMap = State.ipConfig?.inverters || {};
+    const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+    if (!invNums.length) { showToast("No inverters configured.", "warn"); return; }
+    for (const n of invNums) {
+      const ip = invMap[n] || invMap[String(n)] || "";
+      if (!ip) continue;
+      getConfiguredUnits(n, 4).forEach((u) => targets.push({ ip, slave: u }));
+    }
+    if (target_pct < 5) {
+      if (!window.confirm(`Setting plant to ${target_pct}% is very low. Confirm?`)) return;
+    }
+  }
+  const btn = $("apcApplyBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/plant-cap/setpoint/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, targets, target_pct, authKey: auth }),
+    });
+    const data = await r.json();
+    if (r.status === 409) {
+      showToast(data.error || "MW Cap sequencer is active — release it first on the MW Cap tab.", "warn", 6000);
+    } else if (!r.ok || !data.ok) {
+      showToast(data.error || "Apply failed.", "err", 6000);
+    } else {
+      State.apc.activeJob = { job_id: data.job_id, status: "running", steps_done: 0, steps_total: data.steps_total || 1 };
+      renderApcPane();
+      showToast(`Ramp started (job ${String(data.job_id || "").slice(0, 8)}).`, "ok", 4000);
+      _apcStartJobPoll(data.job_id);
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  } finally {
+    const b = $("apcApplyBtn");
+    if (b) b.disabled = false;
+  }
+}
+
+async function submitApcOp(opcode) {
+  const scopeEl = document.querySelector('input[name="apcScope"]:checked');
+  const scope = scopeEl ? scopeEl.value : "node";
+  const ipSel = $("apcIpSel");
+  const nodeSel = $("apcNodeSel");
+  const auth = ($("apcAuthInp") || {}).value || "";
+  const inv = Number(ipSel?.value);
+  const ip = getConfiguredInverterIp(inv);
+  let targets = [];
+  if (scope === "plant") {
+    const invMap = State.ipConfig?.inverters || {};
+    const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+    if (!invNums.length) { showToast("No inverters configured.", "warn"); return; }
+    for (const n of invNums) {
+      const plantIp = invMap[n] || invMap[String(n)] || "";
+      if (!plantIp) continue;
+      getConfiguredUnits(n, 4).forEach((u) => targets.push({ ip: plantIp, slave: u }));
+    }
+    if (opcode === "stop") {
+      const phrase = window.prompt('Type "STOP ALL INVERTERS" to confirm a plant-wide STOP:');
+      if (phrase !== "STOP ALL INVERTERS") { showToast("Plant-wide STOP cancelled.", "warn"); return; }
+    }
+  } else if (scope === "inverter") {
+    if (!ip) { showToast("Select a valid inverter first.", "warn"); return; }
+    targets = getConfiguredUnits(inv, 4).map((u) => ({ ip, slave: u }));
+  } else {
+    const slave = Number(nodeSel?.value);
+    if (!ip || !slave) { showToast("Select a valid inverter and node first.", "warn"); return; }
+    targets = [{ ip, slave }];
+  }
+  if (opcode === "start") {
+    const stateMap = State.apc?.state || {};
+    const missing = targets.filter((t) => {
+      const rec = stateMap[`${t.ip}:${t.slave}`];
+      return !rec || rec.active_pct == null;
+    });
+    if (missing.length > 0) {
+      const preview = missing.slice(0, 3).map((m) => `${m.ip}/${m.slave}`).join(", ");
+      const more = missing.length > 3 ? ` +${missing.length - 3} more` : "";
+      showToast(
+        `Cannot START — ${missing.length} target(s) have no prior %P setpoint (${preview}${more}). ` +
+        `Apply Setpoint first.`,
+        "warn",
+        7000,
+      );
+      return;
+    }
+  }
+  const btn = opcode === "stop" ? $("apcStopBtn") : $("apcStartBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/plant-cap/setpoint/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, targets, target_pct: null, opcode, authKey: auth }),
+    });
+    const data = await r.json();
+    if (r.status === 409 && data?.reason === "no_prior_setpoint") {
+      showToast(data.error || "START blocked: no prior %P setpoint.", "warn", 7000);
+    } else if (!r.ok || !data.ok) {
+      showToast(data.error || `${opcode} failed.`, "err", 6000);
+    } else {
+      showToast(`${opcode === "stop" ? "STOP" : "START"} sent.`, "ok", 4000);
+      setTimeout(() => fetchApcState(), 800);
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function submitApcAbort(jobId) {
+  const auth = ($("apcAuthInp") || {}).value || "";
+  try {
+    const r = await fetch(`/api/plant-cap/setpoint/abort/${jobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ authKey: auth }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      showToast(data.error || "Abort failed.", "err");
+    } else {
+      showToast("Ramp aborted.", "warn", 4000);
+      State.apc.activeJob = null;
+      renderApcPane();
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  }
+}
+
+function _apcStartJobPoll(jobId) {
+  if (State.apc.jobPollTimer) clearInterval(State.apc.jobPollTimer);
+  State.apc.jobPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/plant-cap/setpoint/jobs/${jobId}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.ok && data.job) {
+        State.apc.activeJob = data.job;
+        renderApcPane();
+        if (data.job.status !== "running") {
+          clearInterval(State.apc.jobPollTimer);
+          State.apc.jobPollTimer = null;
+          if (data.job.status === "done") {
+            showToast("Ramp complete.", "ok", 4000);
+            fetchApcState();
+            fetchApcHistory();
+          } else if (data.job.status === "aborted") {
+            showToast("Ramp aborted.", "warn", 4000);
+          } else if (data.job.status === "error") {
+            showToast("Ramp error: " + (data.job.error || "unknown"), "err", 8000);
+          }
+        }
+      }
+    } catch (_) {}
+  }, 1500);
+}
+
+function _apcSyncScopeUi() {
+  const scopeEl = document.querySelector('input[name="apcScope"]:checked');
+  const scope = scopeEl ? scopeEl.value : "node";
+  const ipSel = $("apcIpSel");
+  const nodeSel = $("apcNodeSel");
+  const nodeCurrent = $("apcNodeCurrent");
+  const nodesInfo = $("apcNodesInfo");
+  const plantInfo = $("apcPlantInfo");
+  const authInp = $("apcAuthInp");
+  const isPlant = scope === "plant";
+  const isInverter = scope === "inverter";
+  if (ipSel) ipSel.hidden = isPlant;
+  if (nodeSel) nodeSel.hidden = isInverter || isPlant;
+  if (nodeCurrent) nodeCurrent.hidden = isInverter || isPlant;
+  if (nodesInfo) {
+    nodesInfo.hidden = !isInverter;
+    if (isInverter && ipSel) {
+      const inv = Number(ipSel.value);
+      const units = inv > 0 ? getConfiguredUnits(inv, 4) : [];
+      nodesInfo.textContent = units.length ? `Nodes: ${units.join(", ")}` : "—";
+    }
+  }
+  if (plantInfo) {
+    plantInfo.hidden = !isPlant;
+    if (isPlant) {
+      const invMap = State.ipConfig?.inverters || {};
+      const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+      const totalNodes = invNums.reduce((s, n) => s + getConfiguredUnits(n, 4).length, 0);
+      plantInfo.textContent = `${invNums.length} inverters, ${totalNodes} nodes`;
+    }
+  }
+  if (authInp) {
+    authInp.placeholder = isPlant ? "sacupsMM (plant-wide key)" : "sacupsMM auth key";
+  }
+}
+
+function buildApcPane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "apc";
+  pane.id = "plantCapTabPaneApc";
+  pane.innerHTML = `
+    <div class="apc-panel">
+      <div class="apc-panel-head">
+        <div class="apc-panel-title">Active Power Setpoint</div>
+        <div class="apc-panel-subtitle">Continuous %P (Q15) curtailment via Modbus FC16 → register 0x03E8</div>
+      </div>
+
+      <div id="apcLockoutBanner" class="apc-lockout-banner" hidden>
+        <span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span>
+        <span>MW Cap sequencer is active.&nbsp;<button class="apc-tab-link" type="button" id="apcToMwCapLink">Go to MW Cap</button>&nbsp;and release control first.</span>
+      </div>
+
+      <div class="apc-form-grid">
+        <div class="apc-field">
+          <label class="apc-field-lbl">Scope</label>
+          <div class="apc-scope-row">
+            <label class="apc-chip-radio" title="Apply to a single inverter node.">
+              <input type="radio" name="apcScope" value="node" checked><span>Per Node</span>
+            </label>
+            <label class="apc-chip-radio" title="Apply to all nodes on one inverter IP.">
+              <input type="radio" name="apcScope" value="inverter"><span>Per Inverter</span>
+            </label>
+            <label class="apc-chip-radio" title="Apply to every node across all configured inverters. Requires sacupsMM bulk auth key.">
+              <input type="radio" name="apcScope" value="plant"><span>Plant-Wide</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl">Target</label>
+          <div class="apc-target-row">
+            <select id="apcIpSel" class="sel" title="Inverter (1–27). Each is one INGECON SUN unit at a fixed IP."></select>
+            <select id="apcNodeSel" class="sel" title="Internal node (1–4) — independent power converter inside the inverter, addressed by its Modbus slave ID. There is NO fixed master node; the master role rotates dynamically every cycle, so each converter must be commanded individually."></select>
+            <span class="apc-current-pill" title="Current active power setpoint for this internal node">
+              <span class="apc-current-pill-lbl">Current</span>
+              <span id="apcNodeCurrent">—</span>
+            </span>
+            <span id="apcNodesInfo" class="apc-info-pill" hidden title="All internal nodes (slaves) under this inverter will receive the command"></span>
+            <span id="apcPlantInfo" class="apc-info-pill" hidden title="All configured nodes plant-wide — requires sacupsMM bulk auth key"></span>
+          </div>
+          <small class="apc-field-help">
+            <b>Inverter</b> = one INGECON SUN unit (27 total). <b>Internal node</b> = a Modbus slave (1–4) inside the inverter — each is an independent IGBT converter with its own DC sub-array. The inverter has no fixed master; the leader role rotates per cycle, which is why active-power commands target nodes individually.
+          </small>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl" for="apcPctInp">Setpoint</label>
+          <div class="apc-setpoint-row">
+            <div class="apc-pct-input">
+              <input id="apcPctInp" class="inp" type="number" min="0" max="100" step="1" value="100"
+                title="Active power setpoint as a percentage of rated capacity (0–100)">
+              <span class="apc-pct-suffix">%</span>
+            </div>
+            <div class="apc-presets">
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="100" title="Full output">100</button>
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="90">90</button>
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="75">75</button>
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="50">50</button>
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="25">25</button>
+              <button class="btn btn-outline btn-sm apc-preset-btn" type="button" data-pct="0" title="Lowest setpoint (verify lower bound on the inverter)">0</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl" for="apcAuthInp">Authorization</label>
+          <input id="apcAuthInp" class="inp" type="password" placeholder="sacupsMM auth key" autocomplete="off"
+            title="Enter the sacupsMM bulk auth key (sacups + current or previous minute, e.g. sacups07)">
+        </div>
+      </div>
+
+      <div class="apc-actions">
+        <button id="apcStopBtn" class="btn btn-red" type="button"
+          title="Halt active-power injection on the selected target (Modbus opcode 0x0005). The inverter stays grid-synced and online — only the power output goes to 0%. Requires sacupsMM auth.">
+          <span class="mdi mdi-stop-circle-outline" aria-hidden="true"></span><span>STOP</span>
+        </button>
+        <button id="apcStartBtn" class="btn btn-green" type="button"
+          title="Resume active-power injection (Modbus opcode 0x0006) at the previously written %P setpoint. A prior Apply Setpoint is required — START alone has nothing to resume to.">
+          <span class="mdi mdi-play-circle-outline" aria-hidden="true"></span><span>START</span>
+        </button>
+        <span class="apc-actions-divider" aria-hidden="true"></span>
+        <button id="apcApplyBtn" class="btn btn-accent" type="button"
+          title="Write a new active-power setpoint (Modbus opcode 0x0003) and ramp toward it. This is the only command that changes the %P level; STOP/START just gate output at the level Apply set.">
+          <span class="mdi mdi-flash" aria-hidden="true"></span><span>Apply Setpoint</span>
+        </button>
+      </div>
+      <div class="apc-actions-help" aria-hidden="false">
+        <span class="item stop"><span class="swatch"></span><b>STOP</b> — halt active-power output on this node. Inverter stays grid-synced; only the kW injection goes to 0%. Use to pause output without disconnecting.</span>
+        <span class="item start"><span class="swatch"></span><b>START</b> — resume output at the previously-written %P. Requires a prior Apply Setpoint, otherwise the inverter has nothing to resume to (request is rejected).</span>
+        <span class="item apply"><span class="swatch"></span><b>Apply Setpoint</b> — write the active-power %P level (0–100) and ramp toward it. STOP/START only gate the output; this is what actually changes how much power flows.</span>
+      </div>
+
+      <div id="apcProgressWrap" class="apc-progress-wrap" hidden>
+        <div class="apc-progress-bar"><div id="apcProgressFill" class="apc-progress-fill" style="width:0%"></div></div>
+        <span id="apcProgressLabel" class="apc-progress-label"></span>
+        <button id="apcAbortBtn" class="btn btn-outline btn-sm apc-abort-btn" type="button" hidden>Abort</button>
+      </div>
+
+      <div class="apc-history-section">
+        <div class="apc-history-head" id="apcHistoryHead" role="button" tabindex="0" title="Toggle APC action history">
+          <span class="apc-history-title">History</span>
+          <span id="apcHistoryChevron" class="apc-history-chevron">▼</span>
+        </div>
+        <div id="apcHistoryWrap" class="apc-history-wrap" hidden>
+          <table class="apc-history-table">
+            <thead><tr><th>Time</th><th>Scope</th><th>Action</th><th>Detail</th></tr></thead>
+            <tbody id="apcHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+
+  const pctInp = pane.querySelector("#apcPctInp");
+  const clampPct = () => {
+    if (!pctInp) return;
+    let v = Number(pctInp.value);
+    if (!Number.isFinite(v)) v = 100;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    pctInp.value = String(Math.round(v));
+  };
+  if (pctInp) {
+    pctInp.addEventListener("change", clampPct);
+    pctInp.addEventListener("blur", clampPct);
+  }
+  pane.querySelectorAll(".apc-preset-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (pctInp) pctInp.value = btn.dataset.pct;
+    });
+  });
+  const ipSel = pane.querySelector("#apcIpSel");
+  if (ipSel) ipSel.addEventListener("change", () => { updateApcNodeSlaveOptions(); _apcSyncScopeUi(); });
+  const nodeSel = pane.querySelector("#apcNodeSel");
+  if (nodeSel) nodeSel.addEventListener("change", updateApcNodeCurrentPct);
+  pane.querySelectorAll('input[name="apcScope"]').forEach((r) => {
+    r.addEventListener("change", _apcSyncScopeUi);
+  });
+  const stopBtn = pane.querySelector("#apcStopBtn");
+  if (stopBtn) stopBtn.addEventListener("click", () => submitApcOp("stop"));
+  const startBtn = pane.querySelector("#apcStartBtn");
+  if (startBtn) startBtn.addEventListener("click", () => submitApcOp("start"));
+  const applyBtn = pane.querySelector("#apcApplyBtn");
+  if (applyBtn) applyBtn.addEventListener("click", submitApcApply);
+  const abortBtn = pane.querySelector("#apcAbortBtn");
+  if (abortBtn) abortBtn.addEventListener("click", () => {
+    if (State.apc.activeJob?.job_id) submitApcAbort(State.apc.activeJob.job_id);
+  });
+  const histHead = pane.querySelector("#apcHistoryHead");
+  const histWrap = pane.querySelector("#apcHistoryWrap");
+  const histChevron = pane.querySelector("#apcHistoryChevron");
+  if (histHead && histWrap) {
+    histHead.addEventListener("click", () => {
+      histWrap.hidden = !histWrap.hidden;
+      if (histChevron) histChevron.classList.toggle("open", !histWrap.hidden);
+      if (!histWrap.hidden) fetchApcHistory();
+    });
+    histHead.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") histHead.click(); });
+  }
+  const toMwCapLink = pane.querySelector("#apcToMwCapLink");
+  if (toMwCapLink) toMwCapLink.addEventListener("click", () => switchPlantCapTab("mw-cap"));
+  return pane;
+}
+
+// ─── end APC ────────────────────────────────────────────────────────────────
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Slice ζ — Grid Code (reactive power + power-factor) UI tab
+ * Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice ζ
+ * Reference card: docs/Inverter-Modbus-Reference.md §6 (cmd 1 / 9 / 11)
+ *
+ * SAFETY POSTURE:
+ *   - Default: writes are disabled (server-side gridControlEnabled = "0").
+ *   - The pane shows a hard banner explaining what's required to enable.
+ *   - Read-back panel works regardless of flag — visibility never harms.
+ *   - All write controls are disabled when feature-status reports !enabled.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const GridControlUI = {
+  enabled: false,    // mirror of server's `gridControlEnabled` setting
+  state: null,       // last read-back result
+  inverter: null,
+  slave: null,
+};
+
+function buildGridControlPane() {
+  const pane = document.createElement("div");
+  pane.className = "plant-cap-tab-pane";
+  pane.dataset.tab = "grid-control";
+  pane.id = "plantCapTabPaneGridControl";
+  pane.innerHTML = `
+    <div class="cmp-panel">
+      <div class="cmp-panel-head">
+        <div class="cmp-panel-title">Grid Code — Reactive Power &amp; Power Factor <span class="cmp-badge cmp-badge-amber" id="gcFeatureBadge">Read-only</span></div>
+        <div class="cmp-panel-subtitle">Modbus FC16 commands 1 (tan φ) / 9 (kVAr) / 11 (disable) + holding read-back 41006-41010.</div>
+      </div>
+
+      <div id="gcSafetyBanner" class="apc-lockout-banner">
+        <span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span>
+        <span><b>Writes are DISABLED.</b> Enabling requires (1) security review, (2) 2-week single-inverter soak, (3) operator sign-off, and (4) <code>gridControlEnabled = "1"</code> in settings. Read-back works regardless. See <a href="docs/Inverter-Modbus-Reference.md" target="_blank">reference</a>.</span>
+      </div>
+
+      <div class="apc-form-grid">
+        <div class="apc-field">
+          <label class="apc-field-lbl">Target</label>
+          <div class="apc-target-row">
+            <select id="gcIpSel" class="sel" title="Inverter (1–27)."></select>
+            <select id="gcNodeSel" class="sel" title="Internal node (1–4) — Modbus slave inside the inverter."></select>
+            <button id="gcReadBackBtn" class="btn btn-outline btn-sm" type="button" title="Read holding registers 41006-41010 (always safe).">
+              <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Read state</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl">PF target</label>
+          <div class="apc-setpoint-row">
+            <div class="apc-pct-input">
+              <input id="gcPfInp" class="inp" type="number" min="0.90" max="1.00" step="0.01" value="1.00"
+                     title="Power factor target. NGCP requires 0.95 lag/lead; PDF cmd 1 absolute limit is 0.90.">
+              <span class="apc-pct-suffix">PF</span>
+            </div>
+            <div class="apc-presets">
+              <button class="btn btn-outline btn-sm" type="button" data-pf="0.95" data-sign="lag" title="0.95 lagging (NGCP boundary, inductive)">0.95 lag</button>
+              <button class="btn btn-outline btn-sm" type="button" data-pf="1.00" data-sign="0" title="Unity">1.00</button>
+              <button class="btn btn-outline btn-sm" type="button" data-pf="0.95" data-sign="lead" title="0.95 leading (NGCP boundary, capacitive)">0.95 lead</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl">Reactive (kVAr)</label>
+          <div class="apc-setpoint-row">
+            <div class="apc-pct-input">
+              <input id="gcKvarInp" class="inp" type="number" step="0.1" value="0"
+                     title="Direct reactive power setpoint in kVAr (positive = lag/inject, negative = lead/absorb). Range bounded by inverter nominal kVA.">
+              <span class="apc-pct-suffix">kVAr</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="apc-field">
+          <label class="apc-field-lbl" for="gcAuthInp">Authorization</label>
+          <input id="gcAuthInp" class="inp" type="password" placeholder="sacupsMM auth key" autocomplete="off"
+                 title="sacupsMM bulk auth key (sacups + current or previous minute).">
+        </div>
+      </div>
+
+      <div class="apc-actions">
+        <button id="gcSetPfBtn" class="btn btn-accent" type="button" disabled
+                title="Cmd 1 — write tan(φ) target derived from PF (and sign).">
+          <span class="mdi mdi-sine-wave" aria-hidden="true"></span><span>Set PF</span>
+        </button>
+        <button id="gcSetReactiveBtn" class="btn btn-accent" type="button" disabled
+                title="Cmd 9 — write reactive power setpoint in kVAr × 10.">
+          <span class="mdi mdi-flash-triangle" aria-hidden="true"></span><span>Set kVAr</span>
+        </button>
+        <span class="apc-actions-divider" aria-hidden="true"></span>
+        <button id="gcDisableBtn" class="btn btn-red" type="button" disabled
+                title="Cmd 11 — disable reactive reference, restore inverter default.">
+          <span class="mdi mdi-restore" aria-hidden="true"></span><span>Disable reactive</span>
+        </button>
+      </div>
+      <div class="apc-actions-help" aria-hidden="false">
+        <span class="item apply"><span class="swatch"></span><b>Set PF</b> — write tan(φ) derived from the PF input. NGCP min 0.95 lag/lead; PDF absolute limit 0.90.</span>
+        <span class="item apply"><span class="swatch"></span><b>Set kVAr</b> — direct reactive setpoint. Positive = lagging (inject reactive), negative = leading (absorb).</span>
+        <span class="item stop"><span class="swatch"></span><b>Disable reactive</b> — release the inverter back to its default PF behavior. Always-safe restore.</span>
+      </div>
+
+      <div class="apc-history-section">
+        <div class="apc-history-head" tabindex="0">
+          <span class="apc-history-title">Read-back state (holding 41006-41010)</span>
+        </div>
+        <div id="gcStateWrap" class="apc-history-wrap" style="padding:10px 14px;font-family:var(--font-mono);font-size:11px;color:var(--text2);">
+          <em>Click <b>Read state</b> to query the inverter's current grid-control registers.</em>
+        </div>
+      </div>
+    </div>`;
+
+  const ipSel = pane.querySelector("#gcIpSel");
+  const nodeSel = pane.querySelector("#gcNodeSel");
+  if (ipSel) ipSel.addEventListener("change", () => populateGridControlNodeOptions());
+  if (nodeSel) nodeSel.addEventListener("change", () => { GridControlUI.slave = Number(nodeSel.value) || null; });
+
+  pane.querySelectorAll("[data-pf]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pfInp = pane.querySelector("#gcPfInp");
+      if (pfInp) pfInp.value = btn.dataset.pf;
+      pfInp?.setAttribute("data-sign", btn.dataset.sign || "0");
+    });
+  });
+
+  pane.querySelector("#gcReadBackBtn")?.addEventListener("click", refreshGridControlReadback);
+  pane.querySelector("#gcSetPfBtn")?.addEventListener("click", submitGridControlPf);
+  pane.querySelector("#gcSetReactiveBtn")?.addEventListener("click", submitGridControlReactive);
+  pane.querySelector("#gcDisableBtn")?.addEventListener("click", submitGridControlDisable);
+
+  return pane;
+}
+
+function populateGridControlSelectors() {
+  const sel = $("gcIpSel");
+  if (!sel) return;
+  const invMap = State.ipConfig?.inverters || {};
+  const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+  const prevVal = sel.value;
+  sel.innerHTML = "";
+  if (!invNums.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = State.ipConfig ? "(no inverters configured)" : "(loading inverters…)";
+    sel.appendChild(opt);
+    return;
+  }
+  invNums.forEach((inv) => {
+    const ip = invMap[inv] || invMap[String(inv)] || "";
+    if (!ip) return;
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${String(inv).padStart(2, "0")} — ${ip}`;
+    sel.appendChild(opt);
+  });
+  if (prevVal && Array.from(sel.options).some((o) => o.value === prevVal)) sel.value = prevVal;
+  populateGridControlNodeOptions();
+}
+
+function populateGridControlNodeOptions() {
+  const ipSel = $("gcIpSel");
+  const nodeSel = $("gcNodeSel");
+  if (!ipSel || !nodeSel) return;
+  const inv = Number(ipSel.value);
+  const units = inv > 0 ? getConfiguredUnits(inv, 4) : [1, 2, 3, 4];
+  const prevVal = nodeSel.value;
+  nodeSel.innerHTML = "";
+  units.forEach((u) => {
+    const opt = document.createElement("option");
+    opt.value = String(u);
+    opt.textContent = `Internal node ${u} (slave ${u})`;
+    nodeSel.appendChild(opt);
+  });
+  if (units.map(String).includes(prevVal)) nodeSel.value = prevVal;
+  GridControlUI.slave = Number(nodeSel.value) || null;
+}
+
+async function refreshGridControlFeatureStatus() {
+  try {
+    const r = await fetch("/api/grid-control/feature-status");
+    if (!r.ok) return;
+    const data = await r.json();
+    GridControlUI.enabled = !!data.enabled;
+    const banner = $("gcSafetyBanner");
+    const badge  = $("gcFeatureBadge");
+    if (banner) banner.hidden = GridControlUI.enabled;
+    if (badge) {
+      badge.textContent = GridControlUI.enabled ? "Writes enabled" : "Read-only";
+      badge.className = "cmp-badge " + (GridControlUI.enabled ? "cmp-badge-green" : "cmp-badge-amber");
+    }
+    ["gcSetPfBtn", "gcSetReactiveBtn", "gcDisableBtn"].forEach((id) => {
+      const b = $(id); if (b) b.disabled = !GridControlUI.enabled;
+    });
+  } catch (_) {}
+}
+
+function _gcResolveTarget() {
+  const inv = Number($("gcIpSel")?.value);
+  const slave = Number($("gcNodeSel")?.value);
+  const ip = getConfiguredInverterIp(inv);
+  if (!ip || !slave) return null;
+  return { ip, slave };
+}
+
+async function refreshGridControlReadback() {
+  const t = _gcResolveTarget();
+  const wrap = $("gcStateWrap");
+  if (!t || !wrap) {
+    if (wrap) wrap.innerHTML = '<em style="color:var(--orange);">Pick an inverter + node first.</em>';
+    return;
+  }
+  wrap.innerHTML = '<em>Reading…</em>';
+  try {
+    const r = await fetch(`/api/grid-control/state/${encodeURIComponent(t.ip)}/${t.slave}`);
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      wrap.innerHTML = `<em style="color:var(--red);">Read failed: ${escapeHtml(data?.error || `HTTP ${r.status}`)}</em>`;
+      return;
+    }
+    GridControlUI.state = data;
+    wrap.innerHTML = `
+      <div><b>Power-reduction Q15:</b> ${data.power_q15} → ${Number(data.power_pct_readback || 0).toFixed(1)} %</div>
+      <div><b>Phi tangent (raw Int16):</b> ${data.phi_tangent_signed} → tan(φ) ${Number(data.phi_tangent_value || 0).toFixed(4)} → PF ≈ ${Number(data.power_factor_estimate || 0).toFixed(3)}</div>
+      <div><b>Reactive setpoint:</b> ${data.reactive_signed} (kVAr ÷ 10) → ${Number(data.reactive_kvar || 0).toFixed(1)} kVAr</div>
+      <div><b>Restrictive freq limits flag:</b> ${data.freq_limits_on ? "ON (49.5/50.5 Hz CEI 0-21 — DO NOT issue cmd 12 on this site)" : "OFF (firmware Country Code 42 envelope active)"}</div>
+      <div style="opacity:.6;margin-top:6px;">Raw regs 41006-41010: [${(data.regs || []).join(", ")}]</div>`;
+  } catch (err) {
+    wrap.innerHTML = `<em style="color:var(--red);">Network error: ${escapeHtml(err.message)}</em>`;
+  }
+}
+
+function _pfToPhiRaw(pf, sign) {
+  // tan(φ) = sqrt(1/PF² - 1) ; sign-from-input: "lag" → +, "lead" → -.
+  const pfNum = Math.max(0.90, Math.min(1.00, Number(pf) || 1));
+  const tanPhi = Math.sqrt(Math.max(0, 1 / (pfNum * pfNum) - 1));
+  const signed = sign === "lead" ? -tanPhi : sign === "lag" ? tanPhi : 0;
+  // PDF: phi_raw = tan(φ) × 32767 (NOT × 65535). NGCP PF 0.95 → ±10780 cross-check.
+  return Math.round(signed * 32767);
+}
+
+async function submitGridControlPf() {
+  if (!GridControlUI.enabled) return;
+  const t = _gcResolveTarget();
+  const auth = ($("gcAuthInp") || {}).value || "";
+  const pfInp = $("gcPfInp");
+  if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
+  const pf = Number(pfInp?.value);
+  const sign = (pfInp?.getAttribute("data-sign") || "0");
+  const phi_raw = _pfToPhiRaw(pf, sign);
+  if (Math.abs(phi_raw) > 15870) { showToast("PF target exceeds PDF cmd 1 limit (PF < 0.90).", "warn"); return; }
+  const btn = $("gcSetPfBtn"); if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/grid-control/phi", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ip: t.ip, slave: t.slave, phi_raw, authKey: auth }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      showToast(data.error || `Set PF failed.`, "err", 6000);
+    } else {
+      showToast(`PF target sent (raw ${phi_raw}, ≈ PF ${pf} ${sign}).`, "ok", 4000);
+      setTimeout(refreshGridControlReadback, 800);
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = !GridControlUI.enabled;
+  }
+}
+
+async function submitGridControlReactive() {
+  if (!GridControlUI.enabled) return;
+  const t = _gcResolveTarget();
+  const auth = ($("gcAuthInp") || {}).value || "";
+  if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
+  const kvar = Number($("gcKvarInp")?.value);
+  if (!Number.isFinite(kvar)) { showToast("kVAr value invalid.", "warn"); return; }
+  const kvar_div10 = Math.round(kvar * 10);
+  const btn = $("gcSetReactiveBtn"); if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/grid-control/reactive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ip: t.ip, slave: t.slave, kvar_div10, authKey: auth }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      showToast(data.error || `Set kVAr failed.`, "err", 6000);
+    } else {
+      showToast(`Reactive setpoint sent (${kvar.toFixed(1)} kVAr).`, "ok", 4000);
+      setTimeout(refreshGridControlReadback, 800);
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = !GridControlUI.enabled;
+  }
+}
+
+async function submitGridControlDisable() {
+  if (!GridControlUI.enabled) return;
+  const t = _gcResolveTarget();
+  const auth = ($("gcAuthInp") || {}).value || "";
+  if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
+  if (!window.confirm(`Disable reactive control on ${t.ip} slave ${t.slave}? This restores the inverter's default PF behavior.`)) return;
+  const btn = $("gcDisableBtn"); if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/grid-control/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ip: t.ip, slave: t.slave, authKey: auth }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      showToast(data.error || `Disable failed.`, "err", 6000);
+    } else {
+      showToast("Reactive control disabled.", "ok", 4000);
+      setTimeout(refreshGridControlReadback, 800);
+    }
+  } catch (e) {
+    showToast("Network error: " + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = !GridControlUI.enabled;
+  }
+}
+
+// ─── end Slice ζ Grid Code UI ───────────────────────────────────────────────
 
 function togglePlantCapSchedule() {
   const wrap    = $("plantCapScheduleWrap");
@@ -8856,7 +10429,7 @@ function renderPlantCapPanel() {
     "title",
     status.upperMw == null || status.lowerMw == null
       ? "Configured lower and upper MW cap band."
-      : `Configured plant cap band: ${Number(status.lowerMw).toFixed(3)} to ${Number(status.upperMw).toFixed(3)} MW.`,
+      : `Configured MW Cap band: ${Number(status.lowerMw).toFixed(3)} to ${Number(status.upperMw).toFixed(3)} MW.`,
   );
   modeEl.closest(".plant-cap-metric")?.setAttribute(
     "title",
@@ -8864,7 +10437,7 @@ function renderPlantCapPanel() {
   );
   statusEl.closest(".plant-cap-status-item")?.setAttribute(
     "title",
-    `Current plant cap controller state: ${statusEl.textContent}.`,
+    `Current MW Cap controller state: ${statusEl.textContent}.`,
   );
   reasonEl.closest(".plant-cap-status-item")?.setAttribute(
     "title",
@@ -8882,7 +10455,7 @@ function renderPlantCapPanel() {
     "title",
     status.ownedStopped.length
       ? `Total MW curtailed by ${status.ownedStopped.length} controller-stopped inverter(s) based on PAC at stop time.`
-      : "No inverter is currently curtailed by the plant cap controller.",
+      : "No inverter is currently curtailed by the MW Cap controller.",
   );
   controllableEl?.closest(".plant-cap-status-item")?.setAttribute(
     "title",
@@ -10016,8 +11589,8 @@ function updateInverterCards() {
       badge.className = "badge badge-cap-stopped";
       badge.textContent = "CAP STOPPED";
       badge.title = capTs
-        ? `Stopped by plant cap controller at ${fmtTime(capTs)}, ${Number(capEntry.pacBeforeStopKw || 0).toFixed(1)} kW removed.`
-        : "Stopped by plant cap controller.";
+        ? `Stopped by MW Cap controller at ${fmtTime(capTs)}, ${Number(capEntry.pacBeforeStopKw || 0).toFixed(1)} kW removed.`
+        : "Stopped by MW Cap controller.";
       if (iconEl) {
         iconEl.classList.remove("offline");
         iconEl.classList.add("cap-stopped");
@@ -10498,7 +12071,7 @@ async function refreshPlantCapStatus(silent = true) {
     return data.status || null;
   } catch (err) {
     if (!silent) {
-      showToast(`Plant cap status refresh failed: ${err.message}`, "fault", 5000);
+      showToast(`MW Cap status refresh failed: ${err.message}`, "fault", 5000);
     }
     throw err;
   }
@@ -10555,7 +12128,7 @@ async function enablePlantCapControl() {
   try {
     preview = await previewPlantCap({ context: "live" });
   } catch (err) {
-    showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap preview failed: ${err.message}`, "fault", 5000);
     return;
   }
   // Fetch forecast impact for the configured upper limit
@@ -10567,7 +12140,7 @@ async function enablePlantCapControl() {
     } catch (_) { /* non-fatal */ }
   }
   const ok = await appConfirm(
-    "Enable Plant Output Cap",
+    "Enable MW Cap",
     buildPlantCapEnableConfirmText(preview, forecastImpact),
     { ok: "Enable" },
   );
@@ -10576,15 +12149,15 @@ async function enablePlantCapControl() {
   try {
     authSession = await authorizeBulkCommand(
       "ENABLE",
-      "plant cap monitoring",
+      "MW Cap monitoring",
       countPlantCapTargetsFromPreview(preview),
     );
   } catch (err) {
-    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap enable failed: ${err.message}`, "fault", 5000);
     return;
   }
   if (!authSession) {
-    showToast("Plant cap enable cancelled.", "info", 3200);
+    showToast("MW Cap enable cancelled.", "info", 3200);
     return;
   }
   try {
@@ -10599,28 +12172,28 @@ async function enablePlantCapControl() {
     );
     State.plantCap.preview = response?.status?.preview || State.plantCap.preview;
     applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
-    showToast("Plant cap monitoring enabled.", "success", 3200);
+    showToast("MW Cap monitoring enabled.", "success", 3200);
   } catch (err) {
-    showToast(`Plant cap enable failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap enable failed: ${err.message}`, "fault", 5000);
   }
 }
 
 async function disablePlantCapControl() {
   const ok = await appConfirm(
-    "Disable Plant Output Cap",
-    "Disable plant-wide capping monitoring?\n\nThis stops automatic control but does not restart any inverter that the controller previously stopped.",
+    "Disable MW Cap",
+    "Disable plant-wide MW capping monitoring?\n\nThis stops automatic control but does not restart any inverter that the controller previously stopped.",
     { ok: "Disable" },
   );
   if (!ok) return;
   let authSession = null;
   try {
-    authSession = await authorizeBulkCommand("DISABLE", "plant cap monitoring", 1);
+    authSession = await authorizeBulkCommand("DISABLE", "MW Cap monitoring", 1);
   } catch (err) {
-    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap disable failed: ${err.message}`, "fault", 5000);
     return;
   }
   if (!authSession) {
-    showToast("Plant cap disable cancelled.", "info", 3200);
+    showToast("MW Cap disable cancelled.", "info", 3200);
     return;
   }
   try {
@@ -10631,16 +12204,16 @@ async function disablePlantCapControl() {
       { progress: false },
     );
     applyPlantCapStatusClient(response?.status || null, { preservePreview: true });
-    showToast("Plant cap monitoring disabled.", "success", 3200);
+    showToast("MW Cap monitoring disabled.", "success", 3200);
   } catch (err) {
-    showToast(`Plant cap disable failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap disable failed: ${err.message}`, "fault", 5000);
   }
 }
 
 async function releasePlantCapControl() {
   const ok = await appConfirm(
     "Release Controlled Inverters",
-    "Start all controller-owned inverters sequentially in reverse stop order?\n\nThis also disables plant-wide capping monitoring for the current session.",
+    "Start all controller-owned inverters sequentially in reverse stop order?\n\nThis also disables plant-wide MW Cap monitoring for the current session.",
     { ok: "Release" },
   );
   if (!ok) return;
@@ -10652,11 +12225,11 @@ async function releasePlantCapControl() {
       countPlantCapTargetsFromPreview(State.plantCap.preview),
     );
   } catch (err) {
-    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap release failed: ${err.message}`, "fault", 5000);
     return;
   }
   if (!authSession) {
-    showToast("Plant cap release cancelled.", "info", 3200);
+    showToast("MW Cap release cancelled.", "info", 3200);
     return;
   }
   bulkWriteBegin();
@@ -10673,7 +12246,7 @@ async function releasePlantCapControl() {
     }
     showToast("Controller-owned inverters released.", "success", 3600);
   } catch (err) {
-    showToast(`Plant cap release failed: ${err.message}`, "fault", 5000);
+    showToast(`MW Cap release failed: ${err.message}`, "fault", 5000);
   } finally {
     bulkWriteEnd();
   }
@@ -12506,6 +14079,23 @@ function handleWS(msg) {
     if (msg.payload) renderBackupHealth(msg.payload);
     return;
   }
+  // v2.11.0 Slice δ — APC closed-loop verify result.
+  if (msg.type === "apc:verify") {
+    State.apc = State.apc || {};
+    State.apc.verify = State.apc.verify || {};
+    if (msg.inverter_ip && msg.slave != null) {
+      State.apc.verify[`${msg.inverter_ip}:${msg.slave}`] = {
+        inverter_ip: msg.inverter_ip,
+        slave: msg.slave,
+        requested_pct: msg.requested_pct,
+        observed_pct: msg.observed_pct,
+        bit1_active: msg.bit1_active,
+        result: msg.status,
+      };
+      updateApcNodeCurrentPct();
+    }
+    return;
+  }
   if (msg.type === "init" || msg.type === "live") {
     noteStartupLiveReady();
     noteTodayMwhWsFrame(Date.now());
@@ -12623,6 +14213,60 @@ function handleWS(msg) {
         renderCapScheduleRemarks();
       }
     }
+  }
+  if (msg.type === "curtailment_state") {
+    if (Array.isArray(msg.states)) {
+      const map = {};
+      msg.states.forEach((s) => { map[`${s.ip}:${s.slave}`] = s; });
+      State.apc.state = map;
+    }
+    if (State.currentPage === "plant-cap" && State.plantCapActiveTab === "apc") {
+      updateApcNodeCurrentPct();
+    }
+  }
+  if (msg.type === "curtailment_job") {
+    if (msg.job) {
+      State.apc.activeJob = msg.job;
+      if (State.currentPage === "plant-cap") renderApcPane();
+    }
+  }
+  if (msg.type === "curtailment_error") {
+    if (msg.error) showToast("APC error: " + msg.error, "err", 8000);
+    if (State.currentPage === "plant-cap") renderApcPane();
+  }
+  if (msg.type === "apc.setpoint.start") {
+    // Server signals an APC operation just kicked off (any client). Refresh
+    // setpoint state and history so remote viewers see the change without
+    // waiting for the next polling tick.
+    if (State.currentPage === "plant-cap" && State.plantCapActiveTab === "apc") {
+      fetchApcState();
+      fetchApcHistory();
+    }
+  }
+  if (msg.type === "apc.setpoint.state" && Array.isArray(msg.states)) {
+    // Server's authoritative state-refresh ~3 s after a successful write
+    // (any client). Update the Current pill without waiting for the 30 s poll.
+    const map = {};
+    msg.states.forEach((s) => { if (s?.ip && s?.slave) map[`${s.ip}:${s.slave}`] = s; });
+    State.apc.state = map;
+    if (State.currentPage === "plant-cap" && State.plantCapActiveTab === "apc") {
+      updateApcNodeCurrentPct();
+    }
+  }
+  if (msg.type === "apc.setpoint.abort") {
+    if (State.apc?.activeJob && State.apc.activeJob.job_id === msg.job_id) {
+      State.apc.activeJob = null;
+    }
+    if (State.currentPage === "plant-cap") renderApcPane();
+    if (State.currentPage === "plant-cap" && State.plantCapActiveTab === "apc") {
+      fetchApcHistory();
+    }
+  }
+  if (msg.type === "settingsChanged") {
+    // Lightweight reload — just pull the settings snapshot. Heavier
+    // configChanged is reserved for mode/gateway/token changes that
+    // require a full UI rebuild.
+    loadSettings().catch((err) => console.warn("[ws] settingsChanged reload failed:", err.message));
   }
   if (msg.type === "configChanged") {
     const prevModeWs = State.settings.operationMode;
@@ -14089,6 +15733,11 @@ async function loadIpConfig() {
     scheduleInverterCardsUpdate(true);
     renderPlantCapClientWarnings();
     renderPlantCapPanel();
+    // %P Setpoint pane was likely built before ipConfig finished loading —
+    // refresh its inverter/node dropdowns now that we have real data.
+    if (typeof populateApcIpSelector === "function" && document.getElementById("apcIpSel")) {
+      try { populateApcIpSelector(); } catch (_) {}
+    }
   } catch (e) {
     console.warn("[IPCONFIG] load failed:", e.message);
     State.ipConfig = null;
@@ -14223,6 +15872,12 @@ const ParamPageUI = {
   solarStartH: 5,
   solarEndH: 18,
   reqId: 0,
+  // β-3 — Show diagnostic columns from the slow-poll register block.
+  // Persisted in localStorage so the operator's preference survives reloads.
+  showAdvanced: (() => {
+    try { return localStorage.getItem("paramShowAdvanced") === "1"; }
+    catch (_) { return false; }
+  })(),
 };
 
 const PARAM_LIVE_POLL_MS = 30_000;        // refresh today's data every 30s
@@ -14285,6 +15940,22 @@ function _paramWireOnce() {
   $("paramInv")?.addEventListener("change", _paramOnInverterChange);
   $("paramDate")?.addEventListener("change", _paramOnDateChange);
   $("btnParamRefresh")?.addEventListener("click", _paramOnRefreshClick);
+  // β-3 — Persisted "Show advanced columns" toggle
+  const advToggle = $("paramAdvancedToggle");
+  if (advToggle) {
+    advToggle.checked = ParamPageUI.showAdvanced;
+    advToggle.addEventListener("change", () => {
+      ParamPageUI.showAdvanced = !!advToggle.checked;
+      try { localStorage.setItem("paramShowAdvanced", ParamPageUI.showAdvanced ? "1" : "0"); }
+      catch (_) {}
+      // Rebuild table headers (which read ParamPageUI.showAdvanced at build
+      // time) + re-render every slave's body so cells match the new header.
+      if (ParamPageUI.inverter) {
+        _paramRebuildTabs();
+        ParamPageUI.slaves.forEach((s) => _paramRenderTable(s));
+      }
+    });
+  }
   // Defensive: also wire a delegated listener so if anything ever rebuilds
   // the toolbar DOM the click still routes correctly (the static binding
   // above would orphan onto the detached node otherwise).
@@ -14405,6 +16076,18 @@ function _paramRebuildTabs() {
               <th title="Inverter operating state from Modbus reg 30074: phase (init/magnetizing/connected/error) + flags (stop/blocked/grid-fault).">State</th>
               <th title="Combined 32-bit alarm bitmap captured during the slot.">Inv Alarms</th>
               <th title="Track alarms not exposed by the standard register block — always 0 in this view.">Track Alarms</th>
+              ${ParamPageUI.showAdvanced ? `
+              <th class="param-adv-col" title="Reactive power (var) — Modbus reg 30069, signed Int16 ÷10. Negative = leading (capacitive), positive = lagging (inductive).">QAC (var)</th>
+              <th class="param-adv-col" title="Control electronics temperature (°C) — Modbus reg 30073. Threshold 80 °C; null = sensor offline.">TempINT (°C)</th>
+              <th class="param-adv-col" title="Solar field insulation impedance, POSITIVE-EARTH side (kΩ) — Modbus reg 30070. Low values indicate insulation degradation.">Zpos (kΩ)</th>
+              <th class="param-adv-col" title="Solar field insulation impedance, NEGATIVE-EARTH side (kΩ) — Modbus reg 30071.">Zneg (kΩ)</th>
+              <th class="param-adv-col" title="Solar field voltage, NEGATIVE-EARTH side (V) — Modbus reg 30075. Insulation diagnostic.">VpvN (V)</th>
+              <th class="param-adv-col" title="Solar field voltage, POSITIVE-EARTH side (V) — Modbus reg 30076.">VpvP (V)</th>
+              <th class="param-adv-col" title="Rated power as reported by the device (W) — Modbus reg 30077 ×10. Cross-checks the operator-configured ratedKw.">Nominal (W)</th>
+              <th class="param-adv-col" title="Time remaining (s) until the inverter reconnects to the grid — Modbus reg 30109. 0 means already connected.">TTC (s)</th>
+              <th class="param-adv-col" title="Power-reduction status bits — Modbus reg 30117 (hex). Bit 1 = Modbus curtailment active (Slice δ verify signal).">PRBits</th>
+              <th class="param-adv-col" title="Instantaneous-window alarms (1-second reset) — Modbus reg 30065-30066 (32-bit hex). Useful for catching transient alarms.">InstAlm</th>
+              <th class="param-adv-col" title="Maintained-window alarms (reset on grid reconnect) — Modbus reg 30067-30068 (32-bit hex). Mid-session alarm memory.">MaintAlm</th>` : ""}
             </tr>
           </thead>
           <tbody data-param-tbody="${s}"></tbody>
@@ -14717,7 +16400,19 @@ function _paramRowHtml(r, isLive) {
     <td>${fmt(r.freq_hz, 2)}</td>
     <td class="state-cell" title="Inverter state (reg 30074).">${_stateChip(r.inverter_state_raw_last ?? r.inverter_state_raw)}</td>
     <td class="alarm-cell" title="32-bit Inv alarm bitmap.">${alarmHex(r.inv_alarms)}</td>
-    <td class="alarm-cell" title="Track Alarms not exposed by the standard register block.">${alarmHex(r.track_alarms)}</td>`;
+    <td class="alarm-cell" title="Track Alarms not exposed by the standard register block.">${alarmHex(r.track_alarms)}</td>${
+      ParamPageUI.showAdvanced ? `
+    <td class="param-adv-col">${r.qac_var_avg == null ? "—" : fmtInt(r.qac_var_avg)}</td>
+    <td class="param-adv-col">${r.tempint_c_avg == null ? "—" : fmt(r.tempint_c_avg, 1)}</td>
+    <td class="param-adv-col">${r.zpos_kohm_last == null ? "—" : fmtInt(r.zpos_kohm_last)}</td>
+    <td class="param-adv-col">${r.zneg_kohm_last == null ? "—" : fmtInt(r.zneg_kohm_last)}</td>
+    <td class="param-adv-col">${r.vpv_n_v_avg == null ? "—" : fmtInt(r.vpv_n_v_avg)}</td>
+    <td class="param-adv-col">${r.vpv_p_v_avg == null ? "—" : fmtInt(r.vpv_p_v_avg)}</td>
+    <td class="param-adv-col">${r.nominal_power_w_last == null ? "—" : fmtInt(r.nominal_power_w_last)}</td>
+    <td class="param-adv-col">${r.time_to_connect_s_avg == null ? "—" : fmtInt(r.time_to_connect_s_avg)}</td>
+    <td class="param-adv-col alarm-cell">${r.power_reduction_bits_last == null ? "—" : "0x" + Number(r.power_reduction_bits_last).toString(16).toUpperCase().padStart(4, "0")}</td>
+    <td class="param-adv-col alarm-cell">${alarmHex(r.alarms_inst_32_max)}</td>
+    <td class="param-adv-col alarm-cell">${alarmHex(r.alarms_maint_32_max)}</td>` : ""}`;
 }
 
 function _paramSlotTimeLabel(r) {
@@ -22253,7 +23948,7 @@ function bindEventHandlers() {
     if (t.closest("#btnStopSelected"))   { sendSelectedNodes(0);    return; }
     if (t.closest("#btnPlantCapPreview")) {
       previewPlantCap().catch((err) => {
-        showToast(`Plant cap preview failed: ${err.message}`, "fault", 5000);
+        showToast(`MW Cap preview failed: ${err.message}`, "fault", 5000);
       });
       return;
     }
@@ -22719,12 +24414,26 @@ async function init() {
 
 /* ── IGBT Health Page (v2.11.0 Phase 1) ────────────────────────────────────── */
 
+const IGBT_WINDOW_DAYS_MIN = 7;
+const IGBT_WINDOW_DAYS_MAX = 365;
+const IGBT_WINDOW_DAYS_DEFAULT = 90;
+
+function getIgbtWindowDays() {
+  const el = $("igbtWindowDaysInput");
+  const raw = Number(el?.value);
+  if (!Number.isFinite(raw)) return IGBT_WINDOW_DAYS_DEFAULT;
+  return Math.min(IGBT_WINDOW_DAYS_MAX, Math.max(IGBT_WINDOW_DAYS_MIN, Math.floor(raw)));
+}
+
 function initIgbtHealthPage() {
   // Initialize tier filter chips
   attachTierFilterListeners();
   // Initialize action buttons
   attachRefreshListeners();
+  attachWindowDaysListener();
   attachExportListeners();
+  // Render empty-state immediately so the table isn't a blank rectangle while loading
+  renderIgbtFleetTable([]);
   // Load and render the fleet data
   loadAndRenderIgbtHealthPage().catch((err) => {
     console.error("[igbt] Failed to load health page:", err);
@@ -22736,7 +24445,8 @@ async function loadAndRenderIgbtHealthPage() {
   try {
     showToast("Loading IGBT health data...", 0);
 
-    const response = await fetch("/api/igbt/fleet");
+    const days = getIgbtWindowDays();
+    const response = await fetch(`/api/igbt/fleet?days=${days}&_t=${Date.now()}`);
     const data = await response.json();
 
     if (!data.ok) {
@@ -22749,9 +24459,6 @@ async function loadAndRenderIgbtHealthPage() {
       const dt = new Date(data.generated_at_ms);
       computedAtEl.textContent = dt.toLocaleString();
     }
-
-    // Render summary tier chips above the table
-    renderIgbtSummary(data.summary, data.nodes || []);
 
     // Render fleet table
     renderIgbtFleetTable(data.nodes || []);
@@ -22768,29 +24475,41 @@ async function loadAndRenderIgbtHealthPage() {
 
 function renderIgbtFleetTable(nodes) {
   const tbody = $("igbtFleetTableBody");
-  if (!tbody) return;
+  const table = $("igbtFleetTable");
+  if (!tbody || !table) return;
+  const wrapper = table.parentElement;
 
   tbody.innerHTML = "";
+  // Remove any prior standalone empty state from the wrapper
+  if (wrapper) {
+    const oldEmpty = wrapper.querySelector(":scope > .igbt-empty-state");
+    if (oldEmpty) oldEmpty.remove();
+  }
 
   if (!nodes || nodes.length === 0) {
-    const tr = document.createElement("tr");
-    tr.className = "igbt-empty-row";
-    tr.innerHTML = `
-      <td colspan="12">
-        <div class="igbt-empty-state">
-          <span class="mdi mdi-clipboard-pulse-outline" aria-hidden="true"></span>
-          <div class="igbt-empty-title">No fleet data yet</div>
-          <div class="igbt-empty-copy">
-            Health scores will appear once stop-reason history accumulates. Trigger a manual capture in
-            <strong>Settings → Stop Reasons → Refresh now</strong> for any inverter, or wait for the next
-            FRAMA / thermal / PI&nbsp;ANA event to be recorded.
-          </div>
+    // Hide the table entirely so the long empty-state text can't push the
+    // table width past the wrapper viewport (which would knock the message
+    // off-centre and require horizontal scrolling).
+    table.style.display = "none";
+    if (wrapper) {
+      const empty = document.createElement("div");
+      empty.className = "igbt-empty-state";
+      empty.innerHTML = `
+        <span class="mdi mdi-clipboard-pulse-outline" aria-hidden="true"></span>
+        <div class="igbt-empty-title">No fleet data yet</div>
+        <div class="igbt-empty-copy">
+          Health scores will appear once stop-reason history accumulates. Trigger a manual capture in
+          <strong>Settings → Stop Reasons → Refresh now</strong> for any inverter, or wait for the next
+          FRAMA / thermal / PI&nbsp;ANA event to be recorded.
         </div>
-      </td>
-    `;
-    tbody.appendChild(tr);
+      `;
+      wrapper.appendChild(empty);
+    }
     return;
   }
+
+  // Restore table visibility when we have data.
+  table.style.display = "";
 
   nodes.forEach((node) => {
     const tr = document.createElement("tr");
@@ -22830,33 +24549,6 @@ function renderIgbtFleetTable(nodes) {
   applyTierFilter();
 }
 
-function renderIgbtSummary(summary, nodes) {
-  // Prefer server-provided summary; fall back to client-side aggregation.
-  let counts;
-  if (summary && typeof summary === "object") {
-    counts = {
-      healthy: Number(summary.healthy_count) || 0,
-      watch:   Number(summary.watch_count)   || 0,
-      aging:   Number(summary.aging_count)   || 0,
-      eol:     Number(summary.eol_count)     || 0,
-      offline: Number(summary.offline_count) || 0,
-    };
-  } else {
-    counts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
-    (nodes || []).forEach((n) => {
-      const t = (n.tier || "offline");
-      if (counts[t] != null) counts[t] += 1;
-      else counts.offline += 1;
-    });
-  }
-  const setCount = (id, n) => { const el = $(id); if (el) el.textContent = String(n); };
-  setCount("igbtSummaryHealthy", counts.healthy);
-  setCount("igbtSummaryWatch",   counts.watch);
-  setCount("igbtSummaryAging",   counts.aging);
-  setCount("igbtSummaryEol",     counts.eol);
-  setCount("igbtSummaryOffline", counts.offline);
-}
-
 function attachFleetTableClickListeners() {
   const table = $("igbtFleetTable");
   if (!table) return;
@@ -22878,6 +24570,62 @@ function attachFleetTableClickListeners() {
   });
 }
 
+// Phase 2.1 — render the YoY thermal-baseline section in the drilldown panel.
+// Returns a self-contained block that explains both states:
+//   • baseline still warming up → progress bar, no drift
+//   • baseline ready → current vs prior-year mean + drift score
+function renderThermalBaselineSection(tb) {
+  if (!tb) return "";
+  const fmt1 = (v) => (typeof v === "number" && Number.isFinite(v)) ? v.toFixed(1) : "—";
+  const fmt2 = (v) => (typeof v === "number" && Number.isFinite(v)) ? v.toFixed(2) : "—";
+  const pct  = (r) => Math.round(Math.max(0, Math.min(1, Number(r) || 0)) * 100);
+  const computed = Number(tb.computed_days) || 0;
+  const target   = Number(tb.target_days) || 365;
+  const ratio    = Number(tb.progress_ratio) || 0;
+  const driftStr = (typeof tb.yoy_drift_c === "number" && Number.isFinite(tb.yoy_drift_c))
+    ? `${tb.yoy_drift_c >= 0 ? "+" : ""}${tb.yoy_drift_c.toFixed(2)} °C`
+    : "—";
+  const phaseLabel = tb.scoring_phase === "phase2"
+    ? "Phase 2 (YoY active)"
+    : "Phase 1 (collecting baseline)";
+
+  return `
+        <!-- Thermal Baseline (Phase 2.1) -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Thermal Baseline (YoY)</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Scoring Phase</div>
+            <div class="igbt-detail-value">${phaseLabel}</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Days Collected</div>
+            <div class="igbt-detail-value">
+              ${computed} / ${target}
+              <div class="igbt-progress-track" title="Progress toward 365-day baseline (one full annual cycle).">
+                <div class="igbt-progress-fill" style="width: ${pct(ratio)}%"></div>
+              </div>
+            </div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Mean Temp (90d)</div>
+            <div class="igbt-detail-value">${fmt2(tb.current_mean_c)} °C</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Prior-Year Mean</div>
+            <div class="igbt-detail-value">${fmt2(tb.prior_year_mean_c)} °C</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">YoY Drift</div>
+            <div class="igbt-detail-value">${driftStr}</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Drift Score</div>
+            <div class="igbt-detail-value">${tb.yoy_score == null ? "—" : `${fmt1(tb.yoy_score)} / 100`}</div>
+          </div>
+        </div>
+  `;
+}
+
 async function renderDrilldownPanel(inverter, slave) {
   const panel = $("igbtDetailPanel");
   if (!panel) return;
@@ -22885,7 +24633,8 @@ async function renderDrilldownPanel(inverter, slave) {
   try {
     showToast("Loading node details...", 0);
 
-    const response = await fetch(`/api/igbt/node/${inverter}/${slave}`);
+    const days = getIgbtWindowDays();
+    const response = await fetch(`/api/igbt/node/${inverter}/${slave}?days=${days}`);
     const data = await response.json();
 
     if (!data.ok) {
@@ -22895,32 +24644,24 @@ async function renderDrilldownPanel(inverter, slave) {
     const node = data.node;
     const components = data.components || {};
     const currentState = data.current_state || {};
+    const thermalBaseline = data.thermal_baseline || null;
 
-    // Update header (id + inverter/slave label) and reveal the close button
+    // Reveal the panel
+    panel.hidden = false;
+
+    // Update header (id + inverter/slave label)
     const headerLabel = $("igbtDetailNodeId");
     if (headerLabel) {
       headerLabel.textContent = `Inverter ${node.inverter} · Slave ${node.slave}`;
     }
     const closeBtn = panel.querySelector(".igbt-detail-close");
-    if (closeBtn) {
-      closeBtn.hidden = false;
-      if (!closeBtn.dataset.bound) {
-        closeBtn.dataset.bound = "1";
-        closeBtn.addEventListener("click", () => {
-          if (headerLabel) headerLabel.textContent = "No node selected";
-          const body = $("igbtDetailBody");
-          if (body) {
-            body.innerHTML = `
-              <div class="igbt-detail-empty">
-                <span class="mdi mdi-information-outline" aria-hidden="true"></span>
-                <div>Select a row in the fleet table to see the per-node score breakdown, recent FRAMA / thermal / PI events, and current readings.</div>
-              </div>`;
-          }
-          closeBtn.hidden = true;
-          const tbl = $("igbtFleetTable");
-          if (tbl) tbl.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
-        });
-      }
+    if (closeBtn && !closeBtn.dataset.bound) {
+      closeBtn.dataset.bound = "1";
+      closeBtn.addEventListener("click", () => {
+        panel.hidden = true;
+        const tbl = $("igbtFleetTable");
+        if (tbl) tbl.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
+      });
     }
     // Legacy header element (kept for back-compat with older HTML class)
     const headerId = panel.querySelector(".node-id");
@@ -23028,6 +24769,8 @@ async function renderDrilldownPanel(inverter, slave) {
           </div>
         </div>
 
+        ${renderThermalBaselineSection(thermalBaseline)}
+
         <!-- Current State -->
         <div class="igbt-detail-section">
           <div class="igbt-detail-section-title">Current State</div>
@@ -23105,7 +24848,8 @@ function applyTierFilter() {
 
 function attachRefreshListeners() {
   const btn = $("btnRefreshIgbt");
-  if (!btn) return;
+  if (!btn || btn.dataset.bound) return;
+  btn.dataset.bound = "1";
 
   btn.addEventListener("click", async () => {
     try {
@@ -23113,6 +24857,29 @@ function attachRefreshListeners() {
       await loadAndRenderIgbtHealthPage();
     } finally {
       btn.disabled = false;
+    }
+  });
+}
+
+function attachWindowDaysListener() {
+  const input = $("igbtWindowDaysInput");
+  if (!input || input.dataset.bound) return;
+  input.dataset.bound = "1";
+
+  const refresh = () => {
+    // Normalise the visible value back to the clamped integer
+    const days = getIgbtWindowDays();
+    if (String(days) !== input.value) input.value = String(days);
+    loadAndRenderIgbtHealthPage().catch((err) => {
+      console.error("[igbt] window-change refresh failed:", err);
+    });
+  };
+
+  input.addEventListener("change", refresh);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      refresh();
     }
   });
 }
@@ -23141,7 +24908,8 @@ async function triggerIgbtFleetCsvExport(btn) {
     if (resultEl) { resultEl.textContent = "Exporting…"; resultEl.className = "exp-result"; }
     else showToast("Exporting CSV...", 0);
 
-    const response = await fetch("/api/igbt/fleet.csv");
+    const days = getIgbtWindowDays();
+    const response = await fetch(`/api/igbt/fleet.csv?days=${days}`);
     if (!response.ok) throw new Error(`Export failed (HTTP ${response.status})`);
 
     const blob = await response.blob();

@@ -1953,6 +1953,30 @@ body.sidebar-open .side-nav {
   color: var(--text3);
 }
 
+/* β-3 — Parameters page advanced-columns toggle + diagnostic-column accent. */
+.param-adv-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+}
+.param-adv-toggle:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.param-adv-toggle input[type="checkbox"] { margin: 0; cursor: pointer; }
+.param-table th.param-adv-col,
+.param-table td.param-adv-col {
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border-left: 1px dashed color-mix(in srgb, var(--accent) 25%, var(--border));
+}
+.param-table th.param-adv-col + th.param-adv-col,
+.param-table td.param-adv-col + td.param-adv-col { border-left-color: color-mix(in srgb, var(--border) 60%, transparent); }
+
 .toolbar-info {
   display: inline-flex;
   align-items: center;
@@ -5411,6 +5435,613 @@ select.cam-field-input { appearance: auto; }
 .cap-toolbar-idle {
   color: var(--text3);
 }
+
+/* ─── Plant Controller tab strip (APC + NGCP PGC 2016 compliance) ──────── */
+.plant-cap-tab-strip {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 0;
+}
+.plant-cap-tab-group {
+  padding: 6px 10px;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text3);
+  user-select: none;
+}
+.plant-cap-tab-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 6px;
+  background: var(--border);
+}
+.plant-cap-tab-btn {
+  flex: none;
+  padding: 8px 18px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--text2);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.plant-cap-tab-btn:hover { color: var(--text); }
+.plant-cap-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.plant-cap-tab-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.plant-cap-tab-pane { display: none; }
+.plant-cap-tab-pane.active { display: block; }
+
+/* ─── Slice δ — APC verify chip (next to current %P display) ──────────── */
+.apc-verify-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+}
+.apc-verify-chip[data-status="ok"]       { color: var(--green);  border-color: color-mix(in srgb, var(--green)  55%, var(--border)); background: color-mix(in srgb, var(--green)  10%, var(--surface)); }
+.apc-verify-chip[data-status="mismatch"] { color: var(--red);    border-color: color-mix(in srgb, var(--red)    55%, var(--border)); background: color-mix(in srgb, var(--red)    10%, var(--surface)); }
+.apc-verify-chip[data-status="pending"]  { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.apc-verify-chip[data-status="timeout"], .apc-verify-chip[data-status="no_response"], .apc-verify-chip[data-status="failed"] {
+  color: var(--orange); border-color: color-mix(in srgb, var(--orange) 55%, var(--border));
+}
+
+/* ─── Architecture clarifications (cabinet vs internal node) ──────────── */
+/* Sits inside .apc-field which is a 2-col grid (110px label + 1fr content).
+   Without grid-column: 1/-1 the help text falls into the 110px label column
+   and renders as a narrow vertical strip. Span both columns. */
+.apc-field-help {
+  display: block;
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  margin-top: 6px;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface2));
+  border: 1px dashed color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: 6px;
+}
+.apc-field-help b { color: var(--text); font-weight: 600; }
+
+/* Plain-language explainer for the STOP / START / Apply Setpoint actions. */
+.apc-actions-help {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface2));
+  border: 1px dashed color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 6px;
+}
+.apc-actions-help .item { display: block; }
+.apc-actions-help .item b { color: var(--text); font-weight: 600; }
+.apc-actions-help .item .swatch {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--text3);
+}
+.apc-actions-help .item.stop  .swatch { background: var(--red); }
+.apc-actions-help .item.start .swatch { background: var(--green); }
+.apc-actions-help .item.apply .swatch { background: var(--accent); }
+
+.cmp-target-help {
+  margin: 4px 0 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface2));
+  border: 1px dashed color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 6px;
+}
+.cmp-target-help b { color: var(--text); font-weight: 600; }
+
+/* ─── Compliance test panels (T2/T3/T5/Reports) ────────────────────────── */
+.cmp-panel {
+  padding: 18px 22px;
+  background: var(--surface);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  margin: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cmp-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.cmp-panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cmp-panel-sub {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text2);
+  line-height: 1.55;
+  max-width: 760px;
+}
+.cmp-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.cmp-badge-amber {
+  background: color-mix(in srgb, var(--orange) 18%, transparent);
+  color: var(--orange);
+  border: 1px solid color-mix(in srgb, var(--orange) 50%, var(--border));
+}
+.cmp-badge-green {
+  background: color-mix(in srgb, var(--green) 18%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 50%, var(--border));
+}
+.cmp-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.cmp-label {
+  color: var(--text2);
+  font-size: 11px;
+  margin-left: 6px;
+}
+.cmp-num, .cmp-text {
+  padding: 4px 8px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cmp-num { width: 70px; text-align: center; }
+.cmp-text { width: 200px; }
+.cmp-text-wide { width: 240px; }
+.cmp-num:focus, .cmp-text:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.cmp-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cmp-status {
+  font-size: 11.5px;
+  color: var(--text2);
+  font-style: italic;
+}
+.cmp-results {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.cmp-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+.cmp-result-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+  min-width: 200px;
+}
+.cmp-result-row span { color: var(--text2); }
+.cmp-result-row b   { color: var(--text); font-variant-numeric: tabular-nums; }
+.cmp-step-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.cmp-step-row {
+  display: grid;
+  grid-template-columns: 1.4fr 0.9fr 1.1fr 0.9fr 0.6fr;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.cmp-step-row.ok   { border-color: color-mix(in srgb, var(--green) 50%, var(--border)); }
+.cmp-step-row.fail { border-color: color-mix(in srgb, var(--red)   55%, var(--border)); }
+.cmp-runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cmp-runs-table th, .cmp-runs-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.cmp-runs-table th { color: var(--text2); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+.cmp-runs-table code { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--text2); }
+.cmp-empty { color: var(--text3); text-align: center; padding: 18px; font-size: 12px; }
+.cmp-status-cell { font-weight: 600; }
+.cmp-status-running   { color: var(--accent); }
+.cmp-status-completed { color: var(--green); }
+.cmp-status-failed    { color: var(--red); }
+.cmp-status-aborted   { color: var(--orange); }
+
+/* ─── Active Power Control (APC) panel ──────────────────────────────────── */
+.apc-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px 18px;
+  border-radius: 12px;
+  border: 1px solid var(--border2);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 28%),
+    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
+  box-shadow: var(--panel-shadow), var(--panel-inset-highlight);
+  overflow: hidden;
+}
+.apc-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 78%, transparent) 0%, transparent 72%);
+  pointer-events: none;
+}
+.apc-panel-head { display: flex; flex-direction: column; gap: 2px; }
+.apc-panel-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+.apc-panel-subtitle {
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.apc-form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.apc-field {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+.apc-field-lbl {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.55px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+.apc-scope-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.apc-chip-radio {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  font-size: 0.8125rem;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.apc-chip-radio:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--text);
+}
+.apc-chip-radio input[type="radio"] {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text3);
+  background: transparent;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.apc-chip-radio input[type="radio"]:checked {
+  border-color: var(--accent);
+  background:
+    radial-gradient(circle, var(--accent) 38%, transparent 42%);
+}
+.apc-chip-radio:has(input[type="radio"]:checked) {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+}
+
+.apc-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.apc-target-row .sel {
+  height: 32px;
+  min-width: 140px;
+}
+.apc-current-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg2) 70%, transparent);
+  font-size: 0.75rem;
+  color: var(--text);
+}
+.apc-current-pill-lbl {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+.apc-info-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 0.75rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.apc-setpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.apc-pct-input {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.apc-pct-input .inp {
+  width: 96px;
+  height: 34px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-align: right;
+  padding-right: 28px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.apc-pct-input .inp::-webkit-outer-spin-button,
+.apc-pct-input .inp::-webkit-inner-spin-button { margin: 0; }
+.apc-pct-suffix {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text3);
+  pointer-events: none;
+}
+.apc-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.apc-preset-btn {
+  min-width: 44px;
+  padding: 4px 10px !important;
+}
+
+.apc-field .inp[type="password"] {
+  height: 32px;
+  max-width: 240px;
+  font-size: 0.8125rem;
+}
+
+.apc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+/* Visual separator between the output-gate cluster (STOP/START) and the
+   primary Apply Setpoint action — no more huge dead space pushing Apply
+   to the far right. */
+.apc-actions .apc-actions-divider {
+  display: inline-block;
+  width: 1px;
+  height: 24px;
+  margin: 0 6px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.apc-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+.apc-progress-bar {
+  height: 8px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.apc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, white));
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+.apc-progress-label {
+  font-size: 0.75rem;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.apc-abort-btn { align-self: flex-start; }
+
+.apc-lockout-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  background: color-mix(in srgb, var(--orange, #f59e0b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--orange, #f59e0b) 40%, transparent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  color: var(--orange, #f59e0b);
+}
+.apc-lockout-banner .mdi { font-size: 1.1rem; }
+.apc-lockout-banner[hidden],
+.apc-progress-wrap[hidden],
+.apc-info-pill[hidden] { display: none !important; }
+.apc-tab-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .apc-field {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .apc-actions .btn-accent { margin-left: 0; }
+}
+.apc-history-section {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 4px;
+}
+.apc-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+.apc-history-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.apc-history-chevron {
+  font-size: 0.65rem;
+  color: var(--text3);
+  transition: transform 0.2s;
+}
+.apc-history-chevron.open { transform: rotate(180deg); }
+.apc-history-wrap {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.apc-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+.apc-history-table th,
+.apc-history-table td {
+  padding: 5px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.apc-history-table th {
+  font-weight: 600;
+  color: var(--text2);
+  background: var(--bg2);
+}
+.apc-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: var(--bg2);
+  color: var(--text2);
+  border: 1px solid var(--border);
+}
+.apc-badge-set  { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.apc-badge-stop { background: color-mix(in srgb, var(--red, #ef4444) 15%, transparent); color: var(--red, #ef4444); }
+.apc-badge-start { background: color-mix(in srgb, var(--green, #22c55e) 15%, transparent); color: var(--green, #22c55e); }
+.apc-badge-ok   { background: color-mix(in srgb, var(--green, #22c55e) 12%, transparent); color: var(--green, #22c55e); }
+.apc-badge-err  { background: color-mix(in srgb, var(--red, #ef4444) 12%, transparent); color: var(--red, #ef4444); }
+.apc-badge-queued { background: color-mix(in srgb, var(--orange, #f59e0b) 12%, transparent); color: var(--orange, #f59e0b); }
 
 .analytics-scroll-wrap {
   flex: 1;
@@ -17541,11 +18172,25 @@ body.mode-transition-active {
 }
 
 #page-igbt-health .page-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0;
-  margin: 0;
+  /* Inherit standard .page-toolbar styling (padding, border, radius, shadow). */
+  flex-shrink: 0;
+}
+#page-igbt-health .toolbar-num-input {
+  width: 56px;
+  padding: 2px 6px;
+  margin: 0 4px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+#page-igbt-health .toolbar-num-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 #page-igbt-health .tier-filter-group {
@@ -17660,6 +18305,19 @@ body.mode-transition-active {
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
+  /* When the empty-state is rendered as a sibling of the hidden table,
+     centre it within the wrapper viewport. */
+  display: flex;
+  flex-direction: column;
+}
+#page-igbt-health .igbt-fleet-table-wrapper > .igbt-empty-state {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  margin: 0 auto;
+  max-width: 560px;
+  padding: 56px 24px;
 }
 
 #page-igbt-health .igbt-detail-panel {
@@ -18049,127 +18707,7 @@ body.mode-transition-active {
   }
 }
 
-/* ── IGBT Health Page — v2.11.0 polish (banner + summary chips + empty states) ── */
-#page-igbt-health .igbt-banner {
-  padding: 14px 18px 12px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg,
-    color-mix(in srgb, var(--accent) 4%, var(--surface2)) 0%,
-    var(--surface) 100%);
-}
-#page-igbt-health .igbt-banner-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-#page-igbt-health .igbt-banner-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text);
-}
-#page-igbt-health .igbt-banner-title .mdi {
-  color: var(--accent);
-  font-size: 22px;
-  line-height: 1;
-}
-#page-igbt-health .igbt-banner-title h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-#page-igbt-health .igbt-banner-meta {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-#page-igbt-health .igbt-banner-meta .toolbar-info {
-  font-size: 12px;
-  color: var(--text2);
-}
-#page-igbt-health .igbt-banner-meta .toolbar-info b {
-  color: var(--text);
-  font-weight: 600;
-}
-#page-igbt-health .igbt-banner-sub {
-  margin-top: 8px;
-  color: var(--text2);
-  font-size: 12.5px;
-  line-height: 1.55;
-  max-width: 1100px;
-}
-#page-igbt-health .igbt-banner-sub strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-/* Summary tier chips */
-#page-igbt-health .igbt-summary-chips {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
-  flex-wrap: wrap;
-}
-#page-igbt-health .igbt-summary-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  font-size: 12px;
-  cursor: default;
-  transition: transform 120ms ease, box-shadow 120ms ease;
-}
-#page-igbt-health .igbt-summary-chip:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px color-mix(in srgb, var(--text) 12%, transparent);
-}
-#page-igbt-health .igbt-summary-count {
-  font-weight: 700;
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-}
-#page-igbt-health .igbt-summary-label {
-  color: var(--text2);
-  font-weight: 500;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
-  font-size: 10.5px;
-}
-#page-igbt-health .igbt-summary-chip.tier-healthy {
-  border-color: color-mix(in srgb, var(--green) 50%, var(--border));
-  background: color-mix(in srgb, var(--green) 8%, var(--surface));
-}
-#page-igbt-health .igbt-summary-chip.tier-healthy .igbt-summary-count { color: var(--green); }
-#page-igbt-health .igbt-summary-chip.tier-watch {
-  border-color: color-mix(in srgb, var(--orange) 45%, var(--border));
-  background: color-mix(in srgb, var(--orange) 8%, var(--surface));
-}
-#page-igbt-health .igbt-summary-chip.tier-watch .igbt-summary-count { color: var(--orange); }
-#page-igbt-health .igbt-summary-chip.tier-aging {
-  border-color: color-mix(in srgb, var(--orange) 70%, var(--red));
-  background: color-mix(in srgb, var(--orange) 12%, var(--surface));
-}
-#page-igbt-health .igbt-summary-chip.tier-aging .igbt-summary-count {
-  color: color-mix(in srgb, var(--orange) 60%, var(--red));
-}
-#page-igbt-health .igbt-summary-chip.tier-eol {
-  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
-  background: color-mix(in srgb, var(--red) 10%, var(--surface));
-}
-#page-igbt-health .igbt-summary-chip.tier-eol .igbt-summary-count { color: var(--red); }
-#page-igbt-health .igbt-summary-chip.tier-offline {
-  opacity: 0.85;
-  border-style: dashed;
-}
-
+/* ── IGBT Health Page — tier filter chips + empty states ── */
 /* Tier filter chips — color-coded outlines */
 #page-igbt-health .tier-filter-group .tier-chip.tier-healthy:not([data-selected="true"]) {
   color: var(--green);
@@ -18275,6 +18813,21 @@ body.mode-transition-active {
   font-weight: 600;
 }
 
+/* Phase 2.1 thermal-baseline progress bar inside drilldown rows */
+#page-igbt-health .igbt-progress-track {
+  width: 100%;
+  height: 5px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text2) 18%, transparent);
+  overflow: hidden;
+}
+#page-igbt-health .igbt-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--green)));
+  transition: width 250ms ease;
+}
+
 /* Drilldown empty placeholder */
 #page-igbt-health .igbt-detail-empty {
   display: flex;
@@ -18294,12 +18847,5 @@ body.mode-transition-active {
 #page-igbt-health .igbt-fleet-table tbody tr.selected {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-}
-
-/* Tighten the secondary toolbar (now only holds the tier filter) */
-#page-igbt-health .igbt-toolbar {
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
 }
 
