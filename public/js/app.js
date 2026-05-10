@@ -4808,6 +4808,10 @@ function setActiveSettingsSection(sectionId, persist = true) {
     try { initStopReasonsSection(); } catch (err) {
       console.warn("[stop-reasons] init failed:", err?.message || err);
     }
+    // Also init the cross-check tab within the same section
+    try { initCrossCheckSection(); } catch (err) {
+      console.warn("[cross-check] init failed:", err?.message || err);
+    }
   }
 
   // v2.10.0 Slice C minimal — lazy-init the Serial Number Setting page.
@@ -20425,6 +20429,214 @@ async function _srnLoadHistogram() {
     <table class="srn-histogram-table">${head}<tbody>${body}</tbody></table>`;
   if (msgEl) {
     msgEl.textContent = `Captured ${captured}`;
+    msgEl.className = "smsg";
+  }
+}
+
+// ─── v2.10.0 Slice ε — Standard-Modbus cross-check comparison ─────────────────
+
+const CrossCheckUI = {
+  inited: false,
+  selectedInverter: null,
+  selectedNode: null,
+};
+
+function initCrossCheckSection() {
+  if (CrossCheckUI.inited) {
+    return;
+  }
+  CrossCheckUI.inited = true;
+
+  const invPicker = document.getElementById("srnCrossCheckInverterPicker");
+  const nodePicker = document.getElementById("srnCrossCheckNodePicker");
+  const refreshBtn = document.getElementById("btnSrnCrossCheck");
+  if (!invPicker || !nodePicker || !refreshBtn) return;
+
+  _crossCheckPopulateInverterPicker(invPicker);
+
+  invPicker.addEventListener("change", () => {
+    CrossCheckUI.selectedInverter = Number(invPicker.value) || null;
+    _crossCheckPopulateNodePicker(nodePicker, CrossCheckUI.selectedInverter);
+    _crossCheckResetHost();
+  });
+
+  nodePicker.addEventListener("change", () => {
+    CrossCheckUI.selectedNode = Number(nodePicker.value) || null;
+    _crossCheckResetHost();
+  });
+
+  refreshBtn.addEventListener("click", _crossCheckHandleRefresh);
+
+  // Default to first inverter
+  if (invPicker.options.length > 0) {
+    CrossCheckUI.selectedInverter = Number(invPicker.options[0].value) || null;
+    invPicker.value = invPicker.options[0].value;
+    _crossCheckPopulateNodePicker(nodePicker, CrossCheckUI.selectedInverter);
+  }
+}
+
+function _crossCheckPopulateInverterPicker(picker) {
+  picker.innerHTML = "";
+  const cfgInverters = (State?.ipConfig?.inverters) || (State?.settings?.ipconfig?.inverters) || {};
+  const seen = new Set();
+  Object.entries(cfgInverters).forEach(([k, ip]) => {
+    const inv = Number(k);
+    if (!Number.isFinite(inv) || inv <= 0 || !String(ip || "").trim()) return;
+    if (seen.has(inv)) return;
+    seen.add(inv);
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${inv}  (${ip})`;
+    picker.appendChild(opt);
+  });
+  if (picker.options.length === 0) {
+    for (let i = 1; i <= 27; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `Inverter ${i}`;
+      picker.appendChild(opt);
+    }
+  }
+}
+
+function _crossCheckPopulateNodePicker(picker, inv) {
+  picker.innerHTML = "";
+  if (!inv) return;
+  // Default 4 nodes per inverter; could be extended per ipconfig
+  for (let node = 1; node <= 4; node++) {
+    const opt = document.createElement("option");
+    opt.value = String(node);
+    opt.textContent = `Node ${node}`;
+    picker.appendChild(opt);
+  }
+}
+
+function _crossCheckResetHost() {
+  const host = document.getElementById("srnCrossCheckHost");
+  if (host) {
+    host.innerHTML = `<div class="srn-empty">Pick an inverter and node, then click <strong>Refresh</strong> to compare the two sources.</div>`;
+  }
+  const msgEl = document.getElementById("srnCrossCheckMsg");
+  if (msgEl) msgEl.textContent = "";
+}
+
+async function _crossCheckHandleRefresh() {
+  const inv = CrossCheckUI.selectedInverter;
+  const node = CrossCheckUI.selectedNode;
+  const msgEl = document.getElementById("srnCrossCheckMsg");
+  const host = document.getElementById("srnCrossCheckHost");
+  const btn = document.getElementById("btnSrnCrossCheck");
+
+  if (!inv || !node) {
+    if (msgEl) { msgEl.textContent = "Pick an inverter and node first."; msgEl.className = "smsg error"; }
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Reading standard-Modbus and vendor SCOPE…"; msgEl.className = "smsg"; }
+
+  try {
+    // Fetch both vendor SCOPE and standard-Modbus data
+    const vendorResp = await fetch(`/api/stop-reasons/${inv}/${node}`);
+    const vendorData = await vendorResp.json().catch(() => ({}));
+
+    const stdResp = await fetch(`/api/stop-reasons/standard/${inv}/${node}`);
+    const stdData = await stdResp.json().catch(() => ({}));
+
+    if (!vendorResp.ok || !stdResp.ok) {
+      const msg = vendorData?.error || stdData?.error || "Failed to fetch data";
+      if (msgEl) { msgEl.textContent = `Error: ${msg}`; msgEl.className = "smsg error"; }
+      return;
+    }
+
+    _crossCheckRenderComparison(vendorData, stdData, host, msgEl);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Error: ${err.message}`; msgEl.className = "smsg error"; }
+    if (host) host.innerHTML = `<div class="srn-empty">Error: ${escapeHtml(err.message)}</div>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _crossCheckRenderComparison(vendorData, stdData, host, msgEl) {
+  if (!host) return;
+
+  const vendorSlots = (vendorData?.ok && vendorData.rows) || [];
+  const stdSlots = (stdData?.ok && stdData.slots) || [];
+
+  if (vendorSlots.length === 0 && stdSlots.length === 0) {
+    host.innerHTML = `<div class="srn-empty">No data from either source.</div>`;
+    if (msgEl) { msgEl.textContent = ""; msgEl.className = "smsg"; }
+    return;
+  }
+
+  // Create a side-by-side comparison table
+  // Vendor SCOPE in left columns, standard-Modbus in right columns
+  const head = `
+    <colgroup>
+      <col class="srn-col-slot" style="width: 5%">
+      <col class="srn-col-vendor" style="width: 47.5%">
+      <col class="srn-col-std" style="width: 47.5%">
+    </colgroup>
+    <thead>
+      <tr>
+        <th style="width:5%">Slot</th>
+        <th style="width:47.5%">Vendor SCOPE (FC 0x71)</th>
+        <th style="width:47.5%">Standard-Modbus (regs 30078–30108)</th>
+      </tr>
+    </thead>
+  `;
+
+  let body = "";
+  const maxSlots = Math.max(vendorSlots.length, stdSlots.length);
+  for (let i = 0; i < maxSlots; i++) {
+    const vSlot = vendorSlots[i];
+    const sSlot = stdSlots[i];
+
+    // Determine if this row has a mismatch
+    let mismatchClass = "";
+    let codeMatch = true;
+    let timeMatch = true;
+    if (vSlot && sSlot && vSlot.motparo !== undefined && sSlot.motive_code !== undefined) {
+      const vCode = Number(vSlot.motparo);
+      const sCode = Number(sSlot.motive_code);
+      codeMatch = vCode === sCode;
+      if (!codeMatch) mismatchClass = "srn-mismatch";
+    }
+
+    const vLabel = vSlot
+      ? `${vSlot.motparo || "—"} ${vSlot.motparo_label || ""}`
+      : "—";
+    const vTime = vSlot?.captured_at_iso || vSlot?.event_at_ms
+      ? `${vSlot.captured_at_iso || formatMs(vSlot.event_at_ms)}`
+      : "—";
+
+    const sLabel = sSlot
+      ? (sSlot.timestamp_iso === "offline"
+        ? "OFFLINE"
+        : `${sSlot.motive_code || "—"} ${sSlot.motive_name || ""}`)
+      : "—";
+    const sTime = sSlot?.timestamp_iso || "—";
+
+    const rowClass = (vSlot && sSlot && !codeMatch) ? "srn-mismatch" : "";
+    body += `
+      <tr class="${rowClass}">
+        <td style="text-align:center; width:5%">${i}</td>
+        <td class="${!codeMatch ? "srn-mismatch" : ""}" style="width:47.5%; white-space:normal">
+          <div>${escapeHtml(vLabel)}</div>
+          <div style="font-size:10.5px; color:var(--text2);">${escapeHtml(vTime)}</div>
+        </td>
+        <td class="${!codeMatch ? "srn-mismatch" : ""}" style="width:47.5%; white-space:normal">
+          <div>${escapeHtml(sLabel)}</div>
+          <div style="font-size:10.5px; color:var(--text2);">${escapeHtml(sTime)}</div>
+        </td>
+      </tr>
+    `;
+  }
+
+  host.innerHTML = `<table class="srn-crosscheck-table">${head}<tbody>${body}</tbody></table>`;
+  if (msgEl) {
+    msgEl.textContent = `Compared ${vendorSlots.length} vendor slot(s) with ${stdSlots.length} standard-Modbus slot(s)`;
     msgEl.className = "smsg";
   }
 }

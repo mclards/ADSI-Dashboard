@@ -1339,6 +1339,166 @@ async def read_slow_async(client, unit, ip):
     }
 
 
+async def read_standard_stop_reasons(client, slave, ip):
+    """
+    Read 31 input registers (30078–30108) — standard-Modbus stop-reason ring buffer.
+
+    Returns a dict:
+      {
+        "inverter_ip": str,
+        "slave": int,
+        "read_at_ms": int,
+        "pointer": int,         # 0..4, slot index of most recent event
+        "slots": [ {slot, pointer_points_here, timestamp_iso, motive_code, motive_name, raw} × 5 ]
+      }
+
+    Triggered on-demand from Node via the /stop-reasons/standard FastAPI route.
+    Per-IP lock mirrors Slice β (read_slow_async) to avoid concurrent reads.
+
+    Offline marker: year=0 → timestamp_iso="offline", motive_code=-1.
+
+    Wire format (Slice ε spec §3):
+      read_input_registers(addr=77, count=31, slave=slave)
+      Pointer at reg 30078 → most recent slot (0–4)
+      5 slots of 6 regs each: [year, month, day, hour, minute, motive_code]
+
+    Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice ε
+    """
+    from datetime import datetime as _dt
+
+    if is_write_pending(ip):
+        await asyncio.sleep(min(READ_SPACING, 0.01))
+        return None
+
+    regs = await safe_read(_threaded_read_input, client, 77, 31, slave, ip)
+    if not regs or len(regs) < 31:
+        return None
+
+    def reg(i):
+        return regs[i] if len(regs) > i else 0
+
+    read_at_ms = int(time.time() * 1000)
+    pointer = int(reg(0) or 0) & 0x07  # Mask to 0-7, expect 0-4
+    slots = []
+
+    # Parse 5 slots (6 registers each)
+    for slot_idx in range(5):
+        base = 1 + (slot_idx * 6)
+        year = int(reg(base) or 0)
+        month = int(reg(base + 1) or 0)
+        day = int(reg(base + 2) or 0)
+        hour = int(reg(base + 3) or 0)
+        minute = int(reg(base + 4) or 0)
+        motive_code_raw = int(reg(base + 5) or 0)
+
+        # Decode signed motive code using the same _signed_int16 helper
+        motive_code = _signed_int16(motive_code_raw)
+
+        # Check for offline slot (year=0)
+        if year == 0:
+            timestamp_iso = "offline"
+            motive_code = -1
+            captured_at_ms = None
+        else:
+            # Clamp invalid datetime values to valid ranges
+            year_adj = 2000 + min(max(int(year), 0), 99)
+            month_clamped = min(max(int(month), 1), 12)
+            day_clamped = min(max(int(day), 1), 31)
+            hour_clamped = min(max(int(hour), 0), 23)
+            minute_clamped = min(max(int(minute), 0), 59)
+
+            try:
+                dt_obj = _dt(year_adj, month_clamped, day_clamped, hour_clamped, minute_clamped, 0)
+                timestamp_iso = dt_obj.isoformat() + "Z"
+                captured_at_ms = int(dt_obj.timestamp() * 1000)
+            except (ValueError, OverflowError):
+                # Fallback for truly invalid datetimes
+                timestamp_iso = f"invalid({year_adj:04d}-{month_clamped:02d}-{day_clamped:02d}T{hour_clamped:02d}:{minute_clamped:02d})"
+                captured_at_ms = None
+
+        slot_dict = {
+            "slot": slot_idx,
+            "pointer_points_here": (slot_idx == pointer),
+            "timestamp_iso": timestamp_iso,
+            "motive_code": motive_code,
+            "motive_name": _get_motive_label(motive_code),
+            "raw": {
+                "year": int(reg(base)),
+                "month": int(reg(base + 1)),
+                "day": int(reg(base + 2)),
+                "hour": int(reg(base + 3)),
+                "minute": int(reg(base + 4)),
+                "motive_code_raw": motive_code_raw,
+            }
+        }
+        slots.append(slot_dict)
+
+    # Sort: pointer-pointed slot first, then offline last
+    def slot_sort_key(s):
+        if s["timestamp_iso"] == "offline":
+            return (1, 0)  # offline last
+        if s["pointer_points_here"]:
+            return (0, 0)  # pointer first
+        return (0, 1)     # other valid slots after pointer
+
+    slots.sort(key=slot_sort_key)
+
+    return {
+        "inverter_ip": ip,
+        "slave": int(slave),
+        "read_at_ms": read_at_ms,
+        "pointer": pointer,
+        "slots": slots,
+    }
+
+
+def _get_motive_label(code):
+    """
+    Get the human-readable label for a motive code (0–30, or edge cases like -1).
+
+    Canonical source: server/motiveLabelsStd.js
+    This table is embedded inline here for Python self-containedness.
+    Both must stay in sync.
+
+    Related plan: plans/slice-epsilon-implementation.md §4
+    """
+    motive_labels = {
+        0: "MOTIVO_PARO_NONE",
+        1: "MOTIVO_PARO_VIN",
+        2: "MOTIVO_PARO_FRED",
+        3: "MOTIVO_PARO_VRED",
+        4: "MOTIVO_PARO_VARISTORES",
+        5: "MOTIVO_PARO_AISL_DC",
+        6: "MOTIVO_PARO_IAC_EFICAZ",
+        7: "MOTIVO_PARO_TEMPERATURA",
+        8: "MOTIVO_PARO_LATENCIA_SPI",
+        9: "MOTIVO_PARO_CONFIGURACION",
+        10: "MOTIVO_PARO_PARO_MANUAL",
+        11: "MOTIVO_PARO_BAJA_VPV_MED",
+        12: "MOTIVO_PARO_HW_DESCX2",
+        13: "MOTIVO_PARO_FRAMA3",
+        14: "MOTIVO_PARO_MAX_IAC_INST",
+        15: "MOTIVO_PARO_CARGA_FIRMWARE",
+        16: "MOTIVO_PARO_REDUNDANTE",
+        17: "MOTIVO_PARO_PROTECCION_PIB",
+        18: "MOTIVO_PARO_ERROR_LEC_ADC",
+        19: "MOTIVO_PARO_CONSUMO_POTENCIA",
+        20: "MOTIVO_PARO_FUS_DC",
+        21: "MOTIVO_PARO_TEMP_AUX",
+        22: "MOTIVO_PARO_PROT_AC",
+        23: "MOTIVO_PARO_MAGNETO",
+        24: "MOTIVO_PARO_CONTACTOR",
+        25: "MOTIVO_PARO_RESET_WD",
+        26: "MOTIVO_PARO_PI_ANA_SAT",
+        27: "MOTIVO_PARO_LATENCIA_ADC",
+        28: "MOTIVO_PARO_ERROR_FATAL",
+        29: "MOTIVO_PARO_FRAMA1",
+        30: "MOTIVO_PARO_FRAMA2",
+    }
+    code_num = int(code)
+    return motive_labels.get(code_num, f"unknown({code_num})")
+
+
 # -------------------------------------------------
 #   Slow-poll loop (one coroutine per inverter)
 # -------------------------------------------------
@@ -3017,6 +3177,55 @@ async def api_stop_reasons_read(inverter: int, slave: int, request: Request):
         "read_at_ms": int(time.time() * 1000),
         "nodes": result.get("nodes", []),
         "histogram": result.get("histogram"),
+    }
+
+
+# ─── v2.10.x Slice ε — Standard-Modbus Stop-Reason Cross-Check ──────────────
+
+@app.post("/stop-reasons/standard/{inverter}/{slave}")
+async def api_stop_reasons_standard(inverter: int, slave: int, request: Request):
+    """
+    Read standard-Modbus stop-reason ring buffer (regs 30078–30108) on-demand.
+
+    Returns JSON-ready dict with 5-slot history decoded. No persistence side-effect
+    — Node's internal endpoint `/api/stop-reasons/internal/standard-save` decides
+    whether to write rows.
+
+    Bulk-auth gated (same as vendor SCOPE read).
+    """
+    auth = _extract_auth_header(request)
+    if not _check_bulk_auth(auth):
+        raise HTTPException(401, "unauthorized")
+
+    inv_int = int(inverter)
+    ip = ip_map.get(str(inv_int))
+    if not ip:
+        raise HTTPException(400, f"no IP configured for inverter {inverter}")
+
+    client = clients.get(ip)
+    if client is None:
+        raise HTTPException(503, f"no Modbus client for {ip}")
+
+    try:
+        result = await read_standard_stop_reasons(client, int(slave), ip)
+    except Exception as exc:
+        raise HTTPException(500, f"read_error: {exc}")
+
+    if result is None:
+        return {
+            "ok": False,
+            "inverter": inv_int,
+            "ip": ip,
+            "slave": int(slave),
+            "error": "read_failed",
+        }
+
+    return {
+        "ok": True,
+        "inverter": inv_int,
+        "ip": ip,
+        "slave": int(slave),
+        **result,  # inverter_ip, read_at_ms, pointer, slots
     }
 
 

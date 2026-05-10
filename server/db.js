@@ -1073,6 +1073,28 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_ish_inv_ts ON inverter_stop_histogram(inverter_ip, slave, read_at_ms DESC);
 
+  -- v2.10.x Slice ε: standard-Modbus stop-reason ring buffer cross-check
+  -- On-demand read of regs 30078–30108 (5-slot history) per inverter/slave
+  -- for validation against vendor SCOPE data.
+  CREATE TABLE IF NOT EXISTS inverter_stop_reasons_std (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter_id     INTEGER NOT NULL,
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    slot            INTEGER NOT NULL,           -- 0–4 ring-buffer slot
+    timestamp_iso   TEXT NOT NULL,              -- ISO 8601 (UTC) reconstructed from y/m/d/h/m
+    motive_code     INTEGER NOT NULL,           -- 0–30 per motive lookup table
+    motive_name     TEXT,                       -- MOTIVO_PARO_* symbol for display
+    read_at_ms      INTEGER NOT NULL,           -- wall-clock when read() was invoked
+    captured_at_ms  INTEGER,                    -- event datetime → ms (for sorting)
+    source          TEXT NOT NULL DEFAULT 'standard_modbus',
+    updated_ts      INTEGER NOT NULL
+                    DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    UNIQUE(inverter_ip, slave, slot, timestamp_iso, motive_code)
+  );
+  CREATE INDEX IF NOT EXISTS idx_iss_lookup ON inverter_stop_reasons_std(inverter_ip, slave, read_at_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_iss_slot ON inverter_stop_reasons_std(inverter_ip, slave, slot);
+
   -- v2.10.0 Slice C: serial-number change audit (forever-retained service
   -- record).  Every successful Read mints a session token; every Send
   -- captures the prior serial via mandatory pre-Read so before+after are
@@ -1321,6 +1343,12 @@ ensureColumn("audit_log", "reason", "reason TEXT DEFAULT ''");
 // /api/stop-reasons/internal/capture returns a row id. NULL for legacy alarms
 // raised before v2.10.0 or for alarms whose snapshot read failed.
 ensureColumn("alarms", "stop_reason_id", "stop_reason_id INTEGER");
+
+// v2.10.x Slice ε — standard-Modbus stop-reason cross-check columns.
+// Additive migrations for the inverter_stop_reasons_std table.
+ensureColumn("inverter_stop_reasons_std", "motive_name", "motive_name TEXT");
+ensureColumn("inverter_stop_reasons_std", "captured_at_ms", "captured_at_ms INTEGER");
+ensureColumn("inverter_stop_reasons_std", "source", "source TEXT NOT NULL DEFAULT 'standard_modbus'");
 
 // v2.9.1 — EOD-clean rolling-last snapshot columns. Captured post-1800H local
 // from the last PAC>0 polls; tomorrow's etotal_baseline is derived from these

@@ -12362,6 +12362,7 @@ const INVERTER_ENGINE_SYNC_URL = `${INVERTER_ENGINE_BASE_URL}/sync-clock`;
 
 // v2.10.0 Slice B — Stop Reasons (vendor FC 0x71 SCOPE peek through Python).
 const INVERTER_ENGINE_STOP_REASONS_URL = `${INVERTER_ENGINE_BASE_URL}/stop-reasons`;
+const INVERTER_ENGINE_STOP_REASONS_STD_URL = `${INVERTER_ENGINE_BASE_URL}/stop-reasons/standard`;
 
 // v2.10.0 Slice C — Serial Number Read / Edit / Send through Python (FC11 + FC16).
 const INVERTER_ENGINE_SERIAL_URL = `${INVERTER_ENGINE_BASE_URL}/serial`;
@@ -13555,6 +13556,39 @@ app.post(
       });
     }
 
+    // Slice ε: Best-effort standard-Modbus read (non-blocking, does not fail refresh on error)
+    (async () => {
+      try {
+        const stdUrl = new URL(`${INVERTER_ENGINE_STOP_REASONS_STD_URL}/${inv}/${slave}`);
+        const stdHeaders = { "content-type": "application/json" };
+        stdHeaders["x-bulk-auth"] = req.get("x-bulk-auth") || _currentSacupsKey();
+        const stdRes = await fetch(stdUrl.toString(), {
+          method: "POST",
+          headers: stdHeaders,
+          body: JSON.stringify({}),
+          timeout: 5000,
+        });
+        const stdResult = await stdRes.json().catch(() => null);
+        if (stdResult?.ok && stdResult.slots) {
+          // Persist the standard-Modbus slots
+          await fetch(`http://127.0.0.1:${PORT}/api/stop-reasons/internal/standard-save`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              inverter_ip: ip,
+              slave,
+              read_at_ms: stdResult.read_at_ms,
+              slots: stdResult.slots,
+            }),
+            timeout: 5000,
+          });
+        }
+      } catch (err) {
+        // Log but don't fail the refresh
+        console.warn(`[Slice ε] standard-Modbus read failed for inverter ${inv}: ${err.message}`);
+      }
+    })();
+
     res.json({
       ok: true,
       inverter: inv,
@@ -13565,6 +13599,132 @@ app.post(
       histogram_id: persisted.histogramId,
       upstream_nodes: upstream.nodes?.length || 0,
     });
+  },
+);
+
+// ─── v2.10.x Slice ε — Standard-Modbus Stop-Reason Cross-Check ─────────────
+
+// Internal endpoint: Python POST's here to persist standard-Modbus stop-reason slots.
+// Localhost-only gate prevents remote calls.
+app.post("/api/stop-reasons/internal/standard-save", express.json(), (req, res) => {
+  const remoteIp = req.ip || req.socket.remoteAddress || "";
+  const isLoopback = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1";
+  if (!isLoopback) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
+  }
+
+  const payload = req.body;
+  if (!payload?.inverter_ip || payload.slave === undefined || !Array.isArray(payload.slots)) {
+    return res.status(400).json({ ok: false, error: "invalid payload" });
+  }
+
+  const inverterIp = String(payload.inverter_ip);
+  const slave = Number(payload.slave);
+  const slots = payload.slots;
+  const readAtMs = Number(payload.read_at_ms) || Date.now();
+
+  let persistedCount = 0;
+  try {
+    const insert = db.prepare(`
+      INSERT INTO inverter_stop_reasons_std
+      (inverter_id, inverter_ip, slave, slot, timestamp_iso, motive_code, motive_name, read_at_ms, captured_at_ms, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inverter_ip, slave, slot, timestamp_iso, motive_code) DO UPDATE SET
+        motive_name = excluded.motive_name,
+        read_at_ms = excluded.read_at_ms,
+        captured_at_ms = excluded.captured_at_ms
+    `);
+
+    // Slice ε — reverse-lookup inverter_id from IP via the cached ipconfig.
+    // Falls back to 0 if not found (inverter_id is not part of the UNIQUE
+    // constraint, so the row is still uniquely identified by ip+slave+slot+ts+code).
+    let invId = 0;
+    try {
+      const cfg = loadIpConfigFromDb();
+      const ips = cfg?.inverters || {};
+      for (let i = 1; i <= 27; i++) {
+        if (ips[i] === inverterIp || ips[String(i)] === inverterIp) {
+          invId = i;
+          break;
+        }
+      }
+    } catch (_) { /* invId stays 0 */ }
+
+    for (const slot of slots) {
+      if (slot.timestamp_iso === "offline" || slot.motive_code === -1) {
+        continue;  // Skip offline slots
+      }
+      insert.run(
+        invId,
+        inverterIp,
+        slave,
+        slot.slot,
+        slot.timestamp_iso,
+        slot.motive_code,
+        slot.motive_name || null,
+        readAtMs,
+        slot.captured_at_ms || null,
+        "standard_modbus",
+      );
+      persistedCount++;
+    }
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: `persist failed: ${err.message}`,
+    });
+  }
+
+  res.json({
+    ok: true,
+    inverter_ip: inverterIp,
+    slave,
+    slots_persisted: persistedCount,
+  });
+});
+
+// Public GET endpoint: fetch standard-Modbus slots from DB (remote-mode proxied).
+const _proxyStdStopReasonsInRemote = (req, res, next) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  return next();
+};
+
+app.get(
+  "/api/stop-reasons/standard/:inverter/:slave",
+  _proxyStdStopReasonsInRemote,
+  (req, res) => {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+    if (!Number.isFinite(inv) || inv <= 0 || !Number.isFinite(slave)) {
+      return res.status(400).json({ ok: false, error: "inverter and slave required" });
+    }
+
+    const ip = _resolveInverterIp(inv);
+    if (!ip) {
+      return res.status(404).json({ ok: false, error: `no IP configured for inverter ${inv}` });
+    }
+
+    try {
+      const slots = db.prepare(`
+        SELECT slot, timestamp_iso, motive_code, motive_name, read_at_ms, captured_at_ms
+        FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ?
+        ORDER BY read_at_ms DESC, slot ASC
+        LIMIT 50
+      `).all(ip, slave);
+
+      res.json({
+        ok: true,
+        inverter: inv,
+        ip,
+        slave,
+        slots: slots || [],
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
   },
 );
 

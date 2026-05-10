@@ -2490,6 +2490,12 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 <span class="mdi mdi-chart-bar icon-inline" aria-hidden="true"></span>
                 <span class="card-tab-label">Lifetime Counters</span>
               </button>
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="crosscheck" aria-controls="srnPanelCrossCheck" aria-selected="false"
+                      title="Standard-Modbus ring buffer slots side-by-side with vendor SCOPE data, marked red if mismatch.">
+                <span class="mdi mdi-check-network-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Cross-Check</span>
+              </button>
             </div>
 
             <!-- Tab panel: Captured snapshots -->
@@ -2535,6 +2541,34 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 </div>
                 <div id="srnHistogramHost" class="srn-histogram-host">
                   <div class="srn-empty">Click <strong>Reload histogram</strong> to load the lifetime counters.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab panel: Standard-Modbus cross-check -->
+            <div id="srnPanelCrossCheck" class="card-tab-panel" data-card-tab-panel="crosscheck"
+                 role="tabpanel" aria-labelledby="srnPanelCrossCheck" hidden>
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-check-network-outline icon-inline" aria-hidden="true"></span>
+                  Standard-Modbus Cross-Check
+                </div>
+                <div class="srn-controls">
+                  <label class="invclock-label" for="srnCrossCheckInverterPicker">Inverter</label>
+                  <select id="srnCrossCheckInverterPicker" class="inp invclock-input"
+                          title="Pick an inverter to compare vendor SCOPE stop reasons with standard-Modbus ring buffer."></select>
+                  <label class="invclock-label" for="srnCrossCheckNodePicker">Node</label>
+                  <select id="srnCrossCheckNodePicker" class="inp invclock-input"
+                          title="Pick a node (slave) to view its cross-check."></select>
+                  <button id="btnSrnCrossCheck" class="btn btn-accent" type="button"
+                          title="Read the standard-Modbus ring buffer for this node and compare against the last vendor SCOPE snapshot.">
+                    <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+                    <span>Refresh</span>
+                  </button>
+                  <span class="smsg" id="srnCrossCheckMsg"></span>
+                </div>
+                <div id="srnCrossCheckHost" class="srn-crosscheck-host">
+                  <div class="srn-empty">Pick an inverter and node, then click <strong>Refresh</strong> to compare the two sources.</div>
                 </div>
               </div>
             </div>
