@@ -1,3 +1,31 @@
+"""
+Modbus TCP transport layer for Ingeteam INGECON SUN inverter polling.
+
+Authority & References:
+  - Ingeteam INGECON SUN Modbus RTU specification (3-phase PowerMax 920TL)
+    docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf (AAS1000ICB08)
+  - v2.10.x revamp plan: plans/2026-05-10-modbus-registers-official-revamp.md
+
+Supported Function Codes (FC):
+  - FC 0x03 — Read Holding Registers (read_holding)
+  - FC 0x04 — Read Input Registers (read_input)
+  - FC 0x06 — Write Single Register (write_single)
+  - FC 0x10 — Write Multiple Registers (write_multiple)
+
+FD-Pressure Mitigations (Phase 6, v2.8.11+):
+  - T3.7 — On socket exception, force clean reconnect to avoid FD leak
+  - T3.10 — Re-apply socket timeout before every read (Windows TCP quirk)
+
+Register Decoding Rules (Modbus standard):
+  - UInt16 — 16-bit unsigned (registers 0–65535)
+  - Int16 — 16-bit signed via two's complement (Slice α, v2.10.x+)
+            Per spec, Idc (reg 30010) and PAC (reg 30019) are Int16.
+  - UInt32 hi-lo — 32-bit unsigned as (hi<<16)|lo pair
+            E.g., Etotal (regs 30001-30002), Alarmas (regs 30007-30008)
+
+See services/inverter_engine.py for frame assembly and v2.10.x sign extension.
+"""
+
 from pymodbus.client.sync import ModbusTcpClient
 import time
 

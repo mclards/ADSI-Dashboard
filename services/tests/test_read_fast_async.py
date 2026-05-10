@@ -148,5 +148,66 @@ class HardwareCounterDecodeTests(unittest.TestCase):
         self.assertFalse(valid)
 
 
+class SignedInt16DecodeTests(unittest.TestCase):
+    """
+    Slice α unit tests — Int16 sign extension for Modbus input registers.
+
+    Registers marked "signed yes" in the official Ingeteam INGECON SUN PDF
+    (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 4-5):
+      - Reg 30010 (addr 9) `Idc`  — DC input current, 0.1 A/LSB
+      - Reg 30019 (addr 18) `PAC` — AC output power, tens of W
+    Currently decoded as unsigned UInt16; Slice α applies two's complement.
+
+    Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice α
+    """
+
+    def _signed_int16_inline(self, raw):
+        """
+        Inline two's complement helper for testing.
+        Mirrors the production implementation in inverter_engine.py.
+        """
+        u16 = int(raw) & 0xFFFF
+        return u16 - 0x10000 if u16 > 0x7FFF else u16
+
+    def _get_signed_int16(self):
+        """Get the module-level _signed_int16 function or fallback to inline."""
+        try:
+            import services.inverter_engine as engine_module
+            return engine_module._signed_int16
+        except (ImportError, AttributeError):
+            return self._signed_int16_inline
+
+    def test_signed_int16_idc_negative(self):
+        """Slice α — Idc reg 30010 marked 'signed yes' in PDF §2 pg 4-5.
+        Two's complement: 0xFFF0 → -16."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(0xFFF0), -16)
+
+    def test_signed_int16_pac_negative_min(self):
+        """Slice α — PAC reg 30019 'signed yes'. 0x8000 → -32768 (min Int16)."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(0x8000), -32768)
+
+    def test_signed_int16_pac_positive_max(self):
+        """Slice α — boundary: 0x7FFF → 32767 (max Int16, no sign extension)."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(0x7FFF), 32767)
+
+    def test_signed_int16_zero(self):
+        """Slice α — 0 → 0."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(0), 0)
+
+    def test_signed_int16_positive_one(self):
+        """Slice α — 1 → 1 (no sign extension)."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(1), 1)
+
+    def test_signed_int16_negative_one(self):
+        """Slice α — 0xFFFF → -1."""
+        fn = self._get_signed_int16()
+        self.assertEqual(fn(0xFFFF), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

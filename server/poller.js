@@ -576,6 +576,27 @@ function integratePacToday(parsed) {
   pacIntegratorState[key] = { ts: now, pac, totalKwh: parsed.kwh, pythonKwh: 0 };
 }
 
+/**
+ * Convert Modbus raw UInt16 to signed Int16 (two's complement).
+ *
+ * Per Ingeteam INGECON SUN Modbus RTU spec
+ * (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 4-5):
+ *   - Reg 30010 (addr 9) `Idc`  — signed, 0.1 A/LSB
+ *   - Reg 30019 (addr 18) `PAC` — signed, tens of W
+ *
+ * Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice α
+ */
+function _signedInt16(raw) {
+  const u16 = Number(raw) & 0xFFFF;
+  return u16 > 0x7FFF ? u16 - 0x10000 : u16;
+}
+
+/**
+ * Parse a raw Modbus frame into a normalized dashboard telemetry row.
+ *
+ * Applies Int16 sign extension to `idc` and `pac` registers per the
+ * official Ingeteam Modbus spec (Slice α, v2.10.x).
+ */
 function parseRow(row, identity = null) {
   const resolved =
     identity && typeof identity === "object" ? identity : resolveConfiguredTelemetryIdentity(row, null);
@@ -584,19 +605,27 @@ function parseRow(row, identity = null) {
   const unit = Math.trunc(Number(resolved.unit));
 
   const vdc  = Number(row.vdc  || 0);
-  const idc  = Number(row.idc  || 0);
+  const idc  = Number(_signedInt16(row.idc  || 0));
   const vac1 = Number(row.vac1 || 0);
   const vac2 = Number(row.vac2 || 0);
   const vac3 = Number(row.vac3 || 0);
   const iac1 = Number(row.iac1 || 0);
   const iac2 = Number(row.iac2 || 0);
   const iac3 = Number(row.iac3 || 0);
-  const pac  = Number(row.pac  || 0);
+  const pac  = Number(_signedInt16(row.pac  || 0));
   const alarm = Number(row.alarm || 0);
   const onOffRaw = Number(row.on_off ?? row.onOff ?? 0);
   const on_off = onOffRaw === 1 ? 1 : 0;
 
-  // Sanity clamp
+  // Sanity clamp for PAC. Slice α applies Int16 sign extension before this clamp,
+  // so negative values (e.g. from inverter faults or measurement errors) pass through
+  // unchanged. The clamp catches word-swap firmware variants on the POSITIVE side
+  // (pac * 10 > 260000 W). Negative values always satisfy (pac * 10 <= 260000),
+  // so they flow into safePac. The per-leg zero-coherence guard further down in
+  // this function then handles display safety by forcing safePac to 0 if any
+  // measurement leg is at its noise floor. This preserves diagnostic visibility
+  // for negative-PAC investigation while preventing phantom negative-power
+  // display artifacts.
   let safePac = pac * 10 <= 260000 ? pac * 10 : 0;
   const safePdc = vdc * idc <= 265000 ? vdc * idc : 0;
 
@@ -1656,4 +1685,7 @@ module.exports = {
   classifyRecoveryDelta,
   classifyBucketInc,
   MAX_BUCKET_KWH_PER_INVERTER,
+  // Slice α — Int16 sign extension + parseRow for test/diagnostic access
+  _signedInt16,
+  parseRow,
 };

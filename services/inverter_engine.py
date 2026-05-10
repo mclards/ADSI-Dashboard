@@ -68,6 +68,23 @@ app.add_middleware(
 #   Helpers
 # -------------------------------------------------
 
+def _signed_int16(raw):
+    """Convert Modbus raw UInt16 to signed Int16 (two's complement).
+
+    Per Ingeteam INGECON SUN Modbus RTU spec
+    (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 4-5):
+      - Reg 30010 (addr 9) `Idc`  — signed, 0.1 A/LSB
+      - Reg 30019 (addr 18) `PAC` — signed, tens of W
+    Future use (Slice β):
+      - Reg 30069 (addr 68) `QAC` — signed, reactive W ÷10
+      - Reg 30072-73 (addr 71-72) — signed °C temperatures (Slice α only addresses Idc/PAC; temps already signed-handled in read_fast_async)
+
+    Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice α
+    """
+    u16 = int(raw) & 0xFFFF
+    return u16 - 0x10000 if u16 > 0x7FFF else u16
+
+
 def free_engine_port():
     """Kill any process currently listening on ENGINE_PORT (Windows only)."""
     try:
@@ -2132,12 +2149,12 @@ def _update_metrics_from_frame(frame: dict):
     ms["lastUpdate"][nk] = now
 
     vdc = float(frame.get("vdc") or 0)
-    idc = float(frame.get("idc") or 0)
+    idc = float(_signed_int16(frame.get("idc") or 0))
 
     pdc_raw = (vdc * idc) if vdc * idc <= 265_000 else 0
     ms["pdcData"][nk] = {"lastPdcRaw": pdc_raw}
 
-    pac_reg  = float(frame.get("pac") or 0)
+    pac_reg  = float(_signed_int16(frame.get("pac") or 0))
     # T3.17 fix (Phase 8, 2026-04-14): log when the clamp triggers so an
     # Ingeteam firmware variant that uses a different word order surfaces
     # as a loud warning instead of silently-zeroed PAC.  Previously a bad
