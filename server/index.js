@@ -13207,6 +13207,13 @@ function _computeParamTotals(inv, ip, slave, dateLocal) {
 function _paramRowSelect(ip, slave, dateLocal) {
   // Returns rows in solar-window only.  Caller decides whether to also
   // append the live in-progress bucket (today-only).
+  //
+  // Slice β (v2.10.x) — slow-poll diagnostic columns appended to the SELECT
+  // so callers can consume the new fields via the existing /api/params/*
+  // endpoints. UI table rendering does NOT yet surface these columns;
+  // operators can query the API directly or via raw SQL until the
+  // Parameters page advanced-columns toggle lands in a follow-up pass.
+  // Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice β
   return db.prepare(`
     SELECT slot_index, ts_ms,
            vdc_v, idc_a, pdc_w,
@@ -13215,6 +13222,18 @@ function _paramRowSelect(ip, slave, dateLocal) {
            temp_c, pac_w, cosphi, freq_hz,
            inv_alarms, track_alarms,
            parce_kwh,
+           qac_var_avg,
+           tempint_c_min, tempint_c_max, tempint_c_avg,
+           zpos_kohm_min, zpos_kohm_max, zpos_kohm_last,
+           zneg_kohm_min, zneg_kohm_max, zneg_kohm_last,
+           vpv_n_v_min, vpv_n_v_max, vpv_n_v_avg,
+           vpv_p_v_min, vpv_p_v_max, vpv_p_v_avg,
+           nominal_power_w_last,
+           time_to_connect_s_min, time_to_connect_s_max, time_to_connect_s_avg,
+           time_to_connect_total_s_min, time_to_connect_total_s_max, time_to_connect_total_s_avg,
+           alarms_inst_32_max, alarms_maint_32_max, power_reduction_bits_last,
+           analog_in_1_avg, analog_in_2_avg, analog_in_3_avg, analog_in_4_avg,
+           pt100_1_last, pt100_2_last, inverter_state_raw_last,
            sample_count, is_complete, in_solar_window
       FROM inverter_5min_param
      WHERE inverter_ip = ? AND slave = ? AND date_local = ?

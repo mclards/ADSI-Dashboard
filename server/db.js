@@ -1341,6 +1341,46 @@ ensureColumn("daily_report", "kwh_total_parce",  "kwh_total_parce REAL");
 // actual energy (matches ISM "Partial Energy" semantics far more accurately
 // than a PAC-integrated estimate, which has ±2% averaging error).
 ensureColumn("inverter_5min_param", "parce_kwh", "parce_kwh REAL");
+
+// v2.10.x Slice β — slow-poll diagnostic fields (additive, all NULL by default).
+// Captured by services/inverter_engine.py read_slow_async (addr 64-116) every
+// SLOW_POLL_INTERVAL_S (default 30 s); aggregated by server/dailyAggregator.js.
+// Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice β
+// Impl: plans/slice-beta-implementation.md
+ensureColumn("inverter_5min_param", "qac_var_avg",                  "qac_var_avg REAL");
+ensureColumn("inverter_5min_param", "tempint_c_min",                "tempint_c_min REAL");
+ensureColumn("inverter_5min_param", "tempint_c_max",                "tempint_c_max REAL");
+ensureColumn("inverter_5min_param", "tempint_c_avg",                "tempint_c_avg REAL");
+ensureColumn("inverter_5min_param", "zpos_kohm_min",                "zpos_kohm_min INTEGER");
+ensureColumn("inverter_5min_param", "zpos_kohm_max",                "zpos_kohm_max INTEGER");
+ensureColumn("inverter_5min_param", "zpos_kohm_last",               "zpos_kohm_last INTEGER");
+ensureColumn("inverter_5min_param", "zneg_kohm_min",                "zneg_kohm_min INTEGER");
+ensureColumn("inverter_5min_param", "zneg_kohm_max",                "zneg_kohm_max INTEGER");
+ensureColumn("inverter_5min_param", "zneg_kohm_last",               "zneg_kohm_last INTEGER");
+ensureColumn("inverter_5min_param", "vpv_n_v_min",                  "vpv_n_v_min INTEGER");
+ensureColumn("inverter_5min_param", "vpv_n_v_max",                  "vpv_n_v_max INTEGER");
+ensureColumn("inverter_5min_param", "vpv_n_v_avg",                  "vpv_n_v_avg REAL");
+ensureColumn("inverter_5min_param", "vpv_p_v_min",                  "vpv_p_v_min INTEGER");
+ensureColumn("inverter_5min_param", "vpv_p_v_max",                  "vpv_p_v_max INTEGER");
+ensureColumn("inverter_5min_param", "vpv_p_v_avg",                  "vpv_p_v_avg REAL");
+ensureColumn("inverter_5min_param", "nominal_power_w_last",         "nominal_power_w_last INTEGER");
+ensureColumn("inverter_5min_param", "time_to_connect_s_min",        "time_to_connect_s_min INTEGER");
+ensureColumn("inverter_5min_param", "time_to_connect_s_max",        "time_to_connect_s_max INTEGER");
+ensureColumn("inverter_5min_param", "time_to_connect_s_avg",        "time_to_connect_s_avg REAL");
+ensureColumn("inverter_5min_param", "time_to_connect_total_s_min",  "time_to_connect_total_s_min INTEGER");
+ensureColumn("inverter_5min_param", "time_to_connect_total_s_max",  "time_to_connect_total_s_max INTEGER");
+ensureColumn("inverter_5min_param", "time_to_connect_total_s_avg",  "time_to_connect_total_s_avg REAL");
+ensureColumn("inverter_5min_param", "alarms_inst_32_max",           "alarms_inst_32_max INTEGER");
+ensureColumn("inverter_5min_param", "alarms_maint_32_max",          "alarms_maint_32_max INTEGER");
+ensureColumn("inverter_5min_param", "power_reduction_bits_last",    "power_reduction_bits_last INTEGER");
+ensureColumn("inverter_5min_param", "analog_in_1_avg",              "analog_in_1_avg REAL");
+ensureColumn("inverter_5min_param", "analog_in_2_avg",              "analog_in_2_avg REAL");
+ensureColumn("inverter_5min_param", "analog_in_3_avg",              "analog_in_3_avg REAL");
+ensureColumn("inverter_5min_param", "analog_in_4_avg",              "analog_in_4_avg REAL");
+ensureColumn("inverter_5min_param", "pt100_1_last",                 "pt100_1_last INTEGER");
+ensureColumn("inverter_5min_param", "pt100_2_last",                 "pt100_2_last INTEGER");
+ensureColumn("inverter_5min_param", "inverter_state_raw_last",      "inverter_state_raw_last INTEGER");
+
 // Forecast compare persistence (detailed provenance/error-memory basis).
 ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");

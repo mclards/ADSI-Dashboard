@@ -394,7 +394,113 @@ function run() {
     assert.strictEqual(live2.slot_start_ms, slotStartMs, "slot_start_ms is anchored to slot, not query time");
   }
 
-  console.log("dailyAggregatorCore.test.js — all 19 scenarios passed.");
+  // ── 20. Slice β slow-poll fields — qac_var averaging ───────────────────
+  {
+    resetState();
+    const frame1 = makeFrame({ qac_var: -100 });
+    const frame2 = makeFrame({ qac_var: -110 });
+    const frame3 = makeFrame({ qac_var: null }); // offline
+
+    dailyAggregator.ingestLiveSample(frame1);
+    dailyAggregator.ingestLiveSample(frame2);
+    dailyAggregator.ingestLiveSample(frame3);
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    // Average of -100 and -110 = -105
+    assert.strictEqual(bucket.qac_var_avg, -105, "qac_var averaged correctly");
+  }
+
+  // ── 21. Slice β slow-poll fields — tempint_c min/max ───────────────────
+  {
+    resetState();
+    const frame1 = makeFrame({ tempint_c: 30 });
+    const frame2 = makeFrame({ tempint_c: 45 });
+    const frame3 = makeFrame({ tempint_c: 35 });
+
+    dailyAggregator.ingestLiveSample(frame1);
+    dailyAggregator.ingestLiveSample(frame2);
+    dailyAggregator.ingestLiveSample(frame3);
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.strictEqual(bucket.tempint_c_min, 30, "tempint_c_min tracked");
+    assert.strictEqual(bucket.tempint_c_max, 45, "tempint_c_max tracked");
+    // Average: (30 + 45 + 35) / 3 = 36.666...
+    assert.strictEqual(Math.round(bucket.tempint_c_avg * 100) / 100, 36.67, "tempint_c_avg calculated");
+  }
+
+  // ── 22. Slice β slow-poll fields — alarm windows bitwise-OR ────────────
+  {
+    resetState();
+    const frame1 = makeFrame({ alarms_inst_32: 0x0001 });
+    const frame2 = makeFrame({ alarms_inst_32: 0x0002 });
+    const frame3 = makeFrame({ alarms_inst_32: 0x0004 });
+
+    dailyAggregator.ingestLiveSample(frame1);
+    dailyAggregator.ingestLiveSample(frame2);
+    dailyAggregator.ingestLiveSample(frame3);
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    // Bitwise OR: 0x0001 | 0x0002 | 0x0004 = 0x0007
+    assert.strictEqual(bucket.alarms_inst_32_max, 0x0007, "alarms_inst_32 ORed correctly");
+  }
+
+  // ── 23. Slice β slow-poll fields — last-value snapshots ────────────────
+  {
+    resetState();
+    const frame1 = makeFrame({ zpos_kohm: 50, inverter_state_raw: 0x0202 });
+    const frame2 = makeFrame({ zpos_kohm: 51, inverter_state_raw: 0x0201 });
+
+    dailyAggregator.ingestLiveSample(frame1);
+    dailyAggregator.ingestLiveSample(frame2);
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.strictEqual(bucket.zpos_kohm_last, 51, "zpos_kohm last reading");
+    assert.strictEqual(bucket.inverter_state_raw_last, 0x0201, "inverter_state_raw last reading");
+  }
+
+  // ── 24. Slice β slow-poll fields — AAP0016 analog averaging ────────────
+  {
+    resetState();
+    const frame1 = makeFrame({ analog_in_1: 100, analog_in_2: 200 });
+    const frame2 = makeFrame({ analog_in_1: 120, analog_in_2: 220 });
+
+    dailyAggregator.ingestLiveSample(frame1);
+    dailyAggregator.ingestLiveSample(frame2);
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.strictEqual(bucket.analog_in_1_avg, 110, "analog_in_1 averaged");
+    assert.strictEqual(bucket.analog_in_2_avg, 210, "analog_in_2 averaged");
+  }
+
+  // ── 25. Slice β slow-poll fields — combined old + new fields ───────────
+  {
+    resetState();
+    const frame = makeFrame({
+      pac: 5000,
+      temp_c: 35,
+      qac_var: -50,
+      tempint_c: 38,
+      zpos_kohm: 52,
+      alarms_inst_32: 0x0001,
+      analog_in_1: 1234,
+    });
+
+    dailyAggregator.ingestLiveSample(frame);
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+
+    // Old fields
+    assert.strictEqual(bucket.pac_w, 5000, "pac_w still works");
+    assert.strictEqual(bucket.temp_c, 35, "temp_c still works");
+
+    // New fields
+    assert.strictEqual(bucket.qac_var_avg, -50, "qac_var aggregated");
+    assert.strictEqual(bucket.tempint_c_avg, 38, "tempint_c aggregated");
+    assert.strictEqual(bucket.zpos_kohm_last, 52, "zpos_kohm captured");
+    assert.strictEqual(bucket.alarms_inst_32_max, 0x0001, "alarms captured");
+    assert.strictEqual(bucket.analog_in_1_avg, 1234, "analog captured");
+  }
+
+  console.log("dailyAggregatorCore.test.js — all 25 scenarios passed.");
 }
 
 run();

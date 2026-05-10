@@ -728,6 +728,31 @@ function parseRow(row, identity = null) {
     // averages it into the 5-min row's `temp_c` column. Already adjusted
     // by -1 °C in services/inverter_engine.py for ISM-display parity.
     temp_c,
+    // v2.10.x Slice β — slow-poll diagnostic fields (additive).
+    // Merged into fast-poll frame by slow_poll_inverter() every 30s.
+    // Unsigned fields default to 0; signed fields (qac_var, tempint_c) default to null
+    // and become null if value is 0 (offline marker per Python decode rules).
+    alarms_inst_32:       Number.isFinite(Number(row.alarms_inst_32)) ? Number(row.alarms_inst_32) : 0,
+    alarms_maint_32:      Number.isFinite(Number(row.alarms_maint_32)) ? Number(row.alarms_maint_32) : 0,
+    qac_var:              (() => { const v = Number.isFinite(Number(row.qac_var)) ? Number(row.qac_var) : null; return v === 0 ? null : v; })(),
+    zpos_kohm:            Number.isFinite(Number(row.zpos_kohm)) ? Number(row.zpos_kohm) : 0,
+    zneg_kohm:            Number.isFinite(Number(row.zneg_kohm)) ? Number(row.zneg_kohm) : 0,
+    tempint_c:            (() => { const v = Number.isFinite(Number(row.tempint_c)) ? Number(row.tempint_c) : null; return v === 0 ? null : v; })(),
+    inverter_state_raw:   Number.isFinite(Number(row.inverter_state_raw)) ? Number(row.inverter_state_raw) : 0,
+    vpv_n_v:              Number.isFinite(Number(row.vpv_n_v)) ? Number(row.vpv_n_v) : 0,
+    vpv_p_v:              Number.isFinite(Number(row.vpv_p_v)) ? Number(row.vpv_p_v) : 0,
+    nominal_power_w:      Number.isFinite(Number(row.nominal_power_w)) ? Number(row.nominal_power_w) : 0,
+    time_to_connect_s:    Number.isFinite(Number(row.time_to_connect_s)) ? Number(row.time_to_connect_s) : 0,
+    time_to_connect_total_s: Number.isFinite(Number(row.time_to_connect_total_s)) ? Number(row.time_to_connect_total_s) : 0,
+    power_reduction_bits: Number.isFinite(Number(row.power_reduction_bits)) ? Number(row.power_reduction_bits) : 0,
+    // v2.10.x Slice β — AAP0016 analog inputs (additive).
+    // Also fast-poll widened to capture these; available every 1-2s, not just slow-poll.
+    analog_in_1:          Number.isFinite(Number(row.analog_in_1)) ? Number(row.analog_in_1) : 0,
+    analog_in_2:          Number.isFinite(Number(row.analog_in_2)) ? Number(row.analog_in_2) : 0,
+    analog_in_3:          Number.isFinite(Number(row.analog_in_3)) ? Number(row.analog_in_3) : 0,
+    analog_in_4:          Number.isFinite(Number(row.analog_in_4)) ? Number(row.analog_in_4) : 0,
+    pt100_1:              Number.isFinite(Number(row.pt100_1)) ? Number(row.pt100_1) : 0,
+    pt100_2:              Number.isFinite(Number(row.pt100_2)) ? Number(row.pt100_2) : 0,
   };
 }
 

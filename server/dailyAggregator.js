@@ -186,10 +186,24 @@ const _RANGES = {
   fac:    [40, 65],           // 50 Hz / 60 Hz grids; outside this is a sensor fault
   tempC:  [-40, 150],         // industrial inverter envelope
   parce:  [0, 1_000_000_000], // lifetime monotonic counter — same ceiling as eod_clean sanity gate
+  // v2.10.x Slice β — slow-poll diagnostic fields (additive)
+  qacVar: [-500_000, 500_000], // reactive power in VAR (may be negative)
+  tempInt: [-40, 150],         // control electronics temperature, same envelope as temp_c
+  zpos:   [0, 1_000_000],      // impedance POS-EARTH in kΩ
+  zneg:   [0, 1_000_000],      // impedance NEG-EARTH in kΩ
+  vpv:    [0, 2000],           // solar field voltage (PV side)
+  nominalPower: [0, 50_000_000], // nominal power in watts
+  timeConnect: [0, 3600],      // time-to-connect in seconds (max 1 hour)
+  alarmsBits: [0, 0xFFFFFFFF], // 32-bit alarm bitmaps
+  analogIn: [0, 4095],         // 12-bit ADC input (0-4095)
+  pt100:    [0, 65535],        // PT100 raw ADC value
 };
 
 function _vRange(row, key, range) {
-  const x = Number(row?.[key]);
+  const val = row?.[key];
+  // Preserve explicit null from parseRow (offline marker for signed fields)
+  if (val === null || val === undefined) return null;
+  const x = Number(val);
   if (!Number.isFinite(x)) return null;
   if (x < range[0] || x > range[1]) {
     stats.field_clamp_count += 1;
@@ -224,6 +238,29 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
     sumCos: 0, nCos: 0,
     sumFreq: 0, nFreq: 0,
     sumTemp: 0, nTemp: 0,
+
+    // v2.10.x Slice β — slow-poll accumulators (additive)
+    sumQacVar: 0, nQacVar: 0,
+    minTempInt: null, maxTempInt: null, sumTempInt: 0, nTempInt: 0,
+    minZpos: null, maxZpos: null,
+    minZneg: null, maxZneg: null,
+    zposLast: null,
+    znegLast: null,
+    minVpvN: null, maxVpvN: null, sumVpvN: 0, nVpvN: 0,
+    minVpvP: null, maxVpvP: null, sumVpvP: 0, nVpvP: 0,
+    nominalPowerLast: null,
+    minTimeConnect: null, maxTimeConnect: null, sumTimeConnect: 0, nTimeConnect: 0,
+    minTimeConnectTotal: null, maxTimeConnectTotal: null, sumTimeConnectTotal: 0, nTimeConnectTotal: 0,
+    alarmsInst32Max: 0,   // bitwise-OR
+    alarmsMaint32Max: 0,  // bitwise-OR
+    powerReductionBitsLast: null,
+    sumAnalogIn1: 0, nAnalogIn1: 0,
+    sumAnalogIn2: 0, nAnalogIn2: 0,
+    sumAnalogIn3: 0, nAnalogIn3: 0,
+    sumAnalogIn4: 0, nAnalogIn4: 0,
+    pt100_1Last: null,
+    pt100_2Last: null,
+    inverterStateRawLast: null,
 
     // Bitmaps: max-merge over the bucket
     invAlarms: 0,
@@ -291,6 +328,84 @@ function _accum(b, row) {
     b.invAlarms = (Number(b.invAlarms) | alarm32) >>> 0;
   }
 
+  // v2.10.x Slice β — slow-poll field accumulation (additive)
+  const qacVar = _vRange(row, "qac_var", _RANGES.qacVar);
+  const tempInt = _vRange(row, "tempint_c", _RANGES.tempInt);
+  const zpos = _vRange(row, "zpos_kohm", _RANGES.zpos);
+  const zneg = _vRange(row, "zneg_kohm", _RANGES.zneg);
+  const vpvN = _vRange(row, "vpv_n_v", _RANGES.vpv);
+  const vpvP = _vRange(row, "vpv_p_v", _RANGES.vpv);
+  const nominalPower = _vRange(row, "nominal_power_w", _RANGES.nominalPower);
+  const timeConnect = _vRange(row, "time_to_connect_s", _RANGES.timeConnect);
+  const timeConnectTotal = _vRange(row, "time_to_connect_total_s", _RANGES.timeConnect);
+  const alarmsInst32 = _vRange(row, "alarms_inst_32", _RANGES.alarmsBits);
+  const alarmsMaint32 = _vRange(row, "alarms_maint_32", _RANGES.alarmsBits);
+  const powerReductionBits = _vRange(row, "power_reduction_bits", _RANGES.alarmsBits);
+  const analogIn1 = _vRange(row, "analog_in_1", _RANGES.analogIn);
+  const analogIn2 = _vRange(row, "analog_in_2", _RANGES.analogIn);
+  const analogIn3 = _vRange(row, "analog_in_3", _RANGES.analogIn);
+  const analogIn4 = _vRange(row, "analog_in_4", _RANGES.analogIn);
+  const pt100_1 = _vRange(row, "pt100_1", _RANGES.pt100);
+  const pt100_2 = _vRange(row, "pt100_2", _RANGES.pt100);
+  const inverterStateRaw = _vRange(row, "inverter_state_raw", _RANGES.alarmsBits);
+
+  // Accumulate slow-poll fields
+  if (qacVar != null) { b.sumQacVar += qacVar; b.nQacVar++; touched++; }
+  if (tempInt != null) {
+    if (b.minTempInt == null || tempInt < b.minTempInt) b.minTempInt = tempInt;
+    if (b.maxTempInt == null || tempInt > b.maxTempInt) b.maxTempInt = tempInt;
+    b.sumTempInt += tempInt; b.nTempInt++; touched++;
+  }
+  if (zpos != null) {
+    if (b.minZpos == null || zpos < b.minZpos) b.minZpos = zpos;
+    if (b.maxZpos == null || zpos > b.maxZpos) b.maxZpos = zpos;
+    b.zposLast = zpos; touched++;
+  }
+  if (zneg != null) {
+    if (b.minZneg == null || zneg < b.minZneg) b.minZneg = zneg;
+    if (b.maxZneg == null || zneg > b.maxZneg) b.maxZneg = zneg;
+    b.znegLast = zneg; touched++;
+  }
+  if (vpvN != null) {
+    if (b.minVpvN == null || vpvN < b.minVpvN) b.minVpvN = vpvN;
+    if (b.maxVpvN == null || vpvN > b.maxVpvN) b.maxVpvN = vpvN;
+    b.sumVpvN += vpvN; b.nVpvN++; touched++;
+  }
+  if (vpvP != null) {
+    if (b.minVpvP == null || vpvP < b.minVpvP) b.minVpvP = vpvP;
+    if (b.maxVpvP == null || vpvP > b.maxVpvP) b.maxVpvP = vpvP;
+    b.sumVpvP += vpvP; b.nVpvP++; touched++;
+  }
+  if (nominalPower != null) {
+    b.nominalPowerLast = nominalPower; touched++;
+  }
+  if (timeConnect != null) {
+    if (b.minTimeConnect == null || timeConnect < b.minTimeConnect) b.minTimeConnect = timeConnect;
+    if (b.maxTimeConnect == null || timeConnect > b.maxTimeConnect) b.maxTimeConnect = timeConnect;
+    b.sumTimeConnect += timeConnect; b.nTimeConnect++; touched++;
+  }
+  if (timeConnectTotal != null) {
+    if (b.minTimeConnectTotal == null || timeConnectTotal < b.minTimeConnectTotal) b.minTimeConnectTotal = timeConnectTotal;
+    if (b.maxTimeConnectTotal == null || timeConnectTotal > b.maxTimeConnectTotal) b.maxTimeConnectTotal = timeConnectTotal;
+    b.sumTimeConnectTotal += timeConnectTotal; b.nTimeConnectTotal++; touched++;
+  }
+  if (alarmsInst32 != null) {
+    b.alarmsInst32Max = (Number(b.alarmsInst32Max) | alarmsInst32) >>> 0;
+  }
+  if (alarmsMaint32 != null) {
+    b.alarmsMaint32Max = (Number(b.alarmsMaint32Max) | alarmsMaint32) >>> 0;
+  }
+  if (powerReductionBits != null) {
+    b.powerReductionBitsLast = powerReductionBits; touched++;
+  }
+  if (analogIn1 != null) { b.sumAnalogIn1 += analogIn1; b.nAnalogIn1++; touched++; }
+  if (analogIn2 != null) { b.sumAnalogIn2 += analogIn2; b.nAnalogIn2++; touched++; }
+  if (analogIn3 != null) { b.sumAnalogIn3 += analogIn3; b.nAnalogIn3++; touched++; }
+  if (analogIn4 != null) { b.sumAnalogIn4 += analogIn4; b.nAnalogIn4++; touched++; }
+  if (pt100_1 != null) { b.pt100_1Last = pt100_1; touched++; }
+  if (pt100_2 != null) { b.pt100_2Last = pt100_2; touched++; }
+  if (inverterStateRaw != null) { b.inverterStateRawLast = inverterStateRaw; touched++; }
+
   // sample_count now counts only polls that contributed at least one valid
   // field, so a fully-corrupt frame doesn't inflate the persisted "samples"
   // counter.
@@ -355,6 +470,40 @@ function _flush(b) {
     is_complete: 1,
     in_solar_window: inSolar,
     parce_kwh: b.parceLast != null ? Number(b.parceLast) : null,
+    // v2.10.x Slice β — slow-poll fields (additive)
+    qac_var_avg:         b.nQacVar ? _avg(b.sumQacVar, b.nQacVar, 1) : null,
+    tempint_c_min:       b.minTempInt,
+    tempint_c_max:       b.maxTempInt,
+    tempint_c_avg:       b.nTempInt ? _avg(b.sumTempInt, b.nTempInt, 2) : null,
+    zpos_kohm_min:       b.minZpos,
+    zpos_kohm_max:       b.maxZpos,
+    zpos_kohm_last:      b.zposLast,
+    zneg_kohm_min:       b.minZneg,
+    zneg_kohm_max:       b.maxZneg,
+    zneg_kohm_last:      b.znegLast,
+    vpv_n_v_min:         b.minVpvN,
+    vpv_n_v_max:         b.maxVpvN,
+    vpv_n_v_avg:         b.nVpvN ? _avg(b.sumVpvN, b.nVpvN, 1) : null,
+    vpv_p_v_min:         b.minVpvP,
+    vpv_p_v_max:         b.maxVpvP,
+    vpv_p_v_avg:         b.nVpvP ? _avg(b.sumVpvP, b.nVpvP, 1) : null,
+    nominal_power_w_last: b.nominalPowerLast,
+    time_to_connect_s_min: b.minTimeConnect,
+    time_to_connect_s_max: b.maxTimeConnect,
+    time_to_connect_s_avg: b.nTimeConnect ? _avg(b.sumTimeConnect, b.nTimeConnect, 0) : null,
+    time_to_connect_total_s_min: b.minTimeConnectTotal,
+    time_to_connect_total_s_max: b.maxTimeConnectTotal,
+    time_to_connect_total_s_avg: b.nTimeConnectTotal ? _avg(b.sumTimeConnectTotal, b.nTimeConnectTotal, 0) : null,
+    alarms_inst_32_max:  Number(b.alarmsInst32Max) >>> 0,
+    alarms_maint_32_max: Number(b.alarmsMaint32Max) >>> 0,
+    power_reduction_bits_last: b.powerReductionBitsLast,
+    analog_in_1_avg:     b.nAnalogIn1 ? _avg(b.sumAnalogIn1, b.nAnalogIn1, 0) : null,
+    analog_in_2_avg:     b.nAnalogIn2 ? _avg(b.sumAnalogIn2, b.nAnalogIn2, 0) : null,
+    analog_in_3_avg:     b.nAnalogIn3 ? _avg(b.sumAnalogIn3, b.nAnalogIn3, 0) : null,
+    analog_in_4_avg:     b.nAnalogIn4 ? _avg(b.sumAnalogIn4, b.nAnalogIn4, 0) : null,
+    pt100_1_last:        b.pt100_1Last,
+    pt100_2_last:        b.pt100_2Last,
+    inverter_state_raw_last: b.inverterStateRawLast,
   };
   try {
     _db.prepare(`
@@ -366,6 +515,16 @@ function _flush(b) {
         temp_c, pac_w, cosphi, freq_hz,
         inv_alarms, track_alarms,
         parce_kwh,
+        qac_var_avg, tempint_c_min, tempint_c_max, tempint_c_avg,
+        zpos_kohm_min, zpos_kohm_max, zpos_kohm_last,
+        zneg_kohm_min, zneg_kohm_max, zneg_kohm_last,
+        vpv_n_v_min, vpv_n_v_max, vpv_n_v_avg,
+        vpv_p_v_min, vpv_p_v_max, vpv_p_v_avg,
+        nominal_power_w_last, time_to_connect_s_min, time_to_connect_s_max, time_to_connect_s_avg,
+        time_to_connect_total_s_min, time_to_connect_total_s_max, time_to_connect_total_s_avg,
+        alarms_inst_32_max, alarms_maint_32_max, power_reduction_bits_last,
+        analog_in_1_avg, analog_in_2_avg, analog_in_3_avg, analog_in_4_avg,
+        pt100_1_last, pt100_2_last, inverter_state_raw_last,
         sample_count, is_complete, in_solar_window,
         updated_ts
       ) VALUES (
@@ -376,6 +535,16 @@ function _flush(b) {
         @temp_c, @pac_w, @cosphi, @freq_hz,
         @inv_alarms, @track_alarms,
         @parce_kwh,
+        @qac_var_avg, @tempint_c_min, @tempint_c_max, @tempint_c_avg,
+        @zpos_kohm_min, @zpos_kohm_max, @zpos_kohm_last,
+        @zneg_kohm_min, @zneg_kohm_max, @zneg_kohm_last,
+        @vpv_n_v_min, @vpv_n_v_max, @vpv_n_v_avg,
+        @vpv_p_v_min, @vpv_p_v_max, @vpv_p_v_avg,
+        @nominal_power_w_last, @time_to_connect_s_min, @time_to_connect_s_max, @time_to_connect_s_avg,
+        @time_to_connect_total_s_min, @time_to_connect_total_s_max, @time_to_connect_total_s_avg,
+        @alarms_inst_32_max, @alarms_maint_32_max, @power_reduction_bits_last,
+        @analog_in_1_avg, @analog_in_2_avg, @analog_in_3_avg, @analog_in_4_avg,
+        @pt100_1_last, @pt100_2_last, @inverter_state_raw_last,
         @sample_count, @is_complete, @in_solar_window,
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
       )
@@ -530,6 +699,40 @@ function getCurrentBucket(ip, slave) {
     inv_alarms: Number(b.invAlarms) >>> 0,
     track_alarms: Number(b.trackAlarms) >>> 0,
     parce_kwh: b.parceLast != null ? Number(b.parceLast) : null,
+    // v2.10.x Slice β — slow-poll fields (additive)
+    qac_var_avg:         b.nQacVar ? _avg(b.sumQacVar, b.nQacVar, 1) : null,
+    tempint_c_min:       b.minTempInt,
+    tempint_c_max:       b.maxTempInt,
+    tempint_c_avg:       b.nTempInt ? _avg(b.sumTempInt, b.nTempInt, 2) : null,
+    zpos_kohm_min:       b.minZpos,
+    zpos_kohm_max:       b.maxZpos,
+    zpos_kohm_last:      b.zposLast,
+    zneg_kohm_min:       b.minZneg,
+    zneg_kohm_max:       b.maxZneg,
+    zneg_kohm_last:      b.znegLast,
+    vpv_n_v_min:         b.minVpvN,
+    vpv_n_v_max:         b.maxVpvN,
+    vpv_n_v_avg:         b.nVpvN ? _avg(b.sumVpvN, b.nVpvN, 1) : null,
+    vpv_p_v_min:         b.minVpvP,
+    vpv_p_v_max:         b.maxVpvP,
+    vpv_p_v_avg:         b.nVpvP ? _avg(b.sumVpvP, b.nVpvP, 1) : null,
+    nominal_power_w_last: b.nominalPowerLast,
+    time_to_connect_s_min: b.minTimeConnect,
+    time_to_connect_s_max: b.maxTimeConnect,
+    time_to_connect_s_avg: b.nTimeConnect ? _avg(b.sumTimeConnect, b.nTimeConnect, 0) : null,
+    time_to_connect_total_s_min: b.minTimeConnectTotal,
+    time_to_connect_total_s_max: b.maxTimeConnectTotal,
+    time_to_connect_total_s_avg: b.nTimeConnectTotal ? _avg(b.sumTimeConnectTotal, b.nTimeConnectTotal, 0) : null,
+    alarms_inst_32_max:  Number(b.alarmsInst32Max) >>> 0,
+    alarms_maint_32_max: Number(b.alarmsMaint32Max) >>> 0,
+    power_reduction_bits_last: b.powerReductionBitsLast,
+    analog_in_1_avg:     b.nAnalogIn1 ? _avg(b.sumAnalogIn1, b.nAnalogIn1, 0) : null,
+    analog_in_2_avg:     b.nAnalogIn2 ? _avg(b.sumAnalogIn2, b.nAnalogIn2, 0) : null,
+    analog_in_3_avg:     b.nAnalogIn3 ? _avg(b.sumAnalogIn3, b.nAnalogIn3, 0) : null,
+    analog_in_4_avg:     b.nAnalogIn4 ? _avg(b.sumAnalogIn4, b.nAnalogIn4, 0) : null,
+    pt100_1_last:        b.pt100_1Last,
+    pt100_2_last:        b.pt100_2Last,
+    inverter_state_raw_last: b.inverterStateRawLast,
     sample_count: b.sampleCount,
     is_complete: 0,
     in_solar_window: _isSolarWindow(b.slotIndex) ? 1 : 0,

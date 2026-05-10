@@ -39,6 +39,18 @@ from .shared_data import shared
 ENGINE_PORT = int(os.getenv("INVERTER_ENGINE_PORT", "9100"))
 ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
 
+# Slice β — slow-poll cadence for diagnostic registers (addr 64-116).
+# Runtime tunable via ADSI_SLOW_POLL_INTERVAL_S env var; operator restart
+# required to apply changes. Range: 5-300 seconds (clamped). Set to 0 to
+# disable the slow-poll tier entirely.
+# Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice β
+try:
+    SLOW_POLL_INTERVAL_S = int(os.getenv("ADSI_SLOW_POLL_INTERVAL_S", "30"))
+except (TypeError, ValueError):
+    SLOW_POLL_INTERVAL_S = 30
+if SLOW_POLL_INTERVAL_S != 0:
+    SLOW_POLL_INTERVAL_S = max(5, min(300, SLOW_POLL_INTERVAL_S))
+
 
 # -------------------------------------------------
 #   FastAPI app  —  created ONCE with CORS middleware
@@ -1043,7 +1055,7 @@ def _rtc_from_regs(regs, server_year=None):
 
 async def read_fast_async(client, unit, ip):
     """
-    Read 72 input registers + ON/OFF holding register.
+    Read 78 input registers + ON/OFF holding register.
     Returns a dict keyed to the field names expected by Node-RED,
     plus the v2.9.0 hardware-counter / RTC / full-alarm fields,
     or None on failure.
@@ -1055,13 +1067,16 @@ async def read_fast_async(client, unit, ip):
       • parcE partial kWh (reg 58-59, UInt32 hi-lo)
     Widened from 60→72 regs in v2.10.x to capture:
       • temp_c heatsink temperature (reg 71, raw °C minus 1 for ISM parity)
-    All legacy keys preserved; new keys are additive.
+    Widened from 72→78 regs in v2.10.x (Slice β) to capture:
+      • AAP0016 analog inputs (reg 41-44): 12-bit ADC, 0-4095
+      • AAP0016 PT100 probes (reg 45-46): temperature via ADC
+    All legacy keys preserved; new keys are additive (null if AAP0016 not installed).
     """
     if is_write_pending(ip):
         await asyncio.sleep(min(READ_SPACING, 0.01))
         return None
 
-    regs = await safe_read(_threaded_read_input, client, 0, 72, unit, ip)
+    regs = await safe_read(_threaded_read_input, client, 0, 78, unit, ip)
     if not regs:
         return None
 
@@ -1197,7 +1212,215 @@ async def read_fast_async(client, unit, ip):
         # offset (-1) applied during decode; see the temp_raw block. None
         # while the inverter is offline / sleeping (raw 0 sentinel).
         "temp_c":        temp_c_val,
+        # ─── NEW fields (v2.10.x Slice β — AAP0016 analog inputs) ───
+        "analog_in_1":   int(reg(41) or 0),        # 12-bit ADC input 1 (0–4095)
+        "analog_in_2":   int(reg(42) or 0),        # 12-bit ADC input 2
+        "analog_in_3":   int(reg(43) or 0),        # 12-bit ADC input 3
+        "analog_in_4":   int(reg(44) or 0),        # 12-bit ADC input 4
+        "pt100_1":       int(reg(45) or 0),        # PT100 probe 1 (raw ADC)
+        "pt100_2":       int(reg(46) or 0),        # PT100 probe 2 (raw ADC)
     }
+
+
+async def read_slow_async(client, unit, ip):
+    """
+    Read 53 diagnostic input registers (addr 64–116).
+    Runs on a slow cadence (default 30 s per SLOW_POLL_INTERVAL_S setting).
+
+    Returns a dict keyed to slow-field names, or None on failure.
+    Safe defaults (0 or None) for missing regs preserve backward-compat if
+    the device doesn't support the full range.
+
+    Wire format: read_input_registers(address=64, count=53, unit=unit)
+      Modbus addresses 30065–30117 (PDF §2 p6–9)
+
+    Field decode (per PDF + plan §2 register map):
+      addr 64-65  30065-30066  Instantaneous alarms        UInt32 hi-lo
+      addr 66-67  30067-30068  Maintained alarms            UInt32 hi-lo
+      addr 68     30069        QAC reactive power (signed)  Int16, ÷10 → W
+      addr 69     30070        Zpos (impedance POS-EARTH)   UInt16 kΩ
+      addr 70     30071        Zneg (impedance NEG-EARTH)   UInt16 kΩ
+      addr 71     30072        (reserved)
+      addr 72     30073        TempINT control electronics  Int16 signed, °C
+      addr 73     30074        Estado inverter state        UInt16 bitfield
+      addr 74-75  30075-30076  VpvN / VpvP solar voltages   UInt16 each, V
+      addr 76     30077        Nominal power ÷10            UInt16 tens of W
+      addr 77-107 30078-30108  (skip: standard stop-reason history, Slice ε)
+      addr 108    30109        Time-to-connect remaining    UInt16 seconds
+      addr 109    30110        Time-to-connect total        UInt16 seconds
+      addr 110-115 30111-30115 (skip: MS mirrors, dynamic on this site)
+      addr 116    30117        Power-reduction status bits   UInt16 bitfield
+
+    Notes:
+      - TempINT (addr 72) threshold 80 °C; newly captured, not yet surfaced in UI
+      - Estado (addr 73) decoded by Slice γ; Slice β just captures raw bitfield
+      - Nominal power (addr 76) cross-checks operator-configured ratedKw
+      - Power-reduction bits (addr 116) bit 0 = limited, bit 1 = Modbus reduction (critical for Slice δ)
+    """
+    if is_write_pending(ip):
+        await asyncio.sleep(min(READ_SPACING, 0.01))
+        return None
+
+    regs = await safe_read(_threaded_read_input, client, 64, 53, unit, ip)
+    if not regs:
+        return None
+
+    def reg(i):
+        return regs[i] if len(regs) > i else 0
+
+    # Instantaneous alarms (regs 0-1 in the read, offset 64 in the device)
+    try:
+        alarms_inst_32 = _u32_hi_lo(regs, 0)   # regs[0:2] → addr 64-65
+    except ValueError:
+        alarms_inst_32 = 0
+
+    # Maintained alarms (regs 2-3 in the read, offset 66 in the device)
+    try:
+        alarms_maint_32 = _u32_hi_lo(regs, 2)  # regs[2:4] → addr 66-67
+    except ValueError:
+        alarms_maint_32 = 0
+
+    # QAC reactive power (addr 68, reg index 4 in this read) — Int16 signed
+    # Per PDF: signed, units ÷10 → reactive W
+    qac_raw = int(reg(4) or 0)
+    if qac_raw & 0x8000:
+        qac_raw -= 0x10000
+    qac_var = qac_raw / 10.0 if qac_raw != 0 else None  # None = offline/silent
+
+    # Impedances
+    zpos_kohm = int(reg(5) or 0)   # addr 69, unsigned
+    zneg_kohm = int(reg(6) or 0)   # addr 70, unsigned
+
+    # Control electronics temperature (addr 72, reg index 8 in this read) — Int16 signed
+    tempint_raw = int(reg(8) or 0)
+    if tempint_raw & 0x8000:
+        tempint_raw -= 0x10000
+    # Threshold: 80 °C per PDF. Unlike TempCI, no -1 offset or -14 sentinel documented.
+    # Store as-is; UI can apply thresholds.
+    tempint_c = tempint_raw if tempint_raw != 0 else None
+
+    # Estado inverter state (addr 73, reg index 9) — UInt16 bitfield, decoded by Slice γ
+    inverter_state_raw = int(reg(9) or 0)
+
+    # Solar field voltages (addr 74-75, reg indices 10-11)
+    vpv_n_v = int(reg(10) or 0)   # Negative-earth
+    vpv_p_v = int(reg(11) or 0)   # Positive-earth
+
+    # Nominal power ÷10 (addr 76, reg index 12) — UInt16, units = tens of W
+    nominal_power_w = int((reg(12) or 0) * 10)  # Convert tens to watts
+
+    # Time-to-connect counters (addr 108-109, reg indices 44-45)
+    time_to_connect_s = int(reg(44) or 0)        # Remaining
+    time_to_connect_total_s = int(reg(45) or 0)  # Configured total
+
+    # Power-reduction status bits (addr 116, reg index 52 in this read)
+    power_reduction_bits = int(reg(52) or 0)
+
+    return {
+        "ts":                   int(time.time() * 1000),
+        # ─── Alarm windows ───
+        "alarms_inst_32":       alarms_inst_32,     # 1-second reset window
+        "alarms_maint_32":      alarms_maint_32,    # Reset on grid reconnect
+        # ─── Reactive / diagnostics ───
+        "qac_var":              qac_var,            # Reactive W (None if offline)
+        "zpos_kohm":            zpos_kohm,          # Impedance POS-EARTH
+        "zneg_kohm":            zneg_kohm,          # Impedance NEG-EARTH
+        "tempint_c":            tempint_c,          # Control electronics °C (threshold 80)
+        # ─── State / capability ───
+        "inverter_state_raw":   inverter_state_raw, # Decoded by Slice γ
+        "vpv_n_v":              vpv_n_v,            # Solar field voltage NEG-EARTH
+        "vpv_p_v":              vpv_p_v,            # Solar field voltage POS-EARTH
+        "nominal_power_w":      nominal_power_w,    # Rated power as reported by device
+        # ─── Connection / control ───
+        "time_to_connect_s":           time_to_connect_s,
+        "time_to_connect_total_s":     time_to_connect_total_s,
+        "power_reduction_bits":        power_reduction_bits,  # Bit 1 = Modbus reduction active (Slice δ)
+        "unit":                 unit,  # Pass along for frame merge
+    }
+
+
+# -------------------------------------------------
+#   Slow-poll loop (one coroutine per inverter)
+# -------------------------------------------------
+
+async def slow_poll_inverter(ip):
+    """
+    Slow-poll diagnostic registers (addr 64–116) every SLOW_POLL_INTERVAL_S (default 30 s).
+    Merges slow data into shared[ip] by attaching slow fields to the most recent frame.
+
+    Slice β (v2.10.x) — runs in parallel with fast-poll, independent timing.
+
+    Operation:
+      1. Wait for a live client (same as poll_inverter)
+      2. Discover units via detect_units_async
+      3. For each unit, call read_slow_async()
+      4. Attach slow fields to the most recent frame in shared[ip] matching the unit
+      5. Sleep for SLOW_POLL_INTERVAL_S and repeat
+
+    Settings:
+      - SLOW_POLL_INTERVAL_S: read once at module load from `ADSI_SLOW_POLL_INTERVAL_S`
+        environment variable. Default 30, clamped to [5, 300] (or 0 to disable the
+        slow-poll tier entirely). Operator restart required to apply changes.
+        Runtime tuning via the settings API is NOT yet wired — deferred to a
+        follow-up if operator demand emerges.
+    """
+    print(f"[SLOW-POLL] Started {ip} every {SLOW_POLL_INTERVAL_S}s")
+
+    while True:
+        # Cadence read from module-level SLOW_POLL_INTERVAL_S (env-tunable
+        # via ADSI_SLOW_POLL_INTERVAL_S; clamped 5-300 s at startup, 0 = disabled).
+        slow_interval = SLOW_POLL_INTERVAL_S
+
+        # Disable slow-poll entirely if interval is 0 (operator opt-out).
+        if slow_interval <= 0:
+            await asyncio.sleep(60)
+            continue
+
+        # ── Wait for a live client ──
+        client = clients.get(ip)
+        if not client:
+            await asyncio.sleep(0.5)
+            continue
+
+        # ── Discover units ──
+        units = await detect_units_async(ip)
+
+        if not units:
+            await asyncio.sleep(1)
+            continue
+
+        # ── Slow-poll cycle ──
+        try:
+            inv_num = inverter_number_from_ip(ip)
+
+            for u in units:
+                # Respect write-pending gate
+                if is_write_pending(ip):
+                    await asyncio.sleep(min(slow_interval, 0.05))
+                    break
+
+                # Read slow registers
+                slow_data = await read_slow_async(client, u, ip)
+                if not slow_data:
+                    continue
+
+                # Merge into shared[ip]: find the most recent frame matching this unit
+                if ip in shared:
+                    for frame in reversed(shared[ip]):
+                        if frame.get("unit") == u:
+                            # Attach all slow fields to this frame
+                            frame.update(slow_data)
+                            break
+
+            await asyncio.sleep(slow_interval)
+
+        except asyncio.CancelledError:
+            # Cooperative cancel from supervisor
+            raise
+        except Exception as e:
+            # Log and continue; do not let a single bad slow-poll cycle freeze
+            print(f"[SLOW-POLL] {ip} cycle error (continuing): {type(e).__name__}: {e}")
+            await asyncio.sleep(min(slow_interval, 1.0))
 
 
 # -------------------------------------------------
@@ -2057,6 +2280,7 @@ async def start_polling_manager():
         await asyncio.sleep(0.2)
 
     tasks = {ip: asyncio.create_task(poll_inverter(ip)) for ip in inverters}
+    slow_tasks = {ip: asyncio.create_task(slow_poll_inverter(ip)) for ip in inverters}
 
     async def _supervisor():
         while True:
@@ -2064,11 +2288,16 @@ async def start_polling_manager():
             for ip in inverters:
                 if ip not in tasks or tasks[ip].done():
                     tasks[ip] = asyncio.create_task(poll_inverter(ip))
+                if ip not in slow_tasks or slow_tasks[ip].done():
+                    slow_tasks[ip] = asyncio.create_task(slow_poll_inverter(ip))
 
             # Cancel tasks for removed inverters
             for ip in list(tasks):
                 if ip not in inverters:
                     tasks.pop(ip).cancel()
+            for ip in list(slow_tasks):
+                if ip not in inverters:
+                    slow_tasks.pop(ip).cancel()
 
             await asyncio.sleep(1)
 
@@ -2933,23 +3162,6 @@ async def api_serial_write(inverter: int, slave: int, request: Request):
         **result,
     }
 
-
-from fastapi import WebSocket, WebSocketDisconnect
-
-@app.websocket("/ws")
-async def websocket_metrics(ws: WebSocket):
-    await ws.accept()
-    print("[WS] Client connected")
-
-    try:
-        while True:
-            data = _build_metrics()   # use your existing metrics builder
-            await ws.send_text(json.dumps(data))
-            await asyncio.sleep(0.5)  # 500ms push
-    except WebSocketDisconnect:
-        print("[WS] Client disconnected")
-    except Exception as e:
-        print("[WS] Error:", e)
 
 # -------------------------------------------------
 #   Entry point
