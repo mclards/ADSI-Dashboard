@@ -102,7 +102,7 @@ function defaultParams(overrides = {}) {
   return {
     pf_steps,
     hold_sec:        Math.max(20, Math.min(900,  Number(overrides.hold_sec)        || 60)),
-    sample_period_s: Math.max(1,  Math.min(10,   Number(overrides.sample_period_s) || 2)),
+    sample_period_s: Math.max(1,  Math.min(60,   Number(overrides.sample_period_s) || 2)),
     settle_sec:      Math.max(5,  Math.min(120,  Number(overrides.settle_sec)      || 15)),
     tolerance_pct:   Math.max(1,  Math.min(20,   Number(overrides.tolerance_pct)   || 5)),
   };
@@ -292,8 +292,13 @@ async function runQvSweep(orchRun, fns) {
 
   const passes = stepResults.filter(r => r.pass === true).length;
   const fails  = stepResults.filter(r => r.pass === false).length;
+  // Restoration failure is a SAFETY issue (plant left mid-sweep PF); do not
+  // present it as a clean "completed" run even if every measured step passed.
+  // The status the operator sees in the UI must surface the unsafe end-state.
+  const stepsClean = fails === 0 && passes > 0;
   const status = orchRun.abortRequested ? "aborted"
-               : (fails === 0 && passes > 0 ? "completed" : "failed");
+               : (!restoreOk ? "completed_with_warnings"
+               : (stepsClean ? "completed" : "failed"));
   console.log(
     `[compliance][T3] run_id=${orchRun.run_id || "?"} ${status.toUpperCase()} — ` +
     `${passes} pass / ${fails} fail / ${stepResults.length - passes - fails} skip; restoration=${restoreOk ? "ok" : "PARTIAL"}`,

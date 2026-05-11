@@ -6,6 +6,9 @@ dist/
 release/
 build/*/
 !build/*.nsh
+
+# Vendor doc archives (too large for GitHub; kept locally)
+docs/*.zip
 __pycache__/
 *.pyc
 *.pyo

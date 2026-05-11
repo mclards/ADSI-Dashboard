@@ -145,4 +145,38 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
     assert.strictEqual(r.ok, false);
     assert.strictEqual(run.status, "failed");
   });
+
+  await test("runApcSweep — restoration failure flips status to completed_with_warnings", async () => {
+    // v2.11.x — restore-to-100% writes after the sweep used to be
+    // console-logged only; status was still "completed" even when the
+    // plant was left curtailed. Operator saw a green banner while
+    // production was capped at the last setpoint. Lock the new behavior:
+    // every measured step passes BUT the post-sweep restore write fails,
+    // so status MUST be "completed_with_warnings".
+    const reg = new OrchestratorRegistry();
+    const run = reg.start({
+      test_kind: "t5_apc_sweep",
+      target_inverters: [{ inverter: 1, ip: "1.1.1.1", slave: 1 }],
+      params: { ramp_pct: [100, 50, 100], hold_sec: 30, settle_sec: 5, sample_period_s: 1, tolerance_pct: 5 },
+    });
+    let lastSetpoint = 0;
+    let writeCount = 0;
+    const fns = {
+      sendSetpointPct: async (ip, slave, pct) => {
+        writeCount++;
+        // Fail ONLY the post-sweep restore write (the 4th call: [100, 50, 100, restore-100])
+        if (writeCount === 4) return false;
+        lastSetpoint = pct;
+        return true;
+      },
+      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: (lastSetpoint / 100) * 244.25 * 1000 }),
+      sleepMs: () => Promise.resolve(),
+      nowFn: (() => { let t = 1_000_000; return () => t++; })(),
+    };
+    const r = await runApcSweep(run, 244.25, fns);
+    assert.strictEqual(r.ok, true, "sweep itself should still report ok");
+    assert.strictEqual(r.status, "completed_with_warnings",
+      "status must surface restoration failure; got " + r.status);
+    assert.ok(r.steps.every(s => s.pass === true), "every measured step should still pass");
+  });
 })();

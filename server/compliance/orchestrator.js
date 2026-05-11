@@ -22,7 +22,13 @@ const VALID_KINDS = new Set([
   "t3_qv_sweep",      // scaffolded; writes blocked until Slice ζ
 ]);
 
-const VALID_STATUSES = new Set(["running", "completed", "aborted", "failed"]);
+// `completed_with_warnings` is the post-test end-state when every measured
+// step passed but the safety-restore write back to 100% / disable-reactive
+// failed (T3 / T5). The operator MUST see this distinct from a clean
+// 'completed' so the unsafe end-state is visible in the UI / report.
+const VALID_STATUSES = new Set([
+  "running", "completed", "completed_with_warnings", "aborted", "failed",
+]);
 
 class ComplianceRun {
   constructor({ run_id, test_kind, params, target_inverters, operator_actor, dbHelpers, onEvent }) {
@@ -39,9 +45,17 @@ class ComplianceRun {
     this.abortRequested = false;
     this.steps = [];
     this.summary = null;
-    this.captureBuffer = new CaptureBuffer({ runId: this.run_id });
     this.db = dbHelpers || null;
     this.onEvent = typeof onEvent === "function" ? onEvent : () => {};
+    // Wire the capture buffer's overflow callback to fire a one-shot
+    // `sample_overflow` event on this run so the UI can surface a warning
+    // banner and the report includes a "telemetry incomplete" footnote.
+    this.captureBuffer = new CaptureBuffer({
+      runId: this.run_id,
+      onOverflow: ({ max_samples }) => {
+        this.onEvent({ kind: "sample_overflow", run_id: this.run_id, max_samples });
+      },
+    });
   }
 
   abort(reason) {

@@ -846,6 +846,19 @@
         return { ip, poll, units, loss };
       }
 
+      // Re-pull the persisted config from the server and rebuild the form so
+      // the operator sees the authoritative state immediately after a save —
+      // catches sanitization tweaks (e.g. blank IPs, clamped intervals) and
+      // wins races against another tab that may have saved concurrently.
+      async function refreshFromServer(statusOnSuccess) {
+        try {
+          await load();
+          if (statusOnSuccess) setStatus(statusOnSuccess, "success");
+        } catch (e) {
+          setStatus(`Saved, but reload failed: ${e.message}`, "error");
+        }
+      }
+
       async function saveIP(num) {
         try {
           const row = collectRow(num);
@@ -857,7 +870,7 @@
           if (ret && ret.success === false)
             throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.delete(num);
-          setStatus(`Inverter ${num} settings saved.`, "success");
+          await refreshFromServer(`Inverter ${num} settings saved.`);
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }
@@ -876,7 +889,7 @@
           if (ret && ret.success === false)
             throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.clear();
-          setStatus("All inverter network settings were saved.", "success");
+          await refreshFromServer("All inverter network settings were saved.");
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }

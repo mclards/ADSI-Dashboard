@@ -812,15 +812,29 @@ function parseRow(row, identity = null) {
     temp_c,
     // v2.10.x Slice β — slow-poll diagnostic fields (additive).
     // Merged into fast-poll frame by slow_poll_inverter() every 30s.
-    // Unsigned fields default to 0; signed fields (qac_var, tempint_c) default to null
-    // and become null if value is 0 (offline marker per Python decode rules).
+    //
+    // CRITICAL: slow-poll-only fields MUST default to `null`, never `0`.
+    //   slow_poll_inverter() merges its result into ONE fast-poll frame per
+    //   30 s cycle (services/inverter_engine.py:1577-1583). Every other
+    //   fast-poll frame for that 5-min slot lacks slow data. dailyAggregator
+    //   uses `if (value != null) lastSeen = value` semantics for snapshot
+    //   fields, so any default of `0` causes every fast-poll frame to
+    //   overwrite the slow-poll value with `0` — and the slot persists 0.
+    //   Empirically this dropped `inverter_state_raw_last` to 100% zero in
+    //   v2.10.0-beta despite slow-poll succeeding (audit
+    //   scripts/audit-params-coverage.js).
+    //
+    //   Bitwise-OR aggregator fields (alarms_inst_32, alarms_maint_32) are
+    //   safe with the `0` default because `existing | 0 === existing`.
+    //   Truly fast-poll-sourced fields (analog_in_*, pt100_*) keep `0`
+    //   because the inverter genuinely reports 0 when no probe is wired.
     alarms_inst_32:       Number.isFinite(Number(row.alarms_inst_32)) ? Number(row.alarms_inst_32) : 0,
     alarms_maint_32:      Number.isFinite(Number(row.alarms_maint_32)) ? Number(row.alarms_maint_32) : 0,
     qac_var:              (() => { const v = Number.isFinite(Number(row.qac_var)) ? Number(row.qac_var) : null; return v === 0 ? null : v; })(),
-    zpos_kohm:            Number.isFinite(Number(row.zpos_kohm)) ? Number(row.zpos_kohm) : 0,
-    zneg_kohm:            Number.isFinite(Number(row.zneg_kohm)) ? Number(row.zneg_kohm) : 0,
+    zpos_kohm:            Number.isFinite(Number(row.zpos_kohm)) ? Number(row.zpos_kohm) : null,
+    zneg_kohm:            Number.isFinite(Number(row.zneg_kohm)) ? Number(row.zneg_kohm) : null,
     tempint_c:            (() => { const v = Number.isFinite(Number(row.tempint_c)) ? Number(row.tempint_c) : null; return v === 0 ? null : v; })(),
-    inverter_state_raw:   Number.isFinite(Number(row.inverter_state_raw)) ? Number(row.inverter_state_raw) : 0,
+    inverter_state_raw:   Number.isFinite(Number(row.inverter_state_raw)) ? Number(row.inverter_state_raw) : null,
     // v2.10.x Slice γ — decoded authoritative state (additive). Always computed
     // when a row carries inverter_state_raw, and rendered unconditionally in the
     // Parameters page "State" column. The `useAuthoritativeInverterState` setting
@@ -829,14 +843,15 @@ function parseRow(row, identity = null) {
     inverter_state:       (Number.isFinite(Number(row.inverter_state_raw)) && Number(row.inverter_state_raw) !== 0)
       ? decodeInverterState(Number(row.inverter_state_raw))
       : null,
-    vpv_n_v:              Number.isFinite(Number(row.vpv_n_v)) ? Number(row.vpv_n_v) : 0,
-    vpv_p_v:              Number.isFinite(Number(row.vpv_p_v)) ? Number(row.vpv_p_v) : 0,
-    nominal_power_w:      Number.isFinite(Number(row.nominal_power_w)) ? Number(row.nominal_power_w) : 0,
-    time_to_connect_s:    Number.isFinite(Number(row.time_to_connect_s)) ? Number(row.time_to_connect_s) : 0,
-    time_to_connect_total_s: Number.isFinite(Number(row.time_to_connect_total_s)) ? Number(row.time_to_connect_total_s) : 0,
-    power_reduction_bits: Number.isFinite(Number(row.power_reduction_bits)) ? Number(row.power_reduction_bits) : 0,
+    vpv_n_v:              Number.isFinite(Number(row.vpv_n_v)) ? Number(row.vpv_n_v) : null,
+    vpv_p_v:              Number.isFinite(Number(row.vpv_p_v)) ? Number(row.vpv_p_v) : null,
+    nominal_power_w:      Number.isFinite(Number(row.nominal_power_w)) ? Number(row.nominal_power_w) : null,
+    time_to_connect_s:    Number.isFinite(Number(row.time_to_connect_s)) ? Number(row.time_to_connect_s) : null,
+    time_to_connect_total_s: Number.isFinite(Number(row.time_to_connect_total_s)) ? Number(row.time_to_connect_total_s) : null,
+    power_reduction_bits: Number.isFinite(Number(row.power_reduction_bits)) ? Number(row.power_reduction_bits) : null,
     // v2.10.x Slice β — AAP0016 analog inputs (additive).
-    // Also fast-poll widened to capture these; available every 1-2s, not just slow-poll.
+    // Fast-poll widened to capture these; available every 1-2s, not just slow-poll.
+    // Default 0 is correct because the inverter reports 0 when no probe is wired.
     analog_in_1:          Number.isFinite(Number(row.analog_in_1)) ? Number(row.analog_in_1) : 0,
     analog_in_2:          Number.isFinite(Number(row.analog_in_2)) ? Number(row.analog_in_2) : 0,
     analog_in_3:          Number.isFinite(Number(row.analog_in_3)) ? Number(row.analog_in_3) : 0,
@@ -926,8 +941,87 @@ function loadIpConfigSnapshot(force = false) {
 }
 
 function setIpConfigSnapshot(cfg) {
-  ipConfigCache = sanitizeIpConfig(cfg);
+  const sanitized = sanitizeIpConfig(cfg);
+  ipConfigCache = sanitized;
   ipConfigCacheTs = Date.now();
+  const pruned = pruneStateForConfig(sanitized, {
+    perKey: [
+      liveData,
+      unreachableState,
+      lastPersistState,
+      lastCounterPersistAt,
+      pacIntegratorState,
+      _nominalPowerLastWarnAt,
+    ],
+    perInv: [
+      pacTodayByInverter,
+      recentBucketIncByInv,
+      energyBuckets,
+      todayEnergyBaselineByInv,
+      todayEnergyBaselineLiveByInv,
+    ],
+  });
+  if (pruned > 0) {
+    markLiveSnapshotDirty();
+    console.log(`[poller] pruned ${pruned} stale cache entr${pruned === 1 ? "y" : "ies"} after ipconfig change`);
+  }
+}
+
+// Prune per-key / per-inverter caches so that a save takes effect WITHOUT a
+// service restart. Without this, removed inverters or trimmed unit lists
+// linger in liveData / pacTodayByInverter / etc., showing stale tiles on the
+// dashboard until the process restarts.
+//
+// Inverters whose IP merely changed (same number, same units) keep all their
+// state — the keys are unchanged. Only orphaned (inv, unit) keys are removed.
+//
+// Caches may be plain objects (`{}`) or `Map` instances; both shapes are
+// handled. Returns the count of pruned entries. Caches are passed in so this
+// is unit-testable without spinning up the full poller.
+function pruneStateForConfig(cfg, caches) {
+  try {
+    const expectedKeys = new Set(getExpectedKeysFromIpConfig(cfg));
+    const expectedInverters = new Set();
+    for (const k of expectedKeys) {
+      const inv = Number(String(k).split("_")[0]);
+      if (inv > 0) expectedInverters.add(inv);
+    }
+
+    let pruned = 0;
+    for (const cache of caches?.perKey || []) {
+      pruned += _pruneCache(cache, (key) => expectedKeys.has(String(key)));
+    }
+    for (const cache of caches?.perInv || []) {
+      pruned += _pruneCache(cache, (key) => expectedInverters.has(Number(key)));
+    }
+    return pruned;
+  } catch (err) {
+    console.warn("[poller] cache prune failed:", err.message);
+    return 0;
+  }
+}
+
+function _pruneCache(cache, isAllowed) {
+  if (!cache) return 0;
+  let pruned = 0;
+  if (cache instanceof Map) {
+    for (const key of Array.from(cache.keys())) {
+      if (!isAllowed(key)) {
+        cache.delete(key);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+  if (typeof cache === "object") {
+    for (const key of Object.keys(cache)) {
+      if (!isAllowed(key)) {
+        delete cache[key];
+        pruned++;
+      }
+    }
+  }
+  return pruned;
 }
 
 function getExpectedKeysFromIpConfig(cfg) {
@@ -1841,6 +1935,8 @@ module.exports = {
   buildTodayEnergyRowsFromSeed,
   buildIpConfigLookup,
   resolveConfiguredTelemetryIdentity,
+  pruneStateForConfig,
+  getExpectedKeysFromIpConfig,
   getEnergyBacklogPressure,
   // v2.9.2 — re-exported for callers that pull the clamp pure functions
   // through the poller surface (tests should import from ./pollerClampCore directly).

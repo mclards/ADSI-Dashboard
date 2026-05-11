@@ -176,24 +176,16 @@ function run() {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ENDPOINT RESPONSE SHAPE TESTS (placeholder — requires live server)
+  // ENDPOINT RESPONSE SHAPE TESTS — coverage lives elsewhere
   // ─────────────────────────────────────────────────────────────────────────
-
-  test("(placeholder) GET /api/igbt/fleet response shape", () => {
-    // In Phase 1, this test is a placeholder.
-    // Full integration requires spinning up the Express server and
-    // mocking isRemoteMode(), which is complex in isolation.
-    // This test will be expanded in Phase 2 with a live server harness.
-    assert.ok(true);
-  });
-
-  test("(placeholder) GET /api/igbt/node/:inverter/:slave response shape", () => {
-    assert.ok(true);
-  });
-
-  test("(placeholder) GET /api/igbt/fleet.csv content-type and format", () => {
-    assert.ok(true);
-  });
+  //
+  // The persisted-ipconfig walk that all three endpoints use is locked by
+  // server/tests/ipconfigEnumerate.test.js (9 cases including a regression
+  // guard for the array-shape bug that previously made every endpoint 500).
+  //
+  // Full HTTP-level coverage (status codes, content-type, CSV BOM, remote
+  // proxy fallback) still requires booting Express; that lift is deferred to
+  // Phase 2 when a shared server-test harness lands.
 }
 
 run();

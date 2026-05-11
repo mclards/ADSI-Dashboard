@@ -4640,6 +4640,8 @@ function initPlantCapPage() {
       btn.addEventListener("click", () => switchPlantCapTab(btn.dataset.tab));
     });
     populateApcIpSelector();
+    _populateAllComplianceTargetSelectors();
+    _initComplianceHowtoPersistence();
   } else {
     const apcBtn = $("plantCapTabApc");
     if (apcBtn) apcBtn.hidden = !_apcFeatureEnabled();
@@ -8788,17 +8790,21 @@ function switchPlantCapTab(tabKey) {
 const _compliancePollers = {}; // run_id → setInterval handle
 
 function _complianceTargetSelectorMarkup(idPrefix) {
+  // v2.11.x — replaced free-text Inverter # / Internal node inputs with
+  // <select> dropdowns populated from State.ipConfig (same pattern as
+  // %P Setpoint via populateApcIpSelector). Eliminates input errors
+  // ("inverter 28 doesn't exist", "node 5 not configured", typo IP).
+  // The IP field is now a read-only display showing the resolved IP for
+  // the chosen inverter.
   return `
     <div class="cmp-target-row">
-      <label class="cmp-label" for="${idPrefix}Inv" title="Inverter number (1–27). Each is one INGECON SUN unit.">Inverter #</label>
-      <input id="${idPrefix}Inv" type="number" min="1" max="27" step="1" value="1" class="cmp-num"
-             title="Inverter number (1–27)." />
-      <label class="cmp-label" for="${idPrefix}Slave" title="Internal node — Modbus slave ID (1–4) of the converter inside the inverter. There is no fixed master; converters rotate the master role per cycle, so each must be tested individually.">Internal node</label>
-      <input id="${idPrefix}Slave" type="number" min="1" max="4" step="1" value="1" class="cmp-num"
-             title="Internal converter address inside the inverter (1–4). Each internal node is an independent IGBT bridge. The inverter has no fixed master — the leader role rotates dynamically per cycle, so per-node compliance evidence is required." />
+      <label class="cmp-label" for="${idPrefix}Inv" title="Inverter — the physical INGECON SUN unit (one per IP). Populated from your IP Config.">Inverter</label>
+      <select id="${idPrefix}Inv" class="sel cmp-sel" title="Inverter — the physical INGECON SUN unit (one per IP)."></select>
+      <label class="cmp-label" for="${idPrefix}Slave" title="Internal node — Modbus slave ID (1–4) of an independent converter inside the inverter. The inverter has no fixed master; nodes rotate the leader role per cycle, so each must be tested individually.">Internal node</label>
+      <select id="${idPrefix}Slave" class="sel cmp-sel" title="Internal converter address inside the inverter (1–4). Each internal node is an independent IGBT bridge."></select>
       <label class="cmp-label" for="${idPrefix}Ip">IP</label>
-      <input id="${idPrefix}Ip" type="text" placeholder="auto from inverter # if blank" class="cmp-text"
-             title="Inverter IPv4 address. Leave blank to derive from the inverter # via the configured inverter map." />
+      <input id="${idPrefix}Ip" type="text" class="cmp-text" readonly tabindex="-1"
+             title="Auto-resolved from the chosen Inverter via your IP Config." />
     </div>
     <div class="cmp-target-help">
       <b>Inverter</b> = the physical INGECON SUN unit (one per IP). <b>Internal node</b> = the Modbus slave (1–4) of an independent power converter inside the inverter — each has its own DC string and IGBT bridge. The inverter has no fixed master; the leader role rotates per cycle, which is why every test targets one specific (inverter, internal node) pair so the witness can attribute results unambiguously.
@@ -8806,10 +8812,19 @@ function _complianceTargetSelectorMarkup(idPrefix) {
 }
 
 function _resolveTargetIpFromInv(invNum) {
+  // The persisted ipconfig (server/index.js sanitizeIpConfig) is an OBJECT MAP
+  // keyed by inverter number — `{inverters: {1: "192.168.1.101", 2: "..."}}`.
+  // Earlier this used `.find(r => r.inverter === invNum)` as if it were an
+  // array of records, which silently returned undefined and forced the
+  // "Pick a valid inverter # / slave (and IP if not auto-resolved)" alarm
+  // to fire on every Compliance Start click — even when the inverter # was
+  // valid and a row existed. Mirrors the IGBT health endpoint shape fix.
   try {
-    const cfg = State?.ipConfig?.inverters || [];
-    const rec = cfg.find(r => Number(r?.inverter) === Number(invNum));
-    return rec?.ip || "";
+    const inv = Number(invNum);
+    if (!Number.isFinite(inv) || inv < 1) return "";
+    const map = State?.ipConfig?.inverters;
+    if (!map || typeof map !== "object") return "";
+    return String(map[inv] ?? map[String(inv)] ?? "").trim();
   } catch (_) { return ""; }
 }
 
@@ -8822,14 +8837,184 @@ function _readComplianceTarget(idPrefix) {
   return { inverter: inv, ip, slave };
 }
 
-function _bulkAuthForCompliance() {
-  // Reuse the bulk-control auth flow already used by APC. The user has
-  // entered sacupsMM in a session token store via the existing helper.
-  let cached = "";
+// Populates the (Inverter, Internal node, IP) selectors for one compliance
+// pane (T2 / T3 / T5). Mirrors populateApcIpSelector + updateApcNodeSlaveOptions
+// so all three grid-test panes get the same dropdown UX as %P Setpoint.
+function _populateComplianceTargetSelectors(idPrefix) {
+  const invSel  = $(idPrefix + "Inv");
+  const nodeSel = $(idPrefix + "Slave");
+  const ipDisp  = $(idPrefix + "Ip");
+  if (!invSel || !nodeSel) return;
+  const invMap = State?.ipConfig?.inverters || {};
+  const invNums = Object.keys(invMap).map(Number).filter((n) => n > 0 && invMap[n]).sort((a, b) => a - b);
+  const prevInv = invSel.value;
+  invSel.innerHTML = "";
+  if (!invNums.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = State?.ipConfig ? "(no inverters configured)" : "(loading inverters…)";
+    invSel.appendChild(opt);
+  } else {
+    invNums.forEach((inv) => {
+      const ip = invMap[inv] || invMap[String(inv)] || "";
+      if (!ip) return;
+      const opt = document.createElement("option");
+      opt.value = String(inv);
+      opt.textContent = `Inverter ${String(inv).padStart(2, "0")} — ${ip}`;
+      invSel.appendChild(opt);
+    });
+    if (prevInv && Array.from(invSel.options).some((o) => o.value === prevInv)) {
+      invSel.value = prevInv;
+    }
+  }
+  _populateComplianceNodeSelector(idPrefix);
+  // Wire the change handler exactly once per selector.
+  if (invSel.dataset.bound !== "1") {
+    invSel.dataset.bound = "1";
+    invSel.addEventListener("change", () => _populateComplianceNodeSelector(idPrefix));
+  }
+}
+
+function _populateComplianceNodeSelector(idPrefix) {
+  const invSel  = $(idPrefix + "Inv");
+  const nodeSel = $(idPrefix + "Slave");
+  const ipDisp  = $(idPrefix + "Ip");
+  if (!invSel || !nodeSel) return;
+  const inv = Number(invSel.value);
+  const units = inv > 0 ? getConfiguredUnits(inv, 4) : [];
+  const prevNode = nodeSel.value;
+  nodeSel.innerHTML = "";
+  if (!units.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = inv > 0 ? "(no nodes configured)" : "(pick inverter first)";
+    nodeSel.appendChild(opt);
+  } else {
+    units.forEach((u) => {
+      const opt = document.createElement("option");
+      opt.value = String(u);
+      opt.textContent = `Internal node ${u} (slave ${u})`;
+      nodeSel.appendChild(opt);
+    });
+    if (prevNode && units.map(String).includes(prevNode)) nodeSel.value = prevNode;
+  }
+  if (ipDisp) {
+    const ip = _resolveTargetIpFromInv(inv);
+    ipDisp.value = ip || "";
+    ipDisp.placeholder = ip ? "" : "(no IP for selected inverter)";
+  }
+}
+
+function _populateAllComplianceTargetSelectors() {
+  ["t2", "t3", "t5"].forEach(_populateComplianceTargetSelectors);
+}
+
+// Persists each compliance pane's "How this test works" open/closed state
+// across tab switches and dashboard reloads. Uses localStorage keyed by the
+// pane (`cmp-howto-t2`, etc) so each test remembers independently.
+const _CMP_HOWTO_STORAGE_PREFIX = "cmp-howto:";
+function _initComplianceHowtoPersistence() {
+  document.querySelectorAll("details.cmp-howto[data-cmp-howto]").forEach((el) => {
+    if (el.dataset.persistBound === "1") return;
+    el.dataset.persistBound = "1";
+    const key = _CMP_HOWTO_STORAGE_PREFIX + el.dataset.cmpHowto;
+    let stored = null;
+    try { stored = localStorage.getItem(key); } catch (_) {}
+    // Default = open (first-time operators benefit from seeing the runbook).
+    // Once collapsed, the choice persists until they manually expand again.
+    if (stored === "0") el.removeAttribute("open");
+    else if (stored === "1") el.setAttribute("open", "");
+    el.addEventListener("toggle", () => {
+      try { localStorage.setItem(key, el.open ? "1" : "0"); } catch (_) {}
+    });
+  });
+}
+
+// v2.11.x — operator preference: the auth-key prompt fires at most once per
+// hour for the entire dashboard. Every action still gets a separate Yes/No
+// confirmation modal (the safety net against accidental writes); only the
+// key-entry prompt is suppressed while a fresh cached key is held.
+//
+// Server-side `BULK_AUTH_KEY_LEASE_MS` also raised to 60 min (see
+// server/bulkControlAuth.js) so the cached key remains valid end-to-end.
+// On any 403 from the server, callers should invoke `clearBulkAuthCache()`
+// so the next click re-prompts (key may have rotated out of the lease while
+// the dashboard was idle).
+const BULK_AUTH_CACHE_TTL_MS = 60 * 60 * 1000;
+const _bulkAuthCache = { key: null, expiresAt: 0 };
+
+function getCachedBulkAuthKey() {
+  if (!_bulkAuthCache.key) return "";
+  if (Date.now() >= _bulkAuthCache.expiresAt) {
+    _bulkAuthCache.key = null;
+    _bulkAuthCache.expiresAt = 0;
+    return "";
+  }
+  return _bulkAuthCache.key;
+}
+
+function setCachedBulkAuthKey(key) {
+  const trimmed = String(key || "").trim();
+  if (!trimmed) return;
+  _bulkAuthCache.key = trimmed;
+  _bulkAuthCache.expiresAt = Date.now() + BULK_AUTH_CACHE_TTL_MS;
+}
+
+function clearBulkAuthCache() {
+  _bulkAuthCache.key = null;
+  _bulkAuthCache.expiresAt = 0;
+}
+
+// Used by status pills / debugging — returns minutes remaining on the cache
+// or 0 when expired/empty. Kept side-effect free.
+function bulkAuthCacheMinutesRemaining() {
+  if (!_bulkAuthCache.key) return 0;
+  const ms = _bulkAuthCache.expiresAt - Date.now();
+  return ms > 0 ? Math.ceil(ms / 60_000) : 0;
+}
+
+async function _bulkAuthForCompliance(action = "Start grid-test", scopeLabel = "compliance run") {
+  // Step 1 — every action gets a confirmation modal (Yes/No). Skips the
+  // auth-key prompt when cached, but the operator must still acknowledge
+  // each privileged write so a misclick can't fire blindly.
+  let ok = true;
   try {
-    if (typeof getCachedBulkAuthKey === "function") cached = getCachedBulkAuthKey();
-  } catch (_) {}
-  return cached || prompt("Enter bulk-control authorization key (sacupsMM):") || "";
+    if (typeof appConfirm === "function") {
+      const cachedMins = bulkAuthCacheMinutesRemaining();
+      const cachedNote = cachedMins > 0
+        ? `\n\nAuthorization cached for ${cachedMins} min — no key prompt.`
+        : "\n\nYou'll be prompted for the sacupsMM authorization key next.";
+      ok = await appConfirm(
+        "Confirm action",
+        `${action} ${scopeLabel}?${cachedNote}`,
+        { ok: "Proceed", cancel: "Cancel" },
+      );
+    }
+  } catch (_) { /* fall through; cancel-out below if confirm broke */ }
+  if (!ok) return "";
+
+  // Step 2 — use the cached key when fresh; otherwise show the in-app modal.
+  // window.prompt() is silently disabled in Electron, so the modal flow is
+  // the only working path.
+  const cached = getCachedBulkAuthKey();
+  if (cached) return cached;
+
+  if (typeof initBulkAuthModal === "function") initBulkAuthModal();
+  if (typeof requestBulkAuthorization === "function") {
+    try {
+      const key = String(await requestBulkAuthorization(action, scopeLabel, 1) || "");
+      if (key) setCachedBulkAuthKey(key);
+      return key;
+    } catch (_) {
+      return "";
+    }
+  }
+  // Last-ditch fallback for tests / dev-only builds without the modal HTML.
+  try {
+    const key = String(window.prompt("Enter bulk-control authorization key (sacupsMM):") || "");
+    if (key) setCachedBulkAuthKey(key);
+    return key;
+  } catch (_) { return ""; }
 }
 
 function buildComplianceT2Pane() {
@@ -8845,18 +9030,41 @@ function buildComplianceT2Pane() {
           <div class="cmp-panel-sub">Observation-only test. The dashboard records inverter frequency, state, and alarms while a witness drives the grid simulator (or during a natural grid event). Pass = entire run inside NGCP continuous-stable band 59.7–60.3 Hz with no alarms.</div>
         </div>
       </div>
+
+      <details class="cmp-howto" data-cmp-howto="t2">
+        <summary class="cmp-howto-title">How this test works</summary>
+        <ol class="cmp-howto-steps">
+          <li><b>Pick the node</b> (Inverter, Internal node) — IP auto-resolves from your IP Config.</li>
+          <li><b>Press Start observation.</b> The gateway begins polling the inverter's live frame (Fac, state, alarms) every <code>Sample period</code> seconds for the configured <code>Duration</code>.</li>
+          <li><b>Watch the Live observation panel below.</b> New samples appear every 3 s while the run is in flight — Mean Hz / Min-Max Hz / Alarm count tick upward as data arrives.</li>
+          <li><b>When the timer ends</b>, the result tiles freeze and a CSV+PDF report becomes available on the Reports tab.</li>
+        </ol>
+        <div class="cmp-howto-note">If you see "Samples 0" after 10 s, the sampler isn't getting fresh frames — check that the inverter is online on the Parameters page.</div>
+      </details>
+
       ${_complianceTargetSelectorMarkup("t2")}
       <div class="cmp-target-row">
         <label class="cmp-label" for="t2Duration">Duration (s)</label>
         <input id="t2Duration" type="number" min="60" max="7200" step="60" value="1800" class="cmp-num" />
-        <label class="cmp-label" for="t2Period">Sample period (s)</label>
-        <input id="t2Period" type="number" min="1" max="10" step="1" value="2" class="cmp-num" />
+        <label class="cmp-label" for="t2Period" title="How often the gateway polls the inverter's live frame. Server clamp 1-60 s — values outside that range are silently bumped to the nearest bound.">Sample period (s)</label>
+        <input id="t2Period" type="number" min="1" max="60" step="1" value="2" class="cmp-num"
+               title="1-60 s. 2 s typical for capturing transient excursions; 30-60 s for long-soak observation runs." />
       </div>
       <div class="cmp-actions">
         <button id="t2Start" class="btn btn-accent btn-xs" type="button">Start observation</button>
         <button id="t2Abort" class="btn btn-xs" type="button" disabled>Abort</button>
         <span class="cmp-status" id="t2Status">Idle.</span>
       </div>
+
+      <div class="cmp-progress" id="t2ProgressWrap" hidden>
+        <div class="cmp-progress-bar"><div class="cmp-progress-fill" id="t2ProgressFill"></div></div>
+        <div class="cmp-progress-meta">
+          <span id="t2ProgressElapsed">0:00 elapsed</span>
+          <span id="t2ProgressRemaining">— remaining</span>
+          <span id="t2ProgressLastTick">—</span>
+        </div>
+      </div>
+
       <div class="cmp-results">
         <div class="cmp-result-row"><span>Run ID</span><b id="t2RunId">—</b></div>
         <div class="cmp-result-row"><span>Samples</span><b id="t2Samples">0</b></div>
@@ -8865,8 +9073,31 @@ function buildComplianceT2Pane() {
         <div class="cmp-result-row"><span>Longest excursion</span><b id="t2Excursion">0 ms</b></div>
         <div class="cmp-result-row"><span>Alarm events</span><b id="t2Alarms">0</b></div>
       </div>
+
+      <div class="cmp-live-feed">
+        <div class="cmp-live-feed-head">
+          <span class="cmp-live-feed-title">Live observation feed</span>
+          <span class="cmp-live-feed-sub" id="t2LiveSub">Last 20 samples — refreshes every 3 s while running</span>
+        </div>
+        <div class="cmp-live-feed-table-wrap">
+          <table class="cmp-live-feed-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Freq (Hz)</th>
+                <th>Band</th>
+                <th>State</th>
+                <th>Alarm bits</th>
+                <th>PAC (kW)</th>
+              </tr>
+            </thead>
+            <tbody id="t2LiveFeedBody">
+              <tr class="cmp-live-feed-empty"><td colspan="6">No samples yet. Press Start observation.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>`;
-  // Wire up after insertion in initPlantCapPage via DOM lookup at click time.
   setTimeout(() => {
     $("t2Start")?.addEventListener("click", _onT2Start);
     $("t2Abort")?.addEventListener("click", _onT2Abort);
@@ -8874,31 +9105,161 @@ function buildComplianceT2Pane() {
   return pane;
 }
 
+// Renders the last-N samples table for T2/T3/T5 live feeds. Same shape across
+// all three tests so the operator's eye doesn't have to relearn columns.
+function _renderComplianceLiveFeed(tbodyId, samples, kind) {
+  const tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  if (!Array.isArray(samples) || samples.length === 0) {
+    tbody.innerHTML = `<tr class="cmp-live-feed-empty"><td colspan="6">Waiting for first sample…</td></tr>`;
+    return;
+  }
+  // Show newest first so the operator's gaze lands on the freshest data.
+  const rows = samples.slice().reverse().map(s => {
+    const tsIso = s.ts_ms ? new Date(s.ts_ms).toLocaleTimeString() : "—";
+    const fz    = Number(s.freq_hz);
+    const fzStr = Number.isFinite(fz) ? fz.toFixed(3) : "—";
+    let band = "—", bandClass = "";
+    if (Number.isFinite(fz) && fz >= 45 && fz <= 65) {
+      if (fz >= 59.7 && fz <= 60.3) { band = "continuous"; bandClass = "ok"; }
+      else if (fz >= 58.2 && fz <= 61.8) { band = "withstand"; bandClass = "warn"; }
+      else { band = "outside"; bandClass = "fail"; }
+    } else if (Number.isFinite(fz)) { band = "unit?"; bandClass = "warn"; }
+    const stateRaw = Number(s.state_raw);
+    const stateLbl = Number.isFinite(stateRaw) ? `0x${stateRaw.toString(16).toUpperCase().padStart(4, "0")}` : "—";
+    const alarms = Number(s.alarm_32) || 0;
+    const alarmLbl = alarms === 0
+      ? `<span class="cmp-pill ok">clear</span>`
+      : `<span class="cmp-pill fail">0x${alarms.toString(16).toUpperCase().padStart(8, "0")}</span>`;
+    const pacKw = Number.isFinite(Number(s.pac_w)) ? (Number(s.pac_w) / 1000).toFixed(1) : "—";
+    const cols = kind === "t3"
+      ? `<td>${tsIso}</td><td>${Number.isFinite(Number(s.cosphi)) ? Number(s.cosphi).toFixed(3) : "—"}</td><td>${Number.isFinite(Number(s.qac_var)) ? (Number(s.qac_var) / 1000).toFixed(1) : "—"}</td><td>${stateLbl}</td><td>${alarmLbl}</td><td>${pacKw}</td>`
+      : kind === "t5"
+      ? `<td>${tsIso}</td><td>${pacKw}</td><td>—</td><td>${stateLbl}</td><td>${alarmLbl}</td><td>${Number.isFinite(Number(s.iac_avg_a)) ? Number(s.iac_avg_a).toFixed(1) + " A" : "—"}</td>`
+      : `<td>${tsIso}</td><td>${fzStr}</td><td><span class="cmp-pill ${bandClass}">${band}</span></td><td>${stateLbl}</td><td>${alarmLbl}</td><td>${pacKw}</td>`;
+    return `<tr>${cols}</tr>`;
+  }).join("");
+  tbody.innerHTML = rows;
+}
+
+function _formatMmSs(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function _updateComplianceProgress(prefix, startedAt, durationSec, sampleTotal, lastSampleTs) {
+  const wrap = $(prefix + "ProgressWrap");
+  if (!wrap) return;
+  wrap.hidden = false;
+  const elapsedSec = Math.max(0, (Date.now() - startedAt) / 1000);
+  const remainingSec = Math.max(0, durationSec - elapsedSec);
+  const pct = durationSec > 0 ? Math.min(100, (elapsedSec / durationSec) * 100) : 0;
+  const fill = $(prefix + "ProgressFill"); if (fill) fill.style.width = pct.toFixed(1) + "%";
+  const elap = $(prefix + "ProgressElapsed"); if (elap) elap.textContent = `${_formatMmSs(elapsedSec)} elapsed`;
+  const rem = $(prefix + "ProgressRemaining"); if (rem) rem.textContent = `${_formatMmSs(remainingSec)} remaining`;
+  const tickEl = $(prefix + "ProgressLastTick");
+  if (tickEl) {
+    if (lastSampleTs) {
+      const ageS = Math.max(0, (Date.now() - lastSampleTs) / 1000);
+      tickEl.textContent = `last sample ${ageS < 1 ? "<1s" : Math.round(ageS) + "s"} ago · ${sampleTotal} captured`;
+      tickEl.className = ageS > 10 ? "cmp-progress-tick stale" : "cmp-progress-tick fresh";
+    } else {
+      tickEl.textContent = "waiting for first sample…";
+      tickEl.className = "cmp-progress-tick stale";
+    }
+  }
+}
+
 async function _onT2Start() {
+  // Persist failure reasons in the status pill instead of relying on toasts.
+  // Operators were missing the toast and reading "Idle." as if Start had been
+  // ignored, which made the test look broken when it was actually a one-line
+  // setup miss (no IP resolved, auth key declined, etc).
+  const setStatus = (msg) => { const el = $("t2Status"); if (el) el.textContent = msg; };
   const target = _readComplianceTarget("t2");
-  if (!target) { showToast("Pick a valid inverter # / slave (and IP if not auto-resolved).", 3000); return; }
-  const authKey = _bulkAuthForCompliance();
-  if (!authKey) { showToast("Cancelled.", 1500); return; }
+  if (!target) {
+    const inv = $("t2Inv")?.value || "?";
+    const ipMap = State?.ipConfig?.inverters || {};
+    const ipForInv = ipMap[Number(inv)] || ipMap[String(inv)] || "(none)";
+    setStatus(`✗ No IP for inverter #${inv} — IP Config has "${ipForInv}". Fix the IP Config or type the IP manually.`);
+    showToast("Pick a valid inverter # / slave (and IP if not auto-resolved).", 3000);
+    return;
+  }
+  const authKey = await _bulkAuthForCompliance("Start T2 freq-withstand on", `inverter ${target.inverter} slave ${target.slave}`);
+  if (!authKey) {
+    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    showToast("Cancelled.", 1500);
+    return;
+  }
   const body = {
     test_kind: "t2_freq_withstand",
     targets: [target],
     operator: "operator",
     authKey,
     params: {
-      duration_sec:    Number($("t2Duration")?.value) || 1800,
-      sample_period_s: Number($("t2Period")?.value)   || 2,
+      // Clamp client-side too so the operator sees what's actually used
+      // instead of silently relying on the server clamp.
+      duration_sec:    Math.max(60, Math.min(7200, Number($("t2Duration")?.value) || 1800)),
+      sample_period_s: Math.max(1,  Math.min(60,   Number($("t2Period")?.value)   || 2)),
     },
   };
-  const r = await fetch("/api/compliance/run/start", {
+  setStatus("Starting…");
+  const resp = await fetch("/api/compliance/run/start", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
-  if (!r.ok) { showToast(r.error || "Start failed.", 4000); return; }
+  }).catch(e => ({ ok: false, status: 0, _err: e.message }));
+  if (resp.status === 403) clearBulkAuthCache();   // server rejected our cached key — force re-prompt next click
+  const r = resp.json ? await resp.json().catch(() => ({ ok: false, error: resp._err || "parse error" })) : resp;
+  if (!r.ok) {
+    setStatus(`✗ Start failed: ${r.error || "unknown error"}`);
+    showToast(r.error || "Start failed.", 4000);
+    return;
+  }
+  const startedAt = Date.now();
+  const durationSec = Number(body.params.duration_sec) || 1800;
   $("t2RunId").textContent = r.run_id;
-  $("t2Status").textContent = "Running…";
+  $("t2Status").textContent = "Running — capturing live frames…";
   $("t2Start").disabled = true;
   $("t2Abort").disabled = false;
-  _watchComplianceRun(r.run_id, (status, summary) => {
-    $("t2Status").textContent = status;
+  // Reset feed state so a second run doesn't show last run's data.
+  $("t2LiveFeedBody").innerHTML = `<tr class="cmp-live-feed-empty"><td colspan="6">Waiting for first sample…</td></tr>`;
+  $("t2Samples").textContent = "0"; $("t2MeanHz").textContent = "—";
+  $("t2MinMaxHz").textContent = "—"; $("t2Excursion").textContent = "0 ms";
+  $("t2Alarms").textContent = "0";
+
+  _watchComplianceRun(r.run_id, (status, summary, _steps, live) => {
+    const tail = (live?.samples_tail) || [];
+    const sampleTotal = live?.sample_count_total ?? 0;
+    const lastSampleTs = tail.length > 0 ? Number(tail[tail.length - 1].ts_ms) : null;
+
+    // Status pill copy is more informative than the bare run state — gives
+    // the operator a one-glance signal for what the gateway is doing right now.
+    if (status === "running") {
+      const dropped = live?.sample_dropped || 0;
+      $("t2Status").textContent = sampleTotal > 0
+        ? `Running — ${sampleTotal} samples captured${dropped > 0 ? ` (${dropped} dropped)` : ""}`
+        : "Running — waiting for first frame…";
+    } else {
+      $("t2Status").textContent = status;
+    }
+
+    _updateComplianceProgress("t2", startedAt, durationSec, sampleTotal, lastSampleTs);
+    _renderComplianceLiveFeed("t2LiveFeedBody", tail, "t2");
+
+    // Mid-run KPI tiles — recomputed from the live tail so the operator sees
+    // the dials move every 3 s instead of staring at zeros until finalize().
+    if (status === "running" && tail.length > 0) {
+      const freqs = tail.map(s => Number(s.freq_hz)).filter(f => Number.isFinite(f) && f >= 45 && f <= 65);
+      $("t2Samples").textContent = sampleTotal;
+      if (freqs.length > 0) {
+        const mean = freqs.reduce((a, b) => a + b, 0) / freqs.length;
+        $("t2MeanHz").textContent   = mean.toFixed(3);
+        $("t2MinMaxHz").textContent = `${Math.min(...freqs).toFixed(2)} / ${Math.max(...freqs).toFixed(2)} Hz`;
+      }
+      $("t2Alarms").textContent = tail.reduce((acc, s) => acc + (Number(s.alarm_32) > 0 ? 1 : 0), 0);
+    }
+    // Final values from authoritative summary once finalize() fires.
     if (summary) {
       $("t2Samples").textContent  = summary.samples ?? 0;
       $("t2MeanHz").textContent   = summary.mean_hz ? Number(summary.mean_hz).toFixed(3) : "—";
@@ -8907,7 +9268,7 @@ async function _onT2Start() {
       $("t2Excursion").textContent = `${summary.longest_excursion_ms ?? 0} ms`;
       $("t2Alarms").textContent    = summary.alarm_events ?? 0;
     }
-    if (status === "completed" || status === "failed" || status === "aborted") {
+    if (status === "completed" || status === "completed_with_warnings" || status === "failed" || status === "aborted") {
       $("t2Start").disabled = false;
       $("t2Abort").disabled = true;
     }
@@ -8938,10 +9299,22 @@ function buildComplianceT3Pane() {
           <div class="cmp-panel-sub">Automated PF sweep (cmd 1 — tan φ) per PGC 2016 GCR 4.4.4.1: 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00. Per-step capture of P/Q/V and PF deviation. Reactive control is restored (cmd 11) on completion or abort. Writes require <code>gridControlEnabled = "1"</code>.</div>
         </div>
       </div>
+
+      <details class="cmp-howto" data-cmp-howto="t3">
+        <summary class="cmp-howto-title">How this test works</summary>
+        <ol class="cmp-howto-steps">
+          <li><b>Pick the node</b> and confirm <b>Sweep</b> (PF list + sign), <b>Hold</b> seconds, <b>Tolerance</b>.</li>
+          <li><b>Press Run sweep.</b> The gateway writes phi-tangent setpoints (cmd 1) per step, holds each plateau for the configured time, then averages observed PF.</li>
+          <li><b>Watch the Live observation panel.</b> cosφ + Q (kVAR) tick every 3 s as the inverter responds to each new setpoint.</li>
+          <li><b>On completion or abort</b>, reactive control is restored to default (cmd 11). Status <i>completed_with_warnings</i> means the restore write failed — verify on the Read-back panel.</li>
+        </ol>
+        <div class="cmp-howto-note">Writes are blocked unless <code>gridControlEnabled = "1"</code>. Use <b>Read-back state</b> below to query holding 41006-41010 — that path is always safe.</div>
+      </details>
+
       ${_complianceTargetSelectorMarkup("t3")}
       <div class="cmp-target-row">
         <label class="cmp-label" for="t3Sweep" title="Comma-separated PF list with sign. Defaults to the full 21-step NGCP sweep 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00.">Sweep</label>
-        <input id="t3Sweep" type="text" value="1.00,0.99,0.98,0.97,0.96,0.95,0.96,0.97,0.98,0.99,1.00,-0.99,-0.98,-0.97,-0.96,-0.95,-0.96,-0.97,-0.98,-0.99,1.00" class="cmp-text cmp-text-wide" />
+        <input id="t3Sweep" type="text" value="1.00,0.99,0.98,0.97,0.96,0.95,0.96,0.97,0.98,0.99,1.00,-0.99,-0.98,-0.97,-0.96,-0.95,-0.96,-0.97,-0.98,-0.99,1.00" class="cmp-text cmp-text-flex" />
         <label class="cmp-label" for="t3Hold">Hold (s/step)</label>
         <input id="t3Hold" type="number" min="20" max="900" step="10" value="60" class="cmp-num" />
         <label class="cmp-label" for="t3Settle">Settle (s)</label>
@@ -8962,12 +9335,37 @@ function buildComplianceT3Pane() {
         <button id="t3Readback" class="btn btn-xs" type="button" title="Read holding 41006-41010 (always safe).">Read-back state</button>
         <span class="cmp-status" id="t3Status">Idle.</span>
       </div>
+      <div class="cmp-progress" id="t3ProgressWrap" hidden>
+        <div class="cmp-progress-bar"><div class="cmp-progress-fill" id="t3ProgressFill"></div></div>
+        <div class="cmp-progress-meta">
+          <span id="t3ProgressElapsed">0:00 elapsed</span>
+          <span id="t3ProgressRemaining">— remaining</span>
+          <span id="t3ProgressLastTick">—</span>
+        </div>
+      </div>
       <div class="cmp-results">
         <div class="cmp-result-row"><span>Run ID</span><b id="t3RunId">—</b></div>
         <div class="cmp-result-row"><span>Steps pass / fail</span><b id="t3StepResult">—</b></div>
         <div class="cmp-result-row"><span>Last observed PF</span><b id="t3LastObserved">—</b></div>
       </div>
       <div class="cmp-step-log" id="t3StepLog"></div>
+
+      <div class="cmp-live-feed">
+        <div class="cmp-live-feed-head">
+          <span class="cmp-live-feed-title">Live observation feed</span>
+          <span class="cmp-live-feed-sub" id="t3LiveSub">Last 20 samples — refreshes every 3 s</span>
+        </div>
+        <div class="cmp-live-feed-table-wrap">
+          <table class="cmp-live-feed-table">
+            <thead>
+              <tr><th>Time</th><th>cosφ</th><th>Q (kVAR)</th><th>State</th><th>Alarm bits</th><th>P (kW)</th></tr>
+            </thead>
+            <tbody id="t3LiveFeedBody">
+              <tr class="cmp-live-feed-empty"><td colspan="6">No samples yet. Press Run sweep.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <div class="apc-history-section">
         <div class="apc-history-head" tabindex="0">
@@ -9058,17 +9456,39 @@ async function _onT3ReadbackClick() {
 }
 
 async function _onT3Start() {
+  const setStatus = (msg) => { const el = $("t3Status"); if (el) el.textContent = msg; };
   const target = _readComplianceTarget("t3");
-  if (!target) { showToast("Pick a valid inverter # / slave.", "warn", 3000); return; }
+  if (!target) {
+    const inv = $("t3Inv")?.value || "?";
+    const ipMap = State?.ipConfig?.inverters || {};
+    const ipForInv = ipMap[Number(inv)] || ipMap[String(inv)] || "(none)";
+    setStatus(`✗ No IP for inverter #${inv} — IP Config has "${ipForInv}". Fix the IP Config or type the IP manually.`);
+    showToast("Pick a valid inverter # / slave.", "warn", 3000);
+    return;
+  }
   const sweep = _parseT3Sweep($("t3Sweep")?.value);
-  if (sweep.length < 2) { showToast("Sweep must contain at least 2 PF steps (e.g. \"1.00,0.95lag,1.00\").", "warn", 4000); return; }
-  if (!window.confirm(
-    `Start T3 Q-V sweep on inverter ${target.inverter} slave ${target.slave}?\n\n` +
-    `${sweep.length} PF steps × ${$("t3Hold")?.value || 60}s/step ≈ ${Math.round(sweep.length * (Number($("t3Hold")?.value) || 60) / 60)} min.\n` +
-    `Reactive control will be restored (cmd 11) on completion or abort.`
-  )) return;
-  const authKey = _bulkAuthForCompliance();
-  if (!authKey) { showToast("Cancelled.", "warn", 1500); return; }
+  if (sweep.length < 2) {
+    setStatus("✗ Sweep needs ≥ 2 PF steps (e.g. \"1.00,0.95,1.00\" — minus sign for lead).");
+    showToast("Sweep must contain at least 2 PF steps (e.g. \"1.00,0.95lag,1.00\").", "warn", 4000);
+    return;
+  }
+  // Use the in-app appConfirm modal (consistent with the rest of the dashboard).
+  // window.confirm still works in Electron but renders as a native OS dialog
+  // — visually jarring next to the dark-themed in-app modals.
+  const proceed = await appConfirm(
+    "Start T3 Q-V sweep?",
+    `Inverter ${target.inverter} slave ${target.slave}.\n\n` +
+    `${sweep.length} PF steps × ${$("t3Hold")?.value || 60}s/step ≈ ${Math.round(sweep.length * (Number($("t3Hold")?.value) || 60) / 60)} min.\n\n` +
+    `Reactive control will be restored (cmd 11) on completion or abort.`,
+    { ok: "Run sweep", cancel: "Cancel" },
+  );
+  if (!proceed) { setStatus("Cancelled."); return; }
+  const authKey = await _bulkAuthForCompliance("Start T3 Q-V sweep on", `inverter ${target.inverter} slave ${target.slave}`);
+  if (!authKey) {
+    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    showToast("Cancelled.", "warn", 1500);
+    return;
+  }
   const body = {
     test_kind: "t3_qv_sweep",
     targets: [target], operator: "operator", authKey,
@@ -9080,19 +9500,59 @@ async function _onT3Start() {
       sample_period_s: 2,
     },
   };
-  const r = await fetch("/api/compliance/run/start", {
+  setStatus("Starting…");
+  const resp = await fetch("/api/compliance/run/start", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
-  if (!r.ok) { showToast(r.error || "Start failed.", "err", 5000); return; }
+  }).catch(e => ({ ok: false, status: 0, _err: e.message }));
+  if (resp.status === 403) clearBulkAuthCache();
+  const r = resp.json ? await resp.json().catch(() => ({ ok: false, error: resp._err || "parse error" })) : resp;
+  if (!r.ok) {
+    setStatus(`✗ Start failed: ${r.error || "unknown error"}`);
+    showToast(r.error || "Start failed.", "err", 5000);
+    return;
+  }
+  const t3StartedAt = Date.now();
+  const t3DurationSec = sweep.length * (Number($("t3Hold")?.value) || 60);
   $("t3RunId").textContent = r.run_id;
-  $("t3Status").textContent = "Running…";
+  $("t3Status").textContent = "Running — driving phi-tangent setpoints…";
   $("t3Start").disabled = true;
   $("t3Abort").disabled = false;
   $("t3StepLog").innerHTML = "";
-  _watchComplianceRun(r.run_id, (status, summary, steps) => {
-    $("t3Status").textContent = status;
+  $("t3LiveFeedBody").innerHTML = `<tr class="cmp-live-feed-empty"><td colspan="6">Waiting for first sample…</td></tr>`;
+  _watchComplianceRun(r.run_id, (status, summary, steps, live) => {
+    const tail = (live?.samples_tail) || [];
+    const sampleTotal = live?.sample_count_total ?? 0;
+    const lastSampleTs = tail.length > 0 ? Number(tail[tail.length - 1].ts_ms) : null;
+    if (status === "running") {
+      $("t3Status").textContent = sampleTotal > 0
+        ? `Running — step ${(steps?.length || 0)}/${sweep.length}, ${sampleTotal} samples`
+        : "Running — waiting for first frame…";
+    } else {
+      $("t3Status").textContent = status;
+    }
+    _updateComplianceProgress("t3", t3StartedAt, t3DurationSec, sampleTotal, lastSampleTs);
+    _renderComplianceLiveFeed("t3LiveFeedBody", tail, "t3");
     if (summary) {
       $("t3StepResult").textContent = `${summary.passes ?? 0} / ${(summary.passes ?? 0) + (summary.fails ?? 0)}`;
+    }
+    // Live PF — derived from cosphi or P+Q on the most recent samples.
+    // Lets operator see the inverter responding to phi_tangent writes
+    // instead of staring at a blank "Last observed" until step end.
+    if (status === "running" && tail.length > 0) {
+      const pfs = tail.map(s => {
+        const cp = Number(s.cosphi);
+        if (Number.isFinite(cp) && Math.abs(cp) >= 0.5 && Math.abs(cp) <= 1.0) return Math.abs(cp);
+        const p = Number(s.pac_w), q = Number(s.qac_var);
+        if (Number.isFinite(p) && Number.isFinite(q)) {
+          const sApp = Math.sqrt(p * p + q * q);
+          if (sApp >= 1) return Math.abs(p) / sApp;
+        }
+        return null;
+      }).filter(v => v != null);
+      if (pfs.length > 0) {
+        const mean = pfs.reduce((a, b) => a + b, 0) / pfs.length;
+        $("t3LastObserved").textContent = "PF ≈ " + mean.toFixed(3) + ` (live, n=${live.sample_count_total})`;
+      }
     }
     if (steps && steps.length) {
       const last = steps[steps.length - 1];
@@ -9111,7 +9571,7 @@ async function _onT3Start() {
           </div>`).join("");
       }
     }
-    if (status === "completed" || status === "failed" || status === "aborted") {
+    if (status === "completed" || status === "completed_with_warnings" || status === "failed" || status === "aborted") {
       $("t3Start").disabled = !GridControlUI?.enabled;
       $("t3Abort").disabled = true;
     }
@@ -9137,10 +9597,22 @@ function buildComplianceT5Pane() {
           <div class="cmp-panel-sub">Drives the configured ramp via cmd-3 setpoint writes, holds each plateau, and records observed PAC vs target. Pass per node = steady-state error ≤ ±2 % of target. Inverter is restored to 100 % on completion or abort.</div>
         </div>
       </div>
+
+      <details class="cmp-howto" data-cmp-howto="t5">
+        <summary class="cmp-howto-title">How this test works</summary>
+        <ol class="cmp-howto-steps">
+          <li><b>Pick the node</b>, then enter <b>Ramp</b> (% setpoints comma-sep), <b>Hold</b> seconds per step, and tolerance.</li>
+          <li><b>Press Run sweep.</b> Each step writes a new %P setpoint (cmd 3 → holding 41006), waits the settle window, then averages observed PAC over the remainder of the hold.</li>
+          <li><b>Watch the Live observation panel.</b> P (kW) and Iac (A) tick every 3 s — operator sees the inverter ramp track the setpoint mid-hold instead of waiting for step end.</li>
+          <li><b>On completion or abort</b>, the runner writes 100 % to every target so the plant is never left curtailed. Status <i>completed_with_warnings</i> means that restore failed — verify on the APC tab.</li>
+        </ol>
+        <div class="cmp-howto-note">PAC tracks setpoint with a 30 s settle window per the NGCP §2.5 acceptance criterion. Steady-state error must be within ±tolerance %.</div>
+      </details>
+
       ${_complianceTargetSelectorMarkup("t5")}
       <div class="cmp-target-row">
         <label class="cmp-label" for="t5Ramp">Ramp (% comma-sep)</label>
-        <input id="t5Ramp" type="text" value="100,75,50,25,75,100" class="cmp-text cmp-text-wide" />
+        <input id="t5Ramp" type="text" value="100,75,50,25,75,100" class="cmp-text cmp-text-flex" />
         <label class="cmp-label" for="t5Hold">Hold (s/step)</label>
         <input id="t5Hold" type="number" min="30" max="900" step="10" value="120" class="cmp-num" />
         <label class="cmp-label" for="t5Settle">Settle (s)</label>
@@ -9153,12 +9625,37 @@ function buildComplianceT5Pane() {
         <button id="t5Abort" class="btn btn-xs" type="button" disabled>Abort</button>
         <span class="cmp-status" id="t5Status">Idle.</span>
       </div>
+      <div class="cmp-progress" id="t5ProgressWrap" hidden>
+        <div class="cmp-progress-bar"><div class="cmp-progress-fill" id="t5ProgressFill"></div></div>
+        <div class="cmp-progress-meta">
+          <span id="t5ProgressElapsed">0:00 elapsed</span>
+          <span id="t5ProgressRemaining">— remaining</span>
+          <span id="t5ProgressLastTick">—</span>
+        </div>
+      </div>
       <div class="cmp-results">
         <div class="cmp-result-row"><span>Run ID</span><b id="t5RunId">—</b></div>
         <div class="cmp-result-row"><span>Steps pass / fail</span><b id="t5StepResult">—</b></div>
         <div class="cmp-result-row"><span>Last achieved %</span><b id="t5LastAchieved">—</b></div>
       </div>
       <div class="cmp-step-log" id="t5StepLog"></div>
+
+      <div class="cmp-live-feed">
+        <div class="cmp-live-feed-head">
+          <span class="cmp-live-feed-title">Live observation feed</span>
+          <span class="cmp-live-feed-sub" id="t5LiveSub">Last 20 samples — refreshes every 3 s</span>
+        </div>
+        <div class="cmp-live-feed-table-wrap">
+          <table class="cmp-live-feed-table">
+            <thead>
+              <tr><th>Time</th><th>P (kW)</th><th>—</th><th>State</th><th>Alarm bits</th><th>Iac avg</th></tr>
+            </thead>
+            <tbody id="t5LiveFeedBody">
+              <tr class="cmp-live-feed-empty"><td colspan="6">No samples yet. Press Run sweep.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>`;
   setTimeout(() => {
     $("t5Start")?.addEventListener("click", _onT5Start);
@@ -9168,13 +9665,29 @@ function buildComplianceT5Pane() {
 }
 
 async function _onT5Start() {
+  const setStatus = (msg) => { const el = $("t5Status"); if (el) el.textContent = msg; };
   const target = _readComplianceTarget("t5");
-  if (!target) { showToast("Pick a valid inverter # / slave.", 3000); return; }
+  if (!target) {
+    const inv = $("t5Inv")?.value || "?";
+    const ipMap = State?.ipConfig?.inverters || {};
+    const ipForInv = ipMap[Number(inv)] || ipMap[String(inv)] || "(none)";
+    setStatus(`✗ No IP for inverter #${inv} — IP Config has "${ipForInv}". Fix the IP Config or type the IP manually.`);
+    showToast("Pick a valid inverter # / slave.", 3000);
+    return;
+  }
   const rampStr = String($("t5Ramp")?.value || "");
   const ramp = rampStr.split(",").map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n >= 0 && n <= 100);
-  if (ramp.length < 2) { showToast("Ramp must contain at least 2 setpoints.", 3000); return; }
-  const authKey = _bulkAuthForCompliance();
-  if (!authKey) { showToast("Cancelled.", 1500); return; }
+  if (ramp.length < 2) {
+    setStatus("✗ Ramp needs ≥ 2 setpoints (e.g. \"100,75,50,75,100\").");
+    showToast("Ramp must contain at least 2 setpoints.", 3000);
+    return;
+  }
+  const authKey = await _bulkAuthForCompliance("Start T5 APC sweep on", `inverter ${target.inverter} slave ${target.slave}`);
+  if (!authKey) {
+    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    showToast("Cancelled.", 1500);
+    return;
+  }
   const body = {
     test_kind: "t5_apc_sweep",
     targets: [target], operator: "operator", authKey,
@@ -9186,19 +9699,54 @@ async function _onT5Start() {
       sample_period_s: 2,
     },
   };
-  const r = await fetch("/api/compliance/run/start", {
+  setStatus("Starting…");
+  const resp = await fetch("/api/compliance/run/start", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
-  if (!r.ok) { showToast(r.error || "Start failed.", 4000); return; }
+  }).catch(e => ({ ok: false, status: 0, _err: e.message }));
+  if (resp.status === 403) clearBulkAuthCache();
+  const r = resp.json ? await resp.json().catch(() => ({ ok: false, error: resp._err || "parse error" })) : resp;
+  if (!r.ok) {
+    setStatus(`✗ Start failed: ${r.error || "unknown error"}`);
+    showToast(r.error || "Start failed.", 4000);
+    return;
+  }
+  const t5StartedAt = Date.now();
+  const t5DurationSec = ramp.length * (Number($("t5Hold")?.value) || 120);
   $("t5RunId").textContent = r.run_id;
-  $("t5Status").textContent = "Running…";
+  $("t5Status").textContent = "Running — driving setpoint ramp…";
   $("t5Start").disabled = true;
   $("t5Abort").disabled = false;
   $("t5StepLog").innerHTML = "";
-  _watchComplianceRun(r.run_id, (status, summary, steps) => {
-    $("t5Status").textContent = status;
+  $("t5LiveFeedBody").innerHTML = `<tr class="cmp-live-feed-empty"><td colspan="6">Waiting for first sample…</td></tr>`;
+  _watchComplianceRun(r.run_id, (status, summary, steps, live) => {
+    const tail = (live?.samples_tail) || [];
+    const sampleTotal = live?.sample_count_total ?? 0;
+    const lastSampleTs = tail.length > 0 ? Number(tail[tail.length - 1].ts_ms) : null;
+    if (status === "running") {
+      $("t5Status").textContent = sampleTotal > 0
+        ? `Running — step ${(steps?.length || 0)}/${ramp.length}, ${sampleTotal} samples`
+        : "Running — waiting for first frame…";
+    } else {
+      $("t5Status").textContent = status;
+    }
+    _updateComplianceProgress("t5", t5StartedAt, t5DurationSec, sampleTotal, lastSampleTs);
+    _renderComplianceLiveFeed("t5LiveFeedBody", tail, "t5");
     if (summary) {
       $("t5StepResult").textContent = `${summary.passes ?? 0} / ${(summary.passes ?? 0) + (summary.fails ?? 0)}`;
+    }
+    // Live achieved-% — mean of pac_w in the recent tail relative to rated
+    // 244.25 kW per node. Lets operator confirm the setpoint took effect
+    // mid-hold instead of waiting for endStep() to compute the final value.
+    if (status === "running" && tail.length > 0) {
+      const watts = tail.map(s => Number(s.pac_w)).filter(v => Number.isFinite(v));
+      if (watts.length > 0) {
+        const meanW = watts.reduce((a, b) => a + b, 0) / watts.length;
+        const ratedW = 244.25 * 1000 * (target ? 1 : 0);
+        if (ratedW > 0) {
+          const pct = (meanW / ratedW) * 100;
+          $("t5LastAchieved").textContent = pct.toFixed(2) + ` % (live, n=${live.sample_count_total})`;
+        }
+      }
     }
     if (steps && steps.length) {
       const last = steps[steps.length - 1];
@@ -9215,7 +9763,7 @@ async function _onT5Start() {
           </div>`).join("");
       }
     }
-    if (status === "completed" || status === "failed" || status === "aborted") {
+    if (status === "completed" || status === "completed_with_warnings" || status === "failed" || status === "aborted") {
       $("t5Start").disabled = false;
       $("t5Abort").disabled = true;
     }
@@ -9240,13 +9788,13 @@ function buildComplianceReportsPane() {
       <div class="cmp-panel-head">
         <div>
           <div class="cmp-panel-title">Compliance Reports</div>
-          <div class="cmp-panel-sub">Past test runs are persisted to <code>compliance_run</code>. Generate the CSV evidence bundle on demand; PDF is available for completed runs (uses puppeteer; takes a few seconds).</div>
+          <div class="cmp-panel-sub">Past test runs. <b>Excel</b> = three-sheet workbook (Run Info / Steps / Samples), styled and ready to print. <b>PDF</b> = printable witness report (takes a few seconds).</div>
         </div>
-        <button id="cmpReportsRefresh" class="btn btn-xs" type="button">Refresh</button>
+        <button id="cmpReportsRefresh" class="btn btn-xs" type="button" title="Refresh the run history from the database.">↻ Refresh</button>
       </div>
       <table class="cmp-runs-table">
         <thead>
-          <tr><th>Started</th><th>Test</th><th>Status</th><th>Operator</th><th>Run ID</th><th>Actions</th></tr>
+          <tr><th>Started</th><th>Test</th><th>Status</th><th>Operator</th><th>Run ID</th><th class="cmp-actions-col">Export</th></tr>
         </thead>
         <tbody id="cmpRunsBody"><tr><td colspan="6" class="cmp-empty">Loading…</td></tr></tbody>
       </table>
@@ -9257,42 +9805,80 @@ function buildComplianceReportsPane() {
   return pane;
 }
 
+// Friendly labels for the Test column so operators don't read raw enum values.
+const _CMP_TEST_LABELS = {
+  t2_freq_withstand: "T2 Freq Withstand",
+  t3_qv_sweep:       "T3 Q-V Sweep",
+  t5_apc_sweep:      "T5 APC Sweep",
+};
+
 async function refreshComplianceReports() {
   const r = await fetch("/api/compliance/runs?limit=50").then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
   const body = $("cmpRunsBody");
   if (!body) return;
   if (!r.ok) { body.innerHTML = `<tr><td colspan="6" class="cmp-empty">${r.error || "Load failed."}</td></tr>`; return; }
   if (!r.runs || r.runs.length === 0) {
-    body.innerHTML = `<tr><td colspan="6" class="cmp-empty">No runs yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="cmp-empty">No runs yet. Start one from the T2 / T3 / T5 tab.</td></tr>`;
     return;
   }
-  body.innerHTML = r.runs.map(run => `
-    <tr data-run-id="${run.run_id}">
-      <td>${new Date(run.started_at_ms).toLocaleString()}</td>
-      <td>${run.test_kind}</td>
-      <td class="cmp-status-cell cmp-status-${run.status}">${run.status}</td>
-      <td>${run.operator_actor || "—"}</td>
-      <td><code>${run.run_id}</code></td>
-      <td>
-        <button class="btn btn-xs cmp-csv" data-run-id="${run.run_id}">CSV</button>
-        <button class="btn btn-xs cmp-pdf" data-run-id="${run.run_id}">PDF</button>
-      </td>
-    </tr>
-  `).join("");
-  body.querySelectorAll(".cmp-csv").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "csv")));
-  body.querySelectorAll(".cmp-pdf").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "both")));
+  body.innerHTML = r.runs.map(run => {
+    const testLbl = _CMP_TEST_LABELS[run.test_kind] || run.test_kind;
+    // PDF only available for runs that ended (completed / completed_with_warnings / failed / aborted).
+    const isTerminal = run.status && run.status !== "running";
+    const pdfTitle = isTerminal ? "Download PDF only" : "Available after the run finishes.";
+    const pdfDis = isTerminal ? "" : " disabled";
+    return `
+      <tr data-run-id="${run.run_id}">
+        <td>${new Date(run.started_at_ms).toLocaleString()}</td>
+        <td>${testLbl}</td>
+        <td class="cmp-status-cell cmp-status-${run.status}">${run.status}</td>
+        <td>${run.operator_actor || "—"}</td>
+        <td><code class="cmp-runid">${run.run_id}</code></td>
+        <td class="cmp-actions-col">
+          <button class="btn btn-xs cmp-xlsx" data-run-id="${run.run_id}" title="Download styled Excel workbook (3 sheets, autofit columns, centered cells).">Excel</button>
+          <button class="btn btn-xs cmp-pdf" data-run-id="${run.run_id}" title="${pdfTitle}"${pdfDis}>PDF</button>
+        </td>
+      </tr>`;
+  }).join("");
+  // v2.11.x — Excel button replaces the legacy CSV button. CSV is messy in
+  // Excel (single sheet, no styling, "section" column noise) — XLSX gives
+  // the three-sheet workbook operators expect for witness handover. CSV is
+  // still reachable via the API for external scripts.
+  body.querySelectorAll(".cmp-xlsx").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "xlsx")));
+  // PDF button passes "pdf" (was "both") so the user gets only the PDF
+  // artifact instead of CSV+PDF on every PDF click.
+  body.querySelectorAll(".cmp-pdf").forEach(b => b.addEventListener("click", () => _onComplianceReportClick(b.dataset.runId, "pdf")));
 }
 
 async function _onComplianceReportClick(runId, format) {
-  const r = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/report`, {
+  // Both endpoints (POST /report to generate, GET /artifact to download)
+  // are gated by isAuthorizedPlantWideControl — without authKey/authToken
+  // the server returns 403 "Unauthorized." Run the same auth flow as every
+  // other privileged action so the operator sees the confirm + (optional)
+  // auth modal once per hour.
+  const kindLabel = format === "both" ? "PDF + CSV"
+                  : format === "pdf"  ? "PDF"
+                  : format === "xlsx" ? "Excel"
+                  : "CSV";
+  const authKey = await _bulkAuthForCompliance(`Generate ${kindLabel} report for`, `run ${String(runId).slice(0, 16)}`);
+  if (!authKey) {
+    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    return;
+  }
+  const resp = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/report`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ format }),
-  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+    body: JSON.stringify({ format, authKey, operator: "operator" }),
+  }).catch(e => ({ ok: false, status: 0, _err: e.message }));
+  if (resp.status === 403) clearBulkAuthCache();
+  const r = resp.json ? await resp.json().catch(() => ({ ok: false, error: resp._err || "parse error" })) : resp;
   if (!r.ok) { showToast(r.error || "Report failed.", 4000); return; }
-  // Auto-download the artifact(s).
+  // Auto-download the artifact(s). The GET endpoint accepts authKey as a
+  // query-string param so we can use a plain <a href> without an XHR.
   for (const a of (r.artifacts || [])) {
     if (a.error) { showToast(`${a.kind}: ${a.error}`, 4000); continue; }
-    const url = `/api/compliance/run/${encodeURIComponent(runId)}/artifact?kind=${a.kind}`;
+    const url = `/api/compliance/run/${encodeURIComponent(runId)}/artifact`
+              + `?kind=${encodeURIComponent(a.kind)}`
+              + `&authKey=${encodeURIComponent(authKey)}`;
     const link = document.createElement("a");
     link.href = url;
     link.download = "";
@@ -9306,13 +9892,23 @@ function _watchComplianceRun(runId, onUpdate) {
   if (_compliancePollers[runId]) clearInterval(_compliancePollers[runId]);
   const tick = async () => {
     try {
-      const r = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/status`).then(r => r.json());
+      const r = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/status?tail=20`).then(r => r.json());
       if (!r.ok) return;
       const status = r.run?.status || r.live_status || "running";
       let summary = null;
       try { summary = r.run?.summary_json ? JSON.parse(r.run.summary_json) : null; } catch (_) {}
-      onUpdate(status, summary, r.steps || []);
-      if (status === "completed" || status === "failed" || status === "aborted") {
+      // v2.11.x — pass live observation context to per-test watchers so the
+      // operator sees telemetry flowing during a 30-min run instead of staring
+      // at "Running…" with no progress signal until finalize() fires.
+      const live = {
+        sample_count_pending_flush: Number(r.sample_count_pending_flush || 0),
+        sample_count_persisted:     Number(r.sample_count_persisted || 0),
+        sample_count_total:         Number(r.sample_count_total || 0),
+        sample_dropped:             Number(r.sample_dropped || 0),
+        samples_tail:               Array.isArray(r.samples_tail) ? r.samples_tail : [],
+      };
+      onUpdate(status, summary, r.steps || [], live);
+      if (status === "completed" || status === "completed_with_warnings" || status === "failed" || status === "aborted") {
         clearInterval(_compliancePollers[runId]);
         delete _compliancePollers[runId];
       }
@@ -9323,7 +9919,7 @@ function _watchComplianceRun(runId, onUpdate) {
 }
 
 async function _abortComplianceRun(runId) {
-  const authKey = _bulkAuthForCompliance();
+  const authKey = await _bulkAuthForCompliance("Abort", `compliance run ${runId}`);
   if (!authKey) return;
   await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/abort`, {
     method: "POST", headers: { "content-type": "application/json" },
@@ -9438,7 +10034,6 @@ async function submitApcApply() {
   const ipSel = $("apcIpSel");
   const nodeSel = $("apcNodeSel");
   const pctInp = $("apcPctInp");
-  const auth = ($("apcAuthInp") || {}).value || "";
   let target_pct = pctInp ? Number(pctInp.value) : 100;
   if (!Number.isFinite(target_pct)) target_pct = 100;
   target_pct = Math.max(0, Math.min(100, Math.round(target_pct)));
@@ -9465,8 +10060,23 @@ async function submitApcApply() {
       getConfiguredUnits(n, 4).forEach((u) => targets.push({ ip, slave: u }));
     }
     if (target_pct < 5) {
-      if (!window.confirm(`Setting plant to ${target_pct}% is very low. Confirm?`)) return;
+      const ok = await appConfirm(
+        "Very low plant setpoint",
+        `Setting the entire plant to ${target_pct} % will curtail almost all generation. Continue?`,
+        { ok: `Apply ${target_pct}%`, cancel: "Cancel" },
+      );
+      if (!ok) return;
     }
+  }
+  // Auth modal — same flow as compliance/MW Cap. Cached for the session
+  // after first use, so subsequent Applies skip the prompt automatically.
+  const auth = await _bulkAuthForCompliance(
+    `Apply ${target_pct}% setpoint to`,
+    scope === "plant" ? "the entire plant" : `${targets.length} target node(s)`,
+  );
+  if (!auth) {
+    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    return;
   }
   const btn = $("apcApplyBtn");
   if (btn) btn.disabled = true;
@@ -9477,7 +10087,10 @@ async function submitApcApply() {
       body: JSON.stringify({ scope, targets, target_pct, authKey: auth }),
     });
     const data = await r.json();
-    if (r.status === 409) {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+    } else if (r.status === 409) {
       showToast(data.error || "MW Cap sequencer is active — release it first on the MW Cap tab.", "warn", 6000);
     } else if (!r.ok || !data.ok) {
       showToast(data.error || "Apply failed.", "err", 6000);
@@ -9500,7 +10113,6 @@ async function submitApcOp(opcode) {
   const scope = scopeEl ? scopeEl.value : "node";
   const ipSel = $("apcIpSel");
   const nodeSel = $("apcNodeSel");
-  const auth = ($("apcAuthInp") || {}).value || "";
   const inv = Number(ipSel?.value);
   const ip = getConfiguredInverterIp(inv);
   let targets = [];
@@ -9514,8 +10126,20 @@ async function submitApcOp(opcode) {
       getConfiguredUnits(n, 4).forEach((u) => targets.push({ ip: plantIp, slave: u }));
     }
     if (opcode === "stop") {
-      const phrase = window.prompt('Type "STOP ALL INVERTERS" to confirm a plant-wide STOP:');
-      if (phrase !== "STOP ALL INVERTERS") { showToast("Plant-wide STOP cancelled.", "warn"); return; }
+      // window.prompt() is silently disabled in Electron (returns null) — every
+      // plant-wide STOP would be auto-cancelled if we used it. Route the
+      // safety phrase through the in-app appPrompt modal instead. The check
+      // is case-sensitive and trims whitespace so a stray space doesn't
+      // green-light the action.
+      const phrase = await appPrompt(
+        "Confirm plant-wide STOP",
+        'Type "STOP ALL INVERTERS" exactly to confirm. This stops every configured node.',
+        { placeholder: "STOP ALL INVERTERS" },
+      );
+      if (String(phrase || "").trim() !== "STOP ALL INVERTERS") {
+        showToast("Plant-wide STOP cancelled.", "warn");
+        return;
+      }
     }
   } else if (scope === "inverter") {
     if (!ip) { showToast("Select a valid inverter first.", "warn"); return; }
@@ -9543,6 +10167,15 @@ async function submitApcOp(opcode) {
       return;
     }
   }
+  const opLabel = opcode === "stop" ? "STOP" : "START";
+  const auth = await _bulkAuthForCompliance(
+    `${opLabel} on`,
+    scope === "plant" ? "the entire plant" : `${targets.length} target node(s)`,
+  );
+  if (!auth) {
+    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    return;
+  }
   const btn = opcode === "stop" ? $("apcStopBtn") : $("apcStartBtn");
   if (btn) btn.disabled = true;
   try {
@@ -9552,7 +10185,10 @@ async function submitApcOp(opcode) {
       body: JSON.stringify({ scope, targets, target_pct: null, opcode, authKey: auth }),
     });
     const data = await r.json();
-    if (r.status === 409 && data?.reason === "no_prior_setpoint") {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+    } else if (r.status === 409 && data?.reason === "no_prior_setpoint") {
       showToast(data.error || "START blocked: no prior %P setpoint.", "warn", 7000);
     } else if (!r.ok || !data.ok) {
       showToast(data.error || `${opcode} failed.`, "err", 6000);
@@ -9568,7 +10204,11 @@ async function submitApcOp(opcode) {
 }
 
 async function submitApcAbort(jobId) {
-  const auth = ($("apcAuthInp") || {}).value || "";
+  const auth = await _bulkAuthForCompliance("Abort %P ramp", `job ${String(jobId || "").slice(0, 8)}`);
+  if (!auth) {
+    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    return;
+  }
   try {
     const r = await fetch(`/api/plant-cap/setpoint/abort/${jobId}`, {
       method: "POST",
@@ -9576,7 +10216,10 @@ async function submitApcAbort(jobId) {
       body: JSON.stringify({ authKey: auth }),
     });
     const data = await r.json();
-    if (!r.ok || !data.ok) {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+    } else if (!r.ok || !data.ok) {
       showToast(data.error || "Abort failed.", "err");
     } else {
       showToast("Ramp aborted.", "warn", 4000);
@@ -9624,7 +10267,6 @@ function _apcSyncScopeUi() {
   const nodeCurrent = $("apcNodeCurrent");
   const nodesInfo = $("apcNodesInfo");
   const plantInfo = $("apcPlantInfo");
-  const authInp = $("apcAuthInp");
   const isPlant = scope === "plant";
   const isInverter = scope === "inverter";
   if (ipSel) ipSel.hidden = isPlant;
@@ -9646,9 +10288,6 @@ function _apcSyncScopeUi() {
       const totalNodes = invNums.reduce((s, n) => s + getConfiguredUnits(n, 4).length, 0);
       plantInfo.textContent = `${invNums.length} inverters, ${totalNodes} nodes`;
     }
-  }
-  if (authInp) {
-    authInp.placeholder = isPlant ? "sacupsMM (plant-wide key)" : "sacupsMM auth key";
   }
 }
 
@@ -9721,10 +10360,13 @@ function buildApcPane() {
           </div>
         </div>
 
-        <div class="apc-field">
-          <label class="apc-field-lbl" for="apcAuthInp">Authorization</label>
-          <input id="apcAuthInp" class="inp" type="password" placeholder="sacupsMM auth key" autocomplete="off"
-            title="Enter the sacupsMM bulk auth key (sacups + current or previous minute, e.g. sacups07)">
+        <div class="apc-field apc-field-auth-note">
+          <span class="apc-field-lbl">Authorization</span>
+          <span class="apc-auth-note">
+            Click STOP / START / Apply Setpoint and you'll be prompted for the
+            <code>sacupsMM</code> key. Same modal as the rest of the dashboard;
+            cached for the session after the first use.
+          </span>
         </div>
       </div>
 
@@ -10132,7 +10774,12 @@ async function submitGridControlDisable() {
   const t = _gcResolveTarget();
   const auth = ($("gcAuthInp") || {}).value || "";
   if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
-  if (!window.confirm(`Disable reactive control on ${t.ip} slave ${t.slave}? This restores the inverter's default PF behavior.`)) return;
+  const ok = await appConfirm(
+    "Disable reactive control?",
+    `${t.ip} slave ${t.slave} — this restores the inverter's default PF behavior (cmd 11).`,
+    { ok: "Disable reactive", cancel: "Cancel" },
+  );
+  if (!ok) return;
   const btn = $("gcDisableBtn"); if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/grid-control/disable", {
@@ -12113,7 +12760,10 @@ function countPlantCapTargetsFromPreview(previewRaw) {
 
 async function refreshPlantCapStatus(silent = true) {
   try {
-    const data = await api("/api/plant-cap/status");
+    // Cache-bust per project_refresh_button_cache_bust.md — manual Refresh
+    // clicks must bypass any ETag/304 so the operator sees authoritative
+    // post-action state, not a stale 304 response from a prior poll.
+    const data = await api(`/api/plant-cap/status?_t=${Date.now()}`);
     applyPlantCapStatusClient(data.status || null, { preservePreview: true });
     return data.status || null;
   } catch (err) {
@@ -12302,7 +12952,10 @@ async function releasePlantCapControl() {
 // ─── Cap Schedule Management ──────────────────────────────────────────────────
 async function loadCapScheduleStatus() {
   try {
-    const data = await api("/api/plant-cap/schedule-status");
+    // Cache-bust — schedule remarks change as schedules fire/expire and a
+    // 304 here would freeze the schedule UI on the prior tick. See memory
+    // project_refresh_button_cache_bust.md.
+    const data = await api(`/api/plant-cap/schedule-status?_t=${Date.now()}`);
     State.capSchedules.schedules = Array.isArray(data.schedules) ? data.schedules : [];
     State.capSchedules.remarks   = Array.isArray(data.remarks)   ? data.remarks   : [];
     renderCapScheduleSection();
@@ -15784,6 +16437,10 @@ async function loadIpConfig() {
     // refresh its inverter/node dropdowns now that we have real data.
     if (typeof populateApcIpSelector === "function" && document.getElementById("apcIpSel")) {
       try { populateApcIpSelector(); } catch (_) {}
+    }
+    // Compliance grid-test panes (T2/T3/T5) — same dropdown pattern as %P.
+    if (typeof _populateAllComplianceTargetSelectors === "function") {
+      try { _populateAllComplianceTargetSelectors(); } catch (_) {}
     }
   } catch (e) {
     console.warn("[IPCONFIG] load failed:", e.message);
@@ -24549,11 +25206,13 @@ function renderIgbtFleetTable(nodes) {
       empty.className = "igbt-empty-state";
       empty.innerHTML = `
         <span class="mdi mdi-clipboard-pulse-outline" aria-hidden="true"></span>
-        <div class="igbt-empty-title">No fleet data yet</div>
+        <div class="igbt-empty-title">No nodes to score</div>
         <div class="igbt-empty-copy">
-          Health scores will appear once stop-reason history accumulates. Trigger a manual capture in
-          <strong>Settings → Stop Reasons → Refresh now</strong> for any inverter, or wait for the next
-          FRAMA / thermal / PI&nbsp;ANA event to be recorded.
+          The fleet endpoint returned zero nodes — usually that means no inverters
+          have an IP set in <strong>Settings → IP Configuration</strong>, or every
+          configured slot was filtered out. Health scores are computed for every
+          configured node regardless of stop-reason history (a fresh node simply
+          scores 0 / Healthy until an event is recorded).
         </div>
       `;
       wrapper.appendChild(empty);
@@ -24727,7 +25386,7 @@ async function renderDrilldownPanel(inverter, slave) {
     if (bodyEl) {
       bodyEl.innerHTML = `
         <!-- Score Section -->
-        <div class="igbt-detail-section">
+        <div class="igbt-detail-section igbt-detail-score">
           <div class="igbt-detail-row score-row">
             <div class="igbt-detail-value score-value">
               ${(node.health_score || 0).toFixed(1)}
@@ -24756,7 +25415,7 @@ async function renderDrilldownPanel(inverter, slave) {
                 </div>
               `).join("")}
             </div>
-          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+          ` : `<div class="igbt-detail-empty">No events recorded in this window.</div>`}
         </div>
 
         <!-- FRAMA Component -->
@@ -24779,7 +25438,7 @@ async function renderDrilldownPanel(inverter, slave) {
                 </div>
               `).join("")}
             </div>
-          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+          ` : `<div class="igbt-detail-empty">No events recorded in this window.</div>`}
         </div>
 
         <!-- PI Ana Component -->
@@ -24802,7 +25461,7 @@ async function renderDrilldownPanel(inverter, slave) {
                 </div>
               `).join("")}
             </div>
-          ` : `<div style="padding: 8px; color: var(--text3); font-size: 11px;">No events</div>`}
+          ` : `<div class="igbt-detail-empty">No events recorded in this window.</div>`}
         </div>
 
         <!-- Imbalance Component -->

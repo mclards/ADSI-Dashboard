@@ -116,8 +116,14 @@ function run() {
   });
 
   // ────────────────────────────────────────────────────────────────
-  // Test 2: Slow fields absent → default to null or 0
+  // Test 2: Slow fields absent → default to null (slow-poll-only) or 0 (alarms/analog)
   // ────────────────────────────────────────────────────────────────
+  // CRITICAL: slow-poll-only fields MUST default to null, never 0. The
+  // dailyAggregator's "store last seen" semantics treat 0 as a real value,
+  // so a 0 default would let every fast-poll frame overwrite the merged
+  // slow-poll value with 0 (audited by scripts/audit-params-coverage.js
+  // 2026-05-11). Only fields that are bitwise-OR-aggregated (alarms_*) or
+  // truly fast-poll-sourced (analog_in_*, pt100_*) keep the 0 default.
   test("parseRow: slow fields absent → defaults to null or 0", () => {
     const row = makeRow({
       // No slow fields
@@ -127,22 +133,26 @@ function run() {
     const result = parseRow(row, identity);
     assert(result !== null, "parseRow returned null");
 
-    // Signed fields should be null (falsy)
+    // Slow-poll-only fields must be null (bitwise-OR aggregator wouldn't
+    // protect them; null is the only correct sentinel).
     assert.strictEqual(result.qac_var, null);
     assert.strictEqual(result.tempint_c, null);
+    assert.strictEqual(result.zpos_kohm, null);
+    assert.strictEqual(result.zneg_kohm, null);
+    assert.strictEqual(result.inverter_state_raw, null);
+    assert.strictEqual(result.vpv_n_v, null);
+    assert.strictEqual(result.vpv_p_v, null);
+    assert.strictEqual(result.nominal_power_w, null);
+    assert.strictEqual(result.time_to_connect_s, null);
+    assert.strictEqual(result.time_to_connect_total_s, null);
+    assert.strictEqual(result.power_reduction_bits, null);
 
-    // UInt16 fields default to 0
+    // Bitwise-OR aggregated alarm fields stay at 0 (idempotent: x | 0 = x).
     assert.strictEqual(result.alarms_inst_32, 0);
     assert.strictEqual(result.alarms_maint_32, 0);
-    assert.strictEqual(result.zpos_kohm, 0);
-    assert.strictEqual(result.zneg_kohm, 0);
-    assert.strictEqual(result.inverter_state_raw, 0);
-    assert.strictEqual(result.vpv_n_v, 0);
-    assert.strictEqual(result.vpv_p_v, 0);
-    assert.strictEqual(result.nominal_power_w, 0);
-    assert.strictEqual(result.time_to_connect_s, 0);
-    assert.strictEqual(result.time_to_connect_total_s, 0);
-    assert.strictEqual(result.power_reduction_bits, 0);
+
+    // Fast-poll-sourced AAP0016 fields stay at 0 (inverter reports 0 when
+    // no probe is wired — that IS the correct value).
     assert.strictEqual(result.analog_in_1, 0);
     assert.strictEqual(result.analog_in_2, 0);
     assert.strictEqual(result.analog_in_3, 0);
@@ -169,7 +179,7 @@ function run() {
     assert.strictEqual(result.qac_var, -50);
     assert.strictEqual(result.zpos_kohm, 52);
     assert.strictEqual(result.tempint_c, null);
-    assert.strictEqual(result.zneg_kohm, 0); // default
+    assert.strictEqual(result.zneg_kohm, null); // default for slow-poll-only field
   });
 
   // ────────────────────────────────────────────────────────────────
@@ -239,10 +249,14 @@ function run() {
   // ────────────────────────────────────────────────────────────────
   // Test 7: Zero values for slow fields (offline inverter)
   // ────────────────────────────────────────────────────────────────
-  test("parseRow: zero values → qac_var null, others zero", () => {
+  test("parseRow: zero values from explicit slow-poll → preserved as 0", () => {
+    // When slow-poll explicitly delivers 0 (e.g. inverter just connected, so
+    // time_to_connect_s = 0), parseRow preserves it. Only qac_var and
+    // tempint_c apply the "0 → null" offline-marker convention because the
+    // Python decoder uses 0 as a sentinel for those signed fields specifically.
     const row = makeRow({
-      qac_var: 0, // Offline — should become null
-      tempint_c: 0, // Offline — should become null
+      qac_var: 0, // Python sentinel — should become null
+      tempint_c: 0, // Python sentinel — should become null
       zpos_kohm: 0,
       zneg_kohm: 0,
       vpv_n_v: 0,
@@ -253,11 +267,12 @@ function run() {
     const result = parseRow(row, identity);
     assert(result !== null, "parseRow returned null");
 
-    // Signed fields with 0 should be null (offline marker)
+    // qac_var / tempint_c apply the 0 → null Python sentinel
     assert.strictEqual(result.qac_var, null);
     assert.strictEqual(result.tempint_c, null);
 
-    // UInt16 fields with 0 stay 0
+    // Other fields preserve explicit 0 values from slow-poll (they only
+    // become null when the field is *absent* from the frame entirely).
     assert.strictEqual(result.zpos_kohm, 0);
     assert.strictEqual(result.vpv_n_v, 0);
   });
@@ -280,10 +295,11 @@ function run() {
     assert.strictEqual(result.vdc, 600);
     assert.strictEqual(result.pac, 50000); // scaled
 
-    // Should have all slow fields defaulted
+    // Should have all slow fields defaulted — slow-poll-only fields null,
+    // bitwise-OR alarm fields 0.
     assert.strictEqual(result.qac_var, null);
     assert.strictEqual(result.alarms_inst_32, 0);
-    assert.strictEqual(result.inverter_state_raw, 0);
+    assert.strictEqual(result.inverter_state_raw, null);
   });
 
   // ────────────────────────────────────────────────────────────────

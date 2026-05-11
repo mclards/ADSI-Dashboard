@@ -287,3 +287,37 @@ test("runQvSweep: no usable PF samples → step pass=null (skipped, not failed)"
   });
   assert.strictEqual(steps[0].pass, null);
 });
+
+test("runQvSweep: restoration failure flips status to completed_with_warnings", async () => {
+  // v2.11.x parity with T5 — when every measured PF step passes BUT the
+  // post-sweep `disableReactive` write fails, the plant is left in a
+  // mid-sweep PF state (NOT default reactive control). Operator MUST see
+  // this as 'completed_with_warnings' rather than a clean 'completed' so
+  // the unsafe end-state isn't masked.
+  const targets = [{ ip: "10.0.0.1", slave: 1 }];
+  const params = {
+    pf_steps: [
+      { pf: 1.00, sign: "0" },
+      { pf: 0.95, sign: "lag" },
+    ],
+    hold_sec: 20, settle_sec: 5, sample_period_s: 2,
+  };
+  const { orch, steps } = makeMockOrch(targets, params);
+  let virtualMs = 0;
+  let currentTargetPf = 1.0;
+  await runQvSweep(orch, {
+    sendPhiTangent: (ip, slave, raw) => {
+      const tan = raw / 32767;
+      currentTargetPf = 1 / Math.sqrt(1 + tan * tan);
+      return true;
+    },
+    disableReactive: () => false, // simulate restore failure
+    sampleNode: () => ({ pac_w: 100000, qac_var: 0, vac_avg_v: 230, cosphi: currentTargetPf }),
+    sleepMs: () => Promise.resolve(),
+    nowFn: () => virtualMs,
+  });
+  assert.strictEqual(orch.finalized.status, "completed_with_warnings",
+    `status must surface restoration failure; got ${orch.finalized.status}`);
+  assert.ok(steps.every(s => s.pass === true),
+    "every measured PF step should still pass independently");
+});

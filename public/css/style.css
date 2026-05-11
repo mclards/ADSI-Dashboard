@@ -5638,7 +5638,7 @@ select.cam-field-input { appearance: auto; }
   font-size: 11px;
   margin-left: 6px;
 }
-.cmp-num, .cmp-text {
+.cmp-num, .cmp-text, .cmp-sel {
   padding: 4px 8px;
   border: 1px solid var(--border2);
   border-radius: 6px;
@@ -5650,7 +5650,19 @@ select.cam-field-input { appearance: auto; }
 .cmp-num { width: 70px; text-align: center; }
 .cmp-text { width: 200px; }
 .cmp-text-wide { width: 240px; }
-.cmp-num:focus, .cmp-text:focus {
+/* v2.11.x — used by long comma-separated lists (T3 PF sweep, T5 ramp) so
+ * the input grows to fill the remaining row width instead of clipping the
+ * value. The 320px min keeps the field visually balanced when the row is
+ * narrow (small viewport / collapsed sidebar); flex-basis: 0 lets it claim
+ * everything left over after the fixed-width labels and number inputs. */
+.cmp-text-flex { flex: 1 1 0; min-width: 320px; max-width: 100%; width: auto; }
+.cmp-sel { min-width: 220px; cursor: pointer; }
+.cmp-text[readonly] {
+  background: color-mix(in srgb, var(--surface2) 85%, var(--bg));
+  color: var(--text2);
+  cursor: default;
+}
+.cmp-num:focus, .cmp-text:focus, .cmp-sel:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
 }
@@ -5719,13 +5731,204 @@ select.cam-field-input { appearance: auto; }
   text-align: left;
 }
 .cmp-runs-table th { color: var(--text2); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; }
-.cmp-runs-table code { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--text2); }
+.cmp-runs-table code, .cmp-runs-table .cmp-runid {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.cmp-actions-col { width: 1%; white-space: nowrap; text-align: right; }
+.cmp-actions-col .btn { min-width: 48px; }
+.cmp-runs-table tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 .cmp-empty { color: var(--text3); text-align: center; padding: 18px; font-size: 12px; }
 .cmp-status-cell { font-weight: 600; }
 .cmp-status-running   { color: var(--accent); }
 .cmp-status-completed { color: var(--green); }
 .cmp-status-failed    { color: var(--red); }
 .cmp-status-aborted   { color: var(--orange); }
+
+/* ─── v2.11.x — How-this-works guide + live observation feed ────────────── */
+/* Rendered as <details>/<summary> so the operator can collapse the prose
+ * once they've read it. The "padding-bottom: 0" / collapsed override below
+ * trims the empty-card look when closed so it reads like a single header row. */
+.cmp-howto {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  font-size: 12px;
+  color: var(--text2);
+}
+.cmp-howto:not([open]) {
+  padding: 8px 14px;
+}
+.cmp-howto-title {
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  color: var(--accent);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+.cmp-howto:not([open]) .cmp-howto-title {
+  margin-bottom: 0;
+}
+/* Hide the default disclosure marker — we draw our own chevron so it
+ * matches the rest of the dashboard's iconography. */
+.cmp-howto-title::-webkit-details-marker { display: none; }
+.cmp-howto-title::marker { content: ""; }
+.cmp-howto-title::before {
+  content: "▸";
+  font-size: 11px;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text2));
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+.cmp-howto[open] .cmp-howto-title::before { transform: rotate(90deg); }
+.cmp-howto-title:hover { color: color-mix(in srgb, var(--accent) 80%, var(--text)); }
+.cmp-howto-title:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.cmp-howto-steps {
+  margin: 0 0 6px 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cmp-howto-steps li { line-height: 1.55; }
+.cmp-howto-steps li b { color: var(--text); }
+.cmp-howto-steps li code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--text);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.cmp-howto-note {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--orange);
+  background: color-mix(in srgb, var(--orange) 8%, var(--bg));
+  color: var(--text2);
+  font-size: 11.5px;
+  border-radius: 0 4px 4px 0;
+}
+
+.cmp-progress {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* The HTML `hidden` attribute should always trump `display: flex` above —
+ * without this rule the progress bar is visible in the Idle layout, which
+ * makes operators think a run is in flight before they've even pressed Start. */
+.cmp-progress[hidden] { display: none !important; }
+.cmp-progress-bar {
+  height: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.cmp-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, var(--green)));
+  transition: width 0.6s ease-out;
+}
+.cmp-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.cmp-progress-tick.fresh { color: var(--green); }
+.cmp-progress-tick.stale { color: var(--orange); }
+
+.cmp-live-feed {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.cmp-live-feed-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+}
+.cmp-live-feed-title {
+  font-weight: 600;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text);
+}
+.cmp-live-feed-sub { font-size: 11px; color: var(--text2); }
+.cmp-live-feed-table-wrap {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.cmp-live-feed-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.cmp-live-feed-table th,
+.cmp-live-feed-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  text-align: left;
+}
+.cmp-live-feed-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text2);
+  font-weight: 600;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  z-index: 1;
+}
+.cmp-live-feed-empty td {
+  text-align: center;
+  color: var(--text3);
+  padding: 16px 8px;
+  font-style: italic;
+}
+.cmp-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.cmp-pill.ok   { background: color-mix(in srgb, var(--green)  20%, transparent); color: var(--green);  border: 1px solid color-mix(in srgb, var(--green)  40%, transparent); }
+.cmp-pill.warn { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 40%, transparent); }
+.cmp-pill.fail { background: color-mix(in srgb, var(--red)    20%, transparent); color: var(--red);    border: 1px solid color-mix(in srgb, var(--red)    40%, transparent); }
 
 /* ─── Active Power Control (APC) panel ──────────────────────────────────── */
 .apc-panel {
@@ -5779,6 +5982,26 @@ select.cam-field-input { appearance: auto; }
   letter-spacing: 0.55px;
   text-transform: uppercase;
   color: var(--text3);
+}
+/* v2.11.x — auth-note row replaces the old hardcoded sacupsMM input. The
+ * field is rendered as plain text so operators see WHY there's no input
+ * (modal pops up on action click) instead of staring at a missing field. */
+.apc-field-auth-note .apc-auth-note {
+  font-size: 11.5px;
+  color: var(--text2);
+  line-height: 1.5;
+  padding: 6px 10px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  border-radius: 0 4px 4px 0;
+}
+.apc-field-auth-note .apc-auth-note code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  color: var(--text);
+  padding: 0 4px;
+  border-radius: 3px;
 }
 
 .apc-scope-row {
@@ -18343,9 +18566,13 @@ body.mode-transition-active {
   background: var(--surface);
   border-left: 1px solid var(--border);
   overflow: hidden;
-  z-index: 5;
+  /* Must sit above the fleet table's sticky <thead> (z-index: 10), otherwise
+     the table column headers bleed through and hide the close ✕ in the panel
+     header. Operator-reported regression 2026-05-11. */
+  z-index: 20;
   width: 40%;
   margin-left: auto;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.35);
 }
 
 #page-igbt-health .igbt-detail-panel:not([hidden]) {
@@ -18364,6 +18591,11 @@ body.mode-transition-active {
   align-items: center;
   justify-content: space-between;
   background: linear-gradient(180deg, var(--surface2) 0%, var(--surface) 100%);
+  /* Sticky inside the panel column so the close ✕ never scrolls out of
+     reach if the panel itself ever ends up in a scrolling parent. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 #page-igbt-health .igbt-detail-header .node-id {
@@ -18373,16 +18605,31 @@ body.mode-transition-active {
 }
 
 #page-igbt-health .igbt-detail-close {
-  padding: 4px 8px;
-  border: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text2);
   cursor: pointer;
   font-size: 16px;
-  transition: color 0.2s ease;
+  line-height: 1;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 
 #page-igbt-health .igbt-detail-close:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+#page-igbt-health .igbt-detail-close:focus-visible {
+  outline: none;
+  border-color: var(--accent);
   color: var(--accent);
 }
 
@@ -18399,53 +18646,90 @@ body.mode-transition-active {
 #page-igbt-health .igbt-detail-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface2) 45%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 
 #page-igbt-health .igbt-detail-section-title {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: var(--fw-semibold, 600);
   color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
+/* Tight key/value rows. Flex (not grid) so long values wrap under the label
+   instead of getting clipped. Hairline divider replaces the per-row box that
+   used to fragment the panel into many empty-feeling cells. */
 #page-igbt-health .igbt-detail-row {
-  display: grid;
-  grid-template-columns: 120px 1fr;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 12px;
-  padding: 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface2) 60%, transparent);
-  border: 1px solid rgba(74, 34, 48, 0.3);
+  padding: 5px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+#page-igbt-health .igbt-detail-row:last-child {
+  border-bottom: none;
+}
+
+/* Score block sits OUTSIDE the section frame entirely — no title, no rows;
+   the tier badge does all the work next to a large score number. */
+#page-igbt-health .igbt-detail-section.igbt-detail-score {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 14px 16px;
 }
 
 #page-igbt-health .igbt-detail-row.score-row {
-  grid-template-columns: 1fr;
-  padding: 12px;
+  border-bottom: none;
+  padding: 0;
 }
 
 #page-igbt-health .igbt-detail-label {
   font-size: 11px;
-  font-weight: var(--fw-semibold, 600);
+  font-weight: var(--fw-medium, 500);
   color: var(--text2);
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
+  flex: 0 0 auto;
 }
 
 #page-igbt-health .igbt-detail-value {
   font-size: 12px;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-semibold, 600);
+  text-align: right;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 #page-igbt-health .igbt-detail-value.score-value {
-  font-size: 24px;
+  font-size: 28px;
   font-weight: var(--fw-bold, 700);
   font-variant-numeric: tabular-nums;
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+
+/* Empty-state line for components with zero events. Replaces the previous
+   inline-styled <div> in the renderer; centralised here so any tweak (color,
+   icon, spacing) is one-edit. */
+#page-igbt-health .igbt-detail-empty {
+  margin-top: 6px;
+  padding: 4px 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text3);
 }
 
 #page-igbt-health .igbt-detail-value.score-value .tier-badge {
@@ -18650,6 +18934,8 @@ body.mode-transition-active {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Breathing room from the last .igbt-detail-row inside the same section. */
+  margin-top: 8px;
 }
 
 #page-igbt-health .event-item {

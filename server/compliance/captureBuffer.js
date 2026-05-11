@@ -10,12 +10,19 @@
  */
 
 class CaptureBuffer {
-  constructor({ runId, maxSamples = 50000 } = {}) {
+  constructor({ runId, maxSamples = 50000, onOverflow } = {}) {
     if (!runId) throw new Error("CaptureBuffer requires runId");
     this.runId = String(runId);
     this.maxSamples = Math.max(100, Math.min(500000, Number(maxSamples) || 50000));
     this.samples = [];
     this.dropped = 0;
+    // Optional overflow callback fired exactly once per run (the first time
+    // a sample is dropped). The orchestrator uses it to log a server-side
+    // warning AND broadcast a UI event so the operator running a long
+    // compliance test sees that telemetry is being lost — silent drops
+    // would otherwise make a false-pass report look clean.
+    this._onOverflow = typeof onOverflow === "function" ? onOverflow : null;
+    this._overflowNotified = false;
   }
 
   /**
@@ -27,6 +34,17 @@ class CaptureBuffer {
     if (!s || typeof s !== "object") return;
     if (this.samples.length >= this.maxSamples) {
       this.dropped += 1;
+      if (!this._overflowNotified) {
+        this._overflowNotified = true;
+        try {
+          console.warn(
+            `[compliance][captureBuffer] run_id=${this.runId} sample buffer full ` +
+            `(${this.maxSamples}); subsequent samples will be dropped — increase ` +
+            `maxSamples or shorten the test window`,
+          );
+          if (this._onOverflow) this._onOverflow({ run_id: this.runId, max_samples: this.maxSamples });
+        } catch (_) { /* never let logging crash the runner */ }
+      }
       return;
     }
     this.samples.push({

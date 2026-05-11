@@ -500,7 +500,83 @@ function run() {
     assert.strictEqual(bucket.analog_in_1_avg, 1234, "analog captured");
   }
 
-  console.log("dailyAggregatorCore.test.js — all 25 scenarios passed.");
+  // ── 26. Slow-poll merge survives a flood of fast-poll frames ────────────
+  // Empirical bug from scripts/audit-params-coverage.js (2026-05-11):
+  //   100% of `inverter_5min_param.inverter_state_raw_last` rows were 0
+  //   despite slow-poll succeeding, because fast-poll frames defaulted that
+  //   field to 0 and the aggregator's "store last seen" semantics let every
+  //   subsequent fast-poll frame overwrite the merged slow-poll value.
+  //
+  // Fix: poller.parseRow now defaults slow-poll-only fields to `null`
+  // (server/poller.js parseRow comment block). This test locks in the
+  // intended behavior: a stream of ~600 fast-poll frames with `null` slow
+  // fields plus ONE slow-poll merged frame must yield the slow-poll value
+  // in the persisted bucket, NOT 0 and NOT null.
+  {
+    resetState();
+    const baseTs = Date.now();
+    const slotStartParts = _internal._localParts(baseTs);
+    const slotStartMin = Math.floor(slotStartParts.minute / 5) * 5;
+    const slotStartMs = new Date(
+      slotStartParts.year, slotStartParts.month - 1, slotStartParts.day,
+      slotStartParts.hour, slotStartMin, 0, 0,
+    ).getTime();
+
+    // Helper: a fast-poll-only frame (slow-poll-only fields are null,
+    // exactly like server/poller.js parseRow now produces them).
+    const fastFrame = (ts) => ({
+      source_ip: "192.168.1.10", unit: 1, online: 1, ts,
+      pac: 5000, vdc: 800, idc: 5,
+      vac1: 230, vac2: 231, vac3: 229,
+      iac1: 4.3, iac2: 4.4, iac3: 4.2,
+      cosphi: 0.99, fac_hz: 50.01, temp_c: 35, parce_kwh: 50_000, alarm_32: 0,
+      // slow-poll-only fields explicitly null — fast-poll never sets these:
+      qac_var: null, tempint_c: null,
+      zpos_kohm: null, zneg_kohm: null,
+      vpv_n_v: null, vpv_p_v: null,
+      nominal_power_w: null,
+      time_to_connect_s: null, time_to_connect_total_s: null,
+      power_reduction_bits: null,
+      inverter_state_raw: null,
+    });
+
+    // 50 fast-poll frames at 50 ms cadence — none carries slow data.
+    for (let i = 0; i < 50; i++) {
+      dailyAggregator.ingestLiveSample(fastFrame(slotStartMs + i * 50));
+    }
+
+    // ONE merged frame carrying real slow-poll values (slow-poll fired here).
+    dailyAggregator.ingestLiveSample({
+      ...fastFrame(slotStartMs + 50 * 50),
+      qac_var: 1500,
+      tempint_c: 42,
+      zpos_kohm: 480, zneg_kohm: 470,
+      vpv_n_v: 605, vpv_p_v: 612,
+      nominal_power_w: 250_000,
+      time_to_connect_s: 0, time_to_connect_total_s: 60,
+      power_reduction_bits: 0x0002,
+      inverter_state_raw: 0x0102, // hi=01 stop, lo=02 connected
+    });
+
+    // 100 more fast-poll frames after the merge — these must NOT bury the
+    // slow-poll value (this was the bug).
+    for (let i = 0; i < 100; i++) {
+      dailyAggregator.ingestLiveSample(fastFrame(slotStartMs + (60 + i) * 50));
+    }
+
+    const bucket = dailyAggregator.getCurrentBucket("192.168.1.10", 1);
+    assert.strictEqual(bucket.inverter_state_raw_last, 0x0102, "state_raw retains slow-poll value across fast-poll flood");
+    assert.strictEqual(bucket.nominal_power_w_last, 250_000, "nominal_power_w retains 250 kW (rated)");
+    assert.strictEqual(bucket.zpos_kohm_last, 480, "zpos_kohm retains slow-poll value");
+    assert.strictEqual(bucket.zneg_kohm_last, 470, "zneg_kohm retains slow-poll value");
+    assert.strictEqual(bucket.vpv_n_v_avg, 605, "vpv_n_v retains slow-poll average");
+    assert.strictEqual(bucket.vpv_p_v_avg, 612, "vpv_p_v retains slow-poll average");
+    assert.strictEqual(bucket.power_reduction_bits_last, 0x0002, "power_reduction_bits retains slow-poll value");
+    assert.strictEqual(bucket.qac_var_avg, 1500, "qac_var retains slow-poll value (single sample, so avg = sample)");
+    assert.strictEqual(bucket.tempint_c_avg, 42, "tempint_c retains slow-poll value");
+  }
+
+  console.log("dailyAggregatorCore.test.js — all 26 scenarios passed.");
 }
 
 run();

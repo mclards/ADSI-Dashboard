@@ -33,7 +33,7 @@ function defaultParams(overrides = {}) {
                        ? overrides.ramp_pct.map(_clampPct)
                        : DEFAULT_RAMP,
     hold_sec:        Math.max(30, Math.min(900,  Number(overrides.hold_sec)   || 120)),
-    sample_period_s: Math.max(1,  Math.min(10,   Number(overrides.sample_period_s) || 2)),
+    sample_period_s: Math.max(1,  Math.min(60,   Number(overrides.sample_period_s) || 2)),
     settle_sec:      Math.max(5,  Math.min(120,  Number(overrides.settle_sec) || 30)),
     tolerance_pct:   Math.max(0.5,Math.min(10,   Number(overrides.tolerance_pct) || 2)),
   };
@@ -176,8 +176,14 @@ async function runApcSweep(orchRun, ratedKwPerNode, fns) {
 
     const passes = stepResults.filter(r => r.pass === true).length;
     const fails  = stepResults.filter(r => r.pass === false).length;
+    // Restoration failure means the plant is held below 100% after the test
+    // (e.g. last commanded setpoint was 50% and the restore-to-100 write
+    // failed). Surface this as 'completed_with_warnings' instead of a
+    // clean 'completed' so the operator sees the unsafe end-state.
+    const stepsClean = fails === 0 && passes > 0;
     const status = orchRun.abortRequested ? "aborted"
-                 : (fails === 0 && passes > 0 ? "completed" : "failed");
+                 : (!restoreOk ? "completed_with_warnings"
+                 : (stepsClean ? "completed" : "failed"));
     console.log(
       `[compliance][T5] run_id=${orchRun.run_id || "?"} ${status.toUpperCase()} — ` +
       `${passes} pass / ${fails} fail / ${stepResults.length - passes - fails} skip; restoration=${restoreOk ? "ok" : "PARTIAL"}`,

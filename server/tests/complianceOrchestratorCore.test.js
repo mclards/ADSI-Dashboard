@@ -11,7 +11,7 @@ const assert = require("assert");
 delete require.cache[require.resolve("../compliance/captureBuffer")];
 delete require.cache[require.resolve("../compliance/orchestrator")];
 const { CaptureBuffer } = require("../compliance/captureBuffer");
-const { OrchestratorRegistry, ComplianceRun, VALID_KINDS } = require("../compliance/orchestrator");
+const { OrchestratorRegistry, ComplianceRun, VALID_KINDS, VALID_STATUSES } = require("../compliance/orchestrator");
 
 function test(name, fn) {
   try {
@@ -135,4 +135,17 @@ test("VALID_KINDS contains the three planned kinds", () => {
   assert.ok(VALID_KINDS.has("t2_freq_withstand"));
   assert.ok(VALID_KINDS.has("t5_apc_sweep"));
   assert.ok(VALID_KINDS.has("t3_qv_sweep"));
+});
+
+test("VALID_STATUSES includes completed_with_warnings (T3/T5 restoration-fail surface)", () => {
+  // v2.11.x — added so a step-clean run whose post-test safety-restore
+  // failed (T3 disable-reactive, T5 restore-to-100%) gets a distinct
+  // status from a clean 'completed'. UI watchers and the report HTML
+  // both branch on this string; locking it here prevents an accidental
+  // rename or drop from silently breaking the safety surface.
+  assert.ok(VALID_STATUSES.has("running"));
+  assert.ok(VALID_STATUSES.has("completed"));
+  assert.ok(VALID_STATUSES.has("completed_with_warnings"));
+  assert.ok(VALID_STATUSES.has("aborted"));
+  assert.ok(VALID_STATUSES.has("failed"));
 });

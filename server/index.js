@@ -108,12 +108,15 @@ const {
   listComplianceSteps,
   appendComplianceSample,
   listComplianceSamples,
+  countComplianceSamples,
   appendComplianceArtifact,
   listComplianceArtifacts,
   insertApcVerifyLog,
   getLatestApcVerify,
   getLatestApcVerifyAll,
   pruneApcVerifyLog,
+  // v2.11.x — running per-day per-node MWh logger; backs /api/energy/daily-running.
+  getDailyRunningSummaryRange,
 } = require("./db");
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
@@ -129,6 +132,7 @@ const compliance = {
   testT2: require("./compliance/testT2"),
   testT3: require("./compliance/testT3"),
   reportGen: require("./compliance/reportGenerator"),
+  sampleSource: require("./compliance/sampleSource"),
 };
 const {
   registerClient,
@@ -12129,6 +12133,21 @@ function getConfiguredNodeSet(cfg = null) {
   return set;
 }
 
+// Object-map ipconfig walkers — see server/ipconfigEnumerate.js for the
+// pure implementation and the regression test that locks the shape contract.
+const {
+  enumerateConfiguredNodes: _enumerateConfiguredNodesPure,
+  lookupConfiguredNode: _lookupConfiguredNodePure,
+} = require("./ipconfigEnumerate");
+
+function enumerateConfiguredNodes(cfg = null) {
+  return _enumerateConfiguredNodesPure(cfg || loadIpConfigFromDb());
+}
+
+function lookupConfiguredNode(cfg, inv, slave) {
+  return _lookupConfiguredNodePure(cfg || loadIpConfigFromDb(), inv, slave);
+}
+
 plantCapController = new PlantCapController({
   getLiveData: () => getRuntimeLiveData(),
   getIpConfig: () => loadIpConfigFromDb(),
@@ -13296,117 +13315,102 @@ app.get("/api/igbt/fleet", (req, res) => {
     let totalImbalance = 0;
     let imbalanceCount = 0;
 
-    // Enumerate all configured nodes
-    for (let inv = 1; inv <= 27; inv++) {
-      const invRecords = (ipConfig?.inverters || []).filter(r => r?.inverter === inv);
+    // Enumerate all configured nodes (object-map ipconfig walk)
+    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
+      // Query stop-reason counts (90-day window)
+      const thermalCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-      for (const invRecord of invRecords) {
-        const ip = invRecord?.ip;
-        if (!ip) continue;
+      const framaCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-        const units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
-        if (units.length === 0) {
-          // Default to units 1-4 if not configured
-          units.push(1, 2, 3, 4);
-        }
+      const piAnaCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-        for (const slave of units) {
-          // Query stop-reason counts (90-day window)
-          const thermalCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      // Query last hour 5-min parameters for imbalance
+      const oneHourAgo = now - 60 * 60 * 1000;
+      const paramRows = db.prepare(`
+        SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+          WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+          ORDER BY ts_ms DESC
+      `).all(ip, slave, oneHourAgo);
 
-          const framaCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const imbalancePct = igbtHealth.medianImbalance(paramRows);
+      const tempC = paramRows?.[0]?.temp_c || null;
 
-          const piAnaCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      // Phase 2.1 — fetch YoY thermal drift block (drift is null until
+      // we have ≥1 'computed' row in both 90-day windows).
+      const yoyBlock = computeYoyThermalBlock(ip, slave);
 
-          // Query last hour 5-min parameters for imbalance
-          const oneHourAgo = now - 60 * 60 * 1000;
-          const paramRows = db.prepare(`
-            SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
-              WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
-              ORDER BY ts_ms DESC
-          `).all(ip, slave, oneHourAgo);
+      // Compute health score (Phase 1 weights when yoy_drift_c null,
+      // Phase 2 weights when present — see igbtHealth.computeHealthScore).
+      const scoreResult = igbtHealth.computeHealthScore({
+        thermal_count: thermalCount,
+        frama_count: framaCount,
+        pi_ana_count: piAnaCount,
+        imbalance_pct: imbalancePct,
+        yoy_drift_c: yoyBlock.yoy_drift_c,
+      });
 
-          const imbalancePct = igbtHealth.medianImbalance(paramRows);
-          const tempC = paramRows?.[0]?.temp_c || null;
+      // Query last event
+      const lastEvent = db.prepare(`
+        SELECT motive_code, read_at_ms FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ?
+          ORDER BY read_at_ms DESC LIMIT 1
+      `).get(ip, slave);
 
-          // Phase 2.1 — fetch YoY thermal drift block (drift is null until
-          // we have ≥1 'computed' row in both 90-day windows).
-          const yoyBlock = computeYoyThermalBlock(ip, slave);
+      const node = {
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score,
+        tier: scoreResult.tier,
+        frama_total: framaCount,
+        frama_branch1: db.prepare(`
+          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
+        `).get(ip, slave, cutoffMs)?.cnt || 0,
+        frama_branch2: db.prepare(`
+          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
+        `).get(ip, slave, cutoffMs)?.cnt || 0,
+        frama_branch3: db.prepare(`
+          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
+        `).get(ip, slave, cutoffMs)?.cnt || 0,
+        thermal_trips: thermalCount,
+        pi_ana_trips: piAnaCount,
+        temp_pe_now_c: tempC,
+        imbalance_pct: imbalancePct,
+        last_event_ms: lastEvent?.read_at_ms || null,
+        last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
+        // v2.11.0 Phase 2.1 — YoY thermal drift (null until baseline ready)
+        yoy_drift_c: yoyBlock.yoy_drift_c,
+        baseline_ready: !!yoyBlock.progress?.ready,
+        baseline_progress_ratio: Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
+        baseline_computed_days: yoyBlock.progress?.computed_days || 0,
+        scoring_phase: scoreResult.weights_used?.phase || "phase1",
+      };
 
-          // Compute health score (Phase 1 weights when yoy_drift_c null,
-          // Phase 2 weights when present — see igbtHealth.computeHealthScore).
-          const scoreResult = igbtHealth.computeHealthScore({
-            thermal_count: thermalCount,
-            frama_count: framaCount,
-            pi_ana_count: piAnaCount,
-            imbalance_pct: imbalancePct,
-            yoy_drift_c: yoyBlock.yoy_drift_c,
-          });
+      nodes.push(node);
 
-          // Query last event
-          const lastEvent = db.prepare(`
-            SELECT motive_code, read_at_ms FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ?
-              ORDER BY read_at_ms DESC LIMIT 1
-          `).get(ip, slave);
+      // Count tiers
+      if (scoreResult.tier) {
+        tierCounts[scoreResult.tier]++;
+      } else {
+        tierCounts.offline++;
+      }
 
-          const node = {
-            inverter: inv,
-            ip,
-            slave,
-            health_score: scoreResult.score,
-            tier: scoreResult.tier,
-            frama_total: framaCount,
-            frama_branch1: db.prepare(`
-              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
-            `).get(ip, slave, cutoffMs)?.cnt || 0,
-            frama_branch2: db.prepare(`
-              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
-            `).get(ip, slave, cutoffMs)?.cnt || 0,
-            frama_branch3: db.prepare(`
-              SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-                WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
-            `).get(ip, slave, cutoffMs)?.cnt || 0,
-            thermal_trips: thermalCount,
-            pi_ana_trips: piAnaCount,
-            temp_pe_now_c: tempC,
-            imbalance_pct: imbalancePct,
-            last_event_ms: lastEvent?.read_at_ms || null,
-            last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
-            // v2.11.0 Phase 2.1 — YoY thermal drift (null until baseline ready)
-            yoy_drift_c: yoyBlock.yoy_drift_c,
-            baseline_ready: !!yoyBlock.progress?.ready,
-            baseline_progress_ratio: Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
-            baseline_computed_days: yoyBlock.progress?.computed_days || 0,
-            scoring_phase: scoreResult.weights_used?.phase || "phase1",
-          };
-
-          nodes.push(node);
-
-          // Count tiers
-          if (scoreResult.tier) {
-            tierCounts[scoreResult.tier]++;
-          } else {
-            tierCounts.offline++;
-          }
-
-          // Track average imbalance
-          if (typeof imbalancePct === "number") {
-            totalImbalance += imbalancePct;
-            imbalanceCount++;
-          }
-        }
+      // Track average imbalance
+      if (typeof imbalancePct === "number") {
+        totalImbalance += imbalancePct;
+        imbalanceCount++;
       }
     }
 
@@ -13443,14 +13447,14 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid inverter or slave" });
     }
 
-    // Look up IP from ipconfig
+    // Look up IP from ipconfig (object-map shape; slave must also be in units list)
     const ipConfig = loadIpConfigFromDb();
-    const invRecord = (ipConfig?.inverters || []).find(r => r?.inverter === inv);
-    if (!invRecord || !invRecord.ip) {
+    const cfgNode = lookupConfiguredNode(ipConfig, inv, slave);
+    if (!cfgNode) {
       return res.status(404).json({ ok: false, error: "Node not found" });
     }
 
-    const ip = invRecord.ip;
+    const ip = cfgNode.ip;
     const now = Date.now();
     const windowDays = parseWindowDays(req);
     const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
@@ -13593,95 +13597,81 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
 
     const rows = [];
 
-    // Enumerate all configured nodes
-    for (let inv = 1; inv <= 27; inv++) {
-      const invRecords = (ipConfig?.inverters || []).filter(r => r?.inverter === inv);
+    // Enumerate all configured nodes (object-map ipconfig walk)
+    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
+      // Query data
+      const thermalCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-      for (const invRecord of invRecords) {
-        const ip = invRecord?.ip;
-        if (!ip) continue;
+      const framaCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-        const units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
-        if (units.length === 0) {
-          units.push(1, 2, 3, 4);
-        }
+      const bramaBranch1 = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-        for (const slave of units) {
-          // Query data
-          const thermalCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const bramaBranch2 = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-          const framaCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const bramaBranch3 = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-          const bramaBranch1 = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const piAnaCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+      `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-          const bramaBranch2 = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const oneHourAgo = now - 60 * 60 * 1000;
+      const paramRows = db.prepare(`
+        SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+          WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+          ORDER BY ts_ms DESC
+      `).all(ip, slave, oneHourAgo);
 
-          const bramaBranch3 = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const imbalancePct = igbtHealth.medianImbalance(paramRows);
+      const tempC = paramRows?.[0]?.temp_c || null;
 
-          const piAnaCount = db.prepare(`
-            SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-          `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const scoreResult = igbtHealth.computeHealthScore({
+        thermal_count: thermalCount,
+        frama_count: framaCount,
+        pi_ana_count: piAnaCount,
+        imbalance_pct: imbalancePct,
+      });
 
-          const oneHourAgo = now - 60 * 60 * 1000;
-          const paramRows = db.prepare(`
-            SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
-              WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
-              ORDER BY ts_ms DESC
-          `).all(ip, slave, oneHourAgo);
+      // Last event
+      const lastEvent = db.prepare(`
+        SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
+          WHERE inverter_ip = ? AND slave = ?
+          ORDER BY read_at_ms DESC LIMIT 1
+      `).get(ip, slave);
 
-          const imbalancePct = igbtHealth.medianImbalance(paramRows);
-          const tempC = paramRows?.[0]?.temp_c || null;
-
-          const scoreResult = igbtHealth.computeHealthScore({
-            thermal_count: thermalCount,
-            frama_count: framaCount,
-            pi_ana_count: piAnaCount,
-            imbalance_pct: imbalancePct,
-          });
-
-          // Last event
-          const lastEvent = db.prepare(`
-            SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
-              WHERE inverter_ip = ? AND slave = ?
-              ORDER BY read_at_ms DESC LIMIT 1
-          `).get(ip, slave);
-
-          rows.push({
-            inverter: inv,
-            ip,
-            slave,
-            health_score: scoreResult.score !== null ? scoreResult.score.toFixed(1) : "",
-            tier: scoreResult.tier || "offline",
-            thermal_trips: thermalCount || "",
-            frama_total: framaCount || "",
-            frama_branch1: bramaBranch1 || "",
-            frama_branch2: bramaBranch2 || "",
-            frama_branch3: bramaBranch3 || "",
-            pi_ana_trips: piAnaCount || "",
-            temp_pe_c: tempC !== null ? tempC.toFixed(1) : "",
-            imbalance_pct: imbalancePct !== null ? imbalancePct.toFixed(1) : "",
-            last_event_iso: lastEvent?.timestamp_iso || "",
-            last_event_motive: lastEvent ? getMotiveLabel(lastEvent.motive_code) : "",
-            computed_at_iso: new Date(now).toISOString(),
-          });
-        }
-      }
+      rows.push({
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score !== null ? scoreResult.score.toFixed(1) : "",
+        tier: scoreResult.tier || "offline",
+        thermal_trips: thermalCount || "",
+        frama_total: framaCount || "",
+        frama_branch1: bramaBranch1 || "",
+        frama_branch2: bramaBranch2 || "",
+        frama_branch3: bramaBranch3 || "",
+        pi_ana_trips: piAnaCount || "",
+        temp_pe_c: tempC !== null ? tempC.toFixed(1) : "",
+        imbalance_pct: imbalancePct !== null ? imbalancePct.toFixed(1) : "",
+        last_event_iso: lastEvent?.timestamp_iso || "",
+        last_event_motive: lastEvent ? getMotiveLabel(lastEvent.motive_code) : "",
+        computed_at_iso: new Date(now).toISOString(),
+      });
     }
 
     // Generate CSV
@@ -13755,20 +13745,15 @@ const IGBT_THERMAL_BACKFILL_DAYS = 365;     // align with YoY target
 const IGBT_THERMAL_RATED_KW_PER_NODE = NODE_KW_MAX;  // 244.25 kW (per existing convention)
 
 function _enumerateConfiguredNodePairs(ipConfig) {
-  // Returns [{ inverter, ip, slave }, ...]
-  const out = [];
-  if (!ipConfig?.inverters) return out;
-  for (let inv = 1; inv <= 27; inv++) {
-    const invRecords = (ipConfig.inverters || []).filter(r => r?.inverter === inv);
-    for (const invRecord of invRecords) {
-      const ip = invRecord?.ip;
-      if (!ip) continue;
-      let units = (ipConfig?.units?.[inv] || []).map(u => Number(u)).filter(u => u >= 1 && u <= 4);
-      if (units.length === 0) units = [1, 2, 3, 4];
-      for (const slave of units) out.push({ inverter: inv, ip, slave });
-    }
-  }
-  return out;
+  // Returns [{ inverter, ip, slave }, ...].
+  //
+  // v2.11.x — was using `(ipConfig.inverters || []).filter(r => r.inverter === inv)`
+  // as if `inverters` were an array of records, but the persisted shape is an
+  // object map keyed by inverter number. The thermal-baseline capture/backfill
+  // therefore silently iterated zero pairs, leaving the YoY drift component
+  // of the IGBT health score with no data. Delegate to the shared walker
+  // (server/ipconfigEnumerate.js) so this can never regress.
+  return enumerateConfiguredNodes(ipConfig);
 }
 
 function _captureThermalBaselineOneDay(ip, slave, dateStr) {
@@ -13905,35 +13890,41 @@ app.get("/api/apc/verify-status/:inverter_ip/:slave", (req, res) => {
 // ─── Compliance test orchestration ──────────────────────────────────────
 const REPORT_OUT_DIR = path.join(DATA_DIR, "compliance");
 
-// Per-inverter live sample fetch from latest 5-min row. Used by T2/T5.
+// Per-inverter live sample fetch — used by T2/T3/T5 capture loops.
+//
+// v2.11.x — Earlier versions read straight from `inverter_5min_param`. That
+// table is updated once per 300 s by the daily aggregator slot rollover, so
+// at the test cadence of 2 s every read returned the same row ~150 times in
+// a row. T2 frequency observation showed only ~6 unique points across a
+// 30-min run, T5 APC sweep judged achieved-vs-target against a value 2-3
+// minutes stale, T3 PF derivation never saw the new setpoint take effect.
+//
+// Fix: prefer the in-memory live frame (poller.getLiveData(), refreshes
+// every poll cycle, ≤ 5 s typical) and fall back to the 5-min table only
+// when the live frame is missing or stale. Field mapping + freshness logic
+// live in compliance/sampleSource.js so they can be unit-tested without
+// SQLite or pymodbus mocks.
 function _fetchLiveSampleForCompliance(ip, slave) {
-  try {
-    const row = db.prepare(
-      `SELECT ts_ms, pac_w, vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
-              freq_hz, cosphi, temp_c, pwr_red_bits, inv_alarms,
-              inverter_state_raw
-         FROM inverter_5min_param
-        WHERE inverter_ip = ? AND slave = ?
-        ORDER BY ts_ms DESC LIMIT 1`
-    ).get(String(ip), Number(slave));
-    if (!row) return null;
-    const vacAvg = ((Number(row.vac1_v) || 0) + (Number(row.vac2_v) || 0) + (Number(row.vac3_v) || 0)) / 3;
-    const iacAvg = ((Number(row.iac1_a) || 0) + (Number(row.iac2_a) || 0) + (Number(row.iac3_a) || 0)) / 3;
-    return {
-      ts_ms: Number(row.ts_ms) || Date.now(),
-      pac_w: row.pac_w == null ? null : Number(row.pac_w),
-      vac_avg_v: vacAvg,
-      iac_avg_a: iacAvg,
-      freq_hz: row.freq_hz == null ? null : Number(row.freq_hz),
-      cosphi: row.cosphi == null ? null : Number(row.cosphi),
-      temp_c: row.temp_c == null ? null : Number(row.temp_c),
-      state_raw: row.inverter_state_raw == null ? null : Number(row.inverter_state_raw),
-      alarm_32: row.inv_alarms == null ? null : Number(row.inv_alarms),
-      pwr_red_bits: row.pwr_red_bits == null ? null : Number(row.pwr_red_bits),
-    };
-  } catch (_) {
-    return null;
-  }
+  return compliance.sampleSource.resolveComplianceSample({
+    ip, slave,
+    ipConfig: loadIpConfigFromDb(),
+    liveData: getRuntimeLiveData(),
+    liveFreshMs: LIVE_FRESH_MS,
+    fetchFiveMinRow: () => {
+      try {
+        return db.prepare(
+          `SELECT ts_ms, pac_w, qac_var_avg, vac1_v, vac2_v, vac3_v,
+                  iac1_a, iac2_a, iac3_a, freq_hz, cosphi, temp_c,
+                  pwr_red_bits, inv_alarms, inverter_state_raw
+             FROM inverter_5min_param
+            WHERE inverter_ip = ? AND slave = ?
+            ORDER BY ts_ms DESC LIMIT 1`
+        ).get(String(ip), Number(slave));
+      } catch (_) {
+        return null;
+      }
+    },
+  });
 }
 
 // Send setpoint via the existing applySetpoint path (Python-backed).
@@ -14082,11 +14073,28 @@ app.get("/api/compliance/run/:run_id/status", (req, res) => {
     if (!live && !persisted) return res.status(404).json({ ok: false, error: "Not found." });
     const steps = listComplianceSteps(req.params.run_id);
     const sampleCount = (live && live.captureBuffer) ? live.captureBuffer.size() : 0;
+    const droppedCount = (live && live.captureBuffer) ? live.captureBuffer.droppedCount() : 0;
+    // Persisted sample count = rows already flushed to compliance_run_sample.
+    // The UI shows persisted + pending so operators see total telemetry, not
+    // just the in-memory tail.
+    let persistedSampleCount = 0;
+    try { persistedSampleCount = countComplianceSamples(req.params.run_id); } catch (_) {}
+    // Tail = last N pending samples. Lets the UI show "live observation" feed
+    // (mean Hz, latest pac_w, alarms_32 transitions) while the run is in flight
+    // instead of waiting for finalize() to populate summary_json. Tail is
+    // intentionally short — full samples land in CSV/PDF on report generation.
+    const tail = (live && live.captureBuffer)
+      ? live.captureBuffer.tail(Math.max(1, Math.min(100, Number(req.query.tail) || 20)))
+      : [];
     res.json({
       ok: true,
       run: persisted,
       live_status: live ? live.status : null,
       sample_count_pending_flush: sampleCount,
+      sample_count_persisted: persistedSampleCount,
+      sample_count_total: sampleCount + persistedSampleCount,
+      sample_dropped: droppedCount,
+      samples_tail: tail,
       steps,
     });
   } catch (err) {
@@ -14108,21 +14116,54 @@ app.get("/api/compliance/runs", (req, res) => {
 
 app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) => {
   if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  // Bulk-control auth required (sacupsMM) — same gate as POST /run/start.
+  // PDF generation launches puppeteer which is heavy; without auth a LAN
+  // attacker could DoS the gateway by hammering this endpoint.
+  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized." });
+  }
   try {
     const run = getComplianceRun(req.params.run_id);
     if (!run) return res.status(404).json({ ok: false, error: "Not found." });
     const steps = listComplianceSteps(run.run_id);
     const samples = listComplianceSamples(run.run_id);
     const out = [];
-    // CSV is always cheap.
-    const csv = compliance.reportGen.generateCsvBundle(run, steps, samples, REPORT_OUT_DIR);
-    appendComplianceArtifact({
-      run_id: run.run_id, artifact_kind: "csv",
-      file_path: csv.path, sha256: csv.sha256, bytes: csv.bytes,
-    });
-    out.push({ kind: "csv", ...csv });
-    // PDF only when explicitly requested (puppeteer launch is heavy).
-    if (req.body && req.body.format === "both") {
+    // v2.11.x — `format` controls which artifacts get built. Operators were
+    // hitting the PDF button and getting BOTH CSV + PDF on disk, which
+    // cluttered the artifact catalog. Now the buttons are 1:1 with the
+    // outputs:
+    //   "xlsx" → Excel workbook only (3 sheets, styled — operator default)
+    //   "csv"  → legacy plain CSV (kept for external scripts/CI)
+    //   "pdf"  → printable witness PDF only
+    //   "both" → CSV + PDF (bundle for batch evidence pulls; backward compat)
+    // Default "csv" preserves the legacy contract for any external caller
+    // that omits the field.
+    const format = String(req.body?.format || "csv").toLowerCase();
+    const wantXlsx = (format === "xlsx");
+    const wantCsv  = (format === "csv"  || format === "both");
+    const wantPdf  = (format === "pdf"  || format === "both");
+
+    if (wantXlsx) {
+      try {
+        const xlsx = await compliance.reportGen.generateXlsxBundle(run, steps, samples, REPORT_OUT_DIR);
+        appendComplianceArtifact({
+          run_id: run.run_id, artifact_kind: "xlsx",
+          file_path: xlsx.path, sha256: xlsx.sha256, bytes: xlsx.bytes,
+        });
+        out.push({ kind: "xlsx", ...xlsx });
+      } catch (err) {
+        out.push({ kind: "xlsx", error: err.message });
+      }
+    }
+    if (wantCsv) {
+      const csv = compliance.reportGen.generateCsvBundle(run, steps, samples, REPORT_OUT_DIR);
+      appendComplianceArtifact({
+        run_id: run.run_id, artifact_kind: "csv",
+        file_path: csv.path, sha256: csv.sha256, bytes: csv.bytes,
+      });
+      out.push({ kind: "csv", ...csv });
+    }
+    if (wantPdf) {
       try {
         const pdf = await compliance.reportGen.generatePdfBundle(run, steps, samples, REPORT_OUT_DIR);
         appendComplianceArtifact({
@@ -14131,7 +14172,8 @@ app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) 
         });
         out.push({ kind: "pdf", ...pdf });
       } catch (err) {
-        // Don't fail the whole call — CSV already succeeded.
+        // PDF failure is non-fatal when bundled with CSV; surfaces as a
+        // per-artifact error in the response so the UI can toast it.
         out.push({ kind: "pdf", error: err.message });
       }
     }
@@ -14143,6 +14185,17 @@ app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) 
 
 app.get("/api/compliance/run/:run_id/artifact", (req, res) => {
   if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  // Bulk-control auth required. GET endpoint accepts the authKey/authToken
+  // via query string OR x-auth-key / x-auth-token headers so the UI can
+  // build a plain `<a href>` download link with the rotating key as a
+  // query param. Keys are not logged by the dashboard's HTTP layer.
+  const auth = {
+    authKey: String(req.query.authKey || req.headers["x-auth-key"] || ""),
+    authToken: String(req.query.authToken || req.headers["x-auth-token"] || ""),
+  };
+  if (!isAuthorizedPlantWideControl(auth, req)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized." });
+  }
   try {
     const arts = listComplianceArtifacts(req.params.run_id);
     const kind = String(req.query.kind || "csv");
@@ -14151,8 +14204,25 @@ app.get("/api/compliance/run/:run_id/artifact", (req, res) => {
     if (!fs.existsSync(found.file_path)) {
       return res.status(410).json({ ok: false, error: "Artifact file no longer present on disk." });
     }
-    res.setHeader("Content-Type", kind === "pdf" ? "application/pdf" : "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="${path.basename(found.file_path)}"`);
+    // RFC 5987 — encode the filename so non-ASCII or special-char names
+    // (CJK characters, embedded quotes, semicolons) survive the
+    // Content-Disposition header without truncation. Provide both the
+    // plain `filename=` (ASCII fallback) and `filename*=UTF-8''…` for
+    // browsers that honour the extended encoding.
+    const baseName = path.basename(found.file_path);
+    const asciiSafe = baseName.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+    const utf8Encoded = encodeURIComponent(baseName);
+    // v2.11.x — XLSX uses the canonical Office Open XML MIME so browsers
+    // route the download to Excel automatically. PDF and legacy CSV stay
+    // on their respective MIMEs.
+    const ct = kind === "pdf"  ? "application/pdf"
+             : kind === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+             : "text/csv";
+    res.setHeader("Content-Type", ct);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${asciiSafe}"; filename*=UTF-8''${utf8Encoded}`,
+    );
     fs.createReadStream(found.file_path).pipe(res);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -17186,8 +17256,14 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
 
 app.post("/api/plant-cap/setpoint/abort/:job_id", express.json(), async (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
-    return res.status(403).json({ ok: false, error: "Unauthorized active power control command." });
+  // Abort halts an in-flight ramp mid-execution — it is a STOP-class action
+  // and must require a fresh sacupsMM key (NOT a cached session token), the
+  // same gate the setpoint-apply path enforces for `opcode === "stop"` at
+  // the call site above (~line 17073). A stale browser session must NOT be
+  // able to halt an active power ramp.
+  const b = req.body || {};
+  if (!isValidPlantWideAuthKey(b.authKey, Date.now())) {
+    return res.status(403).json({ ok: false, error: "Fresh sacupsMM key required to abort an active ramp." });
   }
   const job_id = String(req.params.job_id || "").trim();
   const operator = String((req.body || {}).operator || "operator").slice(0, 64);
@@ -20115,6 +20191,69 @@ app.get("/api/energy/daily", (req, res) => {
   } catch (e) {
     console.warn("[energy/daily] failed:", e.message);
     return res.json([]);
+  }
+});
+
+// v2.11.x — Per-day per-node running PAC-integrated MWh logger.
+// Reads `daily_readings_summary.pac_kwh_raw` directly. The same column drives
+// the export's running-MWh fast-path; this endpoint exposes it for ad-hoc
+// lookback ("how much has each node produced today?") without invoking the
+// heavy export. Live rows (`is_final=0`) reflect today's running value;
+// finalized rows (`is_final=1`) are the EOD-locked daily total.
+//
+// Query: ?from=YYYY-MM-DD&to=YYYY-MM-DD (both default to today).
+// Optional ?inverter=N to filter to one inverter slot (1..27).
+//
+// Response shape:
+//   { ok: true, from, to, generated_at_ms, rows: [
+//       { date, inverter, unit, pac_kwh, is_final, updated_ts,
+//         sample_count, online_samples, pac_peak_w, first_ts, last_ts },
+//       ...
+//   ]}
+app.get("/api/energy/daily-running", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  try {
+    const today = localDateStr();
+    const from = String(req.query.from || today).trim();
+    const to = String(req.query.to || from || today).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      return res.status(400).json({ ok: false, error: "from/to must be YYYY-MM-DD" });
+    }
+    const invFilter = req.query.inverter != null ? Number(req.query.inverter) : null;
+    if (invFilter != null && (!Number.isFinite(invFilter) || invFilter < 1 || invFilter > 27)) {
+      return res.status(400).json({ ok: false, error: "inverter must be 1..27" });
+    }
+    const raw = getDailyRunningSummaryRange(from, to) || [];
+    const rows = [];
+    for (const r of raw) {
+      const inv = Number(r.inverter || 0);
+      if (invFilter != null && inv !== invFilter) continue;
+      rows.push({
+        date:           String(r.date || ""),
+        inverter:       inv,
+        unit:           Number(r.unit || 0),
+        pac_kwh:        Number(Number(r.pac_kwh_raw || 0).toFixed(3)),
+        is_final:       Number(r.is_final || 0) === 1 ? 1 : 0,
+        updated_ts:     Number(r.updated_ts || 0),
+        sample_count:   Number(r.sample_count || 0),
+        online_samples: Number(r.online_samples || 0),
+        pac_peak_w:     Number(r.pac_peak || 0),
+        first_ts:       Number(r.first_ts || 0),
+        last_ts:        Number(r.last_ts || 0),
+      });
+    }
+    return res.json({
+      ok: true,
+      from,
+      to,
+      generated_at_ms: Date.now(),
+      rows,
+    });
+  } catch (e) {
+    console.warn("[energy/daily-running] failed:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 

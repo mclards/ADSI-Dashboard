@@ -23,13 +23,17 @@ function run() {
 
   __resetForTests();
   {
+    // v2.11.x — operator preference: rolling lease is now 60 min so the
+    // dashboard prompts for sacupsMM at most once per hour. The lease still
+    // expires at TTL, just on a longer horizon. Numbers below check the new
+    // boundary: still valid at 30 min, expired by 65 min.
     assert.equal(isValidPlantWideAuthKey("sacups05", base), true);
     assert.equal(
-      isValidPlantWideAuthKey("sacups05", base + 5 * 60 * 1000),
+      isValidPlantWideAuthKey("sacups05", base + 30 * 60 * 1000),
       true,
     );
     assert.equal(
-      isValidPlantWideAuthKey("sacups05", base + 11 * 60 * 1000),
+      isValidPlantWideAuthKey("sacups05", base + 65 * 60 * 1000),
       false,
     );
   }
@@ -38,11 +42,11 @@ function run() {
   {
     const session = issuePlantWideAuthSession(base);
     assert.equal(
-      isValidPlantWideAuthSession(session.token, base + 2 * 60 * 1000),
+      isValidPlantWideAuthSession(session.token, base + 30 * 60 * 1000),
       true,
     );
     assert.equal(
-      isValidPlantWideAuthSession(session.token, base + 11 * 60 * 1000),
+      isValidPlantWideAuthSession(session.token, base + 65 * 60 * 1000),
       false,
     );
   }

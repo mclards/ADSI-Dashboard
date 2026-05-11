@@ -96,5 +96,69 @@ test("generateCsvBundle handles empty steps + samples", () => {
   assert.ok(/run_id/.test(content));
 });
 
+test("generateCsvBundle: data rows are properly column-split (regression guard)", () => {
+  // v2.11.x — pre-fix this file produced 3-column rows where every actual
+  // step/sample value was jammed into one comma-quoted cell. Excel opened
+  // the file but operators couldn't filter or sort by step_name / pac_w /
+  // etc. NGCP audit reviewers rejected the shape. Lock the rectangular
+  // column structure here so it can never regress.
+  const out = generateCsvBundle(fakeRun, fakeSteps, fakeSamples, tmpDir);
+  const lines = fs.readFileSync(out.path, "utf8")
+    .replace(/^﻿/, "")
+    .split("\n");
+
+  // Trivial CSV split that respects double-quoted fields. Sufficient for
+  // the test shapes; do NOT use for general CSV parsing.
+  function splitCsv(line) {
+    const cells = [];
+    let cur = "";
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (inQ) {
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') { inQ = false; }
+        else { cur += c; }
+      } else {
+        if (c === ",") { cells.push(cur); cur = ""; }
+        else if (c === '"') { inQ = true; }
+        else { cur += c; }
+      }
+    }
+    cells.push(cur);
+    return cells;
+  }
+
+  // Find a step row and a sample row by their first-cell tag.
+  const stepRow = lines.find((l) => l.startsWith("step,"));
+  const sampleRow = lines.find((l) => l.startsWith("sample,"));
+  assert.ok(stepRow, "no step row found");
+  assert.ok(sampleRow, "no sample row found");
+
+  const stepCells = splitCsv(stepRow);
+  const sampleCells = splitCsv(sampleRow);
+
+  // v2.11.x — sample column count slimmed 14 → 13 by dropping pwr_red_bits
+  // (engineering-only; not needed for compliance evidence). Step rows pad
+  // to the new widest width.
+  assert.strictEqual(sampleCells.length, 13, `sample row must have 13 cells, got ${sampleCells.length}`);
+  assert.strictEqual(stepCells.length, 13, `step row padded to widest section width (13), got ${stepCells.length}`);
+
+  // Step row sanity: first cell is "step", second is the step_idx, third is
+  // the step_name (NOT a comma-blob containing every field).
+  assert.strictEqual(stepCells[0], "step");
+  assert.strictEqual(stepCells[1], "0");
+  assert.strictEqual(stepCells[2], "ramp_100pct", "step_name must live in its own column, not a comma-blob");
+  assert.strictEqual(stepCells[5], "100", "target_value must be its own column");
+  assert.strictEqual(stepCells[8], "PASS", "pass label must be its own column");
+
+  // Sample row sanity: pac_w is column 4, freq_hz column 8 — both as plain
+  // values, not nested inside another cell.
+  assert.strictEqual(sampleCells[0], "sample");
+  assert.strictEqual(sampleCells[2], "1.1.1.1");
+  assert.strictEqual(sampleCells[4], "240000", "pac_w must be its own column");
+  assert.strictEqual(sampleCells[8], "60.05", "freq_hz must be its own column");
+});
+
 // Cleanup
 try { if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}

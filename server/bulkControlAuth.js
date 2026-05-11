@@ -3,8 +3,14 @@
 const crypto = require("crypto");
 
 const PLANT_WIDE_AUTH_PREFIX = "sacups";
-const BULK_AUTH_KEY_LEASE_MS = 10 * 60 * 1000;
-const BULK_AUTH_SESSION_TTL_MS = 10 * 60 * 1000;
+// v2.11.x — operator preference: extend the rolling auth-key lease to 60 min
+// so the dashboard prompts for `sacupsMM` at most once per hour. Each
+// validated request still re-stamps the lease (rolling window), so the
+// effective TTL is up to 60 min after the *last* successful action. The
+// per-action confirm modal in the renderer remains the safety net against
+// accidental writes — the lease only suppresses the *auth-key* prompt.
+const BULK_AUTH_KEY_LEASE_MS = 60 * 60 * 1000;
+const BULK_AUTH_SESSION_TTL_MS = 60 * 60 * 1000;
 
 const authKeyLeases = new Map();
 const authSessions = new Map();

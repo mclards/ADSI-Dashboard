@@ -27,7 +27,13 @@ const NGCP_WITHSTAND_HI  = 61.8;
 function defaultParams(overrides = {}) {
   return {
     duration_sec:    Math.max(60, Math.min(7200, Number(overrides.duration_sec)    || 1800)),
-    sample_period_s: Math.max(1,  Math.min(10,   Number(overrides.sample_period_s) || 2)),
+    // v2.11.x — clamp range widened from 1-10s → 1-60s. The earlier 10s
+    // ceiling silently throttled operator inputs (e.g. 30s requested →
+    // actual 10s applied) and showed misleading sample-cadence in the
+    // live feed. 60s upper bound still gives ≥ 1 sample/min for the
+    // shortest legal duration (60s), so the orchestrator never returns
+    // a zero-sample run.
+    sample_period_s: Math.max(1,  Math.min(60,   Number(overrides.sample_period_s) || 2)),
   };
 }
 
@@ -79,6 +85,12 @@ async function runFrequencyObservation(orchRun, fns) {
     inContinuous: 0,
     inWithstand: 0,
     outsideWithstand: 0,
+    // unitMismatch: samples whose freq_hz fell outside the plausible 45..65
+    // Hz envelope. Indicates a transducer reporting cHz (×100) rather than
+    // an actual grid excursion. Surfaced in the run summary so the
+    // operator notices the bad data path instead of misreading it as a
+    // grid event.
+    unitMismatch: 0,
     minHz: null, maxHz: null, sumHz: 0, nFreq: 0,
     excursionStartTs: null,
     longestExcursionMs: 0,
@@ -99,19 +111,31 @@ async function runFrequencyObservation(orchRun, fns) {
           orchRun.pushSample({ ...sample, ts_ms: tick, inverter_ip: t.ip, slave: t.slave });
           tally.samples += 1;
 
+          // Sanity-clamp freq_hz to a plausible Hz range (45..65) before
+          // bucketing. Some firmware revisions or comm boards have been
+          // observed reporting cHz (×100) instead of Hz; without this
+          // gate, a 60 Hz reading at cHz scale (6000) would land in
+          // "outsideWithstand" and false-fail the test even though the
+          // grid is healthy. Out-of-range values get counted as
+          // unitMismatch so the operator can spot the bad transducer
+          // instead of silently inflating the outside-envelope tally.
           const f = Number(sample.freq_hz);
           if (Number.isFinite(f) && f > 0) {
-            if (f >= NGCP_CONTINUOUS_LO && f <= NGCP_CONTINUOUS_HI) tally.inContinuous += 1;
-            else if (f >= NGCP_WITHSTAND_LO && f <= NGCP_WITHSTAND_HI) {
-              tally.inWithstand += 1;
-              inExcursionThisTick = true;
+            if (f < 45 || f > 65) {
+              tally.unitMismatch = (tally.unitMismatch || 0) + 1;
             } else {
-              tally.outsideWithstand += 1;
-              inExcursionThisTick = true;
+              if (f >= NGCP_CONTINUOUS_LO && f <= NGCP_CONTINUOUS_HI) tally.inContinuous += 1;
+              else if (f >= NGCP_WITHSTAND_LO && f <= NGCP_WITHSTAND_HI) {
+                tally.inWithstand += 1;
+                inExcursionThisTick = true;
+              } else {
+                tally.outsideWithstand += 1;
+                inExcursionThisTick = true;
+              }
+              tally.minHz = tally.minHz == null ? f : Math.min(tally.minHz, f);
+              tally.maxHz = tally.maxHz == null ? f : Math.max(tally.maxHz, f);
+              tally.sumHz += f; tally.nFreq += 1;
             }
-            tally.minHz = tally.minHz == null ? f : Math.min(tally.minHz, f);
-            tally.maxHz = tally.maxHz == null ? f : Math.max(tally.maxHz, f);
-            tally.sumHz += f; tally.nFreq += 1;
           }
 
           // Track state changes (decoded raw differs from last seen).
@@ -136,7 +160,12 @@ async function runFrequencyObservation(orchRun, fns) {
         tally.excursionStartTs = null;
       }
 
-      if (tally.samples % 100 === 0) orchRun.flushSamples();
+      // Flush to SQLite every 10 ticks so the persisted-sample count
+      // visible to the operator (compliance_run_sample table + /status
+      // endpoint) keeps up even when the chosen sample_period_s is high.
+      // At 30 s cadence the earlier `% 100` rule meant 50 min between
+      // flushes — operators saw "samples_persisted=0" for most of the run.
+      if (tally.samples % 10 === 0) orchRun.flushSamples();
 
       // Heartbeat every minute so a 30-min observation isn't silent. Only logs
       // when at least HEARTBEAT_MS has elapsed since the last heartbeat.
@@ -177,12 +206,15 @@ async function runFrequencyObservation(orchRun, fns) {
     });
 
     const finalStatus = orchRun.abortRequested ? "aborted" : "completed";
+    const unitMismatchNote = tally.unitMismatch > 0
+      ? `, unit_mismatch=${tally.unitMismatch} (freq outside 45..65 Hz — check transducer scaling)`
+      : "";
     console.log(
       `[compliance][T2] run_id=${orchRun.run_id || "?"} ${finalStatus.toUpperCase()} — ` +
       `${tally.samples} samples, mean ${meanHz == null ? "—" : meanHz.toFixed(3) + "Hz"}, ` +
       `min/max ${tally.minHz ?? "—"}/${tally.maxHz ?? "—"}, ` +
       `${tally.inContinuous} in-continuous / ${tally.inWithstand} in-withstand / ${tally.outsideWithstand} outside, ` +
-      `pass=${allInContinuous}`,
+      `pass=${allInContinuous}${unitMismatchNote}`,
     );
 
     orchRun.finalize({
@@ -192,6 +224,7 @@ async function runFrequencyObservation(orchRun, fns) {
         in_continuous_band: tally.inContinuous,
         in_withstand_band: tally.inWithstand,
         outside_withstand_band: tally.outsideWithstand,
+        unit_mismatch_samples: tally.unitMismatch,
         min_hz: tally.minHz,
         max_hz: tally.maxHz,
         mean_hz: meanHz,

@@ -1997,6 +1997,14 @@ const stmts = {
   getFinalizedDailySummaryRange: db.prepare(
     `SELECT * FROM daily_readings_summary WHERE date BETWEEN ? AND ? AND is_final=1 ORDER BY date, inverter ASC, unit ASC`,
   ),
+  // v2.11.x — fetch ALL rows in range (live + finalized) for the running-MWh
+  // fast-path that lets today's slice avoid a full raw-readings scan. Each row
+  // already carries pac_kwh_raw maintained incrementally by
+  // applyReadingToSummaryState() on every persisted reading, so this query is
+  // a cheap O(rows-in-range) lookup that replaces the slow-path scan.
+  getDailyRunningSummaryRange: db.prepare(
+    `SELECT * FROM daily_readings_summary WHERE date BETWEEN ? AND ? ORDER BY date, inverter ASC, unit ASC`,
+  ),
   upsertDailyReadingsSummary: db.prepare(`
     INSERT INTO daily_readings_summary(
       date,inverter,unit,sample_count,online_samples,pac_online_sum,pac_online_count,pac_peak,
@@ -4111,6 +4119,23 @@ function getFinalizedDailySummaryRange(startDate, endDate) {
   return stmts.getFinalizedDailySummaryRange.all(s, e);
 }
 
+// v2.11.x — Fetch every daily summary row in the range (live + finalized).
+// Used by the export fast-path to read today's running pac_kwh_raw instead
+// of recomputing from raw readings — eliminates the dashboard freeze that
+// hit during full-range exports because today's slice was always slow-path.
+//
+// Each returned row carries `is_final` (0=live, 1=finalized) and
+// `updated_ts` so the caller can decide whether the live value is fresh
+// enough or whether the row should be ignored in favor of a slow-path
+// rescan. Callers should NOT assume liveness — the freshness check lives
+// at the call site, not here.
+function getDailyRunningSummaryRange(startDate, endDate) {
+  const s = String(startDate || "").trim();
+  const e = String(endDate || "").trim();
+  if (!s || !e) return [];
+  return stmts.getDailyRunningSummaryRange.all(s, e);
+}
+
 function readingsNaturalKey(row) {
   return `${Number(row?.ts || 0)}|${Number(row?.inverter || 0)}|${Number(row?.unit || 0)}`;
 }
@@ -4964,6 +4989,17 @@ function listComplianceSamples(run_id) {
   return stmtListComplianceSamples.all(String(run_id));
 }
 
+// v2.11.x — cheap COUNT(*) for the /status endpoint so the operator UI can
+// show running "samples persisted" while the test is in flight without
+// shipping the whole sample list every 3 s.
+const stmtCountComplianceSamples = db.prepare(
+  `SELECT COUNT(*) AS n FROM compliance_run_sample WHERE run_id = ?`,
+);
+function countComplianceSamples(run_id) {
+  const r = stmtCountComplianceSamples.get(String(run_id));
+  return Number(r?.n || 0);
+}
+
 function appendComplianceArtifact({ run_id, artifact_kind, file_path, sha256, bytes }) {
   return stmtInsertComplianceArtifact.run(
     String(run_id), String(artifact_kind), String(file_path),
@@ -5090,6 +5126,7 @@ module.exports = {
   rebuildDailyReadingsSummaryForDate,
   markDailyUnitsFinal,
   getFinalizedDailySummaryRange,
+  getDailyRunningSummaryRange,
   closeArchiveDbForMonth,
   prepareArchiveDbForTransfer,
   createSqliteTransferSnapshot,
@@ -5153,6 +5190,7 @@ module.exports = {
   listComplianceSteps,
   appendComplianceSample,
   listComplianceSamples,
+  countComplianceSamples,
   appendComplianceArtifact,
   listComplianceArtifacts,
   // v2.11.0 Plant Controller — APC verification (Slice δ)

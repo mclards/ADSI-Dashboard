@@ -27,6 +27,9 @@ const {
   energyNaturalKey,
   // v2.10.x — fast-path: read pre-computed per-unit daily energy for finalized days.
   getFinalizedDailySummaryRange,
+  // v2.11.x — running-MWh fast-path: includes today's live row (is_final=0)
+  // so the export can skip the heavy raw-readings scan for today's slice.
+  getDailyRunningSummaryRange,
 } = require('./db');
 const dailyAggregator = require('./dailyAggregator');
 const { formatAlarmHex, decodeAlarm } = require('./alarms');
@@ -1257,15 +1260,25 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
   // path interruptible for the WS heartbeat and Express keep-alive ticks.
   // The route-level 366-day cap (MAX_EXPORT_RANGE_DAYS) is still the load
   // bound; this just spreads it across more event-loop turns.
-  // --- Fast-path: days whose daily_readings_summary rows are finalized (is_final=1) ---
-  // For these days we skip the expensive raw-readings shard scan entirely and use the
-  // pre-computed pac_kwh_raw (incremental trapezoidal integral) from the summary table.
-  // Today is always slow-path — it's not finalized until EOD.
+  // --- Fast-path: any (day, inv, unit) whose daily_readings_summary row exists ---
+  //
+  // v2.11.x — Pulls BOTH live (is_final=0) and finalized (is_final=1) rows in
+  // one cheap range query. `pac_kwh_raw` is maintained incrementally on every
+  // persisted reading by applyReadingToSummaryState() in db.js, so today's
+  // running value is current within one slot rotation. Using it eliminates
+  // the dashboard freeze that the old "today is always slow-path" rule caused
+  // (operator report 2026-05-11): full-range exports were re-summing every
+  // raw reading for today's fleet on every click.
+  //
+  // The slow path (raw-readings shard scan) remains as a fallback for days
+  // / nodes where no summary row exists at all — e.g. dates predating the
+  // gateway's first run, or nodes whose first reading hasn't yet been
+  // persisted to the summary table.
   const startDate = fmtDate(s);
   const endDate   = fmtDate(e);
   const fastPathDayMap = new Map(); // Map<day, Map<'inv|unit', summaryShape>>
   try {
-    for (const row of (getFinalizedDailySummaryRange(startDate, endDate) || [])) {
+    for (const row of (getDailyRunningSummaryRange(startDate, endDate) || [])) {
       const rowDay = String(row.date || '');
       const inv    = Number(row.inverter || 0);
       const unit   = Number(row.unit || 0);
@@ -1274,20 +1287,26 @@ async function buildEnergySummaryExportRows(startTs, endTs, inverter, options = 
       fastPathDayMap.get(rowDay).set(`${inv}|${unit}`, {
         inverter:    inv,
         unit,
-        first_ts:   Number(row.first_ts   || 0),
-        last_ts:    Number(row.last_ts    || 0),
-        pac_peak:   Number(row.pac_peak   || 0),
-        energy_kwh: Number(row.pac_kwh_raw || 0),
+        first_ts:       Number(row.first_ts       || 0),
+        last_ts:        Number(row.last_ts        || 0),
+        pac_peak:       Number(row.pac_peak       || 0),
+        energy_kwh:     Number(row.pac_kwh_raw    || 0),
+        sample_count:   Number(row.sample_count   || 0),
+        online_samples: Number(row.online_samples || 0),
+        is_final:       Number(row.is_final || 0) === 1 ? 1 : 0,
+        updated_ts:     Number(row.updated_ts || 0),
       });
     }
   } catch (fpErr) {
     console.warn('[exporter] fast-path summary read failed, falling back to full scan:', fpErr?.message || fpErr);
     fastPathDayMap.clear();
   }
-  // Determine which days still need the raw-readings shard scan.
+  // Determine which days still need the raw-readings shard scan. A day goes
+  // to the slow path ONLY if it has no summary row at all — today no longer
+  // gets force-routed to slow-path now that the live running value is used.
   const slowPathDays = new Set();
   for (const day of iterateLocalDates(s, e)) {
-    if (day === today || !fastPathDayMap.has(day)) slowPathDays.add(day);
+    if (!fastPathDayMap.has(day)) slowPathDays.add(day);
   }
 
   const rowsByDay = new Map();
