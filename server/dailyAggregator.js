@@ -271,6 +271,13 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
     // snapshot. Row-to-row delta gives the slot's actual energy.
     parceLast: null,
 
+    // v2.11.x Slice κ — grid-connection cycle counters (K1 wear).
+    // Same monotone-counter pattern as parceLast: store the latest snapshot
+    // we saw during the slot. Row-to-row delta gives the cycle count over
+    // that 5-min window (~zero for healthy nodes; rises sharply on chatter).
+    conexLifetimeLast:   null,
+    conexResettableLast: null,
+
     sampleCount: 0,             // # of polls that contributed at least one field
   };
 }
@@ -322,6 +329,21 @@ function _accum(b, row) {
     if (b.parceLast == null || parce >= b.parceLast) {
       b.parceLast = parce;
       touched++;
+    }
+  }
+  // v2.11.x Slice κ — Conex (grid-connection cycle count) is also monotone.
+  // Same anti-regression guard as parcE. Values are taken from poller's
+  // passthrough (Python's read_fast_async addr 4-5 / addr 62-63 UInt32 hi-lo).
+  const conexL = Number(row?.conex_lifetime);
+  const conexR = Number(row?.conex_resettable);
+  if (Number.isFinite(conexL) && conexL >= 0) {
+    if (b.conexLifetimeLast == null || conexL >= b.conexLifetimeLast) {
+      b.conexLifetimeLast = conexL | 0;
+    }
+  }
+  if (Number.isFinite(conexR) && conexR >= 0) {
+    if (b.conexResettableLast == null || conexR >= b.conexResettableLast) {
+      b.conexResettableLast = conexR | 0;
     }
   }
   if (alarm32 != null) {
@@ -504,6 +526,9 @@ function _flush(b) {
     pt100_1_last:        b.pt100_1Last,
     pt100_2_last:        b.pt100_2Last,
     inverter_state_raw_last: b.inverterStateRawLast,
+    // v2.11.x Slice κ — grid-connection cycle counters (K1 wear).
+    conex_lifetime_last:   b.conexLifetimeLast,
+    conex_resettable_last: b.conexResettableLast,
   };
   try {
     _db.prepare(`
@@ -525,6 +550,7 @@ function _flush(b) {
         alarms_inst_32_max, alarms_maint_32_max, power_reduction_bits_last,
         analog_in_1_avg, analog_in_2_avg, analog_in_3_avg, analog_in_4_avg,
         pt100_1_last, pt100_2_last, inverter_state_raw_last,
+        conex_lifetime_last, conex_resettable_last,
         sample_count, is_complete, in_solar_window,
         updated_ts
       ) VALUES (
@@ -545,6 +571,7 @@ function _flush(b) {
         @alarms_inst_32_max, @alarms_maint_32_max, @power_reduction_bits_last,
         @analog_in_1_avg, @analog_in_2_avg, @analog_in_3_avg, @analog_in_4_avg,
         @pt100_1_last, @pt100_2_last, @inverter_state_raw_last,
+        @conex_lifetime_last, @conex_resettable_last,
         @sample_count, @is_complete, @in_solar_window,
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
       )
@@ -733,6 +760,9 @@ function getCurrentBucket(ip, slave) {
     pt100_1_last:        b.pt100_1Last,
     pt100_2_last:        b.pt100_2Last,
     inverter_state_raw_last: b.inverterStateRawLast,
+    // v2.11.x Slice κ — grid-connection cycle counters (K1 wear).
+    conex_lifetime_last:   b.conexLifetimeLast,
+    conex_resettable_last: b.conexResettableLast,
     sample_count: b.sampleCount,
     is_complete: 0,
     in_solar_window: _isSolarWindow(b.slotIndex) ? 1 : 0,

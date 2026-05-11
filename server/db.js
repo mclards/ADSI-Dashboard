@@ -612,6 +612,10 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_a_ts     ON alarms(ts);
   CREATE INDEX IF NOT EXISTS idx_a_inv_ts ON alarms(inverter, ts);
+  -- v2.11.x Slice κ.3 — loadCriticalPatterns runs WHERE inverter=? AND unit=? AND ts > ?
+  -- per node on every fleet-endpoint hit (108 calls). This index makes the
+  -- query an index range scan rather than inv-filtered scan + unit filter.
+  CREATE INDEX IF NOT EXISTS idx_a_inv_unit_ts ON alarms(inverter, unit, ts);
 
   CREATE TABLE IF NOT EXISTS audit_log (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1120,6 +1124,38 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_scl_inv_ts ON serial_change_log(inverter_ip, acted_at_ms DESC);
   CREATE INDEX IF NOT EXISTS idx_scl_outcome ON serial_change_log(outcome, acted_at_ms DESC);
 
+  -- v2.11.x Slice κ.3: critical-pattern auto-block ledger.
+  --
+  -- Operator rule (2026-05-11): when alarm-pattern 0x0240 or 0x0210 recurs
+  -- (≥ 2 episodes in 48 h) on any node of an inverter, the inverter must
+  -- STOP automatically and remain blocked from manual control until the
+  -- operator clicks "Confirmed" (after physically inspecting + fixing the
+  -- root cause). One active row per inverter at a time -- acked_at_ms IS
+  -- NULL is the "active block" predicate. Once acked the row stays for
+  -- forensic history; re-triggering creates a new row.
+  CREATE TABLE IF NOT EXISTS inverter_critical_blocks (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter            INTEGER NOT NULL,
+    created_at_ms       INTEGER NOT NULL,
+    pattern_key         TEXT NOT NULL,
+    pattern_hex         TEXT NOT NULL,
+    pattern_label       TEXT,
+    triggering_slave    INTEGER,
+    count_in_window     INTEGER,
+    latest_episode_ts   INTEGER,
+    stop_issued_at_ms   INTEGER,
+    stop_result         TEXT,
+    last_reenforced_ms  INTEGER,
+    reenforce_count     INTEGER NOT NULL DEFAULT 0,
+    acked_at_ms         INTEGER,
+    acked_by            TEXT,
+    ack_note            TEXT,
+    updated_ts          INTEGER NOT NULL
+                        DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_icb_active   ON inverter_critical_blocks(inverter, acked_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_icb_inv_ts   ON inverter_critical_blocks(inverter, created_at_ms DESC);
+
   -- v2.10.x All Parameters Data — per-inverter, per-node, per-5-minute
   -- aggregated parameter snapshot. Replaces the on-screen Energy table
   -- (UI only — the existing inverter_5min table and energy_5min stay
@@ -1550,6 +1586,19 @@ ensureColumn("inverter_5min_param", "analog_in_4_avg",              "analog_in_4
 ensureColumn("inverter_5min_param", "pt100_1_last",                 "pt100_1_last INTEGER");
 ensureColumn("inverter_5min_param", "pt100_2_last",                 "pt100_2_last INTEGER");
 ensureColumn("inverter_5min_param", "inverter_state_raw_last",      "inverter_state_raw_last INTEGER");
+
+// v2.11.x Slice κ — grid-connection cycle counters (K1 contactor wear).
+// Captured from fast-poll input regs 30005-30006 (lifetime, UInt32 hi-lo)
+// and 30063-30064 (resettable variant). Both already inside the 0-77
+// fast-read range — zero extra Modbus traffic.
+//
+// Stored as the LAST-known snapshot per 5-min slot (monotonic counters).
+// The contactor health module derives Δ-cycles/day per node by diffing
+// today's first/last snapshot, or 30-day rolling rate. Per-slot delta is
+// near-zero for healthy contactors and rises sharply when K1 chatters.
+ensureColumn("inverter_5min_param", "conex_lifetime_last",   "conex_lifetime_last INTEGER");
+ensureColumn("inverter_5min_param", "conex_resettable_last", "conex_resettable_last INTEGER");
+
 // Forecast compare persistence (detailed provenance/error-memory basis).
 ensureColumn("forecast_error_compare_daily", "run_audit_id", "run_audit_id INTEGER NOT NULL DEFAULT 0");
 ensureColumn("forecast_error_compare_daily", "generator_mode", "generator_mode TEXT");
@@ -5075,6 +5124,124 @@ function pruneIgbtThermalBaseline(retainDays = 800) {
   ).run(cutoffDate).changes;
 }
 
+// ── v2.11.x Slice κ.3 — inverter_critical_blocks DAO ────────────────────────
+// One active row per inverter at a time. "Active" = acked_at_ms IS NULL.
+// History rows (acked) are kept indefinitely for forensic review.
+
+function getActiveCriticalBlock(inverter) {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE inverter = ? AND acked_at_ms IS NULL
+      ORDER BY id DESC LIMIT 1
+  `).get(Number(inverter));
+}
+
+function getAllActiveCriticalBlocks() {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE acked_at_ms IS NULL
+      ORDER BY inverter ASC
+  `).all();
+}
+
+function getCriticalBlockHistory(inverter, limit = 50) {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE inverter = ?
+      ORDER BY id DESC LIMIT ?
+  `).all(Number(inverter), Math.min(500, Math.max(1, Number(limit) || 50)));
+}
+
+// v2.11.x Slice κ.5 — latest acked block for an inverter. Drives the
+// "reset counter after Confirm" semantics: alarm-pattern episode counting
+// and EOL health signaling both ignore evidence older than the acked_at_ms
+// timestamp returned here, so a fresh fault must occur *after* the
+// operator confirms the fix before the inverter is re-blocked.
+function getLatestAckedCriticalBlock(inverter) {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE inverter = ? AND acked_at_ms IS NOT NULL
+      ORDER BY acked_at_ms DESC LIMIT 1
+  `).get(Number(inverter));
+}
+
+function insertCriticalBlock(row) {
+  const r = row || {};
+  return db.prepare(`
+    INSERT INTO inverter_critical_blocks
+      (inverter, created_at_ms, pattern_key, pattern_hex, pattern_label,
+       triggering_slave, count_in_window, latest_episode_ts,
+       stop_issued_at_ms, stop_result, last_reenforced_ms, reenforce_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+  `).run(
+    Number(r.inverter),
+    Number(r.created_at_ms) || Date.now(),
+    String(r.pattern_key || ""),
+    String(r.pattern_hex || ""),
+    r.pattern_label == null ? null : String(r.pattern_label),
+    r.triggering_slave == null ? null : Number(r.triggering_slave),
+    r.count_in_window == null ? null : Number(r.count_in_window),
+    r.latest_episode_ts == null ? null : Number(r.latest_episode_ts),
+    r.stop_issued_at_ms == null ? null : Number(r.stop_issued_at_ms),
+    r.stop_result == null ? null : String(r.stop_result),
+    r.last_reenforced_ms == null ? null : Number(r.last_reenforced_ms),
+  ).lastInsertRowid;
+}
+
+function updateCriticalBlockReenforcement(id, nowMs, stopResult) {
+  return db.prepare(`
+    UPDATE inverter_critical_blocks
+       SET last_reenforced_ms = ?,
+           reenforce_count    = reenforce_count + 1,
+           stop_result        = COALESCE(?, stop_result),
+           updated_ts         = ?
+     WHERE id = ?
+  `).run(Number(nowMs) || Date.now(), stopResult || null, Date.now(), Number(id)).changes;
+}
+
+// v2.11.x Slice κ.3 — in-place promotion of the active block when a more
+// severe pattern (per CRITICAL_PATTERNS.severity_rank) becomes critical
+// while the lesser pattern's block is still open. Updates pattern_key /
+// pattern_hex / pattern_label / triggering_slave / count_in_window /
+// latest_episode_ts ONLY — preserves audit fields (created_at_ms, stop_*,
+// reenforce_count). Operator's ack still references the block by id.
+function updateCriticalBlockPattern(id, fields, nowMs) {
+  const f = fields || {};
+  return db.prepare(`
+    UPDATE inverter_critical_blocks
+       SET pattern_key      = COALESCE(?, pattern_key),
+           pattern_hex      = COALESCE(?, pattern_hex),
+           pattern_label    = COALESCE(?, pattern_label),
+           triggering_slave = COALESCE(?, triggering_slave),
+           count_in_window  = COALESCE(?, count_in_window),
+           latest_episode_ts = COALESCE(?, latest_episode_ts),
+           updated_ts       = ?
+     WHERE id = ? AND acked_at_ms IS NULL
+  `).run(
+    f.pattern_key   == null ? null : String(f.pattern_key),
+    f.pattern_hex   == null ? null : String(f.pattern_hex),
+    f.pattern_label == null ? null : String(f.pattern_label),
+    f.triggering_slave == null ? null : Number(f.triggering_slave),
+    f.count_in_window  == null ? null : Number(f.count_in_window),
+    f.latest_episode_ts == null ? null : Number(f.latest_episode_ts),
+    Number(nowMs) || Date.now(),
+    Number(id),
+  ).changes;
+}
+
+function ackCriticalBlock(inverter, ackedBy, note) {
+  // Closes the active block for this inverter (no-op if none).
+  const active = getActiveCriticalBlock(inverter);
+  if (!active) return { ok: false, error: "no_active_block" };
+  const now = Date.now();
+  const changes = db.prepare(`
+    UPDATE inverter_critical_blocks
+       SET acked_at_ms = ?, acked_by = ?, ack_note = ?, updated_ts = ?
+     WHERE id = ?
+  `).run(now, String(ackedBy || "OPERATOR"), note ? String(note) : null, now, active.id).changes;
+  return { ok: changes > 0, id: active.id, acked_at_ms: now };
+}
+
 module.exports = {
   db,
   stmts,
@@ -5181,6 +5348,15 @@ module.exports = {
   dayHadAgingStopEvent,
   pruneIgbtThermalBaseline,
   IGBT_AGING_MOTIVE_CODES,
+  // v2.11.x Slice κ.3 — critical-pattern auto-block ledger
+  getActiveCriticalBlock,
+  getAllActiveCriticalBlocks,
+  getCriticalBlockHistory,
+  getLatestAckedCriticalBlock,
+  insertCriticalBlock,
+  updateCriticalBlockReenforcement,
+  updateCriticalBlockPattern,
+  ackCriticalBlock,
   // v2.11.0 Plant Controller — NGCP compliance run helpers
   insertComplianceRun,
   finalizeComplianceRun,

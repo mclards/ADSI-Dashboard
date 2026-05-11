@@ -250,9 +250,117 @@ function medianImbalance(param5minRows) {
   }
 }
 
+/**
+ * medianImbalanceWithCount(param5minRows) → { value, sample_count }
+ *
+ * Hardened variant of medianImbalance that also returns the number of
+ * non-null power-bearing samples used. Callers can use sample_count to
+ * decide whether the score's imbalance component is trustworthy:
+ *
+ *   sample_count === 0  → imbalance was synthesized as 0 (no data)
+ *   sample_count <  6   → imbalance based on < 30 min of data (volatile)
+ *   sample_count >= 6   → reasonable confidence
+ *
+ * Use this in new code instead of medianImbalance() so the data-quality
+ * flag is visible to the UI / CSV exporter.
+ */
+function medianImbalanceWithCount(param5minRows) {
+  if (!Array.isArray(param5minRows) || param5minRows.length === 0) {
+    return { value: null, sample_count: 0 };
+  }
+
+  const imbalances = [];
+  for (const row of param5minRows) {
+    const iac1 = row?.iac1_a;
+    const iac2 = row?.iac2_a;
+    const iac3 = row?.iac3_a;
+    if (
+      typeof iac1 !== "number" ||
+      typeof iac2 !== "number" ||
+      typeof iac3 !== "number" ||
+      !Number.isFinite(iac1) ||
+      !Number.isFinite(iac2) ||
+      !Number.isFinite(iac3)
+    ) continue;
+    const avg = (iac1 + iac2 + iac3) / 3;
+    if (avg === 0) continue;
+    const maxDev = Math.max(Math.abs(iac1 - avg), Math.abs(iac2 - avg), Math.abs(iac3 - avg));
+    imbalances.push((maxDev / avg) * 100);
+  }
+
+  if (imbalances.length === 0) return { value: null, sample_count: 0 };
+
+  imbalances.sort((a, b) => a - b);
+  const median = imbalances.length % 2 === 1
+    ? imbalances[Math.floor(imbalances.length / 2)]
+    : (imbalances[imbalances.length / 2 - 1] + imbalances[imbalances.length / 2]) / 2;
+
+  return { value: median, sample_count: imbalances.length };
+}
+
+/**
+ * dataQualityFlags({ thermalCount, framaCount, piAnaCount, imbalanceSampleCount, lastEventMs, now }) → flags
+ *
+ * Produces machine-readable data-quality flags for an IGBT node so the
+ * UI can render an honest "insufficient data" state instead of pretending
+ * a silent node is healthy.
+ *
+ * Returns:
+ *   {
+ *     has_stop_signal:  boolean — any stop events were observed
+ *     has_imbalance:    boolean — at least one in-power Iac sample
+ *     is_silent:        boolean — no stops AND no Iac samples (likely offline)
+ *     stale_param_min:  number|null — minutes since last 5-min param row
+ *   }
+ */
+function dataQualityFlags(inputs) {
+  const {
+    thermalCount = 0,
+    framaCount = 0,
+    piAnaCount = 0,
+    imbalanceSampleCount = 0,
+    lastParamTsMs = null,
+    now = Date.now(),
+  } = inputs || {};
+
+  const has_stop_signal = (Number(thermalCount) + Number(framaCount) + Number(piAnaCount)) > 0;
+  const has_imbalance = Number(imbalanceSampleCount) > 0;
+  const is_silent = !has_stop_signal && !has_imbalance;
+
+  let stale_param_min = null;
+  if (Number.isFinite(Number(lastParamTsMs)) && lastParamTsMs !== null) {
+    const diffMs = Number(now) - Number(lastParamTsMs);
+    if (diffMs >= 0) stale_param_min = Math.floor(diffMs / 60000);
+  }
+
+  return { has_stop_signal, has_imbalance, is_silent, stale_param_min };
+}
+
+// Motive-code groupings — single source of truth for the endpoint layer
+// and for cross-correlation in server/acContactorHealth.js.
+const AGING_MOTIVES = Object.freeze({
+  THERMAL: Object.freeze([7, 21]),              // TEMPERATURA, TEMP_AUX
+  FRAMA:   Object.freeze([13, 29, 30]),         // FRAMA1, FRAMA2, FRAMA3
+  PI_ANA:  Object.freeze([26]),                 // PI_ANA_SAT
+  // Re-exported for symmetry with acContactorHealth.CONTACTOR_STOP_MOTIVES.
+  CONTACTOR: Object.freeze([22, 23, 24]),        // PROT_AC, MAGNETO, CONTACTOR
+});
+
+// Tier band constants — shared with UI for consistent thresholds.
+const TIER_BANDS = Object.freeze({
+  HEALTHY_MAX: 25,
+  WATCH_MAX:   50,
+  AGING_MAX:   75,
+});
+
 module.exports = {
   computeHealthScore,
   tierForScore,
   aggregateMotiveCounts,
   medianImbalance,
+  // hardening additions (v2.11.x Slice κ):
+  medianImbalanceWithCount,
+  dataQualityFlags,
+  AGING_MOTIVES,
+  TIER_BANDS,
 };

@@ -1,0 +1,316 @@
+"use strict";
+
+/**
+ * criticalPatternEnforcer.js — Slice κ.3 (v2.11.x)
+ *
+ * Automatically blocks an inverter from generation when a critical alarm
+ * pattern (0x0240 or 0x0210) recurs unresolved within 48 hours. Operator
+ * rule (2026-05-11): "2-day recurring 0x0240 or 0x0210 episode count must
+ * be considered critical already, needs attention by the inverter engineer.
+ * Block START control … STOP the generation automatically and block the
+ * control on the inverter card and put notice overlayed on it."
+ *
+ * Design:
+ *   - The enforcement loop walks each configured inverter on a fixed cadence
+ *     (default every 2 min). For each inverter it asks the dependency
+ *     `loadPatternsForNode(inv, slave)` for the current pattern severities
+ *     across that inverter's slaves.
+ *   - If ANY slave is severity === "critical" AND no active block exists,
+ *     it opens a block row + issues STOP (value=0) to every configured
+ *     slave of that inverter.
+ *   - If an active block already exists, it checks whether re-enforcement
+ *     is needed (i.e. a slave is currently running) and re-issues STOP at
+ *     most once per re-enforcement interval (default 5 min).
+ *   - Operator clicks "Confirmed" → ackCriticalBlock() closes the block.
+ *     A *new* critical episode after the ack will create a new block row.
+ *
+ * Pure decision logic lives in `decideBlockAction()`. Side effects (STOP
+ * commands, DB writes, logging) are injected as `deps`.
+ */
+
+const { patternSeverityRank } = require("./criticalAlarmPatterns");
+
+// How often we can re-issue STOP for the same active block.
+const RE_ENFORCEMENT_INTERVAL_MS = 5 * 60 * 1000;  // 5 min
+
+// Slice κ.5 — graceful-stop settle interval. The enforcer fans STOP out
+// across every configured slave of an inverter. Firing them in lockstep
+// makes all K1 contactors open at the same instant, which on a shared AC
+// bus produces a coincident voltage transient + di/dt that the surrounding
+// inverters see as a brief disturbance. Spacing the STOPs by this interval
+// lets each slave's K1 settle (~ 50–80 ms mechanical) and lets the gate
+// driver complete its soft-shutdown ramp before the next slave goes.
+//
+// 1500 ms is conservative: well past the K1 mechanical settle, comfortably
+// below the operator's perception of "blocked immediately" (the block row
+// + UI overlay land synchronously on the FIRST tick anyway).
+const STOP_PER_SLAVE_DELAY_MS = 1500;
+
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+/**
+ * Per-inverter decision based on current pattern severities + existing block.
+ *
+ * Selection rule (2026-05-12): when multiple patterns are critical at the
+ * same time, pick the one with the highest `severity_rank` (catalogue order:
+ * 0x0240 substrate-breach OUTRANKS 0x0210 AC overcurrent). Within equal
+ * ranks, tie-break by most-recent episode so the freshest signal wins.
+ *
+ * @param {Object} ctx
+ * @param {number} ctx.inverter
+ * @param {Array<{slave:number, patterns: Array<{key,hex,label,severity,severity_rank,count_in_window,last_seen_ts}>}>} ctx.slaves
+ * @param {Object|null} ctx.activeBlock  — current open block row, or null
+ * @param {number} ctx.now
+ *
+ * @returns {Object} action
+ *   action.kind: "noop" | "open_block" | "reenforce" | "skip_reenforce" | "promote_block"
+ *   action.reason: string
+ *   action.pattern?: { key, hex, label }
+ *   action.triggering_slave?: number
+ *   action.count_in_window?: number
+ *   action.latest_episode_ts?: number
+ */
+function decideBlockAction(ctx) {
+  const slaves = Array.isArray(ctx?.slaves) ? ctx.slaves : [];
+  const now    = Number(ctx?.now) || Date.now();
+  const active = ctx?.activeBlock || null;
+
+  // Find the worst pattern across slaves. Ordering rule:
+  //   1. higher catalogue severity_rank wins (0x0240 > 0x0210)
+  //   2. on ties, more-recent last_seen_ts wins (freshest signal)
+  // Fallback: if the payload omits severity_rank (legacy), look it up.
+  let worst = null;
+  for (const s of slaves) {
+    if (!s || !Array.isArray(s.patterns)) continue;
+    for (const p of s.patterns) {
+      if (p?.severity !== "critical") continue;
+      const ts   = Number(p.last_seen_ts) || 0;
+      const rank = Number(p.severity_rank) || patternSeverityRank(p.key);
+      const cand = {
+        slave: Number(s.slave),
+        key:   String(p.key || ""),
+        hex:   String(p.hex || ""),
+        label: String(p.label || ""),
+        count_in_window: Number(p.count_in_window || 0),
+        last_seen_ts:    ts,
+        severity_rank:   rank,
+      };
+      if (!worst) { worst = cand; continue; }
+      if (cand.severity_rank > worst.severity_rank) { worst = cand; continue; }
+      if (cand.severity_rank === worst.severity_rank && cand.last_seen_ts > worst.last_seen_ts) {
+        worst = cand;
+      }
+    }
+  }
+
+  if (!worst) {
+    return { kind: "noop", reason: active ? "block_active_no_new_critical" : "no_critical_pattern" };
+  }
+
+  if (!active) {
+    return {
+      kind: "open_block",
+      reason: "recurring_critical_pattern",
+      pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+      triggering_slave: worst.slave,
+      count_in_window: worst.count_in_window,
+      latest_episode_ts: worst.last_seen_ts,
+    };
+  }
+
+  // Active block exists. First check whether the currently-worst critical
+  // pattern OUTRANKS the active block's pattern. If yes, promote the block
+  // so the overlay shows the more catastrophic failure mode immediately —
+  // operator must not be misled into thinking only the lesser pattern is
+  // active when the bigger one has also reached critical.
+  const activeRank = patternSeverityRank(active.pattern_key);
+  if (worst.severity_rank > activeRank && worst.key !== active.pattern_key) {
+    return {
+      kind: "promote_block",
+      reason: `promoted_${active.pattern_key}_to_${worst.key}`,
+      pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+      triggering_slave: worst.slave,
+      count_in_window: worst.count_in_window,
+      latest_episode_ts: worst.last_seen_ts,
+    };
+  }
+
+  // Block already active and pattern hasn't been outranked — re-enforce STOP
+  // if the cooldown elapsed.
+  const lastReenforce = Number(active.last_reenforced_ms) || Number(active.stop_issued_at_ms) || Number(active.created_at_ms) || 0;
+  if (now - lastReenforce < RE_ENFORCEMENT_INTERVAL_MS) {
+    return { kind: "skip_reenforce", reason: "cooldown_active" };
+  }
+
+  return {
+    kind: "reenforce",
+    reason: "still_critical_after_block",
+    pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+    triggering_slave: worst.slave,
+    count_in_window: worst.count_in_window,
+    latest_episode_ts: worst.last_seen_ts,
+  };
+}
+
+/**
+ * Build a public "block status" view used by GET /api/critical-blocks and
+ * the inverter-card overlay. Hides internal fields, keeps operator-facing
+ * forensic info.
+ */
+function summarizeBlockForApi(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    inverter: row.inverter,
+    created_at_ms: row.created_at_ms,
+    pattern_key:   row.pattern_key,
+    pattern_hex:   row.pattern_hex,
+    pattern_label: row.pattern_label,
+    triggering_slave:  row.triggering_slave,
+    count_in_window:   row.count_in_window,
+    latest_episode_ts: row.latest_episode_ts,
+    stop_issued_at_ms: row.stop_issued_at_ms,
+    stop_result:       row.stop_result,
+    last_reenforced_ms: row.last_reenforced_ms,
+    reenforce_count:   row.reenforce_count,
+    acked_at_ms:       row.acked_at_ms,
+    acked_by:          row.acked_by,
+    ack_note:          row.ack_note,
+    is_active:         row.acked_at_ms == null,
+  };
+}
+
+/**
+ * Run one enforcement tick for one inverter.
+ *
+ * Side effects are mediated by `deps`:
+ *   deps.getActiveBlock(inverter)               → row|null
+ *   deps.openBlock(rowFields)                   → newId
+ *   deps.promoteBlock(id, patternFields, now)   → void   (Slice κ.3 — pattern update)
+ *   deps.markReenforced(id, nowMs, stopResult)
+ *   deps.issueStop(inverter, slave, reason)     → "ok" | "err:<msg>"
+ *   deps.listSlaves(inverter)                   → [slave numbers]
+ *   deps.loadPatternsForNode(inv, slave, now)   → patternStatus[]
+ *   deps.logAction(payload)                     → void
+ *   deps.now()                                  → number
+ */
+async function enforceOne(inverter, deps) {
+  const now = Number(deps?.now?.() || Date.now());
+  const slaves = (deps?.listSlaves?.(inverter) || []).map(Number).filter((s) => Number.isFinite(s));
+  if (slaves.length === 0) {
+    return { inverter, action: { kind: "noop", reason: "no_configured_slaves" } };
+  }
+
+  // Pull pattern status for each slave.
+  const slavePatterns = slaves.map((s) => ({
+    slave: s,
+    patterns: deps.loadPatternsForNode(inverter, s, now) || [],
+  }));
+
+  const activeBlock = deps.getActiveBlock(inverter) || null;
+  const action = decideBlockAction({ inverter, slaves: slavePatterns, activeBlock, now });
+
+  if (action.kind === "noop" || action.kind === "skip_reenforce") {
+    return { inverter, action };
+  }
+
+  // promote_block: existing active block carries a less-severe pattern than
+  // what's currently critical. Update the row in place, broadcast, audit —
+  // but do NOT re-issue STOP (the inverter is already stopped by the
+  // earlier open_block). This is a pure UI/forensic promotion.
+  if (action.kind === "promote_block") {
+    const prevKey = activeBlock?.pattern_key || "";
+    deps.promoteBlock?.(activeBlock.id, {
+      pattern_key:   action.pattern.key,
+      pattern_hex:   action.pattern.hex,
+      pattern_label: action.pattern.label,
+      triggering_slave:  action.triggering_slave,
+      count_in_window:   action.count_in_window,
+      latest_episode_ts: action.latest_episode_ts,
+    }, now);
+    deps.logAction?.({
+      kind: "critical_block_promoted",
+      inverter, blockId: activeBlock.id,
+      pattern: action.pattern,
+      from_pattern_key: prevKey,
+      triggering_slave: action.triggering_slave,
+      count_in_window:  action.count_in_window,
+    });
+    return { inverter, action, blockId: activeBlock.id };
+  }
+
+  // open_block: insert row first so the UI sees the block even if STOP fails.
+  let blockId = activeBlock?.id || null;
+  if (action.kind === "open_block") {
+    blockId = deps.openBlock({
+      inverter,
+      created_at_ms: now,
+      pattern_key:   action.pattern.key,
+      pattern_hex:   action.pattern.hex,
+      pattern_label: action.pattern.label,
+      triggering_slave:  action.triggering_slave,
+      count_in_window:   action.count_in_window,
+      latest_episode_ts: action.latest_episode_ts,
+      stop_issued_at_ms: null,
+      stop_result:       null,
+      last_reenforced_ms: null,
+    });
+    deps.logAction?.({
+      kind: "critical_block_opened",
+      inverter, blockId, pattern: action.pattern,
+      triggering_slave: action.triggering_slave,
+      count_in_window:  action.count_in_window,
+    });
+  }
+
+  // Issue STOP to every configured slave of this inverter. Best-effort:
+  // failures don't roll back the block (the block represents the SAFETY
+  // intent; if the STOP failed we still want manual control gated).
+  //
+  // Slice κ.5 — graceful sequence. A configurable settle delay between
+  // slaves (deps.stopPerSlaveDelayMs ?? STOP_PER_SLAVE_DELAY_MS, default
+  // 1500 ms) keeps the K1 contactors from opening in lockstep and lets
+  // each gate driver complete its soft-shutdown ramp before the next
+  // slave is commanded. The block row is already in the DB and the UI
+  // overlay is already up — the delays are about HARDWARE quiescence,
+  // not user-visible responsiveness.
+  const stopDelay = (typeof deps?.stopPerSlaveDelayMs === "number")
+    ? deps.stopPerSlaveDelayMs
+    : STOP_PER_SLAVE_DELAY_MS;
+  const stopResults = [];
+  let firstSlave = true;
+  for (const s of slaves) {
+    if (!firstSlave && stopDelay > 0) await _sleep(stopDelay);
+    firstSlave = false;
+    try {
+      const result = await deps.issueStop(inverter, s, `critical_pattern:${action.pattern.key}`);
+      stopResults.push(`s${s}=${result || "ok"}`);
+    } catch (err) {
+      stopResults.push(`s${s}=err:${err?.message || String(err)}`);
+    }
+  }
+  const stopResultStr = stopResults.join(",");
+
+  if (action.kind === "open_block") {
+    deps.markReenforced(blockId, now, stopResultStr);
+  } else if (action.kind === "reenforce") {
+    deps.markReenforced(blockId, now, stopResultStr);
+    deps.logAction?.({
+      kind: "critical_block_reenforced",
+      inverter, blockId,
+      reenforce_count: (activeBlock?.reenforce_count || 0) + 1,
+    });
+  }
+
+  return { inverter, action, stopResult: stopResultStr, blockId };
+}
+
+module.exports = {
+  RE_ENFORCEMENT_INTERVAL_MS,
+  STOP_PER_SLAVE_DELAY_MS,
+  decideBlockAction,
+  summarizeBlockForApi,
+  enforceOne,
+};

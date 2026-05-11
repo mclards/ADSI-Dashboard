@@ -123,7 +123,7 @@
         <button class="nav-btn" data-page="plant-cap" title="Plant Controller — Active Power Control + grid test runners (T2 Frequency Withstand, T3 Q-V, T5 APC Sweep) + report archive.">
           <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>PLANT CONTROLLER</span>
         </button>
-        <button class="nav-btn" data-page="igbt-health" title="Asset health monitoring: IGBT module aging risk across the 27-inverter fleet. Health scores, tiers, and capital-planning export.">
+        <button class="nav-btn" data-page="igbt-health" title="Power electronics asset health: IGBT module aging + AC contactor (K1) wear across the 27-inverter fleet. Composite scores, tier filters, linked-findings cross-correlation, and capital-planning CSV export.">
           <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
         </button>
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
@@ -937,8 +937,26 @@
         <div id="plantCapPageContainer" class="plant-cap-page-container"></div>
       </section>
 
-      <!-- --- PAGE: IGBT HEALTH ---------------------------------------------------- -->
+      <!-- --- PAGE: POWER ELECTRONICS HEALTH (IGBT + AC Contactor) ---------------- -->
+      <!-- v2.11.x Slice κ — IGBT and AC contactor are coupled by the AC current/voltage
+           flow path; this page surfaces both subsystems together with a linked-findings
+           banner in each drilldown. Internal id kept as page-igbt-health for back-compat
+           with deep links + nav routing. -->
       <section id="page-igbt-health" class="page">
+        <!-- Subsystem tabs — switch between IGBT and AC Contactor health views -->
+        <div class="pe-tabs" id="peSubsystemTabs" role="tablist" aria-label="Power electronics subsystem">
+          <button class="pe-tab" data-pe-tab="igbt" data-selected="true" role="tab" aria-selected="true"
+                  title="IGBT module aging — thermal trips, FRAMA branch faults, PI controller saturation, phase-current imbalance, year-over-year thermal drift.">
+            <span class="mdi mdi-chip" aria-hidden="true"></span>
+            <span>IGBT Modules</span>
+          </button>
+          <button class="pe-tab" data-pe-tab="contactor" data-selected="false" role="tab" aria-selected="false"
+                  title="AC Contactor K1 health — contactor stop events, bit-11 alarm episodes, chatter detection, phase voltage/current imbalance under load.">
+            <span class="mdi mdi-electric-switch" aria-hidden="true"></span>
+            <span>AC Contactor (K1)</span>
+          </button>
+        </div>
+
         <div class="page-toolbar">
           <div class="tl-left">
             <div class="tier-filter-group" id="igbtTierFilters">
@@ -965,32 +983,117 @@
         </div>
 
         <div class="igbt-page-body">
-          <!-- Fleet table (left, dominant) -->
-          <div class="igbt-fleet-table-wrapper">
-            <table class="data-table igbt-fleet-table" id="igbtFleetTable">
+          <!-- IGBT fleet (default tab) — column groups: identity, score,
+               fault counts, telemetry, alarms, last event. -->
+          <div class="igbt-fleet-table-wrapper pe-tab-pane" data-pe-pane="igbt">
+            <table class="data-table igbt-fleet-table pe-fleet-table" id="igbtFleetTable">
+              <colgroup class="pe-group-id">
+                <col><col><col>
+              </colgroup>
+              <colgroup class="pe-group-score">
+                <col><col>
+              </colgroup>
+              <colgroup class="pe-group-faults">
+                <col><col><col><col>
+              </colgroup>
+              <colgroup class="pe-group-telemetry">
+                <col><col>
+              </colgroup>
+              <colgroup class="pe-group-alarms">
+                <col>
+              </colgroup>
+              <colgroup class="pe-group-event">
+                <col>
+              </colgroup>
               <thead>
+                <tr class="pe-fleet-grouprow">
+                  <th colspan="3" class="pe-group-head pe-group-head-id">Node</th>
+                  <th colspan="2" class="pe-group-head pe-group-head-score">Health</th>
+                  <th colspan="4" class="pe-group-head pe-group-head-faults" title="90-day rolling counts of aging-relevant stop events.">Stop-Event Counts (90 d)</th>
+                  <th colspan="2" class="pe-group-head pe-group-head-telemetry" title="Latest 1-hour telemetry snapshot.">Live Telemetry</th>
+                  <th colspan="1" class="pe-group-head pe-group-head-alarms" title="Active alarm bits OR-mask from the latest 5-min sample.">Alarms</th>
+                  <th colspan="1" class="pe-group-head pe-group-head-event">Last Stop</th>
+                </tr>
                 <tr>
-                  <th class="report-sort" data-key="inverter">Inverter</th>
-                  <th class="report-sort" data-key="ip">IP Address</th>
-                  <th class="report-sort" data-key="slave">Slave</th>
-                  <th class="report-sort" data-key="score" title="Composite health score (0–100). Higher = more aged.">Health Score</th>
-                  <th class="report-sort" data-key="tier">Tier</th>
-                  <th class="report-sort" data-key="frama_total" title="Total FRAMA events in 90-day window.">FRAMA Total</th>
-                  <th data-key="frama_branches" title="FRAMA branch distribution">Branch 1/2/3</th>
-                  <th class="report-sort" data-key="thermal_trips" title="Thermal trips in 90-day window.">Thermal Trips</th>
-                  <th class="report-sort" data-key="pi_ana_trips">PI Ana Trips</th>
-                  <th class="report-sort" data-key="temp_pe_now" title="Current power-electronics temperature.">Temp (°C)</th>
-                  <th class="report-sort" data-key="imbalance_pct" title="Phase current imbalance percentage.">Imbalance (%)</th>
-                  <th data-key="last_event" title="Most recent stop event.">Last Event</th>
+                  <th class="report-sort" data-key="inverter" title="Inverter number (1–27).">Inv</th>
+                  <th class="report-sort" data-key="ip" title="Modbus TCP IP address.">IP</th>
+                  <th class="report-sort" data-key="slave" title="Internal node / Modbus slave (1–4 per inverter).">Slv</th>
+                  <th class="report-sort" data-key="score" title="Composite IGBT health score (0–100). Higher = more aged. Tier band: <25 healthy · 25–49 watch · 50–74 aging · ≥75 EOL.">Score</th>
+                  <th class="report-sort" data-key="tier" title="Health-tier classification.">Tier</th>
+                  <th class="report-sort" data-key="frama_total" title="FRAMA (power-electronics branch) faults — motives 13/29/30.">FRAMA</th>
+                  <th data-key="frama_branches" title="FRAMA event distribution across branch 1 / 2 / 3.">B1/2/3</th>
+                  <th class="report-sort" data-key="thermal_trips" title="Thermal shutdown trips — motives 7 (TEMPERATURA) + 21 (TEMP_AUX).">Therm</th>
+                  <th class="report-sort" data-key="pi_ana_trips" title="PI current-loop saturation events — motive 26.">PI Sat</th>
+                  <th class="report-sort" data-key="temp_pe_now" title="Most recent power-electronics temperature reading.">Temp °C</th>
+                  <th class="report-sort" data-key="imbalance_pct" title="Median phase-current imbalance over the last hour (max-dev / mean × 100).">Imb %</th>
+                  <th data-key="alarm_bits" title="Currently raised alarm bits — click any chip for diagnostic.">Active Bits</th>
+                  <th data-key="last_event" title="Most recent stop-event timestamp.">When</th>
                 </tr>
               </thead>
               <tbody id="igbtFleetTableBody">
-                <!-- Rows injected by renderFleetTable() -->
+                <!-- Rows injected by renderIgbtFleetTable() -->
               </tbody>
             </table>
           </div>
 
-          <!-- Drilldown side panel (right, on row select) -->
+          <!-- AC Contactor fleet (Slice κ) -->
+          <div class="igbt-fleet-table-wrapper pe-tab-pane" data-pe-pane="contactor" hidden>
+            <table class="data-table igbt-fleet-table pe-fleet-table" id="contactorFleetTable">
+              <colgroup class="pe-group-id">
+                <col><col><col>
+              </colgroup>
+              <colgroup class="pe-group-score">
+                <col><col>
+              </colgroup>
+              <colgroup class="pe-group-faults">
+                <col><col><col>
+              </colgroup>
+              <colgroup class="pe-group-telemetry">
+                <col><col>
+              </colgroup>
+              <colgroup class="pe-group-cycles">
+                <col><col>
+              </colgroup>
+              <colgroup class="pe-group-alarms">
+                <col>
+              </colgroup>
+              <colgroup class="pe-group-event">
+                <col>
+              </colgroup>
+              <thead>
+                <tr class="pe-fleet-grouprow">
+                  <th colspan="3" class="pe-group-head pe-group-head-id">Node</th>
+                  <th colspan="2" class="pe-group-head pe-group-head-score">Health</th>
+                  <th colspan="3" class="pe-group-head pe-group-head-faults" title="90-day rolling counts of contactor failure indicators.">Contactor Events (90 d)</th>
+                  <th colspan="2" class="pe-group-head pe-group-head-telemetry" title="Latest 1-hour telemetry snapshot under load.">Under-Load Imbalance</th>
+                  <th colspan="2" class="pe-group-head pe-group-head-cycles" title="K1 grid-connection cycle counter (Conex reg 30005-30006) and 30-day rate. Direct mechanical-wear metric.">K1 Wear</th>
+                  <th colspan="1" class="pe-group-head pe-group-head-alarms" title="Active alarm bits OR-mask from the latest 5-min sample.">Alarms</th>
+                  <th colspan="1" class="pe-group-head pe-group-head-event">Last Stop</th>
+                </tr>
+                <tr>
+                  <th class="report-sort" data-key="inverter" title="Inverter number (1–27).">Inv</th>
+                  <th class="report-sort" data-key="ip" title="Modbus TCP IP address.">IP</th>
+                  <th class="report-sort" data-key="slave" title="Internal node / Modbus slave (1–4 per inverter).">Slv</th>
+                  <th class="report-sort" data-key="score" title="Composite AC-contactor health score (0–100). Higher = more aged.">Score</th>
+                  <th class="report-sort" data-key="tier" title="Health-tier classification.">Tier</th>
+                  <th class="report-sort" data-key="stop_count" title="Contactor stop events — motives 22 (PROT_AC), 23 (MAGNETO), 24 (CONTACTOR).">Stops</th>
+                  <th class="report-sort" data-key="alarm_episode_count" title="Bit-11 (0x0800) Contactor Fault alarm episodes in window.">Bit-11</th>
+                  <th class="report-sort" data-key="chatter_count" title="Short-cycle bit-11 episodes (cleared within 60 s) — chatter indicator.">Chatter</th>
+                  <th class="report-sort" data-key="vac_imbalance_pct" title="Median per-phase voltage spread under load (≥5 A average current).">Vac Spd %</th>
+                  <th class="report-sort" data-key="iac_imbalance_pct" title="Median per-phase current imbalance under load.">Iac Imb %</th>
+                  <th class="report-sort" data-key="conex_lifetime" title="Lifetime K1 grid-connection count (Conex regs 30005-30006). Direct mechanical-wear counter.">Cycles</th>
+                  <th class="report-sort" data-key="cycle_rate_per_day" title="Average cycles per day over the last 30 days. Healthy ≈ 1/day; >3/day starts to contribute to the score; >20/day saturates the cycle component.">Rate/day</th>
+                  <th data-key="alarm_bits" title="Currently raised alarm bits — click any chip for diagnostic.">Active Bits</th>
+                  <th data-key="last_event" title="Most recent contactor stop-event timestamp.">When</th>
+                </tr>
+              </thead>
+              <tbody id="contactorFleetTableBody">
+                <!-- Rows injected by renderContactorFleetTable() -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Drilldown side panel (shared — body content swapped per tab) -->
           <div id="igbtDetailPanel" class="igbt-detail-panel" hidden>
             <div class="igbt-detail-header">
               <div class="igbt-detail-node-id" id="igbtDetailNodeId">No node selected</div>

@@ -73,6 +73,9 @@ const State = {
     status: null,
     preview: null,
   },
+  // v2.11.x Slice κ.3 — active critical-pattern auto-blocks, keyed by inverter#.
+  // Populated by GET /api/critical-blocks polling + WS "critical_block_changed".
+  criticalBlocks: {},   // { [inverter]: { id, pattern_key, pattern_hex, pattern_label, count_in_window, latest_episode_ts, created_at_ms } }
   plantCapActiveTab: "mw-cap",
   apc: { state: {}, activeJob: null, jobPollTimer: null },
   plantCapPanelCollapsed: true,
@@ -4616,7 +4619,7 @@ function initPlantCapPage() {
       <span class="plant-cap-tab-group" title="Active Power Control">APC</span>
       <button class="plant-cap-tab-btn active" data-tab="mw-cap" type="button">MW Cap</button>
       <button class="plant-cap-tab-btn" id="plantCapTabApc" data-tab="apc" type="button"${!tabEnabled ? " hidden" : ""}>%P Setpoint</button>
-      <button class="plant-cap-tab-btn" id="plantCapTabGridControl" data-tab="grid-control" type="button" title="Reactive power + power-factor control (Slice ζ). Read-back is always available; writes require the gridControlEnabled flag + sacupsMM auth + 2-week soak.">Grid Code</button>
+      <button class="plant-cap-tab-btn" id="plantCapTabGridControl" data-tab="grid-control" type="button" title="Reactive power + power-factor control (Slice ζ). Read-back is always available; writes require the gridControlEnabled flag + bulk-control authorization + 2-week soak.">Grid Code</button>
       <span class="plant-cap-tab-divider" aria-hidden="true"></span>
       <span class="plant-cap-tab-group" title="Grid-code compliance test runners (formal regulation reference: NGCP PGC 2016)">GRID TESTS</span>
       <button class="plant-cap-tab-btn" data-tab="t2" type="button" title="Test T2: Frequency Withstand (observation-only)">T2 Freq</button>
@@ -8983,7 +8986,7 @@ async function _bulkAuthForCompliance(action = "Start grid-test", scopeLabel = "
       const cachedMins = bulkAuthCacheMinutesRemaining();
       const cachedNote = cachedMins > 0
         ? `\n\nAuthorization cached for ${cachedMins} min — no key prompt.`
-        : "\n\nYou'll be prompted for the sacupsMM authorization key next.";
+        : "\n\nYou'll be prompted for the bulk-control authorization key next.";
       ok = await appConfirm(
         "Confirm action",
         `${action} ${scopeLabel}?${cachedNote}`,
@@ -9011,7 +9014,7 @@ async function _bulkAuthForCompliance(action = "Start grid-test", scopeLabel = "
   }
   // Last-ditch fallback for tests / dev-only builds without the modal HTML.
   try {
-    const key = String(window.prompt("Enter bulk-control authorization key (sacupsMM):") || "");
+    const key = String(window.prompt("Enter bulk-control authorization key:") || "");
     if (key) setCachedBulkAuthKey(key);
     return key;
   } catch (_) { return ""; }
@@ -9189,7 +9192,7 @@ async function _onT2Start() {
   }
   const authKey = await _bulkAuthForCompliance("Start T2 freq-withstand on", `inverter ${target.inverter} slave ${target.slave}`);
   if (!authKey) {
-    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    setStatus("✗ Cancelled — bulk-control authorization required.");
     showToast("Cancelled.", 1500);
     return;
   }
@@ -9485,7 +9488,7 @@ async function _onT3Start() {
   if (!proceed) { setStatus("Cancelled."); return; }
   const authKey = await _bulkAuthForCompliance("Start T3 Q-V sweep on", `inverter ${target.inverter} slave ${target.slave}`);
   if (!authKey) {
-    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    setStatus("✗ Cancelled — bulk-control authorization required.");
     showToast("Cancelled.", "warn", 1500);
     return;
   }
@@ -9684,7 +9687,7 @@ async function _onT5Start() {
   }
   const authKey = await _bulkAuthForCompliance("Start T5 APC sweep on", `inverter ${target.inverter} slave ${target.slave}`);
   if (!authKey) {
-    setStatus("✗ Cancelled — bulk-control auth key required (sacupsMM).");
+    setStatus("✗ Cancelled — bulk-control authorization required.");
     showToast("Cancelled.", 1500);
     return;
   }
@@ -9862,7 +9865,7 @@ async function _onComplianceReportClick(runId, format) {
                   : "CSV";
   const authKey = await _bulkAuthForCompliance(`Generate ${kindLabel} report for`, `run ${String(runId).slice(0, 16)}`);
   if (!authKey) {
-    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
     return;
   }
   const resp = await fetch(`/api/compliance/run/${encodeURIComponent(runId)}/report`, {
@@ -10075,7 +10078,7 @@ async function submitApcApply() {
     scope === "plant" ? "the entire plant" : `${targets.length} target node(s)`,
   );
   if (!auth) {
-    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
     return;
   }
   const btn = $("apcApplyBtn");
@@ -10089,7 +10092,7 @@ async function submitApcApply() {
     const data = await r.json();
     if (r.status === 403) {
       clearBulkAuthCache();
-      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+      showToast(data.error || "Authorization expired — please re-enter the authorization key next click.", "warning", 5000);
     } else if (r.status === 409) {
       showToast(data.error || "MW Cap sequencer is active — release it first on the MW Cap tab.", "warn", 6000);
     } else if (!r.ok || !data.ok) {
@@ -10173,7 +10176,7 @@ async function submitApcOp(opcode) {
     scope === "plant" ? "the entire plant" : `${targets.length} target node(s)`,
   );
   if (!auth) {
-    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
     return;
   }
   const btn = opcode === "stop" ? $("apcStopBtn") : $("apcStartBtn");
@@ -10187,7 +10190,7 @@ async function submitApcOp(opcode) {
     const data = await r.json();
     if (r.status === 403) {
       clearBulkAuthCache();
-      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+      showToast(data.error || "Authorization expired — please re-enter the authorization key next click.", "warning", 5000);
     } else if (r.status === 409 && data?.reason === "no_prior_setpoint") {
       showToast(data.error || "START blocked: no prior %P setpoint.", "warn", 7000);
     } else if (!r.ok || !data.ok) {
@@ -10206,7 +10209,7 @@ async function submitApcOp(opcode) {
 async function submitApcAbort(jobId) {
   const auth = await _bulkAuthForCompliance("Abort %P ramp", `job ${String(jobId || "").slice(0, 8)}`);
   if (!auth) {
-    showToast("Cancelled — bulk-control auth key required (sacupsMM).", "warn", 2500);
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
     return;
   }
   try {
@@ -10218,7 +10221,7 @@ async function submitApcAbort(jobId) {
     const data = await r.json();
     if (r.status === 403) {
       clearBulkAuthCache();
-      showToast(data.error || "Authorization expired — please re-enter sacupsMM next click.", "warn", 5000);
+      showToast(data.error || "Authorization expired — please re-enter the authorization key next click.", "warning", 5000);
     } else if (!r.ok || !data.ok) {
       showToast(data.error || "Abort failed.", "err");
     } else {
@@ -10318,7 +10321,7 @@ function buildApcPane() {
             <label class="apc-chip-radio" title="Apply to all nodes on one inverter IP.">
               <input type="radio" name="apcScope" value="inverter"><span>Per Inverter</span>
             </label>
-            <label class="apc-chip-radio" title="Apply to every node across all configured inverters. Requires sacupsMM bulk auth key.">
+            <label class="apc-chip-radio" title="Apply to every node across all configured inverters. Requires bulk-control authorization.">
               <input type="radio" name="apcScope" value="plant"><span>Plant-Wide</span>
             </label>
           </div>
@@ -10334,7 +10337,7 @@ function buildApcPane() {
               <span id="apcNodeCurrent">—</span>
             </span>
             <span id="apcNodesInfo" class="apc-info-pill" hidden title="All internal nodes (slaves) under this inverter will receive the command"></span>
-            <span id="apcPlantInfo" class="apc-info-pill" hidden title="All configured nodes plant-wide — requires sacupsMM bulk auth key"></span>
+            <span id="apcPlantInfo" class="apc-info-pill" hidden title="All configured nodes plant-wide — requires bulk-control authorization"></span>
           </div>
           <small class="apc-field-help">
             <b>Inverter</b> = one INGECON SUN unit (27 total). <b>Internal node</b> = a Modbus slave (1–4) inside the inverter — each is an independent IGBT converter with its own DC sub-array. The inverter has no fixed master; the leader role rotates per cycle, which is why active-power commands target nodes individually.
@@ -10364,15 +10367,15 @@ function buildApcPane() {
           <span class="apc-field-lbl">Authorization</span>
           <span class="apc-auth-note">
             Click STOP / START / Apply Setpoint and you'll be prompted for the
-            <code>sacupsMM</code> key. Same modal as the rest of the dashboard;
-            cached for the session after the first use.
+            bulk-control authorization key. Same modal as the rest of the
+            dashboard; cached for the session after the first use.
           </span>
         </div>
       </div>
 
       <div class="apc-actions">
         <button id="apcStopBtn" class="btn btn-red" type="button"
-          title="Halt active-power injection on the selected target (Modbus opcode 0x0005). The inverter stays grid-synced and online — only the power output goes to 0%. Requires sacupsMM auth.">
+          title="Halt active-power injection on the selected target (Modbus opcode 0x0005). The inverter stays grid-synced and online — only the power output goes to 0%. Requires bulk-control authorization.">
           <span class="mdi mdi-stop-circle-outline" aria-hidden="true"></span><span>STOP</span>
         </button>
         <button id="apcStartBtn" class="btn btn-green" type="button"
@@ -10541,8 +10544,8 @@ function buildGridControlPane() {
 
         <div class="apc-field">
           <label class="apc-field-lbl" for="gcAuthInp">Authorization</label>
-          <input id="gcAuthInp" class="inp" type="password" placeholder="sacupsMM auth key" autocomplete="off"
-                 title="sacupsMM bulk auth key (sacups + current or previous minute).">
+          <input id="gcAuthInp" class="inp" type="password" placeholder="Authorization key" autocomplete="off"
+                 title="Bulk-control authorization key.">
         </div>
       </div>
 
@@ -12249,6 +12252,17 @@ function updateInverterCards() {
     else if (staleSnapshot) card.classList.add("stale");
     else if (topSev === "critical") card.classList.add("critical");
     else if (anyAlarm) card.classList.add("alarm");
+
+    // v2.11.x Slice κ.3 — Critical-pattern auto-block overlay. Wins over
+    // other class states so the operator can't miss it.
+    const critBlock = State.criticalBlocks?.[inv] || null;
+    if (critBlock) {
+      card.classList.add("crit-blocked");
+      _renderCriticalBlockOverlay(card, inv, critBlock);
+    } else {
+      card.classList.remove("crit-blocked");
+      _removeCriticalBlockOverlay(card);
+    }
     if (iconEl) {
       iconEl.className = "card-inv-icon";
       if (!anyOnline) iconEl.classList.add("offline");
@@ -12771,6 +12785,212 @@ async function refreshPlantCapStatus(silent = true) {
       showToast(`MW Cap status refresh failed: ${err.message}`, "fault", 5000);
     }
     throw err;
+  }
+}
+
+// v2.11.x Slice κ.3 — render/remove the inverter-card overlay for a critical block.
+function _renderCriticalBlockOverlay(card, inv, blk) {
+  if (!card || !blk) return;
+  let overlay = card.querySelector(":scope > .inv-card-crit-overlay");
+  const fmtTs = (ms) => {
+    const t = Number(ms);
+    if (!Number.isFinite(t) || t <= 0) return "—";
+    try { return new Date(t).toLocaleString(); } catch (_) { return "—"; }
+  };
+  const titleStr = `BLOCKED — ${blk.pattern_hex || ""} ${blk.pattern_label || blk.pattern_key || ""}`;
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "inv-card-crit-overlay";
+    overlay.setAttribute("role", "alertdialog");
+    card.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="inv-crit-overlay-inner">
+      <div class="inv-crit-overlay-title">
+        <span class="mdi mdi-alert-octagram"></span>
+        ${titleStr}
+      </div>
+      <div class="inv-crit-overlay-detail">
+        Auto-stop issued. ${Number(blk.count_in_window || 0)} episodes in 48 h.
+        Last seen: ${fmtTs(blk.latest_episode_ts)}.
+        Inverter engineer review required.
+      </div>
+      <div class="inv-crit-overlay-actions">
+        <button type="button" class="inv-crit-confirm-btn" data-crit-confirm="${inv}"
+                title="Click only after physically inspecting and resolving the underlying issue.">
+          <span class="mdi mdi-check-bold"></span>
+          Confirmed (issue fixed)
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function _removeCriticalBlockOverlay(card) {
+  const overlay = card?.querySelector?.(":scope > .inv-card-crit-overlay");
+  if (overlay) overlay.remove();
+}
+
+// Delegated click handler for "Confirmed" — bound once at DOMContentLoaded.
+(function _wireCriticalBlockConfirmClicks() {
+  if (typeof document === "undefined") return;
+  document.addEventListener("DOMContentLoaded", () => {
+    document.addEventListener("click", (ev) => {
+      const btn = ev.target?.closest?.("[data-crit-confirm]");
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const inv = Number(btn.getAttribute("data-crit-confirm"));
+      if (Number.isFinite(inv)) confirmCriticalBlock(inv);
+    });
+  });
+})();
+
+// ── v2.11.x Slice κ.3 — Critical-pattern auto-block UI client ───────────────
+// Polls GET /api/critical-blocks every 30 s and on WS "critical_block_changed".
+// Populates State.criticalBlocks (keyed by inverter#) so updateInverterCards()
+// can render the red overlay + disable manual control.
+async function refreshCriticalBlocks(silent = true) {
+  try {
+    const data = await api(`/api/critical-blocks?_t=${Date.now()}`);
+    const map = (data && data.by_inverter) || {};
+    const next = {};
+    for (const k of Object.keys(map)) {
+      const inv = Number(k);
+      if (Number.isFinite(inv) && map[k] && map[k].is_active) {
+        next[inv] = map[k];
+      }
+    }
+    // Detect transitions so the card re-render runs immediately when blocks
+    // open/close even between scheduled ticks.
+    const prevKeys = Object.keys(State.criticalBlocks).sort().join(",");
+    const nextKeys = Object.keys(next).sort().join(",");
+    State.criticalBlocks = next;
+    if (prevKeys !== nextKeys) scheduleInverterCardsUpdate(true);
+    return State.criticalBlocks;
+  } catch (err) {
+    if (!silent) {
+      showToast(`Critical-block status refresh failed: ${err.message}`, "fault", 5000);
+    }
+    return State.criticalBlocks;
+  }
+}
+
+// "Confirmed" handler — operator clicks the overlay button. Three-step
+// confirmation using the project's appConfirm / appPrompt modals (NOT
+// window.confirm/prompt, which break behind the Electron BrowserWindow
+// modal layer and don't follow the dark/light theme).
+async function confirmCriticalBlock(inverter) {
+  const inv = Number(inverter);
+  if (!Number.isFinite(inv)) return;
+  const blk = State.criticalBlocks[inv];
+  if (!blk) {
+    showToast(`No active critical block for inverter ${inv}`, "warning", 4000);
+    return;
+  }
+
+  const fmtTs = (ms) => {
+    const t = Number(ms);
+    if (!Number.isFinite(t) || t <= 0) return "—";
+    try { return new Date(t).toLocaleString(); } catch (_) { return "—"; }
+  };
+
+  // Fetch the operator-facing inspection guide so the confirm modal can
+  // call out exactly which node/branch/phase to inspect (and "check all"
+  // when the signal isn't decisive).
+  let guide = null;
+  try {
+    const r = await api(`/api/critical-blocks/${inv}/inspection-guide?_t=${Date.now()}`);
+    if (r?.ok) guide = r.guide;
+  } catch (_) { /* guide is best-effort; the modal still works without it */ }
+
+  // Build the inspection-guide body section as plain text — appConfirm
+  // splits on "\n\n" into paragraphs, so we keep it compact.
+  const inspectLines = [];
+  if (guide) {
+    if (Array.isArray(guide.primary_nodes) && guide.primary_nodes.length > 0) {
+      inspectLines.push(
+        `Inspect first: Node ${guide.primary_nodes.join(", Node ")}` +
+        ` (active critical signal)`,
+      );
+    }
+    if (Array.isArray(guide.secondary_nodes) && guide.secondary_nodes.length > 0) {
+      inspectLines.push(
+        `Also check: Node ${guide.secondary_nodes.join(", Node ")}` +
+        ` (elevated, single-episode watch)`,
+      );
+    }
+    if (Array.isArray(guide.branch_hints) && guide.branch_hints.length > 0) {
+      const parts = guide.branch_hints.map((h) =>
+        `Node ${h.slave} → ${h.branch_label} (${h.count}/${h.total_frama}, ${h.dominance_pct}%)`,
+      );
+      inspectLines.push(`Dominant FRAMA branch: ${parts.join("; ")}`);
+    }
+    if (Array.isArray(guide.phase_hints) && guide.phase_hints.length > 0) {
+      const parts = guide.phase_hints.map((h) =>
+        `Node ${h.slave} → ${h.line} (Δ ${h.deviation_pct}% from mean ${h.mean_current_a} A)`,
+      );
+      inspectLines.push(`Worst phase imbalance: ${parts.join("; ")}`);
+    }
+    if (guide.fallback_advice) inspectLines.push(guide.fallback_advice);
+  }
+  const inspectionSection = inspectLines.length
+    ? `Where to look:\n${inspectLines.map((l) => `• ${l}`).join("\n")}`
+    : "";
+
+  const triggeringLine = blk.triggering_slave
+    ? `Triggering node: Node ${blk.triggering_slave}`
+    : "";
+
+  const paragraphs = [
+    `This inverter is auto-blocked due to a recurring critical signal:`,
+    `Pattern: ${blk.pattern_hex} (${blk.pattern_label || blk.pattern_key})\n` +
+    `Episodes in 48 h: ${blk.count_in_window || (blk.pattern_key === "IGBT_HEALTH_EOL" ? "n/a (health-based)" : "?")}\n` +
+    `Last seen: ${fmtTs(blk.latest_episode_ts)}` +
+    (triggeringLine ? `\n${triggeringLine}` : ""),
+  ];
+  if (inspectionSection) paragraphs.push(inspectionSection);
+  paragraphs.push(
+    `Click OK only if you have physically inspected the inverter and resolved ` +
+    `the underlying issue. Clicking OK re-enables manual control and clears ` +
+    `the block. A new critical episode after this will create a new block.`,
+  );
+
+  const confirmed = await appConfirm(
+    `Confirm fix — Inverter ${inv}`,
+    paragraphs.join("\n\n"),
+    { ok: "Yes, fix is in place", cancel: "Cancel" },
+  );
+  if (!confirmed) return;
+
+  const authKey = await appPrompt(
+    "Authorization required",
+    "Enter the bulk-control authorization key to confirm the fix.",
+    { placeholder: "" },
+  );
+  if (!authKey) return;
+
+  const note = await appPrompt(
+    "Resolution note (optional)",
+    "Describe what was fixed. This is recorded in the audit log for future forensics.",
+    { placeholder: "e.g. Replaced K1 contactor; reseated DC bus terminals", type: "text" },
+  );
+
+  try {
+    const data = await api(`/api/critical-blocks/${inv}/confirm`, "POST", {
+      authKey: String(authKey || "").trim(),
+      note:    String(note || "").trim(),
+      operator: State.settings.operatorName || "OPERATOR",
+    });
+    if (data?.ok) {
+      delete State.criticalBlocks[inv];
+      showToast(`Inverter ${inv} critical block cleared. Control re-enabled.`, "success", 5000);
+      scheduleInverterCardsUpdate(true);
+    } else {
+      showToast(`Confirm failed: ${data?.error || "unknown"}`, "critical", 6000);
+    }
+  } catch (err) {
+    showToast(`Confirm failed: ${err.message}`, "critical", 6000);
   }
 }
 
@@ -14874,6 +15094,12 @@ function handleWS(msg) {
   if (msg.type === "plant_cap_status") {
     applyPlantCapStatusClient(msg.plantCap || null, { preservePreview: true });
   }
+  // v2.11.x Slice κ.3 — critical-pattern auto-block state change. Refresh
+  // the full list so we pick up new blocks AND newly-acked ones in one call.
+  if (msg.type === "critical_block_changed") {
+    refreshCriticalBlocks().catch(() => {});
+    scheduleInverterCardsUpdate(true);
+  }
   if (msg.type === "plant_cap_schedule_status") {
     if (Array.isArray(msg.schedules)) {
       State.capSchedules.schedules = msg.schedules;
@@ -15990,7 +16216,12 @@ function renderStopReasonCapture(payload, alarmTs, esc) {
     </div>`;
 }
 
-async function openAlarmDetail(alarmValue, alarmHex, alarmId) {
+// v2.11.x Slice κ — accepts optional ctxInv + ctxUnit so callers that know
+// the node (e.g. Power-Electronics drilldown alarm chips) can have the
+// asset-health context tiles populate even when alarmId=0 (no persisted
+// alarms row to fetch). The alarm-table flow keeps passing alarmId only —
+// the modal still resolves inv/unit via /api/alarms/:id/stop-reason.
+async function openAlarmDetail(alarmValue, alarmHex, alarmId, ctxInv, ctxUnit) {
   const modal = document.getElementById("alarmDetailModal");
   const titleEl = document.getElementById("alarmDetailTitle");
   const sevEl = document.getElementById("alarmDetailSev");
@@ -16234,13 +16465,61 @@ async function openAlarmDetail(alarmValue, alarmHex, alarmId) {
          </div>
        </div>`
     : "";
-  bodyEl.innerHTML = fatalBanner + variantBanner + stopReasonHtml + bitSections + provenance;
-  if (Number(alarmId) > 0) {
+  // v2.11.x Slice κ — Asset-Health context panel.  The modal needs a
+  // (inverter, unit) pair to fetch IGBT/Contactor health for that node.
+  // Two sources, in priority order:
+  //   1. explicit ctxInv/ctxUnit args — passed by callers that already
+  //      know the node (e.g. PE drilldown alarm chips). alarmId may be 0.
+  //   2. payload.alarm from /api/alarms/:id/stop-reason — used when only
+  //      alarmId is known (clicks from the alarms table, inverter detail).
+  const assetHealthScope = _alarmSubsystemScope(activeBits);
+  const explicitInv  = Number(ctxInv);
+  const explicitUnit = Number(ctxUnit);
+  const haveExplicitCtx = Number.isFinite(explicitInv) && Number.isFinite(explicitUnit)
+                           && explicitInv > 0 && explicitUnit > 0;
+  const haveStopReasonFetch = Number(alarmId) > 0;
+  const willShowAssetHealth = assetHealthScope !== "none"
+                                && (haveExplicitCtx || haveStopReasonFetch);
+  const assetHealthHtml = willShowAssetHealth
+    ? `<div id="alarmAssetHealthHost" class="alarm-detail-asset-health muted">
+         <div class="alarm-detail-asset-health-title">
+           <span class="mdi mdi-loading mdi-spin"></span>
+           Loading asset health context…
+         </div>
+       </div>`
+    : "";
+  bodyEl.innerHTML = fatalBanner + variantBanner + stopReasonHtml + assetHealthHtml + bitSections + provenance;
+
+  // Explicit-context path — fire the asset-health fetch immediately,
+  // independent of any StopReason fetch.
+  if (willShowAssetHealth && haveExplicitCtx) {
+    fetchAssetHealthContext(explicitInv, explicitUnit, assetHealthScope).then((ctx) => {
+      const ahost = document.getElementById("alarmAssetHealthHost");
+      if (ahost) ahost.outerHTML = renderAssetHealthContext(ctx, assetHealthScope, explicitInv, explicitUnit, esc);
+    });
+  }
+
+  if (haveStopReasonFetch) {
     fetchStopReasonForAlarm(Number(alarmId)).then((payload) => {
       const host = document.getElementById("alarmStopReasonHost");
       if (host) {
         const alarmTs = Number(payload?.alarm?.ts || 0);
         host.outerHTML = renderStopReasonCapture(payload, alarmTs, esc);
+      }
+      // Only fire the implicit asset-health fetch when the caller didn't
+      // already supply explicit context (above).
+      if (willShowAssetHealth && !haveExplicitCtx) {
+        const inv = Number(payload?.alarm?.inverter);
+        const unit = Number(payload?.alarm?.unit);
+        if (Number.isFinite(inv) && Number.isFinite(unit) && inv > 0 && unit > 0) {
+          fetchAssetHealthContext(inv, unit, assetHealthScope).then((ctx) => {
+            const ahost = document.getElementById("alarmAssetHealthHost");
+            if (ahost) ahost.outerHTML = renderAssetHealthContext(ctx, assetHealthScope, inv, unit, esc);
+          });
+        } else {
+          const ahost = document.getElementById("alarmAssetHealthHost");
+          if (ahost) ahost.remove();
+        }
       }
     });
   }
@@ -16319,6 +16598,191 @@ async function openAlarmDetail(alarmValue, alarmHex, alarmId) {
   if (closeBtn) closeBtn.focus();
 }
 
+// ── v2.11.x Slice κ — Asset-Health context inside the Alarm modal ──────────
+// Maps which alarm bits should pull which subsystem's health summary so the
+// modal can show live IGBT / Contactor scores alongside the diagnostic flow.
+// Bit semantics per server/alarms.js §0-§15:
+//   bit 4  RMS overcurrent          → IGBT (PI loop / branch)
+//   bit 5  Overtemperature          → IGBT (thermal)
+//   bit 7  Instantaneous overcurrent→ IGBT (PI loop)
+//   bit 8  AC Protection Fault      → Contactor (AC controller / magneto)
+//   bit 11 Contactor Fault (920TL)  → Contactor (primary)
+const _ALARM_BITS_FOR_IGBT      = new Set([4, 5, 7]);
+const _ALARM_BITS_FOR_CONTACTOR = new Set([8, 11]);
+
+function _alarmSubsystemScope(activeBits) {
+  if (!Array.isArray(activeBits) || activeBits.length === 0) return "none";
+  let hasIgbt = false, hasContactor = false;
+  for (const b of activeBits) {
+    const bit = Number(b?.bit);
+    if (_ALARM_BITS_FOR_IGBT.has(bit))      hasIgbt = true;
+    if (_ALARM_BITS_FOR_CONTACTOR.has(bit)) hasContactor = true;
+  }
+  if (hasIgbt && hasContactor) return "both";
+  if (hasContactor)            return "contactor";
+  if (hasIgbt)                 return "igbt";
+  return "none";
+}
+
+async function fetchAssetHealthContext(inv, slave, scope) {
+  // Always fetch both when scope=="both"; otherwise fetch primary + peer.
+  // The peer fetch is what powers the Linked Findings line — without it
+  // the operator only sees half the story.
+  const days = 90;
+  const out = { igbt: null, contactor: null, error: null };
+  try {
+    const fetches = [];
+    if (scope === "igbt" || scope === "both" || scope === "contactor") {
+      fetches.push(
+        fetch(`/api/igbt/node/${inv}/${slave}?days=${days}&_t=${Date.now()}`)
+          .then((r) => r.ok ? r.json() : null)
+          .then((j) => { if (j && j.ok) out.igbt = j; })
+          .catch(() => {})
+      );
+      fetches.push(
+        fetch(`/api/contactor/node/${inv}/${slave}?days=${days}&_t=${Date.now()}`)
+          .then((r) => r.ok ? r.json() : null)
+          .then((j) => { if (j && j.ok) out.contactor = j; })
+          .catch(() => {})
+      );
+    }
+    await Promise.all(fetches);
+  } catch (err) {
+    out.error = err?.message || "fetch failed";
+  }
+  return out;
+}
+
+function renderAssetHealthContext(ctx, scope, inv, slave, esc) {
+  if (!ctx || (!ctx.igbt && !ctx.contactor)) {
+    return ""; // nothing fetched → drop the panel silently
+  }
+  // Decide which side is primary based on the alarm bits that opened the modal.
+  const primary = scope === "contactor" ? "contactor" : (scope === "igbt" ? "igbt" : "both");
+  const fmt1 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(1) : "—";
+  const fmt2 = (n) => Number.isFinite(Number(n)) ? Number(n).toFixed(2) : "—";
+
+  const ig = ctx.igbt?.node;
+  const igC = ctx.igbt?.components || {};
+  const igTb = ctx.igbt?.thermal_baseline;
+  const ct = ctx.contactor?.node;
+  const ctC = ctx.contactor?.components || {};
+
+  // The linked_findings comes from whichever endpoint we fetched — both
+  // sides ship the same correlator output, so prefer the contactor copy
+  // when contactor is primary, IGBT copy otherwise.
+  const linked = primary === "contactor"
+    ? (ctx.contactor?.linked_findings || ctx.igbt?.linked_findings)
+    : (ctx.igbt?.linked_findings || ctx.contactor?.linked_findings);
+
+  const igTile = ig ? `
+    <a class="alarm-asset-tile ${primary === "igbt" ? "primary" : ""}"
+       href="#" data-asset-tile="igbt" data-inverter="${inv}" data-slave="${slave}"
+       title="Open this node in the Asset Health page → IGBT tab">
+      <div class="alarm-asset-tile-head">
+        <span class="mdi mdi-chip"></span>
+        <span class="alarm-asset-tile-label">IGBT</span>
+        <span class="tier-badge ${ig.tier || "offline"}">${esc(ig.tier || "offline")}</span>
+      </div>
+      <div class="alarm-asset-tile-score">${fmt1(ig.health_score)}</div>
+      <div class="alarm-asset-tile-meta">
+        <span title="Thermal trips in 90 d">T:${esc(igC.thermal_trip_count ?? 0)}</span>
+        <span title="FRAMA branch faults in 90 d">F:${esc(igC.frama_total_count ?? 0)}</span>
+        <span title="PI saturation events in 90 d">PI:${esc(igC.pi_ana_count ?? 0)}</span>
+        <span title="Median phase-current imbalance">Imb:${fmt2(igC.imbalance_pct)}%</span>
+        ${igTb && igTb.scoring_phase === "phase2"
+          ? `<span title="Year-over-year thermal drift">ΔT:${fmt2(igTb.yoy_drift_c)}°C</span>`
+          : ""}
+      </div>
+    </a>` : "";
+
+  const ctTile = ct ? `
+    <a class="alarm-asset-tile ${primary === "contactor" ? "primary" : ""}"
+       href="#" data-asset-tile="contactor" data-inverter="${inv}" data-slave="${slave}"
+       title="Open this node in the Asset Health page → AC Contactor tab">
+      <div class="alarm-asset-tile-head">
+        <span class="mdi mdi-electric-switch"></span>
+        <span class="alarm-asset-tile-label">AC Contactor</span>
+        <span class="tier-badge ${ct.tier || "offline"}">${esc(ct.tier || "offline")}</span>
+      </div>
+      <div class="alarm-asset-tile-score">${fmt1(ct.health_score)}</div>
+      <div class="alarm-asset-tile-meta">
+        <span title="Contactor stop events (motives 22/23/24)">Stops:${esc(ctC.stop_count ?? 0)}</span>
+        <span title="Bit-11 alarm episodes">Ep:${esc(ctC.alarm_episode_count ?? 0)}</span>
+        <span title="Short-cycle bit-11 episodes <60 s">Chatter:${esc(ctC.chatter_count ?? 0)}</span>
+        <span title="Median Vac spread under load (≥5 A)">Vac:${fmt2(ctC.vac_imbalance_pct)}%</span>
+        <span title="Median Iac imbalance under load">Iac:${fmt2(ctC.iac_imbalance_pct)}%</span>
+      </div>
+    </a>` : "";
+
+  const linkedBlock = (linked && linked.linked && Array.isArray(linked.reasons) && linked.reasons.length > 0)
+    ? `<div class="alarm-asset-linked alarm-asset-linked-${esc((linked.severity || "info").toLowerCase())}">
+         <div class="alarm-asset-linked-title">
+           <span class="mdi mdi-link-variant"></span>
+           Linked findings (IGBT ↔ Contactor)
+         </div>
+         <ul class="alarm-asset-linked-list">
+           ${linked.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}
+         </ul>
+       </div>`
+    : "";
+
+  // v2.11.x Slice κ.3 — Critical-pattern badge inside the alarm modal.
+  // Surfaces the forensic precursor severity so operators see "recurring
+  // 0x0240" without leaving the alarm context. Source: whichever endpoint
+  // we have (both ship the same loadCriticalPatterns output).
+  const critPatterns = (ctx.igbt?.critical_patterns || ctx.contactor?.critical_patterns || [])
+    .filter((p) => p && (p.severity === "critical" || p.severity === "watch"));
+  const critBlock = critPatterns.length > 0
+    ? `<div class="alarm-asset-crit alarm-asset-crit-${critPatterns.some((p) => p.severity === "critical") ? "critical" : "watch"}">
+         <div class="alarm-asset-crit-title">
+           <span class="mdi mdi-alert-octagram"></span>
+           Critical alarm-pattern precursor
+         </div>
+         <ul class="alarm-asset-crit-list">
+           ${critPatterns.map((p) => `
+             <li>
+               <strong>${esc(p.label || p.key)}</strong>
+               (${esc(p.hex || "")})
+               — ${esc(p.count_in_window || 0)} episodes in 48 h
+               <span class="alarm-asset-crit-sev sev-${esc(p.severity)}">${esc(p.severity)}</span>
+             </li>
+           `).join("")}
+         </ul>
+       </div>`
+    : "";
+
+  return `
+    <div class="alarm-detail-asset-health">
+      <div class="alarm-detail-asset-health-title">
+        <span class="mdi mdi-heart-pulse"></span>
+        Asset Health · Inverter ${esc(inv)} · Slave ${esc(slave)}
+        <span class="alarm-asset-health-window">(90-day window)</span>
+      </div>
+      <div class="alarm-asset-tiles">
+        ${primary === "contactor" ? ctTile + igTile : igTile + ctTile}
+      </div>
+      ${critBlock}
+      ${linkedBlock}
+    </div>
+  `;
+}
+
+// Delegated click handler — turn the asset-health tiles into deep links
+// that close the alarm modal and open the Asset Health page on the right
+// tab. Bound once via DOMContentLoaded below in wireAlarmDetailModal().
+function _wireAssetHealthTileClicks() {
+  document.addEventListener("click", (ev) => {
+    const tile = ev.target?.closest?.(".alarm-asset-tile");
+    if (!tile) return;
+    ev.preventDefault();
+    const which = tile.getAttribute("data-asset-tile") || "igbt";
+    closeAlarmDetail();
+    if (typeof switchPage === "function") switchPage("igbt-health");
+    if (typeof setActivePeTab === "function") setActivePeTab(which);
+  });
+}
+
 function closeAlarmDetail() {
   const modal = document.getElementById("alarmDetailModal");
   if (modal) modal.classList.add("hidden");
@@ -16340,7 +16804,14 @@ function closeAlarmDetail() {
         closeAlarmDetail();
       }
     });
-    // Delegated click on any .cell-alarm.clickable (alarm table, inverter detail panel, etc.)
+    // v2.11.x Slice κ — deep-link tiles inside the alarm modal jump to the
+    // Asset Health page on the matching subsystem tab.
+    _wireAssetHealthTileClicks();
+    // Delegated click on any .cell-alarm.clickable (alarm table, inverter
+    // detail panel, Power-Electronics drilldown chips, etc.). Cells may
+    // optionally carry data-alarm-inverter + data-alarm-unit so the modal
+    // can populate asset-health context even when alarmId is 0 (no
+    // persisted alarms row to fetch the node from).
     document.addEventListener("click", (ev) => {
       const cell = ev.target?.closest?.(".cell-alarm.clickable");
       if (!cell) return;
@@ -16348,7 +16819,9 @@ function closeAlarmDetail() {
       const v = Number(cell.getAttribute("data-alarm-value") || 0);
       const hex = cell.getAttribute("data-alarm-hex") || "";
       const alarmId = Number(cell.getAttribute("data-alarm-id") || 0);
-      openAlarmDetail(v, hex, alarmId);
+      const ctxInv  = Number(cell.getAttribute("data-alarm-inverter") || 0) || undefined;
+      const ctxUnit = Number(cell.getAttribute("data-alarm-unit")     || 0) || undefined;
+      openAlarmDetail(v, hex, alarmId, ctxInv, ctxUnit);
     });
   });
 })();
@@ -24707,14 +25180,28 @@ function bindEventHandlers() {
 
   // Inverter grid — card start/stop and node toggle buttons (event delegation)
   $("invGrid")?.addEventListener("click", (e) => {
+    // v2.11.x Slice κ.3 — never let a control click through while a critical
+    // block is active on this inverter. CSS also disables pointer-events on
+    // the buttons (.inv-card.crit-blocked rule), so this is defense in depth.
+    // The Confirmed button has its own dedicated handler.
     const ctrlBtn = e.target.closest(".card-ctrl-btn[data-inv]");
     if (ctrlBtn) {
-      sendAllNodesInv(Number(ctrlBtn.dataset.inv), ctrlBtn.dataset.action === "start" ? 1 : 0);
+      const inv = Number(ctrlBtn.dataset.inv);
+      if (State.criticalBlocks?.[inv]) {
+        showToast(`Inverter ${inv} is auto-blocked by recurring critical alarm pattern. Click "Confirmed" on the card overlay after resolving.`, "warning", 6000);
+        return;
+      }
+      sendAllNodesInv(inv, ctrlBtn.dataset.action === "start" ? 1 : 0);
       return;
     }
     const nodeBtn = e.target.closest("button[data-inv][data-node]");
     if (nodeBtn && !nodeBtn.disabled) {
-      toggleNode(Number(nodeBtn.dataset.inv), Number(nodeBtn.dataset.node), nodeBtn);
+      const inv = Number(nodeBtn.dataset.inv);
+      if (State.criticalBlocks?.[inv]) {
+        showToast(`Inverter ${inv} is auto-blocked by recurring critical alarm pattern.`, "warning", 6000);
+        return;
+      }
+      toggleNode(inv, Number(nodeBtn.dataset.node), nodeBtn);
     }
   });
 
@@ -24965,7 +25452,11 @@ function initPromptModal() {
   modal.addEventListener("click", (e) => { if (e.target === modal) _resolvePrompt(null); });
 }
 
-function appPrompt(title, bodyText, { placeholder = "" } = {}) {
+function appPrompt(title, bodyText, { placeholder = "", type = "password" } = {}) {
+  // `type` controls the input element's `type` attribute. Default stays
+  // "password" because the original use sites all collected auth keys.
+  // Pass `type: "text"` for free-text notes/labels so the input renders
+  // plainly without masking dots.
   return new Promise((resolve) => {
     _appPromptState.resolver = resolve;
     const modal  = $("appPromptModal");
@@ -24974,7 +25465,12 @@ function appPrompt(title, bodyText, { placeholder = "" } = {}) {
     const input   = $("appPromptInput");
     if (titleEl) titleEl.textContent = title;
     if (bodyEl)  bodyEl.innerHTML = bodyText ? `<p>${escapeHtml(bodyText)}</p>` : "";
-    if (input)   { input.value = ""; input.placeholder = placeholder || ""; }
+    if (input)   {
+      input.value = "";
+      input.placeholder = placeholder || "";
+      // Sanitize to the two valid options; default to password for safety.
+      input.type = (type === "text") ? "text" : "password";
+    }
     if (modal)   { modal.classList.remove("hidden"); }
     document.body.classList.add("modal-open");
     setTimeout(() => { $("appPromptInput")?.focus(); }, 50);
@@ -25016,6 +25512,11 @@ async function init() {
     // operator notices even from remote mode. Pure GET — no side effects, never throws.
     refreshPollCadenceChip().catch(() => { /* advisory; swallow */ });
     setInterval(() => { refreshPollCadenceChip().catch(() => {}); }, 60_000);
+    // v2.11.x Slice κ.3 — Critical-pattern auto-block polling. WS broadcasts
+    // ("critical_block_changed") give us instant updates; the 30-s poll is
+    // the safety net for clients that may have missed a WS frame.
+    refreshCriticalBlocks(true).catch(() => {});
+    setInterval(() => { refreshCriticalBlocks(true).catch(() => {}); }, 30_000);
     const resumeAlarmAudio = () => {
       try {
         const ctx = getOrCreateAlarmAudioCtx();
@@ -25135,20 +25636,125 @@ function getIgbtWindowDays() {
   return Math.min(IGBT_WINDOW_DAYS_MAX, Math.max(IGBT_WINDOW_DAYS_MIN, Math.floor(raw)));
 }
 
+// v2.11.x Slice κ — which subsystem tab the user is viewing.
+// "igbt" (default) | "contactor". Persisted in-memory only; resets on reload.
+let _peActiveTab = "igbt";
+function getActivePeTab() { return _peActiveTab; }
+
 function initIgbtHealthPage() {
+  // Re-sync JS tab state with the HTML default on every page entry. The
+  // markup always shows the IGBT tab selected by default; if the operator
+  // had previously been on Contactor, navigated away, and came back, the
+  // module-level _peActiveTab would still say "contactor" while the visual
+  // resets to "igbt" — the next fetch would target the wrong subsystem.
+  _peActiveTab = "igbt";
+  document.querySelectorAll("#peSubsystemTabs .pe-tab").forEach((b) => {
+    const sel = b.dataset.peTab === "igbt";
+    b.setAttribute("data-selected", sel ? "true" : "false");
+    b.setAttribute("aria-selected", sel ? "true" : "false");
+  });
+  document.querySelectorAll("#page-igbt-health .pe-tab-pane").forEach((p) => {
+    const sel = p.getAttribute("data-pe-pane") === "igbt";
+    if (sel) p.removeAttribute("hidden");
+    else p.setAttribute("hidden", "");
+  });
+
   // Initialize tier filter chips
   attachTierFilterListeners();
   // Initialize action buttons
   attachRefreshListeners();
   attachWindowDaysListener();
   attachExportListeners();
+  // Initialize subsystem tab switching (IGBT ↔ AC Contactor)
+  attachPeTabListeners();
+  // Single delegated close listener for the shared drilldown panel.
+  // Replaces the two per-render bindings that raced on dataset.bound.
+  attachPeDrilldownCloseListener();
   // Render empty-state immediately so the table isn't a blank rectangle while loading
   renderIgbtFleetTable([]);
-  // Load and render the fleet data
-  loadAndRenderIgbtHealthPage().catch((err) => {
-    console.error("[igbt] Failed to load health page:", err);
-    showToast("Failed to load IGBT health data", 3000);
+  renderContactorFleetTable([]);
+  // Load and render the fleet data for the default tab
+  loadAndRenderActivePeTab().catch((err) => {
+    console.error("[pe-health] Failed to load page:", err);
+    showToast("Failed to load asset health data", 3000);
   });
+}
+
+function attachPeTabListeners() {
+  const tabs = document.querySelectorAll("#peSubsystemTabs .pe-tab");
+  if (!tabs || tabs.length === 0) return;
+  tabs.forEach((tab) => {
+    if (tab.dataset.peTabBound) return;
+    tab.dataset.peTabBound = "1";
+    tab.addEventListener("click", () => {
+      const which = tab.dataset.peTab;
+      if (!which || which === _peActiveTab) return;
+      setActivePeTab(which);
+    });
+  });
+}
+
+function setActivePeTab(which) {
+  if (which !== "igbt" && which !== "contactor") return;
+  if (which === _peActiveTab) return;  // no-op when already on the requested tab
+  _peActiveTab = which;
+  // Update tab buttons
+  document.querySelectorAll("#peSubsystemTabs .pe-tab").forEach((b) => {
+    const sel = b.dataset.peTab === which;
+    b.setAttribute("data-selected", sel ? "true" : "false");
+    b.setAttribute("aria-selected", sel ? "true" : "false");
+  });
+  // Show the matching pane, hide the other.  The selector `[data-pe-pane]`
+  // is what the panes carry; the `data-pe-tab` variant remains tolerated.
+  document.querySelectorAll("#page-igbt-health .pe-tab-pane").forEach((p) => {
+    const sel = p.getAttribute("data-pe-pane") === which || p.dataset.peTab === which;
+    if (sel) p.removeAttribute("hidden");
+    else p.setAttribute("hidden", "");
+  });
+  // Close any open drilldown and clear the selected row on BOTH tables — the
+  // panel is shared between tabs, so a stale selection from the old tab
+  // would otherwise persist as a highlighted row that re-opens nothing.
+  closeAssetDrilldownPanel();
+  // Reload data for the new tab
+  loadAndRenderActivePeTab().catch((err) => {
+    console.error("[pe-health] tab load failed:", err);
+    showToast("Error loading tab data", 3000);
+  });
+}
+
+// Single drilldown closer — used by tab switches AND by the close ✕ button.
+// Centralised so both tables get their `.selected` row cleared regardless of
+// which tab opened the drilldown.  Was previously two separate per-render
+// addEventListener calls that both set `dataset.bound = "1"` on the SAME
+// button DOM node, so whichever drilldown opened first won and the other
+// tab's close handler never ran (operator-reported regression 2026-05-11).
+function closeAssetDrilldownPanel() {
+  const panel = $("igbtDetailPanel");
+  if (panel) panel.hidden = true;
+  ["igbtFleetTable", "contactorFleetTable"].forEach((id) => {
+    const tbl = $(id);
+    if (tbl) tbl.querySelectorAll("tbody tr.selected").forEach((r) => r.classList.remove("selected"));
+  });
+}
+
+// Wire the panel's ✕ close button ONCE on first init.  Delegated so it
+// survives drilldown re-renders that don't replace the button element.
+function attachPeDrilldownCloseListener() {
+  const panel = $("igbtDetailPanel");
+  if (!panel || panel.dataset.peCloseBound) return;
+  panel.dataset.peCloseBound = "1";
+  panel.addEventListener("click", (ev) => {
+    const btn = ev.target?.closest?.(".igbt-detail-close");
+    if (!btn) return;
+    ev.preventDefault();
+    closeAssetDrilldownPanel();
+  });
+}
+
+function loadAndRenderActivePeTab() {
+  return _peActiveTab === "contactor"
+    ? loadAndRenderContactorPage()
+    : loadAndRenderIgbtHealthPage();
 }
 
 async function loadAndRenderIgbtHealthPage() {
@@ -25238,6 +25844,20 @@ function renderIgbtFleetTable(nodes) {
     const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
     const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
     const branchSummary = `${node.frama_branch1 || 0}/${node.frama_branch2 || 0}/${node.frama_branch3 || 0}`;
+    const branchHasFault = (node.frama_branch1 || 0) + (node.frama_branch2 || 0) + (node.frama_branch3 || 0) > 0;
+    const alarmCell = renderAlarmBitsFleetCell(
+      node.current_alarm_bits || 0,
+      node.live_alarm_bits || 0,
+      { inverter: node.inverter, slave: node.slave },
+    );
+    if (node.is_online_now === false) tr.classList.add("pe-row-offline");
+    // v2.11.x Slice κ.3 — red-border row for nodes with a recurring forensic
+    // precursor (0x0240 or 0x0210 ≥2 episodes in 48 h).
+    if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
+      tr.classList.add("pe-row-critical-pattern");
+    } else if (node.worst_pattern_severity === "watch") {
+      tr.classList.add("pe-row-watch-pattern");
+    }
 
     tr.innerHTML = `
       <td>${node.inverter}</td>
@@ -25245,12 +25865,13 @@ function renderIgbtFleetTable(nodes) {
       <td>${node.slave}</td>
       <td class="score-cell tier-${tier}">${scoreDisplay}</td>
       <td><span class="tier-pill tier-${tier}">${tierLabel}</span></td>
-      <td>${node.frama_total || 0}</td>
-      <td class="text-mono">${branchSummary}</td>
-      <td>${node.thermal_trips || 0}</td>
-      <td>${node.pi_ana_trips || 0}</td>
-      <td>${tempDisplay}</td>
-      <td>${imbalanceDisplay}</td>
+      <td class="${_peCountCellClass(node.frama_total, 1, 5)}">${node.frama_total || 0}</td>
+      <td class="text-mono ${branchHasFault ? "pe-count-watch" : ""}">${branchSummary}</td>
+      <td class="${_peCountCellClass(node.thermal_trips, 1, 5)}">${node.thermal_trips || 0}</td>
+      <td class="${_peCountCellClass(node.pi_ana_trips, 1, 3)}">${node.pi_ana_trips || 0}</td>
+      <td class="phase-num">${tempDisplay}</td>
+      <td class="phase-num ${_peSpreadCellClass(node.imbalance_pct, 5, 10)}">${imbalanceDisplay}</td>
+      <td class="pe-fleet-alarm-cell">${alarmCell}</td>
       <td class="text-muted">${lastEventDisplay}</td>
     `;
 
@@ -25261,12 +25882,31 @@ function renderIgbtFleetTable(nodes) {
   applyTierFilter();
 }
 
+// Severity tint helpers for fleet table count + spread cells.
+// Watch threshold ≤ value < act threshold → amber; ≥ act → red.
+function _peCountCellClass(value, watchAt, actAt) {
+  const n = Number(value || 0);
+  if (n >= actAt)   return "pe-count-act";
+  if (n >= watchAt) return "pe-count-watch";
+  return "";
+}
+function _peSpreadCellClass(value, watchAt, actAt) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n >= actAt)   return "pe-count-act";
+  if (n >= watchAt) return "pe-count-watch";
+  return "";
+}
+
 function attachFleetTableClickListeners() {
   const table = $("igbtFleetTable");
   if (!table) return;
 
   table.querySelectorAll("tbody tr").forEach((tr) => {
-    tr.addEventListener("click", async () => {
+    tr.addEventListener("click", async (ev) => {
+      // Clicking an alarm-bit chip should ONLY open the alarm modal (the
+      // global .cell-alarm delegate). Don't also fire the drilldown.
+      if (ev.target?.closest?.(".cell-alarm.clickable")) return;
       const inverter = tr.dataset.inverter;
       const slave = tr.dataset.slave;
 
@@ -25366,15 +26006,9 @@ async function renderDrilldownPanel(inverter, slave) {
     if (headerLabel) {
       headerLabel.textContent = `Inverter ${node.inverter} · Slave ${node.slave}`;
     }
-    const closeBtn = panel.querySelector(".igbt-detail-close");
-    if (closeBtn && !closeBtn.dataset.bound) {
-      closeBtn.dataset.bound = "1";
-      closeBtn.addEventListener("click", () => {
-        panel.hidden = true;
-        const tbl = $("igbtFleetTable");
-        if (tbl) tbl.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
-      });
-    }
+    // Close-button wiring lives in attachPeDrilldownCloseListener() (init
+    // time, delegated, table-agnostic). Per-render bindings used to race on
+    // dataset.bound between IGBT/contactor drilldowns.
     // Legacy header element (kept for back-compat with older HTML class)
     const headerId = panel.querySelector(".node-id");
     if (headerId) {
@@ -25394,6 +26028,9 @@ async function renderDrilldownPanel(inverter, slave) {
             </div>
           </div>
         </div>
+
+        <!-- v2.11.x Slice κ.3 — Critical Alarm Patterns (forensic precursors) -->
+        ${renderCriticalPatternsSection(data.critical_patterns, { inverter: node.inverter, slave: node.slave })}
 
         <!-- Thermal Component -->
         <div class="igbt-detail-section">
@@ -25483,7 +26120,26 @@ async function renderDrilldownPanel(inverter, slave) {
 
         ${renderThermalBaselineSection(thermalBaseline)}
 
-        <!-- Current State -->
+        <!-- v2.11.x Slice κ — Stale-data banner when last 5-min slot > 10 min old -->
+        ${renderStaleDataBanner(currentState, node)}
+
+        <!-- v2.11.x Slice κ — DC bus + power-conversion snapshot -->
+        ${renderDcSideSection(currentState)}
+
+        <!-- v2.11.x Slice κ — AC phase parameters table (per-line V/I + spread) -->
+        ${renderAcPhaseTable(currentState)}
+
+        <!-- v2.11.x Slice κ — Currently raised alarm bits -->
+        ${renderActiveAlarmBitsSection(
+            currentState?.current_alarm_bits,
+            currentState?.live_alarm_bits,
+            { inverter: node.inverter, slave: node.slave },
+        )}
+
+        <!-- v2.11.x Slice κ — Linked Findings (IGBT ↔ Contactor cross-effects) -->
+        ${renderLinkedFindingsSection(data.linked_findings, "contactor")}
+
+        <!-- Current State (status + temperature only — phase data is above) -->
         <div class="igbt-detail-section">
           <div class="igbt-detail-section-title">Current State</div>
           <div class="igbt-detail-row">
@@ -25493,12 +26149,6 @@ async function renderDrilldownPanel(inverter, slave) {
           <div class="igbt-detail-row">
             <div class="igbt-detail-label">Temperature</div>
             <div class="igbt-detail-value">${currentState.temp_pe_c != null ? currentState.temp_pe_c.toFixed(1) : "—"} °C</div>
-          </div>
-          <div class="igbt-detail-row">
-            <div class="igbt-detail-label">Iac1 / Iac2 / Iac3</div>
-            <div class="igbt-detail-value">
-              ${currentState.iac1_a != null ? currentState.iac1_a.toFixed(1) : "—"} / ${currentState.iac2_a != null ? currentState.iac2_a.toFixed(1) : "—"} / ${currentState.iac3_a != null ? currentState.iac3_a.toFixed(1) : "—"} A
-            </div>
           </div>
           <div class="igbt-detail-row">
             <div class="igbt-detail-label">Last Update</div>
@@ -25517,6 +26167,815 @@ async function renderDrilldownPanel(inverter, slave) {
     console.error("[igbt] renderDrilldownPanel failed:", err);
     showToast("Error: " + (err?.message || "Unknown error"), 5000);
   }
+}
+
+// ── v2.11.x Slice κ — AC Contactor (K1) Health Page ──────────────────────────
+// Mirrors the IGBT page render path. Shares window-days + tier filters + the
+// drilldown side panel; the only divergent piece is the components shape and
+// the column layout.
+
+async function loadAndRenderContactorPage() {
+  try {
+    showToast("Loading contactor health data...", 0);
+    const days = getIgbtWindowDays();
+    const response = await fetch(`/api/contactor/fleet?days=${days}&_t=${Date.now()}`);
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Failed to fetch contactor fleet data");
+
+    const computedAtEl = $("igbtComputedAt");
+    if (computedAtEl && data.generated_at_ms) {
+      computedAtEl.textContent = new Date(data.generated_at_ms).toLocaleString();
+    }
+    renderContactorFleetTable(data.nodes || []);
+    attachContactorTableClickListeners();
+    hideToast();
+  } catch (err) {
+    console.error("[contactor] loadAndRenderContactorPage failed:", err);
+    showToast("Error: " + (err?.message || "Unknown error"), 5000);
+  }
+}
+
+function renderContactorFleetTable(nodes) {
+  const tbody = $("contactorFleetTableBody");
+  const table = $("contactorFleetTable");
+  if (!tbody || !table) return;
+  const wrapper = table.parentElement;
+
+  tbody.innerHTML = "";
+  if (wrapper) {
+    const oldEmpty = wrapper.querySelector(":scope > .igbt-empty-state");
+    if (oldEmpty) oldEmpty.remove();
+  }
+
+  if (!nodes || nodes.length === 0) {
+    table.style.display = "none";
+    if (wrapper) {
+      const empty = document.createElement("div");
+      empty.className = "igbt-empty-state";
+      empty.innerHTML = `
+        <span class="mdi mdi-electric-switch" aria-hidden="true"></span>
+        <div class="igbt-empty-title">No nodes to score</div>
+        <div class="igbt-empty-copy">
+          The contactor endpoint returned zero nodes — check
+          <strong>Settings → IP Configuration</strong>.
+        </div>
+      `;
+      wrapper.appendChild(empty);
+    }
+    return;
+  }
+  table.style.display = "";
+
+  nodes.forEach((node) => {
+    const tr = document.createElement("tr");
+    const tier = node.tier || "offline";
+    tr.className = `tier-${tier}`;
+    tr.dataset.inverter = node.inverter;
+    tr.dataset.slave = node.slave;
+    tr.dataset.tier = tier;
+
+    const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
+    const vacDisplay = node.vac_imbalance_pct != null ? node.vac_imbalance_pct.toFixed(2) : "—";
+    const iacDisplay = node.iac_imbalance_pct != null ? node.iac_imbalance_pct.toFixed(2) : "—";
+    const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
+    const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+    const alarmCell = renderAlarmBitsFleetCell(
+      node.current_alarm_bits || 0,
+      node.live_alarm_bits || 0,
+      { inverter: node.inverter, slave: node.slave },
+    );
+    if (node.is_online_now === false) tr.classList.add("pe-row-offline");
+    // v2.11.x Slice κ.3 — red-border row for nodes with a recurring forensic
+    // precursor (0x0240 or 0x0210 ≥2 episodes in 48 h).
+    if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
+      tr.classList.add("pe-row-critical-pattern");
+    } else if (node.worst_pattern_severity === "watch") {
+      tr.classList.add("pe-row-watch-pattern");
+    }
+
+    // K1 wear cells. Lifetime cycle count rendered with thousands separator;
+    // rate-per-day tinted at the same thresholds the scoring formula uses
+    // (>3/day → watch, >20/day → act). "—" when not yet sampled.
+    const cyclesDisplay = (node.conex_lifetime != null && Number.isFinite(node.conex_lifetime))
+      ? Number(node.conex_lifetime).toLocaleString()
+      : "—";
+    const rateDisplay = (node.cycle_rate_per_day != null && Number.isFinite(node.cycle_rate_per_day))
+      ? node.cycle_rate_per_day.toFixed(2)
+      : "—";
+
+    tr.innerHTML = `
+      <td>${node.inverter}</td>
+      <td class="text-mono">${node.ip || "—"}</td>
+      <td>${node.slave}</td>
+      <td class="score-cell tier-${tier}">${scoreDisplay}</td>
+      <td><span class="tier-pill tier-${tier}">${tierLabel}</span></td>
+      <td class="${_peCountCellClass(node.stop_count, 1, 3)}">${node.stop_count || 0}</td>
+      <td class="${_peCountCellClass(node.alarm_episode_count, 1, 3)}">${node.alarm_episode_count || 0}</td>
+      <td class="${_peCountCellClass(node.chatter_count, 1, 2)}">${node.chatter_count || 0}</td>
+      <td class="phase-num ${_peSpreadCellClass(node.vac_imbalance_pct, 1, 2)}">${vacDisplay}</td>
+      <td class="phase-num ${_peSpreadCellClass(node.iac_imbalance_pct, 5, 10)}">${iacDisplay}</td>
+      <td class="phase-num">${cyclesDisplay}</td>
+      <td class="phase-num ${_peSpreadCellClass(node.cycle_rate_per_day, 3, 20)}">${rateDisplay}</td>
+      <td class="pe-fleet-alarm-cell">${alarmCell}</td>
+      <td class="text-muted">${lastEventDisplay}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  applyTierFilter();
+}
+
+function attachContactorTableClickListeners() {
+  const table = $("contactorFleetTable");
+  if (!table) return;
+  table.querySelectorAll("tbody tr").forEach((tr) => {
+    tr.addEventListener("click", async (ev) => {
+      // Clicking an alarm-bit chip should ONLY open the alarm modal.
+      if (ev.target?.closest?.(".cell-alarm.clickable")) return;
+      const inverter = tr.dataset.inverter;
+      const slave = tr.dataset.slave;
+      if (!inverter || !slave) return;
+      table.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
+      tr.classList.add("selected");
+      await renderContactorDrilldown(inverter, slave);
+    });
+  });
+}
+
+async function renderContactorDrilldown(inverter, slave) {
+  const panel = $("igbtDetailPanel");
+  if (!panel) return;
+  try {
+    showToast("Loading node details...", 0);
+    const days = getIgbtWindowDays();
+    const response = await fetch(`/api/contactor/node/${inverter}/${slave}?days=${days}&_t=${Date.now()}`);
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Failed to fetch contactor node data");
+
+    const node = data.node;
+    const c = data.components || {};
+    const cs = data.current_state || {};
+
+    panel.hidden = false;
+    const headerLabel = $("igbtDetailNodeId");
+    if (headerLabel) headerLabel.textContent = `Inverter ${node.inverter} · Slave ${node.slave} · AC Contactor`;
+    // Close button is wired once at init via attachPeDrilldownCloseListener()
+    // — see comment in renderDrilldownPanel(). Don't re-bind here.
+
+    const fmt2 = (v) => (typeof v === "number" && Number.isFinite(v)) ? v.toFixed(2) : "—";
+    const bodyEl = $("igbtDetailBody");
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <div class="igbt-detail-section igbt-detail-score">
+          <div class="igbt-detail-row score-row">
+            <div class="igbt-detail-value score-value">
+              ${(node.health_score || 0).toFixed(1)}
+              <span class="tier-badge ${node.tier}">${node.tier || "Offline"}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- v2.11.x Slice κ.3 — Critical Alarm Patterns (forensic precursors) -->
+        ${renderCriticalPatternsSection(data.critical_patterns, { inverter: node.inverter, slave: node.slave })}
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Stop Reasons (motive 22/23/24)</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(c.stop_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Events</div>
+            <div class="igbt-detail-value">${c.stop_count || 0}</div>
+          </div>
+          ${(c.stop_events || []).length > 0 ? `
+            <div class="event-list">
+              ${(c.stop_events || []).slice(0, 5).map((evt) => `
+                <div class="event-item">
+                  <div class="event-item-time">${new Date(evt.timestamp_iso).toLocaleString()}</div>
+                  <div class="event-item-name">${evt.motive_name || "Unknown"}</div>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div class="igbt-detail-empty">No stop events in this window.</div>`}
+        </div>
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Bit-11 Alarm Episodes (0x0800)</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(c.alarm_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Episodes</div>
+            <div class="igbt-detail-value">${c.alarm_episode_count || 0}</div>
+          </div>
+          ${(c.alarm_events || []).length > 0 ? `
+            <div class="event-list">
+              ${(c.alarm_events || []).slice(0, 5).map((evt) => {
+                const dur = (evt.duration_ms != null) ? `${(evt.duration_ms / 1000).toFixed(1)} s` : "ongoing";
+                return `
+                <div class="event-item">
+                  <div class="event-item-time">${new Date(evt.ts).toLocaleString()}</div>
+                  <div class="event-item-name">duration ${dur} · raw 0x${(evt.alarm_value || 0).toString(16).padStart(4, "0")}</div>
+                </div>
+              `;}).join("")}
+            </div>
+          ` : `<div class="igbt-detail-empty">No bit-11 alarms in this window.</div>`}
+        </div>
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Chatter (short-cycle episodes)</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(c.chatter_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Events (&lt; 60 s)</div>
+            <div class="igbt-detail-value">${c.chatter_count || 0}</div>
+          </div>
+        </div>
+
+        ${renderCycleCountSection(c)}
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Voltage Spread Under Load</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(c.vac_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Median Vac spread</div>
+            <div class="igbt-detail-value">${fmt2(c.vac_imbalance_pct)} %</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Samples (60m, ≥5 A)</div>
+            <div class="igbt-detail-value">${c.imbalance_sample_count || 0}</div>
+          </div>
+        </div>
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Current Imbalance Under Load</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Score</div>
+            <div class="igbt-detail-value">${(c.iac_score || 0).toFixed(1)} / 100</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Median Iac imbalance</div>
+            <div class="igbt-detail-value">${fmt2(c.iac_imbalance_pct)} %</div>
+          </div>
+        </div>
+
+        ${renderLinkedFindingsSection(data.linked_findings, "igbt")}
+
+        <!-- v2.11.x Slice κ — Stale-data banner -->
+        ${renderStaleDataBanner(cs, node)}
+
+        <!-- v2.11.x Slice κ — DC bus + power-conversion snapshot -->
+        ${renderDcSideSection(cs)}
+
+        <!-- v2.11.x Slice κ — AC phase parameters table -->
+        ${renderAcPhaseTable(cs)}
+
+        <!-- v2.11.x Slice κ — Currently raised alarm bits -->
+        ${renderActiveAlarmBitsSection(
+            cs?.current_alarm_bits,
+            cs?.live_alarm_bits,
+            { inverter: node.inverter, slave: node.slave },
+        )}
+
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Current State</div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Status</div>
+            <div class="igbt-detail-value">${cs.is_online_now ? "Online" : "Offline"}</div>
+          </div>
+          <div class="igbt-detail-row">
+            <div class="igbt-detail-label">Last Update</div>
+            <div class="igbt-detail-value">${cs.last_5min_ts_ms ? new Date(cs.last_5min_ts_ms).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    panel.style.display = "";
+    panel.removeAttribute("hidden");
+    hideToast();
+  } catch (err) {
+    console.error("[contactor] renderContactorDrilldown failed:", err);
+    showToast("Error: " + (err?.message || "Unknown error"), 5000);
+  }
+}
+
+/**
+ * renderLinkedFindingsSection(payload, peerSubsystem)
+ *   payload      — { linked, reasons, severity } from server response
+ *   peerSubsystem — "igbt" or "contactor" — labels the cross-reference
+ *
+ * Renders a banner with one bullet per finding. Severity drives the
+ * accent colour (info/watch/act). Returns an empty string when nothing
+ * to link so the drilldown stays uncluttered for healthy nodes.
+ */
+/**
+ * renderCriticalPatternsSection(patterns, node) — forensic precursor block.
+ *
+ * Renders the catalogue of critical alarm-bit patterns (0x0240, 0x0210)
+ * with their 48-hour episode count and severity. When any pattern is
+ * `critical`, the section gets a red border + alert glyph and links to the
+ * recommended-action text — this is the most visually prominent block in
+ * the drilldown because recurring precursors mean catastrophic risk.
+ *
+ * Operator quote (2026-05-11): "2-day recurring 0x0240 or 0x0210 episode
+ * count must be considered critical already, needs attention by the
+ * inverter engineer."
+ *
+ * @param {Array} patterns — server payload `critical_patterns[]` from
+ *                            /api/igbt/node or /api/contactor/node.
+ * @param {Object} [node]  — { inverter, slave } for chip context.
+ * @returns {string} HTML block (always rendered; "all clear" state when ok).
+ */
+function renderCriticalPatternsSection(patterns, node) {
+  if (!Array.isArray(patterns) || patterns.length === 0) return "";
+  const worst = patterns.some((p) => p?.severity === "critical")
+    ? "critical"
+    : (patterns.some((p) => p?.severity === "watch") ? "watch" : "ok");
+
+  const fmtTs = (ms) => {
+    const t = Number(ms);
+    if (!Number.isFinite(t) || t <= 0) return "—";
+    try { return new Date(t).toLocaleString(); } catch (_) { return "—"; }
+  };
+
+  const cards = patterns.map((p) => {
+    const sev = (p?.severity || "ok").toLowerCase();
+    const isCrit = sev === "critical";
+    const isWatch = sev === "watch";
+    const bitChips = Array.isArray(p?.bits) && Array.isArray(p?.bit_labels)
+      ? p.bits.map((b, i) => `<span class="pe-crit-bit">bit ${b} · ${escapeHtmlForPe(p.bit_labels[i] || "")}</span>`).join("")
+      : "";
+    const episodes = Array.isArray(p?.episodes) ? p.episodes : [];
+    const epHtml = episodes.length
+      ? `<div class="pe-crit-episodes">
+           ${episodes.slice(0, 6).map((e) => `
+             <div class="pe-crit-episode">
+               <span class="pe-crit-episode-ts">${fmtTs(e.ts)}</span>
+               <span class="pe-crit-episode-val">0x${(Number(e.alarm_value)|0).toString(16).padStart(4, "0").toUpperCase()}</span>
+             </div>
+           `).join("")}
+           ${episodes.length > 6 ? `<div class="pe-crit-episode-more">+${episodes.length - 6} more</div>` : ""}
+         </div>`
+      : "";
+    return `
+      <div class="pe-crit-card pe-crit-${sev}">
+        <div class="pe-crit-card-head">
+          <span class="mdi ${isCrit ? "mdi-alert-octagram" : (isWatch ? "mdi-alert" : "mdi-check-circle-outline")}" aria-hidden="true"></span>
+          <span class="pe-crit-card-title">${escapeHtmlForPe(p?.label || p?.key || "Pattern")}</span>
+          <span class="pe-crit-mask" title="Multi-bit AND mask on alarm_value">${escapeHtmlForPe(p?.hex || "")}</span>
+          <span class="pe-crit-sev-badge pe-crit-sev-${sev}">${sev === "ok" ? "all clear" : sev}</span>
+        </div>
+        <div class="pe-crit-bits">${bitChips}</div>
+        <div class="pe-crit-meta">
+          <span><strong>${Number(p?.count_in_window || 0)}</strong> episodes in 48 h</span>
+          <span>last seen: ${fmtTs(p?.last_seen_ts)}</span>
+          <span>threshold: ≥ ${Number(p?.min_count_for_critical || 2)} = critical</span>
+        </div>
+        ${p?.description ? `<div class="pe-crit-desc">${escapeHtmlForPe(p.description)}</div>` : ""}
+        ${isCrit && p?.failure_mode ? `<div class="pe-crit-failure"><strong>Failure mode:</strong> ${escapeHtmlForPe(p.failure_mode)}</div>` : ""}
+        ${isCrit && p?.recommended_action ? `<div class="pe-crit-action"><strong>Action:</strong> ${escapeHtmlForPe(p.recommended_action)}</div>` : ""}
+        ${epHtml}
+      </div>
+    `;
+  }).join("");
+
+  const headIcon = worst === "critical" ? "alert-octagram" : (worst === "watch" ? "alert" : "shield-check-outline");
+  const headTitle = worst === "critical"
+    ? "Critical Alarm Patterns — RECURRING (forensic precursor)"
+    : (worst === "watch" ? "Critical Alarm Patterns — single episode observed" : "Critical Alarm Patterns — all clear");
+
+  return `
+    <div class="igbt-detail-section pe-crit-section pe-crit-section-${worst}">
+      <div class="igbt-detail-section-title">
+        <span class="mdi mdi-${headIcon}" aria-hidden="true"></span>
+        ${headTitle}
+      </div>
+      <div class="pe-crit-cards">${cards}</div>
+    </div>
+  `;
+}
+
+function renderLinkedFindingsSection(payload, peerSubsystem) {
+  if (!payload || !payload.linked || !Array.isArray(payload.reasons) || payload.reasons.length === 0) {
+    return "";
+  }
+  const sev = (payload.severity || "info").toLowerCase();
+  const peerLabel = peerSubsystem === "igbt" ? "IGBT module" : "AC contactor";
+  const iconSeverity = sev === "act" ? "alert-octagon" : (sev === "watch" ? "alert" : "information");
+  const items = payload.reasons.map((r) => `<li>${escapeHtmlForPe(r)}</li>`).join("");
+  return `
+    <div class="igbt-detail-section pe-linked-findings pe-linked-${sev}">
+      <div class="igbt-detail-section-title">
+        <span class="mdi mdi-${iconSeverity}" aria-hidden="true"></span>
+        Linked Findings — ${peerLabel}
+      </div>
+      <ul class="pe-linked-list">${items}</ul>
+    </div>
+  `;
+}
+
+/**
+ * renderAcPhaseTable(state) — 3-phase AC parameters snapshot.
+ *
+ * @param {Object} state — drilldown.current_state with optional vac1/2/3_v,
+ *                          iac1/2/3_a, last_5min_ts_ms
+ * @returns {string} HTML block (empty string if no per-phase values present)
+ *
+ * Renders a compact 3×6 table: L1 / L2 / L3 / Spread (max-min) / Spread %.
+ * Spread cells turn amber when voltage spread > 1.0 % or current spread > 5 %
+ * (operator-eyeball thresholds — the score components have their own bands).
+ */
+function renderAcPhaseTable(state) {
+  if (!state) return "";
+  const v1 = Number(state.vac1_v), v2 = Number(state.vac2_v), v3 = Number(state.vac3_v);
+  const i1 = Number(state.iac1_a), i2 = Number(state.iac2_a), i3 = Number(state.iac3_a);
+  const haveV = [v1, v2, v3].every(Number.isFinite);
+  const haveI = [i1, i2, i3].every(Number.isFinite);
+  if (!haveV && !haveI) return "";
+
+  const fmt = (n, d = 1) => Number.isFinite(n) ? n.toFixed(d) : "—";
+  const ts = Number(state.last_5min_ts_ms);
+  const tsLabel = Number.isFinite(ts) && ts > 0 ? new Date(ts).toLocaleString() : "—";
+
+  let vSpread = null, vSpreadPct = null, vCls = "";
+  if (haveV) {
+    const vMax = Math.max(v1, v2, v3), vMin = Math.min(v1, v2, v3), vAvg = (v1 + v2 + v3) / 3;
+    vSpread = vMax - vMin;
+    vSpreadPct = vAvg > 0 ? (vSpread / vAvg) * 100 : null;
+    if (vSpreadPct != null && vSpreadPct >= 2.0)      vCls = "phase-spread-act";
+    else if (vSpreadPct != null && vSpreadPct >= 1.0) vCls = "phase-spread-watch";
+  }
+  let iSpread = null, iSpreadPct = null, iCls = "";
+  if (haveI) {
+    const iMax = Math.max(i1, i2, i3), iMin = Math.min(i1, i2, i3), iAvg = (i1 + i2 + i3) / 3;
+    iSpread = iMax - iMin;
+    iSpreadPct = iAvg > 0 ? (iSpread / iAvg) * 100 : null;
+    if (iSpreadPct != null && iSpreadPct >= 10.0)     iCls = "phase-spread-act";
+    else if (iSpreadPct != null && iSpreadPct >= 5.0) iCls = "phase-spread-watch";
+  }
+
+  const cell = (n, d) => `<td class="phase-num">${fmt(n, d)}</td>`;
+  const spreadCell = (val, unit, pct, cls) => {
+    if (val == null) return `<td class="phase-num">—</td><td class="phase-num">—</td>`;
+    return `<td class="phase-num ${cls}">${fmt(val, 1)} ${unit}</td>` +
+           `<td class="phase-num ${cls}">${pct == null ? "—" : fmt(pct, 2) + " %"}</td>`;
+  };
+
+  return `
+    <div class="igbt-detail-section">
+      <div class="igbt-detail-section-title">
+        AC Phase Parameters
+        <span class="phase-snapshot-when" title="Most recent 5-minute bucket — values are slot averages.">
+          snapshot ${escapeHtmlForPe(tsLabel)}
+        </span>
+      </div>
+      <table class="phase-table">
+        <thead>
+          <tr>
+            <th>Quantity</th>
+            <th class="phase-num">L1</th>
+            <th class="phase-num">L2</th>
+            <th class="phase-num">L3</th>
+            <th class="phase-num" title="max(L1,L2,L3) − min(L1,L2,L3)">Spread</th>
+            <th class="phase-num" title="Spread ÷ average × 100">Spread %</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th class="phase-label">Voltage (V)</th>
+            ${haveV ? cell(v1, 1) + cell(v2, 1) + cell(v3, 1) + spreadCell(vSpread, "V", vSpreadPct, vCls)
+                    : `<td class="phase-num" colspan="5">—</td>`}
+          </tr>
+          <tr>
+            <th class="phase-label">Current (A)</th>
+            ${haveI ? cell(i1, 1) + cell(i2, 1) + cell(i3, 1) + spreadCell(iSpread, "A", iSpreadPct, iCls)
+                    : `<td class="phase-num" colspan="5">—</td>`}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/**
+ * renderCycleCountSection(components) — K1 grid-connection cycle counter.
+ *
+ * Pulls from Conex regs 30005-30006 (lifetime UInt32) sampled every 5 min
+ * and rolled into a 30-day rate by acContactor.computeCycleRatePerDay().
+ *
+ * Renders nothing when no Conex history exists yet (newly persisted nodes
+ * need ≥1 h of samples before the rate is statistically meaningful).
+ *
+ * Phase indicator tells the operator whether the cycle component is
+ * actually contributing to the composite score yet.
+ */
+function renderCycleCountSection(c) {
+  if (!c) return "";
+  const lifetime = (c.conex_lifetime != null && Number.isFinite(c.conex_lifetime))
+    ? Number(c.conex_lifetime) : null;
+  const rate = (c.cycle_rate_per_day != null && Number.isFinite(c.cycle_rate_per_day))
+    ? Number(c.cycle_rate_per_day) : null;
+  if (lifetime == null && rate == null) {
+    // Pre-Slice-κ data or fresh deploy. Show a placeholder so the operator
+    // knows the column exists but Conex isn't sampled yet.
+    return `
+      <div class="igbt-detail-section pe-cycle-section">
+        <div class="igbt-detail-section-title">
+          K1 Cycle Counter (Conex regs 30005-30006)
+          <span class="phase-snapshot-when" title="Collecting samples — the cycle component activates once ≥1 hour of Conex history is recorded.">
+            collecting…
+          </span>
+        </div>
+        <div class="igbt-detail-empty">No Conex history yet. The dashboard polls regs 30005-30006 on every fast cycle; the cycle-rate scoring component activates once a span of at least 1 hour of samples is recorded.</div>
+      </div>`;
+  }
+
+  const phase = c.scoring_phase === "phase2" ? "Phase 2 (cycle active)" : "Phase 1 (cycle pending)";
+  const fmtInt = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : "—";
+  const fmt2 = (n) => Number.isFinite(n) ? n.toFixed(2) : "—";
+  const rateTip = (rate != null && rate >= 20) ? "≥20/day — saturates cycle component at 100"
+                  : (rate != null && rate >= 3) ? "≥3/day — contributing to score"
+                  : "Below 3/day — healthy baseline";
+  const rateCls = rate == null ? "" :
+                  (rate >= 20 ? "phase-spread-act" :
+                   rate >=  3 ? "phase-spread-watch" : "");
+  return `
+    <div class="igbt-detail-section pe-cycle-section">
+      <div class="igbt-detail-section-title">
+        K1 Cycle Counter (Conex regs 30005-30006)
+        <span class="phase-snapshot-when" title="Direct mechanical-wear metric for the K1 AC contactor. Tracked from the inverter's lifetime grid-connection counter.">
+          ${escapeHtmlForPe(phase)}
+        </span>
+      </div>
+      <div class="igbt-detail-row">
+        <div class="igbt-detail-label">Cycle Score</div>
+        <div class="igbt-detail-value">${(c.cycle_score == null ? "—" : (Number(c.cycle_score).toFixed(1) + " / 100"))}</div>
+      </div>
+      <div class="igbt-detail-row">
+        <div class="igbt-detail-label">Lifetime Cycles</div>
+        <div class="igbt-detail-value">${escapeHtmlForPe(fmtInt(lifetime))}</div>
+      </div>
+      <div class="igbt-detail-row">
+        <div class="igbt-detail-label">30-Day Rate</div>
+        <div class="igbt-detail-value ${rateCls}" title="${escapeHtmlForPe(rateTip)}">${escapeHtmlForPe(fmt2(rate))} cycles/day</div>
+      </div>
+      ${Number.isFinite(c.cycle_total_30d) && Number.isFinite(c.cycle_span_days) ? `
+        <div class="igbt-detail-row">
+          <div class="igbt-detail-label">Sampled Window</div>
+          <div class="igbt-detail-value">${escapeHtmlForPe(c.cycle_total_30d.toLocaleString())} cycles over ${escapeHtmlForPe(c.cycle_span_days.toFixed(1))} days (${escapeHtmlForPe(String(c.cycle_samples || 0))} samples)</div>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+/**
+ * renderStaleDataBanner(state, node) — top-of-drilldown freshness flag.
+ *
+ * Returns a red/amber banner when the latest 5-min slot is more than 10 min
+ * old (so the operator knows the DC/AC/alarm-bit cards reflect a stale
+ * snapshot, not live state), or "" when the data is fresh.
+ *
+ * Source: state.last_5min_ts_ms — same timestamp the existing Current State
+ * section uses for its Online/Offline label. We surface it earlier and more
+ * prominently because the new DC/AC tiles below it look "live" by default.
+ */
+function renderStaleDataBanner(state, node) {
+  const ts = Number(state?.last_5min_ts_ms);
+  const now = Date.now();
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return `
+      <div class="pe-stale-banner pe-stale-noinfo">
+        <span class="mdi mdi-cloud-off-outline" aria-hidden="true"></span>
+        <div class="pe-stale-body">
+          <div class="pe-stale-title">No recent telemetry</div>
+          <div class="pe-stale-desc">
+            No 5-min samples for Inverter ${escapeHtmlForPe(node?.inverter)} · Slave ${escapeHtmlForPe(node?.slave)}
+            in the last hour. The DC/AC/alarm panels below are blank until the poller catches up.
+          </div>
+        </div>
+      </div>`;
+  }
+  const ageMs = now - ts;
+  const minOld = Math.floor(ageMs / 60000);
+  // Online / fresh — no banner needed.
+  if (ageMs < 10 * 60 * 1000) return "";
+  const sev = ageMs > 60 * 60 * 1000 ? "act" : "watch";
+  return `
+    <div class="pe-stale-banner pe-stale-${sev}">
+      <span class="mdi mdi-clock-alert-outline" aria-hidden="true"></span>
+      <div class="pe-stale-body">
+        <div class="pe-stale-title">Stale telemetry — last sample ${minOld} min ago</div>
+        <div class="pe-stale-desc">
+          The DC bus + AC phase + alarm-bit panels below are from
+          ${escapeHtmlForPe(new Date(ts).toLocaleString())}.
+          Stop-event counts and recent-event lists still come from the
+          authoritative tables and remain accurate.
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * renderDcSideSection(state) — DC bus + power-conversion snapshot.
+ *
+ * @param {Object} state — drilldown.current_state with optional vdc_v,
+ *                          idc_a, pdc_w, pac_w
+ * @returns {string} HTML block (empty if no DC values present)
+ *
+ * Renders five metric tiles in a single horizontal strip:
+ *   Vdc · Idc · Pdc · Pac · Efficiency (Pac/Pdc)
+ *
+ * Vdc/Idc/Pdc drive IGBT switching stress (Vds margin, junction-current
+ * loading) and so are first-class power-electronics health indicators.
+ * Efficiency exposes conversion losses that grow with module aging.
+ */
+function renderDcSideSection(state) {
+  if (!state) return "";
+  const vdc = Number(state.vdc_v);
+  const idc = Number(state.idc_a);
+  const pdc = Number(state.pdc_w);
+  const pac = Number(state.pac_w);
+  const haveAny = [vdc, idc, pdc, pac].some(Number.isFinite);
+  if (!haveAny) return "";
+
+  const fmt1 = (n) => Number.isFinite(n) ? n.toFixed(1) : "—";
+  const fmtKW = (w) => Number.isFinite(w) ? (w / 1000).toFixed(2) : "—";
+
+  // DC→AC efficiency. Only meaningful when there's non-trivial DC power; at
+  // idle (Pdc near zero) the ratio is dominated by parasitic AC draw and
+  // not informative. Threshold matches the under-load floor used elsewhere.
+  let effPct = null;
+  let effCls = "";
+  if (Number.isFinite(pdc) && Number.isFinite(pac) && pdc > 1000) {
+    effPct = (pac / pdc) * 100;
+    if (effPct < 95)      effCls = "phase-spread-act";
+    else if (effPct < 97) effCls = "phase-spread-watch";
+  }
+
+  const tile = (label, value, unit, cls = "", tip = "") => `
+    <div class="pe-dc-tile ${cls}" ${tip ? `title="${escapeHtmlForPe(tip)}"` : ""}>
+      <div class="pe-dc-tile-label">${escapeHtmlForPe(label)}</div>
+      <div class="pe-dc-tile-value">${escapeHtmlForPe(value)}<span class="pe-dc-tile-unit"> ${escapeHtmlForPe(unit)}</span></div>
+    </div>
+  `;
+
+  return `
+    <div class="igbt-detail-section">
+      <div class="igbt-detail-section-title">
+        DC Side &amp; Power Conversion
+        <span class="phase-snapshot-when" title="Most recent 5-minute bucket — averages within the slot.">
+          ${state.last_5min_ts_ms ? "snapshot " + escapeHtmlForPe(new Date(state.last_5min_ts_ms).toLocaleString()) : ""}
+        </span>
+      </div>
+      <div class="pe-dc-strip">
+        ${tile("Vdc",  fmt1(vdc),  "V",   "", "DC bus voltage — drives IGBT Vds switching stress. INGECON SUN bus typically operates 600–1100 V.")}
+        ${tile("Idc",  fmt1(idc),  "A",   "", "DC input current — direct contributor to IGBT junction current loading.")}
+        ${tile("Pdc",  fmtKW(pdc), "kW",  "", "DC input power = Vdc × Idc.")}
+        ${tile("Pac",  fmtKW(pac), "kW",  "", "AC output power. Compare against Pdc for conversion efficiency.")}
+        ${tile("η",    (effPct == null ? "—" : effPct.toFixed(1)), "%", effCls,
+              effPct == null
+                ? "DC→AC efficiency — needs Pdc > 1 kW for a meaningful ratio."
+                : "DC→AC conversion efficiency = Pac ÷ Pdc × 100. Watch <97%, act <95%.")}
+      </div>
+    </div>
+  `;
+}
+
+// Decoded alarm-bit metadata for the chips. Mirrors server/alarms.js bit
+// definitions but only the fields the chips need (bit / hex / label /
+// severity). Severities collapse to the same three-tier scale the alarm
+// modal uses so the chip colours match.
+const _PE_ALARM_BITS = [
+  { bit: 0,  hex: "0001", label: "Frequency Alarm",          severity: "fault" },
+  { bit: 1,  hex: "0002", label: "Voltage Alarm",            severity: "fault" },
+  { bit: 2,  hex: "0004", label: "Current Control Fault",    severity: "fault" },
+  { bit: 3,  hex: "0008", label: "DSP Watchdog Reset",       severity: "warning" },
+  { bit: 4,  hex: "0010", label: "RMS Overcurrent",          severity: "fault" },
+  { bit: 5,  hex: "0020", label: "Overtemperature",          severity: "fault" },
+  { bit: 6,  hex: "0040", label: "ADC / Sync Error",         severity: "warning" },
+  { bit: 7,  hex: "0080", label: "Instantaneous Overcurrent",severity: "fault" },
+  { bit: 8,  hex: "0100", label: "AC Protection Fault",      severity: "fault" },
+  { bit: 9,  hex: "0200", label: "DC Protection Fault",      severity: "fault" },
+  { bit: 10, hex: "0400", label: "Insulation / Ground Fault",severity: "fault" },
+  { bit: 11, hex: "0800", label: "Contactor Fault",          severity: "fault" },
+  { bit: 12, hex: "1000", label: "Manual Shutdown",          severity: "info" },
+  { bit: 13, hex: "2000", label: "Configuration Change",     severity: "info" },
+  { bit: 14, hex: "4000", label: "DC Overvoltage",           severity: "critical" },
+  { bit: 15, hex: "8000", label: "DC Undervoltage / Low Pwr",severity: "info" },
+];
+
+function _decodeAlarmBits(mask) {
+  const m = Number(mask) | 0;
+  if (m <= 0) return [];
+  return _PE_ALARM_BITS.filter((b) => (m & (1 << b.bit)) !== 0);
+}
+
+/**
+ * renderActiveAlarmBitsSection(currentMask, liveMask, ctx) — chip row.
+ *
+ * @param {number}  currentMask — `current_alarm_bits` from latest 5-min slot
+ *                                (OR-mask, may include cleared bits)
+ * @param {number}  liveMask    — `live_alarm_bits` from uncleared alarms
+ *                                table (authoritative "right now")
+ * @param {Object}  ctx         — { inverter, slave } so the alarm modal can
+ *                                show asset-health context even when the
+ *                                chip carries no specific alarms.id
+ * @returns {string} HTML block; empty when both masks are zero.
+ *
+ * Prefer the LIVE mask when non-zero (authoritative current state); fall
+ * back to the 5-min OR-mask. The label tells the operator which source
+ * is in play so they can judge freshness.
+ */
+function renderActiveAlarmBitsSection(currentMask, liveMask, ctx) {
+  const cur  = Number(currentMask) | 0;
+  const live = Number(liveMask)    | 0;
+  const useLive = live !== 0;
+  const m = useLive ? live : cur;
+  const bits = _decodeAlarmBits(m);
+  if (bits.length === 0) return "";
+  const sourceTip = useLive
+    ? "Source: uncleared alarms table — these are currently raised on the inverter."
+    : "Source: latest 5-min inv_alarms OR-mask — these were raised within the last 5 minutes (one or more may have since cleared).";
+  const sourceLabel = useLive ? "Live" : "Recent (5-min)";
+  const inv = Number(ctx?.inverter || 0);
+  const slv = Number(ctx?.slave    || 0);
+  const ctxAttrs = inv > 0 && slv > 0
+    ? ` data-alarm-inverter="${inv}" data-alarm-unit="${slv}"`
+    : "";
+  const chips = bits.map((b) => {
+    const tip = `${b.label} (0x${b.hex} · bit ${b.bit})`;
+    return `<span class="cell-alarm clickable sev-${b.severity} pe-alarm-bit-chip"
+                  data-alarm-value="${m}"
+                  data-alarm-hex="0x${b.hex}H"${ctxAttrs}
+                  title="${escapeHtmlForPe(tip)} — click for diagnostic">
+              <span class="pe-alarm-bit-hex">0x${b.hex}</span>
+              <span class="pe-alarm-bit-label">${escapeHtmlForPe(b.label)}</span>
+            </span>`;
+  }).join("");
+  return `
+    <div class="igbt-detail-section">
+      <div class="igbt-detail-section-title">
+        <span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span>
+        Active Alarm Bits
+        <span class="pe-alarm-source-badge pe-alarm-source-${useLive ? "live" : "recent"}"
+              title="${escapeHtmlForPe(sourceTip)}">${escapeHtmlForPe(sourceLabel)}</span>
+      </div>
+      <div class="pe-alarm-bit-chips">${chips}</div>
+    </div>
+  `;
+}
+
+/**
+ * renderAlarmBitsFleetCell(currentMask, liveMask, ctx) — fleet-cell chips.
+ *
+ * Same live/recent priority as the drilldown section. Up to 3 chips +
+ * "+N" suffix. Each chip is clickable to open the alarm-detail modal
+ * with the node context so the modal's asset-health tiles populate.
+ */
+function renderAlarmBitsFleetCell(currentMask, liveMask, ctx) {
+  const cur  = Number(currentMask) | 0;
+  const live = Number(liveMask)    | 0;
+  const useLive = live !== 0;
+  const m = useLive ? live : cur;
+  const bits = _decodeAlarmBits(m);
+  if (bits.length === 0) return `<span class="text-muted">—</span>`;
+  const inv = Number(ctx?.inverter || 0);
+  const slv = Number(ctx?.slave    || 0);
+  const ctxAttrs = inv > 0 && slv > 0
+    ? ` data-alarm-inverter="${inv}" data-alarm-unit="${slv}"`
+    : "";
+  const shown = bits.slice(0, 3);
+  const extra = bits.length - shown.length;
+  const sourceMark = useLive
+    ? `<span class="pe-fleet-bit-source pe-fleet-bit-source-live" title="Live — currently uncleared">●</span>`
+    : "";
+  const chips = shown.map((b) => {
+    const tip = `${b.label} (0x${b.hex}${useLive ? " · live" : " · 5-min"})`;
+    return `<span class="cell-alarm clickable sev-${b.severity} pe-fleet-bit-chip"
+                  data-alarm-value="${m}"
+                  data-alarm-hex="0x${b.hex}H"${ctxAttrs}
+                  title="${escapeHtmlForPe(tip)} — click for diagnostic">0x${b.hex}</span>`;
+  }).join("");
+  const more = extra > 0 ? `<span class="pe-fleet-bit-more" title="${extra} more bit${extra > 1 ? "s" : ""} active">+${extra}</span>` : "";
+  return sourceMark + chips + more;
+}
+
+function escapeHtmlForPe(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function attachTierFilterListeners() {
@@ -25548,7 +27007,10 @@ function applyTierFilter() {
     }
   });
 
-  const tbody = $("igbtFleetTableBody");
+  // Apply filter to whichever tab body is currently visible.
+  const tbody = _peActiveTab === "contactor"
+    ? $("contactorFleetTableBody")
+    : $("igbtFleetTableBody");
   if (!tbody) return;
 
   tbody.querySelectorAll("tr").forEach((tr) => {
@@ -25566,7 +27028,7 @@ function attachRefreshListeners() {
   btn.addEventListener("click", async () => {
     try {
       btn.disabled = true;
-      await loadAndRenderIgbtHealthPage();
+      await loadAndRenderActivePeTab();
     } finally {
       btn.disabled = false;
     }
@@ -25582,8 +27044,8 @@ function attachWindowDaysListener() {
     // Normalise the visible value back to the clamped integer
     const days = getIgbtWindowDays();
     if (String(days) !== input.value) input.value = String(days);
-    loadAndRenderIgbtHealthPage().catch((err) => {
-      console.error("[igbt] window-change refresh failed:", err);
+    loadAndRenderActivePeTab().catch((err) => {
+      console.error("[pe-health] window-change refresh failed:", err);
     });
   };
 

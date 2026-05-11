@@ -16379,6 +16379,133 @@ body.mode-transition-active {
   line-height: 1.5;
   border: 1px solid;
 }
+
+/* v2.11.x Slice κ — Asset Health context panel inside the alarm modal.
+   Renders compact IGBT + AC contactor health tiles for the alarm's node so
+   the operator sees how the alarm fits into wider asset-aging context. */
+.alarm-detail-asset-health {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+}
+.alarm-detail-asset-health.muted {
+  opacity: 0.7;
+}
+.alarm-detail-asset-health-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--fw-semibold, 600);
+  font-size: 12.5px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.alarm-detail-asset-health-title .mdi {
+  font-size: 16px;
+  color: var(--accent);
+}
+.alarm-asset-health-window {
+  font-weight: normal;
+  color: var(--text2);
+  font-size: 11px;
+  margin-left: auto;
+}
+.alarm-asset-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.alarm-asset-tile {
+  display: block;
+  text-decoration: none;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.alarm-asset-tile:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+.alarm-asset-tile.primary {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.alarm-asset-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: var(--fw-semibold, 600);
+  margin-bottom: 4px;
+}
+.alarm-asset-tile-head .tier-badge {
+  margin-left: auto;
+  font-size: 10px;
+}
+.alarm-asset-tile-score {
+  font-size: 22px;
+  font-weight: var(--fw-semibold, 600);
+  line-height: 1.1;
+  color: var(--text);
+  margin: 2px 0 4px 0;
+}
+.alarm-asset-tile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.alarm-asset-tile-meta span {
+  white-space: nowrap;
+}
+.alarm-asset-linked {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  border-radius: 4px;
+}
+.alarm-asset-linked.alarm-asset-linked-watch {
+  border-left-color: var(--orange, #f59f00);
+  background: color-mix(in srgb, var(--orange, #f59f00) 8%, var(--surface));
+}
+.alarm-asset-linked.alarm-asset-linked-act {
+  border-left-color: var(--red, #e03131);
+  background: color-mix(in srgb, var(--red, #e03131) 8%, var(--surface));
+}
+.alarm-asset-linked-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: var(--fw-semibold, 600);
+  margin-bottom: 4px;
+}
+.alarm-asset-linked-list {
+  margin: 2px 0 0 0;
+  padding: 0 0 0 18px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.alarm-asset-linked-list li {
+  margin-bottom: 3px;
+}
+.alarm-asset-linked-list li:last-child {
+  margin-bottom: 0;
+}
+/* Tighten on narrow alarm modals */
+@media (max-width: 720px) {
+  .alarm-asset-tiles {
+    grid-template-columns: 1fr;
+  }
+}
 .alarm-detail-banner.critical {
   background: rgba(239, 68, 68, 0.10);
   border-color: rgba(239, 68, 68, 0.45);
@@ -18387,13 +18514,96 @@ body.mode-transition-active {
   color: color-mix(in srgb, var(--accent) 70%, var(--text2));
 }
 
-/* ── IGBT Health Page ────────────────────────────────────────────────────────── */
+/* ── Power Electronics Health Page (IGBT + AC Contactor) ─────────────────────── */
+/* v2.11.x Slice κ — tabbed page. The internal id remains #page-igbt-health for
+   back-compat with nav routing + deep links; visually it now hosts both the
+   IGBT and the AC contactor subsystem tabs. */
 #page-igbt-health {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
   background: var(--surface);
+}
+
+/* Subsystem tab bar — sits above the page-toolbar. */
+#page-igbt-health .pe-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 16px 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#page-igbt-health .pe-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--surface2);
+  color: var(--text2);
+  font-weight: var(--fw-semibold, 600);
+  font-size: 13px;
+  cursor: pointer;
+  position: relative;
+  bottom: -1px;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+#page-igbt-health .pe-tab:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
+}
+#page-igbt-health .pe-tab[data-selected="true"] {
+  background: var(--surface);
+  color: var(--accent);
+  border-color: var(--accent);
+  border-bottom-color: var(--surface);
+}
+#page-igbt-health .pe-tab .mdi {
+  font-size: 16px;
+}
+
+/* Linked Findings banner — surfaces IGBT ↔ Contactor cross-correlation
+   inside each drilldown. Severity drives the accent colour. */
+#page-igbt-health .pe-linked-findings {
+  border-left: 4px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  padding: 10px 12px;
+  border-radius: 4px;
+}
+#page-igbt-health .pe-linked-findings.pe-linked-info {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+#page-igbt-health .pe-linked-findings.pe-linked-watch {
+  border-left-color: var(--orange, #f59f00);
+  background: color-mix(in srgb, var(--orange, #f59f00) 8%, var(--surface));
+}
+#page-igbt-health .pe-linked-findings.pe-linked-act {
+  border-left-color: var(--red, #e03131);
+  background: color-mix(in srgb, var(--red, #e03131) 8%, var(--surface));
+}
+#page-igbt-health .pe-linked-findings .igbt-detail-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+#page-igbt-health .pe-linked-list {
+  margin: 4px 0 0 0;
+  padding: 0 0 0 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+#page-igbt-health .pe-linked-list li {
+  margin-bottom: 4px;
+}
+#page-igbt-health .pe-linked-list li:last-child {
+  margin-bottom: 0;
 }
 
 #page-igbt-health .page-header {
@@ -18547,6 +18757,698 @@ body.mode-transition-active {
      centre it within the wrapper viewport. */
   display: flex;
   flex-direction: column;
+}
+
+/* v2.11.x Slice κ — When the IGBT/Contactor pane is the inactive tab, the
+   `hidden` attribute MUST win over the `display: flex` rule above. Without
+   this override both tables stack in the same grid cell (both wrappers use
+   grid-column: 1 / grid-row: 1) and switching tabs has no visible effect. */
+#page-igbt-health .pe-tab-pane[hidden] {
+  display: none;
+}
+
+/* ── v2.11.x Slice κ — Fleet table comprehensibility polish ─────────────────
+   Column-group header row, sticky thead, severity tints for count cells,
+   alarm-bit chips, and a tightened phase-table for the drilldown. */
+
+/* Group-header row sits above the per-column header row. Alternating tinted
+   backgrounds split the table into scannable sections. */
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow th.pe-group-head {
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text2);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  background: var(--surface2);
+}
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-id        { background: color-mix(in srgb, var(--accent) 4%,  var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-score     { background: color-mix(in srgb, var(--accent) 8%,  var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-faults    { background: color-mix(in srgb, var(--orange, #f59f00) 6%, var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-telemetry { background: color-mix(in srgb, var(--accent) 5%,  var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-cycles    { background: color-mix(in srgb, var(--orange, #f59f00) 5%, var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-alarms    { background: color-mix(in srgb, var(--red,   #e03131) 6%, var(--surface2)); }
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow .pe-group-head-event     { background: var(--surface2); }
+
+/* Sticky thead keeps both header rows visible while operators scroll the body. */
+#page-igbt-health .pe-fleet-table thead th {
+  position: sticky;
+  background: var(--surface2);
+  z-index: 5;
+}
+#page-igbt-health .pe-fleet-table thead .pe-fleet-grouprow th { top: 0; }
+#page-igbt-health .pe-fleet-table thead tr:nth-child(2) th    { top: 30px; font-size: 11px; padding: 6px 8px; }
+
+/* Right-align numeric cells; matched header. */
+#page-igbt-health .pe-fleet-table th.phase-num,
+#page-igbt-health .pe-fleet-table td.phase-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Severity tints on count + spread cells. */
+#page-igbt-health .pe-fleet-table td.pe-count-watch {
+  color: var(--orange, #f59f00);
+  font-weight: var(--fw-semibold, 600);
+  background: color-mix(in srgb, var(--orange, #f59f00) 6%, transparent);
+}
+#page-igbt-health .pe-fleet-table td.pe-count-act {
+  color: var(--red, #e03131);
+  font-weight: var(--fw-semibold, 600);
+  background: color-mix(in srgb, var(--red, #e03131) 8%, transparent);
+}
+
+/* Active alarm bit chips inside fleet rows + drilldown sections. */
+#page-igbt-health .pe-fleet-alarm-cell {
+  white-space: nowrap;
+}
+.pe-fleet-bit-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 3px;
+  border-radius: 3px;
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+  border: 1px solid transparent;
+  line-height: 1.4;
+}
+.pe-fleet-bit-chip.sev-info     { background: color-mix(in srgb, var(--accent) 10%,             var(--surface)); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
+.pe-fleet-bit-chip.sev-warning  { background: color-mix(in srgb, var(--orange, #f59f00) 14%,    var(--surface)); color: var(--orange, #f59f00); border-color: color-mix(in srgb, var(--orange, #f59f00) 35%, transparent); }
+.pe-fleet-bit-chip.sev-fault    { background: color-mix(in srgb, var(--red,    #e03131) 14%,    var(--surface)); color: var(--red,    #e03131); border-color: color-mix(in srgb, var(--red,    #e03131) 35%, transparent); }
+.pe-fleet-bit-chip.sev-critical { background: color-mix(in srgb, var(--red,    #e03131) 28%,    var(--surface)); color: #fff;                  border-color: var(--red, #e03131); }
+.pe-fleet-bit-chip:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+.pe-fleet-bit-more {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+/* Drilldown — Active Alarm Bits chip row */
+.pe-alarm-bit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.pe-alarm-bit-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-decoration: none;
+  line-height: 1.3;
+}
+.pe-alarm-bit-chip.sev-info     { background: color-mix(in srgb, var(--accent) 10%,         var(--surface)); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
+.pe-alarm-bit-chip.sev-warning  { background: color-mix(in srgb, var(--orange, #f59f00) 14%,var(--surface)); color: var(--orange, #f59f00); border-color: color-mix(in srgb, var(--orange, #f59f00) 35%, transparent); }
+.pe-alarm-bit-chip.sev-fault    { background: color-mix(in srgb, var(--red,    #e03131) 14%,var(--surface)); color: var(--red,    #e03131); border-color: color-mix(in srgb, var(--red,    #e03131) 35%, transparent); }
+.pe-alarm-bit-chip.sev-critical { background: color-mix(in srgb, var(--red,    #e03131) 28%,var(--surface)); color: #fff;                  border-color: var(--red, #e03131); }
+.pe-alarm-bit-chip:hover {
+  filter: brightness(1.08);
+}
+.pe-alarm-bit-hex {
+  font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
+  font-weight: var(--fw-semibold, 600);
+  font-size: 11px;
+}
+.pe-alarm-bit-label {
+  font-weight: var(--fw-semibold, 600);
+}
+
+/* Stale-data banner (drilldown top) + offline row tint (fleet table). */
+.pe-stale-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+.pe-stale-banner .mdi {
+  font-size: 20px;
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.pe-stale-body {
+  flex: 1 1 auto;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.pe-stale-title {
+  font-weight: var(--fw-semibold, 600);
+  margin-bottom: 2px;
+}
+.pe-stale-desc {
+  color: var(--text2);
+}
+.pe-stale-banner.pe-stale-noinfo {
+  background: color-mix(in srgb, var(--text2) 12%, var(--surface));
+  border: 1px solid var(--border);
+}
+.pe-stale-banner.pe-stale-watch {
+  background: color-mix(in srgb, var(--orange, #f59f00) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--orange, #f59f00) 40%, transparent);
+}
+.pe-stale-banner.pe-stale-watch .mdi {
+  color: var(--orange, #f59f00);
+}
+.pe-stale-banner.pe-stale-act {
+  background: color-mix(in srgb, var(--red, #e03131) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--red, #e03131) 40%, transparent);
+}
+.pe-stale-banner.pe-stale-act .mdi {
+  color: var(--red, #e03131);
+}
+
+/* Source badge inside the drilldown's "Active Alarm Bits" title row. */
+.pe-alarm-source-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+.pe-alarm-source-badge.pe-alarm-source-live {
+  background: color-mix(in srgb, var(--red, #e03131) 14%, var(--surface));
+  color: var(--red, #e03131);
+  border-color: color-mix(in srgb, var(--red, #e03131) 35%, transparent);
+}
+.pe-alarm-source-badge.pe-alarm-source-recent {
+  background: color-mix(in srgb, var(--orange, #f59f00) 14%, var(--surface));
+  color: var(--orange, #f59f00);
+  border-color: color-mix(in srgb, var(--orange, #f59f00) 35%, transparent);
+}
+
+/* Fleet-cell "live" pulse marker (●) shown before chips when the source
+   is the uncleared alarms table (vs the 5-min OR-mask). */
+.pe-fleet-bit-source-live {
+  display: inline-block;
+  margin-right: 4px;
+  color: var(--red, #e03131);
+  animation: pe-live-pulse 1.8s ease-in-out infinite;
+  font-size: 12px;
+  line-height: 1;
+  vertical-align: middle;
+}
+@keyframes pe-live-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
+/* Offline tint on fleet rows — node has no 5-min sample in 10 min. */
+#page-igbt-health .pe-fleet-table tbody tr.pe-row-offline {
+  opacity: 0.55;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0,
+    transparent 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 12px
+  );
+}
+#page-igbt-health .pe-fleet-table tbody tr.pe-row-offline:hover {
+  opacity: 0.85;
+}
+
+/* ── v2.11.x Slice κ.3 — Critical-pattern auto-block (inverter card overlay) ── */
+/* Operator rule: "block START control of the entire Inverter once after
+   2-day of re-occurrence still not resolved. STOP the generation
+   automatically and block the control on the inverter card and put notice
+   overlayed on it." */
+.inv-card.crit-blocked {
+  position: relative;
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 35%, transparent),
+              0 8px 28px rgba(0, 0, 0, 0.45);
+}
+/* Gate every control inside a blocked card so even if the overlay's z-index
+   is overridden by some future style, the buttons cannot be clicked. The
+   Confirmed button lives INSIDE .inv-card-crit-overlay and is excluded. */
+.inv-card.crit-blocked .card-ctrl-btn,
+.inv-card.crit-blocked button[data-inv][data-node] {
+  pointer-events: none;
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.inv-card.crit-blocked .inv-card-crit-overlay,
+.inv-card.crit-blocked .inv-card-crit-overlay * {
+  pointer-events: auto;
+}
+.inv-card-crit-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--red) 90%, transparent) 0,
+      color-mix(in srgb, var(--red) 90%, transparent) 8px,
+      color-mix(in srgb, #000 60%, var(--red)) 8px,
+      color-mix(in srgb, #000 60%, var(--red)) 16px
+    );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  pointer-events: auto;
+  animation: critOverlayPulse 1.6s ease-in-out infinite alternate;
+}
+@keyframes critOverlayPulse {
+  from { box-shadow: inset 0 0 0 0 rgba(255, 255, 255, 0.0); }
+  to   { box-shadow: inset 0 0 30px 4px rgba(255, 255, 255, 0.18); }
+}
+.inv-crit-overlay-inner {
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid #fff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-width: 92%;
+  text-align: center;
+  color: #fff;
+  font-family: var(--font-sans, system-ui);
+}
+.inv-crit-overlay-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 800;
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.inv-crit-overlay-title .mdi {
+  font-size: 1.2em;
+  color: #fff;
+}
+.inv-crit-overlay-detail {
+  font-size: 0.78em;
+  line-height: 1.3;
+  opacity: 0.95;
+  margin-bottom: 8px;
+}
+.inv-crit-overlay-actions {
+  display: flex;
+  justify-content: center;
+}
+.inv-crit-confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  color: var(--red);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-weight: 700;
+  font-size: 0.85em;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: transform 0.1s, box-shadow 0.15s;
+}
+.inv-crit-confirm-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+.inv-crit-confirm-btn:active {
+  transform: translateY(0);
+}
+.inv-crit-confirm-btn .mdi {
+  font-size: 1.05em;
+}
+
+/* ── v2.11.x Slice κ.3 — Critical Alarm Patterns (forensic precursors) ── */
+/* Red-bordered row indicator on fleet tables for nodes with recurring
+   0x0240 / 0x0210. Operator quote (2026-05-11): "2-day recurring … must
+   be considered critical already, needs attention by the inverter engineer." */
+#page-igbt-health .pe-fleet-table tbody tr.pe-row-critical-pattern {
+  box-shadow: inset 4px 0 0 0 var(--red);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+}
+#page-igbt-health .pe-fleet-table tbody tr.pe-row-critical-pattern:hover {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+#page-igbt-health .pe-fleet-table tbody tr.pe-row-watch-pattern {
+  box-shadow: inset 4px 0 0 0 var(--orange);
+}
+
+/* Drilldown section frame */
+.pe-crit-section {
+  border-radius: 10px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--surface2) 80%, transparent);
+}
+.pe-crit-section-critical {
+  border: 2px solid var(--red);
+  background: color-mix(in srgb, var(--red) 7%, var(--surface2));
+}
+.pe-crit-section-critical .igbt-detail-section-title {
+  color: var(--red);
+  font-weight: 600;
+}
+.pe-crit-section-watch {
+  border: 1px solid var(--orange);
+  background: color-mix(in srgb, var(--orange) 5%, var(--surface2));
+}
+.pe-crit-section-watch .igbt-detail-section-title {
+  color: var(--orange);
+}
+.pe-crit-section-ok {
+  border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+.pe-crit-section-ok .igbt-detail-section-title {
+  color: var(--green);
+}
+
+.pe-crit-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.pe-crit-card {
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.pe-crit-card.pe-crit-critical {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 5%, var(--surface));
+}
+.pe-crit-card.pe-crit-watch {
+  border-color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 4%, var(--surface));
+}
+.pe-crit-card.pe-crit-ok {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--border));
+}
+
+.pe-crit-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.pe-crit-card-head .mdi {
+  font-size: 1.1em;
+}
+.pe-crit-critical .pe-crit-card-head .mdi {
+  color: var(--red);
+}
+.pe-crit-watch .pe-crit-card-head .mdi {
+  color: var(--orange);
+}
+.pe-crit-ok .pe-crit-card-head .mdi {
+  color: var(--green);
+}
+.pe-crit-card-title {
+  font-weight: 600;
+  flex: 1;
+  color: var(--text);
+}
+.pe-crit-mask {
+  font-family: var(--mono, "Consolas", monospace);
+  font-size: 0.85em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text2) 12%, transparent);
+  color: var(--text);
+}
+.pe-crit-sev-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75em;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.pe-crit-sev-critical {
+  background: var(--red);
+  color: #fff;
+}
+.pe-crit-sev-watch {
+  background: var(--orange);
+  color: #fff;
+}
+.pe-crit-sev-ok {
+  background: color-mix(in srgb, var(--green) 25%, transparent);
+  color: var(--green);
+}
+
+.pe-crit-bits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+.pe-crit-bit {
+  font-size: 0.78em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text2) 8%, transparent);
+  color: var(--text2);
+}
+
+.pe-crit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--text2);
+  margin: 4px 0;
+}
+.pe-crit-meta strong {
+  color: var(--text);
+}
+
+.pe-crit-desc,
+.pe-crit-failure,
+.pe-crit-action {
+  font-size: 0.85em;
+  line-height: 1.45;
+  margin-top: 6px;
+  color: var(--text);
+}
+.pe-crit-failure {
+  color: var(--red);
+}
+.pe-crit-action {
+  padding: 6px 8px;
+  border-left: 3px solid var(--red);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+  border-radius: 4px;
+}
+
+.pe-crit-episodes {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px;
+}
+.pe-crit-episode {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78em;
+  padding: 2px 6px;
+  background: color-mix(in srgb, var(--text2) 5%, transparent);
+  border-radius: 3px;
+}
+.pe-crit-episode-ts {
+  color: var(--text2);
+}
+.pe-crit-episode-val {
+  font-family: var(--mono, "Consolas", monospace);
+  color: var(--text);
+}
+.pe-crit-episode-more {
+  font-size: 0.78em;
+  color: var(--text2);
+  padding: 2px 6px;
+  font-style: italic;
+}
+
+/* Alarm modal asset-health critical-pattern badge */
+.alarm-asset-crit {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.alarm-asset-crit-critical {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 7%, var(--surface));
+}
+.alarm-asset-crit-watch {
+  border-color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 5%, var(--surface));
+}
+.alarm-asset-crit-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--red);
+  margin-bottom: 6px;
+}
+.alarm-asset-crit-watch .alarm-asset-crit-title {
+  color: var(--orange);
+}
+.alarm-asset-crit-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.88em;
+}
+.alarm-asset-crit-list li {
+  margin: 4px 0;
+}
+.alarm-asset-crit-sev {
+  display: inline-block;
+  font-size: 0.72em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-left: 4px;
+}
+.alarm-asset-crit-sev.sev-critical {
+  background: var(--red);
+  color: #fff;
+}
+.alarm-asset-crit-sev.sev-watch {
+  background: var(--orange);
+  color: #fff;
+}
+
+/* Drilldown — DC Side & Power Conversion metric strip */
+.pe-dc-strip {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+.pe-dc-tile {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  text-align: left;
+}
+.pe-dc-tile-label {
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text2);
+  margin-bottom: 4px;
+}
+.pe-dc-tile-value {
+  font-size: 18px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.pe-dc-tile-unit {
+  font-size: 11px;
+  color: var(--text2);
+  font-weight: normal;
+  margin-left: 2px;
+}
+.pe-dc-tile.phase-spread-watch {
+  border-color: color-mix(in srgb, var(--orange, #f59f00) 45%, transparent);
+  background: color-mix(in srgb, var(--orange, #f59f00) 8%, var(--surface));
+}
+.pe-dc-tile.phase-spread-watch .pe-dc-tile-value {
+  color: var(--orange, #f59f00);
+}
+.pe-dc-tile.phase-spread-act {
+  border-color: color-mix(in srgb, var(--red, #e03131) 45%, transparent);
+  background: color-mix(in srgb, var(--red, #e03131) 10%, var(--surface));
+}
+.pe-dc-tile.phase-spread-act .pe-dc-tile-value {
+  color: var(--red, #e03131);
+}
+@media (max-width: 720px) {
+  .pe-dc-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* Drilldown — AC Phase Parameters table */
+.phase-snapshot-when {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text2);
+  font-weight: normal;
+}
+#page-igbt-health .igbt-detail-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.phase-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.phase-table thead th {
+  background: var(--surface2);
+  font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text2);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.phase-table tbody th.phase-label {
+  text-align: left;
+  font-weight: var(--fw-semibold, 600);
+  padding: 8px 8px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.phase-table td.phase-num,
+.phase-table th.phase-num {
+  text-align: right;
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.phase-table td.phase-spread-watch {
+  color: var(--orange, #f59f00);
+  font-weight: var(--fw-semibold, 600);
+  background: color-mix(in srgb, var(--orange, #f59f00) 6%, transparent);
+}
+.phase-table td.phase-spread-act {
+  color: var(--red, #e03131);
+  font-weight: var(--fw-semibold, 600);
+  background: color-mix(in srgb, var(--red, #e03131) 8%, transparent);
 }
 #page-igbt-health .igbt-fleet-table-wrapper > .igbt-empty-state {
   flex: 1;

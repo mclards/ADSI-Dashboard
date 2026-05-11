@@ -764,6 +764,18 @@ function parseRow(row, identity = null) {
   // Safe defaults preserve behaviour when Python predates v2.9.0.
   const etotal_kwh = Math.max(0, Math.trunc(Number(row.etotal_kwh || 0)));
   const parce_kwh  = Math.max(0, Math.trunc(Number(row.parce_kwh  || 0)));
+  // v2.11.x Slice κ — grid-connection cycle counters (K1 contactor wear).
+  // Both are UInt32 monotonic counters from input regs 30005-30006 (lifetime)
+  // and 30063-30064 (resettable). `null` rather than `0` so the aggregator
+  // can tell "not yet sampled" apart from "literally zero cycles" (rare on a
+  // commissioned plant, but worth preserving on older Python payloads that
+  // don't emit these keys).
+  const conex_lifetime   = Number.isFinite(Number(row.conex_lifetime))
+    ? Math.max(0, Math.trunc(Number(row.conex_lifetime)))
+    : null;
+  const conex_resettable = Number.isFinite(Number(row.conex_resettable))
+    ? Math.max(0, Math.trunc(Number(row.conex_resettable)))
+    : null;
   const fac_hz     = Number.isFinite(Number(row.fac_hz)) ? Number(row.fac_hz) : null;
   const alarm_32   = Math.max(0, Math.trunc(Number(row.alarm_32 || 0)));
   // v2.10.x — power factor from Python's reg 16 decode. Forwarded to the
@@ -803,6 +815,11 @@ function parseRow(row, identity = null) {
     rtc_valid,
     rtc_ms,
     rtc_drift_s,
+    // v2.11.x Slice κ — grid-connection cycle counters (K1 wear metric).
+    // Last-known monotonic snapshot per frame; aggregator stores the
+    // newest value seen during the 5-min slot.
+    conex_lifetime,
+    conex_resettable,
     // v2.10.x — power factor passthrough (additive); aggregator's _accum
     // averages it into the 5-min row's `cosphi` column.
     cosphi,

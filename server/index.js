@@ -117,6 +117,15 @@ const {
   pruneApcVerifyLog,
   // v2.11.x — running per-day per-node MWh logger; backs /api/energy/daily-running.
   getDailyRunningSummaryRange,
+  // v2.11.x Slice κ.3 — critical-pattern auto-block ledger DAO.
+  getActiveCriticalBlock,
+  getAllActiveCriticalBlocks,
+  getCriticalBlockHistory,
+  getLatestAckedCriticalBlock,
+  insertCriticalBlock,
+  updateCriticalBlockReenforcement,
+  updateCriticalBlockPattern,
+  ackCriticalBlock,
 } = require("./db");
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
@@ -124,6 +133,8 @@ const serialNumber = require("./serialNumber");
 const dailyAggregator = require("./dailyAggregator");
 const igbtHealth = require("./igbtHealth");
 const igbtThermal = require("./igbtThermal");
+const acContactor = require("./acContactorHealth");
+const criticalAlarmPatterns = require("./criticalAlarmPatterns");
 const { ApcVerifier } = require("./apcVerify");
 const { rawToKVar } = require("./reactivePowerScalingCore");
 const compliance = {
@@ -5965,6 +5976,40 @@ async function executeLocalControlWriteRequest(bodyRaw = {}, options = {}) {
       throw err;
     }
   }
+  // v2.11.x Slice κ.3 — critical-pattern auto-block enforcement.
+  // System-driven STOP commands (operator=="SYSTEM:CRIT_BLOCK") are exempt
+  // — those are issued by the enforcer itself and must succeed even while
+  // the block is active. Anything else is refused with status 423 (Locked)
+  // until the operator clicks "Confirmed" on the card overlay.
+  if (operatorName !== "SYSTEM:CRIT_BLOCK") {
+    try {
+      const activeBlock = getActiveCriticalBlock(invNum);
+      if (activeBlock && !activeBlock.acked_at_ms) {
+        logControlAction({
+          operator: operatorName,
+          inverter: invNum,
+          node: unitNum || 0,
+          action,
+          scope: scopeNorm,
+          result: `blocked:critical_pattern:${activeBlock.pattern_key}`,
+          ip,
+          reason: reason || "",
+          details: `Inverter ${invNum} is blocked by recurring ${activeBlock.pattern_hex} (${activeBlock.pattern_key}). Operator must Confirm the issue is resolved before control is re-enabled.`,
+        });
+        const err = new Error(
+          `Inverter ${invNum} is auto-blocked due to recurring critical alarm pattern ${activeBlock.pattern_hex} (${activeBlock.pattern_label || activeBlock.pattern_key}). ` +
+          `Click "Confirmed" on the inverter card after physically inspecting and resolving the issue.`,
+        );
+        err.status = 423;
+        throw err;
+      }
+    } catch (e) {
+      if (e?.status === 423) throw e;
+      // DB read failure — don't gate control on it, just log.
+      console.warn("[critBlock] getActiveCriticalBlock failed:", e?.message || e);
+    }
+  }
+
   try {
     const data = await enqueueWriteCommand(
       scopeNorm,
@@ -6110,6 +6155,37 @@ async function executeLocalBatchControlWriteRequest(bodyRaw = {}, options = {}) 
       );
       err.status = Number(guard.status || 409);
       throw err;
+    }
+  }
+
+  // v2.11.x Slice κ.3 — critical-pattern auto-block guard for batch writes.
+  // System-issued STOP commands bypass; everything else is gated.
+  if (operatorName !== "SYSTEM:CRIT_BLOCK") {
+    try {
+      const activeBlock = getActiveCriticalBlock(invNum);
+      if (activeBlock && !activeBlock.acked_at_ms) {
+        unitList.forEach((unit) => {
+          logControlAction({
+            operator: operatorName,
+            inverter: invNum,
+            node: unit || 0,
+            action,
+            scope: scopeNorm,
+            result: `blocked:critical_pattern:${activeBlock.pattern_key}`,
+            ip,
+            details: `Critical alarm pattern ${activeBlock.pattern_hex} (${activeBlock.pattern_key}) is active. Inverter is auto-blocked until operator clicks Confirmed.`,
+          });
+        });
+        const err = new Error(
+          `Inverter ${invNum} is auto-blocked due to recurring critical alarm pattern ${activeBlock.pattern_hex} (${activeBlock.pattern_label || activeBlock.pattern_key}). ` +
+          `Click "Confirmed" on the inverter card after physically inspecting and resolving the issue.`,
+        );
+        err.status = 423;
+        throw err;
+      }
+    } catch (e) {
+      if (e?.status === 423) throw e;
+      console.warn("[critBlock] getActiveCriticalBlock failed:", e?.message || e);
     }
   }
 
@@ -13227,9 +13303,15 @@ app.get("/api/stop-reasons/:inverter/histogram", (req, res) => {
 // Remote-mode proxy aware
 
 // Motive code definitions for health scoring
-const IGBT_THERMAL_CODES = [7, 20];      // TEMPERATURA, TEMP_AUX (plan §5)
-const IGBT_FRAMA_CODES = [12, 28, 29];   // FRAMA3, FRAMA1, FRAMA2
-const IGBT_PI_ANA_CODES = [25];          // PI_ANA_SAT
+// Motive code groupings — single source of truth.
+// Authoritative table: server/motiveLabelsStd.js (Slice ε mapping).
+// Earlier versions of this file carried off-by-N constants that pre-dated
+// the Slice ε relabel; the SQL queries below were already correct, but the
+// const block was misleading. Aligned 2026-05-11 with hardening pass.
+const IGBT_THERMAL_CODES = [7, 21];      // TEMPERATURA, TEMP_AUX
+const IGBT_FRAMA_CODES   = [13, 29, 30]; // FRAMA3, FRAMA1, FRAMA2
+const IGBT_PI_ANA_CODES  = [26];         // PI_ANA_SAT
+const CONTACTOR_STOP_CODES = [22, 23, 24]; // PROT_AC, MAGNETO, CONTACTOR
 const IGBT_ROLLING_WINDOW_DAYS_DEFAULT = 90;
 const IGBT_ROLLING_WINDOW_DAYS_MIN = 7;
 const IGBT_ROLLING_WINDOW_DAYS_MAX = 365;
@@ -13333,16 +13415,20 @@ app.get("/api/igbt/fleet", (req, res) => {
           WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
       `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-      // Query last hour 5-min parameters for imbalance
+      // Query last hour 5-min parameters for imbalance + per-phase snapshot
+      // + currently-raised alarm bits (inv_alarms bitwise-OR across slot).
       const oneHourAgo = now - 60 * 60 * 1000;
       const paramRows = db.prepare(`
-        SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+        SELECT vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
+               temp_c, ts_ms, inv_alarms
+          FROM inverter_5min_param
           WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
           ORDER BY ts_ms DESC
       `).all(ip, slave, oneHourAgo);
 
       const imbalancePct = igbtHealth.medianImbalance(paramRows);
       const tempC = paramRows?.[0]?.temp_c || null;
+      const currentAlarmBits = Number(paramRows?.[0]?.inv_alarms || 0) | 0;
 
       // Phase 2.1 — fetch YoY thermal drift block (drift is null until
       // we have ≥1 'computed' row in both 90-day windows).
@@ -13390,6 +13476,19 @@ app.get("/api/igbt/fleet", (req, res) => {
         imbalance_pct: imbalancePct,
         last_event_ms: lastEvent?.read_at_ms || null,
         last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
+        // v2.11.x Slice κ — two alarm masks for the UI to choose from:
+        //   • current_alarm_bits — OR-mask of the latest 5-min inv_alarms.
+        //     Reflects "anything raised in the last 5 min". May include bits
+        //     that have since cleared.
+        //   • live_alarm_bits — OR-mask of every uncleared `alarms` row for
+        //     (inverter, unit). Authoritative current state from the alarms
+        //     episode table.
+        current_alarm_bits: currentAlarmBits,
+        live_alarm_bits:    getLiveAlarmBitmap(inv, slave),
+        // Freshness — surfaces "offline" rows without a second query.
+        last_param_ts_ms: paramRows?.[0]?.ts_ms || null,
+        is_online_now: paramRows?.[0]?.ts_ms != null
+          && (now - paramRows[0].ts_ms) < 10 * 60 * 1000,
         // v2.11.0 Phase 2.1 — YoY thermal drift (null until baseline ready)
         yoy_drift_c: yoyBlock.yoy_drift_c,
         baseline_ready: !!yoyBlock.progress?.ready,
@@ -13397,6 +13496,20 @@ app.get("/api/igbt/fleet", (req, res) => {
         baseline_computed_days: yoyBlock.progress?.computed_days || 0,
         scoring_phase: scoreResult.weights_used?.phase || "phase1",
       };
+
+      // v2.11.x Slice κ.3 — Critical alarm-pattern precursors (forensic).
+      const critPatterns = loadCriticalPatterns(inv, slave, now);
+      node.critical_patterns = critPatterns.map((p) => ({
+        key: p.key,
+        hex: p.hex,
+        label: p.label,
+        severity: p.severity,
+        count_in_window: p.count_in_window,
+        last_seen_ts: p.last_seen_ts,
+        recurring: p.recurring,
+      }));
+      node.worst_pattern_severity = criticalAlarmPatterns.worstSeverity(critPatterns);
+      node.has_critical_pattern = criticalAlarmPatterns.hasAnyCriticalPattern(critPatterns);
 
       nodes.push(node);
 
@@ -13476,9 +13589,13 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
         WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
     `).get(ip, slave, cutoffMs)?.cnt || 0;
 
-    // Query param data for imbalance
+    // Query param data for imbalance + per-phase snapshot + DC-side telemetry
+    // + active alarm-bits OR-mask.
     const paramRows = db.prepare(`
-      SELECT iac1_a, iac2_a, iac3_a, temp_c, ts_ms FROM inverter_5min_param
+      SELECT vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
+             vdc_v, idc_a, pdc_w, pac_w,
+             temp_c, ts_ms, inv_alarms
+        FROM inverter_5min_param
         WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
         ORDER BY ts_ms DESC
     `).all(ip, slave, oneHourAgo);
@@ -13518,12 +13635,25 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
         ORDER BY read_at_ms DESC LIMIT 10
     `).all(ip, slave, cutoffMs);
 
-    // Query current state from latest param
+    // Query current state from latest param (per-phase voltage + current +
+    // DC-side telemetry + active alarm bits OR-mask).
     let currentIac1 = null, currentIac2 = null, currentIac3 = null;
+    let currentVac1 = null, currentVac2 = null, currentVac3 = null;
+    let currentVdc = null, currentIdc = null, currentPdc = null, currentPac = null;
+    let currentAlarmBits = 0;
     if (paramRows && paramRows.length > 0) {
-      currentIac1 = paramRows[0].iac1_a;
-      currentIac2 = paramRows[0].iac2_a;
-      currentIac3 = paramRows[0].iac3_a;
+      const latest = paramRows[0];
+      currentIac1 = latest.iac1_a;
+      currentIac2 = latest.iac2_a;
+      currentIac3 = latest.iac3_a;
+      currentVac1 = latest.vac1_v;
+      currentVac2 = latest.vac2_v;
+      currentVac3 = latest.vac3_v;
+      currentVdc  = latest.vdc_v;
+      currentIdc  = latest.idc_a;
+      currentPdc  = latest.pdc_w;
+      currentPac  = latest.pac_w;
+      currentAlarmBits = Number(latest.inv_alarms || 0) | 0;
     }
 
     res.json({
@@ -13561,9 +13691,27 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
       },
       current_state: {
         temp_pe_c: currentTemp,
+        // Per-phase voltage + current snapshot from the most recent 5-min
+        // bucket. Used by the drilldown's AC Phase Parameters table.
+        vac1_v: currentVac1,
+        vac2_v: currentVac2,
+        vac3_v: currentVac3,
         iac1_a: currentIac1,
         iac2_a: currentIac2,
         iac3_a: currentIac3,
+        // DC-side telemetry — drives IGBT switching stress (Vds margin) and
+        // junction-current loading. Pac is included so the UI can compute
+        // and display DC→AC conversion efficiency.
+        vdc_v: currentVdc,
+        idc_a: currentIdc,
+        pdc_w: currentPdc,
+        pac_w: currentPac,
+        // Alarm bits — two views: `current_alarm_bits` is the OR-mask of
+        // the latest 5-min slot (may include bits that have since cleared);
+        // `live_alarm_bits` is the OR of every uncleared alarms-table row
+        // (authoritative "right now"). UI prefers live when non-zero.
+        current_alarm_bits: currentAlarmBits,
+        live_alarm_bits:    getLiveAlarmBitmap(inv, slave),
         last_5min_ts_ms: lastParamTs,
         is_online_now: lastParamTs !== null && (now - lastParamTs) < 10 * 60 * 1000,
       },
@@ -13578,6 +13726,44 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
         target_days:     yoyBlock.progress?.target_days || 365,
         scoring_phase:   scoreResult.weights_used?.phase || "phase1",
       },
+      // v2.11.x Slice κ — Linked Findings: surface contactor↔IGBT cross-effects
+      // so operators see paired wear in one place. Computed via the same
+      // acContactor.correlateWithIgbt() rule set used by /api/contactor/node.
+      linked_findings: (() => {
+        try {
+          const ctSig = loadContactorSignals(inv, ip, slave, cutoffMs, now);
+          const ctScore = acContactor.computeContactorScore({
+            stop_count: ctSig.stop_count,
+            alarm_episode_count: ctSig.alarm_episode_count,
+            chatter_count: ctSig.chatter_count,
+            vac_imbalance_pct: ctSig.vac_imbalance_pct,
+            iac_imbalance_pct: ctSig.iac_imbalance_pct,
+            cycle_rate_per_day: ctSig.cycle_rate_per_day,
+          });
+          return acContactor.correlateWithIgbt({
+            contactor: {
+              stop_count: ctSig.stop_count,
+              alarm_episode_count: ctSig.alarm_episode_count,
+              chatter_count: ctSig.chatter_count,
+              score: ctScore.score,
+              tier: ctScore.tier,
+            },
+            igbt: {
+              thermal_count: thermalCount,
+              frama_count:   framaCount,
+              imbalance_pct: imbalancePct,
+              score: scoreResult.score,
+              tier:  scoreResult.tier,
+            },
+          });
+        } catch (e) {
+          return { linked: false, reasons: [], severity: "info", error: e.message };
+        }
+      })(),
+      // v2.11.x Slice κ.3 — Critical alarm-pattern precursors (forensic).
+      // Surface full pattern objects (catalogue text + episodes) for the
+      // drilldown's red-bordered "Critical Patterns" section.
+      critical_patterns: loadCriticalPatterns(inv, slave, now),
     });
   } catch (err) {
     console.error("[IGBT] /api/igbt/node error:", err.message);
@@ -13729,6 +13915,718 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
     res.send(csv);
   } catch (err) {
     console.error("[IGBT] /api/igbt/fleet.csv error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── v2.11.x Slice κ — AC Contactor Health ─────────────────────────────────
+// Paired with the IGBT hardening pass. The contactor K1 lives between the
+// IGBT bridge and the grid; chatter / weld / coil-failure modes feed back
+// into IGBT branch faults. We surface scores and a "Linked Findings"
+// banner so operators see both subsystems together when they're related.
+//
+// Pure-function math: server/acContactorHealth.js
+// Tests: server/tests/acContactorHealthCore.test.js
+// Audit: audits/2026-05-11/igbt-contactor-hardening.md
+
+/**
+ * getLiveAlarmBitmap(inv, slave) → number
+ *
+ * Returns the OR-mask of every currently-uncleared alarm row in the
+ * `alarms` table for the given (inverter, unit) pair. This is the
+ * authoritative "what's raised right now" source — `inv_alarms` from
+ * `inverter_5min_param` is just the OR across the last 5-min slot and
+ * therefore includes alarms that have since cleared, or misses ones
+ * raised in the gap between the slot and now.
+ *
+ * Pure read; caller decides how to merge with inv_alarms.
+ */
+function getLiveAlarmBitmap(inv, slave) {
+  try {
+    const rows = db.prepare(`
+      SELECT alarm_value FROM alarms
+        WHERE inverter = ? AND unit = ? AND cleared_ts IS NULL
+    `).all(inv, slave);
+    let mask = 0;
+    for (const r of rows) {
+      const v = Number(r?.alarm_value);
+      if (Number.isFinite(v)) mask |= (v | 0);
+    }
+    return mask >>> 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/**
+ * loadCriticalPatterns(inv, slave, now) → patternStatus[]
+ *
+ * Slice κ.3 — Forensic precursor detector. Pulls the last
+ * `CRITICAL_PATTERN_WINDOW_MS` (48h) of alarm rows for (inverter, unit) and
+ * runs them through `criticalAlarmPatterns.evaluateCriticalPatterns`. Returns
+ * one status per known pattern (DC_SUBSTRATE_BREACH / DC_FAULT_AC_OVERCURRENT)
+ * with severity "ok" | "watch" | "critical" and episode list (UI-capped at 20).
+ *
+ * Cheap: 48h alarm window for one unit is ~10s of rows in production. Both
+ * IGBT + Contactor fleet/node endpoints call this since the patterns are
+ * cross-cutting (DC + AC bridge instability).
+ */
+function loadCriticalPatterns(inv, slave, now) {
+  const windowMs = criticalAlarmPatterns.DEFAULT_WINDOW_MS;
+  const windowCutoff = now - windowMs;
+
+  // ── Slice κ.4 Gate 3 — configured-node check ───────────────────────────
+  // The alarms table retains rows for nodes that have since been removed
+  // from ipconfig (e.g. an inverter taken out of service). Auto-blocking
+  // on a phantom node would be a clear false-positive — there's nothing
+  // to inspect and the operator can't even reach it. Return an "all ok"
+  // shape so downstream renderers still get a uniform payload.
+  let isConfigured = true;
+  try {
+    const cfg = loadIpConfigFromDb();
+    isConfigured = !!lookupConfiguredNode(cfg, inv, slave);
+  } catch (_) { /* config lookup failure → assume configured, don't suppress */ }
+  if (!isConfigured) {
+    return criticalAlarmPatterns.evaluateCriticalPatterns([], { now, windowMs });
+  }
+
+  // ── Slice κ.5 — counter reset after operator Confirmation ──────────────
+  // When the operator clicks "Confirmed", the assumption is they've
+  // physically inspected + resolved the underlying fault. Pre-ack alarms
+  // are historical evidence of the SAME fault — counting them again
+  // toward a fresh recurrence would re-block on the operator's heels.
+  // Effective cutoff = max(windowCutoff, latest ack timestamp).
+  let postAckCutoff = windowCutoff;
+  try {
+    const latestAck = getLatestAckedCriticalBlock(inv);
+    const ackTs = Number(latestAck?.acked_at_ms || 0);
+    if (Number.isFinite(ackTs) && ackTs > postAckCutoff) postAckCutoff = ackTs;
+  } catch (_) { /* db lookup failure → behave as if no ack */ }
+
+  let patternResults;
+  try {
+    const rows = db.prepare(`
+      SELECT id, ts, cleared_ts, alarm_value
+        FROM alarms
+        WHERE inverter = ? AND unit = ? AND ts > ?
+        ORDER BY ts DESC
+    `).all(inv, slave, postAckCutoff);
+    patternResults = criticalAlarmPatterns.evaluateCriticalPatterns(rows, { now, windowMs });
+  } catch (err) {
+    console.error("[CriticalPatterns] load failed:", err.message);
+    patternResults = criticalAlarmPatterns.evaluateCriticalPatterns([], { now, windowMs });
+  }
+
+  // v2.11.x Slice κ.4 — IGBT health EOL signal (preventive auto-block).
+  // Slice κ.5 — the helper also receives `postAckCutoff` so it can apply
+  // the EOL_POST_ACK_GRACE_MS grace period (24h after a Confirm, EOL is
+  // suppressed; gives the operator time to verify the fix worked before
+  // the historical 90-day score re-blocks them).
+  try {
+    const eolSignal = _evaluateIgbtHealthEolSignal(inv, slave, now, postAckCutoff);
+    if (eolSignal) patternResults.push(eolSignal);
+  } catch (err) {
+    console.error("[CriticalPatterns] IGBT health eval failed:", err.message);
+  }
+  return patternResults;
+}
+
+// Slice κ.4 false-positive hardening — minimum data density a node must
+// supply before its computed health is allowed to fire the EOL signal:
+//   - ≥ EOL_MIN_PARAM_ROWS recent 5-min samples (proves the node was running
+//     recently enough that imbalance / YoY components reflect current state)
+//   - OR ≥ EOL_MIN_STOPREASON_ROWS observed stop events in the 90-day window
+//     (proves the wear count is grounded in real history, not a sparse boot)
+//   - AND the last 5-min sample is within EOL_MAX_PARAM_STALENESS_MS, so we
+//     don't fire on a long-offline node whose underlying signal is frozen
+const EOL_MIN_PARAM_ROWS           = 3;
+const EOL_MIN_STOPREASON_ROWS      = 5;
+const EOL_MAX_PARAM_STALENESS_MS   = 30 * 60 * 1000;       // 30 min
+
+// Slice κ.5 — post-ack grace for the EOL signal. After an operator clicks
+// "Confirmed" (presumably because they swapped/repaired the module), the
+// 90-day score is still computed against pre-fix history and would
+// re-block immediately. Suppress EOL for this many ms after the latest
+// ack so the new module accumulates fresh data before the score has
+// authority again.
+const EOL_POST_ACK_GRACE_MS        = 24 * 60 * 60 * 1000;  // 24 h
+
+// Pure-ish: pulls the same per-node IGBT health signals the fleet endpoint
+// uses, runs igbtHealth.computeHealthScore, and emits a synthetic critical
+// signal in the catalogue shape if tier === "eol". Returns null otherwise.
+// `inv` is the inverter number (1–27); resolves `ip` via ipconfig.
+//
+// Hardening gates:
+//   Gate 3 (κ.4)   — return null for an unconfigured (inv, slave) pair
+//   Gate 4 (κ.4)   — return null if no recent param row (node is offline)
+//   Gate 5 (κ.4)   — return null if data density is below the minimum
+//   Gate 7 (κ.5)   — return null during the post-ack grace window
+//
+// `_postAckCutoffOverride` is optional. When the caller has already
+// resolved the latest ack timestamp (see loadCriticalPatterns), we use it
+// to avoid a second DAO lookup; otherwise we resolve it locally.
+function _evaluateIgbtHealthEolSignal(inv, slave, now, _postAckCutoffOverride) {
+  const HEALTH_WINDOW_DAYS = 90;
+  const cutoffMs = now - HEALTH_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  let ip = "";
+  try {
+    const cfg = loadIpConfigFromDb();
+    ip = String(
+      cfg?.inverters?.[inv] ?? cfg?.inverters?.[String(inv)] ?? "",
+    ).trim();
+  } catch (_) { /* lookup failure → no signal (Gate 3) */ }
+  if (!ip) return null;
+
+  // Gate 7 (Slice κ.5) — post-ack grace. If the operator confirmed
+  // within EOL_POST_ACK_GRACE_MS, suppress the EOL signal entirely so
+  // the just-resolved historical wear doesn't immediately re-block them.
+  // Alarm-pattern detection (in loadCriticalPatterns) handles its own
+  // ack reset via the postAckCutoff floor.
+  let ackTs = Number(_postAckCutoffOverride) || 0;
+  if (!ackTs) {
+    try {
+      const latestAck = getLatestAckedCriticalBlock(inv);
+      ackTs = Number(latestAck?.acked_at_ms || 0);
+    } catch (_) { /* leave at 0 — no ack, no grace */ }
+  }
+  if (ackTs > 0 && (now - ackTs) < EOL_POST_ACK_GRACE_MS) {
+    return null;
+  }
+
+  // Gate 4 — online check. The node must have reported a 5-min sample
+  // within EOL_MAX_PARAM_STALENESS_MS. An offline node's "current" health
+  // is by definition stale; auto-blocking on stale data is the textbook
+  // false-positive we're guarding against.
+  const latestSampleRow = db.prepare(`
+    SELECT ts_ms FROM inverter_5min_param
+      WHERE inverter_ip = ? AND slave = ?
+      ORDER BY ts_ms DESC LIMIT 1
+  `).get(ip, slave);
+  const latestSampleTs = Number(latestSampleRow?.ts_ms || 0);
+  if (!latestSampleTs || (now - latestSampleTs) > EOL_MAX_PARAM_STALENESS_MS) {
+    return null;
+  }
+
+  // Stop-reason aggregates (mirror /api/igbt/fleet exactly).
+  const thermalCount = db.prepare(`
+    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+  `).get(ip, slave, cutoffMs)?.cnt || 0;
+  const framaCount = db.prepare(`
+    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+  `).get(ip, slave, cutoffMs)?.cnt || 0;
+  const piAnaCount = db.prepare(`
+    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+  `).get(ip, slave, cutoffMs)?.cnt || 0;
+  // Phase imbalance from the last hour of 5-min samples.
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const paramRows = db.prepare(`
+    SELECT iac1_a, iac2_a, iac3_a FROM inverter_5min_param
+      WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+  `).all(ip, slave, oneHourAgo);
+
+  // Gate 5 — data-density check. We must have either enough recent param
+  // samples to trust imbalance/YoY, OR enough historical stop-reasons to
+  // trust the wear counts. Otherwise the score is computed against sparse
+  // data and could spuriously land in EOL.
+  const totalStopReasons = thermalCount + framaCount + piAnaCount;
+  const hasEnoughParamRows  = paramRows.length >= EOL_MIN_PARAM_ROWS;
+  const hasEnoughStopRows   = totalStopReasons >= EOL_MIN_STOPREASON_ROWS;
+  if (!hasEnoughParamRows && !hasEnoughStopRows) return null;
+
+  const imbalancePct = igbtHealth.medianImbalance(paramRows);
+  const yoyBlock = computeYoyThermalBlock(ip, slave);
+  const scoreResult = igbtHealth.computeHealthScore({
+    thermal_count: thermalCount,
+    frama_count: framaCount,
+    pi_ana_count: piAnaCount,
+    imbalance_pct: imbalancePct,
+    yoy_drift_c: yoyBlock.yoy_drift_c,
+  });
+  if (!scoreResult || scoreResult.tier !== "eol") return null;
+
+  // Synthetic critical signal in the same shape as the alarm-pattern
+  // entries so the renderer + the enforcer treat it uniformly.
+  return {
+    key: "IGBT_HEALTH_EOL",
+    hex: "EOL",
+    mask: null,
+    severity_rank: 3,  // catalogue scale: 4=0x0240, 3=EOL, 2=0x0040, 1=0x0210
+    bits: [],
+    bit_labels: [],
+    label: "IGBT Health at End-of-Life",
+    description:
+      "Aggregate IGBT health score (90-day window) has reached the EOL band " +
+      "(≥75). Multiple wear indicators co-occur — thermal trips, FRAMA branch " +
+      "faults, PI saturation, phase imbalance, year-over-year thermal drift.",
+    failure_mode:
+      "Cumulative IGBT wear has crossed the operator-defined replacement " +
+      "threshold. Continuing to run risks bond-wire lift-off, substrate " +
+      "cracking, or thermal runaway leading to module explosion. This is a " +
+      "PREVENTIVE block — no acute fault has fired yet.",
+    recommended_action:
+      "Schedule IGBT module replacement on this node. Open the IGBT Health " +
+      "drilldown to see the dominant aging component (thermal / FRAMA / PI / " +
+      "imbalance / YoY drift) so the replacement plan covers the right cause.",
+    count_in_window: null,
+    window_ms: HEALTH_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    min_count_for_critical: null,
+    first_seen_ts: null,
+    last_seen_ts: now,
+    recurring: true,
+    severity: "critical",
+    episodes: [],
+    // Synthetic-only diagnostic context, surfaced by the renderer when present.
+    health_score: scoreResult.score,
+    health_tier:  scoreResult.tier,
+    scoring_phase: scoreResult.weights_used?.phase || "phase1",
+    // Slice κ.4 — surface the data-density signals the gates checked so the
+    // audit trail / inspection guide can prove "this wasn't fired on thin
+    // data" without re-running the query.
+    last_param_ts_ms:   latestSampleTs,
+    param_rows_1h:      paramRows.length,
+    stop_reasons_90d:   totalStopReasons,
+    breakdown:          scoreResult.breakdown || null,
+  };
+}
+
+/**
+ * loadContactorSignals(inv, ip, slave, cutoffMs, now) → {
+ *   stop_count, alarm_episode_count, chatter_count,
+ *   vac_imbalance_pct, iac_imbalance_pct,
+ *   imbalance_sample_count, last_param_ts_ms,
+ *   recent_stop_events, recent_alarm_events,
+ * }
+ *
+ * Centralizes every DB read needed to score one node so the three contactor
+ * endpoints share identical query semantics. The fleet endpoint discards
+ * the recent_* event arrays; the node endpoint passes them through.
+ */
+function loadContactorSignals(inv, ip, slave, cutoffMs, now) {
+  const oneHourAgo = now - 60 * 60 * 1000;
+
+  // Contactor stop events (motive 22/23/24) in the rolling window.
+  const stopRows = db.prepare(`
+    SELECT timestamp_iso, motive_code, read_at_ms
+      FROM inverter_stop_reasons_std
+      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ?
+            AND motive_code IN (22, 23, 24)
+      ORDER BY read_at_ms DESC
+  `).all(ip, slave, cutoffMs);
+
+  // Contactor alarm episodes (bit 11 / 0x0800 set in alarm_value).
+  // The alarms table is keyed by (inverter, unit) — integers, not IP.
+  const alarmRows = db.prepare(`
+    SELECT id, ts, cleared_ts, alarm_value
+      FROM alarms
+      WHERE inverter = ? AND unit = ? AND ts > ?
+            AND (alarm_value & 2048) != 0
+      ORDER BY ts DESC
+  `).all(inv, slave, cutoffMs);
+
+  // 1-hour Iac/Vac for under-load imbalance + freshness, plus DC-side
+  // telemetry and inv_alarms OR-mask.
+  const paramRows = db.prepare(`
+    SELECT vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
+           vdc_v, idc_a, pdc_w, pac_w,
+           ts_ms, inv_alarms
+      FROM inverter_5min_param
+      WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+      ORDER BY ts_ms DESC
+  `).all(ip, slave, oneHourAgo);
+
+  // v2.11.x Slice κ — 30-day window of Conex snapshots for cycle-rate
+  // computation. We pull only non-null conex_lifetime_last values so
+  // computeCycleRatePerDay can ignore them upfront. Keep this query
+  // separate from the 1-hour paramRows query above to avoid bloating
+  // the hot-path with 30 days of rows.
+  const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+  const conexRows = db.prepare(`
+    SELECT ts_ms, conex_lifetime_last
+      FROM inverter_5min_param
+      WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+            AND conex_lifetime_last IS NOT NULL
+      ORDER BY ts_ms ASC
+  `).all(ip, slave, thirtyDaysAgo);
+
+  const stop_count           = acContactor.countContactorStops(stopRows);
+  const alarm_episode_count  = acContactor.countContactorAlarmEpisodes(alarmRows);
+  const chatter_count        = acContactor.detectChatter(alarmRows);
+  const vac_imbalance_pct    = acContactor.vacImbalanceUnderLoad(paramRows);
+  const iac_imbalance_pct    = acContactor.iacImbalanceUnderLoad(paramRows);
+  // Sample count is the same shape we use for IGBT: rows where iac avg > 0.
+  let imbalance_sample_count = 0;
+  for (const r of paramRows) {
+    const i1 = Number(r?.iac1_a), i2 = Number(r?.iac2_a), i3 = Number(r?.iac3_a);
+    if (![i1, i2, i3].every(Number.isFinite)) continue;
+    if ((i1 + i2 + i3) / 3 >= acContactor.VAC_LOAD_FLOOR_A) imbalance_sample_count++;
+  }
+
+  // v2.11.x Slice κ — cycle-rate (Δ-Conex per day, 30-day rolling).
+  // Pure-function computeCycleRatePerDay ignores regressions, requires ≥ 1 h
+  // span, and returns null when data is insufficient.
+  const cycleStats = acContactor.computeCycleRatePerDay(
+    conexRows.map((r) => ({ ts_ms: r.ts_ms, value: r.conex_lifetime_last })),
+  );
+
+  const latest = paramRows?.[0] || null;
+  // Latest Conex snapshot — last non-null lifetime counter. Falls back to
+  // null if no Conex history yet (newly deployed node / pre-Slice-κ data).
+  let conex_lifetime_last = null;
+  for (let i = conexRows.length - 1; i >= 0; i--) {
+    if (conexRows[i].conex_lifetime_last != null) {
+      conex_lifetime_last = Number(conexRows[i].conex_lifetime_last);
+      break;
+    }
+  }
+
+  return {
+    stop_count,
+    alarm_episode_count,
+    chatter_count,
+    vac_imbalance_pct,
+    iac_imbalance_pct,
+    imbalance_sample_count,
+    last_param_ts_ms: latest?.ts_ms || null,
+    // Conex stats — drives phase-2 contactor score component.
+    conex_lifetime_last,
+    cycle_rate_per_day: cycleStats.rate_per_day,
+    cycle_total_30d:    cycleStats.total_delta,
+    cycle_span_days:    cycleStats.span_days,
+    cycle_samples:      cycleStats.samples_used,
+    // v2.11.x Slice κ — per-phase + DC-side snapshot from the most recent
+    // 5-min bucket + the OR-mask of currently-raised alarm bits. Powers the
+    // drilldown's AC/DC Parameters tables and the fleet table's Alarms column.
+    latest_vac1_v: latest?.vac1_v ?? null,
+    latest_vac2_v: latest?.vac2_v ?? null,
+    latest_vac3_v: latest?.vac3_v ?? null,
+    latest_iac1_a: latest?.iac1_a ?? null,
+    latest_iac2_a: latest?.iac2_a ?? null,
+    latest_iac3_a: latest?.iac3_a ?? null,
+    latest_vdc_v:  latest?.vdc_v  ?? null,
+    latest_idc_a:  latest?.idc_a  ?? null,
+    latest_pdc_w:  latest?.pdc_w  ?? null,
+    latest_pac_w:  latest?.pac_w  ?? null,
+    // `current_alarm_bits` = OR-mask of the latest 5-min slot's inv_alarms.
+    // This reflects "anything raised in the last 5 minutes" and can include
+    // bits that have since cleared.
+    current_alarm_bits: Number(latest?.inv_alarms || 0) | 0,
+    // `live_alarm_bits` = OR-mask of every currently-uncleared alarms row
+    // for (inverter, unit). Authoritative "what's raised right now". The
+    // UI prefers this when non-zero and falls back to current_alarm_bits.
+    live_alarm_bits: getLiveAlarmBitmap(inv, slave),
+    recent_stop_events: stopRows.slice(0, 10),
+    recent_alarm_events: alarmRows.slice(0, 10),
+  };
+}
+
+// GET /api/contactor/fleet — fleet-wide AC contactor health summary.
+app.get("/api/contactor/fleet", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const now = Date.now();
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
+    const ipConfig = loadIpConfigFromDb();
+
+    const nodes = [];
+    const tierCounts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
+    let totalChatter = 0;
+
+    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
+      const sig = loadContactorSignals(inv, ip, slave, cutoffMs, now);
+      const scoreResult = acContactor.computeContactorScore({
+        stop_count: sig.stop_count,
+        alarm_episode_count: sig.alarm_episode_count,
+        chatter_count: sig.chatter_count,
+        vac_imbalance_pct: sig.vac_imbalance_pct,
+        iac_imbalance_pct: sig.iac_imbalance_pct,
+        cycle_rate_per_day: sig.cycle_rate_per_day,
+      });
+
+      // Last contactor stop for the row's "last event" column.
+      const lastStop = sig.recent_stop_events[0] || null;
+
+      // v2.11.x Slice κ.3 — Critical alarm-pattern summary per row.
+      const critPatterns = loadCriticalPatterns(inv, slave, now);
+
+      nodes.push({
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score,
+        tier: scoreResult.tier,
+        stop_count: sig.stop_count,
+        alarm_episode_count: sig.alarm_episode_count,
+        chatter_count: sig.chatter_count,
+        vac_imbalance_pct: sig.vac_imbalance_pct,
+        iac_imbalance_pct: sig.iac_imbalance_pct,
+        imbalance_sample_count: sig.imbalance_sample_count,
+        last_event_ms: lastStop?.read_at_ms || null,
+        last_event_motive_name: lastStop ? getMotiveLabel(lastStop.motive_code) : null,
+        current_alarm_bits: sig.current_alarm_bits,
+        live_alarm_bits: sig.live_alarm_bits,
+        // Online flag derived from 5-min freshness (≤ 10 min ago = online).
+        // Surfaced so the UI can dim offline rows without an extra query.
+        is_online_now: sig.last_param_ts_ms !== null
+          && (now - sig.last_param_ts_ms) < 10 * 60 * 1000,
+        last_param_ts_ms: sig.last_param_ts_ms,
+        // v2.11.x Slice κ — K1 wear metric: lifetime cycle count + 30-day rate.
+        conex_lifetime:     sig.conex_lifetime_last,
+        cycle_rate_per_day: sig.cycle_rate_per_day,
+        scoring_phase:      scoreResult.weights_used?.phase || "phase1",
+        // v2.11.x Slice κ.3 — Critical alarm-pattern summary (compact per-row).
+        critical_patterns: critPatterns.map((p) => ({
+          key: p.key,
+          hex: p.hex,
+          label: p.label,
+          severity: p.severity,
+          count_in_window: p.count_in_window,
+          last_seen_ts: p.last_seen_ts,
+          recurring: p.recurring,
+        })),
+        worst_pattern_severity: criticalAlarmPatterns.worstSeverity(critPatterns),
+        has_critical_pattern:   criticalAlarmPatterns.hasAnyCriticalPattern(critPatterns),
+      });
+
+      if (scoreResult.tier) tierCounts[scoreResult.tier]++;
+      else tierCounts.offline++;
+      totalChatter += sig.chatter_count;
+    }
+
+    res.json({
+      ok: true,
+      generated_at_ms: now,
+      rolling_window_days: windowDays,
+      nodes,
+      summary: {
+        total_nodes: nodes.length,
+        healthy_count: tierCounts.healthy,
+        watch_count: tierCounts.watch,
+        aging_count: tierCounts.aging,
+        eol_count: tierCounts.eol,
+        offline_count: tierCounts.offline,
+        total_chatter_events: totalChatter,
+      },
+    });
+  } catch (err) {
+    console.error("[Contactor] /api/contactor/fleet error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/contactor/node/:inverter/:slave — drilldown panel.
+app.get("/api/contactor/node/:inverter/:slave", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const inv = Number(req.params.inverter);
+    const slave = Number(req.params.slave);
+    if (!Number.isFinite(inv) || !Number.isFinite(slave) || inv < 1 || inv > 27 || slave < 1 || slave > 4) {
+      return res.status(400).json({ ok: false, error: "Invalid inverter or slave" });
+    }
+
+    const ipConfig = loadIpConfigFromDb();
+    const cfgNode = lookupConfiguredNode(ipConfig, inv, slave);
+    if (!cfgNode) return res.status(404).json({ ok: false, error: "Node not found" });
+    const ip = cfgNode.ip;
+
+    const now = Date.now();
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
+
+    const sig = loadContactorSignals(inv, ip, slave, cutoffMs, now);
+    const scoreResult = acContactor.computeContactorScore({
+      stop_count: sig.stop_count,
+      alarm_episode_count: sig.alarm_episode_count,
+      chatter_count: sig.chatter_count,
+      vac_imbalance_pct: sig.vac_imbalance_pct,
+      iac_imbalance_pct: sig.iac_imbalance_pct,
+      cycle_rate_per_day: sig.cycle_rate_per_day,
+    });
+
+    // Pull the matching IGBT signals so the drilldown can show Linked
+    // Findings without a second round-trip.
+    const thermalCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+    const framaCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+    const piAnaCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
+    `).get(ip, slave, cutoffMs)?.cnt || 0;
+    const igbtParamRows = db.prepare(`
+      SELECT iac1_a, iac2_a, iac3_a FROM inverter_5min_param
+        WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+    `).all(ip, slave, now - 60 * 60 * 1000);
+    const igbtImbalance = igbtHealth.medianImbalance(igbtParamRows);
+    const yoyBlock = computeYoyThermalBlock(ip, slave);
+    const igbtScore = igbtHealth.computeHealthScore({
+      thermal_count: thermalCount,
+      frama_count: framaCount,
+      pi_ana_count: piAnaCount,
+      imbalance_pct: igbtImbalance,
+      yoy_drift_c: yoyBlock.yoy_drift_c,
+    });
+
+    const linked = acContactor.correlateWithIgbt({
+      contactor: {
+        stop_count: sig.stop_count,
+        alarm_episode_count: sig.alarm_episode_count,
+        chatter_count: sig.chatter_count,
+        score: scoreResult.score,
+        tier: scoreResult.tier,
+      },
+      igbt: {
+        thermal_count: thermalCount,
+        frama_count: framaCount,
+        imbalance_pct: igbtImbalance,
+        score: igbtScore.score,
+        tier: igbtScore.tier,
+      },
+    });
+
+    res.json({
+      ok: true,
+      node: {
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score,
+        tier: scoreResult.tier,
+        computed_at_ms: now,
+      },
+      components: {
+        stop_score:        scoreResult.breakdown.stop_score,
+        stop_count:        sig.stop_count,
+        stop_events: sig.recent_stop_events.map(e => ({
+          timestamp_iso: e.timestamp_iso,
+          motive_name: getMotiveLabel(e.motive_code),
+        })),
+        alarm_score:       scoreResult.breakdown.alarm_score,
+        alarm_episode_count: sig.alarm_episode_count,
+        alarm_events: sig.recent_alarm_events.map(e => ({
+          ts: e.ts,
+          cleared_ts: e.cleared_ts,
+          alarm_value: e.alarm_value,
+          duration_ms: (e.cleared_ts && e.cleared_ts > e.ts) ? (e.cleared_ts - e.ts) : null,
+        })),
+        chatter_score:     scoreResult.breakdown.chatter_score,
+        chatter_count:     sig.chatter_count,
+        vac_score:         scoreResult.breakdown.vac_score,
+        vac_imbalance_pct: sig.vac_imbalance_pct,
+        iac_score:         scoreResult.breakdown.iac_score,
+        iac_imbalance_pct: sig.iac_imbalance_pct,
+        imbalance_sample_count: sig.imbalance_sample_count,
+        // v2.11.x Slice κ — K1 wear: lifetime count + 30-day rate.
+        cycle_score:           scoreResult.breakdown.cycle_score,
+        conex_lifetime:        sig.conex_lifetime_last,
+        cycle_rate_per_day:    sig.cycle_rate_per_day,
+        cycle_total_30d:       sig.cycle_total_30d,
+        cycle_span_days:       sig.cycle_span_days,
+        cycle_samples:         sig.cycle_samples,
+        scoring_phase:         scoreResult.weights_used?.phase || "phase1",
+      },
+      current_state: {
+        last_5min_ts_ms: sig.last_param_ts_ms,
+        is_online_now: sig.last_param_ts_ms !== null && (now - sig.last_param_ts_ms) < 10 * 60 * 1000,
+        // v2.11.x Slice κ — per-phase + DC-side snapshot + active alarm bits.
+        vac1_v: sig.latest_vac1_v,
+        vac2_v: sig.latest_vac2_v,
+        vac3_v: sig.latest_vac3_v,
+        iac1_a: sig.latest_iac1_a,
+        iac2_a: sig.latest_iac2_a,
+        iac3_a: sig.latest_iac3_a,
+        vdc_v:  sig.latest_vdc_v,
+        idc_a:  sig.latest_idc_a,
+        pdc_w:  sig.latest_pdc_w,
+        pac_w:  sig.latest_pac_w,
+        current_alarm_bits: sig.current_alarm_bits,
+        live_alarm_bits:    sig.live_alarm_bits,
+      },
+      linked_findings: linked,
+      // v2.11.x Slice κ.3 — Critical alarm-pattern precursors (forensic).
+      critical_patterns: loadCriticalPatterns(inv, slave, now),
+      weights_used: scoreResult.weights_used,
+    });
+  } catch (err) {
+    console.error("[Contactor] /api/contactor/node error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/contactor/fleet.csv — capital-planning export.
+app.get("/api/contactor/fleet.csv", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const now = Date.now();
+    const windowDays = parseWindowDays(req);
+    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
+    const ipConfig = loadIpConfigFromDb();
+
+    const rows = [];
+    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
+      const sig = loadContactorSignals(inv, ip, slave, cutoffMs, now);
+      const scoreResult = acContactor.computeContactorScore({
+        stop_count: sig.stop_count,
+        alarm_episode_count: sig.alarm_episode_count,
+        chatter_count: sig.chatter_count,
+        vac_imbalance_pct: sig.vac_imbalance_pct,
+        iac_imbalance_pct: sig.iac_imbalance_pct,
+        cycle_rate_per_day: sig.cycle_rate_per_day,
+      });
+      const lastStop = sig.recent_stop_events[0] || null;
+      rows.push({
+        inverter: inv,
+        ip,
+        slave,
+        health_score: scoreResult.score !== null ? scoreResult.score.toFixed(1) : "",
+        tier: scoreResult.tier || "offline",
+        stop_count: sig.stop_count || "",
+        alarm_episode_count: sig.alarm_episode_count || "",
+        chatter_count: sig.chatter_count || "",
+        vac_imbalance_pct: sig.vac_imbalance_pct !== null ? sig.vac_imbalance_pct.toFixed(2) : "",
+        iac_imbalance_pct: sig.iac_imbalance_pct !== null ? sig.iac_imbalance_pct.toFixed(2) : "",
+        last_event_iso: lastStop?.timestamp_iso || "",
+        last_event_motive: lastStop ? getMotiveLabel(lastStop.motive_code) : "",
+        computed_at_iso: new Date(now).toISOString(),
+      });
+    }
+
+    const headers = [
+      "Inverter", "IP", "Slave", "Health Score", "Tier",
+      "Contactor Stops", "Bit-11 Episodes", "Chatter Events",
+      "Vac Imbalance (%)", "Iac Imbalance (%)",
+      "Last Event (ISO)", "Last Event Motive", "Computed At (ISO)",
+    ];
+    const keys = [
+      "inverter","ip","slave","health_score","tier",
+      "stop_count","alarm_episode_count","chatter_count",
+      "vac_imbalance_pct","iac_imbalance_pct",
+      "last_event_iso","last_event_motive","computed_at_iso",
+    ];
+
+    let csv = "﻿" + headers.join(",") + "\r\n";
+    for (const row of rows) {
+      csv += keys.map(k => escapeCsvCell(row[k])).join(",") + "\r\n";
+    }
+
+    const dateStr = new Date(now).toISOString().split("T")[0];
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="adsi-contactor-fleet-${dateStr}.csv"`,
+    });
+    res.send(csv);
+  } catch (err) {
+    console.error("[Contactor] /api/contactor/fleet.csv error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -22293,6 +23191,491 @@ function _prunDailyParamRetention() {
 }
 setTimeout(_prunDailyParamRetention, 6 * 60 * 1000).unref();            // first run after 6 min (offset from stopReasons)
 setInterval(_prunDailyParamRetention, 6 * 60 * 60 * 1000).unref();      // every 6 h thereafter
+
+// ─── v2.11.x Slice κ.3 — Critical Alarm Pattern auto-block enforcer ──────────
+// Operator rule (2026-05-11): "2-day recurring 0x0240 or 0x0210 episode count
+// must be considered critical already, needs attention by the inverter
+// engineer. Block START control … STOP the generation automatically and
+// block the control on the inverter card and put notice overlayed on it."
+//
+// The loop runs every 2 min on the *gateway* only (remote-mode instances
+// rely on the gateway-side block state via proxied API + WS broadcast).
+
+const criticalPatternEnforcer = require("./criticalPatternEnforcer");
+const CRITICAL_BLOCK_ENFORCE_INTERVAL_MS = 2 * 60 * 1000;   // 2 min cadence
+
+// Slice κ.4 Gate 6 — re-entrancy guard. The enforcer tick does I/O (DB
+// reads per node + async Modbus STOP writes per slave) and could in
+// pathological cases run longer than the interval. Without this guard,
+// two ticks could overlap and double-fire STOP commands or race on the
+// block row. We coalesce into a single in-flight tick.
+let _critBlockTickInFlight = false;
+let _critBlockTickQueued   = false;
+
+async function _runCriticalPatternEnforcerTick() {
+  if (isRemoteMode()) return;       // gateway-only loop
+  if (_critBlockTickInFlight) {
+    // Coalesce: if a tick is in flight, just remember another fire was
+    // requested and let the current tick complete. Avoids unbounded
+    // queueing if ticks ever stack up under load.
+    _critBlockTickQueued = true;
+    return;
+  }
+  _critBlockTickInFlight = true;
+  try {
+    const cfg = loadIpConfigFromDb();
+    // Build a unique list of inverters that have at least one configured
+    // slave. The enforcer's deps.listSlaves(inv) will re-enumerate slaves
+    // per inverter — we just need the inverter set here.
+    const invSet = new Set();
+    const slavesByInv = new Map();
+    for (const { inverter: inv, slave } of enumerateConfiguredNodes(cfg)) {
+      invSet.add(inv);
+      if (!slavesByInv.has(inv)) slavesByInv.set(inv, []);
+      slavesByInv.get(inv).push(slave);
+    }
+
+    const now = Date.now();
+    const deps = {
+      now: () => now,
+      listSlaves: (inv) => slavesByInv.get(inv) || [],
+      loadPatternsForNode: (inv, slave) => loadCriticalPatterns(inv, slave, now),
+      getActiveBlock: (inv) => getActiveCriticalBlock(inv) || null,
+      openBlock: (row) => insertCriticalBlock(row),
+      promoteBlock: (id, fields, nowMs) => updateCriticalBlockPattern(id, fields, nowMs),
+      markReenforced: (id, nowMs, result) => updateCriticalBlockReenforcement(id, nowMs, result),
+      issueStop: async (inv, slave, reason) => {
+        // Bypass bulk-auth: this is system-driven, not operator-driven.
+        // The block row + audit log records *why* the STOP was issued.
+        const r = await executeLocalControlWriteRequest(
+          { inverter: inv, unit: slave, value: 0, scope: "single", operator: "SYSTEM:CRIT_BLOCK", reason },
+          { skipBulkAuth: true },
+        );
+        return r?.ok ? "ok" : `err:${r?.error || "unknown"}`;
+      },
+      logAction: (payload) => {
+        try {
+          // Best-effort audit via the shared audit_log table. Schema is
+          // { ts, operator, inverter, node, action, scope, result, ip, reason }
+          // — see insertAuditLogRow in server/db.js.
+          insertAuditLogRow({
+            ts: Date.now(),
+            operator: "SYSTEM:CRIT_BLOCK",
+            inverter: Number(payload?.inverter) || 0,
+            node: Number(payload?.triggering_slave) || 0,
+            action: payload?.kind || "critical_block",
+            scope: "critical-pattern",
+            result: "ok",
+            reason: payload?.pattern?.key
+              ? `${payload.pattern.key} (${payload.pattern.hex}) ×${payload.count_in_window || "?"}`
+              : (payload?.reenforce_count ? `reenforce #${payload.reenforce_count}` : ""),
+          });
+        } catch (_) { /* audit write failure must not break enforcement */ }
+      },
+    };
+
+    // Iterate inverters serially so a single STOP queue doesn't get
+    // hammered. Each call is internally short (1 modbus write per slave).
+    for (const inv of invSet) {
+      try {
+        const r = await criticalPatternEnforcer.enforceOne(inv, deps);
+        if (
+          r?.action?.kind === "open_block" ||
+          r?.action?.kind === "reenforce"  ||
+          r?.action?.kind === "promote_block"
+        ) {
+          console.log(
+            `[critBlock] inv ${inv} ${r.action.kind}: ${r.action.pattern?.key} ` +
+            `triggering_slave=${r.action.triggering_slave} ` +
+            (r.action.kind === "promote_block"
+              ? `(promoted, no new STOP)`
+              : `stops=${r.stopResult || "—"}`),
+          );
+          // Broadcast so connected clients update their overlays instantly.
+          try {
+            broadcastUpdate({
+              type: "critical_block_changed",
+              inverter: inv,
+              kind: r.action.kind,
+              pattern: r.action.pattern,
+            });
+          } catch (_) { /* WS may be unavailable during boot */ }
+        }
+      } catch (err) {
+        console.error(`[critBlock] inv ${inv} enforce failed:`, err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.error("[critBlock] enforcer tick failed:", err?.message || err);
+  } finally {
+    _critBlockTickInFlight = false;
+    // Drain a queued fire if one came in while we were running. The
+    // setImmediate hop prevents synchronous recursion on rapid back-to-back
+    // ticks; if the queued tick wants to coalesce further it will.
+    if (_critBlockTickQueued) {
+      _critBlockTickQueued = false;
+      setImmediate(() => { _runCriticalPatternEnforcerTick().catch(() => {}); });
+    }
+  }
+}
+
+// First tick offset 90 s after boot so initial alarm/poller warm-up
+// completes; then every 2 min.
+setTimeout(_runCriticalPatternEnforcerTick, 90 * 1000).unref();
+setInterval(_runCriticalPatternEnforcerTick, CRITICAL_BLOCK_ENFORCE_INTERVAL_MS).unref();
+
+// GET /api/critical-blocks — list of ALL active blocks (and recent history).
+// Remote clients proxy through so they get gateway-side authoritative state.
+app.get("/api/critical-blocks", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const active = (getAllActiveCriticalBlocks() || [])
+      .map(criticalPatternEnforcer.summarizeBlockForApi);
+    res.json({
+      ok: true,
+      generated_at_ms: Date.now(),
+      active,
+      // Map keyed by inverter for client convenience.
+      by_inverter: Object.fromEntries(active.map((b) => [b.inverter, b])),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/critical-blocks/:inverter — history for one inverter (including
+// the currently-active row if any). Useful for the drilldown forensic view.
+app.get("/api/critical-blocks/:inverter", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const inv = Number(req.params.inverter);
+    const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+    if (!Number.isFinite(inv) || inv < 1 || inv > invMax) {
+      return res.status(400).json({ ok: false, error: "Invalid inverter" });
+    }
+    const history = (getCriticalBlockHistory(inv, 50) || [])
+      .map(criticalPatternEnforcer.summarizeBlockForApi);
+    const active = history.find((b) => b.is_active) || null;
+    res.json({ ok: true, inverter: inv, active, history });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/critical-blocks/:inverter/simulate — TRAINING / DEMO only.
+// Seeds a synthetic active block so operators can preview the overlay + Confirmed
+// flow on a chosen inverter WITHOUT issuing a real STOP and WITHOUT needing a
+// genuine recurring alarm pattern. Topology-auth gated (adsiM / adsiMM).
+//
+// The synthetic row is indistinguishable from a real block in the UI; clearing
+// uses the same /confirm endpoint. Audit log marks it as 'simulated' so it's
+// always traceable later.
+app.post(
+  "/api/critical-blocks/:inverter/simulate",
+  express.json(),
+  requireTopologyAuth,
+  (req, res) => {
+    if (isRemoteMode()) return proxyToRemote(req, res);
+    try {
+      const inv = Number(req.params.inverter);
+      const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+      if (!Number.isFinite(inv) || inv < 1 || inv > invMax) {
+        return res.status(400).json({ ok: false, error: "Invalid inverter" });
+      }
+      // Refuse if there's already an active block — don't shadow a real one.
+      const existing = getActiveCriticalBlock(inv);
+      if (existing && !existing.acked_at_ms) {
+        return res.status(409).json({
+          ok: false,
+          error: "Inverter already has an active critical block (real or simulated).",
+          blockId: existing.id,
+        });
+      }
+      const requestedKey = String(req.body?.patternKey || "DC_SUBSTRATE_BREACH").trim();
+      // Allow simulating the synthetic IGBT_HEALTH_EOL signal too — operators
+      // need to preview that overlay flavor without waiting for real EOL data.
+      const SYNTHETIC_EOL = {
+        key: "IGBT_HEALTH_EOL",
+        hex: "EOL",
+        label: "IGBT Health at End-of-Life",
+      };
+      const pat = requestedKey === "IGBT_HEALTH_EOL"
+        ? SYNTHETIC_EOL
+        : (criticalAlarmPatterns.CRITICAL_PATTERNS.find((p) => p.key === requestedKey)
+            || criticalAlarmPatterns.CRITICAL_PATTERNS[0]);
+      // Pick the first configured slave so triggering_slave is meaningful.
+      const cfg = loadIpConfigFromDb();
+      const firstSlave = enumerateConfiguredNodes(cfg)
+        .filter((n) => n.inverter === inv)
+        .map((n) => n.slave)
+        .sort((a, b) => a - b)[0] || 1;
+      const now = Date.now();
+      const blockId = insertCriticalBlock({
+        inverter: inv,
+        created_at_ms: now,
+        pattern_key:   pat.key,
+        pattern_hex:   pat.hex,
+        pattern_label: pat.label,
+        triggering_slave:  firstSlave,
+        count_in_window:   2,
+        latest_episode_ts: now - 30 * 60 * 1000, // 30 min ago — looks realistic
+        stop_issued_at_ms: null,
+        stop_result:       "simulated",
+        last_reenforced_ms: now,
+      });
+      try {
+        insertAuditLogRow({
+          ts: now,
+          operator: String(req.headers["x-substation-key"] || req.headers["x-topology-key"] || "ADMIN").trim() || "ADMIN",
+          inverter: inv,
+          node: firstSlave,
+          action: "critical_block_simulated",
+          scope: "critical-pattern",
+          result: "ok",
+          reason: `simulated:${pat.key} (${pat.hex})`,
+        });
+      } catch (_) {}
+      try {
+        broadcastUpdate({
+          type: "critical_block_changed",
+          inverter: inv,
+          kind: "open_block",
+          pattern: { key: pat.key, hex: pat.hex, label: pat.label },
+          simulated: true,
+        });
+      } catch (_) {}
+      return res.json({
+        ok: true,
+        inverter: inv,
+        blockId,
+        pattern: { key: pat.key, hex: pat.hex, label: pat.label },
+        note: "Synthetic block — no STOP issued. Click \"Confirmed\" on the inverter card to clear.",
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  },
+);
+
+// GET /api/critical-blocks/:inverter/inspection-guide
+//
+// Returns operator-actionable inspection guidance for the active block on
+// this inverter: which node(s) carry critical/watch signals right now,
+// which FRAMA branch dominates per node, which AC phase shows the worst
+// current imbalance per node, and a fallback "check all nodes" line for
+// when nothing decisive jumps out. The Confirm modal renders this so the
+// operator doesn't have to leave the card to figure out what to inspect.
+//
+// Pure read endpoint — no auth gate (same surface as GET /api/critical-blocks).
+app.get("/api/critical-blocks/:inverter/inspection-guide", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const inv = Number(req.params.inverter);
+    const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+    if (!Number.isFinite(inv) || inv < 1 || inv > invMax) {
+      return res.status(400).json({ ok: false, error: "Invalid inverter" });
+    }
+    const guide = buildInspectionGuide(inv);
+    if (!guide) return res.status(404).json({ ok: false, error: "no_active_block" });
+    return res.json({ ok: true, inverter: inv, guide });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * buildInspectionGuide(inverter) → guide | null
+ *
+ * Walks the configured slaves of an inverter, re-evaluates critical patterns
+ * + IGBT health for each, and produces an inspection plan:
+ *   primary_nodes:   nodes carrying an active CRITICAL signal — inspect first
+ *   secondary_nodes: nodes with WATCH signals — inspect next, lower priority
+ *   unaffected_nodes: ok across everything (still worth a glance if uncertain)
+ *   branch_hints:    per-node FRAMA branch dominance (90-day window)
+ *   phase_hints:     per-node worst-imbalance AC phase (1-hour window)
+ *   fallback_advice: phrased explicitly so the operator has a default when
+ *                    no single component stands out (the operator's request
+ *                    on 2026-05-12: "if uncertain, suggest check all nodes").
+ *
+ * Returns null when no configured slaves are found for the inverter. The
+ * block-existence check lives in the route handler so this helper can also
+ * be used by future flows (e.g. a per-card "Inspection plan" tooltip)
+ * without coupling to a block row.
+ */
+function buildInspectionGuide(inverter) {
+  const inv = Number(inverter);
+  const cfg = loadIpConfigFromDb();
+  const ip  = String(cfg?.inverters?.[inv] ?? cfg?.inverters?.[String(inv)] ?? "").trim();
+  if (!ip) return null;
+  const slaves = enumerateConfiguredNodes(cfg)
+    .filter((n) => n.inverter === inv)
+    .map((n) => Number(n.slave))
+    .filter((s) => Number.isFinite(s) && s > 0)
+    .sort((a, b) => a - b);
+  if (slaves.length === 0) return null;
+
+  const now = Date.now();
+  const cutoffMs = now - 90 * 24 * 60 * 60 * 1000;
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const ONE_PCT_LINE_FLOOR = 1.0;  // < 1 % spread isn't worth highlighting
+
+  const primary = [];
+  const secondary = [];
+  const unaffected = [];
+  const branchHints = [];
+  const phaseHints = [];
+  // Track per-pattern node membership so the modal can say "0x0240 active
+  // on Nodes 1, 2" rather than just "two nodes affected".
+  const patternMembership = {};  // { key → [slave, ...] }
+
+  for (const slave of slaves) {
+    let nodeSev = "ok";
+    const patterns = loadCriticalPatterns(inv, slave, now) || [];
+    for (const p of patterns) {
+      if (!p) continue;
+      if (p.severity === "critical") {
+        nodeSev = "critical";
+        const list = patternMembership[p.key] || (patternMembership[p.key] = []);
+        list.push(slave);
+      } else if (p.severity === "watch" && nodeSev !== "critical") {
+        nodeSev = "watch";
+      }
+    }
+    if (nodeSev === "critical") primary.push(slave);
+    else if (nodeSev === "watch") secondary.push(slave);
+    else unaffected.push(slave);
+
+    // FRAMA branch dominance — motive 29 = Branch 1, 30 = Branch 2,
+    // 13 = Branch 3 (per project memory + igbtHealth catalogue).
+    const framaBranches = db.prepare(`
+      SELECT motive_code, COUNT(*) AS cnt
+        FROM inverter_stop_reasons_std
+        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ?
+              AND motive_code IN (13, 29, 30)
+        GROUP BY motive_code
+    `).all(ip, slave, cutoffMs);
+    if (framaBranches.length) {
+      const branchTotal = framaBranches.reduce((s, r) => s + Number(r.cnt || 0), 0);
+      const top = framaBranches.slice().sort((a, b) => Number(b.cnt) - Number(a.cnt))[0];
+      const codeToBranch = { 29: 1, 30: 2, 13: 3 };
+      const branchNo = codeToBranch[Number(top.motive_code)] || null;
+      if (branchNo && Number(top.cnt) >= 2) {
+        branchHints.push({
+          slave,
+          branch: branchNo,
+          branch_label: `FRAMA Branch ${branchNo}`,
+          count: Number(top.cnt),
+          total_frama: branchTotal,
+          dominance_pct: branchTotal > 0
+            ? Math.round((Number(top.cnt) / branchTotal) * 100)
+            : 0,
+        });
+      }
+    }
+
+    // AC-phase imbalance — pull recent 5-min samples, compute per-line
+    // mean current, and report the line whose deviation from the average
+    // is largest (only when ≥ ONE_PCT_LINE_FLOOR so we don't waste the
+    // operator's attention on noise).
+    const paramRows = db.prepare(`
+      SELECT iac1_a, iac2_a, iac3_a FROM inverter_5min_param
+        WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+    `).all(ip, slave, oneHourAgo);
+    if (paramRows.length >= 3) {
+      let s1 = 0, s2 = 0, s3 = 0, n = 0;
+      for (const r of paramRows) {
+        const a = Number(r.iac1_a), b = Number(r.iac2_a), c = Number(r.iac3_a);
+        if (![a, b, c].every(Number.isFinite)) continue;
+        s1 += a; s2 += b; s3 += c; n++;
+      }
+      if (n >= 3) {
+        const m1 = s1 / n, m2 = s2 / n, m3 = s3 / n;
+        const mean = (m1 + m2 + m3) / 3;
+        if (mean > 1.0) {
+          const devs = [
+            { line: "L1", abs: Math.abs(m1 - mean), pct: Math.abs((m1 - mean) / mean) * 100 },
+            { line: "L2", abs: Math.abs(m2 - mean), pct: Math.abs((m2 - mean) / mean) * 100 },
+            { line: "L3", abs: Math.abs(m3 - mean), pct: Math.abs((m3 - mean) / mean) * 100 },
+          ].sort((a, b) => b.pct - a.pct);
+          if (devs[0].pct >= ONE_PCT_LINE_FLOOR) {
+            phaseHints.push({
+              slave,
+              line: devs[0].line,
+              deviation_pct: Number(devs[0].pct.toFixed(2)),
+              mean_current_a: Number(mean.toFixed(2)),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback advice — when no specific node stands out, OR when most/all
+  // nodes are affected, tell the operator to inspect everything.
+  const nothingFound = primary.length === 0 && secondary.length === 0
+                       && branchHints.length === 0 && phaseHints.length === 0;
+  const mostAffected = (primary.length + secondary.length) >= Math.max(2, Math.ceil(slaves.length / 2));
+  const fallback = nothingFound
+    ? `No live critical signal detected on any node. Inspect all ${slaves.length} configured nodes to be safe — the block may reflect a transient that has since cleared.`
+    : mostAffected
+      ? `Multiple nodes (${primary.length + secondary.length}/${slaves.length}) carry elevated signals — inspect all configured nodes on this inverter.`
+      : `If symptoms are unclear, inspect all ${slaves.length} configured nodes on this inverter before re-energizing.`;
+
+  return {
+    configured_nodes:  slaves,
+    primary_nodes:     primary,
+    secondary_nodes:   secondary,
+    unaffected_nodes:  unaffected,
+    pattern_membership: patternMembership,
+    branch_hints:      branchHints,
+    phase_hints:       phaseHints,
+    fallback_advice:   fallback,
+    computed_at_ms:    now,
+  };
+}
+
+// POST /api/critical-blocks/:inverter/confirm — operator clears the block.
+// Gate behind bulk-control auth (sacupsMM) because unblocking re-enables
+// inverter control — the same authority level required to START/STOP.
+app.post("/api/critical-blocks/:inverter/confirm", express.json(), (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const inv = Number(req.params.inverter);
+    const invMax = Math.max(1, Number(getSetting("inverterCount", 27)) || 27);
+    if (!Number.isFinite(inv) || inv < 1 || inv > invMax) {
+      return res.status(400).json({ ok: false, error: "Invalid inverter" });
+    }
+    const body = req.body || {};
+    if (!isAuthorizedPlantWideControl(body, req)) {
+      return res.status(403).json({ ok: false, error: "Authorization failed. Confirmation requires bulk-control auth." });
+    }
+    const operator = String(body.operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
+    const note     = body.note ? String(body.note) : null;
+    const result = ackCriticalBlock(inv, operator, note);
+    if (!result?.ok) {
+      return res.status(404).json({ ok: false, error: result?.error || "no_active_block" });
+    }
+    // Audit + broadcast so all clients drop the overlay.
+    try {
+      insertAuditLogRow({
+        ts: Date.now(),
+        operator,
+        inverter: inv,
+        node: 0,
+        action: "critical_block_acked",
+        scope: "critical-pattern",
+        result: "ok",
+        reason: note || `blockId=${result.id}`,
+      });
+    } catch (_) {}
+    try {
+      broadcastUpdate({ type: "critical_block_changed", inverter: inv, kind: "acked", blockId: result.id });
+    } catch (_) {}
+    res.json({ ok: true, inverter: inv, blockId: result.id, acked_at_ms: result.acked_at_ms });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 module.exports = { shutdownEmbedded };
 

@@ -1127,6 +1127,13 @@ async def read_fast_async(client, unit, ip):
         alarm_32   = _u32_hi_lo(regs, 6)
         etotal_kwh = _u32_hi_lo(regs, 0)
         parce_kwh  = _u32_hi_lo(regs, 58)
+        # v2.11.x Slice κ — grid-connection cycle counters. Both are UInt32
+        # hi-lo encoded just like Etotal. `conex` is the lifetime count
+        # (since the inverter was commissioned); `conex_resettable` is an
+        # operator-resettable variant. K1 contactor wear correlates with
+        # cycle count, so the dashboard tracks the delta per day per node.
+        conex_lifetime   = _u32_hi_lo(regs, 4)
+        conex_resettable = _u32_hi_lo(regs, 62)
     except ValueError as ve:
         print(f"[POLL] {ip} unit {unit} truncated frame, dropping: {ve}")
         return None
@@ -1206,6 +1213,14 @@ async def read_fast_async(client, unit, ip):
         "fac_hz":        fac_hz,                # grid frequency (Hz)
         "etotal_kwh":    etotal_kwh,            # lifetime kWh counter (UInt32)
         "parce_kwh":     parce_kwh,             # partial kWh counter  (UInt32)
+        # v2.11.x Slice κ — grid-connection cycle counters (K1 contactor wear).
+        # `conex_lifetime` is the lifetime grid-connection count since
+        # commissioning; `conex_resettable` is the operator-resettable variant.
+        # Both are within the existing 0-77 fast-read range so no extra
+        # Modbus traffic. Persisted by the poller as the per-slot snapshot;
+        # the dashboard derives Δ-cycles/day per node from these snapshots.
+        "conex_lifetime":   conex_lifetime,
+        "conex_resettable": conex_resettable,
         "rtc_iso":       rtc_dt.isoformat() if rtc_dt else None,
         "rtc_ms":        rtc_ms,
         "rtc_valid":     bool(rtc_valid),
