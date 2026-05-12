@@ -469,6 +469,112 @@ async function run() {
     assert.match(r.stopResult, /err:modbus timeout/);
   });
 
+  // ── Slice κ.8 — phase-unbalance gate ───────────────────────────────────
+
+  test("decide: critical pattern + sustained unbalance → open_block (gate passes)", () => {
+    const r = decideBlockAction({
+      inverter: 7,
+      slaves: [
+        {
+          slave: 1,
+          patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }],
+          unbalance: { sustained: true, max_pct: 28.5 },
+        },
+      ],
+      activeBlock: null,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "open_block");
+    assert.strictEqual(r.reason, "recurring_critical_pattern_with_unbalance");
+    assert.strictEqual(r.unbalance.sustained, true);
+    assert.strictEqual(r.unbalance.max_pct, 28.5);
+  });
+
+  test("decide: critical pattern + NO sustained unbalance → gated_pending_unbalance (no STOP)", () => {
+    const r = decideBlockAction({
+      inverter: 7,
+      slaves: [
+        {
+          slave: 1,
+          patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }],
+          unbalance: { sustained: false, max_pct: 8.0 },
+        },
+      ],
+      activeBlock: null,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "gated_pending_unbalance");
+    assert.strictEqual(r.reason, "critical_pattern_without_sustained_unbalance");
+    assert.strictEqual(r.unbalance.sustained, false);
+    assert.strictEqual(r.pattern.key, "DC_SUBSTRATE_BREACH");
+  });
+
+  test("decide: gate is per-slave — pattern on slave 1 with unbalance on slave 2 does NOT open", () => {
+    // Slave 1 has the critical alarm pattern; slave 2 has the sustained
+    // unbalance. The gate requires both signals on the SAME leg (the
+    // physical reason the unbalance check exists at all).
+    const r = decideBlockAction({
+      inverter: 7,
+      slaves: [
+        {
+          slave: 1,
+          patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }],
+          unbalance: { sustained: false, max_pct: 5 },
+        },
+        {
+          slave: 2,
+          patterns: [{ severity: "ok", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", severity_rank: 4, count_in_window: 0, last_seen_ts: 0 }],
+          unbalance: { sustained: true, max_pct: 30 },
+        },
+      ],
+      activeBlock: null,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "gated_pending_unbalance");
+    assert.strictEqual(r.triggering_slave, 1, "gate evaluates per-slave");
+  });
+
+  test("decide: no unbalance field on any slave → falls back to pattern-only (legacy compat)", () => {
+    // When the unbalance map is absent entirely (legacy callers, tests),
+    // the gate must not retroactively prevent blocks. This is the safety
+    // valve so the existing test corpus keeps passing on the rollout.
+    const r = decideBlockAction({
+      inverter: 7,
+      slaves: [
+        { slave: 1, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }] },
+      ],
+      activeBlock: null,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "open_block",
+      "no unbalance verdict provided anywhere → pre-Slice-κ.8 behaviour");
+  });
+
+  await test("enforceOne: gated_pending_unbalance emits audit log but no STOP", async () => {
+    const calls = { stops: [], blocks: [], audits: [] };
+    const deps = {
+      now: () => 1_000_000,
+      listSlaves: () => [1],
+      loadPatternsForNode: () => [{
+        severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240",
+        label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000,
+      }],
+      loadUnbalanceForNode: () => ({ sustained: false, max_pct: 6.0 }),
+      getActiveBlock: () => null,
+      openBlock: (row) => { calls.blocks.push(row); return 999; },
+      markReenforced: () => {},
+      issueStop: async (inv, slave) => { calls.stops.push({ inv, slave }); return "ok"; },
+      logAction: (p) => calls.audits.push(p),
+      stopPerSlaveDelayMs: 0,
+    };
+    const r = await enforceOne(7, deps);
+    assert.strictEqual(r.action.kind, "gated_pending_unbalance");
+    assert.strictEqual(calls.blocks.length, 0, "must NOT open block");
+    assert.strictEqual(calls.stops.length, 0, "must NOT issue STOP");
+    assert.strictEqual(calls.audits.length, 1, "must emit one audit row");
+    assert.strictEqual(calls.audits[0].kind, "critical_block_gated_pending_unbalance");
+  });
+
   console.log("\n──────────────────────────────────────────────────────────");
   console.log("  criticalPatternEnforcerCore.test.js complete\n");
 }

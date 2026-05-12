@@ -58,19 +58,35 @@ function _sleep(ms) {
  * 0x0240 substrate-breach OUTRANKS 0x0210 AC overcurrent). Within equal
  * ranks, tie-break by most-recent episode so the freshest signal wins.
  *
+ * Slice κ.8 (2026-05-12) gate: a critical alarm pattern is no longer
+ * sufficient on its own to open a block. The slave entry may carry an
+ * `unbalance` field (from phaseUnbalance.evaluateSustainedUnbalance);
+ * open_block fires only when both the alarm pattern is critical AND the
+ * unbalance is sustained on the same slave. If pattern is critical but
+ * unbalance is NOT sustained, the action becomes `gated_pending_unbalance`
+ * — the caller logs it for forensics but issues no STOP. This preserves
+ * the precursor-detection visibility (UI still shows "critical" pattern
+ * status) while removing the false-positive STOP that motivated the
+ * change.
+ *
+ * The gate is OPT-IN: if no slave carries `unbalance`, behaviour falls
+ * back to pre-Slice-κ.8 (pattern-only block). This lets legacy callers
+ * and tests upgrade incrementally.
+ *
  * @param {Object} ctx
  * @param {number} ctx.inverter
- * @param {Array<{slave:number, patterns: Array<{key,hex,label,severity,severity_rank,count_in_window,last_seen_ts}>}>} ctx.slaves
+ * @param {Array<{slave:number, patterns: Array<{key,hex,label,severity,severity_rank,count_in_window,last_seen_ts}>, unbalance?: {sustained:boolean, max_pct:number}}>} ctx.slaves
  * @param {Object|null} ctx.activeBlock  — current open block row, or null
  * @param {number} ctx.now
  *
  * @returns {Object} action
- *   action.kind: "noop" | "open_block" | "reenforce" | "skip_reenforce" | "promote_block"
+ *   action.kind: "noop" | "open_block" | "reenforce" | "skip_reenforce" | "promote_block" | "gated_pending_unbalance"
  *   action.reason: string
  *   action.pattern?: { key, hex, label }
  *   action.triggering_slave?: number
  *   action.count_in_window?: number
  *   action.latest_episode_ts?: number
+ *   action.unbalance?: { sustained, max_pct }   // present on open_block + gated_pending_unbalance
  */
 function decideBlockAction(ctx) {
   const slaves = Array.isArray(ctx?.slaves) ? ctx.slaves : [];
@@ -81,6 +97,15 @@ function decideBlockAction(ctx) {
   //   1. higher catalogue severity_rank wins (0x0240 > 0x0210)
   //   2. on ties, more-recent last_seen_ts wins (freshest signal)
   // Fallback: if the payload omits severity_rank (legacy), look it up.
+  //
+  // Slice κ.8 — also attach the per-slave unbalance verdict to the candidate
+  // so the gate logic below can decide whether to open or hold.
+  const unbalanceBySlave = new Map();
+  for (const s of slaves) {
+    if (s && typeof s.slave !== "undefined" && s.unbalance) {
+      unbalanceBySlave.set(Number(s.slave), s.unbalance);
+    }
+  }
   let worst = null;
   for (const s of slaves) {
     if (!s || !Array.isArray(s.patterns)) continue;
@@ -109,14 +134,39 @@ function decideBlockAction(ctx) {
     return { kind: "noop", reason: active ? "block_active_no_new_critical" : "no_critical_pattern" };
   }
 
+  // Slice κ.8 unbalance gate: a critical alarm pattern alone is not
+  // enough — we also need a sustained physical-measurement signal on the
+  // SAME slave (the IGBT leg that's actually misbehaving). If the unbalance
+  // verdict is absent (legacy / test shape), fall back to pre-Slice-κ.8
+  // behaviour. If it's present but not sustained, hold the block open.
+  const unbalanceForWorst = unbalanceBySlave.get(worst.slave) || null;
+  const unbalanceProvided = unbalanceBySlave.size > 0;
+  const unbalancePass = !unbalanceProvided || (unbalanceForWorst && unbalanceForWorst.sustained === true);
+
   if (!active) {
+    if (!unbalancePass) {
+      return {
+        kind: "gated_pending_unbalance",
+        reason: "critical_pattern_without_sustained_unbalance",
+        pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+        triggering_slave: worst.slave,
+        count_in_window: worst.count_in_window,
+        latest_episode_ts: worst.last_seen_ts,
+        unbalance: unbalanceForWorst
+          ? { sustained: !!unbalanceForWorst.sustained, max_pct: Number(unbalanceForWorst.max_pct || 0) }
+          : { sustained: false, max_pct: 0 },
+      };
+    }
     return {
       kind: "open_block",
-      reason: "recurring_critical_pattern",
+      reason: "recurring_critical_pattern_with_unbalance",
       pattern: { key: worst.key, hex: worst.hex, label: worst.label },
       triggering_slave: worst.slave,
       count_in_window: worst.count_in_window,
       latest_episode_ts: worst.last_seen_ts,
+      unbalance: unbalanceForWorst
+        ? { sustained: !!unbalanceForWorst.sustained, max_pct: Number(unbalanceForWorst.max_pct || 0) }
+        : null,
     };
   }
 
@@ -193,6 +243,9 @@ function summarizeBlockForApi(row) {
  *   deps.issueStop(inverter, slave, reason)     → "ok" | "err:<msg>"
  *   deps.listSlaves(inverter)                   → [slave numbers]
  *   deps.loadPatternsForNode(inv, slave, now)   → patternStatus[]
+ *   deps.loadUnbalanceForNode?(inv, slave, now) → {sustained, max_pct, ...} | null
+ *                                                 — Slice κ.8 optional; absent
+ *                                                 = legacy pattern-only behaviour
  *   deps.logAction(payload)                     → void
  *   deps.now()                                  → number
  */
@@ -203,16 +256,43 @@ async function enforceOne(inverter, deps) {
     return { inverter, action: { kind: "noop", reason: "no_configured_slaves" } };
   }
 
-  // Pull pattern status for each slave.
-  const slavePatterns = slaves.map((s) => ({
-    slave: s,
-    patterns: deps.loadPatternsForNode(inverter, s, now) || [],
-  }));
+  // Pull pattern status + unbalance verdict for each slave. The unbalance
+  // dep is optional — if not provided, decideBlockAction falls back to
+  // pre-Slice-κ.8 pattern-only behaviour (this keeps legacy tests working
+  // without requiring every test to inject phase-current data).
+  const slavePatterns = slaves.map((s) => {
+    const entry = {
+      slave: s,
+      patterns: deps.loadPatternsForNode(inverter, s, now) || [],
+    };
+    if (typeof deps.loadUnbalanceForNode === "function") {
+      try {
+        const u = deps.loadUnbalanceForNode(inverter, s, now);
+        if (u && typeof u === "object") entry.unbalance = u;
+      } catch (_) { /* unbalance lookup failure must not break enforcement */ }
+    }
+    return entry;
+  });
 
   const activeBlock = deps.getActiveBlock(inverter) || null;
   const action = decideBlockAction({ inverter, slaves: slavePatterns, activeBlock, now });
 
   if (action.kind === "noop" || action.kind === "skip_reenforce") {
+    return { inverter, action };
+  }
+
+  // Slice κ.8 — pattern recurred but the physical-measurement gate
+  // didn't pass. Surface the situation in the audit trail so an operator
+  // can investigate the precursor, but do NOT open a block or issue STOP.
+  if (action.kind === "gated_pending_unbalance") {
+    deps.logAction?.({
+      kind: "critical_block_gated_pending_unbalance",
+      inverter,
+      pattern: action.pattern,
+      triggering_slave: action.triggering_slave,
+      count_in_window:  action.count_in_window,
+      unbalance: action.unbalance,
+    });
     return { inverter, action };
   }
 

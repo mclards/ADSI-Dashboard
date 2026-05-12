@@ -112,8 +112,25 @@ const SUMMARY_SOLAR_END_H = 18;
 const SUMMARY_MAX_GAP_S = 120;
 const SUMMARY_PAC_KWH_MAX_DT_MS = 30000; // 30 s cap — mirrors COMPUTED_ENERGY_MAX_DT_MS in exporter.js
 const ARCHIVE_BATCH_SIZE = 2000; // reduced from 5000 — smaller batches keep event-loop pauses under ~80ms
+// LRU bound for open archive month-DBs. Each entry pins prepared statements + a
+// per-DB SQLite page cache (8 MB) + WAL state + file descriptors; without this
+// cap the Map at line below grew unbounded as forecast crons / exports /
+// replication touched older months, contributing to the gateway memory creep
+// documented in audits/2026-05-11/db-read-write-health.md §4.4 (H2). The cap is
+// generous enough that the forecast 30-45 day history sweep stays resident
+// across consecutive cron runs (typically spans 2-3 months) while still
+// bounding worst-case memory after long uptime. Map iteration order is
+// insertion order in JS, so we use delete+re-insert on access to maintain
+// LRU ordering and evict from .keys().next() on overflow.
+const ARCHIVE_DB_CACHE_MAX_ENTRIES = 6;
 const ARCHIVE_DB_CACHE = new Map();
 const ARCHIVE_DB_REPLACE_LOCKS = new Set();
+// Telemetry for the LRU eviction policy above. Operators can read these via
+// getArchiveCacheStats() to confirm the bound is doing useful work; spike in
+// evictions correlated with forecast cron windows is the expected signal.
+let _archiveLruEvictionCount = 0;
+let _archiveLruLastEvictedKey = null;
+let _archiveLruLastEvictedAtMs = 0;
 const STARTUP_COMPACT_MAX_BYTES = 64 * 1024 * 1024;
 const READING_STORAGE_COLUMNS = [
   "id",
@@ -3835,16 +3852,67 @@ function normalizeArchiveMonthKey(monthKey) {
     .replace(/\.db$/i, "");
 }
 
+function evictLruArchiveEntries() {
+  if (ARCHIVE_DB_CACHE.size < ARCHIVE_DB_CACHE_MAX_ENTRIES) return 0;
+  // Bounded eviction loop. If every cached entry is replace-locked (should
+  // be very rare — only during atomic archive file swaps) we bail rather than
+  // spin forever.
+  let evicted = 0;
+  let attempts = 0;
+  const safetyCap = ARCHIVE_DB_CACHE.size * 2 + 4;
+  while (ARCHIVE_DB_CACHE.size >= ARCHIVE_DB_CACHE_MAX_ENTRIES && attempts < safetyCap) {
+    attempts++;
+    const oldestKey = ARCHIVE_DB_CACHE.keys().next().value;
+    if (!oldestKey) break;
+    if (ARCHIVE_DB_REPLACE_LOCKS.has(oldestKey)) {
+      // Skip over the locked entry by moving it to the most-recent position;
+      // a later eviction pass will revisit once the lock clears.
+      const skipped = ARCHIVE_DB_CACHE.get(oldestKey);
+      ARCHIVE_DB_CACHE.delete(oldestKey);
+      ARCHIVE_DB_CACHE.set(oldestKey, skipped);
+      continue;
+    }
+    if (closeArchiveDbForMonth(oldestKey)) {
+      evicted++;
+      _archiveLruEvictionCount++;
+      _archiveLruLastEvictedKey = oldestKey;
+      _archiveLruLastEvictedAtMs = Date.now();
+    }
+  }
+  return evicted;
+}
+
 function getArchiveEntry(monthKey, createIfMissing = false) {
   const key = normalizeArchiveMonthKey(monthKey);
   if (!key) return null;
   if (ARCHIVE_DB_REPLACE_LOCKS.has(key)) return null;
-  if (ARCHIVE_DB_CACHE.has(key)) return ARCHIVE_DB_CACHE.get(key);
+  if (ARCHIVE_DB_CACHE.has(key)) {
+    // LRU bump: re-inserting moves the entry to the end of the Map's
+    // insertion-order, so .keys().next() always points at the oldest unused
+    // month for eviction below.
+    const cached = ARCHIVE_DB_CACHE.get(key);
+    ARCHIVE_DB_CACHE.delete(key);
+    ARCHIVE_DB_CACHE.set(key, cached);
+    return cached;
+  }
   const filePath = path.join(ARCHIVE_DIR, `${key}.db`);
   if (!createIfMissing && !fs.existsSync(filePath)) return null;
+  evictLruArchiveEntries();
   const entry = createArchiveEntry(filePath);
   ARCHIVE_DB_CACHE.set(key, entry);
   return entry;
+}
+
+function getArchiveCacheStats() {
+  return {
+    openMonths: ARCHIVE_DB_CACHE.size,
+    maxOpenMonths: ARCHIVE_DB_CACHE_MAX_ENTRIES,
+    months: Array.from(ARCHIVE_DB_CACHE.keys()), // ordered LRU-oldest → newest
+    replaceLocked: Array.from(ARCHIVE_DB_REPLACE_LOCKS.values()),
+    evictionCount: _archiveLruEvictionCount,
+    lastEvictedKey: _archiveLruLastEvictedKey,
+    lastEvictedAtMs: _archiveLruLastEvictedAtMs,
+  };
 }
 
 function closeArchiveDbForMonth(monthKey) {
@@ -4964,6 +5032,29 @@ function get5minParamRowsForDay(inverter_ip, slave, date_local) {
   );
 }
 
+// Slice κ.8 (2026-05-12) — phase-unbalance gate query. Used by the
+// critical-pattern enforcer to confirm a measurement-side signal before
+// auto-blocking. Returns up to `limit` most-recent rows (DESC by updated_ts)
+// for the given inverter_ip/slave, restricted to rows newer than `cutoffMs`.
+// Only the fields needed by phaseUnbalance.computeUnbalanceFromRow.
+const stmtRecent5MinParamForUnbalance = db.prepare(`
+  SELECT iac1_a, iac2_a, iac3_a, pac_w, in_solar_window,
+         date_local, slot_index, updated_ts
+    FROM inverter_5min_param
+   WHERE inverter_ip = ? AND slave = ? AND updated_ts >= ?
+   ORDER BY updated_ts DESC
+   LIMIT ?
+`);
+
+function getRecent5MinParamForUnbalance(inverter_ip, slave, cutoffMs, limit = 6) {
+  return stmtRecent5MinParamForUnbalance.all(
+    String(inverter_ip || ""),
+    Number(slave),
+    Math.max(0, Number(cutoffMs) || 0),
+    Math.max(1, Math.min(64, Number(limit) || 6)),
+  );
+}
+
 // Aging-relevant motive codes (kept here so the capture job can stay generic).
 // Source: server/motiveLabelsStd.js + plans/igbt-health-phase1.md §5.
 const IGBT_AGING_MOTIVE_CODES = [7, 13, 21, 26, 29, 30];
@@ -5586,6 +5677,8 @@ module.exports = {
   getFinalizedDailySummaryRange,
   getDailyRunningSummaryRange,
   closeArchiveDbForMonth,
+  getArchiveCacheStats,
+  evictLruArchiveEntries,
   prepareArchiveDbForTransfer,
   createSqliteTransferSnapshot,
   disposeSqliteTransferSnapshot,
@@ -5636,6 +5729,7 @@ module.exports = {
   getIgbtThermalBaselineRange,
   getIgbtThermalBaselineDateSet,
   get5minParamRowsForDay,
+  getRecent5MinParamForUnbalance,
   dayHadAgingStopEvent,
   pruneIgbtThermalBaseline,
   IGBT_AGING_MOTIVE_CODES,

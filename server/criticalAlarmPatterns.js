@@ -25,16 +25,22 @@
  *     driven into AC overcurrent during a DC-side disturbance. Bond-wire
  *     fatigue accumulates faster than design lifetime.
  *
- * Both patterns share bit 9 (DC Protection Fault). The discriminator
- * between them is bit 6 (measurement-side disruption) vs bit 4
- * (current-side overload). Either pattern recurring on a 48-hour rolling
- * window is considered CRITICAL — escalate to the inverter engineer.
+ * Both remaining patterns share bit 9 (DC Protection Fault). The
+ * discriminator between them is bit 6 (measurement-side disruption) vs
+ * bit 4 (current-side overload). Either pattern recurring on a 48-hour
+ * rolling window is considered CRITICAL — escalate to the inverter
+ * engineer.
  *
- * Recurrence rule (operator-set 2026-05-11):
+ * Note: 0x0040 (bit 6 alone, ADC / Sync persistent without DC-protection
+ * trip) was previously a third entry in this catalogue but was removed in
+ * Slice κ.7 (2026-05-12) after the field observed it auto-blocking
+ * inverters with no real precursor signature. See the catalogue comment
+ * below for the rationale.
+ *
+ * Recurrence rule (operator-set 2026-05-12, tightened from 2026-05-11):
  *   ≥ MIN_COUNT episodes in WINDOW_MS for the same pattern, same node →
- *   `recurring=true` → severity `critical`. The dashboard surfaces these
- *   prominently in the IGBT and Contactor drilldowns, the fleet tables,
- *   and the alarm-detail modal.
+ *   `recurring=true` → severity `critical`. Defaults are 3-in-48h with a
+ *   60-min flap-dedup spacing.
  *
  * Pure functions only — no DB, no I/O, no clock reads except via
  * explicit `now` parameter. Caller hands in alarm rows pre-fetched from
@@ -45,22 +51,25 @@
 // the current state). Higher rank = worse failure mode. Operator ruling
 // (2026-05-12): 0x0240 outranks 0x0210 because a substrate-breaching
 // explosion is catastrophic and immediate, whereas bond-wire fatigue is
-// degenerative. The 4-tier scale slots IGBT_HEALTH_EOL (synthetic
-// preventive signal, emitted by server/index.js) and 0x0040 (early
-// sensor-side disturbance, the precursor to 0x0240) between the two ends.
+// degenerative. IGBT_HEALTH_EOL (synthetic preventive signal, emitted by
+// server/index.js) slots between the two as a graceful-warning rank.
 //
 // Rank scale (higher = worse, must auto-block sooner):
 //   4 → 0x0240            DC Substrate Breach Precursor   (immediate explosion mode)
 //   3 → IGBT_HEALTH_EOL                                   (preventive synthetic, EOL wear)
-//   2 → 0x0040            ADC / Sync Persisting           (early substrate-breach precursor)
 //   1 → 0x0210            DC Fault + AC Overcurrent       (degenerative)
 //
-// Slice κ.6 — `0x0040` is mutually exclusive with `0x0240`: every alarm
-// row with bits 6+9 set would also match bit 6 alone via the superset
-// rule, double-counting that one underlying fault toward both patterns.
-// `exclude_mask: 0x0200` on 0x0040 prevents the double-count — that
-// pattern only fires when bit 9 is ABSENT, i.e. the ADC/Sync disturbance
-// is happening on its own, not yet coupled to a DC-protection trip.
+// Slice κ.7 — `0x0040` (ADC / Sync Persisting) was REMOVED from the
+// auto-block catalogue on 2026-05-12 after field observation: bit 6 alone
+// (ADC/sync disturbance without coupled DC-protection trip) fires often
+// enough during normal operation that 2-in-48h auto-blocks were stopping
+// fleet inverters with no real precursor signature. The escalated form
+// (0x0240, bits 6+9) remains in the catalogue — that one is genuinely
+// catastrophic. Operators who want visibility into bit-6-only events can
+// still see them in the alarm history; we just no longer auto-stop the
+// inverter for them. Tightened thresholds (DEFAULT_MIN_COUNT raised to 3,
+// DEFAULT_MIN_EPISODE_SPACING_MS raised to 60 min) further reduce the
+// false-positive surface on the remaining two patterns.
 const CRITICAL_PATTERNS = Object.freeze([
   Object.freeze({
     key: "DC_SUBSTRATE_BREACH",
@@ -80,30 +89,6 @@ const CRITICAL_PATTERNS = Object.freeze([
       "Schedule inverter-engineer review. Inspect DC bus stability (Vdc swings), " +
       "Zpos / Zneg insulation trend, DC-link capacitor bank health, and K1 contact wear " +
       "(any prior bit-11 episodes or unusual Conex cycle rate).",
-  }),
-  Object.freeze({
-    key: "ADC_SYNC_PERSISTENT",
-    mask: 0x0040,
-    exclude_mask: 0x0200,    // mutually exclusive with 0x0240 (Slice κ.6)
-    hex: "0x0040",
-    severity_rank: 2,  // early precursor to 0x0240 — sensor-side, no protection trip yet
-    bits: Object.freeze([6]),
-    bit_labels: Object.freeze(["ADC / Sync Error"]),
-    label: "ADC / Sync Persisting (Pre-Substrate-Breach)",
-    description:
-      "ADC measurement chain disturbance recurring on its own (without coupled " +
-      "DC Protection Fault). Field-observed by operators as persisting before " +
-      "substrate-breaching IGBT explosion events — typically escalates into 0x0240 " +
-      "before module failure.",
-    failure_mode:
-      "Sensor-chain instability is the early signature of the 0x0240 substrate-breach " +
-      "explosion mode. Without intervention the disturbance commonly couples to " +
-      "DC-protection trips within hours or days, then to module failure.",
-    recommended_action:
-      "Schedule inverter-engineer review. Inspect ADC reference voltage stability, " +
-      "sync clock jitter (cross-check Fac), DC-link capacitor bank for early bulge / " +
-      "venting, and confirm no loose DC-side connections destabilising the measurement " +
-      "chain. Treat as catch-it-before-it-escalates.",
   }),
   Object.freeze({
     key: "DC_FAULT_AC_OVERCURRENT",
@@ -144,10 +129,16 @@ function patternSeverityRank(key) {
   return Number(PATTERN_BY_KEY[String(key || "")]?.severity_rank) || 0;
 }
 
-// Default recurrence window + threshold. Operator-tunable per call but the
-// defaults are the agreed-upon "2-day recurring = critical" rule.
+// Default recurrence window + threshold. Operator-tunable per call.
+//
+// Slice κ.7 (2026-05-12) — DEFAULT_MIN_COUNT raised from 2 → 3 after field
+// observation that the 2-episode threshold was firing during normal
+// operation under noisy line conditions (especially around dawn/dusk
+// transitions). Requiring 3 spaced-apart episodes within 48 h sharply
+// reduces auto-block false positives while still catching a genuine
+// recurring fault well before the next solar cycle.
 const DEFAULT_WINDOW_MS  = 48 * 60 * 60 * 1000;   // 2 days
-const DEFAULT_MIN_COUNT  = 2;                     // ≥ 2 episodes = recurring
+const DEFAULT_MIN_COUNT  = 3;                     // ≥ 3 episodes = recurring (was 2)
 
 // v2.11.x Slice κ.4 false-positive hardening:
 //
@@ -166,7 +157,12 @@ const DEFAULT_MIN_COUNT  = 2;                     // ≥ 2 episodes = recurring
 //    bits; an `alarm_value = 0xFFFF` (16 bits) is almost always a comm
 //    reset or sensor failure, and superset-aware matching would let
 //    that single bogus row look like both 0x0240 and 0x0210 at once.
-const DEFAULT_MIN_EPISODE_SPACING_MS = 30 * 60 * 1000;  // 30 min
+// Slice κ.7 (2026-05-12) — spacing raised from 30 → 60 min. Combined with
+// MIN_COUNT=3, an inverter now needs three independent fault episodes,
+// each at least an hour apart, inside a 48 h window before the auto-block
+// fires. That maps to about ~3 hours of accumulated misbehaviour minimum,
+// which matches the operator's tolerance for "this is real, not a flap."
+const DEFAULT_MIN_EPISODE_SPACING_MS = 60 * 60 * 1000;  // 60 min (was 30)
 const MAX_ALARM_BITS_FOR_PATTERN     = 8;
 
 // Hamming weight (popcount) for a 16-bit value. Used by the suspect-alarm
@@ -193,13 +189,11 @@ function _popcount16(v) {
  * superset rule would otherwise let them match every catalogue entry.
  *
  * v2.11.x Slice κ.6: `excludeMask` lets a catalogue entry be MUTUALLY
- * EXCLUSIVE with a more-severe entry that's a strict superset. Example:
- * `0x0040` (bit 6 alone — ADC/Sync persisting) should fire as a precursor,
- * but `0x0240` (bits 6+9 — the escalated form with DC-protection trip)
- * already covers the case where bit 9 is also set. Setting
- * `excludeMask = 0x0200` on 0x0040's catalogue entry makes 0x0040 match
- * ONLY when bit 9 is absent, so a single row never double-counts toward
- * both patterns.
+ * EXCLUSIVE with a more-severe entry that's a strict superset. No active
+ * pattern uses this in Slice κ.7+ — 0x0040 was the last consumer, and it
+ * was removed from the catalogue when bit-6-only auto-blocks proved too
+ * noisy in the field. The mechanism is retained for future catalogue
+ * additions that need similar disambiguation.
  */
 function matchesPattern(alarmValue, mask, excludeMask) {
   const v = Number(alarmValue);

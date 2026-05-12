@@ -97,6 +97,7 @@ const {
   getIgbtThermalBaselineRange,
   getIgbtThermalBaselineDateSet,
   get5minParamRowsForDay,
+  getRecent5MinParamForUnbalance,
   dayHadAgingStopEvent,
   pruneIgbtThermalBaseline,
   // v2.11.0 Plant Controller — compliance + APC verify
@@ -11204,9 +11205,18 @@ const todayEnergyCache = {
   rows: [],
 };
 const PAST_DAILY_REPORT_CACHE_TTL_MS = 5 * 60 * 1000; // 5-minute cache for immutable past days
-const pastDailyReportCache = new Map(); // day -> { ts, rows }
+// Size cap on past-day caches. Pre-cap the TTL-only logic was lazy (entries
+// only got dropped when re-read after TTL), so an operator opening many past
+// days in one session left rows pinned in heap until either an ipConfig save
+// or process exit. Each entry holds an array of daily-report rows
+// (~27 inverters × ~50-100 fields), so 100+ accumulated entries can reach
+// tens of MB. 60 covers two months of past viewing, more than any
+// realistic session.
+const PAST_DAILY_REPORT_CACHE_MAX_ENTRIES = 60;
+const pastDailyReportCache = new Map(); // day -> { ts, rows } — LRU-ordered
 const PAST_REPORT_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
-const pastReportSummaryCache = new Map(); // day -> { ts, summary }
+const PAST_REPORT_SUMMARY_CACHE_MAX_ENTRIES = 60;
+const pastReportSummaryCache = new Map(); // day -> { ts, summary } — LRU-ordered
 
 function getTodayPacTotalsFromDbCached() {
   const now = Date.now();
@@ -11360,10 +11370,18 @@ function getPastDailyReportRowsCached(day, now = Date.now()) {
 function setPastDailyReportRowsCache(day, rowsRaw, now = Date.now()) {
   const key = String(day || "").trim();
   if (!key) return;
+  // LRU bump on overwrite — keeps Map iteration in oldest→newest order so the
+  // size-cap eviction below drops genuinely stale entries.
+  if (pastDailyReportCache.has(key)) pastDailyReportCache.delete(key);
   pastDailyReportCache.set(key, {
     ts: Number(now || Date.now()),
     rows: cloneDailyReportRows(rowsRaw),
   });
+  while (pastDailyReportCache.size > PAST_DAILY_REPORT_CACHE_MAX_ENTRIES) {
+    const oldestKey = pastDailyReportCache.keys().next().value;
+    if (!oldestKey) break;
+    pastDailyReportCache.delete(oldestKey);
+  }
 }
 
 function cloneReportSummary(summary) {
@@ -11386,10 +11404,16 @@ function getPastReportSummaryCached(day, now = Date.now()) {
 function setPastReportSummaryCache(day, summary, now = Date.now()) {
   const key = String(day || "").trim();
   if (!key || !summary || typeof summary !== "object") return;
+  if (pastReportSummaryCache.has(key)) pastReportSummaryCache.delete(key);
   pastReportSummaryCache.set(key, {
     ts: Number(now || Date.now()),
     summary: cloneReportSummary(summary),
   });
+  while (pastReportSummaryCache.size > PAST_REPORT_SUMMARY_CACHE_MAX_ENTRIES) {
+    const oldestKey = pastReportSummaryCache.keys().next().value;
+    if (!oldestKey) break;
+    pastReportSummaryCache.delete(oldestKey);
+  }
 }
 
 function getSummaryIntervalsForRow(summaryRow) {
@@ -14197,7 +14221,7 @@ function _evaluateIgbtHealthEolSignal(inv, slave, now, _postAckCutoffOverride) {
     key: "IGBT_HEALTH_EOL",
     hex: "EOL",
     mask: null,
-    severity_rank: 3,  // catalogue scale: 4=0x0240, 3=EOL, 2=0x0040, 1=0x0210
+    severity_rank: 3,  // catalogue scale (Slice κ.7): 4=0x0240, 3=EOL, 1=0x0210 (0x0040 removed)
     bits: [],
     bit_labels: [],
     label: "IGBT Health at End-of-Life",
@@ -23599,7 +23623,29 @@ setInterval(_prunDailyParamRetention, 6 * 60 * 60 * 1000).unref();      // every
 // rely on the gateway-side block state via proxied API + WS broadcast).
 
 const criticalPatternEnforcer = require("./criticalPatternEnforcer");
+const phaseUnbalance = require("./phaseUnbalance");
 const CRITICAL_BLOCK_ENFORCE_INTERVAL_MS = 2 * 60 * 1000;   // 2 min cadence
+
+// Slice κ.8 (2026-05-12) — how far back the unbalance check pulls 5-min
+// slot rows. 30 min covers ~6 slots, plenty of headroom over the
+// 2-slot sustained threshold while staying tight enough that yesterday's
+// data never participates in today's decision.
+const UNBALANCE_LOOKBACK_MS = 30 * 60 * 1000;
+
+// Slice κ.7 (2026-05-12) — fleet-wide safety cap on simultaneous auto-
+// blocks. When the field saw a noisy alarm pattern fire across many
+// inverters at once, the enforcer dutifully STOPed every one of them and
+// produced the "everyone is blocked" UI in the screenshot from
+// 2026-05-12. The catalogue change + threshold tightening fix the most
+// common false-positive, but this cap is the belt-and-braces guard for
+// the unknown-unknown next time: if more than CRITICAL_BLOCK_FLEET_OPEN_CAP
+// inverters already carry an active (unacked) block, refuse to open new
+// ones in this tick. Re-enforcement of existing blocks is still
+// permitted (they represent the SAFETY intent already-set), and the
+// pattern detector still surfaces "critical" status to the UI — only the
+// auto-STOP fan-out is gated. Operators see the cap-suspended event in
+// the audit log and can investigate fleet-wide before more STOPs land.
+const CRITICAL_BLOCK_FLEET_OPEN_CAP = 3;
 
 // Slice κ.4 Gate 6 — re-entrancy guard. The enforcer tick does I/O (DB
 // reads per node + async Modbus STOP writes per slave) and could in
@@ -23626,10 +23672,15 @@ async function _runCriticalPatternEnforcerTick() {
     // per inverter — we just need the inverter set here.
     const invSet = new Set();
     const slavesByInv = new Map();
-    for (const { inverter: inv, slave } of enumerateConfiguredNodes(cfg)) {
+    // Slice κ.8 — (inverter, slave) → ip lookup so we can fetch the right
+    // inverter_5min_param rows for the phase-unbalance gate.
+    const ipBySlave = new Map(); // Map<inverter, Map<slave, ip>>
+    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(cfg)) {
       invSet.add(inv);
       if (!slavesByInv.has(inv)) slavesByInv.set(inv, []);
       slavesByInv.get(inv).push(slave);
+      if (!ipBySlave.has(inv)) ipBySlave.set(inv, new Map());
+      ipBySlave.get(inv).set(slave, ip);
     }
 
     const now = Date.now();
@@ -23637,6 +23688,31 @@ async function _runCriticalPatternEnforcerTick() {
       now: () => now,
       listSlaves: (inv) => slavesByInv.get(inv) || [],
       loadPatternsForNode: (inv, slave) => loadCriticalPatterns(inv, slave, now),
+      // Slice κ.8 — phase-unbalance gate. Returns null if we can't resolve
+      // the IP (configured-node walker drift) or the slot table has no
+      // recent rows for this slave. The pure decideBlockAction interprets
+      // a missing unbalance verdict + at-least-one-present sibling as
+      // "no signal → don't escalate".
+      loadUnbalanceForNode: (inv, slave) => {
+        const ip = ipBySlave.get(inv)?.get(slave);
+        if (!ip) return null;
+        let rows;
+        try {
+          rows = getRecent5MinParamForUnbalance(ip, slave, now - UNBALANCE_LOOKBACK_MS, 6) || [];
+        } catch (err) {
+          console.error("[critBlock] unbalance lookup failed:", err?.message || err);
+          return null;
+        }
+        if (!Array.isArray(rows) || rows.length === 0) return null;
+        const verdict = phaseUnbalance.evaluateSustainedUnbalance(rows);
+        return {
+          sustained: !!verdict.sustained,
+          max_pct:   Number(verdict.max_pct || 0),
+          slots_evaluated:      verdict.slots_evaluated,
+          slots_over_threshold: verdict.slots_over_threshold,
+          threshold_pct:        verdict.threshold_pct,
+        };
+      },
       getActiveBlock: (inv) => getActiveCriticalBlock(inv) || null,
       openBlock: (row) => insertCriticalBlock(row),
       promoteBlock: (id, fields, nowMs) => updateCriticalBlockPattern(id, fields, nowMs),
@@ -23679,6 +23755,46 @@ async function _runCriticalPatternEnforcerTick() {
     try { _calibSession = require("./calibrationSession"); } catch (_) {}
     const calibTarget = _calibSession?.isActive() ? _calibSession.currentSession() : null;
 
+    // Slice κ.7 fleet-wide cap (2026-05-12). Count active blocks once per
+    // tick. If we're already at the cap, refuse to OPEN new blocks for
+    // this tick — re-enforcement of already-open blocks still runs (they
+    // represent SAFETY intent already established). The cap protects
+    // against an unknown-unknown pattern firing fleet-wide and STOPing
+    // every inverter, which is exactly the screenshot the operator
+    // showed on 2026-05-12.
+    // Slice κ.8 hardening — only count active blocks whose pattern_key is
+    // still in the CURRENT catalogue. Otherwise legacy blocks (e.g. the
+    // 0x0040 ADC_SYNC_PERSISTENT rows from before Slice κ.7's catalogue
+    // trim) permanently consume the cap and prevent every future
+    // legitimate auto-block, since their pattern_key no longer exists in
+    // any new detector pass to reach `noop` cleanly. Operators still see
+    // those rows in the UI and can ack them, but they don't lock out new
+    // safety actions.
+    let activeBlockCount = 0;
+    let staleActiveBlockCount = 0;
+    try {
+      const allActive = getAllActiveCriticalBlocks() || [];
+      const validKeys = new Set(criticalAlarmPatterns.CRITICAL_PATTERNS.map((p) => p.key));
+      for (const row of allActive) {
+        if (validKeys.has(String(row?.pattern_key || ""))) activeBlockCount++;
+        else staleActiveBlockCount++;
+      }
+    } catch (_) {
+      activeBlockCount = 0;     // fail-open: count error must not block enforcement
+      staleActiveBlockCount = 0;
+    }
+    const fleetCapReached = activeBlockCount >= CRITICAL_BLOCK_FLEET_OPEN_CAP;
+    let _fleetCapSuspendedLoggedThisTick = false;
+    // Surface stale blocks so the operator knows there's housekeeping to do.
+    // Logged once per tick to avoid flooding the console.
+    if (staleActiveBlockCount > 0) {
+      console.log(
+        `[critBlock] ${staleActiveBlockCount} active block(s) carry pattern keys ` +
+        `that are no longer in the catalogue — they remain visible in the UI ` +
+        `but do not count toward the fleet cap. Operator should ack them.`,
+      );
+    }
+
     // Iterate inverters serially so a single STOP queue doesn't get
     // hammered. Each call is internally short (1 modbus write per slave).
     for (const inv of invSet) {
@@ -23686,6 +23802,37 @@ async function _runCriticalPatternEnforcerTick() {
         // Suspended for the calibration session — alarms still record, but
         // we don't auto-STOP the inverter the calibrator is working on.
         continue;
+      }
+      if (fleetCapReached) {
+        // Inverter without an active block → don't open a new one. Inverters
+        // WITH an active block continue through to enforceOne, which may
+        // re-enforce STOP (idempotent, same SAFETY intent) or promote the
+        // block's pattern key.
+        let hasActive = false;
+        try { hasActive = !!getActiveCriticalBlock(inv); } catch (_) {}
+        if (!hasActive) {
+          if (!_fleetCapSuspendedLoggedThisTick) {
+            _fleetCapSuspendedLoggedThisTick = true;
+            try {
+              insertAuditLogRow({
+                ts: Date.now(),
+                operator: "SYSTEM:CRIT_BLOCK",
+                inverter: 0,
+                node: 0,
+                action: "critical_block_fleet_cap_suspended",
+                scope: "critical-pattern",
+                result: "ok",
+                reason: `active=${activeBlockCount} cap=${CRITICAL_BLOCK_FLEET_OPEN_CAP}`,
+              });
+            } catch (_) { /* audit failure must not break enforcement */ }
+            console.warn(
+              `[critBlock] fleet-wide auto-block suspended: ` +
+              `${activeBlockCount} active blocks ≥ cap ${CRITICAL_BLOCK_FLEET_OPEN_CAP}. ` +
+              `Re-enforcement of existing blocks continues; new opens deferred.`,
+            );
+          }
+          continue;
+        }
       }
       try {
         const r = await criticalPatternEnforcer.enforceOne(inv, deps);
@@ -23710,6 +23857,14 @@ async function _runCriticalPatternEnforcerTick() {
               pattern: r.action.pattern,
             });
           } catch (_) { /* WS may be unavailable during boot */ }
+        } else if (r?.action?.kind === "gated_pending_unbalance") {
+          // Slice κ.8 — pattern recurred but unbalance gate didn't pass.
+          // Just a console line; the enforcer already logged the audit row.
+          console.log(
+            `[critBlock] inv ${inv} gated_pending_unbalance: ${r.action.pattern?.key} ` +
+            `slave=${r.action.triggering_slave} unbalance_pct=${r.action.unbalance?.max_pct ?? "—"} ` +
+            `(no STOP, no block row)`,
+          );
         }
       } catch (err) {
         console.error(`[critBlock] inv ${inv} enforce failed:`, err?.message || err);
