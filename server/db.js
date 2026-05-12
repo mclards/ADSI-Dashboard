@@ -1156,6 +1156,64 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_icb_active   ON inverter_critical_blocks(inverter, acked_at_ms);
   CREATE INDEX IF NOT EXISTS idx_icb_inv_ts   ON inverter_critical_blocks(inverter, created_at_ms DESC);
 
+  -- v2.11.x Field Calibration (Phases 2-4): per-write audit ledger and
+  -- snapshot trail.  Plan: plans/2026-05-12-inverter-calibration-tool.md
+  -- Every successful Read mints a baseline snapshot; every Write captures
+  -- before+after+verify result with operator + session id.  Retention:
+  -- calibration_write_log = 5 years (regulatory), snapshots = 1 year.
+  CREATE TABLE IF NOT EXISTS calibration_write_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc          INTEGER NOT NULL,
+    session_id      TEXT    NOT NULL,
+    inverter_id     INTEGER NOT NULL,
+    inverter_ip     TEXT    NOT NULL,
+    slave           INTEGER NOT NULL,
+    reg_offset      INTEGER NOT NULL,
+    param_name      TEXT    NOT NULL,
+    value_before    INTEGER,
+    value_requested INTEGER NOT NULL,
+    value_after     INTEGER,
+    verify_ok       INTEGER NOT NULL DEFAULT 0,
+    operator        TEXT,
+    auth_method     TEXT,
+    error_detail    TEXT,
+    notes           TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_cwl_session ON calibration_write_log(session_id, ts_utc);
+  CREATE INDEX IF NOT EXISTS idx_cwl_inv_ts  ON calibration_write_log(inverter_id, slave, ts_utc DESC);
+
+  CREATE TABLE IF NOT EXISTS calibration_snapshot (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc            INTEGER NOT NULL,
+    inverter_id       INTEGER NOT NULL,
+    inverter_ip       TEXT    NOT NULL,
+    slave             INTEGER NOT NULL,
+    source            TEXT    NOT NULL,    -- 'baseline' | 'post-write' | 'periodic'
+    session_id        TEXT,
+    reg_block_hex     TEXT    NOT NULL,    -- space-separated hex for offsets 80..94
+    valid_cfg_code    INTEGER,
+    model_code        TEXT,
+    firmware_main     TEXT,
+    serial            TEXT,
+    notes             TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_csnap_inv_ts ON calibration_snapshot(inverter_id, slave, ts_utc DESC);
+  CREATE INDEX IF NOT EXISTS idx_csnap_session ON calibration_snapshot(session_id);
+
+  CREATE TABLE IF NOT EXISTS calibration_session_log (
+    session_id        TEXT    PRIMARY KEY,
+    inverter_id       INTEGER NOT NULL,
+    slave             INTEGER NOT NULL,
+    operator          TEXT,
+    started_at_ms     INTEGER NOT NULL,
+    ended_at_ms       INTEGER,
+    end_reason        TEXT,          -- 'operator' | 'timeout' | 'guard_abort' | 'system'
+    write_count       INTEGER NOT NULL DEFAULT 0,
+    consign_writes    INTEGER NOT NULL DEFAULT 0,
+    notes             TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_cs_inv_ts ON calibration_session_log(inverter_id, started_at_ms DESC);
+
   -- v2.10.x All Parameters Data — per-inverter, per-node, per-5-minute
   -- aggregated parameter snapshot. Replaces the on-screen Energy table
   -- (UI only — the existing inverter_5min table and energy_5min stay
@@ -1342,6 +1400,27 @@ db.exec(`
     ON apc_verify_log(inverter_ip, slave, write_ts_ms DESC);
   CREATE INDEX IF NOT EXISTS idx_apc_verify_result
     ON apc_verify_log(result, write_ts_ms DESC);
+
+  -- v2.11.x Phase 3 — Slice ζ write verification log. Every grid-control
+  -- POST (phi/reactive/disable) enqueues a verify cycle that reads holding
+  -- 41006-41010 and classifies. Plan: plans/2026-05-12-ppc-capabilities-implementation.md §4.
+  CREATE TABLE IF NOT EXISTS grid_control_verify_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    write_ts_ms     INTEGER NOT NULL,
+    verify_ts_ms    INTEGER,
+    inverter_ip     TEXT    NOT NULL,
+    slave           INTEGER NOT NULL,
+    kind            TEXT    NOT NULL,              -- 'phi' | 'reactive' | 'disable'
+    requested_raw   INTEGER,                       -- nullable for 'disable'
+    observed_raw    INTEGER,
+    result          TEXT    NOT NULL,              -- 'ok' | 'mismatch' | 'no_response' | 'timeout' | 'failed' | 'pending'
+    operator        TEXT,
+    error_message   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gc_verify_inv_slave_ts
+    ON grid_control_verify_log(inverter_ip, slave, write_ts_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_gc_verify_result
+    ON grid_control_verify_log(result, write_ts_ms DESC);
 `);
 
 function finalizePendingMainDbReplacementSync(database) {
@@ -5114,6 +5193,57 @@ function pruneApcVerifyLog(retainDays = 90) {
   return stmtPruneApcVerify.run(cutoff).changes;
 }
 
+/* ── v2.11.x Phase 3 — grid_control_verify_log helpers (Slice ζ verify) ── */
+
+const stmtInsertGcVerify = db.prepare(`
+  INSERT INTO grid_control_verify_log
+    (write_ts_ms, verify_ts_ms, inverter_ip, slave, kind, requested_raw, observed_raw, result, operator, error_message)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const stmtLatestGcVerifyByNode = db.prepare(`
+  SELECT * FROM grid_control_verify_log
+   WHERE inverter_ip = ? AND slave = ?
+   ORDER BY write_ts_ms DESC LIMIT 1
+`);
+const stmtLatestGcVerifyAll = db.prepare(`
+  SELECT v.* FROM grid_control_verify_log v
+   INNER JOIN (
+     SELECT inverter_ip, slave, MAX(write_ts_ms) AS mx
+       FROM grid_control_verify_log GROUP BY inverter_ip, slave
+   ) m ON m.inverter_ip = v.inverter_ip AND m.slave = v.slave AND m.mx = v.write_ts_ms
+   ORDER BY v.write_ts_ms DESC
+`);
+const stmtPruneGcVerify = db.prepare(`
+  DELETE FROM grid_control_verify_log WHERE write_ts_ms < ?
+`);
+
+function insertGridControlVerifyLog(row) {
+  return stmtInsertGcVerify.run(
+    Number(row.write_ts_ms) || Date.now(),
+    row.verify_ts_ms == null ? null : Number(row.verify_ts_ms),
+    String(row.inverter_ip || ""), Number(row.slave),
+    String(row.kind || ""),
+    row.requested_raw == null ? null : Number(row.requested_raw),
+    row.observed_raw == null ? null : Number(row.observed_raw),
+    String(row.result || "pending"),
+    row.operator ? String(row.operator).slice(0, 64) : null,
+    row.error_message ? String(row.error_message) : null,
+  );
+}
+
+function getLatestGridControlVerify(inverter_ip, slave) {
+  return stmtLatestGcVerifyByNode.get(String(inverter_ip || ""), Number(slave));
+}
+
+function getLatestGridControlVerifyAll() {
+  return stmtLatestGcVerifyAll.all();
+}
+
+function pruneGridControlVerifyLog(retainDays = 90) {
+  const cutoff = Date.now() - Math.max(7, Number(retainDays) || 90) * 86400_000;
+  return stmtPruneGcVerify.run(cutoff).changes;
+}
+
 function pruneIgbtThermalBaseline(retainDays = 800) {
   // Keep ≥ 2 years so YoY comparisons still work after a long uptime.
   const cutoffDays = Math.max(400, Math.floor(Number(retainDays) || 800));
@@ -5242,6 +5372,167 @@ function ackCriticalBlock(inverter, ackedBy, note) {
   return { ok: changes > 0, id: active.id, acked_at_ms: now };
 }
 
+// ─── v2.11.x Field Calibration (Phases 2-4) — DB helpers ─────────────────
+// Plan: plans/2026-05-12-inverter-calibration-tool.md
+// All inserts here are append-only for forensic durability.
+
+function insertCalibrationSnapshot(row) {
+  const r = row || {};
+  return db.prepare(`
+    INSERT INTO calibration_snapshot
+      (ts_utc, inverter_id, inverter_ip, slave, source, session_id,
+       reg_block_hex, valid_cfg_code, model_code, firmware_main, serial, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(r.ts_utc) || Date.now(),
+    Number(r.inverter_id),
+    String(r.inverter_ip || ""),
+    Number(r.slave),
+    String(r.source || "baseline"),
+    r.session_id == null ? null : String(r.session_id),
+    String(r.reg_block_hex || ""),
+    r.valid_cfg_code == null ? null : Number(r.valid_cfg_code),
+    r.model_code == null ? null : String(r.model_code),
+    r.firmware_main == null ? null : String(r.firmware_main),
+    r.serial == null ? null : String(r.serial),
+    r.notes == null ? null : String(r.notes),
+  ).lastInsertRowid;
+}
+
+function getLatestCalibrationSnapshot(inverter_id, slave) {
+  return db.prepare(`
+    SELECT * FROM calibration_snapshot
+     WHERE inverter_id = ? AND slave = ?
+     ORDER BY ts_utc DESC LIMIT 1
+  `).get(Number(inverter_id), Number(slave)) || null;
+}
+
+function listCalibrationSnapshots(inverter_id, slave, limit) {
+  return db.prepare(`
+    SELECT * FROM calibration_snapshot
+     WHERE inverter_id = ? AND slave = ?
+     ORDER BY ts_utc DESC LIMIT ?
+  `).all(Number(inverter_id), Number(slave),
+        Math.min(100, Math.max(1, Number(limit) || 20)));
+}
+
+function getCalibrationSnapshotById(id) {
+  return db.prepare(`
+    SELECT * FROM calibration_snapshot WHERE id = ?
+  `).get(Number(id)) || null;
+}
+
+function deleteCalibrationSnapshotById(id) {
+  return db.prepare(`
+    DELETE FROM calibration_snapshot WHERE id = ?
+  `).run(Number(id)).changes;
+}
+
+function insertCalibrationWriteLog(row) {
+  const r = row || {};
+  return db.prepare(`
+    INSERT INTO calibration_write_log
+      (ts_utc, session_id, inverter_id, inverter_ip, slave, reg_offset,
+       param_name, value_before, value_requested, value_after,
+       verify_ok, operator, auth_method, error_detail, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(r.ts_utc) || Date.now(),
+    String(r.session_id || ""),
+    Number(r.inverter_id),
+    String(r.inverter_ip || ""),
+    Number(r.slave),
+    Number(r.reg_offset),
+    String(r.param_name || ""),
+    r.value_before == null ? null : Number(r.value_before),
+    Number(r.value_requested),
+    r.value_after == null ? null : Number(r.value_after),
+    r.verify_ok ? 1 : 0,
+    r.operator == null ? null : String(r.operator),
+    r.auth_method == null ? null : String(r.auth_method),
+    r.error_detail == null ? null : String(r.error_detail),
+    r.notes == null ? null : String(r.notes),
+  ).lastInsertRowid;
+}
+
+function listCalibrationWriteLog(filters) {
+  const f = filters || {};
+  const limit = Math.min(500, Math.max(1, Number(f.limit) || 100));
+  if (f.session_id) {
+    return db.prepare(`
+      SELECT * FROM calibration_write_log
+       WHERE session_id = ? ORDER BY ts_utc DESC LIMIT ?
+    `).all(String(f.session_id), limit);
+  }
+  if (Number.isInteger(Number(f.inverter_id))) {
+    return db.prepare(`
+      SELECT * FROM calibration_write_log
+       WHERE inverter_id = ? ${f.slave ? "AND slave = ?" : ""}
+       ORDER BY ts_utc DESC LIMIT ?
+    `).all(...(f.slave
+      ? [Number(f.inverter_id), Number(f.slave), limit]
+      : [Number(f.inverter_id), limit]));
+  }
+  return db.prepare(`
+    SELECT * FROM calibration_write_log
+     ORDER BY ts_utc DESC LIMIT ?
+  `).all(limit);
+}
+
+function insertCalibrationSession(row) {
+  const r = row || {};
+  return db.prepare(`
+    INSERT OR REPLACE INTO calibration_session_log
+      (session_id, inverter_id, slave, operator, started_at_ms,
+       ended_at_ms, end_reason, write_count, consign_writes, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    String(r.session_id),
+    Number(r.inverter_id),
+    Number(r.slave),
+    r.operator == null ? null : String(r.operator),
+    Number(r.started_at_ms) || Date.now(),
+    r.ended_at_ms == null ? null : Number(r.ended_at_ms),
+    r.end_reason == null ? null : String(r.end_reason),
+    Number(r.write_count) || 0,
+    Number(r.consign_writes) || 0,
+    r.notes == null ? null : String(r.notes),
+  );
+}
+
+function updateCalibrationSessionEnd(session_id, end_reason, counts) {
+  const c = counts || {};
+  return db.prepare(`
+    UPDATE calibration_session_log
+       SET ended_at_ms    = ?,
+           end_reason     = ?,
+           write_count    = COALESCE(?, write_count),
+           consign_writes = COALESCE(?, consign_writes),
+           notes          = COALESCE(?, notes)
+     WHERE session_id = ?
+  `).run(
+    Date.now(),
+    String(end_reason || "operator"),
+    c.write_count == null ? null : Number(c.write_count),
+    c.consign_writes == null ? null : Number(c.consign_writes),
+    c.notes == null ? null : String(c.notes),
+    String(session_id),
+  ).changes;
+}
+
+function getCalibrationSession(session_id) {
+  return db.prepare(
+    `SELECT * FROM calibration_session_log WHERE session_id = ?`,
+  ).get(String(session_id)) || null;
+}
+
+function listRecentCalibrationSessions(limit) {
+  return db.prepare(`
+    SELECT * FROM calibration_session_log
+     ORDER BY started_at_ms DESC LIMIT ?
+  `).all(Math.min(100, Math.max(1, Number(limit) || 20)));
+}
+
 module.exports = {
   db,
   stmts,
@@ -5357,6 +5648,18 @@ module.exports = {
   updateCriticalBlockReenforcement,
   updateCriticalBlockPattern,
   ackCriticalBlock,
+  // v2.11.x Field Calibration (Phases 2-4) — write log + snapshots + sessions
+  insertCalibrationSnapshot,
+  getLatestCalibrationSnapshot,
+  listCalibrationSnapshots,
+  getCalibrationSnapshotById,
+  deleteCalibrationSnapshotById,
+  insertCalibrationWriteLog,
+  listCalibrationWriteLog,
+  insertCalibrationSession,
+  updateCalibrationSessionEnd,
+  getCalibrationSession,
+  listRecentCalibrationSessions,
   // v2.11.0 Plant Controller — NGCP compliance run helpers
   insertComplianceRun,
   finalizeComplianceRun,
@@ -5374,4 +5677,9 @@ module.exports = {
   getLatestApcVerify,
   getLatestApcVerifyAll,
   pruneApcVerifyLog,
+  // v2.11.x Phase 3 — Grid-control verification (Slice ζ)
+  insertGridControlVerifyLog,
+  getLatestGridControlVerify,
+  getLatestGridControlVerifyAll,
+  pruneGridControlVerifyLog,
 };

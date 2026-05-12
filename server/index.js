@@ -115,6 +115,10 @@ const {
   getLatestApcVerify,
   getLatestApcVerifyAll,
   pruneApcVerifyLog,
+  // v2.11.x Phase 3 — Slice ζ write verification log.
+  insertGridControlVerifyLog,
+  getLatestGridControlVerify,
+  getLatestGridControlVerifyAll,
   // v2.11.x — running per-day per-node MWh logger; backs /api/energy/daily-running.
   getDailyRunningSummaryRange,
   // v2.11.x Slice κ.3 — critical-pattern auto-block ledger DAO.
@@ -126,6 +130,18 @@ const {
   updateCriticalBlockReenforcement,
   updateCriticalBlockPattern,
   ackCriticalBlock,
+  // v2.11.x Field Calibration helpers (Phases 2-4)
+  insertCalibrationSnapshot,
+  getLatestCalibrationSnapshot,
+  listCalibrationSnapshots,
+  getCalibrationSnapshotById,
+  deleteCalibrationSnapshotById,
+  insertCalibrationWriteLog,
+  listCalibrationWriteLog,
+  insertCalibrationSession,
+  updateCalibrationSessionEnd,
+  getCalibrationSession,
+  listRecentCalibrationSessions,
 } = require("./db");
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
@@ -136,7 +152,11 @@ const igbtThermal = require("./igbtThermal");
 const acContactor = require("./acContactorHealth");
 const criticalAlarmPatterns = require("./criticalAlarmPatterns");
 const { ApcVerifier } = require("./apcVerify");
+const { sharedMonitor: gridCodeMonitor } = require("./gridCodeMonitor");
+const { planRamp: planApcRamp, DEFAULT_STEP_INTERVAL_MS: APC_RAMP_STEP_MS } = require("./apcRampLimiter");
+const { GridControlVerifier } = require("./gridControlVerifier");
 const { rawToKVar } = require("./reactivePowerScalingCore");
+const { registerCalibrationRoutes } = require("./calibrationRoutes");
 const compliance = {
   Orchestrator: require("./compliance/orchestrator"),
   testT5: require("./compliance/testT5"),
@@ -8333,6 +8353,9 @@ function buildDefaultSettingsSnapshot() {
     plantCapSequenceCustom: [],
     plantCapCooldownSec: 30,
     plantCapSetpointEnabled: "1",
+    // v2.11.x Phase 2 — APC ramp-rate limiter defaults.
+    apcRampRateEnabled: "0",
+    apcRampRatePctPerMin: "10",
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     cameraConfig: { ...DEFAULT_CAMERA_CFG },
@@ -8473,6 +8496,14 @@ function buildSettingsSnapshot() {
     plantCapSetpointEnabled: String(
       getSetting("plantCapSetpointEnabled", defaults.plantCapSetpointEnabled) === "0" ? "0" : "1",
     ),
+    // v2.11.x Phase 2
+    apcRampRateEnabled: String(
+      getSetting("apcRampRateEnabled", defaults.apcRampRateEnabled) === "1" ? "1" : "0",
+    ),
+    apcRampRatePctPerMin: (() => {
+      const v = Number(getSetting("apcRampRatePctPerMin", defaults.apcRampRatePctPerMin));
+      return String(Number.isFinite(v) && v >= 1 && v <= 100 ? Math.trunc(v) : 10);
+    })(),
     exportUiState: sanitizeExportUiState(
       readJsonSetting("exportUiState", defaults.exportUiState),
     ),
@@ -12260,6 +12291,19 @@ const apcVerifier = new ApcVerifier({
   broadcast: (event, payload) => broadcastUpdate({ type: event, ...payload }),
 });
 
+// v2.11.x Phase 3 — Slice ζ write verifier. Plan: plans/2026-05-12-ppc-capabilities-implementation.md §4.
+// Read-back via the existing Python /grid-control/state endpoint; the
+// `_callPythonGridControl` helper is defined later in the file but the
+// verifier captures it via a closure that resolves at write time, not at
+// constructor time.
+const gridControlVerifier = new GridControlVerifier({
+  readGridState: async (ip, slave) => {
+    return _callPythonGridControl(`/grid-control/state/${encodeURIComponent(ip)}/${slave}`, "GET");
+  },
+  insertVerifyLog: insertGridControlVerifyLog,
+  broadcast: (event, payload) => broadcastUpdate({ type: event, ...payload }),
+});
+
 const complianceOrchestrator = new compliance.Orchestrator.OrchestratorRegistry({
   dbHelpers: {
     insertComplianceRun,
@@ -14915,6 +14959,35 @@ app.post("/api/compliance/run/start", express.json(), async (req, res) => {
     return res.status(400).json({ ok: false, error: "At least one target inverter required." });
   }
 
+  // v2.11.x Phase 4 — refuse compliance runs against any inverter that's
+  // auto-blocked by a recurring critical alarm pattern. T3 (reactive sweep)
+  // and T5 (APC sweep) are *control* sequences — a blocked inverter must
+  // not be commanded mid-block. T2 (frequency observation) is read-only so
+  // we don't gate it.
+  if (test_kind !== "t2_freq_withstand") {
+    const blocked = [];
+    for (const t of targets) {
+      const ip = String(t?.ip || "").trim();
+      const inv = ip ? _inverterFromIp(ip) : Number(t?.inverter) || 0;
+      if (!inv) continue;
+      try {
+        const blk = getActiveCriticalBlock(inv);
+        if (blk && !blk.acked_at_ms) {
+          blocked.push({ inverter: inv, ip, pattern_hex: blk.pattern_hex, pattern_key: blk.pattern_key });
+        }
+      } catch (_) { /* DB read failure → don't gate */ }
+    }
+    if (blocked.length > 0) {
+      const preview = blocked.slice(0, 3).map(b => `Inv ${b.inverter} (${b.pattern_hex})`).join(", ");
+      const more = blocked.length > 3 ? ` (+${blocked.length - 3} more)` : "";
+      return res.status(423).json({
+        ok: false,
+        error: `Cannot start ${test_kind}: ${blocked.length} target(s) auto-blocked by recurring critical patterns — ${preview}${more}. Operator must confirm on the inverter card first.`,
+        blocked,
+      });
+    }
+  }
+
   try {
     const orch = complianceOrchestrator.start({
       test_kind,
@@ -15170,6 +15243,47 @@ async function _callPythonGridControl(path, method = "GET", body = null) {
   }
 }
 
+// v2.11.x Phase 3 — resolve inverter number from configured IP. Returns 0
+// when the IP isn't in ipConfig (defensive — block enforcement requires
+// inverter identity; unknown IP doesn't gate).
+function _inverterFromIp(ip) {
+  try {
+    const cfg = loadIpConfigFromDb();
+    const map = cfg?.inverters || {};
+    const target = String(ip || "").trim();
+    for (const [k, v] of Object.entries(map)) {
+      if (String(v || "").trim() === target) return Number(k) || 0;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+// v2.11.x Phase 3 — refuse grid-control writes while the inverter is auto-
+// blocked by a recurring critical alarm pattern. Mirrors the gate in
+// plantCapController write path (see server/index.js:5984-6011).
+// Returns null when clear, Express-style { status, error } when blocked.
+function _gridControlCriticalBlockCheck(ip) {
+  const inv = _inverterFromIp(ip);
+  if (!inv) return null;             // unknown inverter → don't gate
+  try {
+    const blk = getActiveCriticalBlock(inv);
+    if (blk && !blk.acked_at_ms) {
+      return {
+        status: 423,
+        error:
+          `Inverter ${inv} is auto-blocked due to recurring critical alarm pattern ` +
+          `${blk.pattern_hex} (${blk.pattern_label || blk.pattern_key}). ` +
+          `Grid-control writes are refused until an operator clicks "Confirmed" on the inverter card.`,
+        pattern_hex: blk.pattern_hex,
+        pattern_key: blk.pattern_key,
+      };
+    }
+  } catch (e) {
+    console.warn("[grid-control][critBlock] check failed:", e?.message || e);
+  }
+  return null;
+}
+
 function _gridControlAuditRow({ action, target_ip, slave, result, reason, operator }) {
   try {
     insertAuditLogRow({
@@ -15205,21 +15319,33 @@ app.post("/api/grid-control/phi", express.json(), async (req, res) => {
   }
   const tv = _validateGridControlTarget(b);
   if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  // v2.11.x Phase 3 — critical-block lock.
+  const blk = _gridControlCriticalBlockCheck(tv.ip);
+  if (blk) return res.status(blk.status).json({ ok: false, error: blk.error, pattern_hex: blk.pattern_hex, pattern_key: blk.pattern_key });
   const phi_raw = Number(b.phi_raw);
   if (!Number.isFinite(phi_raw) || Math.abs(phi_raw) > 15870) {
     return res.status(400).json({ ok: false, error: "phi_raw must be Int16 within ±15870 (PDF cmd 1 limit)" });
   }
   try {
+    const rawWrite = Math.round(phi_raw);
     const result = await _callPythonGridControl("/grid-control/phi", "POST",
-      { ip: tv.ip, slave: tv.slave, phi_raw: Math.round(phi_raw) });
+      { ip: tv.ip, slave: tv.slave, phi_raw: rawWrite });
     _gridControlAuditRow({
       action: "grid_control.phi_set",
       target_ip: tv.ip,
       slave: tv.slave,
       result,
-      reason: `phi_raw=${Math.round(phi_raw)} (≈ tan(φ) ${(phi_raw / 32767).toFixed(4)})`,
+      reason: `phi_raw=${rawWrite} (≈ tan(φ) ${(phi_raw / 32767).toFixed(4)})`,
       operator: b.operator,
     });
+    // v2.11.x Phase 3 — closed-loop verify on success.
+    if (result?.ok) {
+      try {
+        gridControlVerifier.scheduleVerify({
+          inverter_ip: tv.ip, slave: tv.slave, kind: "phi", raw: rawWrite, operator: b.operator,
+        });
+      } catch (verr) { console.warn("[grid-control] verify schedule failed:", verr.message); }
+    }
     return res.json(result);
   } catch (err) {
     return res.status(502).json({ ok: false, error: err.message });
@@ -15241,21 +15367,32 @@ app.post("/api/grid-control/reactive", express.json(), async (req, res) => {
   }
   const tv = _validateGridControlTarget(b);
   if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  // v2.11.x Phase 3 — critical-block lock.
+  const blk = _gridControlCriticalBlockCheck(tv.ip);
+  if (blk) return res.status(blk.status).json({ ok: false, error: blk.error, pattern_hex: blk.pattern_hex, pattern_key: blk.pattern_key });
   const kvar_div10 = Number(b.kvar_div10);
   if (!Number.isFinite(kvar_div10) || Math.abs(kvar_div10) > 32767) {
     return res.status(400).json({ ok: false, error: "kvar_div10 must be Int16 (±32767)" });
   }
   try {
+    const rawWrite = Math.round(kvar_div10);
     const result = await _callPythonGridControl("/grid-control/reactive", "POST",
-      { ip: tv.ip, slave: tv.slave, kvar_div10: Math.round(kvar_div10) });
+      { ip: tv.ip, slave: tv.slave, kvar_div10: rawWrite });
     _gridControlAuditRow({
       action: "grid_control.reactive_set",
       target_ip: tv.ip,
       slave: tv.slave,
       result,
-      reason: `kvar_div10=${Math.round(kvar_div10)} (≈ ${(kvar_div10 / 100).toFixed(2)} kVAr; raw × 10 = VAr)`,
+      reason: `kvar_div10=${rawWrite} (≈ ${(kvar_div10 / 100).toFixed(2)} kVAr; raw × 10 = VAr)`,
       operator: b.operator,
     });
+    if (result?.ok) {
+      try {
+        gridControlVerifier.scheduleVerify({
+          inverter_ip: tv.ip, slave: tv.slave, kind: "reactive", raw: rawWrite, operator: b.operator,
+        });
+      } catch (verr) { console.warn("[grid-control] verify schedule failed:", verr.message); }
+    }
     return res.json(result);
   } catch (err) {
     return res.status(502).json({ ok: false, error: err.message });
@@ -15274,6 +15411,11 @@ app.post("/api/grid-control/disable", express.json(), async (req, res) => {
   }
   const tv = _validateGridControlTarget(b);
   if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
+  // 'disable' (cmd 11) is the always-safe restoration — we INTENTIONALLY do
+  // NOT apply the critical-block lock here. If a critical block fires while
+  // a reactive setpoint is in flight, the operator MUST still be able to
+  // issue cmd 11 to return the inverter to default. The block locks
+  // *commanding* reactive/PF, not *releasing* it.
   try {
     const result = await _callPythonGridControl("/grid-control/disable", "POST",
       { ip: tv.ip, slave: tv.slave });
@@ -15285,6 +15427,13 @@ app.post("/api/grid-control/disable", express.json(), async (req, res) => {
       reason: "cmd 11 — restore inverter default",
       operator: b.operator,
     });
+    if (result?.ok) {
+      try {
+        gridControlVerifier.scheduleVerify({
+          inverter_ip: tv.ip, slave: tv.slave, kind: "disable", operator: b.operator,
+        });
+      } catch (verr) { console.warn("[grid-control] verify schedule failed:", verr.message); }
+    }
     return res.json(result);
   } catch (err) {
     return res.status(502).json({ ok: false, error: err.message });
@@ -15324,6 +15473,33 @@ app.get("/api/grid-control/state/:ip/:slave", async (req, res) => {
   }
 });
 
+// v2.11.x Phase 3 — verify-status reads the most-recent grid-control verify
+// row(s). Read-only; mirrors /api/apc/verify-status posture.
+app.get("/api/grid-control/verify-status", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const rows = getLatestGridControlVerifyAll() || [];
+    res.json({ ok: true, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || "verify-status failed" });
+  }
+});
+
+app.get("/api/grid-control/verify-status/:inverter_ip/:slave", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const ip = String(req.params.inverter_ip || "").trim();
+    const slave = Number(req.params.slave);
+    if (!ip || !Number.isFinite(slave)) {
+      return res.status(400).json({ ok: false, error: "ip and slave required" });
+    }
+    const row = getLatestGridControlVerify(ip, slave) || null;
+    res.json({ ok: true, row });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || "verify-status failed" });
+  }
+});
+
 // GET /api/grid-control/feature-status  — UI helper to know if writes are enabled
 app.get("/api/grid-control/feature-status", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
@@ -15334,6 +15510,78 @@ app.get("/api/grid-control/feature-status", (req, res) => {
       ? "Grid-control writes are enabled. Use sacupsMM key per request."
       : "Grid-control writes are DISABLED by default. Enable `gridControlEnabled` after security review + 2-week single-inverter soak + operator sign-off.",
   });
+});
+
+// ─── v2.11.x Field Calibration (Phases 1-4) ────────────────────────────────
+// Plan: plans/2026-05-12-inverter-calibration-tool.md
+// Phase 1 read paths + Phase 2/3/4 write/consign/copy.  Write paths are
+// gated by the calibrationWritesEnabled feature flag (default off).
+function _isCalibrationWritesEnabled() {
+  try {
+    const v = String(getSetting("calibrationWritesEnabled") ?? "0").trim();
+    return v === "1" || v.toLowerCase() === "true";
+  } catch (_) { return false; }
+}
+async function _calibConsign(ip, slave, percent) {
+  return _callPythonGridControl("/calibration/consign", "POST",
+    { ip, slave, percent });
+}
+registerCalibrationRoutes(app, {
+  isRemoteMode,
+  proxyToRemote,
+  requireTopologyAuth,
+  callPython: _callPythonGridControl,
+  loadIpConfigFromDb,
+  getConfiguredNodeSet,
+  isAuthorizedPlantWideControl,
+  getActiveCriticalBlock,
+  isCalibrationWritesEnabled: _isCalibrationWritesEnabled,
+  setSetting,
+  insertCalibrationSnapshot,
+  getLatestCalibrationSnapshot,
+  listCalibrationSnapshots,
+  getCalibrationSnapshotById,
+  deleteCalibrationSnapshotById,
+  insertCalibrationWriteLog,
+  listCalibrationWriteLog,
+  insertCalibrationSession,
+  updateCalibrationSessionEnd,
+  getCalibrationSession,
+  listRecentCalibrationSessions,
+  insertAuditLogRow,
+  broadcastUpdate,
+  setActivePowerPct: _calibConsign,
+});
+
+// ─── v2.11.x Phase 1 — Grid-Code Visibility endpoint ────────────────────────
+// Plan: plans/2026-05-12-ppc-capabilities-implementation.md §2
+// Live P-vs-f / Q-vs-V / dP/dt / PF snapshot from the in-memory monitor.
+// Always-safe read; never touches inverters.
+app.get("/api/grid-code/live", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+  try {
+    const inv = req.query?.inverter != null ? Number(req.query.inverter) : null;
+    const slave = req.query?.slave != null ? Number(req.query.slave) : null;
+    if (Number.isFinite(inv) && Number.isFinite(slave)) {
+      // Per-node snapshot keyed by configured IP.
+      const ip = (() => {
+        try {
+          const cfg = loadIpConfigFromDb();
+          const map = cfg?.inverters || {};
+          return String(map[inv] || map[String(inv)] || "").trim();
+        } catch (_) { return ""; }
+      })();
+      if (!ip) return res.status(404).json({ ok: false, error: `Inverter ${inv} has no configured IP.` });
+      const node = gridCodeMonitor.snapshotNode(ip, slave);
+      return res.json({ ok: true, mode: "node", inverter: inv, slave, ip, node });
+    }
+    // Full plant snapshot (default).
+    const nodes = gridCodeMonitor.snapshotAll();
+    const plant = gridCodeMonitor.snapshotPlant();
+    res.json({ ok: true, mode: "plant", plant, nodes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || "snapshot failed" });
+  }
 });
 
 // ─── v2.10.x All Parameters Data — read-only endpoints ───────────────────
@@ -18034,6 +18282,25 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
   const tv = _validateApcTargets(b.targets, scope);
   if (!tv.ok) return res.status(400).json({ ok: false, error: tv.error });
   const targets = tv.normalized;
+  // v2.11.x Calibration Session Lockdown: refuse APC writes against an
+  // inverter currently under calibration.  The operator's own consign UI is
+  // the only path that can drive APC on the target during a session
+  // (it goes through /api/calibration/consign which bypasses this gate by
+  // calling setActivePowerPct directly).
+  try {
+    const cs = require("./calibrationSession");
+    if (cs.isActive()) {
+      const cur = cs.currentSession();
+      const blocked = targets.find((t) => cs.isInverterUnderCalibration(t.inverter));
+      if (blocked) {
+        return res.status(423).json({
+          ok: false,
+          error: `Inverter ${blocked.inverter} is under active calibration session — APC writes refused. Use the Field Calibration consign panel or end the session.`,
+          calibration_session: { session_id: cur.session_id, inverter: cur.inverter, slave: cur.slave },
+        });
+      }
+    }
+  } catch (_) {}
   const target_pct = Number(b.target_pct);
   const force = Boolean(b.force);
   const operator = String(b.operator || "operator").slice(0, 64);
@@ -18096,9 +18363,113 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
   if (!plantCapController) {
     return res.status(503).json({ ok: false, error: "Plant cap controller not ready." });
   }
+  // v2.11.x Phase 2 — APC ramp-rate limiter.
+  // Plan: plans/2026-05-12-ppc-capabilities-implementation.md §3.
+  // Only paces 'set' opcode; stop/start/abort are unaffected. Worst-case
+  // current_pct across targets drives the plan so all targets advance
+  // together. Disabled by default; opt-in via `apcRampRateEnabled = "1"`.
+  let paced_target_pct = target_pct;
+  let pacedPlan = null;
+  if (isSetpointOp) {
+    const rampEnabled = String(getSetting("apcRampRateEnabled", "0") || "0").trim() === "1";
+    const ratePerMin  = Math.max(1, Math.min(100, Number(getSetting("apcRampRatePctPerMin", "10")) || 10));
+    if (rampEnabled) {
+      let worstCurrent = null;
+      try {
+        const stateRows = getApcState() || [];
+        const stateMap = new Map(stateRows.map(s => [`${s.inverter_ip}:${s.slave}`, s]));
+        const candidates = [];
+        for (const t of targets) {
+          const key = `${String(t.ip || "")}:${Number(t.slave)}`;
+          const rec = stateMap.get(key);
+          if (rec?.active_pct != null) candidates.push(Number(rec.active_pct));
+        }
+        if (candidates.length > 0) {
+          // Worst mover: the target whose current_pct is furthest from target_pct
+          // (largest |Δ|). Plan against that one — quicker movers will overshoot
+          // their intermediate plateau, the inverter accepts it idempotently.
+          worstCurrent = candidates.reduce((acc, c) => Math.abs(c - target_pct) > Math.abs(acc - target_pct) ? c : acc, candidates[0]);
+        }
+      } catch (_) { /* unknown current → no throttle */ }
+      pacedPlan = planApcRamp({
+        current_pct: worstCurrent,
+        target_pct,
+        rate_pct_per_min: ratePerMin,
+        step_interval_ms: APC_RAMP_STEP_MS,
+        now_ms: Date.now(),
+      });
+      if (pacedPlan?.throttled) {
+        paced_target_pct = pacedPlan.immediate_pct;
+        try {
+          broadcastUpdate({
+            type: "apc:throttled",
+            stage: "begin",
+            final_target_pct: target_pct,
+            immediate_pct: paced_target_pct,
+            steps_total: (pacedPlan.remaining_steps || []).length + 1,
+            duration_ms: pacedPlan.total_duration_ms,
+            rate_pct_per_min: ratePerMin,
+            operator,
+          });
+        } catch (_) {}
+        try {
+          insertAuditLogRow({
+            ts: Date.now(),
+            operator: String(operator).slice(0, 64),
+            inverter: 0,
+            node: 0,
+            action: "apc.ramp_paced",
+            scope: "grid-control",
+            result: "ok",
+            ip: "",
+            reason: `current=${worstCurrent != null ? worstCurrent.toFixed(1) : "?"} → step=${paced_target_pct.toFixed(2)} → final=${target_pct} (rate=${ratePerMin}%/min, steps=${pacedPlan.remaining_steps.length + 1})`,
+          });
+        } catch (_) {}
+      }
+    }
+  }
   try {
-    const result = await plantCapController.applySetpoint({ scope, targets, target_pct, opcode, force, operator });
+    const result = await plantCapController.applySetpoint({ scope, targets, target_pct: paced_target_pct, opcode, force, operator });
     if (result?.rejected) return res.status(409).json(result);
+    // v2.11.x Phase 2 — schedule the remaining ramp steps.
+    if (pacedPlan?.throttled && Array.isArray(pacedPlan.remaining_steps) && result?.ok) {
+      pacedPlan.remaining_steps.forEach((step, idx) => {
+        const _t = setTimeout(async () => {
+          try {
+            const sub = await plantCapController.applySetpoint({
+              scope, targets, target_pct: step.pct, opcode: "set", force: true, operator: `${operator}+ramp`,
+            });
+            try {
+              broadcastUpdate({
+                type: "apc:throttled",
+                stage: "step",
+                step_idx: idx + 1,
+                steps_total: pacedPlan.remaining_steps.length + 1,
+                pct: step.pct,
+                final_target_pct: target_pct,
+                ok: !!sub?.ok,
+              });
+            } catch (_) {}
+            try {
+              insertAuditLogRow({
+                ts: Date.now(),
+                operator: `${operator}+ramp`,
+                inverter: 0,
+                node: 0,
+                action: "apc.ramp_step",
+                scope: "grid-control",
+                result: sub?.ok ? "ok" : "failed",
+                ip: "",
+                reason: `step ${idx + 2}/${pacedPlan.remaining_steps.length + 1} pct=${step.pct.toFixed(2)} final=${target_pct}`,
+              });
+            } catch (_) {}
+          } catch (err) {
+            console.warn("[apc-ramp] step failed:", err.message);
+          }
+        }, step.delay_ms);
+        if (_t?.unref) _t.unref();
+      });
+    }
     // Broadcast a "setpoint started" event so connected clients (including
     // remote viewers via the WS bridge) update their %P state and history
     // without waiting for the next polling tick.
@@ -18115,20 +18486,32 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
       });
     } catch (_) {}
     // Slice δ — schedule a closed-loop verify for every target on a 'set' op.
+    // When ramp-rate pacing is active (Phase 2), defer the verifier until the
+    // last paced step has landed so we don't false-mismatch on intermediate
+    // plateaus.
     if (isSetpointOp && result?.ok && Array.isArray(targets)) {
-      try {
-        for (const t of targets) {
-          if (!t?.ip || t?.slave == null) continue;
-          apcVerifier.scheduleVerify({
-            inverter_ip: t.ip,
-            slave: Number(t.slave),
-            requested_pct: target_pct,
-            rated_kw: NODE_KW_MAX,
-            job_id: result?.job_id || null,
-          });
+      const verifyDelay = pacedPlan?.throttled ? (pacedPlan.total_duration_ms || 0) : 0;
+      const scheduleVerify = () => {
+        try {
+          for (const t of targets) {
+            if (!t?.ip || t?.slave == null) continue;
+            apcVerifier.scheduleVerify({
+              inverter_ip: t.ip,
+              slave: Number(t.slave),
+              requested_pct: target_pct,   // final operator-requested target
+              rated_kw: NODE_KW_MAX,
+              job_id: result?.job_id || null,
+            });
+          }
+        } catch (err) {
+          console.warn("[apc-verify] schedule failed:", err.message);
         }
-      } catch (err) {
-        console.warn("[apc-verify] schedule failed:", err.message);
+      };
+      if (verifyDelay > 0) {
+        const _t = setTimeout(scheduleVerify, verifyDelay);
+        if (_t?.unref) _t.unref();
+      } else {
+        scheduleVerify();
       }
     }
     // State refresh: schedule a single state pull ~3 s after the write so
@@ -18671,6 +19054,9 @@ app.post("/api/settings", (req, res) => {
     plantCapSequenceCustom,
     plantCapCooldownSec,
     plantCapSetpointEnabled,
+    // v2.11.x Phase 2 — APC ramp-rate limiter
+    apcRampRateEnabled,
+    apcRampRatePctPerMin,
     go2rtcAutoStart,
     cameraConfig,
     // v2.9.0 Slice G — Inverter Clocks
@@ -18924,6 +19310,17 @@ app.post("/api/settings", (req, res) => {
   if (plantCapSetpointEnabled !== undefined) {
     const v = plantCapSetpointEnabled === true || plantCapSetpointEnabled === "1" || plantCapSetpointEnabled === 1;
     updates.plantCapSetpointEnabled = v ? "1" : "0";
+  }
+  // v2.11.x Phase 2 — APC ramp-rate limiter
+  if (apcRampRateEnabled !== undefined) {
+    const v = apcRampRateEnabled === true || apcRampRateEnabled === "1" || apcRampRateEnabled === 1;
+    updates.apcRampRateEnabled = v ? "1" : "0";
+  }
+  if (apcRampRatePctPerMin !== undefined) {
+    const n = Math.trunc(Number(apcRampRatePctPerMin));
+    if (Number.isFinite(n) && n >= 1 && n <= 100) {
+      updates.apcRampRatePctPerMin = String(n);
+    }
   }
   if (
     updates.plantCapUpperMw !== undefined ||
@@ -23274,9 +23671,22 @@ async function _runCriticalPatternEnforcerTick() {
       },
     };
 
+    // v2.11.x Calibration Session Lockdown: skip the inverter currently
+    // under calibration.  The operator is physically on-site observing
+    // the inverter; auto-block enforcement is redundant and would
+    // interrupt the calibration session with a forced STOP.
+    let _calibSession;
+    try { _calibSession = require("./calibrationSession"); } catch (_) {}
+    const calibTarget = _calibSession?.isActive() ? _calibSession.currentSession() : null;
+
     // Iterate inverters serially so a single STOP queue doesn't get
     // hammered. Each call is internally short (1 modbus write per slave).
     for (const inv of invSet) {
+      if (calibTarget && Number(calibTarget.inverter) === Number(inv)) {
+        // Suspended for the calibration session — alarms still record, but
+        // we don't auto-STOP the inverter the calibrator is working on.
+        continue;
+      }
       try {
         const r = await criticalPatternEnforcer.enforceOne(inv, deps);
         if (

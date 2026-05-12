@@ -126,6 +126,9 @@
         <button class="nav-btn" data-page="igbt-health" title="Power electronics asset health: IGBT module aging + AC contactor (K1) wear across the 27-inverter fleet. Composite scores, tier filters, linked-findings cross-correlation, and capital-planning CSV export.">
           <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
         </button>
+        <button class="nav-btn" data-page="field-calibration" title="Field Calibration — direct Modbus write to inverter scale-factor registers (DC current, DC voltage, AC current, AC voltage, reactive curve), bypassing the LCD menu. Session lockdown, consign mode, fleet anomaly scan.">
+          <span class="nav-icon"><span class="mdi mdi-tune-variant"></span></span><span>FIELD CALIB</span>
+        </button>
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
           <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
@@ -1105,6 +1108,230 @@
         </div>
       </section>
 
+      <!-- --- PAGE: FIELD CALIBRATION ---------------------------------------------- -->
+      <!-- v2.11.x Field Calibration — direct Modbus write to INGECON scale-factor
+           registers + reactive-curve, bypassing the inverter LCD menu. -->
+      <!-- Plan: plans/2026-05-12-inverter-calibration-tool.md -->
+      <section id="page-field-calibration" class="page">
+        <div class="page-toolbar">
+          <div class="tl-left">
+            <span class="toolbar-info" title="Field Calibration — Phase 1 read-only + Phase 2-4 write/consign/copy paths. Lockdown engages when a session is active.">
+              <span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span>
+              Field Calibration
+            </span>
+          </div>
+          <div class="tl-right">
+            <span class="toolbar-info" id="fcalFeatureBadge" title="Writes feature flag (calibrationWritesEnabled). When OFF, the page is read-only.">Writes: <b id="fcalFeatureBadgeText">—</b></span>
+            <button id="btnFcalToggleWrites" class="btn btn-xs btn-outline" type="button" hidden
+                    title="Toggle the calibrationWritesEnabled feature flag. Requires the adsiM/adsiMM topology auth key.">
+              <span class="mdi mdi-key-variant icon-inline" aria-hidden="true"></span>
+              <span id="btnFcalToggleWritesLabel">Enable Writes…</span>
+            </button>
+          </div>
+        </div>
+        <div id="fieldCalibrationSection" class="field-calibration-container">
+          <div id="fcalRemoteBanner" class="invclock-remote-banner" hidden role="status" aria-live="polite"
+               title="In remote mode, calibration reads execute on the gateway (the inverter Modbus link lives there). Phase 2 writes are gateway-only by design.">
+            <span class="mdi mdi-cloud-sync-outline icon-inline" aria-hidden="true"></span>
+            <span class="invclock-remote-banner-text">
+              Remote mode — calibration reads execute on gateway:
+              <span class="mono js-fcal-gateway-host">—</span>
+            </span>
+          </div>
+
+          <!-- Tab navigation: per-node read / fleet anomaly view -->
+          <div class="card-tabs" role="tablist" aria-label="Field Calibration sub-sections">
+            <button class="card-tab" type="button" role="tab"
+                    data-card-tab="single" aria-controls="fcalPanelSingle" aria-selected="true"
+                    title="Per-(inverter, slave) live read of the 14-register scale-factor block + reactive curve.">
+              <span class="mdi mdi-tune-vertical icon-inline" aria-hidden="true"></span>
+              <span class="card-tab-label">Per-Node Readout</span>
+            </button>
+            <button class="card-tab" type="button" role="tab"
+                    data-card-tab="fleet" aria-controls="fcalPanelFleet" aria-selected="false"
+                    title="Walk every (inverter, slave) and surface modules whose calibration drifted out of family.">
+              <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
+              <span class="card-tab-label">Fleet Anomalies</span>
+            </button>
+          </div>
+
+          <!-- ── PINNED HEADER — always visible above the scrolling table ── -->
+          <!-- This block lives OUTSIDE the scroll viewport so it never moves.
+               Per-Node controls and Fleet Scan controls share this header; the
+               per-panel content blocks below toggle their visibility based on
+               the active tab. -->
+          <div class="fcal-header" data-active-tab="single">
+            <div class="fcal-header-block" data-fcal-header="single">
+              <div class="cb-sub-title">
+                <span class="mdi mdi-tune icon-inline" aria-hidden="true"></span>
+                Calibration State (read-only)
+              </div>
+              <div class="srn-controls">
+                <label class="invclock-label" for="fcalInverterPicker">Inverter</label>
+                <select id="fcalInverterPicker" class="inp invclock-input"
+                        title="Pick the inverter (controller) to read."></select>
+                <label class="invclock-label" for="fcalSlavePicker">Node</label>
+                <select id="fcalSlavePicker" class="inp invclock-input" style="max-width: 90px;"
+                        title="Modbus slave id (1..4) of the electronic block within the inverter."></select>
+                <button id="btnFcalRead" class="btn btn-accent" type="button"
+                        title="FC03 read of holding registers 0x50..0x5E (15 regs). First click of the hour prompts for the adsiM/adsiMM topology key; afterwards the cached session covers every read.">
+                  <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+                  <span>Read</span>
+                </button>
+                <button id="btnFcalFullConfig" class="btn btn-outline" type="button"
+                        title="Slow path — chunked FC03 read of the full 177-register config block. Adds RTC, nominal power, grid envelope, country code to the view.">
+                  <span class="mdi mdi-database-search icon-inline" aria-hidden="true"></span>
+                  <span>Full Config Dump</span>
+                </button>
+                <span class="smsg" id="fcalReadMsg"></span>
+              </div>
+
+              <!-- Calibration session card — visible always; controls write lockdown. -->
+              <div class="fcal-session-row" role="group" aria-label="Calibration session control">
+                <div class="fcal-session-card" id="fcalSessionCard">
+                  <div class="fcal-session-state">
+                    <span class="fcal-session-dot" id="fcalSessionDot" aria-hidden="true"></span>
+                    <span class="fcal-session-label" id="fcalSessionLabel">No active session — read-only mode</span>
+                  </div>
+                  <div class="fcal-session-meta" id="fcalSessionMeta" hidden>
+                    <span class="fcal-session-meta-item" id="fcalSessionTarget">Inv —</span>
+                    <span class="fcal-session-meta-item" id="fcalSessionOperator">op —</span>
+                    <span class="fcal-session-meta-item" id="fcalSessionClock">00:00</span>
+                    <span class="fcal-session-meta-item" id="fcalSessionWrites">0 writes</span>
+                  </div>
+                  <div class="fcal-session-actions">
+                    <input id="fcalSessionOperatorInput" class="inp invclock-input fcal-operator-input"
+                           type="text" autocomplete="off" spellcheck="false"
+                           placeholder="Your initials" maxlength="16"
+                           title="Operator initials are stamped on every write in the audit log." />
+                    <button id="btnFcalSessionStart" class="btn btn-red" type="button"
+                            title="Begin a calibration session on the selected (inverter, slave). The dashboard enters lockdown mode and write controls become available.">
+                      <span class="mdi mdi-lock icon-inline" aria-hidden="true"></span>
+                      <span>Start Calibration Session</span>
+                    </button>
+                    <button id="btnFcalSessionEnd" class="btn btn-outline" type="button" hidden
+                            title="Release consign mode, write final snapshot, and re-enable all paused background processes.">
+                      <span class="mdi mdi-lock-open icon-inline" aria-hidden="true"></span>
+                      <span>End Session</span>
+                    </button>
+                  </div>
+                </div>
+                <small class="fcal-phase-note" id="fcalPhaseNote" hidden></small>
+              </div>
+            </div>
+
+            <div class="fcal-header-block" data-fcal-header="fleet" hidden>
+              <div class="cb-sub-title">
+                <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
+                Fleet Anomaly View
+              </div>
+              <div class="srn-controls">
+                <button id="btnFcalFleetScan" class="btn btn-accent" type="button"
+                        title="Walk every configured (inverter, slave), read the calibration block, compute per-field median, and highlight modules whose scale factor is &gt;5 % off the fleet median. Topology key (cached 1 hour) gates the scan.">
+                  <span class="mdi mdi-magnify-scan icon-inline" aria-hidden="true"></span>
+                  <span>Scan Fleet</span>
+                </button>
+                <span class="smsg" id="fcalFleetMsg"></span>
+              </div>
+            </div>
+          </div>
+          <!-- ── END PINNED HEADER ──────────────────────────────────────── -->
+
+          <!-- Tab panel: per-(inverter, slave) read + decoded fields -->
+          <div id="fcalPanelSingle" class="card-tab-panel" data-card-tab-panel="single"
+               role="tabpanel" aria-labelledby="fcalPanelSingle">
+            <!-- Consign mode panel (Phase 3) — only visible during active session -->
+            <div class="fcal-consign-panel" id="fcalConsignPanel" hidden role="region" aria-label="Consign mode">
+              <div class="fcal-consign-title">
+                <span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span>
+                Consign Mode <small>(forces inverter to specified %Pn for current/power calibration)</small>
+              </div>
+              <div class="fcal-consign-tiles">
+                <button class="fcal-consign-tile" type="button" data-consign-pct="10" title="10 % Pn — initial DC current calibration ladder">10 %</button>
+                <button class="fcal-consign-tile" type="button" data-consign-pct="20" title="20 % Pn — reactive curve X1Y1 calibration point">20 %</button>
+                <button class="fcal-consign-tile" type="button" data-consign-pct="60" title="60 % Pn — DC current calibration target per training PDF">60 %</button>
+                <button class="fcal-consign-tile" type="button" data-consign-pct="70" title="70 % Pn — reactive curve X2Y2 calibration point">70 %</button>
+                <button class="fcal-consign-tile fcal-consign-tile-release" type="button" data-consign-pct="100" title="Restore the inverter to full output (release consign).">Release</button>
+              </div>
+              <div class="fcal-consign-status" id="fcalConsignStatus">No consign command issued in this session.</div>
+            </div>
+
+            <div id="fcalReadResult" class="srn-table-host" hidden></div>
+            <div id="fcalFullConfigResult" class="srn-table-host" hidden style="margin-top: 12px;"></div>
+
+            <!-- ── Per-node configuration backup (snapshots + restore) ──
+                 Always visible (read-only): the operator can capture a manual
+                 backup any time. "Restore" requires an active session + the
+                 cached sacupsMM bulk-auth (same flow as inline writes). -->
+            <div class="fcal-backup-panel" id="fcalBackupPanel" role="region" aria-label="Configuration backup">
+              <div class="fcal-backup-header">
+                <div class="fcal-backup-title">
+                  <span class="mdi mdi-content-save-all icon-inline" aria-hidden="true"></span>
+                  Configuration Backups
+                  <small class="fcal-backup-subtitle">snapshots of the 14 scale-factor registers — used to roll back after a bad calibration</small>
+                </div>
+                <div class="fcal-backup-actions">
+                  <input id="fcalBackupNote" class="inp invclock-input" type="text"
+                         autocomplete="off" spellcheck="false"
+                         placeholder="Note (optional)"
+                         maxlength="200" style="max-width: 280px;"
+                         title="Free-text note attached to the snapshot — e.g. 'pre-recalibration 5/12'" />
+                  <button id="btnFcalBackupNow" class="btn btn-accent" type="button"
+                          title="Capture the current calibration block as a manual snapshot. No write to inverter — read-only operation logged in the snapshot table.">
+                    <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span>
+                    <span>Backup Now</span>
+                  </button>
+                  <button id="btnFcalBackupRefresh" class="btn btn-outline" type="button"
+                          title="Re-fetch the snapshot list for this (inverter, node).">
+                    <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+              <div class="fcal-backup-status">
+                <span class="smsg" id="fcalBackupMsg"></span>
+              </div>
+              <div id="fcalBackupList" class="fcal-backup-list">
+                <div class="srn-empty">Pick an inverter + node and click <strong>Read</strong> to load this node's backup history.</div>
+              </div>
+            </div>
+
+            <!-- Bulk Copy panel (Phase 4) — only visible during active session -->
+            <div class="fcal-copy-panel" id="fcalCopyPanel" hidden role="region" aria-label="Copy calibration from another node">
+              <div class="fcal-copy-title">
+                <span class="mdi mdi-content-duplicate icon-inline" aria-hidden="true"></span>
+                Copy from another node
+              </div>
+              <div class="srn-controls">
+                <label class="invclock-label" for="fcalCopySrcInv">Source Inverter</label>
+                <select id="fcalCopySrcInv" class="inp invclock-input"
+                        title="Pick the donor inverter whose calibration should be copied to this session's target."></select>
+                <label class="invclock-label" for="fcalCopySrcSlave">Source Node</label>
+                <select id="fcalCopySrcSlave" class="inp invclock-input" style="max-width: 90px;"></select>
+                <button id="btnFcalCopy" class="btn btn-outline" type="button"
+                        title="Copy every differing scale factor from the source to the session target under one unlock + verify cycle. First click of the hour prompts for the sacupsMM key; afterwards the cached session covers every write.">
+                  <span class="mdi mdi-clipboard-arrow-down-outline icon-inline" aria-hidden="true"></span>
+                  <span>Copy →</span>
+                </button>
+                <label class="invclock-check" title="Bypass the model / firmware / grid-envelope match check. Use only after physically confirming the source and destination modules are identical.">
+                  <input type="checkbox" id="fcalCopyForceFingerprint" />
+                  <span class="invclock-check-label">Force (skip hardware fingerprint check)</span>
+                </label>
+                <span class="smsg" id="fcalCopyMsg"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab panel: fleet anomaly view (per-field median + per-node delta) -->
+          <div id="fcalPanelFleet" class="card-tab-panel" data-card-tab-panel="fleet"
+               role="tabpanel" aria-labelledby="fcalPanelFleet" hidden>
+            <div id="fcalFleetResult" class="srn-table-host">
+              <div class="srn-empty">Click <strong>Scan Fleet</strong> to read every node and surface calibration outliers. Read-only. Takes ~10 s for a fully-populated 108-node fleet.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- --- PAGE: SETTINGS ------------------------------------------------------- -->
       <section id="page-settings" class="page">
         <div class="settings-shell">
@@ -1286,12 +1513,6 @@
                   title="Geographic longitude of the plant site, used for weather lookups and solar forecast alignment."
               /></label>
               <small id="plantLonHelp">Used for weather alignment and forecast context (-180 to 180).</small>
-            </div>
-            <div class="srow">
-              <label class="lbl-check" title="Show the %P Setpoint tab on the Active Power Control page, enabling per-node / per-inverter / plant-wide active power setpoint commands via Modbus FC16 register 0x03E8.">
-                <input type="checkbox" id="setPlantCapSetpointEnabled" />
-                Enable %P Setpoint tab
-              </label>
             </div>
           </div>
           <div class="sgroup settings-card" id="opsCompactSection">
@@ -2671,6 +2892,8 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
               </div>
             </div>
           </div>
+
+          <!-- v2.11.x Field Calibration — relocated to its own top-level page (#page-field-calibration). -->
 
           <!-- v2.10.0 Slice D minimal — Stop Reasons (DebugDesc snapshots) -->
           <div class="sgroup settings-card" id="stopReasonsSection" hidden>

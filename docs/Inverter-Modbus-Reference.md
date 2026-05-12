@@ -114,6 +114,27 @@ Both share the same 16-bit bitmap layout as `Alarmas_Inv` at 30007-30008. See §
 | 41010 | 1009 | **Restrictive freq limits** | R | 0 = OFF (47.5/51.5 Hz), 1 = ON (49.5/50.5 Hz, CEI 0-21) |
 | 41011-41012 | 1010-1011 | Reserved | R | – |
 
+### 2.1 Reference / baseline setpoint storage
+
+The dashboard treats **runtime reference setpoints** and **persistent firmware
+configuration** as two distinct layers. Both are documented; only the runtime
+layer is read live.
+
+| Layer | What | Where stored | Survives power cycle? | Live-read | Authoritative tool |
+|---|---|---|---|---|---|
+| **L1 — Runtime reference** | Most-recent commanded setpoint per axis (active power Q15, phi tangent, reactive kVAr) | Holding regs **41006 / 41007 / 41008** | Yes (registers persist until next write or reset) | Yes — `read_grid_control_state` ([services/inverter_engine.py:3558](../services/inverter_engine.py#L3558)) reads all five 41006-41010 in one FC 0x03 transaction every time the Grid Code → Read-back panel asks. Slice ζ verifier ([server/gridControlVerifier.js](../server/gridControlVerifier.js)) round-trips L1 within ~10 s of every cmd-1/9/11 write. | Dashboard (Plant Controller → Grid Code) |
+| **L2 — Persistent firmware config** | Full holding-register snapshot (177 UInt16): commissioning-time alarm thresholds, country-code envelope, frequency limits, ramp defaults, isolation thresholds, etc. | Inverter NVRAM, exported by ISM as `*.INGECONsettings` XML | Yes — only ISM commissioning workflow rewrites it | **No.** The dashboard does NOT read or write L2. | INGECON SUN Manager (vendor tool) |
+
+L1 verification (the dashboard does this) confirms the *most recent command* landed — it cannot confirm the underlying L2 envelope is correct. Conversely, L2 audit (operator's responsibility, via ISM) confirms the inverter is configured per NGCP Country Code 42 but cannot detect transient L1 drift between commands.
+
+**Example traceability** — a Set kVAr write at 14:23 produces:
+1. Audit row `grid_control.reactive_set` (Node) at `audit_log`
+2. Holding reg **41008** updated to the new Int16 raw value
+3. `gridControlVerifier` schedules a delayed read of 41008 → row in `grid_control_verify_log` with `result = ok / mismatch / no_response / timeout`
+4. Subsequent live observation in input reg **30069** (QAC actual) shows the inverter is now sourcing/sinking the commanded VAr
+
+Sample L2 reference for this fleet: [docs/400152914R81.INGECONsettings](400152914R81.INGECONsettings) (serial 400152914R81, firmware AAV1003BA, exported 2026-05-10 by ISM). The HEXSETTINGS blob is the canonical baseline a healthy unit on this site should match within ±tolerances.
+
 ---
 
 ## 3. Inverter state register (reg 30074) — Slice γ

@@ -850,6 +850,20 @@ async def handle_auto_reset(ip, unit, alarm_val):
     if not auto_reset_cfg.get("enabled"):
         return
 
+    # v2.11.x Calibration Session Lockdown: refuse auto-reset on the
+    # inverter under calibration. The operator may deliberately drive
+    # the inverter into states that trip alarms (e.g. consign 0%); an
+    # auto-reset firing would race the calibration writes.
+    try:
+        inv_num = None
+        for k, v in (ip_map or {}).items():
+            if str(v).strip() == str(ip).strip():
+                inv_num = int(k); break
+        if inv_num is not None and _is_under_calibration(inv_num, int(unit)):
+            return
+    except Exception:
+        pass
+
     # Guard: fatal error (0x7FFF) cannot be cleared remotely. Per Ingeteam
     # Level 1 workflow (AAV2011IMC01_ p.14) and Level 2 (AAV2011IFA01_ p.18):
     #   "When a FATAL ERROR occurs, the inverter is unblocked by entering a
@@ -3943,6 +3957,422 @@ async def api_grid_control_state(ip: str, slave: int):
     """Read holding 41006-41010 in one transaction. Returns raw regs +
     convenience-decoded fields. Sign-cast for phi/reactive is left to Node."""
     return await read_grid_control_state(ip, int(slave))
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Field Calibration (Phase 1 — read-only) — display-bypass calibration tool.
+# Plan: plans/2026-05-12-inverter-calibration-tool.md
+# Decoder + register map: services/calibration_decoder.py
+# Block geometry: 15 holding regs at offsets 0x0050..0x005E (decimal 80-94).
+# Sentinel: offset 80 ValidCfgCode must read 0x1F1F.
+# Phase 1 has NO writes — see Phase 2 for the future calibration_io module.
+# ───────────────────────────────────────────────────────────────────────────
+
+from services import calibration_decoder as _calib_dec
+
+_CALIB_READ_BASE  = _calib_dec.CALIBRATION_BLOCK_BASE   # 80
+_CALIB_READ_COUNT = _calib_dec.CALIBRATION_BLOCK_LEN    # 15
+
+
+def _read_calibration_block_sync(client, lock, slave: int,
+                                  base: int = _CALIB_READ_BASE,
+                                  count: int = _CALIB_READ_COUNT) -> dict:
+    """Blocking FC03 read of the calibration block. Returns raw regs.
+
+    Caller holds the executor; we hold the per-IP lock only for the wire
+    transaction (~50 ms) so the poller can resume immediately.
+    """
+    try:
+        with lock:
+            r = client.read_holding_registers(address=base, count=count, unit=slave)
+        if r is None:
+            return {"ok": False, "error": "null_response"}
+        if r.isError():
+            return {"ok": False, "error": f"modbus_error: {r}"}
+        regs = list(r.registers) if hasattr(r, "registers") else []
+        if len(regs) < count:
+            return {"ok": False, "error": f"short_frame: got {len(regs)}/{count}"}
+        return {"ok": True, "regs": regs, "base": base, "count": count}
+    except Exception as exc:
+        return {"ok": False, "error": f"exception: {exc}"}
+
+
+async def read_calibration_block(ip: str, slave: int) -> dict:
+    """Single-transaction FC03 read of holding 0x50..0x5E (15 regs)."""
+    client = clients.get(ip)
+    if not client:
+        return {"ok": False, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"ok": False, "error": "no_lock"}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        _read_calibration_block_sync,
+        client, lock, int(slave),
+    )
+
+
+def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
+    """Read the input registers that pair with each calibration scale factor.
+
+    Used by the Field Calibration page so the operator sees the LIVE measured
+    value (Vac, Iac, Vdc, Idc, Pac, Qac) alongside the scale factor being
+    edited. Mirrors the TrinPM20 video workflow: read the display value,
+    compare to the external meter, modify scale factor until they match.
+
+    Two FC04 reads under one lock acquisition:
+      • addr 0, count 19  → Vdc(8), Idc(9), Vac1-3(10-12), Iac1-3(13-15), Pac(18)
+      • addr 64, count 12 → Qac(68), VpvN(74), VpvP(75)
+
+    Returns a dict with each live value or None on per-field failure.  Never
+    raises — calibration state must remain readable even if the input regs
+    are momentarily unavailable.
+    """
+    out = {
+        "vac1_v": None, "vac2_v": None, "vac3_v": None,
+        "iac1_a": None, "iac2_a": None, "iac3_a": None,
+        "vdc_v": None,  "idc_a": None,  "pac_w": None,
+        "qac_var": None, "vpv_p_v": None, "vpv_n_v": None,
+        "read_at_ms": int(time.time() * 1000),
+    }
+    try:
+        with lock:
+            r1 = client.read_input_registers(address=0, count=19, unit=slave)
+            r2 = client.read_input_registers(address=64, count=12, unit=slave)
+        if r1 is not None and not r1.isError() and hasattr(r1, "registers"):
+            regs = list(r1.registers)
+            def g(i):
+                return int(regs[i]) & 0xFFFF if i < len(regs) else None
+            # Vac/Iac decoded raw — no scaling needed; matches what the LCD
+            # shows. PAC at addr 18 is in WATTS via raw × 10 convention, but
+            # we display the raw inverter value here so the operator sees
+            # the same number the display shows during calibration.
+            out["vdc_v"]  = g(8)
+            out["idc_a"]  = g(9)
+            out["vac1_v"] = g(10)
+            out["vac2_v"] = g(11)
+            out["vac3_v"] = g(12)
+            out["iac1_a"] = g(13)
+            out["iac2_a"] = g(14)
+            out["iac3_a"] = g(15)
+            pac_raw = g(18)
+            if pac_raw is not None:
+                # raw × 10 = real W (PDF page 7, "30019 PAC in tens of Watt")
+                out["pac_w"] = pac_raw * 10
+        if r2 is not None and not r2.isError() and hasattr(r2, "registers"):
+            regs2 = list(r2.registers)
+            def g2(i):
+                return int(regs2[i]) & 0xFFFF if i < len(regs2) else None
+            # Qac at addr 68 (reg 4 of this read) — Int16 signed, raw × 10 = VAr.
+            q_raw = g2(4)
+            if q_raw is not None:
+                if q_raw & 0x8000:
+                    q_raw -= 0x10000
+                out["qac_var"] = q_raw * 10
+            out["vpv_n_v"] = g2(10)   # addr 74
+            out["vpv_p_v"] = g2(11)   # addr 75
+    except Exception as exc:
+        # Best-effort: any value we already populated stays; rest stays None.
+        out["_warn"] = f"live_read_partial: {exc}"
+    return out
+
+
+async def read_live_for_calibration(ip: str, slave: int) -> dict:
+    """Async wrapper around `_read_live_for_calibration_sync` (per-IP lock)."""
+    client = clients.get(ip)
+    if not client:
+        return {"_warn": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"_warn": "no_lock"}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        _read_live_for_calibration_sync,
+        client, lock, int(slave),
+    )
+
+
+@app.get("/calibration/state/{ip}/{slave}")
+async def api_calibration_state(ip: str, slave: int):
+    """Read + decode the calibration block for one (inverter, slave).
+
+    Returns {ok, regs, calibration: {fields, valid_cfg_code_*}, live: {...}}
+    or {ok: False, error}.  No auth here (Node enforces topology auth before
+    proxying — same pattern as /grid-control/state).
+
+    `live` mirrors the LCD's calibration screen: Vac1-3, Iac1-3, Vdc, Idc,
+    Pac, Qac, VpvP, VpvN. Each value pairs with one or more scale factors
+    in the calibration block so the operator sees the meter value next to
+    the factor they're editing.
+    """
+    raw = await read_calibration_block(ip, int(slave))
+    if not raw.get("ok"):
+        return raw
+    decoded = _calib_dec.decode_calibration_block(raw["regs"], base_offset=_CALIB_READ_BASE)
+    live = await read_live_for_calibration(ip, int(slave))
+    return {
+        "ok":           True,
+        "ip":           ip,
+        "slave":        int(slave),
+        "base":         raw["base"],
+        "count":        raw["count"],
+        "regs":         raw["regs"],
+        "calibration":  decoded,
+        "live":         live,
+        "read_at_ms":   int(time.time() * 1000),
+    }
+
+
+@app.post("/calibration/write")
+async def api_calibration_write(req: Request):
+    """Write ONE calibration register with preflight + range guard + verify.
+
+    Body:
+      {
+        ip:             "192.168.1.101",
+        slave:          1,
+        offset:         81,             # must be in 81..94
+        value:          1125,           # int (will be sign-encoded if needed)
+        max_delta_pct:  50.0,           # optional, null disables guard
+      }
+
+    No auth here — Node enforces sacupsMM + topology + session-id before
+    proxying.  Returns the full write-result dict for audit logging.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    ip = str(body.get("ip") or "").strip()
+    slave = int(body.get("slave") or 0)
+    offset = int(body.get("offset") or 0)
+    if not ip:        raise HTTPException(400, "ip required")
+    if slave <= 0:    raise HTTPException(400, "slave required")
+    if offset <= 0:   raise HTTPException(400, "offset required")
+    if "value" not in body:
+        raise HTTPException(400, "value required")
+
+    client = clients.get(ip)
+    if not client:    raise HTTPException(503, f"no client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None:  raise HTTPException(503, f"no lock for {ip}")
+
+    from services.calibration_io import write_one_with_lock
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: write_one_with_lock(
+                client, lock, slave, offset, int(body["value"]),
+                max_delta_pct=body.get("max_delta_pct", 50.0),
+                verify_delay_s=float(body.get("verify_delay_s", 1.0)),
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+    result["ip"] = ip
+    result["slave"] = slave
+    result["read_at_ms"] = int(time.time() * 1000)
+    return result
+
+
+@app.post("/calibration/write-bulk")
+async def api_calibration_write_bulk(req: Request):
+    """Write multiple calibration registers under a single unlock + verify.
+
+    Body:
+      {
+        ip:    "192.168.1.101",
+        slave: 1,
+        writes: [
+          { offset: 81, value: 1125 },
+          { offset: 84, value: 1684 },
+          ...
+        ],
+        max_delta_pct: 50.0,
+      }
+
+    Returns the bulk write result.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    ip = str(body.get("ip") or "").strip()
+    slave = int(body.get("slave") or 0)
+    writes_raw = body.get("writes") or []
+    if not ip:       raise HTTPException(400, "ip required")
+    if slave <= 0:   raise HTTPException(400, "slave required")
+    if not isinstance(writes_raw, list) or not writes_raw:
+        raise HTTPException(400, "writes (non-empty list) required")
+
+    pairs = []
+    for w in writes_raw:
+        try:
+            pairs.append((int(w["offset"]), int(w["value"])))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise HTTPException(400, f"invalid writes entry: {exc}")
+
+    client = clients.get(ip)
+    if not client:   raise HTTPException(503, f"no client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None: raise HTTPException(503, f"no lock for {ip}")
+
+    from services.calibration_io import write_bulk_with_lock
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: write_bulk_with_lock(
+                client, lock, slave, pairs,
+                max_delta_pct=body.get("max_delta_pct", 50.0),
+                verify_delay_s=float(body.get("verify_delay_s", 1.0)),
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+    result["ip"] = ip
+    result["slave"] = slave
+    result["read_at_ms"] = int(time.time() * 1000)
+    return result
+
+
+_calibration_lockdown = {"active": False, "inverter": None, "slave": None, "session_id": None}
+
+
+def _is_under_calibration(inverter: int, unit: int) -> bool:
+    """Returns True if the (inverter, slave) is the active calibration target.
+    Used by handle_auto_reset to skip the target inverter while a session
+    is in progress.  Node owns the canonical session state and pushes
+    updates via POST /calibration/lockdown."""
+    if not _calibration_lockdown["active"]:
+        return False
+    return (int(_calibration_lockdown["inverter"]) == int(inverter)
+            and int(_calibration_lockdown["slave"]) == int(unit))
+
+
+@app.post("/calibration/lockdown")
+async def api_calibration_lockdown(req: Request):
+    """Node→Python lockdown sync. Set `active=false` to release."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    active = bool(body.get("active"))
+    if active:
+        inverter = int(body.get("inverter") or 0)
+        slave = int(body.get("slave") or 0)
+        if not inverter or not slave:
+            raise HTTPException(400, "inverter+slave required when active=true")
+        _calibration_lockdown.update({
+            "active": True, "inverter": inverter, "slave": slave,
+            "session_id": str(body.get("session_id") or ""),
+        })
+    else:
+        _calibration_lockdown.update({
+            "active": False, "inverter": None, "slave": None, "session_id": None,
+        })
+    print(f"[calibration-lockdown] now active={_calibration_lockdown['active']} target={_calibration_lockdown.get('inverter')}/{_calibration_lockdown.get('slave')}", flush=True)
+    return {"ok": True, "state": dict(_calibration_lockdown)}
+
+
+@app.post("/calibration/consign")
+async def api_calibration_consign(req: Request):
+    """Drive cmd-3 (APC) to a specified percentage for calibration consign.
+
+    Body: { ip, slave, percent }   percent in [0, 100]
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    ip = str(body.get("ip") or "").strip()
+    slave = int(body.get("slave") or 0)
+    pct = float(body.get("percent", -1))
+    if not ip:    raise HTTPException(400, "ip required")
+    if slave <= 0: raise HTTPException(400, "slave required")
+    if pct < 0 or pct > 100:
+        raise HTTPException(400, "percent must be 0..100")
+    return await set_active_power_pct(ip, int(slave), float(pct))
+
+
+@app.get("/calibration/preflight/{ip}/{slave}")
+async def api_calibration_preflight(ip: str, slave: int):
+    """Read sentinel + 81-94 and report sentinel_ok. Used before session start."""
+    client = clients.get(ip)
+    if not client:   return {"ok": False, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None: return {"ok": False, "error": "no_lock"}
+
+    from services.calibration_io import preflight_read_with_lock
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        lambda: preflight_read_with_lock(client, lock, int(slave)),
+    )
+
+
+@app.get("/calibration/full-config/{ip}/{slave}")
+async def api_calibration_full_config(ip: str, slave: int):
+    """Diagnostic-only — read the full 177-register config block and decode
+    RTC + context fields alongside the calibration sub-block.  Slow (one
+    big FC03), so only used by the 'Full Config Dump' button in the UI,
+    not by the at-a-glance read."""
+    client = clients.get(ip)
+    if not client:
+        return {"ok": False, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"ok": False, "error": "no_lock"}
+
+    def _read_full(c, lk, s):
+        # The INGECON comm-board / EKI gateway caps FC03 responses at ~49
+        # registers per frame regardless of the protocol's 125-register
+        # ceiling, so a single 177-register read returns a short_frame.
+        # Chunk into 48-reg slices and concatenate.  All slices share one
+        # per-IP lock acquisition so no other Modbus traffic interleaves.
+        CHUNK = 48
+        try:
+            base  = _calib_dec.CONFIG_BLOCK_BASE
+            total = _calib_dec.CONFIG_BLOCK_LENGTH
+            out: list[int] = []
+            with lk:
+                offset = 0
+                while offset < total:
+                    need = min(CHUNK, total - offset)
+                    r = c.read_holding_registers(
+                        address=base + offset,
+                        count=need,
+                        unit=s,
+                    )
+                    if r is None or r.isError():
+                        return {"ok": False, "error": f"modbus_error@{offset}: {r}"}
+                    got = list(r.registers) if hasattr(r, "registers") else []
+                    if len(got) < need:
+                        return {"ok": False, "error": f"short_frame@{offset}: got {len(got)}/{need}"}
+                    out.extend(got)
+                    offset += need
+            if len(out) < total:
+                return {"ok": False, "error": f"short_frame: got {len(out)}/{total}"}
+            return {"ok": True, "regs": out}
+        except Exception as exc:
+            return {"ok": False, "error": f"exception: {exc}"}
+
+    loop = asyncio.get_running_loop()
+    raw = await loop.run_in_executor(executor, _read_full, client, lock, int(slave))
+    if not raw.get("ok"):
+        return raw
+    decoded = _calib_dec.decode_config_block(raw["regs"])
+    return {
+        "ok": True, "ip": ip, "slave": int(slave),
+        "block_base": _calib_dec.CONFIG_BLOCK_BASE,
+        "block_len":  _calib_dec.CONFIG_BLOCK_LENGTH,
+        "decoded":    decoded,
+        "regs_hex":   " ".join(f"{v & 0xFFFF:04X}" for v in raw["regs"]),
+        "read_at_ms": int(time.time() * 1000),
+    }
 
 
 from fastapi import WebSocket, WebSocketDisconnect

@@ -537,6 +537,34 @@ The preview table shows each candidate inverter in sequence order with its node 
 - while plant-cap monitoring is enabled, all non-exempted inverters are treated as controller-controlled assets
 - the controller may restart any eligible fresh stopped non-exempt inverter; controller-owned stops are still tracked separately for release order and history
 - manual control for non-exempted inverters is blocked while plant cap is active; the operator is warned that the cap session is still ongoing and must disable or exempt first
+
+#### Grid Code Tab — Grid Monitor (v2.11.x)
+
+Inside the Plant Controller page, the **Grid Code** tab adds a read-only **Grid Monitor** panel that visualises live grid behaviour over a rolling 5-minute window at 5-second resolution:
+
+| Chart | Shows |
+| --- | --- |
+| `P vs f` | Active power against grid frequency, with NGCP envelope overlay (continuous 59.7–60.3 Hz; withstand 58.2–61.8 Hz) |
+| `Q vs V` | Reactive power against AC voltage, with ±5 % nominal band shaded |
+| `dP/dt` | Per-node ramp rate over time. Comparable to the configured APC ramp limit when enabled |
+| `Observed PF` | Power factor (|cos φ|) over time, with NGCP 0.95 lag/lead boundaries |
+
+The top-strip chips show live plant aggregate: fresh-node count, mean frequency, mean voltage, total P and Q. The panel polls only while the Grid Code tab is visible and pauses when the operator switches to another tab or page.
+
+#### APC Ramp-Rate Limiter (v2.11.x)
+
+A new optional pacing layer wraps every `set` opcode issued by the **%P Setpoint** tab and the T5 sweep compliance test. The controls live inline at the bottom of the **%P Setpoint** tab — a checkbox + a `Max ramp (%/min)` input that auto-saves on change. Status chip on the right reports `Disabled` (default) or `Pacing @ N%/min`.
+
+| Control | Default | Notes |
+| --- | --- | --- |
+| `Ramp-rate limiter` | OFF | Master switch. When OFF, setpoints write through unchanged |
+| `Max ramp (%/min)` | 10 | Maximum absolute %P change per minute. Industry typical 10 %/min; range 1–100 |
+
+When enabled and the requested setpoint exceeds the per-minute step, the dashboard issues an immediate paced step, schedules the remaining steps as background timers (15 s apart), broadcasts an `apc:throttled` notification, and writes one `apc.ramp_paced` row plus one `apc.ramp_step` row per intermediate setpoint to the audit log. The Slice δ closed-loop verifier defers its read-back until the ramp finishes to avoid false-mismatch records.
+
+#### Grid Code Write Verification (v2.11.x)
+
+Every successful Slice ζ write (`Set PF`, `Set kVAr`, `Disable reactive`) schedules a delayed read-back of holding registers 41006–41010 and records the result in `grid_control_verify_log`. The Read-back panel surfaces the most recent `OK`, `MISMATCH`, `NO_RESPONSE`, `TIMEOUT`, or `PENDING` status for the selected node, with the requested vs observed raw values and the result age in seconds. The same flow refuses writes against an inverter that is auto-blocked by a recurring critical alarm pattern (HTTP 423 with the pattern hex code). `Disable reactive` is intentionally exempt from the block — releasing reactive control is always permitted as the safe direction.
 - a very small gap between `Upper Limit` and `Lower Limit` produces warnings because the controller may overshoot or fail to settle cleanly
 - hover descriptions are available on plant-cap controls, metrics, warnings, and preview fields
 - in `Remote` mode, the panel remains viewable and the requests are proxied to the gateway workstation
@@ -1579,8 +1607,6 @@ Restore behavior:
 - restore overwrites the active database and configuration
 - restore requires application restart to complete cleanly
 
----
-
 ## 6.10 Camera Viewer
 
 The `Camera Viewer` is a live IP camera card displayed within the main inverter grid. It supports three streaming modes and includes an integrated go2rtc process manager for RTSP-to-browser streaming.
@@ -1687,6 +1713,171 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 | FFmpeg mode shows no video | FFmpeg not installed | Install FFmpeg and add to system PATH |
 | Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
 | Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
+
+---
+
+## 6.11 Field Calibration Page (v2.11.x)
+
+The **Field Calibration** page is a dedicated top-nav workspace
+(navigation bar → `FIELD CALIB`) that surfaces each inverter electronic
+block's INGECON-firmware scale-factor / reactive-curve calibration over
+Modbus TCP, so an operator can read and adjust the same values that the
+local LCD display exposes under **Ajustes → Other Adjustments → Scale
+Factor Adjustments** — **without** walking the inverter cabinet and
+stepping through arrow-key menus.
+
+Read-only access is concurrent with normal dashboard operation; the
+**write path** is gated by the `calibrationWritesEnabled` setting
+(default OFF) and requires an active calibration session that triggers
+dashboard lockdown.
+
+### Per-Node Readout tab
+
+Pick an `Inverter` and `Node` (1..4), enter the topology auth key
+(`adsiM` or `adsiMM` where `M` is the current minute), and click
+**Read**. The dashboard issues an FC03 read of holding registers
+`0x50..0x5E` (15 UInt16s) and displays:
+
+| Register window | What it shows |
+|---|---|
+| `ValidCfgCode` (offset 80) | Must read `0x1F1F`. If anything else, the inverter's config block is in an unexpected state and **writes will refuse**. |
+| **AC Voltage** group: `F_E_Vac1/2/3` (offsets 81-83) | Per-phase AC voltage full-scale calibration constants (display labels match LCD). |
+| **AC Current** group: `F_E_Iac1/2/3` (offsets 84-86) | Per-phase AC current full-scale (low-gain). |
+| **DC** group: `F_E_Ipv` (87), `F_E_Vpvp` (88), `F_E_Vpvn` (89) | DC input current + DC voltage (+/−) full-scale. |
+| **Active P** group: `Per. Vacio` (90) | Self-consumption / standby compensation. |
+| **Reactive 1** group: `Pot. Reactiv_X1`, `Comp. Reacti_Y1` (91-92) | First point of the digital reactive-power curve (Pn = 20 % per display calibration procedure). |
+| **Reactive 2** group: `Pot. Reactiv_X2`, `Comp. Reacti_Y2` (93-94) | Second point (Pn = 70 %). `Y2` is the only field that decodes as signed Int16. |
+
+The **Full Config Dump** button issues a slow FC03 read of all 177
+registers (offsets `0x00..0xB0`) and additionally surfaces:
+
+- Inverter RTC mirror (offset 0-5) — useful for cross-checking the clock-sync log
+- Grid envelope (Vacmin/Vacmax, Facmin/Facmax)
+- Nominal and limit active power (decoded as Watts)
+- Country / grid-standard code
+- Raw register dump (collapsible) — 14 rows × 13 cols of hex words
+
+### Fleet Anomalies tab
+
+Click **Scan Fleet** (also gated by topology key). The dashboard walks
+every configured `(inverter, slave)` pair, reads each calibration block,
+computes the per-field median across the fleet, and displays each node's
+delta versus median. Color thresholds:
+
+| Δ vs median | Color | Meaning |
+|---|---|---|
+| ≤ 2 % | green | within normal sensor manufacturing tolerance |
+| 2–5 % | orange | drift worth investigating on next maintenance visit |
+| > 5 % | red | outlier — likely a recently-replaced module with stale factory calibration, or a sensor that needs recalibration |
+
+A full 108-node fleet scan takes ~10 s and is throttled to one
+concurrent call (the second operator click receives HTTP 429 until the
+first scan finishes).
+
+### Calibration Session (writes + dashboard lockdown)
+
+Click **`[Start Calibration Session]`** after picking an inverter / node,
+entering your initials, and supplying a topology key (`adsiM` /
+`adsiMM`). The session card turns red, the dashboard enters **lockdown
+mode**, and a persistent banner pins to the top of every page.
+
+While a session is active:
+
+- **All other top-nav pages are hidden** — only the Field Calibration page is reachable.
+- **APC writes are refused** for the session's inverter (operator must
+  drive `%Pn` via the consign tiles instead).
+- **Critical-pattern auto-block enforcer is suspended** for the session's
+  inverter (alarms still record, but no auto-STOP fires).
+- **Auto-reset is suspended** for the session's node.
+- **Per-register write inputs appear** on the per-node readout table.
+- **Heartbeat pings the server every 10 s** — if your laptop closes or
+  the network drops for 30 s, the session auto-ends and the dashboard
+  restores normal operation.
+- **Hard ceiling of 30 minutes** — sessions auto-end at the absolute
+  limit regardless of heartbeat.
+
+Click **`[End Session]`** to release consign, write a post-session
+snapshot, and restore all paused background processes.
+
+### Writing a calibration value
+
+After starting a session, the per-node readout table gains a `New Value`
+column with editable inputs and a `Write` button per row. To write:
+
+1. Enter the new value (an integer; signed for offsets 92, 94)
+2. Enter your `sacupsMM` key in the bulk-auth field (`sacups` + current
+   minute, e.g. `sacups37`)
+3. Click `Write`
+4. Confirm the modal showing old → new
+
+The pipeline runs: **UNLOCK → WRITE → 1 s settle → VERIFY**. A
+read-back confirms the new value landed. The `ValidCfgCode = 0x1F1F`
+sentinel is checked before AND after the write — if it changes, the
+write reports `sentinel_clobbered` and the operator must investigate
+before continuing.
+
+**Range guard:** writes whose delta vs current is greater than 50 % are
+refused. Tick `Force (bypass 50 % range guard)` to override (logged in
+the audit trail with the override flag).
+
+**Every write is audited** in the `calibration_write_log` table:
+`session_id`, `operator`, `inverter`, `slave`, `reg_offset`,
+`param_name`, `value_before`, `value_requested`, `value_after`,
+`verify_ok`, `auth_method`, `error_detail`. Retention 5 years.
+
+### Consign Mode
+
+When a session is active, a panel appears with tile buttons:
+**`10 %`** / **`20 %`** / **`60 %`** / **`70 %`** / **`Release`**.
+
+Clicking a tile drives `cmd-3` (APC) to that percentage of nominal
+power. The 5 presets correspond to the training PDF's consign steps:
+
+- **10 %** — initial DC current calibration ladder
+- **20 %** — reactive curve X₁Y₁ calibration point
+- **60 %** — DC current calibration target
+- **70 %** — reactive curve X₂Y₂ calibration point
+- **Release** — restore to 100 % Pn
+
+Between distinct setpoints, a 30-second dwell timer enforces PAC
+settling time before another consign command will be accepted. The
+release-to-100 % command is exempt from the dwell guard.
+
+Consign auto-releases on session end (returns to 100 %).
+
+### Bulk Copy
+
+The `Copy from another node` panel lets you read a donor inverter's
+calibration block and write every differing field to the session
+target under one unlock + verify cycle. Useful after a module swap when
+the new electronic block's factory calibration differs from a known-good
+sibling.
+
+Both source and destination must have `ValidCfgCode = 0x1F1F`. Only
+fields where source ≠ destination are written — no-op fields are
+skipped. Every write goes into the audit log with
+`auth_method = sacupsMM+session+copy` and a `notes` column citing the
+source.
+
+### Feature flag
+
+Calibration writes are gated by the `calibrationWritesEnabled` setting,
+default `0`. Set to `1` (Settings → Plant Configuration) after operator
+sign-off. The `Start Calibration Session` button stays disabled when
+the flag is off, with a tooltip explaining how to enable. The page
+toolbar shows a `Writes: ENABLED / OFF` badge so the current state is
+visible at a glance.
+
+### What this does NOT replace
+
+- The multimeter and 3-phase wattmeter still go on-site with the
+  technician. Calibration is iterative: read the live measurement,
+  compute the new scale factor, write, verify against the meter, repeat.
+- Configuration regions outside offsets 81–94 (alarm thresholds, Q-V/Q-P
+  thresholds, derating curves) are intentionally out of scope. Those
+  remain ISM-only commissioning-tier settings.
+- The serial-number write path (`0x9C74` + 0xFFFA unlock magic) is a
+  separate feature under Settings → Serial Number Setting.
 
 ---
 

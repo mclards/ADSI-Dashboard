@@ -17,6 +17,7 @@ const {
 const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
 const dailyAgg = require('./dailyAggregator');
+const { sharedMonitor: gridCodeMonitor } = require('./gridCodeMonitor');
 const {
   normalizeTodayEnergyRows,
   evaluateTodayEnergyHealth,
@@ -1572,6 +1573,33 @@ async function poll() {
 
     seen.add(key);
     markSeenKey(key);
+
+    // v2.11.x Phase 1 — push to grid-code monitor. Plan: plans/2026-05-12-ppc-capabilities-implementation.md §2.
+    // Tap on parsed frame (already in W after parseRow:802 safePac = pac*10).
+    // Pure in-memory ring; no DB, no extra Modbus reads.
+    try {
+      const vac1 = Number(parsed.vac1) || 0;
+      const vac2 = Number(parsed.vac2) || 0;
+      const vac3 = Number(parsed.vac3) || 0;
+      const vacN = (vac1 > 0 ? 1 : 0) + (vac2 > 0 ? 1 : 0) + (vac3 > 0 ? 1 : 0);
+      const vacAvg = vacN > 0 ? (vac1 + vac2 + vac3) / vacN : null;
+      gridCodeMonitor.push({
+        ip: parsed.source_ip,
+        slave: parsed.unit,
+        ts_ms: parsed.ts,
+        pac_w: parsed.pac,
+        qac_var: parsed.qac_var,
+        freq_hz: parsed.fac_hz,
+        vac_avg_v: vacAvg,
+        cosphi: parsed.cosphi,
+        units: 'w',
+      });
+    } catch (gcErr) {
+      // Monitor failures must never break polling.
+      if (!pollStats.lastGridCodeError) {
+        pollStats.lastGridCodeError = String(gcErr?.message || gcErr || "err");
+      }
+    }
 
     // Skip if identical to previous
     const prev = liveData[key];

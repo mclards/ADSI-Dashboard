@@ -4565,6 +4565,12 @@ function switchPage(page) {
   if (page !== "settings") {
     stopReplicationHealthPolling();
   }
+  // v2.11.x Phase 1 — stop Grid Monitor polling when leaving Plant Controller
+  // entirely. switchPlantCapTab handles intra-page tab changes; this catches
+  // the case where the operator clicks a top-level nav button.
+  if (page !== "plant-cap") {
+    try { stopGridMonitor(); } catch (_) {}
+  }
   document
     .querySelectorAll(".page")
     .forEach((p) => p.classList.remove("active"));
@@ -4592,6 +4598,11 @@ function switchPage(page) {
   if (page === "forecast") initForecastPage();
   if (page === "plant-cap") initPlantCapPage();
   if (page === "igbt-health") initIgbtHealthPage();
+  if (page === "field-calibration") {
+    try { initFieldCalibrationSection(); } catch (err) {
+      console.warn("[field-calibration] init failed:", err?.message || err);
+    }
+  }
   if (page === "settings") {
     initSettingsSectionNav();
     unlockSettingsInputs();
@@ -4909,6 +4920,9 @@ function setActiveSettingsSection(sectionId, persist = true) {
       console.warn("[serial-number] init failed:", err?.message || err);
     }
   }
+
+  // v2.11.x — Field Calibration moved to its own top-nav page (page === "field-calibration");
+  // init now triggered from switchPage(), not from this settings sidebar handler.
 }
 
 // v2.8.14: returns true when local backup must be hidden (remote mode).
@@ -6196,9 +6210,12 @@ async function loadSettings() {
     if ($("setPlantCapCooldownSec")) {
       $("setPlantCapCooldownSec").value = String(s.plantCapCooldownSec ?? 30);
     }
-    if ($("setPlantCapSetpointEnabled")) {
-      $("setPlantCapSetpointEnabled").checked = String(s.plantCapSetpointEnabled ?? "1") === "1";
-    }
+    // v2.11.x — plantCapSetpointEnabled toggle moved out of Plant
+    // Configuration; default "1" (tab visible). Set the value directly in
+    // settings if a future toggle UI is added.
+    // v2.11.x Phase 2 — apcRampRateEnabled / apcRampRatePctPerMin live in
+    // State.settings so the Plant Controller APC pane can hydrate its inline
+    // controls. No Settings-page UI controls — see Plant Controller → %P Setpoint.
     $("setDataDir").textContent = s.dataDir || "—";
     const pc = s.inverterPollConfig || {};
     if ($("setPollModbusTimeout"))  $("setPollModbusTimeout").value  = pc.modbusTimeout  ?? 1.0;
@@ -7448,7 +7465,12 @@ async function saveSettings() {
     ),
     plantCapSequenceCustom: plantCapSequence.values,
     plantCapCooldownSec: Number(plantCapRaw.cooldown || 30),
-    plantCapSetpointEnabled: $("setPlantCapSetpointEnabled")?.checked ? "1" : "0",
+    // plantCapSetpointEnabled is preserved as-is — UI moved out of Plant
+    // Configuration; default "1" applied in _apcFeatureEnabled().
+    plantCapSetpointEnabled: State.settings?.plantCapSetpointEnabled ?? "1",
+    // v2.11.x Phase 2 — apcRampRateEnabled / apcRampRatePctPerMin are saved
+    // from the Plant Controller → %P Setpoint pane (inline change handler),
+    // NOT from this Settings-page save path.
     inverterPollConfig: {
       modbusTimeout:  Number($("setPollModbusTimeout")?.value  ?? 1.0),
       reconnectDelay: Number($("setPollReconnectDelay")?.value ?? 0.5),
@@ -8773,6 +8795,9 @@ function switchPlantCapTab(tabKey) {
   if (tabKey === "grid-control") {
     populateGridControlSelectors();
     refreshGridControlFeatureStatus();
+    startGridMonitor();
+  } else {
+    stopGridMonitor();
   }
   if (tabKey === "t2") {
     refreshComplianceT2Status();
@@ -10394,6 +10419,21 @@ function buildApcPane() {
         <span class="item apply"><span class="swatch"></span><b>Apply Setpoint</b> — write the active-power %P level (0–100) and ramp toward it. STOP/START only gate the output; this is what actually changes how much power flows.</span>
       </div>
 
+      <!-- v2.11.x Phase 2 — APC ramp-rate limiter (inline, Plant Controller page) -->
+      <div class="apc-ramp-row" id="apcRampRow"
+           title="Soft ramp pacer. When enabled, every Apply Setpoint write that would change %P faster than the configured rate is split into 15-second steps that converge on the target. NGCP PGC §4.4.4.6 reference; off by default.">
+        <label class="apc-ramp-toggle">
+          <input type="checkbox" id="apcRampRateEnabledInline">
+          <span><b>Ramp-rate limiter</b></span>
+        </label>
+        <label class="apc-ramp-rate">
+          <span>Max ramp</span>
+          <input type="number" id="apcRampRatePctPerMinInline" class="inp inp-sm" min="1" max="100" step="1" value="10">
+          <span class="apc-ramp-suffix">%/min</span>
+        </label>
+        <span id="apcRampStatus" class="apc-ramp-status" aria-live="polite"></span>
+      </div>
+
       <div id="apcProgressWrap" class="apc-progress-wrap" hidden>
         <div class="apc-progress-bar"><div id="apcProgressFill" class="apc-progress-fill" style="width:0%"></div></div>
         <span id="apcProgressLabel" class="apc-progress-label"></span>
@@ -10462,6 +10502,53 @@ function buildApcPane() {
   }
   const toMwCapLink = pane.querySelector("#apcToMwCapLink");
   if (toMwCapLink) toMwCapLink.addEventListener("click", () => switchPlantCapTab("mw-cap"));
+  // v2.11.x Phase 2 — ramp limiter inline controls. Persist via /api/settings
+  // (same backing store as before; we just moved the UI surface).
+  const rampToggle = pane.querySelector("#apcRampRateEnabledInline");
+  const rampInput  = pane.querySelector("#apcRampRatePctPerMinInline");
+  const rampStatus = pane.querySelector("#apcRampStatus");
+  function _setRampStatus(text, kind) {
+    if (!rampStatus) return;
+    rampStatus.textContent = text || "";
+    rampStatus.className = "apc-ramp-status" + (kind ? " " + kind : "");
+  }
+  async function _saveRampSettings() {
+    const enabled = rampToggle?.checked ? "1" : "0";
+    const raw = Number(rampInput?.value);
+    const rate = Number.isFinite(raw) && raw >= 1 && raw <= 100 ? String(Math.trunc(raw)) : "10";
+    if (rampInput) rampInput.value = rate;
+    _setRampStatus("Saving…", "pending");
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apcRampRateEnabled: enabled,
+          apcRampRatePctPerMin: rate,
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      _setRampStatus(enabled === "1" ? `Pacing @ ${rate}%/min` : "Disabled (immediate writes)", enabled === "1" ? "on" : "off");
+      State.settings = State.settings || {};
+      State.settings.apcRampRateEnabled = enabled;
+      State.settings.apcRampRatePctPerMin = rate;
+    } catch (err) {
+      _setRampStatus(`Save failed: ${err.message}`, "err");
+    }
+  }
+  if (rampToggle) rampToggle.addEventListener("change", _saveRampSettings);
+  if (rampInput)  rampInput.addEventListener("change", _saveRampSettings);
+  // Initial hydrate from State.settings (which loadSettings populated at startup).
+  (function _hydrateRampUI() {
+    const enabled = String(State.settings?.apcRampRateEnabled ?? "0") === "1";
+    const rate = (() => {
+      const n = Number(State.settings?.apcRampRatePctPerMin);
+      return Number.isFinite(n) && n >= 1 && n <= 100 ? Math.trunc(n) : 10;
+    })();
+    if (rampToggle) rampToggle.checked = enabled;
+    if (rampInput)  rampInput.value = String(rate);
+    _setRampStatus(enabled ? `Pacing @ ${rate}%/min` : "Disabled (immediate writes)", enabled ? "on" : "off");
+  })();
   return pane;
 }
 
@@ -10500,7 +10587,7 @@ function buildGridControlPane() {
 
       <div id="gcSafetyBanner" class="apc-lockout-banner">
         <span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span>
-        <span><b>Writes are DISABLED.</b> Enabling requires (1) security review, (2) 2-week single-inverter soak, (3) operator sign-off, and (4) <code>gridControlEnabled = "1"</code> in settings. Read-back works regardless. See <a href="docs/Inverter-Modbus-Reference.md" target="_blank">reference</a>.</span>
+        <span><b>Writes are DISABLED.</b> Enabling requires (1) security review, (2) 2-week single-inverter soak, (3) operator sign-off, and (4) <code>gridControlEnabled = "1"</code> in settings. Read-back works regardless. See <a href="user-guide.html#s6" target="_blank">User Guide → Plant Cap</a>.</span>
       </div>
 
       <div class="apc-form-grid">
@@ -10542,10 +10629,13 @@ function buildGridControlPane() {
           </div>
         </div>
 
-        <div class="apc-field">
-          <label class="apc-field-lbl" for="gcAuthInp">Authorization</label>
-          <input id="gcAuthInp" class="inp" type="password" placeholder="Authorization key" autocomplete="off"
-                 title="Bulk-control authorization key.">
+        <div class="apc-field apc-field-auth-note">
+          <span class="apc-field-lbl">Authorization</span>
+          <span class="apc-auth-note">
+            Click <b>Set PF</b> / <b>Set kVAr</b> / <b>Disable reactive</b> and you'll be prompted for the
+            bulk-control authorization key. Same modal as the rest of the
+            dashboard; cached for the session after the first use.
+          </span>
         </div>
       </div>
 
@@ -10576,6 +10666,36 @@ function buildGridControlPane() {
         </div>
         <div id="gcStateWrap" class="apc-history-wrap" style="padding:10px 14px;font-family:var(--font-mono);font-size:11px;color:var(--text2);">
           <em>Click <b>Read state</b> to query the inverter's current grid-control registers.</em>
+        </div>
+      </div>
+    </div>
+
+    <!-- v2.11.x Phase 1 — Grid Monitor (rolling 5-min × 5-sec visibility) -->
+    <!-- Plan: plans/2026-05-12-ppc-capabilities-implementation.md §2 -->
+    <div class="cmp-panel" id="gridMonitorPanel" style="margin-top:12px;">
+      <div class="cmp-panel-head">
+        <div class="cmp-panel-title">Grid Monitor <span class="cmp-badge cmp-badge-blue">Read-only</span></div>
+        <div class="cmp-panel-subtitle">Rolling 5-min × 5-sec window of P, Q, frequency, voltage, ramp rate &amp; observed PF — sourced from live poller frames. NGCP compliance bands overlaid.</div>
+      </div>
+      <div id="gmChips" class="apc-chips-row" style="display:flex;gap:12px;flex-wrap:wrap;padding:8px 14px;font-family:var(--font-mono);font-size:11px;">
+        <span class="cmp-badge cmp-badge-grey">Loading plant aggregate…</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;padding:8px 14px 14px;">
+        <div class="cmp-chart-card">
+          <div class="cmp-chart-title">P vs f <span class="cmp-chart-hint">(NGCP 59.7–60.3 Hz continuous · 58.2–61.8 Hz withstand)</span></div>
+          <canvas id="gmChartPf" height="180"></canvas>
+        </div>
+        <div class="cmp-chart-card">
+          <div class="cmp-chart-title">Q vs V <span class="cmp-chart-hint">(±5% nominal band shaded)</span></div>
+          <canvas id="gmChartQv" height="180"></canvas>
+        </div>
+        <div class="cmp-chart-card">
+          <div class="cmp-chart-title">dP/dt — ramp rate <span class="cmp-chart-hint">(red line = configured APC ramp limit when enabled)</span></div>
+          <canvas id="gmChartDp" height="180"></canvas>
+        </div>
+        <div class="cmp-chart-card">
+          <div class="cmp-chart-title">Observed PF <span class="cmp-chart-hint">(NGCP 0.95 lag/lead boundaries)</span></div>
+          <canvas id="gmChartPfTs" height="180"></canvas>
         </div>
       </div>
     </div>`;
@@ -10693,7 +10813,33 @@ async function refreshGridControlReadback() {
       <div><b>Phi tangent (raw Int16):</b> ${data.phi_tangent_signed} → tan(φ) ${Number(data.phi_tangent_value || 0).toFixed(4)} → PF ≈ ${Number(data.power_factor_estimate || 0).toFixed(3)}</div>
       <div><b>Reactive setpoint:</b> ${data.reactive_signed} (raw, ×10 = VAr) → ${Number(data.reactive_kvar || 0).toFixed(2)} kVAr</div>
       <div><b>Restrictive freq limits flag:</b> ${data.freq_limits_on ? "ON (49.5/50.5 Hz CEI 0-21 — DO NOT issue cmd 12 on this site)" : "OFF (firmware Country Code 42 envelope active)"}</div>
-      <div style="opacity:.6;margin-top:6px;">Raw regs 41006-41010: [${(data.regs || []).join(", ")}]</div>`;
+      <div style="opacity:.6;margin-top:6px;">Raw regs 41006-41010: [${(data.regs || []).join(", ")}]</div>
+      <div id="gcVerifyLine" style="margin-top:8px;"></div>`;
+    // v2.11.x Phase 3 — surface last write verification.
+    try {
+      const vr = await fetch(`/api/grid-control/verify-status/${encodeURIComponent(t.ip)}/${t.slave}`, { cache: "no-store" });
+      if (vr.ok) {
+        const vd = await vr.json();
+        const row = vd?.row;
+        const line = document.getElementById("gcVerifyLine");
+        if (line) {
+          if (!row) {
+            line.innerHTML = '<em style="opacity:.6;">No verification record yet.</em>';
+          } else {
+            const status = String(row.result || "?");
+            const color =
+              status === "ok" ? "var(--green)" :
+              status === "mismatch" ? "var(--red)" :
+              status === "pending" ? "var(--accent)" : "var(--orange)";
+            const ageS = row.verify_ts_ms ? Math.round((Date.now() - row.verify_ts_ms) / 1000) : "—";
+            line.innerHTML =
+              `<b>Last verify:</b> <span style="color:${color};font-weight:600;">${escapeHtml(status.toUpperCase())}</span> ` +
+              `(${escapeHtml(String(row.kind))} req=${row.requested_raw ?? "—"} obs=${row.observed_raw ?? "—"}; ` +
+              `${ageS} s ago)`;
+          }
+        }
+      }
+    } catch (_) { /* verify-status optional */ }
   } catch (err) {
     wrap.innerHTML = `<em style="color:var(--red);">Network error: ${escapeHtml(err.message)}</em>`;
   }
@@ -10711,13 +10857,18 @@ function _pfToPhiRaw(pf, sign) {
 async function submitGridControlPf() {
   if (!GridControlUI.enabled) return;
   const t = _gcResolveTarget();
-  const auth = ($("gcAuthInp") || {}).value || "";
   const pfInp = $("gcPfInp");
   if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
   const pf = Number(pfInp?.value);
   const sign = (pfInp?.getAttribute("data-sign") || "0");
   const phi_raw = _pfToPhiRaw(pf, sign);
   if (Math.abs(phi_raw) > 15870) { showToast("PF target exceeds PDF cmd 1 limit (PF < 0.90).", "warn"); return; }
+  // Modal auth — same flow as APC. Cached per session after first use.
+  const auth = await _bulkAuthForCompliance(`Set PF ${pf} ${sign} on`, `${t.ip}/${t.slave}`);
+  if (!auth) {
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
+    return;
+  }
   const btn = $("gcSetPfBtn"); if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/grid-control/phi", {
@@ -10726,7 +10877,10 @@ async function submitGridControlPf() {
       body: JSON.stringify({ ip: t.ip, slave: t.slave, phi_raw, authKey: auth }),
     });
     const data = await r.json();
-    if (!r.ok || !data.ok) {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — re-enter the key on the next click.", "warning", 5000);
+    } else if (!r.ok || !data.ok) {
       showToast(data.error || `Set PF failed.`, "err", 6000);
     } else {
       showToast(`PF target sent (raw ${phi_raw}, ≈ PF ${pf} ${sign}).`, "ok", 4000);
@@ -10742,7 +10896,6 @@ async function submitGridControlPf() {
 async function submitGridControlReactive() {
   if (!GridControlUI.enabled) return;
   const t = _gcResolveTarget();
-  const auth = ($("gcAuthInp") || {}).value || "";
   if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
   const kvar = Number($("gcKvarInp")?.value);
   if (!Number.isFinite(kvar)) { showToast("kVAr value invalid.", "warn"); return; }
@@ -10751,6 +10904,12 @@ async function submitGridControlReactive() {
   // value is now correctly scaled. See audits/2026-05-11/register-decode-traceback.md
   // Finding 2 — earlier code used kvar*10 which under-wrote by 10×.
   const kvar_div10 = Math.round(kvar * 100);
+  // Modal auth — same flow as APC. Cached per session after first use.
+  const auth = await _bulkAuthForCompliance(`Set ${kvar.toFixed(1)} kVAr on`, `${t.ip}/${t.slave}`);
+  if (!auth) {
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
+    return;
+  }
   const btn = $("gcSetReactiveBtn"); if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/grid-control/reactive", {
@@ -10759,7 +10918,10 @@ async function submitGridControlReactive() {
       body: JSON.stringify({ ip: t.ip, slave: t.slave, kvar_div10, authKey: auth }),
     });
     const data = await r.json();
-    if (!r.ok || !data.ok) {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — re-enter the key on the next click.", "warning", 5000);
+    } else if (!r.ok || !data.ok) {
       showToast(data.error || `Set kVAr failed.`, "err", 6000);
     } else {
       showToast(`Reactive setpoint sent (${kvar.toFixed(1)} kVAr).`, "ok", 4000);
@@ -10775,7 +10937,6 @@ async function submitGridControlReactive() {
 async function submitGridControlDisable() {
   if (!GridControlUI.enabled) return;
   const t = _gcResolveTarget();
-  const auth = ($("gcAuthInp") || {}).value || "";
   if (!t) { showToast("Pick an inverter + node first.", "warn"); return; }
   const ok = await appConfirm(
     "Disable reactive control?",
@@ -10783,6 +10944,12 @@ async function submitGridControlDisable() {
     { ok: "Disable reactive", cancel: "Cancel" },
   );
   if (!ok) return;
+  // Modal auth — same flow as APC. Cached per session after first use.
+  const auth = await _bulkAuthForCompliance(`Disable reactive control on`, `${t.ip}/${t.slave}`);
+  if (!auth) {
+    showToast("Cancelled — bulk-control authorization required.", "warning", 2500);
+    return;
+  }
   const btn = $("gcDisableBtn"); if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/grid-control/disable", {
@@ -10791,7 +10958,10 @@ async function submitGridControlDisable() {
       body: JSON.stringify({ ip: t.ip, slave: t.slave, authKey: auth }),
     });
     const data = await r.json();
-    if (!r.ok || !data.ok) {
+    if (r.status === 403) {
+      clearBulkAuthCache();
+      showToast(data.error || "Authorization expired — re-enter the key on the next click.", "warning", 5000);
+    } else if (!r.ok || !data.ok) {
       showToast(data.error || `Disable failed.`, "err", 6000);
     } else {
       showToast("Reactive control disabled.", "ok", 4000);
@@ -10802,6 +10972,300 @@ async function submitGridControlDisable() {
   } finally {
     if (btn) btn.disabled = !GridControlUI.enabled;
   }
+}
+
+// ─── v2.11.x Phase 1 — Grid Monitor rendering (charts + polling) ───────────
+// Plan: plans/2026-05-12-ppc-capabilities-implementation.md §2
+// All four charts share one polling loop. Pauses when the Grid Code tab isn't
+// visible to avoid spinning Chart.js on a hidden canvas.
+const GridMonitor = {
+  charts: { pf: null, qv: null, dp: null, pfts: null },
+  pollTimer: null,
+  pollMs: 5000,
+  // NGCP envelope (Philippine 60 Hz grid):
+  bandFreqContinuous: [59.7, 60.3],
+  bandFreqWithstand:  [58.2, 61.8],
+  bandVoltPct: 5,           // ±% of nominal (default 480 V three-phase site)
+  voltNominalV: 480,
+  pfMin: 0.95,              // NGCP boundary
+};
+
+function _gmPaletteHash(key) {
+  // Stable per-node colour. djb2-ish.
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = ((h << 5) + h + key.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `hsl(${hue}, 70%, 55%)`;
+}
+
+function _gmEnsureChart(id, type, datasets, options) {
+  const cvs = document.getElementById(id);
+  if (!cvs || !window.Chart) return null;
+  // Re-use the chart if it exists.
+  if (GridMonitor.charts[id]) return GridMonitor.charts[id];
+  const ctx = cvs.getContext("2d");
+  const chart = new Chart(ctx, {
+    type,
+    data: { datasets },
+    options,
+  });
+  GridMonitor.charts[id] = chart;
+  return chart;
+}
+
+function _gmRenderScatterPf(nodes) {
+  const datasets = nodes.map((n) => {
+    const ip = n.inverter_ip;
+    const slave = n.slave;
+    const color = _gmPaletteHash(`${ip}#${slave}`);
+    const points = (n.series || [])
+      .filter((s) => s.freq_hz != null && s.pac_w != null)
+      .map((s) => ({ x: s.freq_hz, y: s.pac_w / 1000 }));
+    return {
+      label: `${ip}/${slave}`,
+      backgroundColor: color,
+      borderColor: color,
+      pointRadius: 2.5,
+      data: points,
+      showLine: false,
+    };
+  });
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    plugins: {
+      legend: { display: nodes.length <= 8, labels: { boxWidth: 8, font: { size: 10 } } },
+      tooltip: { callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.x.toFixed(2)} Hz, ${ctx.parsed.y.toFixed(1)} kW`,
+      } },
+    },
+    scales: {
+      x: {
+        type: "linear",
+        min: 57.5, max: 62.0,
+        title: { display: true, text: "Frequency (Hz)" },
+        grid: { color: (ctx) => {
+          const v = ctx.tick?.value;
+          if (v == null) return "rgba(120,120,120,0.05)";
+          // Continuous band edges in green, withstand in amber.
+          if (v === 59.7 || v === 60.3) return "rgba(80,200,80,0.4)";
+          if (v === 58.2 || v === 61.8) return "rgba(230,180,60,0.4)";
+          return "rgba(120,120,120,0.08)";
+        } },
+      },
+      y: {
+        title: { display: true, text: "Active power P (kW)" },
+        grid: { color: "rgba(120,120,120,0.08)" },
+      },
+    },
+  };
+  const chart = _gmEnsureChart("gmChartPf", "scatter", datasets, opts);
+  if (chart) {
+    chart.data.datasets = datasets;
+    chart.update("none");
+  }
+}
+
+function _gmRenderScatterQv(nodes) {
+  const datasets = nodes.map((n) => {
+    const ip = n.inverter_ip;
+    const slave = n.slave;
+    const color = _gmPaletteHash(`${ip}#${slave}`);
+    const points = (n.series || [])
+      .filter((s) => s.vac_avg_v != null && s.qac_var != null)
+      .map((s) => ({ x: s.vac_avg_v, y: s.qac_var / 1000 }));
+    return {
+      label: `${ip}/${slave}`,
+      backgroundColor: color,
+      borderColor: color,
+      pointRadius: 2.5,
+      data: points,
+      showLine: false,
+    };
+  });
+  const vMin = GridMonitor.voltNominalV * (1 - 2 * GridMonitor.bandVoltPct / 100);
+  const vMax = GridMonitor.voltNominalV * (1 + 2 * GridMonitor.bandVoltPct / 100);
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    plugins: {
+      legend: { display: nodes.length <= 8, labels: { boxWidth: 8, font: { size: 10 } } },
+      tooltip: { callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)} V, ${ctx.parsed.y.toFixed(2)} kVAr`,
+      } },
+    },
+    scales: {
+      x: {
+        type: "linear",
+        min: vMin, max: vMax,
+        title: { display: true, text: "AC voltage V (V)" },
+      },
+      y: {
+        title: { display: true, text: "Reactive Q (kVAr) — + lag / − lead" },
+        grid: { color: "rgba(120,120,120,0.08)" },
+      },
+    },
+  };
+  const chart = _gmEnsureChart("gmChartQv", "scatter", datasets, opts);
+  if (chart) {
+    chart.data.datasets = datasets;
+    chart.update("none");
+  }
+}
+
+function _gmRenderDpDt(nodes) {
+  // Time-series of dP/dt per node, scaled to kW/s.
+  const datasets = nodes.map((n) => {
+    const ip = n.inverter_ip;
+    const slave = n.slave;
+    const color = _gmPaletteHash(`${ip}#${slave}`);
+    const data = [];
+    // Compute dP/dt at every sample using running diff over the series.
+    const s = n.series || [];
+    for (let i = 1; i < s.length; i++) {
+      const a = s[i], b = s[i - 1];
+      const dt = (a.ts_ms - b.ts_ms) / 1000;
+      if (dt > 0 && dt < 60 && a.pac_w != null && b.pac_w != null) {
+        data.push({ x: a.ts_ms, y: (a.pac_w - b.pac_w) / dt / 1000 });
+      }
+    }
+    return {
+      label: `${ip}/${slave}`,
+      borderColor: color,
+      backgroundColor: color,
+      pointRadius: 1.5,
+      showLine: true,
+      tension: 0.2,
+      borderWidth: 1.4,
+      data,
+    };
+  });
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    plugins: {
+      legend: { display: nodes.length <= 8, labels: { boxWidth: 8, font: { size: 10 } } },
+    },
+    scales: {
+      x: {
+        type: "time",
+        time: { displayFormats: { second: "HH:mm:ss", minute: "HH:mm" } },
+        title: { display: true, text: "Time" },
+      },
+      y: {
+        title: { display: true, text: "dP/dt (kW/s)" },
+        grid: { color: "rgba(120,120,120,0.08)" },
+      },
+    },
+  };
+  const chart = _gmEnsureChart("gmChartDp", "line", datasets, opts);
+  if (chart) {
+    chart.data.datasets = datasets;
+    chart.update("none");
+  }
+}
+
+function _gmRenderPfTimeline(nodes) {
+  const datasets = nodes.map((n) => {
+    const ip = n.inverter_ip;
+    const slave = n.slave;
+    const color = _gmPaletteHash(`${ip}#${slave}`);
+    const data = (n.series || [])
+      .filter((s) => s.pf != null)
+      .map((s) => ({ x: s.ts_ms, y: s.pf }));
+    return {
+      label: `${ip}/${slave}`,
+      borderColor: color,
+      backgroundColor: color,
+      pointRadius: 1.5,
+      showLine: true,
+      tension: 0.2,
+      borderWidth: 1.4,
+      data,
+    };
+  });
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    plugins: {
+      legend: { display: nodes.length <= 8, labels: { boxWidth: 8, font: { size: 10 } } },
+    },
+    scales: {
+      x: {
+        type: "time",
+        time: { displayFormats: { second: "HH:mm:ss", minute: "HH:mm" } },
+        title: { display: true, text: "Time" },
+      },
+      y: {
+        min: 0.85, max: 1.0,
+        title: { display: true, text: "Power factor |cos φ|" },
+        grid: { color: "rgba(120,120,120,0.08)" },
+      },
+    },
+  };
+  const chart = _gmEnsureChart("gmChartPfTs", "line", datasets, opts);
+  if (chart) {
+    chart.data.datasets = datasets;
+    chart.update("none");
+  }
+}
+
+function _gmRenderChips(plant) {
+  const wrap = document.getElementById("gmChips");
+  if (!wrap) return;
+  if (!plant || plant.fresh_count === 0) {
+    wrap.innerHTML = '<span class="cmp-badge cmp-badge-grey">No live frames yet — start the poller / wait for first 5-sec tick.</span>';
+    return;
+  }
+  const fHz = plant.plant_freq_hz_avg;
+  const vAvg = plant.plant_vac_v_avg;
+  const pacKw = plant.plant_pac_kw;
+  const qacKvar = plant.plant_qac_kvar;
+  const inBandF = fHz != null && fHz >= GridMonitor.bandFreqContinuous[0] && fHz <= GridMonitor.bandFreqContinuous[1];
+  const inBandV = vAvg != null && Math.abs(vAvg - GridMonitor.voltNominalV) / GridMonitor.voltNominalV <= GridMonitor.bandVoltPct / 100;
+  wrap.innerHTML = `
+    <span class="cmp-badge cmp-badge-blue">Nodes fresh ${plant.fresh_count}/${plant.total_count}</span>
+    <span class="cmp-badge ${inBandF ? "cmp-badge-green" : "cmp-badge-amber"}">f = ${fHz == null ? "—" : fHz.toFixed(3) + " Hz"} ${inBandF ? "✓ band" : "⚠ outside continuous band"}</span>
+    <span class="cmp-badge ${inBandV ? "cmp-badge-green" : "cmp-badge-amber"}">V̄ = ${vAvg == null ? "—" : vAvg.toFixed(1) + " V"} ${inBandV ? "✓ ±5%" : "⚠ outside ±5%"}</span>
+    <span class="cmp-badge cmp-badge-grey">P = ${pacKw.toFixed(1)} kW</span>
+    <span class="cmp-badge cmp-badge-grey">Q = ${qacKvar.toFixed(2)} kVAr</span>
+  `;
+}
+
+async function _gmPoll() {
+  const panel = document.getElementById("gridMonitorPanel");
+  if (!panel || panel.offsetParent === null) return;     // pane not visible
+  try {
+    const r = await fetch("/api/grid-code/live", { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data?.ok) return;
+    _gmRenderChips(data.plant);
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    _gmRenderScatterPf(nodes);
+    _gmRenderScatterQv(nodes);
+    _gmRenderDpDt(nodes);
+    _gmRenderPfTimeline(nodes);
+  } catch (_) { /* ignore transient network errors */ }
+}
+
+function startGridMonitor() {
+  if (GridMonitor.pollTimer) return;
+  _gmPoll();
+  GridMonitor.pollTimer = setInterval(_gmPoll, GridMonitor.pollMs);
+}
+function stopGridMonitor() {
+  if (!GridMonitor.pollTimer) return;
+  clearInterval(GridMonitor.pollTimer);
+  GridMonitor.pollTimer = null;
 }
 
 // ─── end Slice ζ Grid Code UI ───────────────────────────────────────────────
@@ -15013,6 +15477,59 @@ function handleWS(msg) {
         result: msg.status,
       };
       updateApcNodeCurrentPct();
+    }
+    return;
+  }
+  // v2.11.x Phase 2 — APC ramp-rate limiter throttle notification.
+  if (msg.type === "apc:throttled") {
+    if (msg.stage === "begin") {
+      const steps = Number(msg.steps_total) || 0;
+      const durMin = Math.round((Number(msg.duration_ms) || 0) / 60_000);
+      try {
+        showToast(
+          `APC throttled @ ${msg.rate_pct_per_min}%/min — pacing ${steps} step(s) to ${msg.final_target_pct}% over ~${durMin} min.`,
+          "info", 6000,
+        );
+      } catch (_) {}
+    } else if (msg.stage === "step") {
+      // Quieter mid-ramp notifications. Update the State so UI can render
+      // "Ramping (k/n) → P%" alongside the existing setpoint chip.
+      State.apc = State.apc || {};
+      State.apc.throttle = {
+        step_idx: msg.step_idx,
+        steps_total: msg.steps_total,
+        current_step_pct: msg.pct,
+        final_target_pct: msg.final_target_pct,
+        last_ok: !!msg.ok,
+        ts_ms: Date.now(),
+      };
+    }
+    return;
+  }
+  // v2.11.x Phase 3 — Slice ζ verify result. Cached for the read-back chip.
+  if (msg.type === "grid_control:verify") {
+    State.gridControl = State.gridControl || {};
+    State.gridControl.verify = State.gridControl.verify || {};
+    if (msg.inverter_ip && msg.slave != null) {
+      State.gridControl.verify[`${msg.inverter_ip}:${msg.slave}`] = {
+        kind: msg.kind,
+        requested_raw: msg.requested_raw,
+        observed_raw: msg.observed_raw,
+        result: msg.status,
+        ts_ms: Date.now(),
+      };
+      // If the operator is currently looking at this node, refresh the chip.
+      try {
+        if (
+          State.currentPage === "plant-cap" &&
+          State.plantCapActiveTab === "grid-control" &&
+          GridControlUI?.inverter != null
+        ) {
+          // Lightweight repaint — refreshGridControlReadback re-fetches state +
+          // verify in one go.
+          refreshGridControlReadback();
+        }
+      } catch (_) {}
     }
     return;
   }
@@ -27109,6 +27626,1435 @@ async function triggerIgbtFleetCsvExport(btn) {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ─── v2.11.x Field Calibration (Phases 1-4) ─────────────────────────────────
+// Plan: plans/2026-05-12-inverter-calibration-tool.md
+// Phase 1: read-only state + fleet anomalies (always available)
+// Phase 2: session lifecycle + per-register write + audit
+// Phase 3: consign-mode tiles (10/20/60/70 % + release)
+// Phase 4: bulk copy with hardware-fingerprint match
+const FieldCalibrationUI = {
+  inited:    false,
+  inverter:  null,
+  slave:     null,
+  lastState: null,
+  session:   null,         // null | { session_id, inverter, slave, operator, started_at_ms, write_count, consign_writes }
+  heartbeatTimer: null,
+  clockTimer: null,
+  featureStatus: null,
+};
+
+function initFieldCalibrationSection() {
+  if (FieldCalibrationUI.inited) {
+    _fcalApplyRemoteUiState();
+    return;
+  }
+  FieldCalibrationUI.inited = true;
+
+  initCardTabs("fieldCalibrationSection", {
+    storageKey: "adsi_fcal_active_tab",
+    defaultKey: "single",
+  });
+
+  const invPicker = document.getElementById("fcalInverterPicker");
+  const slavePicker = document.getElementById("fcalSlavePicker");
+  const readBtn = document.getElementById("btnFcalRead");
+  const fullBtn = document.getElementById("btnFcalFullConfig");
+  const fleetBtn = document.getElementById("btnFcalFleetScan");
+  if (!invPicker || !slavePicker || !readBtn) return;
+
+  _fcalPopulateInverterPicker(invPicker);
+  _fcalPopulateSlavePicker(slavePicker);
+
+  invPicker.addEventListener("change", () => {
+    FieldCalibrationUI.inverter = Number(invPicker.value) || null;
+    _fcalHideResults();
+  });
+  slavePicker.addEventListener("change", () => {
+    FieldCalibrationUI.slave = Number(slavePicker.value) || null;
+    _fcalHideResults();
+  });
+
+  readBtn.addEventListener("click", _fcalHandleRead);
+  if (fullBtn)  fullBtn.addEventListener("click", _fcalHandleFullConfig);
+  if (fleetBtn) fleetBtn.addEventListener("click", _fcalHandleFleetScan);
+
+  if (invPicker.options.length > 0) {
+    FieldCalibrationUI.inverter = Number(invPicker.options[0].value) || null;
+    invPicker.value = invPicker.options[0].value;
+  }
+  if (slavePicker.options.length > 0) {
+    FieldCalibrationUI.slave = Number(slavePicker.options[0].value) || null;
+  }
+  _fcalApplyRemoteUiState();
+}
+
+function _fcalEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function _fcalPopulateInverterPicker(picker) {
+  picker.innerHTML = "";
+  const cfgInverters = (State?.ipConfig?.inverters)
+    || (State?.settings?.ipconfig?.inverters) || {};
+  Object.entries(cfgInverters).forEach(([k, ip]) => {
+    const inv = Number(k);
+    if (!Number.isFinite(inv) || inv <= 0 || !String(ip || "").trim()) return;
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${inv}  (${ip})`;
+    picker.appendChild(opt);
+  });
+  if (picker.options.length === 0) {
+    for (let i = 1; i <= 27; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `Inverter ${i}`;
+      picker.appendChild(opt);
+    }
+  }
+}
+
+function _fcalPopulateSlavePicker(picker) {
+  picker.innerHTML = "";
+  for (let i = 1; i <= 4; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = String(i);
+    picker.appendChild(opt);
+  }
+}
+
+function _fcalApplyRemoteUiState() {
+  const remote = String(State?.settings?.operationMode || "gateway").trim().toLowerCase() === "remote";
+  const banner = document.getElementById("fcalRemoteBanner");
+  if (banner) {
+    banner.hidden = !remote;
+    const hostEl = banner.querySelector(".js-fcal-gateway-host");
+    if (hostEl) {
+      hostEl.textContent = String(State?.settings?.gatewayHost || "—");
+    }
+  }
+}
+
+function _fcalHideResults() {
+  const single = document.getElementById("fcalReadResult");
+  const full = document.getElementById("fcalFullConfigResult");
+  if (single) { single.hidden = true; single.innerHTML = ""; }
+  if (full)   { full.hidden = true; full.innerHTML = ""; }
+}
+
+function _fcalSetMsg(id, text, kind = "info") {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = String(text || "");
+  el.className = "smsg" + (kind === "err" ? " smsg-err" : kind === "ok" ? " smsg-ok" : "");
+}
+
+async function _fcalAuthedFetch(url, _keyElUnused) {
+  // Topology key now comes from the 1-hour cached session (seeded on the
+  // first privileged click via the in-app modal). Inline key inputs were
+  // removed from the page — there is one canonical key entry path.
+  let key = getCachedTopologyKey();
+  if (!key) {
+    key = await _acquireTopologyKey("Authorize", "calibration read");
+  }
+  if (!key) {
+    const err = new Error("Cancelled — topology key required.");
+    err.userFacing = true;
+    throw err;
+  }
+  const r = await fetch(url, {
+    headers: { "x-topology-key": key, "accept": "application/json" },
+    cache: "no-store",
+  });
+  let body = null;
+  try { body = await r.json(); } catch (_) { body = null; }
+  if (!r.ok) {
+    const e = new Error(body?.error || `HTTP ${r.status}`);
+    e.userFacing = true;
+    e.status = r.status;
+    throw e;
+  }
+  return body;
+}
+
+async function _fcalHandleRead() {
+  const btn = document.getElementById("btnFcalRead");
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalReadMsg", "Pick an inverter and node first.", "err");
+    return;
+  }
+  _fcalSetMsg("fcalReadMsg", "Reading…");
+  if (btn) btn.disabled = true;
+  try {
+    const url = `/api/calibration/state/${inv}/${slave}?_t=${Date.now()}`;
+    const body = await _fcalAuthedFetch(url);
+    if (!body?.ok) throw new Error(body?.error || "read failed");
+    FieldCalibrationUI.lastState = body;
+    _fcalRenderSingle(body);
+    _fcalSetMsg("fcalReadMsg",
+      `Read OK — ValidCfgCode = ${body?.calibration?.valid_cfg_code_hex} ${body?.calibration?.valid_cfg_code_ok ? "✓" : "⚠"}`,
+      body?.calibration?.valid_cfg_code_ok ? "ok" : "err");
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", err?.userFacing ? err.message : `Read failed: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Each scale factor pairs with one (or more) live input register so the
+// operator sees the meter value alongside the factor being edited. Mirrors
+// the TrinPM20 calibration workflow: tweak factor → re-read → meter match.
+const _FCAL_LIVE_MAP = {
+  81: { key: "vac1_v",  unit: "V"   },
+  82: { key: "vac2_v",  unit: "V"   },
+  83: { key: "vac3_v",  unit: "V"   },
+  84: { key: "iac1_a",  unit: "A"   },
+  85: { key: "iac2_a",  unit: "A"   },
+  86: { key: "iac3_a",  unit: "A"   },
+  87: { key: "idc_a",   unit: "A"   },   // ← the 134/141 in the PDF
+  88: { key: "vpv_p_v", unit: "V",  fallback: "vdc_v" },
+  89: { key: "vpv_n_v", unit: "V",  fallback: "vdc_v" },
+  90: { key: "pac_w",   unit: "W"   },
+  91: { key: "qac_var", unit: "VAr" },
+  92: { key: "qac_var", unit: "VAr" },
+  93: { key: "qac_var", unit: "VAr" },
+  94: { key: "qac_var", unit: "VAr" },
+};
+
+function _fcalLiveCell(offset, live) {
+  const m = _FCAL_LIVE_MAP[offset];
+  if (!m || !live) return `<span class="fcal-live-na">—</span>`;
+  let v = live[m.key];
+  if ((v == null || v === 0) && m.fallback) v = live[m.fallback];
+  if (v == null) return `<span class="fcal-live-na">—</span>`;
+  return `<span class="fcal-live-val">${_fcalEsc(String(v))} <small class="fcal-live-unit">${_fcalEsc(m.unit)}</small></span>`;
+}
+
+function _fcalRenderSingle(state) {
+  const host = document.getElementById("fcalReadResult");
+  if (!host) return;
+  const fields = state?.calibration?.fields || [];
+  const live = state?.live || null;
+  // Group by display group so the layout mirrors the display firmware menu.
+  const groups = new Map();
+  for (const f of fields) {
+    if (!groups.has(f.group)) groups.set(f.group, []);
+    groups.get(f.group).push(f);
+  }
+  const groupOrder = ["AC Voltage", "AC Current", "DC", "Active P", "Reactive 1", "Reactive 2"];
+  const orderedGroups = groupOrder.filter((g) => groups.has(g));
+
+  const readAt = new Date(state.read_at_ms || Date.now()).toLocaleString();
+  const sentinel = state?.calibration;
+  const sentinelOk = sentinel?.valid_cfg_code_ok;
+  const sentinelLabel = sentinelOk
+    ? `ValidCfgCode = ${sentinel.valid_cfg_code_hex} (expected 0x1F1F) — block integrity OK`
+    : `ValidCfgCode = ${sentinel?.valid_cfg_code_hex || "?"} (expected 0x1F1F) — unexpected, do NOT proceed to Phase 2 writes`;
+
+  const sections = orderedGroups.map((g) => {
+    const rows = groups.get(g).map((f) => `
+      <tr>
+        <td class="mono fcal-off">${f.offset}</td>
+        <td class="mono">${_fcalEsc(f.label)}</td>
+        <td>${_fcalEsc(f.desc)}</td>
+        <td class="mono fcal-val">${f.is_signed ? f.signed : f.raw_u16}</td>
+        <td class="mono fcal-live">${_fcalLiveCell(f.offset, live)}</td>
+        <td class="mono fcal-hex">0x${(f.raw_u16 & 0xFFFF).toString(16).toUpperCase().padStart(4, "0")}</td>
+      </tr>
+    `).join("");
+    return `
+      <div class="fcal-group">
+        <div class="fcal-group-title">${_fcalEsc(g)}</div>
+        <table class="fcal-table">
+          <thead>
+            <tr>
+              <th>Off</th>
+              <th>Field</th>
+              <th>Description</th>
+              <th class="fcal-val" title="The scale factor currently in the inverter — the value Write modifies.">Factor</th>
+              <th class="fcal-live" title="Live measurement from the inverter input registers — what the LCD would show right now. Compare to your external meter; modify Factor until they match.">Live</th>
+              <th class="fcal-hex">Hex</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+
+  host.innerHTML = `
+    <div class="fcal-readout-header">
+      <div><strong>Inverter ${state.inverter} / Node ${state.slave}</strong> <span class="mono">(${_fcalEsc(state.ip || "")})</span></div>
+      <div class="fcal-readout-meta">
+        <span>Read at ${_fcalEsc(readAt)}</span>
+        <span class="fcal-sentinel ${sentinelOk ? "fcal-sentinel-ok" : "fcal-sentinel-bad"}">${_fcalEsc(sentinelLabel)}</span>
+      </div>
+    </div>
+    ${sections}
+  `;
+  host.hidden = false;
+}
+
+async function _fcalHandleFullConfig() {
+  const btn = document.getElementById("btnFcalFullConfig");
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalReadMsg", "Pick an inverter and node first.", "err");
+    return;
+  }
+  _fcalSetMsg("fcalReadMsg", "Reading full config block (177 regs)…");
+  if (btn) btn.disabled = true;
+  try {
+    const url = `/api/calibration/full-config/${inv}/${slave}?_t=${Date.now()}`;
+    const body = await _fcalAuthedFetch(url);
+    if (!body?.ok) throw new Error(body?.error || "read failed");
+    _fcalRenderFullConfig(body);
+    _fcalSetMsg("fcalReadMsg", `Full config OK — ${body.block_len} registers decoded.`, "ok");
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", err?.userFacing ? err.message : `Full read failed: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _fcalRenderFullConfig(body) {
+  const host = document.getElementById("fcalFullConfigResult");
+  if (!host) return;
+  const dec = body?.decoded || {};
+  const rtc = dec.rtc;
+  const ctx = dec.context || [];
+  const ctxRows = ctx.map((c) => `
+    <tr>
+      <td class="mono fcal-off">${c.offset}</td>
+      <td class="mono">${_fcalEsc(c.field)}</td>
+      <td>${_fcalEsc(c.desc)}</td>
+      <td class="mono fcal-val">${_fcalEsc(c.value == null ? "—" : c.value)}</td>
+      <td class="mono fcal-hex">0x${(c.raw_u16 & 0xFFFF).toString(16).toUpperCase().padStart(4, "0")}</td>
+    </tr>
+  `).join("");
+
+  host.innerHTML = `
+    <div class="fcal-group">
+      <div class="fcal-group-title">Inverter RTC (offset 0–5)</div>
+      <div class="fcal-rtc">${rtc?.iso ? _fcalEsc(rtc.iso) : (rtc ? `${rtc.year}-${rtc.month}-${rtc.day} ${rtc.hour}:${rtc.minute}:${rtc.second}` : "—")}</div>
+    </div>
+    <div class="fcal-group">
+      <div class="fcal-group-title">Context (read-only)</div>
+      <table class="fcal-table">
+        <thead>
+          <tr>
+            <th>Off</th>
+            <th>Field</th>
+            <th>Description</th>
+            <th class="fcal-val">Value</th>
+            <th class="fcal-hex">Hex</th>
+          </tr>
+        </thead>
+        <tbody>${ctxRows}</tbody>
+      </table>
+    </div>
+    <details class="fcal-group" style="margin-top: 8px;">
+      <summary class="fcal-group-title">Raw register dump (${body.block_len} UInt16)</summary>
+      <pre class="mono fcal-raw">${_fcalEsc(body.regs_hex || "")}</pre>
+    </details>
+  `;
+  host.hidden = false;
+}
+
+async function _fcalHandleFleetScan() {
+  const btn = document.getElementById("btnFcalFleetScan");
+  _fcalSetMsg("fcalFleetMsg", "Scanning fleet — this can take ~10 s for a full plant…");
+  if (btn) btn.disabled = true;
+  const host = document.getElementById("fcalFleetResult");
+  if (host) {
+    host.innerHTML = `<div class="srn-empty">Scanning… please wait.</div>`;
+  }
+  try {
+    const url = `/api/calibration/fleet-summary?_t=${Date.now()}`;
+    const body = await _fcalAuthedFetch(url);
+    if (!body?.ok) throw new Error(body?.error || "fleet scan failed");
+    _fcalRenderFleet(body);
+    _fcalSetMsg("fcalFleetMsg", `Scanned ${body.scanned} nodes (${body.failed} failed).`, body.failed ? "err" : "ok");
+  } catch (err) {
+    _fcalSetMsg("fcalFleetMsg", err?.userFacing ? err.message : `Fleet scan failed: ${err?.message || err}`, "err");
+    if (host) host.innerHTML = `<div class="srn-empty">Scan failed — see message above.</div>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _fcalRenderFleet(body) {
+  const host = document.getElementById("fcalFleetResult");
+  if (!host) return;
+  const medians = body.medians || {};
+  const perNode = body.per_node || [];
+  const failures = body.failures || [];
+
+  // Decide which fields to show as columns — only the writable 14.
+  const fieldOrder = [
+    "Fesc_vac_1", "Fesc_vac_2", "Fesc_vac_3",
+    "Fesc_iac_1_baja", "Fesc_iac_2_baja", "Fesc_iac_3_baja",
+    "Fesc_ipv", "Fesc_vpv_p", "Fesc_vpv_n",
+    "comp_per_vacio",
+    "comp_reactiva_x1", "comp_reactiva_y1",
+    "comp_reactiva_x2", "comp_reactiva_y2",
+  ];
+  const shortLabels = {
+    Fesc_vac_1: "Vac1", Fesc_vac_2: "Vac2", Fesc_vac_3: "Vac3",
+    Fesc_iac_1_baja: "Iac1", Fesc_iac_2_baja: "Iac2", Fesc_iac_3_baja: "Iac3",
+    Fesc_ipv: "Ipv", Fesc_vpv_p: "Vpv+", Fesc_vpv_n: "Vpv-",
+    comp_per_vacio: "PerVa", comp_reactiva_x1: "X1", comp_reactiva_y1: "Y1",
+    comp_reactiva_x2: "X2", comp_reactiva_y2: "Y2",
+  };
+
+  const headerCells = fieldOrder.map((f) => `<th title="${_fcalEsc(f)}; median = ${_fcalEsc(medians[f] ?? "—")}">${_fcalEsc(shortLabels[f] || f)}</th>`).join("");
+  const rows = perNode.map((n) => {
+    const cells = fieldOrder.map((f) => {
+      const d = n.deltas_pct?.[f];
+      if (d == null) return `<td class="mono fcal-cell-null">—</td>`;
+      const abs = Math.abs(d);
+      const cls = abs >= 5 ? "fcal-cell-bad" : abs >= 2 ? "fcal-cell-warn" : "fcal-cell-ok";
+      return `<td class="mono ${cls}" title="Δ from fleet median for ${_fcalEsc(f)}">${d > 0 ? "+" : ""}${d.toFixed(2)}%</td>`;
+    }).join("");
+    const cfgOk = n.valid_cfg_code_ok ? "✓" : "⚠";
+    const cfgCls = n.valid_cfg_code_ok ? "fcal-sentinel-ok" : "fcal-sentinel-bad";
+    return `
+      <tr>
+        <td class="mono"><strong>${n.inverter}</strong> / ${n.slave}</td>
+        <td class="mono fcal-ip">${_fcalEsc(n.ip || "")}</td>
+        <td class="${cfgCls}" title="ValidCfgCode sentinel">${cfgOk}</td>
+        ${cells}
+      </tr>
+    `;
+  }).join("");
+
+  const failureRows = failures.map((f) => `
+    <tr class="fcal-fail-row">
+      <td class="mono">${f.inverter} / ${f.slave}</td>
+      <td class="mono fcal-ip">${_fcalEsc(f.ip || "")}</td>
+      <td colspan="${fieldOrder.length + 1}">${_fcalEsc(f.error || "—")}</td>
+    </tr>
+  `).join("");
+
+  host.innerHTML = `
+    <div class="fcal-readout-header">
+      <strong>${perNode.length} nodes scanned</strong>
+      <span class="fcal-readout-meta">
+        <span>Completed at ${new Date(body.completed_at_ms || Date.now()).toLocaleString()}</span>
+        <span class="fcal-legend">
+          <span class="fcal-cell-ok">≤2 %</span>
+          <span class="fcal-cell-warn">2–5 %</span>
+          <span class="fcal-cell-bad">&gt;5 %</span>
+        </span>
+      </span>
+    </div>
+    <div class="fcal-table-scroll">
+      <table class="fcal-table fcal-fleet-table">
+        <thead>
+          <tr>
+            <th>Inv / Node</th>
+            <th>IP</th>
+            <th title="ValidCfgCode sentinel (0x1F1F expected)">Cfg</th>
+            ${headerCells}
+          </tr>
+        </thead>
+        <tbody>${rows}${failureRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ─── Phase 2-4: session lifecycle + writes + consign + copy ──────────────────
+
+async function _fcalLoadFeatureStatus() {
+  try {
+    const r = await fetch("/api/calibration/feature-status?_t=" + Date.now(), { cache: "no-store" });
+    const j = await r.json();
+    FieldCalibrationUI.featureStatus = j;
+    return j;
+  } catch (_) {
+    FieldCalibrationUI.featureStatus = { ok: false };
+    return null;
+  }
+}
+
+function _fcalApplySessionUi() {
+  const s = FieldCalibrationUI.session;
+  const dot = document.getElementById("fcalSessionDot");
+  const label = document.getElementById("fcalSessionLabel");
+  const meta = document.getElementById("fcalSessionMeta");
+  const startBtn = document.getElementById("btnFcalSessionStart");
+  const endBtn = document.getElementById("btnFcalSessionEnd");
+  const opInput = document.getElementById("fcalSessionOperatorInput");
+  const consignPanel = document.getElementById("fcalConsignPanel");
+  const copyPanel = document.getElementById("fcalCopyPanel");
+  const card = document.getElementById("fcalSessionCard");
+  const note = document.getElementById("fcalPhaseNote");
+
+  const writesEnabled = !!(FieldCalibrationUI.featureStatus?.writes_enabled);
+
+  if (s) {
+    // Active session
+    if (dot) dot.classList.add("active");
+    if (label) label.textContent = `Calibration session — Inv ${s.inverter} / Node ${s.slave}`;
+    if (meta) {
+      meta.hidden = false;
+      document.getElementById("fcalSessionTarget").textContent = `Inv ${s.inverter} / Node ${s.slave}`;
+      document.getElementById("fcalSessionOperator").textContent = `op ${s.operator || "—"}`;
+      document.getElementById("fcalSessionWrites").textContent = `${s.write_count || 0} writes`;
+    }
+    if (startBtn) startBtn.hidden = true;
+    if (endBtn)   endBtn.hidden = false;
+    if (opInput)  opInput.hidden = true;
+    if (consignPanel) consignPanel.hidden = false;
+    if (copyPanel)    copyPanel.hidden = false;
+    if (card) card.classList.add("fcal-session-active");
+    if (note) note.hidden = true;
+    // Lock invertor/node pickers — session target is fixed.
+    const invPicker = document.getElementById("fcalInverterPicker");
+    const slavePicker = document.getElementById("fcalSlavePicker");
+    if (invPicker) {
+      invPicker.value = String(s.inverter);
+      invPicker.disabled = true;
+    }
+    if (slavePicker) {
+      slavePicker.value = String(s.slave);
+      slavePicker.disabled = true;
+    }
+    document.body.classList.add("calib-session-active");
+  } else {
+    // No session
+    if (dot) dot.classList.remove("active");
+    if (label) label.textContent = "No active session — read-only mode";
+    if (meta) meta.hidden = true;
+    if (startBtn) {
+      startBtn.hidden = false;
+      startBtn.disabled = !writesEnabled;
+      startBtn.title = writesEnabled
+        ? "Begin a calibration session on the selected (inverter, slave). The dashboard enters lockdown mode and write controls become available."
+        : "Disabled. Click \"Enable Writes…\" on the top-right toolbar to flip `calibrationWritesEnabled` (requires the adsiM/adsiMM topology key).";
+    }
+    if (endBtn) endBtn.hidden = true;
+    if (opInput) opInput.hidden = false;
+    if (consignPanel) consignPanel.hidden = true;
+    if (copyPanel) copyPanel.hidden = true;
+    if (card) card.classList.remove("fcal-session-active");
+    if (note) {
+      note.hidden = false;
+      note.textContent = writesEnabled
+        ? "Read-only mode. Click Start Calibration Session to enable write controls."
+        : "Read-only mode. Click \"Enable Writes…\" on the top-right toolbar (requires adsiM/adsiMM topology key) to unlock the Start button.";
+    }
+    const invPicker = document.getElementById("fcalInverterPicker");
+    const slavePicker = document.getElementById("fcalSlavePicker");
+    if (invPicker) invPicker.disabled = false;
+    if (slavePicker) slavePicker.disabled = false;
+    document.body.classList.remove("calib-session-active");
+  }
+}
+
+function _fcalUpdateSessionClock() {
+  const s = FieldCalibrationUI.session;
+  const el = document.getElementById("fcalSessionClock");
+  if (!s || !el) return;
+  const elapsed = Math.max(0, (Date.now() - s.started_at_ms) / 1000);
+  const m = Math.floor(elapsed / 60), sec = Math.floor(elapsed % 60);
+  el.textContent = `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function _fcalStartHeartbeat() {
+  _fcalStopHeartbeat();
+  FieldCalibrationUI.heartbeatTimer = setInterval(async () => {
+    const s = FieldCalibrationUI.session;
+    if (!s) { _fcalStopHeartbeat(); return; }
+    try {
+      const r = await fetch("/api/calibration/session/heartbeat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_id: s.session_id }),
+      });
+      const j = await r.json();
+      if (!j?.ok) {
+        // Session lost server-side — show banner and clean up.
+        console.warn("[calibration] heartbeat failed:", j?.error);
+        FieldCalibrationUI.session = null;
+        _fcalApplySessionUi();
+        _fcalSetMsg("fcalReadMsg", "Session ended server-side (timeout or abort).", "err");
+        _fcalStopHeartbeat();
+      } else if (j.session) {
+        FieldCalibrationUI.session = j.session;
+        _fcalApplySessionUi();
+      }
+    } catch (_) {}
+  }, 10_000);
+  FieldCalibrationUI.clockTimer = setInterval(_fcalUpdateSessionClock, 1000);
+}
+
+function _fcalStopHeartbeat() {
+  if (FieldCalibrationUI.heartbeatTimer) {
+    clearInterval(FieldCalibrationUI.heartbeatTimer);
+    FieldCalibrationUI.heartbeatTimer = null;
+  }
+  if (FieldCalibrationUI.clockTimer) {
+    clearInterval(FieldCalibrationUI.clockTimer);
+    FieldCalibrationUI.clockTimer = null;
+  }
+}
+
+async function _fcalHandleSessionStart() {
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  const opInput = document.getElementById("fcalSessionOperatorInput");
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalReadMsg", "Pick an inverter + node before starting a session.", "err");
+    return;
+  }
+  const operator = String(opInput?.value || "").trim();
+  if (!operator) {
+    _fcalSetMsg("fcalReadMsg", "Enter your initials before starting the session.", "err");
+    opInput?.focus();
+    return;
+  }
+  // Use the 1-hour cached topology key; if expired, prompt via the in-app modal.
+  let authKey = getCachedTopologyKey();
+  if (!authKey) {
+    authKey = await _acquireTopologyKey(
+      "Start calibration session",
+      `on Inverter ${inv} / Node ${slave} (operator: ${operator})`,
+    );
+  }
+  if (!authKey) {
+    _fcalSetMsg("fcalReadMsg", "Cancelled — session start aborted.", "err");
+    return;
+  }
+  _fcalSetMsg("fcalReadMsg", "Starting session…");
+  const btn = document.getElementById("btnFcalSessionStart");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/calibration/session/start", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-topology-key": authKey },
+      body: JSON.stringify({ inverter: inv, slave, operator }),
+    });
+    const j = await r.json();
+    if (r.status === 401 || r.status === 403 || r.status === 429) {
+      clearTopologyAuthCache();
+      _fcalSetMsg("fcalReadMsg",
+        r.status === 429
+          ? "Too many failed attempts — wait a few seconds and retry."
+          : "Topology key rejected. Click Start again to re-enter.",
+        "err");
+      return;
+    }
+    if (!r.ok || !j?.ok) {
+      _fcalSetMsg("fcalReadMsg", `Session start failed: ${j?.error || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    FieldCalibrationUI.session = j.session;
+    _fcalApplySessionUi();
+    _fcalStartHeartbeat();
+    // Refresh the read view immediately so the user sees the baseline values.
+    _fcalHandleRead();
+    // Populate the bulk-copy source pickers
+    _fcalPopulateCopyPickers();
+    _fcalSetMsg("fcalReadMsg",
+      `Session ${j.session_id.slice(0, 8)} started — write controls now enabled.`, "ok");
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", `Session start error: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _fcalHandleSessionEnd() {
+  const s = FieldCalibrationUI.session;
+  if (!s) return;
+  let authKey = getCachedTopologyKey();
+  if (!authKey) {
+    authKey = await _acquireTopologyKey("End calibration session", `on Inverter ${s.inverter} / Node ${s.slave}`);
+  }
+  if (!authKey) {
+    _fcalSetMsg("fcalReadMsg", "Cancelled — session left active.", "err");
+    return;
+  }
+  const btn = document.getElementById("btnFcalSessionEnd");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/calibration/session/end", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-topology-key": authKey },
+      body: JSON.stringify({ session_id: s.session_id, reason: "operator" }),
+    });
+    const j = await r.json();
+    if (r.status === 401 || r.status === 403 || r.status === 429) {
+      clearTopologyAuthCache();
+      _fcalSetMsg("fcalReadMsg", "Topology key rejected. Click End Session again to re-enter.", "err");
+      return;
+    }
+    if (!r.ok) {
+      _fcalSetMsg("fcalReadMsg", `Session end failed: ${j?.error || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    FieldCalibrationUI.session = null;
+    _fcalApplySessionUi();
+    _fcalStopHeartbeat();
+    _fcalSetMsg("fcalReadMsg",
+      `Session ended — ${j.write_count || 0} writes, ${j.consign_writes || 0} consign commands.`, "ok");
+    // Refresh read to show final state
+    _fcalHandleRead();
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", `Session end error: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// In-place edit support — adds "Edit" handlers to the per-field rows when a
+// session is active.  Hooks into the existing _fcalRenderSingle output by
+// rebuilding it with editable inputs.
+function _fcalRenderSingleEditable(state) {
+  const host = document.getElementById("fcalReadResult");
+  if (!host) return;
+  const fields = state?.calibration?.fields || [];
+  const live = state?.live || null;
+  const groups = new Map();
+  for (const f of fields) {
+    if (!groups.has(f.group)) groups.set(f.group, []);
+    groups.get(f.group).push(f);
+  }
+  const groupOrder = ["AC Voltage", "AC Current", "DC", "Active P", "Reactive 1", "Reactive 2"];
+  const orderedGroups = groupOrder.filter((g) => groups.has(g));
+  const readAt = new Date(state.read_at_ms || Date.now()).toLocaleString();
+  const sentinelOk = state?.calibration?.valid_cfg_code_ok;
+  const sentinelLabel = sentinelOk
+    ? `ValidCfgCode = ${state.calibration.valid_cfg_code_hex} (0x1F1F)`
+    : `ValidCfgCode = ${state?.calibration?.valid_cfg_code_hex || "?"} (expected 0x1F1F)`;
+
+  const sections = orderedGroups.map((g) => {
+    const rows = groups.get(g).map((f) => `
+      <tr data-off="${f.offset}" data-field="${_fcalEsc(f.field)}" data-signed="${f.is_signed ? "1" : "0"}">
+        <td class="mono fcal-off">${f.offset}</td>
+        <td class="mono">${_fcalEsc(f.label)}</td>
+        <td>${_fcalEsc(f.desc)}</td>
+        <td class="mono fcal-val">${f.is_signed ? f.signed : f.raw_u16}</td>
+        <td class="mono fcal-live">${_fcalLiveCell(f.offset, live)}</td>
+        <td>
+          <input class="inp fcal-write-input" type="number" step="1"
+                 data-off="${f.offset}"
+                 value="${f.is_signed ? f.signed : f.raw_u16}"
+                 title="Enter the new value computed from your multimeter / wattmeter reading. Range guard rejects deltas > 50 % unless you pass max_delta_pct=null." />
+        </td>
+        <td>
+          <button class="btn btn-accent btn-sm fcal-write-btn"
+                  data-off="${f.offset}" type="button"
+                  title="Write this single register: unlock → write → 1 s settle → verify. Requires sacupsMM key.">
+            <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span>Write
+          </button>
+        </td>
+      </tr>
+    `).join("");
+    return `
+      <div class="fcal-group">
+        <div class="fcal-group-title">${_fcalEsc(g)}</div>
+        <table class="fcal-table fcal-write-table">
+          <thead>
+            <tr>
+              <th>Off</th>
+              <th>Field</th>
+              <th>Description</th>
+              <th class="fcal-val" title="The scale factor currently in the inverter — Write modifies this.">Factor</th>
+              <th class="fcal-live" title="Live reading from the inverter input registers — what the LCD would show right now. Match this to your external meter by tweaking the New Value.">Live</th>
+              <th>New Value</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+
+  host.innerHTML = `
+    <div class="fcal-readout-header">
+      <div><strong>Inverter ${state.inverter} / Node ${state.slave}</strong> <span class="mono">(${_fcalEsc(state.ip || "")})</span></div>
+      <div class="fcal-readout-meta">
+        <span>Read at ${_fcalEsc(readAt)}</span>
+        <span class="fcal-sentinel ${sentinelOk ? "fcal-sentinel-ok" : "fcal-sentinel-bad"}">${_fcalEsc(sentinelLabel)}</span>
+      </div>
+    </div>
+    <div class="fcal-write-controls">
+      <span class="fcal-write-note">
+        <span class="mdi mdi-shield-key-outline icon-inline" aria-hidden="true"></span>
+        Writes use the 1-hour cached sacupsMM session. First write of the hour prompts; afterwards the in-app modal is bypassed.
+      </span>
+      <label class="invclock-check" for="fcalForceWrite" title="Bypass the 50 % range guard. Use only if you genuinely need to write a value > 50 % from the current — e.g. recalibrating after a sensor swap.">
+        <input type="checkbox" id="fcalForceWrite" />
+        <span class="invclock-check-label">Force (bypass 50 % range guard)</span>
+      </label>
+    </div>
+    ${sections}
+  `;
+  // Wire write buttons
+  host.querySelectorAll(".fcal-write-btn").forEach((btn) => {
+    btn.addEventListener("click", () => _fcalHandleWrite(Number(btn.dataset.off)));
+  });
+  host.hidden = false;
+}
+
+async function _fcalHandleWrite(offset) {
+  const session = FieldCalibrationUI.session;
+  if (!session) {
+    _fcalSetMsg("fcalReadMsg", "Start a calibration session first.", "err");
+    return;
+  }
+  const host = document.getElementById("fcalReadResult");
+  const input = host?.querySelector(`.fcal-write-input[data-off="${offset}"]`);
+  const row = host?.querySelector(`tr[data-off="${offset}"]`);
+  if (!input || !row) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) {
+    _fcalSetMsg("fcalReadMsg", "Enter a valid integer value.", "err");
+    return;
+  }
+  const force = document.getElementById("fcalForceWrite")?.checked;
+  const field = String(row.dataset.field || "");
+  const current = row.querySelector(".fcal-val")?.textContent?.trim();
+  // Cached sacupsMM with in-app modal fallback. Same flow as Plant Controller.
+  const authKey = await _bulkAuthForCompliance(
+    `Write ${field} (${current} → ${value})`,
+    `on Inverter ${session.inverter} / Node ${session.slave}`,
+  );
+  if (!authKey) return;
+  const btn = host.querySelector(`.fcal-write-btn[data-off="${offset}"]`);
+  if (btn) btn.disabled = true;
+  _fcalSetMsg("fcalReadMsg", `Writing ${field}…`);
+  try {
+    const r = await fetch("/api/calibration/write", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        session_id: session.session_id,
+        offset, value: Math.trunc(value),
+        authKey,
+        max_delta_pct: force ? null : 50.0,
+        operator: session.operator,
+      }),
+    });
+    const j = await r.json();
+    if (r.status === 401 || r.status === 403) {
+      clearBulkAuthCache();
+      _fcalSetMsg("fcalReadMsg", "Bulk auth rejected — re-prompting next click.", "err");
+      return;
+    }
+    if (!r.ok || !j?.ok) {
+      _fcalSetMsg("fcalReadMsg", `Write failed: ${j?.error || j?.status || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    _fcalSetMsg("fcalReadMsg",
+      `✓ ${field}: ${j.value_before} → ${j.value_after} verified.`, "ok");
+    // Refresh display to show new value
+    _fcalHandleRead();
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", `Write error: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Consign mode handlers ─────────────────────────────────────────────
+
+async function _fcalHandleConsign(pct) {
+  const session = FieldCalibrationUI.session;
+  if (!session) return;
+  const authKey = await _bulkAuthForCompliance(
+    pct === 100 ? "Release consign" : `Force ${pct} % Pn (consign)`,
+    `on Inverter ${session.inverter} / Node ${session.slave}`,
+  );
+  if (!authKey) return;
+  const status = document.getElementById("fcalConsignStatus");
+  if (status) status.textContent = `Setting consign to ${pct} %…`;
+  try {
+    const r = await fetch("/api/calibration/consign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        session_id: session.session_id,
+        percent: pct,
+        authKey,
+        operator: session.operator,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j?.ok) {
+      if (status) status.textContent = `Consign refused: ${j?.error || `HTTP ${r.status}`}`;
+      return;
+    }
+    if (status) {
+      status.textContent = `Consign ${pct}% accepted at ${new Date().toLocaleTimeString()}${pct !== 100 ? " — wait ~30 s for PAC to settle before measuring." : " (released)"}`;
+    }
+    // Highlight active tile
+    document.querySelectorAll(".fcal-consign-tile").forEach((t) => {
+      t.classList.toggle("fcal-consign-tile-active", Number(t.dataset.consignPct) === pct);
+    });
+  } catch (err) {
+    if (status) status.textContent = `Consign error: ${err?.message || err}`;
+  }
+}
+
+// ─── Bulk copy handlers ────────────────────────────────────────────────
+
+function _fcalPopulateCopyPickers() {
+  const invSel = document.getElementById("fcalCopySrcInv");
+  const slaveSel = document.getElementById("fcalCopySrcSlave");
+  if (!invSel || !slaveSel) return;
+  invSel.innerHTML = "";
+  const cfgInverters = (State?.ipConfig?.inverters)
+    || (State?.settings?.ipconfig?.inverters) || {};
+  const session = FieldCalibrationUI.session;
+  Object.entries(cfgInverters).forEach(([k, ip]) => {
+    const inv = Number(k);
+    if (!Number.isFinite(inv) || inv <= 0) return;
+    if (session && inv === session.inverter) return;   // exclude self
+    const opt = document.createElement("option");
+    opt.value = String(inv);
+    opt.textContent = `Inverter ${inv}  (${ip})`;
+    invSel.appendChild(opt);
+  });
+  slaveSel.innerHTML = "";
+  for (let i = 1; i <= 4; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = String(i);
+    slaveSel.appendChild(opt);
+  }
+}
+
+async function _fcalHandleCopy() {
+  const session = FieldCalibrationUI.session;
+  if (!session) return;
+  const srcInv = Number(document.getElementById("fcalCopySrcInv")?.value);
+  const srcSlave = Number(document.getElementById("fcalCopySrcSlave")?.value);
+  const forceFp = !!document.getElementById("fcalCopyForceFingerprint")?.checked;
+  if (!srcInv || !srcSlave) {
+    _fcalSetMsg("fcalCopyMsg", "Pick source inverter + node.", "err");
+    return;
+  }
+  const authKey = await _bulkAuthForCompliance(
+    "Copy calibration",
+    `from Inverter ${srcInv}/${srcSlave} → Inverter ${session.inverter}/${session.slave}`,
+  );
+  if (!authKey) return;
+  const btn = document.getElementById("btnFcalCopy");
+  if (btn) btn.disabled = true;
+  _fcalSetMsg("fcalCopyMsg", "Reading source + destination…");
+  try {
+    const r = await fetch("/api/calibration/copy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        session_id: session.session_id,
+        source_inverter: srcInv,
+        source_slave: srcSlave,
+        authKey,
+        force_fingerprint: forceFp,
+        operator: session.operator,
+      }),
+    });
+    const j = await r.json();
+    if (r.status === 401 || r.status === 403) {
+      clearBulkAuthCache();
+      _fcalSetMsg("fcalCopyMsg", "Bulk auth rejected — re-prompting next click.", "err");
+      return;
+    }
+    if (r.status === 409 && j?.mismatched_fields) {
+      const fields = (j.mismatched_fields || []).join(", ");
+      _fcalSetMsg("fcalCopyMsg",
+        `Hardware fingerprint mismatch (${fields}). Tick "Force" to override after confirming modules are identical.`,
+        "err");
+      return;
+    }
+    if (!r.ok || !j?.ok) {
+      _fcalSetMsg("fcalCopyMsg", `Copy failed: ${j?.error || j?.status || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    const n = (j.writes || []).length;
+    _fcalSetMsg("fcalCopyMsg", n ? `Copied ${n} differing fields.` : "Source and destination already identical.", "ok");
+    _fcalHandleRead();
+    _fcalLoadBackups();
+  } catch (err) {
+    _fcalSetMsg("fcalCopyMsg", `Copy error: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Backup / Snapshot handlers ────────────────────────────────────────
+
+async function _fcalLoadBackups(opts = {}) {
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  const host = document.getElementById("fcalBackupList");
+  if (!host) return;
+  if (!inv || !slave) {
+    host.innerHTML = `<div class="srn-empty">Pick an inverter + node and click <strong>Read</strong> to load this node's backup history.</div>`;
+    return;
+  }
+  let key = getCachedTopologyKey();
+  if (!key) {
+    if (opts.prompt) {
+      key = await _acquireTopologyKey("Load snapshot history", `for Inverter ${inv} / Node ${slave}`);
+    }
+    if (!key) {
+      host.innerHTML = `<div class="srn-empty">Click <strong>Refresh</strong> to load the backup history (topology key required, cached 1 hour).</div>`;
+      return;
+    }
+  }
+  try {
+    const r = await fetch(`/api/calibration/snapshots/${inv}/${slave}?_t=${Date.now()}`, {
+      headers: { "x-topology-key": key },
+      cache: "no-store",
+    });
+    if (r.status === 401 || r.status === 403) {
+      clearTopologyAuthCache();
+      host.innerHTML = `<div class="srn-empty">Topology key rejected — click <strong>Refresh</strong> to re-enter.</div>`;
+      return;
+    }
+    const j = await r.json();
+    if (!j?.ok) {
+      host.innerHTML = `<div class="srn-empty">Load failed: ${_fcalEsc(j?.error || "")}</div>`;
+      return;
+    }
+    _fcalRenderBackupList(j.snapshots || []);
+  } catch (err) {
+    host.innerHTML = `<div class="srn-empty">Error: ${_fcalEsc(err?.message || String(err))}</div>`;
+  }
+}
+
+function _fcalRenderBackupList(snapshots) {
+  const host = document.getElementById("fcalBackupList");
+  if (!host) return;
+  if (!snapshots.length) {
+    host.innerHTML = `<div class="srn-empty">No snapshots yet. Click <strong>Backup Now</strong> to capture one.</div>`;
+    return;
+  }
+  const sessionActive = !!FieldCalibrationUI.session;
+  const rows = snapshots.map((s) => {
+    const ts = new Date(s.ts_utc).toLocaleString();
+    const sentinelOk = Number(s.valid_cfg_code) === 0x1F1F;
+    const sentinelTag = sentinelOk
+      ? `<span class="fcal-sentinel fcal-sentinel-ok">ValidCfgCode OK</span>`
+      : `<span class="fcal-sentinel fcal-sentinel-bad">ValidCfgCode 0x${Number(s.valid_cfg_code || 0).toString(16).toUpperCase()}</span>`;
+    const sourceLabel = ({
+      "baseline":   "Session baseline",
+      "post-write": "Post-session",
+      "manual":     "Manual backup",
+      "periodic":   "Periodic snapshot",
+    })[s.source] || s.source;
+    const sessionLink = s.session_id ? `<span class="mono">session ${String(s.session_id).slice(0, 8)}</span>` : "";
+    const noteHtml = s.notes ? `<div class="fcal-backup-note">“${_fcalEsc(s.notes)}”</div>` : "";
+    const restoreDisabled = !sessionActive || !sentinelOk;
+    const restoreTitle = !sentinelOk
+      ? "Snapshot's ValidCfgCode is not 0x1F1F — refusing restore"
+      : !sessionActive
+        ? "Restore requires an active calibration session on the same (inverter, node)"
+        : "Replay all 14 scale-factor writes from this snapshot through the unlock + write + verify pipeline.";
+    const deleteBtn = s.source === "manual"
+      ? `<button class="btn btn-outline btn-xs fcal-backup-del" data-snap-id="${s.id}" title="Delete this manual snapshot. Baseline / post-session snapshots are part of the audit trail and cannot be deleted.">
+           <span class="mdi mdi-delete-outline icon-inline" aria-hidden="true"></span>
+         </button>`
+      : "";
+    return `
+      <div class="fcal-backup-row" data-snap-id="${s.id}">
+        <div class="fcal-backup-row-main">
+          <div class="fcal-backup-row-head">
+            <span class="fcal-backup-source fcal-backup-source-${_fcalEsc(s.source)}">${_fcalEsc(sourceLabel)}</span>
+            <span class="fcal-backup-ts mono">${_fcalEsc(ts)}</span>
+            ${sentinelTag}
+            ${sessionLink}
+          </div>
+          ${noteHtml}
+        </div>
+        <div class="fcal-backup-row-actions">
+          <button class="btn btn-accent btn-sm fcal-backup-restore"
+                  data-snap-id="${s.id}"
+                  ${restoreDisabled ? "disabled" : ""}
+                  title="${_fcalEsc(restoreTitle)}">
+            <span class="mdi mdi-restore icon-inline" aria-hidden="true"></span>
+            Restore
+          </button>
+          ${deleteBtn}
+        </div>
+      </div>`;
+  }).join("");
+  host.innerHTML = rows;
+  host.querySelectorAll(".fcal-backup-restore").forEach((btn) => {
+    if (btn.disabled) return;
+    btn.addEventListener("click", () => _fcalHandleRestore(Number(btn.dataset.snapId)));
+  });
+  host.querySelectorAll(".fcal-backup-del").forEach((btn) => {
+    btn.addEventListener("click", () => _fcalHandleDeleteSnapshot(Number(btn.dataset.snapId)));
+  });
+}
+
+async function _fcalHandleBackupNow() {
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalBackupMsg", "Pick an inverter + node first.", "err");
+    return;
+  }
+  let key = getCachedTopologyKey();
+  if (!key) {
+    key = await _acquireTopologyKey("Capture manual backup", `for Inverter ${inv} / Node ${slave}`);
+  }
+  if (!key) return;
+  const note = String(document.getElementById("fcalBackupNote")?.value || "").trim();
+  const btn = document.getElementById("btnFcalBackupNow");
+  if (btn) btn.disabled = true;
+  _fcalSetMsg("fcalBackupMsg", "Capturing snapshot…");
+  try {
+    const r = await fetch(`/api/calibration/snapshot/${inv}/${slave}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-topology-key": key },
+      body: JSON.stringify({
+        note,
+        operator: FieldCalibrationUI.session?.operator || "operator",
+      }),
+    });
+    if (r.status === 401 || r.status === 403) {
+      clearTopologyAuthCache();
+      _fcalSetMsg("fcalBackupMsg", "Topology key rejected — click Backup Now again.", "err");
+      return;
+    }
+    const j = await r.json();
+    if (!j?.ok) {
+      _fcalSetMsg("fcalBackupMsg", `Backup failed: ${j?.error || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    _fcalSetMsg("fcalBackupMsg",
+      `✓ Snapshot id=${j.id} captured at ${new Date(j.ts_utc).toLocaleTimeString()}.`, "ok");
+    const noteInput = document.getElementById("fcalBackupNote");
+    if (noteInput) noteInput.value = "";
+    await _fcalLoadBackups();
+  } catch (err) {
+    _fcalSetMsg("fcalBackupMsg", `Backup error: ${err?.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _fcalHandleRestore(snapshotId) {
+  const session = FieldCalibrationUI.session;
+  if (!session) {
+    _fcalSetMsg("fcalBackupMsg", "Start a calibration session on this node before restoring.", "err");
+    return;
+  }
+  const authKey = await _bulkAuthForCompliance(
+    `Restore snapshot id=${snapshotId}`,
+    `to Inverter ${session.inverter} / Node ${session.slave} (14 register writes via UNLOCK + WRITE + VERIFY)`,
+  );
+  if (!authKey) return;
+  _fcalSetMsg("fcalBackupMsg", `Restoring snapshot ${snapshotId}…`);
+  try {
+    const r = await fetch(`/api/calibration/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        snapshot_id: snapshotId,
+        session_id: session.session_id,
+        authKey,
+        operator: session.operator,
+        max_delta_pct: 50.0,
+      }),
+    });
+    if (r.status === 401 || r.status === 403) {
+      clearBulkAuthCache();
+      _fcalSetMsg("fcalBackupMsg", "Bulk auth rejected — click Restore again to re-prompt.", "err");
+      return;
+    }
+    const j = await r.json();
+    if (!j?.ok) {
+      _fcalSetMsg("fcalBackupMsg", `Restore failed: ${j?.error || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    const writes = j.writes || [];
+    const ok = writes.filter((w) => w.verify_ok).length;
+    _fcalSetMsg("fcalBackupMsg",
+      `✓ Restored ${ok}/${writes.length} registers from snapshot ${snapshotId}.`, "ok");
+    _fcalHandleRead();
+    _fcalLoadBackups();
+  } catch (err) {
+    _fcalSetMsg("fcalBackupMsg", `Restore error: ${err?.message || err}`, "err");
+  }
+}
+
+async function _fcalHandleDeleteSnapshot(snapshotId) {
+  if (!confirm(`Delete snapshot id=${snapshotId}?\n\nOnly manual snapshots can be deleted. Baseline / post-session snapshots are part of the audit trail.`)) {
+    return;
+  }
+  let key = getCachedTopologyKey();
+  if (!key) {
+    key = await _acquireTopologyKey("Delete snapshot", `id=${snapshotId}`);
+  }
+  if (!key) return;
+  try {
+    const r = await fetch(`/api/calibration/snapshot/${snapshotId}`, {
+      method: "DELETE",
+      headers: { "x-topology-key": key },
+    });
+    if (r.status === 401 || r.status === 403) {
+      clearTopologyAuthCache();
+      _fcalSetMsg("fcalBackupMsg", "Topology key rejected.", "err");
+      return;
+    }
+    const j = await r.json();
+    if (!j?.ok) {
+      _fcalSetMsg("fcalBackupMsg", `Delete failed: ${j?.error || `HTTP ${r.status}`}`, "err");
+      return;
+    }
+    _fcalSetMsg("fcalBackupMsg", `Snapshot ${snapshotId} deleted.`, "ok");
+    _fcalLoadBackups();
+  } catch (err) {
+    _fcalSetMsg("fcalBackupMsg", `Delete error: ${err?.message || err}`, "err");
+  }
+}
+
+// Patch _fcalHandleRead to render the editable variant whenever a session is
+// active and to auto-refresh the snapshot list for the current (inv, slave).
+const _fcalHandleReadOriginal = _fcalHandleRead;
+_fcalHandleRead = async function _fcalHandleReadWrapped() {
+  await _fcalHandleReadOriginal();
+  if (FieldCalibrationUI.session && FieldCalibrationUI.lastState) {
+    _fcalRenderSingleEditable(FieldCalibrationUI.lastState);
+  }
+  // Refresh backup history alongside the calibration table.
+  _fcalLoadBackups().catch(() => {});
+};
+
+// Patch initFieldCalibrationSection to also wire session/consign/copy controls.
+const _fcalInitOriginal = initFieldCalibrationSection;
+initFieldCalibrationSection = async function initFieldCalibrationSectionWrapped() {
+  _fcalInitOriginal();
+  // Wire session controls (idempotent — handlers attach on first init only)
+  const startBtn = document.getElementById("btnFcalSessionStart");
+  const endBtn = document.getElementById("btnFcalSessionEnd");
+  if (startBtn && !startBtn.dataset.bound) {
+    startBtn.dataset.bound = "1";
+    startBtn.addEventListener("click", _fcalHandleSessionStart);
+  }
+  if (endBtn && !endBtn.dataset.bound) {
+    endBtn.dataset.bound = "1";
+    endBtn.addEventListener("click", _fcalHandleSessionEnd);
+  }
+  // Consign tiles
+  document.querySelectorAll(".fcal-consign-tile").forEach((tile) => {
+    if (tile.dataset.bound) return;
+    tile.dataset.bound = "1";
+    tile.addEventListener("click", () => _fcalHandleConsign(Number(tile.dataset.consignPct)));
+  });
+  // Copy button
+  const copyBtn = document.getElementById("btnFcalCopy");
+  if (copyBtn && !copyBtn.dataset.bound) {
+    copyBtn.dataset.bound = "1";
+    copyBtn.addEventListener("click", _fcalHandleCopy);
+  }
+  // Feature status + initial session state
+  await _fcalLoadFeatureStatus();
+  _fcalRefreshWritesBadge();
+  // Toggle-writes button on the page toolbar — one click → flip flag.
+  const toggleBtn = document.getElementById("btnFcalToggleWrites");
+  if (toggleBtn && !toggleBtn.dataset.bound) {
+    toggleBtn.dataset.bound = "1";
+    toggleBtn.addEventListener("click", _fcalHandleToggleWrites);
+  }
+  // Backup panel — Backup Now + Refresh
+  const backupBtn = document.getElementById("btnFcalBackupNow");
+  if (backupBtn && !backupBtn.dataset.bound) {
+    backupBtn.dataset.bound = "1";
+    backupBtn.addEventListener("click", _fcalHandleBackupNow);
+  }
+  const backupRefreshBtn = document.getElementById("btnFcalBackupRefresh");
+  if (backupRefreshBtn && !backupRefreshBtn.dataset.bound) {
+    backupRefreshBtn.dataset.bound = "1";
+    backupRefreshBtn.addEventListener("click", () => _fcalLoadBackups({ prompt: true }));
+  }
+  // Tab clicks — swap the matching header block (single vs fleet) so the
+  // controls above the scroll always reflect the active tab.
+  document.querySelectorAll("#fieldCalibrationSection .card-tab").forEach((tabBtn) => {
+    if (tabBtn.dataset.fcalHeaderBound === "1") return;
+    tabBtn.dataset.fcalHeaderBound = "1";
+    tabBtn.addEventListener("click", () => {
+      _fcalSyncHeaderToActiveTab(tabBtn.dataset.cardTab || "single");
+    });
+  });
+  // Initial sync — matches the tab that initCardTabs restored from storage.
+  const initialActive = document.querySelector("#fieldCalibrationSection .card-tab[aria-selected=\"true\"]");
+  _fcalSyncHeaderToActiveTab(initialActive?.dataset?.cardTab || "single");
+  if (FieldCalibrationUI.featureStatus?.session_active) {
+    FieldCalibrationUI.session = FieldCalibrationUI.featureStatus.session;
+    _fcalStartHeartbeat();
+  }
+  _fcalApplySessionUi();
+};
+
+function _fcalSyncHeaderToActiveTab(activeTabKey) {
+  const header = document.querySelector("#page-field-calibration .fcal-header");
+  if (header) header.dataset.activeTab = activeTabKey;
+  document.querySelectorAll("#page-field-calibration .fcal-header-block").forEach((block) => {
+    const isActive = block.dataset.fcalHeader === activeTabKey;
+    if (isActive) block.removeAttribute("hidden");
+    else block.setAttribute("hidden", "");
+  });
+}
+
+function _fcalRefreshWritesBadge() {
+  try {
+    const badgeText = document.getElementById("fcalFeatureBadgeText");
+    const badgeWrap = document.getElementById("fcalFeatureBadge");
+    const toggleBtn = document.getElementById("btnFcalToggleWrites");
+    const toggleLbl = document.getElementById("btnFcalToggleWritesLabel");
+    const writesEnabled = !!(FieldCalibrationUI.featureStatus?.writes_enabled);
+    if (badgeText) badgeText.textContent = writesEnabled ? "ENABLED" : "OFF";
+    if (badgeWrap) badgeWrap.style.color = writesEnabled ? "var(--red)" : "var(--text2)";
+    if (toggleBtn) toggleBtn.hidden = false;
+    if (toggleLbl) toggleLbl.textContent = writesEnabled ? "Disable Writes" : "Enable Writes…";
+    if (toggleBtn) {
+      toggleBtn.classList.toggle("btn-red", !writesEnabled);
+      toggleBtn.classList.toggle("btn-outline", writesEnabled);
+    }
+  } catch (_) {}
+}
+
+// ── Topology-key auth cache (mirrors the bulk-auth 1-hour pattern) ──────
+// Cached for 60 minutes per dashboard session so the operator doesn't get
+// re-prompted for adsiM/adsiMM on every privileged action on this page.
+// Cleared on 401/429 so a rotated key forces a re-prompt next click.
+const TOPOLOGY_AUTH_CACHE_TTL_MS = 60 * 60 * 1000;
+const _topologyAuthCache = { key: null, expiresAt: 0 };
+
+function getCachedTopologyKey() {
+  if (!_topologyAuthCache.key) return "";
+  if (Date.now() >= _topologyAuthCache.expiresAt) {
+    _topologyAuthCache.key = null;
+    _topologyAuthCache.expiresAt = 0;
+    return "";
+  }
+  return _topologyAuthCache.key;
+}
+
+function setCachedTopologyKey(key) {
+  const trimmed = String(key || "").trim();
+  if (!trimmed) return;
+  _topologyAuthCache.key = trimmed;
+  _topologyAuthCache.expiresAt = Date.now() + TOPOLOGY_AUTH_CACHE_TTL_MS;
+}
+
+function clearTopologyAuthCache() {
+  _topologyAuthCache.key = null;
+  _topologyAuthCache.expiresAt = 0;
+}
+
+function topologyAuthCacheMinutesRemaining() {
+  if (!_topologyAuthCache.key) return 0;
+  const ms = _topologyAuthCache.expiresAt - Date.now();
+  return ms > 0 ? Math.ceil(ms / 60_000) : 0;
+}
+
+// Acquire a topology key — confirmation modal + cached-or-prompt flow.
+// Reuses the existing in-app bulkAuthModal because Electron silently
+// disables window.prompt(). Returns "" if the operator cancels.
+async function _acquireTopologyKey(action, scopeLabel) {
+  let ok = true;
+  try {
+    if (typeof appConfirm === "function") {
+      const cachedMins = topologyAuthCacheMinutesRemaining();
+      const cachedNote = cachedMins > 0
+        ? `\n\nTopology authorization cached for ${cachedMins} min — no key prompt.`
+        : "\n\nYou'll be prompted for the adsiM / adsiMM topology key next.";
+      ok = await appConfirm(
+        "Confirm action",
+        `${action} ${scopeLabel}?${cachedNote}`,
+        { ok: "Proceed", cancel: "Cancel" },
+      );
+    }
+  } catch (_) {}
+  if (!ok) return "";
+
+  const cached = getCachedTopologyKey();
+  if (cached) return cached;
+
+  if (typeof initBulkAuthModal === "function") initBulkAuthModal();
+  if (typeof requestBulkAuthorization === "function") {
+    try {
+      const key = String(await requestBulkAuthorization(action, scopeLabel, 1) || "");
+      if (key) setCachedTopologyKey(key);
+      return key;
+    } catch (_) {
+      return "";
+    }
+  }
+  // Dev fallback only — modal markup is part of the dashboard shell.
+  try {
+    const key = String(window.prompt("Enter adsiM/adsiMM topology key:") || "");
+    if (key) setCachedTopologyKey(key);
+    return key;
+  } catch (_) {
+    return "";
+  }
+}
+
+async function _fcalHandleToggleWrites() {
+  const cur = !!(FieldCalibrationUI.featureStatus?.writes_enabled);
+  const target = !cur;
+  const verb = target ? "Enable" : "Disable";
+  const scope = target
+    ? "calibration writes (unlocks direct Modbus writes to scale factors)"
+    : "calibration writes (return to read-only)";
+  const key = await _acquireTopologyKey(verb, scope);
+  if (!key) return;
+
+  try {
+    const r = await fetch("/api/calibration/feature-toggle", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-topology-key": String(key).trim(),
+      },
+      body: JSON.stringify({ enable: target ? "1" : "0" }),
+    });
+    let j = null;
+    try { j = await r.json(); } catch (_) { j = null; }
+    if (r.status === 401 || r.status === 403 || r.status === 429) {
+      clearTopologyAuthCache();
+      _fcalSetMsg("fcalReadMsg",
+        r.status === 429
+          ? "Too many failed attempts — wait a few seconds and retry."
+          : "Topology key rejected. Re-prompting next click.",
+        "err");
+      return;
+    }
+    if (!j?.ok) {
+      const msg = j?.error === "session_active"
+        ? "Cannot disable while a calibration session is active. End the session first."
+        : (j?.error || "Toggle failed.");
+      _fcalSetMsg("fcalReadMsg", msg, "err");
+      return;
+    }
+    await _fcalLoadFeatureStatus();
+    _fcalRefreshWritesBadge();
+    _fcalApplySessionUi();
+    _fcalSetMsg("fcalReadMsg", `Calibration writes ${target ? "ENABLED" : "DISABLED"}.`, "ok");
+  } catch (err) {
+    _fcalSetMsg("fcalReadMsg", `Toggle failed: ${err?.message || err}`, "err");
+  }
+}
 
 // ── v2.9.0 Slice G — deep-link handler for /#settings-inverter-clock ──────
 // The /admin/inverter-clock URL redirects here; consume the hash on load.
