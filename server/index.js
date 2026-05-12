@@ -151,6 +151,7 @@ const dailyAggregator = require("./dailyAggregator");
 const igbtHealth = require("./igbtHealth");
 const igbtThermal = require("./igbtThermal");
 const acContactor = require("./acContactorHealth");
+const stopReasonAggregator = require("./stopReasonAggregator");
 const criticalAlarmPatterns = require("./criticalAlarmPatterns");
 const { ApcVerifier } = require("./apcVerify");
 const { sharedMonitor: gridCodeMonitor } = require("./gridCodeMonitor");
@@ -13467,21 +13468,21 @@ app.get("/api/igbt/fleet", (req, res) => {
 
     // Enumerate all configured nodes (object-map ipconfig walk)
     for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
-      // Query stop-reason counts (90-day window)
-      const thermalCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const framaCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const piAnaCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
+      // Stop-reason counts (rolling window). v2.11.0-beta.6: counts UNION
+      // both `inverter_stop_reasons_std` (operator refresh / std fanout) AND
+      // `inverter_stop_reasons` (Slice F auto-capture on alarm transition)
+      // so the fleet table reflects every captured event regardless of
+      // which path filled it in — see server/stopReasonAggregator.js for
+      // the dedup-bucket rationale.
+      const thermalCount = stopReasonAggregator.countMotivesCombined(
+        db, ip, slave, cutoffMs, [7, 21],
+      );
+      const framaCount = stopReasonAggregator.countMotivesCombined(
+        db, ip, slave, cutoffMs, [13, 29, 30],
+      );
+      const piAnaCount = stopReasonAggregator.countMotivesCombined(
+        db, ip, slave, cutoffMs, [26],
+      );
 
       // Query last hour 5-min parameters for imbalance + per-phase snapshot
       // + currently-raised alarm bits (inv_alarms bitwise-OR across slot).
@@ -13512,12 +13513,8 @@ app.get("/api/igbt/fleet", (req, res) => {
         yoy_drift_c: yoyBlock.yoy_drift_c,
       });
 
-      // Query last event
-      const lastEvent = db.prepare(`
-        SELECT motive_code, read_at_ms FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ?
-          ORDER BY read_at_ms DESC LIMIT 1
-      `).get(ip, slave);
+      // Last stop event — combined across both tables.
+      const lastEvent = stopReasonAggregator.findLastStopEvent(db, ip, slave);
 
       const node = {
         inverter: inv,
@@ -13526,18 +13523,9 @@ app.get("/api/igbt/fleet", (req, res) => {
         health_score: scoreResult.score,
         tier: scoreResult.tier,
         frama_total: framaCount,
-        frama_branch1: db.prepare(`
-          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
-        `).get(ip, slave, cutoffMs)?.cnt || 0,
-        frama_branch2: db.prepare(`
-          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
-        `).get(ip, slave, cutoffMs)?.cnt || 0,
-        frama_branch3: db.prepare(`
-          SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-            WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
-        `).get(ip, slave, cutoffMs)?.cnt || 0,
+        frama_branch1: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [29]),
+        frama_branch2: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [30]),
+        frama_branch3: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13]),
         thermal_trips: thermalCount,
         pi_ana_trips: piAnaCount,
         temp_pe_now_c: tempC,
@@ -13641,21 +13629,18 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
     const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
     const oneHourAgo = now - 60 * 60 * 1000;
 
-    // Query counts
-    const thermalCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-    const framaCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-    const piAnaCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
+    // Query counts. v2.11.0-beta.6: combined across std + vendor SCOPE
+    // (see server/stopReasonAggregator.js — auto-captured events from
+    // Slice F now surface in the IGBT drilldown too).
+    const thermalCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [7, 21],
+    );
+    const framaCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [13, 29, 30],
+    );
+    const piAnaCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [26],
+    );
 
     // Query param data for imbalance + per-phase snapshot + DC-side telemetry
     // + active alarm-bits OR-mask.
@@ -13684,24 +13669,16 @@ app.get("/api/igbt/node/:inverter/:slave", (req, res) => {
       yoy_drift_c: yoyBlock.yoy_drift_c,
     });
 
-    // Query recent events (last 10 per category)
-    const thermalEvents = db.prepare(`
-      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-        ORDER BY read_at_ms DESC LIMIT 10
-    `).all(ip, slave, cutoffMs);
-
-    const framaEvents = db.prepare(`
-      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-        ORDER BY read_at_ms DESC LIMIT 10
-    `).all(ip, slave, cutoffMs);
-
-    const piAnaEvents = db.prepare(`
-      SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-        ORDER BY read_at_ms DESC LIMIT 10
-    `).all(ip, slave, cutoffMs);
+    // Recent events (last 10 per category) — combined cross-table list.
+    const thermalEvents = stopReasonAggregator.listRecentStopEvents(
+      db, ip, slave, cutoffMs, [7, 21], 10,
+    );
+    const framaEvents = stopReasonAggregator.listRecentStopEvents(
+      db, ip, slave, cutoffMs, [13, 29, 30], 10,
+    );
+    const piAnaEvents = stopReasonAggregator.listRecentStopEvents(
+      db, ip, slave, cutoffMs, [26], 10,
+    );
 
     // Query current state from latest param (per-phase voltage + current +
     // DC-side telemetry + active alarm bits OR-mask).
@@ -13851,38 +13828,16 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
 
     const rows = [];
 
-    // Enumerate all configured nodes (object-map ipconfig walk)
+    // Enumerate all configured nodes (object-map ipconfig walk).
+    // v2.11.0-beta.6: motive counts combined across std + vendor SCOPE
+    // so the CSV export agrees with the dashboard fleet table.
     for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
-      // Query data
-      const thermalCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const framaCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const bramaBranch1 = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 29
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const bramaBranch2 = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 30
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const bramaBranch3 = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 13
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
-
-      const piAnaCount = db.prepare(`
-        SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-      `).get(ip, slave, cutoffMs)?.cnt || 0;
+      const thermalCount = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [7, 21]);
+      const framaCount   = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13, 29, 30]);
+      const bramaBranch1 = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [29]);
+      const bramaBranch2 = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [30]);
+      const bramaBranch3 = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13]);
+      const piAnaCount   = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [26]);
 
       const oneHourAgo = now - 60 * 60 * 1000;
       const paramRows = db.prepare(`
@@ -13901,12 +13856,11 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
         imbalance_pct: imbalancePct,
       });
 
-      // Last event
-      const lastEvent = db.prepare(`
-        SELECT timestamp_iso, motive_code FROM inverter_stop_reasons_std
-          WHERE inverter_ip = ? AND slave = ?
-          ORDER BY read_at_ms DESC LIMIT 1
-      `).get(ip, slave);
+      // Last event — combined across both tables (synthesizes a
+      // timestamp_iso from read_at_ms for vendor SCOPE rows).
+      const lastEventRow = stopReasonAggregator.listRecentStopEvents(
+        db, ip, slave, 0, [7, 13, 21, 22, 23, 24, 26, 29, 30], 1,
+      )[0] || null;
 
       rows.push({
         inverter: inv,
@@ -13922,8 +13876,8 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
         pi_ana_trips: piAnaCount || "",
         temp_pe_c: tempC !== null ? tempC.toFixed(1) : "",
         imbalance_pct: imbalancePct !== null ? imbalancePct.toFixed(1) : "",
-        last_event_iso: lastEvent?.timestamp_iso || "",
-        last_event_motive: lastEvent ? getMotiveLabel(lastEvent.motive_code) : "",
+        last_event_iso: lastEventRow?.timestamp_iso || "",
+        last_event_motive: lastEventRow ? getMotiveLabel(lastEventRow.motive_code) : "",
         computed_at_iso: new Date(now).toISOString(),
       });
     }
@@ -14176,18 +14130,18 @@ function _evaluateIgbtHealthEolSignal(inv, slave, now, _postAckCutoffOverride) {
   }
 
   // Stop-reason aggregates (mirror /api/igbt/fleet exactly).
-  const thermalCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-  `).get(ip, slave, cutoffMs)?.cnt || 0;
-  const framaCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-  `).get(ip, slave, cutoffMs)?.cnt || 0;
-  const piAnaCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-  `).get(ip, slave, cutoffMs)?.cnt || 0;
+  // v2.11.0-beta.6: combined across std + vendor SCOPE so the EOL-tier
+  // signal sees auto-captured events (Slice F) the same way the fleet
+  // dashboard does.
+  const thermalCount = stopReasonAggregator.countMotivesCombined(
+    db, ip, slave, cutoffMs, [7, 21],
+  );
+  const framaCount = stopReasonAggregator.countMotivesCombined(
+    db, ip, slave, cutoffMs, [13, 29, 30],
+  );
+  const piAnaCount = stopReasonAggregator.countMotivesCombined(
+    db, ip, slave, cutoffMs, [26],
+  );
   // Phase imbalance from the last hour of 5-min samples.
   const oneHourAgo = now - 60 * 60 * 1000;
   const paramRows = db.prepare(`
@@ -14276,13 +14230,16 @@ function loadContactorSignals(inv, ip, slave, cutoffMs, now) {
   const oneHourAgo = now - 60 * 60 * 1000;
 
   // Contactor stop events (motive 22/23/24) in the rolling window.
-  const stopRows = db.prepare(`
-    SELECT timestamp_iso, motive_code, read_at_ms
-      FROM inverter_stop_reasons_std
-      WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ?
-            AND motive_code IN (22, 23, 24)
-      ORDER BY read_at_ms DESC
-  `).all(ip, slave, cutoffMs);
+  // Contactor stop events (motive 22/23/24) — combined across both
+  // capture sources. v2.11.0-beta.6: was previously read from
+  // `inverter_stop_reasons_std` alone, which is only populated when the
+  // operator clicks "Refresh" on the Stop Reasons page. Slice F's
+  // alarm-transition auto-capture writes to `inverter_stop_reasons`
+  // (column `motparo`), so the contactor dashboard now surfaces those
+  // events too. See server/stopReasonAggregator.js for the dedup rules.
+  const stopRows = stopReasonAggregator.listRecentStopEvents(
+    db, ip, slave, cutoffMs, [22, 23, 24], 50,
+  );
 
   // Contactor alarm episodes (bit 11 / 0x0800 set in alarm_value).
   // The alarms table is keyed by (inverter, unit) — integers, not IP.
@@ -14319,7 +14276,13 @@ function loadContactorSignals(inv, ip, slave, cutoffMs, now) {
       ORDER BY ts_ms ASC
   `).all(ip, slave, thirtyDaysAgo);
 
-  const stop_count           = acContactor.countContactorStops(stopRows);
+  // Use combined-count (unbounded) for the score component so a node with
+  // > 50 stops in the window doesn't get under-scored due to the LIMIT on
+  // `stopRows` above. `stopRows` itself is the recent-events list for the
+  // drilldown panel (capped at 50 ordered most-recent first).
+  const stop_count           = stopReasonAggregator.countMotivesCombined(
+    db, ip, slave, cutoffMs, [22, 23, 24],
+  );
   const alarm_episode_count  = acContactor.countContactorAlarmEpisodes(alarmRows);
   const chatter_count        = acContactor.detectChatter(alarmRows);
   const vac_imbalance_pct    = acContactor.vacImbalanceUnderLoad(paramRows);
@@ -14517,19 +14480,17 @@ app.get("/api/contactor/node/:inverter/:slave", (req, res) => {
     });
 
     // Pull the matching IGBT signals so the drilldown can show Linked
-    // Findings without a second round-trip.
-    const thermalCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (7, 21)
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
-    const framaCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code IN (13, 29, 30)
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
-    const piAnaCount = db.prepare(`
-      SELECT COUNT(*) as cnt FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ? AND motive_code = 26
-    `).get(ip, slave, cutoffMs)?.cnt || 0;
+    // Findings without a second round-trip. v2.11.0-beta.6: combined
+    // count across std + vendor SCOPE (see stopReasonAggregator.js).
+    const thermalCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [7, 21],
+    );
+    const framaCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [13, 29, 30],
+    );
+    const piAnaCount = stopReasonAggregator.countMotivesCombined(
+      db, ip, slave, cutoffMs, [26],
+    );
     const igbtParamRows = db.prepare(`
       SELECT iac1_a, iac2_a, iac3_a FROM inverter_5min_param
         WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
@@ -24112,13 +24073,12 @@ function buildInspectionGuide(inverter) {
 
     // FRAMA branch dominance — motive 29 = Branch 1, 30 = Branch 2,
     // 13 = Branch 3 (per project memory + igbtHealth catalogue).
-    const framaBranches = db.prepare(`
-      SELECT motive_code, COUNT(*) AS cnt
-        FROM inverter_stop_reasons_std
-        WHERE inverter_ip = ? AND slave = ? AND read_at_ms > ?
-              AND motive_code IN (13, 29, 30)
-        GROUP BY motive_code
-    `).all(ip, slave, cutoffMs);
+    // v2.11.0-beta.6: counts combined across std + vendor SCOPE so the
+    // dominant-branch hint isn't blind to Slice F auto-captures.
+    const framaBranches = [29, 30, 13].map((code) => ({
+      motive_code: code,
+      cnt: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [code]),
+    })).filter((r) => r.cnt > 0);
     if (framaBranches.length) {
       const branchTotal = framaBranches.reduce((s, r) => s + Number(r.cnt || 0), 0);
       const top = framaBranches.slice().sort((a, b) => Number(b.cnt) - Number(a.cnt))[0];

@@ -604,14 +604,20 @@ def write_worker_loop(ip, lock, q):
         batch_mode = bool(job.get("batch")) or len(normalized_steps) > 1
         result_payload = [] if batch_mode else False
 
-        # T3.12 fix (Phase 6, 2026-04-14): post-write read-back verification.
-        # Modbus FC6 returns success on transport ACK, which does NOT prove
-        # the register actually changed (e.g. inverter rejects the write
-        # silently due to interlock).  Read back the same holding register
-        # under the same lock and compare; if mismatch, mark this step ok=False
-        # so the caller sees the real outcome.  Best-effort — verification
-        # failure (read returns None) does NOT downgrade a successful write,
-        # only a value MISMATCH does.
+        # T3.12 fix (Phase 6, 2026-04-14) — REVISED Slice κ.9 (2026-05-12):
+        # post-write read-back is now a LOGGED DIAGNOSTIC, not a failure
+        # gate. Field observation 2026-05-12: register 16 holds the actual
+        # ON/OFF state, not the commanded state. INGECON inverters take
+        # several seconds to physically transition (grid sync, soft-start
+        # ramp, K1 contactor mechanical), so an immediate readback sees
+        # the OLD state and trips a mismatch even when the FC6 ACK landed
+        # cleanly and the command is being executed. The original intent
+        # (catching silent-interlock rejections) is preserved via the
+        # poller's continuous reading of register 16 — a real rejection
+        # leaves the on_off indicator on the inverter card stuck in the
+        # prior state for the operator to see.  Returns True/False/None
+        # for forensic logging only; callers MUST NOT downgrade step_ok
+        # on a False verdict.
         def _verify_step(step):
             try:
                 regs = read_holding(client, step["address"], 1, step["unit"])
@@ -633,14 +639,16 @@ def write_worker_loop(ip, lock, q):
                             step["unit"],
                         )
                         if step_ok:
+                            # Slice κ.9 (2026-05-12) — log-only diagnostic;
+                            # do NOT downgrade step_ok. See _verify_step
+                            # docstring for rationale.
                             verdict = _verify_step(step)
                             if verdict is False:
-                                # Confirmed mismatch — surface as failure.
-                                step_ok = False
                                 print(
-                                    f"[write_worker] post-write verify MISMATCH "
+                                    f"[write_worker] post-write verify mismatch (logged, not failed) "
                                     f"ip={ip} unit={step['unit']} "
-                                    f"wrote={step['value']} addr={step['address']}"
+                                    f"wrote={step['value']} addr={step['address']} — "
+                                    f"register may need time to reflect commanded state"
                                 )
                         result_payload.append({
                             "unit": step["unit"],
@@ -655,13 +663,15 @@ def write_worker_loop(ip, lock, q):
                         step["unit"],
                     )
                     if result_payload:
+                        # Slice κ.9 (2026-05-12) — log-only diagnostic;
+                        # do NOT downgrade result_payload.
                         verdict = _verify_step(step)
                         if verdict is False:
-                            result_payload = False
                             print(
-                                f"[write_worker] post-write verify MISMATCH "
+                                f"[write_worker] post-write verify mismatch (logged, not failed) "
                                 f"ip={ip} unit={step['unit']} "
-                                f"wrote={step['value']} addr={step['address']}"
+                                f"wrote={step['value']} addr={step['address']} — "
+                                f"register may need time to reflect commanded state"
                             )
         except Exception:
             result_payload = [] if batch_mode else False
@@ -1654,6 +1664,30 @@ async def poll_inverter(ip):
         # original "one bad inverter freezes everyone" symptom.
         while True:
             try:
+                # Hot-reload safety (v2.11.0-beta.6): re-read the unit list AND
+                # poll interval each cycle so that an ipconfig change
+                # (add/remove node, retune poll interval) takes effect without
+                # a service restart. Previously these were captured once at
+                # task start; the inner loop never reached the outer
+                # `detect_units_async` again while the client stayed up, so a
+                # newly-added unit was never polled and its dashboard row
+                # showed "-" forever.
+                #
+                # IMPORTANT: only consult the static override (configured
+                # units). Bypass `detect_units_async` because its auto-probe
+                # path issues 4 Modbus reads when `static_units[ip]` is empty,
+                # which would multiply per-cycle bus traffic 4x for any
+                # IP-only-configured inverter. The auto-detect result from the
+                # outer iter is preserved by leaving `units` untouched in that
+                # case. The 5 s probe-failure throttle inside
+                # `detect_units_async` is also avoided so an operator config
+                # change is honored immediately even after a probe miss.
+                override = static_units.get(ip)
+                if override and list(override) != units:
+                    print(f"[POLL] {ip}  units changed {units} -> {list(override)}")
+                    units = list(override)
+                interval = max(MIN_POLL_INTERVAL, intervals.get(ip, DEFAULT_INTERVAL))
+
                 client = clients.get(ip)
                 if not client:
                     break
@@ -4022,24 +4056,40 @@ def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
     compare to the external meter, modify scale factor until they match.
 
     Two FC04 reads under one lock acquisition:
-      • addr 0, count 19  → Vdc(8), Idc(9), Vac1-3(10-12), Iac1-3(13-15), Pac(18)
-      • addr 64, count 12 → Qac(68), VpvN(74), VpvP(75)
+      • addr 0,  count 19 → Vdc(8), Idc(9), Vac1-3(10-12), Iac1-3(13-15), Pac(18)
+      • addr 64, count 13 → Qac(68), Estado(73), VpvN(74), VpvP(75), NomPower(76)
 
     Returns a dict with each live value or None on per-field failure.  Never
     raises — calibration state must remain readable even if the input regs
     are momentarily unavailable.
+
+    v2.11.0-beta.6 — Slice κ.10 TrinPM20 gates: extended count 12→13 to
+    include input reg 30077 (NominalPower ÷ 10). Adds `state_raw` (Estado
+    bitfield from reg 30074) and `nominal_power_w` so calibration safety
+    gates can refuse Fesc_ipv writes below 70 % Pn, refuse reactive-curve
+    writes at the wrong consign target, and refuse any write while the
+    inverter is in `error`/`blocked` phase. See server/calibrationRoutes
+    requireSafeForOffset gate.
     """
     out = {
         "vac1_v": None, "vac2_v": None, "vac3_v": None,
         "iac1_a": None, "iac2_a": None, "iac3_a": None,
         "vdc_v": None,  "idc_a": None,  "pac_w": None,
         "qac_var": None, "vpv_p_v": None, "vpv_n_v": None,
+        # Slice κ.10 — TrinPM20 safety-gate fields:
+        "state_raw":       None,    # Estado bitfield (reg 30074)
+        "state_phase":     None,    # decoded low-byte phase (0=initial, 1=init-mag, 2=grid-connected, 3=error)
+        "state_stop":      None,    # bit 8 — 1 = stop, 0 = run
+        "state_blocked":   None,    # bit 9 — 1 = blocked
+        "state_grid_fault": None,   # bit 10 — 1 = grid fault detected
+        "nominal_power_w": None,    # reg 30077 × 10
+        "pct_of_pn":       None,    # pac_w / nominal_power_w × 100 (rounded 0.1)
         "read_at_ms": int(time.time() * 1000),
     }
     try:
         with lock:
             r1 = client.read_input_registers(address=0, count=19, unit=slave)
-            r2 = client.read_input_registers(address=64, count=12, unit=slave)
+            r2 = client.read_input_registers(address=64, count=13, unit=slave)
         if r1 is not None and not r1.isError() and hasattr(r1, "registers"):
             regs = list(r1.registers)
             def g(i):
@@ -4070,8 +4120,30 @@ def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
                 if q_raw & 0x8000:
                     q_raw -= 0x10000
                 out["qac_var"] = q_raw * 10
+            # Estado bitfield at addr 73 (reg 9 of this read) — Slice κ.10.
+            estado_raw = g2(9)
+            if estado_raw is not None:
+                out["state_raw"]        = estado_raw
+                out["state_phase"]      = estado_raw & 0xFF
+                out["state_stop"]       = 1 if (estado_raw & 0x0100) else 0
+                out["state_blocked"]    = 1 if (estado_raw & 0x0200) else 0
+                out["state_grid_fault"] = 1 if (estado_raw & 0x0400) else 0
             out["vpv_n_v"] = g2(10)   # addr 74
             out["vpv_p_v"] = g2(11)   # addr 75
+            # NominalPower at addr 76 (reg 12 of this read) — reported in
+            # tens of W; × 10 → W. Required for the Pac/Pn safety gate.
+            nom_raw = g2(12)
+            if nom_raw is not None:
+                out["nominal_power_w"] = int(nom_raw) * 10
+        # Derive %Pn for the operator-facing context. Defensive: skip when
+        # nominal_power_w is 0/None so we never divide by zero.
+        if out["pac_w"] is not None and out["nominal_power_w"]:
+            try:
+                out["pct_of_pn"] = round(
+                    100.0 * float(out["pac_w"]) / float(out["nominal_power_w"]), 1,
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                out["pct_of_pn"] = None
     except Exception as exc:
         # Best-effort: any value we already populated stays; rest stays None.
         out["_warn"] = f"live_read_partial: {exc}"

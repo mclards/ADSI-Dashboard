@@ -28337,8 +28337,20 @@ function _fcalRenderSingleEditable(state) {
     ? `ValidCfgCode = ${state.calibration.valid_cfg_code_hex} (0x1F1F)`
     : `ValidCfgCode = ${state?.calibration?.valid_cfg_code_hex || "?"} (expected 0x1F1F)`;
 
+  const writability = state?.writability || {};
   const sections = orderedGroups.map((g) => {
-    const rows = groups.get(g).map((f) => `
+    const rows = groups.get(g).map((f) => {
+      const wr = writability[f.offset];
+      const wrClass = wr && !wr.ok
+        ? (wr.severity === "block" ? "fcal-gate-block" : "fcal-gate-warn")
+        : "fcal-gate-ok";
+      const wrTitle = wr && !wr.ok
+        ? wr.reason
+        : "TrinPM20 safety gates clear — Write is safe.";
+      const wrBadge = wr && !wr.ok
+        ? `<span class="fcal-gate-badge ${wrClass}" title="${_fcalEsc(wr.reason || "")}">${wr.severity === "block" ? "blocked" : "warn"}</span>`
+        : `<span class="fcal-gate-badge fcal-gate-ok" title="TrinPM20 gates clear">ready</span>`;
+      return `
       <tr data-off="${f.offset}" data-field="${_fcalEsc(f.field)}" data-signed="${f.is_signed ? "1" : "0"}">
         <td class="mono fcal-off">${f.offset}</td>
         <td class="mono">${_fcalEsc(f.label)}</td>
@@ -28352,14 +28364,16 @@ function _fcalRenderSingleEditable(state) {
                  title="Enter the new value computed from your multimeter / wattmeter reading. Range guard rejects deltas > 50 % unless you pass max_delta_pct=null." />
         </td>
         <td>
-          <button class="btn btn-accent btn-sm fcal-write-btn"
+          <button class="btn btn-accent btn-sm fcal-write-btn ${wrClass}"
                   data-off="${f.offset}" type="button"
-                  title="Write this single register: unlock → write → 1 s settle → verify. Requires sacupsMM key.">
+                  title="${_fcalEsc(wrTitle)}">
             <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span>Write
           </button>
+          ${wrBadge}
         </td>
       </tr>
-    `).join("");
+    `;
+    }).join("");
     return `
       <div class="fcal-group">
         <div class="fcal-group-title">${_fcalEsc(g)}</div>
@@ -28372,7 +28386,7 @@ function _fcalRenderSingleEditable(state) {
               <th class="fcal-val" title="The scale factor currently in the inverter — Write modifies this.">Factor</th>
               <th class="fcal-live" title="Live reading from the inverter input registers — what the LCD would show right now. Match this to your external meter by tweaking the New Value.">Live</th>
               <th>New Value</th>
-              <th></th>
+              <th title="TrinPM20 per-offset safety gate — Pac/Pn band + inverter state. Hover the badge for the specific reason.">Gate</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -28381,12 +28395,41 @@ function _fcalRenderSingleEditable(state) {
     `;
   }).join("");
 
+  // Live state context strip — shows %Pn + inverter phase + critical
+  // flags so the operator can see at a glance whether the inverter is
+  // in the right operating window for TrinPM20 writes.
+  const pctOfPn = live && live.pct_of_pn != null ? Number(live.pct_of_pn) : null;
+  const pacKw   = live && live.pac_w != null ? (Number(live.pac_w) / 1000.0).toFixed(1) : "—";
+  const pnKw    = live && live.nominal_power_w != null ? (Number(live.nominal_power_w) / 1000.0).toFixed(1) : "—";
+  const phaseLabels = { 0: "initial", 1: "init-mag", 2: "grid-connected", 3: "ERROR" };
+  const haveState = live && live.state_phase != null;
+  const phaseStr = haveState
+    ? (phaseLabels[Number(live.state_phase)] || `phase ${live.state_phase}`)
+    : "state unknown";
+  const stateFlags = [];
+  if (live?.state_blocked === 1) stateFlags.push("BLOCKED");
+  if (live?.state_stop === 1) stateFlags.push("STOP");
+  if (live?.state_grid_fault === 1) stateFlags.push("GRID FAULT");
+  // Tri-state: green = grid-connected & no flags, red = error/blocked/grid-fault,
+  // amber = state unread (don't lie green). The gate map will still block on
+  // unreadable state — this chip just keeps the operator honest about it.
+  let stateChipClass;
+  if (!haveState) {
+    stateChipClass = "fcal-state-info";
+  } else if (phaseStr === "ERROR" || stateFlags.length || Number(live.state_phase) !== 2) {
+    stateChipClass = "fcal-state-bad";
+  } else {
+    stateChipClass = "fcal-state-ok";
+  }
+
   host.innerHTML = `
     <div class="fcal-readout-header">
       <div><strong>Inverter ${state.inverter} / Node ${state.slave}</strong> <span class="mono">(${_fcalEsc(state.ip || "")})</span></div>
       <div class="fcal-readout-meta">
         <span>Read at ${_fcalEsc(readAt)}</span>
         <span class="fcal-sentinel ${sentinelOk ? "fcal-sentinel-ok" : "fcal-sentinel-bad"}">${_fcalEsc(sentinelLabel)}</span>
+        <span class="fcal-state ${stateChipClass}" title="Inverter state register (Estado, reg 30074). Calibration writes refuse when phase ≠ grid-connected, BLOCKED, or GRID FAULT.">${_fcalEsc(phaseStr)}${stateFlags.length ? " · " + stateFlags.join(" · ") : ""}</span>
+        <span class="fcal-state fcal-state-info" title="Pac vs configured nominal power. Fesc_ipv (87) requires ≥ 70 %; reactive X1Y1 (91/92) requires ≈ 20 %; reactive X2Y2 (93/94) requires ≈ 70 %.">Pac ${pacKw} kW / Pn ${pnKw} kW = ${pctOfPn != null ? pctOfPn.toFixed(1) + " %" : "—"}</span>
       </div>
     </div>
     <div class="fcal-write-controls">
@@ -28397,6 +28440,10 @@ function _fcalRenderSingleEditable(state) {
       <label class="invclock-check" for="fcalForceWrite" title="Bypass the 50 % range guard. Use only if you genuinely need to write a value > 50 % from the current — e.g. recalibrating after a sensor swap.">
         <input type="checkbox" id="fcalForceWrite" />
         <span class="invclock-check-label">Force (bypass 50 % range guard)</span>
+      </label>
+      <label class="invclock-check" for="fcalForceSafetyGate" title="Bypass the TrinPM20 per-offset safety gate (inverter state + Pac/Pn band). Use only after explicitly acknowledging the consign target is wrong on purpose (sensor-swap scenario).">
+        <input type="checkbox" id="fcalForceSafetyGate" />
+        <span class="invclock-check-label">Force (bypass TrinPM20 safety gate)</span>
       </label>
     </div>
     ${sections}
@@ -28424,6 +28471,7 @@ async function _fcalHandleWrite(offset) {
     return;
   }
   const force = document.getElementById("fcalForceWrite")?.checked;
+  const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
   const field = String(row.dataset.field || "");
   const current = row.querySelector(".fcal-val")?.textContent?.trim();
   // Cached sacupsMM with in-app modal fallback. Same flow as Plant Controller.
@@ -28444,6 +28492,7 @@ async function _fcalHandleWrite(offset) {
         offset, value: Math.trunc(value),
         authKey,
         max_delta_pct: force ? null : 50.0,
+        force_safety_gate: forceSafety || undefined,
         operator: session.operator,
       }),
     });
@@ -28451,6 +28500,15 @@ async function _fcalHandleWrite(offset) {
     if (r.status === 401 || r.status === 403) {
       clearBulkAuthCache();
       _fcalSetMsg("fcalReadMsg", "Bulk auth rejected — re-prompting next click.", "err");
+      return;
+    }
+    if (r.status === 409 && Array.isArray(j?.gates) && j.gates.length) {
+      // TrinPM20 safety gate refused — surface the specific reason(s)
+      // and tell the operator how to override.
+      const reasons = j.gates.map((g) => `[${g.severity}] ${g.reason}`).join(" · ");
+      _fcalSetMsg("fcalReadMsg",
+        `TrinPM20 gate blocked: ${reasons}. Tick "Force (bypass TrinPM20 safety gate)" if you really mean it.`,
+        "err");
       return;
     }
     if (!r.ok || !j?.ok) {
@@ -28555,6 +28613,7 @@ async function _fcalHandleCopy() {
   if (btn) btn.disabled = true;
   _fcalSetMsg("fcalCopyMsg", "Reading source + destination…");
   try {
+    const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
     const r = await fetch("/api/calibration/copy", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -28564,6 +28623,7 @@ async function _fcalHandleCopy() {
         source_slave: srcSlave,
         authKey,
         force_fingerprint: forceFp,
+        force_safety_gate: forceSafety || undefined,
         operator: session.operator,
       }),
     });
@@ -28577,6 +28637,13 @@ async function _fcalHandleCopy() {
       const fields = (j.mismatched_fields || []).join(", ");
       _fcalSetMsg("fcalCopyMsg",
         `Hardware fingerprint mismatch (${fields}). Tick "Force" to override after confirming modules are identical.`,
+        "err");
+      return;
+    }
+    if (r.status === 409 && Array.isArray(j?.gates) && j.gates.length) {
+      const reasons = j.gates.map((g) => `[${g.severity}] ${g.reason}`).join(" · ");
+      _fcalSetMsg("fcalCopyMsg",
+        `TrinPM20 gate blocked copy: ${reasons}. Tick "Force (bypass TrinPM20 safety gate)" to override.`,
         "err");
       return;
     }
@@ -28761,6 +28828,7 @@ async function _fcalHandleRestore(snapshotId) {
     `to Inverter ${session.inverter} / Node ${session.slave} (14 register writes via UNLOCK + WRITE + VERIFY)`,
   );
   if (!authKey) return;
+  const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
   _fcalSetMsg("fcalBackupMsg", `Restoring snapshot ${snapshotId}…`);
   try {
     const r = await fetch(`/api/calibration/restore`, {
@@ -28772,6 +28840,7 @@ async function _fcalHandleRestore(snapshotId) {
         authKey,
         operator: session.operator,
         max_delta_pct: 50.0,
+        force_safety_gate: forceSafety || undefined,
       }),
     });
     if (r.status === 401 || r.status === 403) {
@@ -28780,6 +28849,13 @@ async function _fcalHandleRestore(snapshotId) {
       return;
     }
     const j = await r.json();
+    if (r.status === 409 && Array.isArray(j?.gates) && j.gates.length) {
+      const reasons = j.gates.map((g) => `[${g.severity}] ${g.reason}`).join(" · ");
+      _fcalSetMsg("fcalBackupMsg",
+        `TrinPM20 gate blocked restore: ${reasons}. Tick "Force (bypass TrinPM20 safety gate)" to override.`,
+        "err");
+      return;
+    }
     if (!j?.ok) {
       _fcalSetMsg("fcalBackupMsg", `Restore failed: ${j?.error || `HTTP ${r.status}`}`, "err");
       return;

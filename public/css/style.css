@@ -20284,6 +20284,58 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
+/* TrinPM20 safety gate — state chip + per-offset Write button tint
+   (v2.11.0-beta.6 Slice κ.10). */
+#page-field-calibration #fieldCalibrationSection .fcal-state {
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-state-ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-state-bad {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-state-info {
+  color: var(--text2);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-gate-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-gate-badge.fcal-gate-ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 18%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-gate-badge.fcal-gate-warn {
+  color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 18%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-gate-badge.fcal-gate-block {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+}
+/* Tint the Write button so the operator notices the gate verdict before
+   clicking — block = red outline, warn = orange outline. */
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn.fcal-gate-block {
+  outline: 2px solid var(--red);
+  outline-offset: 1px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn.fcal-gate-warn {
+  outline: 2px solid var(--orange);
+  outline-offset: 1px;
+}
+
 #page-field-calibration #fieldCalibrationSection .fcal-group {
   grid-column: 1 / -1;
   margin: 4px 0;

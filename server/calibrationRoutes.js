@@ -21,6 +21,10 @@
 "use strict";
 
 const calibrationSession = require("./calibrationSession");
+const calibrationSafety = require("./calibrationSafety");
+
+// TrinPM20 writable offsets — used to pre-compute writability map.
+const WRITABLE_OFFSETS = [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94];
 
 const KNOWN_INVERTERS_MAX = 27;
 const KNOWN_NODES_PER_INV = [1, 2, 3, 4];
@@ -126,6 +130,48 @@ function registerCalibrationRoutes(app, deps) {
     return null;
   }
 
+  // v2.11.0-beta.6 Slice κ.10 — TrinPM20 per-offset safety gate.
+  //
+  // Fetches a fresh state+pct_of_pn snapshot from Python and runs each
+  // proposed write through `evaluateWriteSafety`. Returns null when every
+  // offset clears the gate (or when the caller passed
+  // `force_safety_gate=true` and we should warn-only); returns a 409-shaped
+  // error object when at least one gate fires.
+  async function checkTrinPmSafetyGates(ip, slave, offsets, opts) {
+    const force = !!(opts && (opts.force_safety_gate === true
+      || opts.force_safety_gate === "1" || opts.force_safety_gate === 1));
+    let state;
+    try {
+      state = await callPython(
+        `/calibration/state/${encodeURIComponent(ip)}/${slave}`, "GET",
+      );
+    } catch (err) {
+      return {
+        status: 502,
+        error: `safety preflight read failed: ${err?.message || err}`,
+      };
+    }
+    if (!state?.ok || !state.live) {
+      return { status: 424, error: "safety preflight returned no live snapshot" };
+    }
+    const verdicts = offsets.map((off) =>
+      calibrationSafety.evaluateWriteSafety(off, state.live));
+    const blocking = verdicts.filter((v) => !v.ok && v.severity === "block");
+    if (!blocking.length) return { ok: true, verdicts, live: state.live };
+    if (force) {
+      // Caller explicitly overrode — return verdicts so caller can audit
+      // the reasons, but don't block the write.
+      return { ok: true, verdicts, live: state.live, forced: true,
+               blocking_reasons: blocking.map((v) => v.reason) };
+    }
+    return {
+      status: 409,
+      error: "TrinPM20 safety gate refused write — see `gates`.",
+      gates: blocking,
+      live: state.live,
+    };
+  }
+
   function broadcastSessionState(eventKind = "update") {
     if (typeof broadcastUpdate !== "function") return;
     try {
@@ -179,6 +225,14 @@ function registerCalibrationRoutes(app, deps) {
       result.session = calibrationSession.isTargetUnderCalibration(t.inv, t.slave)
         ? calibrationSession.currentSession()
         : null;
+      // v2.11.0-beta.6 Slice κ.10 — per-offset writability verdict so the
+      // UI can render Write buttons green/amber/red before the operator
+      // clicks. Mirrors the TrinPM20 PDF gates (state, Pac/Pn band).
+      if (result?.ok && result.live) {
+        result.writability = calibrationSafety.buildWriteSafetyMap(
+          result.live, WRITABLE_OFFSETS,
+        );
+      }
       return res.json(result);
     } catch (err) {
       return res.status(502).json({ ok: false, error: err?.message || String(err) });
@@ -496,6 +550,14 @@ function registerCalibrationRoutes(app, deps) {
       const cb = checkCriticalBlock(cur.inverter);
       if (cb) return res.status(cb.status).json({ ok: false, ...cb });
 
+      // TrinPM20 safety gates also apply to snapshot restore. Operator can
+      // override via body.force_safety_gate=true after explicit ack.
+      const restoreOffsets = writes.map((w) => Number(w?.offset)).filter(Number.isFinite);
+      const gate = await checkTrinPmSafetyGates(ip, cur.slave, restoreOffsets, body);
+      if (gate?.status) {
+        return res.status(gate.status).json({ ok: false, ...gate });
+      }
+
       try {
         const result = await callPython("/calibration/write-bulk", "POST", {
           ip, slave: cur.slave, writes,
@@ -519,9 +581,13 @@ function registerCalibrationRoutes(app, deps) {
               value_after: w.value_after,
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
-              auth_method: "sacupsMM+session+restore",
+              auth_method: gate?.forced
+                ? "sacupsMM+session+restore+force_safety"
+                : "sacupsMM+session+restore",
               error_detail: result?.error || null,
-              notes: `restore from snapshot id=${snapshotId} (${snap.source})`,
+              notes: gate?.forced
+                ? `restore from snapshot id=${snapshotId} (${snap.source}); TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}`
+                : `restore from snapshot id=${snapshotId} (${snap.source})`,
             });
             if (w.verify_ok) calibrationSession.incrementWrite();
           }
@@ -531,7 +597,9 @@ function registerCalibrationRoutes(app, deps) {
             inverter: cur.inverter, node: cur.slave,
             action: "calibration.snapshot.restore",
             scope: "calibration", result: result?.ok ? "ok" : "partial", ip,
-            reason: `snapshot id=${snapshotId} source=${snap.source} writes=${writes.length}`,
+            reason: gate?.forced
+              ? `snapshot id=${snapshotId} source=${snap.source} writes=${writes.length} FORCED gates=${gate.blocking_reasons.length}`
+              : `snapshot id=${snapshotId} source=${snap.source} writes=${writes.length}`,
           });
         } catch (e) {
           console.warn("[calibration] restore log failed:", e?.message);
@@ -756,12 +824,24 @@ function registerCalibrationRoutes(app, deps) {
       if (!Number.isFinite(value)) {
         return res.status(400).json({ ok: false, error: "value required" });
       }
+
+      // TrinPM20 safety gates (Slice κ.10) — refuse writes that violate
+      // the PDF preconditions. Operator can pass `force_safety_gate=true`
+      // to override after explicit acknowledgement.
+      const gate = await checkTrinPmSafetyGates(ip, slave, [offset], body);
+      if (gate?.status) {
+        return res.status(gate.status).json({ ok: false, ...gate });
+      }
       try {
         const result = await callPython("/calibration/write", "POST", {
           ip, slave, offset, value: Math.trunc(value),
           max_delta_pct: body.max_delta_pct == null ? 50.0 : Number(body.max_delta_pct),
           verify_delay_s: 1.0,
         });
+        if (gate?.forced && gate.blocking_reasons?.length) {
+          result.safety_forced = true;
+          result.safety_reasons = gate.blocking_reasons;
+        }
         try {
           insertCalibrationWriteLog({
             ts_utc: Date.now(),
@@ -774,8 +854,9 @@ function registerCalibrationRoutes(app, deps) {
             value_after: result?.value_after,
             verify_ok: result?.verify_ok ? 1 : 0,
             operator: cur.operator,
-            auth_method: "sacupsMM+session",
+            auth_method: gate?.forced ? "sacupsMM+session+force_safety" : "sacupsMM+session",
             error_detail: result?.error || null,
+            notes: gate?.forced ? `TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}` : null,
           });
           if (result?.verify_ok) calibrationSession.incrementWrite();
         } catch (e) {
@@ -806,12 +887,24 @@ function registerCalibrationRoutes(app, deps) {
       if (!writes || !writes.length) {
         return res.status(400).json({ ok: false, error: "writes (non-empty list) required" });
       }
+
+      // TrinPM20 safety gates (Slice κ.10) — check each proposed offset
+      // against the live state + Pac/Pn snapshot before unlocking.
+      const writeOffsets = writes.map((w) => Number(w?.offset)).filter(Number.isFinite);
+      const gate = await checkTrinPmSafetyGates(ip, slave, writeOffsets, body);
+      if (gate?.status) {
+        return res.status(gate.status).json({ ok: false, ...gate });
+      }
       try {
         const result = await callPython("/calibration/write-bulk", "POST", {
           ip, slave, writes,
           max_delta_pct: body.max_delta_pct == null ? 50.0 : Number(body.max_delta_pct),
           verify_delay_s: 1.0,
         });
+        if (gate?.forced && gate.blocking_reasons?.length) {
+          result.safety_forced = true;
+          result.safety_reasons = gate.blocking_reasons;
+        }
         try {
           for (const w of (result?.writes || [])) {
             insertCalibrationWriteLog({
@@ -824,8 +917,9 @@ function registerCalibrationRoutes(app, deps) {
               value_after: w.value_after,
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
-              auth_method: "sacupsMM+session+bulk",
+              auth_method: gate?.forced ? "sacupsMM+session+bulk+force_safety" : "sacupsMM+session+bulk",
               error_detail: result?.error || null,
+              notes: gate?.forced ? `TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}` : null,
             });
             if (w.verify_ok) calibrationSession.incrementWrite();
           }
@@ -1010,6 +1104,14 @@ function registerCalibrationRoutes(app, deps) {
         return res.json({ ok: true, status: "noop", writes: [], note: "source and destination already identical" });
       }
 
+      // TrinPM20 safety gates apply to bulk-copy targets too. Same override
+      // path (body.force_safety_gate=true).
+      const copyOffsets = writes.map((w) => Number(w?.offset)).filter(Number.isFinite);
+      const copyGate = await checkTrinPmSafetyGates(dstIp, dstSlave, copyOffsets, body);
+      if (copyGate?.status) {
+        return res.status(copyGate.status).json({ ok: false, ...copyGate });
+      }
+
       try {
         const result = await callPython("/calibration/write-bulk", "POST", {
           ip: dstIp, slave: dstSlave, writes,
@@ -1028,9 +1130,13 @@ function registerCalibrationRoutes(app, deps) {
               value_after: w.value_after,
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
-              auth_method: "sacupsMM+session+copy",
+              auth_method: copyGate?.forced
+                ? "sacupsMM+session+copy+force_safety"
+                : "sacupsMM+session+copy",
               error_detail: result?.error || null,
-              notes: `copied from inv ${srcInv} / node ${srcSlave}`,
+              notes: copyGate?.forced
+                ? `copied from inv ${srcInv} / node ${srcSlave}; TrinPM20 gate forced: ${copyGate.blocking_reasons.join(" | ")}`
+                : `copied from inv ${srcInv} / node ${srcSlave}`,
             });
             if (w.verify_ok) calibrationSession.incrementWrite();
           }
