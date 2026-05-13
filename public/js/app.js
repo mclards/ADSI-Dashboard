@@ -4571,6 +4571,59 @@ function switchPage(page) {
   if (page !== "plant-cap") {
     try { stopGridMonitor(); } catch (_) {}
   }
+  // v2.11.x — Field Calibration: when the operator leaves the page,
+  //   • stop the heartbeat timer so the server-side watchdog can release the
+  //     in-memory session lock (was: the heartbeat kept pinging from the
+  //     hidden page, leaving the session "active" indefinitely so the next
+  //     visit got "Another calibration session is already active");
+  //   • best-effort end the session so subsequent /session/start gets a
+  //     clean slate even before the watchdog catches it;
+  //   • drop the cached topology key so re-entering the page re-prompts
+  //     (one prompt per page visit). The bulk cache is shared with the
+  //     compliance + plant-cap pages — clearing topology is enough to force
+  //     `_fcalEnsureUnlock()` to fire on next visit, which will then
+  //     overwrite the bulk key with the current-minute version anyway.
+  //   • null `_fcalUnlockPromise` so a stale in-flight prompt from before
+  //     navigation can't be reused on the next visit.
+  if (page !== "field-calibration") {
+    try {
+      if (typeof FieldCalibrationUI !== "undefined") {
+        const sess = FieldCalibrationUI.session;
+        if (typeof _fcalStopHeartbeat === "function") _fcalStopHeartbeat();
+        if (typeof _fcalStopLiveAutoRefresh === "function") _fcalStopLiveAutoRefresh();
+        // v2.11.x — single atomic page-leave beacon. The server-side
+        // /api/calibration/page-leave-cleanup endpoint:
+        //   • aborts any active calibration session (no session_id needed)
+        //   • disables `calibrationWritesEnabled` setting unconditionally
+        //   • emits an audit row
+        // No topology key required — disabling writes is a safe-by-default
+        // action and the cached key may have lapsed during the transition.
+        // Earlier two-step approach (session/end → feature-toggle) was racy
+        // and silently failed when the cache was empty.
+        fetch("/api/calibration/page-leave-cleanup", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+          keepalive: true,
+        }).catch(() => {});
+        if (sess) sess._bulkAuthKey = null;
+        FieldCalibrationUI.session = null;
+        FieldCalibrationUI.lastState = null;
+        // Disarm force-toggles too — page-leave is an explicit reset.
+        FieldCalibrationUI.forceWrite = false;
+        FieldCalibrationUI.forceSafety = false;
+        // Reflect the disable locally so a quick re-entry shows read-only
+        // immediately, before the featureStatus background fetch rehydrates.
+        if (FieldCalibrationUI.featureStatus) {
+          FieldCalibrationUI.featureStatus.writes_enabled = false;
+        }
+      }
+    } catch (_) {}
+    try { clearTopologyAuthCache(); } catch (_) {}
+    try {
+      if (typeof _fcalUnlockPromise !== "undefined") _fcalUnlockPromise = null;
+    } catch (_) {}
+  }
   document
     .querySelectorAll(".page")
     .forEach((p) => p.classList.remove("active"));
@@ -27641,7 +27694,14 @@ const FieldCalibrationUI = {
   session:   null,         // null | { session_id, inverter, slave, operator, started_at_ms, write_count, consign_writes }
   heartbeatTimer: null,
   clockTimer: null,
+  liveTimer: null,
   featureStatus: null,
+  // Force-override toggles — persisted on the UI state object so they
+  // survive editable-view re-renders (every successful Write/Consign/
+  // Restore/Copy fires _fcalHandleRead which re-renders the controls;
+  // we restore the operator's last choice from these flags).
+  forceWrite:  false,
+  forceSafety: false,
 };
 
 function initFieldCalibrationSection() {
@@ -27664,15 +27724,24 @@ function initFieldCalibrationSection() {
   if (!invPicker || !slavePicker || !readBtn) return;
 
   _fcalPopulateInverterPicker(invPicker);
-  _fcalPopulateSlavePicker(slavePicker);
+  // Slave picker is keyed off the currently-selected inverter — populate
+  // with whatever the picker resolved to first.
+  _fcalPopulateSlavePicker(slavePicker, Number(invPicker.value) || null);
 
   invPicker.addEventListener("change", () => {
     FieldCalibrationUI.inverter = Number(invPicker.value) || null;
+    // Repopulate node options for the new inverter (some have 2/3/4 nodes).
+    _fcalPopulateSlavePicker(slavePicker, FieldCalibrationUI.inverter);
+    FieldCalibrationUI.slave = Number(slavePicker.value) || null;
     _fcalHideResults();
+    // Switching target invalidates the live snapshot — stop the timer
+    // so the next Read starts a fresh refresh cycle for the new node.
+    _fcalStopLiveAutoRefresh();
   });
   slavePicker.addEventListener("change", () => {
     FieldCalibrationUI.slave = Number(slavePicker.value) || null;
     _fcalHideResults();
+    _fcalStopLiveAutoRefresh();
   });
 
   readBtn.addEventListener("click", _fcalHandleRead);
@@ -27695,18 +27764,30 @@ function _fcalEsc(s) {
     .replace(/"/g, "&quot;");
 }
 
+// v2.11.x — operator preference: the Field Calibration inverter & node
+// pickers must use the SAME detection method as the Plant Controller and
+// Grid Control panes (see populateGridControlNodeOptions @ line ~10795).
+// Source of truth is State.ipConfig (inverters map + per-inverter units
+// array), filtered to only entries with a non-empty IP. The node picker
+// is dynamic per the selected inverter — some inverters have 2 / 3 / 4
+// nodes, hardcoding 1-4 was lying to the operator.
 function _fcalPopulateInverterPicker(picker) {
   picker.innerHTML = "";
   const cfgInverters = (State?.ipConfig?.inverters)
     || (State?.settings?.ipconfig?.inverters) || {};
-  Object.entries(cfgInverters).forEach(([k, ip]) => {
-    const inv = Number(k);
-    if (!Number.isFinite(inv) || inv <= 0 || !String(ip || "").trim()) return;
+  // Sort numerically so Inverter 2 sits before Inverter 10.
+  const entries = Object.entries(cfgInverters)
+    .map(([k, ip]) => [Number(k), String(ip || "").trim()])
+    .filter(([k, ip]) => Number.isFinite(k) && k > 0 && ip)
+    .sort((a, b) => a[0] - b[0]);
+  entries.forEach(([inv, ip]) => {
     const opt = document.createElement("option");
     opt.value = String(inv);
     opt.textContent = `Inverter ${inv}  (${ip})`;
     picker.appendChild(opt);
   });
+  // Last-ditch fallback when ipConfig hasn't loaded yet — keep the picker
+  // populated so the page is interactive even mid-boot.
   if (picker.options.length === 0) {
     for (let i = 1; i <= 27; i++) {
       const opt = document.createElement("option");
@@ -27717,14 +27798,25 @@ function _fcalPopulateInverterPicker(picker) {
   }
 }
 
-function _fcalPopulateSlavePicker(picker) {
+function _fcalPopulateSlavePicker(picker, inv) {
+  // Mirrors Plant Controller / Grid Control: getConfiguredUnits returns the
+  // actual node list configured for this inverter (e.g. [1,2,3] for a 3-node
+  // unit, [1,2] for a 2-node unit). Falls back to 1-4 when ipConfig is empty.
+  const invNum = Number(inv);
+  const units = (Number.isFinite(invNum) && invNum > 0)
+    ? getConfiguredUnits(invNum, 4)
+    : [1, 2, 3, 4];
+  const prev = picker.value;
   picker.innerHTML = "";
-  for (let i = 1; i <= 4; i++) {
+  units.forEach((u) => {
     const opt = document.createElement("option");
-    opt.value = String(i);
-    opt.textContent = String(i);
+    opt.value = String(u);
+    opt.textContent = `Node ${u}`;
     picker.appendChild(opt);
-  }
+  });
+  // Preserve the operator's selection across an inverter change when the
+  // new inverter still has that node; otherwise fall to the first node.
+  if (units.map(String).includes(prev)) picker.value = prev;
 }
 
 function _fcalApplyRemoteUiState() {
@@ -27753,26 +27845,116 @@ function _fcalSetMsg(id, text, kind = "info") {
   el.className = "smsg" + (kind === "err" ? " smsg-err" : kind === "ok" ? " smsg-ok" : "");
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Field Calibration page-level UNLOCK — the only auth prompt on the page.
+//
+// Operator preference (firm): exactly ONE auth prompt per page visit.
+// Every button on the calibration page reads cached keys silently after
+// that. Warnings/confirmations are still allowed; the auth-key TYPING
+// modal is what we eliminate from per-button paths.
+//
+// Both the topology key (`adsi${minute}`) and the bulk-control key
+// (`sacups${minute}`) are time-rolling formulas keyed off the same
+// minute. We accept either form in the unlock prompt, extract the
+// minute, and prime BOTH client caches plus activate BOTH server-side
+// leases (60-min rolling window) with one round-trip. From that point
+// on, every calibration handler just reads from cache.
+//
+// Concurrent button clicks coalesce on `_fcalUnlockPromise` so only one
+// modal ever opens. Cache is cleared on page-leave (see switchPage) so
+// re-entering the page re-prompts as the operator expects.
+let _fcalUnlockPromise = null;
+
+function _fcalIsUnlocked() {
+  return !!(getCachedTopologyKey() && getCachedBulkAuthKey());
+}
+
+async function _fcalEnsureUnlock() {
+  if (_fcalIsUnlocked()) return true;
+  if (_fcalUnlockPromise) return _fcalUnlockPromise;
+  _fcalUnlockPromise = (async () => {
+    if (typeof initBulkAuthModal === "function") initBulkAuthModal();
+    if (typeof requestBulkAuthorization !== "function") {
+      _fcalSetMsg("fcalReadMsg", "Authorization modal unavailable.", "err");
+      return false;
+    }
+    let typed;
+    try {
+      // requestBulkAuthorization formats msg as "{action} {scopeLabel}
+      // ({totalTargets} nodes)?" — we phrase the labels so the templated
+      // "(1 nodes)?" tail still reads naturally for an unlock prompt.
+      typed = String(await requestBulkAuthorization(
+        "Unlock Field Calibration page",
+        "— enter sacupsMM or adsiMM (current minute) —",
+        1,
+      ) || "").trim().toLowerCase();
+    } catch (_) { typed = ""; }
+    if (!typed) {
+      _fcalSetMsg("fcalReadMsg", "Cancelled — calibration page is locked.", "err");
+      return false;
+    }
+    const mBulk = typed.match(/^sacups(\d{1,2})$/);
+    const mTopo = typed.match(/^adsi(\d{1,2})$/);
+    const minute = mBulk ? Number(mBulk[1]) : (mTopo ? Number(mTopo[1]) : NaN);
+    if (!Number.isFinite(minute) || minute < 0 || minute > 59) {
+      _fcalSetMsg("fcalReadMsg",
+        "Unlock failed — expected sacupsMM or adsiMM where MM is the current minute (e.g. sacups47).",
+        "err");
+      return false;
+    }
+    // CRITICAL: bulk auth server ONLY accepts the 2-digit padded form
+    // (`sacups07`). Topology accepts both, so we pad uniformly. Without
+    // this, minutes 0-9 unlock client-side but every server request
+    // would 403 → caches wipe → modal re-fires every action.
+    const mm = String(minute).padStart(2, "0");
+    setCachedBulkAuthKey(`sacups${mm}`);
+    setCachedTopologyKey(`adsi${mm}`);
+    _fcalSetMsg("fcalReadMsg", "Calibration page unlocked. No further auth prompts on this visit.", "ok");
+    return true;
+  })().finally(() => { _fcalUnlockPromise = null; });
+  return _fcalUnlockPromise;
+}
+
+// Back-compat shim — every fcal handler used to call _fcalGetBulkAuth.
+// Now it just returns the cached key after ensuring unlock. Empty string
+// on cancellation. NEVER opens its own modal.
+async function _fcalGetBulkAuth(/* actionLabel, scopeLabel */) {
+  const ok = await _fcalEnsureUnlock();
+  if (!ok) return "";
+  return getCachedBulkAuthKey();
+}
+
+function _fcalClearBulkAuthOnReject() {
+  // The unlock prompt re-fires on the next action because both caches
+  // were tied together; clearing one effectively invalidates the page
+  // unlock so the operator gets one fresh prompt.
+  const session = FieldCalibrationUI.session;
+  if (session) session._bulkAuthKey = null;
+  clearBulkAuthCache();
+  clearTopologyAuthCache();
+}
+
 async function _fcalAuthedFetch(url, _keyElUnused) {
-  // Topology key now comes from the 1-hour cached session (seeded on the
-  // first privileged click via the in-app modal). Inline key inputs were
-  // removed from the page — there is one canonical key entry path.
-  let key = getCachedTopologyKey();
-  if (!key) {
-    key = await _acquireTopologyKey("Authorize", "calibration read");
-  }
-  if (!key) {
-    const err = new Error("Cancelled — topology key required.");
-    err.userFacing = true;
-    throw err;
-  }
-  const r = await fetch(url, {
-    headers: { "x-topology-key": key, "accept": "application/json" },
-    cache: "no-store",
-  });
+  // v2.11.x — read-only calibration GETs (/state, /full-config,
+  // /snapshots, /audit-log, /fleet-summary) are now PUBLIC server-side.
+  // Operator preference: routine reads should never trigger the unlock
+  // modal. We still send a cached topology key when one happens to be
+  // present (so server-side audit logging captures the operator), but
+  // we never PROMPT for one from this read path.
+  const key = getCachedTopologyKey();
+  const headers = { "accept": "application/json" };
+  if (key) headers["x-topology-key"] = key;
+  const r = await fetch(url, { headers, cache: "no-store" });
   let body = null;
   try { body = await r.json(); } catch (_) { body = null; }
   if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      // Server still rejected — cached key is stale. Wipe BOTH caches so
+      // that when the operator next does a write/consign action, the
+      // unlock prompt fires ONCE (not per-button).
+      clearTopologyAuthCache();
+      clearBulkAuthCache();
+    }
     const e = new Error(body?.error || `HTTP ${r.status}`);
     e.userFacing = true;
     e.status = r.status;
@@ -27800,10 +27982,107 @@ async function _fcalHandleRead() {
     _fcalSetMsg("fcalReadMsg",
       `Read OK — ValidCfgCode = ${body?.calibration?.valid_cfg_code_hex} ${body?.calibration?.valid_cfg_code_ok ? "✓" : "⚠"}`,
       body?.calibration?.valid_cfg_code_ok ? "ok" : "err");
+    // Spin up the quiet 3-s live-refresh once we have a successful baseline read.
+    _fcalStartLiveAutoRefresh();
   } catch (err) {
     _fcalSetMsg("fcalReadMsg", err?.userFacing ? err.message : `Read failed: ${err?.message || err}`, "err");
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Quiet live-value auto-refresh ─────────────────────────────────────
+// Operator preference: the Live column should update silently every few
+// seconds (like a live LCD) without the operator having to click Read.
+// We only PATCH the .fcal-live cells + the state-strip chips, NEVER
+// re-render the whole table — that would reset the New Value inputs and
+// flicker the gate badges.
+function _fcalStartLiveAutoRefresh() {
+  if (FieldCalibrationUI.liveTimer) return;
+  FieldCalibrationUI.liveTimer = setInterval(_fcalQuietRefreshLive, 3000);
+}
+function _fcalStopLiveAutoRefresh() {
+  if (FieldCalibrationUI.liveTimer) {
+    clearInterval(FieldCalibrationUI.liveTimer);
+    FieldCalibrationUI.liveTimer = null;
+  }
+}
+async function _fcalQuietRefreshLive() {
+  // Skip when tab is hidden — saves Modbus polls / battery on remote viewers.
+  if (typeof document !== "undefined" && document.hidden) return;
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) return;
+  if (!_fcalIsUnlocked()) return;   // never trigger the unlock modal from a timer
+  const host = document.getElementById("fcalReadResult");
+  if (!host || host.hidden) return;
+  try {
+    const key = getCachedTopologyKey();
+    if (!key) return;
+    const r = await fetch(`/api/calibration/state/${inv}/${slave}?_t=${Date.now()}`, {
+      headers: { "x-topology-key": key, "accept": "application/json" },
+      cache: "no-store",
+    });
+    if (!r.ok) return;            // silent — operator already gets red on Read
+    const body = await r.json();
+    if (!body?.ok) return;
+    // Stash for write/restore handlers that read FieldCalibrationUI.lastState.
+    if (FieldCalibrationUI.lastState) {
+      FieldCalibrationUI.lastState.live = body.live || null;
+      FieldCalibrationUI.lastState.read_at_ms = body.read_at_ms || Date.now();
+    }
+    _fcalPatchLiveCells(body.live || null);
+    _fcalPatchStateStrip(body.live || null, body.read_at_ms || Date.now());
+  } catch (_) { /* silent */ }
+}
+
+// Patch only the .fcal-live cells in place — keeps focus / cursor in any
+// New Value input the operator is editing. When the rendered value changes
+// vs the previous tick, briefly highlight the cell so the operator sees
+// the live update happening.
+function _fcalPatchLiveCells(live) {
+  const host = document.getElementById("fcalReadResult");
+  if (!host) return;
+  host.querySelectorAll("tr[data-off]").forEach((row) => {
+    const off = Number(row.dataset.off);
+    const cell = row.querySelector(".fcal-live");
+    if (!cell || !Number.isFinite(off)) return;
+    const next = _fcalLiveCell(off, live);
+    if (cell.innerHTML !== next) {
+      cell.innerHTML = next;
+      cell.classList.add("fcal-live-tick");
+      setTimeout(() => cell.classList.remove("fcal-live-tick"), 320);
+    }
+  });
+}
+
+// Patch the read-out header chips (timestamp, %Pn, state) without touching
+// the rest of the table.
+function _fcalPatchStateStrip(live, readAtMs) {
+  const tsEl = document.querySelector(".js-fcal-read-at");
+  if (tsEl) tsEl.textContent = new Date(readAtMs || Date.now()).toLocaleString();
+  const pacEl = document.querySelector(".js-fcal-pac");
+  const pnEl  = document.querySelector(".js-fcal-pn");
+  const pctEl = document.querySelector(".js-fcal-pct");
+  if (pacEl) pacEl.textContent = live?.pac_w != null ? (Number(live.pac_w) / 1000).toFixed(1) : "—";
+  if (pnEl)  pnEl.textContent  = live?.nominal_power_w != null ? (Number(live.nominal_power_w) / 1000).toFixed(1) : "—";
+  if (pctEl) pctEl.textContent = live?.pct_of_pn != null ? Number(live.pct_of_pn).toFixed(1) : "—";
+  const chip = document.querySelector(".js-fcal-state-chip");
+  if (chip) {
+    const phaseLabels = { 0: "initial", 1: "init-mag", 2: "grid-connected", 3: "ERROR" };
+    const haveState = live && live.state_phase != null;
+    const phaseStr = haveState
+      ? (phaseLabels[Number(live.state_phase)] || `phase ${live.state_phase}`)
+      : "state unknown";
+    const flags = [];
+    if (live?.state_blocked === 1) flags.push("BLOCKED");
+    if (live?.state_stop === 1) flags.push("STOP");
+    if (live?.state_grid_fault === 1) flags.push("GRID FAULT");
+    chip.textContent = flags.length ? `${phaseStr} · ${flags.join(", ")}` : phaseStr;
+    chip.classList.remove("fcal-state-ok", "fcal-state-bad", "fcal-state-info");
+    if (!haveState) chip.classList.add("fcal-state-info");
+    else if (phaseStr === "ERROR" || flags.length || Number(live.state_phase) !== 2) chip.classList.add("fcal-state-bad");
+    else chip.classList.add("fcal-state-ok");
   }
 }
 
@@ -27833,7 +28112,9 @@ function _fcalLiveCell(offset, live) {
   let v = live[m.key];
   if ((v == null || v === 0) && m.fallback) v = live[m.fallback];
   if (v == null) return `<span class="fcal-live-na">—</span>`;
-  return `<span class="fcal-live-val">${_fcalEsc(String(v))} <small class="fcal-live-unit">${_fcalEsc(m.unit)}</small></span>`;
+  // Value + unit rendered as two inline-block spans so units line up
+  // vertically across rows (value column right-aligned, unit fixed-width).
+  return `<span class="fcal-live-pair"><span class="fcal-live-num">${_fcalEsc(String(v))}</span><span class="fcal-live-unit">${_fcalEsc(m.unit)}</span></span>`;
 }
 
 function _fcalRenderSingle(state) {
@@ -27970,105 +28251,425 @@ function _fcalRenderFullConfig(body) {
 
 async function _fcalHandleFleetScan() {
   const btn = document.getElementById("btnFcalFleetScan");
-  _fcalSetMsg("fcalFleetMsg", "Scanning fleet — this can take ~10 s for a full plant…");
-  if (btn) btn.disabled = true;
   const host = document.getElementById("fcalFleetResult");
-  if (host) {
-    host.innerHTML = `<div class="srn-empty">Scanning… please wait.</div>`;
-  }
+  // Progress polling — fires every 1 s in parallel with the fleet-summary
+  // request so the operator gets live "12 / 96 nodes (inv 4/2)" feedback
+  // instead of a 10-second silent spinner. Polling stops automatically
+  // when the main fetch resolves OR when the server reports `busy: false`.
+  let pollHandle = null;
+  let pollDone = false;
+  const renderProgress = (p) => {
+    if (!host) return;
+    const total = Number(p?.total) || 0;
+    const done  = Number(p?.done)  || 0;
+    const failed = Number(p?.failed) || 0;
+    const cur = p?.current ? ` · ${_fcalEsc(p.current)}` : "";
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    host.innerHTML = `
+      <div class="srn-empty">
+        <div class="fcal-scan-progress-label">
+          Scanning fleet — <strong>${done} / ${total}</strong> nodes${cur}
+          ${failed ? ` · <span class="fcal-cell-bad">${failed} failed</span>` : ""}
+        </div>
+        <div class="fcal-scan-progress-bar"><div class="fcal-scan-progress-fill" style="width:${pct}%"></div></div>
+      </div>`;
+  };
+  const startPolling = () => {
+    if (pollHandle) return;
+    pollHandle = setInterval(async () => {
+      if (pollDone) return;
+      try {
+        const r = await fetch(`/api/calibration/fleet-progress?_t=${Date.now()}`,
+          { cache: "no-store" });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!j?.ok) return;
+        renderProgress(j.progress);
+        if (!j.busy && pollDone) clearInterval(pollHandle);
+      } catch (_) { /* silent — main fetch will surface the error */ }
+    }, 1000);
+  };
+  const stopPolling = () => {
+    pollDone = true;
+    if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+  };
+
+  _fcalSetMsg("fcalFleetMsg", "Scanning fleet…");
+  if (btn) btn.disabled = true;
+  // Don't carry the previous scan's outliers-only filter into a fresh scan
+  // — operator might have very different fleet condition between scans.
+  _fcalFleetState.lastBody = null;
+  renderProgress({ total: 0, done: 0, failed: 0, current: "starting" });
+  startPolling();
+  // Fleet scan is a read-only diagnostic — operator preference: NO unlock
+  // modal for this. Use plain fetch instead of _fcalAuthedFetch so a
+  // first-time visitor can run it without typing the topology key.
+  const fetchFleet = async () => {
+    const r = await fetch(`/api/calibration/fleet-summary?_t=${Date.now()}`,
+      { cache: "no-store", headers: { "accept": "application/json" } });
+    let j = null;
+    try { j = await r.json(); } catch (_) { j = null; }
+    if (!r.ok) {
+      const err = new Error(j?.error || `HTTP ${r.status}`);
+      err.userFacing = true;
+      err.status = r.status;
+      err.body = j;
+      throw err;
+    }
+    return j;
+  };
   try {
-    const url = `/api/calibration/fleet-summary?_t=${Date.now()}`;
-    const body = await _fcalAuthedFetch(url);
+    const body = await fetchFleet();
     if (!body?.ok) throw new Error(body?.error || "fleet scan failed");
+    stopPolling();
     _fcalRenderFleet(body);
-    _fcalSetMsg("fcalFleetMsg", `Scanned ${body.scanned} nodes (${body.failed} failed).`, body.failed ? "err" : "ok");
+    // Compose a one-line summary including failure breakdown so the
+    // operator can triage without expanding the failures section.
+    const fb = body.failure_breakdown || {};
+    const fbStr = Object.keys(fb).length
+      ? " (" + Object.entries(fb).map(([k, v]) => `${v} ${k}`).join(", ") + ")"
+      : "";
+    const dur = body.duration_ms ? ` · ${(body.duration_ms / 1000).toFixed(1)} s` : "";
+    _fcalSetMsg("fcalFleetMsg",
+      `Scanned ${body.scanned} nodes (${body.failed} failed${fbStr})${dur}.`,
+      body.failed ? "err" : "ok");
   } catch (err) {
-    _fcalSetMsg("fcalFleetMsg", err?.userFacing ? err.message : `Fleet scan failed: ${err?.message || err}`, "err");
-    if (host) host.innerHTML = `<div class="srn-empty">Scan failed — see message above.</div>`;
+    stopPolling();
+    // Server says another scan is already running — instead of just
+    // erroring, switch into observe-mode and poll progress until that
+    // scan completes, then fetch its result.
+    if (err?.status === 429) {
+      _fcalSetMsg("fcalFleetMsg",
+        "Another scan is already in progress — observing it instead of starting a new one.", "info");
+      startPolling();
+      // Wait for the in-flight scan to finish, then re-issue the request
+      // (the server's _fleetScanInFlight flag will be clear by then).
+      await new Promise((resolve) => {
+        const h = setInterval(async () => {
+          try {
+            const r = await fetch(`/api/calibration/fleet-progress?_t=${Date.now()}`,
+              { cache: "no-store" });
+            if (!r.ok) return;
+            const j = await r.json();
+            if (j?.ok && !j.busy) { clearInterval(h); resolve(); }
+          } catch (_) { /* keep trying */ }
+        }, 1000);
+      });
+      stopPolling();
+      _fcalSetMsg("fcalFleetMsg", "Other scan finished — re-issuing request to fetch results…", "info");
+      try {
+        const body = await fetchFleet();
+        if (body?.ok) {
+          _fcalRenderFleet(body);
+          _fcalSetMsg("fcalFleetMsg",
+            `Scanned ${body.scanned} nodes (${body.failed} failed).`,
+            body.failed ? "err" : "ok");
+        }
+      } catch (err2) {
+        _fcalSetMsg("fcalFleetMsg",
+          `Fleet scan failed after observe-mode retry: ${err2?.message || err2}`, "err");
+        if (host) host.innerHTML = `<div class="srn-empty">Scan failed — see message above.</div>`;
+      }
+    } else {
+      _fcalSetMsg("fcalFleetMsg", err?.userFacing ? err.message : `Fleet scan failed: ${err?.message || err}`, "err");
+      if (host) host.innerHTML = `<div class="srn-empty">Scan failed — see message above.</div>`;
+    }
   } finally {
+    stopPolling();
     if (btn) btn.disabled = false;
   }
 }
 
+// ─── Fleet anomaly view ────────────────────────────────────────────────
+// Stash for the filter toggle so re-render doesn't lose state.
+const _fcalFleetState = { lastBody: null, outliersOnly: false };
+
 function _fcalRenderFleet(body) {
   const host = document.getElementById("fcalFleetResult");
   if (!host) return;
+  _fcalFleetState.lastBody = body;
   const medians = body.medians || {};
   const perNode = body.per_node || [];
   const failures = body.failures || [];
+  const failureBreakdown = body.failure_breakdown || {};
 
-  // Decide which fields to show as columns — only the writable 14.
-  const fieldOrder = [
-    "Fesc_vac_1", "Fesc_vac_2", "Fesc_vac_3",
-    "Fesc_iac_1_baja", "Fesc_iac_2_baja", "Fesc_iac_3_baja",
-    "Fesc_ipv", "Fesc_vpv_p", "Fesc_vpv_n",
-    "comp_per_vacio",
-    "comp_reactiva_x1", "comp_reactiva_y1",
-    "comp_reactiva_x2", "comp_reactiva_y2",
+  // Group the 14 writable fields by category — mirrors the per-node
+  // Read view's section grouping (AC Voltage / AC Current / DC / Active P
+  // / Reactive). Each group becomes a colgroup with its own colspan
+  // header and vertical separator, matching the IGBT/Contactor pattern.
+  const groups = [
+    { key: "vac", title: "AC Voltage",
+      fields: ["Fesc_vac_1", "Fesc_vac_2", "Fesc_vac_3"] },
+    { key: "iac", title: "AC Current",
+      fields: ["Fesc_iac_1_baja", "Fesc_iac_2_baja", "Fesc_iac_3_baja"] },
+    { key: "dc",  title: "DC",
+      fields: ["Fesc_ipv", "Fesc_vpv_p", "Fesc_vpv_n"] },
+    { key: "p",   title: "Active P",
+      fields: ["comp_per_vacio"] },
+    { key: "q",   title: "Reactive",
+      fields: ["comp_reactiva_x1", "comp_reactiva_y1",
+               "comp_reactiva_x2", "comp_reactiva_y2"] },
   ];
+  const fieldOrder = groups.flatMap((g) => g.fields);
   const shortLabels = {
     Fesc_vac_1: "Vac1", Fesc_vac_2: "Vac2", Fesc_vac_3: "Vac3",
     Fesc_iac_1_baja: "Iac1", Fesc_iac_2_baja: "Iac2", Fesc_iac_3_baja: "Iac3",
-    Fesc_ipv: "Ipv", Fesc_vpv_p: "Vpv+", Fesc_vpv_n: "Vpv-",
+    Fesc_ipv: "Ipv", Fesc_vpv_p: "Vpv+", Fesc_vpv_n: "Vpv−",
     comp_per_vacio: "PerVa", comp_reactiva_x1: "X1", comp_reactiva_y1: "Y1",
     comp_reactiva_x2: "X2", comp_reactiva_y2: "Y2",
   };
+  const longLabels = {
+    Fesc_vac_1: "AC voltage scale, phase 1",
+    Fesc_vac_2: "AC voltage scale, phase 2",
+    Fesc_vac_3: "AC voltage scale, phase 3",
+    Fesc_iac_1_baja: "AC current scale, phase 1 (low gain)",
+    Fesc_iac_2_baja: "AC current scale, phase 2",
+    Fesc_iac_3_baja: "AC current scale, phase 3",
+    Fesc_ipv: "DC input current scale (Fesc_ipv)",
+    Fesc_vpv_p: "DC voltage scale, +pole",
+    Fesc_vpv_n: "DC voltage scale, −pole",
+    comp_per_vacio: "Standby losses compensation",
+    comp_reactiva_x1: "Reactive curve point X1",
+    comp_reactiva_y1: "Reactive curve point Y1",
+    comp_reactiva_x2: "Reactive curve point X2",
+    comp_reactiva_y2: "Reactive curve point Y2",
+  };
 
-  const headerCells = fieldOrder.map((f) => `<th title="${_fcalEsc(f)}; median = ${_fcalEsc(medians[f] ?? "—")}">${_fcalEsc(shortLabels[f] || f)}</th>`).join("");
-  const rows = perNode.map((n) => {
-    const cells = fieldOrder.map((f) => {
+  // Tally summary stats — drives the chips at the top.
+  const stats = { healthy: 0, warn: 0, bad: 0, sentinel_bad: 0 };
+  const nodeWorstAbs = (n) => {
+    let worst = 0;
+    for (const f of fieldOrder) {
       const d = n.deltas_pct?.[f];
-      if (d == null) return `<td class="mono fcal-cell-null">—</td>`;
+      if (d == null) continue;
+      const a = Math.abs(d);
+      if (a > worst) worst = a;
+    }
+    return worst;
+  };
+  for (const n of perNode) {
+    const worst = nodeWorstAbs(n);
+    if (worst >= 5) stats.bad++;
+    else if (worst >= 2) stats.warn++;
+    else stats.healthy++;
+    if (n.valid_cfg_code_ok === false) stats.sentinel_bad++;
+  }
+
+  // Apply outliers-only filter (any cell ≥ 2 %) — keeps the table focused
+  // on the rows that matter. Sentinel-failed nodes always show.
+  const visibleNodes = _fcalFleetState.outliersOnly
+    ? perNode.filter((n) => nodeWorstAbs(n) >= 2 || n.valid_cfg_code_ok === false)
+    : perNode.slice();
+  // Sort the visible list worst-first so the operator sees the most
+  // anomalous rows immediately.
+  visibleNodes.sort((a, b) => nodeWorstAbs(b) - nodeWorstAbs(a));
+
+  // Build the column-group banner row.
+  const groupHeaderCells = groups.map((g) => `
+    <th colspan="${g.fields.length}" class="fcal-fleet-group-head fcal-fleet-group-${g.key}"
+        title="${_fcalEsc(g.title)}">${_fcalEsc(g.title)}</th>`).join("");
+  // Per-field column header — short label, full name in tooltip + median.
+  const headerCells = fieldOrder.map((f) => `
+    <th class="fcal-fleet-field-head" title="${_fcalEsc(longLabels[f] || f)} · fleet median = ${_fcalEsc(medians[f] ?? "—")}">${_fcalEsc(shortLabels[f] || f)}</th>`).join("");
+  // Boundary indices — last field index of each group needs a right-border
+  // so the group separators continue down through every body row.
+  const boundaryIdx = new Set();
+  let acc = 3;   // 3 fixed leading columns (Inv/Node, IP, Cfg)
+  for (const g of groups.slice(0, -1)) {
+    acc += g.fields.length;
+    boundaryIdx.add(acc);
+  }
+
+  // Reference row: the fleet median per field. Renders as the FIRST row,
+  // visually distinct, so the operator sees the absolute reference values
+  // without having to back-compute from delta percentages.
+  const medianCells = fieldOrder.map((f, i) => {
+    const m = medians[f];
+    const idx = i + 4;   // 1-indexed + 3 leading
+    const sep = boundaryIdx.has(idx) ? " fcal-fleet-cell-boundary" : "";
+    return `<td class="mono fcal-cell-median${sep}">${m == null ? "—" : Math.round(m)}</td>`;
+  }).join("");
+  const medianRow = `
+    <tr class="fcal-fleet-median-row" title="Fleet median per field — what every Δ % is computed against.">
+      <td class="fcal-fleet-sticky"><span class="fcal-fleet-row-marker">FLEET</span></td>
+      <td class="fcal-fleet-sticky">median</td>
+      <td>—</td>
+      ${medianCells}
+    </tr>
+  `;
+
+  // Body rows.
+  const rows = visibleNodes.map((n) => {
+    const cells = fieldOrder.map((f, i) => {
+      const idx = i + 4;
+      const sep = boundaryIdx.has(idx) ? " fcal-fleet-cell-boundary" : "";
+      const d = n.deltas_pct?.[f];
+      if (d == null) return `<td class="mono fcal-cell-null${sep}">—</td>`;
+      const raw = n.factors_u16?.[f];
+      const med = medians[f];
       const abs = Math.abs(d);
       const cls = abs >= 5 ? "fcal-cell-bad" : abs >= 2 ? "fcal-cell-warn" : "fcal-cell-ok";
-      return `<td class="mono ${cls}" title="Δ from fleet median for ${_fcalEsc(f)}">${d > 0 ? "+" : ""}${d.toFixed(2)}%</td>`;
+      const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "·";
+      const tip = `${longLabels[f] || f}\nfactor = ${raw ?? "—"} · median = ${med == null ? "—" : Math.round(med)} · Δ ${d > 0 ? "+" : ""}${d.toFixed(2)} %`;
+      return `<td class="mono ${cls}${sep}" title="${_fcalEsc(tip)}"><span class="fcal-fleet-arrow">${arrow}</span>${d > 0 ? "+" : ""}${d.toFixed(2)}%</td>`;
     }).join("");
-    const cfgOk = n.valid_cfg_code_ok ? "✓" : "⚠";
-    const cfgCls = n.valid_cfg_code_ok ? "fcal-sentinel-ok" : "fcal-sentinel-bad";
+    const sentinelOk = n.valid_cfg_code_ok !== false;
+    const cfgCellInner = sentinelOk
+      ? `<span class="fcal-fleet-cfg fcal-fleet-cfg-ok" title="ValidCfgCode = ${_fcalEsc(n.valid_cfg_code_hex || "0x1F1F")} (block integrity OK)">✓</span>`
+      : `<span class="fcal-fleet-cfg fcal-fleet-cfg-bad" title="ValidCfgCode = ${_fcalEsc(n.valid_cfg_code_hex || "?")} (expected 0x1F1F — block CORRUPT, do not write)">${_fcalEsc(n.valid_cfg_code_hex || "⚠")}</span>`;
+    const worst = nodeWorstAbs(n);
+    const rowCls = worst >= 5 ? "fcal-fleet-row-bad"
+                : worst >= 2 ? "fcal-fleet-row-warn"
+                : "fcal-fleet-row-ok";
     return `
-      <tr>
-        <td class="mono"><strong>${n.inverter}</strong> / ${n.slave}</td>
-        <td class="mono fcal-ip">${_fcalEsc(n.ip || "")}</td>
-        <td class="${cfgCls}" title="ValidCfgCode sentinel">${cfgOk}</td>
+      <tr class="fcal-fleet-row ${rowCls}" data-inv="${n.inverter}" data-slave="${n.slave}"
+          title="Click to open Inverter ${n.inverter} / Node ${n.slave} in the Per-Node Readout tab.">
+        <td class="mono fcal-fleet-sticky"><strong>Inv ${n.inverter}</strong> / ${n.slave}</td>
+        <td class="mono fcal-ip fcal-fleet-sticky">${_fcalEsc(n.ip || "")}</td>
+        <td>${cfgCellInner}</td>
         ${cells}
       </tr>
     `;
   }).join("");
 
-  const failureRows = failures.map((f) => `
-    <tr class="fcal-fail-row">
-      <td class="mono">${f.inverter} / ${f.slave}</td>
-      <td class="mono fcal-ip">${_fcalEsc(f.ip || "")}</td>
-      <td colspan="${fieldOrder.length + 1}">${_fcalEsc(f.error || "—")}</td>
-    </tr>
-  `).join("");
+  // Failure section — rendered SEPARATELY below the main table with
+  // category breakdown, so failures don't pollute the anomaly grid and
+  // the operator can triage them in one glance.
+  const failureSection = failures.length
+    ? `
+    <div class="fcal-fleet-failures">
+      <div class="fcal-fleet-failures-header">
+        <span class="mdi mdi-alert-circle-outline icon-inline" aria-hidden="true"></span>
+        <strong>${failures.length} node${failures.length === 1 ? "" : "s"} did not respond</strong>
+        ${Object.keys(failureBreakdown).length
+          ? `<span class="fcal-fleet-failures-breakdown">${Object.entries(failureBreakdown).map(([k, v]) => `<span class="fcal-fleet-fail-cat fcal-fleet-fail-cat-${_fcalEsc(k)}">${v} ${_fcalEsc(k)}</span>`).join("")}</span>`
+          : ""}
+      </div>
+      <table class="fcal-table fcal-fleet-failures-table">
+        <thead><tr><th>Inv / Node</th><th>IP</th><th>Category</th><th>Reason</th></tr></thead>
+        <tbody>
+          ${failures.map((f) => `
+            <tr>
+              <td class="mono">Inv ${f.inverter} / ${f.slave}</td>
+              <td class="mono fcal-ip">${_fcalEsc(f.ip || "")}</td>
+              <td><span class="fcal-fleet-fail-cat fcal-fleet-fail-cat-${_fcalEsc(f.category || "py_error")}">${_fcalEsc(f.category || "unknown")}</span></td>
+              <td class="fcal-fleet-fail-reason">${_fcalEsc(f.error || "—")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>` : "";
+
+  // Summary chips — clickable to filter (all ↔ outliers-only).
+  const chipFilterActive = _fcalFleetState.outliersOnly ? " fcal-fleet-chip-active" : "";
+  const completedAt = body.completed_at_ms ? new Date(body.completed_at_ms).toLocaleString() : "—";
 
   host.innerHTML = `
-    <div class="fcal-readout-header">
-      <strong>${perNode.length} nodes scanned</strong>
-      <span class="fcal-readout-meta">
-        <span>Completed at ${new Date(body.completed_at_ms || Date.now()).toLocaleString()}</span>
-        <span class="fcal-legend">
-          <span class="fcal-cell-ok">≤2 %</span>
-          <span class="fcal-cell-warn">2–5 %</span>
-          <span class="fcal-cell-bad">&gt;5 %</span>
+    <div class="fcal-fleet-summary-card">
+      <div class="fcal-fleet-summary-row">
+        <div class="fcal-fleet-summary-headline">
+          <span class="fcal-fleet-summary-num">${perNode.length}</span>
+          <span class="fcal-fleet-summary-label">nodes scanned</span>
+          <span class="fcal-fleet-summary-meta">· completed ${_fcalEsc(completedAt)}${body.duration_ms ? " · " + (body.duration_ms / 1000).toFixed(1) + " s" : ""}</span>
+        </div>
+        <div class="fcal-fleet-summary-chips">
+          <span class="fcal-fleet-chip fcal-fleet-chip-ok"   title="Worst-cell delta is below 2 % — node looks aligned with the fleet.">${stats.healthy} healthy</span>
+          <span class="fcal-fleet-chip fcal-fleet-chip-warn" title="At least one cell is between 2 % and 5 % off the median.">${stats.warn} warn</span>
+          <span class="fcal-fleet-chip fcal-fleet-chip-bad"  title="At least one cell is more than 5 % off the median — investigate before writing.">${stats.bad} critical</span>
+          ${stats.sentinel_bad
+            ? `<span class="fcal-fleet-chip fcal-fleet-chip-sentinel" title="ValidCfgCode sentinel is wrong on these nodes — block is corrupt.">${stats.sentinel_bad} sentinel</span>`
+            : ""}
+          ${failures.length
+            ? `<span class="fcal-fleet-chip fcal-fleet-chip-failed" title="Nodes that did not respond during the scan — see failure section below.">${failures.length} failed</span>`
+            : ""}
+        </div>
+      </div>
+      <div class="fcal-fleet-controls-row">
+        <label class="fcal-fleet-filter-toggle${chipFilterActive}" title="Hide healthy nodes (worst cell &lt; 2 %) so the table only shows rows that need attention.">
+          <input type="checkbox" id="fcalFleetOutliersOnly" ${_fcalFleetState.outliersOnly ? "checked" : ""} />
+          <span>Show outliers only (≥ 2 %)</span>
+          <span class="fcal-fleet-filter-count">${visibleNodes.length} / ${perNode.length} rows</span>
+        </label>
+        <span class="fcal-fleet-legend">
+          <span class="fcal-cell-ok">●</span><span class="fcal-fleet-legend-label">≤ 2 %</span>
+          <span class="fcal-cell-warn">●</span><span class="fcal-fleet-legend-label">2–5 %</span>
+          <span class="fcal-cell-bad">●</span><span class="fcal-fleet-legend-label">&gt; 5 %</span>
         </span>
-      </span>
+        <span class="fcal-fleet-hint" title="Tip: click any row to jump to the Per-Node Readout for that inverter.">click any row to drill in</span>
+      </div>
     </div>
-    <div class="fcal-table-scroll">
-      <table class="fcal-table fcal-fleet-table">
+    <div class="fcal-table-scroll fcal-fleet-table-scroll">
+      <table class="fcal-table fcal-fleet-table fcal-fleet-table-grouped">
+        <colgroup>
+          <col class="fcal-col-node" />
+          <col class="fcal-col-ip" />
+          <col class="fcal-col-cfg" />
+        </colgroup>
+        ${groups.map((g) => `<colgroup class="fcal-colgroup-${g.key}">${g.fields.map(() => `<col class="fcal-col-field" />`).join("")}</colgroup>`).join("")}
         <thead>
-          <tr>
-            <th>Inv / Node</th>
-            <th>IP</th>
+          <tr class="fcal-fleet-grouprow">
+            <th class="fcal-fleet-sticky-head" colspan="3">Node</th>
+            ${groupHeaderCells}
+          </tr>
+          <tr class="fcal-fleet-headrow">
+            <th class="fcal-fleet-sticky-head">Inv / Node</th>
+            <th class="fcal-fleet-sticky-head">IP</th>
             <th title="ValidCfgCode sentinel (0x1F1F expected)">Cfg</th>
             ${headerCells}
           </tr>
         </thead>
-        <tbody>${rows}${failureRows}</tbody>
+        <tbody>${medianRow}${rows}</tbody>
       </table>
     </div>
+    ${failureSection}
   `;
+
+  // Wire row-click → switch to Per-Node Readout tab and select the node.
+  host.querySelectorAll(".fcal-fleet-row").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const inv = Number(tr.dataset.inv);
+      const slv = Number(tr.dataset.slave);
+      if (!Number.isFinite(inv) || !Number.isFinite(slv)) return;
+      _fcalJumpToNode(inv, slv);
+    });
+  });
+  // Wire the outliers-only toggle.
+  const filterEl = host.querySelector("#fcalFleetOutliersOnly");
+  if (filterEl) {
+    filterEl.addEventListener("change", () => {
+      _fcalFleetState.outliersOnly = !!filterEl.checked;
+      // Re-render the same body with the new filter applied.
+      _fcalRenderFleet(_fcalFleetState.lastBody);
+    });
+  }
+}
+
+// Click-target helper: switch the Field Calibration tabs to "Per-Node
+// Readout" and pre-select the picked inverter + node, then trigger Read.
+function _fcalJumpToNode(inv, slv) {
+  try {
+    const invPicker = document.getElementById("fcalInverterPicker");
+    const slavePicker = document.getElementById("fcalSlavePicker");
+    if (invPicker) {
+      invPicker.value = String(inv);
+      invPicker.dispatchEvent(new Event("change"));
+    }
+    if (slavePicker) {
+      slavePicker.value = String(slv);
+      slavePicker.dispatchEvent(new Event("change"));
+    }
+    if (typeof setActiveCardTab === "function") {
+      setActiveCardTab("fieldCalibrationSection", "single", {
+        defaultKey: "single", storageKey: "adsi_fcal_active_tab",
+      });
+    }
+    FieldCalibrationUI.inverter = inv;
+    FieldCalibrationUI.slave = slv;
+    // Auto-Read so the operator sees data immediately.
+    _fcalHandleRead().catch(() => {});
+  } catch (err) {
+    console.warn("[calibration] jump-to-node failed:", err?.message);
+  }
 }
 
 // ─── Phase 2-4: session lifecycle + writes + consign + copy ──────────────────
@@ -28189,7 +28790,11 @@ function _fcalStartHeartbeat() {
         _fcalSetMsg("fcalReadMsg", "Session ended server-side (timeout or abort).", "err");
         _fcalStopHeartbeat();
       } else if (j.session) {
+        // Preserve session-scoped bulk auth key across heartbeat refresh —
+        // the server payload doesn't carry it, but we want one prompt per session.
+        const carry = FieldCalibrationUI.session?._bulkAuthKey || null;
         FieldCalibrationUI.session = j.session;
+        if (carry) FieldCalibrationUI.session._bulkAuthKey = carry;
         _fcalApplySessionUi();
       }
     } catch (_) {}
@@ -28222,14 +28827,10 @@ async function _fcalHandleSessionStart() {
     opInput?.focus();
     return;
   }
-  // Use the 1-hour cached topology key; if expired, prompt via the in-app modal.
-  let authKey = getCachedTopologyKey();
-  if (!authKey) {
-    authKey = await _acquireTopologyKey(
-      "Start calibration session",
-      `on Inverter ${inv} / Node ${slave} (operator: ${operator})`,
-    );
-  }
+  // Page-level unlock — first action of the visit shows the modal once;
+  // every subsequent button uses the cached keys silently.
+  if (!(await _fcalEnsureUnlock())) return;
+  const authKey = getCachedTopologyKey();
   if (!authKey) {
     _fcalSetMsg("fcalReadMsg", "Cancelled — session start aborted.", "err");
     return;
@@ -28245,11 +28846,11 @@ async function _fcalHandleSessionStart() {
     });
     const j = await r.json();
     if (r.status === 401 || r.status === 403 || r.status === 429) {
-      clearTopologyAuthCache();
+      _fcalClearBulkAuthOnReject();
       _fcalSetMsg("fcalReadMsg",
         r.status === 429
           ? "Too many failed attempts — wait a few seconds and retry."
-          : "Topology key rejected. Click Start again to re-enter.",
+          : "Authorization rejected. Click Start again — one fresh unlock prompt will fire.",
         "err");
       return;
     }
@@ -28276,14 +28877,11 @@ async function _fcalHandleSessionStart() {
 async function _fcalHandleSessionEnd() {
   const s = FieldCalibrationUI.session;
   if (!s) return;
-  let authKey = getCachedTopologyKey();
-  if (!authKey) {
-    authKey = await _acquireTopologyKey("End calibration session", `on Inverter ${s.inverter} / Node ${s.slave}`);
-  }
-  if (!authKey) {
+  if (!(await _fcalEnsureUnlock())) {
     _fcalSetMsg("fcalReadMsg", "Cancelled — session left active.", "err");
     return;
   }
+  const authKey = getCachedTopologyKey();
   const btn = document.getElementById("btnFcalSessionEnd");
   if (btn) btn.disabled = true;
   try {
@@ -28294,8 +28892,8 @@ async function _fcalHandleSessionEnd() {
     });
     const j = await r.json();
     if (r.status === 401 || r.status === 403 || r.status === 429) {
-      clearTopologyAuthCache();
-      _fcalSetMsg("fcalReadMsg", "Topology key rejected. Click End Session again to re-enter.", "err");
+      _fcalClearBulkAuthOnReject();
+      _fcalSetMsg("fcalReadMsg", "Authorization rejected. Click End Session again — one fresh unlock prompt will fire.", "err");
       return;
     }
     if (!r.ok) {
@@ -28303,6 +28901,10 @@ async function _fcalHandleSessionEnd() {
       return;
     }
     FieldCalibrationUI.session = null;
+    // Operator-explicit session end → disarm both force toggles. Carrying
+    // them into the next session is too easy to misuse.
+    FieldCalibrationUI.forceWrite = false;
+    FieldCalibrationUI.forceSafety = false;
     _fcalApplySessionUi();
     _fcalStopHeartbeat();
     _fcalSetMsg("fcalReadMsg",
@@ -28426,28 +29028,50 @@ function _fcalRenderSingleEditable(state) {
     <div class="fcal-readout-header">
       <div><strong>Inverter ${state.inverter} / Node ${state.slave}</strong> <span class="mono">(${_fcalEsc(state.ip || "")})</span></div>
       <div class="fcal-readout-meta">
-        <span>Read at ${_fcalEsc(readAt)}</span>
+        <span>Read at <span class="js-fcal-read-at">${_fcalEsc(readAt)}</span></span>
         <span class="fcal-sentinel ${sentinelOk ? "fcal-sentinel-ok" : "fcal-sentinel-bad"}">${_fcalEsc(sentinelLabel)}</span>
-        <span class="fcal-state ${stateChipClass}" title="Inverter state register (Estado, reg 30074). Calibration writes refuse when phase ≠ grid-connected, BLOCKED, or GRID FAULT.">${_fcalEsc(phaseStr)}${stateFlags.length ? " · " + stateFlags.join(" · ") : ""}</span>
-        <span class="fcal-state fcal-state-info" title="Pac vs configured nominal power. Fesc_ipv (87) requires ≥ 70 %; reactive X1Y1 (91/92) requires ≈ 20 %; reactive X2Y2 (93/94) requires ≈ 70 %.">Pac ${pacKw} kW / Pn ${pnKw} kW = ${pctOfPn != null ? pctOfPn.toFixed(1) + " %" : "—"}</span>
+        <span class="fcal-state js-fcal-state-chip ${stateChipClass}" title="Inverter state register (Estado, reg 30074). Calibration writes refuse when phase ≠ grid-connected, BLOCKED, or GRID FAULT.">${_fcalEsc(phaseStr)}${stateFlags.length ? " · " + stateFlags.join(" · ") : ""}</span>
+        <span class="fcal-state fcal-state-info" title="Pac vs configured nominal power. Fesc_ipv (87) requires ≥ 70 %; reactive X1Y1 (91/92) requires ≈ 20 %; reactive X2Y2 (93/94) requires ≈ 70 %.">Pac <span class="js-fcal-pac">${pacKw}</span> kW / Pn <span class="js-fcal-pn">${pnKw}</span> kW = <span class="js-fcal-pct">${pctOfPn != null ? pctOfPn.toFixed(1) : "—"}</span> %</span>
       </div>
     </div>
     <div class="fcal-write-controls">
       <span class="fcal-write-note">
         <span class="mdi mdi-shield-key-outline icon-inline" aria-hidden="true"></span>
-        Writes use the 1-hour cached sacupsMM session. First write of the hour prompts; afterwards the in-app modal is bypassed.
+        Writes use the page-level cached sacupsMM. Force toggles below stay armed across writes until you uncheck them.
       </span>
-      <label class="invclock-check" for="fcalForceWrite" title="Bypass the 50 % range guard. Use only if you genuinely need to write a value > 50 % from the current — e.g. recalibrating after a sensor swap.">
-        <input type="checkbox" id="fcalForceWrite" />
-        <span class="invclock-check-label">Force (bypass 50 % range guard)</span>
+      <label class="fcal-force-toggle ${FieldCalibrationUI.forceWrite ? "fcal-force-armed" : ""}" for="fcalForceWrite" title="Bypass the 50 % range guard. Use only if you genuinely need to write a value > 50 % from the current — e.g. recalibrating after a sensor swap.">
+        <input type="checkbox" id="fcalForceWrite" ${FieldCalibrationUI.forceWrite ? "checked" : ""} />
+        <span class="fcal-force-toggle-label">Force <span class="fcal-force-toggle-detail">(bypass 50 % range guard)</span></span>
       </label>
-      <label class="invclock-check" for="fcalForceSafetyGate" title="Bypass the TrinPM20 per-offset safety gate (inverter state + Pac/Pn band). Use only after explicitly acknowledging the consign target is wrong on purpose (sensor-swap scenario).">
-        <input type="checkbox" id="fcalForceSafetyGate" />
-        <span class="invclock-check-label">Force (bypass TrinPM20 safety gate)</span>
+      <label class="fcal-force-toggle ${FieldCalibrationUI.forceSafety ? "fcal-force-armed" : ""}" for="fcalForceSafetyGate" title="Bypass the TrinPM20 per-offset safety gate (inverter state + Pac/Pn band). Use only after explicitly acknowledging the consign target is wrong on purpose (sensor-swap scenario).">
+        <input type="checkbox" id="fcalForceSafetyGate" ${FieldCalibrationUI.forceSafety ? "checked" : ""} />
+        <span class="fcal-force-toggle-label">Force <span class="fcal-force-toggle-detail">(bypass TrinPM20 safety gate)</span></span>
       </label>
     </div>
     ${sections}
   `;
+  // Wire force-toggle listeners — persist state on FieldCalibrationUI so
+  // it survives the next _fcalHandleRead() re-render. The label gets the
+  // .fcal-force-armed class for unmistakable visual feedback (red border +
+  // bold text) so the operator always knows when they're armed.
+  const forceWriteEl = host.querySelector("#fcalForceWrite");
+  const forceSafetyEl = host.querySelector("#fcalForceSafetyGate");
+  if (forceWriteEl) {
+    forceWriteEl.addEventListener("change", () => {
+      FieldCalibrationUI.forceWrite = !!forceWriteEl.checked;
+      forceWriteEl.closest(".fcal-force-toggle")?.classList.toggle(
+        "fcal-force-armed", FieldCalibrationUI.forceWrite,
+      );
+    });
+  }
+  if (forceSafetyEl) {
+    forceSafetyEl.addEventListener("change", () => {
+      FieldCalibrationUI.forceSafety = !!forceSafetyEl.checked;
+      forceSafetyEl.closest(".fcal-force-toggle")?.classList.toggle(
+        "fcal-force-armed", FieldCalibrationUI.forceSafety,
+      );
+    });
+  }
   // Wire write buttons
   host.querySelectorAll(".fcal-write-btn").forEach((btn) => {
     btn.addEventListener("click", () => _fcalHandleWrite(Number(btn.dataset.off)));
@@ -28470,16 +29094,23 @@ async function _fcalHandleWrite(offset) {
     _fcalSetMsg("fcalReadMsg", "Enter a valid integer value.", "err");
     return;
   }
-  const force = document.getElementById("fcalForceWrite")?.checked;
-  const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
+  // Read from BOTH the live DOM and the persisted state — the persisted
+  // flag wins (the DOM checkbox can be wiped by a re-render between
+  // arming and clicking, which used to lose the operator's choice).
+  const force = !!(document.getElementById("fcalForceWrite")?.checked
+    || FieldCalibrationUI.forceWrite);
+  const forceSafety = !!(document.getElementById("fcalForceSafetyGate")?.checked
+    || FieldCalibrationUI.forceSafety);
   const field = String(row.dataset.field || "");
-  const current = row.querySelector(".fcal-val")?.textContent?.trim();
-  // Cached sacupsMM with in-app modal fallback. Same flow as Plant Controller.
-  const authKey = await _bulkAuthForCompliance(
-    `Write ${field} (${current} → ${value})`,
+  // Session-scoped sacupsMM — prompts at most once per calibration session.
+  const authKey = await _fcalGetBulkAuth(
+    "Calibration writes",
     `on Inverter ${session.inverter} / Node ${session.slave}`,
   );
-  if (!authKey) return;
+  if (!authKey) {
+    _fcalSetMsg("fcalReadMsg", "Cancelled — bulk-control key required.", "err");
+    return;
+  }
   const btn = host.querySelector(`.fcal-write-btn[data-off="${offset}"]`);
   if (btn) btn.disabled = true;
   _fcalSetMsg("fcalReadMsg", `Writing ${field}…`);
@@ -28498,7 +29129,7 @@ async function _fcalHandleWrite(offset) {
     });
     const j = await r.json();
     if (r.status === 401 || r.status === 403) {
-      clearBulkAuthCache();
+      _fcalClearBulkAuthOnReject();
       _fcalSetMsg("fcalReadMsg", "Bulk auth rejected — re-prompting next click.", "err");
       return;
     }
@@ -28515,8 +29146,19 @@ async function _fcalHandleWrite(offset) {
       _fcalSetMsg("fcalReadMsg", `Write failed: ${j?.error || j?.status || `HTTP ${r.status}`}`, "err");
       return;
     }
-    _fcalSetMsg("fcalReadMsg",
-      `✓ ${field}: ${j.value_before} → ${j.value_after} verified.`, "ok");
+    // Conservative-feedback: distinguish exact match from inverter-side
+    // quantization. Both are operationally successful — the write took
+    // and the readback is within tolerance — but the operator gets the
+    // ACTUAL applied value plus a quiet "(quantized to N)" note rather
+    // than the alarming "Write failed: readback mismatch" message.
+    if (j.quantized) {
+      _fcalSetMsg("fcalReadMsg",
+        `✓ ${field}: ${j.value_before} → ${j.value_after} (requested ${j.value_requested}; inverter quantized by ${j.delta_pct}% — within tolerance).`,
+        "ok");
+    } else {
+      _fcalSetMsg("fcalReadMsg",
+        `✓ ${field}: ${j.value_before} → ${j.value_after} verified.`, "ok");
+    }
     // Refresh display to show new value
     _fcalHandleRead();
   } catch (err) {
@@ -28531,8 +29173,8 @@ async function _fcalHandleWrite(offset) {
 async function _fcalHandleConsign(pct) {
   const session = FieldCalibrationUI.session;
   if (!session) return;
-  const authKey = await _bulkAuthForCompliance(
-    pct === 100 ? "Release consign" : `Force ${pct} % Pn (consign)`,
+  const authKey = await _fcalGetBulkAuth(
+    "Calibration writes",
     `on Inverter ${session.inverter} / Node ${session.slave}`,
   );
   if (!authKey) return;
@@ -28550,6 +29192,11 @@ async function _fcalHandleConsign(pct) {
       }),
     });
     const j = await r.json();
+    if (r.status === 401 || r.status === 403) {
+      _fcalClearBulkAuthOnReject();
+      if (status) status.textContent = "Authorization rejected — click again; one fresh unlock prompt will fire.";
+      return;
+    }
     if (!r.ok || !j?.ok) {
       if (status) status.textContent = `Consign refused: ${j?.error || `HTTP ${r.status}`}`;
       return;
@@ -28576,22 +29223,44 @@ function _fcalPopulateCopyPickers() {
   const cfgInverters = (State?.ipConfig?.inverters)
     || (State?.settings?.ipconfig?.inverters) || {};
   const session = FieldCalibrationUI.session;
-  Object.entries(cfgInverters).forEach(([k, ip]) => {
-    const inv = Number(k);
-    if (!Number.isFinite(inv) || inv <= 0) return;
-    if (session && inv === session.inverter) return;   // exclude self
+  // Mirror the main inverter picker: only include configured inverters
+  // with a non-empty IP, sorted numerically, and exclude the current
+  // session's target (you can't copy from yourself).
+  const entries = Object.entries(cfgInverters)
+    .map(([k, ip]) => [Number(k), String(ip || "").trim()])
+    .filter(([k, ip]) => Number.isFinite(k) && k > 0 && ip)
+    .filter(([k, _]) => !(session && k === session.inverter))
+    .sort((a, b) => a[0] - b[0]);
+  entries.forEach(([inv, ip]) => {
     const opt = document.createElement("option");
     opt.value = String(inv);
     opt.textContent = `Inverter ${inv}  (${ip})`;
     invSel.appendChild(opt);
   });
-  slaveSel.innerHTML = "";
-  for (let i = 1; i <= 4; i++) {
-    const opt = document.createElement("option");
-    opt.value = String(i);
-    opt.textContent = String(i);
-    slaveSel.appendChild(opt);
+  // Slave picker mirrors Plant Controller: per-inverter node list from
+  // ipConfig.units. Repopulates whenever the source inverter changes.
+  const repopulateSlave = () => {
+    const srcInv = Number(invSel.value);
+    const units = (Number.isFinite(srcInv) && srcInv > 0)
+      ? getConfiguredUnits(srcInv, 4)
+      : [1, 2, 3, 4];
+    const prev = slaveSel.value;
+    slaveSel.innerHTML = "";
+    units.forEach((u) => {
+      const opt = document.createElement("option");
+      opt.value = String(u);
+      opt.textContent = `Node ${u}`;
+      slaveSel.appendChild(opt);
+    });
+    if (units.map(String).includes(prev)) slaveSel.value = prev;
+  };
+  // Idempotent listener — `dataset.bound` flag prevents stacking handlers
+  // across re-populates.
+  if (!invSel.dataset.copyBound) {
+    invSel.dataset.copyBound = "1";
+    invSel.addEventListener("change", repopulateSlave);
   }
+  repopulateSlave();
 }
 
 async function _fcalHandleCopy() {
@@ -28604,16 +29273,17 @@ async function _fcalHandleCopy() {
     _fcalSetMsg("fcalCopyMsg", "Pick source inverter + node.", "err");
     return;
   }
-  const authKey = await _bulkAuthForCompliance(
-    "Copy calibration",
-    `from Inverter ${srcInv}/${srcSlave} → Inverter ${session.inverter}/${session.slave}`,
+  const authKey = await _fcalGetBulkAuth(
+    "Calibration writes",
+    `Copy from Inverter ${srcInv}/${srcSlave} → Inverter ${session.inverter}/${session.slave}`,
   );
   if (!authKey) return;
   const btn = document.getElementById("btnFcalCopy");
   if (btn) btn.disabled = true;
   _fcalSetMsg("fcalCopyMsg", "Reading source + destination…");
   try {
-    const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
+    const forceSafety = !!(document.getElementById("fcalForceSafetyGate")?.checked
+      || FieldCalibrationUI.forceSafety);
     const r = await fetch("/api/calibration/copy", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -28629,7 +29299,7 @@ async function _fcalHandleCopy() {
     });
     const j = await r.json();
     if (r.status === 401 || r.status === 403) {
-      clearBulkAuthCache();
+      _fcalClearBulkAuthOnReject();
       _fcalSetMsg("fcalCopyMsg", "Bulk auth rejected — re-prompting next click.", "err");
       return;
     }
@@ -28664,7 +29334,7 @@ async function _fcalHandleCopy() {
 
 // ─── Backup / Snapshot handlers ────────────────────────────────────────
 
-async function _fcalLoadBackups(opts = {}) {
+async function _fcalLoadBackups(/* opts = {} */) {
   const inv = FieldCalibrationUI.inverter;
   const slave = FieldCalibrationUI.slave;
   const host = document.getElementById("fcalBackupList");
@@ -28673,29 +29343,13 @@ async function _fcalLoadBackups(opts = {}) {
     host.innerHTML = `<div class="srn-empty">Pick an inverter + node and click <strong>Read</strong> to load this node's backup history.</div>`;
     return;
   }
-  let key = getCachedTopologyKey();
-  if (!key) {
-    if (opts.prompt) {
-      key = await _acquireTopologyKey("Load snapshot history", `for Inverter ${inv} / Node ${slave}`);
-    }
-    if (!key) {
-      host.innerHTML = `<div class="srn-empty">Click <strong>Refresh</strong> to load the backup history (topology key required, cached 1 hour).</div>`;
-      return;
-    }
-  }
+  // Read-only — no auth required (server-side route is now public).
   try {
-    const r = await fetch(`/api/calibration/snapshots/${inv}/${slave}?_t=${Date.now()}`, {
-      headers: { "x-topology-key": key },
-      cache: "no-store",
-    });
-    if (r.status === 401 || r.status === 403) {
-      clearTopologyAuthCache();
-      host.innerHTML = `<div class="srn-empty">Topology key rejected — click <strong>Refresh</strong> to re-enter.</div>`;
-      return;
-    }
+    const r = await fetch(`/api/calibration/snapshots/${inv}/${slave}?_t=${Date.now()}`,
+      { cache: "no-store", headers: { "accept": "application/json" } });
     const j = await r.json();
-    if (!j?.ok) {
-      host.innerHTML = `<div class="srn-empty">Load failed: ${_fcalEsc(j?.error || "")}</div>`;
+    if (!r.ok || !j?.ok) {
+      host.innerHTML = `<div class="srn-empty">Load failed: ${_fcalEsc(j?.error || `HTTP ${r.status}`)}</div>`;
       return;
     }
     _fcalRenderBackupList(j.snapshots || []);
@@ -28777,11 +29431,10 @@ async function _fcalHandleBackupNow() {
     _fcalSetMsg("fcalBackupMsg", "Pick an inverter + node first.", "err");
     return;
   }
-  let key = getCachedTopologyKey();
-  if (!key) {
-    key = await _acquireTopologyKey("Capture manual backup", `for Inverter ${inv} / Node ${slave}`);
-  }
-  if (!key) return;
+  // Backup capture is read-only on the inverter side — Modbus probe + DB
+  // insert. NO unlock prompt: per operator preference, taking a snapshot
+  // is a SAFER-than-default action (gives a rollback point) and routine
+  // ops should be one click.
   const note = String(document.getElementById("fcalBackupNote")?.value || "").trim();
   const btn = document.getElementById("btnFcalBackupNow");
   if (btn) btn.disabled = true;
@@ -28789,17 +29442,12 @@ async function _fcalHandleBackupNow() {
   try {
     const r = await fetch(`/api/calibration/snapshot/${inv}/${slave}`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-topology-key": key },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         note,
         operator: FieldCalibrationUI.session?.operator || "operator",
       }),
     });
-    if (r.status === 401 || r.status === 403) {
-      clearTopologyAuthCache();
-      _fcalSetMsg("fcalBackupMsg", "Topology key rejected — click Backup Now again.", "err");
-      return;
-    }
     const j = await r.json();
     if (!j?.ok) {
       _fcalSetMsg("fcalBackupMsg", `Backup failed: ${j?.error || `HTTP ${r.status}`}`, "err");
@@ -28823,12 +29471,13 @@ async function _fcalHandleRestore(snapshotId) {
     _fcalSetMsg("fcalBackupMsg", "Start a calibration session on this node before restoring.", "err");
     return;
   }
-  const authKey = await _bulkAuthForCompliance(
-    `Restore snapshot id=${snapshotId}`,
-    `to Inverter ${session.inverter} / Node ${session.slave} (14 register writes via UNLOCK + WRITE + VERIFY)`,
+  const authKey = await _fcalGetBulkAuth(
+    "Calibration writes",
+    `Restore snapshot ${snapshotId} → Inverter ${session.inverter} / Node ${session.slave}`,
   );
   if (!authKey) return;
-  const forceSafety = document.getElementById("fcalForceSafetyGate")?.checked;
+  const forceSafety = !!(document.getElementById("fcalForceSafetyGate")?.checked
+    || FieldCalibrationUI.forceSafety);
   _fcalSetMsg("fcalBackupMsg", `Restoring snapshot ${snapshotId}…`);
   try {
     const r = await fetch(`/api/calibration/restore`, {
@@ -28844,7 +29493,7 @@ async function _fcalHandleRestore(snapshotId) {
       }),
     });
     if (r.status === 401 || r.status === 403) {
-      clearBulkAuthCache();
+      _fcalClearBulkAuthOnReject();
       _fcalSetMsg("fcalBackupMsg", "Bulk auth rejected — click Restore again to re-prompt.", "err");
       return;
     }
@@ -28875,10 +29524,8 @@ async function _fcalHandleDeleteSnapshot(snapshotId) {
   if (!confirm(`Delete snapshot id=${snapshotId}?\n\nOnly manual snapshots can be deleted. Baseline / post-session snapshots are part of the audit trail.`)) {
     return;
   }
-  let key = getCachedTopologyKey();
-  if (!key) {
-    key = await _acquireTopologyKey("Delete snapshot", `id=${snapshotId}`);
-  }
+  if (!(await _fcalEnsureUnlock())) return;
+  const key = getCachedTopologyKey();
   if (!key) return;
   try {
     const r = await fetch(`/api/calibration/snapshot/${snapshotId}`, {
@@ -28886,8 +29533,8 @@ async function _fcalHandleDeleteSnapshot(snapshotId) {
       headers: { "x-topology-key": key },
     });
     if (r.status === 401 || r.status === 403) {
-      clearTopologyAuthCache();
-      _fcalSetMsg("fcalBackupMsg", "Topology key rejected.", "err");
+      _fcalClearBulkAuthOnReject();
+      _fcalSetMsg("fcalBackupMsg", "Authorization rejected — click Delete; one fresh unlock prompt will fire.", "err");
       return;
     }
     const j = await r.json();
@@ -29047,22 +29694,9 @@ function topologyAuthCacheMinutesRemaining() {
 // Reuses the existing in-app bulkAuthModal because Electron silently
 // disables window.prompt(). Returns "" if the operator cancels.
 async function _acquireTopologyKey(action, scopeLabel) {
-  let ok = true;
-  try {
-    if (typeof appConfirm === "function") {
-      const cachedMins = topologyAuthCacheMinutesRemaining();
-      const cachedNote = cachedMins > 0
-        ? `\n\nTopology authorization cached for ${cachedMins} min — no key prompt.`
-        : "\n\nYou'll be prompted for the adsiM / adsiMM topology key next.";
-      ok = await appConfirm(
-        "Confirm action",
-        `${action} ${scopeLabel}?${cachedNote}`,
-        { ok: "Proceed", cancel: "Cancel" },
-      );
-    }
-  } catch (_) {}
-  if (!ok) return "";
-
+  // Operator preference: prompt for the topology key at most ONCE per page
+  // visit. The typing modal IS the prompt — no per-button confirm wrapper.
+  // Cached path returns silently; uncached path goes straight to the modal.
   const cached = getCachedTopologyKey();
   if (cached) return cached;
 
@@ -29093,7 +29727,8 @@ async function _fcalHandleToggleWrites() {
   const scope = target
     ? "calibration writes (unlocks direct Modbus writes to scale factors)"
     : "calibration writes (return to read-only)";
-  const key = await _acquireTopologyKey(verb, scope);
+  if (!(await _fcalEnsureUnlock())) return;
+  const key = getCachedTopologyKey();
   if (!key) return;
 
   try {
@@ -29108,11 +29743,11 @@ async function _fcalHandleToggleWrites() {
     let j = null;
     try { j = await r.json(); } catch (_) { j = null; }
     if (r.status === 401 || r.status === 403 || r.status === 429) {
-      clearTopologyAuthCache();
+      _fcalClearBulkAuthOnReject();
       _fcalSetMsg("fcalReadMsg",
         r.status === 429
           ? "Too many failed attempts — wait a few seconds and retry."
-          : "Topology key rejected. Re-prompting next click.",
+          : "Authorization rejected. Click again — one fresh unlock prompt will fire.",
         "err");
       return;
     }

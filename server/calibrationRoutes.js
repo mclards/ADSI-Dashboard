@@ -213,7 +213,12 @@ function registerCalibrationRoutes(app, deps) {
 
   // ── PHASE 1: read endpoints ──────────────────────────────────────────
 
-  app.get("/api/calibration/state/:inverter/:slave", requireTopologyAuth, async (req, res) => {
+  // v2.11.x — read-only Modbus probe. Operator preference (2026-05-13):
+  // diagnostic reads should never trigger the auth modal — same trust
+  // level as the IGBT/Contactor live telemetry. Only state-CHANGING
+  // routes (write/restore/copy/consign/session/feature-toggle) gate on
+  // topology auth from here on.
+  app.get("/api/calibration/state/:inverter/:slave", async (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
     const t = validateInvSlave(req, res); if (!t) return;
     try {
@@ -239,7 +244,8 @@ function registerCalibrationRoutes(app, deps) {
     }
   });
 
-  app.get("/api/calibration/full-config/:inverter/:slave", requireTopologyAuth, async (req, res) => {
+  // Read-only — see comment on /state.
+  app.get("/api/calibration/full-config/:inverter/:slave", async (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
     const t = validateInvSlave(req, res); if (!t) return;
     try {
@@ -252,19 +258,82 @@ function registerCalibrationRoutes(app, deps) {
     }
   });
 
+  // v2.11.x — fleet-scan hardening (operator-visible polling + graceful
+  // failure handling). The scan is a long-running probe that:
+  //   • runs N concurrent worker tasks against /calibration/state for
+  //     every (inv, slave) pair in ipConfig — fan-out kept modest (4) so
+  //     the shared Modbus bus isn't hammered;
+  //   • applies a per-node soft timeout (8 s) so one hung inverter cannot
+  //     stall the whole scan — the slow node gets recorded as a failure
+  //     with reason="timeout" and the scan moves on;
+  //   • categorises failures into {timeout, http_error, py_error,
+  //     modbus_error} so the operator can triage quickly;
+  //   • exposes live progress via the in-memory `_fleetScanProgress`
+  //     object the renderer polls through /feature-status (extended).
+  // v2.11.x — operator preference (2026-05-13): scanning was too aggressive.
+  // Slow inverters were timing out at 8 s and the bus contention from 4
+  // parallel workers caused cascading timeouts. Loosened to:
+  //   • 20 s per-node soft timeout (matches what per-node Read tolerates)
+  //   • 2 concurrent workers (gentle on the shared Modbus bus)
+  //   • 250 ms inter-task delay between worker pickups (rate-limit politeness)
+  //   • round-robin queue + per-IP lock — eliminates the bug where two
+  //     workers both pulled tasks for the same IP, contending on the
+  //     single-master Modbus TCP socket and timing out one of them.
+  //     Symptom that exposed it: nodes that "failed" in the fleet scan
+  //     scanned successfully via per-node Read because the per-node path
+  //     was un-contended.
+  const FLEET_SCAN_NODE_TIMEOUT_MS = 20000;
+  const FLEET_SCAN_CONCURRENCY     = 2;
+  const FLEET_SCAN_INTER_TASK_MS   = 250;
   let _fleetScanInFlight = false;
-  app.get("/api/calibration/fleet-summary", requireTopologyAuth, async (req, res) => {
+  // Per-IP serialisation map — `Promise` per IP that the next worker
+  // hitting that IP must `await` before firing its own probe. Cleared
+  // when each scan completes.
+  const _fleetScanIpLocks = new Map();
+  let _fleetScanProgress = { total: 0, done: 0, failed: 0, started_at_ms: 0, current: null };
+
+  function _withNodeTimeout(promise, ms, ip, slave) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const e = new Error(`node ${ip}/${slave} timed out after ${ms} ms`);
+          e.code = "timeout";
+          reject(e);
+        }, ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  // v2.11.x — fleet-summary is a READ-ONLY diagnostic that scans every
+  // configured node's calibration block and reports outliers vs the fleet
+  // median. Operator preference (2026-05-13): this is "look-don't-touch"
+  // analytics — same trust level as the IGBT/Contactor fleet table — so
+  // it does NOT require the topology key. The data it returns reveals no
+  // secrets (just the same scale-factor values the per-node Read button
+  // shows) and the scan workload is gated by the in-flight singleton +
+  // 4-worker concurrency cap, so it can't be abused for DoS.
+  app.get("/api/calibration/fleet-summary", async (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
     if (_fleetScanInFlight) {
-      return res.status(429).json({ ok: false, error: "fleet scan already running" });
+      return res.status(429).json({
+        ok: false, error: "fleet scan already running",
+        progress: { ..._fleetScanProgress },
+      });
     }
     _fleetScanInFlight = true;
+    _fleetScanProgress = { total: 0, done: 0, failed: 0, started_at_ms: Date.now(), current: null };
     try {
       const cfg = loadIpConfigFromDb();
       const inverters = cfg?.inverters || {};
       const units = cfg?.units || {};
-      const perNode = [];
-      const failures = [];
+      // Build a per-inverter queue first, then INTERLEAVE so the final
+      // queue rotates through inverters one-slave-at-a-time:
+      //   [inv1/s1, inv2/s1, inv3/s1, ..., inv1/s2, inv2/s2, ...]
+      // With 2 concurrent workers this guarantees they pull tasks against
+      // DIFFERENT IPs at the same time — no Modbus bus contention.
+      const perInv = [];
       const sortedInvs = Object.keys(inverters).map(Number)
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= KNOWN_INVERTERS_MAX)
         .sort((a, b) => a - b);
@@ -275,20 +344,142 @@ function registerCalibrationRoutes(app, deps) {
         const unitList = Array.isArray(unitsRaw)
           ? unitsRaw.map(Number).filter((n) => KNOWN_NODES_PER_INV.includes(n))
           : KNOWN_NODES_PER_INV.slice();
-        for (const slave of unitList) {
-          try {
-            const r = await callPython(`/calibration/state/${encodeURIComponent(ip)}/${slave}`, "GET");
-            if (r?.ok) {
-              perNode.push({ inverter: inv, slave, ip, calibration: r.calibration, read_at_ms: r.read_at_ms });
-            } else {
-              failures.push({ inverter: inv, slave, ip, error: r?.error || "unknown" });
-            }
-          } catch (err) {
-            failures.push({ inverter: inv, slave, ip, error: err?.message || String(err) });
+        const tasks = unitList.map((slave) => ({ inverter: inv, slave, ip }));
+        if (tasks.length) perInv.push(tasks);
+      }
+      // Interleave by index — round-robin merge of the per-inverter lists.
+      const queue = [];
+      const maxLen = Math.max(0, ...perInv.map((arr) => arr.length));
+      for (let i = 0; i < maxLen; i++) {
+        for (const arr of perInv) if (i < arr.length) queue.push(arr[i]);
+      }
+      _fleetScanProgress.total = queue.length;
+      _fleetScanIpLocks.clear();
+
+      const perNode = [];
+      const failures = [];
+      let qIdx = 0;
+      // Pop tasks off the shared queue index — `qIdx++` is atomic in V8's
+      // single-threaded event loop, so workers never collide on a task.
+      // Probe one node, with one automatic retry on transient errors
+      // (py_error / timeout). Most "py_error" failures we've seen in the
+      // field are transient — a Modbus poll racing with a slow inverter
+      // recovery. Retrying after a short delay drops the failure rate
+      // dramatically without a meaningful wall-clock cost (only applies
+      // to the small set of nodes that actually fail).
+      // Per-IP serialisation: queue this task behind any in-flight probe
+      // for the SAME IP. The interleaved queue makes collisions rare, but
+      // edge cases (e.g. an inverter has more nodes than there are workers
+      // worth of other inverters in flight) can still happen — the lock
+      // keeps the Modbus bus single-master-per-IP no matter what.
+      async function probeOnce(task) {
+        const prev = _fleetScanIpLocks.get(task.ip) || Promise.resolve();
+        let release;
+        const next = new Promise((r) => { release = r; });
+        _fleetScanIpLocks.set(task.ip, prev.then(() => next));
+        try {
+          await prev;   // wait for any earlier probe on this IP to finish
+          return await _withNodeTimeout(
+            callPython(`/calibration/state/${encodeURIComponent(task.ip)}/${task.slave}`, "GET"),
+            FLEET_SCAN_NODE_TIMEOUT_MS, task.ip, task.slave,
+          );
+        } finally {
+          release();
+          // Trim the chain when this is the last task for that IP — keeps
+          // the map from growing unboundedly mid-scan.
+          if (_fleetScanIpLocks.get(task.ip) === prev.then(() => next)) {
+            _fleetScanIpLocks.delete(task.ip);
           }
         }
       }
+      function categorise(err) {
+        const msg = err?.message || String(err);
+        return {
+          category:
+            err?.code === "timeout"      ? "timeout" :
+            /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg) ? "http_error" :
+            /modbus|illegal data|exception code/i.test(msg)  ? "modbus_error" :
+            "py_error",
+          msg,
+        };
+      }
+
+      async function worker() {
+        for (;;) {
+          const task = queue[qIdx++];
+          if (!task) return;
+          _fleetScanProgress.current = `inv ${task.inverter}/${task.slave}`;
+          // Politeness delay between successive Modbus probes from the
+          // same worker — keeps live polling on other dashboard panes
+          // responsive while the scan runs in the background.
+          if (qIdx > FLEET_SCAN_CONCURRENCY) {
+            await new Promise((r) => setTimeout(r, FLEET_SCAN_INTER_TASK_MS));
+          }
+          let r = null;
+          let lastErr = null;
+          let lastCategory = null;
+          // Up to 2 attempts (1 retry). Don't retry on http_error
+          // (network unreachable — won't recover in 800 ms).
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+              r = await probeOnce(task);
+              if (r?.ok) { lastErr = null; break; }
+              // Soft Python-layer error — retry once unless the error
+              // explicitly says the slave is missing.
+              if (/no.*slave|slave.*not.*found|invalid.*unit/i.test(r?.error || "")) {
+                lastErr = new Error(r.error);
+                lastCategory = "missing_slave";
+                break;
+              }
+              lastErr = new Error(r?.error || "py_error");
+              lastCategory = "py_error";
+            } catch (err) {
+              lastErr = err;
+              const cat = categorise(err);
+              lastCategory = cat.category;
+              if (cat.category === "http_error") break;  // don't retry network failure
+            }
+            if (attempt < 2) {
+              // Brief backoff before retry — the inverter may have just
+              // missed the first poll because of a competing operation.
+              await new Promise((rr) => setTimeout(rr, 800));
+            }
+          }
+          try {
+            if (r?.ok) {
+              perNode.push({
+                inverter: task.inverter, slave: task.slave, ip: task.ip,
+                calibration: r.calibration, read_at_ms: r.read_at_ms,
+              });
+            } else {
+              const msg = lastErr?.message || String(lastErr || "unknown");
+              failures.push({
+                inverter: task.inverter, slave: task.slave, ip: task.ip,
+                category: lastCategory || "py_error",
+                error: msg,
+              });
+              _fleetScanProgress.failed += 1;
+            }
+          } finally {
+            _fleetScanProgress.done += 1;
+          }
+        }
+      }
+      // Spin up `FLEET_SCAN_CONCURRENCY` workers and wait for the queue
+      // to drain. Each worker is a separate async chain pulling from the
+      // shared `queue` index.
+      const workers = [];
+      const n = Math.min(FLEET_SCAN_CONCURRENCY, queue.length || 1);
+      for (let i = 0; i < n; i++) workers.push(worker());
+      await Promise.all(workers);
+
       const summary = _aggregateFleet(perNode);
+      // Tally failure categories so the renderer can show a one-line
+      // breakdown ("3 timeouts, 1 modbus_error") without re-scanning.
+      const failureBreakdown = failures.reduce((acc, f) => {
+        acc[f.category] = (acc[f.category] || 0) + 1;
+        return acc;
+      }, {});
       return res.json({
         ok: true,
         scanned: perNode.length,
@@ -296,13 +487,23 @@ function registerCalibrationRoutes(app, deps) {
         medians: summary.medians,
         per_node: summary.per_node,
         failures,
+        failure_breakdown: failureBreakdown,
+        duration_ms: Date.now() - _fleetScanProgress.started_at_ms,
         completed_at_ms: Date.now(),
       });
     } catch (err) {
       return res.status(500).json({ ok: false, error: err?.message || String(err) });
     } finally {
       _fleetScanInFlight = false;
+      _fleetScanProgress.current = null;
     }
+  });
+
+  // Lightweight progress probe — renderer polls this every 1 s during a
+  // scan to update the progress bar without re-running the whole scan.
+  app.get("/api/calibration/fleet-progress", (req, res) => {
+    if (isRemoteMode()) return proxyToRemote(req, res);
+    res.json({ ok: true, busy: _fleetScanInFlight, progress: { ..._fleetScanProgress } });
   });
 
   app.get("/api/calibration/feature-status", (req, res) => {
@@ -344,7 +545,8 @@ function registerCalibrationRoutes(app, deps) {
     res.json({ ok: true, writes_enabled: enable });
   });
 
-  app.get("/api/calibration/audit-log", requireTopologyAuth, (req, res) => {
+  // Read-only audit log — same trust as audit page.
+  app.get("/api/calibration/audit-log", (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
     try {
       const filters = {
@@ -400,8 +602,9 @@ function registerCalibrationRoutes(app, deps) {
   }
 
   // GET — list snapshots for one (inverter, slave). Topology-auth gated.
+  // Read-only snapshot listing — same trust as audit page.
   app.get("/api/calibration/snapshots/:inverter/:slave",
-    requireTopologyAuth, (req, res) => {
+    (req, res) => {
       if (isRemoteMode()) return proxyToRemote(req, res);
       const inv = Number(req.params.inverter);
       const slave = Number(req.params.slave);
@@ -422,9 +625,13 @@ function registerCalibrationRoutes(app, deps) {
     });
 
   // POST — capture an on-demand backup of the current calibration block.
-  // No session required (read-only operation + DB write); topology auth only.
+  // Read-only Modbus probe + DB row insert. NO topology auth required —
+  // taking a snapshot of the current values is a SAFER-than-default
+  // action (gives the operator a rollback point) and never modifies the
+  // inverter. Operator preference: routine backup capture should be one
+  // click, not three.
   app.post("/api/calibration/snapshot/:inverter/:slave",
-    requireTopologyAuth, async (req, res) => {
+    async (req, res) => {
       if (isRemoteMode()) return proxyToRemote(req, res);
       const inv = Number(req.params.inverter);
       const slave = Number(req.params.slave);
@@ -653,11 +860,31 @@ function registerCalibrationRoutes(app, deps) {
     const ip = resolveIp(inv);
     if (!ip) return res.status(404).json({ ok: false, error: `no IP for inverter ${inv}` });
     if (calibrationSession.isActive()) {
-      return res.status(409).json({
-        ok: false,
-        error: "Another calibration session is already active.",
-        active: calibrationSession.currentSession(),
-      });
+      // Auto-recover from a stuck/abandoned session in two safe cases:
+      //   (a) the existing session targets the SAME (inverter, slave) — treat
+      //       this as the operator restarting the same session (e.g. they
+      //       navigated away and came back, or the page reloaded). End it
+      //       cleanly and fall through to start a fresh one.
+      //   (b) the existing session is past its idle window — the heartbeat
+      //       has gone silent so the watchdog will end it within ≤5 s anyway.
+      //       Don't make the operator wait; force-end now.
+      // Anything else (session active for a DIFFERENT live target with a
+      // recent heartbeat) still rejects, since concurrent calibration on two
+      // inverters is unsafe.
+      const cur = calibrationSession.currentSession() || {};
+      const sameTarget = Number(cur.inverter) === inv && Number(cur.slave) === slave;
+      const idleMs = Number(cur.idle_ms || 0);
+      const idleLimit = Number(cur.idle_timeout_ms || 30_000);
+      const stale = idleMs > idleLimit;
+      if (sameTarget || stale) {
+        calibrationSession.abortAll(sameTarget ? "operator_restart" : "stale_takeover");
+      } else {
+        return res.status(409).json({
+          ok: false,
+          error: `Another calibration session is already active on Inverter ${cur.inverter}/${cur.slave} (operator: ${cur.operator || "?"}).`,
+          active: cur,
+        });
+      }
     }
     const cb = checkCriticalBlock(inv);
     if (cb) return res.status(cb.status).json({ ok: false, ...cb });
@@ -779,6 +1006,19 @@ function registerCalibrationRoutes(app, deps) {
     }
 
     const ended = calibrationSession.end(sid, body.reason || "operator");
+    // v2.11.x — operator preference: calibration writes must NEVER stay
+    // armed when the session ends. We auto-disable the
+    // `calibrationWritesEnabled` setting at session-end on the server, so
+    // the client doesn't have to chain a separate POST (which was racy
+    // and required a still-cached topology key). Idempotent — a no-op
+    // when writes are already disabled.
+    let writesAutoDisabled = false;
+    try {
+      if (typeof setSetting === "function") {
+        setSetting("calibrationWritesEnabled", "0");
+        writesAutoDisabled = true;
+      }
+    } catch (_) {}
     try {
       updateCalibrationSessionEnd(sid, ended.end_reason, {
         write_count: ended.write_count,
@@ -791,10 +1031,59 @@ function registerCalibrationRoutes(app, deps) {
         action: "calibration.session.end",
         scope: "calibration",
         result: "ok",
-        reason: `reason=${ended.end_reason} writes=${ended.write_count} consign=${ended.consign_writes} dur_s=${(ended.duration_ms/1000)|0}`,
+        reason: `reason=${ended.end_reason} writes=${ended.write_count} consign=${ended.consign_writes} dur_s=${(ended.duration_ms/1000)|0}${writesAutoDisabled ? " writes_auto_disabled=1" : ""}`,
       });
+      if (writesAutoDisabled) {
+        insertAuditLogRow?.({
+          ts: Date.now(),
+          actor: "system",
+          action: "calib_writes_disabled",
+          detail: JSON.stringify({ via: "session_end", reason: ended.end_reason }),
+        });
+      }
     } catch (_) {}
-    return res.json({ ok: true, ...ended });
+    return res.json({ ok: true, ...ended, writes_auto_disabled: writesAutoDisabled });
+  });
+
+  // v2.11.x — page-leave beacon. The renderer fires this when the operator
+  // navigates away from the Field Calibration page. It auto-disables the
+  // `calibrationWritesEnabled` setting unconditionally and ends any active
+  // session. NO topology auth required — the renderer can't always carry
+  // the cached key during a page transition (cache may have rolled), and
+  // disabling writes is a SAFE-by-default action that we WANT to succeed
+  // even when authorization has lapsed. Localhost / same-origin only via
+  // standard browser CORS — no abuse vector beyond turning OFF a feature
+  // flag the operator could turn off themselves.
+  app.post("/api/calibration/page-leave-cleanup", (req, res) => {
+    if (isRemoteMode()) return proxyToRemote(req, res);
+    let sessionEnded = false;
+    try {
+      if (calibrationSession.isActive()) {
+        calibrationSession.abortAll("page_leave");
+        sessionEnded = true;
+      }
+    } catch (_) {}
+    let writesDisabled = false;
+    try {
+      if (typeof setSetting === "function") {
+        setSetting("calibrationWritesEnabled", "0");
+        writesDisabled = true;
+      }
+    } catch (_) {}
+    try {
+      if (writesDisabled || sessionEnded) {
+        insertAuditLogRow?.({
+          ts: Date.now(),
+          actor: "system",
+          action: "calib_page_leave_cleanup",
+          detail: JSON.stringify({
+            session_ended: sessionEnded,
+            writes_disabled: writesDisabled,
+          }),
+        });
+      }
+    } catch (_) {}
+    return res.json({ ok: true, session_ended: sessionEnded, writes_disabled: writesDisabled });
   });
 
   // ── PHASE 2: write paths ─────────────────────────────────────────────
@@ -835,7 +1124,16 @@ function registerCalibrationRoutes(app, deps) {
       try {
         const result = await callPython("/calibration/write", "POST", {
           ip, slave, offset, value: Math.trunc(value),
-          max_delta_pct: body.max_delta_pct == null ? 50.0 : Number(body.max_delta_pct),
+          // CRITICAL: distinguish "operator explicitly forced via Force
+          // toggle" (body.max_delta_pct === null) from "client didn't set
+          // the field" (undefined). The operator's Force-armed write
+          // sends explicit null and MUST disable the guard. Using `== null`
+          // here would conflate undefined and null and silently re-apply
+          // the 50 % guard — exactly the bug the Force toggle exists to
+          // bypass. See /restore at line ~660 for the same three-way logic.
+          max_delta_pct: body.max_delta_pct === null
+            ? null
+            : (body.max_delta_pct === undefined ? 50.0 : Number(body.max_delta_pct)),
           verify_delay_s: 1.0,
         });
         if (gate?.forced && gate.blocking_reasons?.length) {
@@ -898,7 +1196,16 @@ function registerCalibrationRoutes(app, deps) {
       try {
         const result = await callPython("/calibration/write-bulk", "POST", {
           ip, slave, writes,
-          max_delta_pct: body.max_delta_pct == null ? 50.0 : Number(body.max_delta_pct),
+          // CRITICAL: distinguish "operator explicitly forced via Force
+          // toggle" (body.max_delta_pct === null) from "client didn't set
+          // the field" (undefined). The operator's Force-armed write
+          // sends explicit null and MUST disable the guard. Using `== null`
+          // here would conflate undefined and null and silently re-apply
+          // the 50 % guard — exactly the bug the Force toggle exists to
+          // bypass. See /restore at line ~660 for the same three-way logic.
+          max_delta_pct: body.max_delta_pct === null
+            ? null
+            : (body.max_delta_pct === undefined ? 50.0 : Number(body.max_delta_pct)),
           verify_delay_s: 1.0,
         });
         if (gate?.forced && gate.blocking_reasons?.length) {
@@ -1115,7 +1422,16 @@ function registerCalibrationRoutes(app, deps) {
       try {
         const result = await callPython("/calibration/write-bulk", "POST", {
           ip: dstIp, slave: dstSlave, writes,
-          max_delta_pct: body.max_delta_pct == null ? 50.0 : Number(body.max_delta_pct),
+          // CRITICAL: distinguish "operator explicitly forced via Force
+          // toggle" (body.max_delta_pct === null) from "client didn't set
+          // the field" (undefined). The operator's Force-armed write
+          // sends explicit null and MUST disable the guard. Using `== null`
+          // here would conflate undefined and null and silently re-apply
+          // the 50 % guard — exactly the bug the Force toggle exists to
+          // bypass. See /restore at line ~660 for the same three-way logic.
+          max_delta_pct: body.max_delta_pct === null
+            ? null
+            : (body.max_delta_pct === undefined ? 50.0 : Number(body.max_delta_pct)),
           verify_delay_s: 1.0,
         });
         try {
@@ -1172,12 +1488,14 @@ function _aggregateFleet(perNode) {
   for (const st of perNode) {
     const fields = st?.calibration?.fields || [];
     const deltas = {};
+    const factors = {};
     for (const f of fields) {
+      const v = Number(f.signed ?? f.raw_u16);
+      factors[f.field] = v;
       const med = medians[f.field];
       if (med == null || med === 0) {
         deltas[f.field] = null;
       } else {
-        const v = Number(f.signed ?? f.raw_u16);
         deltas[f.field] = Number((((v - med) / med) * 100).toFixed(3));
       }
     }
@@ -1185,7 +1503,12 @@ function _aggregateFleet(perNode) {
       inverter:           st.inverter,
       slave:              st.slave,
       ip:                 st.ip,
+      // Surface raw factor values too — the renderer's per-cell tooltip
+      // shows "factor: 1128 (median 1140)" so the operator doesn't have
+      // to back-compute from the delta percentage.
+      factors_u16:        factors,
       deltas_pct:         deltas,
+      valid_cfg_code_hex: st?.calibration?.valid_cfg_code_hex ?? null,
       valid_cfg_code_ok:  st?.calibration?.valid_cfg_code_ok ?? null,
     });
   }

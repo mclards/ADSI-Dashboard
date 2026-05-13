@@ -44,6 +44,19 @@ VALID_CFG_OFFSET = 80
 VERIFY_DELAY_S   = 1.0
 DEFAULT_TIMEOUT_S = 3.0
 
+# v2.11.x — verify tolerance band. Operator preference (2026-05-13):
+# the inverter quantizes some scale factors internally (writing 1884
+# may land on 1814 because the firmware rounds to a coarser step).
+# Treating that as a hard "Write failed: readback mismatch" was alarming
+# and inaccurate — the write DID land, just on a quantization grid.
+# We now mark the write as successful when the readback is within
+# either ±5 % OR ±10 absolute units of the requested value (whichever
+# is larger), and surface a `quantized=true` flag + note instead of an
+# error. Anything outside that band is still a true verify failure
+# (e.g. write didn't take, register was clobbered by a parallel read).
+VERIFY_TOLERANCE_PCT       = 5.0
+VERIFY_TOLERANCE_ABS_UNITS = 10
+
 
 # ─── Errors ────────────────────────────────────────────────────────────────
 
@@ -321,7 +334,21 @@ def write_one_with_lock(
             post_value_disp = post_value
             req_disp        = _u16(new_value)
         out["value_after"] = post_value_disp
-        out["verify_ok"]   = post_value_disp == req_disp
+        # Conservative verify — allow the inverter to quantize within a
+        # tolerance band. Exact match → success. Within tolerance →
+        # success_quantized (still ok=true, just flagged). Outside →
+        # verify_failed (true error: write didn't take or got clobbered).
+        exact_match  = post_value_disp == req_disp
+        delta_units  = abs(int(post_value_disp) - int(req_disp))
+        denom        = max(1, abs(int(req_disp)))
+        delta_pct    = (delta_units / denom) * 100.0
+        tol_units    = max(int(VERIFY_TOLERANCE_ABS_UNITS),
+                           int((VERIFY_TOLERANCE_PCT / 100.0) * denom))
+        within_tol   = delta_units <= tol_units
+        out["verify_ok"]    = exact_match or within_tol
+        out["quantized"]    = (not exact_match) and within_tol
+        out["delta_units"]  = delta_units
+        out["delta_pct"]    = round(delta_pct, 2)
 
         sentinel_ok = post[0] == VALID_CFG_CODE_EXPECTED
         if not sentinel_ok:
@@ -332,13 +359,21 @@ def write_one_with_lock(
             )
             return out
 
-        if out["verify_ok"]:
+        if exact_match:
             out["ok"]     = True
             out["status"] = "success"
+        elif within_tol:
+            out["ok"]     = True
+            out["status"] = "success_quantized"
+            out["note"]   = (
+                f"inverter quantized {req_disp} → {post_value_disp} "
+                f"(Δ {delta_units} units, {delta_pct:.2f} % — within tolerance)"
+            )
         else:
             out["status"] = "verify_failed"
             out["error"]  = (
-                f"readback mismatch: requested {req_disp}, got {post_value_disp}"
+                f"readback {post_value_disp} differs from requested {req_disp} "
+                f"by {delta_units} units ({delta_pct:.2f} %), beyond ±{tol_units}-unit tolerance"
             )
         return out
 
@@ -442,6 +477,7 @@ def write_bulk_with_lock(
 
         results: List[Dict[str, object]] = []
         all_ok = True
+        any_quantized = False
         for off, new_v in writes_sorted:
             cur     = pre["by_offset"].get(int(off))
             post_v  = post[int(off) - VALID_CFG_OFFSET]
@@ -453,18 +489,33 @@ def write_bulk_with_lock(
                 post_disp = post_v
                 req_disp  = _u16(int(new_v))
                 cur_disp  = cur
-            ok = post_disp == req_disp
+            # Same conservative tolerance band as the single-write path —
+            # exact match OR within ±5 % / ±10 units → success.
+            exact      = post_disp == req_disp
+            delta_u    = abs(int(post_disp) - int(req_disp))
+            denom      = max(1, abs(int(req_disp)))
+            tol_units  = max(int(VERIFY_TOLERANCE_ABS_UNITS),
+                             int((VERIFY_TOLERANCE_PCT / 100.0) * denom))
+            within     = delta_u <= tol_units
+            ok         = exact or within
+            quantized  = (not exact) and within
+            if quantized:
+                any_quantized = True
             if not ok:
                 all_ok = False
             results.append({
-                "offset":         int(off),
-                "field":          field_for_offset(off) or "",
-                "value_before":   cur_disp,
+                "offset":          int(off),
+                "field":           field_for_offset(off) or "",
+                "value_before":    cur_disp,
                 "value_requested": int(new_v),
-                "value_after":    post_disp,
-                "verify_ok":      ok,
+                "value_after":     post_disp,
+                "verify_ok":       ok,
+                "quantized":       quantized,
+                "delta_units":     delta_u,
+                "delta_pct":       round((delta_u / denom) * 100.0, 2),
             })
-        out["writes"] = results
+        out["writes"]        = results
+        out["any_quantized"] = any_quantized
 
         if post[0] != VALID_CFG_CODE_EXPECTED:
             out["status"] = "sentinel_clobbered"
@@ -474,7 +525,11 @@ def write_bulk_with_lock(
             return out
 
         out["ok"]     = all_ok
-        out["status"] = "success" if all_ok else "partial_verify_failed"
+        out["status"] = (
+            "success_quantized" if all_ok and any_quantized else
+            "success"           if all_ok else
+            "partial_verify_failed"
+        )
         return out
 
 

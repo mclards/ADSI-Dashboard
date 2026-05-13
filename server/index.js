@@ -12671,6 +12671,21 @@ const _topologyAuthFailures = new Map(); // ip -> { count, windowStart }
 const TOPOLOGY_AUTH_FAIL_LIMIT = 5;
 const TOPOLOGY_AUTH_WINDOW_MS = 60_000;
 
+// v2.11.x — topology key lease, mirroring the bulk-auth lease in
+// server/bulkControlAuth.js. The raw `adsi${minute}` key only validates for
+// ~2 minutes (current ±1) which made the 60-minute client-side cache always
+// fail mid-session — the operator was forced to re-enter the key every few
+// minutes on the Field Calibration page. Once a key validates against the
+// time window, it gets a 60-minute lease keyed by the exact key string;
+// every successful subsequent validation re-stamps the lease (rolling).
+const _topologyAuthLeases = new Map(); // key string -> { issuedAt, expiresAt }
+const TOPOLOGY_AUTH_LEASE_MS = 60 * 60 * 1000;
+function _topologyLeaseCleanup(nowMs) {
+  for (const [k, v] of _topologyAuthLeases) {
+    if (Number(v?.expiresAt || 0) <= nowMs) _topologyAuthLeases.delete(k);
+  }
+}
+
 // Admin/topology auth gate (reuses the `adsiM`/`adsiMM` pattern established
 // for /api/substation/* and topology UI access).
 function requireTopologyAuth(req, res, next) {
@@ -12716,19 +12731,29 @@ function requireTopologyAuth(req, res, next) {
     recordFailure();
     return res.status(401).json({ ok: false, error: "Authorization required." });
   }
-  const m = new Date().getMinutes();
+  const nowMs = Date.now();
+  _topologyLeaseCleanup(nowMs);
+  const m = new Date(nowMs).getMinutes();
   const valid = new Set([
     `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
   ]);
   const mPrev = (m + 59) % 60;
   valid.add(`adsi${mPrev}`);
   valid.add(`adsi${String(mPrev).padStart(2, "0")}`);
-  if (!valid.has(key)) {
-    recordFailure();
-    return res.status(403).json({ ok: false, error: "Invalid authorization key." });
+  // Three acceptance paths in order:
+  //   1) Active 60-min lease for this exact key string (rolling window
+  //      re-stamped on each validation).
+  //   2) Key is in the current ±1 minute window — accept and start lease.
+  //   3) Otherwise reject and record a failure.
+  const lease = _topologyAuthLeases.get(key);
+  const leaseOk = lease && Number(lease.expiresAt || 0) > nowMs;
+  if (leaseOk || valid.has(key)) {
+    _topologyAuthLeases.set(key, { issuedAt: nowMs, expiresAt: nowMs + TOPOLOGY_AUTH_LEASE_MS });
+    if (ip) _topologyAuthFailures.delete(ip);
+    return next();
   }
-  if (ip) _topologyAuthFailures.delete(ip); // success clears the budget
-  next();
+  recordFailure();
+  return res.status(403).json({ ok: false, error: "Invalid authorization key." });
 }
 
 /**
@@ -15501,6 +15526,32 @@ app.get("/api/grid-control/feature-status", (req, res) => {
 // Plan: plans/2026-05-12-inverter-calibration-tool.md
 // Phase 1 read paths + Phase 2/3/4 write/consign/copy.  Write paths are
 // gated by the calibrationWritesEnabled feature flag (default off).
+//
+// STARTUP SAFETY GUARD (operator preference 2026-05-13):
+// Force-disable calibrationWritesEnabled on EVERY server boot. This is the
+// belt-and-suspenders complement to the page-leave auto-disable: even if
+// the dashboard crashed/power-failed mid-session with writes still armed,
+// the next boot starts in safe read-only mode. Operators who actually
+// want to write must explicitly re-enable from the Field Calibration page
+// (requires adsiM/adsiMM topology key).
+try {
+  const prev = String(getSetting("calibrationWritesEnabled") ?? "0").trim();
+  if (prev === "1" || prev.toLowerCase() === "true") {
+    setSetting("calibrationWritesEnabled", "0");
+    try {
+      insertAuditLogRow?.({
+        ts: Date.now(),
+        actor: "system",
+        action: "calib_writes_disabled",
+        detail: JSON.stringify({ via: "startup_guard", prev_value: prev }),
+      });
+    } catch (_) {}
+    console.log("[calibration] startup guard: writes were left enabled — forced OFF");
+  }
+} catch (err) {
+  console.warn("[calibration] startup guard failed:", err?.message || err);
+}
+
 function _isCalibrationWritesEnabled() {
   try {
     const v = String(getSetting("calibrationWritesEnabled") ?? "0").trim();
