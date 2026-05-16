@@ -93,13 +93,17 @@
       {
         "from": "server/ffmpeg",
         "to": "backend/ffmpeg",
-        "filter": ["**/*.exe"]
+        "filter": [
+          "**/*.exe"
+        ]
       }
     ],
     "win": {
       "icon": "icon-256.png",
       "requestedExecutionLevel": "requireAdministrator",
-      "signingHashAlgorithms": ["sha256"],
+      "signingHashAlgorithms": [
+        "sha256"
+      ],
       "signAndEditExecutable": true,
       "rfc3161TimeStampServer": "http://timestamp.sectigo.com",
       "timeStampServer": "http://timestamp.sectigo.com",

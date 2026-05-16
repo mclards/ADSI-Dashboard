@@ -874,8 +874,12 @@ const STOP_REASONS = {
 const SEV_ORDER = { critical: 4, fault: 3, warning: 2, info: 1 };
 
 function decodeAlarm(val) {
-  if (!val || val === 0) return [];
-  return ALARM_BITS.filter((b) => (val & (1 << b.bit)) !== 0).map((b) => ({
+  // The alarm bitfield is the full 32-bit regs 6-7 value (v2.9.0+). Coerce to
+  // an unsigned 32-bit integer so high-word bits (16-31) decode correctly —
+  // a bare `1 << 31` is negative in JS, so test via unsigned shift on `val`.
+  const u = (Number(val) || 0) >>> 0;
+  if (u === 0) return [];
+  return ALARM_BITS.filter((b) => ((u >>> b.bit) & 1) === 1).map((b) => ({
     ...b,
     active: true,
   }));
@@ -1026,6 +1030,7 @@ function raiseActiveAlarm(row, cur, now, newAlarms) {
     alarm_code: formatAlarmHex(cur),
     alarm_value: cur,
     severity,
+    updated_ts: now,
   });
   const alarmId = Number(info?.lastInsertRowid || 0);
   newAlarms.push({
@@ -1056,12 +1061,13 @@ function raiseActiveAlarm(row, cur, now, newAlarms) {
   }
 }
 
-function updateActiveAlarmValue(row, cur) {
+function updateActiveAlarmValue(row, cur, evTs) {
   const severity = getTopSeverity(cur) || "fault";
   stmts.updateActiveAlarm.run(
     formatAlarmHex(cur),
     cur,
     severity,
+    Number(evTs) > 0 ? Number(evTs) : Date.now(),
     row.inverter,
     row.unit,
   );
@@ -1081,7 +1087,17 @@ function checkAlarms(batch) {
     if (!isConfiguredNode(row.inverter, row.unit)) continue;
     const key = `${row.inverter}_${row.unit}`;
     const prev = activeAlarmState[key];
-    const cur = row.alarm || 0;
+    // Full 32-bit alarm bitfield (regs 6-7, v2.9.0+). `row.alarm` is the
+    // DEPRECATED 16-bit low word (reg 7 only) — using it dropped every
+    // high-word bit from episodes/DB/export/critical-pattern detection.
+    // Fall back to it only for pre-v2.9 Python payloads without alarm_32.
+    const cur = (Number(row.alarm_32) || 0) > 0
+      ? Number(row.alarm_32)
+      : Number(row.alarm) || 0;
+    // Stamp each episode with the frame's own capture time (preserved by the
+    // poller as row.ts) rather than one batch-wide Date.now() — a batch can
+    // mix frames from different inverters/poll cycles (2.1 consistency).
+    const evTs = Number(row.ts) > 0 ? Number(row.ts) : now;
 
     if (prev === undefined) {
       // T2.5 fix (Phase 5, 2026-04-14): hydrate from any existing
@@ -1096,20 +1112,20 @@ function checkAlarms(batch) {
         // Re-attach to existing episode. Patch in place on drift; do NOT
         // re-broadcast — the operator has already seen this toast.
         if (Number(existing.alarm_value) !== cur) {
-          updateActiveAlarmValue(row, cur);
+          updateActiveAlarmValue(row, cur, evTs);
         }
         activeAlarmState[key] = cur;
         continue;
       }
       if (existing && cur === 0) {
         // We're down, the unit cleared; close the existing row.
-        stmts.clearAlarm.run(now, row.inverter, row.unit);
+        stmts.clearAlarm.run(evTs, row.inverter, row.unit);
         activeAlarmState[key] = 0;
         continue;
       }
       activeAlarmState[key] = cur;
       if (cur !== 0) {
-        raiseActiveAlarm(row, cur, now, newAlarms);
+        raiseActiveAlarm(row, cur, evTs, newAlarms);
       }
       continue;
     }
@@ -1118,19 +1134,19 @@ function checkAlarms(batch) {
     if (transition === "noop") continue;
 
     if (transition === "clear") {
-      stmts.clearAlarm.run(now, row.inverter, row.unit);
+      stmts.clearAlarm.run(evTs, row.inverter, row.unit);
       activeAlarmState[key] = 0;
       continue;
     }
 
     if (transition === "update_active") {
-      updateActiveAlarmValue(row, cur);
+      updateActiveAlarmValue(row, cur, evTs);
       activeAlarmState[key] = cur;
       continue;
     }
 
     if (transition === "raise") {
-      raiseActiveAlarm(row, cur, now, newAlarms);
+      raiseActiveAlarm(row, cur, evTs, newAlarms);
       activeAlarmState[key] = cur;
     }
   }

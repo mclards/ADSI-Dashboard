@@ -131,6 +131,12 @@ const {
   updateCriticalBlockReenforcement,
   updateCriticalBlockPattern,
   ackCriticalBlock,
+  // Slice κ.9 — solar-window deferred (armed→active) auto-block
+  getPendingCriticalBlock,
+  getAllPendingCriticalBlocks,
+  armOrRefreshPendingCriticalBlock,
+  activatePendingCriticalBlock,
+  disarmPendingCriticalBlock,
   // v2.11.x Field Calibration helpers (Phases 2-4)
   insertCalibrationSnapshot,
   getLatestCalibrationSnapshot,
@@ -1662,6 +1668,11 @@ function shouldProxyApiPath(pathname) {
   if (p === "/backup" || p.startsWith("/backup/")) return false;
   if (p === "/chat" || p.startsWith("/chat/")) return false;
   if (p === "/forecast/solcast" || p.startsWith("/forecast/solcast/")) return false;
+  // Solcast snapshot data must stay accessible in EVERY operation mode — the
+  // Day-Ahead Export date list reads the LOCAL solcast_snapshots table so an
+  // offline gateway never blocks the remote viewer (requirement 1.4).
+  if (p === "/solcast/snapshot-dates" || p.startsWith("/solcast/snapshot-dates/"))
+    return false;
   if (p === "/settings" || p.startsWith("/settings/")) return false;
   if (p === "/runtime/network" || p.startsWith("/runtime/network/")) return false;
   if (p === "/runtime/perf" || p.startsWith("/runtime/perf/")) return false;
@@ -5613,6 +5624,20 @@ const PROXY_TIMEOUT_RULES = [
   // was killing the Plant Serial Map "Scan plant" button in remote mode.
   ["/api/serial/fleet/",  180000],  // 3 min — full-fleet scan / uniqueness
   ["/api/serial/",         60000],  // 60 s  — single read / read-all / send
+  // Field Calibration "Scan Fleet" walks every (inverter, slave) over
+  // Modbus TCP at concurrency 2 with a 20 s per-node timeout + 250 ms
+  // politeness delay — worst case ~50-60 s on a ~96-node plant (same
+  // class of workload as /api/serial/fleet/). The 5 s default was
+  // killing the Fleet Anomalies scan in remote mode with a "network
+  // timeout" before the gateway scan could finish. fleet-progress
+  // returns in <50 ms but must out-live a slow Tailscale RTT so the
+  // observe-mode poller stays alive while the scan runs.
+  ["/api/calibration/fleet-progress", 15000],  // 15 s — fast progress poll
+  ["/api/calibration/fleet-summary",  180000], // 3 min — full-fleet scan
+  // Same page, read-only: the "Full Config Dump" button does a chunked
+  // FC03 read of the full 177-register config block. Fast locally but
+  // can stretch past 5 s on a CPU-loaded gateway over a Tailscale link.
+  ["/api/calibration/full-config",     20000], // 20 s — chunked config read
   // /api/sync-clock returns HTTP 202 in <100 ms (the actual Modbus broadcast
   // runs in the background on the gateway), but a CPU-loaded gateway can
   // take longer to ACK. 30 s gives plenty of head-room while still failing
@@ -10906,6 +10931,78 @@ async function autoFetchSolcastSnapshots(dates, options = {}) {
     console.warn("[forecast] Solcast auto-pull failed (will use cached/physics fallback):", err.message);
     return { pulled: false, reason: String(err.message || "fetch_error").slice(0, 300), pulledTs: null };
   }
+}
+
+/**
+ * Ensure the freshest N day-ahead Solcast snapshots are persisted, where N is
+ * the operator's "Forecast Days" setting (`solcastToolkitDays`, clamped 1–15).
+ *
+ * A single wide Solcast Toolkit pull is sliced into N day rows and persisted to
+ * `solcast_snapshots` via the SAME pipeline used everywhere else
+ * (`autoFetchSolcastSnapshots` → `buildAndPersistSolcastSnapshot` →
+ * `bulkUpsertSolcastSnapshot`). The Forecast-page crons and the Day-Ahead
+ * Export "Load Data" button both call this — one shared code path / one DB.
+ *
+ * If the Toolkit is unreachable, whatever is already in `solcast_snapshots`
+ * (ProgramData) is left intact and reported back as the `fallback-db` source.
+ *
+ * @param {{minDays?:number}} options minDays guarantees the window is at least
+ *   this wide regardless of the setting (the day-ahead lock passes 2 so that
+ *   "tomorrow" is always covered even when Forecast Days is set to 1).
+ */
+async function ensureFreshestDayAheadSnapshots(options = {}) {
+  const cfg = getSolcastConfig();
+  let n = Math.max(
+    1,
+    Math.min(
+      SOLCAST_TOOLKIT_PREVIEW_MAX_DAYS,
+      Math.trunc(Number(cfg?.toolkitDays) || 2),
+    ),
+  );
+  const minDays = Math.max(1, Math.trunc(Number(options.minDays) || 1));
+  if (n < minDays) n = minDays;
+
+  const today = localDateStr();
+  const dates = [];
+  for (let i = 0; i < n; i += 1) dates.push(addDaysIso(today, i));
+
+  const fetchRes = await autoFetchSolcastSnapshots(dates, {
+    toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
+  });
+
+  let availableDates = [];
+  try {
+    availableDates = db
+      .prepare(
+        `SELECT DISTINCT forecast_day FROM solcast_snapshots
+         WHERE forecast_day >= ? ORDER BY forecast_day ASC`,
+      )
+      .all(dates[0])
+      .map((r) => r.forecast_day);
+  } catch (_) {
+    availableDates = [];
+  }
+
+  if (fetchRes?.pulled) {
+    return {
+      ok: true,
+      source: "toolkit",
+      forecastDays: n,
+      requestedDates: dates,
+      persisted: Number(fetchRes.persisted || 0),
+      availableDates,
+    };
+  }
+  // Toolkit unreachable → fall back to whatever is already stored locally.
+  return {
+    ok: availableDates.length > 0,
+    source: "fallback-db",
+    forecastDays: n,
+    requestedDates: dates,
+    persisted: 0,
+    reason: fetchRes?.reason || "toolkit_unreachable",
+    availableDates,
+  };
 }
 
 async function generateDayAheadWithMl(dates) {
@@ -20700,6 +20797,63 @@ app.post("/api/export/solcast-preview", async (req, res) => {
   }
 });
 
+// Day-Ahead Export "Load Data" button. Independently pulls the freshest N
+// day-ahead snapshots (N = Forecast Days setting) directly from the Solcast
+// Toolkit into solcast_snapshots, then falls back to whatever is already
+// stored locally if the Toolkit is unreachable. Path is under
+// /api/forecast/solcast/ so shouldProxyApiPath() keeps it local in EVERY
+// operation mode — a remote client populates its own local snapshots and is
+// never blocked by an offline gateway (requirement 1.4). Shares the exact
+// pipeline used by the Forecast-page crons (requirement 1.3).
+//
+// AUTH: intentionally PUBLIC (no auth gate), consistent with the sibling
+// read-only Solcast ops /api/forecast/solcast/test and /preview and the
+// operator's standing "read-only Solcast/snapshot ops MUST stay public"
+// rule (see feedback_calibration_auth_minimal — a repeated regression
+// target). The Toolkit URL + credentials are server-side settings (not
+// request input → no SSRF), errors are length-capped and never echo
+// credentials, and the action only refreshes a local snapshot cache.
+// Do NOT add topology/bulk auth here without operator sign-off.
+app.post("/api/forecast/solcast/load-data", async (req, res) => {
+  try {
+    if (!hasUsableSolcastConfig(getSolcastConfig())) {
+      // No Toolkit credentials → report stored snapshots as the fallback.
+      let dates = [];
+      try {
+        dates = db
+          .prepare(
+            `SELECT DISTINCT forecast_day FROM solcast_snapshots ORDER BY forecast_day DESC`,
+          )
+          .all()
+          .map((r) => r.forecast_day);
+      } catch (_) {
+        dates = [];
+      }
+      return res.json({
+        ok: dates.length > 0,
+        source: "fallback-db",
+        reason: "not_configured",
+        forecastDays: getSolcastConfig()?.toolkitDays || 2,
+        persisted: 0,
+        requestedDates: [],
+        dates,
+      });
+    }
+    const result = await ensureFreshestDayAheadSnapshots();
+    return res.json({
+      ok: !!result.ok,
+      source: result.source,
+      reason: result.reason || null,
+      forecastDays: result.forecastDays,
+      persisted: result.persisted,
+      requestedDates: result.requestedDates,
+      dates: result.availableDates,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/api/solcast/snapshot-dates", (req, res) => {
   try {
     const rows = db.prepare(
@@ -22182,9 +22336,14 @@ async function downloadRemoteExportToLocal(routePath, payload = {}) {
       exportResult?.appliedFilters?.minAlarmDurationSec,
     );
     if (requestedMinDurationSec > 0 && appliedMinDurationSec !== requestedMinDurationSec) {
-      throw new Error(
-        "Gateway alarm export did not confirm the requested minimum duration filter. Update and restart the gateway app, then export again.",
-      );
+      // 2.3 — degrade gracefully instead of aborting the whole export when
+      // an older gateway can't confirm the min-duration filter. The operator
+      // still gets the (unfiltered) alarm data with an explicit warning,
+      // rather than a hard failure that yields nothing.
+      exportResult.warning =
+        `Minimum-duration filter (${requestedMinDurationSec}s) was NOT applied by the gateway ` +
+        `(older gateway build). Export contains ALL alarms in range — filter locally if needed.`;
+      console.warn(`[export:alarms] ${exportResult.warning}`);
     }
   }
   const remoteRelativePath = normalizeExportRelativePath(
@@ -22500,14 +22659,19 @@ app.post("/api/export/forecast-actual", async (req, res) => {
     validateExportDateRange(payload);
     const source = String(payload.source || "analytics").trim().toLowerCase();
     const isSolcast = source === "solcast";
-    if (isRemoteMode()) {
+    // Solcast day-ahead export runs locally against the LOCAL solcast_snapshots
+    // table (populated by the "Load Data" button) so it works regardless of
+    // operation mode and survives an offline gateway (requirement 1.4). The
+    // Analytics/ML export still proxies — the trained model is gateway-only.
+    if (isRemoteMode() && !isSolcast) {
       return res.json(
         await downloadRemoteExportToLocal("/api/export/forecast-actual", req.body || {}),
       );
     }
-    const currentDaySnapshot = exportTouchesCurrentDay(payload)
-      ? buildCurrentDayEnergySnapshot()
-      : null;
+    const currentDaySnapshot =
+      !isRemoteMode() && exportTouchesCurrentDay(payload)
+        ? buildCurrentDayEnergySnapshot()
+        : null;
     const rawOutPath = await runGatewayExportJob("forecast-actual", () =>
       exporter.exportForecastActual({
         ...payload,
@@ -22646,11 +22810,11 @@ async function runDayAheadLockCapture(cronExpr, captureReason) {
   _dayAheadLockRunning = true;
   try {
     const tomorrow = addDaysIso(localDateStr(), 1);
-    // Step 1: ensure Solcast has fresh data for tomorrow before we freeze it
+    // Step 1: ensure Solcast has fresh data before we freeze it. Persist the
+    // freshest N day-ahead snapshots (N = Forecast Days setting); minDays:2
+    // guarantees `tomorrow` is always covered even when Forecast Days = 1.
     try {
-      await autoFetchSolcastSnapshots([tomorrow], {
-        toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
-      });
+      await ensureFreshestDayAheadSnapshots({ minDays: 2 });
     } catch (fetchErr) {
       console.warn(
         `[Cron:dayahead-lock] pre-capture Solcast fetch failed (${captureReason}): ${fetchErr.message}`,
@@ -22722,19 +22886,18 @@ async function runIntradaySolcastFetch(cronExpr) {
   if (isRemoteMode()) return;
   _intradaySolcastFetchRunning = true;
   try {
-    const today = localDateStr();
-    const tomorrow = addDaysIso(today, 1);
-    const result = await autoFetchSolcastSnapshots([today, tomorrow], {
-      toolkitHours: SOLCAST_TOOLKIT_PREVIEW_MAX_HOURS,
-    });
-    if (result?.pulled) {
+    // Refresh the freshest N day-ahead snapshots (N = Forecast Days setting);
+    // minDays:2 keeps the old today+tomorrow guarantee.
+    const result = await ensureFreshestDayAheadSnapshots({ minDays: 2 });
+    if (result?.ok && result?.source === "toolkit") {
       console.log(
         `[Cron:solcast-intraday ${cronExpr}] refreshed ${result.persisted} slots ` +
-          `(history rows appended: ${result.historyRowsAppended || 0})`,
+          `across ${result.forecastDays} day(s)`,
       );
     } else {
       console.warn(
-        `[Cron:solcast-intraday ${cronExpr}] fetch failed: ${result?.reason || "unknown"}`,
+        `[Cron:solcast-intraday ${cronExpr}] toolkit unreachable (${result?.reason || "unknown"}); ` +
+          `kept ${result?.availableDates?.length || 0} stored day(s)`,
       );
     }
   } catch (err) {
@@ -23726,6 +23889,32 @@ async function _runCriticalPatternEnforcerTick() {
         };
       },
       getActiveBlock: (inv) => getActiveCriticalBlock(inv) || null,
+      // Slice κ.9 — solar-window deferral. "Detect during, STOP after":
+      // arm during the solar window, convert after it closes, disarm if the
+      // pattern resolves first.
+      inSolarWindow: isSolarWindowNow(now),
+      getPendingBlock: (inv) => {
+        const p = getPendingCriticalBlock(inv) || null;
+        if (p && typeof p.unbalance_latched === "string") {
+          try {
+            p.unbalance_latched = JSON.parse(p.unbalance_latched);
+          } catch (e) {
+            // Corrupt latch — surface it (don't silently proceed with a
+            // string, which decideBlockAction would treat as no evidence).
+            // decideBlockAction re-verifies the pattern is still critical
+            // before the deferred STOP, so this degrades safely to "use
+            // null latch" rather than masking the corruption entirely.
+            console.warn(
+              `[critBlock] inv ${inv} pending unbalance_latched JSON corrupt: ${e?.message || e}`,
+            );
+            p.unbalance_latched = null;
+          }
+        }
+        return p;
+      },
+      armPending: (row) => armOrRefreshPendingCriticalBlock(row),
+      activatePending: (id, nowMs) => activatePendingCriticalBlock(id, nowMs, null),
+      disarmPending: (inv, reason) => disarmPendingCriticalBlock(inv, reason),
       openBlock: (row) => insertCriticalBlock(row),
       promoteBlock: (id, fields, nowMs) => updateCriticalBlockPattern(id, fields, nowMs),
       markReenforced: (id, nowMs, result) => updateCriticalBlockReenforcement(id, nowMs, result),
@@ -23791,6 +23980,15 @@ async function _runCriticalPatternEnforcerTick() {
         if (validKeys.has(String(row?.pattern_key || ""))) activeBlockCount++;
         else staleActiveBlockCount++;
       }
+      // Slice κ.9 — armed (pending) rows are deferred STOPs that WILL all
+      // convert to active when the solar window closes. Count them toward
+      // the fleet cap too, otherwise a fleet-wide pattern arming during
+      // solar bypasses the cap and STOPs the whole plant at sundown — the
+      // exact mass-STOP scenario the cap exists to prevent.
+      const allPending = getAllPendingCriticalBlocks() || [];
+      for (const row of allPending) {
+        if (validKeys.has(String(row?.pattern_key || ""))) activeBlockCount++;
+      }
     } catch (_) {
       activeBlockCount = 0;     // fail-open: count error must not block enforcement
       staleActiveBlockCount = 0;
@@ -23821,8 +24019,15 @@ async function _runCriticalPatternEnforcerTick() {
         // re-enforce STOP (idempotent, same SAFETY intent) or promote the
         // block's pattern key.
         let hasActive = false;
+        let hasPending = false;
         try { hasActive = !!getActiveCriticalBlock(inv); } catch (_) {}
-        if (!hasActive) {
+        // Slice κ.9 — inverters with an armed (pending) row must STILL run
+        // enforceOne so the deferral can convert (post-solar) or disarm
+        // (pattern resolved). Skipping them at cap would strand a pending
+        // row forever. Only inverters with NEITHER active NOR pending are
+        // suspended (this is what blocks brand-new arming at the cap).
+        try { hasPending = !!getPendingCriticalBlock(inv); } catch (_) {}
+        if (!hasActive && !hasPending) {
           if (!_fleetCapSuspendedLoggedThisTick) {
             _fleetCapSuspendedLoggedThisTick = true;
             try {
@@ -23869,6 +24074,27 @@ async function _runCriticalPatternEnforcerTick() {
               pattern: r.action.pattern,
             });
           } catch (_) { /* WS may be unavailable during boot */ }
+        } else if (
+          r?.action?.kind === "arm_pending" ||
+          r?.action?.kind === "disarm_pending"
+        ) {
+          // Slice κ.9 — solar-window deferral state changed. Broadcast so the
+          // inverter card can show / clear the amber "armed — auto-stop after
+          // solar window" overlay without waiting for the next poll.
+          console.log(
+            r.action.kind === "arm_pending"
+              ? `[critBlock] inv ${inv} ARMED (deferred): ${r.action.pattern?.key} ` +
+                `slave=${r.action.triggering_slave} — STOP held until solar window closes`
+              : `[critBlock] inv ${inv} disarmed: ${r.action.reason} (no STOP issued)`,
+          );
+          try {
+            broadcastUpdate({
+              type: "critical_block_changed",
+              inverter: inv,
+              kind: r.action.kind,
+              pattern: r.action.pattern || null,
+            });
+          } catch (_) { /* WS may be unavailable during boot */ }
         } else if (r?.action?.kind === "gated_pending_unbalance") {
           // Slice κ.8 — pattern recurred but unbalance gate didn't pass.
           // Just a console line; the enforcer already logged the audit row.
@@ -23908,12 +24134,28 @@ app.get("/api/critical-blocks", (req, res) => {
   try {
     const active = (getAllActiveCriticalBlocks() || [])
       .map(criticalPatternEnforcer.summarizeBlockForApi);
+    // Slice κ.9 — armed-but-deferred rows: confirmed in-solar, STOP held
+    // until the solar window closes. Surfaced so the inverter card can show
+    // a distinct amber "armed" overlay (NOT the red write-locked state).
+    const pending = (getAllPendingCriticalBlocks() || []).map((b) => ({
+      id: b.id,
+      inverter: b.inverter,
+      pattern_key: b.pattern_key,
+      pattern_hex: b.pattern_hex,
+      pattern_label: b.pattern_label,
+      triggering_slave: b.triggering_slave,
+      count_in_window: b.count_in_window,
+      armed_at_ms: b.armed_at_ms,
+      state: "pending",
+    }));
     res.json({
       ok: true,
       generated_at_ms: Date.now(),
       active,
+      pending,
       // Map keyed by inverter for client convenience.
       by_inverter: Object.fromEntries(active.map((b) => [b.inverter, b])),
+      pending_by_inverter: Object.fromEntries(pending.map((b) => [b.inverter, b])),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -24226,7 +24468,8 @@ app.post("/api/critical-blocks/:inverter/confirm", express.json(), (req, res) =>
       return res.status(403).json({ ok: false, error: "Authorization failed. Confirmation requires bulk-control auth." });
     }
     const operator = String(body.operator || getSetting("operatorName", "OPERATOR")).trim() || "OPERATOR";
-    const note     = body.note ? String(body.note) : null;
+    // Bound the free-text note (forensic audit field, not unbounded input).
+    const note     = body.note ? String(body.note).slice(0, 500) : null;
     const result = ackCriticalBlock(inv, operator, note);
     if (!result?.ok) {
       return res.status(404).json({ ok: false, error: result?.error || "no_active_block" });
@@ -24271,4 +24514,8 @@ if (process.env.NODE_ENV === "test") {
     // Store in a test variable; we'll need to hook into isRemoteMode
     global.__adsiTestHooks._forceRemoteMode = enabled;
   };
+  // Hooks for the Day-Ahead "Load Data" / freshest-N snapshot feature.
+  global.__adsiTestHooks.shouldProxyApiPath = shouldProxyApiPath;
+  global.__adsiTestHooks.ensureFreshestDayAheadSnapshots =
+    ensureFreshestDayAheadSnapshots;
 }

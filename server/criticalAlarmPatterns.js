@@ -165,9 +165,17 @@ const DEFAULT_MIN_COUNT  = 3;                     // ≥ 3 episodes = recurring 
 const DEFAULT_MIN_EPISODE_SPACING_MS = 60 * 60 * 1000;  // 60 min (was 30)
 const MAX_ALARM_BITS_FOR_PATTERN     = 8;
 
-// Hamming weight (popcount) for a 16-bit value. Used by the suspect-alarm
-// filter to reject `alarm_value`s that have too many bits set to be a
-// real INGECON fault pattern.
+// Hamming weight (popcount) over the LOW 16 bits only. Used by the
+// suspect-alarm filter to reject `alarm_value`s that have too many bits set
+// to be a real INGECON fault pattern.
+//
+// v2.1 note: `alarm_value` is now the full 32-bit regs 6-7 field, but every
+// CRITICAL_PATTERNS mask and every catalogued ALARM_BITS entry lives in bits
+// 0-15. Scoping the glitch heuristic to the low word is therefore correct
+// AND conservative: a high-word-only noise burst can never *suppress* a
+// genuine low-word pattern match (popcount only ever returns "no match").
+// Do NOT widen this to 32-bit without re-tuning MAX_ALARM_BITS_FOR_PATTERN —
+// it is an operator-tuned safety heuristic (Slice κ.4).
 function _popcount16(v) {
   let x = (Number(v) | 0) & 0xFFFF;
   x = x - ((x >> 1) & 0x5555);

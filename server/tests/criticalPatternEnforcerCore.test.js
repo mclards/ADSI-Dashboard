@@ -59,10 +59,11 @@ async function run() {
     const r = decideBlockAction({
       inverter: 3,
       slaves: [
-        { slave: 1, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "DC Substrate Breach", severity_rank: 2, count_in_window: 3, last_seen_ts: 500 }] },
-        { slave: 2, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "DC Substrate Breach", severity_rank: 2, count_in_window: 4, last_seen_ts: 800 }] },
+        { slave: 1, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "DC Substrate Breach", severity_rank: 2, count_in_window: 3, last_seen_ts: 500 }], unbalance: { sustained: true, max_pct: 24 } },
+        { slave: 2, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "DC Substrate Breach", severity_rank: 2, count_in_window: 4, last_seen_ts: 800 }], unbalance: { sustained: true, max_pct: 27 } },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1000,
     });
     assert.strictEqual(r.kind, "open_block");
@@ -86,9 +87,10 @@ async function run() {
           { severity: "critical", key: "DC_FAULT_AC_OVERCURRENT", hex: "0x0210", label: "AC OC", severity_rank: 1, count_in_window: 5, last_seen_ts: 999_000 },
           // 0x0240 older but worse failure mode
           { severity: "critical", key: "DC_SUBSTRATE_BREACH",     hex: "0x0240", label: "Substrate Breach", severity_rank: 2, count_in_window: 2, last_seen_ts: 100_000 },
-        ] },
+        ], unbalance: { sustained: true, max_pct: 25 } },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1_000_000,
     });
     assert.strictEqual(r.kind, "open_block");
@@ -108,9 +110,10 @@ async function run() {
           { severity: "ok",       key: "DC_SUBSTRATE_BREACH",     hex: "0x0240", severity_rank: 3, count_in_window: 0, last_seen_ts: 0 },
           { severity: "ok",       key: "DC_FAULT_AC_OVERCURRENT", hex: "0x0210", severity_rank: 1, count_in_window: 0, last_seen_ts: 0 },
           { severity: "critical", key: "IGBT_HEALTH_EOL",         hex: "EOL",    severity_rank: 2, count_in_window: null, last_seen_ts: 999_999, health_score: 78 },
-        ] },
+        ], unbalance: { sustained: true, max_pct: 22 } },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1_000_000,
     });
     assert.strictEqual(r.kind, "open_block");
@@ -128,9 +131,10 @@ async function run() {
           { severity: "critical", key: "DC_FAULT_AC_OVERCURRENT", hex: "0x0210", severity_rank: 1, count_in_window: 9, last_seen_ts: 999_900 },
           { severity: "critical", key: "IGBT_HEALTH_EOL",         hex: "EOL",    severity_rank: 2, last_seen_ts: 999_950 },
           { severity: "critical", key: "DC_SUBSTRATE_BREACH",     hex: "0x0240", severity_rank: 3, count_in_window: 2, last_seen_ts: 999_000 },
-        ] },
+        ], unbalance: { sustained: true, max_pct: 30 } },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1_000_000,
     });
     assert.strictEqual(r.kind, "open_block");
@@ -165,9 +169,10 @@ async function run() {
         { slave: 2, patterns: [
           { severity: "critical", key: "DC_FAULT_AC_OVERCURRENT", hex: "0x0210", label: "AC OC", severity_rank: 1, count_in_window: 3, last_seen_ts: 500_000 },
           { severity: "ok",       key: "DC_SUBSTRATE_BREACH",     hex: "0x0240", label: "Substrate Breach", severity_rank: 2, count_in_window: 0, last_seen_ts: 0 },
-        ] },
+        ], unbalance: { sustained: true, max_pct: 26 } },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1_000_000,
     });
     assert.strictEqual(r.kind, "open_block");
@@ -320,6 +325,8 @@ async function run() {
         slave === 2
           ? [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", count_in_window: 3, last_seen_ts: 999_000 }]
           : [{ severity: "ok", key: "DC_SUBSTRATE_BREACH", last_seen_ts: 0 }],
+      loadUnbalanceForNode: (inv, slave) =>
+        slave === 2 ? { sustained: true, max_pct: 25 } : { sustained: false, max_pct: 0 },
       getActiveBlock: () => null,
       openBlock: (row) => { calls.blocks.push(row); return 42; },
       markReenforced: (id, nowMs, result) => { calls.reenforce.push({ id, nowMs, result }); },
@@ -407,6 +414,7 @@ async function run() {
       loadPatternsForNode: () => [
         { severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 3, count_in_window: 2, last_seen_ts: 999_900 },
       ],
+      loadUnbalanceForNode: () => ({ sustained: true, max_pct: 25 }),
       getActiveBlock: () => null,
       openBlock: () => 1,
       markReenforced: () => {},
@@ -437,6 +445,7 @@ async function run() {
       loadPatternsForNode: () => [
         { severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 3, count_in_window: 2, last_seen_ts: 999_900 },
       ],
+      loadUnbalanceForNode: () => ({ sustained: true, max_pct: 25 }),
       getActiveBlock: () => null,
       openBlock: () => 1,
       markReenforced: () => {},
@@ -457,6 +466,7 @@ async function run() {
       now: () => 1_000_000,
       listSlaves: () => [1],
       loadPatternsForNode: () => [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", count_in_window: 2, last_seen_ts: 999_000 }],
+      loadUnbalanceForNode: () => ({ sustained: true, max_pct: 25 }),
       getActiveBlock: () => null,
       openBlock: (row) => { calls.blocks.push(row); return 99; },
       markReenforced: () => {},
@@ -534,20 +544,162 @@ async function run() {
     assert.strictEqual(r.triggering_slave, 1, "gate evaluates per-slave");
   });
 
-  test("decide: no unbalance field on any slave → falls back to pattern-only (legacy compat)", () => {
-    // When the unbalance map is absent entirely (legacy callers, tests),
-    // the gate must not retroactively prevent blocks. This is the safety
-    // valve so the existing test corpus keeps passing on the rollout.
+  test("decide: no unbalance field on any slave → gated (mandatory gate, NO legacy fallback)", () => {
+    // 2.2 — the pre-Slice-κ.8 "no unbalance data ⇒ open" fallback is REMOVED.
+    // Phase-current imbalance is now mandatory: a critical pattern with no
+    // sustained imbalance evidence must NEVER auto-block.
     const r = decideBlockAction({
       inverter: 7,
       slaves: [
         { slave: 1, patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }] },
       ],
       activeBlock: null,
+      inSolarWindow: false,
       now: 1_000_000,
     });
-    assert.strictEqual(r.kind, "open_block",
-      "no unbalance verdict provided anywhere → pre-Slice-κ.8 behaviour");
+    assert.strictEqual(r.kind, "gated_pending_unbalance",
+      "no unbalance verdict anywhere → block must NOT open (mandatory gate)");
+  });
+
+  // ── Slice κ.9 — "detect during solar, STOP after" deferral ─────────────
+
+  test("decide: critical + sustained unbalance + IN solar window → arm_pending (defer STOP)", () => {
+    const r = decideBlockAction({
+      inverter: 9,
+      slaves: [
+        {
+          slave: 1,
+          patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }],
+          unbalance: { sustained: true, max_pct: 31 },
+        },
+      ],
+      activeBlock: null,
+      pendingBlock: null,
+      inSolarWindow: true,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "arm_pending");
+    assert.strictEqual(r.unbalance.sustained, true);
+    assert.strictEqual(r.pattern.key, "DC_SUBSTRATE_BREACH");
+  });
+
+  test("decide: armed pending + solar window CLOSED + still critical → open_block (deferred)", () => {
+    const r = decideBlockAction({
+      inverter: 9,
+      slaves: [
+        {
+          slave: 1,
+          // Out of solar the live unbalance read is structurally not sustained
+          // (rejected by the solar gate) — the latched evidence is trusted.
+          patterns: [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 4, last_seen_ts: 999_500 }],
+          unbalance: { sustained: false, max_pct: 0 },
+        },
+      ],
+      activeBlock: null,
+      pendingBlock: { id: 55, unbalance_latched: { sustained: true, max_pct: 31 } },
+      inSolarWindow: false,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "open_block");
+    assert.strictEqual(r.reason, "deferred_after_solar");
+    assert.strictEqual(r.from_pending, true);
+    assert.strictEqual(r.unbalance.sustained, true, "uses latched in-solar evidence");
+  });
+
+  test("decide: armed pending + pattern resolved before solar close → disarm_pending", () => {
+    const r = decideBlockAction({
+      inverter: 9,
+      slaves: [
+        { slave: 1, patterns: [{ severity: "ok", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", last_seen_ts: 0 }] },
+      ],
+      activeBlock: null,
+      pendingBlock: { id: 55, unbalance_latched: { sustained: true, max_pct: 31 } },
+      inSolarWindow: true,
+      now: 1_000_000,
+    });
+    assert.strictEqual(r.kind, "disarm_pending");
+    assert.strictEqual(r.reason, "pattern_resolved_before_stop");
+  });
+
+  test("enforceOne: arm_pending arms a deferred row — NO STOP, NO openBlock", async () => {
+    const calls = { stops: [], blocks: [], armed: [], logs: [] };
+    const deps = {
+      now: () => 1_000_000,
+      listSlaves: () => [1, 2],
+      loadPatternsForNode: (inv, slave) =>
+        slave === 1
+          ? [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 3, last_seen_ts: 999_000 }]
+          : [{ severity: "ok", key: "DC_SUBSTRATE_BREACH", last_seen_ts: 0 }],
+      loadUnbalanceForNode: (inv, slave) =>
+        slave === 1 ? { sustained: true, max_pct: 29 } : { sustained: false, max_pct: 0 },
+      getActiveBlock: () => null,
+      getPendingBlock: () => null,
+      inSolarWindow: true,
+      armPending: (row) => { calls.armed.push(row); return 70; },
+      openBlock: (row) => { calls.blocks.push(row); return 1; },
+      markReenforced: () => {},
+      issueStop: async (inv, slave) => { calls.stops.push({ inv, slave }); return "ok"; },
+      logAction: (p) => calls.logs.push(p),
+      stopPerSlaveDelayMs: 0,
+    };
+    const r = await enforceOne(9, deps);
+    assert.strictEqual(r.action.kind, "arm_pending");
+    assert.strictEqual(calls.armed.length, 1, "must arm a pending row");
+    assert.strictEqual(calls.armed[0].triggering_slave, 1);
+    assert.strictEqual(calls.blocks.length, 0, "must NOT open an active block");
+    assert.strictEqual(calls.stops.length, 0, "must NOT issue STOP during solar");
+    assert.ok(calls.logs.find((l) => l.kind === "critical_block_armed_pending"));
+  });
+
+  test("enforceOne: deferred conversion after solar — activates pending + issues STOP", async () => {
+    const calls = { stops: [], activated: [], blocks: [], reenf: [] };
+    const deps = {
+      now: () => 2_000_000,
+      listSlaves: () => [1, 2],
+      loadPatternsForNode: () => [{ severity: "critical", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", label: "X", severity_rank: 4, count_in_window: 4, last_seen_ts: 1_999_000 }],
+      loadUnbalanceForNode: () => ({ sustained: false, max_pct: 0 }), // post-solar: not live-sustained
+      getActiveBlock: () => null,
+      getPendingBlock: () => ({ id: 88, unbalance_latched: { sustained: true, max_pct: 33 } }),
+      inSolarWindow: false,
+      activatePending: (id) => { calls.activated.push(id); },
+      openBlock: (row) => { calls.blocks.push(row); return 999; },
+      markReenforced: (id, n, r2) => { calls.reenf.push({ id, r2 }); },
+      issueStop: async (inv, slave) => { calls.stops.push(slave); return "ok"; },
+      logAction: () => {},
+      stopPerSlaveDelayMs: 0,
+    };
+    const r = await enforceOne(9, deps);
+    assert.strictEqual(r.action.kind, "open_block");
+    assert.strictEqual(r.action.reason, "deferred_after_solar");
+    assert.strictEqual(calls.activated.length, 1, "converts the armed row in place");
+    assert.strictEqual(calls.activated[0], 88);
+    assert.strictEqual(calls.blocks.length, 0, "must NOT insert a second row");
+    assert.strictEqual(calls.stops.length, 2, "STOP issued to all slaves after solar");
+    assert.strictEqual(r.blockId, 88, "block id stays stable for the operator");
+  });
+
+  test("enforceOne: disarm_pending drops the armed row, NO STOP", async () => {
+    const calls = { stops: [], disarmed: [], logs: [] };
+    const deps = {
+      now: () => 2_000_000,
+      listSlaves: () => [1],
+      loadPatternsForNode: () => [{ severity: "ok", key: "DC_SUBSTRATE_BREACH", hex: "0x0240", last_seen_ts: 0 }],
+      loadUnbalanceForNode: () => ({ sustained: false, max_pct: 0 }),
+      getActiveBlock: () => null,
+      getPendingBlock: () => ({ id: 91 }),
+      inSolarWindow: true,
+      disarmPending: (inv, reason) => { calls.disarmed.push({ inv, reason }); },
+      openBlock: () => 1,
+      markReenforced: () => {},
+      issueStop: async () => { calls.stops.push(1); return "ok"; },
+      logAction: (p) => calls.logs.push(p),
+      stopPerSlaveDelayMs: 0,
+    };
+    const r = await enforceOne(9, deps);
+    assert.strictEqual(r.action.kind, "disarm_pending");
+    assert.strictEqual(calls.disarmed.length, 1);
+    assert.strictEqual(calls.stops.length, 0, "resolved pattern → no STOP ever");
+    assert.ok(calls.logs.find((l) => l.kind === "critical_block_disarmed"));
   });
 
   await test("enforceOne: gated_pending_unbalance emits audit log but no STOP", async () => {

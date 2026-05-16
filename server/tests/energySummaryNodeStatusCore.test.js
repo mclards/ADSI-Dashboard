@@ -193,7 +193,8 @@ test("ESTIMATED_FROM_PAC when hwProvenance='pac_fallback' (Inv 12 Node 3 case)",
     hwProvenance:   "pac_fallback",
   });
   assert.equal(r.status, "ESTIMATED_FROM_PAC");
-  assert.match(r.reason, /HW Δ filled from PAC integral/);
+  // Reworded (3.1) to plain words — no Δ glyph. Assert the stable phrase.
+  assert.match(r.reason, /filled from the PAC-integrated energy/);
 });
 
 test("ESTIMATED_FROM_PAC fires BEFORE the discrepancy classifier", () => {
@@ -220,4 +221,37 @@ test("hwProvenance='hw_counter' uses the normal discrepancy classifier", () => {
     hwProvenance:   "hw_counter",
   });
   assert.equal(r.status, "BASELINE_LATE");
+});
+
+/* ── 3.1: Notes column must be plain words, no symbols/glyphs ─────────── */
+
+test("every reason string is plain ASCII words (no Δ/≤/—/? glyphs)", () => {
+  // One representative input per status branch so every operator-facing
+  // `reason` is exercised. The Energy Summary "Notes" column renders these
+  // verbatim — they must be unambiguous on every locale/codepage.
+  const cases = [
+    { sampleCount: 0, firstTsMs: 0, lastTsMs: 0, pacPeakW: 0, pacKwh: 0 },                                  // NO_DATA
+    { sampleCount: 4, firstTsMs: T0, lastTsMs: T0 + 13 * MIN, pacPeakW: 0, pacKwh: 0 },                     // BRIEF_RESPONSE
+    { sampleCount: 1500, firstTsMs: T0, lastTsMs: T0 + 6 * HOUR, pacPeakW: 0, pacKwh: 0 },                  // ZERO_PRODUCTION
+    { firstTsMs: T0, lastTsMs: T0 + 12 * HOUR, pacPeakW: 175_000, pacKwh: 1100,                             // ESTIMATED_FROM_PAC
+      etotalDeltaKwh: 1100, hwProvenance: "pac_fallback" },
+    { sampleCount: 8000, firstTsMs: T0, lastTsMs: T0 + 12 * HOUR, pacPeakW: 175_000, pacKwh: 1100,          // BASELINE_LATE
+      etotalDeltaKwh: 574, hwProvenance: "hw_counter" },
+    { sampleCount: 8000, firstTsMs: T0, lastTsMs: T0 + 12 * HOUR, pacPeakW: 180_000, pacKwh: 1000,          // HW_OVER
+      etotalDeltaKwh: 1300, hwProvenance: "hw_counter" },
+    { sampleCount: 8000, firstTsMs: T0, lastTsMs: T0 + 12 * HOUR, pacPeakW: 180_000, pacKwh: 1500,          // ACTIVE
+      etotalDeltaKwh: 1490 },
+  ];
+  const ASCII_WORDS = /^[\x20-\x7E]*$/;          // printable ASCII only
+  for (const input of cases) {
+    const { status, reason } = classifyEnergySummaryNode(input);
+    assert.ok(typeof reason === "string" && reason.length > 0, `${status}: empty reason`);
+    assert.ok(ASCII_WORDS.test(reason), `${status}: non-ASCII glyph in reason -> ${reason}`);
+    // No speculative trailing question mark — Notes must be definitive.
+    assert.ok(!/\?\s*$/.test(reason), `${status}: reason must not end with "?" -> ${reason}`);
+    // Explicitly ban the symbols the operator called out.
+    for (const bad of ["Δ", "≤", "≥", "−", "—", "≈", "°", "Φ"]) {
+      assert.ok(!reason.includes(bad), `${status}: banned glyph ${JSON.stringify(bad)} in reason`);
+    }
+  }
 });

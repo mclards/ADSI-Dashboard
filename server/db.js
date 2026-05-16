@@ -1622,6 +1622,39 @@ ensureColumn("alarms", "stop_reason_id", "stop_reason_id INTEGER");
 // Additive migrations for the inverter_stop_reasons_std table.
 ensureColumn("inverter_stop_reasons_std", "motive_name", "motive_name TEXT");
 ensureColumn("inverter_stop_reasons_std", "captured_at_ms", "captured_at_ms INTEGER");
+
+// v2.11.x Slice κ.9 — "detect during solar, STOP after solar" deferral.
+// `state` distinguishes a STOP-issued/write-locked block ('active') from an
+// armed-but-not-yet-executed one ('pending'). Legacy rows default to 'active'
+// so existing block semantics are unchanged. `armed_at_ms` + the latched
+// unbalance JSON preserve the in-solar physical-confirmation evidence so the
+// post-solar conversion does not need a live (and structurally unavailable)
+// out-of-solar unbalance reading.
+ensureColumn(
+  "inverter_critical_blocks",
+  "state",
+  // CHECK guards against a typo'd state ever creating a "ghost" row that is
+  // invisible to BOTH the state='active' and state='pending' queries (which
+  // would silently neither enforce nor be ackable).
+  "state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','pending'))",
+);
+ensureColumn("inverter_critical_blocks", "armed_at_ms", "armed_at_ms INTEGER");
+ensureColumn(
+  "inverter_critical_blocks",
+  "unbalance_latched",
+  "unbalance_latched TEXT",
+);
+// idx for the κ.9 state-filtered hot queries (getActive/getAllActive/
+// getPending/getAllPending run on every enforcer tick + every
+// /api/critical-blocks hit). The pre-κ.9 idx_icb_active does not cover
+// `state`, so without this the filter degrades to a table scan as the
+// acked-history grows (rows are retained indefinitely for forensics).
+try {
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_icb_state
+       ON inverter_critical_blocks(state, acked_at_ms, inverter)`,
+  );
+} catch (_) { /* index is an optimisation; never fatal */ }
 ensureColumn("inverter_stop_reasons_std", "source", "source TEXT NOT NULL DEFAULT 'standard_modbus'");
 
 // v2.9.1 — EOD-clean rolling-last snapshot columns. Captured post-1800H local
@@ -2015,14 +2048,17 @@ const stmts = {
     VALUES (@ts,@inverter,@unit,@pac,@kwh,@alarm,@online)
   `),
   insertAlarm: db.prepare(`
-    INSERT INTO alarms (ts,inverter,unit,alarm_code,alarm_value,severity)
-    VALUES (@ts,@inverter,@unit,@alarm_code,@alarm_value,@severity)
+    INSERT INTO alarms (ts,inverter,unit,alarm_code,alarm_value,severity,updated_ts)
+    VALUES (@ts,@inverter,@unit,@alarm_code,@alarm_value,@severity,@updated_ts)
   `),
+  // updated_ts is bumped on every in-place combination change so the moment
+  // the alarm bitmask changed is recoverable (2.1 — consistent timestamping).
   updateActiveAlarm: db.prepare(
     `UPDATE alarms
        SET alarm_code=?,
            alarm_value=?,
-           severity=?
+           severity=?,
+           updated_ts=?
      WHERE inverter=? AND unit=? AND cleared_ts IS NULL`,
   ),
   clearAlarm: db.prepare(
@@ -2962,9 +2998,13 @@ function persistCounterState(frame) {
     // the aggressive 50 ms poll cadence. Both checks compare against the
     // previous in-memory sample and dedup at most once per (inv,unit) per
     // hour so the audit log doesn't flood under sustained anomalies.
-    //   1. Etotal monotonicity: lifetime kWh should never decrease. A drop
-    //      means firmware swap, counter wrap (4.29 GWh — never in practice),
-    //      hardware fault, or partial frame decode. Surface to operator.
+    //   1. Etotal monotonicity: lifetime kWh should never decrease (the
+    //      inverter accumulates it internally and it is not resettable). A
+    //      drop means firmware/board swap, UInt32 counter wrap
+    //      (4,294,967,295 kWh ~= 4.29 TWh — never in practice for one
+    //      inverter), hardware fault, or partial frame decode. Either way
+    //      the negative delta is rejected downstream by acceptDelta()
+    //      (>= 0 and <= 9000 kWh/unit/day) and surfaced to the operator.
     //   2. Stuck counter: counter_advancing flipped 1→0 means the unit is
     //      producing PAC but Etotal hasn't ticked over a 5-min window —
     //      a real loss of HW counter trust until cleared.
@@ -5349,10 +5389,14 @@ function pruneIgbtThermalBaseline(retainDays = 800) {
 // One active row per inverter at a time. "Active" = acked_at_ms IS NULL.
 // History rows (acked) are kept indefinitely for forensic review.
 
+// "Active" = STOP-issued + manual-write-locked. Slice κ.9: a 'pending' row is
+// armed during the solar window but has NOT issued STOP and must NOT lock
+// manual writes or consume the fleet cap — so every active-block query filters
+// state='active' explicitly. Legacy rows are 'active' via the column default.
 function getActiveCriticalBlock(inverter) {
   return db.prepare(`
     SELECT * FROM inverter_critical_blocks
-      WHERE inverter = ? AND acked_at_ms IS NULL
+      WHERE inverter = ? AND acked_at_ms IS NULL AND state = 'active'
       ORDER BY id DESC LIMIT 1
   `).get(Number(inverter));
 }
@@ -5360,9 +5404,118 @@ function getActiveCriticalBlock(inverter) {
 function getAllActiveCriticalBlocks() {
   return db.prepare(`
     SELECT * FROM inverter_critical_blocks
-      WHERE acked_at_ms IS NULL
+      WHERE acked_at_ms IS NULL AND state = 'active'
       ORDER BY inverter ASC
   `).all();
+}
+
+function getAllPendingCriticalBlocks() {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE acked_at_ms IS NULL AND state = 'pending'
+      ORDER BY inverter ASC
+  `).all();
+}
+
+// Slice κ.9 — the armed-but-deferred row for an inverter (one at a time).
+function getPendingCriticalBlock(inverter) {
+  return db.prepare(`
+    SELECT * FROM inverter_critical_blocks
+      WHERE inverter = ? AND acked_at_ms IS NULL AND state = 'pending'
+      ORDER BY id DESC LIMIT 1
+  `).get(Number(inverter));
+}
+
+// Arm (or refresh) a pending block: pattern+imbalance confirmed DURING the
+// solar window, STOP deferred until the window closes. No STOP, no write-lock.
+// Refresh-in-place keeps the operator-visible "armed" row id stable.
+function armOrRefreshPendingCriticalBlock(row) {
+  const r = row || {};
+  const now = Number(r.armed_at_ms) || Date.now();
+  const latched = r.unbalance_latched == null
+    ? null
+    : (typeof r.unbalance_latched === "string"
+        ? r.unbalance_latched
+        : JSON.stringify(r.unbalance_latched));
+  const existing = getPendingCriticalBlock(r.inverter);
+  if (existing) {
+    db.prepare(`
+      UPDATE inverter_critical_blocks
+         SET pattern_key       = ?,
+             pattern_hex       = ?,
+             pattern_label     = ?,
+             triggering_slave  = ?,
+             count_in_window   = ?,
+             latest_episode_ts = ?,
+             armed_at_ms       = ?,
+             unbalance_latched = COALESCE(?, unbalance_latched),
+             updated_ts        = ?
+       WHERE id = ?
+    `).run(
+      String(r.pattern_key || ""),
+      String(r.pattern_hex || ""),
+      r.pattern_label == null ? null : String(r.pattern_label),
+      r.triggering_slave == null ? null : Number(r.triggering_slave),
+      r.count_in_window == null ? null : Number(r.count_in_window),
+      r.latest_episode_ts == null ? null : Number(r.latest_episode_ts),
+      now,
+      latched,
+      Date.now(),
+      existing.id,
+    );
+    return existing.id;
+  }
+  return db.prepare(`
+    INSERT INTO inverter_critical_blocks
+      (inverter, created_at_ms, pattern_key, pattern_hex, pattern_label,
+       triggering_slave, count_in_window, latest_episode_ts,
+       stop_issued_at_ms, stop_result, last_reenforced_ms, reenforce_count,
+       state, armed_at_ms, unbalance_latched)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 'pending', ?, ?)
+  `).run(
+    Number(r.inverter),
+    now,
+    String(r.pattern_key || ""),
+    String(r.pattern_hex || ""),
+    r.pattern_label == null ? null : String(r.pattern_label),
+    r.triggering_slave == null ? null : Number(r.triggering_slave),
+    r.count_in_window == null ? null : Number(r.count_in_window),
+    r.latest_episode_ts == null ? null : Number(r.latest_episode_ts),
+    now,
+    latched,
+  ).lastInsertRowid;
+}
+
+// Convert a pending row to active when the solar window has closed and the
+// pattern is still critical. Preserves the row id (UI continuity) and stamps
+// the real block-open + STOP time.
+function activatePendingCriticalBlock(id, nowMs, stopResult) {
+  const now = Number(nowMs) || Date.now();
+  return db.prepare(`
+    UPDATE inverter_critical_blocks
+       SET state              = 'active',
+           created_at_ms      = ?,
+           stop_issued_at_ms  = ?,
+           stop_result        = ?,
+           last_reenforced_ms = ?,
+           updated_ts         = ?
+     WHERE id = ? AND acked_at_ms IS NULL AND state = 'pending'
+  `).run(now, now, stopResult || null, now, now, Number(id)).changes;
+}
+
+// Disarm a pending row that never executed (pattern resolved before the solar
+// window closed). Marked acked by SYSTEM so it drops out of pending/active
+// queries but is retained for forensic review (append-only history style).
+function disarmPendingCriticalBlock(inverter, reason) {
+  const pend = getPendingCriticalBlock(inverter);
+  if (!pend) return 0;
+  const now = Date.now();
+  return db.prepare(`
+    UPDATE inverter_critical_blocks
+       SET acked_at_ms = ?, acked_by = 'SYSTEM:DISARM_PRESOLAR',
+           ack_note = ?, updated_ts = ?
+     WHERE id = ?
+  `).run(now, reason ? String(reason).slice(0, 200) : "pattern_resolved", now, pend.id).changes;
 }
 
 function getCriticalBlockHistory(inverter, limit = 50) {
@@ -5451,16 +5604,21 @@ function updateCriticalBlockPattern(id, fields, nowMs) {
 }
 
 function ackCriticalBlock(inverter, ackedBy, note) {
-  // Closes the active block for this inverter (no-op if none).
-  const active = getActiveCriticalBlock(inverter);
-  if (!active) return { ok: false, error: "no_active_block" };
+  // Closes the active block for this inverter, or — Slice κ.9 — an armed
+  // (pending) block if no active one exists. The operator must be able to
+  // dismiss an armed-but-not-yet-executed deferral (e.g. a known-good
+  // precursor) BEFORE it converts at solar-window close; otherwise the
+  // pending row is invisible to the ack path and would still STOP later.
+  const target = getActiveCriticalBlock(inverter) || getPendingCriticalBlock(inverter);
+  if (!target) return { ok: false, error: "no_active_block" };
+  const wasPending = target.state === "pending";
   const now = Date.now();
   const changes = db.prepare(`
     UPDATE inverter_critical_blocks
        SET acked_at_ms = ?, acked_by = ?, ack_note = ?, updated_ts = ?
      WHERE id = ?
-  `).run(now, String(ackedBy || "OPERATOR"), note ? String(note) : null, now, active.id).changes;
-  return { ok: changes > 0, id: active.id, acked_at_ms: now };
+  `).run(now, String(ackedBy || "OPERATOR"), note ? String(note) : null, now, target.id).changes;
+  return { ok: changes > 0, id: target.id, acked_at_ms: now, was_pending: wasPending };
 }
 
 // ─── v2.11.x Field Calibration (Phases 2-4) — DB helpers ─────────────────
@@ -5742,6 +5900,12 @@ module.exports = {
   updateCriticalBlockReenforcement,
   updateCriticalBlockPattern,
   ackCriticalBlock,
+  // Slice κ.9 — solar-window deferred (armed→active) auto-block
+  getPendingCriticalBlock,
+  getAllPendingCriticalBlocks,
+  armOrRefreshPendingCriticalBlock,
+  activatePendingCriticalBlock,
+  disarmPendingCriticalBlock,
   // v2.11.x Field Calibration (Phases 2-4) — write log + snapshots + sessions
   insertCalibrationSnapshot,
   getLatestCalibrationSnapshot,

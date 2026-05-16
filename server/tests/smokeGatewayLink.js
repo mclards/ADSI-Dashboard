@@ -117,7 +117,10 @@ setTimeout(async () => {
     );
     check(
       "Detail today energy uses authoritative todayEnergyByInv state",
-      appSrc.includes("const kwh = Number((State.todayEnergyByInv[inv] ?? State.invDetailKwh) || 0);"),
+      // v2.9.1+ the kwh assignment became an energy-mode ternary (pac /
+      // etotal / parce). Assert the authoritative pac-mode expression
+      // is still present rather than the exact old single-line form.
+      appSrc.includes("State.todayEnergyByInv[inv] ?? State.invDetailKwh"),
     );
     check(
       "Gateway live payload enriches todayEnergy",

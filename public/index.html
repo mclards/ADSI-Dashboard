@@ -660,6 +660,14 @@
             </div>
             <div class="exp-actions">
               <button
+                id="btnLoadForecastData"
+                class="btn btn-outline btn-full"
+                type="button"
+                title="Pull the freshest day-ahead snapshots directly from the Solcast Toolkit (number of days follows the Forecast Days setting on the Forecast page) into local storage so the export below has the latest data. Falls back to the latest stored snapshot if the Toolkit is unreachable. Works in any operation mode."
+              >
+                <span class="mdi mdi-cloud-download-outline" aria-hidden="true"></span><span>Load Data</span>
+              </button>
+              <button
                 id="btnRunForecastExport"
                 class="btn btn-accent btn-full"
                 type="button"
@@ -1123,9 +1131,9 @@
           <div class="tl-right">
             <span class="toolbar-info" id="fcalFeatureBadge" title="Writes feature flag (calibrationWritesEnabled). When OFF, the page is read-only.">Writes: <b id="fcalFeatureBadgeText">—</b></span>
             <button id="btnFcalToggleWrites" class="btn btn-xs btn-outline" type="button" hidden
-                    title="Toggle the calibrationWritesEnabled feature flag. Requires the adsiM/adsiMM topology auth key.">
+                    title="Enter Calibration Mode — one auth prompt unlocks writes for this visit (sacupsMM/adsiMM).">
               <span class="mdi mdi-key-variant icon-inline" aria-hidden="true"></span>
-              <span id="btnFcalToggleWritesLabel">Enable Writes…</span>
+              <span id="btnFcalToggleWritesLabel">Calibration Mode</span>
             </button>
           </div>
         </div>
@@ -1221,18 +1229,7 @@
             </div>
 
             <div class="fcal-header-block" data-fcal-header="fleet" hidden>
-              <div class="cb-sub-title">
-                <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
-                Fleet Anomaly View
-              </div>
-              <div class="srn-controls">
-                <button id="btnFcalFleetScan" class="btn btn-accent" type="button"
-                        title="Walk every configured (inverter, slave), read the calibration block, compute per-field median, and highlight modules whose scale factor is &gt;5 % off the fleet median. Topology key (cached 1 hour) gates the scan.">
-                  <span class="mdi mdi-magnify-scan icon-inline" aria-hidden="true"></span>
-                  <span>Scan Fleet</span>
-                </button>
-                <span class="smsg" id="fcalFleetMsg"></span>
-              </div>
+              <!-- Fleet header now moved inside the panel for tighter layout (section 4.5) -->
             </div>
           </div>
           <!-- ── END PINNED HEADER ──────────────────────────────────────── -->
@@ -1325,6 +1322,25 @@
           <!-- Tab panel: fleet anomaly view (per-field median + per-node delta) -->
           <div id="fcalPanelFleet" class="card-tab-panel" data-card-tab-panel="fleet"
                role="tabpanel" aria-labelledby="fcalPanelFleet" hidden>
+            <!-- v2.11.x Section 4.5: Compact header bar inside the panel (instead of pinned) -->
+            <div class="fcal-fleet-header">
+              <div class="fcal-fleet-header-title">
+                <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
+                Fleet Anomaly View
+              </div>
+              <div class="fcal-fleet-header-controls">
+                <button id="btnFcalFleetScan" class="btn btn-accent btn-sm" type="button"
+                        title="Walk every configured (inverter, slave), read the calibration block, compute per-field median, and highlight modules whose scale factor is &gt;5 % off the fleet median. Topology key (cached 1 hour) gates the scan.">
+                  <span class="mdi mdi-magnify-scan icon-inline" aria-hidden="true"></span>
+                  <span>Scan Fleet</span>
+                </button>
+              </div>
+            </div>
+            <!-- Status line on its own reserved row so growing text never
+                 shoves the Scan Fleet button (4.5 layout fix). -->
+            <div class="fcal-fleet-msg-row">
+              <span class="smsg" id="fcalFleetMsg"></span>
+            </div>
             <div id="fcalFleetResult" class="srn-table-host">
               <div class="srn-empty">Click <strong>Scan Fleet</strong> to read every node and surface calibration outliers. Read-only. ~50-60 s for a 96-node fleet (gentle 2-worker probe so live polling stays responsive).</div>
             </div>

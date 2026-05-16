@@ -32,20 +32,28 @@
 //                        (likely Modbus comm artefact / aborted inverter restart)
 //   ZERO_PRODUCTION    — window ≥ BRIEF_WINDOW_MIN minutes AND peak_pac == 0
 //                        (inverter was online but never exported power)
-//   ESTIMATED_FROM_PAC — HW Δ columns were filled from the PAC integral
+//   ESTIMATED_FROM_PAC — HW delta columns were filled from the PAC integral
 //                        because the morning baseline anchor was unreliable
 //                        (source='poll_late' or 'eod_clean_only', or
 //                        baseline missing entirely). The PAC-based MWh
 //                        column is independent of HW counters and remains
 //                        authoritative; the HW columns are repeated from
 //                        it so the operator sees a number plus this flag.
-//   BASELINE_LATE      — Etotal HW Δ < (1 − DISCREPANCY_PCT) × PAC integral
-//                        (HW counter under-counts; baseline anchored after
-//                        first production but not severe enough to trip
-//                        the poll_late guard upstream — e.g. operator opted
+//   BASELINE_LATE      — Etotal HW delta < (1 - DISCREPANCY_PCT) x PAC
+//                        integral (HW counter under-counts; the daily
+//                        baseline was anchored after production already
+//                        started but not severe enough to trip the
+//                        poll_late guard upstream — e.g. operator opted
 //                        out of the PAC fallback)
-//   HW_OVER            — Etotal HW Δ > (1 + DISCREPANCY_PCT) × PAC integral
-//                        (PAC integral missed time; counter is the source of truth)
+//   HW_OVER            — Etotal HW delta > (1 + DISCREPANCY_PCT) x PAC
+//                        integral (PAC integral missed time; counter is
+//                        the source of truth)
+//
+// Operator-facing `reason` text is intentionally plain ASCII words only
+// (no delta / less-than-or-equal / trailing-question-mark glyphs) so the
+// exported Energy Summary "Notes" column is unambiguous on every locale and
+// codepage. energySummaryNodeStatusCore.test.js enforces this with a
+// no-symbol guard.
 //   ACTIVE             — fall-through; everything healthy
 //
 // Inputs are kWh-equivalent / W / ms — no units conversion done here.
@@ -89,7 +97,7 @@ function _windowMinutes(firstTsMs, lastTsMs) {
 //     status:        one of { NO_DATA, BRIEF_RESPONSE, ZERO_PRODUCTION,
 //                             BASELINE_LATE, HW_OVER, ACTIVE },
 //     reason:        short human-readable string,
-//     deltaPct:      signed (HW − PAC) / PAC × 100, or NaN if no comparison,
+//     deltaPct:      signed (HW - PAC) / PAC * 100, or NaN if no comparison,
 //     windowMinutes: window length in minutes (0 if missing),
 //   }
 function classifyEnergySummaryNode(input = {}, options = {}) {
@@ -135,7 +143,7 @@ function classifyEnergySummaryNode(input = {}, options = {}) {
     return {
       status: "ZERO_PRODUCTION",
       reason: winMin > 0
-        ? `${winMin.toFixed(1)} min online, peak PAC ≤ ${PEAK_PAC_NOISE_W} W`
+        ? `${winMin.toFixed(1)} min online, peak PAC at or below ${PEAK_PAC_NOISE_W} W`
         : "no PAC observed",
       deltaPct, windowMinutes: winMin,
     };
@@ -148,7 +156,11 @@ function classifyEnergySummaryNode(input = {}, options = {}) {
   if (provenance === "pac_fallback") {
     return {
       status: "ESTIMATED_FROM_PAC",
-      reason: "HW Δ filled from PAC integral (baseline anchor unreliable)",
+      reason:
+        "Hardware Etotal and parcE columns were filled from the PAC-integrated " +
+        "energy because the daily baseline anchor was unreliable. These two " +
+        "columns are NOT independent measurements for this row; the " +
+        "PAC-integrated total is the authoritative day energy.",
       deltaPct, windowMinutes: winMin,
     };
   }
@@ -160,8 +172,13 @@ function classifyEnergySummaryNode(input = {}, options = {}) {
       return {
         status: "BASELINE_LATE",
         reason:
-          `HW Etotal Δ under-counts PAC by ${Math.abs(deltaPct).toFixed(1)}% ` +
-          `(baseline anchored after first production?)`,
+          `Hardware Etotal day delta is lower than the PAC-integrated energy ` +
+          `by ${Math.abs(deltaPct).toFixed(1)} percent. Cause: the daily ` +
+          `baseline was anchored after production had already started ` +
+          `(the gateway started after sunrise with no prior clean ` +
+          `end-of-day snapshot), so the early-morning energy is missing from ` +
+          `the hardware-counter delta. The PAC-integrated total on this row ` +
+          `remains the authoritative day energy.`,
         deltaPct, windowMinutes: winMin,
       };
     }
@@ -169,8 +186,10 @@ function classifyEnergySummaryNode(input = {}, options = {}) {
       return {
         status: "HW_OVER",
         reason:
-          `HW Etotal Δ exceeds PAC by ${deltaPct.toFixed(1)}% ` +
-          `(PAC integration likely missed polling time)`,
+          `Hardware Etotal day delta is higher than the PAC-integrated ` +
+          `energy by ${deltaPct.toFixed(1)} percent. Cause: PAC integration ` +
+          `missed polling time (communication gaps), so the hardware ` +
+          `counter is the more complete day total for this row.`,
         deltaPct, windowMinutes: winMin,
       };
     }

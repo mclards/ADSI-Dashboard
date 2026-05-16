@@ -1706,6 +1706,7 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
     Inverter:     `INV-${String(r.inverter).padStart(2,'0')}`,
     Unit:         r.unit,
     AlarmCode:    formatAlarmHex(r.alarm_value),
+    AlarmCodeText: r.alarm_code == null ? '' : String(r.alarm_code),
     AlarmValue:   r.alarm_value || 0,
     Severity:     (r.severity || 'fault').toUpperCase(),
     Description:  decodeAlarm(r.alarm_value).map(b=>b.label).join('; ') || 'No alarm',
@@ -1716,6 +1717,10 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
     Duration_min: Number((durationMs / 60000).toFixed(2)),
     Status:       status,
     Acknowledged: r.acknowledged ? 'YES' : 'NO',
+    // 2.3 — surface the moment the alarm bitmask last changed composition
+    // (set by updateActiveAlarmValue) and the linked StopReason snapshot id.
+    LastUpdated:  r.updated_ts ? fmtDateTime(Number(r.updated_ts)) : '',
+    StopReasonId: r.stop_reason_id == null ? '' : Number(r.stop_reason_id),
   })}).filter((row) => Number(row.Duration_sec || 0) >= minDurationSec)
     .map(({ Duration_sec, ...row }) => row);
 
@@ -1723,11 +1728,17 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
     {key:'Date',label:'Date'},{key:'Time',label:'Time'},{key:'Plant',label:'Plant'},
     {key:'Operator',label:'Operator'},
     {key:'Inverter',label:'Inverter'},{key:'Unit',label:'Unit/Node'},
-    {key:'AlarmCode',label:'Alarm Code (Hex)'},{key:'Severity',label:'Severity'},
+    {key:'AlarmCode',label:'Alarm Code (Hex)'},
+    {key:'Severity',label:'Severity'},
     {key:'Description',label:'Description'},{key:'ClearedDate',label:'Cleared Date'},
     {key:'ClearedTime',label:'Cleared Time'},{key:'Duration',label:'Duration (HH:MM:SS)'},
     {key:'Duration_min',label:'Duration (min)'},
     {key:'Status',label:'Status'},{key:'Acknowledged',label:'Acknowledged'},
+    // 2.3 — new columns APPENDED at the end so existing positional/index
+    // consumers of the alarm export are unaffected (purely additive).
+    {key:'AlarmCodeText',label:'Alarm Code (Text)'},
+    {key:'LastUpdated',label:'Last Updated'},
+    {key:'StopReasonId',label:'Stop Reason ID'},
   ];
   const headerKeys = headers.map((h) => h.key);
   const sortedRows = sortRowsDateInverterTime(rows, {
@@ -1763,7 +1774,7 @@ function writeEnergySummaryExport({ startTs, endTs, inverter, format, rows }) {
     { key: 'Total_MWh', label: 'Total MWh' },
     { key: 'Etotal_MWh', label: 'Etotal MWh (HW)' },
     { key: 'ParcE_MWh',  label: 'ParcE MWh (HW)' },
-    { key: 'HW_PAC_Delta_pct', label: 'Δ HW vs PAC (%)' },
+    { key: 'HW_PAC_Delta_pct', label: 'HW vs PAC Difference (percent)' },
     { key: 'Status',     label: 'Status' },
     { key: 'Status_Note', label: 'Notes' },
   ];
@@ -3099,11 +3110,11 @@ const _DAILY_DATA_HEADERS = [
   { key: 'Iac1_A',       label: 'Iac1 (A)' },
   { key: 'Iac2_A',       label: 'Iac2 (A)' },
   { key: 'Iac3_A',       label: 'Iac3 (A)' },
-  { key: 'Temp_C',       label: 'Temp (°C)' },
+  { key: 'Temp_C',       label: 'Temp (deg C)' },
   { key: 'Pac_W',        label: 'Pac (W)' },
   { key: 'PartialEnergy_kWh', label: 'Partial Energy (kWh)' },
   { key: 'ParcE_kWh',    label: 'parcE (kWh)' },
-  { key: 'CosPhi',       label: 'CosΦ' },
+  { key: 'CosPhi',       label: 'Cos Phi' },
   { key: 'Freq_Hz',      label: 'Freq (Hz)' },
   { key: 'InvAlarms',    label: 'Inv Alarms' },
   { key: 'TrackAlarms',  label: 'Track Alarms' },
@@ -3231,17 +3242,17 @@ async function _writeDailyDataSheet(wb, sheetName, ctx) {
     InvAlarms: '', TrackAlarms: '',
   };
   sheetRows.push({
-    Time: 'DAY TOTAL — Pac-integrated (kWh)',
+    Time: 'DAY TOTAL - Pac-integrated (kWh)',
     ..._emptyCols,
     PartialEnergy_kWh: Number(pacIntegratedKwh.toFixed(3)),
   });
   sheetRows.push({
-    Time: 'DAY TOTAL — Etotal Δ (kWh)',
+    Time: 'DAY TOTAL - Etotal Day Delta (kWh)',
     ..._emptyCols,
     PartialEnergy_kWh: Number.isFinite(etotalKwh) ? Number(etotalKwh.toFixed(3)) : '',
   });
   sheetRows.push({
-    Time: 'DAY TOTAL — parcE Δ (kWh)',
+    Time: 'DAY TOTAL - parcE Day Delta (kWh)',
     ..._emptyCols,
     PartialEnergy_kWh: Number.isFinite(parceKwh) ? Number(parceKwh.toFixed(3)) : '',
   });

@@ -131,6 +131,13 @@ function decideBlockAction(ctx) {
   }
 
   if (!worst) {
+    // Slice κ.9 — a pending (armed-during-solar) row whose pattern is no
+    // longer critical must be disarmed: the condition is NOT still met, so
+    // the deferred STOP must never execute (2.2 "verify condition is always
+    // met before triggering").
+    if (!active && ctx?.pendingBlock) {
+      return { kind: "disarm_pending", reason: "pattern_resolved_before_stop" };
+    }
     return { kind: "noop", reason: active ? "block_active_no_new_critical" : "no_critical_pattern" };
   }
 
@@ -141,9 +148,51 @@ function decideBlockAction(ctx) {
   // behaviour. If it's present but not sustained, hold the block open.
   const unbalanceForWorst = unbalanceBySlave.get(worst.slave) || null;
   const unbalanceProvided = unbalanceBySlave.size > 0;
-  const unbalancePass = !unbalanceProvided || (unbalanceForWorst && unbalanceForWorst.sustained === true);
+  // 2.2 — phase-current imbalance is now a MANDATORY gate. The pre-Slice-κ.8
+  // "no unbalance data ⇒ pass" legacy fallback is removed: an auto-block must
+  // never fire without a confirmed sustained Iac1/Iac2/Iac3 imbalance on the
+  // triggering slave.
+  const unbalancePass =
+    unbalanceProvided && !!unbalanceForWorst && unbalanceForWorst.sustained === true;
+  const inSolar = ctx?.inSolarWindow === true;
+  const pending = ctx?.pendingBlock || null;
+  const latchedUnbalance = unbalanceForWorst
+    ? { sustained: !!unbalanceForWorst.sustained, max_pct: Number(unbalanceForWorst.max_pct || 0) }
+    : { sustained: false, max_pct: 0 };
 
   if (!active) {
+    // 2.2 "Detect during, STOP after": confirm pattern + imbalance while the
+    // inverter is producing (currents are only real in the solar window), but
+    // defer the actual STOP/block until the window closes so a borderline
+    // signal never interrupts active generation.
+    if (unbalancePass && inSolar) {
+      return {
+        kind: "arm_pending",
+        reason: "confirmed_in_solar_defer_stop_until_window_close",
+        pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+        triggering_slave: worst.slave,
+        count_in_window: worst.count_in_window,
+        latest_episode_ts: worst.last_seen_ts,
+        unbalance: latchedUnbalance,
+      };
+    }
+    // Solar window has closed and we previously armed this inverter during
+    // solar (pattern + imbalance were confirmed and latched). Re-verify the
+    // pattern is STILL critical (worst is truthy here), then execute the
+    // deferred STOP using the latched evidence — a live out-of-solar
+    // unbalance read is structurally unavailable (rejected by the solar gate).
+    if (pending && !inSolar) {
+      return {
+        kind: "open_block",
+        reason: "deferred_after_solar",
+        pattern: { key: worst.key, hex: worst.hex, label: worst.label },
+        triggering_slave: worst.slave,
+        count_in_window: worst.count_in_window,
+        latest_episode_ts: worst.last_seen_ts,
+        unbalance: pending.unbalance_latched || latchedUnbalance,
+        from_pending: true,
+      };
+    }
     if (!unbalancePass) {
       return {
         kind: "gated_pending_unbalance",
@@ -152,11 +201,12 @@ function decideBlockAction(ctx) {
         triggering_slave: worst.slave,
         count_in_window: worst.count_in_window,
         latest_episode_ts: worst.last_seen_ts,
-        unbalance: unbalanceForWorst
-          ? { sustained: !!unbalanceForWorst.sustained, max_pct: Number(unbalanceForWorst.max_pct || 0) }
-          : { sustained: false, max_pct: 0 },
+        unbalance: latchedUnbalance,
       };
     }
+    // unbalancePass && !inSolar && no pending: a fresh confirmation outside
+    // the solar window (rare — currents are usually zero at night). Act now;
+    // there is no production to protect by deferring.
     return {
       kind: "open_block",
       reason: "recurring_critical_pattern_with_unbalance",
@@ -164,9 +214,7 @@ function decideBlockAction(ctx) {
       triggering_slave: worst.slave,
       count_in_window: worst.count_in_window,
       latest_episode_ts: worst.last_seen_ts,
-      unbalance: unbalanceForWorst
-        ? { sustained: !!unbalanceForWorst.sustained, max_pct: Number(unbalanceForWorst.max_pct || 0) }
-        : null,
+      unbalance: latchedUnbalance,
     };
   }
 
@@ -275,9 +323,60 @@ async function enforceOne(inverter, deps) {
   });
 
   const activeBlock = deps.getActiveBlock(inverter) || null;
-  const action = decideBlockAction({ inverter, slaves: slavePatterns, activeBlock, now });
+  // Slice κ.9 — solar-window deferral context. inSolarWindow + the latched
+  // pending row let decideBlockAction arm/defer/convert/disarm.
+  const pendingBlock = (typeof deps.getPendingBlock === "function")
+    ? (deps.getPendingBlock(inverter) || null)
+    : null;
+  const action = decideBlockAction({
+    inverter,
+    slaves: slavePatterns,
+    activeBlock,
+    pendingBlock,
+    inSolarWindow: deps.inSolarWindow === true,
+    now,
+  });
 
   if (action.kind === "noop" || action.kind === "skip_reenforce") {
+    return { inverter, action };
+  }
+
+  // Slice κ.9 — arm a deferred block: pattern + sustained imbalance confirmed
+  // while the inverter is producing, STOP held until the solar window closes.
+  // NO STOP and NO manual-write lock here (pending rows are excluded from the
+  // active-block queries that gate /api/write).
+  if (action.kind === "arm_pending") {
+    deps.armPending?.({
+      inverter,
+      pattern_key:   action.pattern.key,
+      pattern_hex:   action.pattern.hex,
+      pattern_label: action.pattern.label,
+      triggering_slave:  action.triggering_slave,
+      count_in_window:   action.count_in_window,
+      latest_episode_ts: action.latest_episode_ts,
+      armed_at_ms:       now,
+      unbalance_latched: action.unbalance,
+    });
+    deps.logAction?.({
+      kind: "critical_block_armed_pending",
+      inverter,
+      pattern: action.pattern,
+      triggering_slave: action.triggering_slave,
+      count_in_window:  action.count_in_window,
+      unbalance: action.unbalance,
+    });
+    return { inverter, action };
+  }
+
+  // Slice κ.9 — pattern resolved before the solar window closed: the deferred
+  // STOP must NOT execute. Drop the armed row (kept acked for forensics).
+  if (action.kind === "disarm_pending") {
+    deps.disarmPending?.(inverter, action.reason);
+    deps.logAction?.({
+      kind: "critical_block_disarmed",
+      inverter,
+      reason: action.reason,
+    });
     return { inverter, action };
   }
 
@@ -324,25 +423,59 @@ async function enforceOne(inverter, deps) {
   // open_block: insert row first so the UI sees the block even if STOP fails.
   let blockId = activeBlock?.id || null;
   if (action.kind === "open_block") {
-    blockId = deps.openBlock({
-      inverter,
-      created_at_ms: now,
-      pattern_key:   action.pattern.key,
-      pattern_hex:   action.pattern.hex,
-      pattern_label: action.pattern.label,
-      triggering_slave:  action.triggering_slave,
-      count_in_window:   action.count_in_window,
-      latest_episode_ts: action.latest_episode_ts,
-      stop_issued_at_ms: null,
-      stop_result:       null,
-      last_reenforced_ms: null,
-    });
-    deps.logAction?.({
-      kind: "critical_block_opened",
-      inverter, blockId, pattern: action.pattern,
-      triggering_slave: action.triggering_slave,
-      count_in_window:  action.count_in_window,
-    });
+    if (action.from_pending && pendingBlock && typeof deps.activatePending === "function") {
+      // Slice κ.9 — convert the armed (pending) row in place so its id
+      // stays stable for the operator (the UI showed it as "armed").
+      const converted = deps.activatePending(pendingBlock.id, now);
+      if (converted === 0) {
+        // Defensive: the pending row was acked/removed between the read and
+        // the convert (operator dismissed it, or a concurrent tick). Open a
+        // fresh active row so the SAFETY intent (STOP + write-lock) still
+        // engages rather than silently no-op'ing.
+        blockId = deps.openBlock({
+          inverter,
+          created_at_ms: now,
+          pattern_key:   action.pattern.key,
+          pattern_hex:   action.pattern.hex,
+          pattern_label: action.pattern.label,
+          triggering_slave:  action.triggering_slave,
+          count_in_window:   action.count_in_window,
+          latest_episode_ts: action.latest_episode_ts,
+          stop_issued_at_ms: null,
+          stop_result:       null,
+          last_reenforced_ms: null,
+        });
+      } else {
+        blockId = pendingBlock.id;
+      }
+      deps.logAction?.({
+        kind: "critical_block_opened",
+        inverter, blockId, pattern: action.pattern,
+        triggering_slave: action.triggering_slave,
+        count_in_window:  action.count_in_window,
+        reason: converted === 0 ? "deferred_after_solar_reopened" : "deferred_after_solar",
+      });
+    } else {
+      blockId = deps.openBlock({
+        inverter,
+        created_at_ms: now,
+        pattern_key:   action.pattern.key,
+        pattern_hex:   action.pattern.hex,
+        pattern_label: action.pattern.label,
+        triggering_slave:  action.triggering_slave,
+        count_in_window:   action.count_in_window,
+        latest_episode_ts: action.latest_episode_ts,
+        stop_issued_at_ms: null,
+        stop_result:       null,
+        last_reenforced_ms: null,
+      });
+      deps.logAction?.({
+        kind: "critical_block_opened",
+        inverter, blockId, pattern: action.pattern,
+        triggering_slave: action.triggering_slave,
+        count_in_window:  action.count_in_window,
+      });
+    }
   }
 
   // Issue STOP to every configured slave of this inverter. Best-effort:

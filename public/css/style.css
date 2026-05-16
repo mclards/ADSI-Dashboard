@@ -20409,6 +20409,25 @@ body.mode-transition-active {
   letter-spacing: 0.4px;
   color: var(--accent);
   margin: 6px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* v2.11.x Section 4.4 — Write All button in group headers */
+#page-field-calibration #fieldCalibrationSection .fcal-write-all-btn {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+/* v2.11.x Section 4.3 — transient "value applied, input cleared" hint.
+   Subtle dimmed/green state on the New Value input right after a
+   successful write; the next debounced full re-read repaints fresh. */
+#page-field-calibration #fieldCalibrationSection .fcal-write-input-cleared {
+  opacity: 0.55;
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
 }
 
 /* Every calibration group is rendered as its own <table>, so we lock column
@@ -20577,6 +20596,47 @@ body.mode-transition-active {
 #page-field-calibration #fcalFleetResult .fcal-readout-header {
   margin: 4px 0 6px;          /* was 6 / 10 */
   font-size: 12px;
+}
+
+/* v2.11.x Section 4.5 — Compact fleet header bar inside the panel
+ * (moved from pinned header for tighter layout). Flex row with title left,
+ * controls right. */
+#page-field-calibration #fcalPanelFleet .fcal-fleet-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  margin-bottom: 8px;
+}
+
+#page-field-calibration #fcalPanelFleet .fcal-fleet-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+#page-field-calibration #fcalPanelFleet .fcal-fleet-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* Status line is its own full-width row beneath the header bar. Reserved
+ * min-height keeps the table from jumping when the message appears, and
+ * because it is no longer a flex sibling of the button, growing text
+ * ("Scanning fleet...") can never push the Scan Fleet button. */
+#page-field-calibration #fcalPanelFleet .fcal-fleet-msg-row {
+  min-height: 18px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 /* Fleet anomaly view — wider table, scrolls vertically AND horizontally
@@ -20755,6 +20815,22 @@ body.mode-transition-active {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   margin-left: 4px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-fleet-sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-fleet-sort-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-fleet-legend {
   display: inline-flex;
