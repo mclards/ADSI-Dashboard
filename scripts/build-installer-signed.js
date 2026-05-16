@@ -98,6 +98,85 @@ if (!signed) {
   delete env.CSC_KEY_PASSWORD;
 }
 
+// ─── GATE 1.5: free a locked stale build dir ────────────────────────────────
+//
+// Symptom this prevents: electron-builder dies mid-pack with
+//   "The process cannot access the file 'app.asar' because it is being
+//    used by another process"
+// on release/win-unpacked/resources/app.asar.
+//
+// Root causes seen in practice (all leftovers from a PRIOR build/smoke
+// cycle on the same box):
+//   • a hung `app-builder.exe` / `electron.exe` from an interrupted build,
+//   • a packaged "ADSI Inverter Dashboard.exe" launched by an e2e/Electron
+//     smoke that never exited — it keeps app.asar mapped,
+//   • a transient Defender/Windows-Search on-access scan handle that a
+//     tight delete-retry loop kept re-triggering.
+//
+// We proactively (a) kill ONLY repo-owned stale build/app processes whose
+// image lives under the output dir (never system services), then (b) remove
+// win-unpacked with bounded retry/backoff (rmSync handles the short-lived
+// AV/Search handle), then (c) fail fast with a precise, actionable message
+// if it is still wedged — so the failure is legible instead of a confusing
+// mid-pack electron-builder crash.
+function freeStaleBuildDir() {
+  let outDir = 'release';
+  try {
+    const pkg = require(path.join(repoRoot, 'package.json'));
+    outDir = (pkg.build && pkg.build.directories && pkg.build.directories.output) || 'release';
+  } catch (_) {}
+  const outAbs = path.join(repoRoot, outDir);
+  const winUnpacked = path.join(outAbs, 'win-unpacked');
+  if (!fs.existsSync(winUnpacked)) return;
+
+  if (process.platform === 'win32') {
+    // Kill stale processes whose executable path is under the output dir.
+    // Scoped to outAbs so we never touch the running dashboard, MsMpEng,
+    // SearchIndexer, or anything outside this repo's build tree.
+    const ps =
+      `Get-CimInstance Win32_Process | ` +
+      `Where-Object { $_.ExecutablePath -and $_.ExecutablePath -like '${outAbs.replace(/'/g, "''")}\\*' } | ` +
+      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }`;
+    try {
+      const r = spawnSync('powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', ps],
+        { encoding: 'utf8', timeout: 30000 });
+      const killed = String(r.stdout || '').trim();
+      if (killed) {
+        console.log('[build-installer-signed] Terminated stale build/app process(es) holding',
+          outDir + '\\win-unpacked:', killed.split(/\s+/).join(', '));
+      }
+    } catch (_) { /* best-effort — the rmSync retry below is the real guard */ }
+  }
+
+  // rmSync has built-in EBUSY/EPERM/ENOTEMPTY backoff (maxRetries/retryDelay),
+  // which is exactly the right tool for a sub-second AV/indexer handle.
+  try {
+    fs.rmSync(winUnpacked, { recursive: true, force: true, maxRetries: 8, retryDelay: 750 });
+  } catch (err) {
+    if (fs.existsSync(winUnpacked)) {
+      console.error('');
+      console.error('[build-installer-signed] FATAL: cannot clear a stale build dir.');
+      console.error('  Locked path : ' + path.join(winUnpacked, 'resources', 'app.asar'));
+      console.error('  Reason      : ' + (err && err.message ? err.message : 'in use by another process'));
+      console.error('  No repo-owned process holds it, so a system service');
+      console.error('  (Windows Defender real-time scan or Windows Search) has the handle.');
+      console.error('  Clear it with ANY of:');
+      console.error('    • reboot, or');
+      console.error('    • elevated PowerShell:');
+      console.error('        Stop-Service WSearch -Force; Remove-Item "' + winUnpacked + '" -Recurse -Force');
+      console.error('    • resmon → CPU → Associated Handles → search "app.asar" → End process');
+      console.error('  Then re-run: npm run build:installer');
+      console.error('');
+      process.exit(1);
+    }
+  }
+  if (!fs.existsSync(winUnpacked)) {
+    console.log('[build-installer-signed] Cleared stale ' + outDir + '\\win-unpacked before build.');
+  }
+}
+freeStaleBuildDir();
+
 // ─── electron-builder ───────────────────────────────────────────────────────
 const args = ['electron-builder', '--win', 'nsis', '--x64'];
 console.log('[build-installer-signed] Running: npx', args.join(' '));
