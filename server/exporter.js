@@ -2057,6 +2057,104 @@ async function export5min({ startTs, endTs, inverter, format, resolution }) {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Audit Log CSV Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ─── Measurement Board (Power Module) Migration History ──────────────────
+// Audit-class export: every physically relocated Measurement Board — where
+// it came from, where it was found, the serial written, when, by whom, and
+// the result. Same styled XLSX/CSV pipeline, directory tree, and date-aware
+// filename as the other audit exports.
+async function exportMeasurementBoardMigration({ inverter, format, limit } = {}) {
+  const dir = resolveExportDir(inverter, EXPORT_FOLDERS.audits);
+
+  const serialNumber = require('./serialNumber');
+  let inverterIp = null;
+  const invNum = Number(inverter);
+  if (Number.isFinite(invNum) && invNum > 0) {
+    const ipMap = readInverterIpMap();
+    inverterIp = ipMap?.[String(invNum)] || ipMap?.[invNum] || null;
+  }
+  await yieldToEventLoop();
+  const raw = serialNumber.getModuleMigrationHistory(db, {
+    limit: Math.min(20000, Math.max(1, Number(limit) || 20000)),
+    inverterIp,
+  });
+  await yieldToEventLoop();
+
+  const plant = getSetting('plantName', 'ADSI Plant');
+  const invLabel = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? `INV-${String(n).padStart(2, '0')}` : '—';
+  };
+  const nodeLabel = (v) => {
+    const s = String(v == null ? '' : v).trim();
+    if (!s) return '—';
+    return s.toUpperCase() === 'T' ? 'T (nameplate)' : `Node-${s}`;
+  };
+  const outcomeLabel = (o) => {
+    const s = String(o || '');
+    if (s === 'bulk_success') return 'Re-serialized';
+    if (s === 'bulk_needs_ack') return 'Detected (pending ack)';
+    if (s.startsWith('bulk_')) return s.slice(5).replace(/_/g, ' ');
+    return s || '—';
+  };
+
+  const mapped = raw.map((r) => ({
+    Date: fmtDate(r.acted_at_ms),
+    Time: fmtTime(r.acted_at_ms),
+    Plant: plant,
+    Operator: r.acted_by || 'OPERATOR',
+    BoardSerialOld: r.old_serial || '',
+    OriginInverter: invLabel(r.origin_inverter),
+    OriginNode: nodeLabel(r.origin_node),
+    FoundAtInverter: invLabel(r.inverter_id),
+    FoundAtNode: nodeLabel(r.slave),
+    NewSerial: r.new_serial || '',
+    Outcome: outcomeLabel(r.outcome),
+    Verified: r.verify_passed ? 'Yes' : 'No',
+    OriginNote: r.origin_note || '',
+    Error: r.error_detail || '',
+  }));
+
+  const headers = [
+    { key: 'Date', label: 'Date' }, { key: 'Time', label: 'Time' },
+    { key: 'Plant', label: 'Plant' }, { key: 'Operator', label: 'Operator' },
+    { key: 'BoardSerialOld', label: 'Board Serial (Old)' },
+    { key: 'OriginInverter', label: 'Origin Inverter' },
+    { key: 'OriginNode', label: 'Origin Node' },
+    { key: 'FoundAtInverter', label: 'Found At Inverter' },
+    { key: 'FoundAtNode', label: 'Found At Node' },
+    { key: 'NewSerial', label: 'New Serial' },
+    { key: 'Outcome', label: 'Outcome' },
+    { key: 'Verified', label: 'Verified' },
+    { key: 'OriginNote', label: 'Origin Note' },
+    { key: 'Error', label: 'Error' },
+  ];
+  const headerKeys = headers.map((h) => h.key);
+  const sortedRows = sortRowsDateInverterTime(mapped, {
+    dateKey: 'Date',
+    inverterKey: 'FoundAtInverter',
+    timeKey: 'Time',
+    tieBreakerKeys: ['FoundAtNode', 'BoardSerialOld'],
+  });
+  const finalRows = insertBlankRowsByGroup(sortedRows, {
+    groupKeys: ['Date'],
+    headerKeys,
+  });
+
+  // Date-aware filename from the data span (min/max action instant), so the
+  // naming matches the other audit exports even though this isn't a
+  // date-range-filtered report.
+  const ts = raw
+    .map((r) => Number(r.acted_at_ms))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const s = ts.length ? Math.min(...ts) : Date.now();
+  const e = ts.length ? Math.max(...ts) : s;
+  const fileBase = exportDateAwareFileBase(s, e, inverter, 'Measurement Board Migration');
+  return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx', {
+    title: 'ADSI Measurement Board Migration History',
+    dataSheetName: 'Migration History',
+  });
+}
+
 async function exportAudit({ startTs, endTs, inverter, format }) {
   const dir = resolveExportDir(inverter, EXPORT_FOLDERS.audits);
 
@@ -3469,6 +3567,7 @@ module.exports = {
   exportInverterData,
   export5min,
   exportAudit,
+  exportMeasurementBoardMigration,
   exportDailyReport,
   exportDailyData,
   exportDailyDataAllInverters,

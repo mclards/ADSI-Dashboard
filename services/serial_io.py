@@ -42,6 +42,15 @@ SERIAL_BYTE_LEN = {"motorola": 12, "tx": 32}
 VERIFY_DELAY_S = 1.0   # mirrors ISM's Sleep(1000)
 DEFAULT_TIMEOUT_S = 3.0
 
+# An identity write makes the comm board / DSP re-init its Modbus stack, so
+# the FC16 write response is frequently LOST even though the write landed,
+# and the unit needs a beat before it answers FC11 again.  The read-back is
+# therefore the single source of truth (exactly how ISM's frmSetSerial
+# treats it).  Settle longer + retry the verify read before concluding.
+WRITE_ACK_LOST_SETTLE_S = 2.5   # extra settle when the write wasn't ACKed
+VERIFY_READ_ATTEMPTS = 4        # read-back tries before giving up
+VERIFY_READ_BACKOFF_S = 1.0     # between verify-read attempts
+
 
 class SerialIoError(Exception):
     """Operational failure during a serial read / write / verify pipeline."""
@@ -189,14 +198,23 @@ def write_serial_with_lock(
 
     Returns:
       { status:        'success' | 'unlock_failed' | 'write_failed' |
-                       'verify_failed' | 'format_error',
+                       'verify_failed' | 'write_unconfirmed' |
+                       'format_error',
         new_serial:    str,
         readback:      str | None,    # what we got back from FC11 (may differ!)
         error:         str | None,
         unlock_done:   bool,
         write_done:    bool,
         verify_passed: bool,
+        write_ack_lost: bool,         # True ⇒ FC16 ack lost but read-back
+                                      #        confirmed the serial applied
       }
+
+    'success' is decided SOLELY by the read-back equalling new_serial — a
+    lost write ACK with a confirming read-back is success (write_ack_lost
+    flagged).  'write_unconfirmed' means neither the write ACK nor the
+    read-back could be obtained: the change may or may not have landed and
+    the operator must rescan (never reported as success).
 
     All three Modbus exchanges happen under one lock acquisition so the
     poller cannot interleave between unlock and write.  ISM does the same.
@@ -235,33 +253,79 @@ def write_serial_with_lock(
             return out
 
         # ── Stage 2: WRITE ────────────────────────────────────────────
+        # CRITICAL: do NOT bail on a write error here.  Writing the serial
+        # makes the inverter's Modbus stack re-init, so the FC16 *response*
+        # is routinely dropped even though the write physically landed
+        # (operator-confirmed 2026-05-19: a rescan showed the new serial
+        # after a "write_failed").  The read-back in Stage 3 is the single
+        # source of truth — mirrors ISM's frmSetSerial.  Only a genuine
+        # mismatch on read-back is a real failure.
+        write_err = None
         try:
             _do_write(client, slave, regs)
             out["write_done"] = True
         except SerialIoError as exc:
-            out["status"] = "write_failed"
-            out["error"] = str(exc)
-            return out
+            write_err = str(exc)
+            out["error"] = write_err  # kept for diagnostics; not terminal
 
-        # ── Stage 3: VERIFY ───────────────────────────────────────────
-        # Sleep inside the lock so a poller burst can't race in between
-        # the write and the readback.
-        time.sleep(max(0.0, float(verify_delay_s)))
-        try:
-            info = read_slave_id(client, int(slave), timeout_s=timeout_s)
-        except Exception as exc:
-            out["status"] = "verify_failed"
-            out["error"] = f"verify_read_exception: {exc}"
+        # ── Stage 3: VERIFY (authoritative) ───────────────────────────
+        # Settle longer when the write wasn't ACKed (the unit needs a beat
+        # to answer FC11 again), and retry the read-back a few times.  All
+        # inside the lock so a poller burst can't race the readback.
+        settle = (
+            max(float(verify_delay_s), WRITE_ACK_LOST_SETTLE_S)
+            if write_err else float(verify_delay_s)
+        )
+        time.sleep(max(0.0, settle))
+
+        info = None
+        last_verify_err = None
+        for _attempt in range(max(1, VERIFY_READ_ATTEMPTS)):
+            try:
+                info = read_slave_id(client, int(slave), timeout_s=timeout_s)
+                break
+            except Exception as exc:  # noqa: BLE001 — transient bus, retry
+                last_verify_err = exc
+                time.sleep(max(0.0, VERIFY_READ_BACKOFF_S))
+
+        if info is None:
+            # Could not confirm either way.  Explicitly NOT success — the
+            # write may or may not have landed; operator must rescan.
+            out["status"] = "write_unconfirmed"
+            out["error"] = (
+                f"write response lost AND read-back unavailable after "
+                f"{VERIFY_READ_ATTEMPTS} tries "
+                f"(write_err={write_err}; verify_err={last_verify_err}) "
+                f"— rescan to confirm"
+                if write_err else
+                f"verify_read_exception after {VERIFY_READ_ATTEMPTS} tries: "
+                f"{last_verify_err}"
+            )
             return out
 
         out["readback"] = info.serial
         if info.serial == new_serial:
+            # Read-back proves the write applied — success even if the
+            # FC16 ACK was lost in transit.
             out["status"] = "success"
             out["verify_passed"] = True
+            out["write_done"] = True
+            if write_err:
+                out["write_ack_lost"] = True
+                out["error"] = (
+                    f"write FC16 response was lost but read-back confirms "
+                    f"the serial was applied ({write_err})"
+                )
+            else:
+                out["error"] = None
         else:
-            out["status"] = "verify_failed"
+            # Serial did not change — a real failure.  Distinguish a write
+            # that errored from a clean write that simply didn't take.
+            out["status"] = "write_failed" if write_err else "verify_failed"
             out["error"] = (
-                f"readback mismatch: wrote '{new_serial}', got '{info.serial}'"
+                f"readback mismatch: wrote '{new_serial}', got "
+                f"'{info.serial}'"
+                + (f" (write error: {write_err})" if write_err else "")
             )
     return out
 

@@ -33,10 +33,17 @@
 const STATE_PHASE_GRID_CONNECTED = 2;
 const STATE_PHASE_ERROR          = 3;
 
-// TrinPM20 PDF page on DC SETTING. The IPV scale factor accuracy collapses
-// at low current — the calibration target band is 70 % Pn ± 10 pp.
+// TrinPM20 DC SETTING. Follow the video SCRIPT (operator directive
+// 2026-05-17): the DC input-current (Ipv) scale is calibrated at consign
+// 60 % Pn. The "≥ 70 %" mentioned in the video is the ambient-irradiation
+// precondition for the NEIGHBOURING inverters, not the consign for the unit
+// under calibration. So Ipv is a TARGET BAND around 60 % (like the reactive
+// points), NOT a "≥ X %" minimum — enable the write only when live Pac/Pn
+// is in the 60 % band, else block. Audit:
+// audits/2026-05-17/display-firmware-reactive-blink-logic.md §10.3.
 const FESC_IPV_OFFSET            = 87;
-const FESC_IPV_MIN_PCT_OF_PN     = 70.0;
+const FESC_IPV_TARGET_PCT        = 60.0;
+const FESC_IPV_TOLERANCE_PCT_PP  = 5.0;   // 55–65 % — dwell-settled ripple
 
 // Reactive-curve calibration points per TrinPM20:
 //   X1Y1 at 20 % Pn (offsets 91, 92)
@@ -49,25 +56,55 @@ const REACTIVE_X2Y2_TARGET_PCT = 70.0;
 // target. Mirrors the dwell-settled accuracy band on the field.
 const REACTIVE_TOLERANCE_PCT_PP = 5.0;
 
+// Per. Vacio (offset 90) — no-load / self-consumption compensation.
+// CORRECTION 2026-05-17 (operator directive): this IS a writable register
+// (ISM CfgTrifAU `comp_per_vacio`). The TrinPM20 procedure calibrates it
+// with the inverter NOT generating — operator "set consign to 0 %", reads
+// the wattmeter, trims Per. Vacio until reported Pac matches it. So it is a
+// 0 %-consign BAND gate (not generating): too-high Pac/Pn blocks. Band is
+// symmetric to tolerate the slightly-negative no-load self-draw.
+const PER_VACIO_OFFSET           = 90;
+const PER_VACIO_TARGET_PCT       = 0.0;
+const PER_VACIO_TOLERANCE_PCT_PP = 5.0;   // −5…+5 % → "not generating"
+
+// Returns { ok, reason, severity } where severity ∈ "block" | "warn".
+//
+// Intended-purpose correction (operator feedback 2026-05-16): voltage and
+// current SCALE-FACTOR calibration (Vac1-3 / Iac1-3) is legitimately and
+// routinely performed while the inverter is OFF-GRID (initial / init-mag
+// phase, zero Pac) — you trim the ADC scale against an external meter, not
+// against the grid. The previous code hard-BLOCKED every write whenever
+// the inverter wasn't grid-connected, which forced the operator to arm the
+// "bypass TrinPM20 safety gate" checkbox on literally every write. That
+// defeats the gate's purpose.
+//
+// So: genuinely unsafe states (state unreadable / ERROR / BLOCKED / GRID
+// FAULT) remain a hard BLOCK. "Not grid-connected" but otherwise healthy
+// is downgraded to a non-blocking WARN — the write proceeds, the operator
+// is informed, no Force toggle required. The offsets that DO need a real
+// power band (Fesc_ipv ≥ 70 %, reactive X1Y1/X2Y2) keep their own hard
+// block below; those are the actual TrinPM20 constraints.
 function _stateOk(live) {
-  if (!live) return { ok: false, reason: "no live snapshot" };
-  // If state register couldn't be read at all (offline / Modbus miss),
-  // refuse — calibration writes against an unobserved state risk writing
-  // into a faulted inverter.
+  if (!live) return { ok: false, severity: "block", reason: "no live snapshot" };
   if (live.state_raw == null) {
-    return { ok: false, reason: "Inverter state register unreadable" };
+    return { ok: false, severity: "block", reason: "Inverter state register unreadable" };
   }
   if (Number(live.state_phase) === STATE_PHASE_ERROR) {
-    return { ok: false, reason: "Inverter is in ERROR phase" };
+    return { ok: false, severity: "block", reason: "Inverter is in ERROR phase" };
   }
   if (Number(live.state_blocked) === 1) {
-    return { ok: false, reason: "Inverter is BLOCKED" };
+    return { ok: false, severity: "block", reason: "Inverter is BLOCKED" };
   }
   if (Number(live.state_grid_fault) === 1) {
-    return { ok: false, reason: "Inverter reports GRID FAULT" };
+    return { ok: false, severity: "block", reason: "Inverter reports GRID FAULT" };
   }
   if (Number(live.state_phase) !== STATE_PHASE_GRID_CONNECTED) {
-    return { ok: false, reason: `Inverter not grid-connected (phase=${live.state_phase})` };
+    // Off-grid is normal for scale calibration — warn, do not block.
+    return {
+      ok: false,
+      severity: "warn",
+      reason: `Inverter not grid-connected (phase=${live.state_phase}) — scale calibration is valid off-grid; reading may be quieter than at load`,
+    };
   }
   // bit 8 = stop. Calibration writes during stop are allowed for some
   // offsets (Per. Vacio in standby) — we don't refuse on `stop` here;
@@ -90,28 +127,33 @@ function evaluateWriteSafety(offset, live) {
   const s = _stateOk(live);
   if (!s.ok) {
     out.ok = false;
-    out.severity = "block";
+    // Honor the state verdict's own severity: hard-unsafe states block,
+    // "not grid-connected" only warns (write still allowed, no Force).
+    out.severity = s.severity === "warn" ? "warn" : "block";
     out.reason = s.reason;
     return out;
   }
 
   const pct = live && live.pct_of_pn != null ? Number(live.pct_of_pn) : null;
 
-  // DC current scale (Fesc_ipv) — requires high-load read-back to be
-  // numerically meaningful per TrinPM20.
+  // DC current scale (Fesc_ipv) — calibrated at the consign 60 % point per
+  // the TrinPM20 video script. Band gate (like reactive), NOT a minimum:
+  // too LOW and too HIGH are both wrong consign targets.
   if (off === FESC_IPV_OFFSET) {
+    const ipvLo = FESC_IPV_TARGET_PCT - FESC_IPV_TOLERANCE_PCT_PP;
+    const ipvHi = FESC_IPV_TARGET_PCT + FESC_IPV_TOLERANCE_PCT_PP;
     if (pct == null) {
       out.ok = false;
       out.severity = "warn";
-      out.reason = "Cannot verify Pac/Pn (nominal power read failed) — required ≥ 70 %";
-      out.required.pct_of_pn = [FESC_IPV_MIN_PCT_OF_PN, 100];
+      out.reason = `Cannot verify Pac/Pn (nominal power read failed) — Ipv calibrates at consign ${FESC_IPV_TARGET_PCT} % (${ipvLo}–${ipvHi} %)`;
+      out.required.pct_of_pn = [ipvLo, ipvHi];
       return out;
     }
-    if (pct < FESC_IPV_MIN_PCT_OF_PN) {
+    if (pct < ipvLo || pct > ipvHi) {
       out.ok = false;
       out.severity = "block";
-      out.reason = `Pac/Pn = ${pct.toFixed(1)} % — TrinPM20 requires ≥ ${FESC_IPV_MIN_PCT_OF_PN} % for DC current scale write`;
-      out.required.pct_of_pn = [FESC_IPV_MIN_PCT_OF_PN, 100];
+      out.reason = `Pac/Pn = ${pct.toFixed(1)} % — TrinPM20 calibrates DC current (Ipv) at consign ${FESC_IPV_TARGET_PCT} % (${ipvLo}–${ipvHi} %); set consign to 60 % first`;
+      out.required.pct_of_pn = [ipvLo, ipvHi];
       return out;
     }
   }
@@ -133,6 +175,31 @@ function evaluateWriteSafety(offset, live) {
       out.severity = "block";
       out.reason = `Pac/Pn = ${pct.toFixed(1)} % — TrinPM20 reactive ${REACTIVE_X1Y1_OFFSETS.has(off) ? "X1Y1" : "X2Y2"} calibration requires ${target} ± ${REACTIVE_TOLERANCE_PCT_PP} % (consign mode)`;
       out.required.pct_of_pn = [lo, hi];
+      return out;
+    }
+  }
+
+  // Per. Vacio (offset 90) — no-load / self-consumption comp. TrinPM20
+  // calibrates this with the inverter NOT generating (operator sets consign
+  // to 0 %); you then trim Per. Vacio until reported Pac matches the
+  // wattmeter. Band gate around 0 % (too-high Pac/Pn = still generating →
+  // block). Bypassable like the other consign gates (NOT a hard refusal —
+  // that earlier non-bypassable lock on 90 was the bug being corrected).
+  if (off === PER_VACIO_OFFSET) {
+    const pvLo = PER_VACIO_TARGET_PCT - PER_VACIO_TOLERANCE_PCT_PP;
+    const pvHi = PER_VACIO_TARGET_PCT + PER_VACIO_TOLERANCE_PCT_PP;
+    if (pct == null) {
+      out.ok = false;
+      out.severity = "warn";
+      out.reason = `Cannot verify Pac/Pn (nominal power read failed) — Per. Vacio calibrates with the inverter not generating (consign 0 %, ${pvLo}–${pvHi} %)`;
+      out.required.pct_of_pn = [pvLo, pvHi];
+      return out;
+    }
+    if (pct < pvLo || pct > pvHi) {
+      out.ok = false;
+      out.severity = "block";
+      out.reason = `Pac/Pn = ${pct.toFixed(1)} % — TrinPM20 calibrates Per. Vacio (no-load comp) with the inverter NOT generating; set consign to 0 % first (${pvLo}–${pvHi} %)`;
+      out.required.pct_of_pn = [pvLo, pvHi];
       return out;
     }
   }
@@ -162,12 +229,16 @@ module.exports = {
   buildWriteSafetyMap,
   // Exposed for tests
   FESC_IPV_OFFSET,
-  FESC_IPV_MIN_PCT_OF_PN,
+  FESC_IPV_TARGET_PCT,
+  FESC_IPV_TOLERANCE_PCT_PP,
   REACTIVE_X1Y1_OFFSETS,
   REACTIVE_X2Y2_OFFSETS,
   REACTIVE_X1Y1_TARGET_PCT,
   REACTIVE_X2Y2_TARGET_PCT,
   REACTIVE_TOLERANCE_PCT_PP,
+  PER_VACIO_OFFSET,
+  PER_VACIO_TARGET_PCT,
+  PER_VACIO_TOLERANCE_PCT_PP,
   STATE_PHASE_GRID_CONNECTED,
   STATE_PHASE_ERROR,
 };

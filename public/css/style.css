@@ -9414,74 +9414,18 @@ select.cam-field-input { appearance: auto; }
   background: var(--accent);
 }
 
-.notif-bell {
-  position: fixed;
-  left: 16px;
-  bottom: 16px;
-  z-index: 8000;
-  padding: 5px 12px;
-  border-radius: 20px;
-  border: 1px solid var(--btn-red-border);
-  background: linear-gradient(
-    180deg,
-    var(--btn-red-1) 0%,
-    var(--btn-red-2) 100%
-  );
-  color: var(--btn-red-color);
-  font-size: 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  box-shadow: var(--btn-red-shadow);
-  animation: bell-pulse 2.5s ease-in-out infinite;
-  transition:
-    transform 0.16s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease,
-    filter 0.18s ease;
-}
-
-@keyframes bell-pulse {
-  0%,
-  100% {
-    box-shadow: 0 10px 24px rgba(154, 42, 66, 0.2);
-  }
-  50% {
-    box-shadow: 0 14px 30px rgba(154, 42, 66, 0.42);
-  }
-}
-
-.notif-bell:hover,
-.notif-bell:focus-visible {
-  transform: translateY(-1px);
-  border-color: var(--btn-red-border-hover);
-  box-shadow: var(--btn-red-shadow-hover);
-  filter: brightness(1.04);
-}
-
-.notif-bell #notifCount {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.notif-bell > .mdi {
-  font-size: 16px;
-  line-height: 1;
-}
-
-.notif-bell.hidden {
-  display: none !important;
-}
+/* The bottom-left floating notification bell was removed in the notification
+   revamp — the sidebar ALARMS badge is the only left-side indicator and the
+   bottom-right hub pill (.toast-summary-pill) is the single live-alert
+   trigger. Notification surfaces are consolidated on the right. */
 
 .notif-panel {
   position: fixed;
-  left: 16px;
-  bottom: 52px;
-  z-index: 8500;
-  width: 340px;
-  max-height: 380px;
+  right: 16px;
+  bottom: 60px; /* clears the hub pill which anchors at bottom: 16px */
+  z-index: 8600;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(380px, calc(100vh - var(--app-footer-h) - 110px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -10313,6 +10257,13 @@ body.mode-transition-active {
 .notif-list {
   flex: 1;
   overflow-y: auto;
+}
+
+.notif-empty {
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text3);
 }
 
 .notif-item {
@@ -17408,6 +17359,19 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 18%, var(--surface));
   color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
 }
+/* Bulk-Fix status badge — same look as the fleet pill but usable inside
+   table cells (the .pill rules are scoped to .srn-fleet-block-head). */
+.srn-badge {
+  display: inline-flex; align-items: center;
+  padding: 2px 9px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.srn-badge.ok    { background: color-mix(in srgb, var(--green)  18%, var(--surface)); color: var(--green);  border: 1px solid color-mix(in srgb, var(--green)  35%, var(--border)); }
+.srn-badge.warn  { background: color-mix(in srgb, var(--orange) 18%, var(--surface)); color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border)); }
+.srn-badge.bad   { background: color-mix(in srgb, var(--red)    18%, var(--surface)); color: var(--red);    border: 1px solid color-mix(in srgb, var(--red)    35%, var(--border)); }
+.srn-badge.quiet { background: color-mix(in srgb, var(--text2)  12%, var(--surface)); color: var(--text2);  border: 1px solid var(--border); }
+
 .srn-fleet-block .srn-table {
   border-radius: 0;
 }
@@ -20193,20 +20157,18 @@ body.mode-transition-active {
 
 /* ─────────────────────────────────────────────────────────────────────────
    v2.11.x — Field Calibration (own top-nav page #page-field-calibration)
-   Plan: plans/2026-05-12-inverter-calibration-tool.md
-   All rules scoped under #page-field-calibration #fieldCalibrationSection
-   to avoid collisions. Container is a flex-column (no grid), so legacy
-   grid-column: 1 / -1 declarations are harmless no-ops.
+   Revamped to cohesive modern design system (2026-05-17)
+   All rules scoped under #page-field-calibration to avoid collisions.
+   Design system: card recipe (.fcal-group), calm headers, token colors,
+   compact controls, no prose/copy, quiet→accent hierarchy.
    ───────────────────────────────────────────────────────────────────────── */
 
-/* The page is a non-scroll flex column. Tab strip + pinned header sit at
- * the top in static normal flow (never scroll). Only the active tab panel
- * — which holds the table results — scrolls. This is simpler and more
- * robust than position:sticky which kept producing visual artifacts. */
+/* Container is flex-column. Tab strip + pinned header static at top;
+ * only the active tab panel scrolls. Simple, robust layout. */
 #page-field-calibration .field-calibration-container {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   padding: 8px 18px 0;
   flex: 1;
   min-height: 0;
@@ -20217,34 +20179,111 @@ body.mode-transition-active {
   flex-shrink: 0;
 }
 
-/* Tab strip — static at top, full width, opaque background. */
-#page-field-calibration #fieldCalibrationSection .card-tabs {
-  flex-shrink: 0;
-  background-color: var(--panel);
-  background-image: none;
+#page-field-calibration .toolbar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text2);
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
 }
 
-/* Pinned header — also static (no sticky), opaque panel color so no
- * content can ever bleed through. Per-tab header blocks swap visibility
- * based on the .fcal-header[data-active-tab] attribute. */
+/* Compact segmented tab strip — quiet inactive, accent underline on active. */
+#page-field-calibration .fcal-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+  padding: 0;
+  background: transparent;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  margin: 0 -2px;
+}
+
+#page-field-calibration .fcal-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+#page-field-calibration .fcal-tab:hover {
+  color: var(--text);
+}
+
+#page-field-calibration .fcal-tab[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+#page-field-calibration .fcal-tab .mdi {
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+/* Ensure srn-controls inside field calibration page is properly styled. */
+#page-field-calibration #fieldCalibrationSection .srn-controls {
+  margin-bottom: 0;
+  gap: 8px;
+}
+/* Read status ("Reading…", errors) sits INLINE next to the Read button
+   instead of wrapping to its own full-width line (operator request
+   2026-05-17: the wrapped line added page height). Overrides the global
+   .smsg `flex: 1 1 100%` for this element only; long text ellipsizes. */
+#page-field-calibration #fieldCalibrationSection .srn-controls #fcalReadMsg {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 320px;
+  margin-left: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Micro-labels for inputs in header controls. */
+#page-field-calibration #fieldCalibrationSection .invclock-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+}
+
+/* Pinned header — static, compact toolbar row with per-tab controls. */
 #page-field-calibration #fieldCalibrationSection .fcal-header {
   flex-shrink: 0;
-  background-color: var(--panel);
-  padding: 8px 0 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background-color: transparent;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-header-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-header-block[hidden] {
   display: none !important;
+}
+
+/* Header controls row — compact toolbar with selects and buttons. */
+#page-field-calibration #fieldCalibrationSection .fcal-header-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* Only the active tab panel scrolls. Inactive panel is display:none. */
@@ -20253,6 +20292,11 @@ body.mode-transition-active {
   min-height: 0;
   overflow-y: auto;
   padding: 8px 0 24px;
+  display: none;
+}
+
+#page-field-calibration #fieldCalibrationSection .card-tab-panel:not([hidden]) {
+  display: block;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-row {
@@ -20270,29 +20314,30 @@ body.mode-transition-active {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--panel2) 70%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-state {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 13px;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  flex: 1;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent);
+  background: var(--text2);
+  flex-shrink: 0;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-dot.active {
   background: var(--red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 30%, transparent);
   animation: fcal-pulse 1.4s ease-in-out infinite;
 }
 
@@ -20304,6 +20349,8 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-session-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-phase-note {
@@ -20313,27 +20360,61 @@ body.mode-transition-active {
   padding: 0 4px;
 }
 
+/* Full-width status bar — 5 FIXED equal columns spanning the whole row
+   (operator request 2026-05-17): Inverter/Node · Read-at · ValidCfgCode ·
+   state · Pac/Pn. Each element sits in its own fixed 1/5 slot so the bar
+   always fills the width and the layout never shifts with content. */
 #page-field-calibration #fieldCalibrationSection .fcal-readout-header {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
   gap: 10px;
-  margin: 6px 0 10px;
-  font-size: 13px;
-}
-
-#page-field-calibration #fieldCalibrationSection .fcal-readout-meta {
-  display: flex;
-  gap: 14px;
-  align-items: center;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 6px 2px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
   font-size: 12px;
   color: var(--text2);
 }
+/* Each slot keeps to one line; long values ellipsize (full text stays in
+   the title attribute / chips). Chips align to the slot start. */
+#page-field-calibration #fieldCalibrationSection .fcal-readout-header > * {
+  min-width: 0;
+  justify-self: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-readout-title {
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-readout-title .mono {
+  font-weight: var(--fw-regular, 400);
+  color: var(--text2);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-readout-at {
+  color: var(--text3, var(--text2));
+}
+/* Narrow screens — 5 fixed slots would squeeze; wrap to a flexible flow. */
+@media (max-width: 900px) {
+  #page-field-calibration #fieldCalibrationSection .fcal-readout-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+  #page-field-calibration #fieldCalibrationSection .fcal-readout-header > * {
+    white-space: normal;
+  }
+}
 
 #page-field-calibration #fieldCalibrationSection .fcal-sentinel {
+  display: inline-flex;
+  align-items: center;
   font-weight: 600;
+  font-size: 11px;
   padding: 2px 8px;
   border-radius: 4px;
 }
@@ -20346,10 +20427,12 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
-/* TrinPM20 safety gate — state chip + per-offset Write button tint
-   (v2.11.0-beta.6 Slice κ.10). */
+/* TrinPM20 safety gate — state chip. */
 #page-field-calibration #fieldCalibrationSection .fcal-state {
+  display: inline-flex;
+  align-items: center;
   font-weight: 600;
+  font-size: 11px;
   padding: 2px 8px;
   border-radius: 4px;
 }
@@ -20387,38 +20470,149 @@ body.mode-transition-active {
   color: var(--red);
   background: color-mix(in srgb, var(--red) 18%, transparent);
 }
-/* Tint the Write button so the operator notices the gate verdict before
-   clicking — block = red outline, warn = orange outline. */
-#page-field-calibration #fieldCalibrationSection .fcal-write-btn.fcal-gate-block {
-  outline: 2px solid var(--red);
-  outline-offset: 1px;
+/* Gate verdict is surfaced as a calm rail along the TOP edge of the
+   slot-card (operator request 2026-05-17 — not the left side). block =
+   red, warn = orange. Scaffold (no fresh read) suppresses it entirely. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-gate-block {
+  box-shadow: inset 0 3px 0 0 var(--red);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-write-btn.fcal-gate-warn {
-  outline: 2px solid var(--orange);
-  outline-offset: 1px;
+#page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-gate-warn {
+  box-shadow: inset 0 3px 0 0 var(--orange);
+}
+#page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot { box-shadow: none; }
+
+/* ── Write button: quiet by default, primary only when there is work ─────
+   Calm ghost until the row is dirty (New value ≠ Factor); then it becomes
+   the accent primary action. Red is reserved for a deliberately-armed
+   Force bypass — never a normal write. (primary-action / state-clarity) */
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  font-size: 11.5px;
+  font-weight: var(--fw-semibold, 600);
+  line-height: 1;
+  color: var(--text2);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn .mdi { margin: 0; font-size: 14px; }
+/* Not dirty → de-emphasize to near-icon weight so the grid reads calm. */
+#page-field-calibration #fieldCalibrationSection .fcal-row:not(.fcal-dirty) .fcal-write-btn {
+  opacity: 0.5;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-row:not(.fcal-dirty) .fcal-write-btn:hover {
+  opacity: 1;
+}
+/* Dirty → this is now the primary action on the slot-card. */
+#page-field-calibration #fieldCalibrationSection .fcal-row.fcal-dirty .fcal-write-btn {
+  opacity: 1;
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-row.fcal-dirty .fcal-write-btn:hover {
+  background: color-mix(in srgb, var(--accent) 86%, #000);
+  border-color: color-mix(in srgb, var(--accent) 86%, #000);
+}
+/* Dirty AND a Force bypass armed → destructive treatment (red). */
+#page-field-calibration #fcalReadResult.fcal-force-on .fcal-row.fcal-dirty .fcal-write-btn,
+#page-field-calibration .fcal-force-on .fcal-row.fcal-dirty .fcal-write-btn {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
 }
 
+/* Each parameter group is its own card — clear surface, calm border,
+   rounded, no inter-row noise bleeding between groups. */
 #page-field-calibration #fieldCalibrationSection .fcal-group {
-  grid-column: 1 / -1;
-  margin: 4px 0;
+  margin: 0;
+  background: var(--surface2);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
+  overflow: hidden;
+  /* Flex column so the footer (Write all / status) can be pushed to the
+     bottom when the card is stretched to match its row's tallest sibling. */
+  display: flex;
+  flex-direction: column;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-group-title {
-  font-size: 12.5px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  color: var(--accent);
-  margin: 6px 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  margin: 0;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-group-name { text-transform: none; }
+#page-field-calibration #fieldCalibrationSection .fcal-group-count {
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  background: color-mix(in srgb, var(--border) 35%, transparent);
+  padding: 1px 7px;
+  border-radius: 999px;
 }
 
-/* v2.11.x Section 4.4 — Write All button in group headers */
+/* Group-card footer — holds "Write all", separated from the slot row by a
+   calm top border, button right-aligned (operator request 2026-05-17). */
+#page-field-calibration #fieldCalibrationSection .fcal-group-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  background: color-mix(in srgb, var(--panel2) 22%, transparent);
+  /* Pin to the card bottom so footers line up across a stretched row. */
+  margin-top: auto;
+}
+/* Write all — quiet ghost; lights up only when the card has dirty rows. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-all-btn {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text2);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-all-btn .mdi { font-size: 14px; }
+#page-field-calibration #fieldCalibrationSection .fcal-group.fcal-group-dirty .fcal-write-all-btn {
+  opacity: 1;
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-all-btn:hover {
+  opacity: 1;
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+#page-field-calibration #fieldCalibrationSection .fcal-group.fcal-group-dirty .fcal-write-all-btn:hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--accent) 86%, #000);
+  border-color: color-mix(in srgb, var(--accent) 86%, #000);
 }
 
 /* v2.11.x Section 4.3 — transient "value applied, input cleared" hint.
@@ -20428,6 +20622,321 @@ body.mode-transition-active {
   opacity: 0.55;
   border-color: var(--green);
   background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   v2.11.x — Per-Node Readout: FIXED card grid (operator request 2026-05-17)
+   The readout is a permanent grid of grouped parameter slot-cards. Read
+   fills .fcal-val / .fcal-live; Calibration Mode off → .fcal-readonly dims
+   the write controls; no fresh read → .fcal-scaffold blanks the values.
+   ════════════════════════════════════════════════════════════════════════ */
+/* The HOST is the grid: GROUP cards lay out 3 per row (operator request
+   2026-05-17 — "there should be 3 groups in a row"). The readout header,
+   write-controls, and the empty/preview frame span all 3 columns.
+   align-items:start so each group card keeps its own natural height
+   (groups have different parameter counts). Inside a (now ~1/3-width)
+   group card the slots stack one per row — a 3-col card cannot also fit
+   3 usable slot-columns with number inputs. "Write all" stays a footer. */
+#page-field-calibration #fcalReadResult.fcal-grid-host {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  /* stretch (not start) → every card in a row matches the tallest one,
+     so the bottoms line up. Footers are pinned down via margin-top:auto. */
+  align-items: stretch;
+}
+#page-field-calibration #fcalReadResult.fcal-grid-host .fcal-readout-header {
+  grid-column: 1 / -1;
+}
+/* Inside each group card: one column PER FIELD in that group (operator
+   request 2026-05-17) — 1 field → full width, 3 → 3 in a row, 4 → 4 in a
+   row. `--fcal-cols` is set inline per group by _fcalRenderSingleEditable.
+   Slots are narrow here, so each slot stacks its input + Write vertically
+   (see .fcal-slot-write) to stay usable. */
+#page-field-calibration #fieldCalibrationSection .fcal-param-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--fcal-cols, 3), minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+/* Very narrow viewport — drop to a single field so inputs never overflow
+   (overrides the per-field column count above). */
+@media (max-width: 560px) {
+  #page-field-calibration #fieldCalibrationSection .fcal-param-grid {
+    grid-template-columns: 1fr;
+  }
+}
+/* Narrow viewport — step the group-card row count down so inputs stay
+   usable and no horizontal scrollbar appears on a remote-viewer laptop. */
+@media (max-width: 1100px) {
+  #page-field-calibration #fcalReadResult.fcal-grid-host {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 680px) {
+  #page-field-calibration #fcalReadResult.fcal-grid-host {
+    grid-template-columns: 1fr;
+  }
+}
+/* One parameter = one COMPACT slot-card: 3 tight rows (name+offset /
+   Factor·Live / write). No boxed metrics, no description block — the
+   operator called those redundant. Dense but legible. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 9px;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: 7px;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+/* Name = label text (ellipsizes if long) + offset chip that stays visible
+   (never clipped) + optional gate badge. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-param-name {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.25;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-pname-txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-off-chip {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+/* Factor + Live on ONE tight inline row (label + value pairs). */
+/* Two metrics span the FULL slot width: Factor pinned left, Live pinned
+   right (operator request 2026-05-17). One line, no wrap. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  font-size: 12px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Live sits flush at the right edge so the pair fills the slot. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot-metric:last-child {
+  justify-content: flex-end;
+  text-align: right;
+}
+/* Replaces the "FACTOR"/"LIVE" text labels (space-inefficient) with a
+   compact icon: tune-variant = stored scale factor, pulse = live reading.
+   The metric span carries a title= so hover still explains each. Live
+   already shows its unit, so the two read unambiguously. */
+#page-field-calibration #fieldCalibrationSection .fcal-metric-ic {
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text3, var(--text2));
+  flex: 0 0 auto;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-val {
+  font-size: 13px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-live {
+  font-size: 12.5px;
+  display: inline-block;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-live-pair {
+  justify-content: flex-start;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-live-num { min-width: 0; }
+/* Write row — input grows, button is the trailing action. Slim height. */
+/* Slots are narrow (3-up inside a ~1/3-width group card), so stack the
+   input ABOVE a full-width Write button — guarantees both stay usable at
+   any column width instead of an unreadable inline squeeze. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot-write {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+/* X1 (91) / Y2 (94): display-only — no input/Write. Quiet locked chip
+   occupying the same footprint so the grid stays aligned (operator
+   2026-05-17: only Y1 + X2 are editable). */
+#page-field-calibration #fieldCalibrationSection .fcal-slot-readonly {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text3, var(--text2));
+  background: color-mix(in srgb, var(--border) 22%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 7px;
+  cursor: default;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot-readonly .mdi { font-size: 13px; }
+#page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-slot-ro {
+  opacity: 0.92;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-write-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-write-btn {
+  width: 100%;
+  justify-content: center;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+/* ── Meter-value mode (linear scale factors 81–89) ──────────────────────
+   A compact segmented toggle picks Factor (type the raw scale factor) vs
+   Meter (type the multimeter/wattmeter reading; the factor is the closed
+   form of the single-point gain trim, F_E = round(F_E·meter/live)). Only
+   .fcal-write-input is pre-filled, so the Write path/gates are unchanged. */
+#page-field-calibration #fieldCalibrationSection .fcal-mode-toggle {
+  display: flex;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 7px;
+  overflow: hidden;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-mode-btn {
+  flex: 1 1 0;
+  padding: 3px 6px;
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.02em;
+  color: var(--text3, var(--text2));
+  background: color-mix(in srgb, var(--border) 14%, transparent);
+  border: 0;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-mode-btn + .fcal-mode-btn {
+  border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-mode-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-mode-btn.fcal-mode-active {
+  color: #fff;
+  background: var(--accent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-mode-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+/* Meter input — same footprint as the factor input, with an accent rail so
+   it reads as "a live measurement", visually distinct from the factor. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-meter-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border-left: 2px solid var(--accent);
+}
+/* Derivation line: "→ F_E 935 (was 940)" — green when valid, red on guard. */
+#page-field-calibration #fieldCalibrationSection .fcal-meter-calc {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-semibold, 600);
+  line-height: 1.3;
+  word-break: break-word;
+  color: var(--green, var(--accent));
+}
+#page-field-calibration #fieldCalibrationSection .fcal-meter-calc.fcal-meter-bad {
+  color: var(--red);
+  font-weight: 500;
+}
+/* Dirty (New value ≠ Factor) → accent the whole card edge so the operator
+   can see "this card has an unsaved change" at a glance. */
+#page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-dirty {
+  border-color: var(--accent);
+}
+#page-field-calibration #fcalReadResult.fcal-force-on .fcal-slot.fcal-dirty {
+  border-color: var(--red);
+}
+
+/* ── Read-only (Calibration Mode off, or scaffold) ──────────────────────
+   The grid stays fully visible — only the write affordances dim. */
+#page-field-calibration #fcalReadResult.fcal-readonly .fcal-slot-write {
+  opacity: 0.5;
+  filter: grayscale(0.3);
+}
+#page-field-calibration #fcalReadResult.fcal-readonly .fcal-write-input,
+#page-field-calibration #fcalReadResult.fcal-readonly .fcal-write-btn,
+#page-field-calibration #fcalReadResult.fcal-readonly .fcal-write-all-btn {
+  cursor: not-allowed;
+}
+/* Scaffold (no fresh read) — values are placeholders, keep them quiet. */
+#page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot .fcal-val,
+#page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot .fcal-live {
+  color: var(--text2);
+}
+
+/* Read-only / scaffold header banner (replaces the force-toggle strip). */
+#page-field-calibration #fieldCalibrationSection .fcal-write-controls-ro {
+  justify-content: flex-start;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-note-ro {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text2);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-note-ro .mdi { font-size: 14px; }
+
+/* Empty state — no catalog read yet this visit (the fixed frame). */
+#page-field-calibration #fieldCalibrationSection .fcal-group-empty {
+  grid-column: 1 / -1;   /* preview / no-catalog frame spans the full row */
+  border-style: dashed;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-empty-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 22px 18px;
+  color: var(--text2);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-empty-card .mdi {
+  font-size: 26px;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text2));
+  flex: 0 0 auto;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-empty-card strong {
+  color: var(--text);
+  font-size: 13px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-empty-sub {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 /* Every calibration group is rendered as its own <table>, so we lock column
@@ -20442,59 +20951,95 @@ body.mode-transition-active {
 
 #page-field-calibration #fieldCalibrationSection .fcal-table th,
 #page-field-calibration #fieldCalibrationSection .fcal-table td {
-  padding: 8px 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
   text-align: left;
   vertical-align: middle;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-/* Edge padding — extra breathing room on first and last columns so the
- * table content does not hug the card border. */
+#page-field-calibration #fieldCalibrationSection .fcal-table tbody tr:last-child td {
+  border-bottom: 0;
+}
 #page-field-calibration #fieldCalibrationSection .fcal-table th:first-child,
 #page-field-calibration #fieldCalibrationSection .fcal-table td:first-child {
-  padding-left: 18px;
+  padding-left: 14px;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-table th:last-child,
 #page-field-calibration #fieldCalibrationSection .fcal-table td:last-child {
-  padding-right: 18px;
+  padding-right: 14px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-table th {
-  font-weight: 600;
-  background: color-mix(in srgb, var(--panel2) 50%, transparent);
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text2);
+  background: transparent;
 }
 
-/* Locked column widths — applied to every group table so each column lines
- * up across AC Voltage / AC Current / DC / Active P / Reactive 1 / Reactive 2.
- * Read-only table: Off | Field | Description | Factor | Live | Hex (6 cols).
- * Editable table:  Off | Field | Description | Factor | Live | New Value | Gate (7 cols).
- * Numeric columns (Off, Factor, Live, Hex, New Value, Gate) are centered
- * so the values sit visually balanced under their headers. Field/Description
- * stay left-aligned (text content with variable length). */
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(1),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(1) { width: 64px;  text-align: center; color: var(--text2); }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(2),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(2) { width: 170px; text-align: left; }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(3),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(3) { width: auto; text-align: left; white-space: normal; }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(4),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(4) { width: 100px; text-align: center; }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(5),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(5) { width: 150px; text-align: center; color: var(--accent); }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:nth-child(6),
-#page-field-calibration #fieldCalibrationSection .fcal-table td:nth-child(6) { width: 110px; text-align: center; color: var(--text2); }
+/* ── Read-only readout table (6 cols: Off|Field|Desc|Factor|Live|Hex) ──
+ * Untouched legacy layout — scoped so it does NOT bleed into the new
+ * 5-col write table below. */
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(1),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(1) { width: 56px;  text-align: center; color: var(--text2); }
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(2),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(2) { width: 160px; text-align: left; }
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(3),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(3) { width: auto; text-align: left; white-space: normal; }
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(4),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(4) { width: 100px; text-align: right; }
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(5),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(5) { width: 140px; text-align: right; color: var(--accent); }
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(6),
+#page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(6) { width: 110px; text-align: right; color: var(--text2); }
 
-/* Editable-mode replaces the Hex column with New Value + Gate action.
- * 7th column carries the per-row Write button + gate badge. */
-#page-field-calibration #fieldCalibrationSection .fcal-write-table th:nth-child(6),
-#page-field-calibration #fieldCalibrationSection .fcal-write-table td:nth-child(6) { width: 140px; text-align: center; color: var(--text); }
-#page-field-calibration #fieldCalibrationSection .fcal-write-table th:nth-child(7),
-#page-field-calibration #fieldCalibrationSection .fcal-write-table td:nth-child(7) { width: 160px; text-align: center; white-space: nowrap; color: var(--text); }
-#page-field-calibration #fieldCalibrationSection .fcal-write-table td:nth-child(6) .fcal-write-input { margin: 0 auto; display: inline-block; }
-#page-field-calibration #fieldCalibrationSection .fcal-write-table td:nth-child(7) .fcal-write-btn { margin: 0 6px 0 0; }
+/* ── New compact write table — 5 columns by CLASS, not position ──────────
+ * Parameter (flexes, holds name+desc so there is NO empty whitespace gulf)
+ * | Factor | Live | New value | Write. */
+#page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-param,
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-param { width: auto; text-align: left; white-space: normal; }
+#page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-val,
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-val { width: 92px;  text-align: right; color: var(--text2); }
+#page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-live,
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-live { width: 104px; text-align: right; }
+#page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-newval,
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-newval { width: 124px; text-align: right; }
+#page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-act,
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-act { width: 118px; text-align: right; white-space: nowrap; }
+
+/* Parameter cell — primary name + tiny offset chip, secondary description
+ * on its own muted line. This is what removes the giant empty column. */
+#page-field-calibration #fieldCalibrationSection .fcal-param-name {
+  display: block;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  line-height: 1.35;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-off-chip {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: var(--fw-regular, 400);
+  color: var(--text2);
+  font-family: ui-monospace, Consolas, monospace;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-param-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-val {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-act .fcal-gate-badge { margin-left: 6px; }
 
 /* Live cell visuals — green numeric value + dim unit, both anchored to the
  * column centerline. The numeric span is right-aligned, the unit span is
@@ -20543,11 +21088,9 @@ body.mode-transition-active {
   opacity: 0.5;
 }
 
-/* Hide the per-group header rows in subsequent group tables so the
- * combined view looks like one continuous table with section dividers. */
-#page-field-calibration #fieldCalibrationSection .fcal-group + .fcal-group .fcal-table thead {
-  display: none;
-}
+/* Each group is now its own card, so every card keeps its (compact,
+ * muted) column header for context when the operator scrolls. The old
+ * "one continuous table" hide rule is intentionally retired. */
 
 #page-field-calibration #fieldCalibrationSection .fcal-rtc {
   font-family: ui-monospace, Consolas, monospace;
@@ -20568,99 +21111,97 @@ body.mode-transition-active {
   overflow: auto;
 }
 
-/* ── Fleet anomaly view — compact layout (operator preference 2026-05-13)
- * The default `.fcal-header-block` + `.cb-sub-title` + `.srn-controls` +
- * `.srn-empty` stack added too much vertical breathing room before the
- * actual results table. Tighten everything inside the fleet panel so the
- * table sits closer to the Scan Fleet button. */
-#page-field-calibration #fcalPanelFleet {
+/* PARAMETERS page ⇄ Fleet Anomalies view switch (#btnParamFleetToggle).
+   When .fleet-mode is set we hide the per-node parameter log + its
+   log-only toolbar controls so the relocated fleet view owns the page,
+   without fighting _paramShowBlank()'s own hidden-state logic. */
+#page-energy.fleet-mode #paramBlank,
+#page-energy.fleet-mode #paramTabs,
+#page-energy.fleet-mode #paramPanels,
+#page-energy.fleet-mode .page-toolbar .tl-left,
+#page-energy.fleet-mode .param-adv-toggle,
+#page-energy.fleet-mode #paramSolarBadge,
+#page-energy.fleet-mode #paramRowCount {
+  display: none !important;
+}
+
+/* ── Fleet anomaly view — compact layout ──────────────────────────────── */
+#fcalPanelFleet {
   padding-top: 0;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-header-block[data-fcal-header="fleet"] {
-  margin-bottom: 6px;
-}
-#page-field-calibration #fieldCalibrationSection .fcal-header-block[data-fcal-header="fleet"] .cb-sub-title {
-  margin: 0 0 6px;
-  padding-bottom: 0;
-}
-#page-field-calibration #fieldCalibrationSection .fcal-header-block[data-fcal-header="fleet"] .srn-controls {
-  margin-bottom: 0;
-}
-#page-field-calibration #fcalFleetResult {
+
+#fcalFleetResult {
   margin-top: 8px;
 }
-#page-field-calibration #fcalFleetResult .srn-empty {
-  padding: 10px 14px;        /* was 20 — too much when no rows yet */
+
+#fcalFleetResult .srn-empty {
+  padding: 10px 14px;
   text-align: left;
+  border: 1px dashed var(--border);
+  background: transparent;
 }
-#page-field-calibration #fcalFleetResult .fcal-readout-header {
-  margin: 4px 0 6px;          /* was 6 / 10 */
+
+#fcalFleetResult .fcal-readout-header {
+  margin: 4px 0 6px;
   font-size: 12px;
 }
 
-/* v2.11.x Section 4.5 — Compact fleet header bar inside the panel
- * (moved from pinned header for tighter layout). Flex row with title left,
- * controls right. */
-#page-field-calibration #fcalPanelFleet .fcal-fleet-header {
+/* Fleet header bar inside the panel — compact card system. */
+#fcalPanelFleet .fcal-fleet-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--panel2) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
   margin-bottom: 8px;
 }
 
-#page-field-calibration #fcalPanelFleet .fcal-fleet-header-title {
+#fcalPanelFleet .fcal-fleet-header-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
 }
 
-#page-field-calibration #fcalPanelFleet .fcal-fleet-header-controls {
+#fcalPanelFleet .fcal-fleet-header-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
-/* Status line is its own full-width row beneath the header bar. Reserved
- * min-height keeps the table from jumping when the message appears, and
- * because it is no longer a flex sibling of the button, growing text
- * ("Scanning fleet...") can never push the Scan Fleet button. */
-#page-field-calibration #fcalPanelFleet .fcal-fleet-msg-row {
+/* Status line reserved height — prevents layout shift. */
+#fcalPanelFleet .fcal-fleet-msg-row {
   min-height: 18px;
   margin-bottom: 6px;
   font-size: 12px;
   line-height: 18px;
+  color: var(--text2);
 }
 
-/* Fleet anomaly view — wider table, scrolls vertically AND horizontally
- * with a STICKY thead so the column labels stay anchored as the operator
- * scrolls through 27 inverters × 2-4 nodes (up to ~96 rows). The wrapper
- * is a fixed-height scrollbox; the thead uses position: sticky relative
- * to that scroll container. */
-#page-field-calibration #fieldCalibrationSection .fcal-table-scroll {
-  grid-column: 1 / -1;
+/* Fleet anomaly view — wider table, scrolls with sticky thead. */
+.fcal-table-scroll {
   overflow: auto;
   max-height: 70vh;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
   background: var(--surface);
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table {
+.fcal-fleet-table {
   min-width: 920px;
   font-size: 12px;
   border-collapse: separate;   /* required for sticky thead borders */
   border-spacing: 0;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table thead th {
+.fcal-fleet-table thead th {
   position: sticky;
   top: 0;
   z-index: 5;
@@ -20671,8 +21212,8 @@ body.mode-transition-active {
   box-shadow: 0 1px 0 0 var(--border);
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table th,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table td {
+.fcal-fleet-table th,
+.fcal-fleet-table td {
   text-align: center;
   padding: 6px 6px;
   white-space: nowrap;
@@ -20681,77 +21222,77 @@ body.mode-transition-active {
 }
 /* Field cells specifically — slightly tighter for the delta values so
  * "+12.34%▲" fits in an 88 px column without truncation. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table-grouped tbody td.mono {
+.fcal-fleet-table-grouped tbody td.mono {
   font-size: 11.5px;
   padding: 5px 4px;
   font-variant-numeric: tabular-nums;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table th:first-child,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table td:first-child,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table .fcal-ip {
+.fcal-fleet-table th:first-child,
+.fcal-fleet-table td:first-child,
+.fcal-fleet-table .fcal-ip {
   text-align: left;
 }
 
 /* Subtle alternating-row banding so rows stay scannable when there are
  * 50+ rows in view. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table tbody tr:nth-child(even) td {
+.fcal-fleet-table tbody tr:nth-child(even) td {
   background: color-mix(in srgb, var(--surface2) 50%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table tbody tr:hover td {
+.fcal-fleet-table tbody tr:hover td {
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));
 }
 
 /* ── Fleet anomaly view — summary card + chips + filter row ──────────── */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-card {
+.fcal-fleet-summary-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 14px;
   margin: 0 0 10px;
   background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-row {
+.fcal-fleet-summary-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-headline {
+.fcal-fleet-summary-headline {
   display: flex;
   align-items: baseline;
   gap: 6px;
   font-size: 13px;
   color: var(--text);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-num {
+.fcal-fleet-summary-num {
   font-size: 22px;
   font-weight: var(--fw-bold, 700);
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-label {
+.fcal-fleet-summary-label {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 10.5px;
   font-weight: var(--fw-semibold, 600);
   color: var(--text2);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-meta {
+.fcal-fleet-summary-meta {
   font-size: 11.5px;
   color: var(--text2);
   margin-left: 4px;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-summary-chips {
+.fcal-fleet-summary-chips {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip {
+.fcal-fleet-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -20764,29 +21305,29 @@ body.mode-transition-active {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip-ok {
+.fcal-fleet-chip-ok {
   color: var(--green);
   border-color: color-mix(in srgb, var(--green) 50%, transparent);
   background: color-mix(in srgb, var(--green) 10%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip-warn {
+.fcal-fleet-chip-warn {
   color: var(--orange);
   border-color: color-mix(in srgb, var(--orange) 50%, transparent);
   background: color-mix(in srgb, var(--orange) 10%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip-bad,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip-sentinel {
+.fcal-fleet-chip-bad,
+.fcal-fleet-chip-sentinel {
   color: var(--red);
   border-color: color-mix(in srgb, var(--red) 60%, transparent);
   background: color-mix(in srgb, var(--red) 12%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-chip-failed {
+.fcal-fleet-chip-failed {
   color: var(--text2);
   border-color: var(--border);
   background: color-mix(in srgb, var(--border) 30%, transparent);
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-controls-row {
+.fcal-fleet-controls-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -20794,7 +21335,7 @@ body.mode-transition-active {
   padding-top: 6px;
   border-top: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-filter-toggle {
+.fcal-fleet-filter-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -20803,20 +21344,20 @@ body.mode-transition-active {
   cursor: pointer;
   user-select: none;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-filter-toggle input[type="checkbox"] {
+.fcal-fleet-filter-toggle input[type="checkbox"] {
   width: 14px;
   height: 14px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-filter-count {
+.fcal-fleet-filter-count {
   color: var(--text2);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   margin-left: 4px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-sort-toggle {
+.fcal-fleet-sort-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -20825,52 +21366,55 @@ body.mode-transition-active {
   cursor: pointer;
   user-select: none;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-sort-toggle input[type="checkbox"] {
+.fcal-fleet-sort-toggle input[type="checkbox"] {
   width: 14px;
   height: 14px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-legend {
+.fcal-fleet-legend {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: 11.5px;
   color: var(--text2);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-legend > span {
+.fcal-fleet-legend > span {
   font-size: 14px;
   margin-right: -2px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-legend-label {
+.fcal-fleet-legend-label {
   font-size: 11px !important;
   color: var(--text2) !important;
   margin-right: 6px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-hint {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text2);
-  font-style: italic;
-}
+/* .fcal-fleet-hint removed — the "click any row to drill in" note is gone
+   now that the fleet table is a read-only overview. */
 
 /* ── Grouped table — column-group banner row + body separators ──────────
  * Uses `table-layout: fixed` + explicit <col> widths to keep every column
  * predictably sized regardless of content. With auto-layout the AC-Current
  * cells (5+ chars: "+1.50%▲") would steal width from the leading Inv/Node
  * column, collapsing it to a single character. Fixed layout fixes that. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table-grouped {
+.fcal-fleet-table-grouped {
   table-layout: fixed;
+  /* Fill the scroll container so there is no dead space to the right on
+   * wide monitors; min-width keeps a horizontal scrollbar on narrow ones.
+   * With table-layout:fixed the leading cols hold their px width and the
+   * spare width is shared across the % field cols. */
+  width: 100%;
   min-width: 1480px;          /* enough for 14 field cols × 80 px + 3 leading cols */
 }
-/* Per-column widths via <col> — applies to every cell in that column. */
-#page-field-calibration #fieldCalibrationSection .fcal-col-node  { width: 110px; }
-#page-field-calibration #fieldCalibrationSection .fcal-col-ip    { width: 130px; }
-#page-field-calibration #fieldCalibrationSection .fcal-col-cfg   { width: 60px;  }
-#page-field-calibration #fieldCalibrationSection .fcal-col-field { width: 88px;  }
+/* Per-column widths via <col> — applies to every cell in that column.
+ * Leading 3 cols are fixed px; field cols use % so they absorb the
+ * remaining width evenly instead of leaving the table short. */
+.fcal-col-node  { width: 110px; }
+.fcal-col-ip    { width: 130px; }
+.fcal-col-cfg   { width: 60px;  }
+.fcal-col-field { width: auto; min-width: 70px; }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-grouprow th.fcal-fleet-group-head {
+.fcal-fleet-grouprow th.fcal-fleet-group-head {
   font-size: 10.5px;
   font-weight: var(--fw-bold, 700);
   text-transform: uppercase;
@@ -20885,22 +21429,22 @@ body.mode-transition-active {
   top: 0;
   z-index: 6;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-grouprow th.fcal-fleet-group-head:last-child {
+.fcal-fleet-grouprow th.fcal-fleet-group-head:last-child {
   border-right: none;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-group-vac { background: color-mix(in srgb, var(--accent) 7%, var(--surface2)); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-group-iac { background: color-mix(in srgb, var(--accent) 11%, var(--surface2)); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-group-dc  { background: color-mix(in srgb, var(--orange) 8%, var(--surface2)); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-group-p   { background: color-mix(in srgb, var(--orange) 12%, var(--surface2)); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-group-q   { background: color-mix(in srgb, var(--accent) 14%, var(--surface2)); }
+.fcal-fleet-group-vac { background: color-mix(in srgb, var(--accent) 7%, var(--surface2)); }
+.fcal-fleet-group-iac { background: color-mix(in srgb, var(--accent) 11%, var(--surface2)); }
+.fcal-fleet-group-dc  { background: color-mix(in srgb, var(--orange) 8%, var(--surface2)); }
+.fcal-fleet-group-p   { background: color-mix(in srgb, var(--orange) 12%, var(--surface2)); }
+.fcal-fleet-group-q   { background: color-mix(in srgb, var(--accent) 14%, var(--surface2)); }
 
 /* Boundary border continues through every body row to form vertical lanes. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table-grouped tbody td.fcal-fleet-cell-boundary {
+.fcal-fleet-table-grouped tbody td.fcal-fleet-cell-boundary {
   border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 
 /* The per-column header row — second sticky row, sits below the group banner. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-headrow th {
+.fcal-fleet-headrow th {
   position: sticky;
   top: 30px;       /* group-row height */
   background: var(--surface2);
@@ -20918,13 +21462,13 @@ body.mode-transition-active {
  * underneath don't show through. NO horizontal stickiness — that was
  * collapsing the leading columns when combined with auto layout; with
  * fixed layout the columns stay visible without horizontal sticky. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table-grouped thead .fcal-fleet-sticky-head {
+.fcal-fleet-table-grouped thead .fcal-fleet-sticky-head {
   background: var(--surface2);
 }
 /* Body cell sticky markers — keep the styling hooks but no horizontal
  * sticky positioning. Operator can scroll horizontally; with the table
  * size we now ship (1480 px) it fits on most monitors without scroll. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-table-grouped .fcal-fleet-sticky {
+.fcal-fleet-table-grouped .fcal-fleet-sticky {
   background: var(--surface);
   font-size: 12px;
   white-space: nowrap;
@@ -20933,14 +21477,14 @@ body.mode-transition-active {
 }
 
 /* Median reference row — tinted, italic, sits at the top of the body. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-median-row td {
+.fcal-fleet-median-row td {
   background: color-mix(in srgb, var(--accent) 7%, var(--surface)) !important;
   font-style: italic;
   color: var(--text2);
   font-weight: var(--fw-semibold, 600);
   border-bottom: 2px solid color-mix(in srgb, var(--accent) 30%, var(--border));
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row-marker {
+.fcal-fleet-row-marker {
   font-size: 9px;
   font-weight: var(--fw-bold, 700);
   letter-spacing: 0.6px;
@@ -20951,16 +21495,13 @@ body.mode-transition-active {
   margin-right: 4px;
 }
 
-/* Tier row borders — left-edge stripe so worst rows pop. */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row { cursor: pointer; }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row.fcal-fleet-row-bad td:first-child  { border-left: 3px solid var(--red); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row.fcal-fleet-row-warn td:first-child { border-left: 3px solid var(--orange); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row.fcal-fleet-row-ok td:first-child   { border-left: 3px solid color-mix(in srgb, var(--green) 60%, transparent); }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-row:hover td {
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface)) !important;
-}
+/* Tier row borders — left-edge stripe so worst rows pop. Rows are a
+   read-only overview (drill-in removed) so no pointer cursor / hover. */
+.fcal-fleet-row.fcal-fleet-row-bad td:first-child  { border-left: 3px solid var(--red); }
+.fcal-fleet-row.fcal-fleet-row-warn td:first-child { border-left: 3px solid var(--orange); }
+.fcal-fleet-row.fcal-fleet-row-ok td:first-child   { border-left: 3px solid color-mix(in srgb, var(--green) 60%, transparent); }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-arrow {
+.fcal-fleet-arrow {
   display: inline-block;
   width: 8px;
   font-size: 8px;
@@ -20969,7 +21510,7 @@ body.mode-transition-active {
   margin-right: 1px;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-cfg {
+.fcal-fleet-cfg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -20978,24 +21519,24 @@ body.mode-transition-active {
   border-radius: 4px;
   font-size: 11px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-cfg-ok {
+.fcal-fleet-cfg-ok {
   color: var(--green);
   background: color-mix(in srgb, var(--green) 12%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-cfg-bad {
+.fcal-fleet-cfg-bad {
   color: var(--red);
   background: color-mix(in srgb, var(--red) 16%, transparent);
 }
 
 /* ── Failure section — separated below the main table ─────────────────── */
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures {
+.fcal-fleet-failures {
   margin-top: 14px;
   padding: 10px 14px;
   background: color-mix(in srgb, var(--red) 6%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--red) 30%, var(--border));
-  border-radius: 8px;
+  border-radius: 10px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures-header {
+.fcal-fleet-failures-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -21004,12 +21545,12 @@ body.mode-transition-active {
   color: var(--red);
   margin-bottom: 8px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures-breakdown {
+.fcal-fleet-failures-breakdown {
   display: inline-flex;
   gap: 6px;
   margin-left: auto;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-fail-cat {
+.fcal-fleet-fail-cat {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -21022,27 +21563,27 @@ body.mode-transition-active {
   background: var(--surface2);
   border: 1px solid var(--border);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-fail-cat-timeout {
+.fcal-fleet-fail-cat-timeout {
   color: var(--orange);
   background: color-mix(in srgb, var(--orange) 12%, transparent);
   border-color: color-mix(in srgb, var(--orange) 40%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-fail-cat-modbus_error,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-fail-cat-http_error {
+.fcal-fleet-fail-cat-modbus_error,
+.fcal-fleet-fail-cat-http_error {
   color: var(--red);
   background: color-mix(in srgb, var(--red) 12%, transparent);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures-table {
+.fcal-fleet-failures-table {
   width: 100%;
   font-size: 11.5px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures-table th,
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-failures-table td {
+.fcal-fleet-failures-table th,
+.fcal-fleet-failures-table td {
   padding: 4px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-fleet-fail-reason {
+.fcal-fleet-fail-reason {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 10.5px;
   color: var(--text2);
@@ -21053,12 +21594,12 @@ body.mode-transition-active {
 /* Fleet-scan progress UI (rendered inline by _fcalHandleFleetScan while
  * the scan is in flight). Bar height 8 px, accent fill, smooth width
  * transition so progress doesn't jitter on each 1-s poll. */
-#page-field-calibration #fieldCalibrationSection .fcal-scan-progress-label {
+.fcal-scan-progress-label {
   font-size: 12.5px;
   margin-bottom: 8px;
   color: var(--text);
 }
-#page-field-calibration #fieldCalibrationSection .fcal-scan-progress-bar {
+.fcal-scan-progress-bar {
   width: 100%;
   max-width: 480px;
   height: 8px;
@@ -21067,18 +21608,18 @@ body.mode-transition-active {
   overflow: hidden;
   margin: 0 auto;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-scan-progress-fill {
+.fcal-scan-progress-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--green)));
   transition: width 280ms ease-out;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-cell-ok   { color: var(--green); }
-#page-field-calibration #fieldCalibrationSection .fcal-cell-warn { color: var(--orange); }
-#page-field-calibration #fieldCalibrationSection .fcal-cell-bad  { color: var(--red); font-weight: 700; }
-#page-field-calibration #fieldCalibrationSection .fcal-cell-null { color: var(--text2); opacity: 0.5; }
+.fcal-cell-ok   { color: var(--green); }
+.fcal-cell-warn { color: var(--orange); }
+.fcal-cell-bad  { color: var(--red); font-weight: 700; }
+.fcal-cell-null { color: var(--text2); opacity: 0.5; }
 
-#page-field-calibration #fieldCalibrationSection .fcal-fail-row td {
+.fcal-fail-row td {
   background: color-mix(in srgb, var(--red) 8%, transparent);
   color: var(--red);
   font-style: italic;
@@ -21096,31 +21637,25 @@ body.mode-transition-active {
 
 /* ── Session card: active vs idle state ─────────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-session-card.fcal-session-active {
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--red) 14%, transparent),
-    color-mix(in srgb, var(--red) 4%, transparent) 60%,
-    color-mix(in srgb, var(--panel2) 60%, transparent)
-  );
-  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent),
-              0 4px 18px color-mix(in srgb, var(--red) 12%, transparent);
+  background: color-mix(in srgb, var(--red) 8%, var(--surface2));
+  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-meta {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
   align-items: center;
-  font-size: 12px;
-  color: var(--text);
+  font-size: 11.5px;
+  color: var(--text2);
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-session-meta-item {
   font-family: ui-monospace, Consolas, monospace;
-  padding: 2px 8px;
+  padding: 2px 6px;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--panel2) 80%, transparent);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  font-size: 11px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-operator-input {
@@ -21142,32 +21677,40 @@ body.calib-session-active {
   padding-top: 0;
 }
 
-/* ── Consign mode panel (Phase 3) ───────────────────────────────────────── */
-#page-field-calibration #fieldCalibrationSection .fcal-consign-panel {
-  grid-column: 1 / -1;
-  margin: 14px 0 4px;
+/* ── Fixed control cards: Consign Mode + Safety Bypass ─────────────────────
+   Operator request (2026-05-17): these are NOT a separate top strip — they
+   are the first two cells of the same parameter grid, so each one is exactly
+   one column wide and the same dimension as an AC / DC group-card. They
+   reuse `.fcal-group` verbatim (background / border / radius / overflow);
+   only the inner body padding and the flush-right header hint differ. */
+#page-field-calibration #fieldCalibrationSection .fcal-ctl-card {
+  display: flex;
+  flex-direction: column;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-ctl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  /* Grow to fill the stretched card so the status/note footer ends up at
+     the bottom, level with the Write-all footers on the group cards. */
+  flex: 1 1 auto;
+}
+/* Header hint sits flush-right inside the shared .fcal-group-title flex. */
+#page-field-calibration #fieldCalibrationSection .fcal-card-hint {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3, var(--text2));
+  flex: 0 0 auto;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-consign-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
-  margin-bottom: 10px;
-}
-#page-field-calibration #fieldCalibrationSection .fcal-consign-title small {
-  font-weight: 400;
-  color: var(--text2);
-}
-
-#page-field-calibration #fieldCalibrationSection .fcal-consign-tiles {
+#page-field-calibration #fieldCalibrationSection .fcal-consign-tiles-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(80px, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-consign-tile {
@@ -21200,27 +21743,150 @@ body.calib-session-active {
   background: var(--green);
   color: white;
 }
+/* (Removed: the 0 % Consume tile — operator clarified Per. Vacio calibrates
+   at consign 50 %, not 0 %; "Pot. Activ" is just Per. Vacio in watts.) */
 
 #page-field-calibration #fieldCalibrationSection .fcal-consign-status {
   font-size: 12px;
   color: var(--text2);
-  padding-top: 4px;
-  border-top: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+  padding: 8px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+/* No idle placeholder text — when there's no consign status the footer
+   collapses entirely (no empty padded bar / divider). */
+#page-field-calibration #fieldCalibrationSection .fcal-consign-status:empty {
+  display: none;
 }
 
+/* (The old side-by-side .fcal-controls-row / .fcal-bypass-panel layout and
+   the .fcal-consign-header chip were removed — the two control cards now
+   live as the first two cells of the parameter grid and reuse
+   .fcal-group / .fcal-group-title / .fcal-card-hint defined above.) */
+/* Tile = big % over a small role sub-label. */
+#page-field-calibration #fieldCalibrationSection .fcal-consign-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.1;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-tile-pct {
+  font-size: 14px;
+  font-weight: var(--fw-semibold, 600);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-tile-sub {
+  font-size: 9.5px;
+  font-weight: var(--fw-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.8;
+}
+/* Reactive procedure guide — the one bit of in-card prose the operator
+   explicitly asked for. Kept to a single tight line + a rich tooltip.
+   Sits inside the padded .fcal-ctl-body, so it's a self-contained
+   rounded note rather than a full-bleed strip. */
+#page-field-calibration #fieldCalibrationSection .fcal-consign-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 8px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-consign-guide .mdi {
+  font-size: 14px;
+  color: color-mix(in srgb, var(--accent) 75%, var(--text2));
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-consign-guide strong { color: var(--text); }
+
+/* Safety-bypass switches relocated to the pinned Read toolbar (operator
+   request 2026-05-17): compact, right-aligned via margin-left:auto inside
+   the flex .srn-controls row, tooltip-only (no subtitle text, no note).
+   The .fcal-force-toggle pill / armed styling is shared, just tightened. */
+#page-field-calibration #fieldCalibrationSection .fcal-bypass-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-bypass-inline .fcal-force-toggle {
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-bypass-inline .fcal-force-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+}
+
+/* Not in Calibration Mode → the control cards are visible but locked:
+   dimmed, controls disabled, not-allowed cursor. */
+#page-field-calibration #fieldCalibrationSection .fcal-ctl-locked .fcal-consign-tiles-list {
+  opacity: 0.5;
+  filter: grayscale(0.35);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-consign-tile:disabled {
+  cursor: not-allowed;
+  transform: none;
+}
+/* Calibration Mode OFF → consign tiles are hard-gated (see
+   _fcalHandleConsign + _fcalRefreshWritesBadge). Dim per-tile so the lock
+   reads clearly even without the .fcal-ctl-locked ancestor. */
+#page-field-calibration #fieldCalibrationSection .fcal-consign-tile.fcal-consign-tile-locked {
+  opacity: 0.5;
+  filter: grayscale(0.35);
+  cursor: not-allowed;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-consign-tile:disabled:hover {
+  background: color-mix(in srgb, var(--panel2) 80%, transparent);
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+  transform: none;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-force-toggle.fcal-ctl-disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-force-toggle input:disabled {
+  cursor: not-allowed;
+}
+/* (No bespoke responsive rule needed — the two control cards are ordinary
+   .fcal-grid-host cells, so they collapse 3→2→1 with the AC/DC group cards
+   via the host media queries above.) */
+
 /* ── Write controls (Phase 2) — inputs and Force checkbox ──────────────── */
+/* Slim toolbar — no orange slab. Just a quiet strip with a cached-auth
+   hint on the left and the two Force chips pushed to the right. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-controls {
   grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  margin: 10px 0 14px;
-  padding: 10px 14px;
-  background: color-mix(in srgb, var(--orange) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--orange) 40%, transparent);
-  border-radius: 6px;
-  font-size: 12.5px;
+  gap: 10px;
+  margin: 8px 0 10px;
+  padding: 8px 2px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  border-radius: 0;
+  font-size: 12px;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-controls-spacer { flex: 1 1 auto; }
+#page-field-calibration #fieldCalibrationSection .fcal-write-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text2);
+  font-size: 11.5px;
+}
+#page-field-calibration #fieldCalibrationSection .sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
 /* ── Force toggles — operator-armable bypass switches ─────────────────────
@@ -21273,88 +21939,89 @@ body.calib-session-active {
   border-radius: 3px;
   margin-right: 2px;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-force-toggle-detail {
-  color: inherit;
-  opacity: 0.85;
-  font-weight: var(--fw-regular, 400);
-  margin-left: 4px;
-}
 
 #page-field-calibration #fieldCalibrationSection .fcal-write-table .fcal-write-input {
-  width: 110px;
+  width: 100px;
   text-align: right;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12.5px;
+  font-size: 12px;
   padding: 4px 8px;
   font-variant-numeric: tabular-nums;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 6px;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
-
-/* Factor column also benefits from tabular numerals so values align
- * with the New Value input above. */
-#page-field-calibration #fieldCalibrationSection .fcal-table td.fcal-val {
+/* Dirty input — subtle accent ring so the operator can see, at a glance,
+   exactly which rows have unsaved edits (state-clarity). */
+#page-field-calibration #fieldCalibrationSection tr.fcal-row.fcal-dirty .fcal-write-input {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-val {
   font-variant-numeric: tabular-nums;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-write-table .btn-sm {
-  font-size: 11.5px;
-  padding: 4px 10px;
-}
-
-#page-field-calibration #fieldCalibrationSection .fcal-write-btn .mdi {
-  margin-right: 4px;
-}
-
-/* ── Copy panel (Phase 4) ──────────────────────────────────────────────── */
+/* ── Copy panel (Phase 4) — card system ───────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-copy-panel {
-  grid-column: 1 / -1;
-  margin: 14px 0 4px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--panel2) 60%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  margin: 10px 0;
+  background: var(--surface2);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+#page-field-calibration #fieldCalibrationSection .fcal-copy-header {
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--panel2) 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-copy-title {
-  font-size: 13px;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
   color: var(--text);
-  margin-bottom: 8px;
+  margin: 0;
 }
 
-/* ── Backup / snapshot panel ─────────────────────────────────────────── */
+#page-field-calibration #fieldCalibrationSection .fcal-copy-panel > .srn-controls {
+  padding: 10px 14px;
+}
+
+/* ── Backup / snapshot panel — card system ────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-backup-panel {
-  grid-column: 1 / -1;
-  margin: 14px 0 4px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--panel2) 50%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  margin: 10px 0;
+  background: var(--surface2);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-header {
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--panel2) 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-#page-field-calibration #fieldCalibrationSection .fcal-backup-subtitle {
-  font-weight: 400;
-  color: var(--text2);
-  font-size: 11.5px;
-  margin-left: 6px;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  margin: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-actions {
@@ -21362,11 +22029,21 @@ body.calib-session-active {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
+/* Note field grows to fill the header but stays bounded so the two
+   buttons keep a stable position on the right. */
+#page-field-calibration #fieldCalibrationSection .fcal-backup-note-input {
+  flex: 1 1 200px;
+  min-width: 150px;
+  max-width: 320px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-status {
   min-height: 18px;
-  margin-bottom: 6px;
+  padding: 8px 14px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-list {
@@ -21375,6 +22052,7 @@ body.calib-session-active {
   gap: 6px;
   max-height: 320px;
   overflow-y: auto;
+  padding: 8px 14px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-row {
@@ -21382,11 +22060,24 @@ body.calib-session-active {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 12px;
+  padding: 9px 12px 9px 14px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel2) 80%, transparent);
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
   font-size: 12.5px;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-backup-row:hover {
+  background: color-mix(in srgb, var(--panel2) 95%, transparent);
+  border-color: color-mix(in srgb, var(--border) 85%, transparent);
+}
+/* Left stripe mirrors the source badge color for at-a-glance scanning. */
+#page-field-calibration #fieldCalibrationSection .fcal-backup-row:has(.fcal-backup-source-baseline) {
+  border-left-color: color-mix(in srgb, var(--green) 60%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection .fcal-backup-row:has(.fcal-backup-source-post-write) {
+  border-left-color: color-mix(in srgb, var(--orange) 60%, transparent);
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-row-main {
@@ -21397,13 +22088,15 @@ body.calib-session-active {
 #page-field-calibration #fieldCalibrationSection .fcal-backup-row-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px 10px;
   align-items: center;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-source {
-  display: inline-block;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.3px;
   padding: 2px 8px;
@@ -21411,6 +22104,8 @@ body.calib-session-active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
   text-transform: uppercase;
+  min-width: 104px;
+  flex: 0 0 auto;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-backup-source-baseline {
   background: color-mix(in srgb, var(--green) 16%, transparent);
@@ -21426,8 +22121,18 @@ body.calib-session-active {
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-ts {
-  color: var(--text2);
+  color: var(--text);
   font-size: 11.5px;
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+
+#page-field-calibration #fieldCalibrationSection .fcal-backup-session {
+  font-size: 11px;
+  color: var(--text2);
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--border) 35%, transparent);
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-backup-note {
@@ -21476,5 +22181,373 @@ body.calib-session-active #fieldCalibrationSection {
   outline: 2px solid color-mix(in srgb, var(--red) 50%, transparent);
   outline-offset: 6px;
   border-radius: 8px;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Standalone Calibrator mode (.calibrator-mode)
+   The class is set in TWO places, both intentional:
+     1. An inline <head> script in index.html adds it to <html> BEFORE the
+        body is parsed — this is what prevents a flash of the fleet dashboard
+        on the first paint of the calibrator window.
+     2. handleCalibratorMode() in app.js also adds it to <body> (belt &
+        suspenders / SPA bookkeeping).
+   The selector is `.calibrator-mode` (no element qualifier) so it matches
+   whether the class lands on <html> or <body>. Zero effect on the normal
+   dashboard (class is never set there).
+   ─────────────────────────────────────────────────────────────────────────── */
+.calibrator-mode #titlebar,
+.calibrator-mode #sideNav,
+.calibrator-mode #globalProgressRow,
+.calibrator-mode #licenseNotice,
+.calibrator-mode #navToggleBtn {
+  display: none !important;
+}
+
+/* Reclaim the full window now that the header + progress strip are gone. */
+.calibrator-mode #main {
+  top: 0 !important;
+  right: 0 !important;
+  left: 0 !important;
+  bottom: 0 !important;
+}
+
+/* Hide every page except Field Calibration so there is never a flash of the
+   fleet grid before the JS route settles. */
+.calibrator-mode #main > .page:not(#page-field-calibration) {
+  display: none !important;
+}
+
+/* Transport selector — only meaningful for the standalone calibrator (its
+   /api/transport/select + /api/serial/ports routes live on :3600, not the
+   dashboard :3500). Hidden everywhere except calibrator mode. Theme-token
+   styling so it adapts across all themes. */
+.fcal-transport {
+  display: none;
+}
+
+.calibrator-mode .fcal-transport {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+/* ── Firmware Upgrade (EXPERIMENTAL) — calibrator mode ONLY ────────────────
+   Hidden on the dashboard build entirely; the brick-risk feature only
+   surfaces in the standalone Inverter Calibration Tool. Opened from the
+   top-right "FW Upgrade" button as a centred modal dialog. Theme-token
+   styled so it adapts across all themes. */
+
+/* Top-right opener button — calibrator mode only, pushed to the right
+   edge of the .srn-controls row. */
+.fcal-fw-open {
+  display: none;
+}
+
+.calibrator-mode .fcal-fw-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  border-color: var(--red, #d9534f);
+  color: var(--red, #d9534f);
+}
+
+/* The modal is never shown outside calibrator mode and is hidden until
+   opened (the [hidden] attribute is toggled by JS). */
+.fcal-fw-modal {
+  display: none;
+}
+
+.calibrator-mode .fcal-fw-modal:not([hidden]) {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+}
+
+.calibrator-mode .fcal-fw-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.calibrator-mode .fcal-fw-dialog {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, 94vw);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--red, #d9534f);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.calibrator-mode .fcal-fw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.calibrator-mode .fcal-fw-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--red, #d9534f);
+}
+
+.calibrator-mode .fcal-fw-body {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calibrator-mode .fcal-fw-warn {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--orange, #e0a800);
+  background: color-mix(in srgb, var(--orange, #e0a800) 12%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  border-radius: 4px;
+}
+
+.calibrator-mode .fcal-fw-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.calibrator-mode .fcal-fw-box {
+  font-family: var(--mono-font, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, var(--surface));
+  color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-adv summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted, var(--text));
+  user-select: none;
+}
+
+.calibrator-mode .fcal-fw-adv[open] summary {
+  margin-bottom: 8px;
+}
+
+.calibrator-mode .fcal-fw-arm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--red, #d9534f);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red, #d9534f) 8%, transparent);
+}
+
+.calibrator-mode .fcal-fw-arm-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--red, #d9534f);
+}
+
+.calibrator-mode .fcal-fw-sha {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.calibrator-mode .fcal-fw-progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.calibrator-mode .fcal-fw-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent, #2f7ed8);
+  transition: width 0.25s ease;
+}
+
+.calibrator-mode .fcal-fw-progress-text {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-log {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--mono-font, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, var(--surface));
+  color: var(--text);
+}
+
+/* Each logical line. Wraps gracefully on narrow widths without orphaning a
+   label from its control (pairs are kept together via .fcal-tg). */
+.calibrator-mode .fcal-transport-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.calibrator-mode .fcal-transport-row-top {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+
+.calibrator-mode .fcal-transport-label {
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.calibrator-mode .fcal-transport-modes {
+  display: flex;
+  gap: 16px;
+}
+
+.calibrator-mode .fcal-transport-mode {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* Push Connect to the far right of the top row. */
+.calibrator-mode .fcal-transport-connect {
+  margin-left: auto;
+}
+
+/* Hidden serial/tcp pane. */
+.calibrator-mode .fcal-transport-pane[hidden] {
+  display: none;
+}
+
+/* Label+control pair — inline unit that never splits across a wrap. */
+.calibrator-mode .fcal-tg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+/* The class rule above out-specifies the UA [hidden] { display:none }, so a
+   .fcal-tg group with the hidden attribute would still render (e.g. the
+   optional "From IP config" dropdown when no IP config is available). Honor
+   hidden explicitly. */
+.calibrator-mode .fcal-tg[hidden] {
+  display: none !important;
+}
+
+.calibrator-mode .fcal-tg .invclock-label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.calibrator-mode .fcal-transport-hint {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.calibrator-mode .fcal-transport-sub {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.calibrator-mode .fcal-transport-msg {
+  min-height: 16px;
+}
+
+/* Standalone tool connects to ONE inverter by IP (Ethernet) or COM port —
+   the fleet "Inverter" picker is redundant here. Hide its label + select in
+   calibrator mode; NODE (slave/block id) + Read remain. The picker stays in
+   the DOM (still populated so FieldCalibrationUI.inverter has a valid value
+   for the calibration route, whose {ip} segment the calibrator shim drops). */
+.calibrator-mode label[for="fcalInverterPicker"],
+.calibrator-mode #fcalInverterPicker {
+  display: none !important;
+}
+
+/* Floating theme-cycle control. The titlebar (and its theme toggle) is hidden
+   in calibrator mode, so this is the only theme affordance. It is built only
+   in calibrator mode by handleCalibratorMode(); styling is theme-token based
+   so it adapts to every theme (dark/light/classic/midnight) automatically. */
+#calibratorThemeFab {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 100000;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: transform 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+#calibratorThemeFab:hover {
+  background: var(--accent);
+  color: var(--surface);
+  transform: scale(1.06);
+}
+
+#calibratorThemeFab:active {
+  transform: scale(0.96);
 }
 

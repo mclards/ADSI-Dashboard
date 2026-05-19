@@ -561,3 +561,69 @@ def preflight_read_with_lock(client, lock: threading.Lock, slave: int) -> dict:
         except CalibIoError as exc:
             out["error"] = str(exc)
         return out
+
+
+# ─── Active Power Control (APC) — Continuous %P Setpoint ────────────────────
+# Verified protocol 2026-05-04: FC16 → reg 0x03E8 (1000)
+#   opcode 0x0005 = STOP  |  0x0006 = START  |  0x0003 = SET-ACTIVE-PCT
+#   reg[1001] = Q15 setpoint = (pct/100) × 0x7FFF  (only when opcode=0x0003)
+# Wire test: PAC 143 kW → 125 kW within 8 s at 50 % on inverter .126 slave 1.
+# See plans/2026-05-04-curtailment-control.md §1 for full verification record.
+
+APC_REG          = 0x03E8   # 1000 — command register
+APC_OPCODE_SET_P = 0x0003
+APC_OPCODE_STOP  = 0x0005
+APC_OPCODE_START = 0x0006
+APC_Q15_MAX      = 0x7FFF
+
+
+def _q15_from_pct(pct: float) -> int:
+    """Convert 0..100 % to Q15 integer (0x0000..0x7FFF). Clamps at bounds."""
+    v = int(round((max(0.0, min(100.0, float(pct))) / 100.0) * APC_Q15_MAX))
+    return max(0, min(APC_Q15_MAX, v))
+
+
+def _consign_apc_sync(client, lock: threading.Lock, slave: int, pct: float) -> dict:
+    """Write SET-ACTIVE-PCT (opcode 0x0003) with Q15 setpoint. Blocking.
+
+    Caller MUST pass an already-verified pct in [0, 100].
+    Returns {ok, pct, q15, error?} dict ready for HTTP serialization.
+    """
+    q15 = _q15_from_pct(pct)
+    values = [APC_OPCODE_SET_P, q15]
+    out = {"pct": float(pct), "q15": int(q15), "ok": False}
+
+    try:
+        with lock:
+            r = client.write_registers(address=APC_REG, values=values, unit=int(slave))
+        if r is None:
+            out["error"] = "null_response"
+            return out
+        if r.isError():
+            out["error"] = f"modbus_error: {r}"
+            return out
+        out["ok"] = True
+        return out
+    except Exception as exc:
+        out["error"] = f"exception: {exc}"
+        return out
+
+
+def consign_apc_with_lock(client, lock: threading.Lock, slave: int, pct: float) -> dict:
+    """Write APC setpoint for reactive calibration consign @ specified percent.
+
+    Validates 0 <= pct <= 100, then calls _consign_apc_sync under the lock.
+    Returns {ok, pct, q15, error?}.
+
+    This is the single-source calibration-grade APC writer, used by both
+    inverter_engine.py (async wrapper) and CalibratorService.py (standalone).
+    """
+    pct_f = float(pct)
+    if pct_f < 0.0 or pct_f > 100.0:
+        return {
+            "ok": False,
+            "pct": pct_f,
+            "q15": 0,
+            "error": f"percent must be 0..100, got {pct_f}",
+        }
+    return _consign_apc_sync(client, lock, int(slave), pct_f)

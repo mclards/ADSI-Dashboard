@@ -5622,6 +5622,14 @@ const PROXY_TIMEOUT_RULES = [
   // and POST /api/serial/:inv/:slave triggers a fleet-wide uniqueness scan
   // before writing. Worst-case ~60-90 s on a healthy plant; 5 s default
   // was killing the Plant Serial Map "Scan plant" button in remote mode.
+  // Bulk re-serialize. /bulk/apply writes the locked serial to every
+  // selected node SEQUENTIALLY (unlock+write+1s-verify+readback ≈ 3-4 s
+  // each); a worst-case 108-node pass is ~10-12 min, so it needs a much
+  // larger ceiling than the 60 s generic /api/serial/ bucket or the proxy
+  // aborts it mid-write in remote mode. /bulk/plan is a full-fleet FC11
+  // scan (same class as /fleet/). More specific prefix first (first-match).
+  ["/api/serial/bulk/apply", 960000],  // 16 min — sequential whole-fleet write
+  ["/api/serial/bulk/",      180000],  // 3 min  — plan scan / static map
   ["/api/serial/fleet/",  180000],  // 3 min — full-fleet scan / uniqueness
   ["/api/serial/",         60000],  // 60 s  — single read / read-all / send
   // Field Calibration "Scan Fleet" walks every (inverter, slave) over
@@ -7367,10 +7375,26 @@ function getTailscaleStatusSnapshot(deviceHintOverride = "") {
   };
 }
 
+// Read-only operator-diagnostic endpoints that MUST stay public — never
+// gated by the remote API token, in any mode (gateway OR remote). The
+// Parameters page is the canonical case: a token mismatch between boxes,
+// or a non-loopback browser, would otherwise return "Unauthorized API
+// request." and render the table blank. Scoped strictly to GET so no
+// write/control surface is ever widened. Mirrors the existing public
+// posture of /api/counter-state/summary and the calibration read-only ops.
+function _isPublicUnauthedApiPath(req) {
+  if (String(req?.method || "").toUpperCase() !== "GET") return false;
+  // The "/api" mount strips the prefix from req.path inside this middleware,
+  // so match the never-stripped originalUrl.
+  const p = String(req?.originalUrl || req?.url || "").split("?")[0];
+  return /^\/api\/params(\/|$)/.test(p);
+}
+
 function remoteApiTokenGate(req, res, next) {
   const token = getRemoteApiToken();
   if (!token) return next();
   if (isLoopbackRequest(req)) return next();
+  if (_isPublicUnauthedApiPath(req)) return next();
   const provided = resolveRequestToken(req);
   if (provided === token) return next();
   return res.status(401).json({ ok: false, error: "Unauthorized API request." });
@@ -12248,6 +12272,11 @@ function defaultIpConfig() {
   return cfg;
 }
 
+// NOTE: the old RS485-USB fleet bridge `serial` ipconfig block was removed in
+// v2.11.x — field calibration over RS485-USB now lives in the standalone
+// Inverter Calibration Tool (its own /api/transport/select on :3600), so the
+// dashboard ipconfig no longer carries or sanitizes a `serial` key.
+
 function sanitizeIpConfig(input) {
   const out = defaultIpConfig();
   const src = input && typeof input === "object" ? input : {};
@@ -16443,6 +16472,333 @@ async function _proxySerialRead(inverter, slave, { fmt = "auto" } = {}) {
   return { ok: false, error: lastErr || "engine unreachable" };
 }
 
+// Extend the request/response socket timeout for the long-running bulk
+// routes so Node's default ~5-min server.requestTimeout doesn't destroy
+// the connection mid-operation on the LOCAL (gateway-mode) path. Scoped to
+// these handlers only — global server timeouts are left untouched.
+function _extendBulkSocketTimeout(req, res, ms) {
+  try { if (typeof req.setTimeout === "function") req.setTimeout(ms); } catch (_) {}
+  try { if (typeof res.setTimeout === "function") res.setTimeout(ms); } catch (_) {}
+  try {
+    if (req.socket && typeof req.socket.setTimeout === "function") {
+      req.socket.setTimeout(ms);
+    }
+  } catch (_) {}
+}
+
+// Internal helper — one UNLOCK+WRITE+VERIFY against Python for bulk
+// re-serialize.  Mirrors the inline fetch in POST /api/serial/:inv/:slave
+// but without the operator session-token gate (the bulk orchestrator reads
+// the live serial immediately before writing, which preserves the same
+// "never write blind" invariant).  Never throws — returns the engine body
+// or a synthesized error envelope.  Bounded by a 45 s AbortController so a
+// single hung node cannot stall the whole sequential bulk loop (the engine
+// pipeline is unlock+write+1 s verify ≈ 3-4 s; 45 s is generous head-room).
+async function _proxySerialWrite(inverter, slave, newSerial, fmt) {
+  const url = `${INVERTER_ENGINE_SERIAL_URL}/${inverter}/${slave}`;
+  const headers = {
+    "content-type": "application/json",
+    "x-bulk-auth": _currentSacupsKey(),
+  };
+  const _abort = new AbortController();
+  const _to = setTimeout(() => { try { _abort.abort(); } catch (_) {} }, 45000);
+  if (_to && typeof _to.unref === "function") _to.unref();
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ new_serial: newSerial, fmt }),
+      signal: _abort.signal,
+    });
+    const body = await r.json().catch(() => null);
+    if (!r.ok || !body) {
+      return {
+        ok: false,
+        status: "engine_error",
+        error: body?.detail || body?.error || `engine HTTP ${r.status}`,
+      };
+    }
+    return body;
+  } catch (err) {
+    const aborted = err?.name === "AbortError";
+    return {
+      ok: false,
+      status: aborted ? "engine_timeout" : "engine_unreachable",
+      error: aborted ? "engine write timed out after 45s" : (err?.message || String(err)),
+    };
+  } finally {
+    clearTimeout(_to);
+  }
+}
+
+// ─── Bulk re-serialize (canonical map) ────────────────────────────────────
+// Registered BEFORE the generic /:inverter/:slave shape so "bulk" is not
+// captured as :inverter.
+
+// GET /api/serial/bulk/map — the locked factory serial map.
+// Pure read of a static module (no Modbus, no auth) so the UI can render
+// the table in any mode. The map is generated 1:1 from the authoritative
+// docs/Fixed_Inverter_SerialNumbers.xlsx (the permanent field guide).
+app.get("/api/serial/bulk/map", (req, res) => {
+  const { FIXED_SERIAL_MAP, FIXED_SERIAL_FMT } = require("./serialFixedMap");
+  res.json({
+    ok: true,
+    fmt: FIXED_SERIAL_FMT,
+    source: "docs/Fixed_Inverter_SerialNumbers.xlsx",
+    note: "\"T\" is the inverter nameplate (reference only) — never written. "
+        + "Modbus slaves 1..4 are the writable nodes.",
+    map: FIXED_SERIAL_MAP,
+  });
+});
+
+// POST /api/serial/bulk/plan — scan the fleet, diff every writable node
+// against the canonical map, return the classified plan (no writes).
+// Bulk-auth gated, gateway-only (Modbus-driving).
+//   body: { bypass_cache?: bool (default true — a re-serialize plan should
+//           reflect the live wire, not a 5-min-old cache) }
+app.post(
+  "/api/serial/bulk/plan",
+  express.json(),
+  _proxySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    // Local path: a full-fleet FC11 scan can outlast Node's default
+    // ~5-min server.requestTimeout — extend this socket so it isn't
+    // destroyed mid-scan. (Remote path already returned via the proxy.)
+    _extendBulkSocketTimeout(req, res, 240000);
+    const topology = _buildTopologyForSerial();
+    if (!topology.length) {
+      return res.status(400).json({ ok: false, error: "no inverters configured" });
+    }
+    const bypassCache = req.body?.bypass_cache !== false; // default ON
+    try {
+      const scan = await serialNumber.fleetScan({
+        topology,
+        readOne: (inv, slave, opts) => _proxySerialRead(inv, slave, opts),
+        bypassCache,
+      });
+      const plan = serialNumber.buildBulkPlan({
+        scanRows: scan.rows,
+        topology,
+      });
+      res.json({
+        ok: true,
+        bypass_cache: bypassCache,
+        scanned_at_ms: scan.finished_at_ms,
+        scan_failed: scan.failed,
+        ...plan,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  },
+);
+
+// POST /api/serial/bulk/apply — write the canonical serial to each selected
+// (inverter, slave).  Sequential (keeps the RS485 bus quiet + clean audit
+// attribution), read-immediately-before-write, uniqueness check skipped by
+// design (the canonical map is pre-validated globally unique), every write
+// logged + readback-verified.  Bulk-auth gated, gateway-only.
+// Relocation guard: the live serial is re-read here (authoritative) and
+// looked up in the locked map. If it belongs to a DIFFERENT slot the board
+// was physically moved — the write is skipped as `needs_ack` unless
+// `ack_relocations` is set, and either way the origin is logged.
+//   body: {
+//     targets: [{ inverter, slave }, ...],   // required, ≤108
+//     ack_relocations: bool,                 // allow re-serializing moved modules
+//     acted_by?: string,
+//   }
+app.post(
+  "/api/serial/bulk/apply",
+  express.json(),
+  _proxySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    // Sequential whole-fleet write can run 10+ min — extend this socket so
+    // Node's default ~5-min requestTimeout doesn't kill it on the local
+    // (gateway-mode) path. Remote path already returned via the proxy,
+    // which honours the /api/serial/bulk/apply PROXY_TIMEOUT_RULES entry.
+    _extendBulkSocketTimeout(req, res, 960000);
+    const {
+      FIXED_SERIAL_MAP, FIXED_SERIAL_FMT, lookupSerialOrigin,
+    } = require("./serialFixedMap");
+    const body = req.body || {};
+    const ackRelocations = Boolean(body.ack_relocations);
+    const actedBy = String(
+      body.acted_by || req.headers["x-acted-by"] || "OPERATOR",
+    ).slice(0, 64);
+    const rawTargets = Array.isArray(body.targets) ? body.targets : [];
+    if (!rawTargets.length) {
+      return res.status(400).json({ ok: false, error: "targets[] required" });
+    }
+    if (rawTargets.length > 108) {
+      return res.status(400).json({ ok: false, error: "too many targets (max 108)" });
+    }
+    // Normalise + validate every target against the canonical map up front.
+    const targets = [];
+    for (const t of rawTargets) {
+      const inv = Number(t?.inverter);
+      const slave = Number(t?.slave);
+      if (!FIXED_SERIAL_MAP[inv] || ![1, 2, 3, 4].includes(slave)) {
+        return res.status(400).json({
+          ok: false,
+          error: `invalid target inverter=${t?.inverter} slave=${t?.slave}`,
+        });
+      }
+      targets.push({ inv, slave });
+    }
+
+    const results = [];
+    for (const { inv, slave } of targets) {
+      const ip = _resolveInverterIp(inv);
+      const target = FIXED_SERIAL_MAP[inv][String(slave)];
+      const row = {
+        inverter: inv, slave, ip: ip || null,
+        target_serial: target,
+        old_serial: null, status: null, verify_passed: false, error: null,
+        origin_kind: null, origin: null, origin_note: null,
+      };
+      if (!ip) {
+        row.status = "no_ip";
+        row.error = `no IP configured for inverter ${inv}`;
+        results.push(row);
+        continue;
+      }
+      // Read live serial immediately before writing (captures old_serial
+      // for the audit row, lets us skip a node already correct, and is the
+      // authoritative input to the relocation guard).
+      const read = await _proxySerialRead(inv, slave, { fmt: "auto" });
+      if (!read?.ok) {
+        row.status = "unreachable";
+        row.error = read?.error || "read_failed";
+        try {
+          serialNumber.logSerialChange(db, {
+            inverterId: inv, inverterIp: ip, slave,
+            actedAtMs: Date.now(), actedBy,
+            fmt: FIXED_SERIAL_FMT, oldSerial: "", newSerial: target,
+            verifyPassed: false, outcome: "bulk_read_failed",
+            errorDetail: row.error,
+          });
+        } catch (_) { /* non-fatal */ }
+        results.push(row);
+        continue;
+      }
+      row.old_serial = read.serial || "";
+      if (row.old_serial === target) {
+        row.status = "match_skipped";
+        results.push(row);
+        continue;
+      }
+      // ── Relocation guard (server-authoritative, auto-detected) ──────
+      // Look the LIVE serial up in the locked map. If it belongs to a
+      // different slot, this physical module was moved here — capture the
+      // origin and require acknowledgement before re-serializing it.
+      const found = lookupSerialOrigin(row.old_serial);
+      let needsAck = false;
+      if (!found) {
+        row.origin_kind = "unknown";
+        row.origin_note =
+          `prior serial ${row.old_serial} not in locked map (factory-default / foreign)`;
+      } else if (found.kind === "nameplate") {
+        row.origin_kind = "nameplate";
+        row.origin = { inverter: found.inverter, node: found.node };
+        row.origin_note =
+          `live serial ${row.old_serial} is the nameplate of Inv ${found.inverter} (unexpected on a node)`;
+        needsAck = true;
+      } else if (found.inverter === inv && Number(found.node) === Number(slave)) {
+        row.origin_kind = "unknown";
+        row.origin_note = `in-place correction (prior ${row.old_serial})`;
+      } else {
+        row.origin_kind = "relocated";
+        row.origin = { inverter: found.inverter, node: found.node };
+        row.origin_note =
+          `module from Inv ${found.inverter} / Node ${found.node} (serial ${row.old_serial})`;
+        needsAck = true;
+      }
+      if (needsAck && !ackRelocations) {
+        row.status = "needs_ack";
+        row.error = "relocated module — ack_relocations required";
+        // Still log the detection so the move is traceable even when the
+        // write is deferred.
+        try {
+          serialNumber.logSerialChange(db, {
+            inverterId: inv, inverterIp: ip, slave,
+            actedAtMs: Date.now(), actedBy,
+            fmt: FIXED_SERIAL_FMT,
+            oldSerial: row.old_serial, newSerial: target,
+            verifyPassed: false, outcome: "bulk_needs_ack",
+            errorDetail: row.error, originNote: row.origin_note,
+            originInverter: row.origin?.inverter ?? null,
+            originNode: row.origin?.node ?? null,
+          });
+        } catch (_) { /* non-fatal */ }
+        results.push(row);
+        continue;
+      }
+      // UNLOCK + WRITE + VERIFY via Python (uniqueness check intentionally
+      // skipped — the canonical map is proven globally unique).
+      const up = await _proxySerialWrite(inv, slave, target, FIXED_SERIAL_FMT);
+      const status = String(up?.status || (up?.ok ? "success" : "unknown"));
+      const verifyPassed = Boolean(up?.verify_passed);
+      row.status = up?.ok && verifyPassed ? "success" : (status || "fail");
+      row.verify_passed = verifyPassed;
+      row.readback = up?.readback || null;
+      if (!row.verify_passed) row.error = up?.error || status;
+      try {
+        serialNumber.logSerialChange(db, {
+          inverterId: inv, inverterIp: ip, slave,
+          actedAtMs: Number(up?.acted_at_ms) || Date.now(),
+          actedBy,
+          fmt: FIXED_SERIAL_FMT,
+          oldSerial: row.old_serial, newSerial: target,
+          verifyPassed,
+          outcome: `bulk_${status}`,
+          errorDetail: row.error || null,
+          originNote: row.origin_note,
+          originInverter: row.origin?.inverter ?? null,
+          originNode: row.origin?.node ?? null,
+        });
+      } catch (err) {
+        console.warn("[serial-bulk] audit log insert failed:", err.message);
+      }
+      if (row.verify_passed) {
+        serialNumber.invalidateCachedSerial(ip, slave);
+        serialNumber.setCachedSerial(ip, slave, target);
+      }
+      try {
+        logControlAction({
+          operator: actedBy, inverter: inv, node: slave,
+          action: "serial_change", scope: "bulk",
+          result: row.verify_passed ? "ok" : "fail",
+          ip,
+          reason: `bulk old=${row.old_serial} new=${target} status=${status}`
+                + (row.origin_kind === "relocated" ? ` [${row.origin_note}]` : ""),
+        });
+      } catch (_) { /* non-fatal */ }
+      results.push(row);
+    }
+
+    const tally = (s) => results.filter((r) => r.status === s).length;
+    res.json({
+      ok: true,
+      acted_by: actedBy,
+      total: results.length,
+      summary: {
+        success: tally("success"),
+        match_skipped: tally("match_skipped"),
+        unreachable: tally("unreachable"),
+        needs_ack: tally("needs_ack"),
+        no_ip: tally("no_ip"),
+        failed: results.filter(
+          (r) => !["success", "match_skipped", "unreachable", "needs_ack", "no_ip"]
+            .includes(r.status),
+        ).length,
+      },
+      results,
+    });
+  },
+);
+
 // IMPORTANT: register the literal-prefixed routes (/log/:inverter,
 // /fleet-cache) BEFORE the generic two-segment shape /:inverter/:slave so
 // Express doesn't capture "log" as :inverter and "1" as :slave.
@@ -16470,6 +16826,70 @@ app.get("/api/serial/log/:inverter", (req, res) => {
 // GET /api/serial/fleet-cache — diagnostic surface for the cached map.
 app.get("/api/serial/fleet-cache", (req, res) => {
   res.json({ ok: true, entries: serialNumber.getFleetCacheSnapshot() });
+});
+
+// GET /api/serial/migration-history — Power Module Migration History.
+// Chronological trail of every physically relocated board (rows whose
+// structured origin slot differs from where they were found). Pure DB
+// read of serial_change_log — public, like /api/serial/log/:inverter, and
+// works in remote mode off the replicated table (no Modbus, no proxy).
+//   query: ?limit=N (default 200, max 5000), ?inverter=ID (optional filter)
+app.get("/api/serial/migration-history", (req, res) => {
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 200));
+  let inverterIp = null;
+  const invQ = Number(req.query.inverter);
+  if (Number.isFinite(invQ) && invQ > 0) inverterIp = _resolveInverterIp(invQ) || null;
+  try {
+    const rows = serialNumber.getModuleMigrationHistory(db, {
+      limit, inverterIp,
+    });
+    res.json({
+      ok: true,
+      total: rows.length,
+      filtered_inverter: Number.isFinite(invQ) && invQ > 0 ? invQ : null,
+      rows,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// NOTE: Measurement Board migration export is served by the standard
+// export pipeline — POST /api/export/measurement-board-migration — so it
+// produces a styled XLSX/CSV in the same Logs directory tree, with the
+// same date-aware filename convention, as every other export. See that
+// route alongside /api/export/alarms etc.
+
+// GET /api/serial/ports — RS485-USB bridge (Option A). Lists COM ports the
+// gateway PC can see, for the Settings → RS485 Bus picker. Topology-gated
+// (same gate as IP Config — it exposes local hardware inventory). The port
+// list is gateway-local hardware, so proxy to the gateway in remote mode.
+app.get("/api/serial/ports", requireTopologyAuth, (req, res) => {
+  if (isRemoteMode())
+    return proxyToRemote(req, res, "", { forwardOperatorAuth: true });
+  const _abort = new AbortController();
+  const _to = setTimeout(() => {
+    try {
+      _abort.abort();
+    } catch (_) {}
+  }, 8000);
+  if (_to?.unref) _to.unref();
+  fetch(`${INVERTER_ENGINE_BASE_URL}/serial/ports`, {
+    method: "GET",
+    headers: { "content-type": "application/json" },
+    signal: _abort.signal,
+  })
+    .then((r) => r.json().catch(() => ({ ports: [] })))
+    .then((body) => {
+      const ports = Array.isArray(body?.ports) ? body.ports : [];
+      res.json({ ok: true, ports });
+    })
+    .catch((err) => {
+      res
+        .status(502)
+        .json({ ok: false, error: `engine unreachable: ${err.message}`, ports: [] });
+    })
+    .finally(() => clearTimeout(_to));
 });
 
 // Internal — build the topology list (every (inverter, slave) with a
@@ -16726,21 +17146,32 @@ app.post(
     }
     const oldSerial = sess.session.oldSerial;
 
-    // ── Override gate ──────────────────────────────────────────────
-    // override_conflicts requires a topology-auth key on top of bulk auth.
-    if (overrideConflicts) {
-      const topKey = String(
-        req.headers["x-topology-key"] || req.headers["x-substation-key"] || "",
-      ).trim().toLowerCase();
-      const mm = String(new Date().getMinutes()).padStart(2, "0");
-      const prevMm = String((new Date().getMinutes() + 59) % 60).padStart(2, "0");
-      const ok = topKey === `adsim` || topKey === `adsi${mm}` || topKey === `adsi${prevMm}`;
-      if (!ok) {
-        return res.status(401).json({
-          ok: false, error: "Override requires topology auth (header x-topology-key).",
-        });
+    // ── Relocation provenance (single-send path) ───────────────────
+    // So the Power Module Migration History is complete regardless of
+    // whether a board was re-serialized via Bulk Fix or the one-by-one
+    // Send: if the captured prior serial belongs to a different locked
+    // slot, this board was physically moved here — record its origin.
+    let _ssOriginNote = null, _ssOriginInv = null, _ssOriginNode = null;
+    try {
+      const { lookupSerialOrigin: _lkup } = require("./serialFixedMap");
+      const _fo = _lkup(oldSerial);
+      if (_fo && !(_fo.inverter === inv && Number(_fo.node) === Number(slave))) {
+        _ssOriginInv = _fo.inverter;
+        _ssOriginNode = _fo.node;
+        _ssOriginNote = _fo.kind === "nameplate"
+          ? `live serial ${oldSerial} is the nameplate of Inv ${_fo.inverter} (unexpected on a node)`
+          : `module from Inv ${_fo.inverter} / Node ${_fo.node} (serial ${oldSerial})`;
       }
-    }
+    } catch (_) { /* map module optional — never block a write */ }
+
+    // ── Override gate ──────────────────────────────────────────────
+    // CONSISTENCY (2026-05-19, operator directive): the entire serial
+    // feature uses ONE credential — bulk control (sacupsMM), already
+    // enforced by `_requireBulkAuth` on this route. The duplicate-serial
+    // override no longer demands a second topology (adsiMM) key — that
+    // was the lone inconsistency (Bulk Fix writes deliberate values with
+    // bulk auth alone). `override_conflicts` still just bypasses the
+    // uniqueness block; the operator confirm dialog remains the guard.
 
     // ── Fleet uniqueness check (skippable via check_uniqueness=false) ──
     let uniqueness = null;
@@ -16796,6 +17227,9 @@ app.post(
             verifyPassed: false,
             outcome: "engine_error",
             errorDetail: detail,
+            originNote: _ssOriginNote,
+            originInverter: _ssOriginInv,
+            originNode: _ssOriginNode,
           });
         } catch (_) { /* non-fatal */ }
         return res.status(502).json({
@@ -16811,6 +17245,9 @@ app.post(
           verifyPassed: false,
           outcome: "engine_unreachable",
           errorDetail: err.message,
+          originNote: _ssOriginNote,
+          originInverter: _ssOriginInv,
+          originNode: _ssOriginNode,
         });
       } catch (_) { /* non-fatal */ }
       return res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
@@ -16829,6 +17266,9 @@ app.post(
         verifyPassed,
         outcome: status,
         errorDetail: upstream.error || null,
+        originNote: _ssOriginNote,
+        originInverter: _ssOriginInv,
+        originNode: _ssOriginNode,
       });
     } catch (err) {
       console.warn("[serial] audit log insert failed:", err.message);
@@ -18758,10 +19198,7 @@ app.get("/api/ip-config", (req, res) => {
   }
 });
 
-app.post("/api/ip-config", (req, res) => {
-  if (isRemoteMode()) {
-    return proxyToRemote(req, res);
-  }
+function _applyIpConfigPost(req, res) {
   try {
     const cfg = saveIpConfigToDb(req.body || {});
     mirrorIpConfigToLegacyFiles(cfg);
@@ -18776,6 +19213,26 @@ app.post("/api/ip-config", (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+}
+
+app.post("/api/ip-config", (req, res) => {
+  if (isRemoteMode()) {
+    return proxyToRemote(req, res);
+  }
+  // RS485 bridge hardening (scoped): a `serial` block redirects inverter
+  // polling to a local bridge listener — a privileged change. Gate ONLY
+  // requests that carry it. Serial-less IP-config saves keep their exact
+  // prior behavior (no contract change → nothing existing breaks); the RS485
+  // settings UI already sends x-topology-key. The broader pre-existing fact
+  // that this endpoint is otherwise ungated is surfaced to the operator
+  // separately and intentionally NOT widened here (out of feature scope,
+  // remote-mode IP-config sync risk).
+  const bodyHasSerial =
+    req.body && typeof req.body === "object" && req.body.serial != null;
+  if (bodyHasSerial) {
+    return requireTopologyAuth(req, res, () => _applyIpConfigPost(req, res));
+  }
+  return _applyIpConfigPost(req, res);
 });
 
 // ───── Substation Meter Endpoints (E2a-c) ─────
@@ -22594,6 +23051,24 @@ app.post("/api/export/audit", async (req, res) => {
     return sendExportRouteError(res, e);
   }
 });
+// Measurement Board (power module) migration history — styled XLSX/CSV
+// into the standard Audits export tree (not date-range filtered: it is the
+// full relocation trail, optionally narrowed by inverter).
+app.post("/api/export/measurement-board-migration", async (req, res) => {
+  try {
+    if (isRemoteMode()) {
+      return res.json(await downloadRemoteExportToLocal(
+        "/api/export/measurement-board-migration", req.body || {}));
+    }
+    const payload = req.body || {};
+    const outPath = await runGatewayExportJob("measurement-board-migration", () =>
+      exporter.exportMeasurementBoardMigration(payload),
+    );
+    return res.json(buildExportResult(outPath));
+  } catch (e) {
+    return sendExportRouteError(res, e);
+  }
+});
 app.post("/api/export/daily-report", async (req, res) => {
   try {
     if (isRemoteMode()) {
@@ -23538,8 +24013,16 @@ function _flushAndClose() {
   } catch (err) {
     console.warn("[Server] Parameters aggregator shutdown flush failed:", err?.message || err);
   }
-  cleanupGatewayMainDbSnapshotSync();
-  closeDb();                                      // WAL checkpoint + db.close
+  // Failure-isolated so the WAL checkpoint is ALWAYS reached. _flushClosed
+  // is already true (set above), so if anything here threw, the
+  // process 'exit' safety-net's retry would early-return on that guard and
+  // closeDb() would never run — leaving the main DB's WAL un-checkpointed.
+  // closeDb() is itself internally try/caught; the extra wrapper also keeps
+  // _flushAndClose() from ever throwing out of a 'process exit' handler.
+  try { cleanupGatewayMainDbSnapshotSync(); }
+  catch (err) { console.warn("[Server] gateway snapshot cleanup failed on shutdown:", err?.message || err); }
+  try { closeDb(); }                              // WAL checkpoint + db.close
+  catch (err) { console.error("[Server] closeDb failed on shutdown:", err?.message || err); }
 }
 
 // Yield to libuv so handles entering UV_HANDLE_CLOSING can finish closing

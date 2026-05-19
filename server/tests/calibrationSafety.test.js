@@ -6,12 +6,14 @@
  * Plan: plans/2026-05-12-inverter-calibration-tool.md §2.4
  *
  * Locks the contract that:
- *   • Fesc_ipv (offset 87) refuses to write below 70 % Pac/Pn
+ *   • Fesc_ipv (offset 87) is gated to the 60 % consign band
  *   • Reactive X1Y1 (91, 92) requires 20 ± 5 % Pn (consign target)
  *   • Reactive X2Y2 (93, 94) requires 70 ± 5 % Pn (consign target)
+ *   • Per. Vacio (offset 90) requires the 0 % consign band — inverter NOT
+ *     generating (corrected 2026-05-17: was wrongly state-only/display-only)
  *   • Any write refuses while the inverter is in ERROR / BLOCKED / GRID FAULT
  *     phase, or when the state register couldn't be read at all.
- *   • Offsets 81-86 / 88-90 are state-gated only (Pac/Pn band is not enforced).
+ *   • Offsets 81-86 / 88-89 are state-gated only (Pac/Pn band is not enforced).
  */
 
 const assert = require("assert");
@@ -74,10 +76,26 @@ function run() {
     assert.ok(/grid fault/i.test(v.reason));
   });
 
-  test("state: refuses when phase != grid-connected (e.g. initial=0)", () => {
+  // Contract change (2026-05-16, operator feedback): scale-factor
+  // calibration is legitimately done OFF-GRID. "Not grid-connected" must
+  // WARN, not BLOCK — so a plain Vac/Iac offset still writes without the
+  // operator having to arm the Force-bypass on every single write. Only
+  // genuinely unsafe states (unreadable / ERROR / BLOCKED / GRID FAULT)
+  // remain a hard block (covered by the tests above).
+  test("state: phase != grid-connected (initial=0) warns, does NOT block", () => {
     const v = evaluateWriteSafety(81, makeLive({ state_phase: 0 }));
     assert.strictEqual(v.ok, false);
+    assert.strictEqual(v.severity, "warn");
     assert.ok(/grid-connected/i.test(v.reason));
+  });
+
+  test("state: not-grid-connected warn is non-blocking for Vac/Iac scale", () => {
+    // Server only refuses on severity === "block" (checkTrinPmSafetyGates),
+    // so a warn verdict means the write proceeds with no Force toggle.
+    for (const off of [81, 82, 83, 84, 85, 86]) {
+      const v = evaluateWriteSafety(off, makeLive({ state_phase: 1 }));
+      assert.strictEqual(v.severity, "warn", `offset ${off}`);
+    }
   });
 
   test("state: passes for grid-connected non-faulted inverter", () => {
@@ -85,24 +103,38 @@ function run() {
     assert.strictEqual(v.ok, true);
   });
 
-  // ── Fesc_ipv (offset 87) — Pac/Pn ≥ 70 % gate ───────────────────────────
+  // ── Fesc_ipv (offset 87) — Pac/Pn ≈ 60 % consign band (TrinPM20 script) ──
+  // Band gate, NOT a minimum: both too-low and too-high are wrong consign
+  // targets. Operator directive 2026-05-17 — follow the video (60 %).
 
-  test("Fesc_ipv: refuses below 70 % Pn", () => {
+  test("Fesc_ipv: refuses well below the 60 % band (40 %)", () => {
     const v = evaluateWriteSafety(87, makeLive({ pac_w: 100000, pct_of_pn: 40.0 }));
     assert.strictEqual(v.ok, false);
     assert.strictEqual(v.severity, "block");
-    assert.ok(/70/.test(v.reason));
-    assert.deepStrictEqual(v.required.pct_of_pn, [70.0, 100]);
+    assert.ok(/60/.test(v.reason));
+    assert.deepStrictEqual(v.required.pct_of_pn, [55.0, 65.0]);
   });
 
-  test("Fesc_ipv: allows at exactly 70 % Pn (inclusive)", () => {
+  test("Fesc_ipv: allows at exactly 60 % Pn (consign target)", () => {
+    const v = evaluateWriteSafety(87, makeLive({ pct_of_pn: 60.0 }));
+    assert.strictEqual(v.ok, true);
+  });
+
+  test("Fesc_ipv: allows across the 55–65 % band", () => {
+    for (const pct of [55, 58, 60, 62, 65]) {
+      assert.strictEqual(evaluateWriteSafety(87, makeLive({ pct_of_pn: pct })).ok, true,
+        `pct ${pct} should pass`);
+    }
+  });
+
+  test("Fesc_ipv: refuses ABOVE the band (70 % is now the wrong target)", () => {
     const v = evaluateWriteSafety(87, makeLive({ pct_of_pn: 70.0 }));
-    assert.strictEqual(v.ok, true);
+    assert.strictEqual(v.ok, false);
+    assert.strictEqual(v.severity, "block");
   });
 
-  test("Fesc_ipv: allows above 70 % Pn", () => {
-    const v = evaluateWriteSafety(87, makeLive({ pct_of_pn: 85.4 }));
-    assert.strictEqual(v.ok, true);
+  test("Fesc_ipv: refuses just outside the 65 % upper bound", () => {
+    assert.strictEqual(evaluateWriteSafety(87, makeLive({ pct_of_pn: 66.0 })).ok, false);
   });
 
   test("Fesc_ipv: refuses when nominal power read failed (pct_of_pn null)", () => {
@@ -158,7 +190,7 @@ function run() {
     assert.strictEqual(evaluateWriteSafety(94, makeLive({ pct_of_pn: 20 })).ok, false);
   });
 
-  // ── Voltage / generic scale factors (81-86, 88-90) — state-only ───────
+  // ── Voltage / generic scale factors (81-86, 88-89) — state-only ───────
 
   test("Fesc_vac_1 (81): no Pac/Pn band — passes at any pct when state OK", () => {
     for (const pct of [0.5, 20, 50, 99]) {
@@ -167,9 +199,32 @@ function run() {
     }
   });
 
-  test("comp_per_vacio (90): state-only gate — Pac/Pn irrelevant", () => {
-    const v = evaluateWriteSafety(90, makeLive({ pct_of_pn: 0.5 }));
+  // ── Per. Vacio (offset 90) — 0 % consign band (NOT generating) ─────────
+  // Corrected 2026-05-17: offset 90 is editable (ISM CfgTrifAU writable
+  // scale factor), calibrated with the inverter not generating. It is a
+  // 0 %-band gate, NOT state-only, and NOT a non-bypassable refusal.
+
+  test("comp_per_vacio (90): allows at 0 % Pn (inverter not generating)", () => {
+    const v = evaluateWriteSafety(90, makeLive({ pct_of_pn: 0 }));
     assert.strictEqual(v.ok, true);
+  });
+
+  test("comp_per_vacio (90): allows within the 0 % band (incl. slight -ve no-load)", () => {
+    for (const pct of [-3, 0, 4.9]) {
+      const v = evaluateWriteSafety(90, makeLive({ pct_of_pn: pct }));
+      assert.strictEqual(v.ok, true, `pct ${pct} should pass for offset 90`);
+    }
+  });
+
+  test("comp_per_vacio (90): BLOCKS when generating (50 % — wrong consign)", () => {
+    const v = evaluateWriteSafety(90, makeLive({ pct_of_pn: 50 }));
+    assert.strictEqual(v.ok, false);
+    assert.strictEqual(v.severity, "block");
+    assert.ok(/not generating|0 %/i.test(v.reason), `reason: ${v.reason}`);
+  });
+
+  test("comp_per_vacio (90): blocks just above the band (e.g. 6 %)", () => {
+    assert.strictEqual(evaluateWriteSafety(90, makeLive({ pct_of_pn: 6 })).ok, false);
   });
 
   // ── buildWriteSafetyMap — every offset surfaces a verdict ──────────────
@@ -179,8 +234,8 @@ function run() {
     const m = buildWriteSafetyMap(live, [81, 87, 91, 93]);
     assert.deepStrictEqual(Object.keys(m).map(Number).sort((a,b)=>a-b), [81, 87, 91, 93]);
     assert.strictEqual(m[81].ok, true,  "Vac scale passes regardless of pct");
-    assert.strictEqual(m[87].ok, false, "Fesc_ipv blocks at 60 % (need 70)");
-    assert.strictEqual(m[91].ok, false, "X1Y1 blocks at 60 % (need 20)");
+    assert.strictEqual(m[87].ok, true,  "Fesc_ipv ALLOWS at 60 % (consign target)");
+    assert.strictEqual(m[91].ok, false, "X1Y1 blocks at 60 % (need 20 ± 5)");
     assert.strictEqual(m[93].ok, false, "X2Y2 blocks at 60 % (need 70 ± 5)");
   });
 

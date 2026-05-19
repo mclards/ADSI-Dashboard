@@ -89,6 +89,14 @@ const REASONS = Object.freeze({
   RELAUNCH: "relaunch",                           // Programmatic relaunch
   LICENSE_EXPIRED: "license-expired",             // License runtime shutdown
   UNCAUGHT_EXCEPTION: "uncaught-exception",       // Main-process crash handler
+  PROCESS_EXIT: "process-exit",                   // Last-resort: only caught at
+                                                  // the final process 'exit'/
+                                                  // app 'quit' tick. Still a
+                                                  // graceful classification —
+                                                  // the JS runtime DID get to
+                                                  // exit (not a BSOD / power
+                                                  // loss / hard kill, which
+                                                  // skip 'exit' entirely).
 });
 
 // Initiator gives the banner a crisp "who caused this" hint.

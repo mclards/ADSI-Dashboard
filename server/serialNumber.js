@@ -23,6 +23,12 @@
 const crypto = require("crypto");
 const { lookupMotiveLabel } = require("./motiveLabels");
 const { bindingsFromReq } = require("./bulkControlAuth");
+const {
+  FIXED_SERIAL_MAP,
+  FIXED_SERIAL_FMT,
+  WRITABLE_NODES,
+  lookupSerialOrigin,
+} = require("./serialFixedMap");
 
 // Session token TTL — operator must issue Send within this window.
 const SESSION_TTL_MS = 5 * 60 * 1000;
@@ -179,12 +185,19 @@ function getFleetCacheSnapshot() {
 function logSerialChange(db, {
   inverterId, inverterIp, slave, actedAtMs, actedBy,
   fmt, oldSerial, newSerial, verifyPassed, outcome, errorDetail,
+  originNote = null, originInverter = null, originNode = null,
 }) {
+  // `acted_at_ms` is the true action instant (engine-reported when available,
+  // else now); `updated_ts` is the row-write instant for replication. Keep
+  // them distinct so history timestamps stay accurate. `origin_note` is the
+  // human string; `origin_inverter`/`origin_node` are the structured pair
+  // that powers the Power Module Migration History (no text parsing).
   const r = db.prepare(`
     INSERT INTO serial_change_log
       (inverter_id, inverter_ip, slave, acted_at_ms, acted_by,
-       fmt, old_serial, new_serial, verify_passed, outcome, error_detail, updated_ts)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       fmt, old_serial, new_serial, verify_passed, outcome, error_detail,
+       origin_note, origin_inverter, origin_node, updated_ts)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     Number(inverterId) || 0,
     String(inverterIp),
@@ -197,16 +210,45 @@ function logSerialChange(db, {
     verifyPassed ? 1 : 0,
     String(outcome || ""),
     errorDetail ? String(errorDetail) : null,
+    originNote ? String(originNote) : null,
+    (originInverter != null && Number.isFinite(Number(originInverter)))
+      ? Number(originInverter) : null,
+    (originNode != null && String(originNode) !== "") ? String(originNode) : null,
     Date.now(),
   );
   return Number(r.lastInsertRowid);
+}
+
+// ─── Power Module Migration History ───────────────────────────────────────
+//
+// Every relocation/nameplate detection writes a structured origin pair.
+// This returns the chronological trail of physically-moved boards: each
+// row says a module whose serial belonged to (origin_inverter,
+// origin_node) was found at (inverter_id, slave) and re-serialized to
+// new_serial, with the action instant + operator + outcome.  Pure read.
+function getModuleMigrationHistory(db, { limit = 200, inverterIp = null } = {}) {
+  const cap = Math.max(1, Math.min(5000, Number(limit) || 200));
+  const where = ["origin_inverter IS NOT NULL"];
+  const args = [];
+  if (inverterIp) { where.push("inverter_ip = ?"); args.push(String(inverterIp)); }
+  args.push(cap);
+  return db.prepare(`
+    SELECT id, inverter_id, inverter_ip, slave, acted_at_ms, acted_by,
+           fmt, old_serial, new_serial, verify_passed, outcome, error_detail,
+           origin_note, origin_inverter, origin_node
+    FROM serial_change_log
+    WHERE ${where.join(" AND ")}
+    ORDER BY acted_at_ms DESC
+    LIMIT ?
+  `).all(...args);
 }
 
 function getRecentChangesForInverter(db, inverterIp, limit = 100) {
   const cap = Math.max(1, Math.min(1000, Number(limit) || 100));
   return db.prepare(`
     SELECT id, inverter_id, inverter_ip, slave, acted_at_ms, acted_by,
-           fmt, old_serial, new_serial, verify_passed, outcome, error_detail
+           fmt, old_serial, new_serial, verify_passed, outcome, error_detail,
+           origin_note, origin_inverter, origin_node
     FROM serial_change_log
     WHERE inverter_ip = ?
     ORDER BY acted_at_ms DESC
@@ -218,7 +260,8 @@ function getRecentChangesAll(db, limit = 200) {
   const cap = Math.max(1, Math.min(2000, Number(limit) || 200));
   return db.prepare(`
     SELECT id, inverter_id, inverter_ip, slave, acted_at_ms, acted_by,
-           fmt, old_serial, new_serial, verify_passed, outcome, error_detail
+           fmt, old_serial, new_serial, verify_passed, outcome, error_detail,
+           origin_note, origin_inverter, origin_node
     FROM serial_change_log
     ORDER BY acted_at_ms DESC
     LIMIT ?
@@ -411,6 +454,140 @@ async function fleetScan({
   };
 }
 
+// ─── Bulk re-serialize plan (diff live fleet vs canonical map) ────────────
+//
+// Compares the current per-node serial (from a fleet scan) against the
+// operator-authoritative FIXED_SERIAL_MAP and classifies every writable
+// node.  Pure — no Modbus, no DB.  Only nodes 1..4 are considered ("T" is
+// the inverter nameplate, never written).
+//
+// `scanRows` shape (subset of fleetScan() row output):
+//   [{ inverter_id, inverter_ip, inverter_name, slave, ok, serial, error }]
+// `topology` (optional) lets us emit `missing` rows for configured nodes
+// the scan never returned (so the plan covers the whole fleet, not just
+// whatever answered).
+//
+// Returned row `status`:
+//   match       — live serial already equals the target (skip)
+//   mismatch    — live serial differs (eligible to write)
+//   unreachable — node answered the scan with an error (cannot write now)
+//   missing     — node is configured but produced no scan row (absent unit)
+//
+// Each mismatch row also carries an `origin` classification derived from
+// looking the LIVE serial up in the locked map's reverse index:
+//   origin_kind = "relocated"  — the live serial belongs to a DIFFERENT
+//        slot in the locked map → this physical module was physically moved
+//        here from `origin: {inverter,node}`.  Re-serializing rewrites a
+//        transplanted board, so it `needs_ack:true` and the origin is
+//        captured in `origin_note` for the audit trail.
+//   origin_kind = "unknown"    — the live serial is not in the map at all
+//        (factory-default / never-serialized / foreign).  Normal write.
+//   origin_kind = "nameplate"  — live serial matches a "T" nameplate slot
+//        (shouldn't happen on a node; surfaced so the UI can explain it) —
+//        treated like "relocated" for acknowledgement safety.
+function _originNote(originKind, origin, liveSerial) {
+  if (originKind === "relocated") {
+    return `module from Inv ${origin.inverter} / Node ${origin.node} `
+         + `(serial ${liveSerial})`;
+  }
+  if (originKind === "nameplate") {
+    return `live serial ${liveSerial} is the nameplate of Inv `
+         + `${origin.inverter} (unexpected on a node)`;
+  }
+  return `prior serial ${liveSerial} not in locked map `
+       + `(factory-default / foreign)`;
+}
+
+function buildBulkPlan({ scanRows, topology = null }) {
+  const byKey = new Map();
+  for (const r of scanRows || []) {
+    byKey.set(`${Number(r.inverter_id)}|${Number(r.slave)}`, r);
+  }
+  // The universe of writable targets is the canonical map (1..27 × 1..4),
+  // optionally intersected with what topology actually configures.
+  const topoKeys = topology
+    ? new Set(topology.map((t) => `${Number(t.inverterId)}|${Number(t.slave)}`))
+    : null;
+
+  const rows = [];
+  for (const invIdStr of Object.keys(FIXED_SERIAL_MAP)) {
+    const invId = Number(invIdStr);
+    for (const slave of WRITABLE_NODES) {
+      if (topoKeys && !topoKeys.has(`${invId}|${slave}`)) continue;
+      const target = FIXED_SERIAL_MAP[invId][String(slave)];
+      const scan = byKey.get(`${invId}|${slave}`);
+      let status;
+      let current = null;
+      let error = null;
+      if (!scan) {
+        status = "missing";
+      } else if (!scan.ok) {
+        status = "unreachable";
+        error = scan.error || "read_failed";
+      } else {
+        current = scan.serial || "";
+        status = current === target ? "match" : "mismatch";
+      }
+      // Origin / relocation classification (only meaningful for a real
+      // mismatch — a match is, by definition, the board that belongs here).
+      let originKind = null;
+      let origin = null;
+      let needsAck = false;
+      let originNote = null;
+      if (status === "mismatch") {
+        const found = lookupSerialOrigin(current);
+        if (!found) {
+          originKind = "unknown";
+        } else if (found.kind === "nameplate") {
+          originKind = "nameplate";
+          origin = found;
+          needsAck = true;
+        } else if (
+          found.inverter === invId && Number(found.node) === Number(slave)
+        ) {
+          // Live serial is this very slot's locked serial — but `current
+          // !== target` only happens here if the map target changed; treat
+          // as a plain in-place correction (no relocation).
+          originKind = "unknown";
+        } else {
+          originKind = "relocated";
+          origin = { inverter: found.inverter, node: found.node };
+          needsAck = true;
+        }
+        originNote = _originNote(originKind, origin, current);
+      }
+      rows.push({
+        inverter_id: invId,
+        inverter_name: scan?.inverter_name || `Inverter ${invId}`,
+        inverter_ip: scan?.inverter_ip || null,
+        slave,
+        current_serial: current,
+        target_serial: target,
+        status,
+        error,
+        origin_kind: originKind,        // relocated | unknown | nameplate | null
+        origin,                         // { inverter, node } when relocated
+        needs_ack: needsAck,            // true ⇒ acknowledgement required
+        origin_note: originNote,        // human string for the audit log
+      });
+    }
+  }
+  const count = (s) => rows.filter((r) => r.status === s).length;
+  return {
+    fmt: FIXED_SERIAL_FMT,
+    total: rows.length,
+    summary: {
+      match: count("match"),
+      mismatch: count("mismatch"),
+      unreachable: count("unreachable"),
+      missing: count("missing"),
+      relocated: rows.filter((r) => r.origin_kind === "relocated").length,
+      needs_ack: rows.filter((r) => r.needs_ack).length,
+    },
+    rows,
+  };
+}
+
 module.exports = {
   // Session tokens
   SESSION_TTL_MS,
@@ -427,7 +604,10 @@ module.exports = {
   logSerialChange,
   getRecentChangesForInverter,
   getRecentChangesAll,
+  getModuleMigrationHistory,
   // Uniqueness + fleet scan
   fleetUniquenessCheck,
   fleetScan,
+  // Bulk re-serialize
+  buildBulkPlan,
 };

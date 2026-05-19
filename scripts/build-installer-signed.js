@@ -40,8 +40,9 @@ const releaseDir = path.join(repoRoot, 'release');
 const ALLOW_UNSIGNED = process.env.ADSI_ALLOW_UNSIGNED === '1';
 // 150 MB floor — post-v2.8.13 slimmed builds land around 180-220 MB after
 // removing duplicate ffmpeg/go2rtc/service-dist payloads from the asar and
-// pinning locales to en-US (see package.json files globs). A broken build
-// missing the Python services EXE would still be well under 100 MB.
+// pinning locales to en-US (see package.json files globs). This includes three
+// Python service EXEs (InverterCoreService, ForecastCoreService, CalibratorService).
+// A broken build missing any Python service EXE would still be well under 100 MB.
 // Historical pre-slim builds were ~500-620 MB.
 const MIN_INSTALLER_BYTES = 150 * 1024 * 1024;
 
@@ -301,8 +302,9 @@ if (stat.size < MIN_INSTALLER_BYTES) {
   console.error(
     '[build-installer-signed] FATAL: installer is only ' + sizeMB + ' MB, below ' + floorMB + ' MB floor.',
   );
-  console.error('  Post-slim healthy builds are ~180-220 MB. This build is likely missing the');
-  console.error('  Python services EXE or other bundled assets. Do NOT upload.');
+  console.error('  Post-slim healthy builds are ~180-220 MB. This build is likely missing one or more');
+  console.error('  Python service EXEs (InverterCoreService.exe, ForecastCoreService.exe,');
+  console.error('  CalibratorService.exe) or other bundled assets. Do NOT upload.');
   process.exit(1);
 }
 

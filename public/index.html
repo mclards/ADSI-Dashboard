@@ -11,6 +11,22 @@
     />
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link rel="stylesheet" href="css/style.css" />
+    <script>
+      // Pre-paint calibrator-mode gate. Runs during <head> parsing — before
+      // <body> exists — so the fleet dashboard chrome is hidden on the very
+      // first paint of the standalone Inverter Calibration Tool window (no
+      // flash of the dashboard). style.css above is render-blocking, so its
+      // .calibrator-mode rules are applied before first paint. app.js later
+      // re-asserts the class on <body>. Completely inert for the dashboard
+      // (no ?calibrator=1 → class is never added).
+      (function () {
+        try {
+          if (/[?&]calibrator=1\b/.test(window.location.search || "")) {
+            document.documentElement.classList.add("calibrator-mode");
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <!-- --------------------------- HEADER --------------------------------------- -->
@@ -126,9 +142,12 @@
         <button class="nav-btn" data-page="igbt-health" title="Power electronics asset health: IGBT module aging + AC contactor (K1) wear across the 27-inverter fleet. Composite scores, tier filters, linked-findings cross-correlation, and capital-planning CSV export.">
           <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
         </button>
-        <button class="nav-btn" data-page="field-calibration" title="Field Calibration — direct Modbus write to inverter scale-factor registers (DC current, DC voltage, AC current, AC voltage, reactive curve), bypassing the LCD menu. Session lockdown, consign mode, fleet anomaly scan.">
-          <span class="nav-icon"><span class="mdi mdi-tune-variant"></span></span><span>FIELD CALIB</span>
-        </button>
+        <!-- v2.11.x — FIELD CALIB nav entry removed from the dashboard: field
+             calibration is now the standalone "Inverter Calibration Tool"
+             (Settings → Field Calibrator / Calibrator Desktop Shortcut). The
+             #page-field-calibration markup + fcal JS are intentionally kept
+             because the standalone tool reuses this exact page via the
+             ?calibrator=1 boot hook. Do not delete the page itself. -->
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
           <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
@@ -351,6 +370,12 @@
             </button>
           </div>
           <div class="tl-right">
+            <button id="btnParamFleetToggle" class="btn btn-outline" type="button"
+                    aria-pressed="false"
+                    title="Switch to the fleet-wide calibration anomaly scan: walk every configured (inverter, node), compute per-field medians, and surface modules whose scale factors drifted out of family. Click again to return to the parameter log.">
+              <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
+              <span id="btnParamFleetToggleLabel">Fleet Anomalies</span>
+            </button>
             <label class="param-adv-toggle" title="Show diagnostic columns from the slow-poll register block (reactive power, control-electronics temp, insulation impedance, time-to-connect, power-reduction bits, etc.). Off by default to keep the table scannable.">
               <input type="checkbox" id="paramAdvancedToggle" />
               <span>Show advanced columns</span>
@@ -373,6 +398,35 @@
         <!-- Tab strip + panels — populated dynamically based on ipconfig.units[invId] -->
         <div id="paramTabs" class="card-tabs" role="tablist" aria-label="Inverter nodes" hidden></div>
         <div id="paramPanels" hidden></div>
+
+        <!-- Fleet Calibration Anomalies — relocated here from the Field
+             Calibration tool (v2.11.x). Toggled by #btnParamFleetToggle.
+             Inner ids (#fcalPanelFleet / #btnFcalFleetScan / #fcalFleetMsg /
+             #fcalFleetResult) are retained so the existing fleet scan JS +
+             the (now page-agnostic) fleet CSS work unchanged. -->
+        <div id="paramFleetView" hidden>
+          <div id="fcalPanelFleet">
+            <div class="fcal-fleet-header">
+              <div class="fcal-fleet-header-title">
+                <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
+                Fleet Calibration Anomalies
+              </div>
+              <div class="fcal-fleet-header-controls">
+                <button id="btnFcalFleetScan" class="btn btn-accent btn-sm" type="button"
+                        title="Walk every configured (inverter, node), read the calibration block, compute per-field median, and highlight modules whose scale factor is &gt;5 % off the fleet median. Read-only.">
+                  <span class="mdi mdi-magnify-scan icon-inline" aria-hidden="true"></span>
+                  <span>Scan Fleet</span>
+                </button>
+              </div>
+            </div>
+            <div class="fcal-fleet-msg-row">
+              <span class="smsg" id="fcalFleetMsg"></span>
+            </div>
+            <div id="fcalFleetResult" class="srn-table-host">
+              <div class="srn-empty">Click <strong>Scan Fleet</strong> to read every node and surface calibration outliers. Read-only. ~50-60 s for a 96-node fleet (gentle 2-worker probe so live polling stays responsive).</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- --- PAGE: AUDIT LOG ------------------------------------------------------ -->
@@ -1129,9 +1183,11 @@
             </span>
           </div>
           <div class="tl-right">
-            <span class="toolbar-info" id="fcalFeatureBadge" title="Writes feature flag (calibrationWritesEnabled). When OFF, the page is read-only.">Writes: <b id="fcalFeatureBadgeText">—</b></span>
+            <span class="toolbar-status" id="fcalFeatureBadge" title="Writes feature flag (calibrationWritesEnabled). When OFF, the page is read-only.">
+              <span id="fcalFeatureBadgeText">—</span>
+            </span>
             <button id="btnFcalToggleWrites" class="btn btn-xs btn-outline" type="button" hidden
-                    title="Enter Calibration Mode — one auth prompt unlocks writes for this visit (sacupsMM/adsiMM).">
+                    title="Enter Calibration Mode — one authorization prompt unlocks writes for this visit.">
               <span class="mdi mdi-key-variant icon-inline" aria-hidden="true"></span>
               <span id="btnFcalToggleWritesLabel">Calibration Mode</span>
             </button>
@@ -1147,21 +1203,13 @@
             </span>
           </div>
 
-          <!-- Tab navigation: per-node read / fleet anomaly view -->
-          <div class="card-tabs" role="tablist" aria-label="Field Calibration sub-sections">
-            <button class="card-tab" type="button" role="tab"
-                    data-card-tab="single" aria-controls="fcalPanelSingle" aria-selected="true"
-                    title="Per-(inverter, slave) live read of the 14-register scale-factor block + reactive curve.">
-              <span class="mdi mdi-tune-vertical icon-inline" aria-hidden="true"></span>
-              <span class="card-tab-label">Per-Node Readout</span>
-            </button>
-            <button class="card-tab" type="button" role="tab"
-                    data-card-tab="fleet" aria-controls="fcalPanelFleet" aria-selected="false"
-                    title="Walk every (inverter, slave) and surface modules whose calibration drifted out of family.">
-              <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
-              <span class="card-tab-label">Fleet Anomalies</span>
-            </button>
-          </div>
+          <!-- Tab navigation removed — Fleet Anomalies moved to the dashboard
+               PARAMETERS page (v2.11.x). The standalone Inverter Calibration
+               Tool is per-node only, so the lone "Per-Node Readout" tab was
+               dropped. #fcalPanelSingle stays visible because
+               initCardTabs/setActiveCardTab drives panel visibility off
+               .card-tab-panel (defaultKey "single"), independent of any
+               .card-tab buttons existing. -->
 
           <!-- ── PINNED HEADER — always visible above the scrolling table ── -->
           <!-- This block lives OUTSIDE the scroll viewport so it never moves.
@@ -1170,11 +1218,96 @@
                the active tab. -->
           <div class="fcal-header" data-active-tab="single">
             <div class="fcal-header-block" data-fcal-header="single">
-              <div class="cb-sub-title">
-                <span class="mdi mdi-tune icon-inline" aria-hidden="true"></span>
-                Calibration State (read-only)
+              <!-- Transport selector — visible ONLY in the standalone Inverter
+                   Calibration Tool (body/.calibrator-mode). Lets the operator
+                   pick Modbus TCP (Ethernet, IP from the selected inverter) or
+                   Modbus RTU over a direct RS485-USB / COM-port link. Calls the
+                   calibrator server's /api/transport/select + /api/serial/ports.
+                   Hidden in every other context via CSS. -->
+              <div class="fcal-transport" id="fcalTransportBar" role="group" aria-label="Calibration transport">
+                <div class="fcal-transport-row fcal-transport-row-top">
+                  <span class="fcal-transport-label">Transport</span>
+                  <div class="fcal-transport-modes" role="radiogroup" aria-label="Transport mode">
+                    <label class="fcal-transport-mode" title="Modbus TCP over the inverter's Ethernet IP (resolved from the selected inverter below).">
+                      <input type="radio" name="fcalTransportMode" value="tcp" checked />
+                      <span>Ethernet</span>
+                    </label>
+                    <label class="fcal-transport-mode" title="Modbus RTU over a direct RS485-USB / COM-port link to one inverter.">
+                      <input type="radio" name="fcalTransportMode" value="serial" />
+                      <span>COM Port (RS485-USB)</span>
+                    </label>
+                  </div>
+                  <button id="btnFcalTransportConnect" class="btn btn-accent fcal-transport-connect" type="button"
+                          title="Open the selected transport on the calibrator service. Required before Read or Write.">
+                    <span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span><span>Connect</span>
+                  </button>
+                </div>
+
+                <div class="fcal-transport-row fcal-transport-pane" data-fcal-transport="tcp">
+                  <span class="fcal-tg" id="fcalTransportIpSelectWrap" hidden>
+                    <label class="invclock-label" for="fcalTransportIpSelect">From IP config</label>
+                    <select id="fcalTransportIpSelect" class="inp invclock-input"
+                            style="max-width: 230px;"
+                            title="Pick an inverter IP from the loaded IP configuration. Optional convenience — you can still type any IP in the field beside it.">
+                    </select>
+                  </span>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalTransportIp">Inverter IP</label>
+                    <input id="fcalTransportIp" class="inp invclock-input" type="text"
+                           inputmode="decimal" autocomplete="off" spellcheck="false"
+                           placeholder="192.168.1.x" style="min-width: 170px;"
+                           title="IPv4 address of the inverter to calibrate over Ethernet (Modbus TCP). This is a standalone direct connection — type any IP, or pick one from the IP-config dropdown if available." />
+                  </span>
+                  <span class="fcal-transport-sub">direct Modbus-TCP to one inverter</span>
+                </div>
+
+                <div class="fcal-transport-row fcal-transport-pane" data-fcal-transport="serial" hidden>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalSerialPort">COM</label>
+                    <select id="fcalSerialPort" class="inp invclock-input" style="min-width: 180px;"
+                            title="COM port of the RS485-USB adapter. Click Ports to enumerate."></select>
+                  </span>
+                  <button id="btnFcalSerialRefresh" class="btn btn-outline" type="button"
+                          title="Re-enumerate available COM ports from the system.">
+                    <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span><span>Ports</span>
+                  </button>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalSerialBaud">Baud</label>
+                    <select id="fcalSerialBaud" class="inp invclock-input" style="max-width: 96px;"
+                            title="Serial baud rate (default 9600).">
+                      <option>1200</option><option>2400</option><option>4800</option>
+                      <option selected>9600</option><option>19200</option><option>38400</option>
+                      <option>57600</option><option>115200</option>
+                    </select>
+                  </span>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalSerialParity">Parity</label>
+                    <select id="fcalSerialParity" class="inp invclock-input" style="max-width: 72px;"
+                            title="Parity (default None).">
+                      <option value="N" selected>N</option><option value="E">E</option><option value="O">O</option>
+                    </select>
+                  </span>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalSerialStop">Stop</label>
+                    <select id="fcalSerialStop" class="inp invclock-input" style="max-width: 64px;"
+                            title="Stop bits (default 1).">
+                      <option selected>1</option><option>2</option>
+                    </select>
+                  </span>
+                  <span class="fcal-tg">
+                    <label class="invclock-label" for="fcalSerialBits">Bits</label>
+                    <select id="fcalSerialBits" class="inp invclock-input" style="max-width: 64px;"
+                            title="Data bits (default 8).">
+                      <option>7</option><option selected>8</option>
+                    </select>
+                  </span>
+                </div>
+
+                <span class="smsg fcal-transport-msg" id="fcalTransportMsg"></span>
               </div>
-              <div class="srn-controls">
+
+              <div class="fcal-header-controls">
+                <div class="srn-controls">
                 <label class="invclock-label" for="fcalInverterPicker">Inverter</label>
                 <select id="fcalInverterPicker" class="inp invclock-input"
                         title="Pick the inverter (controller) to read."></select>
@@ -1182,50 +1315,35 @@
                 <select id="fcalSlavePicker" class="inp invclock-input" style="max-width: 90px;"
                         title="Modbus slave id (1..4) of the electronic block within the inverter."></select>
                 <button id="btnFcalRead" class="btn btn-accent" type="button"
-                        title="FC03 read of holding registers 0x50..0x5E (15 regs). First click of the hour prompts for the adsiM/adsiMM topology key; afterwards the cached session covers every read.">
+                        title="Read the live calibration block from the inverter. Read-only — no authorization prompt.">
                   <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
                   <span>Read</span>
                 </button>
-                <button id="btnFcalFullConfig" class="btn btn-outline" type="button"
-                        title="Slow path — chunked FC03 read of the full 177-register config block. Adds RTC, nominal power, grid envelope, country code to the view.">
-                  <span class="mdi mdi-database-search icon-inline" aria-hidden="true"></span>
-                  <span>Full Config Dump</span>
-                </button>
                 <span class="smsg" id="fcalReadMsg"></span>
+                <span class="fcal-bypass-inline" role="group" aria-label="Safety bypass">
+                  <label class="fcal-force-toggle" for="fcalForceWrite"
+                         title="Bypass the 50 % range guard: a write is normally refused when the new value differs from the current factor by more than 50 %. Arming this allows a &gt; 50 % delta — use only when a large step is genuinely correct (e.g. recalibrating after a sensor swap). Stays armed across writes until you turn it off; disabled unless you are in Calibration Mode.">
+                    <input type="checkbox" id="fcalForceWrite" />
+                    <span class="fcal-force-toggle-label">Force range guard</span>
+                  </label>
+                  <label class="fcal-force-toggle" for="fcalForceSafetyGate"
+                         title="Bypass the TrinPM20 per-offset safety gate: skips the inverter-state / Pac-band check (inverter must normally be grid-connected, no ERROR/BLOCKED/GRID-FAULT, and Pac/Pn in the required band for Fesc_ipv / reactive). Arm only when you have deliberately accepted the operating point is off on purpose. Stays armed across writes until you turn it off; disabled unless you are in Calibration Mode. Note: the display-only paired reactive coordinates (offsets 91 + 94) remain refused even with this armed; Per. Vacio (90) IS editable — its 0 %-consign gate is one of the gates this bypasses.">
+
+                    <input type="checkbox" id="fcalForceSafetyGate" />
+                    <span class="fcal-force-toggle-label">Force TrinPM20 gate</span>
+                  </label>
+                </span>
+                <button id="btnFwOpen" class="btn btn-outline fcal-fw-open" type="button"
+                        title="Open the experimental per-node firmware upgrade tool (standalone calibrator only). Dry-Run is safe and touches no hardware.">
+                  <span class="mdi mdi-memory icon-inline" aria-hidden="true"></span>
+                  <span>FW Upgrade</span>
+                </button>
+                </div>
               </div>
 
-              <!-- Calibration session card — visible always; controls write lockdown. -->
-              <div class="fcal-session-row" role="group" aria-label="Calibration session control">
-                <div class="fcal-session-card" id="fcalSessionCard">
-                  <div class="fcal-session-state">
-                    <span class="fcal-session-dot" id="fcalSessionDot" aria-hidden="true"></span>
-                    <span class="fcal-session-label" id="fcalSessionLabel">No active session — read-only mode</span>
-                  </div>
-                  <div class="fcal-session-meta" id="fcalSessionMeta" hidden>
-                    <span class="fcal-session-meta-item" id="fcalSessionTarget">Inv —</span>
-                    <span class="fcal-session-meta-item" id="fcalSessionOperator">op —</span>
-                    <span class="fcal-session-meta-item" id="fcalSessionClock">00:00</span>
-                    <span class="fcal-session-meta-item" id="fcalSessionWrites">0 writes</span>
-                  </div>
-                  <div class="fcal-session-actions">
-                    <input id="fcalSessionOperatorInput" class="inp invclock-input fcal-operator-input"
-                           type="text" autocomplete="off" spellcheck="false"
-                           placeholder="Your initials" maxlength="16"
-                           title="Operator initials are stamped on every write in the audit log." />
-                    <button id="btnFcalSessionStart" class="btn btn-red" type="button"
-                            title="Begin a calibration session on the selected (inverter, slave). The dashboard enters lockdown mode and write controls become available.">
-                      <span class="mdi mdi-lock icon-inline" aria-hidden="true"></span>
-                      <span>Start Calibration Session</span>
-                    </button>
-                    <button id="btnFcalSessionEnd" class="btn btn-outline" type="button" hidden
-                            title="Release consign mode, write final snapshot, and re-enable all paused background processes.">
-                      <span class="mdi mdi-lock-open icon-inline" aria-hidden="true"></span>
-                      <span>End Session</span>
-                    </button>
-                  </div>
-                </div>
-                <small class="fcal-phase-note" id="fcalPhaseNote" hidden></small>
-              </div>
+              <!-- Calibration session is fully automatic and has no UI:
+                   it starts on the first Write in Calibration Mode and
+                   ends when you exit Calibration Mode. -->
             </div>
 
             <div class="fcal-header-block" data-fcal-header="fleet" hidden>
@@ -1237,24 +1355,13 @@
           <!-- Tab panel: per-(inverter, slave) read + decoded fields -->
           <div id="fcalPanelSingle" class="card-tab-panel" data-card-tab-panel="single"
                role="tabpanel" aria-labelledby="fcalPanelSingle">
-            <!-- Consign mode panel (Phase 3) — only visible during active session -->
-            <div class="fcal-consign-panel" id="fcalConsignPanel" hidden role="region" aria-label="Consign mode">
-              <div class="fcal-consign-title">
-                <span class="mdi mdi-tune-variant icon-inline" aria-hidden="true"></span>
-                Consign Mode <small>(forces inverter to specified %Pn for current/power calibration)</small>
-              </div>
-              <div class="fcal-consign-tiles">
-                <button class="fcal-consign-tile" type="button" data-consign-pct="10" title="10 % Pn — initial DC current calibration ladder">10 %</button>
-                <button class="fcal-consign-tile" type="button" data-consign-pct="20" title="20 % Pn — reactive curve X1Y1 calibration point">20 %</button>
-                <button class="fcal-consign-tile" type="button" data-consign-pct="60" title="60 % Pn — DC current calibration target per training PDF">60 %</button>
-                <button class="fcal-consign-tile" type="button" data-consign-pct="70" title="70 % Pn — reactive curve X2Y2 calibration point">70 %</button>
-                <button class="fcal-consign-tile fcal-consign-tile-release" type="button" data-consign-pct="100" title="Restore the inverter to full output (release consign).">Release</button>
-              </div>
-              <div class="fcal-consign-status" id="fcalConsignStatus">No consign command issued in this session.</div>
-            </div>
-
-            <div id="fcalReadResult" class="srn-table-host" hidden></div>
-            <div id="fcalFullConfigResult" class="srn-table-host" hidden style="margin-top: 12px;"></div>
+            <!-- Per-Node Readout — a PERMANENT grid of grouped parameter
+                 cards. The Consign Mode + Safety Bypass control cards are
+                 generated as the FIRST TWO grid cells by
+                 _fcalRenderSingleEditable() so they inherit the exact
+                 group-card dimensions (operator request 2026-05-17).
+                 Rendered on page init; Read fills the slot values. -->
+            <div id="fcalReadResult" class="srn-table-host fcal-grid-host"></div>
 
             <!-- ── Per-node configuration backup (snapshots + restore) ──
                  Always visible (read-only): the operator can capture a manual
@@ -1265,16 +1372,15 @@
                 <div class="fcal-backup-title">
                   <span class="mdi mdi-content-save-all icon-inline" aria-hidden="true"></span>
                   Configuration Backups
-                  <small class="fcal-backup-subtitle">snapshots of the 14 scale-factor registers — used to roll back after a bad calibration</small>
                 </div>
                 <div class="fcal-backup-actions">
-                  <input id="fcalBackupNote" class="inp invclock-input" type="text"
+                  <input id="fcalBackupNote" class="inp invclock-input fcal-backup-note-input" type="text"
                          autocomplete="off" spellcheck="false"
                          placeholder="Note (optional)"
-                         maxlength="200" style="max-width: 280px;"
+                         maxlength="200"
                          title="Free-text note attached to the snapshot — e.g. 'pre-recalibration 5/12'" />
                   <button id="btnFcalBackupNow" class="btn btn-accent" type="button"
-                          title="Capture the current calibration block as a manual snapshot. No write to inverter — read-only operation logged in the snapshot table.">
+                          title="Capture the current calibration block as a manual snapshot. No write to inverter — read-only operation logged in the snapshot table. Skipped if nothing changed since the last backup.">
                     <span class="mdi mdi-content-save icon-inline" aria-hidden="true"></span>
                     <span>Backup Now</span>
                   </button>
@@ -1295,9 +1401,11 @@
 
             <!-- Bulk Copy panel (Phase 4) — only visible during active session -->
             <div class="fcal-copy-panel" id="fcalCopyPanel" hidden role="region" aria-label="Copy calibration from another node">
-              <div class="fcal-copy-title">
-                <span class="mdi mdi-content-duplicate icon-inline" aria-hidden="true"></span>
-                Copy from another node
+              <div class="fcal-copy-header">
+                <div class="fcal-copy-title">
+                  <span class="mdi mdi-content-duplicate icon-inline" aria-hidden="true"></span>
+                  Copy from another node
+                </div>
               </div>
               <div class="srn-controls">
                 <label class="invclock-label" for="fcalCopySrcInv">Source Inverter</label>
@@ -1306,7 +1414,7 @@
                 <label class="invclock-label" for="fcalCopySrcSlave">Source Node</label>
                 <select id="fcalCopySrcSlave" class="inp invclock-input" style="max-width: 90px;"></select>
                 <button id="btnFcalCopy" class="btn btn-outline" type="button"
-                        title="Copy every differing scale factor from the source to the session target under one unlock + verify cycle. First click of the hour prompts for the sacupsMM key; afterwards the cached session covers every write.">
+                        title="Copy every differing scale factor from the source to the target under one verify cycle. Uses the cached Calibration Mode authorization.">
                   <span class="mdi mdi-clipboard-arrow-down-outline icon-inline" aria-hidden="true"></span>
                   <span>Copy →</span>
                 </button>
@@ -1317,34 +1425,170 @@
                 <span class="smsg" id="fcalCopyMsg"></span>
               </div>
             </div>
-          </div>
 
-          <!-- Tab panel: fleet anomaly view (per-field median + per-node delta) -->
-          <div id="fcalPanelFleet" class="card-tab-panel" data-card-tab-panel="fleet"
-               role="tabpanel" aria-labelledby="fcalPanelFleet" hidden>
-            <!-- v2.11.x Section 4.5: Compact header bar inside the panel (instead of pinned) -->
-            <div class="fcal-fleet-header">
-              <div class="fcal-fleet-header-title">
-                <span class="mdi mdi-chart-scatter-plot icon-inline" aria-hidden="true"></span>
-                Fleet Anomaly View
-              </div>
-              <div class="fcal-fleet-header-controls">
-                <button id="btnFcalFleetScan" class="btn btn-accent btn-sm" type="button"
-                        title="Walk every configured (inverter, slave), read the calibration block, compute per-field median, and highlight modules whose scale factor is &gt;5 % off the fleet median. Topology key (cached 1 hour) gates the scan.">
-                  <span class="mdi mdi-magnify-scan icon-inline" aria-hidden="true"></span>
-                  <span>Scan Fleet</span>
+            <!-- ── Firmware Upgrade (EXPERIMENTAL) ───────────────────────
+                 Standalone Inverter Calibration Tool ONLY (.calibrator-mode
+                 via CSS). Irreversible per-node DSP flash. Dry-Run is the
+                 default and MUST pass before the live path can be armed; the
+                 live button stays disabled until a dry-run of the SELECTED
+                 file succeeds, the operator ticks the irreversible
+                 acknowledgement, types the exact confirmation phrase, and
+                 supplies the topology auth key. All real safety gates are
+                 enforced server-side in firmware_transport.flash_inverter_node. -->
+            <div class="fcal-fw-modal" id="fcalFirmwarePanel" role="dialog"
+                 aria-modal="true" aria-label="Firmware upgrade (experimental)" hidden>
+              <div class="fcal-fw-backdrop" data-fw-close></div>
+              <div class="fcal-fw-dialog" role="document">
+              <div class="fcal-fw-header">
+                <div class="fcal-fw-title">
+                  <span class="mdi mdi-memory icon-inline" aria-hidden="true"></span>
+                  Firmware Upgrade
+                  <span class="fcal-fw-badge">EXPERIMENTAL · IRREVERSIBLE</span>
+                </div>
+                <button id="btnFwClose" class="btn btn-outline" type="button"
+                        data-fw-close aria-label="Close firmware upgrade"
+                        title="Close the firmware upgrade dialog.">
+                  <span class="mdi mdi-close icon-inline" aria-hidden="true"></span>
+                  <span>Close</span>
                 </button>
               </div>
-            </div>
-            <!-- Status line on its own reserved row so growing text never
-                 shoves the Scan Fleet button (4.5 layout fix). -->
-            <div class="fcal-fleet-msg-row">
-              <span class="smsg" id="fcalFleetMsg"></span>
-            </div>
-            <div id="fcalFleetResult" class="srn-table-host">
-              <div class="srn-empty">Click <strong>Scan Fleet</strong> to read every node and surface calibration outliers. Read-only. ~50-60 s for a 96-node fleet (gentle 2-worker probe so live polling stays responsive).</div>
+
+              <div id="fcalFwBody" class="fcal-fw-body">
+                <p class="fcal-fw-warn">
+                  Flashing rewrites the inverter DSP program. It is
+                  <strong>irreversible</strong> and a wrong or interrupted
+                  image can brick the unit. Always run <strong>Dry-Run</strong>
+                  first — it simulates the entire flash with zero hardware
+                  contact. Live flash is gated server-side and uses
+                  whichever transport is connected — Ethernet (via the
+                  gateway) or RS485-USB (the most-direct path to the
+                  node). For a serial flash the tool takes exclusive
+                  ownership of the COM port for the duration; reconnect
+                  the transport afterwards.
+                </p>
+
+                <div class="fcal-fw-row">
+                  <label class="invclock-label" for="fwFilePath">Firmware file</label>
+                  <input id="fwFilePath" class="inp invclock-input" type="text"
+                         autocomplete="off" spellcheck="false"
+                         style="min-width: 320px;"
+                         placeholder="Click Browse… to pick a .S image"
+                         title="Absolute path to the Motorola S-record (.S) firmware image. Use Browse… to select it; you may also paste a full path. Filename must follow the ISM LLLnnnn… rule." />
+                  <button id="btnFwBrowse" class="btn btn-outline" type="button"
+                          title="Open the native file picker and choose the .S firmware image to flash.">
+                    <span class="mdi mdi-folder-open-outline icon-inline" aria-hidden="true"></span>
+                    <span>Browse…</span>
+                  </button>
+                </div>
+
+                <div class="fcal-fw-row">
+                  <label class="invclock-label" for="fwNode">Target node</label>
+                  <input id="fwNode" class="inp invclock-input" type="number"
+                         min="1" max="247" step="1" style="max-width: 90px;"
+                         title="Modbus node address of the single unit to flash (1–247). Broadcast/0 is forbidden by the server." />
+                  <button id="btnFwIdentity" class="btn btn-outline" type="button"
+                          title="Read FC11 Report-Slave-ID so you can confirm exactly which physical unit this would flash. Read-only.">
+                    <span class="mdi mdi-card-account-details-outline icon-inline" aria-hidden="true"></span>
+                    <span>Read Identity</span>
+                  </button>
+                  <span class="smsg" id="fwIdentityMsg"></span>
+                </div>
+                <div id="fwIdentityBox" class="fcal-fw-box" hidden></div>
+
+                <details class="fcal-fw-adv">
+                  <summary title="Advanced frame parameters — defaults match the decoded ISM Cargador for DSP807-class INGECON PowerMax units.">Advanced</summary>
+                  <div class="fcal-fw-row">
+                    <label class="invclock-label" for="fwArgDsp">DSP map</label>
+                    <select id="fwArgDsp" class="inp invclock-input" style="max-width: 130px;"
+                            title="ISM arg_dsp: 1/6 → DSP807 flash map (default), other → DSP803.">
+                      <option value="1" selected>DSP807 (1)</option>
+                      <option value="6">DSP807 (6)</option>
+                      <option value="0">DSP803 (0)</option>
+                    </select>
+                    <label class="invclock-label" for="fwFrameLen">Frame</label>
+                    <select id="fwFrameLen" class="inp invclock-input" style="max-width: 96px;"
+                            title="Data words per 0x91 frame (ISM default 512).">
+                      <option value="512" selected>512</option>
+                      <option value="1024">1024</option>
+                    </select>
+                    <label class="fcal-force-toggle" for="fwLegacy50"
+                           title="Use the pre-2009 legacy opcodes 0x50/0x51/0x52 instead of 0x90/0x91/0x92. Only for very old units.">
+                      <input type="checkbox" id="fwLegacy50" />
+                      <span class="fcal-force-toggle-label">Legacy 0x50</span>
+                    </label>
+                    <label class="fcal-force-toggle" for="fwAllowDowngrade"
+                           title="Permit flashing an image that appears OLDER than what the unit reports. Off by default — the server blocks apparent downgrades.">
+                      <input type="checkbox" id="fwAllowDowngrade" />
+                      <span class="fcal-force-toggle-label">Allow downgrade</span>
+                    </label>
+                  </div>
+                </details>
+
+                <div class="fcal-fw-row">
+                  <button id="btnFwDryRun" class="btn btn-accent" type="button"
+                          title="Simulate the full flash against an in-memory DSP. Zero hardware contact. Must pass before a live flash can be armed.">
+                    <span class="mdi mdi-play-circle-outline icon-inline" aria-hidden="true"></span>
+                    <span>Dry-Run (safe)</span>
+                  </button>
+                  <span class="smsg" id="fwDryRunMsg"></span>
+                </div>
+                <div id="fwDryRunBox" class="fcal-fw-box" hidden></div>
+
+                <div class="fcal-fw-arm" id="fwArmBlock" hidden>
+                  <div class="fcal-fw-arm-title">
+                    <span class="mdi mdi-alert icon-inline" aria-hidden="true"></span>
+                    Arm live flash
+                  </div>
+                  <div class="fcal-fw-sha">
+                    SHA-256:&nbsp;<span class="mono" id="fwShaText">—</span>
+                  </div>
+                  <label class="invclock-check fcal-fw-ack"
+                         title="You acknowledge this writes the inverter DSP and cannot be undone.">
+                    <input type="checkbox" id="fwAck" />
+                    <span class="invclock-check-label">I understand this is irreversible and can brick the inverter.</span>
+                  </label>
+                  <div class="fcal-fw-row">
+                    <label class="invclock-label" for="fwConfirmText">Type to confirm</label>
+                    <input id="fwConfirmText" class="inp invclock-input" type="text"
+                           autocomplete="off" spellcheck="false" style="min-width: 170px;"
+                           placeholder="FLASH <node>"
+                           title="Type FLASH followed by the exact target node number, e.g. FLASH 23." />
+                  </div>
+                  <div class="fcal-fw-row">
+                    <label class="invclock-label" for="fwAuthKey">Authorization</label>
+                    <input id="fwAuthKey" class="inp invclock-input" type="password"
+                           autocomplete="off" spellcheck="false" style="min-width: 140px;"
+                           placeholder="topology key"
+                           title="Topology authorization key (adsiMM). Required only for the live flash." />
+                    <button id="btnFwFlash" class="btn btn-danger" type="button" disabled
+                            title="Start the IRREVERSIBLE live flash. Stays disabled until the dry-run passed, the box is ticked, the confirmation phrase matches, and an auth key is present.">
+                      <span class="mdi mdi-flash icon-inline" aria-hidden="true"></span>
+                      <span>FLASH (live)</span>
+                    </button>
+                    <button id="btnFwAbort" class="btn btn-outline" type="button" hidden
+                            title="Cooperatively abort the running flash at the next frame boundary.">
+                      <span class="mdi mdi-stop-circle-outline icon-inline" aria-hidden="true"></span>
+                      <span>Abort</span>
+                    </button>
+                    <span class="smsg" id="fwFlashMsg"></span>
+                  </div>
+                </div>
+
+                <div id="fwProgressWrap" class="fcal-fw-progress-wrap" hidden>
+                  <div class="fcal-fw-progress-bar">
+                    <div id="fwProgressFill" class="fcal-fw-progress-fill"></div>
+                  </div>
+                  <div id="fwProgressText" class="fcal-fw-progress-text">—</div>
+                </div>
+                <pre id="fwLog" class="fcal-fw-log" hidden></pre>
+              </div>
+              </div>
             </div>
           </div>
+
+          <!-- Fleet Anomalies relocated to the dashboard PARAMETERS page
+               (#page-energy → #paramFleetView). The Inverter Calibration Tool
+               is per-node only. -->
         </div>
       </section>
 
@@ -1429,6 +1673,14 @@
                 <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide" title="Open the IP Configuration editor to manage inverter network addresses and polling parameters.">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
                   <span>IP Configuration</span>
+                </button>
+                <button id="btnOpenCalibrator" class="btn btn-outline settings-utility-wide" title="Open the isolated Field Calibration tool with COM vs Ethernet transport selector.">
+                  <span class="mdi mdi-tune-variant" aria-hidden="true"></span>
+                  <span>Field Calibrator</span>
+                </button>
+                <button id="btnCreateCalibratorShortcut" class="btn btn-outline settings-utility-wide" title="Create a Desktop shortcut that launches the Field Calibrator directly — no dashboard, no login required.">
+                  <span class="mdi mdi-rocket-launch-outline" aria-hidden="true"></span>
+                  <span>Calibrator Desktop Shortcut</span>
                 </button>
                 <button id="btnResetSettingsDefaults" class="btn btn-red settings-utility-wide" title="Reset all settings to factory defaults. This cannot be undone without a prior export or backup.">
                   <span class="mdi mdi-restore" aria-hidden="true"></span>
@@ -2804,6 +3056,12 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
                 <span class="card-tab-label">Plant Serial Map</span>
               </button>
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="bulk" aria-controls="snbPanelBulk" aria-selected="false"
+                      title="Diff every node against the locked factory serial map and re-write only the wrong ones in one pass.">
+                <span class="mdi mdi-auto-fix icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Bulk Fix</span>
+              </button>
             </div>
 
             <!-- Tab panel: per-inverter Read / Edit / Send + audit log -->
@@ -2904,6 +3162,70 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 </div>
                 <div id="snbFleetTableHost" class="srn-table-host">
                   <div class="srn-empty">Click <strong>Scan plant</strong> to read every (inverter, slave), or <strong>Show cached map</strong> to display whatever the gateway last collected.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab panel: Bulk Fix (diff vs locked factory map, re-write wrong) -->
+            <div id="snbPanelBulk" class="card-tab-panel" data-card-tab-panel="bulk"
+                 role="tabpanel" aria-labelledby="snbPanelBulk" hidden>
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-auto-fix icon-inline" aria-hidden="true"></span>
+                  Bulk re-serialize against locked factory map
+                </div>
+                <div class="srn-controls">
+                  <button id="btnSnbBulkMap" class="btn btn-outline" type="button"
+                          title="Show the locked factory serial map (docs/Fixed_Inverter_SerialNumbers.xlsx). 'T' is the inverter nameplate (reference only); slaves 1-4 are written. Read-only — works in remote mode.">
+                    <span class="mdi mdi-file-table-outline icon-inline" aria-hidden="true"></span>
+                    <span>Show target map</span>
+                  </button>
+                  <button id="btnSnbBulkScan" class="btn btn-accent" type="button"
+                          title="Read every node from the wire and diff against the locked map. Bulk-auth required. No writes.">
+                    <span class="mdi mdi-compare-horizontal icon-inline" aria-hidden="true"></span>
+                    <span>Scan &amp; diff</span>
+                  </button>
+                  <label class="invclock-check" for="snbBulkAckRelocations" id="snbBulkAckWrap" hidden
+                         title="Auto-detected: one or more selected nodes carry a serial that the locked map assigns to a DIFFERENT slot — i.e. a physically relocated power module. Tick to allow re-serializing those moved modules; their origin slot is logged for traceability.">
+                    <input type="checkbox" id="snbBulkAckRelocations" />
+                    <span class="invclock-check-label" id="snbBulkAckLabel">Acknowledge relocated modules</span>
+                  </label>
+                  <button id="btnSnbBulkApply" class="btn btn-danger" type="button"
+                          title="UNLOCK + WRITE + readback-verify the locked serial to every selected mismatched node, one at a time. Logged forever; cannot be undone in one click."
+                          disabled>
+                    <span class="mdi mdi-content-save-all-outline icon-inline" aria-hidden="true"></span>
+                    <span>Apply selected</span>
+                  </button>
+                  <span class="smsg" id="snbBulkMsg"></span>
+                </div>
+                <div id="snbBulkTableHost" class="srn-table-host">
+                  <div class="srn-empty">Click <strong>Scan &amp; diff</strong> to compare every live node against the locked factory serial map. Only mismatched, reachable nodes are eligible to re-write.</div>
+                </div>
+
+                <div class="cb-sub-title" style="font-size: 12.5px; margin-top: 16px;">
+                  <span class="mdi mdi-swap-horizontal-bold icon-inline" aria-hidden="true"></span>
+                  Measurement Board (Power Module) Migration History
+                </div>
+                <div class="srn-controls">
+                  <button id="btnSnbMigHistory" class="btn btn-outline" type="button"
+                          title="Chronological trail of every physically relocated Measurement Board (power module) — where each board came from, where it was found, when, and by whom. Reads the change log; works in remote mode.">
+                    <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
+                    <span>Load migration history</span>
+                  </button>
+                  <select id="snbMigFormat" class="inp invclock-input" style="max-width: 150px;"
+                          title="Export file format — styled Excel workbook (.xlsx) or plain CSV. Matches every other dashboard export.">
+                    <option value="xlsx" selected>Excel (.xlsx)</option>
+                    <option value="csv">CSV (.csv)</option>
+                  </select>
+                  <button id="btnSnbMigExport" class="btn btn-outline" type="button"
+                          title="Save the full Measurement Board migration trail to the standard export folder (Logs → All Inverters → Audits), styled and named like every other export. Opens the folder when done.">
+                    <span class="mdi mdi-file-export-outline icon-inline" aria-hidden="true"></span>
+                    <span>Export</span>
+                  </button>
+                  <span class="smsg" id="snbMigMsg"></span>
+                </div>
+                <div id="snbMigHistoryHost" class="srn-table-host">
+                  <div class="srn-empty">Click <strong>Load migration history</strong> to list every power module that was physically moved between slots (origin slot &rarr; where it was found &rarr; re-serialized), with timestamps and operator.</div>
                 </div>
               </div>
             </div>
@@ -3061,15 +3383,6 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
       </div>
       <div id="notifList" class="notif-list"></div>
     </div>
-
-    <button
-      id="notifBell"
-      class="notif-bell hidden"
-      title="Active alarm list"
-      aria-label="View active alarms"
-    >
-      <span class="mdi mdi-bell-alert-outline" aria-hidden="true"></span><span id="notifCount" aria-label="Number of active alarms">0</span>
-    </button>
 
     <button
       id="chatBubble"

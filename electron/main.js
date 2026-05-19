@@ -158,6 +158,7 @@ const _shutdownReason = safeRequire("./shutdownReason", {
     RELAUNCH: "relaunch",
     LICENSE_EXPIRED: "license-expired",
     UNCAUGHT_EXCEPTION: "uncaught-exception",
+    PROCESS_EXIT: "process-exit",
   },
   INITIATORS: {
     WINDOWS_OS: "windows-os",
@@ -243,7 +244,15 @@ function recordEarlyExitMarker(reason, initiator, extra) {
 // first-instance's sentinel and synthesize a bogus "unexpected-shutdown"
 // into prev. The actual call moves below the singleton lock check.
 let _lastShutdownSnapshot = null;
+// True only for the FIRST instance (and standalone calibrator), which is the
+// sole owner of the lifecycle markers. A losing second instance must never
+// touch them (it would write a `current` marker while the real first
+// instance is still running, masking a later first-instance crash as
+// graceful). _initShutdownSnapshot() runs only on the owning process, so it
+// is the precise place to assert ownership for the process-exit fallback.
+let _ownsLifecycleMarkers = false;
 function _initShutdownSnapshot() {
+  _ownsLifecycleMarkers = true;
   try {
     _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
     if (_lastShutdownSnapshot) {
@@ -265,6 +274,16 @@ function _initShutdownSnapshot() {
 // Allow dashboard alarm audio to start immediately on packaged clients.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
+// Standalone Field Calibrator launch mode. The Desktop shortcut created from
+// Settings → "Calibrator Desktop Shortcut" passes `--calibrator`, which makes
+// this process boot ONLY the calibrator stack (Python :9200 + Node :3600 +
+// the calibrator window) — no dashboard server, no login, no fleet UI. It
+// uses its own ports and ~/.calibrator DB, so it can run with or without the
+// dashboard already open. Must be evaluated before the single-instance lock.
+const CALIBRATOR_STANDALONE =
+  process.argv.includes("--calibrator") ||
+  process.argv.includes("--calibrator-standalone");
+
 // T6.1 fix: single-instance lock.  Prevents two copies of the packaged app
 // from running simultaneously against the same adsi.db + ports 3500/9000,
 // which previously risked SQLite "database is locked" and Python FastAPI
@@ -272,8 +291,15 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 // instance will quit immediately after signalling the first to focus its
 // window.  Must run BEFORE app.whenReady() so the lock is in place before
 // any services initialise.
-const _gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!_gotSingleInstanceLock) {
+//
+// The standalone calibrator deliberately does NOT take this lock: it targets
+// a disjoint port/DB set (3600/9200, ~/.calibrator) and is meant to launch
+// even while the dashboard owns the lock. Its own stale-port cleanup
+// (cleanupStaleCalibratorPorts) guards against two calibrator instances.
+const _gotSingleInstanceLock = CALIBRATOR_STANDALONE
+  ? true
+  : app.requestSingleInstanceLock();
+if (!CALIBRATOR_STANDALONE && !_gotSingleInstanceLock) {
   console.warn("[main] Another instance is already running — quitting this one.");
   // Second instance — DO NOT touch lifecycle markers. The running first
   // instance owns the current sentinel; we just exit cleanly so the user
@@ -366,17 +392,46 @@ const BACKEND_RESTART_MAX_MS = 30000;
 const FORECAST_MODE_SYNC_MS = 10000;
 const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
 const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
+// Hard ceiling for the whole stopRuntimeServices() drain. The sub-phases
+// already have bounded, unref'd timers (embedded ~5 s, per-child force-kill
+// ~2 s, run concurrently → ~7-9 s real worst case). If a non-resolving
+// promise wedges the drain past this ceiling we self-exit via app.exit()
+// rather than lingering until the operator / OS / build tooling force-kills
+// us with TerminateProcess — which skips process 'exit' and leaves NO
+// shutdown marker, the exact cause of the false "Unexpected prior shutdown"
+// banner. 20 s is comfortably above any healthy drain so it never preempts
+// one; it only bounds a true hang. Disarmed once finalizeAppShutdown() runs
+// (so the legitimately-longer install path is unaffected).
+const APP_SHUTDOWN_HARD_CEILING_MS = 20000;
 const IS_DEV = process.env.NODE_ENV === "development";
 const BACKEND_EXE_NAMES = ["InverterCoreService.exe"];
 const BACKEND_SCRIPT_NAMES = ["InverterCoreService.py", "main2.py"];
 const FORECAST_EXE_NAMES = ["ForecastCoreService.exe"];
 const FORECAST_SCRIPT_NAMES = ["ForecastCoreService.py"];
+const CALIBRATOR_EXE_NAMES = ["CalibratorService.exe"];
+const CALIBRATOR_SCRIPT_NAMES = ["CalibratorService.py"];
+const CALIBRATOR_NODE_ENTRY = "server/calibratorMain.js";
+const CALIBRATOR_PY_PORT = 9200;
+const CALIBRATOR_NODE_PORT = 3600;
+const CALIBRATOR_READINESS_TIMEOUT_MS = 15000;
 const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe"];
 // Login-page admin auth key is intentionally fixed across devices.
 const LOGIN_ADMIN_AUTH_KEY = "ADSI-2026";
 const DEFAULT_LOGIN_USERNAME = "admin";
 const DEFAULT_LOGIN_PASSWORD = "1234";
 const APP_ICON = path.join(__dirname, "../assets/icon.ico");
+
+// Resolve the Field Calibrator icon. In a packaged build the icon must be a
+// REAL on-disk file (a Windows .lnk cannot read an icon embedded inside
+// app.asar), so package.json ships assets/calib.{ico,png} via extraResources
+// to the resources root. In dev, fall back to the repo assets/ copy.
+function calibratorIconPath(ext = "ico") {
+  try {
+    const packaged = path.join(process.resourcesPath || "", `calib.${ext}`);
+    if (app.isPackaged && fs.existsSync(packaged)) return packaged;
+  } catch (_) {}
+  return path.join(__dirname, "..", "assets", `calib.${ext}`);
+}
 const PROGRAMDATA_ROOT = process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
 const PROGRAMDATA_DIR = path.join(PROGRAMDATA_ROOT, "InverterDashboard");
 // Lazy license path resolution — must NOT be evaluated at module load because
@@ -440,6 +495,10 @@ let loadingWin = null;
 let loginWin = null;
 let topologyWin = null;
 let ipConfigWin = null;
+let calibratorWin = null;
+let _calibratorSpawnInProgress = false; // FIX B: spawn-guard to prevent overlapping invocations
+let calibratorPyProc = null;
+let calibratorNodeProc = null;
 let webProc = null;
 let embeddedServerStarted = false;
 let embeddedServerModule = null;
@@ -475,6 +534,10 @@ let allowMainWindowClose = false;
 let appShutdownPromise = null;
 let appShutdownBypassQuit = false;
 let appShutdownFinalAction = { type: "quit", exitCode: 0 };
+// Set true the instant finalizeAppShutdown() runs. Disarms the
+// stopRuntimeServices() hard-ceiling watchdog so the (legitimately longer)
+// install / relaunch finalize paths are never preempted.
+let _appShutdownFinalized = false;
 let backendStopExpected = false;
 let appUpdateAutoCheckTimer = null;
 let appUpdateAutoCheckStarted = false;
@@ -1669,6 +1732,7 @@ async function stopRuntimeServices(reason = "application shutdown") {
 }
 
 function finalizeAppShutdown() {
+  _appShutdownFinalized = true;   // disarm the hard-ceiling watchdog
   appShutdownBypassQuit = true;
   allowMainWindowClose = true;
   const action = normalizeAppShutdownAction(appShutdownFinalAction);
@@ -1816,11 +1880,40 @@ function requestAppShutdown(options = {}) {
   });
   if (appShutdownPromise) return appShutdownPromise;
   console.log(`[main] Shutdown requested (${reason})`);
+  // Hard-ceiling watchdog: a non-resolving promise inside the drain must
+  // never leave the app hung. A hung app gets force-killed (operator Task
+  // Manager, OS shutdown-timeout, or release tooling's taskkill) via
+  // TerminateProcess, which skips process 'exit' and leaves no shutdown
+  // marker → the next boot false-flags "Unexpected prior shutdown". Self-
+  // exiting via app.exit() instead runs the 'exit'/'quit' fallback writer,
+  // so the marker is always persisted. unref() so the timer itself never
+  // keeps the process alive; finalizeAppShutdown() disarms it for the
+  // legitimately-longer install/relaunch paths.
+  const _watchdog = setTimeout(() => {
+    if (_appShutdownFinalized) return;
+    try {
+      console.error(
+        `[main] Shutdown drain exceeded ${APP_SHUTDOWN_HARD_CEILING_MS}ms ` +
+        `(reason=${reason}) — forcing app.exit() so the graceful marker is ` +
+        `recorded by the process-exit fallback instead of being lost to a kill.`,
+      );
+    } catch (_) {}
+    _appShutdownFinalized = true;
+    appShutdownBypassQuit = true;
+    try {
+      const action = normalizeAppShutdownAction(appShutdownFinalAction);
+      app.exit(action && action.type === "exit" ? action.exitCode || 0 : 0);
+    } catch (_) {
+      app.exit(0);
+    }
+  }, APP_SHUTDOWN_HARD_CEILING_MS);
+  if (_watchdog && typeof _watchdog.unref === "function") _watchdog.unref();
   appShutdownPromise = stopRuntimeServices(reason)
     .catch((err) => {
       console.error("[main] Shutdown sequence failed:", err?.message || err);
     })
     .finally(() => {
+      try { clearTimeout(_watchdog); } catch (_) {}
       finalizeAppShutdown();
     });
   return appShutdownPromise;
@@ -1828,6 +1921,14 @@ function requestAppShutdown(options = {}) {
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  // Standalone Field Calibrator: skip the entire dashboard boot (license,
+  // login, Express :3500, Python :9000, fleet UI) and bring up ONLY the
+  // calibrator stack. Returns early so none of the dashboard lifecycle runs.
+  if (CALIBRATOR_STANDALONE) {
+    await startCalibratorStandalone();
+    return;
+  }
+
   if (process.platform === "win32") {
     app.setAppUserModelId("com.inverter.dashboard");
   }
@@ -1904,6 +2005,16 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  // Standalone calibrator: the calibratorWin "closed" handler already called
+  // terminateCalibratorProcesses(). Re-assert (idempotent) and exit directly
+  // — there is no dashboard server to drain, so the heavy quit() path would
+  // only hang on a :3500 that was never started. Short delay lets the
+  // child SIGTERMs land before the process goes away.
+  if (CALIBRATOR_STANDALONE) {
+    try { terminateCalibratorProcesses(); } catch (_) {}
+    setTimeout(() => app.exit(0), 600);
+    return;
+  }
   if (process.platform !== "darwin") quit();
 });
 
@@ -1945,6 +2056,70 @@ app.on("before-quit", (event) => {
 });
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+});
+
+// ─── Last-resort graceful-shutdown marker ─────────────────────────────────────
+//
+// Forensic evidence (shutdown-reason.prev.json showing reason="unexpected-
+// shutdown" while the boot-sentinel was present) proved the prior process
+// ended with NO shutdown-reason.current.json on disk. requestAppShutdown()
+// writes that marker synchronously as its FIRST action, so its absence means
+// requestAppShutdown() never ran for that process — it exited through a path
+// with no Electron/Node lifecycle handler (a hung-then-force-killed quit, a
+// build-tool taskkill of the running app, a relaunch chain that skipped the
+// normal quit, or an early-exit not covered by recordEarlyExitMarker()).
+// Every such path STILL fires Node's `process 'exit'` (and Electron's app
+// 'quit') because the JS runtime got to terminate itself. Only genuinely
+// uncatchable terminations — TerminateProcess/kill -9, BSOD, power loss,
+// native abort — skip these events, and those SHOULD remain classified
+// "unexpected". So this is the correct, complete safety net: it converts
+// "the app actually exited cleanly but some path forgot to record a reason"
+// into a graceful marker, while leaving real crashes correctly flagged.
+//
+// recordShutdownReasonOnce() is first-write-wins (guarded by
+// _shutdownReasonRecorded), so this NEVER clobbers a more specific reason
+// already recorded by before-quit / session-end / powerMonitor / install /
+// relaunch / uncaught-exception. It only fills the gap when nothing else did.
+// The writer is fully synchronous (fs.writeFileSync + renameSync) — the only
+// kind of work permitted in a 'process exit' handler — and is internally
+// try/caught so it can never throw out of the exit path.
+function recordProcessExitFallbackMarker(via) {
+  // Only the lifecycle-marker owner may write. A losing second instance
+  // (app.exit(0) at the singleton-lock check) must leave the running first
+  // instance's sentinel/marker untouched — otherwise its exit here would
+  // plant a `current` marker that hides a subsequent first-instance crash.
+  if (!_ownsLifecycleMarkers) return;
+  if (_shutdownReasonRecorded) return;
+  // Strictly additive: never overwrite a reason already on disk. The
+  // uncaughtException (line ~62) and powerMonitor.suspend handlers write
+  // `current` via the RAW writer WITHOUT flipping _shutdownReasonRecorded,
+  // so the flag check alone is not enough — re-check the file so a real
+  // main-process crash keeps its "uncaught-exception" forensic record
+  // instead of being relabelled "process-exit".
+  try {
+    const cur = _shutdownReason.PATHS && _shutdownReason.PATHS.current;
+    if (cur && fs.existsSync(cur)) return;
+  } catch (_) { /* fall through — recording is better than nothing */ }
+  recordShutdownReasonOnce(SHUTDOWN_REASONS.PROCESS_EXIT, {
+    initiator: SHUTDOWN_INITIATORS.RUNTIME,
+    extra: { via: String(via || "process-exit"), fallback: true },
+  });
+}
+
+// `app 'quit'` fires once Electron has decided to quit (after will-quit,
+// before the process actually goes away) — still a live JS context where the
+// sync writer is safe. Belt to the `process 'exit'` suspenders below.
+app.on("quit", () => {
+  try { recordProcessExitFallbackMarker("app-quit"); } catch (_) {}
+});
+
+// `process 'exit'` is the universal final tick: it fires for app.quit(),
+// app.exit(), window-all-closed natural teardown, the watchdog self-exit,
+// and any plain process termination. Sync-only context — perfect for the
+// sync marker writer. This is the catch-all that guarantees a marker on
+// every exit the runtime is alive to observe.
+process.on("exit", () => {
+  try { recordProcessExitFallbackMarker("process-exit"); } catch (_) {}
 });
 
 // v2.8.14 — Windows OS shutdown / logoff detection.
@@ -4355,6 +4530,334 @@ function openIpConfigWindow() {
   });
 }
 
+function terminateCalibratorProcesses() {
+  try {
+    if (calibratorPyProc && !calibratorPyProc.killed) {
+      calibratorPyProc.kill("SIGTERM");
+      setTimeout(() => {
+        if (calibratorPyProc && !calibratorPyProc.killed) {
+          calibratorPyProc.kill("SIGKILL");
+        }
+      }, 2000);
+    }
+  } catch (err) {
+    console.warn("[main] Failed to kill calibratorPyProc:", err?.message);
+  }
+  try {
+    if (calibratorNodeProc && !calibratorNodeProc.killed) {
+      calibratorNodeProc.kill("SIGTERM");
+      setTimeout(() => {
+        if (calibratorNodeProc && !calibratorNodeProc.killed) {
+          calibratorNodeProc.kill("SIGKILL");
+        }
+      }, 2000);
+    }
+  } catch (err) {
+    console.warn("[main] Failed to kill calibratorNodeProc:", err?.message);
+  }
+  // Also try to kill by exe name
+  try {
+    execFileSync("taskkill", ["/F", "/IM", "CalibratorService.exe"], {
+      timeout: 5000,
+      windowsHide: true,
+    });
+  } catch (_) {}
+}
+
+function spawnCalibratorPython() {
+  if (calibratorPyProc && !calibratorPyProc.killed) {
+    return calibratorPyProc;
+  }
+
+  const resourcesPath = process.resourcesPath || path.join(__dirname, "..", "resources");
+  const exePath = path.join(resourcesPath, "backend", "CalibratorService.exe");
+  // Root-level shim (mirrors root InverterCoreService.py) so `python CalibratorService.py`
+  // runs with repo root on sys.path and `services.calibrator_app` resolves.
+  const scriptPath = path.join(__dirname, "..", "CalibratorService.py");
+
+  // Try packaged EXE first, fall back to script
+  const usePy = !app.isPackaged || !fs.existsSync(exePath);
+  const command = usePy ? "python" : exePath;
+  const args = usePy ? [scriptPath] : [];
+
+  try {
+    calibratorPyProc = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+
+    calibratorPyProc.on("error", (err) => {
+      console.error("[main] calibrator python spawn error:", err?.message);
+    });
+
+    calibratorPyProc.on("exit", (code, signal) => {
+      console.log(`[main] calibrator python exited: code=${code} signal=${signal}`);
+      calibratorPyProc = null;
+    });
+
+    console.log(`[main] spawned calibrator python (PID ${calibratorPyProc.pid})`);
+    return calibratorPyProc;
+  } catch (err) {
+    console.error("[main] Failed to spawn calibrator python:", err?.message);
+    return null;
+  }
+}
+
+function spawnCalibratorNode() {
+  if (calibratorNodeProc && !calibratorNodeProc.killed) {
+    return calibratorNodeProc;
+  }
+
+  const resourcesPath = process.resourcesPath || path.join(__dirname, "..", "resources");
+  // In packaged app, Node and bundled modules are in resources/app.asar
+  const nodeEntry = app.isPackaged
+    ? path.join(resourcesPath, "app.asar", CALIBRATOR_NODE_ENTRY)
+    : path.join(__dirname, "..", CALIBRATOR_NODE_ENTRY);
+
+  // ALWAYS run the calibrator Node via Electron's own runtime
+  // (process.execPath + ELECTRON_RUN_AS_NODE=1), in BOTH dev and packaged.
+  // Rationale: better-sqlite3 is built for the Electron ABI (the dashboard
+  // needs it). Spawning with a system `node` (different NODE_MODULE_VERSION)
+  // makes calibratorDb's require('better-sqlite3') throw immediately, the
+  // Node server never binds :3600, and the readiness wait times out
+  // ("Calibrator Startup Failed"). Electron-as-Node is ABI-matched and
+  // asar-aware, so this is correct for dev and packaged alike.
+  const command = process.execPath;
+  const args = [nodeEntry, "--port", String(CALIBRATOR_NODE_PORT)];
+  const spawnOpts = {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+  };
+
+  try {
+    calibratorNodeProc = spawn(command, args, spawnOpts);
+
+    calibratorNodeProc.on("error", (err) => {
+      console.error("[main] calibrator node spawn error:", err?.message);
+    });
+
+    calibratorNodeProc.on("exit", (code, signal) => {
+      console.log(`[main] calibrator node exited: code=${code} signal=${signal}`);
+      calibratorNodeProc = null;
+    });
+
+    console.log(`[main] spawned calibrator node (PID ${calibratorNodeProc.pid})`);
+    return calibratorNodeProc;
+  } catch (err) {
+    console.error("[main] Failed to spawn calibrator node:", err?.message);
+    return null;
+  }
+}
+
+async function waitForCalibratorReady(timeoutMs = CALIBRATOR_READINESS_TIMEOUT_MS) {
+  const startTime = Date.now();
+  const pollInterval = 250;
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const res = await new Promise((resolve) => {
+        const req = http.get(
+          `http://127.0.0.1:${CALIBRATOR_NODE_PORT}/health`,
+          { timeout: 1500 },
+          (response) => {
+            let body = "";
+            response.on("data", (chunk) => { body += chunk; });
+            response.on("end", () => {
+              try {
+                const json = JSON.parse(body);
+                resolve(json?.ok === true);
+              } catch (_) {
+                resolve(response.statusCode === 200);
+              }
+            });
+          }
+        );
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => {
+          req.destroy();
+          resolve(false);
+        });
+      });
+
+      if (res) return true;
+    } catch (_) {}
+
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+
+  return false;
+}
+
+function openCalibratorWindow(theme = "") {
+  if (calibratorWin && !calibratorWin.isDestroyed()) {
+    focusWindow(calibratorWin);
+    return;
+  }
+
+  calibratorWin = new BrowserWindow({
+    width: 1400,
+    height: 850,
+    minWidth: 1000,
+    minHeight: 700,
+    icon: calibratorIconPath("ico"),
+    title: "Inverter Calibration Tool",
+    frame: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#080c14",
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: true,
+    },
+  });
+
+  // Load the dashboard SPA in calibrator-only mode: the ?calibrator=1 query
+  // param triggers a boot hook in app.js that routes straight to the Field
+  // Calibration page and hides the fleet dashboard chrome (sidebar/header).
+  // An optional &theme= carries the dashboard's current theme across the
+  // origin boundary (calibrator window is :3600, separate localStorage).
+  let calibratorUrl = `http://127.0.0.1:${CALIBRATOR_NODE_PORT}/?calibrator=1`;
+  const themeStr = String(theme || "").trim();
+  if (/^[a-z]+$/.test(themeStr)) {
+    calibratorUrl += `&theme=${encodeURIComponent(themeStr)}`;
+  }
+  calibratorWin.loadURL(calibratorUrl).catch((err) => {
+    console.error("[main] load calibrator error:", err.message);
+  });
+
+  calibratorWin.once("ready-to-show", () => {
+    focusWindow(calibratorWin);
+  });
+
+  calibratorWin.on("closed", () => {
+    calibratorWin = null;
+    // Tear down child procs when window closes
+    terminateCalibratorProcesses();
+  });
+}
+
+// FIX C: Helper to check if a port is in use (best-effort port probe)
+async function isPortInUse(port, host = "127.0.0.1", timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port, timeout: timeoutMs });
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("error", () => resolve(false));
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+// FIX C: Cleanup stale calibrator procs before spawn
+async function cleanupStaleCalibratorPorts() {
+  try {
+    const ports = [9200, 3600]; // Python service + Node service ports
+    for (const port of ports) {
+      if (await isPortInUse(port)) {
+        console.log(`[main] Port ${port} still in use; killing stale CalibratorService processes`);
+        try {
+          execFileSync("taskkill", ["/F", "/IM", "CalibratorService.exe"], {
+            timeout: 3000,
+            windowsHide: true,
+          });
+        } catch (_) {
+          // May not be running
+        }
+        // Also try to kill any stale Node processes listening on calibrator ports
+        // (best-effort, using tasklist to find by command-line pattern)
+        try {
+          const { execSync } = require("child_process");
+          const tasks = execSync("tasklist /V /FO CSV", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
+          const lines = tasks.split("\n").slice(1); // skip header
+          for (const line of lines) {
+            const parts = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/); // CSV-aware split
+            if (parts.length > 8) {
+              const cmdLine = parts[8]?.toLowerCase() || "";
+              if (cmdLine.includes("calibrator") || cmdLine.includes("3600")) {
+                const pid = parseInt(parts[1]?.replace(/"/g, ""), 10);
+                if (pid > 0) {
+                  try {
+                    execFileSync("taskkill", ["/pid", String(pid), "/f"], {
+                      timeout: 2000,
+                      windowsHide: true,
+                    });
+                    console.log(`[main] Killed stale calibrator process PID ${pid}`);
+                  } catch (_) {
+                    // already dead
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {
+          // tasklist may not be available or fail; best-effort only
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[main] cleanupStaleCalibratorPorts warning:", err.message);
+    // Non-fatal; allow spawn to proceed
+  }
+}
+
+async function openCalibratorWindowGuarded(theme = "") {
+  // FIX C: Cleanup orphan processes and check port availability
+  await cleanupStaleCalibratorPorts();
+
+  // Kill any stale procs from a prior session (additional safety)
+  try {
+    execFileSync("taskkill", ["/F", "/IM", "CalibratorService.exe"], {
+      timeout: 3000,
+      windowsHide: true,
+    });
+  } catch (_) {}
+
+  // Spawn the Python and Node calibrator services
+  spawnCalibratorPython();
+  spawnCalibratorNode();
+
+  // Wait for Node to be ready
+  const ready = await waitForCalibratorReady();
+  if (!ready) {
+    terminateCalibratorProcesses();
+    await dialog.showErrorBox(
+      "Calibrator Startup Failed",
+      "The calibrator service failed to start. Please check the logs and try again."
+    );
+    return false;
+  }
+
+  openCalibratorWindow(theme);
+  return true;
+}
+
+// Entry point for `--calibrator` (Desktop shortcut). Brings up only the
+// calibrator stack as a focused field tool. On failure or window close the
+// process exits cleanly (handled in window-all-closed) instead of running
+// the dashboard's heavy requestAppShutdown path.
+async function startCalibratorStandalone() {
+  try {
+    if (process.platform === "win32") {
+      app.setAppUserModelId("com.engr-m.inverter-dashboard.calibrator");
+    }
+    app.setName("Inverter Calibration Tool");
+    Menu.setApplicationMenu(null);
+  } catch (_) {}
+
+  const ok = await openCalibratorWindowGuarded();
+  if (!ok) {
+    // openCalibratorWindowGuarded already surfaced an error dialog.
+    app.exit(1);
+  }
+}
+
 function requestServerJson(method, routePath, payload, timeoutMs = 3500) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -4909,6 +5412,62 @@ ipcMain.on("open-topology-window", async (event) => {
 ipcMain.on("open-ip-config-window", async (event) => {
   const ownerWin = BrowserWindow.fromWebContents(event.sender) || null;
   await openIpConfigWindowGuarded(ownerWin);
+});
+ipcMain.on("open-calibrator", async (event, theme) => {
+  if (_calibratorSpawnInProgress) return;
+  if (calibratorWin && !calibratorWin.isDestroyed()) {
+    focusWindow(calibratorWin);
+    return;
+  }
+  _calibratorSpawnInProgress = true;
+  try {
+    await openCalibratorWindowGuarded(theme);
+  } finally {
+    _calibratorSpawnInProgress = false;
+  }
+});
+ipcMain.handle("create-calibrator-shortcut", async () => {
+  try {
+    if (process.platform !== "win32") {
+      return { ok: false, error: "Desktop shortcuts are only supported on Windows." };
+    }
+    const desktop = app.getPath("desktop");
+    const shortcutPath = path.join(desktop, "Inverter Calibration Tool.lnk");
+    const target = process.execPath;
+    const iconPath = calibratorIconPath("ico");
+    // Packaged: process.execPath IS the installed app .exe (Electron renamed
+    // by electron-builder), so `--calibrator` alone re-launches this app
+    // straight into standalone calibrator mode.
+    //
+    // Dev: process.execPath is the bare electron.exe, which needs the app
+    // path as its first argument or it just shows Electron's default splash
+    // (the "run a local app" screen). Quote it — the path may contain spaces.
+    let args;
+    let workingDir;
+    if (app.isPackaged) {
+      args = "--calibrator";
+      workingDir = path.dirname(process.execPath);
+    } else {
+      const appPath = app.getAppPath(); // project root in dev
+      args = `"${appPath}" --calibrator`;
+      workingDir = appPath;
+    }
+    const ok = shell.writeShortcutLink(shortcutPath, "create", {
+      target,
+      args,
+      cwd: workingDir,
+      icon: iconPath,
+      iconIndex: 0,
+      description: "Inverter Calibration Tool — isolated inverter calibration (no dashboard required)",
+      appUserModelId: "com.engr-m.inverter-dashboard.calibrator",
+    });
+    if (!ok) {
+      return { ok: false, error: "Windows declined to write the shortcut file." };
+    }
+    return { ok: true, path: shortcutPath };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 });
 ipcMain.on("close-current-window", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);

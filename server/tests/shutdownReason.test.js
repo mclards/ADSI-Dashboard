@@ -179,4 +179,35 @@ runTest("record-returns-null-when-writer-fails", ({ scratchRoot, originalProgram
   }
 });
 
+runTest("process-exit-fallback-classifies-graceful", ({ scratchRoot, originalProgramData }) => {
+  // Mirrors the electron/main.js last-resort writer: when no specific
+  // handler ran, the process 'exit' / app 'quit' fallback records
+  // REASONS.PROCESS_EXIT. The next boot MUST classify that as "graceful"
+  // (no false "Unexpected prior shutdown" banner) — that is the entire
+  // point of the hardening.
+  const mod = freshRequire(originalProgramData, scratchRoot);
+  assert.strictEqual(
+    mod.REASONS.PROCESS_EXIT,
+    "process-exit",
+    "PROCESS_EXIT reason constant must be exported for the main.js fallback",
+  );
+  // Startup #1 — writes sentinel
+  mod.readLastShutdownSync();
+  // The process exits without any specific handler firing; the fallback
+  // records process-exit synchronously.
+  const rec = mod.recordShutdownReasonSync(mod.REASONS.PROCESS_EXIT, {
+    initiator: mod.INITIATORS.RUNTIME,
+    extra: { via: "process-exit", fallback: true },
+  });
+  assert.ok(rec, "fallback record should be written");
+  assert.strictEqual(rec.reason, "process-exit");
+  assert.strictEqual(rec.fallback, true, "extra.fallback should round-trip");
+  assert.ok(fs.existsSync(mod.PATHS.current), "current marker present after fallback record");
+  // Startup #2 — classify
+  const snap = mod.readLastShutdownSync();
+  assert.strictEqual(snap.classification, "graceful", "process-exit must be graceful, not unexpected");
+  assert.strictEqual(snap.priorReason.reason, "process-exit");
+  assert.strictEqual(snap.priorReason.initiator, "runtime");
+});
+
 console.log("✓ shutdownReason.test.js — all scenarios passed");

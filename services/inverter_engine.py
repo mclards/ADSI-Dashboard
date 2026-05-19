@@ -39,6 +39,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from drivers.modbus_tcp import create_client, read_input, read_holding, write_single
 from .shared_data import shared
 
+# RS485-USB fleet bridge removed in v2.11.x (field calibration moved to the
+# standalone Inverter Calibration Tool). Kept as a None sentinel so the
+# remaining `if rs485_bridge is not None:` guards below stay valid no-ops
+# with no behaviour change to live polling.
+rs485_bridge = None
+
 ENGINE_PORT = int(os.getenv("INVERTER_ENGINE_PORT", "9100"))
 ENGINE_HOST = str(os.getenv("INVERTER_ENGINE_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
 
@@ -2556,6 +2562,12 @@ async def ipconfig_watcher():
                     print("[WATCH] ipconfig changed — reloading")
                 last_signature = signature
                 await rebuild_global_maps(cfg)
+                # Reconcile RS485 bridge buses on ipconfig change
+                if rs485_bridge is not None:
+                    try:
+                        await rs485_bridge.reconcile(cfg)
+                    except Exception as exc:
+                        print(f"[RS485-BRIDGE] reconcile error: {exc}")
         except Exception:
             pass
 
@@ -3304,6 +3316,22 @@ async def api_stop_reasons_standard(inverter: int, slave: int, request: Request)
 
 # ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ────────────────────
 
+@app.get("/serial/ports")
+async def api_serial_ports():
+    """List available serial ports (for RS485-USB bridge configuration).
+
+    Returns:
+        [{"device": "COM3", "description": "..."}]
+        Empty list if pyserial not available.
+    """
+    if rs485_bridge is None:
+        return []
+    try:
+        return rs485_bridge.list_serial_ports()
+    except Exception:
+        return []
+
+
 @app.get("/serial/{inverter}/{slave}")
 async def api_serial_read(inverter: int, slave: int, request: Request):
     """FC11 Report Slave ID read for one inverter+slave.
@@ -3446,17 +3474,20 @@ async def api_serial_write(inverter: int, slave: int, request: Request):
 
 
 # ─── Active Power Control (APC) — Continuous %P Setpoint ────────────────────
+# Transport-agnostic core exported from calibration_io.py (2026-05-17 C1 move).
 # Verified protocol 2026-05-04: FC16 → reg 0x03E8 (1000)
 #   opcode 0x0005 = STOP  |  0x0006 = START  |  0x0003 = SET-ACTIVE-PCT
 #   reg[1001] = Q15 setpoint = (pct/100) × 0x7FFF  (only when opcode=0x0003)
 # Wire test: PAC 143 kW → 125 kW within 8 s at 50 % on inverter .126 slave 1.
 # See plans/2026-05-04-curtailment-control.md §1 for full verification record.
-
-_APC_REG          = 0x03E8   # 1000 — command register
-_APC_OPCODE_SET_P = 0x0003
-_APC_OPCODE_STOP  = 0x0005
-_APC_OPCODE_START = 0x0006
-_APC_Q15_MAX      = 0x7FFF
+from services.calibration_io import (
+    APC_REG,
+    APC_OPCODE_SET_P,
+    APC_OPCODE_STOP,
+    APC_OPCODE_START,
+    APC_Q15_MAX,
+    consign_apc_with_lock,
+)
 
 # Per-slave setpoint state — updated on each confirmed write.
 # Key: (ip, slave)  Value: {active_pct, opcode, applied_ts, job_id, source}
@@ -3467,62 +3498,6 @@ ramp_jobs: dict = {}
 
 # Serializes job creation; ramp execution itself is per-job async.
 ramp_lock = threading.Lock()
-
-
-def _q15_from_pct(pct: float) -> int:
-    """Convert 0..100 % to Q15 integer (0x0000..0x7FFF). Clamps at bounds."""
-    v = int(round((max(0.0, min(100.0, float(pct))) / 100.0) * _APC_Q15_MAX))
-    return max(0, min(_APC_Q15_MAX, v))
-
-
-def _write_command_register_sync(client, lock, slave: int, opcode: int,
-                                  setpoint: Optional[int] = None) -> dict:
-    """Blocking — run inside executor. Holds lock only for the FC16 frame (~50 ms)."""
-    values = [opcode] if setpoint is None else [opcode, setpoint]
-    try:
-        with lock:
-            r = client.write_registers(address=_APC_REG, values=values, unit=slave)
-        if r is None:
-            return {"ok": False, "error": "null_response"}
-        if r.isError():
-            return {"ok": False, "error": f"modbus_error: {r}"}
-        return {"ok": True}
-    except Exception as exc:
-        return {"ok": False, "error": f"exception: {exc}"}
-
-
-async def write_command_register(ip: str, slave: int, opcode: int,
-                                  setpoint: Optional[int] = None) -> dict:
-    """Async wrapper for _write_command_register_sync. Returns {ok, error?}."""
-    client = clients.get(ip)
-    if not client:
-        return {"ok": False, "error": "no_client"}
-    lock = thread_locks.get(ip)
-    if lock is None:
-        return {"ok": False, "error": "no_lock"}
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        executor,
-        _write_command_register_sync,
-        client, lock, slave, opcode, setpoint,
-    )
-
-
-async def set_active_power_pct(ip: str, slave: int, pct: float) -> dict:
-    """Write SET-ACTIVE-PCT (opcode 0x0003) with Q15 setpoint. Returns {ok, pct, q15, error?}."""
-    q15 = _q15_from_pct(pct)
-    result = await write_command_register(ip, slave, _APC_OPCODE_SET_P, q15)
-    return {**result, "pct": pct, "q15": q15}
-
-
-async def stop_inverter_apc(ip: str, slave: int) -> dict:
-    """Write STOP opcode (0x0005). Independent of the binary-sequencer path."""
-    return await write_command_register(ip, slave, _APC_OPCODE_STOP)
-
-
-async def start_inverter_apc(ip: str, slave: int) -> dict:
-    """Write START opcode (0x0006)."""
-    return await write_command_register(ip, slave, _APC_OPCODE_START)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -3717,15 +3692,15 @@ async def _execute_ramp(job_id: str, targets: list, sub_setpoints: list,
                     if opcode_str == "stop":
                         r = await stop_inverter_apc(ip_, slave_)
                         st_pct = 0.0
-                        st_op  = _APC_OPCODE_STOP
+                        st_op  = APC_OPCODE_STOP
                     elif opcode_str == "start":
                         r = await start_inverter_apc(ip_, slave_)
                         st_pct = 100.0
-                        st_op  = _APC_OPCODE_START
+                        st_op  = APC_OPCODE_START
                     else:
                         r = await set_active_power_pct(ip_, slave_, _sub)
                         st_pct = _sub
-                        st_op  = _APC_OPCODE_SET_P
+                        st_op  = APC_OPCODE_SET_P
                     if r.get("ok"):
                         curtailment_state[(ip_, slave_)] = {
                             "active_pct": st_pct,
@@ -4003,32 +3978,12 @@ async def api_grid_control_state(ip: str, slave: int):
 # ───────────────────────────────────────────────────────────────────────────
 
 from services import calibration_decoder as _calib_dec
-
-_CALIB_READ_BASE  = _calib_dec.CALIBRATION_BLOCK_BASE   # 80
-_CALIB_READ_COUNT = _calib_dec.CALIBRATION_BLOCK_LEN    # 15
-
-
-def _read_calibration_block_sync(client, lock, slave: int,
-                                  base: int = _CALIB_READ_BASE,
-                                  count: int = _CALIB_READ_COUNT) -> dict:
-    """Blocking FC03 read of the calibration block. Returns raw regs.
-
-    Caller holds the executor; we hold the per-IP lock only for the wire
-    transaction (~50 ms) so the poller can resume immediately.
-    """
-    try:
-        with lock:
-            r = client.read_holding_registers(address=base, count=count, unit=slave)
-        if r is None:
-            return {"ok": False, "error": "null_response"}
-        if r.isError():
-            return {"ok": False, "error": f"modbus_error: {r}"}
-        regs = list(r.registers) if hasattr(r, "registers") else []
-        if len(regs) < count:
-            return {"ok": False, "error": f"short_frame: got {len(regs)}/{count}"}
-        return {"ok": True, "regs": regs, "base": base, "count": count}
-    except Exception as exc:
-        return {"ok": False, "error": f"exception: {exc}"}
+from .calibration_core import (
+    _read_calibration_block_sync,
+    _read_live_for_calibration_sync,
+    _CALIB_READ_BASE,
+    _CALIB_READ_COUNT,
+)
 
 
 async def read_calibration_block(ip: str, slave: int) -> dict:
@@ -4047,107 +4002,6 @@ async def read_calibration_block(ip: str, slave: int) -> dict:
     )
 
 
-def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
-    """Read the input registers that pair with each calibration scale factor.
-
-    Used by the Field Calibration page so the operator sees the LIVE measured
-    value (Vac, Iac, Vdc, Idc, Pac, Qac) alongside the scale factor being
-    edited. Mirrors the TrinPM20 video workflow: read the display value,
-    compare to the external meter, modify scale factor until they match.
-
-    Two FC04 reads under one lock acquisition:
-      • addr 0,  count 19 → Vdc(8), Idc(9), Vac1-3(10-12), Iac1-3(13-15), Pac(18)
-      • addr 64, count 13 → Qac(68), Estado(73), VpvN(74), VpvP(75), NomPower(76)
-
-    Returns a dict with each live value or None on per-field failure.  Never
-    raises — calibration state must remain readable even if the input regs
-    are momentarily unavailable.
-
-    v2.11.0-beta.6 — Slice κ.10 TrinPM20 gates: extended count 12→13 to
-    include input reg 30077 (NominalPower ÷ 10). Adds `state_raw` (Estado
-    bitfield from reg 30074) and `nominal_power_w` so calibration safety
-    gates can refuse Fesc_ipv writes below 70 % Pn, refuse reactive-curve
-    writes at the wrong consign target, and refuse any write while the
-    inverter is in `error`/`blocked` phase. See server/calibrationRoutes
-    requireSafeForOffset gate.
-    """
-    out = {
-        "vac1_v": None, "vac2_v": None, "vac3_v": None,
-        "iac1_a": None, "iac2_a": None, "iac3_a": None,
-        "vdc_v": None,  "idc_a": None,  "pac_w": None,
-        "qac_var": None, "vpv_p_v": None, "vpv_n_v": None,
-        # Slice κ.10 — TrinPM20 safety-gate fields:
-        "state_raw":       None,    # Estado bitfield (reg 30074)
-        "state_phase":     None,    # decoded low-byte phase (0=initial, 1=init-mag, 2=grid-connected, 3=error)
-        "state_stop":      None,    # bit 8 — 1 = stop, 0 = run
-        "state_blocked":   None,    # bit 9 — 1 = blocked
-        "state_grid_fault": None,   # bit 10 — 1 = grid fault detected
-        "nominal_power_w": None,    # reg 30077 × 10
-        "pct_of_pn":       None,    # pac_w / nominal_power_w × 100 (rounded 0.1)
-        "read_at_ms": int(time.time() * 1000),
-    }
-    try:
-        with lock:
-            r1 = client.read_input_registers(address=0, count=19, unit=slave)
-            r2 = client.read_input_registers(address=64, count=13, unit=slave)
-        if r1 is not None and not r1.isError() and hasattr(r1, "registers"):
-            regs = list(r1.registers)
-            def g(i):
-                return int(regs[i]) & 0xFFFF if i < len(regs) else None
-            # Vac/Iac decoded raw — no scaling needed; matches what the LCD
-            # shows. PAC at addr 18 is in WATTS via raw × 10 convention, but
-            # we display the raw inverter value here so the operator sees
-            # the same number the display shows during calibration.
-            out["vdc_v"]  = g(8)
-            out["idc_a"]  = g(9)
-            out["vac1_v"] = g(10)
-            out["vac2_v"] = g(11)
-            out["vac3_v"] = g(12)
-            out["iac1_a"] = g(13)
-            out["iac2_a"] = g(14)
-            out["iac3_a"] = g(15)
-            pac_raw = g(18)
-            if pac_raw is not None:
-                # raw × 10 = real W (PDF page 7, "30019 PAC in tens of Watt")
-                out["pac_w"] = pac_raw * 10
-        if r2 is not None and not r2.isError() and hasattr(r2, "registers"):
-            regs2 = list(r2.registers)
-            def g2(i):
-                return int(regs2[i]) & 0xFFFF if i < len(regs2) else None
-            # Qac at addr 68 (reg 4 of this read) — Int16 signed, raw × 10 = VAr.
-            q_raw = g2(4)
-            if q_raw is not None:
-                if q_raw & 0x8000:
-                    q_raw -= 0x10000
-                out["qac_var"] = q_raw * 10
-            # Estado bitfield at addr 73 (reg 9 of this read) — Slice κ.10.
-            estado_raw = g2(9)
-            if estado_raw is not None:
-                out["state_raw"]        = estado_raw
-                out["state_phase"]      = estado_raw & 0xFF
-                out["state_stop"]       = 1 if (estado_raw & 0x0100) else 0
-                out["state_blocked"]    = 1 if (estado_raw & 0x0200) else 0
-                out["state_grid_fault"] = 1 if (estado_raw & 0x0400) else 0
-            out["vpv_n_v"] = g2(10)   # addr 74
-            out["vpv_p_v"] = g2(11)   # addr 75
-            # NominalPower at addr 76 (reg 12 of this read) — reported in
-            # tens of W; × 10 → W. Required for the Pac/Pn safety gate.
-            nom_raw = g2(12)
-            if nom_raw is not None:
-                out["nominal_power_w"] = int(nom_raw) * 10
-        # Derive %Pn for the operator-facing context. Defensive: skip when
-        # nominal_power_w is 0/None so we never divide by zero.
-        if out["pac_w"] is not None and out["nominal_power_w"]:
-            try:
-                out["pct_of_pn"] = round(
-                    100.0 * float(out["pac_w"]) / float(out["nominal_power_w"]), 1,
-                )
-            except (TypeError, ValueError, ZeroDivisionError):
-                out["pct_of_pn"] = None
-    except Exception as exc:
-        # Best-effort: any value we already populated stays; rest stays None.
-        out["_warn"] = f"live_read_partial: {exc}"
-    return out
 
 
 async def read_live_for_calibration(ip: str, slave: int) -> dict:
@@ -4352,9 +4206,12 @@ async def api_calibration_lockdown(req: Request):
 
 @app.post("/calibration/consign")
 async def api_calibration_consign(req: Request):
-    """Drive cmd-3 (APC) to a specified percentage for calibration consign.
+    """Drive APC setpoint (opcode 0x0003) to specified percent for calibration consign.
 
     Body: { ip, slave, percent }   percent in [0, 100]
+
+    Delegates to calibration_io.consign_apc_with_lock (single-source core).
+    Returns {ok, pct, q15, error?}.
     """
     try:
         body = await req.json()
@@ -4363,11 +4220,28 @@ async def api_calibration_consign(req: Request):
     ip = str(body.get("ip") or "").strip()
     slave = int(body.get("slave") or 0)
     pct = float(body.get("percent", -1))
-    if not ip:    raise HTTPException(400, "ip required")
-    if slave <= 0: raise HTTPException(400, "slave required")
+    if not ip:
+        raise HTTPException(400, "ip required")
+    if slave <= 0:
+        raise HTTPException(400, "slave required")
     if pct < 0 or pct > 100:
         raise HTTPException(400, "percent must be 0..100")
-    return await set_active_power_pct(ip, int(slave), float(pct))
+
+    # Resolve client + lock from the fleet registry
+    client = clients.get(ip)
+    if not client:
+        return {"ok": False, "pct": pct, "q15": 0, "error": "no_client"}
+    lock = thread_locks.get(ip)
+    if lock is None:
+        return {"ok": False, "pct": pct, "q15": 0, "error": "no_lock"}
+
+    # Delegate to single-source calibration core
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor,
+        consign_apc_with_lock,
+        client, lock, int(slave), float(pct),
+    )
 
 
 @app.get("/calibration/preflight/{ip}/{slave}")
@@ -4495,6 +4369,15 @@ async def main():
     except Exception as exc:
         print(f"[RECOVERY] could not schedule seed_pac_from_baseline: {exc}")
 
+    # RS485-USB bridge (Option A) — start if configured.
+    # Runs in background so a missing pyserial or port error never blocks engine startup.
+    if rs485_bridge is not None:
+        try:
+            cfg = await load_ipconfig()
+            asyncio.create_task(rs485_bridge.serve(cfg))
+        except Exception as exc:
+            print(f"[RS485-BRIDGE] could not start bridge: {exc}")
+
     asyncio.create_task(ipconfig_watcher())
     asyncio.create_task(start_polling_manager())
 
@@ -4528,6 +4411,12 @@ async def main():
                 await stop_task
             except asyncio.CancelledError:
                 pass
+        # RS485-USB bridge shutdown
+        if rs485_bridge is not None:
+            try:
+                await rs485_bridge.shutdown()
+            except Exception as e:
+                print(f"[RS485-BRIDGE] Shutdown error: {e}")
         clear_service_stop_file()
 
 

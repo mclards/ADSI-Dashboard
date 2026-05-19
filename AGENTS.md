@@ -202,9 +202,11 @@ npm run rebuild:native:electron
 - Rebuild only the changed service EXE:
   - inverter-service changes → `dist/InverterCoreService.exe`
   - forecast-service changes → `dist/ForecastCoreService.exe`
-  - shared changes (`services/shared_data.py`, `drivers/modbus_tcp.py`) → rebuild both
+  - calibrator-service changes → `dist/CalibratorService.exe`
+  - shared changes (`services/shared_data.py`, `drivers/modbus_tcp.py`) → rebuild all three
 - Do not publish if EXEs were built against stale Python binaries.
 - After rebuilding Python EXEs, always run `npm run rebuild:native:electron` before the Electron build.
+- **PyInstaller build command**: For each spec, run `pyinstaller --noconfirm services/<ServiceName>.spec` (outputs to `dist/<ServiceName>.exe`).
 
 ---
 

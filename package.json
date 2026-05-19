@@ -87,6 +87,18 @@
         "to": "backend/ForecastCoreService.exe"
       },
       {
+        "from": "dist/CalibratorService.exe",
+        "to": "backend/CalibratorService.exe"
+      },
+      {
+        "from": "assets/calib.ico",
+        "to": "calib.ico"
+      },
+      {
+        "from": "assets/calib.png",
+        "to": "calib.png"
+      },
+      {
         "from": "server/go2rtc",
         "to": "backend/go2rtc"
       },

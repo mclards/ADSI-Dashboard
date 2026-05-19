@@ -26,6 +26,23 @@ const calibrationSafety = require("./calibrationSafety");
 // TrinPM20 writable offsets — used to pre-compute writability map.
 const WRITABLE_OFFSETS = [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94];
 
+// Non-bypassable display-only calibration offsets (force_safety_gate
+// cannot override). This is a live-Modbus tool; the set is the hard
+// backstop. CORRECTION HISTORY (audits/2026-05-17/...reactive-blink-logic.md
+// §15–§16, operator directives):
+//   • 90 Per. Vacio — removed: ISM CfgTrifAU classifies it a writable
+//     scale factor; editable, 0 %-consign band gate (bypassable).
+//   • 91 Pot. Reactiv_X1 / 94 Comp. Reacti_Y2 — removed: the operator
+//     found large fleet-anomaly drift on these (suspected bad prior
+//     edits) and decided to enable writes for in-field correction. They
+//     keep their consign-band SAFETY gate in calibrationSafety.js
+//     (91 @20 %, 94 @70 %, same as Y1/X2, bypassable) — just no longer
+//     NON-bypassably refused.
+// The set is now EMPTY: every writable offset (81-94) is gated only by
+// the bypassable per-offset consign/state gate. The guard below is kept
+// (defensive, re-populatable) but currently never fires.
+const CALIB_DISPLAY_ONLY_OFFSETS = new Set([]);
+
 const KNOWN_INVERTERS_MAX = 27;
 const KNOWN_NODES_PER_INV = [1, 2, 3, 4];
 
@@ -138,6 +155,36 @@ function registerCalibrationRoutes(app, deps) {
   // `force_safety_gate=true` and we should warn-only); returns a 409-shaped
   // error object when at least one gate fires.
   async function checkTrinPmSafetyGates(ip, slave, offsets, opts) {
+    // NON-BYPASSABLE backstop — refuse any offset in
+    // CALIB_DISPLAY_ONLY_OFFSETS before anything else, so force_safety_gate
+    // cannot override. That set is currently EMPTY (2026-05-17: 90, 91 and
+    // 94 were all re-enabled by operator directive — see the set's comment
+    // + audit §15/§16); every writable offset is now governed only by the
+    // bypassable consign/state gate in calibrationSafety.js. This guard is
+    // retained defensively so re-restricting an offset is a one-line change.
+    const _DO_NAMES = { 90: "Per. Vacio", 91: "Pot. Reactiv_X1",
+      92: "Comp. Reacti_Y1", 93: "Pot. Reactiv_X2", 94: "Comp. Reacti_Y2" };
+    const _doName = (o) => _DO_NAMES[o] || `offset ${o}`;
+    const lockedHit = (offsets || [])
+      .map(Number)
+      .filter((o) => CALIB_DISPLAY_ONLY_OFFSETS.has(o));
+    if (lockedHit.length) {
+      return {
+        status: 409,
+        error: "Calibration parameter(s) refused (non-bypassable, "
+          + "display-only by configuration): "
+          + lockedHit.map((o) => `${_doName(o)} (offset ${o})`).join(", ")
+          + ".",
+        gates: lockedHit.map((o) => ({
+          offset: o,
+          ok: false,
+          severity: "block",
+          reason: `Offset ${o} (${_doName(o)}) is configured display-only `
+            + "— write refused, non-bypassable.",
+        })),
+        non_bypassable: true,
+      };
+    }
     const force = !!(opts && (opts.force_safety_gate === true
       || opts.force_safety_gate === "1" || opts.force_safety_gate === 1));
     let state;
@@ -671,6 +718,43 @@ function registerCalibrationRoutes(app, deps) {
           }
         }
       } catch (_) { /* metadata is best-effort */ }
+
+      // ── Dedup: don't stack byte-identical snapshots ────────────────────
+      // A snapshot only exists to be restored, and restore replays the
+      // 14-register block. If the freshly-read block is identical to the
+      // most recent snapshot for this (inverter, node), a new row would
+      // preserve nothing new — it just clutters the list. Skip the insert
+      // and return the existing snapshot so the UI can say "no change".
+      // (Compared against the latest of ANY source — baseline/post/manual —
+      // since restore semantics are source-agnostic.)
+      try {
+        const latest = typeof getLatestCalibrationSnapshot === "function"
+          ? getLatestCalibrationSnapshot(inv, slave)
+          : null;
+        if (latest && String(latest.reg_block_hex || "") === regBlockHex) {
+          try {
+            insertAuditLogRow?.({
+              ts: Date.now(),
+              operator: String((req.body && req.body.operator) || "operator"),
+              inverter: inv, node: slave,
+              action: "calibration.snapshot.dedup",
+              scope: "calibration", result: "skipped", ip,
+              reason: `identical to snapshot id=${latest.id} (no config change)`,
+            });
+          } catch (_) {}
+          return res.json({
+            ok: true,
+            deduped: true,
+            id: latest.id,
+            ts_utc: latest.ts_utc,
+            source: latest.source,
+            inverter: inv, slave,
+            valid_cfg_code: preflight.sentinel,
+            message: "No configuration change since the last backup — existing snapshot kept (not duplicated).",
+            writes_preview: _decodeSnapshotWrites(regBlockHex),
+          });
+        }
+      } catch (_) { /* dedup is best-effort; fall through to insert */ }
 
       try {
         const id = insertCalibrationSnapshot({
@@ -1243,7 +1327,7 @@ function registerCalibrationRoutes(app, deps) {
 
   // Tracks last consign timestamp per inverter for the dwell timer.
   const _consignDwell = new Map();   // `${inv}/${slave}` -> { pct, ts_ms }
-  const CONSIGN_MIN_DWELL_MS = 30_000;
+  const CONSIGN_MIN_DWELL_MS = 10_000;
 
   app.post("/api/calibration/consign",
     requireWritesEnabled,
@@ -1265,12 +1349,17 @@ function registerCalibrationRoutes(app, deps) {
         return res.status(400).json({ ok: false, error: "percent must be 0..100" });
       }
 
-      // Dwell guard: between distinct setpoints we require 30 s minimum so the
+      // Dwell guard: between distinct setpoints we require 10 s minimum so the
       // PAC has time to settle before the operator does the next measurement.
-      // The "release to 100 %" case is exempt.
+      // RELEASE (100 % / full output) is ALWAYS exempt — restoring the
+      // inverter to full power must never be delayed or refused, no matter
+      // how recently another setpoint was applied. Treat pct >= 100 as
+      // release so a clamped/over-100 value can't accidentally re-arm the
+      // guard either.
       const key = `${inv}/${slave}`;
+      const isRelease = pct >= 100;
       const last = _consignDwell.get(key);
-      if (last && pct !== 100 && last.pct !== pct) {
+      if (last && !isRelease && last.pct !== pct) {
         const since = Date.now() - last.ts_ms;
         if (since < CONSIGN_MIN_DWELL_MS) {
           return res.status(429).json({

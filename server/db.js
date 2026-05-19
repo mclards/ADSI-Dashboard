@@ -1579,6 +1579,16 @@ ensureColumn("alarms", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("daily_report", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("settings", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 // Migration: daily audit control-action count per inverter (added 2026-03).
+// Migration: serial-change provenance — traces a physically relocated
+// power module back to the factory slot its prior serial belonged to
+// (added 2026-05-19 for the Bulk Fix relocation guard).  `origin_note` is
+// the human string; `origin_inverter`/`origin_node` are the structured
+// pair that powers the Power Module Migration History query (so it never
+// has to text-parse the note).  `origin_node` is TEXT because it may be a
+// numeric node (1..4) or the "T" nameplate.
+ensureColumn("serial_change_log", "origin_note", "origin_note TEXT");
+ensureColumn("serial_change_log", "origin_inverter", "origin_inverter INTEGER");
+ensureColumn("serial_change_log", "origin_node", "origin_node TEXT");
 ensureColumn("daily_report", "control_count", "control_count INTEGER DEFAULT 0");
 ensureColumn("daily_report", "availability_pct", "availability_pct REAL DEFAULT 0");
 ensureColumn("daily_report", "performance_pct", "performance_pct REAL DEFAULT 0");

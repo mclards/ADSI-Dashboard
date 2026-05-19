@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Navigation
   openTopologyWindow: () => ipcRenderer.send("open-topology-window"),
   openIpConfigWindow: () => ipcRenderer.send("open-ip-config-window"),
+  openCalibrator: (theme) => ipcRenderer.send("open-calibrator", theme),
+  createCalibratorShortcut: () => ipcRenderer.invoke("create-calibrator-shortcut"),
   openLogs: (folder) => ipcRenderer.send("open-logs-folder", folder),
 
   // File/folder operations

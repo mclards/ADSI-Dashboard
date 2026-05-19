@@ -242,7 +242,7 @@ The `About` card also shows:
 
 | Overlay | Purpose |
 | --- | --- |
-| Alarm notification bell/panel | Quick list of active unacknowledged alarms |
+| Alarm notification hub (bottom-right pill + panel) | Quick list of active unacknowledged alarms |
 | Operator Messages panel | Short notes exchanged between gateway and remote operators |
 | User Guide modal | Embedded quick-reference guide |
 | Bulk authorization modal | Required for selected multi-inverter control actions |
@@ -323,9 +323,14 @@ Current behavior:
 
 Use the theme toggle to switch the dashboard visual theme. Theme choice persists between restarts.
 
-### 5.3 Alarm Notification Bell and Quick-ACK
+### 5.3 Alarm Notification Hub and Quick-ACK
 
-The alarm bell appears when active unacknowledged alarms exist. It opens the alarm notification panel without forcing page navigation.
+Alarm notifications are consolidated into a single bottom-right hub so they stay readable without blocking the page. There is exactly one indicator per side:
+
+- **Left (navigation only):** the sidebar `ALARMS` item shows a count badge of unacknowledged active alarms. Clicking it opens the full Alarms page.
+- **Bottom-right (live alerts):** a compact **summary pill** appears whenever unacknowledged active alarms exist. It shows a per-severity tally and the active-alarm count. Clicking the pill opens the alarm notification panel directly above it — no page navigation. Click it again (or the panel's close button) to dismiss the panel.
+
+The earlier bottom-left floating bell has been removed; the pill replaces it, eliminating the previous duplicate left/right notification icons.
 
 The notification panel shows up to 50 recent active alarms. Each unacknowledged alarm entry includes:
 
@@ -334,14 +339,14 @@ The notification panel shows up to 50 recent active alarms. Each unacknowledged 
 - timestamp
 - **`✔ ACK` button** — acknowledges the alarm directly from the panel without navigating to the Alarms page
 
-Already-acknowledged alarms show a muted **`✔ Acked`** label instead of the button.
+Already-acknowledged alarms show a muted **`✔ Acked`** label instead of the button. When there are no active alarms the panel shows a simple "No active alarms." message and the pill is hidden.
 
-Alarm toasts (the pop-up notifications that appear in the corner when a new alarm is raised) also include an inline **`ACK`** button. Clicking ACK from a toast:
+Alarm toasts (the brief pop-up notifications that appear bottom-right when a new alarm is raised, capped to a small stack so they never cover the inverter cards) also include an inline **`ACK`** button. Clicking ACK from a toast:
 
 - immediately registers the acknowledgement
 - auto-dismisses the toast after a short delay
 
-Use the Alarms page for formal review, bulk acknowledgement, and history. Use the bell panel and toast buttons for quick acknowledgement without leaving the current page.
+Use the Alarms page for formal review, bulk acknowledgement, and history. Use the bottom-right hub pill, its panel, and toast buttons for quick acknowledgement without leaving the current page.
 
 ### 5.4 Operator Messages
 
@@ -1505,7 +1510,7 @@ The `Serial Number Setting` card mirrors ISM's `frmSetSerial` flow so the
 dashboard can read, edit, and write inverter serial numbers without
 plugging in the vendor laptop.
 
-The card has two tabs:
+The card has three tabs:
 
 #### Read / Edit / Send
 
@@ -1526,9 +1531,25 @@ Operational rules:
   from the vendor IL bytecode and are **identical to ISM's writer** — the
   dashboard write is indistinguishable on the wire.
 - A duplicate serial blocks the write before the unlock frame is sent;
-  the operator can either pick a different candidate or open the override
-  dialog (gated by `topology` auth) when the duplicate is intentional
-  (e.g. RMA replacement).
+  the operator can either pick a different candidate or send with
+  `override_conflicts` when the duplicate is intentional (e.g. RMA
+  replacement).
+- **The read-back is the source of truth.** Writing a serial makes the
+  inverter re-initialise its Modbus stack, so the FC16 write *response* is
+  frequently lost even though the write physically landed. The pipeline
+  therefore always performs the verify read-back (longer settle + retries
+  when the write wasn't acknowledged) and decides the outcome from what the
+  unit actually reports: a confirmed read-back is `success` even if the
+  write ACK was lost (flagged `write_ack_lost`). Only a read-back that
+  still shows the old serial is a true failure. If neither the write ACK
+  nor a read-back can be obtained, the result is `write_unconfirmed`
+  (never reported as success) — rescan to confirm.
+- **One credential, end to end.** The entire Serial Number feature —
+  single Read / Send, Read-all, Plant Serial Map scan, Bulk Fix
+  plan/apply, and the duplicate override — is gated by **one** key:
+  bulk inverter control (`sacupsMM`). It no longer asks for the topology
+  key (`adsiMM`) anywhere. Pure read surfaces (audit log, migration
+  history, cached map, target map) need no key at all.
 
 #### Plant Serial Map
 
@@ -1539,13 +1560,52 @@ Operational rules:
 | `Show cached map` | Renders the last cached fleet map without triggering any new reads (works in remote mode). |
 | Fleet table | One row per `(inverter, slave)` with current serial, model, firmware, and a duplicate-detection badge. |
 
+#### Bulk Fix
+
+Re-writes the entire plant against the **locked factory serial map**
+(`docs/Fixed_Inverter_SerialNumbers.xlsx`) in one reviewed pass, instead of
+editing 100+ nodes one at a time.
+
+| Control | Function |
+| --- | --- |
+| `Show target map` | Displays the locked factory map for all 27 inverters, generated 1:1 from the authoritative `docs/Fixed_Inverter_SerialNumbers.xlsx` (the permanent field guide). `T` is the inverter nameplate (reference only — never written); slaves 1–4 are the writable nodes. Read-only — works in remote mode. |
+| `Scan & diff` | Reads every node from the wire and compares it to the locked map. Bulk-auth required. **No writes.** Each node is classified `match`, `mismatch`, `unreachable`, or `no live unit`, and each mismatch gets an **Origin**: `factory / unknown` (serial not in the map) or **relocated** (`⇄ Inv X / Node Y` — the live serial belongs to a different slot, i.e. a physically moved power module). Only `mismatch` rows are selectable. |
+| `Acknowledge relocated module(s)` | **Auto-detected.** This control appears only when the current selection includes one or more relocated modules. It must be ticked to re-serialize moved boards; otherwise those rows are skipped (their origin is logged either way). It does not appear when nothing relocated is selected. |
+| `Apply selected` | UNLOCK + WRITE + readback-verify the locked serial to every selected mismatched node, **one at a time**. Every write is recorded in `serial_change_log` (scope `bulk`) with the action timestamp, operator, old→new serial, and — for a moved module — a structured origin (`origin_inverter`/`origin_node`) plus an `origin_note` such as `module from Inv 4 / Node 1 (serial 400152915R41)`. Cannot be undone in one click. |
+| `Load migration history` | Opens the **Measurement Board (Power Module) Migration History** — the chronological trail of every physically relocated board: origin slot → where it was found → re-serialized, with timestamp, operator, and result. It captures relocations re-serialized via **either** Bulk Fix **or** the one-by-one Read / Edit / Send tab, so the trail is complete regardless of method. Read-only; works in remote mode (reads the replicated `serial_change_log`). A relocation that was only detected but not yet acknowledged is listed as *detected (pending ack)* so nothing is lost. |
+| `Export` (format selector) | Saves the full Measurement Board migration trail through the **standard export pipeline** — a styled Excel workbook (`.xlsx`) or CSV, written to the same Logs tree as every other export (`<csvSavePath>\All Inverters\Audits\`) with the same date-aware filename convention (`DD-MMYYYY All Inverters Measurement Board Migration.xlsx`). Columns: Date, Time, Plant, Operator, Board Serial (Old), Origin Inverter, Origin Node, Found At Inverter, Found At Node, New Serial, Outcome, Verified, Origin Note, Error. The folder opens automatically when done. Endpoint `POST /api/export/measurement-board-migration` (gateway export job; proxied + downloaded locally in remote mode, exactly like the Alarms/Audit exports). |
+
+Operational rules:
+
+- The source file is the **single source of truth**. If a field serial is
+  wrong, fix `docs/Fixed_Inverter_SerialNumbers.xlsx` and regenerate the
+  map — the dashboard cross-checks every live node against it.
+- The serial numbering is **locked**: every node's serial is fixed even
+  when a physical node is absent — its serial stays reserved and is never
+  reused. That is what lets the dashboard recognise a relocated module by
+  its serial. `Scan & diff` reports absent units as `no live unit` and
+  never writes to them.
+- **Module relocation tracking:** when you physically move a power module
+  (e.g. Inverter 4 / Node 1 → Inverter 27 / Node 2), the moved board still
+  reports its old serial. Bulk Fix recognises that serial as belonging to
+  Inv 4 / Node 1, flags it relocated, requires the auto acknowledgement,
+  and records where the board came from in the change log with correct
+  timestamps — so the move is traceable for historical data.
+- The fleet uniqueness scan is **skipped** during Bulk Fix because the
+  factory map is pre-validated globally unique; transient mid-sweep
+  collisions would otherwise produce false blocks. Every write is still
+  readback-verified.
+- Writes run sequentially to keep the shared RS485 bus quiet and the
+  audit trail cleanly attributed.
+
 Remote-mode behavior:
 
 - The audit log mirrors from the gateway so remote operators can review
   past changes.
-- `Read` and `Send` are disabled when running from a remote workstation
-  because the FC11 / FC16 transactions must execute on the gateway-side
-  network.
+- `Read`, `Send`, `Scan & diff`, and `Apply selected` are disabled when
+  running from a remote workstation because the FC11 / FC16 transactions
+  must execute on the gateway-side network. `Show target map` and the
+  audit log remain available.
 
 ### 6.9.9 Cloud Backup & Restore
 
@@ -1868,6 +1928,88 @@ the flag is off, with a tooltip explaining how to enable. The page
 toolbar shows a `Writes: ENABLED / OFF` badge so the current state is
 visible at a glance.
 
+### Firmware Upgrade (EXPERIMENTAL)
+
+> **Irreversible.** Flashing rewrites the inverter DSP program and
+> **cannot be undone**. A wrong or interrupted image can brick the unit.
+> This feature is gated, experimental, and available **only in the
+> standalone Inverter Calibration Tool** (not the dashboard). Use it only
+> with the manufacturer-supplied image for the exact unit, after operator
+> sign-off.
+
+A **FW Upgrade** button at the top-right of the per-node controls row
+(standalone calibrator only) opens the **Firmware Upgrade** dialog. The
+workflow is deliberately staged so the irreversible step cannot be
+reached by accident:
+
+1. **Connect a transport** to the target inverter — either **Ethernet**
+   (Modbus-TCP via the transparent gateway) or **RS485-USB** (Modbus-RTU,
+   the most-direct link to the node DSP — no comm board / gateway in the
+   loop). The flash uses whichever is connected. For a serial flash the
+   tool takes **exclusive ownership of the COM port** for the duration
+   (the serial analogue of the RS-485 bus lock); reconnect the transport
+   in the calibrator afterwards. The `0x96` high-speed/baud-bump frame is
+   never sent, so there is no baud-switch race at any speed.
+2. **Browse… to the firmware file.** The native OS file picker opens;
+   choose the `.S` Motorola S-record image (you may also paste an
+   absolute path). The filename must follow the ISM `LLLnnnn…` rule
+   (e.g. `AAV1003IJK01BC_InverterFirmware.S`); the server still verifies
+   it is a real `.S` file, size-capped, and SHA-256-pinned to the
+   dry-run.
+3. **Set the target node** (1–247; broadcast/0 is forbidden) and
+   optionally **Read Identity** — an FC11 Report-Slave-ID showing the
+   exact serial / model / running firmware of the unit you would flash.
+4. **Dry-Run (safe).** This simulates the *entire* flash against an
+   in-memory DSP with **zero hardware contact**. It also computes and
+   displays the file's **SHA-256**. A successful dry-run of the *exact*
+   selected file/node/parameters is a hard precondition for arming the
+   live flash — changing any of them re-disables the live button.
+5. **Arm.** The live block reveals only after a passing dry-run. You
+   must (a) tick the irreversible-acknowledgement box, (b) type the
+   exact phrase `FLASH <node>` (e.g. `FLASH 23`), and (c) supply the
+   topology authorization key (`adsiMM`). The **FLASH (live)** button
+   stays disabled until all of these and the SHA still match.
+6. **FLASH (live).** A final browser confirmation restates the file,
+   node and SHA-256. The flash then runs as a background job with a
+   live progress bar, an audit-event log, and an **Abort** button.
+
+**Server-side gates (enforced regardless of the UI).** The live flash is
+refused unless *all* hold: explicit irreversible confirmation; a prior
+successful dry-run of the same SHA-256; exactly one link (a TCP host or
+a serial COM port — never both, never neither); a
+single non-broadcast node; a verified file (real regular file, `.S`,
+size capped, ISM filename rule, SHA-256 match); an FC11 model/version
+compatibility check (apparent downgrades blocked unless **Allow
+downgrade** is ticked); an exclusive RS-485 bus lock; an audit sink; and
+a watchdog deadline.
+
+**Bootloader preservation.** The loader never transmits the bootloader
+or reset-vector banks. An interrupted or aborted application flash
+therefore leaves the unit **re-flashable** — Abort is fail-safe and is
+intentionally *not* behind an auth prompt so it is always immediately
+available.
+
+**Downgrade is possible.** The DSP bootloader and the on-wire protocol
+enforce no version monotonicity — the loader erases and writes whatever
+compatible image you send, older or newer. In ISM the
+upgrade-vs-downgrade decision is purely an application-layer policy
+(`QueHableAhoraOCalleParaSiempre(newCode, forceDowngrade)` /
+`CheckCanUpgradeFirmware`), bypassable with ISM's own *force* flag. This
+tool mirrors that: the downgrade block is a conservative software
+heuristic (FC11 firmware string vs the filename version trailer), lifted
+by ticking **Allow downgrade** under Advanced. The heuristic compares the
+FC11 string, not the embedded `CodigoFirmware.Version` ISM reads, so it
+is conservative and does not change what the hardware accepts — the
+bootloader takes any compatible image. The file↔model prefix check
+(`AAV1003…`) and the SHA-pinned dry-run still apply, and
+bootloader-bank preservation keeps even a mistaken-direction flash
+recoverable.
+
+**Audit trail.** Every live attempt and its outcome is appended to
+`firmware-audit.jsonl` under `%PROGRAMDATA%\InverterDashboard\`
+(`firmware.live.start` / `.ok` / `.fail` with host, node, file, SHA-256,
+and frame counters).
+
 ### What this does NOT replace
 
 - The multimeter and 3-phase wattmeter still go on-site with the
@@ -2003,7 +2145,7 @@ Important:
 3. Load records.
 4. Review severity, duration, status, and acknowledgement state.
 5. Acknowledge alarms when permitted.
-6. Use the alarm bell for quick active-alarm review.
+6. Use the bottom-right notification hub pill for quick active-alarm review.
 
 ## 8.6 Daily Performance Review
 
@@ -2200,7 +2342,7 @@ is safe.
 
 Additional tips:
 
-- use the alarm bell for active alarm review without changing pages
+- use the bottom-right notification hub pill for active alarm review without changing pages
 - use the operator message bubble for shift notes and remote coordination
 - use `Open Folder` in Settings to verify export output quickly
 - use `Check for Updates` and `Refresh License` during planned maintenance windows

@@ -18,7 +18,7 @@ import sys
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -414,6 +414,106 @@ class WriteSerialWithLockTests(unittest.TestCase):
         )
         self.assertEqual(out["status"], "format_error")
         self.assertEqual(len(client.write_calls), 0)
+
+    # ── Lost-write-ACK handling (operator-confirmed 2026-05-19) ────────────
+    # The inverter applies the serial write but its Modbus stack re-inits,
+    # so the FC16 *response* is dropped. The read-back is authoritative:
+    # a lost ACK with a confirming read-back is SUCCESS, never write_failed.
+
+    def _make_client_unlock_ok_write_fails(self, *, readback_serial,
+                                           readback_raises=False):
+        """Unlock (write-call #1) OK; serial write (#2) raises a
+        no-response error; FC11 read-back returns `readback_serial`
+        (or raises if `readback_raises`)."""
+        client = MagicMock()
+        write_calls = []
+
+        def write_regs(address=None, values=None, unit=None, **kw):
+            write_calls.append({"address": address, "unit": unit})
+            if len(write_calls) == 1:
+                return FakeWriteRegistersResponse(error=False)  # unlock OK
+            raise OSError(
+                "Modbus Error: [Invalid Message] No response received, "
+                "expected at least 8 bytes (0 received)"
+            )
+
+        client.write_registers = MagicMock(side_effect=write_regs)
+        client.write_calls = write_calls
+        payload = _build_fc11_payload(readback_serial)
+
+        class Sock:
+            def __init__(self):
+                self._reply = b""
+
+            def settimeout(self, t):
+                pass
+
+            def sendall(self, data):
+                if readback_raises:
+                    raise OSError("read-back unreachable")
+                txn = struct.unpack(">H", bytes(data)[0:2])[0]
+                slave = bytes(data)[6]
+                pdu = bytes([0x11]) + bytes([len(payload)]) + payload
+                self._reply = struct.pack(
+                    ">HHHB", txn, 0, 1 + len(pdu), slave) + pdu
+
+            def recv(self, n):
+                chunk, self._reply = self._reply[:n], self._reply[n:]
+                return chunk
+
+            def close(self):
+                pass
+
+        client.socket = Sock()
+        return client
+
+    def _fast_verify(self):
+        """Patch the verify settle/backoff to 0 so tests don't sleep."""
+        import services.serial_io as sio
+        return patch.multiple(
+            sio, WRITE_ACK_LOST_SETTLE_S=0.0, VERIFY_READ_BACKOFF_S=0.0,
+        )
+
+    def test_write_ack_lost_but_readback_confirms_is_success(self):
+        client = self._make_client_unlock_ok_write_fails(
+            readback_serial="400152A18R44")
+        with self._fast_verify():
+            out = write_serial_with_lock(
+                client, threading.Lock(), slave=2,
+                new_serial="400152A18R44", fmt="motorola", verify_delay_s=0.0,
+            )
+        self.assertEqual(out["status"], "success")
+        self.assertTrue(out["verify_passed"])
+        self.assertTrue(out["write_done"])
+        self.assertTrue(out.get("write_ack_lost"))
+        self.assertEqual(out["readback"], "400152A18R44")
+        self.assertIn("read-back confirms", out["error"])
+
+    def test_write_failed_when_readback_still_old(self):
+        client = self._make_client_unlock_ok_write_fails(
+            readback_serial=MOTOROLA_SERIAL)  # serial did NOT change
+        with self._fast_verify():
+            out = write_serial_with_lock(
+                client, threading.Lock(), slave=2,
+                new_serial="400152A18R44", fmt="motorola", verify_delay_s=0.0,
+            )
+        self.assertEqual(out["status"], "write_failed")
+        self.assertFalse(out["verify_passed"])
+        self.assertEqual(out["readback"], MOTOROLA_SERIAL)
+        self.assertIn("readback mismatch", out["error"])
+
+    def test_write_unconfirmed_when_readback_unavailable(self):
+        client = self._make_client_unlock_ok_write_fails(
+            readback_serial=MOTOROLA_SERIAL, readback_raises=True)
+        with self._fast_verify():
+            out = write_serial_with_lock(
+                client, threading.Lock(), slave=2,
+                new_serial="400152A18R44", fmt="motorola", verify_delay_s=0.0,
+            )
+        self.assertEqual(out["status"], "write_unconfirmed")
+        self.assertFalse(out["verify_passed"])
+        self.assertIsNone(out["readback"])
+        self.assertIn("rescan", out["error"])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
