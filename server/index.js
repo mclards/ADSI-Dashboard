@@ -50,6 +50,8 @@ const {
   queryEnergy5minRangeAll,
   queryEnergy5minRange,
   sumEnergy5minByInverterRange,
+  countDistinctReadingBuckets,
+  getLatestReadingDate,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,
@@ -12248,12 +12250,11 @@ function getLatestReportDate() {
     // Fallback handled below.
   }
   try {
-    const rowReadings = db
-      .prepare(
-        "SELECT strftime('%Y-%m-%d', MAX(ts)/1000, 'unixepoch', 'localtime') AS d FROM readings",
-      )
-      .get();
-    return String(rowReadings?.d || "").trim();
+    // Archive-aware fallback: after a plant outage longer than retainDays the
+    // hot `readings` table can be fully pruned while the newest data survives
+    // only in a month archive. getLatestReadingDate() checks hot first, then
+    // the newest archive shard, so report-date discovery still resolves.
+    return String(getLatestReadingDate() || "").trim();
   } catch (_) {
     return "";
   }
@@ -12912,16 +12913,10 @@ function computeSolarWindowGapRatio(dateKey, nowMs = Date.now()) {
   const expected = Math.max(1, Math.floor((windowEndMs - windowStartMs) / SLOT_MS));
   let actual = 0;
   try {
-    const row = db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM (
-            SELECT DISTINCT (ts / ${SLOT_MS}) AS bucket
-              FROM readings
-             WHERE ts >= ? AND ts < ?
-         )`,
-      )
-      .get(windowStartMs, windowEndMs);
-    actual = Number(row?.n || 0);
+    // Archive-aware: a date_key whose readings were rotated into a month
+    // archive must still count, otherwise an archived day looks "crashed"
+    // and the engine wrongly reseeds kwh_today from the hardware baseline.
+    actual = countDistinctReadingBuckets(windowStartMs, windowEndMs, SLOT_MS);
   } catch (err) {
     console.warn("[counter] gap-ratio query failed:", err.message);
   }

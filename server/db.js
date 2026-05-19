@@ -2132,6 +2132,13 @@ const stmts = {
   countEnergy5minRangeAll: db.prepare(
     `SELECT COUNT(*) AS n FROM energy_5min WHERE ts BETWEEN ? AND ?`,
   ),
+  // Half-open [s,e) distinct 5-min (or arbitrary slot) bucket ids — hot side
+  // of the archive-aware countDistinctReadingBuckets() helper. SQL-side
+  // DISTINCT keeps memory bounded to the bucket count, not the raw row count.
+  selectReadingBucketsRange: db.prepare(
+    `SELECT DISTINCT (ts / ?) AS b FROM readings WHERE ts >= ? AND ts < ?`,
+  ),
+  selectMaxReadingTs: db.prepare(`SELECT MAX(ts) AS m FROM readings`),
   sumEnergy5minRange: db.prepare(
     `SELECT inverter, SUM(kwh_inc) AS total_kwh
        FROM energy_5min
@@ -3867,6 +3874,12 @@ function createArchiveEntry(filePath) {
     selectReadingsRangeByInv: archiveDb.prepare(
       `SELECT ${READING_SELECT_SQL} FROM readings WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`,
     ),
+    // Mirror of stmts.selectReadingBucketsRange / selectMaxReadingTs so the
+    // archive-aware helpers can union month shards without materialising rows.
+    selectReadingBucketsRange: archiveDb.prepare(
+      `SELECT DISTINCT (ts / ?) AS b FROM readings WHERE ts >= ? AND ts < ?`,
+    ),
+    selectMaxReadingTs: archiveDb.prepare(`SELECT MAX(ts) AS m FROM readings`),
     selectEnergyRangeAll: archiveDb.prepare(
       `SELECT * FROM energy_5min WHERE ts BETWEEN ? AND ? ORDER BY inverter ASC, ts ASC`,
     ),
@@ -4479,6 +4492,69 @@ function queryReadingsRange(inverter, startTs, endTs) {
   }
   pushUniqueRows(out, stmts.getReadingsRange.all(inv, s, e), readingsNaturalKey);
   return Array.from(out.values()).sort(sortReadingsAsc);
+}
+
+// Archive-aware distinct-bucket count over a HALF-OPEN [startTs, endTs)
+// window. Used by the counter-baseline crash detector so a day whose
+// readings have already been rotated into a month archive is not mistaken
+// for "no data" (which would falsely trip crash_detected and reseed
+// kwh_today from the hardware baseline). Reuses getArchiveEntry(key,false)
+// exactly like the other range readers — LRU + replace-lock + eviction
+// stay authoritative; no raw archive handle is opened here.
+function countDistinctReadingBuckets(startTs, endTs, slotMs) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  const slot = Math.max(1, Math.trunc(Number(slotMs || 0)));
+  if (!(e > s)) return 0;
+  const buckets = new Set();
+  // iterateMonthKeys uses BETWEEN-style inclusive bounds; the per-shard SQL
+  // re-applies the exact half-open [s,e) filter so month selection being
+  // slightly wide is harmless.
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    for (const row of entry.selectReadingBucketsRange.all(slot, s, e)) {
+      buckets.add(Number(row.b));
+    }
+  }
+  for (const row of stmts.selectReadingBucketsRange.all(slot, s, e)) {
+    buckets.add(Number(row.b));
+  }
+  return buckets.size;
+}
+
+// Latest local YYYY-MM-DD that has raw `readings`, checking the hot DB first
+// (newest telemetry always lands hot — archiving only moves data OLDER than
+// the retention cutoff) and falling back to the newest month archive when
+// the hot table has been fully pruned (plant down longer than retainDays).
+// Used as the last-resort fallback in getLatestReportDate so report-date
+// discovery still works off archived-only history after a long outage.
+function getLatestReadingDate() {
+  try {
+    const hot = stmts.selectMaxReadingTs.get();
+    const hotMax = Number(hot?.m || 0);
+    if (hotMax > 0) return localDateStr(hotMax);
+  } catch (_) {
+    // fall through to archive scan
+  }
+  try {
+    const monthKeys = fs
+      .readdirSync(ARCHIVE_DIR)
+      .filter((name) => /^\d{4}-\d{2}\.db$/.test(name))
+      .map((name) => name.replace(/\.db$/i, ""))
+      .sort()
+      .reverse(); // newest month first
+    for (const monthKey of monthKeys) {
+      const entry = getArchiveEntry(monthKey, false);
+      if (!entry) continue;
+      const row = entry.selectMaxReadingTs.get();
+      const maxTs = Number(row?.m || 0);
+      if (maxTs > 0) return localDateStr(maxTs);
+    }
+  } catch (_) {
+    // no archives readable
+  }
+  return "";
 }
 
 // v2.10.4 — chunked source enumeration for export paths.
@@ -5836,6 +5912,8 @@ module.exports = {
   readingsNaturalKey,
   energyNaturalKey,
   sumEnergy5minByInverterRange,
+  countDistinctReadingBuckets,
+  getLatestReadingDate,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,

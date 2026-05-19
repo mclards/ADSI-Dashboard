@@ -1117,7 +1117,7 @@ so historical data can be cross-referenced.
 | --- | --- |
 | `Inverter` | Pick the inverter to export. |
 | `Date` | Date to export. **Today is locked** until the dashboard reaches the End-of-Day snapshot hour (`Settings → Plant Configuration → Solar Window`). Until then only past dates may be exported (HTTP 423 returned otherwise). |
-| `Export Daily Data` | Streams the workbook directly to disk via `ExcelJS.WorkbookWriter`. |
+| `Export` | Streams the workbook directly to disk via `ExcelJS.WorkbookWriter`. (All export-card primary buttons are now labelled simply **Export**; the card title identifies what is exported.) |
 | `Cancel` | Cancels an in-flight build. |
 
 Workbook structure:

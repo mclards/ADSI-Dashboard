@@ -68,7 +68,7 @@ class TestTriBandFeatureConstruction:
     def _make_test_weather(self):
         """Create minimal test weather DataFrame."""
         return pd.DataFrame({
-            "time": pd.date_range("2026-03-30", periods=SLOTS_DAY, freq="5T"),
+            "time": pd.date_range("2026-03-30", periods=SLOTS_DAY, freq="5min"),
             "rad": np.random.uniform(0, 800, SLOTS_DAY),
             "cloud": np.random.uniform(0, 100, SLOTS_DAY),
             "temp": np.random.uniform(20, 35, SLOTS_DAY),

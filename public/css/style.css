@@ -7813,6 +7813,17 @@ select.cam-field-input { appearance: auto; }
   justify-content: center;
 }
 
+/* Day-Ahead Forecast Export is the only card with three actions
+   (Load Data / Export / Cancel). Force all three onto a single row
+   instead of wrapping Cancel beneath the 2-column default grid. */
+.exp-actions.exp-actions--triple {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+}
+
+.exp-actions.exp-actions--triple .exp-cancel-btn {
+  min-width: 0;
+}
+
 .exp-result.error {
   color: var(--red);
 }

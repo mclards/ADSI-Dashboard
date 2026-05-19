@@ -100,6 +100,13 @@ test.describe("Electron UI smoke", () => {
       await mainWindow
         .locator('[data-settings-section="connectivitySection"]')
         .evaluate((el) => el.click());
+      // Replication-health UI (#repConnectedVal / refresh) lives under the
+      // connectivity "Gateway Link" card tab in the settings-section-registry
+      // card-tab layout — selecting the section alone leaves it hidden, so
+      // activate the Link tab before asserting visibility.
+      await mainWindow
+        .locator('#connectivitySection .card-tab[data-card-tab="link"]')
+        .evaluate((el) => el.click());
       await expect(mainWindow.locator("#repConnectedVal")).toBeVisible();
       await mainWindow.locator("#btnRefreshReplicationHealth").click();
       await expect

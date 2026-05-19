@@ -3570,13 +3570,15 @@ def audit_loss_factors(lookback_days: int = 30) -> dict:
         if metered_kwh_total <= 0:
             continue
 
-        # Load loss-adjusted inverter data
-        d_dt = datetime.strptime(day, "%Y-%m-%d")
-        day_start_ms = int(d_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-        day_end_ms = day_start_ms + 86400 * 1000
+        # Load loss-adjusted inverter data. Use the hot-DB + month-archive
+        # merge loader so the audit still sees days that have been rotated
+        # out of the hot DB (a hot-only read silently skipped archived days,
+        # degrading loss-factor calibration when retainDays is small).
         loss_factors = _load_inverter_loss_factors()
-        inv_5min = _query_energy_5min_loss_adjusted(APP_DB_FILE, day_start_ms, day_end_ms, loss_factors)
-        loss_adj_kwh_total = sum(inv_5min.values())
+        loss_adj_slots, _present = _load_actual_loss_adjusted_from_appdata(day, loss_factors)
+        loss_adj_kwh_total = (
+            float(np.sum(loss_adj_slots)) if loss_adj_slots is not None else 0.0
+        )
 
         if loss_adj_kwh_total <= 0:
             continue
