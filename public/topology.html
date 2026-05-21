@@ -2,251 +2,282 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Inverter Dashboard</title>
+    <title>ADSI Inverter Dashboard Topology</title>
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
     <style>
+      /* ══════════════════════════════════════════════
+         DESIGN TOKENS
+         ══════════════════════════════════════════════ */
       :root {
         --teal: #34d399;
         --green: #10b981;
+        --green-glow: rgba(16,185,129,.35);
         --red: #ef476f;
+        --red-glow: rgba(239,71,111,.35);
         --yellow: #f59e0b;
+        --yellow-glow: rgba(245,158,11,.25);
         --slate: #94a3b8;
         --text: #dbe7ff;
         --muted: #8ea4c8;
-        --line: #1f3252;
-        --bg: #061022;
-        --panel: #0b162b;
-        --panel2: #0f1e38;
+        --line: #1e3050;
+        --bg: #060d1a;
+        --panel: #0a1528;
+        --panel2: #0d1a30;
         --blue: #60a5fa;
+        --blue-glow: rgba(96,165,250,.25);
+        --purple: #a78bfa;
+        --glass: rgba(10,21,40,.72);
+        --glass-border: rgba(96,165,250,.15);
+        --glass-shine: rgba(255,255,255,.03);
+        --radius: 10px;
+        --radius-lg: 14px;
+        --shadow-card: 0 4px 24px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.2);
+        --shadow-glow: 0 0 20px rgba(96,165,250,.12);
+        --transition: .22s cubic-bezier(.4,0,.2,1);
       }
       html.light {
         --teal: #0d9488;
         --green: #059669;
+        --green-glow: rgba(5,150,105,.2);
         --red: #dc2626;
+        --red-glow: rgba(220,38,38,.2);
         --yellow: #d97706;
+        --yellow-glow: rgba(217,119,6,.15);
         --slate: #64748b;
         --text: #1e293b;
         --muted: #4f6788;
-        --line: #c4d4ea;
+        --line: #c8d8ec;
         --bg: #edf3fb;
         --panel: #ffffff;
-        --panel2: #eef4fc;
+        --panel2: #f0f5fc;
         --blue: #2563eb;
+        --blue-glow: rgba(37,99,235,.12);
+        --purple: #7c3aed;
+        --glass: rgba(255,255,255,.82);
+        --glass-border: rgba(37,99,235,.12);
+        --glass-shine: rgba(255,255,255,.5);
+        --shadow-card: 0 4px 20px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.05);
+        --shadow-glow: 0 0 16px rgba(37,99,235,.08);
       }
-      * {
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
-      }
-      html,
-      body {
-        height: 100%;
-        overflow: hidden;
-      }
+
+      /* ══════════════════════════════════════════════
+         RESET & BASE
+         ══════════════════════════════════════════════ */
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; overflow: hidden; }
       body {
         font-family: "Sora", sans-serif;
         background:
-          radial-gradient(
-            circle at 15% -20%,
-            rgba(52, 211, 153, 0.12),
-            transparent 50%
-          ),
+          radial-gradient(ellipse 80% 60% at 15% -10%, rgba(96,165,250,.08), transparent),
+          radial-gradient(ellipse 60% 50% at 85% 110%, rgba(167,139,250,.06), transparent),
+          radial-gradient(ellipse 50% 40% at 50% 50%, rgba(52,211,153,.04), transparent),
           var(--bg);
         color: var(--text);
         display: flex;
         flex-direction: column;
       }
+      html.light body {
+        background:
+          radial-gradient(ellipse 80% 60% at 20% -10%, rgba(37,99,235,.06), transparent),
+          radial-gradient(ellipse 60% 50% at 80% 110%, rgba(124,58,237,.04), transparent),
+          var(--bg);
+      }
+
+      /* ══════════════════════════════════════════════
+         BUTTONS (base)
+         ══════════════════════════════════════════════ */
       button {
         border: 1px solid var(--line);
-        background: transparent;
+        background: var(--glass);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         color: var(--text);
-        height: 30px;
-        padding: 0 11px;
+        height: 32px;
+        padding: 0 13px;
         cursor: pointer;
-        border-radius: 6px;
-        font:
-          600 0.72rem "Sora",
-          sans-serif;
-        transition: 0.16s ease;
+        border-radius: 8px;
+        font: 600 .72rem "Sora", sans-serif;
+        transition: var(--transition);
         white-space: nowrap;
+        position: relative;
+        overflow: hidden;
+      }
+      button::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(135deg, var(--glass-shine), transparent 60%);
+        pointer-events: none;
       }
       button:hover {
         border-color: var(--blue);
         color: var(--blue);
+        box-shadow: 0 0 12px var(--blue-glow);
+        transform: translateY(-1px);
       }
+      button:active { transform: translateY(0); }
       button.active {
         border-color: var(--blue);
         color: var(--blue);
-        background: rgba(96, 165, 250, 0.12);
+        background: rgba(96,165,250,.12);
+        box-shadow: inset 0 0 12px rgba(96,165,250,.08), 0 0 8px var(--blue-glow);
       }
+
+      /* ══════════════════════════════════════════════
+         HEADER — frosted glass
+         ══════════════════════════════════════════════ */
       #header {
         min-height: 78px;
         height: 78px;
         display: grid;
         grid-template-columns: auto 1fr auto;
         align-items: center;
-        padding: 0 14px;
-        border-bottom: 1px solid var(--line);
-        background: linear-gradient(
-          180deg,
-          rgba(10, 18, 34, 0.97) 0%,
-          rgba(8, 15, 28, 0.97) 100%
-        );
+        padding: 0 16px;
+        border-bottom: 1px solid var(--glass-border);
+        background:
+          linear-gradient(180deg, rgba(10,21,40,.95), rgba(6,13,26,.95));
+        backdrop-filter: blur(20px) saturate(1.6);
+        -webkit-backdrop-filter: blur(20px) saturate(1.6);
         z-index: 20;
-        gap: 12px;
+        gap: 14px;
         flex-shrink: 0;
-        box-shadow:
-          0 1px 0 var(--line),
-          0 6px 20px rgba(0, 0, 0, 0.28);
+        box-shadow: 0 1px 0 var(--glass-border), 0 8px 32px rgba(0,0,0,.35);
       }
-      #header-left {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
+      html.light #header {
+        background: linear-gradient(180deg, rgba(16,28,50,.97), rgba(10,20,38,.97));
+        border-bottom-color: rgba(96,165,250,.15);
+        box-shadow: 0 1px 0 rgba(96,165,250,.1), 0 8px 32px rgba(0,0,0,.2);
       }
-      #header-center {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 0;
-      }
-      #header-logo {
-        height: 34px;
-        width: auto;
-        object-fit: contain;
-      }
+      #header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      #header-center { display: flex; align-items: center; justify-content: center; min-width: 0; }
+      #header-logo { height: 34px; width: auto; object-fit: contain; filter: drop-shadow(0 0 6px rgba(96,165,250,.2)); }
+      #header-right { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; justify-content: flex-end; justify-self: end; }
+
+      /* ── Metric pill ── */
       .metric-pill {
         min-width: 460px;
         max-width: 100%;
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        padding: 8px 16px;
+        border: 1px solid rgba(96,165,250,.18);
+        border-radius: 12px;
+        padding: 9px 20px;
         text-align: center;
-        background: linear-gradient(
-          135deg,
-          rgba(20, 36, 64, 0.9) 0%,
-          rgba(12, 22, 44, 0.9) 100%
-        );
+        background:
+          linear-gradient(135deg, rgba(20,36,64,.85), rgba(12,22,44,.85));
+        backdrop-filter: blur(10px);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 2px 12px rgba(0,0,0,.2);
+      }
+      html.light .metric-pill {
+        border-color: rgba(37,99,235,.18);
+        background: linear-gradient(135deg, rgba(30,48,78,.92), rgba(18,31,56,.92));
       }
       .metric-label {
-        font:
-          700 0.56rem "JetBrains Mono",
-          monospace;
-        letter-spacing: 0.12em;
+        font: 700 .55rem "JetBrains Mono", monospace;
+        letter-spacing: .14em;
         color: var(--muted);
         text-transform: uppercase;
       }
+      html.light .metric-label { color: #9db4d8; }
       .metric-value {
-        margin-top: 2px;
-        font:
-          800 1.02rem "Sora",
-          sans-serif;
-        letter-spacing: 0.07em;
-        color: var(--blue);
+        margin-top: 3px;
+        font: 800 1rem "Sora", sans-serif;
+        letter-spacing: .08em;
+        background: linear-gradient(135deg, var(--blue), var(--purple));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      #header-right {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: nowrap;
-        justify-content: flex-end;
-        justify-self: end;
+      html.light .metric-value {
+        background: linear-gradient(135deg, #2563eb, #7c3aed);
+        -webkit-background-clip: text;
+        background-clip: text;
       }
+
+      /* ── Clock wrap ── */
       #clock-wrap {
         display: flex;
         align-items: center;
-        gap: 7px;
-        height: 34px;
-        padding: 0 10px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: rgba(15, 30, 56, 0.58);
+        gap: 8px;
+        height: 36px;
+        padding: 0 12px;
+        border: 1px solid rgba(96,165,250,.15);
+        border-radius: 10px;
+        background: rgba(15,30,56,.55);
+        backdrop-filter: blur(8px);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+      }
+      html.light #clock-wrap {
+        background: rgba(13,29,54,.82);
+        border-color: rgba(96,165,250,.2);
       }
       .ws-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
         background: var(--green);
-        box-shadow: 0 0 8px var(--green);
+        box-shadow: 0 0 10px var(--green-glow), 0 0 4px var(--green);
+        animation: pulse-dot 2s ease-in-out infinite;
+      }
+      @keyframes pulse-dot {
+        0%, 100% { box-shadow: 0 0 10px var(--green-glow), 0 0 4px var(--green); }
+        50% { box-shadow: 0 0 18px var(--green-glow), 0 0 8px var(--green); }
       }
       .ws-label {
-        font:
-          700 0.66rem "JetBrains Mono",
-          monospace;
+        font: 700 .65rem "JetBrains Mono", monospace;
         color: var(--green);
-        letter-spacing: 0.08em;
+        letter-spacing: .08em;
         text-transform: uppercase;
       }
       #clock {
-        font:
-          700 0.76rem "JetBrains Mono",
-          monospace;
+        font: 700 .76rem "JetBrains Mono", monospace;
         color: var(--muted);
         min-width: 68px;
         text-align: right;
       }
+      html.light #clock { color: #d7e8ff; }
+
+      /* ── Top buttons ── */
       .top-btn {
-        height: 34px;
-        padding: 0 13px;
-        border-radius: 8px;
-      }
-      html.light #header {
-        background: linear-gradient(
-          180deg,
-          rgba(20, 33, 56, 0.98) 0%,
-          rgba(12, 22, 40, 0.98) 100%
-        );
-        border-bottom-color: #38527c;
-        box-shadow:
-          0 1px 0 #38527c,
-          0 6px 20px rgba(0, 0, 0, 0.35);
-      }
-      html.light .metric-pill {
-        border-color: #446089;
-        background: linear-gradient(
-          135deg,
-          rgba(30, 48, 78, 0.94) 0%,
-          rgba(18, 31, 56, 0.94) 100%
-        );
-      }
-      html.light .metric-label {
-        color: #9db4d8;
-      }
-      html.light .metric-value {
-        color: #72a9ff;
-      }
-      html.light #clock-wrap {
-        background: rgba(13, 29, 54, 0.86);
-        border-color: #446089;
-      }
-      html.light #clock {
-        color: #d7e8ff;
+        height: 36px;
+        padding: 0 14px;
+        border-radius: 10px;
+        border-color: rgba(96,165,250,.18);
+        background: rgba(15,30,56,.45);
+        color: #c8daff;
       }
       html.light .top-btn {
         color: #e7efff;
-        border-color: #4b678f;
-        background: rgba(15, 31, 56, 0.45);
+        border-color: rgba(96,165,250,.22);
+        background: rgba(15,31,56,.45);
       }
       html.light .top-btn:hover {
-        color: #ffffff;
-        border-color: #79aaff;
-        background: rgba(33, 60, 102, 0.72);
+        color: #fff;
+        border-color: rgba(96,165,250,.5);
+        background: rgba(33,60,102,.65);
       }
       #scan-btn.scanning {
         color: var(--yellow);
         border-color: var(--yellow);
+        box-shadow: 0 0 14px var(--yellow-glow);
+        animation: scan-pulse .8s ease-in-out infinite alternate;
       }
+      @keyframes scan-pulse {
+        from { box-shadow: 0 0 10px var(--yellow-glow); }
+        to { box-shadow: 0 0 22px var(--yellow-glow); }
+      }
+
+      /* ══════════════════════════════════════════════
+         STATS BAR
+         ══════════════════════════════════════════════ */
       #stats-bar {
         display: flex;
-        min-height: 40px;
+        min-height: 42px;
         border-bottom: 1px solid var(--line);
         background: var(--panel2);
         overflow-x: auto;
@@ -256,58 +287,44 @@
       .stat-chip {
         display: inline-flex;
         align-items: center;
-        gap: 7px;
-        padding: 0 16px;
+        gap: 8px;
+        padding: 0 18px;
         border-right: 1px solid var(--line);
-        font-size: 0.7rem;
-        min-height: 40px;
+        font-size: .7rem;
+        min-height: 42px;
+        transition: background var(--transition);
       }
-      .dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-      }
-      .s-total .dot {
-        background: var(--blue);
-      }
-      .s-ok .dot {
-        background: var(--green);
-      }
-      .s-down .dot {
-        background: var(--red);
-      }
-      .s-warn .dot {
-        background: var(--yellow);
-      }
-      .s-unk .dot {
-        background: var(--slate);
-      }
-      .val {
-        font:
-          700 0.95rem "JetBrains Mono",
-          monospace;
-      }
+      .stat-chip:hover { background: rgba(96,165,250,.04); }
+      .dot { width: 8px; height: 8px; border-radius: 50%; transition: box-shadow var(--transition); }
+      .s-total .dot { background: var(--blue); box-shadow: 0 0 6px var(--blue-glow); }
+      .s-ok .dot { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
+      .s-down .dot { background: var(--red); box-shadow: 0 0 6px var(--red-glow); }
+      .s-warn .dot { background: var(--yellow); box-shadow: 0 0 6px var(--yellow-glow); }
+      .s-unk .dot { background: var(--slate); }
+      .val { font: 700 .95rem "JetBrains Mono", monospace; }
+
+      /* ══════════════════════════════════════════════
+         ALERT BAR
+         ══════════════════════════════════════════════ */
       #alert-bar {
         display: none;
-        min-height: 30px;
-        height: 30px;
+        min-height: 32px;
+        height: 32px;
         align-items: center;
-        padding: 0 10px;
+        padding: 0 12px;
         gap: 10px;
-        border-bottom: 1px solid rgba(239, 71, 111, 0.35);
-        background: rgba(239, 71, 111, 0.09);
+        border-bottom: 1px solid rgba(239,71,111,.3);
+        background:
+          linear-gradient(90deg, rgba(239,71,111,.1), rgba(239,71,111,.05), rgba(239,71,111,.1));
         overflow: hidden;
         flex-shrink: 0;
       }
-      #alert-bar.visible {
-        display: flex;
-      }
+      #alert-bar.visible { display: flex; }
       .alert-badge {
-        font:
-          700 0.58rem "JetBrains Mono",
-          monospace;
+        font: 700 .58rem "JetBrains Mono", monospace;
         color: var(--red);
-        letter-spacing: 0.1em;
+        letter-spacing: .1em;
+        text-shadow: 0 0 8px var(--red-glow);
       }
       #alert-ticker {
         flex: 1;
@@ -315,7 +332,7 @@
         overflow: hidden;
         white-space: nowrap;
         color: var(--red);
-        font-size: 0.74rem;
+        font-size: .74rem;
         line-height: 1.1;
         display: block;
         position: relative;
@@ -332,97 +349,122 @@
         white-space: nowrap;
       }
       @keyframes alert-marquee {
-        0% {
-          transform: translateX(100%);
-        }
-        100% {
-          transform: translateX(-100%);
-        }
+        0% { transform: translateX(100%); }
+        100% { transform: translateX(-100%); }
       }
-      /* ── Layout shell ── */
-      #app {
-        display: flex;
-        flex: 1;
-        min-height: 0;
-        overflow: hidden;
-      }
+
+      /* ══════════════════════════════════════════════
+         LAYOUT SHELL
+         ══════════════════════════════════════════════ */
+      #app { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+
+      /* ══════════════════════════════════════════════
+         SIDEBAR — glass panel
+         ══════════════════════════════════════════════ */
       #sidebar {
-        width: 260px;
+        width: 264px;
         border-right: 1px solid var(--line);
         overflow-y: auto;
         overflow-x: hidden;
-        background: var(--panel);
+        background:
+          linear-gradient(180deg, var(--panel), rgba(10,21,40,.95));
         flex-shrink: 0;
       }
+      html.light #sidebar {
+        background: linear-gradient(180deg, var(--panel), var(--panel2));
+      }
+      #sidebar::-webkit-scrollbar { width: 5px; }
+      #sidebar::-webkit-scrollbar-thumb { background: rgba(96,165,250,.3); border-radius: 4px; }
+      #sidebar::-webkit-scrollbar-track { background: transparent; }
       .sidebar-title {
-        padding: 12px 14px;
+        padding: 14px 16px;
         border-bottom: 1px solid var(--line);
-        font:
-          0.68rem "JetBrains Mono",
-          monospace;
-        letter-spacing: 0.08em;
+        font: 600 .68rem "JetBrains Mono", monospace;
+        letter-spacing: .1em;
         color: var(--muted);
+        background: rgba(96,165,250,.03);
       }
       #sidebar-search {
-        width: calc(100% - 20px);
-        margin: 8px 10px;
-        height: 32px;
+        width: calc(100% - 24px);
+        margin: 10px 12px;
+        height: 34px;
         border: 1px solid var(--line);
-        background: transparent;
+        background: rgba(96,165,250,.04);
         color: var(--text);
-        padding: 0 10px;
-        border-radius: 6px;
+        padding: 0 12px;
+        border-radius: 8px;
         outline: none;
-        font:
-          0.74rem "JetBrains Mono",
-          monospace;
+        font: .74rem "JetBrains Mono", monospace;
+        transition: var(--transition);
+      }
+      #sidebar-search:focus {
+        border-color: var(--blue);
+        box-shadow: 0 0 12px var(--blue-glow);
+        background: rgba(96,165,250,.08);
       }
       .sb-block-hdr {
-        padding: 8px 14px 4px;
-        font:
-          0.66rem "JetBrains Mono",
-          monospace;
+        padding: 10px 16px 5px;
+        font: 600 .64rem "JetBrains Mono", monospace;
         color: var(--yellow);
+        letter-spacing: .06em;
+        text-shadow: 0 0 6px var(--yellow-glow);
       }
       .sb-row {
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 7px 14px;
-        border-left: 2px solid transparent;
+        gap: 10px;
+        padding: 8px 16px;
+        border-left: 3px solid transparent;
         cursor: pointer;
+        transition: var(--transition);
+        position: relative;
       }
-      .sb-row:hover {
-        background: rgba(96, 165, 250, 0.08);
+      .sb-row::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        background: linear-gradient(90deg, rgba(96,165,250,.06), transparent);
+        transition: opacity var(--transition);
+        pointer-events: none;
       }
+      .sb-row:hover::after { opacity: 1; }
+      .sb-row:hover { background: rgba(96,165,250,.06); }
       .sb-row.selected {
         border-left-color: var(--blue);
-        background: rgba(96, 165, 250, 0.1);
+        background: rgba(96,165,250,.1);
       }
+      .sb-row.selected::after { opacity: 1; }
       .sb-dot {
-        width: 8px;
-        height: 8px;
+        width: 9px;
+        height: 9px;
         border-radius: 50%;
         background: var(--slate);
+        transition: var(--transition);
+        flex-shrink: 0;
       }
       .sb-row.ok .sb-dot {
         background: var(--green);
+        box-shadow: 0 0 8px var(--green-glow);
       }
       .sb-row.down .sb-dot {
         background: var(--red);
+        box-shadow: 0 0 8px var(--red-glow);
+        animation: pulse-red 1.5s ease-in-out infinite;
       }
-      .sb-label {
-        font-size: 0.78rem;
-        flex: 1;
+      @keyframes pulse-red {
+        0%, 100% { box-shadow: 0 0 6px var(--red-glow); }
+        50% { box-shadow: 0 0 14px var(--red-glow); }
       }
-      .sb-ip {
-        font-size: 0.68rem;
-        color: var(--muted);
-        font-family: "JetBrains Mono", monospace;
-      }
+      .sb-label { font-size: .78rem; flex: 1; font-weight: 500; }
+      .sb-ip { font-size: .67rem; color: var(--muted); font-family: "JetBrains Mono", monospace; }
+
+      /* ══════════════════════════════════════════════
+         DASHBOARD AREA
+         ══════════════════════════════════════════════ */
       #dashboard-area {
         flex: 1;
-        padding: 12px 16px;
+        padding: 14px 18px;
         min-width: 0;
         min-height: 0;
         display: flex;
@@ -431,286 +473,341 @@
       }
       #filter-bar {
         display: flex;
-        gap: 6px;
-        margin-bottom: 10px;
+        gap: 7px;
+        margin-bottom: 12px;
         flex-wrap: wrap;
         align-items: center;
         flex-shrink: 0;
       }
-      .filter-btn {
-        height: 30px;
-        font-size: 0.7rem;
-      }
+      .filter-btn { height: 32px; font-size: .7rem; }
       .filter-btn.active {
         border-color: var(--blue);
         color: var(--blue);
+        background: rgba(96,165,250,.1);
+        box-shadow: 0 0 8px var(--blue-glow);
       }
       .meta-btn {
-        height: 30px;
-        font-size: 0.7rem;
+        height: 32px;
+        font-size: .7rem;
         color: var(--muted);
       }
       #zoom-label {
-        font:
-          700 0.72rem "JetBrains Mono",
-          monospace;
+        font: 700 .72rem "JetBrains Mono", monospace;
         color: var(--muted);
         padding: 0 6px;
         min-width: 56px;
         text-align: center;
       }
-      /* ── SVG stage: fills remaining space, scrolls in both axes ── */
+
+      /* ══════════════════════════════════════════════
+         SVG STAGE — the main topology viewport
+         ══════════════════════════════════════════════ */
       #svg-stage {
         flex: 1;
-        min-height: 0; /* critical: allows flex child to shrink below content */
-        overflow: auto; /* show scrollbars whenever content overflows */
+        min-height: 0;
+        overflow: auto;
         overscroll-behavior: contain;
-        border: 1px solid var(--line);
-        background: linear-gradient(
-          180deg,
-          rgba(11, 22, 43, 0.96),
-          rgba(9, 19, 39, 0.96)
-        );
-        border-radius: 8px;
-        padding: 10px;
+        border: 1px solid var(--glass-border);
+        background:
+          radial-gradient(ellipse 50% 50% at 50% 50%, rgba(96,165,250,.03), transparent),
+          linear-gradient(180deg, rgba(11,22,43,.96), rgba(6,13,26,.98));
+        border-radius: var(--radius-lg);
+        padding: 12px;
         cursor: grab;
         touch-action: none;
         position: relative;
-      }
-      #svg-stage::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-      }
-      #svg-stage::-webkit-scrollbar-thumb {
-        background: rgba(96, 165, 250, 0.45);
-        border-radius: 6px;
-      }
-      #svg-stage::-webkit-scrollbar-track {
-        background: rgba(8, 16, 34, 0.35);
-      }
-      #svg-stage.panning {
-        cursor: grabbing;
-      }
-      /* ── svg-canvas holds the SVG; its size drives the scrollable area ── */
-      #svg-canvas {
-        display: block;
-        position: relative;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.03), var(--shadow-card);
       }
       html.light #svg-stage {
-        background: #f5f8fd;
+        background:
+          radial-gradient(ellipse 50% 50% at 50% 50%, rgba(37,99,235,.03), transparent),
+          #f5f8fd;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.5), var(--shadow-card);
       }
-      #main-svg {
-        display: block;
-        transform-origin: top left;
-        max-width: none;
-        min-width: 0;
+      #svg-stage::-webkit-scrollbar { width: 7px; height: 7px; }
+      #svg-stage::-webkit-scrollbar-thumb {
+        background: rgba(96,165,250,.35);
+        border-radius: 6px;
       }
-      /* ── Legend ── */
-      #legend {
-        display: flex;
-        margin-top: 10px;
-        border: 1px solid var(--line);
-        border-radius: 7px;
-        overflow: hidden;
-        width: fit-content;
-        max-width: 100%;
-        flex-shrink: 0;
-      }
-      .legend-item {
-        padding: 8px 12px;
-        border-right: 1px solid var(--line);
-        font-size: 0.66rem;
-        background: var(--panel);
-        white-space: nowrap;
-      }
-      .legend-item:last-child {
-        border-right: none;
-      }
-      /* ── SVG element styles ── */
-      .inv {
-        cursor: pointer;
-      }
+      #svg-stage::-webkit-scrollbar-thumb:hover { background: rgba(96,165,250,.55); }
+      #svg-stage::-webkit-scrollbar-track { background: rgba(8,16,34,.25); border-radius: 6px; }
+      #svg-stage.panning { cursor: grabbing; }
+      #svg-canvas { display: block; position: relative; }
+      #main-svg { display: block; transform-origin: top left; max-width: none; min-width: 0; }
+
+      /* ══════════════════════════════════════════════
+         SVG ELEMENT STYLES — Blocks, Inverters, Links
+         ══════════════════════════════════════════════ */
+
+      /* ── Inverter nodes ── */
+      .inv { cursor: pointer; transition: filter .2s; }
+      .inv:hover { filter: brightness(1.2) drop-shadow(0 0 6px var(--blue-glow)); }
       .inv text {
-        fill: #e8f1ff;
+        fill: #c8daff;
         font-family: "JetBrains Mono", monospace;
         font-weight: 700;
+        font-size: 8px;
         paint-order: stroke;
-        stroke: rgba(0, 0, 0, 0.7);
-        stroke-width: 0.85px;
+        stroke: rgba(0,0,0,.65);
+        stroke-width: .8px;
+        transition: fill .2s;
       }
-      .inv-ok text {
-        fill: #ffffff;
-        stroke: rgba(0, 0, 0, 0.45);
-      }
-      .inv-down text {
-        fill: #ffffff;
-        stroke: rgba(0, 0, 0, 0.45);
-      }
-      .block rect {
-        fill: #12233a;
-        stroke: #3a5580;
-        stroke-width: 1.4;
-      }
-      .block text {
-        fill: #dceaff;
-        font-family: "JetBrains Mono", monospace;
-        font-weight: 700;
-        paint-order: stroke;
-        stroke: rgba(0, 0, 0, 0.35);
-        stroke-width: 0.75px;
-        letter-spacing: 0.04em;
-      }
-      html.light .inv text {
-        fill: #1f3357;
-        stroke: rgba(255, 255, 255, 0.6);
-      }
-      html.light .inv-ok text {
-        fill: #ffffff;
-      }
-      html.light .inv-down text {
-        fill: #ffffff;
-      }
-      html.light .block rect {
-        fill: #d6e2f3;
-        stroke: #7996bf;
-      }
-      html.light .block text {
-        fill: #1f3357;
-        stroke: rgba(255, 255, 255, 0.45);
-      }
+      .inv-ok text { fill: #fff; stroke: rgba(0,0,0,.4); }
+      .inv-down text { fill: #fff; stroke: rgba(0,0,0,.4); }
+      html.light .inv text { fill: #2d4a78; stroke: rgba(255,255,255,.55); }
+      html.light .inv-ok text { fill: #fff; }
+      html.light .inv-down text { fill: #fff; }
+
       .inv-shape {
         fill: #0f2138;
-        stroke: #375074;
+        stroke: #2d4a6e;
         stroke-width: 1.5;
+        rx: 6;
+        transition: all .25s ease;
       }
-      html.light .inv-shape {
-        fill: #dbe8fa;
-        stroke: #7f9dc5;
-      }
+      html.light .inv-shape { fill: #dbe8fa; stroke: #7f9dc5; }
+
       .inv-ok .inv-shape {
-        fill: #0f7c4a !important;
+        fill: #0a6e42 !important;
         stroke: #22c55e !important;
         stroke-width: 2 !important;
+        filter: drop-shadow(0 0 8px rgba(34,197,94,.4));
       }
       html.light .inv-ok .inv-shape {
         fill: #16935a !important;
         stroke: #0f7d4a !important;
+        filter: drop-shadow(0 0 6px rgba(5,150,105,.3));
       }
+
       .inv-down .inv-shape {
-        fill: #7a1d30 !important;
+        fill: #6e1a2d !important;
         stroke: #ff6f8d !important;
         stroke-width: 2 !important;
+        filter: drop-shadow(0 0 8px rgba(248,113,113,.4));
+        animation: inv-down-pulse 1.8s ease-in-out infinite;
+      }
+      @keyframes inv-down-pulse {
+        0%, 100% { filter: drop-shadow(0 0 6px rgba(248,113,113,.3)); }
+        50% { filter: drop-shadow(0 0 14px rgba(248,113,113,.6)); }
       }
       html.light .inv-down .inv-shape {
         fill: #d64c6b !important;
         stroke: #b92f4f !important;
+        filter: drop-shadow(0 0 6px rgba(220,38,38,.3));
       }
+
       .inv.selected .inv-shape {
         stroke: var(--blue) !important;
         stroke-width: 2.5 !important;
+        filter: drop-shadow(0 0 10px rgba(96,165,250,.5)) !important;
       }
-      .block-ok rect {
-        fill: #12233a;
-        stroke: #3a5580;
+
+      /* ── Block labels ── */
+      .block rect {
+        fill: #101e36;
+        stroke: #2e4872;
+        stroke-width: 1.4;
+        rx: 5;
+        transition: all .2s;
       }
-      html.light .block-ok rect {
-        fill: #d6e2f3;
-        stroke: #7996bf;
+      .block text {
+        fill: #b8d0f0;
+        font-family: "JetBrains Mono", monospace;
+        font-weight: 700;
+        paint-order: stroke;
+        stroke: rgba(0,0,0,.3);
+        stroke-width: .7px;
+        letter-spacing: .05em;
       }
+      html.light .block rect { fill: #d6e4f6; stroke: #7996bf; }
+      html.light .block text { fill: #1f3357; stroke: rgba(255,255,255,.4); }
+
+      .block-ok rect { fill: #101e36; stroke: #2e4872; }
+      html.light .block-ok rect { fill: #d6e4f6; stroke: #7996bf; }
+
       .block-warn rect {
-        fill: #3a2c0f !important;
+        fill: #2e2610 !important;
         stroke: #fbbf24 !important;
         stroke-width: 1.5 !important;
+        filter: drop-shadow(0 0 6px var(--yellow-glow));
       }
-      html.light .block-warn rect {
-        fill: #fff2c6 !important;
-        stroke: #d59a1f !important;
-      }
+      html.light .block-warn rect { fill: #fff2c6 !important; stroke: #d59a1f !important; filter: none; }
+
       .block-down rect {
-        fill: #3a151d !important;
+        fill: #351520 !important;
         stroke: #f87171 !important;
         stroke-width: 1.5 !important;
+        filter: drop-shadow(0 0 6px var(--red-glow));
         opacity: 1;
       }
-      html.light .block-down rect {
-        fill: #ffd9e1 !important;
-        stroke: #d54e6c !important;
-      }
-      .link path {
-        stroke: #1e3a4a !important;
-      }
+      html.light .block-down rect { fill: #ffd9e1 !important; stroke: #d54e6c !important; filter: none; }
+
+      /* ── Connection links ── */
+      .link path { stroke: #1a2e48 !important; transition: stroke .3s; }
       .link-ok path {
         stroke: #3399ff !important;
+        filter: drop-shadow(0 0 4px rgba(51,153,255,.3));
       }
       .link-down path {
         stroke: #f87171 !important;
+        filter: drop-shadow(0 0 4px rgba(248,113,113,.3));
+        animation: link-flicker 1.2s ease-in-out infinite alternate;
       }
-      /* ── Detail panel ── */
+      @keyframes link-flicker {
+        from { opacity: .7; }
+        to { opacity: 1; }
+      }
+
+      /* ── Server node (orange ellipse) ── */
+      #main-svg > g:first-child ellipse {
+        filter: drop-shadow(0 0 12px rgba(250,104,0,.35));
+        transition: filter .3s;
+      }
+      #main-svg > g:first-child:hover ellipse {
+        filter: drop-shadow(0 0 18px rgba(250,104,0,.5));
+      }
+
+      /* ══════════════════════════════════════════════
+         LEGEND
+         ══════════════════════════════════════════════ */
+      #legend {
+        display: flex;
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+        width: fit-content;
+        max-width: 100%;
+        flex-shrink: 0;
+        box-shadow: var(--shadow-card);
+      }
+      .legend-item {
+        padding: 9px 14px;
+        border-right: 1px solid var(--line);
+        font-size: .66rem;
+        font-weight: 500;
+        background: var(--panel);
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        transition: background var(--transition);
+      }
+      .legend-item:last-child { border-right: none; }
+      .legend-item:hover { background: rgba(96,165,250,.04); }
+      .legend-item::before {
+        content: '';
+        width: 10px;
+        height: 10px;
+        border-radius: 3px;
+        flex-shrink: 0;
+      }
+      .legend-item:nth-child(1)::before { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
+      .legend-item:nth-child(2)::before { background: var(--red); box-shadow: 0 0 6px var(--red-glow); }
+      .legend-item:nth-child(3)::before { background: var(--slate); }
+      .legend-item:nth-child(4)::before { background: var(--yellow); box-shadow: 0 0 6px var(--yellow-glow); }
+
+      /* ══════════════════════════════════════════════
+         DETAIL PANEL — slide-in glass
+         ══════════════════════════════════════════════ */
       #detail-panel {
         position: fixed;
         top: 0;
         right: 0;
-        width: 298px;
+        width: 310px;
         height: 100%;
-        background: var(--panel);
-        border-left: 1px solid var(--line);
-        padding: 52px 16px 18px;
+        background:
+          linear-gradient(180deg, rgba(10,21,40,.97), rgba(6,13,26,.98));
+        backdrop-filter: blur(24px) saturate(1.4);
+        -webkit-backdrop-filter: blur(24px) saturate(1.4);
+        border-left: 1px solid var(--glass-border);
+        padding: 56px 18px 20px;
         transform: translateX(100%);
-        transition: 0.25s;
+        transition: transform .3s cubic-bezier(.4,0,.2,1);
         overflow: auto;
         z-index: 30;
+        box-shadow: -6px 0 32px rgba(0,0,0,.4);
       }
-      #detail-panel.open {
-        transform: translateX(0);
+      html.light #detail-panel {
+        background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(240,245,252,.98));
+        box-shadow: -6px 0 32px rgba(0,0,0,.1);
       }
+      #detail-panel.open { transform: translateX(0); }
       #close-detail {
         position: absolute;
-        top: 12px;
-        right: 12px;
-        width: 28px;
-        height: 28px;
+        top: 14px;
+        right: 14px;
+        width: 30px;
+        height: 30px;
         padding: 0;
-        font:
-          700 0.8rem "JetBrains Mono",
-          monospace;
+        font: 700 .8rem "JetBrains Mono", monospace;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
       .d-badge {
         display: inline-block;
-        padding: 4px 8px;
-        margin: 10px 0;
+        padding: 5px 12px;
+        margin: 12px 0;
         border: 1px solid var(--line);
-        border-radius: 4px;
+        border-radius: 6px;
+        font: 600 .72rem "JetBrains Mono", monospace;
+        letter-spacing: .05em;
       }
       .d-row {
         display: flex;
         justify-content: space-between;
         gap: 12px;
-        padding: 7px 0;
+        padding: 9px 0;
         border-bottom: 1px solid var(--line);
-        font-size: 0.74rem;
+        font-size: .74rem;
+        transition: background var(--transition);
       }
-      /* ── Tooltip ── */
+      .d-row:hover { background: rgba(96,165,250,.04); margin: 0 -8px; padding: 9px 8px; border-radius: 6px; }
+
+      /* ══════════════════════════════════════════════
+         TOOLTIP
+         ══════════════════════════════════════════════ */
       #tooltip {
         position: fixed;
         opacity: 0;
         pointer-events: none;
-        background: rgba(2, 8, 16, 0.96);
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 8px 10px;
-        font-size: 0.68rem;
+        background: rgba(2,8,16,.94);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(96,165,250,.2);
+        border-radius: 10px;
+        padding: 10px 13px;
+        font-size: .68rem;
         z-index: 9999;
         color: #e5efff;
+        box-shadow: 0 8px 32px rgba(0,0,0,.5), 0 0 12px var(--blue-glow);
+        transition: opacity .15s;
+        max-width: 240px;
       }
       html.light #tooltip {
-        background: rgba(255, 255, 255, 0.96);
+        background: rgba(255,255,255,.96);
         color: #1e293b;
+        border-color: rgba(37,99,235,.15);
+        box-shadow: 0 8px 32px rgba(0,0,0,.12);
       }
-      /* ── Auth gate ── */
+      #tooltip strong {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--blue);
+        font-size: .78rem;
+      }
+
+      /* ══════════════════════════════════════════════
+         AUTH GATE — frosted overlay
+         ══════════════════════════════════════════════ */
       #auth-gate {
         position: fixed;
         inset: 0;
-        background: rgba(2, 8, 16, 0.96);
+        background: rgba(2,8,16,.92);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
         display: none;
         align-items: center;
         justify-content: center;
@@ -718,108 +815,153 @@
       }
       #auth-card {
         width: min(92vw, 420px);
-        border: 1px solid var(--line);
-        background: var(--panel);
-        padding: 18px;
-        border-radius: 8px;
+        border: 1px solid var(--glass-border);
+        background:
+          linear-gradient(145deg, rgba(15,26,48,.95), rgba(8,16,32,.98));
+        padding: 28px 24px;
+        border-radius: 16px;
+        box-shadow: 0 16px 64px rgba(0,0,0,.5), 0 0 40px var(--blue-glow);
       }
       #auth-title {
-        font:
-          700 0.92rem "JetBrains Mono",
-          monospace;
-        color: var(--blue);
-        letter-spacing: 0.08em;
+        font: 700 .95rem "JetBrains Mono", monospace;
+        background: linear-gradient(135deg, var(--blue), var(--purple));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        letter-spacing: .1em;
       }
       #auth-sub {
-        margin-top: 8px;
-        font-size: 0.74rem;
+        margin-top: 10px;
+        font-size: .76rem;
         color: var(--muted);
+        line-height: 1.5;
       }
       #auth-input {
         width: 100%;
-        margin-top: 12px;
-        height: 35px;
+        margin-top: 16px;
+        height: 40px;
         border: 1px solid var(--line);
-        background: transparent;
+        background: rgba(96,165,250,.04);
         color: var(--text);
-        padding: 0 10px;
+        padding: 0 14px;
         outline: none;
-        border-radius: 6px;
+        border-radius: 10px;
         font-family: "JetBrains Mono", monospace;
+        font-size: .82rem;
+        transition: var(--transition);
+      }
+      #auth-input:focus {
+        border-color: var(--blue);
+        box-shadow: 0 0 16px var(--blue-glow);
+        background: rgba(96,165,250,.08);
       }
       #auth-submit {
-        margin-top: 10px;
+        margin-top: 14px;
         width: 100%;
-        height: 34px;
+        height: 40px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--blue), var(--purple));
+        border: none;
+        color: #fff;
+        font-weight: 700;
+        font-size: .8rem;
+        letter-spacing: .04em;
+        box-shadow: 0 4px 16px rgba(96,165,250,.3);
+      }
+      #auth-submit:hover {
+        box-shadow: 0 6px 24px rgba(96,165,250,.45);
+        transform: translateY(-2px);
       }
       #auth-error {
-        min-height: 18px;
-        margin-top: 8px;
-        font-size: 0.74rem;
+        min-height: 20px;
+        margin-top: 10px;
+        font-size: .74rem;
         color: var(--red);
+        text-shadow: 0 0 6px var(--red-glow);
       }
+
+      /* ══════════════════════════════════════════════
+         FOOTER
+         ══════════════════════════════════════════════ */
+      footer {
+        text-align: center;
+        padding: 10px 16px;
+        font-size: 11px;
+        color: #5a7ea8;
+        border-top: 1px solid var(--line);
+        background: rgba(6,13,26,.6);
+        backdrop-filter: blur(8px);
+      }
+      footer strong { color: var(--blue); }
+      html.light footer {
+        background: rgba(255,255,255,.6);
+        color: #5a7ea8;
+        border-top-color: var(--line);
+      }
+
+      /* ══════════════════════════════════════════════
+         RESPONSIVE
+         ══════════════════════════════════════════════ */
       @media (max-width: 1050px) {
-        #sidebar {
-          width: 220px;
-        }
+        #sidebar { width: 220px; }
       }
       @media (max-width: 900px) {
-        #sidebar {
-          display: none;
-        }
-        #detail-panel {
-          width: 100%;
-        }
-        #clock {
-          display: none;
-        }
+        #sidebar { display: none; }
+        #detail-panel { width: 100%; }
+        #clock { display: none; }
+        .metric-pill { min-width: 280px; }
+      }
+      @media (max-width: 600px) {
+        .metric-pill { display: none; }
+        #header { grid-template-columns: auto auto; }
+        #header-center { display: none; }
       }
     </style>
   </head>
   <body>
     <div id="auth-gate">
       <div id="auth-card">
-        <div id="auth-title">TOPOLOGY AUTHORIZATION</div>
-        <div id="auth-sub">Enter authorization key to open topology.</div>
-        <input id="auth-input" type="password" autocomplete="off" />
-        <button id="auth-submit">Unlock</button>
+        <div id="auth-title">TOPOLOGY ACCESS</div>
+        <div id="auth-sub">Authorized access is required to open the topology view.</div>
+        <input id="auth-input" type="password" autocomplete="off" placeholder="Authorization key" />
+        <button id="auth-submit">Continue</button>
         <div id="auth-error"></div>
       </div>
     </div>
     <div id="header">
       <div id="header-left">
-        <img id="header-logo" src="/assets/adsi_logo.png" alt="Inverter Dashboard" />
+        <img id="header-logo" src="/assets/adsi_logo.png" alt="ADSI Inverter Dashboard" />
       </div>
       <div id="header-center">
         <div class="metric-pill">
-          <div class="metric-label">Topology View</div>
-          <div class="metric-value">SOLAR PLANT / INVERTER MONITOR</div>
+          <div class="metric-label">Plant Topology</div>
+          <div class="metric-value">INVERTER STATUS OVERVIEW</div>
         </div>
       </div>
       <div id="header-right">
         <div id="clock-wrap">
           <span class="ws-dot"></span>
-          <span class="ws-label">Live</span>
+          <span class="ws-label">Active</span>
           <div id="clock">--:--:--</div>
         </div>
-        <button class="top-btn" id="theme-toggle" title="Toggle dark/light">
+        <button class="top-btn" id="theme-toggle" title="Switch theme">
           <span id="theme-label">Light</span>
         </button>
-        <button class="top-btn" id="fullscreen-btn" title="Toggle fullscreen">
-          Fullscreen
+        <button class="top-btn" id="fullscreen-btn" title="Toggle full-screen view">
+          Full Screen
         </button>
         <button
           class="top-btn"
           id="open-config-btn"
-          title="Open IP Config (Ctrl+I)"
+          title="Open network configuration (Ctrl+I)"
         >
-          IP Config
+          Network Config
         </button>
-        <button class="top-btn" id="scan-btn">Scan All</button>
+        <button class="top-btn" id="scan-btn">Refresh Status</button>
       </div>
     </div>
     <div id="alert-bar">
-      <div class="alert-badge">ALERT</div>
+      <div class="alert-badge">OFFLINE ALERT</div>
       <div id="alert-ticker"></div>
     </div>
     <div id="stats-bar">
@@ -846,25 +988,25 @@
     </div>
     <div id="app">
       <aside id="sidebar">
-        <div class="sidebar-title">INVERTER INDEX</div>
+        <div class="sidebar-title">INVERTER DIRECTORY</div>
         <input
           id="sidebar-search"
           type="text"
           autocomplete="off"
-          placeholder="Search INV or IP"
+          placeholder="Search inverter or IP"
         />
         <div id="sidebar-list"></div>
       </aside>
       <main id="dashboard-area">
         <div id="filter-bar">
-          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn active" data-filter="all">All Devices</button>
           <button class="filter-btn" data-filter="ok">Online</button>
           <button class="filter-btn" data-filter="down">Offline</button>
           <button class="filter-btn" data-filter="unknown">Unknown</button>
-          <button class="meta-btn" id="zoom-out-btn">Zoom -</button>
+          <button class="meta-btn" id="zoom-out-btn">Zoom Out</button>
           <div id="zoom-label">100%</div>
-          <button class="meta-btn" id="zoom-in-btn">Zoom +</button>
-          <button class="meta-btn" id="zoom-fit-btn">Fit</button>
+          <button class="meta-btn" id="zoom-in-btn">Zoom In</button>
+          <button class="meta-btn" id="zoom-fit-btn">Fit View</button>
         </div>
         <div id="svg-stage">
           <div id="svg-canvas">
@@ -873,657 +1015,284 @@
               viewBox="0 0 581 628"
               preserveAspectRatio="xMidYMid meet"
             >
-              <g>
+              <!-- ── SVG Defs: gradients & filters ── -->
+              <defs>
+                <filter id="glow-server" x="-30%" y="-30%" width="160%" height="160%">
+                  <feGaussianBlur in="SourceAlpha" stdDeviation="4" result="blur"/>
+                  <feFlood flood-color="#fa6800" flood-opacity=".4"/>
+                  <feComposite in2="blur" operator="in"/>
+                  <feMerge>
+                    <feMergeNode/>
+                    <feMergeNode in="SourceGraphic"/>
+                  </feMerge>
+                </filter>
+                <linearGradient id="server-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#ff8c2e"/>
+                  <stop offset="100%" stop-color="#e05500"/>
+                </linearGradient>
+                <linearGradient id="link-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#3399ff"/>
+                  <stop offset="100%" stop-color="#60a5fa"/>
+                </linearGradient>
+              </defs>
+
+              <!-- ── Server node ── -->
+              <g filter="url(#glow-server)">
                 <ellipse
                   cx="290"
                   cy="20"
                   rx="70"
                   ry="20"
-                  fill="#fa6800"
-                  stroke="#c73500"
+                  fill="url(#server-grad)"
+                  stroke="#b84400"
+                  stroke-width="1.5"
                 />
                 <text
-                  fill="#000"
-                  font-family="Tahoma"
+                  fill="#fff"
+                  font-family="JetBrains Mono, monospace"
                   font-weight="bold"
                   text-anchor="middle"
-                  font-size="16px"
+                  font-size="13px"
                   x="289.5"
-                  y="26.5"
+                  y="25"
+                  letter-spacing=".12em"
                 >
                   SERVER
                 </text>
               </g>
+
+              <!-- ── Links ── -->
               <g id="link-block4-block5" class="link">
-                <path
-                  d="M 50 222.76 L 50 139.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 50 228.76 L 46 220.76 L 50 222.76 L 54 220.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 50 133.24 L 54 141.24 L 50 139.24 L 46 141.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 50 222.76 L 50 139.24" fill="none" stroke-width="2" />
+                <path d="M 50 228.76 L 46 220.76 L 50 222.76 L 54 220.76 Z" fill="#3399ff" />
+                <path d="M 50 133.24 L 54 141.24 L 50 139.24 L 46 141.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block3-block4" class="link">
-                <path
-                  d="M 50 342.76 L 50 259.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 50 348.76 L 46 340.76 L 50 342.76 L 54 340.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 50 253.24 L 54 261.24 L 50 259.24 L 46 261.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 50 342.76 L 50 259.24" fill="none" stroke-width="2" />
+                <path d="M 50 348.76 L 46 340.76 L 50 342.76 L 54 340.76 Z" fill="#3399ff" />
+                <path d="M 50 253.24 L 54 261.24 L 50 259.24 L 46 261.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block2-block3" class="link">
-                <path
-                  d="M 50 462.76 L 50 379.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 50 468.76 L 46 460.76 L 50 462.76 L 54 460.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 50 373.24 L 54 381.24 L 50 379.24 L 46 381.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 50 462.76 L 50 379.24" fill="none" stroke-width="2" />
+                <path d="M 50 468.76 L 46 460.76 L 50 462.76 L 54 460.76 Z" fill="#3399ff" />
+                <path d="M 50 373.24 L 54 381.24 L 50 379.24 L 46 381.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block1-block2" class="link">
-                <path
-                  d="M 50 561.76 L 50 499.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 50 567.76 L 46 559.76 L 50 561.76 L 54 559.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 50 493.24 L 54 501.24 L 50 499.24 L 46 501.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 50 561.76 L 50 499.24" fill="none" stroke-width="2" />
+                <path d="M 50 567.76 L 46 559.76 L 50 561.76 L 54 559.76 Z" fill="#3399ff" />
+                <path d="M 50 493.24 L 54 501.24 L 50 499.24 L 46 501.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block2-block6" class="link">
-                <path
-                  d="M 151.76 481 L 108.24 481"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 157.76 481 L 149.76 485 L 151.76 481 L 149.76 477 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 102.24 481 L 110.24 477 L 108.24 481 L 110.24 485 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 151.76 481 L 108.24 481" fill="none" stroke-width="2" />
+                <path d="M 157.76 481 L 149.76 485 L 151.76 481 L 149.76 477 Z" fill="#3399ff" />
+                <path d="M 102.24 481 L 110.24 477 L 108.24 481 L 110.24 485 Z" fill="#3399ff" />
               </g>
               <g id="link-block6-block9" class="link">
-                <path
-                  d="M 210 462.76 L 210 379.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 210 468.76 L 206 460.76 L 210 462.76 L 214 460.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 210 373.24 L 214 381.24 L 210 379.24 L 206 381.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 210 462.76 L 210 379.24" fill="none" stroke-width="2" />
+                <path d="M 210 468.76 L 206 460.76 L 210 462.76 L 214 460.76 Z" fill="#3399ff" />
+                <path d="M 210 373.24 L 214 381.24 L 210 379.24 L 206 381.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block11-block12" class="link">
-                <path
-                  d="M 370 462.76 L 370 414.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 370 468.76 L 366 460.76 L 370 462.76 L 374 460.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 370 408.24 L 374 416.24 L 370 414.24 L 366 416.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 370 462.76 L 370 414.24" fill="none" stroke-width="2" />
+                <path d="M 370 468.76 L 366 460.76 L 370 462.76 L 374 460.76 Z" fill="#3399ff" />
+                <path d="M 370 408.24 L 374 416.24 L 370 414.24 L 366 416.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block9-block11" class="link">
-                <path
-                  d="M 291.76 361 L 268.24 361"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 297.76 361 L 289.76 365 L 291.76 361 L 289.76 357 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 262.24 361 L 270.24 357 L 268.24 361 L 270.24 365 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 291.76 361 L 268.24 361" fill="none" stroke-width="2" />
+                <path d="M 297.76 361 L 289.76 365 L 291.76 361 L 289.76 357 Z" fill="#3399ff" />
+                <path d="M 262.24 361 L 270.24 357 L 268.24 361 L 270.24 365 Z" fill="#3399ff" />
               </g>
               <g id="link-block7-block8" class="link">
-                <path
-                  d="M 530 222.76 L 530 139.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 530 228.76 L 526 220.76 L 530 222.76 L 534 220.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 530 133.24 L 534 141.24 L 530 139.24 L 526 141.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 530 222.76 L 530 139.24" fill="none" stroke-width="2" />
+                <path d="M 530 228.76 L 526 220.76 L 530 222.76 L 534 220.76 Z" fill="#3399ff" />
+                <path d="M 530 133.24 L 534 141.24 L 530 139.24 L 526 141.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block8-block10" class="link">
-                <path
-                  d="M 530 342.76 L 530 259.24"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 530 348.76 L 526 340.76 L 530 342.76 L 534 340.76 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 530 253.24 L 534 261.24 L 530 259.24 L 526 261.24 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 530 342.76 L 530 259.24" fill="none" stroke-width="2" />
+                <path d="M 530 348.76 L 526 340.76 L 530 342.76 L 534 340.76 Z" fill="#3399ff" />
+                <path d="M 530 253.24 L 534 261.24 L 530 259.24 L 526 261.24 Z" fill="#3399ff" />
               </g>
               <g id="link-block10-block11" class="link">
-                <path
-                  d="M 448.24 361 L 471.76 361"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 442.24 361 L 450.24 357 L 448.24 361 L 450.24 365 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 477.76 361 L 469.76 365 L 471.76 361 L 469.76 357 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 448.24 361 L 471.76 361" fill="none" stroke-width="2" />
+                <path d="M 442.24 361 L 450.24 357 L 448.24 361 L 450.24 365 Z" fill="#3399ff" />
+                <path d="M 477.76 361 L 469.76 365 L 471.76 361 L 469.76 357 Z" fill="#3399ff" />
               </g>
               <g id="link-block12-block13" class="link">
-                <path
-                  d="M 428.24 481 L 471.76 481"
-                  fill="none"
-                  stroke-width="2"
-                />
-                <path
-                  d="M 422.24 481 L 430.24 477 L 428.24 481 L 430.24 485 Z"
-                  fill="#3399ff"
-                />
-                <path
-                  d="M 477.76 481 L 469.76 485 L 471.76 481 L 469.76 477 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 428.24 481 L 471.76 481" fill="none" stroke-width="2" />
+                <path d="M 422.24 481 L 430.24 477 L 428.24 481 L 430.24 485 Z" fill="#3399ff" />
+                <path d="M 477.76 481 L 469.76 485 L 471.76 481 L 469.76 477 Z" fill="#3399ff" />
               </g>
               <g id="link-block5-server" class="link">
-                <path
-                  d="M 100 121 L 231.91 39.46"
-                  fill="none"
-                  stroke-width="3"
-                />
-                <path
-                  d="M 237.65 35.91 L 232.36 44.47 L 231.91 39.46 L 227.63 36.81 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 100 121 L 231.91 39.46" fill="none" stroke-width="3" />
+                <path d="M 237.65 35.91 L 232.36 44.47 L 231.91 39.46 L 227.63 36.81 Z" fill="#3399ff" />
               </g>
               <g id="link-block7-server" class="link">
-                <path
-                  d="M 480 121 L 348.09 39.46"
-                  fill="none"
-                  stroke-width="3"
-                />
-                <path
-                  d="M 342.35 35.91 L 352.37 36.81 L 348.09 39.46 L 347.64 44.47 Z"
-                  fill="#3399ff"
-                />
+                <path d="M 480 121 L 348.09 39.46" fill="none" stroke-width="3" />
+                <path d="M 342.35 35.91 L 352.37 36.81 L 348.09 39.46 L 347.64 44.47 Z" fill="#3399ff" />
               </g>
+
+              <!-- ── Block labels ── -->
               <g id="block-5" class="block">
-                <rect x="0" y="111" width="100" height="20" rx="3" />
-                <text x="49.5" y="125" text-anchor="middle" font-size="11">
-                  BLOCK 5
-                </text>
+                <rect x="0" y="111" width="100" height="20" rx="5" />
+                <text x="49.5" y="125" text-anchor="middle" font-size="11">BLOCK 5</text>
               </g>
               <g id="block-4" class="block">
-                <rect x="0" y="231" width="100" height="20" rx="3" />
-                <text x="49.5" y="245" text-anchor="middle" font-size="11">
-                  BLOCK 4
-                </text>
+                <rect x="0" y="231" width="100" height="20" rx="5" />
+                <text x="49.5" y="245" text-anchor="middle" font-size="11">BLOCK 4</text>
               </g>
               <g id="block-3" class="block">
-                <rect x="0" y="351" width="100" height="20" rx="3" />
-                <text x="49.5" y="365" text-anchor="middle" font-size="11">
-                  BLOCK 3
-                </text>
+                <rect x="0" y="351" width="100" height="20" rx="5" />
+                <text x="49.5" y="365" text-anchor="middle" font-size="11">BLOCK 3</text>
               </g>
               <g id="block-2" class="block">
-                <rect x="0" y="471" width="100" height="20" rx="3" />
-                <text x="49.5" y="485" text-anchor="middle" font-size="11">
-                  BLOCK 2
-                </text>
+                <rect x="0" y="471" width="100" height="20" rx="5" />
+                <text x="49.5" y="485" text-anchor="middle" font-size="11">BLOCK 2</text>
               </g>
               <g id="block-1" class="block">
-                <rect x="0" y="570" width="100" height="20" rx="3" />
-                <text x="49.5" y="584" text-anchor="middle" font-size="11">
-                  BLOCK 1
-                </text>
+                <rect x="0" y="570" width="100" height="20" rx="5" />
+                <text x="49.5" y="584" text-anchor="middle" font-size="11">BLOCK 1</text>
               </g>
               <g id="block-9" class="block">
-                <rect x="160" y="351" width="100" height="20" rx="3" />
-                <text x="209.5" y="365" text-anchor="middle" font-size="11">
-                  BLOCK 9
-                </text>
+                <rect x="160" y="351" width="100" height="20" rx="5" />
+                <text x="209.5" y="365" text-anchor="middle" font-size="11">BLOCK 9</text>
               </g>
               <g id="block-6" class="block">
-                <rect x="160" y="471" width="100" height="20" rx="3" />
-                <text x="209.5" y="485" text-anchor="middle" font-size="11">
-                  BLOCK 6
-                </text>
+                <rect x="160" y="471" width="100" height="20" rx="5" />
+                <text x="209.5" y="485" text-anchor="middle" font-size="11">BLOCK 6</text>
               </g>
               <g id="block-11" class="block">
-                <rect x="300" y="351" width="140" height="20" rx="3" />
-                <text x="369.5" y="365" text-anchor="middle" font-size="11">
-                  BLOCK 11
-                </text>
+                <rect x="300" y="351" width="140" height="20" rx="5" />
+                <text x="369.5" y="365" text-anchor="middle" font-size="11">BLOCK 11</text>
               </g>
               <g id="block-12" class="block">
-                <rect x="320" y="471" width="100" height="20" rx="3" />
-                <text x="369.5" y="485" text-anchor="middle" font-size="11">
-                  BLOCK 12
-                </text>
+                <rect x="320" y="471" width="100" height="20" rx="5" />
+                <text x="369.5" y="485" text-anchor="middle" font-size="11">BLOCK 12</text>
               </g>
               <g id="block-7" class="block">
-                <rect x="480" y="111" width="100" height="20" rx="3" />
-                <text x="529.5" y="125" text-anchor="middle" font-size="11">
-                  BLOCK 7
-                </text>
+                <rect x="480" y="111" width="100" height="20" rx="5" />
+                <text x="529.5" y="125" text-anchor="middle" font-size="11">BLOCK 7</text>
               </g>
               <g id="block-8" class="block">
-                <rect x="480" y="231" width="100" height="20" rx="3" />
-                <text x="529.5" y="245" text-anchor="middle" font-size="11">
-                  BLOCK 8
-                </text>
+                <rect x="480" y="231" width="100" height="20" rx="5" />
+                <text x="529.5" y="245" text-anchor="middle" font-size="11">BLOCK 8</text>
               </g>
               <g id="block-10" class="block">
-                <rect x="480" y="351" width="100" height="20" rx="3" />
-                <text x="529.5" y="365" text-anchor="middle" font-size="11">
-                  BLOCK 10
-                </text>
+                <rect x="480" y="351" width="100" height="20" rx="5" />
+                <text x="529.5" y="365" text-anchor="middle" font-size="11">BLOCK 10</text>
               </g>
               <g id="block-13" class="block">
-                <rect x="480" y="471" width="100" height="20" rx="3" />
-                <text x="529.5" y="485" text-anchor="middle" font-size="11">
-                  BLOCK 13
-                </text>
+                <rect x="480" y="471" width="100" height="20" rx="5" />
+                <text x="529.5" y="485" text-anchor="middle" font-size="11">BLOCK 13</text>
               </g>
+
+              <!-- ── Inverter nodes ── -->
               <g id="inv-9" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="0"
-                  y="136"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="19.5" y="153.5" text-anchor="middle" font-size="8">
-                  INV 9
-                </text>
+                <rect class="inv-shape" x="0" y="136" width="40" height="30" rx="6" />
+                <text x="19.5" y="153.5" text-anchor="middle" font-size="8">INV 9</text>
               </g>
               <g id="inv-10" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="60"
-                  y="136"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="79.5" y="153.5" text-anchor="middle" font-size="8">
-                  INV 10
-                </text>
+                <rect class="inv-shape" x="60" y="136" width="40" height="30" rx="6" />
+                <text x="79.5" y="153.5" text-anchor="middle" font-size="8">INV 10</text>
               </g>
               <g id="inv-7" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="0"
-                  y="256"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="19.5" y="273.5" text-anchor="middle" font-size="8">
-                  INV 7
-                </text>
+                <rect class="inv-shape" x="0" y="256" width="40" height="30" rx="6" />
+                <text x="19.5" y="273.5" text-anchor="middle" font-size="8">INV 7</text>
               </g>
               <g id="inv-8" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="60"
-                  y="256"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="79.5" y="273.5" text-anchor="middle" font-size="8">
-                  INV 8
-                </text>
+                <rect class="inv-shape" x="60" y="256" width="40" height="30" rx="6" />
+                <text x="79.5" y="273.5" text-anchor="middle" font-size="8">INV 8</text>
               </g>
               <g id="inv-5" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="0"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="19.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 5
-                </text>
+                <rect class="inv-shape" x="0" y="376" width="40" height="30" rx="6" />
+                <text x="19.5" y="393.5" text-anchor="middle" font-size="8">INV 5</text>
               </g>
               <g id="inv-6" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="60"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="79.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 6
-                </text>
+                <rect class="inv-shape" x="60" y="376" width="40" height="30" rx="6" />
+                <text x="79.5" y="393.5" text-anchor="middle" font-size="8">INV 6</text>
               </g>
               <g id="inv-3" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="0"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="19.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 3
-                </text>
+                <rect class="inv-shape" x="0" y="496" width="40" height="30" rx="6" />
+                <text x="19.5" y="513.5" text-anchor="middle" font-size="8">INV 3</text>
               </g>
               <g id="inv-4" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="60"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="79.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 4
-                </text>
+                <rect class="inv-shape" x="60" y="496" width="40" height="30" rx="6" />
+                <text x="79.5" y="513.5" text-anchor="middle" font-size="8">INV 4</text>
               </g>
               <g id="inv-1" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="0"
-                  y="595"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="19.5" y="612.5" text-anchor="middle" font-size="8">
-                  INV 1
-                </text>
+                <rect class="inv-shape" x="0" y="595" width="40" height="30" rx="6" />
+                <text x="19.5" y="612.5" text-anchor="middle" font-size="8">INV 1</text>
               </g>
               <g id="inv-2" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="60"
-                  y="595"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="79.5" y="612.5" text-anchor="middle" font-size="8">
-                  INV 2
-                </text>
+                <rect class="inv-shape" x="60" y="595" width="40" height="30" rx="6" />
+                <text x="79.5" y="612.5" text-anchor="middle" font-size="8">INV 2</text>
               </g>
               <g id="inv-17" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="160"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="179.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 17
-                </text>
+                <rect class="inv-shape" x="160" y="376" width="40" height="30" rx="6" />
+                <text x="179.5" y="393.5" text-anchor="middle" font-size="8">INV 17</text>
               </g>
               <g id="inv-18" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="220"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="239.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 18
-                </text>
+                <rect class="inv-shape" x="220" y="376" width="40" height="30" rx="6" />
+                <text x="239.5" y="393.5" text-anchor="middle" font-size="8">INV 18</text>
               </g>
               <g id="inv-11" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="160"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="179.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 11
-                </text>
+                <rect class="inv-shape" x="160" y="496" width="40" height="30" rx="6" />
+                <text x="179.5" y="513.5" text-anchor="middle" font-size="8">INV 11</text>
               </g>
               <g id="inv-12" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="220"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="239.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 12
-                </text>
+                <rect class="inv-shape" x="220" y="496" width="40" height="30" rx="6" />
+                <text x="239.5" y="513.5" text-anchor="middle" font-size="8">INV 12</text>
               </g>
               <g id="inv-21" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="300"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="319.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 21
-                </text>
+                <rect class="inv-shape" x="300" y="376" width="40" height="30" rx="6" />
+                <text x="319.5" y="393.5" text-anchor="middle" font-size="8">INV 21</text>
               </g>
               <g id="inv-22" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="350"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="369.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 22
-                </text>
+                <rect class="inv-shape" x="350" y="376" width="40" height="30" rx="6" />
+                <text x="369.5" y="393.5" text-anchor="middle" font-size="8">INV 22</text>
               </g>
               <g id="inv-23" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="400"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="419.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 23
-                </text>
+                <rect class="inv-shape" x="400" y="376" width="40" height="30" rx="6" />
+                <text x="419.5" y="393.5" text-anchor="middle" font-size="8">INV 23</text>
               </g>
               <g id="inv-24" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="320"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="339.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 24
-                </text>
+                <rect class="inv-shape" x="320" y="496" width="40" height="30" rx="6" />
+                <text x="339.5" y="513.5" text-anchor="middle" font-size="8">INV 24</text>
               </g>
               <g id="inv-25" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="380"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="399.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 25
-                </text>
+                <rect class="inv-shape" x="380" y="496" width="40" height="30" rx="6" />
+                <text x="399.5" y="513.5" text-anchor="middle" font-size="8">INV 25</text>
               </g>
               <g id="inv-13" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="480"
-                  y="136"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="499.5" y="153.5" text-anchor="middle" font-size="8">
-                  INV 13
-                </text>
+                <rect class="inv-shape" x="480" y="136" width="40" height="30" rx="6" />
+                <text x="499.5" y="153.5" text-anchor="middle" font-size="8">INV 13</text>
               </g>
               <g id="inv-14" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="540"
-                  y="136"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="559.5" y="153.5" text-anchor="middle" font-size="8">
-                  INV 14
-                </text>
+                <rect class="inv-shape" x="540" y="136" width="40" height="30" rx="6" />
+                <text x="559.5" y="153.5" text-anchor="middle" font-size="8">INV 14</text>
               </g>
               <g id="inv-15" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="480"
-                  y="256"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="499.5" y="273.5" text-anchor="middle" font-size="8">
-                  INV 15
-                </text>
+                <rect class="inv-shape" x="480" y="256" width="40" height="30" rx="6" />
+                <text x="499.5" y="273.5" text-anchor="middle" font-size="8">INV 15</text>
               </g>
               <g id="inv-16" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="540"
-                  y="256"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="559.5" y="273.5" text-anchor="middle" font-size="8">
-                  INV 16
-                </text>
+                <rect class="inv-shape" x="540" y="256" width="40" height="30" rx="6" />
+                <text x="559.5" y="273.5" text-anchor="middle" font-size="8">INV 16</text>
               </g>
               <g id="inv-19" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="480"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="499.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 19
-                </text>
+                <rect class="inv-shape" x="480" y="376" width="40" height="30" rx="6" />
+                <text x="499.5" y="393.5" text-anchor="middle" font-size="8">INV 19</text>
               </g>
               <g id="inv-20" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="540"
-                  y="376"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="559.5" y="393.5" text-anchor="middle" font-size="8">
-                  INV 20
-                </text>
+                <rect class="inv-shape" x="540" y="376" width="40" height="30" rx="6" />
+                <text x="559.5" y="393.5" text-anchor="middle" font-size="8">INV 20</text>
               </g>
               <g id="inv-26" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="480"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="499.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 26
-                </text>
+                <rect class="inv-shape" x="480" y="496" width="40" height="30" rx="6" />
+                <text x="499.5" y="513.5" text-anchor="middle" font-size="8">INV 26</text>
               </g>
               <g id="inv-27" class="inv">
-                <rect
-                  class="inv-shape"
-                  x="540"
-                  y="496"
-                  width="40"
-                  height="30"
-                  rx="4.5"
-                />
-                <text x="559.5" y="513.5" text-anchor="middle" font-size="8">
-                  INV 27
-                </text>
+                <rect class="inv-shape" x="540" y="496" width="40" height="30" rx="6" />
+                <text x="559.5" y="513.5" text-anchor="middle" font-size="8">INV 27</text>
               </g>
             </svg>
           </div>
@@ -1531,8 +1300,8 @@
         <div id="legend">
           <div class="legend-item">Online</div>
           <div class="legend-item">Offline</div>
-          <div class="legend-item">Unknown</div>
-          <div class="legend-item">Block Degraded</div>
+          <div class="legend-item">Status Unknown</div>
+          <div class="legend-item">Block with Partial Outage</div>
         </div>
       </main>
     </div>
@@ -1649,8 +1418,6 @@
         const scaledW = SVG_BASE_W * zoom;
         const scaledH = SVG_BASE_H * zoom;
 
-        // Center the SVG when it is smaller than the stage; otherwise let it overflow
-        // so the stage scrollbar appears.
         const marginX = Math.max(0, (stageW - scaledW) / 2);
         const marginY = Math.max(0, (stageH - scaledH) / 2);
 
@@ -1662,8 +1429,6 @@
         mainSvg.style.marginRight = "0";
         mainSvg.style.marginBottom = "0";
 
-        // svgCanvas must be exactly the size of the scaled SVG (plus centering offset)
-        // so the browser's native overflow/scrollbar logic works correctly for BOTH axes.
         const canvasW = scaledW + marginX;
         const canvasH = scaledH + marginY;
         svgCanvas.style.width = `${Math.max(stageW, canvasW)}px`;
@@ -1723,7 +1488,7 @@
         } catch (_) {}
       }
       function updateFullscreenButton() {
-        fullscreenBtn.textContent = isFullscreen() ? "Windowed" : "Fullscreen";
+        fullscreenBtn.textContent = isFullscreen() ? "Exit Full Screen" : "Full Screen";
         fullscreenBtn.classList.toggle("active", isFullscreen());
       }
 
@@ -1748,9 +1513,9 @@
           inv.addEventListener("mouseenter", () => {
             tooltip.innerHTML = `
         <strong>INV ${id}</strong>
-        <div>${inverterIP[id] || "No IP"}</div>
+        <div>${inverterIP[id] || "IP not configured"}</div>
         <div>${(inverterState[id] || "unknown").toUpperCase()}</div>
-        <div>Last seen: ${lastSeenByInv[id] ? lastSeenByInv[id].toLocaleTimeString() : "Never"}</div>`;
+        <div>Last response: ${lastSeenByInv[id] ? lastSeenByInv[id].toLocaleTimeString() : "No response yet"}</div>`;
             tooltip.style.opacity = "1";
           });
           inv.addEventListener("mousemove", (e) => {
@@ -1785,7 +1550,7 @@
 
       function scanAllInverters() {
         scanBtn.classList.add("scanning");
-        scanBtn.textContent = "Scanning...";
+        scanBtn.textContent = "Refreshing...";
         Object.entries(inverterIP).forEach(([id, ip]) => {
           if (!ip) return;
           setInverterStatus(Number(id), "unknown");
@@ -1793,7 +1558,7 @@
         });
         setTimeout(() => {
           scanBtn.classList.remove("scanning");
-          scanBtn.textContent = "Scan All";
+          scanBtn.textContent = "Refresh Status";
         }, 5000);
       }
 
@@ -1886,7 +1651,7 @@
         }
         bar.classList.add("visible");
         const text = downs
-          .map(([id]) => `INV ${id} OFFLINE (${inverterIP[id] || "no IP"})`)
+          .map(([id]) => `INV ${id} offline (${inverterIP[id] || "IP not configured"})`)
           .join(" | ");
         ticker.innerHTML = `<span class="ticker-run">${text}</span>`;
         const span = ticker.querySelector(".ticker-run");
@@ -1999,7 +1764,7 @@
         const ip = inverterIP[id] || "-";
         const seen = lastSeenByInv[id]
           ? lastSeenByInv[id].toLocaleTimeString()
-          : "Never";
+          : "No response yet";
         const hist = historyByInv[id] || [];
         const blockId = Object.keys(BLOCK_MAP).find((b) =>
           BLOCK_MAP[b].includes(id),
@@ -2008,15 +1773,17 @@
           hist.length < 2
             ? "-"
             : `${Math.round((hist.filter((h) => h.status === "ok").length / hist.length) * 100)}%`;
+        const statusColor = status === 'ok' ? 'var(--green)' : status === 'down' ? 'var(--red)' : 'var(--slate)';
+        const statusGlow = status === 'ok' ? 'var(--green-glow)' : status === 'down' ? 'var(--red-glow)' : 'transparent';
         document.getElementById("detail-content").innerHTML = `
-    <h2 style="font:700 1.05rem 'JetBrains Mono',monospace">INV ${pad2(id)}</h2>
-    <div class="d-badge">${status.toUpperCase()}</div>
-    <div class="d-row"><span>IP</span><span>${ip}</span></div>
-    <div class="d-row"><span>Last Seen</span><span>${seen}</span></div>
-    <div class="d-row"><span>Block</span><span>${blockId || "-"}</span></div>
-    <div class="d-row"><span>Session Uptime</span><span>${uptime}</span></div>
-    <button style="margin-top:10px;width:100%;height:33px" onclick="_doOpenIP(${id})">
-      Open Web Interface</button>`;
+    <h2 style="font:700 1.1rem 'JetBrains Mono',monospace;background:linear-gradient(135deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">INV ${pad2(id)}</h2>
+    <div class="d-badge" style="border-color:${statusColor};color:${statusColor};box-shadow:0 0 8px ${statusGlow}">${status.toUpperCase()}</div>
+    <div class="d-row"><span style="color:var(--muted)">IP Address</span><span style="font-family:'JetBrains Mono',monospace;font-size:.72rem">${ip}</span></div>
+    <div class="d-row"><span style="color:var(--muted)">Last Response</span><span>${seen}</span></div>
+    <div class="d-row"><span style="color:var(--muted)">Block Group</span><span>${blockId || "-"}</span></div>
+    <div class="d-row"><span style="color:var(--muted)">Session Availability</span><span style="font-weight:700;color:var(--blue)">${uptime}</span></div>
+    <button style="margin-top:14px;width:100%;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--purple));border:none;color:#fff;font-weight:700;box-shadow:0 4px 16px var(--blue-glow)" onclick="_doOpenIP(${id})">
+      Open Device Page</button>`;
       }
 
       window._doOpenIP = (id) => {
@@ -2090,7 +1857,7 @@
 
       function alertClientModeUnavailable(feature) {
         alert(
-          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+          `${feature} is available only in Gateway mode.\nChange Operation Mode in Settings to continue.`,
         );
       }
 
@@ -2138,12 +1905,7 @@
       window.addEventListener("resize", onViewportChanged);
       updateFullscreenButton();
 
-      // ── Wheel scroll — attached DIRECTLY on svgStage ─────────────────────────────
-      // Replaces the old window-level routeWheelToViewport which was unreliable:
-      // it only called preventDefault() conditionally (after checking scroll position
-      // changed), causing race conditions where the browser swallowed the event before
-      // the JS handler could redirect it.  Attaching here with passive:false guarantees
-      // we own the event immediately, and we always direct both axes into the stage.
+      // ── Wheel scroll ──────────────────────────────────────────────────────────────
       svgStage.addEventListener(
         "wheel",
         (e) => {
@@ -2245,8 +2007,8 @@
 
       openTopologyAfterAuth();
     </script>
-    <footer style="text-align:center;padding:8px 16px;font-size:11px;color:#5a7ea8;border-top:1px solid #1a2e4a;margin-top:8px;">
-      Inverter Dashboard v2.2 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
+    <footer>
+      ADSI Inverter Dashboard v2.5.2 &nbsp;&middot;&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Monta&ntilde;o REE</strong> (Engr. M.) &nbsp;&middot;&nbsp; &copy; 2026 All rights reserved.
     </footer>
   </body>
 </html>
